@@ -5,6 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
 from bot.keyboards.common import back_to_menu
+from bot.messages import safe_edit_message_text
 
 router = Router()
 
@@ -14,7 +15,7 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.answer("Отменено")
     if callback.message:
-        await callback.message.answer("Операция отменена.", reply_markup=back_to_menu())
+        await safe_edit_message_text(callback.message, "Операция отменена.", reply_markup=back_to_menu())
 
 
 @router.callback_query()

@@ -28,9 +28,9 @@ from bot.keyboards.admin import (
     user_actions_keyboard,
     users_keyboard,
 )
-from bot.keyboards.common import back_to_menu, cancel_keyboard, confirm_cancel_keyboard
-from bot.keyboards.keys import after_key_created_keyboard, key_actions_keyboard, keys_list_keyboard
-from bot.messages import send_awg_config
+from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
+from bot.keyboards.keys import key_actions_keyboard, keys_list_keyboard
+from bot.messages import AWG_CONFIG_FILENAME, safe_edit_message_text, send_awg_config
 from bot.pagination import page_offset, split_page
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
@@ -74,7 +74,7 @@ async def admin_panel(callback: CallbackQuery, services: Any) -> None:
         return
     try:
         await require_superadmin(services, callback.from_user.id)
-        await callback.message.answer("Админ-панель:", reply_markup=admin_panel_keyboard())
+        await safe_edit_message_text(callback.message, "Админ-панель:", reply_markup=admin_panel_keyboard())
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -92,7 +92,8 @@ async def admin_requests(callback: CallbackQuery, services: Any) -> None:
             offset=page_offset(page, ADMIN_PAGE_SIZE),
         )
         requests, has_next = split_page(items, ADMIN_PAGE_SIZE)
-        await callback.message.answer(
+        await safe_edit_message_text(
+            callback.message,
             access_requests_page_text(requests, page),
             reply_markup=pending_requests_keyboard(requests, page=page, has_next=has_next),
         )
@@ -108,7 +109,7 @@ async def admin_request_detail(callback: CallbackQuery, services: Any) -> None:
     try:
         request_id = int(callback.data.rsplit(":", 1)[-1])
         request = await services.access.get_request(callback.from_user.id, request_id)
-        await callback.message.answer(access_request_text(request), reply_markup=pending_requests_keyboard([request]))
+        await safe_edit_message_text(callback.message, access_request_text(request), reply_markup=pending_requests_keyboard([request]))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -125,7 +126,7 @@ async def admin_approve(callback: CallbackQuery, services: Any, bot: Bot) -> Non
             await _safe_notify(bot, request.telegram_user_id, "Ваша заявка одобрена. Отправьте /start, чтобы открыть меню.")
         if callback.message:
             text = "Заявка одобрена." if changed else "Заявка уже была обработана."
-            await callback.message.answer(text, reply_markup=admin_panel_keyboard())
+            await safe_edit_message_text(callback.message, text, reply_markup=admin_panel_keyboard())
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -142,7 +143,7 @@ async def admin_reject(callback: CallbackQuery, services: Any, bot: Bot) -> None
             await _safe_notify(bot, request.telegram_user_id, "Ваша заявка отклонена.")
         if callback.message:
             text = "Заявка отклонена." if changed else "Заявка уже была обработана."
-            await callback.message.answer(text, reply_markup=admin_panel_keyboard())
+            await safe_edit_message_text(callback.message, text, reply_markup=admin_panel_keyboard())
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -160,7 +161,7 @@ async def admin_users(callback: CallbackQuery, services: Any) -> None:
             offset=page_offset(page, ADMIN_PAGE_SIZE),
         )
         users, has_next = split_page(items, ADMIN_PAGE_SIZE)
-        await callback.message.answer(users_page_text(users, page), reply_markup=users_keyboard(users, page=page, has_next=has_next))
+        await safe_edit_message_text(callback.message, users_page_text(users, page), reply_markup=users_keyboard(users, page=page, has_next=has_next))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -174,7 +175,7 @@ async def admin_user_detail(callback: CallbackQuery, services: Any) -> None:
         await require_superadmin(services, callback.from_user.id)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         user = await services.users.get_user(user_id)
-        await callback.message.answer(user_card_text(user), reply_markup=user_actions_keyboard(user))
+        await safe_edit_message_text(callback.message, user_card_text(user), reply_markup=user_actions_keyboard(user))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -189,7 +190,7 @@ async def admin_user_approve(callback: CallbackQuery, services: Any) -> None:
         await services.users.set_role(callback.from_user.id, user_id, UserRole.APPROVED_USER)
         if callback.message:
             user = await services.users.get_user(user_id)
-            await callback.message.answer("Пользователь одобрен.", reply_markup=user_actions_keyboard(user))
+            await safe_edit_message_text(callback.message, "Пользователь одобрен.", reply_markup=user_actions_keyboard(user))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -211,7 +212,7 @@ async def admin_block_user(callback: CallbackQuery, services: Any) -> None:
             )
             if result.errors:
                 text += "\nПроверьте audit log и отзовите оставшиеся ключи вручную."
-            await callback.message.answer(text, reply_markup=user_actions_keyboard(user))
+            await safe_edit_message_text(callback.message, text, reply_markup=user_actions_keyboard(user))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -226,7 +227,7 @@ async def admin_unblock_user(callback: CallbackQuery, services: Any) -> None:
         await services.users.set_role(callback.from_user.id, user_id, UserRole.APPROVED_USER)
         if callback.message:
             user = await services.users.get_user(user_id)
-            await callback.message.answer("Пользователь разблокирован.", reply_markup=user_actions_keyboard(user))
+            await safe_edit_message_text(callback.message, "Пользователь разблокирован.", reply_markup=user_actions_keyboard(user))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -247,7 +248,8 @@ async def admin_user_keys(callback: CallbackQuery, services: Any) -> None:
             offset=page_offset(page, ADMIN_KEYS_PAGE_SIZE),
         )
         keys, has_next = split_page(items, ADMIN_KEYS_PAGE_SIZE)
-        await callback.message.answer(
+        await safe_edit_message_text(
+            callback.message,
             keys_page_text(keys, page, owner_user_id=user_id),
             reply_markup=keys_list_keyboard(keys, page=page, has_next=has_next, owner_user_id=user_id),
         )
@@ -270,7 +272,7 @@ async def admin_audit(callback: CallbackQuery, services: Any) -> None:
             rows.append(("Назад", f"admin:audit:{page - 1}"))
         if has_next:
             rows.append(("Дальше", f"admin:audit:{page + 1}"))
-        await callback.message.answer(audit_page_text(audit_items, page), reply_markup=_simple_nav(rows, "admin:panel"))
+        await safe_edit_message_text(callback.message, audit_page_text(audit_items, page), reply_markup=_simple_nav(rows, "admin:panel"))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -286,7 +288,8 @@ async def admin_issue_choose_user(callback: CallbackQuery, services: Any) -> Non
         await require_superadmin(services, callback.from_user.id)
         items = await services.users.list_users(callback.from_user.id, limit=ADMIN_PAGE_SIZE + 1)
         users, has_next = split_page(items, ADMIN_PAGE_SIZE)
-        await callback.message.answer(
+        await safe_edit_message_text(
+            callback.message,
             "Выберите пользователя для выдачи ключа:",
             reply_markup=admin_issue_users_keyboard(users, page=0, has_next=has_next),
         )
@@ -310,7 +313,8 @@ async def admin_issue_choose_user_page(callback: CallbackQuery, services: Any) -
             offset=page_offset(page, ADMIN_PAGE_SIZE),
         )
         users, has_next = split_page(items, ADMIN_PAGE_SIZE)
-        await callback.message.answer(
+        await safe_edit_message_text(
+            callback.message,
             "Выберите пользователя для выдачи ключа:",
             reply_markup=admin_issue_users_keyboard(users, page=page, has_next=has_next),
         )
@@ -331,7 +335,7 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
         user = await services.users.get_user(user_id)
         await state.set_state(AdminCreateKeyStates.choosing_type)
         await state.update_data(owner_user_id=user.telegram_user_id)
-        await callback.message.answer(user_card_text(user), reply_markup=admin_key_type_keyboard(user.telegram_user_id))
+        await safe_edit_message_text(callback.message, user_card_text(user), reply_markup=admin_key_type_keyboard(user.telegram_user_id))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -348,7 +352,8 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
         _, _, key_type, raw_user_id = callback.data.split(":", 3)
         await state.set_state(AdminCreateKeyStates.waiting_note)
         await state.update_data(owner_user_id=int(raw_user_id), key_type=key_type)
-        await callback.message.answer(
+        await safe_edit_message_text(
+            callback.message,
             "Введите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
             reply_markup=cancel_keyboard(),
         )
@@ -396,20 +401,20 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
         elif key_type == VpnKeyType.AWG.value:
             result = await services.awg.create_awg_key(callback.from_user.id, profile, note)
         else:
-            await callback.message.answer("Неизвестный тип ключа.")
+            await safe_edit_message_text(callback.message, "Неизвестный тип ключа.")
             return
-        await callback.message.answer("Ключ выдан пользователю.", reply_markup=after_key_created_keyboard(result.key))
         if result.key.key_type == VpnKeyType.AWG:
             config = await services.awg.get_awg_client_config_plain(callback.from_user.id, result.key.id, audit=False)
             await send_awg_config(
                 callback.message,
                 title=f"AWG-ключ #{result.key.id}",
                 config_text=config,
-                filename=f"awg-key-{result.key.id}.conf",
+                filename=AWG_CONFIG_FILENAME,
                 reply_markup=key_actions_keyboard(result.key),
+                edit_text=True,
             )
         else:
-            await callback.message.answer(result.config_text, reply_markup=key_actions_keyboard(result.key))
+            await safe_edit_message_text(callback.message, result.config_text, reply_markup=key_actions_keyboard(result.key))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

@@ -1,10 +1,27 @@
 from __future__ import annotations
 
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, Message
 
 from utils.formatting import h, pre
 
 MAX_TEXT_CONFIG_LEN = 3500
+AWG_CONFIG_FILENAME = "awg.conf"
+
+
+async def safe_edit_message_text(
+    message: Message,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if _is_message_not_modified(exc):
+            return False
+        raise
+    return True
 
 
 async def send_awg_config(
@@ -12,15 +29,39 @@ async def send_awg_config(
     *,
     title: str,
     config_text: str,
-    filename: str,
+    filename: str = AWG_CONFIG_FILENAME,
     reply_markup: InlineKeyboardMarkup | None = None,
+    edit_text: bool = False,
 ) -> None:
+    text_was_updated = True
     if len(config_text) <= MAX_TEXT_CONFIG_LEN:
-        await message.answer(f"<b>{h(title)}</b>\n\n{pre(config_text)}", reply_markup=reply_markup)
+        text = f"<b>{h(title)}</b>\n\n{pre(config_text)}"
+        if edit_text:
+            text_was_updated = await safe_edit_message_text(message, text, reply_markup=reply_markup)
+        else:
+            await message.answer(text, reply_markup=reply_markup)
+        document_reply_markup = None
+        document_caption = f"{h(title)}\nФайл конфигурации: {h(filename)}"
+    else:
+        text = f"{h(title)}\nКонфиг отправлен файлом, потому что он слишком длинный для сообщения."
+        if edit_text:
+            text_was_updated = await safe_edit_message_text(message, text, reply_markup=reply_markup)
+        else:
+            await message.answer(text, reply_markup=reply_markup)
+        document_reply_markup = None
+        document_caption = text
+
+    if edit_text and not text_was_updated:
         return
+
     document = BufferedInputFile(config_text.encode("utf-8"), filename=filename)
     await message.answer_document(
         document,
-        caption=f"{h(title)}\nКонфиг отправлен файлом, потому что он слишком длинный для сообщения.",
-        reply_markup=reply_markup,
+        caption=document_caption,
+        disable_content_type_detection=False,
+        reply_markup=document_reply_markup,
     )
+
+
+def _is_message_not_modified(exc: TelegramBadRequest) -> bool:
+    return "message is not modified" in str(exc).lower()

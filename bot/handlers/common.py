@@ -9,7 +9,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, User as TgUser
 
 from bot.formatters import role_text
-from bot.keyboards.common import back_to_menu, main_reply_keyboard
+from bot.keyboards.common import back_to_menu, main_menu
+from bot.messages import safe_edit_message_text
 from bot.rate_limit import RateLimitExceeded
 from config.settings import SettingsError
 from models.dto import TelegramUserProfile
@@ -90,7 +91,7 @@ async def help_command(message: Message, services: Any) -> None:
 async def help_callback(callback: CallbackQuery, services: Any) -> None:
     await callback.answer()
     if callback.message and callback.from_user:
-        await callback.message.answer(await help_text(services, callback.from_user.id), reply_markup=back_to_menu())
+        await safe_edit_message_text(callback.message, await help_text(services, callback.from_user.id), reply_markup=back_to_menu())
 
 
 @router.message(F.text == "Помощь")
@@ -105,9 +106,10 @@ async def menu_callback(callback: CallbackQuery, services: Any) -> None:
     await callback.answer()
     if callback.from_user is None or callback.message is None:
         return
-    await callback.message.answer(
+    await safe_edit_message_text(
+        callback.message,
         f"Главное меню, {h(callback.from_user.first_name or callback.from_user.id)}.",
-        reply_markup=main_reply_keyboard(await is_admin(services, callback.from_user.id)),
+        reply_markup=main_menu(await is_admin(services, callback.from_user.id)),
     )
 
 
