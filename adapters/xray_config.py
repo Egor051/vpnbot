@@ -214,7 +214,7 @@ class XrayConfigAdapter:
             encoding="utf-8",
             dir=self.config_path.parent,
             prefix=f".{self.config_path.name}.",
-            suffix=".tmp",
+            suffix=".json",
             delete=False,
         ) as file:
             file.write(content)
