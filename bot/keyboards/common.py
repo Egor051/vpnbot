@@ -31,6 +31,29 @@ def back_to_menu() -> InlineKeyboardMarkup:
     )
 
 
+def faq_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Как подключиться?", callback_data="faq:connect")],
+            [InlineKeyboardButton(text="1 ключ = 1 устройство?", callback_data="faq:device")],
+            [InlineKeyboardButton(text="Что выбрать: AWG или Xray?", callback_data="faq:choice")],
+            [InlineKeyboardButton(text="Почему не работает?", callback_data="faq:trouble")],
+            [InlineKeyboardButton(text="Видит ли кто-нибудь мои заметки?", callback_data="faq:notes")],
+            [InlineKeyboardButton(text="Техподдержка", callback_data="faq:support")],
+            [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
+        ]
+    )
+
+
+def faq_answer_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="К вопросам", callback_data="help")],
+            [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
+        ]
+    )
+
+
 def cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="cancel")]]

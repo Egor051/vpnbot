@@ -1,8 +1,25 @@
 from __future__ import annotations
 
-from models.dto import AccessRequest, ProxyEntry, User, VpnKey
+from aiogram.types import User as TgUser
+
+from models.dto import AccessRequest, KeyTrafficStatsView, ProxyEntry, TrafficStats, User, VpnKey
 from models.enums import UserRole, VpnKeyStatus, VpnKeyType
-from utils.formatting import code, h
+from utils.formatting import (
+    code,
+    format_bytes,
+    format_greeting_name,
+    format_msk_datetime,
+    format_user_display,
+    h,
+)
+
+
+ONE_KEY_ONE_DEVICE_WARNING = "<b>⚠️ 1 КЛЮЧ = 1 УСТРОЙСТВО</b>"
+NOTE_CREATE_WARNING = "<b>Рекомендуем не оставлять поле пустым, чтобы не запутаться в ключах.</b>"
+SERVER_RESTART_WARNING = (
+    "<b>⚠️ Сервер перезагружается по чётным числам в 04:00 по МСК. "
+    "Перезагрузка занимает несколько минут, в это время соединение может кратковременно прерваться.</b>"
+)
 
 
 def short_note(note: str | None, limit: int = 42) -> str:
@@ -42,11 +59,27 @@ def key_title(key: VpnKey) -> str:
     return f"{prefix} #{key.id}"
 
 
+def key_display_label(key: VpnKey) -> str:
+    if key.email_label:
+        return key.email_label
+    if key.note:
+        return key.note
+    if key.public_key:
+        return key.public_key[:12] + "..."
+    return key_title(key)
+
+
+def main_menu_text(user: TgUser) -> str:
+    name = format_greeting_name(user.id, user.first_name, user.username)
+    return f"Доброго времени суток, {h(name)}\n\n{SERVER_RESTART_WARNING}\n\nВыберите действие."
+
+
 def key_list_card(key: VpnKey) -> str:
     parts = [
         f"<b>{key_title(key)}</b>",
         f"Статус: {h(status_text(key.status))}",
-        f"Создан: {h(key.created_at)}",
+        f"Label: {code(key_display_label(key))}",
+        f"Создан: {h(format_msk_datetime(key.created_at))}",
         f"Заметка: {h(short_note(key.note))}",
     ]
     if key.client_ip:
@@ -57,10 +90,10 @@ def key_list_card(key: VpnKey) -> str:
 def keys_page_text(keys: list[VpnKey], page: int, owner_user_id: int | None = None) -> str:
     title = "<b>Ключи пользователя</b>" if owner_user_id else "<b>Мои ключи</b>"
     if not keys:
-        return f"{title}\n\nНа этой странице ключей нет."
+        return f"{title}\n\n{ONE_KEY_ONE_DEVICE_WARNING}\n\nНа этой странице ключей нет."
     xray = [key for key in keys if key.key_type == VpnKeyType.XRAY]
     awg = [key for key in keys if key.key_type == VpnKeyType.AWG]
-    sections = [f"{title} · страница {page + 1}"]
+    sections = [f"{title} · страница {page + 1}", ONE_KEY_ONE_DEVICE_WARNING]
     if xray:
         sections.append("<b>Xray</b>\n" + "\n\n".join(key_list_card(key) for key in xray))
     if awg:
@@ -72,16 +105,83 @@ def key_detail_text(key: VpnKey) -> str:
     lines = [
         f"<b>{key_title(key)}</b>",
         f"Статус: {h(status_text(key.status))}",
-        f"Создан: {h(key.created_at)}",
-        f"Обновлён: {h(key.updated_at)}",
+        f"Label: {code(key_display_label(key))}",
+        f"Создан: {h(format_msk_datetime(key.created_at))}",
+        f"Обновлён: {h(format_msk_datetime(key.updated_at))}",
         f"Заметка: {h(key.note or 'нет')}",
     ]
     if key.client_ip:
         lines.append(f"IP: {code(key.client_ip)}")
-    if key.email_label:
-        lines.append(f"Label: {code(key.email_label)}")
     if key.public_key:
         lines.append(f"Public key: {code(key.public_key)}")
+    return "\n".join(lines)
+
+
+def traffic_stats_text(view: KeyTrafficStatsView) -> str:
+    key = view.key
+    owner = view.owner
+    owner_text = (
+        format_user_display(owner.telegram_user_id, owner.username)
+        if owner is not None
+        else format_user_display(key.owner_user_id, key.username)
+    )
+    lines = [
+        f"<b>Статистика {h(key_title(key))}</b>",
+        f"Тип: {h(key.key_type.value.upper())}",
+        f"Label: {code(key_display_label(key))}",
+        f"Владелец: {h(owner_text)}",
+    ]
+    stats = view.stats
+    if stats is None or not stats.available:
+        lines.append("")
+        if stats and stats.last_success_at:
+            lines.append("Статистика сейчас недоступна. Последний успешный снимок:")
+            lines.append(f"Скачано: {h(format_bytes(stats.downloaded_bytes))}")
+            lines.append(f"Отправлено: {h(format_bytes(stats.uploaded_bytes))}")
+            lines.append(f"Обновлено: {h(format_msk_datetime(stats.last_success_at))}")
+        else:
+            lines.append("Статистика пока недоступна.")
+        if stats and stats.unavailable_reason:
+            lines.append(f"Причина: {h(stats.unavailable_reason)}")
+        return "\n".join(lines)
+    lines.extend(
+        [
+            f"Скачано: {h(format_bytes(stats.downloaded_bytes))}",
+            f"Отправлено: {h(format_bytes(stats.uploaded_bytes))}",
+            f"Обновлено: {h(format_msk_datetime(stats.last_success_at))}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int) -> str:
+    if not views:
+        return "<b>Статистика ключей</b>\n\nНа этой странице ключей нет."
+    lines = [f"<b>Статистика ключей</b> · страница {page + 1}"]
+    for view in views:
+        stats = view.stats
+        owner = view.owner
+        owner_text = (
+            format_user_display(owner.telegram_user_id, owner.username)
+            if owner is not None
+            else format_user_display(view.key.owner_user_id, view.key.username)
+        )
+        if stats is None or not stats.available:
+            if stats and stats.last_success_at:
+                traffic = f"последнее: ↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
+            else:
+                traffic = "статистика пока недоступна"
+        else:
+            traffic = f"↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
+        updated = ""
+        if stats and stats.last_success_at:
+            updated = f" · обновлено {format_msk_datetime(stats.last_success_at)}"
+        elif stats and stats.last_attempt_at:
+            updated = f" · попытка {format_msk_datetime(stats.last_attempt_at)}"
+        lines.append(
+            f"{h(view.key.key_type.value.upper())} · {code(key_display_label(view.key))} · "
+            f"{h(owner_text)} · {h(traffic + updated)}"
+        )
     return "\n".join(lines)
 
 
@@ -92,8 +192,7 @@ def create_confirm_text(key_type: str, note: str | None, owner: User | None = No
         f"Заметка: {h(note or 'нет')}",
     ]
     if owner is not None:
-        username = f"@{owner.username}" if owner.username else str(owner.telegram_user_id)
-        lines.append(f"Владелец: {h(username)}")
+        lines.append(f"Владелец: {h(format_user_display(owner.telegram_user_id, owner.username))}")
     return "\n".join(lines)
 
 
@@ -142,7 +241,7 @@ def access_request_text(request: AccessRequest) -> str:
         f"User ID: {code(request.telegram_user_id)}\n"
         f"Username: {h(username)}\n"
         f"Статус: {h(request.status.value)}\n"
-        f"Создана: {h(request.requested_at)}"
+        f"Создана: {h(format_msk_datetime(request.requested_at))}"
     )
 
 
@@ -152,34 +251,99 @@ def access_requests_page_text(requests: list[AccessRequest], page: int) -> str:
     return f"<b>Заявки на доступ</b> · страница {page + 1}\n\n" + "\n\n".join(access_request_text(req) for req in requests)
 
 
-def user_card_text(user: User) -> str:
+def user_card_text(user: User, keys: list[VpnKey] | None = None, stats_by_key_id: dict[int, TrafficStats] | None = None) -> str:
     username = f"@{user.username}" if user.username else "не указан"
-    return (
-        "<b>Пользователь</b>\n"
-        f"ID: {code(user.telegram_user_id)}\n"
-        f"Username: {h(username)}\n"
-        f"Роль: {h(role_text(user.role))}\n"
-        f"Обновлён: {h(user.updated_at)}"
-    )
+    lines = [
+        "<b>Пользователь</b>",
+        f"Telegram ID: {code(user.telegram_user_id)}",
+        f"Username: {h(username)}",
+        f"Роль: {h(role_text(user.role))}",
+        f"Обновлён: {h(format_msk_datetime(user.updated_at))}",
+    ]
+    if keys is not None:
+        lines.append("")
+        lines.append("<b>Ключи</b>")
+        if not keys:
+            lines.append("Ключей нет.")
+        else:
+            stats_by_key_id = stats_by_key_id or {}
+            for key in keys:
+                stats = stats_by_key_id.get(key.id)
+                traffic = ""
+                if stats and stats.available:
+                    traffic = f" · ↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
+                elif stats:
+                    traffic = " · статистика пока недоступна"
+                lines.append(f"{h(key.key_type.value.upper())} · {code(key_display_label(key))}{traffic}")
+    return "\n".join(lines)
 
 
-def users_page_text(users: list[User], page: int) -> str:
+def users_page_text(users: list[User], page: int, key_counts: dict[int, int] | None = None) -> str:
     if not users:
         return "<b>Пользователи</b>\n\nНа этой странице пользователей нет."
     lines = [f"<b>Пользователи</b> · страница {page + 1}"]
+    key_counts = key_counts or {}
     for user in users:
-        username = f"@{user.username}" if user.username else str(user.telegram_user_id)
-        lines.append(f"{code(user.telegram_user_id)} · {h(username)} · {h(role_text(user.role))}")
+        username = format_user_display(user.telegram_user_id, user.username)
+        key_count = key_counts.get(user.telegram_user_id, 0)
+        lines.append(
+            f"{code(user.telegram_user_id)} · {h(username)} · {h(role_text(user.role))} · ключей: {key_count}"
+        )
     return "\n".join(lines)
 
 
-def audit_page_text(items: list[dict[str, object]], page: int) -> str:
+def audit_page_text(items: list[dict[str, object]], page: int, users: dict[int, User] | None = None) -> str:
     if not items:
         return "<b>Логи действий</b>\n\nНа этой странице записей нет."
     lines = [f"<b>Логи действий</b> · страница {page + 1}"]
+    users = users or {}
     for item in items:
-        lines.append(
-            f"#{item['id']} · {h(item['created_at'])} · {h(item['action'])} · "
-            f"{h(item['entity_type'])}:{h(item['entity_id'] or '-')}"
-        )
+        lines.append(h(_human_audit_line(item, users)))
     return "\n".join(lines)
+
+
+def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
+    actor_id = item.get("actor_user_id")
+    actor: User | None = users.get(int(actor_id)) if actor_id is not None else None
+    actor_text = (
+        format_user_display(actor.telegram_user_id, actor.username)
+        if actor is not None
+        else format_user_display(int(actor_id), None) if actor_id is not None else "система"
+    )
+    action = str(item.get("action") or "")
+    details = item.get("details")
+    details_dict = details if isinstance(details, dict) else {}
+    label = str(details_dict.get("label") or details_dict.get("email_label") or details_dict.get("key_label") or "")
+    owner_user_id = details_dict.get("owner_user_id")
+    owner_username = details_dict.get("owner_username")
+    owner_text = format_user_display(
+        int(owner_user_id) if owner_user_id is not None else None,
+        str(owner_username) if owner_username else None,
+    )
+    owner_suffix = ""
+    if owner_user_id is not None and actor_id is not None and int(owner_user_id) != int(actor_id):
+        owner_suffix = f" для {owner_text}"
+    time_text = format_msk_datetime(str(item.get("created_at") or ""))
+    if action == "xray_key_created":
+        suffix = (f" создал Xray-ключ {label}" if label else " создал Xray-ключ") + owner_suffix
+    elif action == "awg_key_created":
+        suffix = (f" создал AWG-ключ {label}" if label else " создал AWG-ключ") + owner_suffix
+    elif action == "stats_viewed":
+        target_user_id = details_dict.get("target_user_id")
+        target_username = details_dict.get("target_username")
+        target_text = format_user_display(
+            int(target_user_id) if target_user_id is not None else None,
+            str(target_username) if target_username else None,
+        )
+        suffix = f" открыл статистику пользователя {target_text}"
+    elif action == "user_role_changed":
+        suffix = " изменил роль пользователя"
+    elif action == "user_blocked":
+        suffix = " заблокировал пользователя"
+    elif action == "access_approved":
+        suffix = " одобрил заявку на доступ"
+    elif action == "access_rejected":
+        suffix = " отклонил заявку на доступ"
+    else:
+        suffix = f" выполнил действие {action}"
+    return f"{time_text} — {actor_text}{suffix}"

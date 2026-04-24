@@ -50,7 +50,7 @@ class XrayService:
         clean_note = normalize_note(note)
 
         async with self._lock:
-            uuid_value, email_label = await self._unique_identity(owner.telegram_user_id)
+            uuid_value, email_label = await self._unique_identity(owner.telegram_user_id, owner.username)
             short_id_managed = self.settings.xray_manage_short_ids
             short_id = self.ids.xray_short_id() if short_id_managed else self.settings.xray_short_id
             link = self._build_vless_link(uuid_value, short_id, email_label)
@@ -108,7 +108,7 @@ class XrayService:
                 action="xray_key_created",
                 entity_type=AuditEntityType.VPN_KEY,
                 entity_id=key.id,
-                details={"owner_user_id": owner.telegram_user_id},
+                details={"owner_user_id": owner.telegram_user_id, "owner_username": owner.username, "label": email_label},
             )
             active_key = await self._get_key(key.id)
             return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key))
@@ -294,10 +294,10 @@ class XrayService:
         in_use = await self.vpn_keys.count_active_managed_short_id(short_id, exclude_key_id=key.id)
         return in_use == 0
 
-    async def _unique_identity(self, telegram_user_id: int) -> tuple[str, str]:
+    async def _unique_identity(self, telegram_user_id: int, username: str | None) -> tuple[str, str]:
         for _ in range(5):
             uuid_value = self.ids.uuid4()
-            email_label = self.ids.email_label(telegram_user_id)
+            email_label = self.ids.email_label(telegram_user_id, username)
             if await self.vpn_keys.find_by_uuid(uuid_value) is None and await self.vpn_keys.find_by_email_label(email_label) is None:
                 return uuid_value, email_label
         raise InvalidOperation("Не удалось сгенерировать уникальные Xray-идентификаторы")
@@ -315,7 +315,7 @@ class XrayService:
         if self.settings.xray_flow:
             params["flow"] = self.settings.xray_flow
         query = urlencode(params)
-        fragment = quote("xray")
+        fragment = quote(email_label or "xray")
         return f"vless://{uuid_value}@{self.settings.xray_public_host}:{self.settings.xray_public_port}?{query}#{fragment}"
 
     def _format_config(self, key: VpnKey) -> str:
@@ -324,8 +324,9 @@ class XrayService:
         email_label = str(key.payload.get("email_label") or key.email_label or "")
         link = self._build_vless_link(uuid_value, short_id, email_label)
         note = f"\nЗаметка: {h(key.note)}" if key.note else ""
+        label = f"\nLabel: {h(email_label)}" if email_label else ""
         return (
             f"<b>Xray-ключ #{key.id}</b>\n"
-            f"Статус: {key.status.value}{note}\n\n"
+            f"Статус: {key.status.value}{label}{note}\n\n"
             f"{code(link)}"
         )

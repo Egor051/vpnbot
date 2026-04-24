@@ -9,8 +9,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.formatters import (
+    NOTE_CREATE_WARNING,
+    ONE_KEY_ONE_DEVICE_WARNING,
     access_request_text,
     access_requests_page_text,
+    admin_stats_page_text,
     audit_page_text,
     create_confirm_text,
     keys_page_text,
@@ -161,7 +164,12 @@ async def admin_users(callback: CallbackQuery, services: Any) -> None:
             offset=page_offset(page, ADMIN_PAGE_SIZE),
         )
         users, has_next = split_page(items, ADMIN_PAGE_SIZE)
-        await safe_edit_message_text(callback.message, users_page_text(users, page), reply_markup=users_keyboard(users, page=page, has_next=has_next))
+        key_counts = await services.users.count_keys_for_users(callback.from_user.id, [user.telegram_user_id for user in users])
+        await safe_edit_message_text(
+            callback.message,
+            users_page_text(users, page, key_counts),
+            reply_markup=users_keyboard(users, page=page, has_next=has_next),
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -175,7 +183,13 @@ async def admin_user_detail(callback: CallbackQuery, services: Any) -> None:
         await require_superadmin(services, callback.from_user.id)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         user = await services.users.get_user(user_id)
-        await safe_edit_message_text(callback.message, user_card_text(user), reply_markup=user_actions_keyboard(user))
+        keys = await services.vpn_keys.list_for_actor(callback.from_user.id, owner_user_id=user_id, limit=10)
+        stats_by_key_id = await services.traffic_stats.cached_for_keys(keys)
+        await safe_edit_message_text(
+            callback.message,
+            user_card_text(user, keys, stats_by_key_id),
+            reply_markup=user_actions_keyboard(user),
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -267,12 +281,50 @@ async def admin_audit(callback: CallbackQuery, services: Any) -> None:
         await require_superadmin(services, callback.from_user.id)
         items = await services.audit.recent(limit=AUDIT_PAGE_SIZE + 1, offset=page_offset(page, AUDIT_PAGE_SIZE))
         audit_items, has_next = split_page(items, AUDIT_PAGE_SIZE)
+        actor_ids = [
+            int(item["actor_user_id"])
+            for item in audit_items
+            if item.get("actor_user_id") is not None
+        ]
+        audit_users = await services.users.users.list_by_ids(actor_ids)
         rows = []
         if page > 0:
             rows.append(("Назад", f"admin:audit:{page - 1}"))
         if has_next:
             rows.append(("Дальше", f"admin:audit:{page + 1}"))
-        await safe_edit_message_text(callback.message, audit_page_text(audit_items, page), reply_markup=_simple_nav(rows, "admin:panel"))
+        await safe_edit_message_text(
+            callback.message,
+            audit_page_text(audit_items, page, audit_users),
+            reply_markup=_simple_nav(rows, "admin:panel"),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:stats(?::\d+)?$"))
+async def admin_stats(callback: CallbackQuery, services: Any) -> None:
+    await callback.answer("Обновляю статистику...")
+    if callback.from_user is None or callback.message is None:
+        return
+    page = _page_from_callback(callback.data)
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        items = await services.traffic_stats.list_for_superadmin(
+            callback.from_user.id,
+            limit=ADMIN_KEYS_PAGE_SIZE + 1,
+            offset=page_offset(page, ADMIN_KEYS_PAGE_SIZE),
+        )
+        views, has_next = split_page(items, ADMIN_KEYS_PAGE_SIZE)
+        rows = []
+        if page > 0:
+            rows.append(("Назад", f"admin:stats:{page - 1}"))
+        if has_next:
+            rows.append(("Дальше", f"admin:stats:{page + 1}"))
+        await safe_edit_message_text(
+            callback.message,
+            admin_stats_page_text(views, page),
+            reply_markup=_simple_nav(rows, "admin:panel"),
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -335,7 +387,8 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
         user = await services.users.get_user(user_id)
         await state.set_state(AdminCreateKeyStates.choosing_type)
         await state.update_data(owner_user_id=user.telegram_user_id)
-        await safe_edit_message_text(callback.message, user_card_text(user), reply_markup=admin_key_type_keyboard(user.telegram_user_id))
+        text = f"{user_card_text(user)}\n\n{ONE_KEY_ONE_DEVICE_WARNING}\n\nВыберите тип ключа:"
+        await safe_edit_message_text(callback.message, text, reply_markup=admin_key_type_keyboard(user.telegram_user_id))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -354,7 +407,7 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
         await state.update_data(owner_user_id=int(raw_user_id), key_type=key_type)
         await safe_edit_message_text(
             callback.message,
-            "Введите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
+            f"{NOTE_CREATE_WARNING}\n\nВведите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
             reply_markup=cancel_keyboard(),
         )
     except Exception as exc:

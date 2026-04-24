@@ -139,3 +139,9 @@ class UserService:
     async def list_users(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[User]:
         await self.require_superadmin(actor_user_id)
         return await self.users.list_users(limit=limit, offset=offset)
+
+    async def count_keys_for_users(self, actor_user_id: int, user_ids: list[int]) -> dict[int, int]:
+        await self.require_superadmin(actor_user_id)
+        if self._vpn_keys is None:
+            return {}
+        return await self._vpn_keys.count_by_owners(user_ids)

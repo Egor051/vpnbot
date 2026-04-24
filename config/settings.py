@@ -78,6 +78,7 @@ class Settings:
     xray_short_id: str
     xray_manage_short_ids: bool
     xray_allow_restart_on_rollback: bool
+    xray_stats_server: str
 
     awg_config_path: Path
     awg_interface: str
@@ -149,6 +150,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_short_id=_optional("XRAY_SHORT_ID"),
         xray_manage_short_ids=_bool("XRAY_MANAGE_SHORT_IDS", False),
         xray_allow_restart_on_rollback=_bool("XRAY_ALLOW_RESTART_ON_ROLLBACK", False),
+        xray_stats_server=_optional("XRAY_STATS_SERVER"),
         awg_config_path=Path(_optional("AWG_CONFIG_PATH", "/etc/amnezia/amneziawg/awg0.conf")),
         awg_interface=_optional("AWG_INTERFACE", "awg0"),
         awg_network=_optional("AWG_NETWORK", "10.0.0.0/24"),

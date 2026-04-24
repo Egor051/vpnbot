@@ -8,6 +8,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message
 
 from bot.handlers.common import answer_message_error, is_admin, profile_from_tg
+from bot.formatters import main_menu_text
 from bot.keyboards.admin import access_request_keyboard
 from bot.keyboards.common import main_reply_keyboard
 from models.enums import UserRole
@@ -29,7 +30,7 @@ async def start_command(message: Message, services: Any, bot: Bot) -> None:
             return
         if result.user.role in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
             await message.answer(
-                "Доступ активен. Выберите действие.",
+                main_menu_text(message.from_user),
                 reply_markup=main_reply_keyboard(await is_admin(services, message.from_user.id)),
             )
             return

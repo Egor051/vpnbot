@@ -148,6 +148,38 @@ class VpnKeyRepository:
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
+    async def list_traffic_supported(self, limit: int = 20, offset: int = 0) -> list[VpnKey]:
+        cursor = await self.db.conn.execute(
+            """
+            SELECT * FROM vpn_keys
+            WHERE key_type IN (?, ?)
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (VpnKeyType.XRAY.value, VpnKeyType.AWG.value, limit, offset),
+        )
+        rows = await cursor.fetchall()
+        return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
+
+    async def count_by_owners(self, owner_user_ids: list[int]) -> dict[int, int]:
+        if not owner_user_ids:
+            return {}
+        placeholders = ",".join("?" for _ in owner_user_ids)
+        cursor = await self.db.conn.execute(
+            f"""
+            SELECT owner_user_id, COUNT(*) AS cnt
+            FROM vpn_keys
+            WHERE owner_user_id IN ({placeholders})
+            GROUP BY owner_user_id
+            """,
+            tuple(owner_user_ids),
+        )
+        rows = await cursor.fetchall()
+        return {int(row["owner_user_id"]): int(row["cnt"]) for row in rows}
+
+    async def list_recent_by_owner(self, owner_user_id: int, limit: int = 10) -> list[VpnKey]:
+        return await self.list_by_owner(owner_user_id, limit=limit, offset=0)
+
     async def list_keys_by_owner_and_type(
         self,
         owner_user_id: int,

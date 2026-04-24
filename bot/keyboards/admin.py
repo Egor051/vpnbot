@@ -4,6 +4,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from models.dto import AccessRequest, User
 from models.enums import UserRole
+from utils.formatting import format_user_display
 
 
 def access_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
@@ -22,6 +23,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Заявки на доступ", callback_data="admin:reqs")],
             [InlineKeyboardButton(text="Пользователи", callback_data="admin:users")],
+            [InlineKeyboardButton(text="Статистика ключей", callback_data="admin:stats")],
             [InlineKeyboardButton(text="Логи действий", callback_data="admin:audit")],
             [InlineKeyboardButton(text="Выдать ключ пользователю", callback_data="admin:issue")],
             [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
@@ -51,23 +53,29 @@ def pending_requests_keyboard(requests: list[AccessRequest], page: int = 0, has_
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def users_keyboard(users: list[User], page: int = 0, has_next: bool = False, prefix: str = "admin:user") -> InlineKeyboardMarkup:
+def users_keyboard(
+    users: list[User],
+    page: int = 0,
+    has_next: bool = False,
+    prefix: str = "admin:user",
+    nav_prefix: str = "admin:users",
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for user in users:
-        title = user.username or str(user.telegram_user_id)
+        title = format_user_display(user.telegram_user_id, user.username)
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{title} · {user.role.value}",
+                    text=title,
                     callback_data=f"{prefix}:{user.telegram_user_id}",
                 )
             ]
         )
     nav: list[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="Назад", callback_data=f"admin:users:{page - 1}"))
+        nav.append(InlineKeyboardButton(text="Назад", callback_data=f"{nav_prefix}:{page - 1}"))
     if has_next:
-        nav.append(InlineKeyboardButton(text="Дальше", callback_data=f"admin:users:{page + 1}"))
+        nav.append(InlineKeyboardButton(text="Дальше", callback_data=f"{nav_prefix}:{page + 1}"))
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton(text="Админ-панель", callback_data="admin:panel")])
@@ -101,8 +109,8 @@ def admin_key_type_keyboard(user_id: int) -> InlineKeyboardMarkup:
 def admin_issue_users_keyboard(users: list[User], page: int = 0, has_next: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for user in users:
-        title = user.username or str(user.telegram_user_id)
-        rows.append([InlineKeyboardButton(text=f"{title} · {user.role.value}", callback_data=f"admin:issue:{user.telegram_user_id}")])
+        title = format_user_display(user.telegram_user_id, user.username)
+        rows.append([InlineKeyboardButton(text=title, callback_data=f"admin:issue:{user.telegram_user_id}")])
     nav: list[InlineKeyboardButton] = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="Назад", callback_data=f"admin:issuepage:{page - 1}"))

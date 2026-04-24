@@ -97,3 +97,19 @@ class UserRepository:
         )
         rows = await cursor.fetchall()
         return [user for row in rows if (user := _row_to_user(row)) is not None]
+
+    async def list_by_ids(self, telegram_user_ids: list[int]) -> dict[int, User]:
+        if not telegram_user_ids:
+            return {}
+        placeholders = ",".join("?" for _ in telegram_user_ids)
+        cursor = await self.db.conn.execute(
+            f"SELECT * FROM users WHERE telegram_user_id IN ({placeholders})",
+            tuple(telegram_user_ids),
+        )
+        rows = await cursor.fetchall()
+        users: dict[int, User] = {}
+        for row in rows:
+            user = _row_to_user(row)
+            if user is not None:
+                users[user.telegram_user_id] = user
+        return users

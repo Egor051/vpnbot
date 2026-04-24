@@ -15,6 +15,7 @@ from adapters.ip_allocator import IpAllocator
 from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter
+from adapters.xray_stats import XrayStatsAdapter
 from bot.handlers import admin, callbacks, common, keys, proxy, start
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.rate_limit import RateLimiter
@@ -24,6 +25,7 @@ from models.enums import VpnKeyType
 from repositories.access_requests import AccessRequestRepository
 from repositories.audit_log import AuditLogRepository
 from repositories.proxy_entries import ProxyRepository
+from repositories.traffic_stats import TrafficStatsRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.access_approval import AccessApprovalService
@@ -31,6 +33,7 @@ from services.audit import AuditService
 from services.awg import AwgService
 from services.notes import NotesService
 from services.proxy import ProxyService
+from services.traffic_stats import TrafficStatsService
 from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
 from services.xray import XrayService
@@ -47,6 +50,7 @@ class Services:
     proxy: ProxyService
     notes: NotesService
     vpn_keys: VpnKeyQueryService
+    traffic_stats: TrafficStatsService
     audit: AuditService
 
 
@@ -66,6 +70,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
     vpn_keys_repo = VpnKeyRepository(db)
     proxy_repo = ProxyRepository(db)
     audit_repo = AuditLogRepository(db)
+    traffic_stats_repo = TrafficStatsRepository(db)
 
     audit_service = AuditService(audit_repo, clock)
     user_service = UserService(users=users_repo, settings=settings, clock=clock, audit=audit_service)
@@ -86,6 +91,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         backup=backup,
         systemctl=systemctl,
     )
+    xray_stats_adapter = XrayStatsAdapter(shell=shell, stats_server=settings.xray_stats_server)
     awg_adapter = AwgConfigAdapter(
         config_path=settings.awg_config_path,
         interface=settings.awg_interface,
@@ -111,6 +117,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         ip_allocator=ip_allocator,
         settings=settings,
         clock=clock,
+        ids=ids,
         audit=audit_service,
     )
     user_service.attach_key_management(
@@ -133,6 +140,14 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         audit=audit_service,
     )
     vpn_key_service = VpnKeyQueryService(vpn_keys=vpn_keys_repo, users=user_service)
+    traffic_stats_service = TrafficStatsService(
+        stats=traffic_stats_repo,
+        vpn_keys=vpn_keys_repo,
+        users_repo=users_repo,
+        users=user_service,
+        awg=awg_adapter,
+        xray=xray_stats_adapter,
+    )
 
     await proxy_service.seed_default_from_env()
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
@@ -147,6 +162,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         proxy=proxy_service,
         notes=notes_service,
         vpn_keys=vpn_key_service,
+        traffic_stats=traffic_stats_service,
         audit=audit_service,
     )
 

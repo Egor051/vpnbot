@@ -71,6 +71,20 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS vpn_key_traffic_stats (
+  key_id INTEGER PRIMARY KEY,
+  downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+  uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+  last_raw_downloaded_bytes INTEGER,
+  last_raw_uploaded_bytes INTEGER,
+  last_success_at TEXT,
+  last_attempt_at TEXT,
+  available INTEGER NOT NULL DEFAULT 0,
+  unavailable_reason TEXT,
+  source TEXT,
+  FOREIGN KEY(key_id) REFERENCES vpn_keys(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_access_requests_user_status ON access_requests(telegram_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner ON vpn_keys(owner_user_id);
@@ -83,3 +97,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_client_ip_active
   WHERE client_ip IS NOT NULL AND status IN ('pending_apply','active');
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner_type_status ON vpn_keys(owner_user_id, key_type, status);
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);

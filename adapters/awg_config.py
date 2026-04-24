@@ -112,6 +112,7 @@ class AwgConfigAdapter:
         public_key: str,
         preshared_key: str | None,
         client_ip: str,
+        label: str | None = None,
     ) -> None:
         await self.ensure_interface_active()
         backup_path = self.backup.create_backup(self.config_path)
@@ -132,6 +133,7 @@ class AwgConfigAdapter:
                 public_key=public_key,
                 preshared_key=preshared_key,
                 client_ip=client_ip,
+                label=label,
             )
             self._parse_sections(updated)
             self.backup.atomic_write_text(self.config_path, updated, mode_from=backup_path)
@@ -195,6 +197,35 @@ class AwgConfigAdapter:
             return False
         return any(line.strip() == f"peer: {public_key}" for line in result.stdout.splitlines())
 
+    async def list_transfer(self) -> dict[str, tuple[int, int]]:
+        result = await self.shell.run(["awg", "show", self.interface, "transfer"], timeout=10)
+        source = "awg"
+        if not result.ok:
+            result = await self.shell.run(["wg", "show", self.interface, "transfer"], timeout=10)
+            source = "wg"
+        if not result.ok:
+            raise AwgApplyError(f"Не удалось получить AWG transfer через awg/wg: {result.stderr or result.stdout}")
+        return self.parse_transfer_output(result.stdout, source=source)
+
+    @staticmethod
+    def parse_transfer_output(text: str, *, source: str = "awg") -> dict[str, tuple[int, int]]:
+        transfers: dict[str, tuple[int, int]] = {}
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) != 3:
+                raise AwgApplyError(f"Некорректная строка {source} transfer: {line}")
+            public_key, received_raw, sent_raw = parts
+            try:
+                received_bytes = int(received_raw)
+                sent_bytes = int(sent_raw)
+            except ValueError as exc:
+                raise AwgApplyError(f"Некорректные байты {source} transfer: {line}") from exc
+            transfers[public_key] = (received_bytes, sent_bytes)
+        return transfers
+
     def _read_text(self) -> str:
         try:
             return self.config_path.read_text(encoding="utf-8")
@@ -251,9 +282,11 @@ class AwgConfigAdapter:
         public_key: str,
         preshared_key: str | None,
         client_ip: str,
+        label: str | None = None,
     ) -> str:
+        label_part = f" label={label}" if label else ""
         lines = [
-            f"# vpn-bot peer start key_id={key_id} owner={owner_user_id}",
+            f"# vpn-bot peer start key_id={key_id} owner={owner_user_id}{label_part}",
             "[Peer]",
             f"PublicKey = {public_key}",
         ]
