@@ -66,6 +66,27 @@ class VpnKey:
 
 
 @dataclass(frozen=True, slots=True)
+class TrafficStats:
+    key_id: int
+    downloaded_bytes: int
+    uploaded_bytes: int
+    last_raw_downloaded_bytes: int | None
+    last_raw_uploaded_bytes: int | None
+    last_success_at: str | None
+    last_attempt_at: str | None
+    available: bool
+    unavailable_reason: str | None
+    source: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class KeyTrafficStatsView:
+    key: VpnKey
+    owner: User | None
+    stats: TrafficStats | None
+
+
+@dataclass(frozen=True, slots=True)
 class VpnKeyCreateResult:
     key: VpnKey
     config_text: str

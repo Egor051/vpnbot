@@ -7,7 +7,7 @@ from typing import AsyncIterator
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 class Database:
@@ -59,6 +59,30 @@ class Database:
                 "ON vpn_keys(owner_user_id, key_type, status)"
             )
             await self._set_schema_version(2)
+            version = 2
+        if version < 3:
+            await self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vpn_key_traffic_stats (
+                  key_id INTEGER PRIMARY KEY,
+                  downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                  uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+                  last_raw_downloaded_bytes INTEGER,
+                  last_raw_uploaded_bytes INTEGER,
+                  last_success_at TEXT,
+                  last_attempt_at TEXT,
+                  available INTEGER NOT NULL DEFAULT 0,
+                  unavailable_reason TEXT,
+                  source TEXT,
+                  FOREIGN KEY(key_id) REFERENCES vpn_keys(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success "
+                "ON vpn_key_traffic_stats(last_success_at)"
+            )
+            await self._set_schema_version(3)
 
     async def _schema_version(self) -> int:
         await self.conn.execute(

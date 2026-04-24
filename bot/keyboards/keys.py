@@ -21,15 +21,23 @@ def keys_list_keyboard(keys: list[VpnKey], page: int = 0, has_next: bool = False
     for key in keys:
         prefix = "Xray" if key.key_type == VpnKeyType.XRAY else "AWG"
         rows.append([InlineKeyboardButton(text=f"{prefix} #{key.id} · {key.status.value}", callback_data=f"key:open:{key.id}")])
-        action_row: list[InlineKeyboardButton] = []
         if key.status == VpnKeyStatus.ACTIVE:
-            action_row.append(InlineKeyboardButton(text="Конфиг", callback_data=f"key:show:{key.id}"))
-            action_row.append(InlineKeyboardButton(text="Отозвать", callback_data=f"key:revoke:{key.id}"))
+            rows.append(
+                [
+                    InlineKeyboardButton(text="Конфиг", callback_data=f"key:show:{key.id}"),
+                    InlineKeyboardButton(text="Статистика", callback_data=f"key:stats:{key.id}"),
+                    InlineKeyboardButton(text="Отозвать", callback_data=f"key:revoke:{key.id}"),
+                ]
+            )
+        else:
+            rows.append([InlineKeyboardButton(text="Статистика", callback_data=f"key:stats:{key.id}")])
         if key.status != VpnKeyStatus.DELETED:
-            action_row.append(InlineKeyboardButton(text="Заметка", callback_data=f"key:note:{key.id}"))
-            action_row.append(InlineKeyboardButton(text="Удалить", callback_data=f"key:delete:{key.id}"))
-        if action_row:
-            rows.append(action_row)
+            rows.append(
+                [
+                    InlineKeyboardButton(text="Заметка", callback_data=f"key:note:{key.id}"),
+                    InlineKeyboardButton(text="Удалить", callback_data=f"key:delete:{key.id}"),
+                ]
+            )
 
     prev_page = page - 1
     next_page = page + 1
@@ -53,6 +61,7 @@ def key_actions_keyboard(key: VpnKey) -> InlineKeyboardMarkup:
     if key.status == VpnKeyStatus.ACTIVE:
         rows.append([InlineKeyboardButton(text="Показать конфиг", callback_data=f"key:show:{key.id}")])
         rows.append([InlineKeyboardButton(text="Отозвать", callback_data=f"key:revoke:{key.id}")])
+    rows.append([InlineKeyboardButton(text="Статистика", callback_data=f"key:stats:{key.id}")])
     if key.status != VpnKeyStatus.DELETED:
         rows.append([InlineKeyboardButton(text="Редактировать заметку", callback_data=f"key:note:{key.id}")])
         rows.append([InlineKeyboardButton(text="Удалить", callback_data=f"key:delete:{key.id}")])

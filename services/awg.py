@@ -5,6 +5,7 @@ import logging
 
 from adapters.awg_config import AwgConfigAdapter
 from adapters.clock import ClockProvider
+from adapters.id_generator import IdGenerator
 from adapters.ip_allocator import IpAllocator
 from config.settings import Settings
 from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
@@ -29,6 +30,7 @@ class AwgService:
         ip_allocator: IpAllocator,
         settings: Settings,
         clock: ClockProvider,
+        ids: IdGenerator,
         audit: AuditService,
     ) -> None:
         self.vpn_keys = vpn_keys
@@ -37,6 +39,7 @@ class AwgService:
         self.ip_allocator = ip_allocator
         self.settings = settings
         self.clock = clock
+        self.ids = ids
         self.audit = audit
         self._lock = asyncio.Lock()
 
@@ -54,17 +57,20 @@ class AwgService:
             self._endpoint_port(server_config.listen_port)
             client_ip = await self.ip_allocator.next_free_ip()
             private_key, public_key = await self._generate_unique_keypair()
+            email_label = await self._generate_unique_label(owner.telegram_user_id, owner.username)
             preshared_key = await self.adapter.generate_preshared_key() if self.settings.awg_use_preshared_key else None
             payload = {
                 "private_key": private_key,
                 "public_key": public_key,
                 "preshared_key": preshared_key,
                 "client_ip": client_ip,
+                "email_label": email_label,
             }
             public_payload = {
                 "public_key": public_key,
                 "client_ip": client_ip,
                 "endpoint": f"{self.settings.awg_endpoint_host}:{self._endpoint_port(server_config.listen_port)}",
+                "email_label": email_label,
             }
             key = await self.vpn_keys.create_pending(
                 owner_user_id=owner.telegram_user_id,
@@ -75,6 +81,7 @@ class AwgService:
                 public_payload=public_payload,
                 created_by=actor_user_id,
                 now=self.clock.now(),
+                email_label=email_label,
                 public_key=public_key,
                 client_ip=client_ip,
             )
@@ -85,6 +92,7 @@ class AwgService:
                     public_key=public_key,
                     preshared_key=preshared_key,
                     client_ip=client_ip,
+                    label=email_label,
                 )
             except Exception as exc:
                 await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
@@ -107,7 +115,12 @@ class AwgService:
                 action="awg_key_created",
                 entity_type=AuditEntityType.VPN_KEY,
                 entity_id=key.id,
-                details={"owner_user_id": owner.telegram_user_id, "client_ip": client_ip},
+                details={
+                    "owner_user_id": owner.telegram_user_id,
+                    "owner_username": owner.username,
+                    "client_ip": client_ip,
+                    "label": email_label,
+                },
             )
             active_key = await self._get_key(key.id)
             return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key))
@@ -298,12 +311,20 @@ class AwgService:
                 return private_key, public_key
         raise InvalidOperation("Не удалось сгенерировать уникальный AWG public key")
 
+    async def _generate_unique_label(self, telegram_user_id: int, username: str | None) -> str:
+        for _ in range(5):
+            label = self.ids.key_label(telegram_user_id, username)
+            if await self.vpn_keys.find_by_email_label(label) is None:
+                return label
+        raise InvalidOperation("Не удалось сгенерировать уникальный label для AWG-ключа")
+
     def _format_config(self, key: VpnKey) -> str:
         config = self._client_config(key)
         note = f"\nЗаметка: {h(key.note)}" if key.note else ""
+        label = f"\nLabel: {h(key.email_label)}" if key.email_label else ""
         return (
             f"<b>AWG-ключ #{key.id}</b>\n"
-            f"Статус: {key.status.value}{note}\n\n"
+            f"Статус: {key.status.value}{label}{note}\n\n"
             f"{pre(config)}"
         )
 

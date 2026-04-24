@@ -7,10 +7,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.formatters import (
+    NOTE_CREATE_WARNING,
+    ONE_KEY_ONE_DEVICE_WARNING,
     create_confirm_text,
     key_detail_text,
     keys_page_text,
     note_confirm_text,
+    traffic_stats_text,
     xray_config_text,
 )
 from bot.fsm.states import CreateKeyStates, EditNoteStates
@@ -26,7 +29,7 @@ from bot.messages import AWG_CONFIG_FILENAME, safe_edit_message_text, send_awg_c
 from bot.pagination import page_offset, split_page
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
-from models.enums import VpnKeyType
+from models.enums import AuditEntityType, VpnKeyType
 
 router = Router()
 KEYS_PAGE_SIZE = 5
@@ -73,14 +76,18 @@ async def create_key_menu(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     if callback.message:
-        await safe_edit_message_text(callback.message, "Выберите тип ключа:", reply_markup=create_key_keyboard())
+        await safe_edit_message_text(
+            callback.message,
+            f"{ONE_KEY_ONE_DEVICE_WARNING}\n\nВыберите тип ключа:",
+            reply_markup=create_key_keyboard(),
+        )
 
 
 @router.message(F.text == "Создать ключ")
 async def create_key_menu_message(message: Message) -> None:
     if not await ensure_private_message(message):
         return
-    await message.answer("Выберите тип ключа:", reply_markup=create_key_keyboard())
+    await message.answer(f"{ONE_KEY_ONE_DEVICE_WARNING}\n\nВыберите тип ключа:", reply_markup=create_key_keyboard())
 
 
 @router.callback_query(F.data.in_({"keys:create:xray", "keys:create:awg"}))
@@ -95,7 +102,7 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(key_type=key_type)
     await safe_edit_message_text(
         callback.message,
-        "Введите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
+        f"{NOTE_CREATE_WARNING}\n\nВведите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
         reply_markup=cancel_keyboard(),
     )
 
@@ -193,6 +200,34 @@ async def show_key_config(callback: CallbackQuery, services: Any, rate_limiter: 
                 reply_markup=key_actions_keyboard(key),
                 edit_text=True,
             )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.startswith("key:stats:"))
+async def show_key_stats(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        key_id = int(callback.data.rsplit(":", 1)[-1])
+        await callback.answer("Обновляю статистику...")
+        view = await services.traffic_stats.refresh_for_actor(callback.from_user.id, key_id)
+        owner = view.owner
+        await services.audit.write(
+            actor_user_id=callback.from_user.id,
+            action="stats_viewed",
+            entity_type=AuditEntityType.VPN_KEY,
+            entity_id=key_id,
+            details={
+                "target_user_id": view.key.owner_user_id,
+                "target_username": owner.username if owner else view.key.username,
+                "key_type": view.key.key_type.value,
+                "label": view.key.email_label,
+            },
+        )
+        await safe_edit_message_text(callback.message, traffic_stats_text(view), reply_markup=key_actions_keyboard(view.key))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
