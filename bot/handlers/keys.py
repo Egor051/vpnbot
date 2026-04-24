@@ -7,7 +7,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.formatters import (
-    awg_config_text,
     create_confirm_text,
     key_detail_text,
     keys_page_text,
@@ -18,13 +17,12 @@ from bot.fsm.states import CreateKeyStates, EditNoteStates
 from bot.handlers.common import answer_callback_error, answer_message_error, profile_from_tg
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import (
-    after_key_created_keyboard,
     confirm_keyboard,
     create_key_keyboard,
     key_actions_keyboard,
     keys_list_keyboard,
 )
-from bot.messages import send_awg_config
+from bot.messages import AWG_CONFIG_FILENAME, safe_edit_message_text, send_awg_config
 from bot.pagination import page_offset, split_page
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
@@ -50,7 +48,7 @@ async def list_keys(callback: CallbackQuery, services: Any) -> None:
         )
         keys, has_next = split_page(items, KEYS_PAGE_SIZE)
         text = keys_page_text(keys, page)
-        await callback.message.answer(text, reply_markup=keys_list_keyboard(keys, page=page, has_next=has_next))
+        await safe_edit_message_text(callback.message, text, reply_markup=keys_list_keyboard(keys, page=page, has_next=has_next))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -75,7 +73,7 @@ async def create_key_menu(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     if callback.message:
-        await callback.message.answer("Выберите тип ключа:", reply_markup=create_key_keyboard())
+        await safe_edit_message_text(callback.message, "Выберите тип ключа:", reply_markup=create_key_keyboard())
 
 
 @router.message(F.text == "Создать ключ")
@@ -95,7 +93,8 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext) -> None:
     key_type = callback.data.rsplit(":", 1)[-1]
     await state.set_state(CreateKeyStates.waiting_note)
     await state.update_data(key_type=key_type)
-    await callback.message.answer(
+    await safe_edit_message_text(
+        callback.message,
         "Введите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
         reply_markup=cancel_keyboard(),
     )
@@ -137,20 +136,20 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         elif key_type == VpnKeyType.AWG.value:
             result = await services.awg.create_awg_key(callback.from_user.id, profile, note)
         else:
-            await callback.message.answer("Неизвестный тип ключа.")
+            await safe_edit_message_text(callback.message, "Неизвестный тип ключа.")
             return
-        await callback.message.answer("Ключ создан.", reply_markup=after_key_created_keyboard(result.key))
         if result.key.key_type == VpnKeyType.AWG:
             config = await services.awg.get_awg_client_config_plain(callback.from_user.id, result.key.id, audit=False)
             await send_awg_config(
                 callback.message,
                 title=f"AWG-ключ #{result.key.id}",
                 config_text=config,
-                filename=f"awg-key-{result.key.id}.conf",
+                filename=AWG_CONFIG_FILENAME,
                 reply_markup=key_actions_keyboard(result.key),
+                edit_text=True,
             )
         else:
-            await callback.message.answer(result.config_text, reply_markup=key_actions_keyboard(result.key))
+            await safe_edit_message_text(callback.message, result.config_text, reply_markup=key_actions_keyboard(result.key))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -165,7 +164,7 @@ async def open_key(callback: CallbackQuery, services: Any) -> None:
     try:
         key_id = int(callback.data.rsplit(":", 1)[-1])
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
-        await callback.message.answer(key_detail_text(key), reply_markup=key_actions_keyboard(key))
+        await safe_edit_message_text(callback.message, key_detail_text(key), reply_markup=key_actions_keyboard(key))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -183,15 +182,16 @@ async def show_key_config(callback: CallbackQuery, services: Any, rate_limiter: 
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         if key.key_type == VpnKeyType.XRAY:
             text = xray_config_text(await services.xray.get_xray_key_config(callback.from_user.id, key_id))
-            await callback.message.answer(text, reply_markup=key_actions_keyboard(key))
+            await safe_edit_message_text(callback.message, text, reply_markup=key_actions_keyboard(key))
         else:
             config = await services.awg.get_awg_client_config_plain(callback.from_user.id, key_id)
             await send_awg_config(
                 callback.message,
                 title=f"AWG-ключ #{key.id}",
                 config_text=config,
-                filename=f"awg-key-{key.id}.conf",
+                filename=AWG_CONFIG_FILENAME,
                 reply_markup=key_actions_keyboard(key),
+                edit_text=True,
             )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -207,7 +207,8 @@ async def revoke_key_prompt(callback: CallbackQuery, services: Any) -> None:
     try:
         key_id = int(callback.data.rsplit(":", 1)[-1])
         await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
-        await callback.message.answer(
+        await safe_edit_message_text(
+            callback.message,
             f"Отозвать ключ #{key_id}? Доступ по нему будет отключён.",
             reply_markup=confirm_keyboard("revoke", key_id),
         )
@@ -225,7 +226,8 @@ async def delete_key_prompt(callback: CallbackQuery, services: Any) -> None:
     try:
         key_id = int(callback.data.rsplit(":", 1)[-1])
         await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
-        await callback.message.answer(
+        await safe_edit_message_text(
+            callback.message,
             f"Удалить ключ #{key_id}? Это мягкое удаление через сервис.",
             reply_markup=confirm_keyboard("delete", key_id),
         )
@@ -251,7 +253,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Any, rate_limite
                 if key.key_type == VpnKeyType.XRAY
                 else await services.awg.revoke_awg_key(callback.from_user.id, key_id)
             )
-            await callback.message.answer("Ключ отозван.", reply_markup=key_actions_keyboard(updated))
+            await safe_edit_message_text(callback.message, "Ключ отозван.", reply_markup=key_actions_keyboard(updated))
         elif action == "delete":
             rate_limiter.check(callback.from_user.id, "key_delete", 10)
             await callback.answer("Выполняю...")
@@ -260,7 +262,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Any, rate_limite
                 if key.key_type == VpnKeyType.XRAY
                 else await services.awg.delete_awg_key(callback.from_user.id, key_id)
             )
-            await callback.message.answer("Ключ удалён.", reply_markup=key_actions_keyboard(updated))
+            await safe_edit_message_text(callback.message, "Ключ удалён.", reply_markup=key_actions_keyboard(updated))
         else:
             await callback.answer("Неизвестное действие", show_alert=True)
     except Exception as exc:
@@ -279,7 +281,8 @@ async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services:
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await state.set_state(EditNoteStates.waiting_note)
         await state.update_data(key_id=key_id)
-        await callback.message.answer(
+        await safe_edit_message_text(
+            callback.message,
             f"Новая заметка для {key.key_type.value.upper()} #{key.id}. Отправьте <code>-</code>, чтобы очистить.",
             reply_markup=cancel_keyboard(),
         )
@@ -320,7 +323,7 @@ async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services
         note = data.get("note")
         await services.notes.update_key_note(callback.from_user.id, key_id, note)
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
-        await callback.message.answer("Заметка обновлена.", reply_markup=key_actions_keyboard(key))
+        await safe_edit_message_text(callback.message, "Заметка обновлена.", reply_markup=key_actions_keyboard(key))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
