@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from aiosqlite import Row
@@ -9,9 +10,15 @@ from db.database import Database
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 
+logger = logging.getLogger(__name__)
+
 
 def _json_loads(value: str) -> dict[str, object]:
-    data = json.loads(value)
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        logger.warning("Некорректный JSON в vpn_keys payload/public_payload")
+        return {"_corrupted": True}
     if not isinstance(data, dict):
         return {}
     return data
@@ -90,7 +97,7 @@ class VpnKeyRepository:
                 created_by,
             ),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
         key = await self.get_by_id(int(cursor.lastrowid))
         if key is None:
             raise RuntimeError("VPN key insert failed")
@@ -230,6 +237,49 @@ class VpnKeyRepository:
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
+    async def list_by_statuses(
+        self,
+        statuses: set[VpnKeyStatus],
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[VpnKey]:
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        cursor = await self.db.conn.execute(
+            f"""
+            SELECT * FROM vpn_keys
+            WHERE status IN ({placeholders})
+            ORDER BY updated_at ASC, id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (*(status.value for status in statuses), limit, offset),
+        )
+        rows = await cursor.fetchall()
+        return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
+
+    async def list_by_type_statuses(
+        self,
+        key_type: VpnKeyType,
+        statuses: set[VpnKeyStatus],
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[VpnKey]:
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        cursor = await self.db.conn.execute(
+            f"""
+            SELECT * FROM vpn_keys
+            WHERE key_type = ? AND status IN ({placeholders})
+            ORDER BY updated_at ASC, id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (key_type.value, *(status.value for status in statuses), limit, offset),
+        )
+        rows = await cursor.fetchall()
+        return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
+
     async def mark_active(
         self,
         key_id: int,
@@ -258,14 +308,14 @@ class VpnKeyRepository:
                 key_id,
             ),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
 
     async def set_status(self, key_id: int, status: VpnKeyStatus, now: str) -> None:
         await self.db.conn.execute(
             "UPDATE vpn_keys SET status = ?, updated_at = ? WHERE id = ?",
             (status.value, now, key_id),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
 
     async def update_key_status(self, key_id: int, status: VpnKeyStatus, now: str) -> None:
         await self.set_status(key_id, status, now)
@@ -279,7 +329,7 @@ class VpnKeyRepository:
             """,
             (VpnKeyStatus.REVOKED.value, now, now, actor_user_id, key_id),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
 
     async def mark_deleted(self, key_id: int, actor_user_id: int, now: str) -> None:
         await self.db.conn.execute(
@@ -290,7 +340,7 @@ class VpnKeyRepository:
             """,
             (VpnKeyStatus.DELETED.value, now, now, actor_user_id, key_id),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
 
     async def soft_delete_key(self, key_id: int, actor_user_id: int, now: str) -> None:
         await self.mark_deleted(key_id, actor_user_id, now)
@@ -300,7 +350,7 @@ class VpnKeyRepository:
             "UPDATE vpn_keys SET note = ?, updated_at = ? WHERE id = ?",
             (note, now, key_id),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
 
     async def get_occupied_awg_ips(self) -> set[str]:
         cursor = await self.db.conn.execute(

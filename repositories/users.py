@@ -7,6 +7,7 @@ from aiosqlite import Row
 from db.database import Database
 from models.dto import TelegramUserProfile, User
 from models.enums import UserRole
+from services.errors import NotFound
 
 
 def _row_to_user(row: Row | None) -> User | None:
@@ -54,7 +55,7 @@ class UserRepository:
                 now,
             ),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
         user = await self.get_by_id(profile.telegram_user_id)
         if user is None:
             raise RuntimeError("User upsert failed")
@@ -73,10 +74,10 @@ class UserRepository:
                 """,
                 (admin_id, UserRole.SUPERADMIN.value, now, now),
             )
-        await self.db.conn.commit()
+        await self.db.commit()
 
     async def set_role(self, telegram_user_id: int, role: UserRole, now: str, blocked_at: str | None = None) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE users
             SET role = ?, updated_at = ?, blocked_at = ?
@@ -84,7 +85,9 @@ class UserRepository:
             """,
             (role.value, now, blocked_at, telegram_user_id),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
+        if cursor.rowcount != 1:
+            raise NotFound("Пользователь не найден")
 
     async def list_users(self, limit: int = 20, offset: int = 0) -> list[User]:
         cursor = await self.db.conn.execute(

@@ -35,7 +35,7 @@ from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import key_actions_keyboard, keys_list_keyboard
 from bot.messages import AWG_CONFIG_FILENAME, safe_edit_message_text, send_awg_config
 from bot.pagination import page_offset, split_page
-from bot.private_chat import ensure_private_callback, ensure_private_message
+from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
 from models.dto import TelegramUserProfile
 from models.enums import UserRole, VpnKeyType
@@ -52,6 +52,8 @@ AUDIT_PAGE_SIZE = 12
 async def admin_command(message: Message, services: Any) -> None:
     if message.from_user is None:
         return
+    if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     try:
         await require_superadmin(services, message.from_user.id)
         await message.answer("Админ-панель:", reply_markup=admin_panel_keyboard())
@@ -63,6 +65,8 @@ async def admin_command(message: Message, services: Any) -> None:
 async def admin_menu_message(message: Message, services: Any) -> None:
     if message.from_user is None:
         return
+    if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     try:
         await require_superadmin(services, message.from_user.id)
         await message.answer("Админ-панель:", reply_markup=admin_panel_keyboard())
@@ -72,6 +76,8 @@ async def admin_menu_message(message: Message, services: Any) -> None:
 
 @router.callback_query(F.data == "admin:panel")
 async def admin_panel(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     await callback.answer()
     if callback.from_user is None or callback.message is None:
         return
@@ -84,6 +90,8 @@ async def admin_panel(callback: CallbackQuery, services: Any) -> None:
 
 @router.callback_query(F.data.regexp(r"^admin:reqs(?::\d+)?$"))
 async def admin_requests(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     await callback.answer()
     if callback.from_user is None or callback.message is None:
         return
@@ -106,6 +114,8 @@ async def admin_requests(callback: CallbackQuery, services: Any) -> None:
 
 @router.callback_query(F.data.startswith("admin:req:"))
 async def admin_request_detail(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     await callback.answer()
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
@@ -120,6 +130,8 @@ async def admin_request_detail(callback: CallbackQuery, services: Any) -> None:
 @router.callback_query(F.data.startswith("admin:approve:"))
 async def admin_approve(callback: CallbackQuery, services: Any, bot: Bot) -> None:
     if callback.from_user is None or callback.data is None:
+        return
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await callback.answer("Обрабатываю...")
     try:
@@ -138,6 +150,8 @@ async def admin_approve(callback: CallbackQuery, services: Any, bot: Bot) -> Non
 async def admin_reject(callback: CallbackQuery, services: Any, bot: Bot) -> None:
     if callback.from_user is None or callback.data is None:
         return
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     await callback.answer("Обрабатываю...")
     try:
         request_id = int(callback.data.rsplit(":", 1)[-1])
@@ -153,6 +167,8 @@ async def admin_reject(callback: CallbackQuery, services: Any, bot: Bot) -> None
 
 @router.callback_query(F.data.regexp(r"^admin:users(?::\d+)?$"))
 async def admin_users(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     await callback.answer()
     if callback.from_user is None or callback.message is None:
         return
@@ -176,6 +192,8 @@ async def admin_users(callback: CallbackQuery, services: Any) -> None:
 
 @router.callback_query(F.data.startswith("admin:user:"))
 async def admin_user_detail(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     await callback.answer()
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
@@ -198,6 +216,8 @@ async def admin_user_detail(callback: CallbackQuery, services: Any) -> None:
 async def admin_user_approve(callback: CallbackQuery, services: Any) -> None:
     if callback.from_user is None or callback.data is None:
         return
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     await callback.answer("Обрабатываю...")
     try:
         user_id = int(callback.data.rsplit(":", 1)[-1])
@@ -213,19 +233,27 @@ async def admin_user_approve(callback: CallbackQuery, services: Any) -> None:
 async def admin_block_user(callback: CallbackQuery, services: Any) -> None:
     if callback.from_user is None or callback.data is None:
         return
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     await callback.answer("Обрабатываю...")
     try:
         user_id = int(callback.data.rsplit(":", 1)[-1])
         result = await services.users.block_user(callback.from_user.id, user_id, revoke_active_keys=True)
         if callback.message:
             user = await services.users.get_user(user_id)
-            text = (
-                "Пользователь заблокирован.\n"
-                f"Отозвано ключей: {len(result.revoked_key_ids)}\n"
-                f"Ошибок отзыва: {len(result.errors)}"
-            )
             if result.errors:
-                text += "\nПроверьте audit log и отзовите оставшиеся ключи вручную."
+                text = (
+                    "Блокировка не завершена: не удалось безопасно отключить все VPN-ключи.\n"
+                    f"Отключено ключей: {len(result.revoked_key_ids)}\n"
+                    f"Ошибок: {len(result.errors)}\n"
+                    "Пользователь не переведён в статус заблокированного. Проверьте журнал действий."
+                )
+            else:
+                text = (
+                    "Пользователь заблокирован.\n"
+                    f"Отключено ключей: {len(result.revoked_key_ids)}\n"
+                    "Ошибок: 0"
+                )
             await safe_edit_message_text(callback.message, text, reply_markup=user_actions_keyboard(user))
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -234,6 +262,8 @@ async def admin_block_user(callback: CallbackQuery, services: Any) -> None:
 @router.callback_query(F.data.startswith("admin:unblock:"))
 async def admin_unblock_user(callback: CallbackQuery, services: Any) -> None:
     if callback.from_user is None or callback.data is None:
+        return
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await callback.answer("Обрабатываю...")
     try:
@@ -248,6 +278,8 @@ async def admin_unblock_user(callback: CallbackQuery, services: Any) -> None:
 
 @router.callback_query(F.data.regexp(r"^admin:ukeys:\d+:\d+$"))
 async def admin_user_keys(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     await callback.answer()
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
@@ -273,6 +305,8 @@ async def admin_user_keys(callback: CallbackQuery, services: Any) -> None:
 
 @router.callback_query(F.data.regexp(r"^admin:audit(?::\d+)?$"))
 async def admin_audit(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     await callback.answer()
     if callback.from_user is None or callback.message is None:
         return
@@ -303,6 +337,8 @@ async def admin_audit(callback: CallbackQuery, services: Any) -> None:
 
 @router.callback_query(F.data.regexp(r"^admin:stats(?::\d+)?$"))
 async def admin_stats(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
     await callback.answer("Обновляю статистику...")
     if callback.from_user is None or callback.message is None:
         return
@@ -331,7 +367,7 @@ async def admin_stats(callback: CallbackQuery, services: Any) -> None:
 
 @router.callback_query(F.data == "admin:issue")
 async def admin_issue_choose_user(callback: CallbackQuery, services: Any) -> None:
-    if not await ensure_private_callback(callback):
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await callback.answer()
     if callback.from_user is None or callback.message is None:
@@ -351,7 +387,7 @@ async def admin_issue_choose_user(callback: CallbackQuery, services: Any) -> Non
 
 @router.callback_query(F.data.regexp(r"^admin:issuepage:\d+$"))
 async def admin_issue_choose_user_page(callback: CallbackQuery, services: Any) -> None:
-    if not await ensure_private_callback(callback):
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await callback.answer()
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -376,7 +412,7 @@ async def admin_issue_choose_user_page(callback: CallbackQuery, services: Any) -
 
 @router.callback_query(F.data.regexp(r"^admin:issue:\d+$"))
 async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
-    if not await ensure_private_callback(callback):
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await callback.answer()
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -395,7 +431,7 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
 
 @router.callback_query(AdminCreateKeyStates.choosing_type, F.data.regexp(r"^admin:ctype:(xray|awg):\d+$"))
 async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
-    if not await ensure_private_callback(callback):
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await callback.answer()
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -418,7 +454,7 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
 async def admin_issue_note(message: Message, state: FSMContext, services: Any) -> None:
     if message.from_user is None:
         return
-    if not await ensure_private_message(message):
+    if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
         return
     data = await state.get_data()
     try:
@@ -438,7 +474,7 @@ async def admin_issue_note(message: Message, state: FSMContext, services: Any) -
 async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, services: Any, rate_limiter: RateLimiter) -> None:
     if callback.from_user is None or callback.message is None:
         return
-    if not await ensure_private_callback(callback):
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     data = await state.get_data()
     await state.clear()
@@ -463,11 +499,15 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
                 title=f"AWG-ключ #{result.key.id}",
                 config_text=config,
                 filename=AWG_CONFIG_FILENAME,
-                reply_markup=key_actions_keyboard(result.key),
+                reply_markup=key_actions_keyboard(result.key, owner_user_id=result.key.owner_user_id),
                 edit_text=True,
             )
         else:
-            await safe_edit_message_text(callback.message, result.config_text, reply_markup=key_actions_keyboard(result.key))
+            await safe_edit_message_text(
+                callback.message,
+                result.config_text,
+                reply_markup=key_actions_keyboard(result.key, owner_user_id=result.key.owner_user_id),
+            )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

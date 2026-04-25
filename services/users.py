@@ -105,7 +105,13 @@ class UserService:
             else:
                 keys = await self._vpn_keys.list_by_owner_statuses(
                     target_user_id,
-                    {VpnKeyStatus.ACTIVE, VpnKeyStatus.PENDING_APPLY},
+                    {
+                        VpnKeyStatus.ACTIVE,
+                        VpnKeyStatus.PENDING_APPLY,
+                        VpnKeyStatus.PENDING_REVOKE,
+                        VpnKeyStatus.PENDING_DELETE,
+                        VpnKeyStatus.DELETE_FAILED,
+                    },
                     limit=500,
                 )
                 for key in keys:
@@ -118,6 +124,22 @@ class UserService:
                         revoked_key_ids.append(key.id)
                     except Exception as exc:
                         errors.append(KeyOperationError(key.id, key.key_type, str(exc)))
+
+        if errors:
+            await self.audit.write(
+                actor_user_id=actor_user_id,
+                action="user_block_failed",
+                entity_type=AuditEntityType.USER,
+                entity_id=target_user_id,
+                details={
+                    "revoke_active_keys": revoke_active_keys,
+                    "revoked_key_ids": revoked_key_ids,
+                    "error_count": len(errors),
+                    "errors": [{"key_id": item.key_id, "key_type": item.key_type.value, "error": item.error} for item in errors],
+                },
+            )
+            user = await self.get_user(target_user_id)
+            return BlockUserResult(user=user, revoked_key_ids=tuple(revoked_key_ids), errors=tuple(errors))
 
         now = self.clock.now()
         await self.users.set_role(target_user_id, UserRole.BLOCKED_USER, now, blocked_at=now)

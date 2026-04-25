@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
 def setup_logging(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        try:
+            log_dir.chmod(0o700)
+        except OSError:
+            pass
     formatter = logging.Formatter(
         fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S%z",
@@ -26,6 +32,11 @@ def setup_logging(log_dir: Path) -> None:
         backupCount=5,
         encoding="utf-8",
     )
+    if os.name == "posix":
+        try:
+            (log_dir / "bot.log").chmod(0o600)
+        except OSError:
+            pass
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
 

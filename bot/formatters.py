@@ -78,7 +78,7 @@ def key_list_card(key: VpnKey) -> str:
     parts = [
         f"<b>{key_title(key)}</b>",
         f"Статус: {h(status_text(key.status))}",
-        f"Label: {code(key_display_label(key))}",
+        f"Метка: {code(key_display_label(key))}",
         f"Создан: {h(format_msk_datetime(key.created_at))}",
         f"Заметка: {h(short_note(key.note))}",
     ]
@@ -105,7 +105,7 @@ def key_detail_text(key: VpnKey) -> str:
     lines = [
         f"<b>{key_title(key)}</b>",
         f"Статус: {h(status_text(key.status))}",
-        f"Label: {code(key_display_label(key))}",
+        f"Метка: {code(key_display_label(key))}",
         f"Создан: {h(format_msk_datetime(key.created_at))}",
         f"Обновлён: {h(format_msk_datetime(key.updated_at))}",
         f"Заметка: {h(key.note or 'нет')}",
@@ -113,7 +113,7 @@ def key_detail_text(key: VpnKey) -> str:
     if key.client_ip:
         lines.append(f"IP: {code(key.client_ip)}")
     if key.public_key:
-        lines.append(f"Public key: {code(key.public_key)}")
+        lines.append(f"Публичный ключ: {code(key.public_key)}")
     return "\n".join(lines)
 
 
@@ -128,7 +128,7 @@ def traffic_stats_text(view: KeyTrafficStatsView) -> str:
     lines = [
         f"<b>Статистика {h(key_title(key))}</b>",
         f"Тип: {h(key.key_type.value.upper())}",
-        f"Label: {code(key_display_label(key))}",
+        f"Метка: {code(key_display_label(key))}",
         f"Владелец: {h(owner_text)}",
     ]
     stats = view.stats
@@ -215,13 +215,13 @@ def awg_config_text(config_text: str) -> str:
 def proxy_entry_text(entry: ProxyEntry) -> str:
     lines = [
         f"<b>{h(entry.proxy_type)}</b>",
-        f"Host: {code(entry.host)}",
-        f"Port: {code(entry.port)}",
+        f"Хост: {code(entry.host)}",
+        f"Порт: {code(entry.port)}",
     ]
     if entry.login:
-        lines.append(f"Login: {code(entry.login)}")
+        lines.append(f"Логин: {code(entry.login)}")
     if entry.password:
-        lines.append(f"Password: {code(entry.password)}")
+        lines.append(f"Пароль: {code(entry.password)}")
     if entry.note:
         lines.append(f"Описание: {h(entry.note)}")
     lines.append(f"Статус: {h(entry.status.value)}")
@@ -238,7 +238,7 @@ def access_request_text(request: AccessRequest) -> str:
     username = f"@{request.username}" if request.username else "не указан"
     return (
         f"<b>Заявка #{request.id}</b>\n"
-        f"User ID: {code(request.telegram_user_id)}\n"
+        f"Telegram ID: {code(request.telegram_user_id)}\n"
         f"Username: {h(username)}\n"
         f"Статус: {h(request.status.value)}\n"
         f"Создана: {h(format_msk_datetime(request.requested_at))}"

@@ -13,7 +13,11 @@ Restart=on-failure
 RestartSec=5
 User=root
 Group=root
-NoNewPrivileges=false
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/vpn-service /run /usr/local/etc/xray /etc/amnezia/amneziawg
 
 [Install]
 WantedBy=multi-user.target

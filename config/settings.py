@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import ipaddress
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +36,26 @@ def _int(name: str, default: int | None = None) -> int:
         raise SettingsError(f"Переменная {name} должна быть целым числом") from exc
 
 
+def _int_range(name: str, default: int | None, min_value: int, max_value: int) -> int:
+    value = _int(name, default)
+    if not min_value <= value <= max_value:
+        raise SettingsError(f"Переменная {name} должна быть в диапазоне {min_value}–{max_value}")
+    return value
+
+
+def _optional_int_range(name: str, min_value: int, max_value: int) -> int | None:
+    raw = _optional(name)
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SettingsError(f"Переменная {name} должна быть целым числом") from exc
+    if not min_value <= value <= max_value:
+        raise SettingsError(f"Переменная {name} должна быть в диапазоне {min_value}–{max_value}")
+    return value
+
+
 def _bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
@@ -54,6 +76,26 @@ def _admin_ids(raw: str) -> frozenset[int]:
     if not values:
         raise SettingsError("ADMIN_IDS не должен быть пустым")
     return frozenset(values)
+
+
+def _xray_short_id(value: str, *, required: bool) -> str:
+    if not value:
+        if required:
+            raise SettingsError("XRAY_SHORT_ID должен быть задан, если XRAY_MANAGE_SHORT_IDS=false")
+        return ""
+    if len(value) > 16 or len(value) % 2 != 0 or re.fullmatch(r"[0-9a-fA-F]+", value) is None:
+        raise SettingsError("XRAY_SHORT_ID должен быть hex-строкой чётной длины до 16 символов")
+    return value.lower()
+
+
+def _ipv4_network(name: str, value: str) -> str:
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise SettingsError(f"{name} должен быть корректной IPv4-сетью") from exc
+    if network.version != 4:
+        raise SettingsError(f"{name} сейчас поддерживает только IPv4")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +142,7 @@ class Settings:
     default_proxy_password: str
     default_proxy_note: str
     audit_retention_days: int
+    config_backup_keep_last: int
 
     def validate_xray_ready(self) -> None:
         required = {
@@ -112,6 +155,7 @@ class Settings:
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise SettingsError("Для создания Xray-ключа не заданы: " + ", ".join(missing))
+        _xray_short_id(self.xray_short_id, required=not self.xray_manage_short_ids)
 
     def validate_awg_ready(self) -> None:
         missing = [
@@ -127,10 +171,11 @@ class Settings:
 
 def load_settings(env_path: str | Path | None = None) -> Settings:
     load_dotenv(env_path)
-    proxy_port_raw = _optional("DEFAULT_PROXY_PORT")
-    awg_mtu_raw = _optional("AWG_MTU")
     awg_dns = _optional("AWG_DNS") or _optional("AWG_CLIENT_DNS", "1.1.1.1")
-    xray_port_raw = _optional("XRAY_PUBLIC_PORT") or _optional("XRAY_SERVER_PORT")
+    xray_manage_short_ids = _bool("XRAY_MANAGE_SHORT_IDS", False)
+    xray_short_id = _xray_short_id(_optional("XRAY_SHORT_ID"), required=False)
+    xray_port = _optional("XRAY_PUBLIC_PORT") or _optional("XRAY_SERVER_PORT")
+    awg_network = _ipv4_network("AWG_NETWORK", _optional("AWG_NETWORK", "10.0.0.0/24"))
     return Settings(
         bot_token=_required("BOT_TOKEN"),
         admin_ids=_admin_ids(_required("ADMIN_IDS")),
@@ -141,33 +186,38 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_service_name=_optional("XRAY_SERVICE_NAME", "xray"),
         xray_inbound_tag=_optional("XRAY_INBOUND_TAG"),
         xray_public_host=_optional("XRAY_PUBLIC_HOST") or _optional("XRAY_SERVER_ADDRESS"),
-        xray_public_port=int(xray_port_raw) if xray_port_raw else 443,
+        xray_public_port=(
+            _int_range("XRAY_PUBLIC_PORT" if _optional("XRAY_PUBLIC_PORT") else "XRAY_SERVER_PORT", 443, 1, 65535)
+            if xray_port
+            else 443
+        ),
         xray_reality_public_key=_optional("XRAY_REALITY_PUBLIC_KEY") or _optional("XRAY_PUBLIC_KEY"),
         xray_sni=_optional("XRAY_SNI") or _optional("XRAY_SERVER_NAME"),
         xray_flow=_optional("XRAY_FLOW", "xtls-rprx-vision"),
         xray_fingerprint=_optional("XRAY_FINGERPRINT", "chrome"),
         xray_network_type=_optional("XRAY_NETWORK_TYPE", "tcp"),
-        xray_short_id=_optional("XRAY_SHORT_ID"),
-        xray_manage_short_ids=_bool("XRAY_MANAGE_SHORT_IDS", False),
+        xray_short_id=xray_short_id,
+        xray_manage_short_ids=xray_manage_short_ids,
         xray_allow_restart_on_rollback=_bool("XRAY_ALLOW_RESTART_ON_ROLLBACK", False),
         xray_stats_server=_optional("XRAY_STATS_SERVER"),
         awg_config_path=Path(_optional("AWG_CONFIG_PATH", "/etc/amnezia/amneziawg/awg0.conf")),
         awg_interface=_optional("AWG_INTERFACE", "awg0"),
-        awg_network=_optional("AWG_NETWORK", "10.0.0.0/24"),
+        awg_network=awg_network,
         awg_server_address=_optional("AWG_SERVER_ADDRESS", "10.0.0.1"),
         awg_endpoint_host=_optional("AWG_ENDPOINT_HOST"),
-        awg_endpoint_port=_int("AWG_ENDPOINT_PORT", 0),
+        awg_endpoint_port=_int_range("AWG_ENDPOINT_PORT", 0, 0, 65535),
         awg_server_public_key=_optional("AWG_SERVER_PUBLIC_KEY"),
         awg_client_dns=awg_dns,
-        awg_mtu=int(awg_mtu_raw) if awg_mtu_raw else None,
+        awg_mtu=_optional_int_range("AWG_MTU", 576, 1500),
         awg_allowed_ips=_optional("AWG_ALLOWED_IPS", "0.0.0.0/0, ::/0"),
-        awg_persistent_keepalive=_int("AWG_PERSISTENT_KEEPALIVE", 25),
+        awg_persistent_keepalive=_int_range("AWG_PERSISTENT_KEEPALIVE", 25, 0, 86400),
         awg_use_preshared_key=_bool("AWG_USE_PRESHARED_KEY", True),
         default_proxy_type=_optional("DEFAULT_PROXY_TYPE"),
         default_proxy_host=_optional("DEFAULT_PROXY_HOST"),
-        default_proxy_port=int(proxy_port_raw) if proxy_port_raw else None,
+        default_proxy_port=_optional_int_range("DEFAULT_PROXY_PORT", 1, 65535),
         default_proxy_login=_optional("DEFAULT_PROXY_LOGIN"),
         default_proxy_password=_optional("DEFAULT_PROXY_PASSWORD"),
         default_proxy_note=_optional("DEFAULT_PROXY_NOTE"),
-        audit_retention_days=_int("AUDIT_RETENTION_DAYS", 180),
+        audit_retention_days=_int_range("AUDIT_RETENTION_DAYS", 180, 0, 3650),
+        config_backup_keep_last=_int_range("CONFIG_BACKUP_KEEP_LAST", 20, 1, 500),
     )

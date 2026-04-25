@@ -13,6 +13,7 @@ from adapters.errors import (
     XrayConfigError,
     XrayInboundNotFoundError,
 )
+from adapters.file_lock import ConfigFileLock
 from adapters.systemctl import SystemCtlAdapter
 
 
@@ -43,30 +44,34 @@ class XrayConfigAdapter:
         flow: str,
         manage_short_id: bool,
     ) -> None:
-        await self._ensure_current_config_valid()
-        backup_path = self.backup.create_backup(self.config_path)
-        temp_path: Path | None = None
-        try:
-            config = self._read_config(self.config_path)
-            inbound = self._target_inbound(config)
-            clients = self._clients(inbound)
-            if self._find_client_in_list(clients, uuid_value=uuid_value, email_label=email_label) is not None:
-                raise XrayClientAlreadyExistsError("Xray client с таким UUID/email уже существует")
+        with ConfigFileLock(self.config_path):
+            await self._ensure_current_config_valid()
+            snapshot = self._snapshot_config()
+            backup_path = self.backup.create_backup(self.config_path)
+            temp_path: Path | None = None
+            try:
+                config = self._read_config(self.config_path)
+                self._assert_config_unchanged(snapshot)
+                inbound = self._target_inbound(config)
+                clients = self._clients(inbound)
+                if self._find_client_in_list(clients, uuid_value=uuid_value, email_label=email_label) is not None:
+                    raise XrayClientAlreadyExistsError("Xray client с таким UUID/email уже существует")
 
-            client: dict[str, Any] = {"id": uuid_value, "email": email_label}
-            if flow:
-                client["flow"] = flow
-            clients.append(client)
-            if manage_short_id:
-                self._add_short_id(inbound, short_id)
+                client: dict[str, Any] = {"id": uuid_value, "email": email_label}
+                if flow:
+                    client["flow"] = flow
+                clients.append(client)
+                if manage_short_id:
+                    self._add_short_id(inbound, short_id)
 
-            temp_path = self._write_temp_config(config, backup_path)
-            await self._test_config(temp_path)
-            self._replace_main_config(temp_path, backup_path)
-            await self._reload_or_restore(backup_path)
-        except Exception:
-            self._cleanup_temp(temp_path)
-            raise
+                temp_path = self._write_temp_config(config, backup_path)
+                await self._test_config(temp_path)
+                self._assert_config_unchanged(snapshot)
+                self._replace_main_config(temp_path, backup_path)
+                await self._reload_or_restore(backup_path)
+            except Exception:
+                self._cleanup_temp(temp_path)
+                raise
 
     async def remove_client(
         self,
@@ -76,39 +81,43 @@ class XrayConfigAdapter:
         short_id: str | None,
         remove_short_id: bool,
     ) -> None:
-        await self._ensure_current_config_valid()
-        backup_path = self.backup.create_backup(self.config_path)
-        temp_path: Path | None = None
-        try:
-            config = self._read_config(self.config_path)
-            inbound = self._target_inbound(config)
-            clients = self._clients(inbound)
-            changed = False
+        with ConfigFileLock(self.config_path):
+            await self._ensure_current_config_valid()
+            snapshot = self._snapshot_config()
+            backup_path = self.backup.create_backup(self.config_path)
+            temp_path: Path | None = None
+            try:
+                config = self._read_config(self.config_path)
+                self._assert_config_unchanged(snapshot)
+                inbound = self._target_inbound(config)
+                clients = self._clients(inbound)
+                changed = False
 
-            new_clients = [
-                client
-                for client in clients
-                if not (
-                    isinstance(client, dict)
-                    and ((uuid_value and client.get("id") == uuid_value) or (email_label and client.get("email") == email_label))
-                )
-            ]
-            if len(new_clients) != len(clients):
-                inbound["settings"]["clients"] = new_clients
-                changed = True
-            if remove_short_id and short_id and self._remove_short_id(inbound, short_id):
-                changed = True
+                new_clients = [
+                    client
+                    for client in clients
+                    if not (
+                        isinstance(client, dict)
+                        and ((uuid_value and client.get("id") == uuid_value) or (email_label and client.get("email") == email_label))
+                    )
+                ]
+                if len(new_clients) != len(clients):
+                    inbound["settings"]["clients"] = new_clients
+                    changed = True
+                if remove_short_id and short_id and self._remove_short_id(inbound, short_id):
+                    changed = True
 
-            if not changed:
-                return
+                if not changed:
+                    return
 
-            temp_path = self._write_temp_config(config, backup_path)
-            await self._test_config(temp_path)
-            self._replace_main_config(temp_path, backup_path)
-            await self._reload_or_restore(backup_path)
-        except Exception:
-            self._cleanup_temp(temp_path)
-            raise
+                temp_path = self._write_temp_config(config, backup_path)
+                await self._test_config(temp_path)
+                self._assert_config_unchanged(snapshot)
+                self._replace_main_config(temp_path, backup_path)
+                await self._reload_or_restore(backup_path)
+            except Exception:
+                self._cleanup_temp(temp_path)
+                raise
 
     def find_client(self, *, uuid_value: str | None = None, email_label: str | None = None) -> dict[str, Any] | None:
         config = self._read_config(self.config_path)
@@ -126,6 +135,18 @@ class XrayConfigAdapter:
         if not isinstance(data, dict):
             raise XrayConfigError("Xray config должен быть JSON-объектом")
         return data
+
+    def _snapshot_config(self) -> tuple[int, int]:
+        try:
+            stat = self.config_path.stat()
+        except FileNotFoundError as exc:
+            raise XrayConfigError(f"Xray config не найден: {self.config_path}") from exc
+        return stat.st_mtime_ns, stat.st_size
+
+    def _assert_config_unchanged(self, snapshot: tuple[int, int]) -> None:
+        current = self._snapshot_config()
+        if current != snapshot:
+            raise XrayConfigError("Xray config изменился во время операции. Изменения не применены.")
 
     def _target_inbound(self, config: dict[str, Any]) -> dict[str, Any]:
         inbounds = config.get("inbounds")
@@ -243,9 +264,11 @@ class XrayConfigAdapter:
         os.replace(temp_path, self.config_path)
 
     async def _reload_or_restore(self, backup_path: Path) -> None:
-        result = await self.systemctl.reload(self.service_name)
+        result = await self.systemctl.reload_or_restart(self.service_name)
         if result.ok:
-            return
+            active = await self.systemctl.is_active(self.service_name)
+            if active.ok and active.stdout.strip() == "active":
+                return
         self.backup.restore(backup_path, self.config_path)
         restored_test = await self.systemctl.xray_test_config(self.config_path)
         if not restored_test.ok:

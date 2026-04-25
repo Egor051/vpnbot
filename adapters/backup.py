@@ -11,8 +11,9 @@ from adapters.errors import AdapterError
 
 
 class BackupAdapter:
-    def __init__(self, clock: ClockProvider) -> None:
+    def __init__(self, clock: ClockProvider, keep_last: int = 20) -> None:
         self.clock = clock
+        self.keep_last = max(0, keep_last)
 
     def create_backup(self, target: Path) -> Path:
         if not target.exists():
@@ -25,6 +26,9 @@ class BackupAdapter:
         else:
             raise AdapterError(f"Не удалось создать уникальное имя backup для {target}")
         shutil.copy2(target, backup_path)
+        self._chmod_private_file(backup_path)
+        if self.keep_last:
+            self.cleanup_old_backups(target.parent, pattern=f"{target.name}.*.bak", keep_last=self.keep_last)
         return backup_path
 
     def restore(self, backup_path: Path, target: Path) -> None:
@@ -34,6 +38,7 @@ class BackupAdapter:
         tmp_path = target.with_name(f".{target.name}.restore.{time.time_ns()}.{secrets.token_hex(4)}")
         try:
             shutil.copy2(backup_path, tmp_path)
+            self._chmod_private_file(tmp_path)
             with tmp_path.open("rb+") as file:
                 file.flush()
                 os.fsync(file.fileno())
@@ -53,6 +58,7 @@ class BackupAdapter:
                 os.fsync(file.fileno())
             if mode_from and mode_from.exists():
                 shutil.copystat(mode_from, tmp_path)
+            self._chmod_private_file(tmp_path)
             os.replace(tmp_path, target)
             self._fsync_parent(target)
         finally:
@@ -78,3 +84,11 @@ class BackupAdapter:
             os.fsync(fd)
         finally:
             os.close(fd)
+
+    def _chmod_private_file(self, path: Path) -> None:
+        if os.name != "posix":
+            return
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
