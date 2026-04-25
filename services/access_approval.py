@@ -50,28 +50,29 @@ class AccessApprovalService:
 
     async def approve(self, actor_user_id: int, request_id: int) -> tuple[AccessRequest, bool]:
         await self.users.require_superadmin(actor_user_id)
-        request = await self.requests.get_by_id(request_id)
-        if request is None:
-            raise NotFound("Заявка не найдена")
-        changed = await self.requests.set_status_if_pending(
-            request_id,
-            AccessRequestStatus.APPROVED,
-            actor_user_id,
-            self.clock.now(),
-        )
-        if changed:
-            await self.users.users.set_role(request.telegram_user_id, UserRole.APPROVED_USER, self.clock.now(), blocked_at=None)
-            await self.audit.write(
-                actor_user_id=actor_user_id,
-                action="access_approved",
-                entity_type=AuditEntityType.ACCESS_REQUEST,
-                entity_id=request_id,
-                details={"telegram_user_id": request.telegram_user_id},
+        async with self.requests.db.transaction():
+            request = await self.requests.get_by_id(request_id)
+            if request is None:
+                raise NotFound("Заявка не найдена")
+            changed = await self.requests.set_status_if_pending(
+                request_id,
+                AccessRequestStatus.APPROVED,
+                actor_user_id,
+                self.clock.now(),
             )
-        refreshed = await self.requests.get_by_id(request_id)
-        if refreshed is None:
-            raise NotFound("Заявка не найдена")
-        return refreshed, changed
+            if changed:
+                await self.users.users.set_role(request.telegram_user_id, UserRole.APPROVED_USER, self.clock.now(), blocked_at=None)
+                await self.audit.write(
+                    actor_user_id=actor_user_id,
+                    action="access_approved",
+                    entity_type=AuditEntityType.ACCESS_REQUEST,
+                    entity_id=request_id,
+                    details={"telegram_user_id": request.telegram_user_id},
+                )
+            refreshed = await self.requests.get_by_id(request_id)
+            if refreshed is None:
+                raise NotFound("Заявка не найдена")
+            return refreshed, changed
 
     async def reject(self, actor_user_id: int, request_id: int) -> tuple[AccessRequest, bool]:
         await self.users.require_superadmin(actor_user_id)

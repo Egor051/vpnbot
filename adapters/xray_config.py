@@ -64,10 +64,10 @@ class XrayConfigAdapter:
                 if manage_short_id:
                     self._add_short_id(inbound, short_id)
 
-                temp_path = self._write_temp_config(config, backup_path)
+                temp_path = self._write_temp_config(config, self.config_path)
                 await self._test_config(temp_path)
                 self._assert_config_unchanged(snapshot)
-                self._replace_main_config(temp_path, backup_path)
+                self._replace_main_config(temp_path, self.config_path)
                 await self._reload_or_restore(backup_path)
             except Exception:
                 self._cleanup_temp(temp_path)
@@ -110,10 +110,10 @@ class XrayConfigAdapter:
                 if not changed:
                     return
 
-                temp_path = self._write_temp_config(config, backup_path)
+                temp_path = self._write_temp_config(config, self.config_path)
                 await self._test_config(temp_path)
                 self._assert_config_unchanged(snapshot)
-                self._replace_main_config(temp_path, backup_path)
+                self._replace_main_config(temp_path, self.config_path)
                 await self._reload_or_restore(backup_path)
             except Exception:
                 self._cleanup_temp(temp_path)
@@ -243,7 +243,7 @@ class XrayConfigAdapter:
             os.fsync(file.fileno())
             temp_path = Path(file.name)
         if mode_from.exists():
-            os.chmod(temp_path, mode_from.stat().st_mode)
+            self._copy_stat(mode_from, temp_path)
         return temp_path
 
     async def _test_config(self, path: Path) -> None:
@@ -260,7 +260,7 @@ class XrayConfigAdapter:
 
     def _replace_main_config(self, temp_path: Path, mode_from: Path) -> None:
         if mode_from.exists():
-            os.chmod(temp_path, mode_from.stat().st_mode)
+            self._copy_stat(mode_from, temp_path)
         os.replace(temp_path, self.config_path)
 
     async def _reload_or_restore(self, backup_path: Path) -> None:
@@ -269,7 +269,7 @@ class XrayConfigAdapter:
             active = await self.systemctl.is_active(self.service_name)
             if active.ok and active.stdout.strip() == "active":
                 return
-        self.backup.restore(backup_path, self.config_path)
+        self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
         restored_test = await self.systemctl.xray_test_config(self.config_path)
         if not restored_test.ok:
             raise XrayApplyError("Xray reload failed, backup restored, но восстановленный config не прошёл проверку")
@@ -282,3 +282,13 @@ class XrayConfigAdapter:
     def _cleanup_temp(self, temp_path: Path | None) -> None:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink(missing_ok=True)
+
+    def _copy_stat(self, source: Path, target: Path) -> None:
+        stat = source.stat()
+        os.chmod(target, stat.st_mode)
+        if os.name != "posix":
+            return
+        try:
+            os.chown(target, stat.st_uid, stat.st_gid)
+        except OSError:
+            pass
