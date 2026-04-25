@@ -87,9 +87,6 @@ CREATE TABLE IF NOT EXISTS vpn_key_traffic_stats (
 
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_access_requests_user_status ON access_requests(telegram_user_id, status);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_one_pending
-  ON access_requests(telegram_user_id)
-  WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_access_requests_pending_created ON access_requests(status, requested_at);
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner ON vpn_keys(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_type_status ON vpn_keys(key_type, status);

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -191,14 +192,25 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
 
 
 async def _startup_reconcile_keys(services: Services) -> None:
-    xray_summary = await services.xray.startup_reconcile()
-    awg_summary = await services.awg.startup_reconcile()
+    xray_summary = await _safe_startup_reconcile("Xray", services.xray.startup_reconcile)
+    awg_summary = await _safe_startup_reconcile("AWG", services.awg.startup_reconcile)
     logger.info("Startup VPN key reconciliation: xray=%s awg=%s", xray_summary, awg_summary)
     if xray_summary["checked"] or awg_summary["checked"]:
-        await services.audit.write(
-            actor_user_id=None,
-            action="startup_reconciliation_completed",
-            entity_type=AuditEntityType.SYSTEM,
-            entity_id=None,
-            details={"xray": xray_summary, "awg": awg_summary},
-        )
+        try:
+            await services.audit.write(
+                actor_user_id=None,
+                action="startup_reconciliation_completed",
+                entity_type=AuditEntityType.SYSTEM,
+                entity_id=None,
+                details={"xray": xray_summary, "awg": awg_summary},
+            )
+        except Exception:
+            logger.warning("Startup VPN key reconciliation completed, but audit write failed", exc_info=True)
+
+
+async def _safe_startup_reconcile(name: str, reconcile: Any) -> dict[str, int]:
+    try:
+        return await reconcile()
+    except Exception:
+        logger.warning("Startup VPN key reconciliation for %s failed; bot startup continues", name, exc_info=True)
+        return {"checked": 0, "recovered": 0, "failed": 1}

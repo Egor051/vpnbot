@@ -144,7 +144,7 @@ class AwgConfigAdapter:
                 )
                 await self._validate_candidate_config(updated)
                 self._assert_config_unchanged(snapshot)
-                self.backup.atomic_write_text(self.config_path, updated, mode_from=backup_path)
+                self.backup.atomic_write_text(self.config_path, updated, mode_from=self.config_path)
                 wrote_config = True
 
                 touched_runtime = True
@@ -154,7 +154,7 @@ class AwgConfigAdapter:
                     raise AwgApplyError("AWG peer добавлен командой, но не найден в runtime")
             except Exception:
                 if wrote_config:
-                    self.backup.restore(backup_path, self.config_path)
+                    self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
                 if touched_runtime:
                     await self._remove_peer_runtime(public_key)
                 raise
@@ -172,7 +172,7 @@ class AwgConfigAdapter:
                 if updated != original:
                     await self._validate_candidate_config(updated)
                     self._assert_config_unchanged(snapshot)
-                    self.backup.atomic_write_text(self.config_path, updated, mode_from=backup_path)
+                    self.backup.atomic_write_text(self.config_path, updated, mode_from=self.config_path)
                     wrote_config = True
 
                 if public_key and not await self._remove_peer_runtime(public_key):
@@ -183,7 +183,7 @@ class AwgConfigAdapter:
                     raise AwgApplyError("AWG peer удалён из runtime, но всё ещё найден в config")
             except Exception:
                 if wrote_config:
-                    self.backup.restore(backup_path, self.config_path)
+                    self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
                 raise
 
     def client_interface_options(self) -> dict[str, str]:

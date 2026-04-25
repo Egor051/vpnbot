@@ -31,14 +31,17 @@ class BackupAdapter:
             self.cleanup_old_backups(target.parent, pattern=f"{target.name}.*.bak", keep_last=self.keep_last)
         return backup_path
 
-    def restore(self, backup_path: Path, target: Path) -> None:
+    def restore(self, backup_path: Path, target: Path, mode_from: Path | None = None) -> None:
         if not backup_path.exists():
             raise AdapterError(f"Backup не найден: {backup_path}")
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = target.with_name(f".{target.name}.restore.{time.time_ns()}.{secrets.token_hex(4)}")
         try:
             shutil.copy2(backup_path, tmp_path)
-            self._chmod_private_file(tmp_path)
+            if mode_from is not None and mode_from.exists():
+                self._copy_stat(mode_from, tmp_path)
+            else:
+                self._chmod_private_file(tmp_path)
             with tmp_path.open("rb+") as file:
                 file.flush()
                 os.fsync(file.fileno())
@@ -57,8 +60,9 @@ class BackupAdapter:
                 file.flush()
                 os.fsync(file.fileno())
             if mode_from and mode_from.exists():
-                shutil.copystat(mode_from, tmp_path)
-            self._chmod_private_file(tmp_path)
+                self._copy_stat(mode_from, tmp_path)
+            else:
+                self._chmod_private_file(tmp_path)
             os.replace(tmp_path, target)
             self._fsync_parent(target)
         finally:
@@ -90,5 +94,15 @@ class BackupAdapter:
             return
         try:
             path.chmod(0o600)
+        except OSError:
+            pass
+
+    def _copy_stat(self, source: Path, target: Path) -> None:
+        shutil.copystat(source, target)
+        if os.name != "posix":
+            return
+        stat = source.stat()
+        try:
+            os.chown(target, stat.st_uid, stat.st_gid)
         except OSError:
             pass

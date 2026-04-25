@@ -239,6 +239,7 @@ class AwgService:
         key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
         if key.status != VpnKeyStatus.ACTIVE:
             raise InvalidOperation("Конфигурация доступна только для активного ключа")
+        await self._ensure_client_payload_valid(actor_user_id, key)
         await self.audit.write(
             actor_user_id=actor_user_id,
             action="awg_config_shown",
@@ -252,6 +253,7 @@ class AwgService:
         key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
         if key.status != VpnKeyStatus.ACTIVE:
             raise InvalidOperation("Конфигурация доступна только для активного ключа")
+        await self._ensure_client_payload_valid(actor_user_id, key)
         if audit:
             await self.audit.write(
                 actor_user_id=actor_user_id,
@@ -430,9 +432,9 @@ class AwgService:
         server_config = self.adapter.read_server_config()
         server_public_key = self._server_public_key(server_config.public_key)
         endpoint_port = self._endpoint_port(server_config.listen_port)
-        private_key = str(key.payload.get("private_key") or "")
+        private_key = self._required_private_key(key)
         preshared_key = key.payload.get("preshared_key")
-        client_ip = str(key.payload.get("client_ip") or key.client_ip or "")
+        client_ip = self._required_client_ip(key)
         lines = [
             "[Interface]",
             f"PrivateKey = {private_key}",
@@ -463,6 +465,37 @@ class AwgService:
             ]
         )
         return "\n".join(lines)
+
+    async def _ensure_client_payload_valid(self, actor_user_id: int, key: VpnKey) -> None:
+        try:
+            self._required_private_key(key)
+            self._required_client_ip(key)
+        except InvalidOperation as exc:
+            logger.warning("AWG client payload is corrupted for key_id=%s: %s", key.id, exc)
+            await self.audit.write(
+                actor_user_id=actor_user_id,
+                action="awg_config_corrupted",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={"client_ip": key.client_ip, "reason": str(exc)},
+            )
+            raise
+
+    def _required_private_key(self, key: VpnKey) -> str:
+        private_key = str(key.payload.get("private_key") or "").strip()
+        if not private_key or "\n" in private_key or "\r" in private_key:
+            raise InvalidOperation("AWG-конфигурация повреждена: отсутствует private key клиента")
+        return private_key
+
+    def _required_client_ip(self, key: VpnKey) -> str:
+        client_ip = str(key.payload.get("client_ip") or key.client_ip or "").strip()
+        try:
+            parsed = ipaddress.ip_address(client_ip)
+        except ValueError as exc:
+            raise InvalidOperation("AWG-конфигурация повреждена: некорректный IP клиента") from exc
+        if parsed.version != 4:
+            raise InvalidOperation("AWG-конфигурация повреждена: IP клиента должен быть IPv4")
+        return client_ip
 
     def _server_public_key(self, config_public_key: str | None) -> str:
         public_key = self.settings.awg_server_public_key or config_public_key
