@@ -7,6 +7,7 @@ from urllib.parse import quote, urlencode
 from adapters.clock import ClockProvider
 from adapters.id_generator import IdGenerator
 from adapters.xray_config import XrayConfigAdapter
+from bot.formatters import status_text
 from config.settings import Settings
 from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
@@ -209,13 +210,7 @@ class XrayService:
             except Exception as exc:
                 summary["failed"] += 1
                 logger.warning("Не удалось восстановить Xray-ключ key_id=%s: %s", key.id, exc, exc_info=True)
-                await self.audit.write(
-                    actor_user_id=None,
-                    action="xray_startup_reconcile_failed",
-                    entity_type=AuditEntityType.VPN_KEY,
-                    entity_id=key.id,
-                    details={"status": key.status.value, "error": str(exc)},
-                )
+                await self._write_startup_reconcile_failure_audit(key, exc)
         return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
@@ -377,6 +372,18 @@ class XrayService:
 
         return False
 
+    async def _write_startup_reconcile_failure_audit(self, key: VpnKey, error: Exception) -> None:
+        try:
+            await self.audit.write(
+                actor_user_id=None,
+                action="xray_startup_reconcile_failed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={"status": key.status.value, "error": str(error)},
+            )
+        except Exception:
+            logger.warning("Не удалось записать audit для ошибки восстановления Xray-ключа key_id=%s", key.id, exc_info=True)
+
     async def _unique_identity(self, telegram_user_id: int, username: str | None) -> tuple[str, str]:
         for _ in range(5):
             uuid_value = self.ids.uuid4()
@@ -424,6 +431,6 @@ class XrayService:
         label = f"\nМетка: {h(email_label)}" if email_label else ""
         return (
             f"<b>Xray-ключ #{key.id}</b>\n"
-            f"Статус: {key.status.value}{label}{note}\n\n"
+            f"Статус: {status_text(key.status)}{label}{note}\n\n"
             f"{code(link)}"
         )

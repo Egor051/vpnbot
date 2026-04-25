@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import ipaddress
 import logging
 
@@ -11,6 +13,7 @@ from adapters.ip_allocator import IpAllocator
 from config.settings import Settings
 from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
+from bot.formatters import status_text
 from repositories.vpn_keys import VpnKeyRepository
 from services.audit import AuditService
 from services.errors import AccessDenied, InvalidOperation, NotFound
@@ -223,13 +226,7 @@ class AwgService:
             except Exception as exc:
                 summary["failed"] += 1
                 logger.warning("Не удалось восстановить AWG-ключ key_id=%s: %s", key.id, exc, exc_info=True)
-                await self.audit.write(
-                    actor_user_id=None,
-                    action="awg_startup_reconcile_failed",
-                    entity_type=AuditEntityType.VPN_KEY,
-                    entity_id=key.id,
-                    details={"status": key.status.value, "client_ip": key.client_ip, "error": str(exc)},
-                )
+                await self._write_startup_reconcile_failure_audit(key, exc)
         return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
@@ -410,6 +407,18 @@ class AwgService:
 
         return False
 
+    async def _write_startup_reconcile_failure_audit(self, key: VpnKey, error: Exception) -> None:
+        try:
+            await self.audit.write(
+                actor_user_id=None,
+                action="awg_startup_reconcile_failed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={"status": key.status.value, "client_ip": key.client_ip, "error": str(error)},
+            )
+        except Exception:
+            logger.warning("Не удалось записать audit для ошибки восстановления AWG-ключа key_id=%s", key.id, exc_info=True)
+
     def _ensure_ipv4_network(self) -> None:
         try:
             network = ipaddress.ip_network(self.settings.awg_network, strict=False)
@@ -424,7 +433,7 @@ class AwgService:
         label = f"\nМетка: {h(key.email_label)}" if key.email_label else ""
         return (
             f"<b>AWG-ключ #{key.id}</b>\n"
-            f"Статус: {key.status.value}{label}{note}\n\n"
+            f"Статус: {status_text(key.status)}{label}{note}\n\n"
             f"{pre(config)}"
         )
 
@@ -482,9 +491,21 @@ class AwgService:
             raise
 
     def _required_private_key(self, key: VpnKey) -> str:
-        private_key = str(key.payload.get("private_key") or "").strip()
-        if not private_key or "\n" in private_key or "\r" in private_key:
+        private_key = str(key.payload.get("private_key") or "")
+        if not private_key:
             raise InvalidOperation("AWG-конфигурация повреждена: отсутствует private key клиента")
+        if "\n" in private_key or "\r" in private_key:
+            raise InvalidOperation("AWG-конфигурация повреждена: некорректный private key клиента")
+        if any(character.isspace() for character in private_key):
+            raise InvalidOperation("AWG-конфигурация повреждена: некорректный private key клиента")
+        if private_key.upper() in {"...", "<KEY>", "<PRIVATE_KEY>", "PRIVATE_KEY", "CHANGE_ME"}:
+            raise InvalidOperation("AWG-конфигурация повреждена: некорректный private key клиента")
+        try:
+            decoded = base64.b64decode(private_key, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise InvalidOperation("AWG-конфигурация повреждена: некорректный private key клиента") from exc
+        if len(decoded) != 32:
+            raise InvalidOperation("AWG-конфигурация повреждена: некорректный private key клиента")
         return private_key
 
     def _required_client_ip(self, key: VpnKey) -> str:
