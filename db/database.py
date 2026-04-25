@@ -211,6 +211,20 @@ class Database:
             await self._wait_for_connection_turn()
         await self._raw_conn().commit()
 
+    async def rollback(self) -> None:
+        current_task = asyncio.current_task()
+        if self._transaction_owner is current_task and self._transaction_depth > 0:
+            return
+        if self._implicit_write_owner is current_task:
+            try:
+                await self._raw_conn().rollback()
+            finally:
+                self._clear_implicit_write_owner()
+            return
+        if self._transaction_lock.locked():
+            await self._wait_for_connection_turn()
+        await self._raw_conn().rollback()
+
     @asynccontextmanager
     async def transaction(self, immediate: bool = True) -> AsyncIterator[aiosqlite.Connection]:
         current_task = asyncio.current_task()
@@ -271,8 +285,6 @@ class Database:
             self._implicit_write_depth = 1
             return True
 
-        if self._transaction_lock.locked():
-            await self._wait_for_connection_turn()
         return False
 
     async def _wait_for_connection_turn(self) -> None:
@@ -312,6 +324,17 @@ class Database:
 
 
 class _ConnectionProxy:
+    _GATED_METHODS = {
+        "execute",
+        "executemany",
+        "executescript",
+        "execute_insert",
+        "execute_fetchall",
+        "execute_fetchone",
+        "commit",
+        "rollback",
+    }
+
     def __init__(self, db: Database) -> None:
         self._db = db
 
@@ -326,6 +349,15 @@ class _ConnectionProxy:
                 await self._db._rollback_implicit_write_owner()
             raise
 
+    async def executemany(self, sql: str, parameters: Any, /) -> aiosqlite.Cursor:
+        implicit_write = await self._db._before_connection_execute(sql)
+        try:
+            return await self._db._raw_conn().executemany(sql, parameters)
+        except Exception:
+            if implicit_write:
+                await self._db._rollback_implicit_write_owner()
+            raise
+
     async def executescript(self, sql_script: str) -> aiosqlite.Cursor:
         implicit_write = await self._db._before_connection_execute(sql_script, write=True)
         try:
@@ -335,13 +367,115 @@ class _ConnectionProxy:
                 await self._db._rollback_implicit_write_owner()
             raise
 
+    async def execute_insert(self, sql: str, parameters: Any = None, /) -> aiosqlite.Row | None:
+        implicit_write = await self._db._before_connection_execute(sql, write=True)
+        try:
+            if parameters is None:
+                return await self._db._raw_conn().execute_insert(sql)
+            return await self._db._raw_conn().execute_insert(sql, parameters)
+        except Exception:
+            if implicit_write:
+                await self._db._rollback_implicit_write_owner()
+            raise
+
+    async def execute_fetchall(self, sql: str, parameters: Any = None, /) -> list[aiosqlite.Row]:
+        cursor = await self.execute(sql) if parameters is None else await self.execute(sql, parameters)
+        try:
+            return await cursor.fetchall()
+        except Exception:
+            if self._db._implicit_write_owner is asyncio.current_task():
+                await self._db._rollback_implicit_write_owner()
+            raise
+
+    async def execute_fetchone(self, sql: str, parameters: Any = None, /) -> aiosqlite.Row | None:
+        cursor = await self.execute(sql) if parameters is None else await self.execute(sql, parameters)
+        try:
+            return await cursor.fetchone()
+        except Exception:
+            if self._db._implicit_write_owner is asyncio.current_task():
+                await self._db._rollback_implicit_write_owner()
+            raise
+
+    async def commit(self) -> None:
+        await self._db.commit()
+
+    async def rollback(self) -> None:
+        await self._db.rollback()
+
     def __getattr__(self, name: str) -> Any:
+        if name in self._GATED_METHODS:
+            raise AttributeError(f"Database connection method {name!r} is gated by Database.conn proxy")
         return getattr(self._db._raw_conn(), name)
 
 
 def _is_write_statement(sql: str) -> bool:
-    stripped = sql.lstrip()
+    stripped = _strip_leading_sql_noise(sql)
     if not stripped:
         return False
-    first = stripped.split(None, 1)[0].upper()
-    return first not in {"SELECT", "PRAGMA", "WITH", "EXPLAIN"}
+    first = stripped.split(None, 1)[0].rstrip(";").upper()
+    if first in {"SELECT", "EXPLAIN"}:
+        return False
+    if first == "PRAGMA":
+        return _pragma_mutates(stripped)
+    if first == "WITH":
+        return True
+    if first in {
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "REPLACE",
+        "CREATE",
+        "DROP",
+        "ALTER",
+        "VACUUM",
+        "REINDEX",
+        "ANALYZE",
+        "ATTACH",
+        "DETACH",
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+    }:
+        return True
+    return True
+
+
+def _strip_leading_sql_noise(sql: str) -> str:
+    stripped = sql.lstrip()
+    while True:
+        if stripped.startswith("--"):
+            newline = stripped.find("\n")
+            if newline == -1:
+                return ""
+            stripped = stripped[newline + 1 :].lstrip()
+            continue
+        if stripped.startswith("/*"):
+            end = stripped.find("*/", 2)
+            if end == -1:
+                return stripped
+            stripped = stripped[end + 2 :].lstrip()
+            continue
+        return stripped
+
+
+def _pragma_mutates(sql: str) -> bool:
+    parts = sql.split(None, 1)
+    body = parts[1].strip() if len(parts) > 1 else ""
+    if "=" in body:
+        return True
+    name = body.split("(", 1)[0].split(";", 1)[0].strip().lower()
+    name = name.split(None, 1)[0] if name else ""
+    return name in {
+        "application_id",
+        "auto_vacuum",
+        "busy_timeout",
+        "foreign_keys",
+        "incremental_vacuum",
+        "journal_mode",
+        "locking_mode",
+        "optimize",
+        "synchronous",
+        "user_version",
+        "vacuum",
+        "wal_checkpoint",
+    }

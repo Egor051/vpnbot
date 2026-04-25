@@ -143,6 +143,16 @@ sudo systemctl status vpn-bot
 - Опасные действия в боте требуют confirm/cancel.
 - Чужие конфиги доступны только владельцу или `SUPERADMIN`.
 
+## Linux permission QA
+
+POSIX mode preservation tests are skipped on Windows. Run this check on Ubuntu 24 VDS/CI:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_followup_hardening.py -k mode
+```
+
+Expected result: main Xray/AWG config files keep their original owner/group/mode after mutation or rollback (for example `0644` stays `0644`), while generated backup files are `0600`.
+
 ## Допущения
 
 - Xray-ссылка генерируется как VLESS Reality.

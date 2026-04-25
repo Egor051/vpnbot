@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import stat
@@ -31,6 +32,10 @@ from services.audit import AuditService
 from services.awg import AwgService
 from services.errors import InvalidOperation
 from services.users import UserService
+from services.xray import XrayService
+
+
+VALID_AWG_PRIVATE_KEY = base64.b64encode(bytes(range(32))).decode("ascii")
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -246,6 +251,166 @@ def test_shared_connection_write_waits_for_active_transaction(tmp_path: Path) ->
     asyncio.run(run())
 
 
+def test_connection_proxy_gates_execute_insert_and_execute_fetchall_writes(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+
+            async def insert_via_execute_insert() -> None:
+                await db.conn.execute_insert(
+                    """
+                    INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (301, "insert", "Insert", UserRole.PENDING_USER.value, "now", "now"),
+                )
+                await db.commit()
+
+            async with db.transaction():
+                task = asyncio.create_task(insert_via_execute_insert())
+                await asyncio.sleep(0.05)
+                assert not task.done()
+            await asyncio.wait_for(task, timeout=1)
+
+            async def insert_via_execute_fetchall() -> None:
+                rows = await db.conn.execute_fetchall(
+                    """
+                    INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    RETURNING telegram_user_id
+                    """,
+                    (302, "fetchall", "Fetchall", UserRole.PENDING_USER.value, "now", "now"),
+                )
+                assert [row["telegram_user_id"] for row in rows] == [302]
+                await db.commit()
+
+            async with db.transaction():
+                task = asyncio.create_task(insert_via_execute_fetchall())
+                await asyncio.sleep(0.05)
+                assert not task.done()
+            await asyncio.wait_for(task, timeout=1)
+
+            cursor = await db.conn.execute("SELECT COUNT(*) AS cnt FROM users WHERE telegram_user_id IN (301, 302)")
+            row = await cursor.fetchone()
+            assert row["cnt"] == 2
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_connection_proxy_raw_commit_and_rollback_do_not_break_foreign_transaction(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+
+            async with db.transaction():
+                await db.conn.execute(
+                    """
+                    INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
+                    VALUES (401, 'commit', 'Commit', 'pending', 'now', 'now')
+                    """
+                )
+                commit_task = asyncio.create_task(db.conn.commit())
+                await asyncio.sleep(0.05)
+                assert not commit_task.done()
+            await asyncio.wait_for(commit_task, timeout=1)
+
+            async with db.transaction():
+                await db.conn.execute(
+                    """
+                    INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
+                    VALUES (402, 'rollback', 'Rollback', 'pending', 'now', 'now')
+                    """
+                )
+                rollback_task = asyncio.create_task(db.conn.rollback())
+                await asyncio.sleep(0.05)
+                assert not rollback_task.done()
+            await asyncio.wait_for(rollback_task, timeout=1)
+
+            cursor = await db.conn.execute("SELECT COUNT(*) AS cnt FROM users WHERE telegram_user_id IN (401, 402)")
+            row = await cursor.fetchone()
+            assert row["cnt"] == 2
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_connection_proxy_select_during_active_transaction_does_not_wait(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            async with db.transaction():
+                cursor = await asyncio.wait_for(db.conn.execute("SELECT 1 AS value"), timeout=1)
+                row = await cursor.fetchone()
+                assert row["value"] == 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_connection_proxy_treats_with_mutation_as_gated_write(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+
+            async def insert_with_cte() -> None:
+                await db.conn.execute(
+                    """
+                    WITH src(id, username) AS (SELECT 501, 'cte')
+                    INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
+                    SELECT id, username, 'CTE', 'pending', 'now', 'now' FROM src
+                    """
+                )
+                await db.commit()
+
+            async with db.transaction():
+                task = asyncio.create_task(insert_with_cte())
+                await asyncio.sleep(0.05)
+                assert not task.done()
+            await asyncio.wait_for(task, timeout=1)
+            cursor = await db.conn.execute("SELECT username FROM users WHERE telegram_user_id = 501")
+            row = await cursor.fetchone()
+            assert row["username"] == "cte"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_common_repository_calls_still_work_with_connection_proxy(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users = UserRepository(db)
+            requests = AccessRequestRepository(db)
+            user = await users.upsert_profile(
+                TelegramUserProfile(telegram_user_id=601, username="repo", first_name="Repo"),
+                UserRole.PENDING_USER,
+                "now",
+            )
+            request, created = await requests.create_pending_idempotent(user.telegram_user_id, user.username, "now")
+            assert created is True
+            assert request.telegram_user_id == 601
+            assert await users.get_by_id(601) == user
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_approve_rolls_back_request_if_role_update_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
         db = Database(tmp_path / "vpn.db")
@@ -349,6 +514,179 @@ def test_startup_reconcile_service_or_audit_failure_does_not_abort() -> None:
     asyncio.run(_startup_reconcile_keys(services))
 
 
+def test_awg_startup_reconcile_audit_failure_does_not_stop_remaining_keys(tmp_path: Path) -> None:
+    keys = [
+        VpnKey(
+            id=1,
+            owner_user_id=100,
+            username="user",
+            key_type=VpnKeyType.AWG,
+            status=VpnKeyStatus.PENDING_DELETE,
+            note=None,
+            uuid=None,
+            email_label="label-1",
+            public_key="public-1",
+            client_ip="10.0.0.2",
+            payload={},
+            public_payload={},
+            created_at="now",
+            updated_at="now",
+            revoked_at=None,
+            deleted_at=None,
+            created_by=100,
+            revoked_by=None,
+            deleted_by=None,
+        ),
+        VpnKey(
+            id=2,
+            owner_user_id=100,
+            username="user",
+            key_type=VpnKeyType.AWG,
+            status=VpnKeyStatus.PENDING_DELETE,
+            note=None,
+            uuid=None,
+            email_label="label-2",
+            public_key="public-2",
+            client_ip="10.0.0.3",
+            payload={},
+            public_payload={},
+            created_at="now",
+            updated_at="now",
+            revoked_at=None,
+            deleted_at=None,
+            created_by=100,
+            revoked_by=None,
+            deleted_by=None,
+        ),
+    ]
+
+    class Repo:
+        async def list_by_type_statuses(self, key_type: VpnKeyType, statuses: set[VpnKeyStatus], limit: int = 500) -> list[VpnKey]:
+            return keys
+
+    class Audit:
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        async def write(self, *, action: str, **kwargs: object) -> None:
+            self.actions.append(action)
+            raise RuntimeError("audit failed")
+
+    async def run() -> None:
+        audit = Audit()
+        service = AwgService(
+            vpn_keys=Repo(),  # type: ignore[arg-type]
+            users=object(),  # type: ignore[arg-type]
+            adapter=object(),  # type: ignore[arg-type]
+            ip_allocator=object(),  # type: ignore[arg-type]
+            settings=_settings(tmp_path),
+            clock=ClockProvider(),
+            ids=object(),  # type: ignore[arg-type]
+            audit=audit,  # type: ignore[arg-type]
+        )
+        processed: list[int] = []
+
+        async def reconcile_key(key: VpnKey) -> bool:
+            processed.append(key.id)
+            if key.id == 1:
+                raise RuntimeError("service failed")
+            return False
+
+        service._startup_reconcile_key = reconcile_key  # type: ignore[method-assign]
+        summary = await service.startup_reconcile()
+        assert summary == {"checked": 2, "recovered": 0, "failed": 1}
+        assert processed == [1, 2]
+        assert audit.actions == ["awg_startup_reconcile_failed"]
+
+    asyncio.run(run())
+
+
+def test_xray_startup_reconcile_audit_failure_does_not_stop_remaining_keys(tmp_path: Path) -> None:
+    keys = [
+        VpnKey(
+            id=1,
+            owner_user_id=100,
+            username="user",
+            key_type=VpnKeyType.XRAY,
+            status=VpnKeyStatus.PENDING_DELETE,
+            note=None,
+            uuid="00000000-0000-4000-8000-000000000001",
+            email_label="label-1",
+            public_key=None,
+            client_ip=None,
+            payload={},
+            public_payload={},
+            created_at="now",
+            updated_at="now",
+            revoked_at=None,
+            deleted_at=None,
+            created_by=100,
+            revoked_by=None,
+            deleted_by=None,
+        ),
+        VpnKey(
+            id=2,
+            owner_user_id=100,
+            username="user",
+            key_type=VpnKeyType.XRAY,
+            status=VpnKeyStatus.PENDING_DELETE,
+            note=None,
+            uuid="00000000-0000-4000-8000-000000000002",
+            email_label="label-2",
+            public_key=None,
+            client_ip=None,
+            payload={},
+            public_payload={},
+            created_at="now",
+            updated_at="now",
+            revoked_at=None,
+            deleted_at=None,
+            created_by=100,
+            revoked_by=None,
+            deleted_by=None,
+        ),
+    ]
+
+    class Repo:
+        async def list_by_type_statuses(self, key_type: VpnKeyType, statuses: set[VpnKeyStatus], limit: int = 500) -> list[VpnKey]:
+            return keys
+
+    class Audit:
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        async def write(self, *, action: str, **kwargs: object) -> None:
+            self.actions.append(action)
+            raise RuntimeError("audit failed")
+
+    async def run() -> None:
+        audit = Audit()
+        service = XrayService(
+            vpn_keys=Repo(),  # type: ignore[arg-type]
+            users=object(),  # type: ignore[arg-type]
+            adapter=object(),  # type: ignore[arg-type]
+            settings=_settings(tmp_path),
+            clock=ClockProvider(),
+            ids=object(),  # type: ignore[arg-type]
+            audit=audit,  # type: ignore[arg-type]
+        )
+        processed: list[int] = []
+
+        async def reconcile_key(key: VpnKey) -> bool:
+            processed.append(key.id)
+            if key.id == 1:
+                raise RuntimeError("service failed")
+            return False
+
+        service._startup_reconcile_key = reconcile_key  # type: ignore[method-assign]
+        summary = await service.startup_reconcile()
+        assert summary == {"checked": 2, "recovered": 0, "failed": 1}
+        assert processed == [1, 2]
+        assert audit.actions == ["xray_startup_reconcile_failed"]
+
+    asyncio.run(run())
+
+
 def test_admin_private_chat_guard_rejects_group_message_and_callback(monkeypatch: pytest.MonkeyPatch) -> None:
     message_calls: list[str] = []
     callback_calls: list[tuple[str, bool | None]] = []
@@ -385,7 +723,19 @@ def test_admin_private_chat_guard_rejects_group_message_and_callback(monkeypatch
     assert callback_calls == [(ADMIN_PRIVATE_ONLY_TEXT, True)]
 
 
-def test_awg_corrupted_payload_does_not_return_empty_private_key() -> None:
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"_corrupted": True, "client_ip": "10.0.0.2"},
+        {"client_ip": "10.0.0.2"},
+        {"private_key": "", "client_ip": "10.0.0.2"},
+        {"private_key": f"{VALID_AWG_PRIVATE_KEY}\n", "client_ip": "10.0.0.2"},
+        {"private_key": "...", "client_ip": "10.0.0.2"},
+        {"private_key": "not-base64", "client_ip": "10.0.0.2"},
+        {"private_key": base64.b64encode(b"short").decode("ascii"), "client_ip": "10.0.0.2"},
+    ],
+)
+def test_awg_invalid_private_key_payload_does_not_return_config(payload: dict[str, object], tmp_path: Path) -> None:
     class Repo:
         async def get_by_id(self, key_id: int) -> VpnKey | None:
             return VpnKey(
@@ -399,7 +749,7 @@ def test_awg_corrupted_payload_does_not_return_empty_private_key() -> None:
                 email_label="label",
                 public_key="public",
                 client_ip="10.0.0.2",
-                payload={"_corrupted": True},
+                payload=payload,
                 public_payload={},
                 created_at="now",
                 updated_at="now",
@@ -435,13 +785,124 @@ def test_awg_corrupted_payload_does_not_return_empty_private_key() -> None:
             users=Users(),  # type: ignore[arg-type]
             adapter=Adapter(),  # type: ignore[arg-type]
             ip_allocator=object(),  # type: ignore[arg-type]
-            settings=_settings(Path("/tmp")),
+            settings=_settings(tmp_path),
             clock=ClockProvider(),
             ids=object(),  # type: ignore[arg-type]
             audit=audit,  # type: ignore[arg-type]
         )
-        with pytest.raises(InvalidOperation, match="AWG-конфигурация повреждена"):
+        with pytest.raises(InvalidOperation, match="AWG-конфигурация повреждена") as exc_info:
             await service.get_awg_client_config_plain(100, 10)
+        assert "PrivateKey" not in str(exc_info.value)
         assert audit.actions == ["awg_config_corrupted"]
 
     asyncio.run(run())
+
+
+def test_awg_valid_private_key_payload_returns_config_and_russian_status(tmp_path: Path) -> None:
+    payload = {"private_key": VALID_AWG_PRIVATE_KEY, "client_ip": "10.0.0.2"}
+
+    class Repo:
+        async def get_by_id(self, key_id: int) -> VpnKey | None:
+            return VpnKey(
+                id=key_id,
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.AWG,
+                status=VpnKeyStatus.ACTIVE,
+                note=None,
+                uuid=None,
+                email_label="label",
+                public_key="public",
+                client_ip="10.0.0.2",
+                payload=payload,
+                public_payload={},
+                created_at="now",
+                updated_at="now",
+                revoked_at=None,
+                deleted_at=None,
+                created_by=100,
+                revoked_by=None,
+                deleted_by=None,
+            )
+
+    class Users:
+        async def require_approved_or_admin(self, actor_user_id: int) -> User:
+            return User(actor_user_id, "user", "User", UserRole.APPROVED_USER, "now", "now", None)
+
+    class Adapter:
+        def read_server_config(self) -> AwgServerConfig:
+            return AwgServerConfig(listen_port=443, public_key="server-public", interface_options={})
+
+        def client_interface_options(self) -> dict[str, str]:
+            return {}
+
+    class Audit:
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        async def write(self, *, action: str, **kwargs: object) -> None:
+            self.actions.append(action)
+
+    async def run() -> None:
+        audit = Audit()
+        service = AwgService(
+            vpn_keys=Repo(),  # type: ignore[arg-type]
+            users=Users(),  # type: ignore[arg-type]
+            adapter=Adapter(),  # type: ignore[arg-type]
+            ip_allocator=object(),  # type: ignore[arg-type]
+            settings=_settings(tmp_path),
+            clock=ClockProvider(),
+            ids=object(),  # type: ignore[arg-type]
+            audit=audit,  # type: ignore[arg-type]
+        )
+        config = await service.get_awg_client_config_plain(100, 10)
+        assert f"PrivateKey = {VALID_AWG_PRIVATE_KEY}" in config
+        assert audit.actions == ["awg_config_file_shown"]
+
+        key = await Repo().get_by_id(10)
+        assert key is not None
+        text = service._format_config(key)
+        assert "Статус: активен" in text
+        assert "Статус: active" not in text
+
+    asyncio.run(run())
+
+
+def test_xray_config_format_uses_russian_status(tmp_path: Path) -> None:
+    key = VpnKey(
+        id=10,
+        owner_user_id=100,
+        username="user",
+        key_type=VpnKeyType.XRAY,
+        status=VpnKeyStatus.ACTIVE,
+        note=None,
+        uuid="00000000-0000-4000-8000-000000000000",
+        email_label="label",
+        public_key=None,
+        client_ip=None,
+        payload={
+            "uuid": "00000000-0000-4000-8000-000000000000",
+            "short_id": "abcd",
+            "email_label": "label",
+        },
+        public_payload={},
+        created_at="now",
+        updated_at="now",
+        revoked_at=None,
+        deleted_at=None,
+        created_by=100,
+        revoked_by=None,
+        deleted_by=None,
+    )
+    service = XrayService(
+        vpn_keys=object(),  # type: ignore[arg-type]
+        users=object(),  # type: ignore[arg-type]
+        adapter=object(),  # type: ignore[arg-type]
+        settings=_settings(tmp_path),
+        clock=ClockProvider(),
+        ids=object(),  # type: ignore[arg-type]
+        audit=object(),  # type: ignore[arg-type]
+    )
+    text = service._format_config(key)
+    assert "Статус: активен" in text
+    assert "Статус: active" not in text
