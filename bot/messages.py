@@ -32,6 +32,7 @@ async def send_awg_config(
     filename: str = AWG_CONFIG_FILENAME,
     reply_markup: InlineKeyboardMarkup | None = None,
     edit_text: bool = False,
+    send_document: bool = True,
 ) -> None:
     text_was_updated = True
     if len(config_text) <= MAX_TEXT_CONFIG_LEN:
@@ -50,6 +51,9 @@ async def send_awg_config(
             await message.answer(text, reply_markup=reply_markup)
         document_reply_markup = None
         document_caption = text
+
+    if not send_document and len(config_text) <= MAX_TEXT_CONFIG_LEN:
+        return
 
     if edit_text and not text_was_updated:
         return

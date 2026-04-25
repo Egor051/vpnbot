@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 from aiosqlite import Row
 
 from db.database import Database
@@ -34,11 +36,20 @@ class AccessRequestRepository:
             """,
             (telegram_user_id, username, AccessRequestStatus.PENDING.value, now),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
         request = await self.get_by_id(int(cursor.lastrowid))
         if request is None:
             raise RuntimeError("Access request insert failed")
         return request
+
+    async def create_pending_idempotent(self, telegram_user_id: int, username: str | None, now: str) -> tuple[AccessRequest, bool]:
+        try:
+            return await self.create(telegram_user_id, username, now), True
+        except sqlite3.IntegrityError:
+            pending = await self.get_pending_for_user(telegram_user_id)
+            if pending is None:
+                raise
+            return pending, False
 
     async def get_by_id(self, request_id: int) -> AccessRequest | None:
         cursor = await self.db.conn.execute("SELECT * FROM access_requests WHERE id = ?", (request_id,))
@@ -94,7 +105,7 @@ class AccessRequestRepository:
                 AccessRequestStatus.PENDING.value,
             ),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
         return cursor.rowcount == 1
 
     async def list_by_status(self, status: AccessRequestStatus, limit: int = 20, offset: int = 0) -> list[AccessRequest]:

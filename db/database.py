@@ -1,19 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
 
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
+logger = logging.getLogger(__name__)
 
 
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._conn: aiosqlite.Connection | None = None
+        self._transaction_lock = asyncio.Lock()
+        self._transaction_owner: asyncio.Task[object] | None = None
+        self._transaction_depth = 0
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -22,7 +30,9 @@ class Database:
         return self._conn
 
     async def connect(self) -> None:
+        created = not self.path.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._chmod_private_dir(self.path.parent)
         self._conn = await aiosqlite.connect(self.path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA foreign_keys = ON")
@@ -30,6 +40,8 @@ class Database:
         await self._conn.execute("PRAGMA synchronous = NORMAL")
         await self._conn.execute("PRAGMA busy_timeout = 5000")
         await self._conn.commit()
+        if created or os.name == "posix":
+            self._chmod_private_file(self.path)
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -42,7 +54,7 @@ class Database:
         sql = schema_path.read_text(encoding="utf-8")
         await self.conn.executescript(sql)
         await self._apply_migrations()
-        await self.conn.commit()
+        await self.commit()
 
     async def _apply_migrations(self) -> None:
         version = await self._schema_version()
@@ -83,6 +95,31 @@ class Database:
                 "ON vpn_key_traffic_stats(last_success_at)"
             )
             await self._set_schema_version(3)
+            version = 3
+        if version < 4:
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            await self._collapse_duplicate_pending_access_requests(now)
+            await self.conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_one_pending
+                ON access_requests(telegram_user_id)
+                WHERE status = 'pending'
+                """
+            )
+            await self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_access_requests_pending_created
+                ON access_requests(status, requested_at)
+                """
+            )
+            await self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_vpn_keys_status_type
+                ON vpn_keys(status, key_type)
+                """
+            )
+            await self._set_schema_version(4)
+            await self._validate_reference_integrity()
 
     async def _schema_version(self) -> int:
         await self.conn.execute(
@@ -107,13 +144,96 @@ class Database:
             (str(version),),
         )
 
+    async def _collapse_duplicate_pending_access_requests(self, now: str) -> None:
+        await self.conn.execute(
+            """
+            UPDATE access_requests
+            SET status = 'rejected',
+                decided_at = COALESCE(decided_at, ?),
+                decision_note = COALESCE(decision_note, 'Автоматически закрыта миграцией: дубликат pending-заявки')
+            WHERE id IN (
+                SELECT id
+                FROM (
+                    SELECT
+                        id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY telegram_user_id
+                            ORDER BY requested_at ASC, id ASC
+                        ) AS rn
+                    FROM access_requests
+                    WHERE status = 'pending'
+                )
+                WHERE rn > 1
+            )
+            """,
+            (now,),
+        )
+
+    async def _validate_reference_integrity(self) -> None:
+        for table, column in (("access_requests", "telegram_user_id"), ("vpn_keys", "owner_user_id")):
+            cursor = await self.conn.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM {table}
+                LEFT JOIN users ON users.telegram_user_id = {table}.{column}
+                WHERE users.telegram_user_id IS NULL
+                """
+            )
+            row = await cursor.fetchone()
+            count = int(row["cnt"]) if row is not None else 0
+            if count:
+                logger.warning(
+                    "Найдены записи без связанного пользователя: table=%s column=%s count=%s",
+                    table,
+                    column,
+                    count,
+                )
+
+    async def commit(self) -> None:
+        if self._transaction_depth == 0:
+            await self.conn.commit()
+
     @asynccontextmanager
     async def transaction(self, immediate: bool = True) -> AsyncIterator[aiosqlite.Connection]:
-        await self.conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+        current_task = asyncio.current_task()
+        if current_task is None:
+            raise RuntimeError("Database transaction requires an asyncio task")
+
+        outermost = self._transaction_owner is not current_task
+        if outermost:
+            await self._transaction_lock.acquire()
+            self._transaction_owner = current_task
+            self._transaction_depth = 0
+            await self.conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+        self._transaction_depth += 1
         try:
             yield self.conn
         except Exception:
-            await self.conn.rollback()
+            self._transaction_depth -= 1
+            if outermost:
+                await self.conn.rollback()
+                self._transaction_owner = None
+                self._transaction_lock.release()
             raise
         else:
-            await self.conn.commit()
+            self._transaction_depth -= 1
+            if outermost:
+                await self.conn.commit()
+                self._transaction_owner = None
+                self._transaction_lock.release()
+
+    def _chmod_private_dir(self, path: Path) -> None:
+        if os.name != "posix":
+            return
+        try:
+            path.chmod(0o700)
+        except OSError:
+            logger.warning("Не удалось выставить права 700 на директорию %s", path, exc_info=True)
+
+    def _chmod_private_file(self, path: Path) -> None:
+        if os.name != "posix":
+            return
+        try:
+            path.chmod(0o600)
+        except OSError:
+            logger.warning("Не удалось выставить права 600 на файл SQLite %s", path, exc_info=True)

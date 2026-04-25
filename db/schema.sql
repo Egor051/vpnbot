@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS access_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  telegram_user_id INTEGER NOT NULL,
+  telegram_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
   username TEXT,
   status TEXT NOT NULL,
   requested_at TEXT NOT NULL,
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS access_requests (
 
 CREATE TABLE IF NOT EXISTS vpn_keys (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  owner_user_id INTEGER NOT NULL,
+  owner_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
   username TEXT,
   key_type TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -87,8 +87,13 @@ CREATE TABLE IF NOT EXISTS vpn_key_traffic_stats (
 
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_access_requests_user_status ON access_requests(telegram_user_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_one_pending
+  ON access_requests(telegram_user_id)
+  WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_access_requests_pending_created ON access_requests(status, requested_at);
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner ON vpn_keys(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_type_status ON vpn_keys(key_type, status);
+CREATE INDEX IF NOT EXISTS idx_vpn_keys_status_type ON vpn_keys(status, key_type);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_uuid ON vpn_keys(uuid) WHERE uuid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_email_label ON vpn_keys(email_label) WHERE email_label IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_public_key ON vpn_keys(public_key) WHERE public_key IS NOT NULL;

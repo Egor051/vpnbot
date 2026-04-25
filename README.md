@@ -43,6 +43,7 @@ utils/
 ## База данных
 
 SQLite-файл по умолчанию: `/opt/vpn-service/data/vpn.db`.
+Миграции выполняются автоматически при запуске бота или `init_db.py`.
 
 Схема лежит в `db/schema.sql` и создаёт таблицы:
 
@@ -51,6 +52,16 @@ SQLite-файл по умолчанию: `/opt/vpn-service/data/vpn.db`.
 - `vpn_keys`
 - `proxy_entries`
 - `audit_log`
+- `vpn_key_traffic_stats`
+
+Текущая версия схемы: `4`.
+
+Миграция v4:
+
+- добавляет partial unique index на одну pending-заявку на пользователя;
+- добавляет индексы для восстановления зависших VPN-ключей;
+- для новых БД добавляет FK от заявок и ключей к `users`;
+- на существующих БД FK не перестраивает таблицы, чтобы не рисковать потерей данных, но логирует найденные orphan-записи.
 
 Bootstrap:
 
@@ -89,6 +100,9 @@ AWG_SERVER_PUBLIC_KEY=
 AWG_CLIENT_DNS=1.1.1.1
 AWG_ALLOWED_IPS=0.0.0.0/0, ::/0
 AWG_PERSISTENT_KEEPALIVE=25
+
+AUDIT_RETENTION_DAYS=180
+CONFIG_BACKUP_KEEP_LAST=20
 ```
 
 ## Установка на Ubuntu 24
@@ -98,7 +112,7 @@ sudo mkdir -p /opt/vpn-service/{bot,data,logs,scripts}
 sudo chown -R "$USER":"$USER" /opt/vpn-service
 cd /opt/vpn-service
 
-python3.11 -m venv .venv
+python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements.txt
 
@@ -121,8 +135,11 @@ sudo systemctl status vpn-bot
 ## Безопасность
 
 - Bot token, ADMIN_IDS, endpoint и proxy secrets берутся только из `.env`.
-- Приватные ключи, preshared keys, proxy passwords и полные конфиги не пишутся в audit details.
-- Xray/AWG конфиги изменяются только через adapter flow с timestamped backup и restore при ошибке.
+- Приватные ключи, preshared keys, proxy passwords, UUID/shortId и полные конфиги маскируются в audit details рекурсивно.
+- Xray/AWG конфиги изменяются только через adapter flow с file lock, timestamped backup, проверкой mtime и restore при ошибке.
+- Backup-файлы конфигов создаются с правами `600`; количество хранимых backup ограничивает `CONFIG_BACKUP_KEEP_LAST`.
+- SQLite DB и директории data/logs получают приватные права на Linux, если бот управляет этими путями.
+- При старте бот пытается безопасно восстановить зависшие статусы `pending_apply`, `pending_revoke`, `pending_delete`, `delete_failed`.
 - Опасные действия в боте требуют confirm/cancel.
 - Чужие конфиги доступны только владельцу или `SUPERADMIN`.
 

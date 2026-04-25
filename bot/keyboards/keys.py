@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from bot.formatters import status_text
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 
@@ -20,7 +21,7 @@ def keys_list_keyboard(keys: list[VpnKey], page: int = 0, has_next: bool = False
     rows: list[list[InlineKeyboardButton]] = []
     for key in keys:
         prefix = "Xray" if key.key_type == VpnKeyType.XRAY else "AWG"
-        rows.append([InlineKeyboardButton(text=f"{prefix} #{key.id} · {key.status.value}", callback_data=f"key:open:{key.id}")])
+        rows.append([InlineKeyboardButton(text=f"{prefix} #{key.id} · {status_text(key.status)}", callback_data=f"key:open:{key.id}")])
         if key.status == VpnKeyStatus.ACTIVE:
             rows.append(
                 [
@@ -56,7 +57,7 @@ def keys_list_keyboard(keys: list[VpnKey], page: int = 0, has_next: bool = False
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def key_actions_keyboard(key: VpnKey) -> InlineKeyboardMarkup:
+def key_actions_keyboard(key: VpnKey, owner_user_id: int | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if key.status == VpnKeyStatus.ACTIVE:
         rows.append([InlineKeyboardButton(text="Показать конфиг", callback_data=f"key:show:{key.id}")])
@@ -65,7 +66,8 @@ def key_actions_keyboard(key: VpnKey) -> InlineKeyboardMarkup:
     if key.status != VpnKeyStatus.DELETED:
         rows.append([InlineKeyboardButton(text="Редактировать заметку", callback_data=f"key:note:{key.id}")])
         rows.append([InlineKeyboardButton(text="Удалить", callback_data=f"key:delete:{key.id}")])
-    rows.append([InlineKeyboardButton(text="К списку", callback_data="keys:list")])
+    back_data = f"admin:ukeys:{owner_user_id}:0" if owner_user_id is not None else "keys:list"
+    rows.append([InlineKeyboardButton(text="К списку", callback_data=back_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

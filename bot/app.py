@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher
@@ -21,7 +22,7 @@ from bot.middlewares.access import BlockedUserMiddleware
 from bot.rate_limit import RateLimiter
 from config.settings import Settings
 from db.database import Database
-from models.enums import VpnKeyType
+from models.enums import AuditEntityType, VpnKeyType
 from repositories.access_requests import AccessRequestRepository
 from repositories.audit_log import AuditLogRepository
 from repositories.proxy_entries import ProxyRepository
@@ -37,6 +38,8 @@ from services.traffic_stats import TrafficStatsService
 from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
 from services.xray import XrayService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -61,7 +64,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
 
     clock = ClockProvider()
     shell = ShellRunner(max_output_chars=4096)
-    backup = BackupAdapter(clock)
+    backup = BackupAdapter(clock, keep_last=settings.config_backup_keep_last)
     systemctl = SystemCtlAdapter(shell)
     ids = IdGenerator()
 
@@ -166,6 +169,8 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         audit=audit_service,
     )
 
+    await _startup_reconcile_keys(services)
+
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
     dp.workflow_data["services"] = services
@@ -183,3 +188,17 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
     dp.include_router(callbacks.router)
 
     return bot, dp, db
+
+
+async def _startup_reconcile_keys(services: Services) -> None:
+    xray_summary = await services.xray.startup_reconcile()
+    awg_summary = await services.awg.startup_reconcile()
+    logger.info("Startup VPN key reconciliation: xray=%s awg=%s", xray_summary, awg_summary)
+    if xray_summary["checked"] or awg_summary["checked"]:
+        await services.audit.write(
+            actor_user_id=None,
+            action="startup_reconciliation_completed",
+            entity_type=AuditEntityType.SYSTEM,
+            entity_id=None,
+            details={"xray": xray_summary, "awg": awg_summary},
+        )

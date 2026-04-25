@@ -58,13 +58,13 @@ class ProxyService:
         for entry in entries:
             lines = [
                 f"<b>{h(entry.proxy_type)}</b>",
-                f"Host: {code(entry.host)}",
-                f"Port: {code(entry.port)}",
+                f"Хост: {code(entry.host)}",
+                f"Порт: {code(entry.port)}",
             ]
             if entry.login:
-                lines.append(f"Login: {code(entry.login)}")
+                lines.append(f"Логин: {code(entry.login)}")
             if entry.password:
-                lines.append(f"Password: {code(entry.password)}")
+                lines.append(f"Пароль: {code(entry.password)}")
             if entry.note:
                 lines.append(f"Описание: {h(entry.note)}")
             lines.append(f"Статус: {entry.status.value}")

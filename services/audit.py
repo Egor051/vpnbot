@@ -11,12 +11,23 @@ from repositories.audit_log import AuditLogRepository
 class AuditService:
     _SECRET_KEYS = {
         "private_key",
+        "privatekey",
         "preshared_key",
+        "presharedkey",
+        "public_key",
+        "publickey",
         "password",
         "token",
+        "bot_token",
         "payload_json",
         "config",
         "link",
+        "uuid",
+        "short_id",
+        "shortid",
+        "privateKey",
+        "publicKey",
+        "shortId",
     }
 
     def __init__(self, audit_logs: AuditLogRepository, clock: ClockProvider) -> None:
@@ -62,12 +73,20 @@ class AuditService:
         return removed
 
     def _sanitize(self, details: dict[str, Any]) -> dict[str, Any]:
-        clean: dict[str, Any] = {}
-        for key, value in details.items():
-            if key in self._SECRET_KEYS:
-                clean[key] = "***"
-            elif isinstance(value, str) and len(value) > 256:
-                clean[key] = value[:256] + "...[truncated]"
-            else:
-                clean[key] = value
-        return clean
+        value = self._sanitize_value(details)
+        return value if isinstance(value, dict) else {}
+
+    def _sanitize_value(self, value: Any, key: str | None = None) -> Any:
+        if key is not None and self._is_secret_key(key):
+            return "***"
+        if isinstance(value, dict):
+            return {str(item_key): self._sanitize_value(item_value, str(item_key)) for item_key, item_value in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._sanitize_value(item) for item in value]
+        if isinstance(value, str) and len(value) > 256:
+            return value[:256] + "...[truncated]"
+        return value
+
+    def _is_secret_key(self, key: str) -> bool:
+        normalized = key.strip().lower().replace("-", "_")
+        return normalized in {item.lower().replace("-", "_") for item in self._SECRET_KEYS}

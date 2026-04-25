@@ -152,11 +152,15 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
                 title=f"AWG-ключ #{result.key.id}",
                 config_text=config,
                 filename=AWG_CONFIG_FILENAME,
-                reply_markup=key_actions_keyboard(result.key),
+                reply_markup=key_actions_keyboard(result.key, owner_user_id=_admin_owner_context(result.key, callback.from_user.id)),
                 edit_text=True,
             )
         else:
-            await safe_edit_message_text(callback.message, result.config_text, reply_markup=key_actions_keyboard(result.key))
+            await safe_edit_message_text(
+                callback.message,
+                result.config_text,
+                reply_markup=key_actions_keyboard(result.key, owner_user_id=_admin_owner_context(result.key, callback.from_user.id)),
+            )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -171,7 +175,11 @@ async def open_key(callback: CallbackQuery, services: Any) -> None:
     try:
         key_id = int(callback.data.rsplit(":", 1)[-1])
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
-        await safe_edit_message_text(callback.message, key_detail_text(key), reply_markup=key_actions_keyboard(key))
+        await safe_edit_message_text(
+            callback.message,
+            key_detail_text(key),
+            reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -189,7 +197,11 @@ async def show_key_config(callback: CallbackQuery, services: Any, rate_limiter: 
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         if key.key_type == VpnKeyType.XRAY:
             text = xray_config_text(await services.xray.get_xray_key_config(callback.from_user.id, key_id))
-            await safe_edit_message_text(callback.message, text, reply_markup=key_actions_keyboard(key))
+            await safe_edit_message_text(
+                callback.message,
+                text,
+                reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
+            )
         else:
             config = await services.awg.get_awg_client_config_plain(callback.from_user.id, key_id)
             await send_awg_config(
@@ -197,8 +209,9 @@ async def show_key_config(callback: CallbackQuery, services: Any, rate_limiter: 
                 title=f"AWG-ключ #{key.id}",
                 config_text=config,
                 filename=AWG_CONFIG_FILENAME,
-                reply_markup=key_actions_keyboard(key),
+                reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
                 edit_text=True,
+                send_document=False,
             )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -227,7 +240,11 @@ async def show_key_stats(callback: CallbackQuery, services: Any) -> None:
                 "label": view.key.email_label,
             },
         )
-        await safe_edit_message_text(callback.message, traffic_stats_text(view), reply_markup=key_actions_keyboard(view.key))
+        await safe_edit_message_text(
+            callback.message,
+            traffic_stats_text(view),
+            reply_markup=key_actions_keyboard(view.key, owner_user_id=_admin_owner_context(view.key, callback.from_user.id)),
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -288,7 +305,11 @@ async def confirm_key_action(callback: CallbackQuery, services: Any, rate_limite
                 if key.key_type == VpnKeyType.XRAY
                 else await services.awg.revoke_awg_key(callback.from_user.id, key_id)
             )
-            await safe_edit_message_text(callback.message, "Ключ отозван.", reply_markup=key_actions_keyboard(updated))
+            await safe_edit_message_text(
+                callback.message,
+                "Ключ отозван.",
+                reply_markup=key_actions_keyboard(updated, owner_user_id=_admin_owner_context(updated, callback.from_user.id)),
+            )
         elif action == "delete":
             rate_limiter.check(callback.from_user.id, "key_delete", 10)
             await callback.answer("Выполняю...")
@@ -297,7 +318,11 @@ async def confirm_key_action(callback: CallbackQuery, services: Any, rate_limite
                 if key.key_type == VpnKeyType.XRAY
                 else await services.awg.delete_awg_key(callback.from_user.id, key_id)
             )
-            await safe_edit_message_text(callback.message, "Ключ удалён.", reply_markup=key_actions_keyboard(updated))
+            await safe_edit_message_text(
+                callback.message,
+                "Ключ удалён.",
+                reply_markup=key_actions_keyboard(updated, owner_user_id=_admin_owner_context(updated, callback.from_user.id)),
+            )
         else:
             await callback.answer("Неизвестное действие", show_alert=True)
     except Exception as exc:
@@ -358,7 +383,11 @@ async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services
         note = data.get("note")
         await services.notes.update_key_note(callback.from_user.id, key_id, note)
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
-        await safe_edit_message_text(callback.message, "Заметка обновлена.", reply_markup=key_actions_keyboard(key))
+        await safe_edit_message_text(
+            callback.message,
+            "Заметка обновлена.",
+            reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -368,6 +397,10 @@ def _clean_note(value: str | None) -> str | None:
         return None
     note = value.strip()
     return None if note in {"", "-"} else note
+
+
+def _admin_owner_context(key, actor_user_id: int) -> int | None:
+    return key.owner_user_id if key.owner_user_id != actor_user_id else None
 
 
 def _page_from_callback(data: str | None, default: int = 0) -> int:

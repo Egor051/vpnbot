@@ -24,23 +24,29 @@ class AccessApprovalService:
         self.audit = audit
 
     async def create_or_get_request(self, profile: TelegramUserProfile) -> AccessRequestResult:
-        user = await self.users.ensure_user(profile)
-        if user.role in {UserRole.SUPERADMIN, UserRole.APPROVED_USER, UserRole.BLOCKED_USER}:
-            return AccessRequestResult(user=user, request=None, created=False)
+        async with self.requests.db.transaction():
+            user = await self.users.ensure_user(profile)
+            if user.role in {UserRole.SUPERADMIN, UserRole.APPROVED_USER, UserRole.BLOCKED_USER}:
+                return AccessRequestResult(user=user, request=None, created=False)
 
-        pending = await self.requests.get_pending_for_user(profile.telegram_user_id)
-        if pending is not None:
-            return AccessRequestResult(user=user, request=pending, created=False)
+            pending = await self.requests.get_pending_for_user(profile.telegram_user_id)
+            if pending is not None:
+                return AccessRequestResult(user=user, request=pending, created=False)
 
-        request = await self.requests.create(profile.telegram_user_id, profile.username, self.clock.now())
-        await self.audit.write(
-            actor_user_id=profile.telegram_user_id,
-            action="access_requested",
-            entity_type=AuditEntityType.ACCESS_REQUEST,
-            entity_id=request.id,
-            details={"telegram_user_id": profile.telegram_user_id, "username": profile.username},
-        )
-        return AccessRequestResult(user=user, request=request, created=True)
+            request, created = await self.requests.create_pending_idempotent(
+                profile.telegram_user_id,
+                profile.username,
+                self.clock.now(),
+            )
+            if created:
+                await self.audit.write(
+                    actor_user_id=profile.telegram_user_id,
+                    action="access_requested",
+                    entity_type=AuditEntityType.ACCESS_REQUEST,
+                    entity_id=request.id,
+                    details={"telegram_user_id": profile.telegram_user_id, "username": profile.username},
+                )
+            return AccessRequestResult(user=user, request=request, created=created)
 
     async def approve(self, actor_user_id: int, request_id: int) -> tuple[AccessRequest, bool]:
         await self.users.require_superadmin(actor_user_id)

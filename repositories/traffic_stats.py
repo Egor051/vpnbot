@@ -93,7 +93,7 @@ class TrafficStatsRepository:
                 source,
             ),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
         stats = await self.get_by_key_id(key_id)
         if stats is None:
             raise RuntimeError("Traffic stats upsert failed")
@@ -122,7 +122,7 @@ class TrafficStatsRepository:
             """,
             (key_id, now, reason[:512], source),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
         stats = await self.get_by_key_id(key_id)
         if stats is None:
             raise RuntimeError("Traffic stats unavailable upsert failed")

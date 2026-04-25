@@ -7,6 +7,7 @@ from pathlib import Path
 
 from adapters.backup import BackupAdapter
 from adapters.errors import AwgApplyError, AwgConfigError, AwgPeerAlreadyExistsError
+from adapters.file_lock import ConfigFileLock
 from adapters.shell_runner import ShellRunner
 from models.dto import ShellResult
 
@@ -114,56 +115,76 @@ class AwgConfigAdapter:
         client_ip: str,
         label: str | None = None,
     ) -> None:
-        await self.ensure_interface_active()
-        backup_path = self.backup.create_backup(self.config_path)
-        try:
-            original = self._read_text()
-            sections = self._parse_sections(original)
-            if self._managed_block_exists(original, key_id):
+        with ConfigFileLock(self.config_path):
+            await self.ensure_interface_active()
+            snapshot = self._snapshot_config()
+            backup_path = self.backup.create_backup(self.config_path)
+            wrote_config = False
+            touched_runtime = False
+            try:
+                original = self._read_text()
+                self._assert_config_unchanged(snapshot)
+                sections = self._parse_sections(original)
+                if self._managed_block_exists(original, key_id):
+                    if not await self.verify_runtime_peer(public_key):
+                        touched_runtime = True
+                        if not await self._add_peer_runtime(public_key, preshared_key, client_ip):
+                            raise AwgApplyError("AWG peer есть в config, но не применён в runtime")
+                    return
+                if self._find_peer(sections, public_key=public_key, client_ip=client_ip) is not None:
+                    raise AwgPeerAlreadyExistsError("AWG peer с таким public key или client_ip уже есть в конфиге")
+
+                updated = original.rstrip() + "\n\n" + self._peer_block(
+                    key_id=key_id,
+                    owner_user_id=owner_user_id,
+                    public_key=public_key,
+                    preshared_key=preshared_key,
+                    client_ip=client_ip,
+                    label=label,
+                )
+                await self._validate_candidate_config(updated)
+                self._assert_config_unchanged(snapshot)
+                self.backup.atomic_write_text(self.config_path, updated, mode_from=backup_path)
+                wrote_config = True
+
+                touched_runtime = True
+                if not await self._add_peer_runtime(public_key, preshared_key, client_ip):
+                    raise AwgApplyError("Не удалось применить AWG peer в runtime")
                 if not await self.verify_runtime_peer(public_key):
-                    if not await self._add_peer_runtime(public_key, preshared_key, client_ip):
-                        raise AwgApplyError("AWG peer есть в config, но не применён в runtime")
-                return
-            if self._find_peer(sections, public_key=public_key, client_ip=client_ip) is not None:
-                raise AwgPeerAlreadyExistsError("AWG peer с таким public key или client_ip уже есть в конфиге")
-
-            updated = original.rstrip() + "\n\n" + self._peer_block(
-                key_id=key_id,
-                owner_user_id=owner_user_id,
-                public_key=public_key,
-                preshared_key=preshared_key,
-                client_ip=client_ip,
-                label=label,
-            )
-            self._parse_sections(updated)
-            self.backup.atomic_write_text(self.config_path, updated, mode_from=backup_path)
-
-            if not await self._add_peer_runtime(public_key, preshared_key, client_ip):
-                raise AwgApplyError("Не удалось применить AWG peer в runtime")
-            if not await self.verify_runtime_peer(public_key):
-                raise AwgApplyError("AWG peer добавлен командой, но не найден в runtime")
-        except Exception:
-            self.backup.restore(backup_path, self.config_path)
-            await self._remove_peer_runtime(public_key)
-            raise
+                    raise AwgApplyError("AWG peer добавлен командой, но не найден в runtime")
+            except Exception:
+                if wrote_config:
+                    self.backup.restore(backup_path, self.config_path)
+                if touched_runtime:
+                    await self._remove_peer_runtime(public_key)
+                raise
 
     async def remove_peer(self, *, key_id: int, public_key: str | None) -> None:
-        await self.ensure_interface_active()
-        backup_path = self.backup.create_backup(self.config_path)
-        try:
-            original = self._read_text()
-            updated = self._remove_managed_block(original, key_id)
-            if updated != original:
-                self._parse_sections(updated)
-                self.backup.atomic_write_text(self.config_path, updated, mode_from=backup_path)
+        with ConfigFileLock(self.config_path):
+            await self.ensure_interface_active()
+            snapshot = self._snapshot_config()
+            backup_path = self.backup.create_backup(self.config_path)
+            wrote_config = False
+            try:
+                original = self._read_text()
+                self._assert_config_unchanged(snapshot)
+                updated = self._remove_managed_block(original, key_id)
+                if updated != original:
+                    await self._validate_candidate_config(updated)
+                    self._assert_config_unchanged(snapshot)
+                    self.backup.atomic_write_text(self.config_path, updated, mode_from=backup_path)
+                    wrote_config = True
 
-            if public_key and not await self._remove_peer_runtime(public_key):
-                raise AwgApplyError("Не удалось удалить AWG peer из runtime")
-            if public_key and await self.verify_runtime_peer(public_key):
-                raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
-        except Exception:
-            self.backup.restore(backup_path, self.config_path)
-            raise
+                if public_key and not await self._remove_peer_runtime(public_key):
+                    raise AwgApplyError("Не удалось удалить AWG peer из runtime")
+                if public_key and await self.verify_runtime_peer(public_key):
+                    raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
+                if public_key and self.find_peer(public_key=public_key, client_ip=None) is not None:
+                    raise AwgApplyError("AWG peer удалён из runtime, но всё ещё найден в config")
+            except Exception:
+                if wrote_config:
+                    self.backup.restore(backup_path, self.config_path)
+                raise
 
     def client_interface_options(self) -> dict[str, str]:
         if not self.config_path.exists():
@@ -231,6 +252,36 @@ class AwgConfigAdapter:
             return self.config_path.read_text(encoding="utf-8")
         except FileNotFoundError as exc:
             raise AwgConfigError(f"AWG config не найден: {self.config_path}") from exc
+
+    def _snapshot_config(self) -> tuple[int, int]:
+        try:
+            stat = self.config_path.stat()
+        except FileNotFoundError as exc:
+            raise AwgConfigError(f"AWG config не найден: {self.config_path}") from exc
+        return stat.st_mtime_ns, stat.st_size
+
+    def _assert_config_unchanged(self, snapshot: tuple[int, int]) -> None:
+        current = self._snapshot_config()
+        if current != snapshot:
+            raise AwgConfigError("AWG config изменился во время операции. Изменения не применены.")
+
+    async def _validate_candidate_config(self, text: str) -> None:
+        self._parse_sections(text)
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.config_path.parent, delete=False) as tmp:
+                tmp.write(text)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                tmp_path = Path(tmp.name)
+            result = await self.shell.run(["awg-quick", "strip", str(tmp_path)], timeout=10)
+            if result.returncode == 127:
+                result = await self.shell.run(["wg-quick", "strip", str(tmp_path)], timeout=10)
+            if result.returncode not in {0, 127}:
+                raise AwgConfigError("AWG config не прошёл проверку awg-quick/wg-quick strip")
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
     def _parse_sections(self, text: str) -> list[_AwgSection]:
         sections: list[_AwgSection] = []

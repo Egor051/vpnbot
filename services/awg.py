@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 
 from adapters.awg_config import AwgConfigAdapter
@@ -18,6 +19,21 @@ from services.users import UserService
 from utils.formatting import h, pre
 
 logger = logging.getLogger(__name__)
+
+AWG_ACCESS_MAY_EXIST_STATUSES = {
+    VpnKeyStatus.ACTIVE,
+    VpnKeyStatus.PENDING_APPLY,
+    VpnKeyStatus.PENDING_REVOKE,
+    VpnKeyStatus.PENDING_DELETE,
+    VpnKeyStatus.DELETE_FAILED,
+}
+
+AWG_STARTUP_RECONCILE_STATUSES = {
+    VpnKeyStatus.PENDING_APPLY,
+    VpnKeyStatus.PENDING_REVOKE,
+    VpnKeyStatus.PENDING_DELETE,
+    VpnKeyStatus.DELETE_FAILED,
+}
 
 
 class AwgService:
@@ -48,6 +64,7 @@ class AwgService:
 
     async def create_awg_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
         self.settings.validate_awg_ready()
+        self._ensure_ipv4_network()
         await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
         clean_note = normalize_note(note)
 
@@ -135,12 +152,12 @@ class AwgService:
                 return key
             if key.status == VpnKeyStatus.DELETED:
                 return key
-            if key.status not in {VpnKeyStatus.ACTIVE, VpnKeyStatus.PENDING_APPLY}:
+            if key.status not in AWG_ACCESS_MAY_EXIST_STATUSES:
                 raise InvalidOperation("Отозвать можно только активный AWG-ключ")
             previous_status = key.status
             await self.vpn_keys.set_status(key_id, VpnKeyStatus.PENDING_REVOKE, self.clock.now())
             try:
-                await self.adapter.remove_peer(key_id=key_id, public_key=key.public_key)
+                await self._remove_awg_access(key)
             except Exception:
                 await self.vpn_keys.set_status(key_id, previous_status, self.clock.now())
                 await self.audit.write(
@@ -172,8 +189,8 @@ class AwgService:
             previous_status = key.status
             await self.vpn_keys.set_status(key_id, VpnKeyStatus.PENDING_DELETE, self.clock.now())
             try:
-                if previous_status in {VpnKeyStatus.ACTIVE, VpnKeyStatus.PENDING_APPLY}:
-                    await self.adapter.remove_peer(key_id=key_id, public_key=key.public_key)
+                if previous_status in AWG_ACCESS_MAY_EXIST_STATUSES:
+                    await self._remove_awg_access(key)
             except Exception as exc:
                 await self.vpn_keys.set_status(key_id, VpnKeyStatus.DELETE_FAILED, self.clock.now())
                 await self.audit.write(
@@ -193,6 +210,27 @@ class AwgService:
                 details={"previous_status": previous_status.value, "client_ip": key.client_ip},
             )
             return await self._get_key(key_id)
+
+    async def startup_reconcile(self) -> dict[str, int]:
+        summary = {"checked": 0, "recovered": 0, "failed": 0}
+        keys = await self.vpn_keys.list_by_type_statuses(VpnKeyType.AWG, AWG_STARTUP_RECONCILE_STATUSES, limit=500)
+        for key in keys:
+            summary["checked"] += 1
+            try:
+                changed = await self._startup_reconcile_key(key)
+                if changed:
+                    summary["recovered"] += 1
+            except Exception as exc:
+                summary["failed"] += 1
+                logger.warning("Не удалось восстановить AWG-ключ key_id=%s: %s", key.id, exc, exc_info=True)
+                await self.audit.write(
+                    actor_user_id=None,
+                    action="awg_startup_reconcile_failed",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key.id,
+                    details={"status": key.status.value, "client_ip": key.client_ip, "error": str(exc)},
+                )
+        return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
         return await self.get_awg_client_config(actor_user_id, key_id)
@@ -318,10 +356,70 @@ class AwgService:
                 return label
         raise InvalidOperation("Не удалось сгенерировать уникальный label для AWG-ключа")
 
+    async def _remove_awg_access(self, key: VpnKey) -> None:
+        await self.adapter.remove_peer(key_id=key.id, public_key=key.public_key)
+
+    async def _startup_reconcile_key(self, key: VpnKey) -> bool:
+        if key.status == VpnKeyStatus.PENDING_APPLY:
+            peer = self.adapter.find_peer(public_key=key.public_key, client_ip=key.client_ip)
+            if peer is None:
+                await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+                await self.audit.write(
+                    actor_user_id=None,
+                    action="awg_startup_pending_apply_failed",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key.id,
+                    details={"peer_present": False, "client_ip": key.client_ip},
+                )
+                return True
+            await self.vpn_keys.mark_active(key.id, self.clock.now())
+            await self.audit.write(
+                actor_user_id=None,
+                action="awg_startup_pending_apply_active",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={"peer_present": True, "client_ip": key.client_ip},
+            )
+            return True
+
+        if key.status == VpnKeyStatus.PENDING_REVOKE:
+            await self._remove_awg_access(key)
+            await self.vpn_keys.mark_revoked(key.id, key.revoked_by or key.deleted_by or key.created_by, self.clock.now())
+            await self.audit.write(
+                actor_user_id=None,
+                action="awg_startup_revoke_completed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={"client_ip": key.client_ip},
+            )
+            return True
+
+        if key.status in {VpnKeyStatus.PENDING_DELETE, VpnKeyStatus.DELETE_FAILED}:
+            await self._remove_awg_access(key)
+            await self.vpn_keys.mark_deleted(key.id, key.deleted_by or key.revoked_by or key.created_by, self.clock.now())
+            await self.audit.write(
+                actor_user_id=None,
+                action="awg_startup_delete_completed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={"previous_status": key.status.value, "client_ip": key.client_ip},
+            )
+            return True
+
+        return False
+
+    def _ensure_ipv4_network(self) -> None:
+        try:
+            network = ipaddress.ip_network(self.settings.awg_network, strict=False)
+        except ValueError as exc:
+            raise InvalidOperation("AWG_NETWORK должен быть корректной IPv4-сетью") from exc
+        if network.version != 4:
+            raise InvalidOperation("AWG_NETWORK сейчас поддерживает только IPv4")
+
     def _format_config(self, key: VpnKey) -> str:
         config = self._client_config(key)
         note = f"\nЗаметка: {h(key.note)}" if key.note else ""
-        label = f"\nLabel: {h(key.email_label)}" if key.email_label else ""
+        label = f"\nМетка: {h(key.email_label)}" if key.email_label else ""
         return (
             f"<b>AWG-ключ #{key.id}</b>\n"
             f"Статус: {key.status.value}{label}{note}\n\n"

@@ -19,6 +19,21 @@ from utils.formatting import code, h
 
 logger = logging.getLogger(__name__)
 
+XRAY_ACCESS_MAY_EXIST_STATUSES = {
+    VpnKeyStatus.ACTIVE,
+    VpnKeyStatus.PENDING_APPLY,
+    VpnKeyStatus.PENDING_REVOKE,
+    VpnKeyStatus.PENDING_DELETE,
+    VpnKeyStatus.DELETE_FAILED,
+}
+
+XRAY_STARTUP_RECONCILE_STATUSES = {
+    VpnKeyStatus.PENDING_APPLY,
+    VpnKeyStatus.PENDING_REVOKE,
+    VpnKeyStatus.PENDING_DELETE,
+    VpnKeyStatus.DELETE_FAILED,
+}
+
 
 class XrayService:
     def __init__(
@@ -123,17 +138,12 @@ class XrayService:
                 return key
             if key.status == VpnKeyStatus.DELETED:
                 return key
-            if key.status not in {VpnKeyStatus.ACTIVE, VpnKeyStatus.PENDING_APPLY}:
+            if key.status not in XRAY_ACCESS_MAY_EXIST_STATUSES:
                 raise InvalidOperation("Отозвать можно только активный Xray-ключ")
             previous_status = key.status
             await self.vpn_keys.set_status(key_id, VpnKeyStatus.PENDING_REVOKE, self.clock.now())
             try:
-                await self.adapter.remove_client(
-                    uuid_value=key.uuid,
-                    email_label=key.email_label,
-                    short_id=str(key.payload.get("short_id") or ""),
-                    remove_short_id=await self._can_remove_short_id(key),
-                )
+                await self._remove_xray_access(key)
             except Exception:
                 await self.vpn_keys.set_status(key_id, previous_status, self.clock.now())
                 await self.audit.write(
@@ -165,13 +175,8 @@ class XrayService:
             previous_status = key.status
             await self.vpn_keys.set_status(key_id, VpnKeyStatus.PENDING_DELETE, self.clock.now())
             try:
-                if previous_status in {VpnKeyStatus.ACTIVE, VpnKeyStatus.PENDING_APPLY}:
-                    await self.adapter.remove_client(
-                        uuid_value=key.uuid,
-                        email_label=key.email_label,
-                        short_id=str(key.payload.get("short_id") or ""),
-                        remove_short_id=await self._can_remove_short_id(key),
-                    )
+                if previous_status in XRAY_ACCESS_MAY_EXIST_STATUSES:
+                    await self._remove_xray_access(key)
             except Exception as exc:
                 await self.vpn_keys.set_status(key_id, VpnKeyStatus.DELETE_FAILED, self.clock.now())
                 await self.audit.write(
@@ -191,6 +196,27 @@ class XrayService:
                 details={"previous_status": previous_status.value},
             )
             return await self._get_key(key_id)
+
+    async def startup_reconcile(self) -> dict[str, int]:
+        summary = {"checked": 0, "recovered": 0, "failed": 0}
+        keys = await self.vpn_keys.list_by_type_statuses(VpnKeyType.XRAY, XRAY_STARTUP_RECONCILE_STATUSES, limit=500)
+        for key in keys:
+            summary["checked"] += 1
+            try:
+                changed = await self._startup_reconcile_key(key)
+                if changed:
+                    summary["recovered"] += 1
+            except Exception as exc:
+                summary["failed"] += 1
+                logger.warning("Не удалось восстановить Xray-ключ key_id=%s: %s", key.id, exc, exc_info=True)
+                await self.audit.write(
+                    actor_user_id=None,
+                    action="xray_startup_reconcile_failed",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key.id,
+                    details={"status": key.status.value, "error": str(exc)},
+                )
+        return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
         return await self.get_xray_key_config(actor_user_id, key_id)
@@ -294,6 +320,63 @@ class XrayService:
         in_use = await self.vpn_keys.count_active_managed_short_id(short_id, exclude_key_id=key.id)
         return in_use == 0
 
+    async def _remove_xray_access(self, key: VpnKey) -> None:
+        await self.adapter.remove_client(
+            uuid_value=key.uuid,
+            email_label=key.email_label,
+            short_id=str(key.payload.get("short_id") or ""),
+            remove_short_id=await self._can_remove_short_id(key),
+        )
+
+    async def _startup_reconcile_key(self, key: VpnKey) -> bool:
+        if key.status == VpnKeyStatus.PENDING_APPLY:
+            client = self.adapter.find_client(uuid_value=key.uuid, email_label=key.email_label)
+            if client is None:
+                await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+                await self.audit.write(
+                    actor_user_id=None,
+                    action="xray_startup_pending_apply_failed",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key.id,
+                    details={"client_present": False},
+                )
+                return True
+            await self.vpn_keys.mark_active(key.id, self.clock.now())
+            await self.audit.write(
+                actor_user_id=None,
+                action="xray_startup_pending_apply_active",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={"client_present": True},
+            )
+            return True
+
+        if key.status == VpnKeyStatus.PENDING_REVOKE:
+            await self._remove_xray_access(key)
+            await self.vpn_keys.mark_revoked(key.id, key.revoked_by or key.deleted_by or key.created_by, self.clock.now())
+            await self.audit.write(
+                actor_user_id=None,
+                action="xray_startup_revoke_completed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={},
+            )
+            return True
+
+        if key.status in {VpnKeyStatus.PENDING_DELETE, VpnKeyStatus.DELETE_FAILED}:
+            await self._remove_xray_access(key)
+            await self.vpn_keys.mark_deleted(key.id, key.deleted_by or key.revoked_by or key.created_by, self.clock.now())
+            await self.audit.write(
+                actor_user_id=None,
+                action="xray_startup_delete_completed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={"previous_status": key.status.value},
+            )
+            return True
+
+        return False
+
     async def _unique_identity(self, telegram_user_id: int, username: str | None) -> tuple[str, str]:
         for _ in range(5):
             uuid_value = self.ids.uuid4()
@@ -303,6 +386,7 @@ class XrayService:
         raise InvalidOperation("Не удалось сгенерировать уникальные Xray-идентификаторы")
 
     def _build_vless_link(self, uuid_value: str, short_id: str, email_label: str) -> str:
+        host = self._format_host(self.settings.xray_public_host)
         params = {
             "type": self.settings.xray_network_type,
             "security": "reality",
@@ -316,7 +400,20 @@ class XrayService:
             params["flow"] = self.settings.xray_flow
         query = urlencode(params)
         fragment = quote(email_label or "xray")
-        return f"vless://{uuid_value}@{self.settings.xray_public_host}:{self.settings.xray_public_port}?{query}#{fragment}"
+        return f"vless://{uuid_value}@{host}:{self.settings.xray_public_port}?{query}#{fragment}"
+
+    def _format_host(self, host: str) -> str:
+        if host.startswith("[") and host.endswith("]"):
+            return host
+        try:
+            import ipaddress
+
+            parsed = ipaddress.ip_address(host)
+        except ValueError:
+            return host
+        if parsed.version == 6:
+            return f"[{host}]"
+        return host
 
     def _format_config(self, key: VpnKey) -> str:
         uuid_value = str(key.payload.get("uuid") or key.uuid or "")
@@ -324,7 +421,7 @@ class XrayService:
         email_label = str(key.payload.get("email_label") or key.email_label or "")
         link = self._build_vless_link(uuid_value, short_id, email_label)
         note = f"\nЗаметка: {h(key.note)}" if key.note else ""
-        label = f"\nLabel: {h(email_label)}" if email_label else ""
+        label = f"\nМетка: {h(email_label)}" if email_label else ""
         return (
             f"<b>Xray-ключ #{key.id}</b>\n"
             f"Статус: {key.status.value}{label}{note}\n\n"

@@ -63,7 +63,7 @@ class ProxyRepository:
             """,
             (proxy_type, host, port, login, password, note, ProxyStatus.ACTIVE.value, now, now),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
         entry = await self.get_by_id(int(cursor.lastrowid))
         if entry is None:
             raise RuntimeError("Proxy insert failed")
@@ -79,4 +79,4 @@ class ProxyRepository:
             "UPDATE proxy_entries SET note = ?, updated_at = ? WHERE id = ?",
             (note, now, proxy_id),
         )
-        await self.db.conn.commit()
+        await self.db.commit()

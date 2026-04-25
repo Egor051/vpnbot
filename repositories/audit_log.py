@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from db.database import Database
 from models.enums import AuditEntityType
+
+logger = logging.getLogger(__name__)
 
 
 class AuditLogRepository:
@@ -35,7 +38,7 @@ class AuditLogRepository:
                 now,
             ),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
 
     async def list_recent(self, limit: int = 20, offset: int = 0) -> list[dict[str, object]]:
         cursor = await self.db.conn.execute(
@@ -55,7 +58,7 @@ class AuditLogRepository:
                 "action": row["action"],
                 "entity_type": row["entity_type"],
                 "entity_id": row["entity_id"],
-                "details": json.loads(row["details_json"] or "{}"),
+                "details": self._safe_details(row["details_json"], int(row["id"])),
                 "created_at": row["created_at"],
             }
             for row in rows
@@ -66,5 +69,15 @@ class AuditLogRepository:
             "DELETE FROM audit_log WHERE created_at < ?",
             (cutoff,),
         )
-        await self.db.conn.commit()
+        await self.db.commit()
         return int(cursor.rowcount or 0)
+
+    def _safe_details(self, value: str | None, row_id: int) -> dict[str, object]:
+        if not value:
+            return {}
+        try:
+            data = json.loads(value)
+        except json.JSONDecodeError:
+            logger.warning("Некорректный JSON в audit_log.details_json id=%s", row_id)
+            return {"_corrupted": True}
+        return data if isinstance(data, dict) else {"_invalid": True}
