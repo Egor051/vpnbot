@@ -406,7 +406,7 @@ class XrayService:
         if self.settings.xray_flow:
             params["flow"] = self.settings.xray_flow
         query = urlencode(params)
-        fragment = quote(email_label or "xray")
+        fragment = quote("xray")
         return f"vless://{uuid_value}@{host}:{self.settings.xray_public_port}?{query}#{fragment}"
 
     def _format_host(self, host: str) -> str:
