@@ -172,10 +172,12 @@ def test_awg_delete_failed_retry_removes_access_before_deleted() -> None:
         async def set_status(self, key_id: int, status: VpnKeyStatus, now: str) -> None:
             self.key = self._replace(status=status)
 
-        async def mark_deleted(self, key_id: int, actor_user_id: int, now: str) -> None:
-            self.key = self._replace(status=VpnKeyStatus.DELETED, deleted_by=actor_user_id)
+        async def hard_delete_with_stats(self, key_id: int) -> None:
+            self.key = None
 
         def _replace(self, **changes: object) -> VpnKey:
+            if self.key is None:
+                raise RuntimeError("key is deleted")
             return replace(self.key, **changes)
 
     class Users:
@@ -206,10 +208,10 @@ def test_awg_delete_failed_retry_removes_access_before_deleted() -> None:
         audit=Audit(),  # type: ignore[arg-type]
     )
 
-    result = asyncio.run(service.delete_awg_key(100, 10))
+    asyncio.run(service.delete_awg_key(100, 10))
 
     assert adapter.removed is True
-    assert result.status == VpnKeyStatus.DELETED
+    assert repo.key is None
 
 
 def test_db_v4_prevents_two_pending_requests_and_tolerates_corrupted_json(tmp_path: Path) -> None:

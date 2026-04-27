@@ -146,11 +146,11 @@ class VpnKeyRepository:
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM vpn_keys
-            WHERE owner_user_id = ?
+            WHERE owner_user_id = ? AND status != ?
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
             """,
-            (owner_user_id, limit, offset),
+            (owner_user_id, VpnKeyStatus.DELETED.value, limit, offset),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
@@ -159,14 +159,38 @@ class VpnKeyRepository:
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM vpn_keys
-            WHERE key_type IN (?, ?)
+            WHERE key_type IN (?, ?) AND status != ?
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
             """,
-            (VpnKeyType.XRAY.value, VpnKeyType.AWG.value, limit, offset),
+            (VpnKeyType.XRAY.value, VpnKeyType.AWG.value, VpnKeyStatus.DELETED.value, limit, offset),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
+
+    async def count_by_owner(self, owner_user_id: int) -> int:
+        cursor = await self.db.conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM vpn_keys
+            WHERE owner_user_id = ? AND status != ?
+            """,
+            (owner_user_id, VpnKeyStatus.DELETED.value),
+        )
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row is not None else 0
+
+    async def count_by_owner_and_type(self, owner_user_id: int, key_type: VpnKeyType) -> int:
+        cursor = await self.db.conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM vpn_keys
+            WHERE owner_user_id = ? AND key_type = ? AND status != ?
+            """,
+            (owner_user_id, key_type.value, VpnKeyStatus.DELETED.value),
+        )
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row is not None else 0
 
     async def count_by_owners(self, owner_user_ids: list[int]) -> dict[int, int]:
         if not owner_user_ids:
@@ -176,10 +200,10 @@ class VpnKeyRepository:
             f"""
             SELECT owner_user_id, COUNT(*) AS cnt
             FROM vpn_keys
-            WHERE owner_user_id IN ({placeholders})
+            WHERE owner_user_id IN ({placeholders}) AND status != ?
             GROUP BY owner_user_id
             """,
-            tuple(owner_user_ids),
+            (*owner_user_ids, VpnKeyStatus.DELETED.value),
         )
         rows = await cursor.fetchall()
         return {int(row["owner_user_id"]): int(row["cnt"]) for row in rows}
@@ -206,11 +230,11 @@ class VpnKeyRepository:
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM vpn_keys
-            WHERE owner_user_id = ? AND key_type = ?
+            WHERE owner_user_id = ? AND key_type = ? AND status != ?
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
             """,
-            (owner_user_id, key_type.value, limit, offset),
+            (owner_user_id, key_type.value, VpnKeyStatus.DELETED.value, limit, offset),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
@@ -344,6 +368,17 @@ class VpnKeyRepository:
 
     async def soft_delete_key(self, key_id: int, actor_user_id: int, now: str) -> None:
         await self.mark_deleted(key_id, actor_user_id, now)
+
+    async def hard_delete_with_stats(self, key_id: int) -> None:
+        async with self.db.transaction():
+            await self.db.conn.execute(
+                "DELETE FROM vpn_key_traffic_stats WHERE key_id = ?",
+                (key_id,),
+            )
+            await self.db.conn.execute(
+                "DELETE FROM vpn_keys WHERE id = ?",
+                (key_id,),
+            )
 
     async def update_note(self, key_id: int, note: str | None, now: str) -> None:
         await self.db.conn.execute(

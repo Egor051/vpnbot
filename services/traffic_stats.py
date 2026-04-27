@@ -5,7 +5,7 @@ import logging
 from adapters.awg_config import AwgConfigAdapter
 from adapters.xray_stats import XrayStatsAdapter
 from models.dto import KeyTrafficStatsView, TrafficStats, VpnKey
-from models.enums import UserRole, VpnKeyType
+from models.enums import UserRole, VpnKeyStatus, VpnKeyType
 from repositories.traffic_stats import TrafficStatsRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
@@ -36,7 +36,7 @@ class TrafficStatsService:
     async def refresh_for_actor(self, actor_user_id: int, key_id: int) -> KeyTrafficStatsView:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         key = await self.vpn_keys.get_by_id(key_id)
-        if key is None:
+        if key is None or key.status == VpnKeyStatus.DELETED:
             raise NotFound("Ключ не найден")
         if actor.role != UserRole.SUPERADMIN and key.owner_user_id != actor_user_id:
             raise AccessDenied("Нельзя смотреть статистику чужого ключа")

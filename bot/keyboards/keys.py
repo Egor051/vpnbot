@@ -17,7 +17,13 @@ def create_key_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def keys_list_keyboard(keys: list[VpnKey], page: int = 0, has_next: bool = False, owner_user_id: int | None = None) -> InlineKeyboardMarkup:
+def keys_list_keyboard(
+    keys: list[VpnKey],
+    page: int = 0,
+    has_next: bool = False,
+    owner_user_id: int | None = None,
+    total_pages: int = 1,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for key in keys:
         prefix = "Xray" if key.key_type == VpnKeyType.XRAY else "AWG"
@@ -45,9 +51,9 @@ def keys_list_keyboard(keys: list[VpnKey], page: int = 0, has_next: bool = False
     page_prefix = f"admin:ukeys:{owner_user_id}" if owner_user_id is not None else "keys:list"
     nav: list[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="Назад", callback_data=f"{page_prefix}:{prev_page}"))
+        nav.append(InlineKeyboardButton(text=f"Назад {page}/{total_pages}", callback_data=f"{page_prefix}:{prev_page}"))
     if has_next:
-        nav.append(InlineKeyboardButton(text="Дальше", callback_data=f"{page_prefix}:{next_page}"))
+        nav.append(InlineKeyboardButton(text=f"Далее {page + 2}/{total_pages}", callback_data=f"{page_prefix}:{next_page}"))
     if nav:
         rows.append(nav)
 
@@ -84,6 +90,15 @@ def after_key_created_keyboard(key: VpnKey) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Открыть ключ", callback_data=f"key:open:{key.id}")],
+            [InlineKeyboardButton(text="Мои ключи", callback_data="keys:list")],
+            [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
+        ]
+    )
+
+
+def after_key_deleted_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [InlineKeyboardButton(text="Мои ключи", callback_data="keys:list")],
             [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
         ]

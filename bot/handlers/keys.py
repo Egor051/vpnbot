@@ -20,13 +20,14 @@ from bot.fsm.states import CreateKeyStates, EditNoteStates
 from bot.handlers.common import answer_callback_error, answer_message_error, profile_from_tg
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import (
+    after_key_deleted_keyboard,
     confirm_keyboard,
     create_key_keyboard,
     key_actions_keyboard,
     keys_list_keyboard,
 )
 from bot.messages import AWG_CONFIG_FILENAME, safe_edit_message_text, send_awg_config
-from bot.pagination import page_offset, split_page
+from bot.pagination import page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
 from models.enums import AuditEntityType, VpnKeyType
@@ -44,14 +45,18 @@ async def list_keys(callback: CallbackQuery, services: Any) -> None:
         return
     page = _page_from_callback(callback.data, default=0)
     try:
-        items = await services.vpn_keys.list_for_actor(
+        keys, current_page, total_pages, has_next = await _load_keys_page(
+            services,
             callback.from_user.id,
-            limit=KEYS_PAGE_SIZE + 1,
-            offset=page_offset(page, KEYS_PAGE_SIZE),
+            page=page,
+            page_size=KEYS_PAGE_SIZE,
         )
-        keys, has_next = split_page(items, KEYS_PAGE_SIZE)
-        text = keys_page_text(keys, page)
-        await safe_edit_message_text(callback.message, text, reply_markup=keys_list_keyboard(keys, page=page, has_next=has_next))
+        text = keys_page_text(keys, current_page)
+        await safe_edit_message_text(
+            callback.message,
+            text,
+            reply_markup=keys_list_keyboard(keys, page=current_page, has_next=has_next, total_pages=total_pages),
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -63,9 +68,16 @@ async def list_keys_message(message: Message, services: Any) -> None:
     if not await ensure_private_message(message):
         return
     try:
-        items = await services.vpn_keys.list_for_actor(message.from_user.id, limit=KEYS_PAGE_SIZE + 1)
-        keys, has_next = split_page(items, KEYS_PAGE_SIZE)
-        await message.answer(keys_page_text(keys, 0), reply_markup=keys_list_keyboard(keys, page=0, has_next=has_next))
+        keys, current_page, total_pages, has_next = await _load_keys_page(
+            services,
+            message.from_user.id,
+            page=0,
+            page_size=KEYS_PAGE_SIZE,
+        )
+        await message.answer(
+            keys_page_text(keys, current_page),
+            reply_markup=keys_list_keyboard(keys, page=current_page, has_next=has_next, total_pages=total_pages),
+        )
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -280,7 +292,10 @@ async def delete_key_prompt(callback: CallbackQuery, services: Any) -> None:
         await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await safe_edit_message_text(
             callback.message,
-            f"Удалить ключ #{key_id}? Это мягкое удаление через сервис.",
+            (
+                f"Полностью удалить ключ #{key_id}? Доступ будет отключён на сервере, "
+                "запись ключа и его статистика будут удалены из бота. Это действие нельзя отменить."
+            ),
             reply_markup=confirm_keyboard("delete", key_id),
         )
     except Exception as exc:
@@ -313,15 +328,35 @@ async def confirm_key_action(callback: CallbackQuery, services: Any, rate_limite
         elif action == "delete":
             rate_limiter.check(callback.from_user.id, "key_delete", 10)
             await callback.answer("Выполняю...")
-            updated = (
+            owner_context = _admin_owner_context(key, callback.from_user.id)
+            if key.key_type == VpnKeyType.XRAY:
                 await services.xray.delete_xray_key(callback.from_user.id, key_id)
-                if key.key_type == VpnKeyType.XRAY
-                else await services.awg.delete_awg_key(callback.from_user.id, key_id)
-            )
+            else:
+                await services.awg.delete_awg_key(callback.from_user.id, key_id)
+            if owner_context is not None:
+                keys, current_page, total_pages, has_next = await _load_keys_page(
+                    services,
+                    callback.from_user.id,
+                    owner_user_id=owner_context,
+                    page=0,
+                    page_size=KEYS_PAGE_SIZE,
+                )
+                await safe_edit_message_text(
+                    callback.message,
+                    f"Ключ полностью удалён.\n\n{keys_page_text(keys, current_page, owner_user_id=owner_context)}",
+                    reply_markup=keys_list_keyboard(
+                        keys,
+                        page=current_page,
+                        has_next=has_next,
+                        owner_user_id=owner_context,
+                        total_pages=total_pages,
+                    ),
+                )
+                return
             await safe_edit_message_text(
                 callback.message,
-                "Ключ удалён.",
-                reply_markup=key_actions_keyboard(updated, owner_user_id=_admin_owner_context(updated, callback.from_user.id)),
+                "Ключ полностью удалён.",
+                reply_markup=after_key_deleted_keyboard(),
             )
         else:
             await callback.answer("Неизвестное действие", show_alert=True)
@@ -401,6 +436,37 @@ def _clean_note(value: str | None) -> str | None:
 
 def _admin_owner_context(key, actor_user_id: int) -> int | None:
     return key.owner_user_id if key.owner_user_id != actor_user_id else None
+
+
+async def _load_keys_page(
+    services: Any,
+    actor_user_id: int,
+    *,
+    owner_user_id: int | None = None,
+    page: int,
+    page_size: int,
+):
+    total_count = await services.vpn_keys.count_for_actor(actor_user_id, owner_user_id=owner_user_id)
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    current_page = min(max(page, 0), total_pages - 1)
+    keys = await services.vpn_keys.list_for_actor(
+        actor_user_id,
+        owner_user_id=owner_user_id,
+        limit=page_size,
+        offset=page_offset(current_page, page_size),
+    )
+    if not keys and current_page > 0:
+        total_count = await services.vpn_keys.count_for_actor(actor_user_id, owner_user_id=owner_user_id)
+        total_pages = max(1, (total_count + page_size - 1) // page_size)
+        current_page = max(0, min(current_page - 1, total_pages - 1))
+        keys = await services.vpn_keys.list_for_actor(
+            actor_user_id,
+            owner_user_id=owner_user_id,
+            limit=page_size,
+            offset=page_offset(current_page, page_size),
+        )
+    has_next = current_page + 1 < total_pages
+    return keys, current_page, total_pages, has_next
 
 
 def _page_from_callback(data: str | None, default: int = 0) -> int:

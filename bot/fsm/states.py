@@ -17,3 +17,8 @@ class AdminCreateKeyStates(StatesGroup):
     choosing_type = State()
     waiting_note = State()
     confirming = State()
+
+
+class AdminAnnouncementStates(StatesGroup):
+    waiting_message = State()
+    confirming = State()

@@ -26,7 +26,17 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Статистика ключей", callback_data="admin:stats")],
             [InlineKeyboardButton(text="Логи действий", callback_data="admin:audit")],
             [InlineKeyboardButton(text="Выдать ключ пользователю", callback_data="admin:issue")],
+            [InlineKeyboardButton(text="Объявление", callback_data="admin:announce")],
             [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
+        ]
+    )
+
+
+def announcement_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Отправить", callback_data="admin:announce:send")],
+            [InlineKeyboardButton(text="Отмена", callback_data="admin:announce:cancel")],
         ]
     )
 

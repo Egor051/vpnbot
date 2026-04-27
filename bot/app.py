@@ -31,6 +31,7 @@ from repositories.traffic_stats import TrafficStatsRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.access_approval import AccessApprovalService
+from services.announcements import AnnouncementService
 from services.audit import AuditService
 from services.awg import AwgService
 from services.notes import NotesService
@@ -56,6 +57,7 @@ class Services:
     vpn_keys: VpnKeyQueryService
     traffic_stats: TrafficStatsService
     audit: AuditService
+    announcements: AnnouncementService
 
 
 async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
@@ -152,6 +154,11 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         awg=awg_adapter,
         xray=xray_stats_adapter,
     )
+    announcement_service = AnnouncementService(
+        users=user_service,
+        users_repo=users_repo,
+        audit=audit_service,
+    )
 
     await proxy_service.seed_default_from_env()
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
@@ -168,6 +175,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         vpn_keys=vpn_key_service,
         traffic_stats=traffic_stats_service,
         audit=audit_service,
+        announcements=announcement_service,
     )
 
     await _startup_reconcile_keys(services)
