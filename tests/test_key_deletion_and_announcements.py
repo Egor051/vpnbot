@@ -146,9 +146,11 @@ class XrayAdapter:
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
         self.removed = False
+        self.remove_calls = 0
 
     async def remove_client(self, **kwargs: object) -> None:
         self.removed = True
+        self.remove_calls += 1
         if self.fail:
             raise RuntimeError("remove failed")
 
@@ -157,9 +159,11 @@ class AwgAdapter:
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
         self.removed = False
+        self.remove_calls = 0
 
     async def remove_peer(self, **kwargs: object) -> None:
         self.removed = True
+        self.remove_calls += 1
         if self.fail:
             raise RuntimeError("remove failed")
 
@@ -328,6 +332,54 @@ def test_awg_delete_failed_and_pending_cleanup_statuses_reserve_ip(tmp_path: Pat
     asyncio.run(run())
 
 
+def test_successful_hard_delete_frees_awg_ip_for_reuse(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users = UserRepository(db)
+            await users.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            repo = VpnKeyRepository(db)
+            key = await repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.AWG,
+                note=None,
+                payload={},
+                public_payload={},
+                created_by=100,
+                now="now",
+                public_key="public",
+                client_ip="10.0.0.2",
+            )
+            await repo.set_status(key.id, VpnKeyStatus.ACTIVE, "now")
+            await db.conn.execute(
+                """
+                INSERT INTO vpn_key_traffic_stats (key_id, downloaded_bytes, uploaded_bytes)
+                VALUES (?, 123, 45)
+                """,
+                (key.id,),
+            )
+            await db.commit()
+
+            assert "10.0.0.2" in await repo.get_occupied_awg_ips()
+
+            await repo.hard_delete_with_stats(key.id)
+
+            assert await repo.get_by_id(key.id) is None
+            cursor = await db.conn.execute("SELECT COUNT(*) AS cnt FROM vpn_key_traffic_stats WHERE key_id = ?", (key.id,))
+            row = await cursor.fetchone()
+            assert row["cnt"] == 0
+            assert "10.0.0.2" not in await repo.get_occupied_awg_ips()
+            allocator = IpAllocator(repo, "10.0.0.0/29", "10.0.0.1")
+            assert await allocator.next_free_ip() == "10.0.0.2"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("key_type", [VpnKeyType.XRAY, VpnKeyType.AWG])
 def test_delete_succeeds_when_post_hard_delete_audit_fails(key_type: VpnKeyType, tmp_path: Path) -> None:
     async def run() -> None:
@@ -391,6 +443,75 @@ def test_delete_succeeds_when_post_hard_delete_audit_fails(key_type: VpnKeyType,
             row = await cursor.fetchone()
             assert row["cnt"] == 0
             assert audit.actions == [f"{key_type.value}_key_hard_deleted"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("key_type", [VpnKeyType.XRAY, VpnKeyType.AWG])
+def test_startup_hard_delete_audit_failure_does_not_mark_cleanup_failed(key_type: VpnKeyType, tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users = UserRepository(db)
+            await users.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            repo = VpnKeyRepository(db)
+            keys = []
+            for index, status in enumerate((VpnKeyStatus.PENDING_DELETE, VpnKeyStatus.DELETE_FAILED), start=1):
+                key = await repo.create_pending(
+                    owner_user_id=100,
+                    username="user",
+                    key_type=key_type,
+                    note=None,
+                    payload={"short_id_managed": False} if key_type == VpnKeyType.XRAY else {},
+                    public_payload={},
+                    created_by=100,
+                    now=f"now-{index}",
+                    uuid=f"00000000-0000-4000-8000-00000000000{index}" if key_type == VpnKeyType.XRAY else None,
+                    email_label=f"label-{index}",
+                    public_key=f"public-{index}" if key_type == VpnKeyType.AWG else None,
+                    client_ip=f"10.0.0.{index + 1}" if key_type == VpnKeyType.AWG else None,
+                )
+                await repo.set_status(key.id, status, f"status-{index}")
+                keys.append(key)
+
+            audit = FailingAudit()
+            if key_type == VpnKeyType.XRAY:
+                adapter = XrayAdapter()
+                service = XrayService(
+                    vpn_keys=repo,
+                    users=Users(),  # type: ignore[arg-type]
+                    adapter=adapter,  # type: ignore[arg-type]
+                    settings=_settings(tmp_path),
+                    clock=ClockProvider(),
+                    ids=object(),  # type: ignore[arg-type]
+                    audit=audit,  # type: ignore[arg-type]
+                )
+                summary = await service.startup_reconcile()
+                expected_action = "xray_startup_delete_completed"
+            else:
+                adapter = AwgAdapter()
+                service = AwgService(
+                    vpn_keys=repo,
+                    users=Users(),  # type: ignore[arg-type]
+                    adapter=adapter,  # type: ignore[arg-type]
+                    ip_allocator=object(),  # type: ignore[arg-type]
+                    settings=_settings(tmp_path),
+                    clock=ClockProvider(),
+                    ids=object(),  # type: ignore[arg-type]
+                    audit=audit,  # type: ignore[arg-type]
+                )
+                summary = await service.startup_reconcile()
+                expected_action = "awg_startup_delete_completed"
+
+            assert summary == {"checked": 2, "recovered": 2, "failed": 0}
+            assert adapter.remove_calls == 2
+            assert audit.actions == [expected_action, expected_action]
+            for key in keys:
+                assert await repo.get_by_id(key.id) is None
         finally:
             await db.close()
 
@@ -564,15 +685,24 @@ def test_group_chat_announcement_message_does_not_start_or_send() -> None:
 
 def test_announcement_uses_copy_message_without_text_additions(tmp_path: Path) -> None:
     class UsersRepo:
-        async def count_announcement_recipients(self) -> int:
-            raise AssertionError("send_to_all should not count recipients")
-
-        async def list_announcement_recipients(self, *, limit: int, offset: int) -> list[User]:
-            users = [
+        def __init__(self) -> None:
+            self.users = [
                 User(1, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None),
                 User(2, "user", "User", UserRole.APPROVED_USER, "now", "now", None),
             ]
-            return users[offset : offset + limit]
+
+        async def count_announcement_recipients(self) -> int:
+            raise AssertionError("send_to_all should not count recipients")
+
+        async def list_announcement_recipients_after(self, *, last_seen_id: int | None, limit: int) -> list[User]:
+            return [
+                user
+                for user in self.users
+                if last_seen_id is None or user.telegram_user_id > last_seen_id
+            ][:limit]
+
+        async def list_announcement_recipients(self, *, limit: int, offset: int) -> list[User]:
+            raise AssertionError("send_to_all should not use OFFSET pagination")
 
     class Bot:
         def __init__(self) -> None:
@@ -638,7 +768,7 @@ def test_announcement_count_uses_count_query_not_list() -> None:
 def test_announcement_batches_and_single_send_failure_does_not_abort() -> None:
     class UsersRepo:
         def __init__(self) -> None:
-            self.offsets: list[int] = []
+            self.last_seen_ids: list[int | None] = []
             self.users = [
                 User(1, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None),
                 User(2, "bad", "Bad", UserRole.APPROVED_USER, "now", "now", None),
@@ -650,9 +780,16 @@ def test_announcement_batches_and_single_send_failure_does_not_abort() -> None:
         async def count_announcement_recipients(self) -> int:
             return len(self.users)
 
+        async def list_announcement_recipients_after(self, *, last_seen_id: int | None, limit: int) -> list[User]:
+            self.last_seen_ids.append(last_seen_id)
+            return [
+                user
+                for user in self.users
+                if last_seen_id is None or user.telegram_user_id > last_seen_id
+            ][:limit]
+
         async def list_announcement_recipients(self, *, limit: int, offset: int) -> list[User]:
-            self.offsets.append(offset)
-            return self.users[offset : offset + limit]
+            raise AssertionError("send_to_all should not use OFFSET pagination")
 
     class Bot:
         def __init__(self) -> None:
@@ -679,7 +816,70 @@ def test_announcement_batches_and_single_send_failure_does_not_abort() -> None:
         assert result.total == 5
         assert result.success == 4
         assert result.failed == 1
-        assert repo.offsets == [0, 2, 4, 5]
+        assert repo.last_seen_ids == [None, 2, 4, 5]
         assert bot.copied == [1, 3, 4, 5]
+
+    asyncio.run(run())
+
+
+def test_announcement_keyset_pagination_does_not_duplicate_when_lower_ids_change_between_batches() -> None:
+    class UsersRepo:
+        def __init__(self) -> None:
+            self.last_seen_ids: list[int | None] = []
+            self.users = [
+                User(10, "u10", "User 10", UserRole.APPROVED_USER, "now", "now", None),
+                User(20, "u20", "User 20", UserRole.APPROVED_USER, "now", "now", None),
+                User(30, "u30", "User 30", UserRole.APPROVED_USER, "now", "now", None),
+                User(40, "u40", "User 40", UserRole.APPROVED_USER, "now", "now", None),
+            ]
+
+        async def count_announcement_recipients(self) -> int:
+            return len(self.users)
+
+        async def list_announcement_recipients_after(self, *, last_seen_id: int | None, limit: int) -> list[User]:
+            self.last_seen_ids.append(last_seen_id)
+            result = [
+                user
+                for user in sorted(self.users, key=lambda item: item.telegram_user_id)
+                if last_seen_id is None or user.telegram_user_id > last_seen_id
+            ][:limit]
+            if last_seen_id is None:
+                self.users = [
+                    User(15, "new", "New", UserRole.APPROVED_USER, "now", "now", None),
+                    User(20, "u20", "User 20", UserRole.APPROVED_USER, "now", "now", None),
+                    User(30, "u30", "User 30", UserRole.APPROVED_USER, "now", "now", None),
+                    User(40, "u40", "User 40", UserRole.APPROVED_USER, "now", "now", None),
+                ]
+            return result
+
+        async def list_announcement_recipients(self, *, limit: int, offset: int) -> list[User]:
+            raise AssertionError("send_to_all should not use OFFSET pagination")
+
+    class Bot:
+        def __init__(self) -> None:
+            self.copied: list[int] = []
+
+        async def copy_message(self, *, chat_id: int, from_chat_id: int, message_id: int) -> None:
+            self.copied.append(chat_id)
+
+    async def run() -> None:
+        repo = UsersRepo()
+        service = AnnouncementService(
+            users=Users(),  # type: ignore[arg-type]
+            users_repo=repo,  # type: ignore[arg-type]
+            audit=Audit(),  # type: ignore[arg-type]
+            delay_seconds=0,
+            batch_size=2,
+        )
+        bot = Bot()
+
+        result = await service.send_to_all(actor_user_id=1, bot=bot, from_chat_id=1, message_id=77)  # type: ignore[arg-type]
+
+        assert repo.last_seen_ids == [None, 20, 40]
+        assert bot.copied == [10, 20, 30, 40]
+        assert len(bot.copied) == len(set(bot.copied))
+        assert result.total == 4
+        assert result.success == 4
+        assert result.failed == 0
 
     asyncio.run(run())

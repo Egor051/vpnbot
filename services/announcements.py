@@ -54,13 +54,14 @@ class AnnouncementService:
         total = 0
         success = 0
         failed = 0
-        offset = 0
+        last_seen_id: int | None = None
         while True:
-            recipients = await self.users_repo.list_announcement_recipients(limit=self.batch_size, offset=offset)
+            recipients = await self.users_repo.list_announcement_recipients_after(last_seen_id=last_seen_id, limit=self.batch_size)
             if not recipients:
                 break
-            total += len(recipients)
             for recipient in recipients:
+                last_seen_id = recipient.telegram_user_id
+                total += 1
                 target_id = recipient.telegram_user_id
                 if target_id <= 0:
                     failed += 1
@@ -72,7 +73,6 @@ class AnnouncementService:
                     failed += 1
                 if self.delay_seconds > 0:
                     await asyncio.sleep(self.delay_seconds)
-            offset += len(recipients)
 
         result = AnnouncementResult(total=total, success=success, failed=failed)
         try:
