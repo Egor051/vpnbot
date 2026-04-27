@@ -203,13 +203,16 @@ class AwgService:
                 )
                 raise
             await self.vpn_keys.hard_delete_with_stats(key_id)
-            await self.audit.write(
-                actor_user_id=actor_user_id,
-                action="awg_key_hard_deleted",
-                entity_type=AuditEntityType.VPN_KEY,
-                entity_id=key_id,
-                details={"owner_user_id": key.owner_user_id, "previous_status": previous_status.value, "client_ip": key.client_ip},
-            )
+            try:
+                await self.audit.write(
+                    actor_user_id=actor_user_id,
+                    action="awg_key_hard_deleted",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key_id,
+                    details={"owner_user_id": key.owner_user_id, "previous_status": previous_status.value, "client_ip": key.client_ip},
+                )
+            except Exception:
+                logger.warning("AWG key hard-deleted, but audit write failed for key_id=%s", key_id, exc_info=True)
 
     async def startup_reconcile(self) -> dict[str, int]:
         summary = {"checked": 0, "recovered": 0, "failed": 0}
@@ -397,18 +400,21 @@ class AwgService:
                 await self.vpn_keys.set_status(key.id, VpnKeyStatus.DELETE_FAILED, self.clock.now())
                 raise
             await self.vpn_keys.hard_delete_with_stats(key.id)
-            await self.audit.write(
-                actor_user_id=None,
-                action="awg_startup_delete_completed",
-                entity_type=AuditEntityType.VPN_KEY,
-                entity_id=key.id,
-                details={
-                    "owner_user_id": key.owner_user_id,
-                    "previous_status": key.status.value,
-                    "client_ip": key.client_ip,
-                    "hard_delete": True,
-                },
-            )
+            try:
+                await self.audit.write(
+                    actor_user_id=None,
+                    action="awg_startup_delete_completed",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key.id,
+                    details={
+                        "owner_user_id": key.owner_user_id,
+                        "previous_status": key.status.value,
+                        "client_ip": key.client_ip,
+                        "hard_delete": True,
+                    },
+                )
+            except Exception:
+                logger.warning("AWG startup hard-delete completed, but audit write failed for key_id=%s", key.id, exc_info=True)
             return True
 
         return False

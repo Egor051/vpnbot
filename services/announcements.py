@@ -30,15 +30,17 @@ class AnnouncementService:
         users_repo: UserRepository,
         audit: AuditService,
         delay_seconds: float = 0.07,
+        batch_size: int = 100,
     ) -> None:
         self.users = users
         self.users_repo = users_repo
         self.audit = audit
         self.delay_seconds = delay_seconds
+        self.batch_size = max(batch_size, 1)
 
     async def count_recipients(self, actor_user_id: int) -> int:
         await self.users.require_superadmin(actor_user_id)
-        return len(await self.users_repo.list_announcement_recipients())
+        return await self.users_repo.count_announcement_recipients()
 
     async def send_to_all(
         self,
@@ -49,24 +51,30 @@ class AnnouncementService:
         message_id: int,
     ) -> AnnouncementResult:
         await self.users.require_superadmin(actor_user_id)
-        recipients = await self.users_repo.list_announcement_recipients()
-
+        total = 0
         success = 0
         failed = 0
-        for recipient in recipients:
-            target_id = recipient.telegram_user_id
-            if target_id <= 0:
-                failed += 1
-                logger.warning("Skipping announcement recipient with non-private chat id=%s", target_id)
-                continue
-            if await self._copy_message(bot, target_id, from_chat_id, message_id):
-                success += 1
-            else:
-                failed += 1
-            if self.delay_seconds > 0:
-                await asyncio.sleep(self.delay_seconds)
+        offset = 0
+        while True:
+            recipients = await self.users_repo.list_announcement_recipients(limit=self.batch_size, offset=offset)
+            if not recipients:
+                break
+            total += len(recipients)
+            for recipient in recipients:
+                target_id = recipient.telegram_user_id
+                if target_id <= 0:
+                    failed += 1
+                    logger.warning("Skipping announcement recipient with non-private chat id=%s", target_id)
+                    continue
+                if await self._copy_message(bot, target_id, from_chat_id, message_id):
+                    success += 1
+                else:
+                    failed += 1
+                if self.delay_seconds > 0:
+                    await asyncio.sleep(self.delay_seconds)
+            offset += len(recipients)
 
-        result = AnnouncementResult(total=len(recipients), success=success, failed=failed)
+        result = AnnouncementResult(total=total, success=success, failed=failed)
         try:
             await self.audit.write(
                 actor_user_id=actor_user_id,

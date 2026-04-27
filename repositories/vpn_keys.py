@@ -388,12 +388,20 @@ class VpnKeyRepository:
         await self.db.commit()
 
     async def get_occupied_awg_ips(self) -> set[str]:
+        reserved_statuses = (
+            VpnKeyStatus.PENDING_APPLY,
+            VpnKeyStatus.ACTIVE,
+            VpnKeyStatus.PENDING_REVOKE,
+            VpnKeyStatus.PENDING_DELETE,
+            VpnKeyStatus.DELETE_FAILED,
+        )
+        placeholders = ",".join("?" for _ in reserved_statuses)
         cursor = await self.db.conn.execute(
-            """
+            f"""
             SELECT client_ip FROM vpn_keys
-            WHERE key_type = ? AND client_ip IS NOT NULL AND status IN (?, ?)
+            WHERE key_type = ? AND client_ip IS NOT NULL AND status IN ({placeholders})
             """,
-            (VpnKeyType.AWG.value, VpnKeyStatus.PENDING_APPLY.value, VpnKeyStatus.ACTIVE.value),
+            (VpnKeyType.AWG.value, *(status.value for status in reserved_statuses)),
         )
         rows = await cursor.fetchall()
         return {str(row["client_ip"]) for row in rows}

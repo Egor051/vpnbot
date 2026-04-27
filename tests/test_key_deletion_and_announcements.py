@@ -9,7 +9,8 @@ import pytest
 from aiogram.enums import ChatType
 
 from adapters.clock import ClockProvider
-from bot.handlers.admin import admin_announcement_message
+from adapters.ip_allocator import IpAllocator
+from bot.handlers.admin import admin_announcement_message, admin_announcement_start
 from bot.keyboards.keys import keys_list_keyboard
 from config.settings import Settings
 from db.database import Database
@@ -19,6 +20,7 @@ from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.announcements import AnnouncementService
 from services.awg import AwgService
+from services.errors import AccessDenied
 from services.xray import XrayService
 
 
@@ -119,12 +121,25 @@ class Users:
         return User(actor_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
 
 
+class SuperadminOnlyUsers:
+    async def require_superadmin(self, actor_user_id: int) -> User:
+        if actor_user_id != 1:
+            raise AccessDenied("Недостаточно прав")
+        return User(actor_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
+
+
 class Audit:
     def __init__(self) -> None:
         self.actions: list[str] = []
 
     async def write(self, *, action: str, **kwargs: object) -> None:
         self.actions.append(action)
+
+
+class FailingAudit(Audit):
+    async def write(self, *, action: str, **kwargs: object) -> None:
+        self.actions.append(action)
+        raise RuntimeError("audit failed")
 
 
 class XrayAdapter:
@@ -253,6 +268,135 @@ def test_delete_keeps_key_delete_failed_when_server_removal_fails(tmp_path: Path
     asyncio.run(run())
 
 
+def test_awg_delete_failed_and_pending_cleanup_statuses_reserve_ip(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            users = UserRepository(db)
+            await db.bootstrap()
+            await users.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            repo = VpnKeyRepository(db)
+            key = await repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.AWG,
+                note=None,
+                payload={},
+                public_payload={},
+                created_by=100,
+                now="now",
+                public_key="delete-failed-public",
+                client_ip="10.0.0.2",
+            )
+            await repo.set_status(key.id, VpnKeyStatus.DELETE_FAILED, "now")
+            pending_delete = await repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.AWG,
+                note=None,
+                payload={},
+                public_payload={},
+                created_by=100,
+                now="now",
+                public_key="pending-delete-public",
+                client_ip="10.0.0.3",
+            )
+            await repo.set_status(pending_delete.id, VpnKeyStatus.PENDING_DELETE, "now")
+            pending_revoke = await repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.AWG,
+                note=None,
+                payload={},
+                public_payload={},
+                created_by=100,
+                now="now",
+                public_key="pending-revoke-public",
+                client_ip="10.0.0.4",
+            )
+            await repo.set_status(pending_revoke.id, VpnKeyStatus.PENDING_REVOKE, "now")
+
+            occupied = await repo.get_occupied_awg_ips()
+            allocator = IpAllocator(repo, "10.0.0.0/29", "10.0.0.1")
+
+            assert {"10.0.0.2", "10.0.0.3", "10.0.0.4"}.issubset(occupied)
+            assert await allocator.next_free_ip() == "10.0.0.5"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("key_type", [VpnKeyType.XRAY, VpnKeyType.AWG])
+def test_delete_succeeds_when_post_hard_delete_audit_fails(key_type: VpnKeyType, tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            users = UserRepository(db)
+            await db.bootstrap()
+            await users.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            repo = VpnKeyRepository(db)
+            key = await repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=key_type,
+                note=None,
+                payload={"short_id_managed": False} if key_type == VpnKeyType.XRAY else {},
+                public_payload={},
+                created_by=100,
+                now="now",
+                uuid="00000000-0000-4000-8000-000000000001" if key_type == VpnKeyType.XRAY else None,
+                email_label="label",
+                public_key="public" if key_type == VpnKeyType.AWG else None,
+                client_ip="10.0.0.2" if key_type == VpnKeyType.AWG else None,
+            )
+            await repo.set_status(key.id, VpnKeyStatus.ACTIVE, "now")
+            await db.conn.execute(
+                """
+                INSERT INTO vpn_key_traffic_stats (key_id, downloaded_bytes, uploaded_bytes)
+                VALUES (?, 10, 20)
+                """,
+                (key.id,),
+            )
+            await db.commit()
+            audit = FailingAudit()
+            if key_type == VpnKeyType.XRAY:
+                service = XrayService(
+                    vpn_keys=repo,
+                    users=Users(),  # type: ignore[arg-type]
+                    adapter=XrayAdapter(),  # type: ignore[arg-type]
+                    settings=_settings(tmp_path),
+                    clock=ClockProvider(),
+                    ids=object(),  # type: ignore[arg-type]
+                    audit=audit,  # type: ignore[arg-type]
+                )
+                await service.delete_xray_key(100, key.id)
+            else:
+                service = AwgService(
+                    vpn_keys=repo,
+                    users=Users(),  # type: ignore[arg-type]
+                    adapter=AwgAdapter(),  # type: ignore[arg-type]
+                    ip_allocator=object(),  # type: ignore[arg-type]
+                    settings=_settings(tmp_path),
+                    clock=ClockProvider(),
+                    ids=object(),  # type: ignore[arg-type]
+                    audit=audit,  # type: ignore[arg-type]
+                )
+                await service.delete_awg_key(100, key.id)
+
+            assert await repo.get_by_id(key.id) is None
+            cursor = await db.conn.execute("SELECT COUNT(*) AS cnt FROM vpn_key_traffic_stats WHERE key_id = ?", (key.id,))
+            row = await cursor.fetchone()
+            assert row["cnt"] == 0
+            assert audit.actions == [f"{key_type.value}_key_hard_deleted"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_revoke_still_leaves_key_revoked_in_db(tmp_path: Path) -> None:
     async def run() -> None:
         repo = MemoryKeyRepo(_key(VpnKeyType.AWG))
@@ -340,13 +484,95 @@ def test_announcement_waits_for_confirmation_before_sending() -> None:
     asyncio.run(run())
 
 
+def test_regular_user_cannot_start_announcement(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def allow_private_callback(callback: object, text: str = "") -> bool:
+        return True
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", allow_private_callback)
+
+    class Callback:
+        def __init__(self) -> None:
+            self.from_user = SimpleNamespace(id=2)
+            self.message = SimpleNamespace(chat=SimpleNamespace(type=ChatType.PRIVATE), edit_text=self.edit_text)
+            self.data = "admin:announce"
+            self.answers: list[tuple[str, bool | None]] = []
+            self.edits: list[object] = []
+
+        async def answer(self, text: str | None = None, show_alert: bool | None = None, **kwargs: object) -> None:
+            self.answers.append((text or "", show_alert))
+
+        async def edit_text(self, text: str, reply_markup: object = None) -> None:
+            self.edits.append((text, reply_markup))
+
+    class State:
+        async def clear(self) -> None:
+            raise AssertionError("state should not be cleared")
+
+        async def set_state(self, state: object) -> None:
+            raise AssertionError("state should not be set")
+
+    async def run() -> None:
+        callback = Callback()
+        services = SimpleNamespace(users=SuperadminOnlyUsers())
+
+        await admin_announcement_start(callback, State(), services)  # type: ignore[arg-type]
+
+        assert callback.edits == []
+        assert callback.answers[-1] == ("Недостаточно прав", True)
+
+    asyncio.run(run())
+
+
+def test_group_chat_announcement_message_does_not_start_or_send() -> None:
+    class State:
+        async def update_data(self, **kwargs: object) -> None:
+            raise AssertionError("state should not be updated")
+
+        async def set_state(self, state: object) -> None:
+            raise AssertionError("state should not be set")
+
+        async def clear(self) -> None:
+            raise AssertionError("state should not be cleared")
+
+    class Announcements:
+        async def count_recipients(self, actor_user_id: int) -> int:
+            raise AssertionError("recipients should not be counted")
+
+        async def send_to_all(self, **kwargs: object) -> None:
+            raise AssertionError("announcement should not be sent")
+
+    class Message:
+        def __init__(self) -> None:
+            self.from_user = SimpleNamespace(id=1)
+            self.chat = SimpleNamespace(id=-100, type=ChatType.SUPERGROUP)
+            self.message_id = 55
+            self.answers: list[str] = []
+
+        async def answer(self, text: str, reply_markup: object = None) -> None:
+            self.answers.append(text)
+
+    async def run() -> None:
+        message = Message()
+        services = SimpleNamespace(users=Users(), announcements=Announcements())
+
+        await admin_announcement_message(message, State(), services)  # type: ignore[arg-type]
+
+        assert message.answers == ["Админ-панель доступна только в личном чате с ботом."]
+
+    asyncio.run(run())
+
+
 def test_announcement_uses_copy_message_without_text_additions(tmp_path: Path) -> None:
     class UsersRepo:
-        async def list_announcement_recipients(self) -> list[User]:
-            return [
+        async def count_announcement_recipients(self) -> int:
+            raise AssertionError("send_to_all should not count recipients")
+
+        async def list_announcement_recipients(self, *, limit: int, offset: int) -> list[User]:
+            users = [
                 User(1, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None),
                 User(2, "user", "User", UserRole.APPROVED_USER, "now", "now", None),
             ]
+            return users[offset : offset + limit]
 
     class Bot:
         def __init__(self) -> None:
@@ -378,5 +604,82 @@ def test_announcement_uses_copy_message_without_text_additions(tmp_path: Path) -
             {"chat_id": 2, "from_chat_id": 1, "message_id": 77},
         ]
         assert bot.sent_messages == []
+
+    asyncio.run(run())
+
+
+def test_announcement_count_uses_count_query_not_list() -> None:
+    class UsersRepo:
+        def __init__(self) -> None:
+            self.count_called = False
+
+        async def count_announcement_recipients(self) -> int:
+            self.count_called = True
+            return 3
+
+        async def list_announcement_recipients(self, *, limit: int, offset: int) -> list[User]:
+            raise AssertionError("count_recipients should not list recipients")
+
+    async def run() -> None:
+        repo = UsersRepo()
+        service = AnnouncementService(
+            users=Users(),  # type: ignore[arg-type]
+            users_repo=repo,  # type: ignore[arg-type]
+            audit=Audit(),  # type: ignore[arg-type]
+            delay_seconds=0,
+        )
+
+        assert await service.count_recipients(1) == 3
+        assert repo.count_called is True
+
+    asyncio.run(run())
+
+
+def test_announcement_batches_and_single_send_failure_does_not_abort() -> None:
+    class UsersRepo:
+        def __init__(self) -> None:
+            self.offsets: list[int] = []
+            self.users = [
+                User(1, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None),
+                User(2, "bad", "Bad", UserRole.APPROVED_USER, "now", "now", None),
+                User(3, "pending", "Pending", UserRole.PENDING_USER, "now", "now", None),
+                User(4, "ok", "Ok", UserRole.APPROVED_USER, "now", "now", None),
+                User(5, "ok2", "Ok2", UserRole.APPROVED_USER, "now", "now", None),
+            ]
+
+        async def count_announcement_recipients(self) -> int:
+            return len(self.users)
+
+        async def list_announcement_recipients(self, *, limit: int, offset: int) -> list[User]:
+            self.offsets.append(offset)
+            return self.users[offset : offset + limit]
+
+    class Bot:
+        def __init__(self) -> None:
+            self.copied: list[int] = []
+
+        async def copy_message(self, *, chat_id: int, from_chat_id: int, message_id: int) -> None:
+            if chat_id == 2:
+                raise RuntimeError("blocked")
+            self.copied.append(chat_id)
+
+    async def run() -> None:
+        repo = UsersRepo()
+        service = AnnouncementService(
+            users=Users(),  # type: ignore[arg-type]
+            users_repo=repo,  # type: ignore[arg-type]
+            audit=Audit(),  # type: ignore[arg-type]
+            delay_seconds=0,
+            batch_size=2,
+        )
+        bot = Bot()
+
+        result = await service.send_to_all(actor_user_id=1, bot=bot, from_chat_id=1, message_id=77)  # type: ignore[arg-type]
+
+        assert result.total == 5
+        assert result.success == 4
+        assert result.failed == 1
+        assert repo.offsets == [0, 2, 4, 5]
+        assert bot.copied == [1, 3, 4, 5]
 
     asyncio.run(run())
