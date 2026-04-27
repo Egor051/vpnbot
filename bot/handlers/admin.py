@@ -21,12 +21,14 @@ from bot.formatters import (
     users_page_text,
 )
 from bot.fsm.states import AdminCreateKeyStates
+from bot.fsm.states import AdminAnnouncementStates
 from bot.guards import require_superadmin
 from bot.handlers.common import answer_callback_error, answer_message_error
 from bot.keyboards.admin import (
     admin_issue_users_keyboard,
     admin_key_type_keyboard,
     admin_panel_keyboard,
+    announcement_confirm_keyboard,
     pending_requests_keyboard,
     user_actions_keyboard,
     users_keyboard,
@@ -79,6 +81,99 @@ async def admin_panel(callback: CallbackQuery, services: Any) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await callback.answer()
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await safe_edit_message_text(callback.message, "Админ-панель:", reply_markup=admin_panel_keyboard())
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:announce")
+async def admin_announcement_start(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await callback.answer()
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await state.clear()
+        await state.set_state(AdminAnnouncementStates.waiting_message)
+        await safe_edit_message_text(
+            callback.message,
+            "Отправьте сообщение объявления. Оно будет разослано пользователям без изменений после подтверждения.",
+            reply_markup=cancel_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.message(AdminAnnouncementStates.waiting_message)
+async def admin_announcement_message(message: Message, state: FSMContext, services: Any) -> None:
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    try:
+        await require_superadmin(services, message.from_user.id)
+        recipient_count = await services.announcements.count_recipients(message.from_user.id)
+        await state.update_data(from_chat_id=message.chat.id, message_id=message.message_id)
+        await state.set_state(AdminAnnouncementStates.confirming)
+        await message.answer(
+            (
+                "Разослать это объявление пользователям?\n"
+                f"Получателей: {recipient_count}\n"
+                "Сообщение будет отправлено без дополнительных подписей."
+            ),
+            reply_markup=announcement_confirm_keyboard(),
+        )
+    except Exception as exc:
+        await state.clear()
+        await answer_message_error(message, exc)
+
+
+@router.callback_query(AdminAnnouncementStates.confirming, F.data == "admin:announce:send")
+async def admin_announcement_send(callback: CallbackQuery, state: FSMContext, services: Any, bot: Bot) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        data = await state.get_data()
+        from_chat_id = int(data["from_chat_id"])
+        message_id = int(data["message_id"])
+        await state.clear()
+        await callback.answer("Отправляю...")
+        result = await services.announcements.send_to_all(
+            actor_user_id=callback.from_user.id,
+            bot=bot,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+        )
+        await safe_edit_message_text(
+            callback.message,
+            (
+                "Объявление отправлено.\n"
+                f"Получателей: {result.total}\n"
+                f"Успешно: {result.success}\n"
+                f"Ошибок: {result.failed}"
+            ),
+            reply_markup=admin_panel_keyboard(),
+        )
+    except Exception as exc:
+        await state.clear()
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminAnnouncementStates.confirming, F.data == "admin:announce:cancel")
+async def admin_announcement_cancel(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await state.clear()
+    await callback.answer("Отменено")
     if callback.from_user is None or callback.message is None:
         return
     try:
@@ -287,17 +382,36 @@ async def admin_user_keys(callback: CallbackQuery, services: Any) -> None:
         _, _, raw_user_id, raw_page = callback.data.split(":", 3)
         user_id = int(raw_user_id)
         page = max(int(raw_page), 0)
-        items = await services.vpn_keys.list_for_actor(
+        total_count = await services.vpn_keys.count_for_actor(callback.from_user.id, owner_user_id=user_id)
+        total_pages = max(1, (total_count + ADMIN_KEYS_PAGE_SIZE - 1) // ADMIN_KEYS_PAGE_SIZE)
+        current_page = min(page, total_pages - 1)
+        keys = await services.vpn_keys.list_for_actor(
             callback.from_user.id,
             owner_user_id=user_id,
-            limit=ADMIN_KEYS_PAGE_SIZE + 1,
-            offset=page_offset(page, ADMIN_KEYS_PAGE_SIZE),
+            limit=ADMIN_KEYS_PAGE_SIZE,
+            offset=page_offset(current_page, ADMIN_KEYS_PAGE_SIZE),
         )
-        keys, has_next = split_page(items, ADMIN_KEYS_PAGE_SIZE)
+        if not keys and current_page > 0:
+            total_count = await services.vpn_keys.count_for_actor(callback.from_user.id, owner_user_id=user_id)
+            total_pages = max(1, (total_count + ADMIN_KEYS_PAGE_SIZE - 1) // ADMIN_KEYS_PAGE_SIZE)
+            current_page = max(0, min(current_page - 1, total_pages - 1))
+            keys = await services.vpn_keys.list_for_actor(
+                callback.from_user.id,
+                owner_user_id=user_id,
+                limit=ADMIN_KEYS_PAGE_SIZE,
+                offset=page_offset(current_page, ADMIN_KEYS_PAGE_SIZE),
+            )
+        has_next = current_page + 1 < total_pages
         await safe_edit_message_text(
             callback.message,
-            keys_page_text(keys, page, owner_user_id=user_id),
-            reply_markup=keys_list_keyboard(keys, page=page, has_next=has_next, owner_user_id=user_id),
+            keys_page_text(keys, current_page, owner_user_id=user_id),
+            reply_markup=keys_list_keyboard(
+                keys,
+                page=current_page,
+                has_next=has_next,
+                owner_user_id=user_id,
+                total_pages=total_pages,
+            ),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)

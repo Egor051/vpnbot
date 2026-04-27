@@ -165,14 +165,12 @@ class XrayService:
             )
             return await self._get_key(key_id)
 
-    async def delete_key(self, actor_user_id: int, key_id: int) -> VpnKey:
-        return await self.delete_xray_key(actor_user_id, key_id)
+    async def delete_key(self, actor_user_id: int, key_id: int) -> None:
+        await self.delete_xray_key(actor_user_id, key_id)
 
-    async def delete_xray_key(self, actor_user_id: int, key_id: int) -> VpnKey:
+    async def delete_xray_key(self, actor_user_id: int, key_id: int) -> None:
         async with self._lock:
             key = await self._get_xray_key_for_manage(actor_user_id, key_id)
-            if key.status == VpnKeyStatus.DELETED:
-                return key
             previous_status = key.status
             await self.vpn_keys.set_status(key_id, VpnKeyStatus.PENDING_DELETE, self.clock.now())
             try:
@@ -188,15 +186,17 @@ class XrayService:
                     details={"previous_status": previous_status.value, "error": str(exc)},
                 )
                 raise
-            await self.vpn_keys.mark_deleted(key_id, actor_user_id, self.clock.now())
-            await self.audit.write(
-                actor_user_id=actor_user_id,
-                action="xray_key_deleted",
-                entity_type=AuditEntityType.VPN_KEY,
-                entity_id=key_id,
-                details={"previous_status": previous_status.value},
-            )
-            return await self._get_key(key_id)
+            await self.vpn_keys.hard_delete_with_stats(key_id)
+            try:
+                await self.audit.write(
+                    actor_user_id=actor_user_id,
+                    action="xray_key_hard_deleted",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key_id,
+                    details={"owner_user_id": key.owner_user_id, "previous_status": previous_status.value},
+                )
+            except Exception:
+                logger.warning("Xray key hard-deleted, but audit write failed for key_id=%s", key_id, exc_info=True)
 
     async def startup_reconcile(self) -> dict[str, int]:
         summary = {"checked": 0, "recovered": 0, "failed": 0}
@@ -359,15 +359,22 @@ class XrayService:
             return True
 
         if key.status in {VpnKeyStatus.PENDING_DELETE, VpnKeyStatus.DELETE_FAILED}:
-            await self._remove_xray_access(key)
-            await self.vpn_keys.mark_deleted(key.id, key.deleted_by or key.revoked_by or key.created_by, self.clock.now())
-            await self.audit.write(
-                actor_user_id=None,
-                action="xray_startup_delete_completed",
-                entity_type=AuditEntityType.VPN_KEY,
-                entity_id=key.id,
-                details={"previous_status": key.status.value},
-            )
+            try:
+                await self._remove_xray_access(key)
+            except Exception:
+                await self.vpn_keys.set_status(key.id, VpnKeyStatus.DELETE_FAILED, self.clock.now())
+                raise
+            await self.vpn_keys.hard_delete_with_stats(key.id)
+            try:
+                await self.audit.write(
+                    actor_user_id=None,
+                    action="xray_startup_delete_completed",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key.id,
+                    details={"owner_user_id": key.owner_user_id, "previous_status": key.status.value, "hard_delete": True},
+                )
+            except Exception:
+                logger.warning("Xray startup hard-delete completed, but audit write failed for key_id=%s", key.id, exc_info=True)
             return True
 
         return False

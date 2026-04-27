@@ -101,6 +101,42 @@ class UserRepository:
         rows = await cursor.fetchall()
         return [user for row in rows if (user := _row_to_user(row)) is not None]
 
+    async def count_announcement_recipients(self) -> int:
+        cursor = await self.db.conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM users
+            WHERE role != ?
+            """,
+            (UserRole.BLOCKED_USER.value,),
+        )
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row is not None else 0
+
+    async def list_announcement_recipients_after(self, last_seen_id: int | None, limit: int = 100) -> list[User]:
+        if last_seen_id is None:
+            cursor = await self.db.conn.execute(
+                """
+                SELECT * FROM users
+                WHERE role != ?
+                ORDER BY telegram_user_id ASC
+                LIMIT ?
+                """,
+                (UserRole.BLOCKED_USER.value, limit),
+            )
+        else:
+            cursor = await self.db.conn.execute(
+                """
+                SELECT * FROM users
+                WHERE role != ? AND telegram_user_id > ?
+                ORDER BY telegram_user_id ASC
+                LIMIT ?
+                """,
+                (UserRole.BLOCKED_USER.value, last_seen_id, limit),
+            )
+        rows = await cursor.fetchall()
+        return [user for row in rows if (user := _row_to_user(row)) is not None]
+
     async def list_by_ids(self, telegram_user_ids: list[int]) -> dict[int, User]:
         if not telegram_user_ids:
             return {}
