@@ -269,7 +269,7 @@ class AwgConfigAdapter:
         self._parse_sections(text)
         tmp_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.config_path.parent, delete=False) as tmp:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.config_path.parent, suffix=".conf", delete=False) as tmp:
                 tmp.write(text)
                 tmp.flush()
                 os.fsync(tmp.fileno())
