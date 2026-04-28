@@ -105,7 +105,7 @@ class XrayService:
                 )
             except Exception as exc:
                 await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
-                await self.audit.write(
+                await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
                     action="xray_create_failed",
                     entity_type=AuditEntityType.VPN_KEY,
@@ -119,7 +119,7 @@ class XrayService:
             except Exception:
                 logger.critical("Xray client applied, but DB mark_active failed for key_id=%s", key.id, exc_info=True)
                 raise
-            await self.audit.write(
+            await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action="xray_key_created",
                 entity_type=AuditEntityType.VPN_KEY,
@@ -147,7 +147,7 @@ class XrayService:
                 await self._remove_xray_access(key)
             except Exception:
                 await self.vpn_keys.set_status(key_id, previous_status, self.clock.now())
-                await self.audit.write(
+                await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
                     action="xray_revoke_failed",
                     entity_type=AuditEntityType.VPN_KEY,
@@ -156,7 +156,7 @@ class XrayService:
                 )
                 raise
             await self.vpn_keys.mark_revoked(key_id, actor_user_id, self.clock.now())
-            await self.audit.write(
+            await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action="xray_key_revoked",
                 entity_type=AuditEntityType.VPN_KEY,
@@ -178,7 +178,7 @@ class XrayService:
                     await self._remove_xray_access(key)
             except Exception as exc:
                 await self.vpn_keys.set_status(key_id, VpnKeyStatus.DELETE_FAILED, self.clock.now())
-                await self.audit.write(
+                await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
                     action="xray_delete_failed",
                     entity_type=AuditEntityType.VPN_KEY,
@@ -187,30 +187,37 @@ class XrayService:
                 )
                 raise
             await self.vpn_keys.hard_delete_with_stats(key_id)
-            try:
-                await self.audit.write(
-                    actor_user_id=actor_user_id,
-                    action="xray_key_hard_deleted",
-                    entity_type=AuditEntityType.VPN_KEY,
-                    entity_id=key_id,
-                    details={"owner_user_id": key.owner_user_id, "previous_status": previous_status.value},
-                )
-            except Exception:
-                logger.warning("Xray key hard-deleted, but audit write failed for key_id=%s", key_id, exc_info=True)
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="xray_key_hard_deleted",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={"owner_user_id": key.owner_user_id, "previous_status": previous_status.value},
+            )
 
     async def startup_reconcile(self) -> dict[str, int]:
         summary = {"checked": 0, "recovered": 0, "failed": 0}
-        keys = await self.vpn_keys.list_by_type_statuses(VpnKeyType.XRAY, XRAY_STARTUP_RECONCILE_STATUSES, limit=500)
-        for key in keys:
-            summary["checked"] += 1
-            try:
-                changed = await self._startup_reconcile_key(key)
-                if changed:
-                    summary["recovered"] += 1
-            except Exception as exc:
-                summary["failed"] += 1
-                logger.warning("Не удалось восстановить Xray-ключ key_id=%s: %s", key.id, exc, exc_info=True)
-                await self._write_startup_reconcile_failure_audit(key, exc)
+        last_id = 0
+        while True:
+            keys = await self.vpn_keys.list_by_type_statuses(
+                VpnKeyType.XRAY,
+                XRAY_STARTUP_RECONCILE_STATUSES,
+                limit=500,
+                after_id=last_id,
+            )
+            if not keys:
+                break
+            for key in keys:
+                last_id = key.id
+                summary["checked"] += 1
+                try:
+                    changed = await self._startup_reconcile_key(key)
+                    if changed:
+                        summary["recovered"] += 1
+                except Exception as exc:
+                    summary["failed"] += 1
+                    logger.warning("Не удалось восстановить Xray-ключ key_id=%s: %s", key.id, exc, exc_info=True)
+                    await self._write_startup_reconcile_failure_audit(key, exc)
         return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
@@ -328,7 +335,7 @@ class XrayService:
             client = self.adapter.find_client(uuid_value=key.uuid, email_label=key.email_label)
             if client is None:
                 await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
-                await self.audit.write(
+                await self._write_audit_best_effort(
                     actor_user_id=None,
                     action="xray_startup_pending_apply_failed",
                     entity_type=AuditEntityType.VPN_KEY,
@@ -337,7 +344,7 @@ class XrayService:
                 )
                 return True
             await self.vpn_keys.mark_active(key.id, self.clock.now())
-            await self.audit.write(
+            await self._write_audit_best_effort(
                 actor_user_id=None,
                 action="xray_startup_pending_apply_active",
                 entity_type=AuditEntityType.VPN_KEY,
@@ -349,7 +356,7 @@ class XrayService:
         if key.status == VpnKeyStatus.PENDING_REVOKE:
             await self._remove_xray_access(key)
             await self.vpn_keys.mark_revoked(key.id, key.revoked_by or key.deleted_by or key.created_by, self.clock.now())
-            await self.audit.write(
+            await self._write_audit_best_effort(
                 actor_user_id=None,
                 action="xray_startup_revoke_completed",
                 entity_type=AuditEntityType.VPN_KEY,
@@ -365,31 +372,55 @@ class XrayService:
                 await self.vpn_keys.set_status(key.id, VpnKeyStatus.DELETE_FAILED, self.clock.now())
                 raise
             await self.vpn_keys.hard_delete_with_stats(key.id)
-            try:
-                await self.audit.write(
-                    actor_user_id=None,
-                    action="xray_startup_delete_completed",
-                    entity_type=AuditEntityType.VPN_KEY,
-                    entity_id=key.id,
-                    details={"owner_user_id": key.owner_user_id, "previous_status": key.status.value, "hard_delete": True},
-                )
-            except Exception:
-                logger.warning("Xray startup hard-delete completed, but audit write failed for key_id=%s", key.id, exc_info=True)
+            await self._write_audit_best_effort(
+                actor_user_id=None,
+                action="xray_startup_delete_completed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={"owner_user_id": key.owner_user_id, "previous_status": key.status.value, "hard_delete": True},
+            )
             return True
 
         return False
 
     async def _write_startup_reconcile_failure_audit(self, key: VpnKey, error: Exception) -> None:
+        await self._write_audit_best_effort(
+            actor_user_id=None,
+            action="xray_startup_reconcile_failed",
+            entity_type=AuditEntityType.VPN_KEY,
+            entity_id=key.id,
+            details={"status": key.status.value, "error": str(error)},
+        )
+
+    async def _write_audit_best_effort(
+        self,
+        *,
+        actor_user_id: int | None,
+        action: str,
+        entity_type: AuditEntityType,
+        entity_id: str | int | None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        writer = getattr(self.audit, "write_best_effort", None)
+        if writer is not None:
+            await writer(
+                actor_user_id=actor_user_id,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                details=details,
+            )
+            return
         try:
             await self.audit.write(
-                actor_user_id=None,
-                action="xray_startup_reconcile_failed",
-                entity_type=AuditEntityType.VPN_KEY,
-                entity_id=key.id,
-                details={"status": key.status.value, "error": str(error)},
+                actor_user_id=actor_user_id,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                details=details,
             )
         except Exception:
-            logger.warning("Не удалось записать audit для ошибки восстановления Xray-ключа key_id=%s", key.id, exc_info=True)
+            logger.warning("Audit write failed after Xray operation: action=%s entity_id=%s", action, entity_id, exc_info=True)
 
     async def _unique_identity(self, telegram_user_id: int, username: str | None) -> tuple[str, str]:
         for _ in range(5):
@@ -413,7 +444,8 @@ class XrayService:
         if self.settings.xray_flow:
             params["flow"] = self.settings.xray_flow
         query = urlencode(params)
-        fragment = quote("xray")
+        fragment_label = f"xray_{email_label}" if email_label else "xray"
+        fragment = quote(fragment_label)
         return f"vless://{uuid_value}@{host}:{self.settings.xray_public_port}?{query}#{fragment}"
 
     def _format_host(self, host: str) -> str:

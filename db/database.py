@@ -60,9 +60,13 @@ class Database:
         if schema_path is None:
             schema_path = Path(__file__).with_name("schema.sql")
         sql = schema_path.read_text(encoding="utf-8")
-        await self.conn.executescript(sql)
-        await self._apply_migrations()
-        await self.commit()
+        try:
+            await self.conn.executescript(sql)
+            await self._apply_migrations()
+            await self.commit()
+        except Exception:
+            await self.rollback()
+            raise
 
     async def _apply_migrations(self) -> None:
         version = await self._schema_version()
@@ -127,7 +131,7 @@ class Database:
                 """
             )
             await self._set_schema_version(4)
-            await self._validate_reference_integrity()
+        await self._validate_reference_integrity()
 
     async def _schema_version(self) -> int:
         await self.conn.execute(
@@ -190,11 +194,11 @@ class Database:
             row = await cursor.fetchone()
             count = int(row["cnt"]) if row is not None else 0
             if count:
-                logger.warning(
-                    "Найдены записи без связанного пользователя: table=%s column=%s count=%s",
-                    table,
-                    column,
-                    count,
+                raise RuntimeError(
+                    "Найдены записи без связанного пользователя: "
+                    f"table={table} column={column} count={count}. "
+                    "Остановите запуск, сделайте backup SQLite DB и вручную восстановите владельца "
+                    "или удалите orphan-записи после проверки."
                 )
 
     async def commit(self) -> None:

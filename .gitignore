@@ -136,6 +136,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -206,3 +208,20 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .env.safe
+
+# Project-local runtime artifacts and secret material
+/data/
+/logs/
+/backups/
+backups/
+*.db
+*.sqlite
+*.sqlite3
+*.conf
+*.conf.*
+!*.example.conf
+*.bak
+*.backup
+*.key
+*.pub
+*.psk

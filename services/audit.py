@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 from datetime import timedelta
 
 from adapters.clock import ClockProvider
 from models.enums import AuditEntityType
 from repositories.audit_log import AuditLogRepository
+
+logger = logging.getLogger(__name__)
 
 
 class AuditService:
@@ -51,6 +54,31 @@ class AuditService:
             details=self._sanitize(details or {}),
             now=self.clock.now(),
         )
+
+    async def write_best_effort(
+        self,
+        *,
+        actor_user_id: int | None,
+        action: str,
+        entity_type: AuditEntityType,
+        entity_id: str | int | None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            await self.write(
+                actor_user_id=actor_user_id,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                details=details,
+            )
+        except Exception:
+            logger.exception(
+                "Audit write failed after business operation: action=%s entity_type=%s entity_id=%s",
+                action,
+                entity_type.value,
+                entity_id,
+            )
 
     async def recent(self, limit: int = 20, offset: int = 0) -> list[dict[str, object]]:
         return await self.audit_logs.list_recent(limit=limit, offset=offset)

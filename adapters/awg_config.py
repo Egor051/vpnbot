@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from adapters.errors import AwgApplyError, AwgConfigError, AwgPeerAlreadyExistsE
 from adapters.file_lock import ConfigFileLock
 from adapters.shell_runner import ShellRunner
 from models.dto import ShellResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +168,7 @@ class AwgConfigAdapter:
             snapshot = self._snapshot_config()
             backup_path = self.backup.create_backup(self.config_path)
             wrote_config = False
+            runtime_removed = False
             try:
                 original = self._read_text()
                 self._assert_config_unchanged(snapshot)
@@ -177,13 +181,20 @@ class AwgConfigAdapter:
 
                 if public_key and not await self._remove_peer_runtime(public_key):
                     raise AwgApplyError("Не удалось удалить AWG peer из runtime")
+                runtime_removed = public_key is not None
                 if public_key and await self.verify_runtime_peer(public_key):
                     raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
                 if public_key and self.find_peer(public_key=public_key, client_ip=None) is not None:
                     raise AwgApplyError("AWG peer удалён из runtime, но всё ещё найден в config")
-            except Exception:
+            except Exception as exc:
                 if wrote_config:
                     self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
+                if runtime_removed:
+                    try:
+                        await self._sync_runtime_from_config(self.config_path)
+                    except Exception as restore_exc:
+                        logger.error("AWG config restored, but runtime restore failed after remove_peer error", exc_info=True)
+                        raise AwgApplyError("AWG config восстановлен, но runtime не удалось синхронизировать после ошибки удаления peer") from restore_exc
                 raise
 
     def client_interface_options(self) -> dict[str, str]:
@@ -274,14 +285,41 @@ class AwgConfigAdapter:
                 tmp.flush()
                 os.fsync(tmp.fileno())
                 tmp_path = Path(tmp.name)
-            result = await self.shell.run(["awg-quick", "strip", str(tmp_path)], timeout=10)
-            if result.returncode == 127:
-                result = await self.shell.run(["wg-quick", "strip", str(tmp_path)], timeout=10)
-            if result.returncode not in {0, 127}:
+            result = await self._quick_strip(tmp_path)
+            if not result.ok:
                 raise AwgConfigError("AWG config не прошёл проверку awg-quick/wg-quick strip")
         finally:
             if tmp_path is not None:
                 tmp_path.unlink(missing_ok=True)
+
+    async def _quick_strip(self, path: Path) -> ShellResult:
+        result = await self.shell.run(["awg-quick", "strip", str(path)], timeout=10)
+        if result.returncode != 127:
+            return result
+        result = await self.shell.run(["wg-quick", "strip", str(path)], timeout=10)
+        if result.returncode == 127:
+            raise AwgConfigError("Не найден awg-quick или wg-quick для проверки AWG config")
+        return result
+
+    async def _sync_runtime_from_config(self, config_path: Path) -> None:
+        stripped_path: Path | None = None
+        try:
+            stripped = await self._quick_strip(config_path)
+            if not stripped.ok:
+                raise AwgApplyError("Не удалось подготовить AWG config для syncconf")
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=config_path.parent, suffix=".conf", delete=False) as tmp:
+                tmp.write(stripped.stdout)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                stripped_path = Path(tmp.name)
+            result = await self._run_awg_or_wg(["syncconf", self.interface, str(stripped_path)], timeout=15)
+            if not result.ok:
+                raise AwgApplyError("Не удалось синхронизировать AWG runtime из восстановленного config")
+        except AwgConfigError as exc:
+            raise AwgApplyError("Не удалось проверить восстановленный AWG config перед syncconf") from exc
+        finally:
+            if stripped_path is not None:
+                stripped_path.unlink(missing_ok=True)
 
     def _parse_sections(self, text: str) -> list[_AwgSection]:
         sections: list[_AwgSection] = []

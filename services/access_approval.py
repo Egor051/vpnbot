@@ -76,30 +76,31 @@ class AccessApprovalService:
 
     async def reject(self, actor_user_id: int, request_id: int) -> tuple[AccessRequest, bool]:
         await self.users.require_superadmin(actor_user_id)
-        request = await self.requests.get_by_id(request_id)
-        if request is None:
-            raise NotFound("Заявка не найдена")
-        changed = await self.requests.set_status_if_pending(
-            request_id,
-            AccessRequestStatus.REJECTED,
-            actor_user_id,
-            self.clock.now(),
-        )
-        if changed:
-            user = await self.users.users.get_by_id(request.telegram_user_id)
-            if user is not None and user.role != UserRole.BLOCKED_USER:
-                await self.users.users.set_role(request.telegram_user_id, UserRole.PENDING_USER, self.clock.now(), blocked_at=None)
-            await self.audit.write(
-                actor_user_id=actor_user_id,
-                action="access_rejected",
-                entity_type=AuditEntityType.ACCESS_REQUEST,
-                entity_id=request_id,
-                details={"telegram_user_id": request.telegram_user_id},
+        async with self.requests.db.transaction():
+            request = await self.requests.get_by_id(request_id)
+            if request is None:
+                raise NotFound("Заявка не найдена")
+            changed = await self.requests.set_status_if_pending(
+                request_id,
+                AccessRequestStatus.REJECTED,
+                actor_user_id,
+                self.clock.now(),
             )
-        refreshed = await self.requests.get_by_id(request_id)
-        if refreshed is None:
-            raise NotFound("Заявка не найдена")
-        return refreshed, changed
+            if changed:
+                user = await self.users.users.get_by_id(request.telegram_user_id)
+                if user is not None and user.role != UserRole.BLOCKED_USER:
+                    await self.users.users.set_role(request.telegram_user_id, UserRole.PENDING_USER, self.clock.now(), blocked_at=None)
+                await self.audit.write(
+                    actor_user_id=actor_user_id,
+                    action="access_rejected",
+                    entity_type=AuditEntityType.ACCESS_REQUEST,
+                    entity_id=request_id,
+                    details={"telegram_user_id": request.telegram_user_id},
+                )
+            refreshed = await self.requests.get_by_id(request_id)
+            if refreshed is None:
+                raise NotFound("Заявка не найдена")
+            return refreshed, changed
 
     async def list_pending(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[AccessRequest]:
         await self.users.require_superadmin(actor_user_id)

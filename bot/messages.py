@@ -20,6 +20,9 @@ async def safe_edit_message_text(
     except TelegramBadRequest as exc:
         if _is_message_not_modified(exc):
             return False
+        if _is_edit_unavailable(exc):
+            await message.answer(text, reply_markup=reply_markup)
+            return True
         raise
     return True
 
@@ -69,3 +72,16 @@ async def send_awg_config(
 
 def _is_message_not_modified(exc: TelegramBadRequest) -> bool:
     return "message is not modified" in str(exc).lower()
+
+
+def _is_edit_unavailable(exc: TelegramBadRequest) -> bool:
+    message = str(exc).lower()
+    return any(
+        text in message
+        for text in (
+            "message to edit not found",
+            "message can't be edited",
+            "there is no text in the message to edit",
+            "message is not found",
+        )
+    )

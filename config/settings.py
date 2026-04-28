@@ -106,6 +106,7 @@ class Settings:
     db_path: Path
     log_dir: Path
     bot_lock_path: Path
+    bot_drop_pending_updates: bool
 
     xray_config_path: Path
     xray_service_name: str
@@ -182,6 +183,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         db_path=Path(_optional("DB_PATH", "/opt/vpn-service/data/vpn.db")),
         log_dir=Path(_optional("LOG_DIR", "/opt/vpn-service/logs")),
         bot_lock_path=Path(_optional("BOT_LOCK_PATH", "/run/vpn-bot.lock")),
+        bot_drop_pending_updates=_bool("BOT_DROP_PENDING_UPDATES", False),
         xray_config_path=Path(_optional("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")),
         xray_service_name=_optional("XRAY_SERVICE_NAME", "xray"),
         xray_inbound_tag=_optional("XRAY_INBOUND_TAG"),
