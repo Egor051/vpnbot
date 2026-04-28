@@ -40,7 +40,7 @@ class NotesService:
         key = await self.vpn_keys.get_by_id(key_id)
         if key is None:
             raise NotFound("Ключ не найден")
-        actor = await self.users.get_user(actor_user_id)
+        actor = await self.users.require_approved_or_admin(actor_user_id)
         if actor.role != UserRole.SUPERADMIN and key.owner_user_id != actor_user_id:
             raise AccessDenied("Можно менять заметку только своих ключей")
         clean_note = normalize_note(note)

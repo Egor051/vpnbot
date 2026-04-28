@@ -31,11 +31,14 @@ from models.dto import ShellResult, TelegramUserProfile, User, VpnKey
 from models.enums import AccessRequestStatus, AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType, parse_user_role
 from repositories.access_requests import AccessRequestRepository
 from repositories.audit_log import AuditLogRepository
+from repositories.proxy_entries import ProxyRepository
 from repositories.users import UserRepository
+from repositories.vpn_keys import VpnKeyRepository
 from services.access_approval import AccessApprovalService
 from services.audit import AuditService
 from services.awg import AwgService
 from services.errors import AccessDenied, InvalidOperation
+from services.notes import NotesService
 from services.users import UserService
 from services.xray import XrayService
 
@@ -920,6 +923,158 @@ def test_announcement_recipients_exclude_blocked_predicate_users(tmp_path: Path)
             await db.close()
 
     asyncio.run(run())
+
+
+def test_blocked_at_only_owner_cannot_update_key_note(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            settings = _settings(tmp_path)
+            users_repo = UserRepository(db)
+            vpn_keys = VpnKeyRepository(db)
+            audit_repo = AuditLogRepository(db)
+            audit = AuditService(audit_repo, ClockProvider())
+            users = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=audit)
+            await users.bootstrap_admins()
+            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, audit=audit)
+
+            await users_repo.upsert_profile(TelegramUserProfile(telegram_user_id=240, username="owner", first_name="Owner"), UserRole.APPROVED_USER, "now")
+            key = await vpn_keys.create_pending(
+                owner_user_id=240,
+                username="owner",
+                key_type=VpnKeyType.XRAY,
+                note="old",
+                payload={},
+                public_payload={},
+                created_by=240,
+                now="now",
+                uuid="00000000-0000-4000-8000-000000000240",
+                email_label="owner",
+            )
+            await db.conn.execute("UPDATE users SET blocked_at = ? WHERE telegram_user_id = ?", ("blocked", 240))
+            await db.commit()
+
+            with pytest.raises(AccessDenied):
+                await notes.update_key_note(240, key.id, "new")
+
+            refreshed = await vpn_keys.get_by_id(key.id)
+            assert refreshed is not None
+            assert refreshed.note == "old"
+            assert await _count_audit_actions(db, "note_updated") == 0
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("legacy_role", ["banned", "revoked", "blocked", "ban"])
+def test_legacy_blocked_owner_cannot_update_key_note(legacy_role: str, tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            settings = _settings(tmp_path)
+            users_repo = UserRepository(db)
+            vpn_keys = VpnKeyRepository(db)
+            audit = AuditService(AuditLogRepository(db), ClockProvider())
+            users = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=audit)
+            await users.bootstrap_admins()
+            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, audit=audit)
+
+            await db.conn.execute(
+                """
+                INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at, blocked_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (241, legacy_role, legacy_role.title(), legacy_role, "now", "now"),
+            )
+            await db.commit()
+            key = await vpn_keys.create_pending(
+                owner_user_id=241,
+                username=legacy_role,
+                key_type=VpnKeyType.XRAY,
+                note="old",
+                payload={},
+                public_payload={},
+                created_by=241,
+                now="now",
+                uuid="00000000-0000-4000-8000-000000000241",
+                email_label=legacy_role,
+            )
+
+            with pytest.raises(AccessDenied):
+                await notes.update_key_note(241, key.id, "new")
+
+            refreshed = await vpn_keys.get_by_id(key.id)
+            assert refreshed is not None
+            assert refreshed.note == "old"
+            assert await _count_audit_actions(db, "note_updated") == 0
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_key_note_update_preserves_approved_owner_non_owner_and_superadmin_rules(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            settings = _settings(tmp_path)
+            users_repo = UserRepository(db)
+            vpn_keys = VpnKeyRepository(db)
+            audit = AuditService(AuditLogRepository(db), ClockProvider())
+            users = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=audit)
+            await users.bootstrap_admins()
+            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, audit=audit)
+
+            await users_repo.upsert_profile(TelegramUserProfile(telegram_user_id=250, username="owner", first_name="Owner"), UserRole.APPROVED_USER, "now")
+            await users_repo.upsert_profile(TelegramUserProfile(telegram_user_id=251, username="other", first_name="Other"), UserRole.APPROVED_USER, "now")
+            key = await vpn_keys.create_pending(
+                owner_user_id=250,
+                username="owner",
+                key_type=VpnKeyType.XRAY,
+                note="old",
+                payload={},
+                public_payload={},
+                created_by=250,
+                now="now",
+                uuid="00000000-0000-4000-8000-000000000250",
+                email_label="owner",
+            )
+
+            await notes.update_key_note(250, key.id, "owner note")
+            refreshed = await vpn_keys.get_by_id(key.id)
+            assert refreshed is not None
+            assert refreshed.note == "owner note"
+            assert await _count_audit_actions(db, "note_updated") == 1
+
+            with pytest.raises(AccessDenied):
+                await notes.update_key_note(251, key.id, "other note")
+            refreshed = await vpn_keys.get_by_id(key.id)
+            assert refreshed is not None
+            assert refreshed.note == "owner note"
+            assert await _count_audit_actions(db, "note_updated") == 1
+
+            await notes.update_key_note(1, key.id, "admin note")
+            refreshed = await vpn_keys.get_by_id(key.id)
+            assert refreshed is not None
+            assert refreshed.note == "admin note"
+            assert await _count_audit_actions(db, "note_updated") == 2
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+async def _count_audit_actions(db: Database, action: str) -> int:
+    cursor = await db.conn.execute("SELECT COUNT(*) AS cnt FROM audit_log WHERE action = ?", (action,))
+    row = await cursor.fetchone()
+    return int(row["cnt"]) if row is not None else 0
 
 
 def test_legacy_blocking_role_aliases_are_treated_as_blocked() -> None:
