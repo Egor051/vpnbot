@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from models.access import is_blocked_user
 from models.dto import AccessRequest, User
 from models.enums import UserRole
 from utils.formatting import format_user_display
@@ -94,11 +95,12 @@ def users_keyboard(
 
 def user_actions_keyboard(user: User) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    if user.role != UserRole.APPROVED_USER:
+    blocked = is_blocked_user(user)
+    if user.role != UserRole.APPROVED_USER and not blocked:
         rows.append([InlineKeyboardButton(text="Одобрить пользователя", callback_data=f"admin:userapprove:{user.telegram_user_id}")])
-    if user.role != UserRole.BLOCKED_USER:
+    if not blocked:
         rows.append([InlineKeyboardButton(text="Заблокировать", callback_data=f"admin:block:{user.telegram_user_id}")])
-    if user.role == UserRole.BLOCKED_USER:
+    if blocked:
         rows.append([InlineKeyboardButton(text="Разблокировать", callback_data=f"admin:unblock:{user.telegram_user_id}")])
     rows.append([InlineKeyboardButton(text="Выдать ключ", callback_data=f"admin:issue:{user.telegram_user_id}")])
     rows.append([InlineKeyboardButton(text="Ключи пользователя", callback_data=f"admin:ukeys:{user.telegram_user_id}:0")])

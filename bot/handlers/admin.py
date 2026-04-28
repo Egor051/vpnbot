@@ -347,7 +347,8 @@ async def admin_block_user(callback: CallbackQuery, services: Any) -> None:
                 text = (
                     "Пользователь заблокирован.\n"
                     f"Отключено ключей: {len(result.revoked_key_ids)}\n"
-                    "Ошибок: 0"
+                    "Ошибок: 0\n"
+                    "Теперь пользователю доступен только /start для повторной заявки."
                 )
             await safe_edit_message_text(callback.message, text, reply_markup=user_actions_keyboard(user))
     except Exception as exc:
@@ -363,10 +364,14 @@ async def admin_unblock_user(callback: CallbackQuery, services: Any) -> None:
     await callback.answer("Обрабатываю...")
     try:
         user_id = int(callback.data.rsplit(":", 1)[-1])
-        await services.users.set_role(callback.from_user.id, user_id, UserRole.APPROVED_USER)
+        await services.users.unblock_user(callback.from_user.id, user_id)
         if callback.message:
             user = await services.users.get_user(user_id)
-            await safe_edit_message_text(callback.message, "Пользователь разблокирован.", reply_markup=user_actions_keyboard(user))
+            await safe_edit_message_text(
+                callback.message,
+                "Пользователь разблокирован. FSM-состояние очищено, сценарии начнутся заново.",
+                reply_markup=user_actions_keyboard(user),
+            )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

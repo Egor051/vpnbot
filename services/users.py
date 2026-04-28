@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 
 from adapters.clock import ClockProvider
 from config.settings import Settings
+from models.access import is_blocked_user
 from models.dto import BlockUserResult, KeyOperationError, TelegramUserProfile, User, VpnKey
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.users import UserRepository
@@ -12,6 +14,8 @@ from services.audit import AuditService
 from services.errors import AccessDenied, InvalidOperation, NotFound
 
 KeyRevoker = Callable[[int, int], Awaitable[VpnKey]]
+StateClearer = Callable[[int], Awaitable[None]]
+logger = logging.getLogger(__name__)
 
 
 class UserService:
@@ -29,13 +33,25 @@ class UserService:
         self.audit = audit
         self._vpn_keys: VpnKeyRepository | None = None
         self._key_revokers: dict[VpnKeyType, KeyRevoker] = {}
+        self._state_clearer: StateClearer | None = None
 
     def attach_key_management(self, vpn_keys: VpnKeyRepository, revokers: dict[VpnKeyType, KeyRevoker]) -> None:
         self._vpn_keys = vpn_keys
         self._key_revokers = dict(revokers)
 
+    def attach_state_clearer(self, clearer: StateClearer) -> None:
+        self._state_clearer = clearer
+
     async def bootstrap_admins(self) -> None:
         await self.users.create_admin_placeholders(self.settings.admin_ids, self.clock.now())
+
+    async def clear_user_state(self, telegram_user_id: int) -> None:
+        if self._state_clearer is None:
+            return
+        try:
+            await self._state_clearer(telegram_user_id)
+        except Exception:
+            logger.warning("Не удалось очистить FSM-состояние пользователя %s", telegram_user_id, exc_info=True)
 
     async def ensure_user(self, profile: TelegramUserProfile) -> User:
         existing = await self.users.get_by_id(profile.telegram_user_id)
@@ -65,7 +81,11 @@ class UserService:
 
     async def require_approved_or_admin(self, actor_user_id: int) -> User:
         user = await self.get_user(actor_user_id)
-        if user.role not in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
+        if user.role == UserRole.SUPERADMIN:
+            return user
+        if is_blocked_user(user):
+            raise AccessDenied("Доступ заблокирован")
+        if user.role != UserRole.APPROVED_USER:
             raise AccessDenied("Доступ не одобрен")
         return user
 
@@ -77,11 +97,17 @@ class UserService:
         await self.require_superadmin(actor_user_id)
         if target_user_id in self.settings.admin_ids and role != UserRole.SUPERADMIN:
             raise InvalidOperation("Нельзя изменить роль superadmin из ADMIN_IDS")
+        current = await self.get_user(target_user_id)
+        if current.role == UserRole.SUPERADMIN and role != UserRole.SUPERADMIN:
+            raise InvalidOperation("Нельзя изменить роль superadmin")
         blocked_at = self.clock.now() if role == UserRole.BLOCKED_USER else None
         await self.users.set_role(target_user_id, role, self.clock.now(), blocked_at=blocked_at)
+        if role in {UserRole.BLOCKED_USER, UserRole.APPROVED_USER, UserRole.PENDING_USER}:
+            await self.clear_user_state(target_user_id)
+        action = "user_unblocked" if role == UserRole.APPROVED_USER and is_blocked_user(current) else "user_role_changed"
         await self.audit.write(
             actor_user_id=actor_user_id,
-            action="user_role_changed",
+            action=action,
             entity_type=AuditEntityType.USER,
             entity_id=target_user_id,
             details={"role": role.value},
@@ -96,6 +122,9 @@ class UserService:
         await self.require_superadmin(actor_user_id)
         if target_user_id in self.settings.admin_ids:
             raise InvalidOperation("Нельзя заблокировать superadmin из ADMIN_IDS")
+        target = await self.get_user(target_user_id)
+        if target.role == UserRole.SUPERADMIN:
+            raise InvalidOperation("Нельзя заблокировать superadmin")
 
         revoked_key_ids: list[int] = []
         errors: list[KeyOperationError] = []
@@ -143,6 +172,7 @@ class UserService:
 
         now = self.clock.now()
         await self.users.set_role(target_user_id, UserRole.BLOCKED_USER, now, blocked_at=now)
+        await self.clear_user_state(target_user_id)
         await self.audit.write(
             actor_user_id=actor_user_id,
             action="user_blocked",
@@ -157,6 +187,24 @@ class UserService:
         )
         user = await self.get_user(target_user_id)
         return BlockUserResult(user=user, revoked_key_ids=tuple(revoked_key_ids), errors=tuple(errors))
+
+    async def unblock_user(self, actor_user_id: int, target_user_id: int) -> User:
+        await self.require_superadmin(actor_user_id)
+        if target_user_id in self.settings.admin_ids:
+            raise InvalidOperation("Нельзя изменить роль superadmin из ADMIN_IDS")
+        target = await self.get_user(target_user_id)
+        if target.role == UserRole.SUPERADMIN:
+            raise InvalidOperation("Нельзя изменить роль superadmin")
+        await self.users.set_role(target_user_id, UserRole.APPROVED_USER, self.clock.now(), blocked_at=None)
+        await self.clear_user_state(target_user_id)
+        await self.audit.write(
+            actor_user_id=actor_user_id,
+            action="user_unblocked",
+            entity_type=AuditEntityType.USER,
+            entity_id=target_user_id,
+            details={"role": UserRole.APPROVED_USER.value},
+        )
+        return await self.get_user(target_user_id)
 
     async def list_users(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[User]:
         await self.require_superadmin(actor_user_id)
