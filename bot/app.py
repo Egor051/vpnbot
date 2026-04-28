@@ -92,6 +92,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
     xray_adapter = XrayConfigAdapter(
         config_path=settings.xray_config_path,
         service_name=settings.xray_service_name,
+        apply_mode=settings.xray_apply_mode,
         inbound_tag=settings.xray_inbound_tag,
         allow_restart_on_rollback=settings.xray_allow_restart_on_rollback,
         backup=backup,

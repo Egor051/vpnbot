@@ -21,9 +21,3 @@ class SystemCtlAdapter:
 
     async def xray_test_config(self, config_path: Path) -> ShellResult:
         return await self.shell.run(["xray", "run", "-test", "-config", str(config_path)], timeout=20)
-
-    async def reload_or_restart(self, service_name: str) -> ShellResult:
-        result = await self.reload(service_name)
-        if result.ok:
-            return result
-        return await self.restart(service_name)

@@ -63,6 +63,14 @@ def _bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _choice(name: str, default: str, allowed: set[str]) -> str:
+    value = _optional(name, default).lower()
+    if value not in allowed:
+        allowed_values = ", ".join(sorted(allowed))
+        raise SettingsError(f"Переменная {name} должна быть одним из значений: {allowed_values}")
+    return value
+
+
 def _admin_ids(raw: str) -> frozenset[int]:
     values: set[int] = set()
     for item in raw.split(","):
@@ -110,6 +118,7 @@ class Settings:
 
     xray_config_path: Path
     xray_service_name: str
+    xray_apply_mode: str
     xray_inbound_tag: str
     xray_public_host: str
     xray_public_port: int
@@ -186,6 +195,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         bot_drop_pending_updates=_bool("BOT_DROP_PENDING_UPDATES", False),
         xray_config_path=Path(_optional("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")),
         xray_service_name=_optional("XRAY_SERVICE_NAME", "xray"),
+        xray_apply_mode=_choice("XRAY_APPLY_MODE", "reload", {"reload", "restart"}),
         xray_inbound_tag=_optional("XRAY_INBOUND_TAG"),
         xray_public_host=_optional("XRAY_PUBLIC_HOST") or _optional("XRAY_SERVER_ADDRESS"),
         xray_public_port=(

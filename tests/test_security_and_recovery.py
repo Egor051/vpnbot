@@ -35,6 +35,7 @@ def _settings(**overrides: object) -> Settings:
         bot_drop_pending_updates=False,
         xray_config_path=Path("/tmp/xray.json"),
         xray_service_name="xray",
+        xray_apply_mode="reload",
         xray_inbound_tag="",
         xray_public_host="2001:db8::1",
         xray_public_port=443,
@@ -110,12 +111,25 @@ def test_settings_drop_pending_updates_defaults_false_and_can_be_enabled(
     monkeypatch.setenv("ADMIN_IDS", "1")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
     monkeypatch.delenv("BOT_DROP_PENDING_UPDATES", raising=False)
+    monkeypatch.delenv("XRAY_APPLY_MODE", raising=False)
 
-    assert load_settings().bot_drop_pending_updates is False
+    settings = load_settings()
+    assert settings.bot_drop_pending_updates is False
+    assert settings.xray_apply_mode == "reload"
 
     monkeypatch.setenv("BOT_DROP_PENDING_UPDATES", "true")
 
     assert load_settings().bot_drop_pending_updates is True
+
+
+def test_settings_reject_invalid_xray_apply_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("ADMIN_IDS", "1")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
+    monkeypatch.setenv("XRAY_APPLY_MODE", "bad")
+
+    with pytest.raises(SettingsError, match="XRAY_APPLY_MODE"):
+        load_settings()
 
 
 def test_readme_uses_env_example_as_canonical_source() -> None:
@@ -126,6 +140,7 @@ def test_readme_uses_env_example_as_canonical_source() -> None:
     assert "AWG_DNS" in readme
     assert "legacy alias" in readme
     assert "AWG_CLIENT_DNS=" not in readme
+    assert "XRAY_APPLY_MODE=restart" in readme
 
 
 def test_audit_sanitizer_masks_nested_secrets() -> None:

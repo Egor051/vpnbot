@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -17,12 +18,16 @@ from adapters.file_lock import ConfigFileLock
 from adapters.systemctl import SystemCtlAdapter
 
 
+logger = logging.getLogger(__name__)
+
+
 class XrayConfigAdapter:
     def __init__(
         self,
         *,
         config_path: Path,
         service_name: str,
+        apply_mode: str,
         inbound_tag: str,
         allow_restart_on_rollback: bool,
         backup: BackupAdapter,
@@ -30,10 +35,15 @@ class XrayConfigAdapter:
     ) -> None:
         self.config_path = config_path
         self.service_name = service_name
+        if apply_mode not in {"reload", "restart"}:
+            raise XrayConfigError("Xray apply mode должен быть reload или restart")
+        self.apply_mode = apply_mode
         self.inbound_tag = inbound_tag
         self.allow_restart_on_rollback = allow_restart_on_rollback
         self.backup = backup
         self.systemctl = systemctl
+        if self.apply_mode == "restart":
+            logger.warning("XRAY_APPLY_MODE=restart: Xray config changes will restart service %s", self.service_name)
 
     async def add_client(
         self,
@@ -68,7 +78,7 @@ class XrayConfigAdapter:
                 await self._test_config(temp_path)
                 self._assert_config_unchanged(snapshot)
                 self._replace_main_config(temp_path, self.config_path)
-                await self._reload_or_restore(backup_path)
+                await self._apply_or_restore(backup_path)
             except Exception:
                 self._cleanup_temp(temp_path)
                 raise
@@ -114,7 +124,7 @@ class XrayConfigAdapter:
                 await self._test_config(temp_path)
                 self._assert_config_unchanged(snapshot)
                 self._replace_main_config(temp_path, self.config_path)
-                await self._reload_or_restore(backup_path)
+                await self._apply_or_restore(backup_path)
             except Exception:
                 self._cleanup_temp(temp_path)
                 raise
@@ -264,6 +274,12 @@ class XrayConfigAdapter:
         os.replace(temp_path, self.config_path)
         self._fsync_parent(self.config_path)
 
+    async def _apply_or_restore(self, backup_path: Path) -> None:
+        if self.apply_mode == "restart":
+            await self._restart_or_restore(backup_path)
+            return
+        await self._reload_or_restore(backup_path)
+
     async def _reload_or_restore(self, backup_path: Path) -> None:
         result = await self.systemctl.reload(self.service_name)
         if result.ok:
@@ -279,6 +295,25 @@ class XrayConfigAdapter:
             if not restart.ok:
                 raise XrayApplyError("Xray reload failed, backup restored, но restart также не удался")
         raise XrayApplyError("Не удалось применить Xray config через reload; backup восстановлен")
+
+    async def _restart_or_restore(self, backup_path: Path) -> None:
+        logger.info("Applying Xray config via systemctl restart %s", self.service_name)
+        if await self._restart_service():
+            return
+        self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
+        restored_test = await self.systemctl.xray_test_config(self.config_path)
+        if not restored_test.ok:
+            raise XrayApplyError("Xray restart failed, backup restored, но восстановленный config не прошёл проверку")
+        if not await self._restart_service():
+            raise XrayApplyError("Xray restart failed, backup restored, но restart восстановленного config также не удался")
+        raise XrayApplyError("Не удалось применить Xray config через restart; backup восстановлен и Xray перезапущен")
+
+    async def _restart_service(self) -> bool:
+        result = await self.systemctl.restart(self.service_name)
+        if not result.ok:
+            return False
+        active = await self.systemctl.is_active(self.service_name)
+        return active.ok and active.stdout.strip() == "active"
 
     def _cleanup_temp(self, temp_path: Path | None) -> None:
         if temp_path is not None and temp_path.exists():

@@ -41,6 +41,23 @@ from services.xray import XrayService
 VALID_AWG_PRIVATE_KEY = base64.b64encode(bytes(range(32))).decode("ascii")
 
 
+def _write_minimal_xray_config(config_path: Path) -> None:
+    config_path.write_text(
+        json.dumps(
+            {
+                "inbounds": [
+                    {
+                        "protocol": "vless",
+                        "settings": {"clients": []},
+                        "streamSettings": {"security": "reality", "realitySettings": {"shortIds": []}},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         bot_token="token",
@@ -51,6 +68,7 @@ def _settings(tmp_path: Path) -> Settings:
         bot_drop_pending_updates=False,
         xray_config_path=tmp_path / "xray.json",
         xray_service_name="xray",
+        xray_apply_mode="reload",
         xray_inbound_tag="",
         xray_public_host="vpn.example.com",
         xray_public_port=443,
@@ -505,9 +523,6 @@ def test_xray_mutation_preserves_main_config_mode_while_backup_is_private(tmp_pa
         async def reload(self, service_name: str) -> ShellResult:
             return ShellResult(("systemctl",), 0, "", "")
 
-        async def reload_or_restart(self, service_name: str) -> ShellResult:
-            return await self.reload(service_name)
-
         async def is_active(self, service_name: str) -> ShellResult:
             return ShellResult(("systemctl",), 0, "active", "")
 
@@ -531,6 +546,7 @@ def test_xray_mutation_preserves_main_config_mode_while_backup_is_private(tmp_pa
         adapter = XrayConfigAdapter(
             config_path=config_path,
             service_name="xray",
+            apply_mode="reload",
             inbound_tag="",
             allow_restart_on_rollback=False,
             backup=BackupAdapter(ClockProvider()),
@@ -540,6 +556,58 @@ def test_xray_mutation_preserves_main_config_mode_while_backup_is_private(tmp_pa
         backup = next(tmp_path.glob("config.json.*.bak"))
         assert stat.S_IMODE(config_path.stat().st_mode) == 0o644
         assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+    asyncio.run(run())
+
+
+def test_xray_reload_mode_uses_reload_without_restart(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            self.calls.append("test:candidate" if path != config_path else "test:config")
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray", "run", "-test", "-config", str(path)), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            self.calls.append("reload")
+            return ShellResult(("systemctl", "reload", service_name), 0, "", "")
+
+        async def restart(self, service_name: str) -> ShellResult:
+            self.calls.append("restart")
+            return ShellResult(("systemctl", "restart", service_name), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            self.calls.append("is-active")
+            return ShellResult(("systemctl", "is-active", service_name), 0, "active", "")
+
+    async def run() -> None:
+        _write_minimal_xray_config(config_path)
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="reload",
+            inbound_tag="",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+        )
+
+        await adapter.add_client(
+            uuid_value="00000000-0000-4000-8000-000000000000",
+            email_label="user",
+            short_id="abcd",
+            flow="",
+            manage_short_id=True,
+        )
+
+        updated = json.loads(config_path.read_text(encoding="utf-8"))
+        assert updated["inbounds"][0]["settings"]["clients"][0]["email"] == "user"
+        assert systemctl.calls == ["test:config", "test:candidate", "reload", "is-active"]
 
     asyncio.run(run())
 
@@ -583,6 +651,7 @@ def test_xray_reload_failure_restores_backup_without_restart_when_disabled(tmp_p
         adapter = XrayConfigAdapter(
             config_path=config_path,
             service_name="xray",
+            apply_mode="reload",
             inbound_tag="",
             allow_restart_on_rollback=False,
             backup=BackupAdapter(ClockProvider()),
@@ -651,6 +720,7 @@ def test_xray_reload_failure_restarts_restored_config_when_enabled(tmp_path: Pat
         adapter = XrayConfigAdapter(
             config_path=config_path,
             service_name="xray",
+            apply_mode="reload",
             inbound_tag="",
             allow_restart_on_rollback=True,
             backup=BackupAdapter(ClockProvider()),
@@ -719,6 +789,7 @@ def test_xray_reload_failure_with_invalid_restored_config_never_restarts(tmp_pat
         adapter = XrayConfigAdapter(
             config_path=config_path,
             service_name="xray",
+            apply_mode="reload",
             inbound_tag="",
             allow_restart_on_rollback=True,
             backup=BackupAdapter(ClockProvider()),
@@ -737,6 +808,171 @@ def test_xray_reload_failure_with_invalid_restored_config_never_restarts(tmp_pat
         restored = json.loads(config_path.read_text(encoding="utf-8"))
         assert restored["inbounds"][0]["settings"]["clients"] == []
         assert systemctl.restart_calls == 0
+
+    asyncio.run(run())
+
+
+def test_xray_restart_mode_applies_with_restart_without_reload(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            self.calls.append("test:candidate" if path != config_path else "test:config")
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray", "run", "-test", "-config", str(path)), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            self.calls.append("reload")
+            return ShellResult(("systemctl", "reload", service_name), 0, "", "")
+
+        async def restart(self, service_name: str) -> ShellResult:
+            self.calls.append("restart")
+            return ShellResult(("systemctl", "restart", service_name), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            self.calls.append("is-active")
+            return ShellResult(("systemctl", "is-active", service_name), 0, "active", "")
+
+    async def run() -> None:
+        _write_minimal_xray_config(config_path)
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="restart",
+            inbound_tag="",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+        )
+
+        await adapter.add_client(
+            uuid_value="00000000-0000-4000-8000-000000000000",
+            email_label="user",
+            short_id="abcd",
+            flow="",
+            manage_short_id=True,
+        )
+
+        updated = json.loads(config_path.read_text(encoding="utf-8"))
+        assert updated["inbounds"][0]["settings"]["clients"][0]["email"] == "user"
+        assert systemctl.calls == ["test:config", "test:candidate", "restart", "is-active"]
+
+    asyncio.run(run())
+
+
+def test_xray_restart_mode_restores_and_restarts_backup_on_restart_failure(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.restart_results = [
+                ShellResult(("systemctl", "restart", "xray"), 1, "", "restart failed"),
+                ShellResult(("systemctl", "restart", "xray"), 0, "", ""),
+            ]
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            self.calls.append("test:candidate" if path != config_path else "test:config")
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray", "run", "-test", "-config", str(path)), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            self.calls.append("reload")
+            return ShellResult(("systemctl", "reload", service_name), 0, "", "")
+
+        async def restart(self, service_name: str) -> ShellResult:
+            self.calls.append("restart")
+            return self.restart_results.pop(0)
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            self.calls.append("is-active")
+            return ShellResult(("systemctl", "is-active", service_name), 0, "active", "")
+
+    async def run() -> None:
+        _write_minimal_xray_config(config_path)
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="restart",
+            inbound_tag="",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(XrayApplyError, match="backup восстановлен"):
+            await adapter.add_client(
+                uuid_value="00000000-0000-4000-8000-000000000000",
+                email_label="user",
+                short_id="abcd",
+                flow="",
+                manage_short_id=True,
+            )
+
+        restored = json.loads(config_path.read_text(encoding="utf-8"))
+        assert restored["inbounds"][0]["settings"]["clients"] == []
+        assert systemctl.calls == ["test:config", "test:candidate", "restart", "test:config", "restart", "is-active"]
+
+    asyncio.run(run())
+
+
+def test_xray_restart_mode_invalid_restored_config_never_restarts_backup(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.config_test_calls = 0
+            self.restart_calls = 0
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            if path == config_path:
+                self.config_test_calls += 1
+                if self.config_test_calls >= 2:
+                    return ShellResult(("xray", "run", "-test", "-config", str(path)), 1, "", "restored config invalid")
+            else:
+                json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray", "run", "-test", "-config", str(path)), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "reload", service_name), 0, "", "")
+
+        async def restart(self, service_name: str) -> ShellResult:
+            self.restart_calls += 1
+            return ShellResult(("systemctl", "restart", service_name), 1, "", "restart failed")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "is-active", service_name), 0, "active", "")
+
+    async def run() -> None:
+        _write_minimal_xray_config(config_path)
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="restart",
+            inbound_tag="",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(XrayApplyError, match="восстановленный config не прошёл проверку"):
+            await adapter.add_client(
+                uuid_value="00000000-0000-4000-8000-000000000000",
+                email_label="user",
+                short_id="abcd",
+                flow="",
+                manage_short_id=True,
+            )
+
+        restored = json.loads(config_path.read_text(encoding="utf-8"))
+        assert restored["inbounds"][0]["settings"]["clients"] == []
+        assert systemctl.restart_calls == 1
 
     asyncio.run(run())
 
