@@ -51,7 +51,7 @@ async def list_keys(callback: CallbackQuery, services: Any) -> None:
             page=page,
             page_size=KEYS_PAGE_SIZE,
         )
-        text = keys_page_text(keys, current_page)
+        text = keys_page_text(keys, current_page, viewer_user_id=callback.from_user.id)
         await safe_edit_message_text(
             callback.message,
             text,
@@ -75,7 +75,7 @@ async def list_keys_message(message: Message, services: Any) -> None:
             page_size=KEYS_PAGE_SIZE,
         )
         await message.answer(
-            keys_page_text(keys, current_page),
+            keys_page_text(keys, current_page, viewer_user_id=message.from_user.id),
             reply_markup=keys_list_keyboard(keys, page=current_page, has_next=has_next, total_pages=total_pages),
         )
     except Exception as exc:
@@ -189,7 +189,7 @@ async def open_key(callback: CallbackQuery, services: Any) -> None:
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await safe_edit_message_text(
             callback.message,
-            key_detail_text(key),
+            key_detail_text(key, viewer_user_id=callback.from_user.id),
             reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
         )
     except Exception as exc:
@@ -254,7 +254,7 @@ async def show_key_stats(callback: CallbackQuery, services: Any) -> None:
         )
         await safe_edit_message_text(
             callback.message,
-            traffic_stats_text(view),
+            traffic_stats_text(view, viewer_user_id=callback.from_user.id),
             reply_markup=key_actions_keyboard(view.key, owner_user_id=_admin_owner_context(view.key, callback.from_user.id)),
         )
     except Exception as exc:
@@ -343,7 +343,10 @@ async def confirm_key_action(callback: CallbackQuery, services: Any, rate_limite
                 )
                 await safe_edit_message_text(
                     callback.message,
-                    f"Ключ полностью удалён.\n\n{keys_page_text(keys, current_page, owner_user_id=owner_context)}",
+                    (
+                        "Ключ полностью удалён.\n\n"
+                        f"{keys_page_text(keys, current_page, viewer_user_id=callback.from_user.id, owner_user_id=owner_context)}"
+                    ),
                     reply_markup=keys_list_keyboard(
                         keys,
                         page=current_page,

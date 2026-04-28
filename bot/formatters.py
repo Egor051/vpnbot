@@ -59,11 +59,19 @@ def key_title(key: VpnKey) -> str:
     return f"{prefix} #{key.id}"
 
 
-def key_display_label(key: VpnKey) -> str:
+def key_note_for_viewer(key: VpnKey, viewer_user_id: int) -> str | None:
+    if not key.note:
+        return None
+    note_owner_id = getattr(key, "note_owner_id", None) or key.owner_user_id
+    return key.note if int(note_owner_id) == int(viewer_user_id) else None
+
+
+def key_display_label(key: VpnKey, viewer_user_id: int | None = None) -> str:
     if key.email_label:
         return key.email_label
-    if key.note:
-        return key.note
+    note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
+    if note:
+        return note
     if key.public_key:
         return key.public_key[:12] + "..."
     return key_title(key)
@@ -74,20 +82,23 @@ def main_menu_text(user: TgUser) -> str:
     return f"Доброго времени суток, {h(name)}\n\n{SERVER_RESTART_WARNING}\n\nВыберите действие."
 
 
-def key_list_card(key: VpnKey) -> str:
+def key_list_card(key: VpnKey, *, viewer_user_id: int) -> str:
+    note = key_note_for_viewer(key, viewer_user_id)
+    label = key_display_label(key, viewer_user_id=viewer_user_id)
     parts = [
         f"<b>{key_title(key)}</b>",
         f"Статус: {h(status_text(key.status))}",
-        f"Метка: {code(key_display_label(key))}",
+        f"Метка: {code(label)}",
         f"Создан: {h(format_msk_datetime(key.created_at))}",
-        f"Заметка: {h(short_note(key.note))}",
     ]
+    if not note or label != note:
+        parts.append(f"Заметка: {h(short_note(note))}")
     if key.client_ip:
         parts.append(f"IP: {code(key.client_ip)}")
     return "\n".join(parts)
 
 
-def keys_page_text(keys: list[VpnKey], page: int, owner_user_id: int | None = None) -> str:
+def keys_page_text(keys: list[VpnKey], page: int, *, viewer_user_id: int, owner_user_id: int | None = None) -> str:
     title = "<b>Ключи пользователя</b>" if owner_user_id else "<b>Мои ключи</b>"
     if not keys:
         return f"{title}\n\n{ONE_KEY_ONE_DEVICE_WARNING}\n\nНа этой странице ключей нет."
@@ -95,21 +106,24 @@ def keys_page_text(keys: list[VpnKey], page: int, owner_user_id: int | None = No
     awg = [key for key in keys if key.key_type == VpnKeyType.AWG]
     sections = [f"{title} · страница {page + 1}", ONE_KEY_ONE_DEVICE_WARNING]
     if xray:
-        sections.append("<b>Xray</b>\n" + "\n\n".join(key_list_card(key) for key in xray))
+        sections.append("<b>Xray</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in xray))
     if awg:
-        sections.append("<b>AWG</b>\n" + "\n\n".join(key_list_card(key) for key in awg))
+        sections.append("<b>AWG</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in awg))
     return "\n\n".join(sections)
 
 
-def key_detail_text(key: VpnKey) -> str:
+def key_detail_text(key: VpnKey, *, viewer_user_id: int) -> str:
+    note = key_note_for_viewer(key, viewer_user_id)
+    label = key_display_label(key, viewer_user_id=viewer_user_id)
     lines = [
         f"<b>{key_title(key)}</b>",
         f"Статус: {h(status_text(key.status))}",
-        f"Метка: {code(key_display_label(key))}",
+        f"Метка: {code(label)}",
         f"Создан: {h(format_msk_datetime(key.created_at))}",
         f"Обновлён: {h(format_msk_datetime(key.updated_at))}",
-        f"Заметка: {h(key.note or 'нет')}",
     ]
+    if not note or label != note:
+        lines.append(f"Заметка: {h(note or 'нет')}")
     if key.client_ip:
         lines.append(f"IP: {code(key.client_ip)}")
     if key.public_key:
@@ -117,7 +131,7 @@ def key_detail_text(key: VpnKey) -> str:
     return "\n".join(lines)
 
 
-def traffic_stats_text(view: KeyTrafficStatsView) -> str:
+def traffic_stats_text(view: KeyTrafficStatsView, *, viewer_user_id: int) -> str:
     key = view.key
     owner = view.owner
     owner_text = (
@@ -125,12 +139,16 @@ def traffic_stats_text(view: KeyTrafficStatsView) -> str:
         if owner is not None
         else format_user_display(key.owner_user_id, key.username)
     )
+    label = key_display_label(key, viewer_user_id=viewer_user_id)
     lines = [
         f"<b>Статистика {h(key_title(key))}</b>",
         f"Тип: {h(key.key_type.value.upper())}",
-        f"Метка: {code(key_display_label(key))}",
+        f"Метка: {code(label)}",
         f"Владелец: {h(owner_text)}",
     ]
+    note = key_note_for_viewer(key, viewer_user_id)
+    if note and label != note:
+        lines.append(f"Заметка: {h(note)}")
     stats = view.stats
     if stats is None or not stats.available:
         lines.append("")
@@ -154,7 +172,7 @@ def traffic_stats_text(view: KeyTrafficStatsView) -> str:
     return "\n".join(lines)
 
 
-def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int) -> str:
+def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer_user_id: int) -> str:
     if not views:
         return "<b>Статистика ключей</b>\n\nНа этой странице ключей нет."
     lines = [f"<b>Статистика ключей</b> · страница {page + 1}"]
@@ -178,10 +196,15 @@ def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int) -> str:
             updated = f" · обновлено {format_msk_datetime(stats.last_success_at)}"
         elif stats and stats.last_attempt_at:
             updated = f" · попытка {format_msk_datetime(stats.last_attempt_at)}"
-        lines.append(
-            f"{h(view.key.key_type.value.upper())} · {code(key_display_label(view.key))} · "
+        label = key_display_label(view.key, viewer_user_id=viewer_user_id)
+        line = (
+            f"{h(view.key.key_type.value.upper())} · {code(label)} · "
             f"{h(owner_text)} · {h(traffic + updated)}"
         )
+        note = key_note_for_viewer(view.key, viewer_user_id)
+        if note and label != note:
+            line += f" · Заметка: {h(short_note(note))}"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -251,7 +274,13 @@ def access_requests_page_text(requests: list[AccessRequest], page: int) -> str:
     return f"<b>Заявки на доступ</b> · страница {page + 1}\n\n" + "\n\n".join(access_request_text(req) for req in requests)
 
 
-def user_card_text(user: User, keys: list[VpnKey] | None = None, stats_by_key_id: dict[int, TrafficStats] | None = None) -> str:
+def user_card_text(
+    user: User,
+    keys: list[VpnKey] | None = None,
+    stats_by_key_id: dict[int, TrafficStats] | None = None,
+    *,
+    viewer_user_id: int | None = None,
+) -> str:
     username = f"@{user.username}" if user.username else "не указан"
     lines = [
         "<b>Пользователь</b>",
@@ -274,7 +303,7 @@ def user_card_text(user: User, keys: list[VpnKey] | None = None, stats_by_key_id
                     traffic = f" · ↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
                 elif stats:
                     traffic = " · статистика пока недоступна"
-                lines.append(f"{h(key.key_type.value.upper())} · {code(key_display_label(key))}{traffic}")
+                lines.append(f"{h(key.key_type.value.upper())} · {code(key_display_label(key, viewer_user_id=viewer_user_id))}{traffic}")
     return "\n".join(lines)
 
 

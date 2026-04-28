@@ -300,7 +300,7 @@ async def admin_user_detail(callback: CallbackQuery, services: Any) -> None:
         stats_by_key_id = await services.traffic_stats.cached_for_keys(keys)
         await safe_edit_message_text(
             callback.message,
-            user_card_text(user, keys, stats_by_key_id),
+            user_card_text(user, keys, stats_by_key_id, viewer_user_id=callback.from_user.id),
             reply_markup=user_actions_keyboard(user),
         )
     except Exception as exc:
@@ -409,7 +409,7 @@ async def admin_user_keys(callback: CallbackQuery, services: Any) -> None:
         has_next = current_page + 1 < total_pages
         await safe_edit_message_text(
             callback.message,
-            keys_page_text(keys, current_page, owner_user_id=user_id),
+            keys_page_text(keys, current_page, viewer_user_id=callback.from_user.id, owner_user_id=user_id),
             reply_markup=keys_list_keyboard(
                 keys,
                 page=current_page,
@@ -477,7 +477,7 @@ async def admin_stats(callback: CallbackQuery, services: Any) -> None:
             rows.append(("Дальше", f"admin:stats:{page + 1}"))
         await safe_edit_message_text(
             callback.message,
-            admin_stats_page_text(views, page),
+            admin_stats_page_text(views, page, viewer_user_id=callback.from_user.id),
             reply_markup=_simple_nav(rows, "admin:panel"),
         )
     except Exception as exc:

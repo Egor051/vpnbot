@@ -7,7 +7,7 @@ from urllib.parse import quote, urlencode
 from adapters.clock import ClockProvider
 from adapters.id_generator import IdGenerator
 from adapters.xray_config import XrayConfigAdapter
-from bot.formatters import status_text
+from bot.formatters import key_note_for_viewer, status_text
 from config.settings import Settings
 from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
@@ -127,7 +127,7 @@ class XrayService:
                 details={"owner_user_id": owner.telegram_user_id, "owner_username": owner.username, "label": email_label},
             )
             active_key = await self._get_key(key.id)
-            return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key))
+            return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key, viewer_user_id=actor_user_id))
 
     async def revoke_key(self, actor_user_id: int, key_id: int) -> VpnKey:
         return await self.revoke_xray_key(actor_user_id, key_id)
@@ -234,7 +234,7 @@ class XrayService:
             entity_id=key_id,
             details={},
         )
-        return self._format_config(key)
+        return self._format_config(key, viewer_user_id=actor_user_id)
 
     async def list_user_keys(
         self,
@@ -461,12 +461,13 @@ class XrayService:
             return f"[{host}]"
         return host
 
-    def _format_config(self, key: VpnKey) -> str:
+    def _format_config(self, key: VpnKey, *, viewer_user_id: int | None = None) -> str:
         uuid_value = str(key.payload.get("uuid") or key.uuid or "")
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "")
         email_label = str(key.payload.get("email_label") or key.email_label or "")
         link = self._build_vless_link(uuid_value, short_id, email_label)
-        note = f"\nЗаметка: {h(key.note)}" if key.note else ""
+        visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
+        note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
         label = f"\nМетка: {h(email_label)}" if email_label else ""
         return (
             f"<b>Xray-ключ #{key.id}</b>\n"
