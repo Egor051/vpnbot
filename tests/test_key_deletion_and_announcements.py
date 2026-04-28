@@ -10,8 +10,11 @@ from aiogram.enums import ChatType
 
 from adapters.clock import ClockProvider
 from adapters.ip_allocator import IpAllocator
-from bot.handlers.admin import admin_announcement_message, admin_announcement_start
+from bot.fsm.states import AdminCreateKeyStates, CreateKeyStates
+from bot.handlers.admin import admin_announcement_message, admin_announcement_start, admin_issue_confirm
+from bot.handlers.keys import create_key_confirm
 from bot.keyboards.keys import keys_list_keyboard
+from bot.rate_limit import RateLimitExceeded
 from config.settings import Settings
 from db.database import Database
 from models.dto import TelegramUserProfile, User, VpnKey
@@ -20,7 +23,7 @@ from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.announcements import AnnouncementService
 from services.awg import AwgService
-from services.errors import AccessDenied
+from services.errors import AccessDenied, NotFound
 from services.xray import XrayService
 
 
@@ -640,6 +643,209 @@ def test_regular_user_cannot_start_announcement(monkeypatch: pytest.MonkeyPatch)
 
         assert callback.edits == []
         assert callback.answers[-1] == ("Недостаточно прав", True)
+
+    asyncio.run(run())
+
+
+def test_create_key_confirm_keeps_fsm_data_when_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def allow_private_callback(callback: object) -> bool:
+        return True
+
+    edits: list[tuple[str, object]] = []
+
+    async def fake_edit(message: object, text: str, reply_markup: object = None, **kwargs: object) -> None:
+        edits.append((text, reply_markup))
+
+    monkeypatch.setattr("bot.handlers.keys.ensure_private_callback", allow_private_callback)
+    monkeypatch.setattr("bot.handlers.keys.safe_edit_message_text", fake_edit)
+
+    class State:
+        def __init__(self) -> None:
+            self.current_state = CreateKeyStates.confirming
+            self.data = {"key_type": VpnKeyType.XRAY.value, "note": "work laptop"}
+
+        async def get_data(self) -> dict[str, object]:
+            return dict(self.data)
+
+        async def clear(self) -> None:
+            self.current_state = None
+            self.data.clear()
+
+    class Callback:
+        def __init__(self) -> None:
+            self.from_user = SimpleNamespace(id=100, username="user", first_name="User")
+            self.message = SimpleNamespace()
+            self.data = "create:confirm"
+            self.answers: list[tuple[str, bool | None]] = []
+
+        async def answer(self, text: str | None = None, show_alert: bool | None = None, **kwargs: object) -> None:
+            self.answers.append((text or "", show_alert))
+
+    class RateLimiter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def check(self, user_id: int, action: str, cooldown_seconds: float) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RateLimitExceeded(7)
+
+    class Xray:
+        def __init__(self) -> None:
+            self.created_notes: list[str | None] = []
+
+        async def create_xray_key(self, user_id: int, profile: TelegramUserProfile, note: str | None) -> SimpleNamespace:
+            self.created_notes.append(note)
+            return SimpleNamespace(key=_key(VpnKeyType.XRAY), config_text="xray config")
+
+    async def run() -> None:
+        state = State()
+        callback = Callback()
+        rate_limiter = RateLimiter()
+        xray = Xray()
+        services = SimpleNamespace(xray=xray, awg=SimpleNamespace())
+
+        await create_key_confirm(callback, state, services, rate_limiter)  # type: ignore[arg-type]
+
+        assert state.current_state == CreateKeyStates.confirming
+        assert state.data == {"key_type": VpnKeyType.XRAY.value, "note": "work laptop"}
+        assert callback.answers == [("Слишком часто. Повторите через 7 сек.", True)]
+        assert xray.created_notes == []
+        assert edits == []
+
+        await create_key_confirm(callback, state, services, rate_limiter)  # type: ignore[arg-type]
+
+        assert state.current_state is None
+        assert state.data == {}
+        assert callback.answers[-1] == ("Создаю ключ...", None)
+        assert xray.created_notes == ["work laptop"]
+        assert edits and edits[-1][0] == "xray config"
+
+    asyncio.run(run())
+
+
+def test_admin_issue_confirm_validates_owner_before_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def allow_private_callback(callback: object, text: str = "") -> bool:
+        return True
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", allow_private_callback)
+
+    class State:
+        def __init__(self) -> None:
+            self.current_state = AdminCreateKeyStates.confirming
+            self.data = {"owner_user_id": 404, "key_type": VpnKeyType.XRAY.value, "note": "admin note"}
+
+        async def get_data(self) -> dict[str, object]:
+            return dict(self.data)
+
+        async def clear(self) -> None:
+            self.current_state = None
+            self.data.clear()
+
+    class Callback:
+        def __init__(self) -> None:
+            self.from_user = SimpleNamespace(id=1, username="admin", first_name="Admin")
+            self.message = SimpleNamespace()
+            self.data = "admin:cconfirm"
+            self.answers: list[tuple[str, bool | None]] = []
+
+        async def answer(self, text: str | None = None, show_alert: bool | None = None, **kwargs: object) -> None:
+            self.answers.append((text or "", show_alert))
+
+    class Users:
+        async def get_user(self, telegram_user_id: int) -> User:
+            raise NotFound("Пользователь не найден")
+
+    class RateLimiter:
+        def check(self, user_id: int, action: str, cooldown_seconds: float) -> None:
+            raise AssertionError("rate limiter should not run before owner validation")
+
+    async def run() -> None:
+        state = State()
+        callback = Callback()
+        services = SimpleNamespace(users=Users(), xray=SimpleNamespace(), awg=SimpleNamespace())
+
+        await admin_issue_confirm(callback, state, services, RateLimiter())  # type: ignore[arg-type]
+
+        assert state.current_state == AdminCreateKeyStates.confirming
+        assert state.data == {"owner_user_id": 404, "key_type": VpnKeyType.XRAY.value, "note": "admin note"}
+        assert callback.answers == [("Пользователь не найден", True)]
+
+    asyncio.run(run())
+
+
+def test_admin_issue_confirm_keeps_fsm_data_when_rate_limited_after_owner_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def allow_private_callback(callback: object, text: str = "") -> bool:
+        return True
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", allow_private_callback)
+
+    class State:
+        def __init__(self) -> None:
+            self.current_state = AdminCreateKeyStates.confirming
+            self.data = {"owner_user_id": 200, "key_type": VpnKeyType.XRAY.value, "note": "admin note"}
+
+        async def get_data(self) -> dict[str, object]:
+            return dict(self.data)
+
+        async def clear(self) -> None:
+            self.current_state = None
+            self.data.clear()
+
+    class Callback:
+        def __init__(self) -> None:
+            self.from_user = SimpleNamespace(id=1, username="admin", first_name="Admin")
+            self.message = SimpleNamespace()
+            self.data = "admin:cconfirm"
+            self.answers: list[tuple[str, bool | None]] = []
+
+        async def answer(self, text: str | None = None, show_alert: bool | None = None, **kwargs: object) -> None:
+            self.answers.append((text or "", show_alert))
+
+    class Users:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_user(self, telegram_user_id: int) -> User:
+            self.calls += 1
+            return User(
+                telegram_user_id=telegram_user_id,
+                username="target",
+                first_name="Target",
+                role=UserRole.APPROVED_USER,
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                blocked_at=None,
+            )
+
+    class RateLimiter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def check(self, user_id: int, action: str, cooldown_seconds: float) -> None:
+            self.calls += 1
+            raise RateLimitExceeded(9)
+
+    class Xray:
+        async def create_xray_key(self, user_id: int, profile: TelegramUserProfile, note: str | None) -> SimpleNamespace:
+            raise AssertionError("key should not be created while rate limited")
+
+    async def run() -> None:
+        state = State()
+        callback = Callback()
+        users = Users()
+        rate_limiter = RateLimiter()
+        services = SimpleNamespace(users=users, xray=Xray(), awg=SimpleNamespace())
+
+        await admin_issue_confirm(callback, state, services, rate_limiter)  # type: ignore[arg-type]
+
+        assert users.calls == 1
+        assert rate_limiter.calls == 1
+        assert state.current_state == AdminCreateKeyStates.confirming
+        assert state.data == {"owner_user_id": 200, "key_type": VpnKeyType.XRAY.value, "note": "admin note"}
+        assert callback.answers == [("Слишком часто. Повторите через 9 сек.", True)]
 
     asyncio.run(run())
 
