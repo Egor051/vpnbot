@@ -185,6 +185,9 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
     dp = Dispatcher(storage=MemoryStorage())
     dp.workflow_data["services"] = services
     dp.workflow_data["rate_limiter"] = RateLimiter()
+    user_service.attach_state_clearer(
+        lambda user_id: dp.fsm.get_context(bot=bot, chat_id=user_id, user_id=user_id).clear()
+    )
 
     blocked_middleware = BlockedUserMiddleware(user_service)
     dp.message.outer_middleware(blocked_middleware)

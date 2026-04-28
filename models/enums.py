@@ -10,6 +10,31 @@ class UserRole(StrEnum):
     BLOCKED_USER = "BLOCKED_USER"
 
 
+def parse_user_role(value: str | UserRole) -> UserRole:
+    if isinstance(value, UserRole):
+        return value
+    try:
+        return UserRole(value)
+    except ValueError:
+        normalized = value.strip().lower()
+        aliases = {
+            "superadmin": UserRole.SUPERADMIN,
+            "super_admin": UserRole.SUPERADMIN,
+            "approved": UserRole.APPROVED_USER,
+            "approved_user": UserRole.APPROVED_USER,
+            "pending": UserRole.PENDING_USER,
+            "pending_user": UserRole.PENDING_USER,
+            "blocked": UserRole.BLOCKED_USER,
+            "blocked_user": UserRole.BLOCKED_USER,
+            "banned": UserRole.BLOCKED_USER,
+            "ban": UserRole.BLOCKED_USER,
+            "revoked": UserRole.BLOCKED_USER,
+        }
+        if normalized in aliases:
+            return aliases[normalized]
+        raise
+
+
 class AccessRequestStatus(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"

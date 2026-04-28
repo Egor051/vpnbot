@@ -340,6 +340,13 @@ def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
         suffix = " изменил роль пользователя"
     elif action == "user_blocked":
         suffix = " заблокировал пользователя"
+    elif action == "user_unblocked":
+        suffix = " разблокировал пользователя"
+    elif action == "access_requested":
+        if details_dict.get("repeat_after_block"):
+            suffix = " отправил повторную заявку на доступ"
+        else:
+            suffix = " отправил заявку на доступ"
     elif action == "access_approved":
         suffix = " одобрил заявку на доступ"
     elif action == "access_rejected":

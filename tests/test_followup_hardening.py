@@ -22,11 +22,13 @@ from adapters.errors import XrayApplyError
 from adapters.xray_config import XrayConfigAdapter
 from bot.app import _startup_reconcile_keys
 from bot.messages import safe_edit_message_text
+from bot.middlewares.access import BLOCKED_CALLBACK_TEXT, BLOCKED_MESSAGE_TEXT, BlockedUserMiddleware
 from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
 from config.settings import Settings
 from db.database import Database
+from models.access import is_blocked_user
 from models.dto import ShellResult, TelegramUserProfile, User, VpnKey
-from models.enums import AccessRequestStatus, AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
+from models.enums import AccessRequestStatus, AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType, parse_user_role
 from repositories.access_requests import AccessRequestRepository
 from repositories.audit_log import AuditLogRepository
 from repositories.users import UserRepository
@@ -471,6 +473,204 @@ def test_approve_rolls_back_request_if_role_update_fails(tmp_path: Path, monkeyp
             await db.close()
 
     asyncio.run(run())
+
+
+def test_blocked_middleware_blocks_message_and_clears_fsm(monkeypatch: pytest.MonkeyPatch) -> None:
+    answers: list[str] = []
+
+    async def fake_message_answer(self: Message, text: str, **kwargs: object) -> None:
+        answers.append(text)
+
+    monkeypatch.setattr(Message, "answer", fake_message_answer)
+
+    class Users:
+        async def get_user(self, telegram_user_id: int) -> User:
+            return User(telegram_user_id, "blocked", "Blocked", UserRole.BLOCKED_USER, "now", "now", "now")
+
+    class State:
+        def __init__(self) -> None:
+            self.cleared = False
+
+        async def clear(self) -> None:
+            self.cleared = True
+
+    async def run() -> None:
+        middleware = BlockedUserMiddleware(Users())  # type: ignore[arg-type]
+        user = TgUser(id=200, is_bot=False, first_name="Blocked", username="blocked")
+        message = Message(
+            message_id=1,
+            date=datetime.now(timezone.utc),
+            chat=Chat(id=200, type=ChatType.PRIVATE),
+            from_user=user,
+            text="/help",
+        )
+        state = State()
+        handler_called = False
+
+        async def handler(event: object, data: dict[str, object]) -> None:
+            nonlocal handler_called
+            handler_called = True
+
+        await middleware(handler, message, {"event_from_user": user, "state": state})
+
+        assert handler_called is False
+        assert state.cleared is True
+        assert answers == [BLOCKED_MESSAGE_TEXT]
+
+    asyncio.run(run())
+
+
+def test_blocked_middleware_allows_start_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    answers: list[str] = []
+
+    async def fake_message_answer(self: Message, text: str, **kwargs: object) -> None:
+        answers.append(text)
+
+    monkeypatch.setattr(Message, "answer", fake_message_answer)
+
+    class Users:
+        async def get_user(self, telegram_user_id: int) -> User:
+            raise AssertionError("start should bypass blocked lookup")
+
+    class State:
+        def __init__(self) -> None:
+            self.cleared = False
+
+        async def clear(self) -> None:
+            self.cleared = True
+
+    async def run() -> None:
+        middleware = BlockedUserMiddleware(Users())  # type: ignore[arg-type]
+        user = TgUser(id=200, is_bot=False, first_name="Blocked", username="blocked")
+        message = Message(
+            message_id=1,
+            date=datetime.now(timezone.utc),
+            chat=Chat(id=200, type=ChatType.PRIVATE),
+            from_user=user,
+            text="/start",
+        )
+        state = State()
+        handler_called = False
+
+        async def handler(event: object, data: dict[str, object]) -> None:
+            nonlocal handler_called
+            handler_called = True
+
+        await middleware(handler, message, {"event_from_user": user, "state": state})
+
+        assert handler_called is True
+        assert state.cleared is False
+        assert answers == []
+
+    asyncio.run(run())
+
+
+def test_blocked_middleware_blocks_callback_before_handlers(monkeypatch: pytest.MonkeyPatch) -> None:
+    answers: list[tuple[str, bool | None]] = []
+
+    async def fake_callback_answer(self: CallbackQuery, text: str, show_alert: bool | None = None, **kwargs: object) -> None:
+        answers.append((text, show_alert))
+
+    monkeypatch.setattr(CallbackQuery, "answer", fake_callback_answer)
+
+    class Users:
+        async def get_user(self, telegram_user_id: int) -> User:
+            return User(telegram_user_id, "blocked", "Blocked", UserRole.BLOCKED_USER, "now", "now", "now")
+
+    class State:
+        def __init__(self) -> None:
+            self.cleared = False
+
+        async def clear(self) -> None:
+            self.cleared = True
+
+    async def run() -> None:
+        middleware = BlockedUserMiddleware(Users())  # type: ignore[arg-type]
+        user = TgUser(id=200, is_bot=False, first_name="Blocked", username="blocked")
+        callback_message = Message(
+            message_id=1,
+            date=datetime.now(timezone.utc),
+            chat=Chat(id=200, type=ChatType.PRIVATE),
+        )
+        callback = CallbackQuery(
+            id="cb",
+            from_user=user,
+            chat_instance="ci",
+            message=callback_message,
+            data="keys:create",
+        )
+        state = State()
+        handler_called = False
+
+        async def handler(event: object, data: dict[str, object]) -> None:
+            nonlocal handler_called
+            handler_called = True
+
+        await middleware(handler, callback, {"event_from_user": user, "state": state})
+
+        assert handler_called is False
+        assert state.cleared is True
+        assert answers == [(BLOCKED_CALLBACK_TEXT, True)]
+
+    asyncio.run(run())
+
+
+def test_blocked_user_start_creates_single_repeat_access_request(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            settings = _settings(tmp_path)
+            users_repo = UserRepository(db)
+            requests_repo = AccessRequestRepository(db)
+            audit = AuditService(AuditLogRepository(db), ClockProvider())
+            users = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=audit)
+            await users.bootstrap_admins()
+            profile = TelegramUserProfile(telegram_user_id=200, username="blocked", first_name="Blocked")
+            await users_repo.upsert_profile(profile, UserRole.BLOCKED_USER, "now")
+            await users_repo.set_role(profile.telegram_user_id, UserRole.BLOCKED_USER, "now", blocked_at="now")
+
+            service = AccessApprovalService(requests=requests_repo, users=users, clock=ClockProvider(), audit=audit)
+
+            first = await service.create_or_get_request(profile)
+            second = await service.create_or_get_request(profile)
+
+            assert first.user.role == UserRole.BLOCKED_USER
+            assert first.request is not None
+            assert first.created is True
+            assert second.request is not None
+            assert second.request.id == first.request.id
+            assert second.created is False
+
+            cursor = await db.conn.execute(
+                "SELECT COUNT(*) AS cnt FROM access_requests WHERE telegram_user_id = ? AND status = ?",
+                (profile.telegram_user_id, AccessRequestStatus.PENDING.value),
+            )
+            row = await cursor.fetchone()
+            assert row["cnt"] == 1
+
+            cursor = await db.conn.execute(
+                "SELECT details_json FROM audit_log WHERE action = 'access_requested'"
+            )
+            audit_row = await cursor.fetchone()
+            assert audit_row is not None
+            assert json.loads(audit_row["details_json"])["repeat_after_block"] is True
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_legacy_blocking_role_aliases_are_treated_as_blocked() -> None:
+    assert parse_user_role("blocked") == UserRole.BLOCKED_USER
+    assert parse_user_role("banned") == UserRole.BLOCKED_USER
+    assert parse_user_role("revoked") == UserRole.BLOCKED_USER
+
+
+def test_superadmin_is_not_blocked_by_stale_blocked_at() -> None:
+    user = User(1, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", "now")
+    assert is_blocked_user(user) is False
 
 
 def test_reject_rolls_back_request_if_role_update_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

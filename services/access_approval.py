@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from adapters.clock import ClockProvider
+from models.access import is_blocked_user
 from models.dto import AccessRequest, AccessRequestResult, TelegramUserProfile
 from models.enums import AccessRequestStatus, AuditEntityType, UserRole
 from repositories.access_requests import AccessRequestRepository
@@ -26,7 +27,7 @@ class AccessApprovalService:
     async def create_or_get_request(self, profile: TelegramUserProfile) -> AccessRequestResult:
         async with self.requests.db.transaction():
             user = await self.users.ensure_user(profile)
-            if user.role in {UserRole.SUPERADMIN, UserRole.APPROVED_USER, UserRole.BLOCKED_USER}:
+            if user.role in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
                 return AccessRequestResult(user=user, request=None, created=False)
 
             pending = await self.requests.get_pending_for_user(profile.telegram_user_id)
@@ -44,7 +45,11 @@ class AccessApprovalService:
                     action="access_requested",
                     entity_type=AuditEntityType.ACCESS_REQUEST,
                     entity_id=request.id,
-                    details={"telegram_user_id": profile.telegram_user_id, "username": profile.username},
+                    details={
+                        "telegram_user_id": profile.telegram_user_id,
+                        "username": profile.username,
+                        "repeat_after_block": is_blocked_user(user),
+                    },
                 )
             return AccessRequestResult(user=user, request=request, created=created)
 
@@ -62,6 +67,7 @@ class AccessApprovalService:
             )
             if changed:
                 await self.users.users.set_role(request.telegram_user_id, UserRole.APPROVED_USER, self.clock.now(), blocked_at=None)
+                await self.users.clear_user_state(request.telegram_user_id)
                 await self.audit.write(
                     actor_user_id=actor_user_id,
                     action="access_approved",

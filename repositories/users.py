@@ -6,7 +6,7 @@ from aiosqlite import Row
 
 from db.database import Database
 from models.dto import TelegramUserProfile, User
-from models.enums import UserRole
+from models.enums import UserRole, parse_user_role
 from services.errors import NotFound
 
 
@@ -17,7 +17,7 @@ def _row_to_user(row: Row | None) -> User | None:
         telegram_user_id=int(row["telegram_user_id"]),
         username=row["username"],
         first_name=row["first_name"],
-        role=UserRole(row["role"]),
+        role=parse_user_role(row["role"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         blocked_at=row["blocked_at"],
