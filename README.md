@@ -61,7 +61,7 @@ SQLite-файл по умолчанию: `/opt/vpn-service/data/vpn.db`.
 - добавляет partial unique index на одну pending-заявку на пользователя;
 - добавляет индексы для восстановления зависших VPN-ключей;
 - для новых БД добавляет FK от заявок и ключей к `users`;
-- на существующих БД FK не перестраивает таблицы, чтобы не рисковать потерей данных, но логирует найденные orphan-записи.
+- на существующих БД FK не перестраивает таблицы, чтобы не рисковать потерей данных, но останавливает запуск при найденных orphan-записях.
 
 Bootstrap:
 
@@ -80,6 +80,8 @@ ADMIN_IDS=123456789,987654321
 
 DB_PATH=/opt/vpn-service/data/vpn.db
 LOG_DIR=/opt/vpn-service/logs
+BOT_LOCK_PATH=/run/vpn-bot.lock
+BOT_DROP_PENDING_UPDATES=false
 
 XRAY_CONFIG_PATH=/usr/local/etc/xray/config.json
 XRAY_SERVICE_NAME=xray
@@ -104,6 +106,10 @@ AWG_PERSISTENT_KEEPALIVE=25
 AUDIT_RETENTION_DAYS=180
 CONFIG_BACKUP_KEEP_LAST=20
 ```
+
+`BOT_DROP_PENDING_UPDATES=true` допустим только для первичного перехода с webhook или ручной очистки очереди Telegram. Для production polling по умолчанию оставляйте `false`, чтобы restart бота не терял pending callback/messages.
+
+Если bootstrap останавливается с сообщением про orphan-записи в SQLite, не удаляйте данные автоматически. Сделайте backup `vpn.db`, найдите строки без связанного пользователя через `LEFT JOIN users`, затем вручную восстановите владельца или удалите orphan-записи только после проверки.
 
 ## Установка на Ubuntu 24
 

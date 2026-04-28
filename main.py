@@ -17,7 +17,7 @@ async def main() -> None:
     with SingleInstanceLock(settings.bot_lock_path):
         bot, dp, db = await create_app(settings)
         try:
-            await bot.delete_webhook(drop_pending_updates=True)
+            await bot.delete_webhook(drop_pending_updates=settings.bot_drop_pending_updates)
             logger.info("VPN bot started")
             await dp.start_polling(bot)
         finally:

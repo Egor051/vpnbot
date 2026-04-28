@@ -34,6 +34,7 @@ def _settings(tmp_path: Path) -> Settings:
         db_path=tmp_path / "vpn.db",
         log_dir=tmp_path / "logs",
         bot_lock_path=tmp_path / "vpn.lock",
+        bot_drop_pending_updates=False,
         xray_config_path=tmp_path / "xray.json",
         xray_service_name="xray",
         xray_inbound_tag="",
@@ -169,6 +170,103 @@ class AwgAdapter:
         self.remove_calls += 1
         if self.fail:
             raise RuntimeError("remove failed")
+
+
+def test_xray_create_succeeds_when_post_apply_audit_fails(tmp_path: Path) -> None:
+    class Adapter:
+        async def add_client(self, **kwargs: object) -> None:
+            return None
+
+    class Ids:
+        def uuid4(self) -> str:
+            return "00000000-0000-4000-8000-000000000001"
+
+        def email_label(self, telegram_user_id: int, username: str | None = None) -> str:
+            return "label"
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await UserRepository(db).upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            repo = VpnKeyRepository(db)
+            audit = FailingAudit()
+            service = XrayService(
+                vpn_keys=repo,
+                users=Users(),  # type: ignore[arg-type]
+                adapter=Adapter(),  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=Ids(),  # type: ignore[arg-type]
+                audit=audit,  # type: ignore[arg-type]
+            )
+
+            result = await service.create_xray_key(100, TelegramUserProfile(100, "user", "User"), None)
+
+            assert result.key.status == VpnKeyStatus.ACTIVE
+            assert audit.actions == ["xray_key_created"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_awg_create_succeeds_when_post_apply_audit_fails(tmp_path: Path) -> None:
+    class Adapter:
+        def read_server_config(self) -> SimpleNamespace:
+            return SimpleNamespace(listen_port=443, public_key="server-public", interface_options={})
+
+        def client_interface_options(self) -> dict[str, str]:
+            return {}
+
+        async def generate_private_key(self) -> str:
+            return "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+
+        async def generate_public_key(self, private_key: str) -> str:
+            return "public"
+
+        async def generate_preshared_key(self) -> str:
+            return "psk"
+
+        async def add_peer(self, **kwargs: object) -> None:
+            return None
+
+    class Allocator:
+        async def next_free_ip(self) -> str:
+            return "10.0.0.2"
+
+    class Ids:
+        def key_label(self, telegram_user_id: int, username: str | None = None) -> str:
+            return "label"
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await UserRepository(db).upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            repo = VpnKeyRepository(db)
+            audit = FailingAudit()
+            service = AwgService(
+                vpn_keys=repo,
+                users=Users(),  # type: ignore[arg-type]
+                adapter=Adapter(),  # type: ignore[arg-type]
+                ip_allocator=Allocator(),  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=Ids(),  # type: ignore[arg-type]
+                audit=audit,  # type: ignore[arg-type]
+            )
+
+            result = await service.create_awg_key(100, TelegramUserProfile(100, "user", "User"), None)
+
+            assert result.key.status == VpnKeyStatus.ACTIVE
+            assert audit.actions == ["awg_key_created"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
 
 
 def test_hard_delete_with_stats_removes_key_and_stats(tmp_path: Path) -> None:
@@ -543,6 +641,46 @@ def test_revoke_still_leaves_key_revoked_in_db(tmp_path: Path) -> None:
         assert result.status == VpnKeyStatus.REVOKED
         assert repo.key is not None
         assert repo.key.status == VpnKeyStatus.REVOKED
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("key_type", [VpnKeyType.XRAY, VpnKeyType.AWG])
+def test_revoke_succeeds_when_post_revoke_audit_fails(key_type: VpnKeyType, tmp_path: Path) -> None:
+    async def run() -> None:
+        repo = MemoryKeyRepo(_key(key_type))
+        audit = FailingAudit()
+        if key_type == VpnKeyType.XRAY:
+            adapter = XrayAdapter()
+            service = XrayService(
+                vpn_keys=repo,  # type: ignore[arg-type]
+                users=Users(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=object(),  # type: ignore[arg-type]
+                audit=audit,  # type: ignore[arg-type]
+            )
+            result = await service.revoke_xray_key(100, 10)
+        else:
+            adapter = AwgAdapter()
+            service = AwgService(
+                vpn_keys=repo,  # type: ignore[arg-type]
+                users=Users(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+                ip_allocator=object(),  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=object(),  # type: ignore[arg-type]
+                audit=audit,  # type: ignore[arg-type]
+            )
+            result = await service.revoke_awg_key(100, 10)
+
+        assert adapter.removed is True
+        assert result.status == VpnKeyStatus.REVOKED
+        assert repo.key is not None
+        assert repo.key.status == VpnKeyStatus.REVOKED
+        assert audit.actions == [f"{key_type.value}_key_revoked"]
 
     asyncio.run(run())
 

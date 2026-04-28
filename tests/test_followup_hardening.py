@@ -12,13 +12,16 @@ from types import SimpleNamespace
 import aiosqlite
 import pytest
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Chat, Message, User as TgUser
 
 from adapters.awg_config import AwgServerConfig
 from adapters.backup import BackupAdapter
 from adapters.clock import ClockProvider
+from adapters.errors import XrayApplyError
 from adapters.xray_config import XrayConfigAdapter
 from bot.app import _startup_reconcile_keys
+from bot.messages import safe_edit_message_text
 from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
 from config.settings import Settings
 from db.database import Database
@@ -45,6 +48,7 @@ def _settings(tmp_path: Path) -> Settings:
         db_path=tmp_path / "vpn.db",
         log_dir=tmp_path / "logs",
         bot_lock_path=tmp_path / "vpn.lock",
+        bot_drop_pending_updates=False,
         xray_config_path=tmp_path / "xray.json",
         xray_service_name="xray",
         xray_inbound_tag="",
@@ -451,6 +455,46 @@ def test_approve_rolls_back_request_if_role_update_fails(tmp_path: Path, monkeyp
     asyncio.run(run())
 
 
+def test_reject_rolls_back_request_if_role_update_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            settings = _settings(tmp_path)
+            users_repo = UserRepository(db)
+            requests_repo = AccessRequestRepository(db)
+            audit = AuditService(AuditLogRepository(db), ClockProvider())
+            users = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=audit)
+            await users.bootstrap_admins()
+            await users_repo.upsert_profile(TelegramUserProfile(telegram_user_id=200, username="user", first_name="User"), UserRole.APPROVED_USER, "now")
+            request = await requests_repo.create(200, "user", "now")
+
+            original_set_role = users_repo.set_role
+
+            async def fail_target_role(telegram_user_id: int, role: UserRole, now: str, blocked_at: str | None = None) -> None:
+                if telegram_user_id == 200:
+                    raise RuntimeError("role update failed")
+                await original_set_role(telegram_user_id, role, now, blocked_at)
+
+            monkeypatch.setattr(users_repo, "set_role", fail_target_role)
+            service = AccessApprovalService(requests=requests_repo, users=users, clock=ClockProvider(), audit=audit)
+
+            with pytest.raises(RuntimeError, match="role update failed"):
+                await service.reject(1, request.id)
+
+            refreshed_request = await requests_repo.get_by_id(request.id)
+            refreshed_user = await users_repo.get_by_id(200)
+            assert refreshed_request is not None
+            assert refreshed_request.status == AccessRequestStatus.PENDING
+            assert refreshed_user is not None
+            assert refreshed_user.role == UserRole.APPROVED_USER
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX mode preservation is only meaningful on POSIX")
 def test_xray_mutation_preserves_main_config_mode_while_backup_is_private(tmp_path: Path) -> None:
     class FakeSystemctl:
@@ -458,8 +502,11 @@ def test_xray_mutation_preserves_main_config_mode_while_backup_is_private(tmp_pa
             json.loads(path.read_text(encoding="utf-8"))
             return ShellResult(("xray",), 0, "", "")
 
-        async def reload_or_restart(self, service_name: str) -> ShellResult:
+        async def reload(self, service_name: str) -> ShellResult:
             return ShellResult(("systemctl",), 0, "", "")
+
+        async def reload_or_restart(self, service_name: str) -> ShellResult:
+            return await self.reload(service_name)
 
         async def is_active(self, service_name: str) -> ShellResult:
             return ShellResult(("systemctl",), 0, "active", "")
@@ -493,6 +540,67 @@ def test_xray_mutation_preserves_main_config_mode_while_backup_is_private(tmp_pa
         backup = next(tmp_path.glob("config.json.*.bak"))
         assert stat.S_IMODE(config_path.stat().st_mode) == 0o644
         assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+    asyncio.run(run())
+
+
+def test_xray_reload_failure_restores_backup_without_restart_when_disabled(tmp_path: Path) -> None:
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.restart_calls = 0
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray",), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "reload", service_name), 1, "", "reload failed")
+
+        async def restart(self, service_name: str) -> ShellResult:
+            self.restart_calls += 1
+            return ShellResult(("systemctl", "restart", service_name), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "is-active", service_name), 0, "active", "")
+
+    async def run() -> None:
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "inbounds": [
+                        {
+                            "protocol": "vless",
+                            "settings": {"clients": []},
+                            "streamSettings": {"security": "reality", "realitySettings": {"shortIds": []}},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            inbound_tag="",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(XrayApplyError):
+            await adapter.add_client(
+                uuid_value="00000000-0000-4000-8000-000000000000",
+                email_label="user",
+                short_id="abcd",
+                flow="",
+                manage_short_id=True,
+            )
+
+        restored = json.loads(config_path.read_text(encoding="utf-8"))
+        assert restored["inbounds"][0]["settings"]["clients"] == []
+        assert systemctl.restart_calls == 0
 
     asyncio.run(run())
 
@@ -561,8 +669,15 @@ def test_awg_startup_reconcile_audit_failure_does_not_stop_remaining_keys(tmp_pa
     ]
 
     class Repo:
-        async def list_by_type_statuses(self, key_type: VpnKeyType, statuses: set[VpnKeyStatus], limit: int = 500) -> list[VpnKey]:
-            return keys
+        async def list_by_type_statuses(
+            self,
+            key_type: VpnKeyType,
+            statuses: set[VpnKeyStatus],
+            limit: int = 500,
+            offset: int = 0,
+            after_id: int | None = None,
+        ) -> list[VpnKey]:
+            return [key for key in keys if after_id is None or key.id > after_id][:limit]
 
     class Audit:
         def __init__(self) -> None:
@@ -648,8 +763,15 @@ def test_xray_startup_reconcile_audit_failure_does_not_stop_remaining_keys(tmp_p
     ]
 
     class Repo:
-        async def list_by_type_statuses(self, key_type: VpnKeyType, statuses: set[VpnKeyStatus], limit: int = 500) -> list[VpnKey]:
-            return keys
+        async def list_by_type_statuses(
+            self,
+            key_type: VpnKeyType,
+            statuses: set[VpnKeyStatus],
+            limit: int = 500,
+            offset: int = 0,
+            after_id: int | None = None,
+        ) -> list[VpnKey]:
+            return [key for key in keys if after_id is None or key.id > after_id][:limit]
 
     class Audit:
         def __init__(self) -> None:
@@ -683,6 +805,86 @@ def test_xray_startup_reconcile_audit_failure_does_not_stop_remaining_keys(tmp_p
         assert summary == {"checked": 2, "recovered": 0, "failed": 1}
         assert processed == [1, 2]
         assert audit.actions == ["xray_startup_reconcile_failed"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("key_type", [VpnKeyType.XRAY, VpnKeyType.AWG])
+def test_startup_reconcile_processes_more_than_one_batch(key_type: VpnKeyType, tmp_path: Path) -> None:
+    keys = [
+        VpnKey(
+            id=index,
+            owner_user_id=100,
+            username="user",
+            key_type=key_type,
+            status=VpnKeyStatus.PENDING_DELETE,
+            note=None,
+            uuid=f"00000000-0000-4000-8000-{index:012d}" if key_type == VpnKeyType.XRAY else None,
+            email_label=f"label-{index}",
+            public_key=f"public-{index}" if key_type == VpnKeyType.AWG else None,
+            client_ip=f"10.0.0.{index % 250 + 1}" if key_type == VpnKeyType.AWG else None,
+            payload={},
+            public_payload={},
+            created_at="now",
+            updated_at="now",
+            revoked_at=None,
+            deleted_at=None,
+            created_by=100,
+            revoked_by=None,
+            deleted_by=None,
+        )
+        for index in range(1, 502)
+    ]
+
+    class Repo:
+        async def list_by_type_statuses(
+            self,
+            requested_type: VpnKeyType,
+            statuses: set[VpnKeyStatus],
+            limit: int = 500,
+            offset: int = 0,
+            after_id: int | None = None,
+        ) -> list[VpnKey]:
+            assert requested_type == key_type
+            return [key for key in keys if after_id is None or key.id > after_id][:limit]
+
+    class Audit:
+        async def write(self, **kwargs: object) -> None:
+            return None
+
+    async def run() -> None:
+        if key_type == VpnKeyType.XRAY:
+            service = XrayService(
+                vpn_keys=Repo(),  # type: ignore[arg-type]
+                users=object(),  # type: ignore[arg-type]
+                adapter=object(),  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=object(),  # type: ignore[arg-type]
+                audit=Audit(),  # type: ignore[arg-type]
+            )
+        else:
+            service = AwgService(
+                vpn_keys=Repo(),  # type: ignore[arg-type]
+                users=object(),  # type: ignore[arg-type]
+                adapter=object(),  # type: ignore[arg-type]
+                ip_allocator=object(),  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=object(),  # type: ignore[arg-type]
+                audit=Audit(),  # type: ignore[arg-type]
+            )
+        processed: list[int] = []
+
+        async def reconcile_key(key: VpnKey) -> bool:
+            processed.append(key.id)
+            return False
+
+        service._startup_reconcile_key = reconcile_key  # type: ignore[method-assign]
+        summary = await service.startup_reconcile()
+
+        assert summary == {"checked": 501, "recovered": 0, "failed": 0}
+        assert processed == list(range(1, 502))
 
     asyncio.run(run())
 
@@ -906,3 +1108,86 @@ def test_xray_config_format_uses_russian_status(tmp_path: Path) -> None:
     text = service._format_config(key)
     assert "Статус: активен" in text
     assert "Статус: active" not in text
+
+
+def test_safe_edit_message_text_sends_new_message_when_edit_target_is_unavailable() -> None:
+    class MessageStub:
+        def __init__(self) -> None:
+            self.answers: list[tuple[str, object | None]] = []
+
+        async def edit_text(self, text: str, reply_markup: object = None) -> None:
+            raise TelegramBadRequest(method=SimpleNamespace(), message="Bad Request: message to edit not found")
+
+        async def answer(self, text: str, reply_markup: object = None) -> None:
+            self.answers.append((text, reply_markup))
+
+    async def run() -> None:
+        message = MessageStub()
+        assert await safe_edit_message_text(message, "fallback", reply_markup="keyboard") is True  # type: ignore[arg-type]
+        assert message.answers == [("fallback", "keyboard")]
+
+    asyncio.run(run())
+
+
+def test_awg_client_config_skips_empty_interface_options(tmp_path: Path) -> None:
+    payload = {"private_key": VALID_AWG_PRIVATE_KEY, "client_ip": "10.0.0.2"}
+
+    class Repo:
+        async def get_by_id(self, key_id: int) -> VpnKey | None:
+            return VpnKey(
+                id=key_id,
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.AWG,
+                status=VpnKeyStatus.ACTIVE,
+                note=None,
+                uuid=None,
+                email_label="label",
+                public_key="public",
+                client_ip="10.0.0.2",
+                payload=payload,
+                public_payload={},
+                created_at="now",
+                updated_at="now",
+                revoked_at=None,
+                deleted_at=None,
+                created_by=100,
+                revoked_by=None,
+                deleted_by=None,
+            )
+
+    class Users:
+        async def require_approved_or_admin(self, actor_user_id: int) -> User:
+            return User(actor_user_id, "user", "User", UserRole.APPROVED_USER, "now", "now", None)
+
+    class Adapter:
+        def read_server_config(self) -> AwgServerConfig:
+            return AwgServerConfig(listen_port=443, public_key="server-public", interface_options={})
+
+        def client_interface_options(self) -> dict[str, str]:
+            return {"I2": "", "I3": "   ", "H1": "abc", "Jc": "4", "DNS": "9.9.9.9"}
+
+    class Audit:
+        async def write(self, **kwargs: object) -> None:
+            return None
+
+    async def run() -> None:
+        service = AwgService(
+            vpn_keys=Repo(),  # type: ignore[arg-type]
+            users=Users(),  # type: ignore[arg-type]
+            adapter=Adapter(),  # type: ignore[arg-type]
+            ip_allocator=object(),  # type: ignore[arg-type]
+            settings=_settings(tmp_path),
+            clock=ClockProvider(),
+            ids=object(),  # type: ignore[arg-type]
+            audit=Audit(),  # type: ignore[arg-type]
+        )
+        config = await service.get_awg_client_config_plain(100, 10)
+        assert "I2 =" not in config
+        assert "I3 =" not in config
+        assert "H1 = abc" in config
+        assert "Jc = 4" in config
+        assert "DNS = 1.1.1.1" in config
+        assert "DNS = 9.9.9.9" not in config
+
+    asyncio.run(run())

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from adapters.awg_config import AwgConfigAdapter
 from adapters.backup import BackupAdapter
 from adapters.clock import ClockProvider
+from adapters.errors import AwgApplyError, AwgConfigError
 from adapters.shell_runner import ShellRunner
 from config.settings import Settings, SettingsError, load_settings
 from db.database import CURRENT_SCHEMA_VERSION, Database
@@ -30,6 +32,7 @@ def _settings(**overrides: object) -> Settings:
         db_path=Path("/tmp/vpn.db"),
         log_dir=Path("/tmp/logs"),
         bot_lock_path=Path("/tmp/vpn.lock"),
+        bot_drop_pending_updates=False,
         xray_config_path=Path("/tmp/xray.json"),
         xray_service_name="xray",
         xray_inbound_tag="",
@@ -83,6 +86,7 @@ def test_xray_vless_ipv6_host_is_bracketed() -> None:
     link = service._build_vless_link("00000000-0000-4000-8000-000000000000", "abcd", "label")
 
     assert "vless://00000000-0000-4000-8000-000000000000@[2001:db8::1]:443?" in link
+    assert link.endswith("#xray_label")
 
 
 def test_settings_reject_invalid_xray_short_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -96,6 +100,22 @@ def test_settings_reject_invalid_xray_short_id(monkeypatch: pytest.MonkeyPatch, 
 
     with pytest.raises(SettingsError):
         load_settings()
+
+
+def test_settings_drop_pending_updates_defaults_false_and_can_be_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("ADMIN_IDS", "1")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
+    monkeypatch.delenv("BOT_DROP_PENDING_UPDATES", raising=False)
+
+    assert load_settings().bot_drop_pending_updates is False
+
+    monkeypatch.setenv("BOT_DROP_PENDING_UPDATES", "true")
+
+    assert load_settings().bot_drop_pending_updates is True
 
 
 def test_audit_sanitizer_masks_nested_secrets() -> None:
@@ -139,6 +159,77 @@ AllowedIPs = 10.0.0.2/32
 
     assert "PublicKey = client" not in updated
     assert "[Interface]" in updated
+
+
+def test_awg_candidate_validation_fails_when_quick_tools_are_missing(tmp_path: Path) -> None:
+    class Shell:
+        async def run(self, args: list[str], **kwargs: object) -> object:
+            return type("Result", (), {"returncode": 127, "ok": False, "stdout": "", "stderr": "not found"})()
+
+    config_path = tmp_path / "awg.conf"
+    config_path.write_text("[Interface]\nPrivateKey = server\n", encoding="utf-8")
+    adapter = AwgConfigAdapter(
+        config_path=config_path,
+        interface="awg0",
+        backup=BackupAdapter(ClockProvider()),
+        shell=Shell(),  # type: ignore[arg-type]
+        persistent_keepalive=25,
+    )
+
+    async def run() -> None:
+        with pytest.raises(AwgConfigError, match="Не найден awg-quick или wg-quick"):
+            await adapter._validate_candidate_config("[Interface]\nPrivateKey = server\n")
+
+    asyncio.run(run())
+
+
+def test_awg_remove_peer_restores_runtime_from_config_after_runtime_remove_failure(tmp_path: Path) -> None:
+    class Shell:
+        def __init__(self) -> None:
+            self.syncconf_calls = 0
+
+        async def run(self, args: list[str], **kwargs: object) -> object:
+            if args[:3] == ["awg", "show", "awg0"]:
+                return type("Result", (), {"returncode": 0, "ok": True, "stdout": "peer: public\n", "stderr": ""})()
+            if args[:6] == ["awg", "set", "awg0", "peer", "public", "remove"]:
+                return type("Result", (), {"returncode": 0, "ok": True, "stdout": "", "stderr": ""})()
+            if args[:2] == ["awg-quick", "strip"]:
+                return type("Result", (), {"returncode": 0, "ok": True, "stdout": "[Interface]\nPrivateKey = server\n", "stderr": ""})()
+            if args[:3] == ["awg", "syncconf", "awg0"]:
+                self.syncconf_calls += 1
+                return type("Result", (), {"returncode": 0, "ok": True, "stdout": "", "stderr": ""})()
+            raise AssertionError(f"unexpected command: {args}")
+
+    config_path = tmp_path / "awg.conf"
+    config_path.write_text(
+        """[Interface]
+PrivateKey = server
+
+# vpn-bot peer start key_id=10 owner=100 label=test
+[Peer]
+PublicKey = public
+AllowedIPs = 10.0.0.2/32
+# vpn-bot peer end key_id=10
+""",
+        encoding="utf-8",
+    )
+    shell = Shell()
+    adapter = AwgConfigAdapter(
+        config_path=config_path,
+        interface="awg0",
+        backup=BackupAdapter(ClockProvider()),
+        shell=shell,  # type: ignore[arg-type]
+        persistent_keepalive=25,
+    )
+
+    async def run() -> None:
+        with pytest.raises(AwgApplyError, match="всё ещё найден"):
+            await adapter.remove_peer(key_id=10, public_key="public")
+
+    asyncio.run(run())
+
+    assert "PublicKey = public" in config_path.read_text(encoding="utf-8")
+    assert shell.syncconf_calls == 1
 
 
 def test_awg_delete_failed_retry_removes_access_before_deleted() -> None:
@@ -245,6 +336,167 @@ def test_db_v4_prevents_two_pending_requests_and_tolerates_corrupted_json(tmp_pa
             keys = await VpnKeyRepository(db).list_by_owner(100)
             assert len(keys) == 1
             assert keys[0].payload == {"_corrupted": True}
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_bootstrap_fails_fast_on_legacy_orphan_rows(tmp_path: Path) -> None:
+    async def run() -> None:
+        import aiosqlite
+
+        db_path = tmp_path / "legacy-orphan.db"
+        async with aiosqlite.connect(db_path) as conn:
+            await conn.executescript(
+                """
+                CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO schema_meta VALUES ('schema_version','4');
+                CREATE TABLE users (
+                  telegram_user_id INTEGER PRIMARY KEY,
+                  username TEXT,
+                  first_name TEXT,
+                  role TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  blocked_at TEXT
+                );
+                CREATE TABLE access_requests (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  telegram_user_id INTEGER NOT NULL,
+                  username TEXT,
+                  status TEXT NOT NULL,
+                  requested_at TEXT NOT NULL,
+                  decided_by INTEGER,
+                  decided_at TEXT,
+                  decision_note TEXT
+                );
+                CREATE TABLE vpn_keys (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  owner_user_id INTEGER NOT NULL,
+                  username TEXT,
+                  key_type TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  note TEXT,
+                  uuid TEXT,
+                  email_label TEXT,
+                  public_key TEXT,
+                  client_ip TEXT,
+                  payload_json TEXT NOT NULL,
+                  public_payload_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  revoked_at TEXT,
+                  deleted_at TEXT,
+                  created_by INTEGER NOT NULL,
+                  revoked_by INTEGER,
+                  deleted_by INTEGER
+                );
+                CREATE TABLE proxy_entries (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  proxy_type TEXT NOT NULL,
+                  host TEXT NOT NULL,
+                  port INTEGER NOT NULL,
+                  login TEXT,
+                  password TEXT,
+                  note TEXT,
+                  status TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE audit_log (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  actor_user_id INTEGER,
+                  action TEXT NOT NULL,
+                  entity_type TEXT NOT NULL,
+                  entity_id TEXT,
+                  details_json TEXT,
+                  created_at TEXT NOT NULL
+                );
+                CREATE TABLE vpn_key_traffic_stats (
+                  key_id INTEGER PRIMARY KEY,
+                  downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                  uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+                  last_raw_downloaded_bytes INTEGER,
+                  last_raw_uploaded_bytes INTEGER,
+                  last_success_at TEXT,
+                  last_attempt_at TEXT,
+                  available INTEGER NOT NULL DEFAULT 0,
+                  unavailable_reason TEXT,
+                  source TEXT
+                );
+                INSERT INTO vpn_keys (
+                  owner_user_id, username, key_type, status, payload_json, public_payload_json,
+                  created_at, updated_at, created_by
+                )
+                VALUES (999, 'orphan', 'xray', 'active', '{}', '{}', 'now', 'now', 999);
+                """
+            )
+            await conn.commit()
+
+        db = Database(db_path)
+        await db.connect()
+        try:
+            with pytest.raises(RuntimeError, match="orphan"):
+                await db.bootstrap()
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_access_request_idempotency_does_not_swallow_unrelated_integrity_error() -> None:
+    class Repo(AccessRequestRepository):
+        async def create(self, telegram_user_id: int, username: str | None, now: str):
+            raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+
+        async def get_pending_for_user(self, telegram_user_id: int):
+            raise AssertionError("unexpected pending lookup")
+
+    async def run() -> None:
+        repo = Repo(Database(Path(":memory:")))
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            await repo.create_pending_idempotent(100, "user", "now")
+
+    asyncio.run(run())
+
+
+def test_managed_short_id_counts_cleanup_statuses_but_not_revoked(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users = UserRepository(db)
+            await users.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            repo = VpnKeyRepository(db)
+            keys: list[VpnKey] = []
+            for index, status in enumerate(
+                (
+                    VpnKeyStatus.ACTIVE,
+                    VpnKeyStatus.PENDING_REVOKE,
+                    VpnKeyStatus.PENDING_DELETE,
+                    VpnKeyStatus.DELETE_FAILED,
+                    VpnKeyStatus.REVOKED,
+                ),
+                start=1,
+            ):
+                key = await repo.create_pending(
+                    owner_user_id=100,
+                    username="user",
+                    key_type=VpnKeyType.XRAY,
+                    note=None,
+                    payload={"short_id": "abcd", "short_id_managed": True},
+                    public_payload={},
+                    created_by=100,
+                    now=f"now-{index}",
+                    uuid=f"00000000-0000-4000-8000-00000000000{index}",
+                    email_label=f"label-{index}",
+                )
+                await repo.set_status(key.id, status, f"status-{index}")
+                keys.append(key)
+
+            assert await repo.count_active_managed_short_id("abcd", exclude_key_id=keys[0].id) == 3
         finally:
             await db.close()
 

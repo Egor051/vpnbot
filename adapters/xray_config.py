@@ -262,9 +262,10 @@ class XrayConfigAdapter:
         if mode_from.exists():
             self._copy_stat(mode_from, temp_path)
         os.replace(temp_path, self.config_path)
+        self._fsync_parent(self.config_path)
 
     async def _reload_or_restore(self, backup_path: Path) -> None:
-        result = await self.systemctl.reload_or_restart(self.service_name)
+        result = await self.systemctl.reload(self.service_name)
         if result.ok:
             active = await self.systemctl.is_active(self.service_name)
             if active.ok and active.stdout.strip() == "active":
@@ -292,3 +293,19 @@ class XrayConfigAdapter:
             os.chown(target, stat.st_uid, stat.st_gid)
         except OSError:
             pass
+
+    def _fsync_parent(self, path: Path) -> None:
+        if os.name != "posix":
+            return
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        fd: int | None = None
+        try:
+            fd = os.open(path.parent, flags)
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            if fd is not None:
+                os.close(fd)

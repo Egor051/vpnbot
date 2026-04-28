@@ -45,7 +45,9 @@ class AccessRequestRepository:
     async def create_pending_idempotent(self, telegram_user_id: int, username: str | None, now: str) -> tuple[AccessRequest, bool]:
         try:
             return await self.create(telegram_user_id, username, now), True
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as exc:
+            if not _is_pending_request_unique_conflict(exc):
+                raise
             pending = await self.get_pending_for_user(telegram_user_id)
             if pending is None:
                 raise
@@ -120,3 +122,10 @@ class AccessRequestRepository:
         )
         rows = await cursor.fetchall()
         return [request for row in rows if (request := _row_to_access_request(row)) is not None]
+
+
+def _is_pending_request_unique_conflict(exc: sqlite3.IntegrityError) -> bool:
+    message = str(exc).lower()
+    if "idx_access_requests_one_pending" in message:
+        return True
+    return "unique constraint failed: access_requests.telegram_user_id" in message
