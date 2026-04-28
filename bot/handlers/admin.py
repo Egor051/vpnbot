@@ -477,7 +477,7 @@ async def admin_stats(callback: CallbackQuery, services: Any) -> None:
             rows.append(("Дальше", f"admin:stats:{page + 1}"))
         await safe_edit_message_text(
             callback.message,
-            admin_stats_page_text(views, page),
+            admin_stats_page_text(views, page, viewer_user_id=callback.from_user.id),
             reply_markup=_simple_nav(rows, "admin:panel"),
         )
     except Exception as exc:

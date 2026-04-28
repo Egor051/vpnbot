@@ -254,7 +254,7 @@ async def show_key_stats(callback: CallbackQuery, services: Any) -> None:
         )
         await safe_edit_message_text(
             callback.message,
-            traffic_stats_text(view),
+            traffic_stats_text(view, viewer_user_id=callback.from_user.id),
             reply_markup=key_actions_keyboard(view.key, owner_user_id=_admin_owner_context(view.key, callback.from_user.id)),
         )
     except Exception as exc:

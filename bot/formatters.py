@@ -59,11 +59,19 @@ def key_title(key: VpnKey) -> str:
     return f"{prefix} #{key.id}"
 
 
-def key_display_label(key: VpnKey) -> str:
+def key_note_for_viewer(key: VpnKey, viewer_user_id: int) -> str | None:
+    if not key.note:
+        return None
+    note_owner_id = getattr(key, "note_owner_id", None) or key.owner_user_id
+    return key.note if int(note_owner_id) == int(viewer_user_id) else None
+
+
+def key_display_label(key: VpnKey, viewer_user_id: int | None = None) -> str:
     if key.email_label:
         return key.email_label
-    if key.note:
-        return key.note
+    note = key.note if viewer_user_id is None else key_note_for_viewer(key, viewer_user_id)
+    if note:
+        return note
     if key.public_key:
         return key.public_key[:12] + "..."
     return key_title(key)
@@ -117,7 +125,7 @@ def key_detail_text(key: VpnKey) -> str:
     return "\n".join(lines)
 
 
-def traffic_stats_text(view: KeyTrafficStatsView) -> str:
+def traffic_stats_text(view: KeyTrafficStatsView, *, viewer_user_id: int) -> str:
     key = view.key
     owner = view.owner
     owner_text = (
@@ -125,12 +133,16 @@ def traffic_stats_text(view: KeyTrafficStatsView) -> str:
         if owner is not None
         else format_user_display(key.owner_user_id, key.username)
     )
+    label = key_display_label(key, viewer_user_id=viewer_user_id)
     lines = [
         f"<b>Статистика {h(key_title(key))}</b>",
         f"Тип: {h(key.key_type.value.upper())}",
-        f"Метка: {code(key_display_label(key))}",
+        f"Метка: {code(label)}",
         f"Владелец: {h(owner_text)}",
     ]
+    note = key_note_for_viewer(key, viewer_user_id)
+    if note and label != note:
+        lines.append(f"Заметка: {h(note)}")
     stats = view.stats
     if stats is None or not stats.available:
         lines.append("")
@@ -154,7 +166,7 @@ def traffic_stats_text(view: KeyTrafficStatsView) -> str:
     return "\n".join(lines)
 
 
-def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int) -> str:
+def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer_user_id: int) -> str:
     if not views:
         return "<b>Статистика ключей</b>\n\nНа этой странице ключей нет."
     lines = [f"<b>Статистика ключей</b> · страница {page + 1}"]
@@ -178,10 +190,15 @@ def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int) -> str:
             updated = f" · обновлено {format_msk_datetime(stats.last_success_at)}"
         elif stats and stats.last_attempt_at:
             updated = f" · попытка {format_msk_datetime(stats.last_attempt_at)}"
-        lines.append(
-            f"{h(view.key.key_type.value.upper())} · {code(key_display_label(view.key))} · "
+        label = key_display_label(view.key, viewer_user_id=viewer_user_id)
+        line = (
+            f"{h(view.key.key_type.value.upper())} · {code(label)} · "
             f"{h(owner_text)} · {h(traffic + updated)}"
         )
+        note = key_note_for_viewer(view.key, viewer_user_id)
+        if note and label != note:
+            line += f" · Заметка: {h(short_note(note))}"
+        lines.append(line)
     return "\n".join(lines)
 
 
