@@ -81,7 +81,11 @@ class UserService:
 
     async def require_approved_or_admin(self, actor_user_id: int) -> User:
         user = await self.get_user(actor_user_id)
-        if user.role not in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
+        if user.role == UserRole.SUPERADMIN:
+            return user
+        if is_blocked_user(user):
+            raise AccessDenied("Доступ заблокирован")
+        if user.role != UserRole.APPROVED_USER:
             raise AccessDenied("Доступ не одобрен")
         return user
 

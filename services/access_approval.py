@@ -27,7 +27,10 @@ class AccessApprovalService:
     async def create_or_get_request(self, profile: TelegramUserProfile) -> AccessRequestResult:
         async with self.requests.db.transaction():
             user = await self.users.ensure_user(profile)
-            if user.role in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
+            blocked = is_blocked_user(user)
+            if user.role == UserRole.SUPERADMIN:
+                return AccessRequestResult(user=user, request=None, created=False)
+            if user.role == UserRole.APPROVED_USER and not blocked:
                 return AccessRequestResult(user=user, request=None, created=False)
 
             pending = await self.requests.get_pending_for_user(profile.telegram_user_id)
@@ -94,7 +97,7 @@ class AccessApprovalService:
             )
             if changed:
                 user = await self.users.users.get_by_id(request.telegram_user_id)
-                if user is not None and user.role != UserRole.BLOCKED_USER:
+                if user is not None and not is_blocked_user(user):
                     await self.users.users.set_role(request.telegram_user_id, UserRole.PENDING_USER, self.clock.now(), blocked_at=None)
                 await self.audit.write(
                     actor_user_id=actor_user_id,
@@ -121,6 +124,6 @@ class AccessApprovalService:
 
     async def check_access(self, actor_user_id: int) -> UserRole:
         user = await self.users.get_user(actor_user_id)
-        if user.role == UserRole.BLOCKED_USER:
+        if is_blocked_user(user):
             raise InvalidOperation("Пользователь заблокирован")
         return user.role
