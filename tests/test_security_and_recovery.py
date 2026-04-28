@@ -118,6 +118,16 @@ def test_settings_drop_pending_updates_defaults_false_and_can_be_enabled(
     assert load_settings().bot_drop_pending_updates is True
 
 
+def test_readme_uses_env_example_as_canonical_source() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert ".env.example" in readme
+    assert "cp .env.example .env" in readme
+    assert "AWG_DNS" in readme
+    assert "legacy alias" in readme
+    assert "AWG_CLIENT_DNS=" not in readme
+
+
 def test_audit_sanitizer_masks_nested_secrets() -> None:
     audit = AuditService(audit_logs=object(), clock=ClockProvider())  # type: ignore[arg-type]
 

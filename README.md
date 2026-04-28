@@ -72,40 +72,16 @@ cd /opt/vpn-service
 
 ## Переменные окружения
 
-Скопируйте `.env.example` в `/opt/vpn-service/.env` и заполните значения:
+Канонический список переменных находится в `.env.example`. Не ведите второй список
+вручную: при установке скопируйте example-файл и заполните значения в `.env`:
 
 ```bash
-BOT_TOKEN=
-ADMIN_IDS=123456789,987654321
-
-DB_PATH=/opt/vpn-service/data/vpn.db
-LOG_DIR=/opt/vpn-service/logs
-BOT_LOCK_PATH=/run/vpn-bot.lock
-BOT_DROP_PENDING_UPDATES=false
-
-XRAY_CONFIG_PATH=/usr/local/etc/xray/config.json
-XRAY_SERVICE_NAME=xray
-XRAY_INBOUND_TAG=
-XRAY_PUBLIC_HOST=
-XRAY_PUBLIC_PORT=443
-XRAY_REALITY_PUBLIC_KEY=
-XRAY_SNI=
-XRAY_FLOW=xtls-rprx-vision
-
-AWG_CONFIG_PATH=/etc/amnezia/amneziawg/awg0.conf
-AWG_INTERFACE=awg0
-AWG_NETWORK=10.0.0.0/24
-AWG_SERVER_ADDRESS=10.0.0.1
-AWG_ENDPOINT_HOST=
-AWG_ENDPOINT_PORT=
-AWG_SERVER_PUBLIC_KEY=
-AWG_CLIENT_DNS=1.1.1.1
-AWG_ALLOWED_IPS=0.0.0.0/0, ::/0
-AWG_PERSISTENT_KEEPALIVE=25
-
-AUDIT_RETENTION_DAYS=180
-CONFIG_BACKUP_KEEP_LAST=20
+cp .env.example .env
+nano .env
 ```
+
+`AWG_DNS` — основная переменная для DNS в клиентском AWG config.
+`AWG_CLIENT_DNS` поддерживается только как legacy alias для старых установок.
 
 `BOT_DROP_PENDING_UPDATES=true` допустим только для первичного перехода с webhook или ручной очистки очереди Telegram. Для production polling по умолчанию оставляйте `false`, чтобы restart бота не терял pending callback/messages.
 

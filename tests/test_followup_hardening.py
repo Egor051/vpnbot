@@ -605,6 +605,142 @@ def test_xray_reload_failure_restores_backup_without_restart_when_disabled(tmp_p
     asyncio.run(run())
 
 
+def test_xray_reload_failure_restarts_restored_config_when_enabled(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            if path == config_path:
+                self.calls.append("test:config")
+            else:
+                self.calls.append("test:candidate")
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray", "run", "-test", "-config", str(path)), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            self.calls.append("reload")
+            return ShellResult(("systemctl", "reload", service_name), 1, "", "reload failed")
+
+        async def restart(self, service_name: str) -> ShellResult:
+            self.calls.append("restart")
+            return ShellResult(("systemctl", "restart", service_name), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            self.calls.append("is-active")
+            return ShellResult(("systemctl", "is-active", service_name), 0, "active", "")
+
+    async def run() -> None:
+        config_path.write_text(
+            json.dumps(
+                {
+                    "inbounds": [
+                        {
+                            "protocol": "vless",
+                            "settings": {"clients": []},
+                            "streamSettings": {"security": "reality", "realitySettings": {"shortIds": []}},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            inbound_tag="",
+            allow_restart_on_rollback=True,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(XrayApplyError, match="backup восстановлен"):
+            await adapter.add_client(
+                uuid_value="00000000-0000-4000-8000-000000000000",
+                email_label="user",
+                short_id="abcd",
+                flow="",
+                manage_short_id=True,
+            )
+
+        restored = json.loads(config_path.read_text(encoding="utf-8"))
+        assert restored["inbounds"][0]["settings"]["clients"] == []
+        assert systemctl.calls == ["test:config", "test:candidate", "reload", "test:config", "restart"]
+
+    asyncio.run(run())
+
+
+def test_xray_reload_failure_with_invalid_restored_config_never_restarts(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.config_test_calls = 0
+            self.restart_calls = 0
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            if path == config_path:
+                self.config_test_calls += 1
+                if self.config_test_calls >= 2:
+                    return ShellResult(("xray", "run", "-test", "-config", str(path)), 1, "", "restored config invalid")
+            else:
+                json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray", "run", "-test", "-config", str(path)), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "reload", service_name), 1, "", "reload failed")
+
+        async def restart(self, service_name: str) -> ShellResult:
+            self.restart_calls += 1
+            return ShellResult(("systemctl", "restart", service_name), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "is-active", service_name), 0, "active", "")
+
+    async def run() -> None:
+        config_path.write_text(
+            json.dumps(
+                {
+                    "inbounds": [
+                        {
+                            "protocol": "vless",
+                            "settings": {"clients": []},
+                            "streamSettings": {"security": "reality", "realitySettings": {"shortIds": []}},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            inbound_tag="",
+            allow_restart_on_rollback=True,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(XrayApplyError, match="восстановленный config не прошёл проверку"):
+            await adapter.add_client(
+                uuid_value="00000000-0000-4000-8000-000000000000",
+                email_label="user",
+                short_id="abcd",
+                flow="",
+                manage_short_id=True,
+            )
+
+        restored = json.loads(config_path.read_text(encoding="utf-8"))
+        assert restored["inbounds"][0]["settings"]["clients"] == []
+        assert systemctl.restart_calls == 0
+
+    asyncio.run(run())
+
+
 def test_startup_reconcile_service_or_audit_failure_does_not_abort() -> None:
     class FailingXray:
         async def startup_reconcile(self) -> dict[str, int]:
