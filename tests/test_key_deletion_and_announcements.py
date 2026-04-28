@@ -37,6 +37,7 @@ def _settings(tmp_path: Path) -> Settings:
         bot_drop_pending_updates=False,
         xray_config_path=tmp_path / "xray.json",
         xray_service_name="xray",
+        xray_apply_mode="reload",
         xray_inbound_tag="",
         xray_public_host="vpn.example.com",
         xray_public_port=443,

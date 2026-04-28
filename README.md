@@ -83,6 +83,11 @@ nano .env
 `AWG_DNS` — основная переменная для DNS в клиентском AWG config.
 `AWG_CLIENT_DNS` поддерживается только как legacy alias для старых установок.
 
+`XRAY_APPLY_MODE=reload` — безопасный режим по умолчанию: бот применяет Xray config
+через `systemctl reload xray`. Если unit на конкретном VDS не поддерживает reload,
+в single-server setup можно явно поставить `XRAY_APPLY_MODE=restart`. Restart кратко
+прерывает Xray-соединения, но не использует `reload-or-restart` или `kill -HUP`.
+
 `BOT_DROP_PENDING_UPDATES=true` допустим только для первичного перехода с webhook или ручной очистки очереди Telegram. Для production polling по умолчанию оставляйте `false`, чтобы restart бота не терял pending callback/messages.
 
 Если bootstrap останавливается с сообщением про orphan-записи в SQLite, не удаляйте данные автоматически. Сделайте backup `vpn.db`, найдите строки без связанного пользователя через `LEFT JOIN users`, затем вручную восстановите владельца или удалите orphan-записи только после проверки.
