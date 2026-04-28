@@ -591,13 +591,14 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     data = await state.get_data()
-    await state.clear()
     try:
-        owner = await services.users.get_user(int(data["owner_user_id"]))
-        profile = TelegramUserProfile(owner.telegram_user_id, owner.username, owner.first_name)
+        owner_user_id = int(data["owner_user_id"])
         key_type = str(data["key_type"])
         note = data.get("note")
+        owner = await services.users.get_user(owner_user_id)
+        profile = TelegramUserProfile(owner.telegram_user_id, owner.username, owner.first_name)
         rate_limiter.check(callback.from_user.id, "key_create", 20)
+        await state.clear()
         await callback.answer("Создаю ключ...")
         if key_type == VpnKeyType.XRAY.value:
             result = await services.xray.create_xray_key(callback.from_user.id, profile, note)

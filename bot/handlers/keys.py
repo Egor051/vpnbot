@@ -143,12 +143,12 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
     if not await ensure_private_callback(callback):
         return
     data = await state.get_data()
-    await state.clear()
     key_type = str(data.get("key_type") or "")
     note = data.get("note")
     try:
         profile = profile_from_tg(callback.from_user)
         rate_limiter.check(callback.from_user.id, "key_create", 20)
+        await state.clear()
         await callback.answer("Создаю ключ...")
         if key_type == VpnKeyType.XRAY.value:
             result = await services.xray.create_xray_key(callback.from_user.id, profile, note)
