@@ -13,7 +13,7 @@ from adapters.ip_allocator import IpAllocator
 from config.settings import Settings
 from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
-from bot.formatters import status_text
+from bot.formatters import key_note_for_viewer, status_text
 from repositories.vpn_keys import VpnKeyRepository
 from services.audit import AuditService
 from services.errors import AccessDenied, InvalidOperation, NotFound
@@ -143,7 +143,7 @@ class AwgService:
                 },
             )
             active_key = await self._get_key(key.id)
-            return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key))
+            return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key, viewer_user_id=actor_user_id))
 
     async def revoke_key(self, actor_user_id: int, key_id: int) -> VpnKey:
         return await self.revoke_awg_key(actor_user_id, key_id)
@@ -251,7 +251,7 @@ class AwgService:
             entity_id=key_id,
             details={"client_ip": key.client_ip},
         )
-        return self._format_config(key)
+        return self._format_config(key, viewer_user_id=actor_user_id)
 
     async def get_awg_client_config_plain(self, actor_user_id: int, key_id: int, audit: bool = True) -> str:
         key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
@@ -470,9 +470,10 @@ class AwgService:
         if network.version != 4:
             raise InvalidOperation("AWG_NETWORK сейчас поддерживает только IPv4")
 
-    def _format_config(self, key: VpnKey) -> str:
+    def _format_config(self, key: VpnKey, *, viewer_user_id: int | None = None) -> str:
         config = self._client_config(key)
-        note = f"\nЗаметка: {h(key.note)}" if key.note else ""
+        visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
+        note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
         label = f"\nМетка: {h(key.email_label)}" if key.email_label else ""
         return (
             f"<b>AWG-ключ #{key.id}</b>\n"

@@ -69,7 +69,7 @@ def key_note_for_viewer(key: VpnKey, viewer_user_id: int) -> str | None:
 def key_display_label(key: VpnKey, viewer_user_id: int | None = None) -> str:
     if key.email_label:
         return key.email_label
-    note = key.note if viewer_user_id is None else key_note_for_viewer(key, viewer_user_id)
+    note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
     if note:
         return note
     if key.public_key:
@@ -82,20 +82,23 @@ def main_menu_text(user: TgUser) -> str:
     return f"Доброго времени суток, {h(name)}\n\n{SERVER_RESTART_WARNING}\n\nВыберите действие."
 
 
-def key_list_card(key: VpnKey) -> str:
+def key_list_card(key: VpnKey, *, viewer_user_id: int) -> str:
+    note = key_note_for_viewer(key, viewer_user_id)
+    label = key_display_label(key, viewer_user_id=viewer_user_id)
     parts = [
         f"<b>{key_title(key)}</b>",
         f"Статус: {h(status_text(key.status))}",
-        f"Метка: {code(key_display_label(key))}",
+        f"Метка: {code(label)}",
         f"Создан: {h(format_msk_datetime(key.created_at))}",
-        f"Заметка: {h(short_note(key.note))}",
     ]
+    if not note or label != note:
+        parts.append(f"Заметка: {h(short_note(note))}")
     if key.client_ip:
         parts.append(f"IP: {code(key.client_ip)}")
     return "\n".join(parts)
 
 
-def keys_page_text(keys: list[VpnKey], page: int, owner_user_id: int | None = None) -> str:
+def keys_page_text(keys: list[VpnKey], page: int, *, viewer_user_id: int, owner_user_id: int | None = None) -> str:
     title = "<b>Ключи пользователя</b>" if owner_user_id else "<b>Мои ключи</b>"
     if not keys:
         return f"{title}\n\n{ONE_KEY_ONE_DEVICE_WARNING}\n\nНа этой странице ключей нет."
@@ -103,21 +106,24 @@ def keys_page_text(keys: list[VpnKey], page: int, owner_user_id: int | None = No
     awg = [key for key in keys if key.key_type == VpnKeyType.AWG]
     sections = [f"{title} · страница {page + 1}", ONE_KEY_ONE_DEVICE_WARNING]
     if xray:
-        sections.append("<b>Xray</b>\n" + "\n\n".join(key_list_card(key) for key in xray))
+        sections.append("<b>Xray</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in xray))
     if awg:
-        sections.append("<b>AWG</b>\n" + "\n\n".join(key_list_card(key) for key in awg))
+        sections.append("<b>AWG</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in awg))
     return "\n\n".join(sections)
 
 
-def key_detail_text(key: VpnKey) -> str:
+def key_detail_text(key: VpnKey, *, viewer_user_id: int) -> str:
+    note = key_note_for_viewer(key, viewer_user_id)
+    label = key_display_label(key, viewer_user_id=viewer_user_id)
     lines = [
         f"<b>{key_title(key)}</b>",
         f"Статус: {h(status_text(key.status))}",
-        f"Метка: {code(key_display_label(key))}",
+        f"Метка: {code(label)}",
         f"Создан: {h(format_msk_datetime(key.created_at))}",
         f"Обновлён: {h(format_msk_datetime(key.updated_at))}",
-        f"Заметка: {h(key.note or 'нет')}",
     ]
+    if not note or label != note:
+        lines.append(f"Заметка: {h(note or 'нет')}")
     if key.client_ip:
         lines.append(f"IP: {code(key.client_ip)}")
     if key.public_key:
@@ -268,7 +274,13 @@ def access_requests_page_text(requests: list[AccessRequest], page: int) -> str:
     return f"<b>Заявки на доступ</b> · страница {page + 1}\n\n" + "\n\n".join(access_request_text(req) for req in requests)
 
 
-def user_card_text(user: User, keys: list[VpnKey] | None = None, stats_by_key_id: dict[int, TrafficStats] | None = None) -> str:
+def user_card_text(
+    user: User,
+    keys: list[VpnKey] | None = None,
+    stats_by_key_id: dict[int, TrafficStats] | None = None,
+    *,
+    viewer_user_id: int | None = None,
+) -> str:
     username = f"@{user.username}" if user.username else "не указан"
     lines = [
         "<b>Пользователь</b>",
@@ -291,7 +303,7 @@ def user_card_text(user: User, keys: list[VpnKey] | None = None, stats_by_key_id
                     traffic = f" · ↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
                 elif stats:
                     traffic = " · статистика пока недоступна"
-                lines.append(f"{h(key.key_type.value.upper())} · {code(key_display_label(key))}{traffic}")
+                lines.append(f"{h(key.key_type.value.upper())} · {code(key_display_label(key, viewer_user_id=viewer_user_id))}{traffic}")
     return "\n".join(lines)
 
 
