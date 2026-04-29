@@ -377,7 +377,17 @@ class AwgService:
         raise InvalidOperation("Не удалось сгенерировать уникальный label для AWG-ключа")
 
     async def _remove_awg_access(self, key: VpnKey) -> None:
-        await self.adapter.remove_peer(key_id=key.id, public_key=key.public_key)
+        public_key = key.public_key
+        if not public_key:
+            finder = getattr(self.adapter, "find_managed_peer_public_key", None)
+            if finder is not None:
+                public_key = finder(key.id)
+        if not public_key:
+            raise InvalidOperation(
+                "Нельзя безопасно удалить AWG peer: в БД нет public key, "
+                "и восстановить его из managed block не удалось."
+            )
+        await self.adapter.remove_peer(key_id=key.id, public_key=public_key)
 
     async def _startup_reconcile_key(self, key: VpnKey) -> bool:
         if key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:

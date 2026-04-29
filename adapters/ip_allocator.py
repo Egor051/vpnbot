@@ -36,15 +36,19 @@ class IpAllocator:
 
     async def next_free_ip(self) -> str:
         occupied = {ipaddress.ip_address(value) for value in await self.vpn_keys.get_occupied_awg_ips()}
+        occupied_networks: list[ipaddress.IPv4Network] = []
         if self.awg_config is not None:
             try:
-                occupied.update(
-                    ipaddress.ip_address(value)
-                    for value in self.awg_config.list_peer_allowed_ips()
-                    if value
-                )
+                for value in self.awg_config.list_peer_allowed_ips():
+                    if not value:
+                        continue
+                    network = ipaddress.ip_network(value, strict=False)
+                    if network.version != 4:
+                        continue
+                    if network.overlaps(self.network):
+                        occupied_networks.append(network)
             except ValueError as exc:
-                raise AwgIpAllocationError("AWG config содержит некорректный IP в AllowedIPs") from exc
+                raise AwgIpAllocationError("AWG config содержит некорректный IPv4 AllowedIPs") from exc
             except Exception as exc:
                 raise AwgIpAllocationError(f"Не удалось прочитать занятые IP из AWG config: {exc}") from exc
         # Revoked/deleted/failed keys are intentionally excluded by the repository query,
@@ -52,6 +56,10 @@ class IpAllocator:
         # including unmanaged peers that are not represented in SQLite.
         for candidate in self.network.hosts():
             if candidate == self.server_address:
+                continue
+            if candidate in occupied:
+                continue
+            if any(candidate in network for network in occupied_networks):
                 continue
             if candidate not in occupied:
                 return str(candidate)
