@@ -14,6 +14,8 @@ from models.dto import ShellResult
 
 logger = logging.getLogger(__name__)
 
+MACHINE_OUTPUT_LIMIT = 1024 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class AwgServerConfig:
@@ -266,10 +268,18 @@ class AwgConfigAdapter:
         return any(line.strip() == f"peer: {public_key}" for line in result.stdout.splitlines())
 
     async def list_transfer(self) -> dict[str, tuple[int, int]]:
-        result = await self.shell.run(["awg", "show", self.interface, "transfer"], timeout=10)
+        result = await self.shell.run(
+            ["awg", "show", self.interface, "transfer"],
+            timeout=10,
+            max_output_chars=MACHINE_OUTPUT_LIMIT,
+        )
         source = "awg"
         if not result.ok:
-            result = await self.shell.run(["wg", "show", self.interface, "transfer"], timeout=10)
+            result = await self.shell.run(
+                ["wg", "show", self.interface, "transfer"],
+                timeout=10,
+                max_output_chars=MACHINE_OUTPUT_LIMIT,
+            )
             source = "wg"
         if not result.ok:
             raise AwgApplyError(f"Не удалось получить AWG transfer через awg/wg: {result.stderr or result.stdout}")

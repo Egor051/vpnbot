@@ -155,8 +155,8 @@ class TrafficStatsService:
         return await self._store_success(
             key=key,
             previous=previous,
-            raw_downloaded_bytes=raw_downloaded or 0,
-            raw_uploaded_bytes=raw_uploaded or 0,
+            raw_downloaded_bytes=raw_downloaded,
+            raw_uploaded_bytes=raw_uploaded,
             source="xray statsquery",
             now=now,
         )
@@ -166,17 +166,17 @@ class TrafficStatsService:
         *,
         key: VpnKey,
         previous: TrafficStats | None,
-        raw_downloaded_bytes: int,
-        raw_uploaded_bytes: int,
+        raw_downloaded_bytes: int | None,
+        raw_uploaded_bytes: int | None,
         source: str,
         now: str,
     ) -> TrafficStats:
-        downloaded = self._next_total(
+        downloaded, stored_raw_downloaded = self._next_total_for_direction(
             previous.downloaded_bytes if previous else 0,
             previous.last_raw_downloaded_bytes if previous else None,
             raw_downloaded_bytes,
         )
-        uploaded = self._next_total(
+        uploaded, stored_raw_uploaded = self._next_total_for_direction(
             previous.uploaded_bytes if previous else 0,
             previous.last_raw_uploaded_bytes if previous else None,
             raw_uploaded_bytes,
@@ -185,11 +185,21 @@ class TrafficStatsService:
             key_id=key.id,
             downloaded_bytes=downloaded,
             uploaded_bytes=uploaded,
-            raw_downloaded_bytes=raw_downloaded_bytes,
-            raw_uploaded_bytes=raw_uploaded_bytes,
+            raw_downloaded_bytes=stored_raw_downloaded,
+            raw_uploaded_bytes=stored_raw_uploaded,
             now=now,
             source=source,
         )
+
+    def _next_total_for_direction(
+        self,
+        previous_total: int,
+        previous_raw: int | None,
+        current_raw: int | None,
+    ) -> tuple[int, int | None]:
+        if current_raw is None:
+            return previous_total, previous_raw
+        return self._next_total(previous_total, previous_raw, current_raw), max(current_raw, 0)
 
     def _next_total(self, previous_total: int, previous_raw: int | None, current_raw: int) -> int:
         current_raw = max(current_raw, 0)
