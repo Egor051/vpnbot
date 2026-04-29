@@ -206,3 +206,78 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .env.safe
+
+# VPN bot project: local secrets, runtime data, and generated configs
+
+# Python/cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment/secrets
+.env
+.env.*
+!.env.example
+
+# Databases/data
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Logs/runtime
+logs/
+*.log
+*.pid
+*.lock
+
+# VPN/security-sensitive files
+*.key
+*.pem
+*.p12
+*.crt
+*.csr
+*.conf
+*.ovpn
+wg0.conf
+awg0.conf
+xray-config.json
+config.json.bak*
+*.bak
+*.backup
+
+# Keep safe examples trackable
+!*.example
+!*.sample
+!docs/**/*.conf.example
+!docs/**/*.json.example
+
+# Local IDE/editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Deployment/local artifacts
+dist/
+build/
+*.egg-info/
+.cache/
+tmp/
+temp/
