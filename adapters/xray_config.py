@@ -105,14 +105,7 @@ class XrayConfigAdapter:
                 clients = self._clients(inbound)
                 changed = False
 
-                new_clients = [
-                    client
-                    for client in clients
-                    if not (
-                        isinstance(client, dict)
-                        and ((uuid_value and client.get("id") == uuid_value) or (email_label and client.get("email") == email_label))
-                    )
-                ]
+                new_clients = [client for client in clients if not self._matches_client_for_remove(client, uuid_value, email_label)]
                 if len(new_clients) != len(clients):
                     inbound["settings"]["clients"] = new_clients
                     changed = True
@@ -218,6 +211,13 @@ class XrayConfigAdapter:
             if email_label and client.get("email") == email_label:
                 return client
         return None
+
+    def _matches_client_for_remove(self, client: Any, uuid_value: str | None, email_label: str | None) -> bool:
+        if not isinstance(client, dict):
+            return False
+        if uuid_value:
+            return client.get("id") == uuid_value
+        return bool(email_label and client.get("email") == email_label)
 
     def _add_short_id(self, inbound: dict[str, Any], short_id: str) -> None:
         reality = self._reality_settings(inbound)

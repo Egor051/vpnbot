@@ -1231,6 +1231,69 @@ def test_xray_reload_mode_uses_reload_without_restart(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_xray_remove_client_prefers_uuid_over_email_collision(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    bot_uuid = "00000000-0000-4000-8000-000000000001"
+    manual_uuid = "00000000-0000-4000-8000-000000000002"
+    email_label = "xray_A7kQz"
+
+    class FakeSystemctl:
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray", "run", "-test", "-config", str(path)), 0, "", "")
+
+        async def restart(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "restart", service_name), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "reload", service_name), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "is-active", service_name), 0, "active", "")
+
+    async def run() -> None:
+        config_path.write_text(
+            json.dumps(
+                {
+                    "inbounds": [
+                        {
+                            "protocol": "vless",
+                            "settings": {
+                                "clients": [
+                                    {"id": manual_uuid, "email": email_label},
+                                    {"id": bot_uuid, "email": email_label},
+                                ]
+                            },
+                            "streamSettings": {"security": "reality", "realitySettings": {"shortIds": []}},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="restart",
+            inbound_tag="",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=FakeSystemctl(),  # type: ignore[arg-type]
+        )
+
+        await adapter.remove_client(
+            uuid_value=bot_uuid,
+            email_label=email_label,
+            short_id=None,
+            remove_short_id=False,
+        )
+
+        clients = json.loads(config_path.read_text(encoding="utf-8"))["inbounds"][0]["settings"]["clients"]
+        assert clients == [{"id": manual_uuid, "email": email_label}]
+
+    asyncio.run(run())
+
+
 def test_xray_reload_failure_restores_backup_without_restart_when_disabled(tmp_path: Path) -> None:
     class FakeSystemctl:
         def __init__(self) -> None:
