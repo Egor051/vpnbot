@@ -13,7 +13,7 @@ from adapters.xray_stats import MACHINE_OUTPUT_LIMIT as XRAY_MACHINE_OUTPUT_LIMI
 from adapters.xray_stats import XrayStatsAdapter
 from models.dto import ShellResult, TrafficStats, VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
-from services.traffic_stats import TrafficStatsService
+from services.traffic_stats import PUBLIC_BACKEND_STATS_ERROR, TrafficStatsService
 
 
 def _xray_key() -> VpnKey:
@@ -28,6 +28,30 @@ def _xray_key() -> VpnKey:
         email_label="xray_A7kQz",
         public_key=None,
         client_ip=None,
+        payload={},
+        public_payload={},
+        created_at="now",
+        updated_at="now",
+        revoked_at=None,
+        deleted_at=None,
+        created_by=100,
+        revoked_by=None,
+        deleted_by=None,
+    )
+
+
+def _awg_key() -> VpnKey:
+    return VpnKey(
+        id=11,
+        owner_user_id=100,
+        username="user",
+        key_type=VpnKeyType.AWG,
+        status=VpnKeyStatus.ACTIVE,
+        note=None,
+        uuid=None,
+        email_label="awg_A7kQz",
+        public_key="public",
+        client_ip="10.0.0.2",
         payload={},
         public_payload={},
         created_at="now",
@@ -215,5 +239,65 @@ def test_xray_restored_partial_counter_increments_from_preserved_raw() -> None:
         )
         assert restored.downloaded_bytes == 1200
         assert restored.uploaded_bytes == 600
+
+    asyncio.run(run())
+
+
+def test_legacy_total_does_not_decrease_when_previous_raw_is_missing() -> None:
+    service = _service(_StatsRepo())
+
+    assert service._next_total(1000, None, 100) == 1000  # noqa: SLF001
+    assert service._next_total(1000, None, 1500) == 1500  # noqa: SLF001
+    assert service._next_total(1500, 1200, 100) == 1600  # noqa: SLF001
+    assert service._next_total(1500, 1200, 1400) == 1700  # noqa: SLF001
+
+
+def test_xray_stats_internal_error_is_not_returned_as_public_reason() -> None:
+    class Xray:
+        async def query_all(self) -> dict[str, int]:
+            raise RuntimeError("stderr: /usr/local/etc/xray/config.json token=secret")
+
+    async def run() -> None:
+        service = TrafficStatsService(
+            stats=_StatsRepo(),  # type: ignore[arg-type]
+            vpn_keys=SimpleNamespace(),
+            users_repo=SimpleNamespace(),
+            users=SimpleNamespace(clock=SimpleNamespace(now=lambda: "now")),
+            awg=SimpleNamespace(),
+            xray=Xray(),  # type: ignore[arg-type]
+        )
+
+        _, reason = await service._load_xray_stats([_xray_key()])  # noqa: SLF001
+
+        assert reason == PUBLIC_BACKEND_STATS_ERROR
+        assert reason is not None
+        assert "xray" not in reason.lower()
+        assert "secret" not in reason
+        assert "/usr/local" not in reason
+
+    asyncio.run(run())
+
+
+def test_awg_stats_internal_error_is_not_returned_as_public_reason() -> None:
+    class Awg:
+        async def list_transfer(self) -> dict[str, tuple[int, int]]:
+            raise RuntimeError("awg show failed: /etc/amnezia/amneziawg/awg0.conf")
+
+    async def run() -> None:
+        service = TrafficStatsService(
+            stats=_StatsRepo(),  # type: ignore[arg-type]
+            vpn_keys=SimpleNamespace(),
+            users_repo=SimpleNamespace(),
+            users=SimpleNamespace(clock=SimpleNamespace(now=lambda: "now")),
+            awg=Awg(),  # type: ignore[arg-type]
+            xray=SimpleNamespace(),
+        )
+
+        _, reason = await service._load_awg_transfers([_awg_key()])  # noqa: SLF001
+
+        assert reason == PUBLIC_BACKEND_STATS_ERROR
+        assert reason is not None
+        assert "awg0.conf" not in reason
+        assert "/etc" not in reason
 
     asyncio.run(run())

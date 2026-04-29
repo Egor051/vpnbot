@@ -11,7 +11,7 @@ from typing import Any, AsyncIterator
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 logger = logging.getLogger(__name__)
 
 
@@ -146,6 +146,20 @@ class Database:
                 """
             )
             await self._set_schema_version(5)
+            version = 5
+        if version < 6:
+            await self._validate_reserved_awg_client_ip_duplicates()
+            await self.conn.execute("DROP INDEX IF EXISTS idx_vpn_keys_client_ip_reserved")
+            await self.conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_client_ip_reserved
+                ON vpn_keys(client_ip)
+                WHERE client_ip IS NOT NULL
+                  AND key_type = 'awg'
+                  AND status IN ('pending_apply','active','apply_failed','pending_revoke','pending_delete','delete_failed')
+                """
+            )
+            await self._set_schema_version(6)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -311,7 +325,7 @@ class Database:
             FROM vpn_keys
             WHERE key_type = 'awg'
               AND client_ip IS NOT NULL
-              AND status IN ('pending_apply','active','pending_revoke','pending_delete','delete_failed')
+              AND status IN ('pending_apply','active','apply_failed','pending_revoke','pending_delete','delete_failed')
             GROUP BY client_ip
             HAVING COUNT(*) > 1
             LIMIT 1

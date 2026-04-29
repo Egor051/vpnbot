@@ -538,6 +538,79 @@ def test_block_user_revokes_more_than_one_batch(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_block_user_revokes_apply_failed_keys(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            settings = _settings(tmp_path)
+            users_repo = UserRepository(db)
+            await users_repo.upsert_profile(TelegramUserProfile(1, "admin", "Admin"), UserRole.SUPERADMIN, "now")
+            await users_repo.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            keys_repo = VpnKeyRepository(db)
+            xray_key = await keys_repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.XRAY,
+                note=None,
+                payload={"short_id_managed": False},
+                public_payload={},
+                created_by=100,
+                now="now-1",
+                uuid="00000000-0000-4000-8000-000000000101",
+                email_label="xray_apply_failed",
+            )
+            await keys_repo.set_status(xray_key.id, VpnKeyStatus.APPLY_FAILED, "status-1")
+            awg_key = await keys_repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.AWG,
+                note=None,
+                payload={},
+                public_payload={},
+                created_by=100,
+                now="now-2",
+                public_key="public-apply-failed",
+                client_ip="10.0.0.2",
+            )
+            await keys_repo.set_status(awg_key.id, VpnKeyStatus.APPLY_FAILED, "status-2")
+            service = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=_Audit())  # type: ignore[arg-type]
+            revoked: list[tuple[VpnKeyType, int]] = []
+
+            async def revoke_xray(actor_user_id: int, key_id: int) -> VpnKey:
+                revoked.append((VpnKeyType.XRAY, key_id))
+                await keys_repo.mark_revoked(key_id, actor_user_id, "now")
+                key = await keys_repo.get_by_id(key_id)
+                assert key is not None
+                return key
+
+            async def revoke_awg(actor_user_id: int, key_id: int) -> VpnKey:
+                revoked.append((VpnKeyType.AWG, key_id))
+                await keys_repo.mark_revoked(key_id, actor_user_id, "now")
+                key = await keys_repo.get_by_id(key_id)
+                assert key is not None
+                return key
+
+            service.attach_key_management(keys_repo, {VpnKeyType.XRAY: revoke_xray, VpnKeyType.AWG: revoke_awg})
+
+            result = await service.block_user(1, 100)
+
+            assert result.errors == ()
+            assert set(result.revoked_key_ids) == {xray_key.id, awg_key.id}
+            assert set(revoked) == {(VpnKeyType.XRAY, xray_key.id), (VpnKeyType.AWG, awg_key.id)}
+            stored_xray = await keys_repo.get_by_id(xray_key.id)
+            stored_awg = await keys_repo.get_by_id(awg_key.id)
+            user = await users_repo.get_by_id(100)
+            assert stored_xray is not None and stored_xray.status == VpnKeyStatus.REVOKED
+            assert stored_awg is not None and stored_awg.status == VpnKeyStatus.REVOKED
+            assert user is not None and user.role == UserRole.BLOCKED_USER
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_concurrent_xray_create_vs_block_finishes_without_active_key(tmp_path: Path) -> None:
     class Adapter:
         def __init__(self) -> None:

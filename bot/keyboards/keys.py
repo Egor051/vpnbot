@@ -88,12 +88,14 @@ def key_actions_keyboard(key: VpnKey, owner_user_id: int | None = None, page: in
 
 def confirm_keyboard(action: str, key_id: int, owner_user_id: int | None = None, page: int = 0) -> InlineKeyboardMarkup:
     confirm_data = f"confirm:{action}:{key_id}"
+    cancel_data = f"key:open:{key_id}"
     if owner_user_id is not None:
         confirm_data = f"{confirm_data}:{owner_user_id}:{page}"
+        cancel_data = f"{cancel_data}:{owner_user_id}:{page}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Подтвердить", callback_data=confirm_data)],
-            [InlineKeyboardButton(text="Отмена", callback_data=f"key:open:{key_id}")],
+            [InlineKeyboardButton(text="Отмена", callback_data=cancel_data)],
         ]
     )
 

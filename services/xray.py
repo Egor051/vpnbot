@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 XRAY_ACCESS_MAY_EXIST_STATUSES = {
     VpnKeyStatus.ACTIVE,
     VpnKeyStatus.PENDING_APPLY,
+    VpnKeyStatus.APPLY_FAILED,
     VpnKeyStatus.PENDING_REVOKE,
     VpnKeyStatus.PENDING_DELETE,
     VpnKeyStatus.DELETE_FAILED,

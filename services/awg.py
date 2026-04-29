@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 AWG_ACCESS_MAY_EXIST_STATUSES = {
     VpnKeyStatus.ACTIVE,
     VpnKeyStatus.PENDING_APPLY,
+    VpnKeyStatus.APPLY_FAILED,
     VpnKeyStatus.PENDING_REVOKE,
     VpnKeyStatus.PENDING_DELETE,
     VpnKeyStatus.DELETE_FAILED,
@@ -395,6 +396,19 @@ class AwgService:
         if key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
             peer = self.adapter.find_peer(public_key=key.public_key, client_ip=key.client_ip)
             if peer is None:
+                runtime_peer_present = await self._runtime_peer_present(key)
+                if runtime_peer_present:
+                    await self._remove_awg_access(key)
+                    if key.status == VpnKeyStatus.PENDING_APPLY:
+                        await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+                    await self._write_audit_best_effort(
+                        actor_user_id=None,
+                        action="awg_startup_runtime_orphan_removed",
+                        entity_type=AuditEntityType.VPN_KEY,
+                        entity_id=key.id,
+                        details={"runtime_peer_present": True, "client_ip": key.client_ip, "previous_status": key.status.value},
+                    )
+                    return True
                 if key.status == VpnKeyStatus.PENDING_APPLY:
                     await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
                     await self._write_audit_best_effort(
@@ -450,6 +464,14 @@ class AwgService:
             return True
 
         return False
+
+    async def _runtime_peer_present(self, key: VpnKey) -> bool:
+        if not key.public_key:
+            return False
+        verifier = getattr(self.adapter, "verify_runtime_peer", None)
+        if verifier is None:
+            return False
+        return bool(await verifier(key.public_key))
 
     async def _write_startup_reconcile_failure_audit(self, key: VpnKey, error: Exception) -> None:
         await self._write_audit_best_effort(

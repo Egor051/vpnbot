@@ -54,7 +54,7 @@ SQLite-файл по умолчанию: `/opt/vpn-service/data/vpn.db`.
 - `audit_log`
 - `vpn_key_traffic_stats`
 
-Текущая версия схемы: `5`.
+Текущая версия схемы: `6`.
 
 Миграция v4:
 
@@ -69,6 +69,11 @@ SQLite-файл по умолчанию: `/opt/vpn-service/data/vpn.db`.
 - перед созданием индекса останавливает запуск при найденных duplicate reserved `client_ip`;
 - валидирует orphan `vpn_key_traffic_stats.key_id` и actor/reference поля, где это критично;
 - для новых БД включает CHECK constraints для enum-like полей.
+
+Миграция v6:
+
+- расширяет reserved AWG `client_ip` index на статус `apply_failed`, потому что такой peer мог частично примениться в runtime;
+- перед пересозданием индекса останавливает запуск при duplicate reserved `client_ip`, включая `apply_failed`.
 
 Bootstrap:
 
@@ -86,6 +91,8 @@ cd /opt/vpn-service
 cp .env.example .env
 nano .env
 ```
+
+После `cp .env.example .env` обязательно замените `ADMIN_IDS` на реальный числовой Telegram ID администратора. Нельзя оставлять default/example/sample ID из примера. Если ID указан неверно, можно потерять доступ к админке или выдать `SUPERADMIN` не тому пользователю.
 
 `AWG_DNS` — основная переменная для DNS в клиентском AWG config.
 `AWG_CLIENT_DNS` поддерживается только как legacy alias для старых установок.
@@ -122,6 +129,8 @@ false: `0,false,no,n,off`. Любое другое непустое значен
 
 Если bootstrap останавливается с сообщением про orphan-записи в SQLite, не удаляйте данные автоматически. Сделайте backup `vpn.db`, найдите строки без связанного пользователя через `LEFT JOIN users`, затем вручную восстановите владельца или удалите orphan-записи только после проверки.
 
+Перед production deploy перепроверьте все значения `.env`, особенно `XRAY_*`, `AWG_*`, `AWG_DNS`, `AWG_ALLOWED_IPS`, `AWG_ENDPOINT_HOST`, `AWG_ENDPOINT_PORT`, `AWG_SERVER_ADDRESS` и `AWG_NETWORK`. После заполнения `.env` создайте тестовый Xray-ключ и тестовый AWG-ключ, импортируйте клиентские конфиги и реально проверьте подключение.
+
 ## Установка на Ubuntu 24
 
 ```bash
@@ -152,6 +161,7 @@ sudo systemctl status vpn-bot
 ## Безопасность
 
 - Bot token, ADMIN_IDS, endpoint и proxy secrets берутся только из `.env`.
+- Перед production deploy проверьте ownership и permissions: код проекта не должен быть writable для посторонних или непривилегированных пользователей; `.env`, SQLite DB, backup/config files должны иметь ограниченные права; `data/` и `logs/` должны быть writable только нужному пользователю или systemd service user.
 - SQLite DB является secret storage: в `vpn_keys.payload_json` хранятся приватные данные ключей, поэтому backup и доступ к файлам DB должны быть ограничены.
 - SQLite sidecar-файлы `vpn.db-wal` и `vpn.db-shm`, если они существуют, также выставляются в `0600` на POSIX.
 - Systemd unit задаёт `UMask=0077`, чтобы новые файлы процесса не становились world-readable.
@@ -166,6 +176,8 @@ sudo systemctl status vpn-bot
 - Чужие конфиги доступны только владельцу или `SUPERADMIN`.
 - Пользовательские заметки к ключам являются private owner note: владелец видит и редактирует свою заметку, `SUPERADMIN` не видит и не перезаписывает чужую private note.
 - Объявления отправляются всем non-blocked пользователям, включая pending/approved/admin, но исключая заблокированных.
+- Бот рассчитан только на private chat. В BotFather запретите добавление бота в группы и настройте group privacy так, чтобы бот использовался только в личном чате.
+- При добавлении новых audit-событий не пишите в `details` полные ключи, VLESS-ссылки, private keys, preshared keys, UUID, shortId, proxy passwords и полные client configs. Audit должен содержать безопасные идентификаторы, тип действия и минимальный контекст; masking нужно проверять при каждом новом событии.
 
 ## Linux permission QA
 
@@ -183,6 +195,6 @@ Expected result: main Xray/AWG config files keep their original owner/group/mode
 - Если `XRAY_INBOUND_TAG` пустой, допускается только один VLESS/Reality inbound.
 - AWG adapter добавляет только bot-managed `[Peer]` блоки с маркерами `vpn-bot peer start/end`.
 - AWG unmanaged peer с `AllowedIPs` subnet внутри `AWG_NETWORK` резервирует весь диапазон subnet для allocator; subnet вне `AWG_NETWORK` игнорируется для allocation.
-- AWG IP переиспользуется только после статусов `revoked`, `deleted` или `failed`.
+- AWG IP переиспользуется только после статусов `revoked`, `deleted` или `failed`; `apply_failed` считается reserved до reconciliation/delete/revoke.
 - R01 (`/start` в группах) сознательно закрыт продуктово запретом приглашения бота в группы.
 - R34 (proxy password как shared secret) является ожидаемым поведением продукта.

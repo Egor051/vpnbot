@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 
 from adapters.clock import ClockProvider
-from bot.keyboards.keys import key_actions_keyboard, keys_list_keyboard
+from bot.keyboards.admin import user_actions_keyboard
+from bot.keyboards.keys import confirm_keyboard, key_actions_keyboard, keys_list_keyboard
 from config.settings import Settings
 from db.database import Database
 from models.dto import TelegramUserProfile, User, VpnKey
@@ -205,3 +206,31 @@ def test_note_buttons_hidden_for_admin_foreign_key_context() -> None:
 
     assert f"key:note:{key.id}" not in detail_callbacks
     assert f"key:note:{key.id}" not in list_callbacks
+
+
+def test_user_actions_keyboard_hides_issue_key_for_pending_and_blocked_users() -> None:
+    pending = User(200, "pending", "Pending", UserRole.PENDING_USER, "now", "now", None)
+    blocked = User(300, "blocked", "Blocked", UserRole.BLOCKED_USER, "now", "now", "now")
+    approved = User(400, "approved", "Approved", UserRole.APPROVED_USER, "now", "now", None)
+    superadmin = User(1, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
+
+    def callbacks(user: User) -> set[str | None]:
+        return {button.callback_data for row in user_actions_keyboard(user).inline_keyboard for button in row}
+
+    assert f"admin:issue:{pending.telegram_user_id}" not in callbacks(pending)
+    assert f"admin:issue:{blocked.telegram_user_id}" not in callbacks(blocked)
+    assert f"admin:issue:{approved.telegram_user_id}" in callbacks(approved)
+    assert f"admin:issue:{superadmin.telegram_user_id}" in callbacks(superadmin)
+
+
+def test_confirm_cancel_keeps_admin_owner_and_page_context() -> None:
+    admin_keyboard = confirm_keyboard("delete", 10, owner_user_id=100, page=2)
+    user_keyboard = confirm_keyboard("delete", 10)
+
+    admin_callbacks = [button.callback_data for row in admin_keyboard.inline_keyboard for button in row]
+    user_callbacks = [button.callback_data for row in user_keyboard.inline_keyboard for button in row]
+
+    assert "confirm:delete:10:100:2" in admin_callbacks
+    assert "key:open:10:100:2" in admin_callbacks
+    assert "confirm:delete:10" in user_callbacks
+    assert "key:open:10" in user_callbacks

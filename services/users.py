@@ -187,6 +187,7 @@ class UserService:
         statuses = {
             VpnKeyStatus.ACTIVE,
             VpnKeyStatus.PENDING_APPLY,
+            VpnKeyStatus.APPLY_FAILED,
             VpnKeyStatus.PENDING_REVOKE,
             VpnKeyStatus.PENDING_DELETE,
             VpnKeyStatus.DELETE_FAILED,

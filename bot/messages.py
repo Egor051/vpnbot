@@ -44,11 +44,10 @@ async def send_awg_config(
     edit_text: bool = False,
     send_document: bool = True,
 ) -> None:
-    text_was_updated = True
     if len(config_text) <= MAX_TEXT_CONFIG_LEN:
         text = cap_telegram_html(f"<b>{h(title)}</b>\n\n{pre(config_text)}")
         if edit_text:
-            text_was_updated = await safe_edit_message_text(message, text, reply_markup=reply_markup)
+            await safe_edit_message_text(message, text, reply_markup=reply_markup)
         else:
             await message.answer(text, reply_markup=reply_markup)
         document_reply_markup = None
@@ -56,16 +55,13 @@ async def send_awg_config(
     else:
         text = cap_telegram_html(f"{h(title)}\nКонфиг отправлен файлом, потому что он слишком длинный для сообщения.")
         if edit_text:
-            text_was_updated = await safe_edit_message_text(message, text, reply_markup=reply_markup)
+            await safe_edit_message_text(message, text, reply_markup=reply_markup)
         else:
             await message.answer(text, reply_markup=reply_markup)
         document_reply_markup = None
         document_caption = text
 
     if not send_document and len(config_text) <= MAX_TEXT_CONFIG_LEN:
-        return
-
-    if edit_text and not text_was_updated:
         return
 
     document = BufferedInputFile(config_text.encode("utf-8"), filename=filename)

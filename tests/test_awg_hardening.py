@@ -257,6 +257,61 @@ def test_missing_public_key_without_managed_block_fails_safe(tmp_path: Path) -> 
     asyncio.run(run())
 
 
+def test_apply_failed_runtime_only_peer_is_removed_on_startup(tmp_path: Path) -> None:
+    key = replace(_key(), status=VpnKeyStatus.APPLY_FAILED)
+
+    class Repo:
+        def __init__(self) -> None:
+            self.sent = False
+            self.statuses: list[VpnKeyStatus] = []
+
+        async def list_by_type_statuses(
+            self,
+            key_type: VpnKeyType,
+            statuses: set[VpnKeyStatus],
+            limit: int = 500,
+            offset: int = 0,
+            after_id: int | None = None,
+        ) -> list[VpnKey]:
+            assert VpnKeyStatus.APPLY_FAILED in statuses
+            if self.sent:
+                return []
+            self.sent = True
+            return [key]
+
+        async def set_status(self, key_id: int, status: VpnKeyStatus, now: str) -> None:
+            self.statuses.append(status)
+
+        async def mark_active(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("runtime-only peer must not be marked active without config peer")
+
+    class Adapter:
+        def __init__(self) -> None:
+            self.removed_public_key: str | None = None
+
+        def find_peer(self, **kwargs: object) -> None:
+            return None
+
+        async def verify_runtime_peer(self, public_key: str) -> bool:
+            return public_key == key.public_key
+
+        async def remove_peer(self, *, key_id: int, public_key: str | None) -> None:
+            self.removed_public_key = public_key
+
+    async def run() -> None:
+        repo = Repo()
+        adapter = Adapter()
+        service = _service(tmp_path, repo, adapter)
+
+        summary = await service.startup_reconcile()
+
+        assert summary == {"checked": 1, "recovered": 1, "failed": 0}
+        assert adapter.removed_public_key == key.public_key
+        assert repo.statuses == []
+
+    asyncio.run(run())
+
+
 def test_add_peer_restore_failure_still_attempts_runtime_cleanup(tmp_path: Path) -> None:
     config_path = _write_awg_config(tmp_path)
 

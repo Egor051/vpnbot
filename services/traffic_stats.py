@@ -13,6 +13,7 @@ from services.errors import AccessDenied, NotFound
 from services.users import UserService
 
 logger = logging.getLogger(__name__)
+PUBLIC_BACKEND_STATS_ERROR = "Не удалось получить данные от backend"
 
 
 class TrafficStatsService:
@@ -77,9 +78,8 @@ class TrafficStatsService:
         try:
             return await self.awg.list_transfer(), None
         except Exception as exc:
-            reason = f"AWG transfer недоступен: {exc}"
-            logger.warning(reason)
-            return {}, reason
+            logger.warning("AWG transfer недоступен: %s", exc, exc_info=True)
+            return {}, PUBLIC_BACKEND_STATS_ERROR
 
     async def _load_xray_stats(self, keys: list[VpnKey]) -> tuple[dict[str, int], str | None]:
         if not any(key.key_type == VpnKeyType.XRAY for key in keys):
@@ -87,9 +87,8 @@ class TrafficStatsService:
         try:
             return await self.xray.query_all(), None
         except Exception as exc:
-            reason = f"Xray stats API недоступен: {exc}"
-            logger.warning(reason)
-            return {}, reason
+            logger.warning("Xray stats API недоступен: %s", exc, exc_info=True)
+            return {}, PUBLIC_BACKEND_STATS_ERROR
 
     async def _refresh_awg_key(
         self,
@@ -204,7 +203,7 @@ class TrafficStatsService:
     def _next_total(self, previous_total: int, previous_raw: int | None, current_raw: int) -> int:
         current_raw = max(current_raw, 0)
         if previous_raw is None:
-            return current_raw
+            return max(previous_total, current_raw)
         if current_raw < previous_raw:
             return previous_total + current_raw
         return previous_total + (current_raw - previous_raw)

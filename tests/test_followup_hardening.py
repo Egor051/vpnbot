@@ -21,7 +21,7 @@ from adapters.clock import ClockProvider
 from adapters.errors import XrayApplyError
 from adapters.xray_config import XrayConfigAdapter
 from bot.app import _startup_reconcile_keys
-from bot.messages import safe_edit_message_text
+from bot.messages import MAX_TEXT_CONFIG_LEN, safe_edit_message_text, send_awg_config
 from bot.middlewares.access import BLOCKED_CALLBACK_TEXT, BLOCKED_MESSAGE_TEXT, BlockedUserMiddleware
 from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
 from config.settings import Settings
@@ -209,7 +209,7 @@ def test_legacy_v3_duplicate_pending_migrates_before_unique_index(tmp_path: Path
             print("BOOTSTRAP_OK")
             cursor = await db.conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             version = await cursor.fetchone()
-            assert version["value"] == "5"
+            assert version["value"] == "6"
             cursor = await db.conn.execute(
                 "SELECT status, COUNT(*) AS cnt FROM access_requests GROUP BY status ORDER BY status"
             )
@@ -2179,6 +2179,42 @@ def test_safe_edit_message_text_sends_new_message_when_edit_target_is_unavailabl
         message = MessageStub()
         assert await safe_edit_message_text(message, "fallback", reply_markup="keyboard") is True  # type: ignore[arg-type]
         assert message.answers == [("fallback", "keyboard")]
+
+    asyncio.run(run())
+
+
+def test_send_awg_config_still_sends_document_when_edit_text_is_not_modified() -> None:
+    class MessageStub:
+        def __init__(self) -> None:
+            self.documents: list[tuple[object, str | None]] = []
+
+        async def edit_text(self, text: str, reply_markup: object = None) -> None:
+            raise TelegramBadRequest(method=SimpleNamespace(), message="Bad Request: message is not modified")
+
+        async def answer(self, text: str, reply_markup: object = None) -> None:
+            raise AssertionError("long config should be sent as document")
+
+        async def answer_document(
+            self,
+            document: object,
+            caption: str | None = None,
+            disable_content_type_detection: bool = False,
+            reply_markup: object = None,
+        ) -> None:
+            self.documents.append((document, caption))
+
+    async def run() -> None:
+        message = MessageStub()
+        await send_awg_config(
+            message,  # type: ignore[arg-type]
+            title="AWG",
+            config_text="x" * (MAX_TEXT_CONFIG_LEN + 1),
+            filename="awg_A7kQz.conf",
+            edit_text=True,
+        )
+
+        assert len(message.documents) == 1
+        assert message.documents[0][1] is not None
 
     asyncio.run(run())
 

@@ -38,7 +38,7 @@ from bot.keyboards.keys import key_actions_keyboard, keys_list_keyboard
 from bot.messages import awg_config_filename, safe_edit_message_text, send_awg_config
 from bot.pagination import page_offset, split_page
 from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
-from bot.rate_limit import RateLimiter
+from bot.rate_limit import RateLimitExceeded, RateLimiter
 from models.dto import TelegramUserProfile
 from models.enums import UserRole, VpnKeyType
 from services.user_locks import UserLockManager
@@ -177,6 +177,8 @@ async def admin_announcement_send(
             ),
             reply_markup=admin_panel_keyboard(),
         )
+    except RateLimitExceeded as exc:
+        await answer_callback_error(callback, exc)
     except Exception as exc:
         await state.clear()
         await answer_callback_error(callback, exc)

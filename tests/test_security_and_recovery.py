@@ -330,13 +330,13 @@ def test_awg_delete_failed_retry_removes_access_before_deleted() -> None:
     assert repo.key is None
 
 
-def test_db_v5_prevents_two_pending_requests_and_tolerates_corrupted_json(tmp_path: Path) -> None:
+def test_db_v6_prevents_two_pending_requests_and_tolerates_corrupted_json(tmp_path: Path) -> None:
     async def run() -> None:
         db = Database(tmp_path / "vpn.db")
         await db.connect()
         try:
             await db.bootstrap()
-            assert CURRENT_SCHEMA_VERSION == 5
+            assert CURRENT_SCHEMA_VERSION == 6
             users = UserRepository(db)
             profile = TelegramUserProfile(telegram_user_id=100, username="user", first_name="User")
             await users.upsert_profile(profile, UserRole.PENDING_USER, "now")

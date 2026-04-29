@@ -102,7 +102,8 @@ def user_actions_keyboard(user: User) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="Заблокировать", callback_data=f"admin:block:{user.telegram_user_id}")])
     if blocked:
         rows.append([InlineKeyboardButton(text="Разблокировать", callback_data=f"admin:unblock:{user.telegram_user_id}")])
-    rows.append([InlineKeyboardButton(text="Выдать ключ", callback_data=f"admin:issue:{user.telegram_user_id}")])
+    if user.role in {UserRole.APPROVED_USER, UserRole.SUPERADMIN} and not blocked:
+        rows.append([InlineKeyboardButton(text="Выдать ключ", callback_data=f"admin:issue:{user.telegram_user_id}")])
     rows.append([InlineKeyboardButton(text="Ключи пользователя", callback_data=f"admin:ukeys:{user.telegram_user_id}:0")])
     rows.append([InlineKeyboardButton(text="К пользователям", callback_data="admin:users")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -409,6 +409,7 @@ class VpnKeyRepository:
         reserved_statuses = (
             VpnKeyStatus.PENDING_APPLY,
             VpnKeyStatus.ACTIVE,
+            VpnKeyStatus.APPLY_FAILED,
             VpnKeyStatus.PENDING_REVOKE,
             VpnKeyStatus.PENDING_DELETE,
             VpnKeyStatus.DELETE_FAILED,
@@ -446,6 +447,7 @@ class VpnKeyRepository:
         statuses = (
             VpnKeyStatus.ACTIVE,
             VpnKeyStatus.PENDING_APPLY,
+            VpnKeyStatus.APPLY_FAILED,
             VpnKeyStatus.PENDING_REVOKE,
             VpnKeyStatus.PENDING_DELETE,
             VpnKeyStatus.DELETE_FAILED,
