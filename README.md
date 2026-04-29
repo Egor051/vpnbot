@@ -59,6 +59,7 @@ This project handles operational VPN and Telegram secrets. Never commit or publi
 - SQLite databases or database dumps.
 - Server IP addresses combined with credentials.
 - SSH, panel, hosting, or other server credentials.
+- Recommended BotFather setting: disable adding this bot to groups. The bot is designed to work in private chats only; group chats may expose user data, admin actions, or sensitive operational messages.
 
 Use `.env.example` only as a template. Keep production configuration on the server and outside Git history.
 
