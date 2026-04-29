@@ -182,8 +182,8 @@ def test_xray_create_succeeds_when_post_apply_audit_fails(tmp_path: Path) -> Non
         def uuid4(self) -> str:
             return "00000000-0000-4000-8000-000000000001"
 
-        def email_label(self, telegram_user_id: int, username: str | None = None) -> str:
-            return "label"
+        def generated_key_name(self, prefix: str) -> str:
+            return f"{prefix}_Ab3dE"
 
     async def run() -> None:
         db = Database(tmp_path / "vpn.db")
@@ -238,8 +238,8 @@ def test_awg_create_succeeds_when_post_apply_audit_fails(tmp_path: Path) -> None
             return "10.0.0.2"
 
     class Ids:
-        def key_label(self, telegram_user_id: int, username: str | None = None) -> str:
-            return "label"
+        def generated_key_name(self, prefix: str) -> str:
+            return f"{prefix}_Ab3dE"
 
     async def run() -> None:
         db = Database(tmp_path / "vpn.db")

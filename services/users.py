@@ -12,6 +12,7 @@ from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.audit import AuditService
 from services.errors import AccessDenied, InvalidOperation, NotFound
+from services.user_locks import UserLockManager
 
 KeyRevoker = Callable[[int, int], Awaitable[VpnKey]]
 StateClearer = Callable[[int], Awaitable[None]]
@@ -26,11 +27,13 @@ class UserService:
         settings: Settings,
         clock: ClockProvider,
         audit: AuditService,
+        user_locks: UserLockManager | None = None,
     ) -> None:
         self.users = users
         self.settings = settings
         self.clock = clock
         self.audit = audit
+        self.user_locks = user_locks or UserLockManager()
         self._vpn_keys: VpnKeyRepository | None = None
         self._key_revokers: dict[VpnKeyType, KeyRevoker] = {}
         self._state_clearer: StateClearer | None = None
@@ -120,44 +123,43 @@ class UserService:
         revoke_active_keys: bool = True,
     ) -> BlockUserResult:
         await self.require_superadmin(actor_user_id)
-        if target_user_id in self.settings.admin_ids:
-            raise InvalidOperation("Нельзя заблокировать superadmin из ADMIN_IDS")
-        target = await self.get_user(target_user_id)
-        if target.role == UserRole.SUPERADMIN:
-            raise InvalidOperation("Нельзя заблокировать superadmin")
+        async with self.user_locks.lock(target_user_id):
+            if target_user_id in self.settings.admin_ids:
+                raise InvalidOperation("Нельзя заблокировать superadmin из ADMIN_IDS")
+            target = await self.get_user(target_user_id)
+            if target.role == UserRole.SUPERADMIN:
+                raise InvalidOperation("Нельзя заблокировать superadmin")
 
-        revoked_key_ids: list[int] = []
-        errors: list[KeyOperationError] = []
-        if revoke_active_keys:
-            if self._vpn_keys is None or not self._key_revokers:
-                errors.append(KeyOperationError(0, VpnKeyType.XRAY, "Сервисы отзыва ключей не подключены"))
-            else:
-                keys = await self._vpn_keys.list_by_owner_statuses(
-                    target_user_id,
-                    {
-                        VpnKeyStatus.ACTIVE,
-                        VpnKeyStatus.PENDING_APPLY,
-                        VpnKeyStatus.PENDING_REVOKE,
-                        VpnKeyStatus.PENDING_DELETE,
-                        VpnKeyStatus.DELETE_FAILED,
+            revoked_key_ids: list[int] = []
+            errors: list[KeyOperationError] = []
+            if revoke_active_keys:
+                if self._vpn_keys is None or not self._key_revokers:
+                    errors.append(KeyOperationError(0, VpnKeyType.XRAY, "Сервисы отзыва ключей не подключены"))
+                else:
+                    await self._revoke_all_access_keys(actor_user_id, target_user_id, revoked_key_ids, errors)
+
+            if errors:
+                await self.audit.write(
+                    actor_user_id=actor_user_id,
+                    action="user_block_failed",
+                    entity_type=AuditEntityType.USER,
+                    entity_id=target_user_id,
+                    details={
+                        "revoke_active_keys": revoke_active_keys,
+                        "revoked_key_ids": revoked_key_ids,
+                        "error_count": len(errors),
+                        "errors": [{"key_id": item.key_id, "key_type": item.key_type.value, "error": item.error} for item in errors],
                     },
-                    limit=500,
                 )
-                for key in keys:
-                    revoker = self._key_revokers.get(key.key_type)
-                    if revoker is None:
-                        errors.append(KeyOperationError(key.id, key.key_type, "Нет сервиса для отзыва ключа"))
-                        continue
-                    try:
-                        await revoker(actor_user_id, key.id)
-                        revoked_key_ids.append(key.id)
-                    except Exception as exc:
-                        errors.append(KeyOperationError(key.id, key.key_type, str(exc)))
+                user = await self.get_user(target_user_id)
+                return BlockUserResult(user=user, revoked_key_ids=tuple(revoked_key_ids), errors=tuple(errors))
 
-        if errors:
+            now = self.clock.now()
+            await self.users.set_role(target_user_id, UserRole.BLOCKED_USER, now, blocked_at=now)
+            await self.clear_user_state(target_user_id)
             await self.audit.write(
                 actor_user_id=actor_user_id,
-                action="user_block_failed",
+                action="user_blocked",
                 entity_type=AuditEntityType.USER,
                 entity_id=target_user_id,
                 details={
@@ -170,23 +172,44 @@ class UserService:
             user = await self.get_user(target_user_id)
             return BlockUserResult(user=user, revoked_key_ids=tuple(revoked_key_ids), errors=tuple(errors))
 
-        now = self.clock.now()
-        await self.users.set_role(target_user_id, UserRole.BLOCKED_USER, now, blocked_at=now)
-        await self.clear_user_state(target_user_id)
-        await self.audit.write(
-            actor_user_id=actor_user_id,
-            action="user_blocked",
-            entity_type=AuditEntityType.USER,
-            entity_id=target_user_id,
-            details={
-                "revoke_active_keys": revoke_active_keys,
-                "revoked_key_ids": revoked_key_ids,
-                "error_count": len(errors),
-                "errors": [{"key_id": item.key_id, "key_type": item.key_type.value, "error": item.error} for item in errors],
-            },
-        )
-        user = await self.get_user(target_user_id)
-        return BlockUserResult(user=user, revoked_key_ids=tuple(revoked_key_ids), errors=tuple(errors))
+    async def _revoke_all_access_keys(
+        self,
+        actor_user_id: int,
+        target_user_id: int,
+        revoked_key_ids: list[int],
+        errors: list[KeyOperationError],
+    ) -> None:
+        if self._vpn_keys is None:
+            errors.append(KeyOperationError(0, VpnKeyType.XRAY, "Сервисы отзыва ключей не подключены"))
+            return
+        statuses = {
+            VpnKeyStatus.ACTIVE,
+            VpnKeyStatus.PENDING_APPLY,
+            VpnKeyStatus.PENDING_REVOKE,
+            VpnKeyStatus.PENDING_DELETE,
+            VpnKeyStatus.DELETE_FAILED,
+        }
+        processed_success_ids: set[int] = set()
+        while True:
+            keys = await self._vpn_keys.list_by_owner_statuses(target_user_id, statuses, limit=500)
+            if not keys:
+                return
+            for key in keys:
+                if key.id in processed_success_ids:
+                    errors.append(KeyOperationError(key.id, key.key_type, "Ключ остался в активном статусе после отзыва"))
+                    return
+                revoker = self._key_revokers.get(key.key_type)
+                if revoker is None:
+                    errors.append(KeyOperationError(key.id, key.key_type, "Нет сервиса для отзыва ключа"))
+                    continue
+                try:
+                    await revoker(actor_user_id, key.id)
+                    revoked_key_ids.append(key.id)
+                    processed_success_ids.add(key.id)
+                except Exception as exc:
+                    errors.append(KeyOperationError(key.id, key.key_type, str(exc)))
+            if errors:
+                return
 
     async def unblock_user(self, actor_user_id: int, target_user_id: int) -> User:
         await self.require_superadmin(actor_user_id)

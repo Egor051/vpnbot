@@ -5,6 +5,9 @@ import secrets
 import uuid
 
 
+KEY_NAME_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+
 class IdGenerator:
     def uuid4(self) -> str:
         return str(uuid.uuid4())
@@ -18,6 +21,9 @@ class IdGenerator:
 
     def email_label(self, telegram_user_id: int, username: str | None = None) -> str:
         return self.key_label(telegram_user_id, username)
+
+    def generated_key_name(self, prefix: str) -> str:
+        return f"{prefix}_{''.join(secrets.choice(KEY_NAME_ALPHABET) for _ in range(5))}"
 
     def _label_base(self, telegram_user_id: int, username: str | None) -> str:
         if username:

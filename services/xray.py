@@ -13,8 +13,10 @@ from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.vpn_keys import VpnKeyRepository
 from services.audit import AuditService
+from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.notes import normalize_note
+from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
 
@@ -30,6 +32,7 @@ XRAY_ACCESS_MAY_EXIST_STATUSES = {
 
 XRAY_STARTUP_RECONCILE_STATUSES = {
     VpnKeyStatus.PENDING_APPLY,
+    VpnKeyStatus.APPLY_FAILED,
     VpnKeyStatus.PENDING_REVOKE,
     VpnKeyStatus.PENDING_DELETE,
     VpnKeyStatus.DELETE_FAILED,
@@ -47,6 +50,8 @@ class XrayService:
         clock: ClockProvider,
         ids: IdGenerator,
         audit: AuditService,
+        user_locks: UserLockManager | None = None,
+        backend_health: BackendHealth | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
         self.users = users
@@ -55,84 +60,91 @@ class XrayService:
         self.clock = clock
         self.ids = ids
         self.audit = audit
+        self.user_locks = user_locks or getattr(users, "user_locks", UserLockManager())
+        self.backend_health = backend_health or BackendHealth()
         self._lock = asyncio.Lock()
 
     async def create_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
         return await self.create_xray_key(actor_user_id, owner, note)
 
     async def create_xray_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
+        self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         self.settings.validate_xray_ready()
-        await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
         clean_note = normalize_note(note)
 
-        async with self._lock:
-            uuid_value, email_label = await self._unique_identity(owner.telegram_user_id, owner.username)
-            short_id_managed = self.settings.xray_manage_short_ids
-            short_id = self.ids.xray_short_id() if short_id_managed else self.settings.xray_short_id
-            link = self._build_vless_link(uuid_value, short_id, email_label)
-            payload = {
-                "uuid": uuid_value,
-                "email_label": email_label,
-                "short_id": short_id,
-                "short_id_managed": short_id_managed,
-                "flow": self.settings.xray_flow,
-            }
-            public_payload = {
-                "email_label": email_label,
-                "short_id": short_id,
-                "display_name": f"Xray #{email_label}",
-                "link": link,
-            }
-            key = await self.vpn_keys.create_pending(
-                owner_user_id=owner.telegram_user_id,
-                username=owner.username,
-                key_type=VpnKeyType.XRAY,
-                note=clean_note,
-                payload=payload,
-                public_payload=public_payload,
-                created_by=actor_user_id,
-                now=self.clock.now(),
-                uuid=uuid_value,
-                email_label=email_label,
-            )
-            try:
-                await self.adapter.add_client(
-                    uuid_value=uuid_value,
+        async with self.user_locks.lock(owner.telegram_user_id):
+            await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+            async with self._lock:
+                await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+                uuid_value, email_label = await self._unique_identity(owner.telegram_user_id, owner.username)
+                short_id_managed = self.settings.xray_manage_short_ids
+                short_id = self.ids.xray_short_id() if short_id_managed else self.settings.xray_short_id
+                link = self._build_vless_link(uuid_value, short_id, email_label)
+                payload = {
+                    "uuid": uuid_value,
+                    "email_label": email_label,
+                    "short_id": short_id,
+                    "short_id_managed": short_id_managed,
+                    "flow": self.settings.xray_flow,
+                }
+                public_payload = {
+                    "email_label": email_label,
+                    "short_id": short_id,
+                    "display_name": f"Xray #{email_label}",
+                    "link": link,
+                }
+                key = await self.vpn_keys.create_pending(
+                    owner_user_id=owner.telegram_user_id,
+                    username=owner.username,
+                    key_type=VpnKeyType.XRAY,
+                    note=clean_note,
+                    payload=payload,
+                    public_payload=public_payload,
+                    created_by=actor_user_id,
+                    now=self.clock.now(),
+                    uuid=uuid_value,
                     email_label=email_label,
-                    short_id=short_id,
-                    flow=self.settings.xray_flow,
-                    manage_short_id=short_id_managed,
                 )
-            except Exception as exc:
-                await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+                try:
+                    await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+                    await self.adapter.add_client(
+                        uuid_value=uuid_value,
+                        email_label=email_label,
+                        short_id=short_id,
+                        flow=self.settings.xray_flow,
+                        manage_short_id=short_id_managed,
+                    )
+                except Exception as exc:
+                    await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+                    await self._write_audit_best_effort(
+                        actor_user_id=actor_user_id,
+                        action="xray_create_failed",
+                        entity_type=AuditEntityType.VPN_KEY,
+                        entity_id=key.id,
+                        details={"owner_user_id": owner.telegram_user_id, "error": str(exc)},
+                    )
+                    raise
+
+                try:
+                    await self.vpn_keys.mark_active(key.id, self.clock.now(), payload=payload, public_payload=public_payload)
+                except Exception:
+                    logger.critical("Xray client applied, but DB mark_active failed for key_id=%s", key.id, exc_info=True)
+                    raise
                 await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
-                    action="xray_create_failed",
+                    action="xray_key_created",
                     entity_type=AuditEntityType.VPN_KEY,
                     entity_id=key.id,
-                    details={"owner_user_id": owner.telegram_user_id, "error": str(exc)},
+                    details={"owner_user_id": owner.telegram_user_id, "owner_username": owner.username, "label": email_label},
                 )
-                raise
-
-            try:
-                await self.vpn_keys.mark_active(key.id, self.clock.now(), payload=payload, public_payload=public_payload)
-            except Exception:
-                logger.critical("Xray client applied, but DB mark_active failed for key_id=%s", key.id, exc_info=True)
-                raise
-            await self._write_audit_best_effort(
-                actor_user_id=actor_user_id,
-                action="xray_key_created",
-                entity_type=AuditEntityType.VPN_KEY,
-                entity_id=key.id,
-                details={"owner_user_id": owner.telegram_user_id, "owner_username": owner.username, "label": email_label},
-            )
-            active_key = await self._get_key(key.id)
-            return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key, viewer_user_id=actor_user_id))
+                active_key = await self._get_key(key.id)
+                return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key, viewer_user_id=actor_user_id))
 
     async def revoke_key(self, actor_user_id: int, key_id: int) -> VpnKey:
         return await self.revoke_xray_key(actor_user_id, key_id)
 
     async def revoke_xray_key(self, actor_user_id: int, key_id: int) -> VpnKey:
+        self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         async with self._lock:
             key = await self._get_xray_key_for_manage(actor_user_id, key_id)
             if key.status == VpnKeyStatus.REVOKED:
@@ -169,6 +181,7 @@ class XrayService:
         await self.delete_xray_key(actor_user_id, key_id)
 
     async def delete_xray_key(self, actor_user_id: int, key_id: int) -> None:
+        self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         async with self._lock:
             key = await self._get_xray_key_for_manage(actor_user_id, key_id)
             previous_status = key.status
@@ -331,25 +344,27 @@ class XrayService:
         )
 
     async def _startup_reconcile_key(self, key: VpnKey) -> bool:
-        if key.status == VpnKeyStatus.PENDING_APPLY:
+        if key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
             client = self.adapter.find_client(uuid_value=key.uuid, email_label=key.email_label)
             if client is None:
-                await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
-                await self._write_audit_best_effort(
-                    actor_user_id=None,
-                    action="xray_startup_pending_apply_failed",
-                    entity_type=AuditEntityType.VPN_KEY,
-                    entity_id=key.id,
-                    details={"client_present": False},
-                )
-                return True
+                if key.status == VpnKeyStatus.PENDING_APPLY:
+                    await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+                    await self._write_audit_best_effort(
+                        actor_user_id=None,
+                        action="xray_startup_pending_apply_failed",
+                        entity_type=AuditEntityType.VPN_KEY,
+                        entity_id=key.id,
+                        details={"client_present": False},
+                    )
+                    return True
+                return False
             await self.vpn_keys.mark_active(key.id, self.clock.now())
             await self._write_audit_best_effort(
                 actor_user_id=None,
-                action="xray_startup_pending_apply_active",
+                action="xray_startup_apply_recovered",
                 entity_type=AuditEntityType.VPN_KEY,
                 entity_id=key.id,
-                details={"client_present": True},
+                details={"client_present": True, "previous_status": key.status.value},
             )
             return True
 
@@ -425,7 +440,7 @@ class XrayService:
     async def _unique_identity(self, telegram_user_id: int, username: str | None) -> tuple[str, str]:
         for _ in range(5):
             uuid_value = self.ids.uuid4()
-            email_label = self.ids.email_label(telegram_user_id, username)
+            email_label = self.ids.generated_key_name("xray")
             if await self.vpn_keys.find_by_uuid(uuid_value) is None and await self.vpn_keys.find_by_email_label(email_label) is None:
                 return uuid_value, email_label
         raise InvalidOperation("Не удалось сгенерировать уникальные Xray-идентификаторы")
@@ -444,7 +459,7 @@ class XrayService:
         if self.settings.xray_flow:
             params["flow"] = self.settings.xray_flow
         query = urlencode(params)
-        fragment_label = f"xray_{email_label}" if email_label else "xray"
+        fragment_label = email_label or "xray"
         fragment = quote(fragment_label)
         return f"vless://{uuid_value}@{host}:{self.settings.xray_public_port}?{query}#{fragment}"
 

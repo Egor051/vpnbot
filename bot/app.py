@@ -34,9 +34,11 @@ from services.access_approval import AccessApprovalService
 from services.announcements import AnnouncementService
 from services.audit import AuditService
 from services.awg import AwgService
+from services.backend_health import BackendHealth
 from services.notes import NotesService
 from services.proxy import ProxyService
 from services.traffic_stats import TrafficStatsService
+from services.user_locks import UserLockManager
 from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
 from services.xray import XrayService
@@ -58,6 +60,7 @@ class Services:
     traffic_stats: TrafficStatsService
     audit: AuditService
     announcements: AnnouncementService
+    backend_health: BackendHealth
 
 
 async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
@@ -70,6 +73,8 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
     backup = BackupAdapter(clock, keep_last=settings.config_backup_keep_last)
     systemctl = SystemCtlAdapter(shell)
     ids = IdGenerator()
+    user_locks = UserLockManager()
+    backend_health = BackendHealth()
 
     users_repo = UserRepository(db)
     access_repo = AccessRequestRepository(db)
@@ -79,7 +84,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
     traffic_stats_repo = TrafficStatsRepository(db)
 
     audit_service = AuditService(audit_repo, clock)
-    user_service = UserService(users=users_repo, settings=settings, clock=clock, audit=audit_service)
+    user_service = UserService(users=users_repo, settings=settings, clock=clock, audit=audit_service, user_locks=user_locks)
     await user_service.bootstrap_admins()
 
     access_service = AccessApprovalService(
@@ -116,6 +121,8 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         clock=clock,
         ids=ids,
         audit=audit_service,
+        user_locks=user_locks,
+        backend_health=backend_health,
     )
     awg_service = AwgService(
         vpn_keys=vpn_keys_repo,
@@ -126,6 +133,8 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         clock=clock,
         ids=ids,
         audit=audit_service,
+        user_locks=user_locks,
+        backend_health=backend_health,
     )
     user_service.attach_key_management(
         vpn_keys_repo,
@@ -177,6 +186,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         traffic_stats=traffic_stats_service,
         audit=audit_service,
         announcements=announcement_service,
+        backend_health=backend_health,
     )
 
     await _startup_reconcile_keys(services)
@@ -206,6 +216,12 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
 async def _startup_reconcile_keys(services: Services) -> None:
     xray_summary = await _safe_startup_reconcile("Xray", services.xray.startup_reconcile)
     awg_summary = await _safe_startup_reconcile("AWG", services.awg.startup_reconcile)
+    backend_health = getattr(services, "backend_health", None)
+    if backend_health is not None:
+        if xray_summary.get("failed", 0):
+            backend_health.mark_degraded(VpnKeyType.XRAY, "startup reconciliation failed")
+        if awg_summary.get("failed", 0):
+            backend_health.mark_degraded(VpnKeyType.AWG, "startup reconciliation failed")
     logger.info("Startup VPN key reconciliation: xray=%s awg=%s", xray_summary, awg_summary)
     if xray_summary["checked"] or awg_summary["checked"]:
         try:
