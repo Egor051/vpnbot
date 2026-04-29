@@ -106,6 +106,21 @@ def _ipv4_network(name: str, value: str) -> str:
     return value
 
 
+def _ipv4_address_in_network(name: str, value: str, network_value: str) -> str:
+    try:
+        network = ipaddress.ip_network(network_value, strict=False)
+        address = ipaddress.ip_address(value.split("/", 1)[0])
+    except ValueError as exc:
+        raise SettingsError(f"{name} должен быть корректным IPv4-адресом внутри AWG_NETWORK") from exc
+    if address.version != 4:
+        raise SettingsError(f"{name} сейчас поддерживает только IPv4")
+    if address not in network:
+        raise SettingsError(f"{name} должен входить в AWG_NETWORK")
+    if address == network.network_address or address == network.broadcast_address:
+        raise SettingsError(f"{name} не должен быть network или broadcast address")
+    return str(address)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     bot_token: str
@@ -186,6 +201,11 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
     xray_short_id = _xray_short_id(_optional("XRAY_SHORT_ID"), required=False)
     xray_port = _optional("XRAY_PUBLIC_PORT") or _optional("XRAY_SERVER_PORT")
     awg_network = _ipv4_network("AWG_NETWORK", _optional("AWG_NETWORK", "10.0.0.0/24"))
+    awg_server_address = _ipv4_address_in_network(
+        "AWG_SERVER_ADDRESS",
+        _optional("AWG_SERVER_ADDRESS", "10.0.0.1"),
+        awg_network,
+    )
     return Settings(
         bot_token=_required("BOT_TOKEN"),
         admin_ids=_admin_ids(_required("ADMIN_IDS")),
@@ -195,7 +215,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         bot_drop_pending_updates=_bool("BOT_DROP_PENDING_UPDATES", False),
         xray_config_path=Path(_optional("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")),
         xray_service_name=_optional("XRAY_SERVICE_NAME", "xray"),
-        xray_apply_mode=_choice("XRAY_APPLY_MODE", "reload", {"reload", "restart"}),
+        xray_apply_mode=_choice("XRAY_APPLY_MODE", "restart", {"reload", "restart"}),
         xray_inbound_tag=_optional("XRAY_INBOUND_TAG"),
         xray_public_host=_optional("XRAY_PUBLIC_HOST") or _optional("XRAY_SERVER_ADDRESS"),
         xray_public_port=(
@@ -215,7 +235,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         awg_config_path=Path(_optional("AWG_CONFIG_PATH", "/etc/amnezia/amneziawg/awg0.conf")),
         awg_interface=_optional("AWG_INTERFACE", "awg0"),
         awg_network=awg_network,
-        awg_server_address=_optional("AWG_SERVER_ADDRESS", "10.0.0.1"),
+        awg_server_address=awg_server_address,
         awg_endpoint_host=_optional("AWG_ENDPOINT_HOST"),
         awg_endpoint_port=_int_range("AWG_ENDPOINT_PORT", 0, 0, 65535),
         awg_server_public_key=_optional("AWG_SERVER_PUBLIC_KEY"),

@@ -21,8 +21,17 @@ class IpAllocator:
         awg_config: AwgPeerIpSource | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
-        self.network = ipaddress.ip_network(network, strict=False)
-        self.server_address = ipaddress.ip_address(server_address.split("/", 1)[0])
+        try:
+            self.network = ipaddress.ip_network(network, strict=False)
+            self.server_address = ipaddress.ip_address(server_address.split("/", 1)[0])
+        except ValueError as exc:
+            raise AwgIpAllocationError("AWG_NETWORK и AWG_SERVER_ADDRESS должны быть корректными IPv4-значениями") from exc
+        if self.network.version != 4 or self.server_address.version != 4:
+            raise AwgIpAllocationError("AWG allocator сейчас поддерживает только IPv4")
+        if self.server_address not in self.network:
+            raise AwgIpAllocationError("AWG_SERVER_ADDRESS должен входить в AWG_NETWORK")
+        if self.server_address == self.network.network_address or self.server_address == self.network.broadcast_address:
+            raise AwgIpAllocationError("AWG_SERVER_ADDRESS не должен быть network или broadcast address")
         self.awg_config = awg_config
 
     async def next_free_ip(self) -> str:

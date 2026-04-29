@@ -83,10 +83,25 @@ nano .env
 `AWG_DNS` — основная переменная для DNS в клиентском AWG config.
 `AWG_CLIENT_DNS` поддерживается только как legacy alias для старых установок.
 
-`XRAY_APPLY_MODE=reload` — безопасный режим по умолчанию: бот применяет Xray config
-через `systemctl reload xray`. Если unit на конкретном VDS не поддерживает reload,
-в single-server setup можно явно поставить `XRAY_APPLY_MODE=restart`. Restart кратко
-прерывает Xray-соединения, но не использует `reload-or-restart` или `kill -HUP`.
+`XRAY_APPLY_MODE=restart` — рекомендуемый production-режим по умолчанию для
+single-server setup: бот проверяет config и применяет изменения через
+`systemctl restart xray`. Restart кратко прерывает Xray-соединения, но даёт более
+предсказуемое применение config, чем reload. `XRAY_APPLY_MODE=reload` всё ещё
+поддерживается, если ваш unit гарантированно применяет reload; бот не использует
+`reload-or-restart` или `kill -HUP`.
+
+Если `XRAY_INBOUND_TAG` пустой, бот использует VLESS/Reality inbound только когда
+такой inbound ровно один. При нескольких VLESS/Reality inbound укажите tag явно,
+иначе создание/удаление Xray-ключа остановится с ошибкой, чтобы не изменить
+неправильный inbound.
+
+`AWG_SERVER_ADDRESS` должен быть IPv4-адресом внутри `AWG_NETWORK` и не может быть
+network/broadcast address. Если в server config есть `Address`, его IPv4-адрес
+должен совпадать с `AWG_SERVER_ADDRESS`.
+
+Новые ключи получают короткие пользовательские labels вида `xray_Ab3dE` или
+`awg_A7kQz`. Старые labels не мигрируются. Для AWG файл конфигурации отправляется
+как `<awg_label>.conf`.
 
 `BOT_DROP_PENDING_UPDATES=true` допустим только для первичного перехода с webhook или ручной очистки очереди Telegram. Для production polling по умолчанию оставляйте `false`, чтобы restart бота не терял pending callback/messages.
 
@@ -122,11 +137,12 @@ sudo systemctl status vpn-bot
 ## Безопасность
 
 - Bot token, ADMIN_IDS, endpoint и proxy secrets берутся только из `.env`.
+- SQLite DB является secret storage: в `vpn_keys.payload_json` хранятся приватные данные ключей, поэтому backup и доступ к файлам DB должны быть ограничены.
 - Приватные ключи, preshared keys, proxy passwords, UUID/shortId и полные конфиги маскируются в audit details рекурсивно.
 - Xray/AWG конфиги изменяются только через adapter flow с file lock, timestamped backup, проверкой mtime и restore при ошибке.
 - Backup-файлы конфигов создаются с правами `600`; количество хранимых backup ограничивает `CONFIG_BACKUP_KEEP_LAST`.
 - SQLite DB и директории data/logs получают приватные права на Linux, если бот управляет этими путями.
-- При старте бот пытается безопасно восстановить зависшие статусы `pending_apply`, `pending_revoke`, `pending_delete`, `delete_failed`.
+- При старте бот пытается безопасно восстановить зависшие статусы `pending_apply`, `apply_failed`, `pending_revoke`, `pending_delete`, `delete_failed`. Если reconciliation для Xray или AWG завершается с ошибкой, мутирующие операции этого backend переходят в degraded mode до ручной проверки и перезапуска.
 - Опасные действия в боте требуют confirm/cancel.
 - Чужие конфиги доступны только владельцу или `SUPERADMIN`.
 
@@ -143,6 +159,6 @@ Expected result: main Xray/AWG config files keep their original owner/group/mode
 ## Допущения
 
 - Xray-ссылка генерируется как VLESS Reality.
-- Если `XRAY_INBOUND_TAG` пустой, используется первый inbound с `settings.clients`.
+- Если `XRAY_INBOUND_TAG` пустой, допускается только один VLESS/Reality inbound.
 - AWG adapter добавляет только bot-managed `[Peer]` блоки с маркерами `vpn-bot peer start/end`.
 - AWG IP переиспользуется только после статусов `revoked`, `deleted` или `failed`.

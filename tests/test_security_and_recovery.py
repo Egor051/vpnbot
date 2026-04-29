@@ -87,7 +87,7 @@ def test_xray_vless_ipv6_host_is_bracketed() -> None:
     link = service._build_vless_link("00000000-0000-4000-8000-000000000000", "abcd", "label")
 
     assert "vless://00000000-0000-4000-8000-000000000000@[2001:db8::1]:443?" in link
-    assert link.endswith("#xray_label")
+    assert link.endswith("#label")
 
 
 def test_settings_reject_invalid_xray_short_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -115,7 +115,7 @@ def test_settings_drop_pending_updates_defaults_false_and_can_be_enabled(
 
     settings = load_settings()
     assert settings.bot_drop_pending_updates is False
-    assert settings.xray_apply_mode == "reload"
+    assert settings.xray_apply_mode == "restart"
 
     monkeypatch.setenv("BOT_DROP_PENDING_UPDATES", "true")
 

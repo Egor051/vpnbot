@@ -173,9 +173,14 @@ class XrayConfigAdapter:
                     return inbound
             raise XrayInboundNotFoundError(f"Xray inbound tag={self.inbound_tag!r} не найден")
 
-        for inbound in inbounds:
-            if isinstance(inbound, dict) and self._is_vless_reality(inbound):
-                return inbound
+        candidates = [inbound for inbound in inbounds if isinstance(inbound, dict) and self._is_vless_reality(inbound)]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise XrayInboundNotFoundError(
+                "В Xray config найдено несколько VLESS/Reality inbound. "
+                "Укажите XRAY_INBOUND_TAG, чтобы бот не выбрал неправильный inbound."
+            )
         raise XrayInboundNotFoundError("Не найден Xray inbound protocol=vless и security=reality")
 
     def _is_vless_reality(self, inbound: dict[str, Any]) -> bool:

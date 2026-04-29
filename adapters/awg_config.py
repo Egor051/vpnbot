@@ -20,6 +20,7 @@ class AwgServerConfig:
     listen_port: int | None
     public_key: str | None
     interface_options: dict[str, str]
+    address: str | None = None
 
 
 @dataclass(slots=True)
@@ -106,6 +107,7 @@ class AwgConfigAdapter:
             listen_port=listen_port,
             public_key=interface.options.get("PublicKey"),
             interface_options=options,
+            address=interface.options.get("Address"),
         )
 
     async def add_peer(
