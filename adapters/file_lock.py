@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from types import TracebackType
 from typing import TextIO
 
 
+class ConfigLockBusyError(TimeoutError):
+    pass
+
+
 class ConfigFileLock:
-    def __init__(self, target: Path) -> None:
+    def __init__(self, target: Path, timeout: float = 5.0, poll_interval: float = 0.05) -> None:
         self.lock_path = target.with_name(f".{target.name}.lock")
+        self.timeout = max(timeout, 0.0)
+        self.poll_interval = max(poll_interval, 0.01)
         self._file: TextIO | None = None
 
     def __enter__(self) -> ConfigFileLock:
@@ -17,7 +24,16 @@ class ConfigFileLock:
         if os.name == "posix":
             import fcntl
 
-            fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+            deadline = time.monotonic() + self.timeout
+            while True:
+                try:
+                    fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        file.close()
+                        raise ConfigLockBusyError("config lock busy: другой процесс уже изменяет конфигурацию") from exc
+                    time.sleep(min(self.poll_interval, max(deadline - time.monotonic(), 0.0)))
         self._file = file
         return self
 

@@ -60,7 +60,12 @@ def _bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
         return default
-    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    raise SettingsError(f"Переменная {name} должна быть явным boolean: true/false, yes/no, on/off или 1/0")
 
 
 def _choice(name: str, default: str, allowed: set[str]) -> str:
@@ -181,6 +186,22 @@ class Settings:
         if missing:
             raise SettingsError("Для создания Xray-ключа не заданы: " + ", ".join(missing))
         _xray_short_id(self.xray_short_id, required=not self.xray_manage_short_ids)
+        if self.xray_network_type not in {"tcp", "raw"}:
+            raise SettingsError("XRAY_NETWORK_TYPE должен быть tcp или raw")
+        if self.xray_fingerprint not in {
+            "chrome",
+            "firefox",
+            "safari",
+            "ios",
+            "android",
+            "edge",
+            "randomized",
+            "randomizedalpn",
+            "randomizednoalpn",
+        }:
+            raise SettingsError("XRAY_FINGERPRINT содержит неподдерживаемое значение")
+        if re.fullmatch(r"[A-Za-z0-9_-]+", self.xray_reality_public_key) is None:
+            raise SettingsError("XRAY_REALITY_PUBLIC_KEY должен быть base64url-совместимой строкой")
 
     def validate_awg_ready(self) -> None:
         missing = [
@@ -226,8 +247,12 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_reality_public_key=_optional("XRAY_REALITY_PUBLIC_KEY") or _optional("XRAY_PUBLIC_KEY"),
         xray_sni=_optional("XRAY_SNI") or _optional("XRAY_SERVER_NAME"),
         xray_flow=_optional("XRAY_FLOW", "xtls-rprx-vision"),
-        xray_fingerprint=_optional("XRAY_FINGERPRINT", "chrome"),
-        xray_network_type=_optional("XRAY_NETWORK_TYPE", "tcp"),
+        xray_fingerprint=_choice(
+            "XRAY_FINGERPRINT",
+            "chrome",
+            {"chrome", "firefox", "safari", "ios", "android", "edge", "randomized", "randomizedalpn", "randomizednoalpn"},
+        ),
+        xray_network_type=_choice("XRAY_NETWORK_TYPE", "tcp", {"tcp", "raw"}),
         xray_short_id=xray_short_id,
         xray_manage_short_ids=xray_manage_short_ids,
         xray_allow_restart_on_rollback=_bool("XRAY_ALLOW_RESTART_ON_ROLLBACK", False),

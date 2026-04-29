@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from adapters.awg_config import MACHINE_OUTPUT_LIMIT as AWG_MACHINE_OUTPUT_LIMIT
@@ -145,7 +146,7 @@ def test_awg_transfer_large_output_uses_machine_output_limit() -> None:
 
     async def run() -> None:
         adapter = AwgConfigAdapter(
-            config_path=__file__,  # type: ignore[arg-type]
+            config_path=Path(__file__),
             interface="awg0",
             backup=SimpleNamespace(),
             shell=Shell(),  # type: ignore[arg-type]

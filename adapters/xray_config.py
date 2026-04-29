@@ -33,6 +33,8 @@ class XrayConfigAdapter:
         backup: BackupAdapter,
         systemctl: SystemCtlAdapter,
     ) -> None:
+        if config_path.is_symlink():
+            raise XrayConfigError("Xray config path не должен быть symlink. Укажите реальный путь к config.json.")
         self.config_path = config_path
         self.service_name = service_name
         if apply_mode not in {"reload", "restart"}:

@@ -49,7 +49,7 @@ class Database:
         await self._raw_conn().execute("PRAGMA busy_timeout = 5000")
         await self._raw_conn().commit()
         if created or os.name == "posix":
-            self._chmod_private_file(self.path)
+            self._chmod_sqlite_files()
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -64,6 +64,7 @@ class Database:
             await self.conn.executescript(sql)
             await self._apply_migrations()
             await self.commit()
+            self._chmod_sqlite_files()
         except Exception:
             await self.rollback()
             raise
@@ -450,6 +451,13 @@ class Database:
             path.chmod(0o600)
         except OSError:
             logger.warning("Не удалось выставить права 600 на файл SQLite %s", path, exc_info=True)
+
+    def _chmod_sqlite_files(self) -> None:
+        if os.name != "posix":
+            return
+        for path in (self.path, self.path.with_name(self.path.name + "-wal"), self.path.with_name(self.path.name + "-shm")):
+            if path.exists():
+                self._chmod_private_file(path)
 
 
 class _ConnectionProxy:

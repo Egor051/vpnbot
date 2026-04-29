@@ -9,8 +9,10 @@ from models.dto import VpnKey
 from utils.formatting import h, pre
 
 MAX_TEXT_CONFIG_LEN = 3500
+TELEGRAM_TEXT_LIMIT = 4096
 AWG_CONFIG_FILENAME = "awg.conf"
 _AWG_GENERATED_NAME_RE = re.compile(r"^awg_[A-Za-z0-9]{5}$")
+_TRUNCATED_SUFFIX = "\n...обрезано"
 
 
 async def safe_edit_message_text(
@@ -19,6 +21,7 @@ async def safe_edit_message_text(
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
+    text = cap_telegram_html(text)
     try:
         await message.edit_text(text, reply_markup=reply_markup)
     except TelegramBadRequest as exc:
@@ -43,15 +46,15 @@ async def send_awg_config(
 ) -> None:
     text_was_updated = True
     if len(config_text) <= MAX_TEXT_CONFIG_LEN:
-        text = f"<b>{h(title)}</b>\n\n{pre(config_text)}"
+        text = cap_telegram_html(f"<b>{h(title)}</b>\n\n{pre(config_text)}")
         if edit_text:
             text_was_updated = await safe_edit_message_text(message, text, reply_markup=reply_markup)
         else:
             await message.answer(text, reply_markup=reply_markup)
         document_reply_markup = None
-        document_caption = f"{h(title)}\nФайл конфигурации: {h(filename)}"
+        document_caption = cap_telegram_html(f"{h(title)}\nФайл конфигурации: {h(filename)}", limit=1024)
     else:
-        text = f"{h(title)}\nКонфиг отправлен файлом, потому что он слишком длинный для сообщения."
+        text = cap_telegram_html(f"{h(title)}\nКонфиг отправлен файлом, потому что он слишком длинный для сообщения.")
         if edit_text:
             text_was_updated = await safe_edit_message_text(message, text, reply_markup=reply_markup)
         else:
@@ -79,6 +82,44 @@ def awg_config_filename(key: VpnKey) -> str:
     if _AWG_GENERATED_NAME_RE.fullmatch(label):
         return f"{label}.conf"
     return AWG_CONFIG_FILENAME
+
+
+def cap_telegram_html(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
+    if len(text) <= limit:
+        return text
+    suffix = _TRUNCATED_SUFFIX
+    if limit <= len(suffix):
+        return suffix[-limit:]
+    raw_limit = limit - len(suffix)
+    cut = text.rfind("\n", 0, raw_limit)
+    if cut < raw_limit // 2:
+        cut = raw_limit
+    snippet = text[:cut].rstrip()
+    last_lt = snippet.rfind("<")
+    last_gt = snippet.rfind(">")
+    if last_lt > last_gt:
+        snippet = snippet[:last_lt].rstrip()
+    closing = _closing_tags(snippet)
+    if len(snippet) + len(closing) + len(suffix) > limit:
+        snippet = snippet[: max(limit - len(closing) - len(suffix), 0)].rstrip()
+        last_lt = snippet.rfind("<")
+        last_gt = snippet.rfind(">")
+        if last_lt > last_gt:
+            snippet = snippet[:last_lt].rstrip()
+        closing = _closing_tags(snippet)
+    return snippet + closing + suffix
+
+
+def _closing_tags(text: str) -> str:
+    stack: list[str] = []
+    for match in re.finditer(r"</?(b|code|pre)>", text):
+        tag = match.group(1)
+        if match.group(0).startswith("</"):
+            if tag in stack:
+                stack.pop(len(stack) - 1 - stack[::-1].index(tag))
+            continue
+        stack.append(tag)
+    return "".join(f"</{tag}>" for tag in reversed(stack))
 
 
 def _is_message_not_modified(exc: TelegramBadRequest) -> bool:

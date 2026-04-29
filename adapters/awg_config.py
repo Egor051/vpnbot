@@ -85,6 +85,8 @@ class AwgConfigAdapter:
         shell: ShellRunner,
         persistent_keepalive: int,
     ) -> None:
+        if config_path.is_symlink():
+            raise AwgConfigError("AWG config path не должен быть symlink. Укажите реальный путь к awg0.conf.")
         self.config_path = config_path
         self.interface = interface
         self.backup = backup
