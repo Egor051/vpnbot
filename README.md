@@ -1,129 +1,159 @@
 # VPN Telegram Bot
 
-Production-ready skeleton Telegram-бота для управления доступом к VPN-проекту на одном VDS без Docker, Redis, PostgreSQL и тяжёлого ORM.
+Telegram bot for self-hosted VPN access management on an Ubuntu VDS. The bot manages users, access approval, Xray VLESS Reality keys, AmneziaWG keys, key revocation/deletion, audit records, and basic traffic statistics.
 
-## Архитектура
+This project is designed for a single-server deployment without Docker, Redis, PostgreSQL, or a heavy ORM.
 
-Поток вызовов:
+## Features
+
+- Telegram user registration and access approval flow.
+- Admin panel for pending requests, users, key issuance, audit, stats, and announcements.
+- Xray VLESS Reality key creation, config delivery, revocation, deletion, and startup reconciliation.
+- AmneziaWG key creation, client config delivery, revocation, deletion, IP allocation, and startup reconciliation.
+- Optional proxy entry display seeded from `DEFAULT_PROXY_*` environment variables. The bot does not install or manage Dante by itself.
+- Ownership checks so users can only view and manage their own keys unless they are admins.
+- Audit log with recursive masking for sensitive values.
+- SQLite storage with migrations from `db/schema.sql`.
+- Rotating local logs in `LOG_DIR`.
+- systemd deployment using `deploy/vpn-bot.service`.
+- Intended target: Ubuntu VDS with existing Xray and/or AmneziaWG installation.
+
+## Stack
+
+- Python 3
+- aiogram 3
+- SQLite via aiosqlite
+- python-dotenv
+- systemd
+- Xray VLESS Reality
+- AmneziaWG / WireGuard-compatible tooling
+- Ubuntu / Linux VDS
+
+## Repository Layout
 
 ```text
-Telegram update/callback
-  -> bot/handlers
-  -> services
-  -> repositories / adapters
-  -> SQLite / Xray config / AWG config / systemctl / subprocess
+main.py                    # Bot entry point
+init_db.py                 # SQLite schema bootstrap/migration entry point
+requirements.txt           # Runtime dependencies
+.env.example               # Environment variable template
+db/schema.sql              # Database schema
+deploy/vpn-bot.service     # systemd unit template
+bot/                       # Telegram handlers, keyboards, FSM, formatting
+services/                  # Business workflows and permissions
+repositories/              # SQLite access layer
+adapters/                  # Xray, AWG, systemctl, backups, shell adapters
+config/settings.py         # Environment parsing and validation
+tests/                     # Regression and hardening tests
 ```
 
-Правила слоёв:
+## Security Warning
 
-- `handlers`: Telegram input, простая валидация, вызов сервисов, русский ответ пользователю.
-- `services`: бизнес-сценарии, права, status progression, audit, rollback orchestration.
-- `repositories`: только SQLite CRUD и точечные запросы.
-- `adapters`: Xray, AWG, backup/restore, systemctl, subprocess, IP allocation.
-- `models`: компактные `dataclass(slots=True)` DTO и `Enum`.
+This project handles operational VPN and Telegram secrets. Never commit or publish:
 
-## Дерево проекта
+- `.env` files.
+- Telegram bot tokens.
+- Private keys or preshared keys.
+- Real Xray Reality server/client configuration.
+- Real AmneziaWG server/client configuration.
+- Full VPN client configs.
+- SQLite databases or database dumps.
+- Server IP addresses combined with credentials.
+- SSH, panel, hosting, or other server credentials.
 
-```text
-main.py
-init_db.py
-requirements.txt
-.env.example
-deploy/vpn-bot.service
-bot/
-config/
-db/
-models/
-repositories/
-services/
-adapters/
-utils/
-```
+Use `.env.example` only as a template. Keep production configuration on the server and outside Git history.
 
-## База данных
+## Environment Variables
 
-SQLite-файл по умолчанию: `/opt/vpn-service/data/vpn.db`.
-Миграции выполняются автоматически при запуске бота или `init_db.py`.
+Copy `.env.example` to `.env` and replace placeholders with values for your server. `BOT_TOKEN` and `ADMIN_IDS` are required for startup. Fill the relevant Xray or AWG values before issuing that key type.
 
-Схема лежит в `db/schema.sql` и создаёт таблицы:
-
-- `users`
-- `access_requests`
-- `vpn_keys`
-- `proxy_entries`
-- `audit_log`
-- `vpn_key_traffic_stats`
-
-Текущая версия схемы: `4`.
-
-Миграция v4:
-
-- добавляет partial unique index на одну pending-заявку на пользователя;
-- добавляет индексы для восстановления зависших VPN-ключей;
-- для новых БД добавляет FK от заявок и ключей к `users`;
-- на существующих БД FK не перестраивает таблицы, чтобы не рисковать потерей данных, но логирует найденные orphan-записи.
-
-Bootstrap:
-
-```bash
-cd /opt/vpn-service
-/opt/vpn-service/.venv/bin/python init_db.py
-```
-
-## Переменные окружения
-
-Скопируйте `.env.example` в `/opt/vpn-service/.env` и заполните значения:
-
-```bash
-BOT_TOKEN=
-ADMIN_IDS=123456789,987654321
+```dotenv
+BOT_TOKEN=<telegram_bot_token>
+ADMIN_IDS=<telegram_user_id>,<telegram_user_id>
 
 DB_PATH=/opt/vpn-service/data/vpn.db
 LOG_DIR=/opt/vpn-service/logs
+BOT_LOCK_PATH=/run/vpn-bot.lock
 
 XRAY_CONFIG_PATH=/usr/local/etc/xray/config.json
 XRAY_SERVICE_NAME=xray
 XRAY_INBOUND_TAG=
-XRAY_PUBLIC_HOST=
+XRAY_PUBLIC_HOST=<vpn_public_host>
 XRAY_PUBLIC_PORT=443
-XRAY_REALITY_PUBLIC_KEY=
-XRAY_SNI=
+XRAY_REALITY_PUBLIC_KEY=<xray_reality_public_key>
+XRAY_SNI=<xray_reality_sni>
 XRAY_FLOW=xtls-rprx-vision
+XRAY_FINGERPRINT=chrome
+XRAY_NETWORK_TYPE=tcp
+XRAY_SHORT_ID=<xray_short_id>
+XRAY_MANAGE_SHORT_IDS=false
+XRAY_ALLOW_RESTART_ON_ROLLBACK=false
+XRAY_STATS_SERVER=
 
 AWG_CONFIG_PATH=/etc/amnezia/amneziawg/awg0.conf
 AWG_INTERFACE=awg0
 AWG_NETWORK=10.0.0.0/24
 AWG_SERVER_ADDRESS=10.0.0.1
-AWG_ENDPOINT_HOST=
-AWG_ENDPOINT_PORT=
-AWG_SERVER_PUBLIC_KEY=
-AWG_CLIENT_DNS=1.1.1.1
+AWG_ENDPOINT_HOST=<awg_endpoint_host>
+AWG_ENDPOINT_PORT=<awg_endpoint_port>
+AWG_SERVER_PUBLIC_KEY=<awg_server_public_key>
+AWG_DNS=1.1.1.1
+AWG_MTU=
 AWG_ALLOWED_IPS=0.0.0.0/0, ::/0
 AWG_PERSISTENT_KEEPALIVE=25
+AWG_USE_PRESHARED_KEY=true
+
+DEFAULT_PROXY_TYPE=
+DEFAULT_PROXY_HOST=
+DEFAULT_PROXY_PORT=
+DEFAULT_PROXY_LOGIN=
+DEFAULT_PROXY_PASSWORD=
+DEFAULT_PROXY_NOTE=
 
 AUDIT_RETENTION_DAYS=180
 CONFIG_BACKUP_KEEP_LAST=20
 ```
 
-## Установка на Ubuntu 24
+Notes:
+
+- If `XRAY_INBOUND_TAG` is empty, the adapter uses the first inbound with `settings.clients`.
+- If `XRAY_MANAGE_SHORT_IDS=false`, `XRAY_SHORT_ID` must be set.
+- `AWG_ENDPOINT_HOST` and `AWG_ENDPOINT_PORT` should point to the public AWG endpoint clients will use.
+- `DEFAULT_PROXY_*` seeds one proxy entry only when the proxy table is empty.
+
+## Deployment Overview
+
+The supplied systemd unit expects the project in `/opt/vpn-service`. If you deploy elsewhere, update `deploy/vpn-bot.service` before installing it.
+
+Short order:
+
+1. Clone the repository.
+2. Create a virtual environment.
+3. Install `requirements.txt`.
+4. Copy `.env.example` to `.env`.
+5. Fill `.env`.
+6. Initialize the database.
+7. Run the bot manually.
+8. Install the systemd service.
 
 ```bash
-sudo mkdir -p /opt/vpn-service/{bot,data,logs,scripts}
+sudo mkdir -p /opt/vpn-service
 sudo chown -R "$USER":"$USER" /opt/vpn-service
+git clone https://github.com/Egor051/vpnbot.git /opt/vpn-service
 cd /opt/vpn-service
 
 python3 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r requirements.txt
+. .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
 
 cp .env.example .env
 nano .env
 
-.venv/bin/python init_db.py
-.venv/bin/python -m compileall .
+python init_db.py
+python main.py
 ```
 
-Установить systemd unit:
+Install and start the systemd service:
 
 ```bash
 sudo cp deploy/vpn-bot.service /etc/systemd/system/vpn-bot.service
@@ -132,30 +162,60 @@ sudo systemctl enable --now vpn-bot
 sudo systemctl status vpn-bot
 ```
 
-## Безопасность
+## Maintenance
 
-- Bot token, ADMIN_IDS, endpoint и proxy secrets берутся только из `.env`.
-- Приватные ключи, preshared keys, proxy passwords, UUID/shortId и полные конфиги маскируются в audit details рекурсивно.
-- Xray/AWG конфиги изменяются только через adapter flow с file lock, timestamped backup, проверкой mtime и restore при ошибке.
-- Backup-файлы конфигов создаются с правами `600`; количество хранимых backup ограничивает `CONFIG_BACKUP_KEEP_LAST`.
-- SQLite DB и директории data/logs получают приватные права на Linux, если бот управляет этими путями.
-- При старте бот пытается безопасно восстановить зависшие статусы `pending_apply`, `pending_revoke`, `pending_delete`, `delete_failed`.
-- Опасные действия в боте требуют confirm/cancel.
-- Чужие конфиги доступны только владельцу или `SUPERADMIN`.
-
-## Linux permission QA
-
-POSIX mode preservation tests are skipped on Windows. Run this check on Ubuntu 24 VDS/CI:
+Update from GitHub:
 
 ```bash
-.venv/bin/python -m pytest -q tests/test_followup_hardening.py -k mode
+cd /opt/vpn-service
+git pull --ff-only
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python init_db.py
+sudo systemctl restart vpn-bot
 ```
 
-Expected result: main Xray/AWG config files keep their original owner/group/mode after mutation or rollback (for example `0644` stays `0644`), while generated backup files are `0600`.
+Check status:
 
-## Допущения
+```bash
+sudo systemctl status vpn-bot
+```
 
-- Xray-ссылка генерируется как VLESS Reality.
-- Если `XRAY_INBOUND_TAG` пустой, используется первый inbound с `settings.clients`.
-- AWG adapter добавляет только bot-managed `[Peer]` блоки с маркерами `vpn-bot peer start/end`.
-- AWG IP переиспользуется только после статусов `revoked`, `deleted` или `failed`.
+Restart the service:
+
+```bash
+sudo systemctl restart vpn-bot
+```
+
+View logs:
+
+```bash
+sudo journalctl -u vpn-bot -f
+tail -f /opt/vpn-service/logs/bot.log
+```
+
+## Database
+
+SQLite is used as the local storage backend. By default the database path is:
+
+```text
+/opt/vpn-service/data/vpn.db
+```
+
+`init_db.py` opens the database and applies schema bootstrap/migrations. The bot also bootstraps the database during app creation.
+
+Current schema tables include:
+
+- `users`
+- `access_requests`
+- `vpn_keys`
+- `proxy_entries`
+- `audit_log`
+- `vpn_key_traffic_stats`
+
+## Project Status
+
+Early self-hosted project. It is usable as a focused VPN management bot, but production use requires careful review, server-specific testing, operational backups, secret handling discipline, and hardening of the surrounding Xray/AWG/server setup.
+
+## License
+
+MIT License. See [LICENSE](LICENSE).
