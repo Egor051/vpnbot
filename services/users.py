@@ -104,17 +104,18 @@ class UserService:
         if current.role == UserRole.SUPERADMIN and role != UserRole.SUPERADMIN:
             raise InvalidOperation("Нельзя изменить роль superadmin")
         blocked_at = self.clock.now() if role == UserRole.BLOCKED_USER else None
-        await self.users.set_role(target_user_id, role, self.clock.now(), blocked_at=blocked_at)
+        action = "user_unblocked" if role == UserRole.APPROVED_USER and is_blocked_user(current) else "user_role_changed"
+        async with self.users.db.transaction():
+            await self.users.set_role(target_user_id, role, self.clock.now(), blocked_at=blocked_at)
+            await self.audit.write(
+                actor_user_id=actor_user_id,
+                action=action,
+                entity_type=AuditEntityType.USER,
+                entity_id=target_user_id,
+                details={"role": role.value},
+            )
         if role in {UserRole.BLOCKED_USER, UserRole.APPROVED_USER, UserRole.PENDING_USER}:
             await self.clear_user_state(target_user_id)
-        action = "user_unblocked" if role == UserRole.APPROVED_USER and is_blocked_user(current) else "user_role_changed"
-        await self.audit.write(
-            actor_user_id=actor_user_id,
-            action=action,
-            entity_type=AuditEntityType.USER,
-            entity_id=target_user_id,
-            details={"role": role.value},
-        )
 
     async def block_user(
         self,
@@ -139,7 +140,7 @@ class UserService:
                     await self._revoke_all_access_keys(actor_user_id, target_user_id, revoked_key_ids, errors)
 
             if errors:
-                await self.audit.write(
+                await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
                     action="user_block_failed",
                     entity_type=AuditEntityType.USER,
@@ -155,20 +156,21 @@ class UserService:
                 return BlockUserResult(user=user, revoked_key_ids=tuple(revoked_key_ids), errors=tuple(errors))
 
             now = self.clock.now()
-            await self.users.set_role(target_user_id, UserRole.BLOCKED_USER, now, blocked_at=now)
+            async with self.users.db.transaction():
+                await self.users.set_role(target_user_id, UserRole.BLOCKED_USER, now, blocked_at=now)
+                await self.audit.write(
+                    actor_user_id=actor_user_id,
+                    action="user_blocked",
+                    entity_type=AuditEntityType.USER,
+                    entity_id=target_user_id,
+                    details={
+                        "revoke_active_keys": revoke_active_keys,
+                        "revoked_key_ids": revoked_key_ids,
+                        "error_count": len(errors),
+                        "errors": [{"key_id": item.key_id, "key_type": item.key_type.value, "error": item.error} for item in errors],
+                    },
+                )
             await self.clear_user_state(target_user_id)
-            await self.audit.write(
-                actor_user_id=actor_user_id,
-                action="user_blocked",
-                entity_type=AuditEntityType.USER,
-                entity_id=target_user_id,
-                details={
-                    "revoke_active_keys": revoke_active_keys,
-                    "revoked_key_ids": revoked_key_ids,
-                    "error_count": len(errors),
-                    "errors": [{"key_id": item.key_id, "key_type": item.key_type.value, "error": item.error} for item in errors],
-                },
-            )
             user = await self.get_user(target_user_id)
             return BlockUserResult(user=user, revoked_key_ids=tuple(revoked_key_ids), errors=tuple(errors))
 
@@ -218,15 +220,16 @@ class UserService:
         target = await self.get_user(target_user_id)
         if target.role == UserRole.SUPERADMIN:
             raise InvalidOperation("Нельзя изменить роль superadmin")
-        await self.users.set_role(target_user_id, UserRole.APPROVED_USER, self.clock.now(), blocked_at=None)
+        async with self.users.db.transaction():
+            await self.users.set_role(target_user_id, UserRole.APPROVED_USER, self.clock.now(), blocked_at=None)
+            await self.audit.write(
+                actor_user_id=actor_user_id,
+                action="user_unblocked",
+                entity_type=AuditEntityType.USER,
+                entity_id=target_user_id,
+                details={"role": UserRole.APPROVED_USER.value},
+            )
         await self.clear_user_state(target_user_id)
-        await self.audit.write(
-            actor_user_id=actor_user_id,
-            action="user_unblocked",
-            entity_type=AuditEntityType.USER,
-            entity_id=target_user_id,
-            details={"role": UserRole.APPROVED_USER.value},
-        )
         return await self.get_user(target_user_id)
 
     async def list_users(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[User]:
@@ -238,3 +241,33 @@ class UserService:
         if self._vpn_keys is None:
             return {}
         return await self._vpn_keys.count_by_owners(user_ids)
+
+    async def _write_audit_best_effort(
+        self,
+        *,
+        actor_user_id: int | None,
+        action: str,
+        entity_type: AuditEntityType,
+        entity_id: str | int | None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        writer = getattr(self.audit, "write_best_effort", None)
+        if writer is not None:
+            await writer(
+                actor_user_id=actor_user_id,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                details=details,
+            )
+            return
+        try:
+            await self.audit.write(
+                actor_user_id=actor_user_id,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                details=details,
+            )
+        except Exception:
+            logger.warning("Audit write failed after user operation: action=%s entity_id=%s", action, entity_id, exc_info=True)

@@ -39,11 +39,12 @@ def keys_list_keyboard(
         else:
             rows.append([InlineKeyboardButton(text="Статистика", callback_data=f"key:stats:{key.id}")])
         if key.status != VpnKeyStatus.DELETED:
+            note_buttons: list[InlineKeyboardButton] = []
+            if owner_user_id is None:
+                note_buttons.append(InlineKeyboardButton(text="Заметка", callback_data=f"key:note:{key.id}"))
+            note_buttons.append(InlineKeyboardButton(text="Удалить", callback_data=f"key:delete:{key.id}"))
             rows.append(
-                [
-                    InlineKeyboardButton(text="Заметка", callback_data=f"key:note:{key.id}"),
-                    InlineKeyboardButton(text="Удалить", callback_data=f"key:delete:{key.id}"),
-                ]
+                note_buttons
             )
 
     prev_page = page - 1
@@ -70,7 +71,8 @@ def key_actions_keyboard(key: VpnKey, owner_user_id: int | None = None) -> Inlin
         rows.append([InlineKeyboardButton(text="Отозвать", callback_data=f"key:revoke:{key.id}")])
     rows.append([InlineKeyboardButton(text="Статистика", callback_data=f"key:stats:{key.id}")])
     if key.status != VpnKeyStatus.DELETED:
-        rows.append([InlineKeyboardButton(text="Редактировать заметку", callback_data=f"key:note:{key.id}")])
+        if owner_user_id is None:
+            rows.append([InlineKeyboardButton(text="Редактировать заметку", callback_data=f"key:note:{key.id}")])
         rows.append([InlineKeyboardButton(text="Удалить", callback_data=f"key:delete:{key.id}")])
     back_data = f"admin:ukeys:{owner_user_id}:0" if owner_user_id is not None else "keys:list"
     rows.append([InlineKeyboardButton(text="К списку", callback_data=back_data)])

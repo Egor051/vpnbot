@@ -240,7 +240,7 @@ class XrayService:
         key = await self._get_xray_key_for_manage(actor_user_id, key_id, allow_read=True)
         if key.status != VpnKeyStatus.ACTIVE:
             raise InvalidOperation("Конфигурация доступна только для активного ключа")
-        await self.audit.write(
+        await self._write_audit_best_effort(
             actor_user_id=actor_user_id,
             action="xray_config_shown",
             entity_type=AuditEntityType.VPN_KEY,
@@ -273,9 +273,11 @@ class XrayService:
 
     async def update_xray_note(self, actor_user_id: int, key_id: int, note: str | None) -> VpnKey:
         key = await self._get_xray_key_for_manage(actor_user_id, key_id, allow_read=True)
+        if key.owner_user_id != actor_user_id:
+            raise AccessDenied("Можно менять заметку только своих ключей")
         clean_note = normalize_note(note)
         await self.vpn_keys.update_note(key.id, clean_note, self.clock.now())
-        await self.audit.write(
+        await self._write_audit_best_effort(
             actor_user_id=actor_user_id,
             action="xray_note_updated",
             entity_type=AuditEntityType.VPN_KEY,

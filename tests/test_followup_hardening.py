@@ -1018,7 +1018,7 @@ def test_legacy_blocked_owner_cannot_update_key_note(legacy_role: str, tmp_path:
     asyncio.run(run())
 
 
-def test_key_note_update_preserves_approved_owner_non_owner_and_superadmin_rules(tmp_path: Path) -> None:
+def test_key_note_update_preserves_owner_private_note_rules(tmp_path: Path) -> None:
     async def run() -> None:
         db = Database(tmp_path / "vpn.db")
         await db.connect()
@@ -1060,11 +1060,12 @@ def test_key_note_update_preserves_approved_owner_non_owner_and_superadmin_rules
             assert refreshed.note == "owner note"
             assert await _count_audit_actions(db, "note_updated") == 1
 
-            await notes.update_key_note(1, key.id, "admin note")
+            with pytest.raises(AccessDenied):
+                await notes.update_key_note(1, key.id, "admin note")
             refreshed = await vpn_keys.get_by_id(key.id)
             assert refreshed is not None
-            assert refreshed.note == "admin note"
-            assert await _count_audit_actions(db, "note_updated") == 2
+            assert refreshed.note == "owner note"
+            assert await _count_audit_actions(db, "note_updated") == 1
         finally:
             await db.close()
 

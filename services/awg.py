@@ -258,7 +258,7 @@ class AwgService:
         if key.status != VpnKeyStatus.ACTIVE:
             raise InvalidOperation("Конфигурация доступна только для активного ключа")
         await self._ensure_client_payload_valid(actor_user_id, key)
-        await self.audit.write(
+        await self._write_audit_best_effort(
             actor_user_id=actor_user_id,
             action="awg_config_shown",
             entity_type=AuditEntityType.VPN_KEY,
@@ -273,7 +273,7 @@ class AwgService:
             raise InvalidOperation("Конфигурация доступна только для активного ключа")
         await self._ensure_client_payload_valid(actor_user_id, key)
         if audit:
-            await self.audit.write(
+            await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action="awg_config_file_shown",
                 entity_type=AuditEntityType.VPN_KEY,
@@ -306,9 +306,11 @@ class AwgService:
 
     async def update_awg_note(self, actor_user_id: int, key_id: int, note: str | None) -> VpnKey:
         key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
+        if key.owner_user_id != actor_user_id:
+            raise AccessDenied("Можно менять заметку только своих ключей")
         clean_note = normalize_note(note)
         await self.vpn_keys.update_note(key.id, clean_note, self.clock.now())
-        await self.audit.write(
+        await self._write_audit_best_effort(
             actor_user_id=actor_user_id,
             action="awg_note_updated",
             entity_type=AuditEntityType.VPN_KEY,
