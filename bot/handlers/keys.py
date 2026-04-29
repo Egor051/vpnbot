@@ -26,7 +26,7 @@ from bot.keyboards.keys import (
     key_actions_keyboard,
     keys_list_keyboard,
 )
-from bot.messages import AWG_CONFIG_FILENAME, safe_edit_message_text, send_awg_config
+from bot.messages import awg_config_filename, safe_edit_message_text, send_awg_config
 from bot.pagination import page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
@@ -163,7 +163,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
                 callback.message,
                 title=f"AWG-ключ #{result.key.id}",
                 config_text=config,
-                filename=AWG_CONFIG_FILENAME,
+                filename=awg_config_filename(result.key),
                 reply_markup=key_actions_keyboard(result.key, owner_user_id=_admin_owner_context(result.key, callback.from_user.id)),
                 edit_text=True,
             )
@@ -220,7 +220,7 @@ async def show_key_config(callback: CallbackQuery, services: Any, rate_limiter: 
                 callback.message,
                 title=f"AWG-ключ #{key.id}",
                 config_text=config,
-                filename=AWG_CONFIG_FILENAME,
+                filename=awg_config_filename(key),
                 reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
                 edit_text=True,
                 send_document=False,

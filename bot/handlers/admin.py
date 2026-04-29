@@ -35,15 +35,17 @@ from bot.keyboards.admin import (
 )
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import key_actions_keyboard, keys_list_keyboard
-from bot.messages import AWG_CONFIG_FILENAME, safe_edit_message_text, send_awg_config
+from bot.messages import awg_config_filename, safe_edit_message_text, send_awg_config
 from bot.pagination import page_offset, split_page
 from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
 from models.dto import TelegramUserProfile
 from models.enums import UserRole, VpnKeyType
+from services.user_locks import UserLockManager
 
 router = Router()
 logger = logging.getLogger(__name__)
+_announcement_confirm_locks = UserLockManager()
 
 ADMIN_PAGE_SIZE = 8
 ADMIN_KEYS_PAGE_SIZE = 5
@@ -135,24 +137,36 @@ async def admin_announcement_message(message: Message, state: FSMContext, servic
 
 
 @router.callback_query(AdminAnnouncementStates.confirming, F.data == "admin:announce:send")
-async def admin_announcement_send(callback: CallbackQuery, state: FSMContext, services: Any, bot: Bot) -> None:
+async def admin_announcement_send(
+    callback: CallbackQuery,
+    state: FSMContext,
+    services: Any,
+    bot: Bot,
+    rate_limiter: RateLimiter | None = None,
+) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     if callback.from_user is None or callback.message is None:
         return
     try:
-        await require_superadmin(services, callback.from_user.id)
-        data = await state.get_data()
-        from_chat_id = int(data["from_chat_id"])
-        message_id = int(data["message_id"])
-        await state.clear()
-        await callback.answer("Отправляю...")
-        result = await services.announcements.send_to_all(
-            actor_user_id=callback.from_user.id,
-            bot=bot,
-            from_chat_id=from_chat_id,
-            message_id=message_id,
-        )
+        async with _announcement_confirm_locks.lock(callback.from_user.id):
+            await require_superadmin(services, callback.from_user.id)
+            data = await state.get_data()
+            if "from_chat_id" not in data or "message_id" not in data:
+                await callback.answer("Объявление уже отправлено или устарело.", show_alert=True)
+                return
+            from_chat_id = int(data["from_chat_id"])
+            message_id = int(data["message_id"])
+            if rate_limiter is not None:
+                rate_limiter.check(callback.from_user.id, "announcement_send", 20)
+            await state.clear()
+            await callback.answer("Отправляю...")
+            result = await services.announcements.send_to_all(
+                actor_user_id=callback.from_user.id,
+                bot=bot,
+                from_chat_id=from_chat_id,
+                message_id=message_id,
+            )
         await safe_edit_message_text(
             callback.message,
             (
@@ -618,7 +632,7 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
                 callback.message,
                 title=f"AWG-ключ #{result.key.id}",
                 config_text=config,
-                filename=AWG_CONFIG_FILENAME,
+                filename=awg_config_filename(result.key),
                 reply_markup=key_actions_keyboard(result.key, owner_user_id=result.key.owner_user_id),
                 edit_text=True,
             )

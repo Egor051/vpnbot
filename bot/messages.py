@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import re
+
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, Message
 
+from models.dto import VpnKey
 from utils.formatting import h, pre
 
 MAX_TEXT_CONFIG_LEN = 3500
 AWG_CONFIG_FILENAME = "awg.conf"
+_AWG_GENERATED_NAME_RE = re.compile(r"^awg_[A-Za-z0-9]{5}$")
 
 
 async def safe_edit_message_text(
@@ -68,6 +72,13 @@ async def send_awg_config(
         disable_content_type_detection=False,
         reply_markup=document_reply_markup,
     )
+
+
+def awg_config_filename(key: VpnKey) -> str:
+    label = key.email_label or str(key.public_payload.get("email_label") or "")
+    if _AWG_GENERATED_NAME_RE.fullmatch(label):
+        return f"{label}.conf"
+    return AWG_CONFIG_FILENAME
 
 
 def _is_message_not_modified(exc: TelegramBadRequest) -> bool:
