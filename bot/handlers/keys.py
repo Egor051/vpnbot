@@ -31,6 +31,7 @@ from bot.pagination import page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
 from models.enums import AuditEntityType, VpnKeyType
+from services.errors import AccessDenied, NotFound
 
 router = Router()
 KEYS_PAGE_SIZE = 5
@@ -83,10 +84,17 @@ async def list_keys_message(message: Message, services: Any) -> None:
 
 
 @router.callback_query(F.data == "keys:create")
-async def create_key_menu(callback: CallbackQuery) -> None:
+async def create_key_menu(callback: CallbackQuery, services: Any) -> None:
     if not await ensure_private_callback(callback):
         return
-    await callback.answer()
+    try:
+        if callback.from_user is None:
+            return
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        await callback.answer()
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+        return
     if callback.message:
         await safe_edit_message_text(
             callback.message,
@@ -96,27 +104,37 @@ async def create_key_menu(callback: CallbackQuery) -> None:
 
 
 @router.message(F.text == "Создать ключ")
-async def create_key_menu_message(message: Message) -> None:
+async def create_key_menu_message(message: Message, services: Any) -> None:
     if not await ensure_private_message(message):
         return
-    await message.answer(f"{ONE_KEY_ONE_DEVICE_WARNING}\n\nВыберите тип ключа:", reply_markup=create_key_keyboard())
+    if message.from_user is None:
+        return
+    try:
+        await _ensure_can_enter_create(message.from_user.id, services)
+        await message.answer(f"{ONE_KEY_ONE_DEVICE_WARNING}\n\nВыберите тип ключа:", reply_markup=create_key_keyboard())
+    except Exception as exc:
+        await answer_message_error(message, exc)
 
 
 @router.callback_query(F.data.in_({"keys:create:xray", "keys:create:awg"}))
-async def create_key_choose(callback: CallbackQuery, state: FSMContext) -> None:
+async def create_key_choose(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
     if not await ensure_private_callback(callback):
         return
-    await callback.answer()
-    if callback.message is None or callback.data is None:
+    if callback.from_user is None or callback.message is None or callback.data is None:
         return
-    key_type = callback.data.rsplit(":", 1)[-1]
-    await state.set_state(CreateKeyStates.waiting_note)
-    await state.update_data(key_type=key_type)
-    await safe_edit_message_text(
-        callback.message,
-        f"{NOTE_CREATE_WARNING}\n\nВведите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
-        reply_markup=cancel_keyboard(),
-    )
+    try:
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        await callback.answer()
+        key_type = callback.data.rsplit(":", 1)[-1]
+        await state.set_state(CreateKeyStates.waiting_note)
+        await state.update_data(key_type=key_type)
+        await safe_edit_message_text(
+            callback.message,
+            f"{NOTE_CREATE_WARNING}\n\nВведите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
+            reply_markup=cancel_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
 
 
 @router.message(CreateKeyStates.waiting_note)
@@ -185,12 +203,16 @@ async def open_key(callback: CallbackQuery, services: Any) -> None:
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        key_id = int(callback.data.rsplit(":", 1)[-1])
+        key_id, owner_context, page_context = _parse_key_context(callback.data, "key:open")
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await safe_edit_message_text(
             callback.message,
             key_detail_text(key, viewer_user_id=callback.from_user.id),
-            reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
+            reply_markup=key_actions_keyboard(
+                key,
+                owner_user_id=owner_context or _admin_owner_context(key, callback.from_user.id),
+                page=page_context,
+            ),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -269,12 +291,13 @@ async def revoke_key_prompt(callback: CallbackQuery, services: Any) -> None:
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        key_id = int(callback.data.rsplit(":", 1)[-1])
-        await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
+        key_id, owner_context, page_context = _parse_key_context(callback.data, "key:revoke")
+        key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
+        owner_context = owner_context or _admin_owner_context(key, callback.from_user.id)
         await safe_edit_message_text(
             callback.message,
             f"Отозвать ключ #{key_id}? Доступ по нему будет отключён.",
-            reply_markup=confirm_keyboard("revoke", key_id),
+            reply_markup=confirm_keyboard("revoke", key_id, owner_user_id=owner_context, page=page_context),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -288,15 +311,18 @@ async def delete_key_prompt(callback: CallbackQuery, services: Any) -> None:
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        key_id = int(callback.data.rsplit(":", 1)[-1])
-        await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
+        key_id, owner_context, page_context = _parse_key_context(callback.data, "key:delete")
+        key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
+        owner_context = owner_context or _admin_owner_context(key, callback.from_user.id)
+        if owner_context is not None and owner_context != key.owner_user_id:
+            raise AccessDenied("Контекст удаления устарел, откройте список ключей заново")
         await safe_edit_message_text(
             callback.message,
             (
                 f"Полностью удалить ключ #{key_id}? Доступ будет отключён на сервере, "
                 "запись ключа и его статистика будут удалены из бота. Это действие нельзя отменить."
             ),
-            reply_markup=confirm_keyboard("delete", key_id),
+            reply_markup=confirm_keyboard("delete", key_id, owner_user_id=owner_context, page=page_context),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -309,8 +335,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Any, rate_limite
     if not await ensure_private_callback(callback):
         return
     try:
-        _, action, raw_key_id = callback.data.split(":", 2)
-        key_id = int(raw_key_id)
+        action, key_id, owner_context_from_callback, page_context = _parse_confirm_context(callback.data)
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         if action == "revoke":
             rate_limiter.check(callback.from_user.id, "key_revoke", 10)
@@ -328,7 +353,9 @@ async def confirm_key_action(callback: CallbackQuery, services: Any, rate_limite
         elif action == "delete":
             rate_limiter.check(callback.from_user.id, "key_delete", 10)
             await callback.answer("Выполняю...")
-            owner_context = _admin_owner_context(key, callback.from_user.id)
+            owner_context = owner_context_from_callback or _admin_owner_context(key, callback.from_user.id)
+            if owner_context is not None and owner_context != key.owner_user_id:
+                raise AccessDenied("Контекст удаления устарел, откройте список ключей заново")
             if key.key_type == VpnKeyType.XRAY:
                 await services.xray.delete_xray_key(callback.from_user.id, key_id)
             else:
@@ -338,7 +365,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Any, rate_limite
                     services,
                     callback.from_user.id,
                     owner_user_id=owner_context,
-                    page=0,
+                    page=page_context,
                     page_size=KEYS_PAGE_SIZE,
                 )
                 await safe_edit_message_text(
@@ -439,6 +466,41 @@ def _clean_note(value: str | None) -> str | None:
 
 def _admin_owner_context(key, actor_user_id: int) -> int | None:
     return key.owner_user_id if key.owner_user_id != actor_user_id else None
+
+
+async def _ensure_can_enter_create(actor_user_id: int, services: Any) -> None:
+    try:
+        await services.users.require_approved_or_admin(actor_user_id)
+    except NotFound as exc:
+        raise AccessDenied("Сначала отправьте /start, чтобы создать заявку на доступ") from exc
+    except AccessDenied as exc:
+        if "не одобрен" in str(exc):
+            raise AccessDenied("Доступ ещё не одобрен. Дождитесь решения администратора.") from exc
+        raise
+
+
+def _parse_key_context(data: str | None, prefix: str) -> tuple[int, int | None, int]:
+    if not data:
+        raise ValueError("Некорректная callback-кнопка")
+    parts = data.split(":")
+    expected = prefix.split(":")
+    if parts[: len(expected)] != expected or len(parts) not in {len(expected) + 1, len(expected) + 3}:
+        raise ValueError("Некорректная callback-кнопка")
+    key_id = int(parts[len(expected)])
+    if len(parts) == len(expected) + 1:
+        return key_id, None, 0
+    return key_id, int(parts[len(expected) + 1]), max(int(parts[len(expected) + 2]), 0)
+
+
+def _parse_confirm_context(data: str) -> tuple[str, int, int | None, int]:
+    parts = data.split(":")
+    if len(parts) not in {3, 5} or parts[0] != "confirm":
+        raise ValueError("Некорректная callback-кнопка")
+    action = parts[1]
+    key_id = int(parts[2])
+    if len(parts) == 3:
+        return action, key_id, None, 0
+    return action, key_id, int(parts[3]), max(int(parts[4]), 0)
 
 
 async def _load_keys_page(

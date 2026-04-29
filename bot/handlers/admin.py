@@ -566,14 +566,26 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
 async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
-    await callback.answer()
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
         await require_superadmin(services, callback.from_user.id)
         _, _, key_type, raw_user_id = callback.data.split(":", 3)
+        owner_user_id = int(raw_user_id)
+        data = await state.get_data()
+        expected_owner_id = data.get("owner_user_id")
+        if expected_owner_id is None or int(expected_owner_id) != owner_user_id:
+            await state.clear()
+            await callback.answer("Действие устарело, начните выдачу заново", show_alert=True)
+            await safe_edit_message_text(
+                callback.message,
+                "Действие устарело, начните выдачу заново.",
+                reply_markup=admin_panel_keyboard(),
+            )
+            return
+        await callback.answer()
         await state.set_state(AdminCreateKeyStates.waiting_note)
-        await state.update_data(owner_user_id=int(raw_user_id), key_type=key_type)
+        await state.update_data(owner_user_id=owner_user_id, key_type=key_type)
         await safe_edit_message_text(
             callback.message,
             f"{NOTE_CREATE_WARNING}\n\nВведите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
