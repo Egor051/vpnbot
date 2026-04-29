@@ -24,6 +24,16 @@ def _json_loads(value: str) -> dict[str, object]:
     return data
 
 
+def _enum_value(enum_cls: type[VpnKeyType] | type[VpnKeyStatus], value: str, field: str) -> VpnKeyType | VpnKeyStatus:
+    try:
+        return enum_cls(value)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Некорректное значение {field} в SQLite: {value!r}. "
+            "Сделайте backup DB и исправьте повреждённую запись вручную."
+        ) from exc
+
+
 def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
     if row is None:
         return None
@@ -31,8 +41,8 @@ def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
         id=int(row["id"]),
         owner_user_id=int(row["owner_user_id"]),
         username=row["username"],
-        key_type=VpnKeyType(row["key_type"]),
-        status=VpnKeyStatus(row["status"]),
+        key_type=_enum_value(VpnKeyType, row["key_type"], "vpn_keys.key_type"),  # type: ignore[arg-type]
+        status=_enum_value(VpnKeyStatus, row["status"], "vpn_keys.status"),  # type: ignore[arg-type]
         note=row["note"],
         uuid=row["uuid"],
         email_label=row["email_label"],

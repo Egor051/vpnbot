@@ -17,11 +17,18 @@ _BLOCKED_ROLE_SQL_PLACEHOLDERS = ", ".join("?" for _ in _BLOCKED_ROLE_SQL_VALUES
 def _row_to_user(row: Row | None) -> User | None:
     if row is None:
         return None
+    try:
+        role = parse_user_role(row["role"])
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Некорректное значение users.role в SQLite: {row['role']!r}. "
+            "Сделайте backup DB и исправьте повреждённую запись вручную."
+        ) from exc
     return User(
         telegram_user_id=int(row["telegram_user_id"]),
         username=row["username"],
         first_name=row["first_name"],
-        role=parse_user_role(row["role"]),
+        role=role,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         blocked_at=row["blocked_at"],
