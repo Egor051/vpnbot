@@ -24,6 +24,16 @@ def _json_loads(value: str) -> dict[str, object]:
     return data
 
 
+def _enum_value(enum_cls: type[VpnKeyType] | type[VpnKeyStatus], value: str, field: str) -> VpnKeyType | VpnKeyStatus:
+    try:
+        return enum_cls(value)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Некорректное значение {field} в SQLite: {value!r}. "
+            "Сделайте backup DB и исправьте повреждённую запись вручную."
+        ) from exc
+
+
 def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
     if row is None:
         return None
@@ -31,8 +41,8 @@ def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
         id=int(row["id"]),
         owner_user_id=int(row["owner_user_id"]),
         username=row["username"],
-        key_type=VpnKeyType(row["key_type"]),
-        status=VpnKeyStatus(row["status"]),
+        key_type=_enum_value(VpnKeyType, row["key_type"], "vpn_keys.key_type"),  # type: ignore[arg-type]
+        status=_enum_value(VpnKeyStatus, row["status"], "vpn_keys.status"),  # type: ignore[arg-type]
         note=row["note"],
         uuid=row["uuid"],
         email_label=row["email_label"],
@@ -288,18 +298,26 @@ class VpnKeyRepository:
         statuses: set[VpnKeyStatus],
         limit: int = 500,
         offset: int = 0,
+        after_id: int | None = None,
     ) -> list[VpnKey]:
         if not statuses:
             return []
         placeholders = ",".join("?" for _ in statuses)
+        after_sql = ""
+        params: list[object] = [key_type.value, *(status.value for status in statuses)]
+        if after_id is not None:
+            after_sql = "AND id > ?"
+            params.append(after_id)
+        params.extend([limit, offset])
         cursor = await self.db.conn.execute(
             f"""
             SELECT * FROM vpn_keys
             WHERE key_type = ? AND status IN ({placeholders})
-            ORDER BY updated_at ASC, id ASC
+              {after_sql}
+            ORDER BY id ASC
             LIMIT ? OFFSET ?
             """,
-            (key_type.value, *(status.value for status in statuses), limit, offset),
+            tuple(params),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
@@ -391,6 +409,7 @@ class VpnKeyRepository:
         reserved_statuses = (
             VpnKeyStatus.PENDING_APPLY,
             VpnKeyStatus.ACTIVE,
+            VpnKeyStatus.APPLY_FAILED,
             VpnKeyStatus.PENDING_REVOKE,
             VpnKeyStatus.PENDING_DELETE,
             VpnKeyStatus.DELETE_FAILED,
@@ -425,10 +444,18 @@ class VpnKeyRepository:
         return _row_to_vpn_key(row)
 
     async def count_active_managed_short_id(self, short_id: str, exclude_key_id: int | None = None) -> int:
+        statuses = (
+            VpnKeyStatus.ACTIVE,
+            VpnKeyStatus.PENDING_APPLY,
+            VpnKeyStatus.APPLY_FAILED,
+            VpnKeyStatus.PENDING_REVOKE,
+            VpnKeyStatus.PENDING_DELETE,
+            VpnKeyStatus.DELETE_FAILED,
+        )
+        placeholders = ",".join("?" for _ in statuses)
         params: list[object] = [
             VpnKeyType.XRAY.value,
-            VpnKeyStatus.ACTIVE.value,
-            VpnKeyStatus.PENDING_APPLY.value,
+            *(status.value for status in statuses),
             short_id,
         ]
         exclude_sql = ""
@@ -440,7 +467,7 @@ class VpnKeyRepository:
             SELECT COUNT(*) AS cnt
             FROM vpn_keys
             WHERE key_type = ?
-              AND status IN (?, ?)
+              AND status IN ({placeholders})
               AND json_extract(payload_json, '$.short_id') = ?
               AND json_extract(payload_json, '$.short_id_managed') = 1
               {exclude_sql}

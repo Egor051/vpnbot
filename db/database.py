@@ -11,7 +11,7 @@ from typing import Any, AsyncIterator
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 6
 logger = logging.getLogger(__name__)
 
 
@@ -49,7 +49,7 @@ class Database:
         await self._raw_conn().execute("PRAGMA busy_timeout = 5000")
         await self._raw_conn().commit()
         if created or os.name == "posix":
-            self._chmod_private_file(self.path)
+            self._chmod_sqlite_files()
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -60,9 +60,14 @@ class Database:
         if schema_path is None:
             schema_path = Path(__file__).with_name("schema.sql")
         sql = schema_path.read_text(encoding="utf-8")
-        await self.conn.executescript(sql)
-        await self._apply_migrations()
-        await self.commit()
+        try:
+            await self.conn.executescript(sql)
+            await self._apply_migrations()
+            await self.commit()
+            self._chmod_sqlite_files()
+        except Exception:
+            await self.rollback()
+            raise
 
     async def _apply_migrations(self) -> None:
         version = await self._schema_version()
@@ -127,7 +132,36 @@ class Database:
                 """
             )
             await self._set_schema_version(4)
-            await self._validate_reference_integrity()
+            version = 4
+        if version < 5:
+            await self._validate_reserved_awg_client_ip_duplicates()
+            await self.conn.execute("DROP INDEX IF EXISTS idx_vpn_keys_client_ip_active")
+            await self.conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_client_ip_reserved
+                ON vpn_keys(client_ip)
+                WHERE client_ip IS NOT NULL
+                  AND key_type = 'awg'
+                  AND status IN ('pending_apply','active','pending_revoke','pending_delete','delete_failed')
+                """
+            )
+            await self._set_schema_version(5)
+            version = 5
+        if version < 6:
+            await self._validate_reserved_awg_client_ip_duplicates()
+            await self.conn.execute("DROP INDEX IF EXISTS idx_vpn_keys_client_ip_reserved")
+            await self.conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_client_ip_reserved
+                ON vpn_keys(client_ip)
+                WHERE client_ip IS NOT NULL
+                  AND key_type = 'awg'
+                  AND status IN ('pending_apply','active','apply_failed','pending_revoke','pending_delete','delete_failed')
+                """
+            )
+            await self._set_schema_version(6)
+        await self._validate_reference_integrity()
+        await self._validate_enum_values()
 
     async def _schema_version(self) -> int:
         await self.conn.execute(
@@ -178,24 +212,132 @@ class Database:
         )
 
     async def _validate_reference_integrity(self) -> None:
-        for table, column in (("access_requests", "telegram_user_id"), ("vpn_keys", "owner_user_id")):
+        checks = (
+            ("access_requests", "telegram_user_id", False),
+            ("access_requests", "decided_by", True),
+            ("vpn_keys", "owner_user_id", False),
+            ("vpn_keys", "created_by", False),
+            ("vpn_keys", "revoked_by", True),
+            ("vpn_keys", "deleted_by", True),
+        )
+        for table, column, nullable in checks:
+            null_filter = f"{table}.{column} IS NOT NULL AND " if nullable else ""
             cursor = await self.conn.execute(
                 f"""
                 SELECT COUNT(*) AS cnt
                 FROM {table}
                 LEFT JOIN users ON users.telegram_user_id = {table}.{column}
-                WHERE users.telegram_user_id IS NULL
+                WHERE {null_filter}users.telegram_user_id IS NULL
                 """
             )
             row = await cursor.fetchone()
             count = int(row["cnt"]) if row is not None else 0
             if count:
-                logger.warning(
-                    "Найдены записи без связанного пользователя: table=%s column=%s count=%s",
-                    table,
-                    column,
-                    count,
+                raise RuntimeError(
+                    "Найдены записи без связанного пользователя: "
+                    f"table={table} column={column} count={count}. "
+                    "Остановите запуск, сделайте backup SQLite DB и вручную восстановите владельца "
+                    "или удалите orphan-записи после проверки."
                 )
+        cursor = await self.conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM vpn_key_traffic_stats
+            LEFT JOIN vpn_keys ON vpn_keys.id = vpn_key_traffic_stats.key_id
+            WHERE vpn_keys.id IS NULL
+            """
+        )
+        row = await cursor.fetchone()
+        count = int(row["cnt"]) if row is not None else 0
+        if count:
+            raise RuntimeError(
+                "Найдены orphan-записи traffic stats: table=vpn_key_traffic_stats "
+                f"column=key_id count={count}. Остановите запуск, сделайте backup SQLite DB "
+                "и вручную удалите/восстановите статистику после проверки."
+            )
+
+    async def _validate_enum_values(self) -> None:
+        enum_checks = (
+            (
+                "users",
+                "role",
+                (
+                    "SUPERADMIN",
+                    "APPROVED_USER",
+                    "PENDING_USER",
+                    "BLOCKED_USER",
+                    "superadmin",
+                    "super_admin",
+                    "approved",
+                    "approved_user",
+                    "pending",
+                    "pending_user",
+                    "blocked",
+                    "blocked_user",
+                    "banned",
+                    "ban",
+                    "revoked",
+                ),
+            ),
+            ("access_requests", "status", ("pending", "approved", "rejected")),
+            (
+                "vpn_keys",
+                "key_type",
+                ("xray", "awg"),
+            ),
+            (
+                "vpn_keys",
+                "status",
+                (
+                    "pending_apply",
+                    "active",
+                    "apply_failed",
+                    "pending_revoke",
+                    "revoked",
+                    "pending_delete",
+                    "delete_failed",
+                    "deleted",
+                    "failed",
+                ),
+            ),
+            ("proxy_entries", "proxy_type", ("socks5", "socks4", "http", "https")),
+            ("proxy_entries", "status", ("active", "disabled")),
+        )
+        for table, column, allowed_values in enum_checks:
+            placeholders = ",".join("?" for _ in allowed_values)
+            cursor = await self.conn.execute(
+                f"SELECT COUNT(*) AS cnt FROM {table} WHERE {column} NOT IN ({placeholders})",
+                allowed_values,
+            )
+            row = await cursor.fetchone()
+            count = int(row["cnt"]) if row is not None else 0
+            if count:
+                raise RuntimeError(
+                    "Найдены некорректные enum-значения в SQLite: "
+                    f"table={table} column={column} count={count}. "
+                    "Остановите запуск, сделайте backup SQLite DB и исправьте значения вручную."
+                )
+
+    async def _validate_reserved_awg_client_ip_duplicates(self) -> None:
+        cursor = await self.conn.execute(
+            """
+            SELECT client_ip, COUNT(*) AS cnt
+            FROM vpn_keys
+            WHERE key_type = 'awg'
+              AND client_ip IS NOT NULL
+              AND status IN ('pending_apply','active','apply_failed','pending_revoke','pending_delete','delete_failed')
+            GROUP BY client_ip
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
+        )
+        row = await cursor.fetchone()
+        if row is not None:
+            raise RuntimeError(
+                "Найдены дубли AWG client_ip в reserved статусах: "
+                f"client_ip={row['client_ip']} count={row['cnt']}. "
+                "Остановите запуск, сделайте backup SQLite DB и вручную разберите конфликт перед миграцией."
+            )
 
     async def commit(self) -> None:
         current_task = asyncio.current_task()
@@ -285,6 +427,8 @@ class Database:
             self._implicit_write_depth = 1
             return True
 
+        if self._transaction_lock.locked():
+            await self._wait_for_connection_turn()
         return False
 
     async def _wait_for_connection_turn(self) -> None:
@@ -321,6 +465,13 @@ class Database:
             path.chmod(0o600)
         except OSError:
             logger.warning("Не удалось выставить права 600 на файл SQLite %s", path, exc_info=True)
+
+    def _chmod_sqlite_files(self) -> None:
+        if os.name != "posix":
+            return
+        for path in (self.path, self.path.with_name(self.path.name + "-wal"), self.path.with_name(self.path.name + "-shm")):
+            if path.exists():
+                self._chmod_private_file(path)
 
 
 class _ConnectionProxy:

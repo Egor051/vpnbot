@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,12 +12,17 @@ from adapters.file_lock import ConfigFileLock
 from adapters.shell_runner import ShellRunner
 from models.dto import ShellResult
 
+logger = logging.getLogger(__name__)
+
+MACHINE_OUTPUT_LIMIT = 1024 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class AwgServerConfig:
     listen_port: int | None
     public_key: str | None
     interface_options: dict[str, str]
+    address: str | None = None
 
 
 @dataclass(slots=True)
@@ -47,6 +53,28 @@ class AwgConfigAdapter:
         "I4",
         "I5",
     }
+    _CRITICAL_PEER_KEYS = {"PublicKey", "AllowedIPs", "PresharedKey"}
+    _CRITICAL_INTERFACE_KEYS = {
+        "PrivateKey",
+        "Address",
+        "ListenPort",
+        "Jc",
+        "Jmin",
+        "Jmax",
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "H1",
+        "H2",
+        "H3",
+        "H4",
+        "I1",
+        "I2",
+        "I3",
+        "I4",
+        "I5",
+    }
 
     def __init__(
         self,
@@ -57,6 +85,8 @@ class AwgConfigAdapter:
         shell: ShellRunner,
         persistent_keepalive: int,
     ) -> None:
+        if config_path.is_symlink():
+            raise AwgConfigError("AWG config path не должен быть symlink. Укажите реальный путь к awg0.conf.")
         self.config_path = config_path
         self.interface = interface
         self.backup = backup
@@ -103,6 +133,7 @@ class AwgConfigAdapter:
             listen_port=listen_port,
             public_key=interface.options.get("PublicKey"),
             interface_options=options,
+            address=interface.options.get("Address"),
         )
 
     async def add_peer(
@@ -152,12 +183,14 @@ class AwgConfigAdapter:
                     raise AwgApplyError("Не удалось применить AWG peer в runtime")
                 if not await self.verify_runtime_peer(public_key):
                     raise AwgApplyError("AWG peer добавлен командой, но не найден в runtime")
-            except Exception:
-                if wrote_config:
-                    self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
-                if touched_runtime:
-                    await self._remove_peer_runtime(public_key)
-                raise
+            except Exception as exc:
+                rollback_errors = await self._rollback_add_peer(
+                    backup_path=backup_path,
+                    wrote_config=wrote_config,
+                    touched_runtime=touched_runtime,
+                    public_key=public_key,
+                )
+                self._raise_with_rollback_summary("AWG peer add failed", exc, rollback_errors)
 
     async def remove_peer(self, *, key_id: int, public_key: str | None) -> None:
         with ConfigFileLock(self.config_path):
@@ -165,6 +198,7 @@ class AwgConfigAdapter:
             snapshot = self._snapshot_config()
             backup_path = self.backup.create_backup(self.config_path)
             wrote_config = False
+            runtime_removed = False
             try:
                 original = self._read_text()
                 self._assert_config_unchanged(snapshot)
@@ -177,14 +211,18 @@ class AwgConfigAdapter:
 
                 if public_key and not await self._remove_peer_runtime(public_key):
                     raise AwgApplyError("Не удалось удалить AWG peer из runtime")
+                runtime_removed = public_key is not None
                 if public_key and await self.verify_runtime_peer(public_key):
                     raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
                 if public_key and self.find_peer(public_key=public_key, client_ip=None) is not None:
                     raise AwgApplyError("AWG peer удалён из runtime, но всё ещё найден в config")
-            except Exception:
-                if wrote_config:
-                    self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
-                raise
+            except Exception as exc:
+                rollback_errors = await self._rollback_remove_peer(
+                    backup_path=backup_path,
+                    wrote_config=wrote_config,
+                    runtime_removed=runtime_removed,
+                )
+                self._raise_with_rollback_summary("AWG peer remove failed", exc, rollback_errors)
 
     def client_interface_options(self) -> dict[str, str]:
         if not self.config_path.exists():
@@ -204,8 +242,21 @@ class AwgConfigAdapter:
                 value = part.strip()
                 if not value:
                     continue
-                ips.add(value.split("/", 1)[0].strip())
+                ips.add(value)
         return ips
+
+    def find_managed_peer_public_key(self, key_id: int) -> str | None:
+        block = self._managed_block_lines(self._read_text(), key_id)
+        if not block:
+            return None
+        for raw_line in block:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = [part.strip() for part in line.split("=", 1)]
+            if key == "PublicKey" and value:
+                return value
+        return None
 
     async def ensure_interface_active(self) -> None:
         result = await self._show_interface()
@@ -219,10 +270,18 @@ class AwgConfigAdapter:
         return any(line.strip() == f"peer: {public_key}" for line in result.stdout.splitlines())
 
     async def list_transfer(self) -> dict[str, tuple[int, int]]:
-        result = await self.shell.run(["awg", "show", self.interface, "transfer"], timeout=10)
+        result = await self.shell.run(
+            ["awg", "show", self.interface, "transfer"],
+            timeout=10,
+            max_output_chars=MACHINE_OUTPUT_LIMIT,
+        )
         source = "awg"
         if not result.ok:
-            result = await self.shell.run(["wg", "show", self.interface, "transfer"], timeout=10)
+            result = await self.shell.run(
+                ["wg", "show", self.interface, "transfer"],
+                timeout=10,
+                max_output_chars=MACHINE_OUTPUT_LIMIT,
+            )
             source = "wg"
         if not result.ok:
             raise AwgApplyError(f"Не удалось получить AWG transfer через awg/wg: {result.stderr or result.stdout}")
@@ -274,14 +333,41 @@ class AwgConfigAdapter:
                 tmp.flush()
                 os.fsync(tmp.fileno())
                 tmp_path = Path(tmp.name)
-            result = await self.shell.run(["awg-quick", "strip", str(tmp_path)], timeout=10)
-            if result.returncode == 127:
-                result = await self.shell.run(["wg-quick", "strip", str(tmp_path)], timeout=10)
-            if result.returncode not in {0, 127}:
+            result = await self._quick_strip(tmp_path)
+            if not result.ok:
                 raise AwgConfigError("AWG config не прошёл проверку awg-quick/wg-quick strip")
         finally:
             if tmp_path is not None:
                 tmp_path.unlink(missing_ok=True)
+
+    async def _quick_strip(self, path: Path) -> ShellResult:
+        result = await self.shell.run(["awg-quick", "strip", str(path)], timeout=10)
+        if result.returncode != 127:
+            return result
+        result = await self.shell.run(["wg-quick", "strip", str(path)], timeout=10)
+        if result.returncode == 127:
+            raise AwgConfigError("Не найден awg-quick или wg-quick для проверки AWG config")
+        return result
+
+    async def _sync_runtime_from_config(self, config_path: Path) -> None:
+        stripped_path: Path | None = None
+        try:
+            stripped = await self._quick_strip(config_path)
+            if not stripped.ok:
+                raise AwgApplyError("Не удалось подготовить AWG config для syncconf")
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=config_path.parent, suffix=".conf", delete=False) as tmp:
+                tmp.write(stripped.stdout)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                stripped_path = Path(tmp.name)
+            result = await self._run_awg_or_wg(["syncconf", self.interface, str(stripped_path)], timeout=15)
+            if not result.ok:
+                raise AwgApplyError("Не удалось синхронизировать AWG runtime из восстановленного config")
+        except AwgConfigError as exc:
+            raise AwgApplyError("Не удалось проверить восстановленный AWG config перед syncconf") from exc
+        finally:
+            if stripped_path is not None:
+                stripped_path.unlink(missing_ok=True)
 
     def _parse_sections(self, text: str) -> list[_AwgSection]:
         sections: list[_AwgSection] = []
@@ -303,11 +389,17 @@ class AwgConfigAdapter:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = [part.strip() for part in line.split("=", 1)]
+            self._reject_duplicate_critical_key(current, key)
             current.options[key] = value
 
         if not any(section.name == "Interface" for section in sections):
             raise AwgConfigError("В AWG config не найден [Interface]")
         return sections
+
+    def _reject_duplicate_critical_key(self, section: _AwgSection, key: str) -> None:
+        critical = self._CRITICAL_INTERFACE_KEYS if section.name == "Interface" else self._CRITICAL_PEER_KEYS
+        if key in critical and key in section.options:
+            raise AwgConfigError(f"Дублирующий критичный параметр AWG config: [{section.name}] {key}")
 
     def _find_peer(
         self,
@@ -322,9 +414,26 @@ class AwgConfigAdapter:
             if public_key and section.options.get("PublicKey") == public_key:
                 return dict(section.options)
             allowed_ips = section.options.get("AllowedIPs", "")
-            if client_ip and any(part.strip().split("/", 1)[0] == client_ip for part in allowed_ips.split(",")):
+            if client_ip and self._allowed_ips_contains(allowed_ips, client_ip):
                 return dict(section.options)
         return None
+
+    def _allowed_ips_contains(self, allowed_ips: str, client_ip: str) -> bool:
+        try:
+            candidate = self._ip_address(client_ip)
+        except ValueError:
+            return False
+        for part in allowed_ips.split(","):
+            value = part.strip()
+            if not value:
+                continue
+            try:
+                network = self._ip_network(value)
+            except ValueError:
+                continue
+            if network.version == candidate.version and candidate in network:
+                return True
+        return False
 
     def _peer_block(
         self,
@@ -379,6 +488,71 @@ class AwgConfigAdapter:
         updated_lines = lines[:start_index] + lines[end_index + 1 :]
         return "\n".join(updated_lines).rstrip() + "\n"
 
+    def _managed_block_lines(self, text: str, key_id: int) -> list[str] | None:
+        lines = text.splitlines()
+        start_marker = f"# vpn-bot peer start key_id={key_id} "
+        end_marker = f"# vpn-bot peer end key_id={key_id}"
+        start_index: int | None = None
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if start_index is None and stripped.startswith(start_marker):
+                start_index = index
+                continue
+            if start_index is not None and stripped == end_marker:
+                return lines[start_index : index + 1]
+        return None
+
+    async def _rollback_add_peer(
+        self,
+        *,
+        backup_path: Path,
+        wrote_config: bool,
+        touched_runtime: bool,
+        public_key: str,
+    ) -> list[str]:
+        errors: list[str] = []
+        if wrote_config:
+            try:
+                self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
+            except Exception:
+                logger.error("AWG rollback failed: restore config after add_peer error", exc_info=True)
+                errors.append("restore config")
+        if touched_runtime:
+            try:
+                await self._remove_peer_runtime(public_key)
+            except Exception:
+                logger.error("AWG rollback failed: runtime cleanup after add_peer error", exc_info=True)
+                errors.append("runtime cleanup")
+        return errors
+
+    async def _rollback_remove_peer(
+        self,
+        *,
+        backup_path: Path,
+        wrote_config: bool,
+        runtime_removed: bool,
+    ) -> list[str]:
+        errors: list[str] = []
+        if wrote_config:
+            try:
+                self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
+            except Exception:
+                logger.error("AWG rollback failed: restore config after remove_peer error", exc_info=True)
+                errors.append("restore config")
+        if runtime_removed:
+            try:
+                await self._sync_runtime_from_config(self.config_path)
+            except Exception:
+                logger.error("AWG rollback failed: runtime sync after remove_peer error", exc_info=True)
+                errors.append("runtime sync")
+        return errors
+
+    def _raise_with_rollback_summary(self, context: str, primary: Exception, rollback_errors: list[str]) -> None:
+        if rollback_errors:
+            steps = ", ".join(rollback_errors)
+            raise AwgApplyError(f"{context}: {primary}; rollback failed steps: {steps}") from primary
+        raise primary
+
     async def _add_peer_runtime(self, public_key: str, preshared_key: str | None, client_ip: str) -> bool:
         args = ["set", self.interface, "peer", public_key]
         temp_path: str | None = None
@@ -425,6 +599,16 @@ class AwgConfigAdapter:
         except ValueError as exc:
             raise AwgConfigError(f"AWG integer parameter has invalid value: {value}") from exc
 
+    def _ip_network(self, value: str):
+        import ipaddress
+
+        return ipaddress.ip_network(value, strict=False)
+
+    def _ip_address(self, value: str):
+        import ipaddress
+
+        return ipaddress.ip_address(value)
+
 
 def self_check_allowed_ips_parser() -> bool:
     text = """
@@ -454,5 +638,5 @@ AllowedIPs = 10.0.0.3/32
             continue
         for part in section.options.get("AllowedIPs", "").split(","):
             if part.strip():
-                ips.add(part.strip().split("/", 1)[0])
-    return {"10.0.0.2", "fd00::2", "10.0.0.3"} == ips
+                ips.add(part.strip())
+    return {"10.0.0.2/32", "fd00::2/128", "10.0.0.3/32"} == ips

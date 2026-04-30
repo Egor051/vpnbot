@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message, User as TgUser
 
 from bot.formatters import main_menu_text
 from bot.keyboards.common import back_to_menu, faq_answer_keyboard, faq_keyboard, main_menu
-from bot.messages import safe_edit_message_text
+from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.rate_limit import RateLimitExceeded
 from config.settings import SettingsError
 from models.dto import TelegramUserProfile
@@ -46,7 +46,7 @@ def service_error_text(exc: Exception) -> str:
 async def answer_callback_error(callback: CallbackQuery, exc: Exception) -> None:
     if not isinstance(exc, (AccessDenied, InvalidOperation, NotFound, ServiceError, SettingsError, ValueError, RateLimitExceeded)):
         logger.exception("Unhandled callback error")
-    await callback.answer(service_error_text(exc), show_alert=True)
+    await safe_callback_answer(callback, service_error_text(exc), show_alert=True)
 
 
 async def answer_message_error(message: Message, exc: Exception) -> None:
@@ -88,14 +88,14 @@ async def help_command(message: Message, services: Any) -> None:
 
 @router.callback_query(F.data == "help")
 async def help_callback(callback: CallbackQuery, services: Any) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     if callback.message and callback.from_user:
         await safe_edit_message_text(callback.message, FAQ_TEXT, reply_markup=faq_keyboard())
 
 
 @router.callback_query(F.data.startswith("faq:"))
 async def faq_answer_callback(callback: CallbackQuery) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     if callback.message is None or callback.data is None:
         return
     topic = callback.data.split(":", 1)[1]
@@ -114,7 +114,7 @@ async def help_menu_message(message: Message, services: Any) -> None:
 
 @router.callback_query(F.data == "menu:main")
 async def menu_callback(callback: CallbackQuery, services: Any) -> None:
-    await callback.answer()
+    await safe_callback_answer(callback)
     if callback.from_user is None or callback.message is None:
         return
     await safe_edit_message_text(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -17,23 +18,34 @@ from adapters.file_lock import ConfigFileLock
 from adapters.systemctl import SystemCtlAdapter
 
 
+logger = logging.getLogger(__name__)
+
+
 class XrayConfigAdapter:
     def __init__(
         self,
         *,
         config_path: Path,
         service_name: str,
+        apply_mode: str,
         inbound_tag: str,
         allow_restart_on_rollback: bool,
         backup: BackupAdapter,
         systemctl: SystemCtlAdapter,
     ) -> None:
+        if config_path.is_symlink():
+            raise XrayConfigError("Xray config path не должен быть symlink. Укажите реальный путь к config.json.")
         self.config_path = config_path
         self.service_name = service_name
+        if apply_mode not in {"reload", "restart"}:
+            raise XrayConfigError("Xray apply mode должен быть reload или restart")
+        self.apply_mode = apply_mode
         self.inbound_tag = inbound_tag
         self.allow_restart_on_rollback = allow_restart_on_rollback
         self.backup = backup
         self.systemctl = systemctl
+        if self.apply_mode == "restart":
+            logger.warning("XRAY_APPLY_MODE=restart: Xray config changes will restart service %s", self.service_name)
 
     async def add_client(
         self,
@@ -68,7 +80,7 @@ class XrayConfigAdapter:
                 await self._test_config(temp_path)
                 self._assert_config_unchanged(snapshot)
                 self._replace_main_config(temp_path, self.config_path)
-                await self._reload_or_restore(backup_path)
+                await self._apply_or_restore(backup_path)
             except Exception:
                 self._cleanup_temp(temp_path)
                 raise
@@ -93,14 +105,7 @@ class XrayConfigAdapter:
                 clients = self._clients(inbound)
                 changed = False
 
-                new_clients = [
-                    client
-                    for client in clients
-                    if not (
-                        isinstance(client, dict)
-                        and ((uuid_value and client.get("id") == uuid_value) or (email_label and client.get("email") == email_label))
-                    )
-                ]
+                new_clients = [client for client in clients if not self._matches_client_for_remove(client, uuid_value, email_label)]
                 if len(new_clients) != len(clients):
                     inbound["settings"]["clients"] = new_clients
                     changed = True
@@ -114,7 +119,7 @@ class XrayConfigAdapter:
                 await self._test_config(temp_path)
                 self._assert_config_unchanged(snapshot)
                 self._replace_main_config(temp_path, self.config_path)
-                await self._reload_or_restore(backup_path)
+                await self._apply_or_restore(backup_path)
             except Exception:
                 self._cleanup_temp(temp_path)
                 raise
@@ -163,9 +168,14 @@ class XrayConfigAdapter:
                     return inbound
             raise XrayInboundNotFoundError(f"Xray inbound tag={self.inbound_tag!r} не найден")
 
-        for inbound in inbounds:
-            if isinstance(inbound, dict) and self._is_vless_reality(inbound):
-                return inbound
+        candidates = [inbound for inbound in inbounds if isinstance(inbound, dict) and self._is_vless_reality(inbound)]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise XrayInboundNotFoundError(
+                "В Xray config найдено несколько VLESS/Reality inbound. "
+                "Укажите XRAY_INBOUND_TAG, чтобы бот не выбрал неправильный inbound."
+            )
         raise XrayInboundNotFoundError("Не найден Xray inbound protocol=vless и security=reality")
 
     def _is_vless_reality(self, inbound: dict[str, Any]) -> bool:
@@ -201,6 +211,13 @@ class XrayConfigAdapter:
             if email_label and client.get("email") == email_label:
                 return client
         return None
+
+    def _matches_client_for_remove(self, client: Any, uuid_value: str | None, email_label: str | None) -> bool:
+        if not isinstance(client, dict):
+            return False
+        if uuid_value:
+            return client.get("id") == uuid_value
+        return bool(email_label and client.get("email") == email_label)
 
     def _add_short_id(self, inbound: dict[str, Any], short_id: str) -> None:
         reality = self._reality_settings(inbound)
@@ -262,9 +279,16 @@ class XrayConfigAdapter:
         if mode_from.exists():
             self._copy_stat(mode_from, temp_path)
         os.replace(temp_path, self.config_path)
+        self._fsync_parent(self.config_path)
+
+    async def _apply_or_restore(self, backup_path: Path) -> None:
+        if self.apply_mode == "restart":
+            await self._restart_or_restore(backup_path)
+            return
+        await self._reload_or_restore(backup_path)
 
     async def _reload_or_restore(self, backup_path: Path) -> None:
-        result = await self.systemctl.reload_or_restart(self.service_name)
+        result = await self.systemctl.reload(self.service_name)
         if result.ok:
             active = await self.systemctl.is_active(self.service_name)
             if active.ok and active.stdout.strip() == "active":
@@ -279,6 +303,25 @@ class XrayConfigAdapter:
                 raise XrayApplyError("Xray reload failed, backup restored, но restart также не удался")
         raise XrayApplyError("Не удалось применить Xray config через reload; backup восстановлен")
 
+    async def _restart_or_restore(self, backup_path: Path) -> None:
+        logger.info("Applying Xray config via systemctl restart %s", self.service_name)
+        if await self._restart_service():
+            return
+        self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
+        restored_test = await self.systemctl.xray_test_config(self.config_path)
+        if not restored_test.ok:
+            raise XrayApplyError("Xray restart failed, backup restored, но восстановленный config не прошёл проверку")
+        if not await self._restart_service():
+            raise XrayApplyError("Xray restart failed, backup restored, но restart восстановленного config также не удался")
+        raise XrayApplyError("Не удалось применить Xray config через restart; backup восстановлен и Xray перезапущен")
+
+    async def _restart_service(self) -> bool:
+        result = await self.systemctl.restart(self.service_name)
+        if not result.ok:
+            return False
+        active = await self.systemctl.is_active(self.service_name)
+        return active.ok and active.stdout.strip() == "active"
+
     def _cleanup_temp(self, temp_path: Path | None) -> None:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink(missing_ok=True)
@@ -292,3 +335,19 @@ class XrayConfigAdapter:
             os.chown(target, stat.st_uid, stat.st_gid)
         except OSError:
             pass
+
+    def _fsync_parent(self, path: Path) -> None:
+        if os.name != "posix":
+            return
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        fd: int | None = None
+        try:
+            fd = os.open(path.parent, flags)
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            if fd is not None:
+                os.close(fd)

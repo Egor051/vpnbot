@@ -11,7 +11,7 @@ from aiogram.enums import ChatType
 from adapters.clock import ClockProvider
 from adapters.ip_allocator import IpAllocator
 from bot.fsm.states import AdminCreateKeyStates, CreateKeyStates
-from bot.handlers.admin import admin_announcement_message, admin_announcement_start, admin_issue_confirm
+from bot.handlers.admin import admin_announcement_message, admin_announcement_send, admin_announcement_start, admin_issue_confirm
 from bot.handlers.keys import create_key_confirm
 from bot.keyboards.keys import keys_list_keyboard
 from bot.rate_limit import RateLimitExceeded
@@ -34,8 +34,10 @@ def _settings(tmp_path: Path) -> Settings:
         db_path=tmp_path / "vpn.db",
         log_dir=tmp_path / "logs",
         bot_lock_path=tmp_path / "vpn.lock",
+        bot_drop_pending_updates=False,
         xray_config_path=tmp_path / "xray.json",
         xray_service_name="xray",
+        xray_apply_mode="reload",
         xray_inbound_tag="",
         xray_public_host="vpn.example.com",
         xray_public_port=443,
@@ -171,6 +173,103 @@ class AwgAdapter:
             raise RuntimeError("remove failed")
 
 
+def test_xray_create_succeeds_when_post_apply_audit_fails(tmp_path: Path) -> None:
+    class Adapter:
+        async def add_client(self, **kwargs: object) -> None:
+            return None
+
+    class Ids:
+        def uuid4(self) -> str:
+            return "00000000-0000-4000-8000-000000000001"
+
+        def generated_key_name(self, prefix: str) -> str:
+            return f"{prefix}_Ab3dE"
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await UserRepository(db).upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            repo = VpnKeyRepository(db)
+            audit = FailingAudit()
+            service = XrayService(
+                vpn_keys=repo,
+                users=Users(),  # type: ignore[arg-type]
+                adapter=Adapter(),  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=Ids(),  # type: ignore[arg-type]
+                audit=audit,  # type: ignore[arg-type]
+            )
+
+            result = await service.create_xray_key(100, TelegramUserProfile(100, "user", "User"), None)
+
+            assert result.key.status == VpnKeyStatus.ACTIVE
+            assert audit.actions == ["xray_key_created"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_awg_create_succeeds_when_post_apply_audit_fails(tmp_path: Path) -> None:
+    class Adapter:
+        def read_server_config(self) -> SimpleNamespace:
+            return SimpleNamespace(listen_port=443, public_key="server-public", interface_options={})
+
+        def client_interface_options(self) -> dict[str, str]:
+            return {}
+
+        async def generate_private_key(self) -> str:
+            return "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+
+        async def generate_public_key(self, private_key: str) -> str:
+            return "public"
+
+        async def generate_preshared_key(self) -> str:
+            return "psk"
+
+        async def add_peer(self, **kwargs: object) -> None:
+            return None
+
+    class Allocator:
+        async def next_free_ip(self) -> str:
+            return "10.0.0.2"
+
+    class Ids:
+        def generated_key_name(self, prefix: str) -> str:
+            return f"{prefix}_Ab3dE"
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await UserRepository(db).upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            repo = VpnKeyRepository(db)
+            audit = FailingAudit()
+            service = AwgService(
+                vpn_keys=repo,
+                users=Users(),  # type: ignore[arg-type]
+                adapter=Adapter(),  # type: ignore[arg-type]
+                ip_allocator=Allocator(),  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=Ids(),  # type: ignore[arg-type]
+                audit=audit,  # type: ignore[arg-type]
+            )
+
+            result = await service.create_awg_key(100, TelegramUserProfile(100, "user", "User"), None)
+
+            assert result.key.status == VpnKeyStatus.ACTIVE
+            assert audit.actions == ["awg_key_created"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_hard_delete_with_stats_removes_key_and_stats(tmp_path: Path) -> None:
     async def run() -> None:
         db = Database(tmp_path / "vpn.db")
@@ -217,6 +316,44 @@ def test_hard_delete_with_stats_removes_key_and_stats(tmp_path: Path) -> None:
 def test_hard_delete_active_key_removes_server_access(key_type: VpnKeyType, tmp_path: Path) -> None:
     async def run() -> None:
         repo = MemoryKeyRepo(_key(key_type))
+        audit = Audit()
+        if key_type == VpnKeyType.XRAY:
+            adapter = XrayAdapter()
+            service = XrayService(
+                vpn_keys=repo,  # type: ignore[arg-type]
+                users=Users(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=object(),  # type: ignore[arg-type]
+                audit=audit,  # type: ignore[arg-type]
+            )
+            await service.delete_xray_key(100, 10)
+        else:
+            adapter = AwgAdapter()
+            service = AwgService(
+                vpn_keys=repo,  # type: ignore[arg-type]
+                users=Users(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+                ip_allocator=object(),  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=object(),  # type: ignore[arg-type]
+                audit=audit,  # type: ignore[arg-type]
+            )
+            await service.delete_awg_key(100, 10)
+
+        assert adapter.removed is True
+        assert repo.hard_deleted is True
+        assert repo.key is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("key_type", [VpnKeyType.XRAY, VpnKeyType.AWG])
+def test_hard_delete_apply_failed_key_still_attempts_server_cleanup(key_type: VpnKeyType, tmp_path: Path) -> None:
+    async def run() -> None:
+        repo = MemoryKeyRepo(_key(key_type, status=VpnKeyStatus.APPLY_FAILED))
         audit = Audit()
         if key_type == VpnKeyType.XRAY:
             adapter = XrayAdapter()
@@ -323,12 +460,60 @@ def test_awg_delete_failed_and_pending_cleanup_statuses_reserve_ip(tmp_path: Pat
                 client_ip="10.0.0.4",
             )
             await repo.set_status(pending_revoke.id, VpnKeyStatus.PENDING_REVOKE, "now")
+            apply_failed = await repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.AWG,
+                note=None,
+                payload={},
+                public_payload={},
+                created_by=100,
+                now="now",
+                public_key="apply-failed-public",
+                client_ip="10.0.0.5",
+            )
+            await repo.set_status(apply_failed.id, VpnKeyStatus.APPLY_FAILED, "now")
 
             occupied = await repo.get_occupied_awg_ips()
             allocator = IpAllocator(repo, "10.0.0.0/29", "10.0.0.1")
 
-            assert {"10.0.0.2", "10.0.0.3", "10.0.0.4"}.issubset(occupied)
-            assert await allocator.next_free_ip() == "10.0.0.5"
+            assert {"10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"}.issubset(occupied)
+            assert await allocator.next_free_ip() == "10.0.0.6"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_awg_apply_failed_ip_is_reusable_after_safe_final_status(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users = UserRepository(db)
+            await users.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            repo = VpnKeyRepository(db)
+            key = await repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.AWG,
+                note=None,
+                payload={},
+                public_payload={},
+                created_by=100,
+                now="now",
+                public_key="public",
+                client_ip="10.0.0.2",
+            )
+            await repo.set_status(key.id, VpnKeyStatus.APPLY_FAILED, "now")
+            allocator = IpAllocator(repo, "10.0.0.0/29", "10.0.0.1")
+
+            assert await allocator.next_free_ip() == "10.0.0.3"
+
+            await repo.set_status(key.id, VpnKeyStatus.REVOKED, "now")
+
+            assert await allocator.next_free_ip() == "10.0.0.2"
         finally:
             await db.close()
 
@@ -543,6 +728,46 @@ def test_revoke_still_leaves_key_revoked_in_db(tmp_path: Path) -> None:
         assert result.status == VpnKeyStatus.REVOKED
         assert repo.key is not None
         assert repo.key.status == VpnKeyStatus.REVOKED
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("key_type", [VpnKeyType.XRAY, VpnKeyType.AWG])
+def test_revoke_succeeds_when_post_revoke_audit_fails(key_type: VpnKeyType, tmp_path: Path) -> None:
+    async def run() -> None:
+        repo = MemoryKeyRepo(_key(key_type))
+        audit = FailingAudit()
+        if key_type == VpnKeyType.XRAY:
+            adapter = XrayAdapter()
+            service = XrayService(
+                vpn_keys=repo,  # type: ignore[arg-type]
+                users=Users(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=object(),  # type: ignore[arg-type]
+                audit=audit,  # type: ignore[arg-type]
+            )
+            result = await service.revoke_xray_key(100, 10)
+        else:
+            adapter = AwgAdapter()
+            service = AwgService(
+                vpn_keys=repo,  # type: ignore[arg-type]
+                users=Users(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+                ip_allocator=object(),  # type: ignore[arg-type]
+                settings=_settings(tmp_path),
+                clock=ClockProvider(),
+                ids=object(),  # type: ignore[arg-type]
+                audit=audit,  # type: ignore[arg-type]
+            )
+            result = await service.revoke_awg_key(100, 10)
+
+        assert adapter.removed is True
+        assert result.status == VpnKeyStatus.REVOKED
+        assert repo.key is not None
+        assert repo.key.status == VpnKeyStatus.REVOKED
+        assert audit.actions == [f"{key_type.value}_key_revoked"]
 
     asyncio.run(run())
 
@@ -850,6 +1075,80 @@ def test_admin_issue_confirm_keeps_fsm_data_when_rate_limited_after_owner_valida
     asyncio.run(run())
 
 
+def test_announcement_confirm_keeps_fsm_data_when_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def allow_private_callback(callback: object, text: str = "") -> bool:
+        return True
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", allow_private_callback)
+
+    class State:
+        def __init__(self) -> None:
+            self.current_state = object()
+            self.data = {"from_chat_id": 1, "message_id": 77}
+
+        async def get_data(self) -> dict[str, object]:
+            return dict(self.data)
+
+        async def clear(self) -> None:
+            self.current_state = None
+            self.data.clear()
+
+    class Callback:
+        def __init__(self) -> None:
+            self.from_user = SimpleNamespace(id=1)
+            self.message = SimpleNamespace()
+            self.answers: list[tuple[str, bool | None]] = []
+
+        async def answer(self, text: str | None = None, show_alert: bool | None = None, **kwargs: object) -> None:
+            self.answers.append((text or "", show_alert))
+
+    class RateLimiter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def check(self, user_id: int, action: str, cooldown_seconds: float) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RateLimitExceeded(5)
+
+    class Announcements:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def send_to_all(self, **kwargs: object) -> SimpleNamespace:
+            self.calls += 1
+            return SimpleNamespace(total=1, success=1, failed=0)
+
+    async def fake_edit(message: object, text: str, reply_markup: object = None, **kwargs: object) -> bool:
+        message.text = text
+        return True
+
+    monkeypatch.setattr("bot.handlers.admin.safe_edit_message_text", fake_edit)
+
+    async def run() -> None:
+        state = State()
+        callback = Callback()
+        announcements = Announcements()
+        rate_limiter = RateLimiter()
+        services = SimpleNamespace(users=Users(), announcements=announcements)
+
+        await admin_announcement_send(callback, state, services, object(), rate_limiter)  # type: ignore[arg-type]
+
+        assert state.current_state is not None
+        assert state.data == {"from_chat_id": 1, "message_id": 77}
+        assert callback.answers == [("Слишком часто. Повторите через 5 сек.", True)]
+        assert announcements.calls == 0
+
+        await admin_announcement_send(callback, state, services, object(), rate_limiter)  # type: ignore[arg-type]
+
+        assert state.current_state is None
+        assert state.data == {}
+        assert announcements.calls == 1
+        assert callback.answers[-1] == ("Отправляю...", None)
+
+    asyncio.run(run())
+
+
 def test_group_chat_announcement_message_does_not_start_or_send() -> None:
     class State:
         async def update_data(self, **kwargs: object) -> None:
@@ -1022,6 +1321,10 @@ def test_announcement_batches_and_single_send_failure_does_not_abort() -> None:
         assert result.total == 5
         assert result.success == 4
         assert result.failed == 1
+        assert result.last_seen_id == 5
+        assert result.delivered_user_ids == (1, 3, 4, 5)
+        assert result.failed_user_ids == (2,)
+        assert result.skipped_user_ids == ()
         assert repo.last_seen_ids == [None, 2, 4, 5]
         assert bot.copied == [1, 3, 4, 5]
 

@@ -60,7 +60,20 @@ def _bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
         return default
-    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    raise SettingsError(f"Переменная {name} должна быть явным boolean: true/false, yes/no, on/off или 1/0")
+
+
+def _choice(name: str, default: str, allowed: set[str]) -> str:
+    value = _optional(name, default).lower()
+    if value not in allowed:
+        allowed_values = ", ".join(sorted(allowed))
+        raise SettingsError(f"Переменная {name} должна быть одним из значений: {allowed_values}")
+    return value
 
 
 def _admin_ids(raw: str) -> frozenset[int]:
@@ -98,6 +111,21 @@ def _ipv4_network(name: str, value: str) -> str:
     return value
 
 
+def _ipv4_address_in_network(name: str, value: str, network_value: str) -> str:
+    try:
+        network = ipaddress.ip_network(network_value, strict=False)
+        address = ipaddress.ip_address(value.split("/", 1)[0])
+    except ValueError as exc:
+        raise SettingsError(f"{name} должен быть корректным IPv4-адресом внутри AWG_NETWORK") from exc
+    if address.version != 4:
+        raise SettingsError(f"{name} сейчас поддерживает только IPv4")
+    if address not in network:
+        raise SettingsError(f"{name} должен входить в AWG_NETWORK")
+    if address == network.network_address or address == network.broadcast_address:
+        raise SettingsError(f"{name} не должен быть network или broadcast address")
+    return str(address)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     bot_token: str
@@ -106,9 +134,11 @@ class Settings:
     db_path: Path
     log_dir: Path
     bot_lock_path: Path
+    bot_drop_pending_updates: bool
 
     xray_config_path: Path
     xray_service_name: str
+    xray_apply_mode: str
     xray_inbound_tag: str
     xray_public_host: str
     xray_public_port: int
@@ -156,6 +186,22 @@ class Settings:
         if missing:
             raise SettingsError("Для создания Xray-ключа не заданы: " + ", ".join(missing))
         _xray_short_id(self.xray_short_id, required=not self.xray_manage_short_ids)
+        if self.xray_network_type not in {"tcp", "raw"}:
+            raise SettingsError("XRAY_NETWORK_TYPE должен быть tcp или raw")
+        if self.xray_fingerprint not in {
+            "chrome",
+            "firefox",
+            "safari",
+            "ios",
+            "android",
+            "edge",
+            "randomized",
+            "randomizedalpn",
+            "randomizednoalpn",
+        }:
+            raise SettingsError("XRAY_FINGERPRINT содержит неподдерживаемое значение")
+        if re.fullmatch(r"[A-Za-z0-9_-]+", self.xray_reality_public_key) is None:
+            raise SettingsError("XRAY_REALITY_PUBLIC_KEY должен быть base64url-совместимой строкой")
 
     def validate_awg_ready(self) -> None:
         missing = [
@@ -176,14 +222,21 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
     xray_short_id = _xray_short_id(_optional("XRAY_SHORT_ID"), required=False)
     xray_port = _optional("XRAY_PUBLIC_PORT") or _optional("XRAY_SERVER_PORT")
     awg_network = _ipv4_network("AWG_NETWORK", _optional("AWG_NETWORK", "10.0.0.0/24"))
+    awg_server_address = _ipv4_address_in_network(
+        "AWG_SERVER_ADDRESS",
+        _optional("AWG_SERVER_ADDRESS", "10.0.0.1"),
+        awg_network,
+    )
     return Settings(
         bot_token=_required("BOT_TOKEN"),
         admin_ids=_admin_ids(_required("ADMIN_IDS")),
         db_path=Path(_optional("DB_PATH", "/opt/vpn-service/data/vpn.db")),
         log_dir=Path(_optional("LOG_DIR", "/opt/vpn-service/logs")),
         bot_lock_path=Path(_optional("BOT_LOCK_PATH", "/run/vpn-bot.lock")),
+        bot_drop_pending_updates=_bool("BOT_DROP_PENDING_UPDATES", False),
         xray_config_path=Path(_optional("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")),
         xray_service_name=_optional("XRAY_SERVICE_NAME", "xray"),
+        xray_apply_mode=_choice("XRAY_APPLY_MODE", "restart", {"reload", "restart"}),
         xray_inbound_tag=_optional("XRAY_INBOUND_TAG"),
         xray_public_host=_optional("XRAY_PUBLIC_HOST") or _optional("XRAY_SERVER_ADDRESS"),
         xray_public_port=(
@@ -194,8 +247,12 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_reality_public_key=_optional("XRAY_REALITY_PUBLIC_KEY") or _optional("XRAY_PUBLIC_KEY"),
         xray_sni=_optional("XRAY_SNI") or _optional("XRAY_SERVER_NAME"),
         xray_flow=_optional("XRAY_FLOW", "xtls-rprx-vision"),
-        xray_fingerprint=_optional("XRAY_FINGERPRINT", "chrome"),
-        xray_network_type=_optional("XRAY_NETWORK_TYPE", "tcp"),
+        xray_fingerprint=_choice(
+            "XRAY_FINGERPRINT",
+            "chrome",
+            {"chrome", "firefox", "safari", "ios", "android", "edge", "randomized", "randomizedalpn", "randomizednoalpn"},
+        ),
+        xray_network_type=_choice("XRAY_NETWORK_TYPE", "tcp", {"tcp", "raw"}),
         xray_short_id=xray_short_id,
         xray_manage_short_ids=xray_manage_short_ids,
         xray_allow_restart_on_rollback=_bool("XRAY_ALLOW_RESTART_ON_ROLLBACK", False),
@@ -203,7 +260,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         awg_config_path=Path(_optional("AWG_CONFIG_PATH", "/etc/amnezia/amneziawg/awg0.conf")),
         awg_interface=_optional("AWG_INTERFACE", "awg0"),
         awg_network=awg_network,
-        awg_server_address=_optional("AWG_SERVER_ADDRESS", "10.0.0.1"),
+        awg_server_address=awg_server_address,
         awg_endpoint_host=_optional("AWG_ENDPOINT_HOST"),
         awg_endpoint_port=_int_range("AWG_ENDPOINT_PORT", 0, 0, 65535),
         awg_server_public_key=_optional("AWG_SERVER_PUBLIC_KEY"),

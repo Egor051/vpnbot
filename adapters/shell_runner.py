@@ -20,10 +20,12 @@ class ShellRunner:
         input_text: str | None = None,
         timeout: float = 15.0,
         sensitive_values: Sequence[str] = (),
+        max_output_chars: int | None = None,
     ) -> ShellResult:
         if not args:
             raise ValueError("args must not be empty")
 
+        output_limit = self.max_output_chars if max_output_chars is None else max_output_chars
         safe_args = self._redact_args(args, sensitive_values)
         try:
             process = await asyncio.create_subprocess_exec(
@@ -40,8 +42,8 @@ class ShellRunner:
         stderr_task: asyncio.Task[tuple[bytes, bool]] | None = None
         stdin_task: asyncio.Task[None] | None = None
         try:
-            stdout_task = asyncio.create_task(self._read_stream_limited(process.stdout))
-            stderr_task = asyncio.create_task(self._read_stream_limited(process.stderr))
+            stdout_task = asyncio.create_task(self._read_stream_limited(process.stdout, output_limit))
+            stderr_task = asyncio.create_task(self._read_stream_limited(process.stderr, output_limit))
             stdin_task = asyncio.create_task(self._write_stdin(process, input_text))
             await asyncio.wait_for(process.wait(), timeout=timeout)
             await stdin_task
@@ -56,8 +58,8 @@ class ShellRunner:
             logger.error("Команда превысила timeout: %s", " ".join(safe_args))
             return ShellResult(tuple(args), 124, "", "timeout")
 
-        stdout = self._compact(stdout_raw, stdout_truncated)
-        stderr = self._compact(stderr_raw, stderr_truncated)
+        stdout = self._compact(stdout_raw, stdout_truncated, output_limit)
+        stderr = self._compact(stderr_raw, stderr_truncated, output_limit)
         if process.returncode != 0:
             logger.warning(
                 "Команда завершилась с ошибкой rc=%s: %s; stderr=%s",
@@ -79,7 +81,7 @@ class ShellRunner:
             process.stdin.close()
         await process.stdin.wait_closed()
 
-    async def _read_stream_limited(self, stream: asyncio.StreamReader | None) -> tuple[bytes, bool]:
+    async def _read_stream_limited(self, stream: asyncio.StreamReader | None, max_output_chars: int) -> tuple[bytes, bool]:
         if stream is None:
             return b"", False
         chunks: list[bytes] = []
@@ -89,7 +91,7 @@ class ShellRunner:
             chunk = await stream.read(1024)
             if not chunk:
                 break
-            remaining = self.max_output_chars - total
+            remaining = max_output_chars - total
             if remaining > 0:
                 chunks.append(chunk[:remaining])
                 total += min(len(chunk), remaining)
@@ -97,11 +99,12 @@ class ShellRunner:
                 truncated = True
         return b"".join(chunks), truncated
 
-    def _compact(self, data: bytes, truncated: bool = False) -> str:
+    def _compact(self, data: bytes, truncated: bool = False, max_output_chars: int | None = None) -> str:
+        output_limit = self.max_output_chars if max_output_chars is None else max_output_chars
         text = data.decode("utf-8", errors="replace").strip()
-        if not truncated and len(text) <= self.max_output_chars:
+        if not truncated and len(text) <= output_limit:
             return text
-        return text[: self.max_output_chars] + "...[truncated]"
+        return text[:output_limit] + "...[truncated]"
 
     def _redact_args(self, args: Sequence[str], sensitive_values: Sequence[str]) -> list[str]:
         return [self._redact(item, sensitive_values) for item in args]

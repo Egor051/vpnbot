@@ -4,6 +4,8 @@ import json
 
 from adapters.shell_runner import ShellRunner
 
+MACHINE_OUTPUT_LIMIT = 1024 * 1024
+
 
 class XrayStatsUnavailable(RuntimeError):
     pass
@@ -20,6 +22,7 @@ class XrayStatsAdapter:
         result = await self.shell.run(
             ["xray", "api", "statsquery", f"--server={self.stats_server}"],
             timeout=15,
+            max_output_chars=MACHINE_OUTPUT_LIMIT,
         )
         if not result.ok:
             raise XrayStatsUnavailable(f"Xray stats API недоступен: {result.stderr or result.stdout}")

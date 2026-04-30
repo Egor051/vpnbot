@@ -13,6 +13,7 @@ from services.errors import AccessDenied, NotFound
 from services.users import UserService
 
 logger = logging.getLogger(__name__)
+PUBLIC_BACKEND_STATS_ERROR = "Не удалось получить данные от backend"
 
 
 class TrafficStatsService:
@@ -77,9 +78,8 @@ class TrafficStatsService:
         try:
             return await self.awg.list_transfer(), None
         except Exception as exc:
-            reason = f"AWG transfer недоступен: {exc}"
-            logger.warning(reason)
-            return {}, reason
+            logger.warning("AWG transfer недоступен: %s", exc, exc_info=True)
+            return {}, PUBLIC_BACKEND_STATS_ERROR
 
     async def _load_xray_stats(self, keys: list[VpnKey]) -> tuple[dict[str, int], str | None]:
         if not any(key.key_type == VpnKeyType.XRAY for key in keys):
@@ -87,9 +87,8 @@ class TrafficStatsService:
         try:
             return await self.xray.query_all(), None
         except Exception as exc:
-            reason = f"Xray stats API недоступен: {exc}"
-            logger.warning(reason)
-            return {}, reason
+            logger.warning("Xray stats API недоступен: %s", exc, exc_info=True)
+            return {}, PUBLIC_BACKEND_STATS_ERROR
 
     async def _refresh_awg_key(
         self,
@@ -155,8 +154,8 @@ class TrafficStatsService:
         return await self._store_success(
             key=key,
             previous=previous,
-            raw_downloaded_bytes=raw_downloaded or 0,
-            raw_uploaded_bytes=raw_uploaded or 0,
+            raw_downloaded_bytes=raw_downloaded,
+            raw_uploaded_bytes=raw_uploaded,
             source="xray statsquery",
             now=now,
         )
@@ -166,17 +165,17 @@ class TrafficStatsService:
         *,
         key: VpnKey,
         previous: TrafficStats | None,
-        raw_downloaded_bytes: int,
-        raw_uploaded_bytes: int,
+        raw_downloaded_bytes: int | None,
+        raw_uploaded_bytes: int | None,
         source: str,
         now: str,
     ) -> TrafficStats:
-        downloaded = self._next_total(
+        downloaded, stored_raw_downloaded = self._next_total_for_direction(
             previous.downloaded_bytes if previous else 0,
             previous.last_raw_downloaded_bytes if previous else None,
             raw_downloaded_bytes,
         )
-        uploaded = self._next_total(
+        uploaded, stored_raw_uploaded = self._next_total_for_direction(
             previous.uploaded_bytes if previous else 0,
             previous.last_raw_uploaded_bytes if previous else None,
             raw_uploaded_bytes,
@@ -185,16 +184,26 @@ class TrafficStatsService:
             key_id=key.id,
             downloaded_bytes=downloaded,
             uploaded_bytes=uploaded,
-            raw_downloaded_bytes=raw_downloaded_bytes,
-            raw_uploaded_bytes=raw_uploaded_bytes,
+            raw_downloaded_bytes=stored_raw_downloaded,
+            raw_uploaded_bytes=stored_raw_uploaded,
             now=now,
             source=source,
         )
 
+    def _next_total_for_direction(
+        self,
+        previous_total: int,
+        previous_raw: int | None,
+        current_raw: int | None,
+    ) -> tuple[int, int | None]:
+        if current_raw is None:
+            return previous_total, previous_raw
+        return self._next_total(previous_total, previous_raw, current_raw), max(current_raw, 0)
+
     def _next_total(self, previous_total: int, previous_raw: int | None, current_raw: int) -> int:
         current_raw = max(current_raw, 0)
         if previous_raw is None:
-            return current_raw
+            return max(previous_total, current_raw)
         if current_raw < previous_raw:
             return previous_total + current_raw
         return previous_total + (current_raw - previous_raw)

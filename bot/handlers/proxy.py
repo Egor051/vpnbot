@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, Message
 from bot.formatters import proxy_page_text
 from bot.handlers.common import answer_callback_error
 from bot.keyboards.common import pagination_keyboard
-from bot.messages import safe_edit_message_text
+from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.pagination import page_offset, split_page
 from bot.private_chat import ensure_private_callback, ensure_private_message
 
@@ -43,7 +43,7 @@ async def show_proxy_message(message: Message, services: Any) -> None:
 async def show_proxy(callback: CallbackQuery, services: Any) -> None:
     if not await ensure_private_callback(callback):
         return
-    await callback.answer()
+    await safe_callback_answer(callback)
     if callback.from_user is None or callback.message is None:
         return
     page = _page_from_callback(callback.data)

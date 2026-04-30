@@ -9,7 +9,11 @@ CREATE TABLE IF NOT EXISTS users (
   telegram_user_id INTEGER PRIMARY KEY,
   username TEXT,
   first_name TEXT,
-  role TEXT NOT NULL,
+  role TEXT NOT NULL CHECK(role IN (
+    'SUPERADMIN','APPROVED_USER','PENDING_USER','BLOCKED_USER',
+    'superadmin','super_admin','approved','approved_user','pending','pending_user',
+    'blocked','blocked_user','banned','ban','revoked'
+  )),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   blocked_at TEXT
@@ -19,7 +23,7 @@ CREATE TABLE IF NOT EXISTS access_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
   username TEXT,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
   requested_at TEXT NOT NULL,
   decided_by INTEGER,
   decided_at TEXT,
@@ -30,8 +34,8 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   owner_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
   username TEXT,
-  key_type TEXT NOT NULL,
-  status TEXT NOT NULL,
+  key_type TEXT NOT NULL CHECK(key_type IN ('xray','awg')),
+  status TEXT NOT NULL CHECK(status IN ('pending_apply','active','apply_failed','pending_revoke','revoked','pending_delete','delete_failed','deleted','failed')),
   note TEXT,
   uuid TEXT,
   email_label TEXT,
@@ -50,13 +54,13 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
 
 CREATE TABLE IF NOT EXISTS proxy_entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  proxy_type TEXT NOT NULL,
+  proxy_type TEXT NOT NULL CHECK(proxy_type IN ('socks5','socks4','http','https')),
   host TEXT NOT NULL,
   port INTEGER NOT NULL,
   login TEXT,
   password TEXT,
   note TEXT,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('active','disabled')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -94,9 +98,6 @@ CREATE INDEX IF NOT EXISTS idx_vpn_keys_status_type ON vpn_keys(status, key_type
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_uuid ON vpn_keys(uuid) WHERE uuid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_email_label ON vpn_keys(email_label) WHERE email_label IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_public_key ON vpn_keys(public_key) WHERE public_key IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_client_ip_active
-  ON vpn_keys(client_ip)
-  WHERE client_ip IS NOT NULL AND status IN ('pending_apply','active');
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner_type_status ON vpn_keys(owner_user_id, key_type, status);
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);

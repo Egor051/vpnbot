@@ -13,11 +13,13 @@ from adapters.ip_allocator import IpAllocator
 from config.settings import Settings
 from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
-from bot.formatters import status_text
+from bot.formatters import key_note_for_viewer, status_text
 from repositories.vpn_keys import VpnKeyRepository
 from services.audit import AuditService
+from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.notes import normalize_note
+from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import h, pre
 
@@ -26,6 +28,7 @@ logger = logging.getLogger(__name__)
 AWG_ACCESS_MAY_EXIST_STATUSES = {
     VpnKeyStatus.ACTIVE,
     VpnKeyStatus.PENDING_APPLY,
+    VpnKeyStatus.APPLY_FAILED,
     VpnKeyStatus.PENDING_REVOKE,
     VpnKeyStatus.PENDING_DELETE,
     VpnKeyStatus.DELETE_FAILED,
@@ -33,6 +36,7 @@ AWG_ACCESS_MAY_EXIST_STATUSES = {
 
 AWG_STARTUP_RECONCILE_STATUSES = {
     VpnKeyStatus.PENDING_APPLY,
+    VpnKeyStatus.APPLY_FAILED,
     VpnKeyStatus.PENDING_REVOKE,
     VpnKeyStatus.PENDING_DELETE,
     VpnKeyStatus.DELETE_FAILED,
@@ -51,6 +55,8 @@ class AwgService:
         clock: ClockProvider,
         ids: IdGenerator,
         audit: AuditService,
+        user_locks: UserLockManager | None = None,
+        backend_health: BackendHealth | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
         self.users = users
@@ -60,95 +66,103 @@ class AwgService:
         self.clock = clock
         self.ids = ids
         self.audit = audit
+        self.user_locks = user_locks or getattr(users, "user_locks", UserLockManager())
+        self.backend_health = backend_health or BackendHealth()
         self._lock = asyncio.Lock()
 
     async def create_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
         return await self.create_awg_key(actor_user_id, owner, note)
 
     async def create_awg_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
+        self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         self.settings.validate_awg_ready()
         self._ensure_ipv4_network()
-        await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
         clean_note = normalize_note(note)
 
-        async with self._lock:
-            server_config = self.adapter.read_server_config()
-            self._server_public_key(server_config.public_key)
-            self._endpoint_port(server_config.listen_port)
-            client_ip = await self.ip_allocator.next_free_ip()
-            private_key, public_key = await self._generate_unique_keypair()
-            email_label = await self._generate_unique_label(owner.telegram_user_id, owner.username)
-            preshared_key = await self.adapter.generate_preshared_key() if self.settings.awg_use_preshared_key else None
-            payload = {
-                "private_key": private_key,
-                "public_key": public_key,
-                "preshared_key": preshared_key,
-                "client_ip": client_ip,
-                "email_label": email_label,
-            }
-            public_payload = {
-                "public_key": public_key,
-                "client_ip": client_ip,
-                "endpoint": f"{self.settings.awg_endpoint_host}:{self._endpoint_port(server_config.listen_port)}",
-                "email_label": email_label,
-            }
-            key = await self.vpn_keys.create_pending(
-                owner_user_id=owner.telegram_user_id,
-                username=owner.username,
-                key_type=VpnKeyType.AWG,
-                note=clean_note,
-                payload=payload,
-                public_payload=public_payload,
-                created_by=actor_user_id,
-                now=self.clock.now(),
-                email_label=email_label,
-                public_key=public_key,
-                client_ip=client_ip,
-            )
-            try:
-                await self.adapter.add_peer(
-                    key_id=key.id,
+        async with self.user_locks.lock(owner.telegram_user_id):
+            await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+            async with self._lock:
+                await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+                server_config = self.adapter.read_server_config()
+                self._ensure_server_address_matches_config(server_config)
+                self._server_public_key(server_config.public_key)
+                self._endpoint_port(server_config.listen_port)
+                client_ip = await self.ip_allocator.next_free_ip()
+                private_key, public_key = await self._generate_unique_keypair()
+                email_label = await self._generate_unique_label(owner.telegram_user_id, owner.username)
+                preshared_key = await self.adapter.generate_preshared_key() if self.settings.awg_use_preshared_key else None
+                payload = {
+                    "private_key": private_key,
+                    "public_key": public_key,
+                    "preshared_key": preshared_key,
+                    "client_ip": client_ip,
+                    "email_label": email_label,
+                }
+                public_payload = {
+                    "public_key": public_key,
+                    "client_ip": client_ip,
+                    "endpoint": f"{self.settings.awg_endpoint_host}:{self._endpoint_port(server_config.listen_port)}",
+                    "email_label": email_label,
+                }
+                key = await self.vpn_keys.create_pending(
                     owner_user_id=owner.telegram_user_id,
+                    username=owner.username,
+                    key_type=VpnKeyType.AWG,
+                    note=clean_note,
+                    payload=payload,
+                    public_payload=public_payload,
+                    created_by=actor_user_id,
+                    now=self.clock.now(),
+                    email_label=email_label,
                     public_key=public_key,
-                    preshared_key=preshared_key,
                     client_ip=client_ip,
-                    label=email_label,
                 )
-            except Exception as exc:
-                await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
-                await self.audit.write(
+                try:
+                    await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+                    await self.adapter.add_peer(
+                        key_id=key.id,
+                        owner_user_id=owner.telegram_user_id,
+                        public_key=public_key,
+                        preshared_key=preshared_key,
+                        client_ip=client_ip,
+                        label=email_label,
+                    )
+                except Exception as exc:
+                    await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+                    await self._write_audit_best_effort(
+                        actor_user_id=actor_user_id,
+                        action="awg_create_failed",
+                        entity_type=AuditEntityType.VPN_KEY,
+                        entity_id=key.id,
+                        details={"owner_user_id": owner.telegram_user_id, "client_ip": client_ip, "error": str(exc)},
+                    )
+                    raise
+
+                try:
+                    await self.vpn_keys.mark_active(key.id, self.clock.now(), payload=payload, public_payload=public_payload)
+                except Exception:
+                    logger.critical("AWG peer applied, but DB mark_active failed for key_id=%s", key.id, exc_info=True)
+                    raise
+                await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
-                    action="awg_create_failed",
+                    action="awg_key_created",
                     entity_type=AuditEntityType.VPN_KEY,
                     entity_id=key.id,
-                    details={"owner_user_id": owner.telegram_user_id, "client_ip": client_ip, "error": str(exc)},
+                    details={
+                        "owner_user_id": owner.telegram_user_id,
+                        "owner_username": owner.username,
+                        "client_ip": client_ip,
+                        "label": email_label,
+                    },
                 )
-                raise
-
-            try:
-                await self.vpn_keys.mark_active(key.id, self.clock.now(), payload=payload, public_payload=public_payload)
-            except Exception:
-                logger.critical("AWG peer applied, but DB mark_active failed for key_id=%s", key.id, exc_info=True)
-                raise
-            await self.audit.write(
-                actor_user_id=actor_user_id,
-                action="awg_key_created",
-                entity_type=AuditEntityType.VPN_KEY,
-                entity_id=key.id,
-                details={
-                    "owner_user_id": owner.telegram_user_id,
-                    "owner_username": owner.username,
-                    "client_ip": client_ip,
-                    "label": email_label,
-                },
-            )
-            active_key = await self._get_key(key.id)
-            return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key))
+                active_key = await self._get_key(key.id)
+                return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key, viewer_user_id=actor_user_id))
 
     async def revoke_key(self, actor_user_id: int, key_id: int) -> VpnKey:
         return await self.revoke_awg_key(actor_user_id, key_id)
 
     async def revoke_awg_key(self, actor_user_id: int, key_id: int) -> VpnKey:
+        self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         async with self._lock:
             key = await self._get_awg_key_for_manage(actor_user_id, key_id)
             if key.status == VpnKeyStatus.REVOKED:
@@ -163,7 +177,7 @@ class AwgService:
                 await self._remove_awg_access(key)
             except Exception:
                 await self.vpn_keys.set_status(key_id, previous_status, self.clock.now())
-                await self.audit.write(
+                await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
                     action="awg_revoke_failed",
                     entity_type=AuditEntityType.VPN_KEY,
@@ -172,7 +186,7 @@ class AwgService:
                 )
                 raise
             await self.vpn_keys.mark_revoked(key_id, actor_user_id, self.clock.now())
-            await self.audit.write(
+            await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action="awg_key_revoked",
                 entity_type=AuditEntityType.VPN_KEY,
@@ -185,6 +199,7 @@ class AwgService:
         await self.delete_awg_key(actor_user_id, key_id)
 
     async def delete_awg_key(self, actor_user_id: int, key_id: int) -> None:
+        self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         async with self._lock:
             key = await self._get_awg_key_for_manage(actor_user_id, key_id)
             previous_status = key.status
@@ -194,7 +209,7 @@ class AwgService:
                     await self._remove_awg_access(key)
             except Exception as exc:
                 await self.vpn_keys.set_status(key_id, VpnKeyStatus.DELETE_FAILED, self.clock.now())
-                await self.audit.write(
+                await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
                     action="awg_delete_failed",
                     entity_type=AuditEntityType.VPN_KEY,
@@ -203,30 +218,37 @@ class AwgService:
                 )
                 raise
             await self.vpn_keys.hard_delete_with_stats(key_id)
-            try:
-                await self.audit.write(
-                    actor_user_id=actor_user_id,
-                    action="awg_key_hard_deleted",
-                    entity_type=AuditEntityType.VPN_KEY,
-                    entity_id=key_id,
-                    details={"owner_user_id": key.owner_user_id, "previous_status": previous_status.value, "client_ip": key.client_ip},
-                )
-            except Exception:
-                logger.warning("AWG key hard-deleted, but audit write failed for key_id=%s", key_id, exc_info=True)
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="awg_key_hard_deleted",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={"owner_user_id": key.owner_user_id, "previous_status": previous_status.value, "client_ip": key.client_ip},
+            )
 
     async def startup_reconcile(self) -> dict[str, int]:
         summary = {"checked": 0, "recovered": 0, "failed": 0}
-        keys = await self.vpn_keys.list_by_type_statuses(VpnKeyType.AWG, AWG_STARTUP_RECONCILE_STATUSES, limit=500)
-        for key in keys:
-            summary["checked"] += 1
-            try:
-                changed = await self._startup_reconcile_key(key)
-                if changed:
-                    summary["recovered"] += 1
-            except Exception as exc:
-                summary["failed"] += 1
-                logger.warning("Не удалось восстановить AWG-ключ key_id=%s: %s", key.id, exc, exc_info=True)
-                await self._write_startup_reconcile_failure_audit(key, exc)
+        last_id = 0
+        while True:
+            keys = await self.vpn_keys.list_by_type_statuses(
+                VpnKeyType.AWG,
+                AWG_STARTUP_RECONCILE_STATUSES,
+                limit=500,
+                after_id=last_id,
+            )
+            if not keys:
+                break
+            for key in keys:
+                last_id = key.id
+                summary["checked"] += 1
+                try:
+                    changed = await self._startup_reconcile_key(key)
+                    if changed:
+                        summary["recovered"] += 1
+                except Exception as exc:
+                    summary["failed"] += 1
+                    logger.warning("Не удалось восстановить AWG-ключ key_id=%s: %s", key.id, exc, exc_info=True)
+                    await self._write_startup_reconcile_failure_audit(key, exc)
         return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
@@ -237,14 +259,14 @@ class AwgService:
         if key.status != VpnKeyStatus.ACTIVE:
             raise InvalidOperation("Конфигурация доступна только для активного ключа")
         await self._ensure_client_payload_valid(actor_user_id, key)
-        await self.audit.write(
+        await self._write_audit_best_effort(
             actor_user_id=actor_user_id,
             action="awg_config_shown",
             entity_type=AuditEntityType.VPN_KEY,
             entity_id=key_id,
             details={"client_ip": key.client_ip},
         )
-        return self._format_config(key)
+        return self._format_config(key, viewer_user_id=actor_user_id)
 
     async def get_awg_client_config_plain(self, actor_user_id: int, key_id: int, audit: bool = True) -> str:
         key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
@@ -252,7 +274,7 @@ class AwgService:
             raise InvalidOperation("Конфигурация доступна только для активного ключа")
         await self._ensure_client_payload_valid(actor_user_id, key)
         if audit:
-            await self.audit.write(
+            await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action="awg_config_file_shown",
                 entity_type=AuditEntityType.VPN_KEY,
@@ -285,9 +307,11 @@ class AwgService:
 
     async def update_awg_note(self, actor_user_id: int, key_id: int, note: str | None) -> VpnKey:
         key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
+        if key.owner_user_id != actor_user_id:
+            raise AccessDenied("Можно менять заметку только своих ключей")
         clean_note = normalize_note(note)
         await self.vpn_keys.update_note(key.id, clean_note, self.clock.now())
-        await self.audit.write(
+        await self._write_audit_best_effort(
             actor_user_id=actor_user_id,
             action="awg_note_updated",
             entity_type=AuditEntityType.VPN_KEY,
@@ -350,41 +374,66 @@ class AwgService:
 
     async def _generate_unique_label(self, telegram_user_id: int, username: str | None) -> str:
         for _ in range(5):
-            label = self.ids.key_label(telegram_user_id, username)
+            label = self.ids.generated_key_name("awg")
             if await self.vpn_keys.find_by_email_label(label) is None:
                 return label
         raise InvalidOperation("Не удалось сгенерировать уникальный label для AWG-ключа")
 
     async def _remove_awg_access(self, key: VpnKey) -> None:
-        await self.adapter.remove_peer(key_id=key.id, public_key=key.public_key)
+        public_key = key.public_key
+        if not public_key:
+            finder = getattr(self.adapter, "find_managed_peer_public_key", None)
+            if finder is not None:
+                public_key = finder(key.id)
+        if not public_key:
+            raise InvalidOperation(
+                "Нельзя безопасно удалить AWG peer: в БД нет public key, "
+                "и восстановить его из managed block не удалось."
+            )
+        await self.adapter.remove_peer(key_id=key.id, public_key=public_key)
 
     async def _startup_reconcile_key(self, key: VpnKey) -> bool:
-        if key.status == VpnKeyStatus.PENDING_APPLY:
+        if key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
             peer = self.adapter.find_peer(public_key=key.public_key, client_ip=key.client_ip)
             if peer is None:
-                await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
-                await self.audit.write(
-                    actor_user_id=None,
-                    action="awg_startup_pending_apply_failed",
-                    entity_type=AuditEntityType.VPN_KEY,
-                    entity_id=key.id,
-                    details={"peer_present": False, "client_ip": key.client_ip},
-                )
-                return True
+                runtime_peer_present = await self._runtime_peer_present(key)
+                if runtime_peer_present:
+                    await self._remove_awg_access(key)
+                    if key.status == VpnKeyStatus.PENDING_APPLY:
+                        await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+                    await self._write_audit_best_effort(
+                        actor_user_id=None,
+                        action="awg_startup_runtime_orphan_removed",
+                        entity_type=AuditEntityType.VPN_KEY,
+                        entity_id=key.id,
+                        details={"runtime_peer_present": True, "client_ip": key.client_ip, "previous_status": key.status.value},
+                    )
+                    return True
+                if key.status == VpnKeyStatus.PENDING_APPLY:
+                    await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+                    await self._write_audit_best_effort(
+                        actor_user_id=None,
+                        action="awg_startup_pending_apply_failed",
+                        entity_type=AuditEntityType.VPN_KEY,
+                        entity_id=key.id,
+                        details={"peer_present": False, "client_ip": key.client_ip},
+                    )
+                    return True
+                return False
             await self.vpn_keys.mark_active(key.id, self.clock.now())
-            await self.audit.write(
+            await self._write_audit_best_effort(
                 actor_user_id=None,
-                action="awg_startup_pending_apply_active",
+                action="awg_startup_apply_recovered",
                 entity_type=AuditEntityType.VPN_KEY,
                 entity_id=key.id,
-                details={"peer_present": True, "client_ip": key.client_ip},
+                details={"peer_present": True, "client_ip": key.client_ip, "previous_status": key.status.value},
             )
             return True
 
         if key.status == VpnKeyStatus.PENDING_REVOKE:
             await self._remove_awg_access(key)
             await self.vpn_keys.mark_revoked(key.id, key.revoked_by or key.deleted_by or key.created_by, self.clock.now())
-            await self.audit.write(
+            await self._write_audit_best_effort(
                 actor_user_id=None,
                 action="awg_startup_revoke_completed",
                 entity_type=AuditEntityType.VPN_KEY,
@@ -400,48 +449,107 @@ class AwgService:
                 await self.vpn_keys.set_status(key.id, VpnKeyStatus.DELETE_FAILED, self.clock.now())
                 raise
             await self.vpn_keys.hard_delete_with_stats(key.id)
-            try:
-                await self.audit.write(
-                    actor_user_id=None,
-                    action="awg_startup_delete_completed",
-                    entity_type=AuditEntityType.VPN_KEY,
-                    entity_id=key.id,
-                    details={
-                        "owner_user_id": key.owner_user_id,
-                        "previous_status": key.status.value,
-                        "client_ip": key.client_ip,
-                        "hard_delete": True,
-                    },
-                )
-            except Exception:
-                logger.warning("AWG startup hard-delete completed, but audit write failed for key_id=%s", key.id, exc_info=True)
+            await self._write_audit_best_effort(
+                actor_user_id=None,
+                action="awg_startup_delete_completed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={
+                    "owner_user_id": key.owner_user_id,
+                    "previous_status": key.status.value,
+                    "client_ip": key.client_ip,
+                    "hard_delete": True,
+                },
+            )
             return True
 
         return False
 
+    async def _runtime_peer_present(self, key: VpnKey) -> bool:
+        if not key.public_key:
+            return False
+        verifier = getattr(self.adapter, "verify_runtime_peer", None)
+        if verifier is None:
+            return False
+        return bool(await verifier(key.public_key))
+
     async def _write_startup_reconcile_failure_audit(self, key: VpnKey, error: Exception) -> None:
+        await self._write_audit_best_effort(
+            actor_user_id=None,
+            action="awg_startup_reconcile_failed",
+            entity_type=AuditEntityType.VPN_KEY,
+            entity_id=key.id,
+            details={"status": key.status.value, "client_ip": key.client_ip, "error": str(error)},
+        )
+
+    async def _write_audit_best_effort(
+        self,
+        *,
+        actor_user_id: int | None,
+        action: str,
+        entity_type: AuditEntityType,
+        entity_id: str | int | None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        writer = getattr(self.audit, "write_best_effort", None)
+        if writer is not None:
+            await writer(
+                actor_user_id=actor_user_id,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                details=details,
+            )
+            return
         try:
             await self.audit.write(
-                actor_user_id=None,
-                action="awg_startup_reconcile_failed",
-                entity_type=AuditEntityType.VPN_KEY,
-                entity_id=key.id,
-                details={"status": key.status.value, "client_ip": key.client_ip, "error": str(error)},
+                actor_user_id=actor_user_id,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                details=details,
             )
         except Exception:
-            logger.warning("Не удалось записать audit для ошибки восстановления AWG-ключа key_id=%s", key.id, exc_info=True)
+            logger.warning("Audit write failed after AWG operation: action=%s entity_id=%s", action, entity_id, exc_info=True)
 
     def _ensure_ipv4_network(self) -> None:
         try:
             network = ipaddress.ip_network(self.settings.awg_network, strict=False)
+            server_address = ipaddress.ip_address(self.settings.awg_server_address.split("/", 1)[0])
         except ValueError as exc:
-            raise InvalidOperation("AWG_NETWORK должен быть корректной IPv4-сетью") from exc
-        if network.version != 4:
+            raise InvalidOperation("AWG_NETWORK и AWG_SERVER_ADDRESS должны быть корректными IPv4-значениями") from exc
+        if network.version != 4 or server_address.version != 4:
             raise InvalidOperation("AWG_NETWORK сейчас поддерживает только IPv4")
+        if server_address not in network:
+            raise InvalidOperation("AWG_SERVER_ADDRESS должен входить в AWG_NETWORK")
+        if server_address == network.network_address or server_address == network.broadcast_address:
+            raise InvalidOperation("AWG_SERVER_ADDRESS не должен быть network или broadcast address")
 
-    def _format_config(self, key: VpnKey) -> str:
+    def _ensure_server_address_matches_config(self, server_config: object) -> None:
+        raw_address = getattr(server_config, "address", None)
+        if not raw_address:
+            return
+        expected = ipaddress.ip_address(self.settings.awg_server_address.split("/", 1)[0])
+        config_addresses: list[ipaddress.IPv4Address] = []
+        for part in str(raw_address).split(","):
+            value = part.strip()
+            if not value:
+                continue
+            try:
+                interface = ipaddress.ip_interface(value)
+            except ValueError as exc:
+                raise InvalidOperation("Address в AWG config должен содержать корректные IP-интерфейсы") from exc
+            if interface.version == 4:
+                config_addresses.append(interface.ip)
+        if not config_addresses:
+            raise InvalidOperation("В Address AWG config не найден IPv4-адрес сервера")
+        if expected not in config_addresses:
+            raise InvalidOperation("AWG_SERVER_ADDRESS не совпадает с IPv4 Address в AWG config")
+
+    def _format_config(self, key: VpnKey, *, viewer_user_id: int | None = None) -> str:
         config = self._client_config(key)
-        note = f"\nЗаметка: {h(key.note)}" if key.note else ""
+        visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
+        note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
         label = f"\nМетка: {h(key.email_label)}" if key.email_label else ""
         return (
             f"<b>AWG-ключ #{key.id}</b>\n"
@@ -451,6 +559,7 @@ class AwgService:
 
     def _client_config(self, key: VpnKey) -> str:
         server_config = self.adapter.read_server_config()
+        self._ensure_server_address_matches_config(server_config)
         server_public_key = self._server_public_key(server_config.public_key)
         endpoint_port = self._endpoint_port(server_config.listen_port)
         private_key = self._required_private_key(key)
@@ -467,6 +576,8 @@ class AwgService:
             interface_options["MTU"] = str(self.settings.awg_mtu)
         for option, value in interface_options.items():
             if option == "DNS":
+                continue
+            if value is None or str(value).strip() == "":
                 continue
             lines.append(f"{option} = {value}")
         lines.extend(

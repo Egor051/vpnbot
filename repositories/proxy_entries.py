@@ -10,6 +10,13 @@ from models.enums import ProxyStatus
 def _row_to_proxy(row: Row | None) -> ProxyEntry | None:
     if row is None:
         return None
+    try:
+        status = ProxyStatus(row["status"])
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Некорректное значение proxy_entries.status в SQLite: {row['status']!r}. "
+            "Сделайте backup DB и исправьте повреждённую запись вручную."
+        ) from exc
     return ProxyEntry(
         id=int(row["id"]),
         proxy_type=row["proxy_type"],
@@ -18,7 +25,7 @@ def _row_to_proxy(row: Row | None) -> ProxyEntry | None:
         login=row["login"],
         password=row["password"],
         note=row["note"],
-        status=ProxyStatus(row["status"]),
+        status=status,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

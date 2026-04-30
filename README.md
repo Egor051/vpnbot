@@ -118,6 +118,8 @@ Notes:
 
 - If `XRAY_INBOUND_TAG` is empty, the adapter uses the first inbound with `settings.clients`.
 - If `XRAY_MANAGE_SHORT_IDS=false`, `XRAY_SHORT_ID` must be set.
+- `XRAY_APPLY_MODE=restart` is the default production apply mode; use `reload` only when your Xray unit reliably applies reload.
+- `AWG_CLIENT_DNS` is supported only as a legacy alias; use `AWG_DNS` for new deployments.
 - `AWG_ENDPOINT_HOST` and `AWG_ENDPOINT_PORT` should point to the public AWG endpoint clients will use.
 - `DEFAULT_PROXY_*` seeds one proxy entry only when the proxy table is empty.
 
