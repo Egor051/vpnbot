@@ -4,13 +4,13 @@ import asyncio
 from types import SimpleNamespace
 
 from bot.fsm.states import AdminCreateKeyStates, CreateKeyStates
-from bot.handlers.admin import admin_issue_type_selected
+from bot.handlers.admin import admin_access_decision_confirm, admin_approve, admin_block_user, admin_block_user_confirm, admin_issue_type_selected
 from bot.handlers.keys import confirm_key_action, create_key_choose, create_key_menu
 from bot.handlers.start import start_command
 from bot.keyboards.common import main_menu
 from bot.keyboards.keys import keys_list_keyboard
-from models.dto import User, VpnKey
-from models.enums import UserRole, VpnKeyStatus, VpnKeyType
+from models.dto import AccessRequest, User, VpnKey
+from models.enums import AccessRequestStatus, UserRole, VpnKeyStatus, VpnKeyType
 from services.errors import AccessDenied, NotFound
 
 
@@ -184,6 +184,255 @@ def test_admin_issue_type_matching_owner_enters_note_state(monkeypatch) -> None:
         assert state.data["key_type"] == "awg"
         assert callback.answers == [("", None)]
         assert edits
+
+    asyncio.run(run())
+
+
+def test_admin_block_first_callback_only_shows_confirmation(monkeypatch) -> None:
+    edits: list[tuple[str, object]] = []
+
+    async def fake_edit(message: object, text: str, **kwargs: object) -> None:
+        edits.append((text, kwargs.get("reply_markup")))
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.admin.safe_edit_message_text", fake_edit)
+
+    class Users:
+        def __init__(self) -> None:
+            self.block_calls = 0
+
+        async def require_superadmin(self, telegram_user_id: int) -> User:
+            return User(telegram_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
+
+        async def get_user(self, telegram_user_id: int) -> User:
+            return User(telegram_user_id, "target", "Target", UserRole.APPROVED_USER, "now", "now", None)
+
+        async def count_keys_for_users(self, actor_user_id: int, user_ids: list[int]) -> dict[int, int]:
+            return {200: 2}
+
+        async def block_user(self, *args: object, **kwargs: object) -> None:
+            self.block_calls += 1
+
+    async def run() -> None:
+        users = Users()
+        callback = _Callback("admin:block:200")
+        await admin_block_user(callback, SimpleNamespace(users=users))  # type: ignore[arg-type]
+
+        assert users.block_calls == 0
+        assert "Подтвердите блокировку пользователя" in edits[-1][0]
+        markup = edits[-1][1]
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+        assert callbacks == ["admin:block:confirm:200", "admin:user:200"]
+
+    asyncio.run(run())
+
+
+def test_admin_block_confirm_performs_block(monkeypatch) -> None:
+    edits: list[str] = []
+
+    async def fake_edit(message: object, text: str, **kwargs: object) -> None:
+        edits.append(text)
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.admin.safe_edit_message_text", fake_edit)
+
+    class Users:
+        def __init__(self) -> None:
+            self.block_calls = 0
+
+        async def require_superadmin(self, telegram_user_id: int) -> User:
+            return User(telegram_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
+
+        async def get_user(self, telegram_user_id: int) -> User:
+            return User(telegram_user_id, "target", "Target", UserRole.APPROVED_USER, "now", "now", None)
+
+        async def block_user(self, actor_user_id: int, user_id: int, revoke_active_keys: bool = True) -> SimpleNamespace:
+            self.block_calls += 1
+            return SimpleNamespace(revoked_key_ids=(10,), errors=())
+
+    async def run() -> None:
+        users = Users()
+        callback = _Callback("admin:block:confirm:200")
+        await admin_block_user_confirm(callback, SimpleNamespace(users=users))  # type: ignore[arg-type]
+
+        assert users.block_calls == 1
+        assert "Пользователь заблокирован." in edits[-1]
+
+    asyncio.run(run())
+
+
+def test_admin_block_confirm_already_blocked_does_not_block_again(monkeypatch) -> None:
+    edits: list[str] = []
+
+    async def fake_edit(message: object, text: str, **kwargs: object) -> None:
+        edits.append(text)
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.admin.safe_edit_message_text", fake_edit)
+
+    class Users:
+        def __init__(self) -> None:
+            self.block_calls = 0
+
+        async def require_superadmin(self, telegram_user_id: int) -> User:
+            return User(telegram_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
+
+        async def get_user(self, telegram_user_id: int) -> User:
+            return User(telegram_user_id, "target", "Target", UserRole.BLOCKED_USER, "now", "now", "blocked")
+
+        async def block_user(self, *args: object, **kwargs: object) -> None:
+            self.block_calls += 1
+
+    async def run() -> None:
+        users = Users()
+        callback = _Callback("admin:block:confirm:200")
+        await admin_block_user_confirm(callback, SimpleNamespace(users=users))  # type: ignore[arg-type]
+
+        assert users.block_calls == 0
+        assert edits == ["Пользователь уже заблокирован."]
+
+    asyncio.run(run())
+
+
+def test_admin_approve_first_callback_only_shows_confirmation(monkeypatch) -> None:
+    edits: list[tuple[str, object]] = []
+
+    async def fake_edit(message: object, text: str, **kwargs: object) -> None:
+        edits.append((text, kwargs.get("reply_markup")))
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.admin.safe_edit_message_text", fake_edit)
+
+    class Access:
+        def __init__(self) -> None:
+            self.approve_calls = 0
+
+        async def get_request(self, actor_user_id: int, request_id: int) -> AccessRequest:
+            return AccessRequest(request_id, 200, "target", AccessRequestStatus.PENDING, "now", None, None, None)
+
+        async def approve(self, *args: object, **kwargs: object) -> None:
+            self.approve_calls += 1
+
+    async def run() -> None:
+        access = Access()
+        callback = _Callback("admin:approve:5")
+        await admin_approve(callback, SimpleNamespace(access=access), SimpleNamespace())  # type: ignore[arg-type]
+
+        assert access.approve_calls == 0
+        assert "Подтвердите действие" in edits[-1][0]
+        markup = edits[-1][1]
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+        assert callbacks == ["admin:approve:confirm:5", "admin:req:5"]
+
+    asyncio.run(run())
+
+
+def test_admin_access_confirm_approve_changes_pending_request_and_notifies(monkeypatch) -> None:
+    edits: list[str] = []
+
+    async def fake_edit(message: object, text: str, **kwargs: object) -> None:
+        edits.append(text)
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.admin.safe_edit_message_text", fake_edit)
+
+    class Access:
+        def __init__(self) -> None:
+            self.approve_calls = 0
+
+        async def get_request(self, actor_user_id: int, request_id: int) -> AccessRequest:
+            return AccessRequest(request_id, 200, "target", AccessRequestStatus.PENDING, "now", None, None, None)
+
+        async def approve(self, actor_user_id: int, request_id: int) -> tuple[AccessRequest, bool]:
+            self.approve_calls += 1
+            return AccessRequest(request_id, 200, "target", AccessRequestStatus.APPROVED, "now", 1, "now", None), True
+
+    class Bot:
+        def __init__(self) -> None:
+            self.sent: list[tuple[int, str]] = []
+
+        async def send_message(self, user_id: int, text: str) -> None:
+            self.sent.append((user_id, text))
+
+    async def run() -> None:
+        access = Access()
+        bot = Bot()
+        callback = _Callback("admin:approve:confirm:5")
+        await admin_access_decision_confirm(callback, SimpleNamespace(access=access), bot)  # type: ignore[arg-type]
+
+        assert access.approve_calls == 1
+        assert bot.sent == [(200, "Ваша заявка одобрена. Отправьте /start, чтобы открыть меню.")]
+        assert edits == ["Заявка одобрена."]
+
+    asyncio.run(run())
+
+
+def test_admin_access_confirm_reject_changes_pending_request_and_notifies(monkeypatch) -> None:
+    edits: list[str] = []
+
+    async def fake_edit(message: object, text: str, **kwargs: object) -> None:
+        edits.append(text)
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.admin.safe_edit_message_text", fake_edit)
+
+    class Access:
+        def __init__(self) -> None:
+            self.reject_calls = 0
+
+        async def get_request(self, actor_user_id: int, request_id: int) -> AccessRequest:
+            return AccessRequest(request_id, 200, "target", AccessRequestStatus.PENDING, "now", None, None, None)
+
+        async def reject(self, actor_user_id: int, request_id: int) -> tuple[AccessRequest, bool]:
+            self.reject_calls += 1
+            return AccessRequest(request_id, 200, "target", AccessRequestStatus.REJECTED, "now", 1, "now", None), True
+
+    class Bot:
+        def __init__(self) -> None:
+            self.sent: list[tuple[int, str]] = []
+
+        async def send_message(self, user_id: int, text: str) -> None:
+            self.sent.append((user_id, text))
+
+    async def run() -> None:
+        access = Access()
+        bot = Bot()
+        callback = _Callback("admin:reject:confirm:5")
+        await admin_access_decision_confirm(callback, SimpleNamespace(access=access), bot)  # type: ignore[arg-type]
+
+        assert access.reject_calls == 1
+        assert bot.sent == [(200, "Ваша заявка отклонена.")]
+        assert edits == ["Заявка отклонена."]
+
+    asyncio.run(run())
+
+
+def test_admin_access_confirm_processed_request_does_not_change_again(monkeypatch) -> None:
+    edits: list[str] = []
+
+    async def fake_edit(message: object, text: str, **kwargs: object) -> None:
+        edits.append(text)
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.admin.safe_edit_message_text", fake_edit)
+
+    class Access:
+        def __init__(self) -> None:
+            self.reject_calls = 0
+
+        async def get_request(self, actor_user_id: int, request_id: int) -> AccessRequest:
+            return AccessRequest(request_id, 200, "target", AccessRequestStatus.APPROVED, "now", 1, "now", None)
+
+        async def reject(self, *args: object, **kwargs: object) -> None:
+            self.reject_calls += 1
+
+    async def run() -> None:
+        access = Access()
+        callback = _Callback("admin:reject:confirm:5")
+        await admin_access_decision_confirm(callback, SimpleNamespace(access=access), SimpleNamespace())  # type: ignore[arg-type]
+
+        assert access.reject_calls == 0
+        assert edits == ["Заявка уже была обработана."]
 
     asyncio.run(run())
 

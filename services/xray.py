@@ -128,8 +128,17 @@ class XrayService:
 
                 try:
                     await self.vpn_keys.mark_active(key.id, self.clock.now(), payload=payload, public_payload=public_payload)
-                except Exception:
-                    logger.critical("Xray client applied, but DB mark_active failed for key_id=%s", key.id, exc_info=True)
+                except Exception as exc:
+                    await self._compensate_failed_create_after_apply(
+                        actor_user_id=actor_user_id,
+                        key_id=key.id,
+                        owner_user_id=owner.telegram_user_id,
+                        uuid_value=uuid_value,
+                        email_label=email_label,
+                        short_id=short_id,
+                        short_id_managed=short_id_managed,
+                        original_error=exc,
+                    )
                     raise
                 await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
@@ -344,6 +353,63 @@ class XrayService:
             email_label=key.email_label,
             short_id=str(key.payload.get("short_id") or ""),
             remove_short_id=await self._can_remove_short_id(key),
+        )
+
+    async def _compensate_failed_create_after_apply(
+        self,
+        *,
+        actor_user_id: int,
+        key_id: int,
+        owner_user_id: int,
+        uuid_value: str,
+        email_label: str,
+        short_id: str,
+        short_id_managed: bool,
+        original_error: Exception,
+    ) -> None:
+        logger.critical(
+            "Xray client applied, but DB mark_active failed for key_id=%s; attempting compensation",
+            key_id,
+            exc_info=True,
+        )
+        try:
+            await self.adapter.remove_client(
+                uuid_value=uuid_value,
+                email_label=email_label,
+                short_id=short_id,
+                remove_short_id=short_id_managed,
+            )
+        except Exception as compensation_error:
+            self.backend_health.mark_degraded(VpnKeyType.XRAY, "post-apply mark_active failed and compensation failed")
+            logger.critical(
+                "Xray create compensation failed after DB mark_active failure for key_id=%s",
+                key_id,
+                exc_info=True,
+            )
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="xray_create_compensation_failed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={
+                    "owner_user_id": owner_user_id,
+                    "original_error_type": type(original_error).__name__,
+                    "compensation_error_type": type(compensation_error).__name__,
+                    "backend_degraded": True,
+                },
+            )
+            return
+
+        try:
+            await self.vpn_keys.set_status(key_id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+        except Exception:
+            logger.warning("Xray create compensation succeeded, but failed to mark key apply_failed key_id=%s", key_id, exc_info=True)
+        await self._write_audit_best_effort(
+            actor_user_id=actor_user_id,
+            action="xray_create_compensated_after_db_failure",
+            entity_type=AuditEntityType.VPN_KEY,
+            entity_id=key_id,
+            details={"owner_user_id": owner_user_id, "original_error_type": type(original_error).__name__},
         )
 
     async def _startup_reconcile_key(self, key: VpnKey) -> bool:

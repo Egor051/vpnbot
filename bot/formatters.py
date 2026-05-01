@@ -268,6 +268,19 @@ def access_request_text(request: AccessRequest) -> str:
     )
 
 
+def access_request_decision_confirm_text(request: AccessRequest, action: str) -> str:
+    action_text = "одобрить" if action == "approve" else "отклонить"
+    username = f"@{request.username}" if request.username else "не указан"
+    return (
+        f"<b>Подтвердите действие: {h(action_text)}</b>\n"
+        f"Заявка: #{request.id}\n"
+        f"Telegram ID: {code(request.telegram_user_id)}\n"
+        f"Username: {h(username)}\n"
+        f"Статус: {h(request.status.value)}\n"
+        f"Создана: {h(format_msk_datetime(request.requested_at))}"
+    )
+
+
 def access_requests_page_text(requests: list[AccessRequest], page: int) -> str:
     if not requests:
         return "<b>Заявки на доступ</b>\n\nНовых заявок нет."
@@ -305,6 +318,20 @@ def user_card_text(
                     traffic = " · статистика пока недоступна"
                 lines.append(f"{h(key.key_type.value.upper())} · {code(key_display_label(key, viewer_user_id=viewer_user_id))}{traffic}")
     return "\n".join(lines)
+
+
+def block_user_confirm_text(user: User, key_count: int) -> str:
+    username = f"@{user.username}" if user.username else "не указан"
+    return (
+        "<b>Подтвердите блокировку пользователя</b>\n"
+        f"Telegram ID: {code(user.telegram_user_id)}\n"
+        f"Username: {h(username)}\n"
+        f"Имя: {h(user.first_name or 'не указано')}\n"
+        f"Текущая роль: {h(role_text(user.role))}\n"
+        f"Ключей к проверке/отзыву: {key_count}\n\n"
+        "Действие заблокирует доступ к боту и попытается отозвать VPN-ключи. "
+        "Если часть VPN-ключей не получится отключить автоматически, потребуется ручная проверка на сервере."
+    )
 
 
 def users_page_text(users: list[User], page: int, key_counts: dict[int, int] | None = None) -> str:

@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from aiosqlite import Row
+
+from db.database import Database
+
+
+@dataclass(frozen=True, slots=True)
+class AnnouncementBatch:
+    id: int
+    actor_user_id: int
+    from_chat_id: int
+    message_id: int
+    status: str
+    total_count: int
+    success_count: int
+    failed_count: int
+    skipped_count: int
+    created_at: str
+    updated_at: str
+    completed_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AnnouncementDelivery:
+    announcement_id: int
+    user_id: int
+    status: str
+    error_text: str | None
+    created_at: str
+    updated_at: str
+
+
+def _row_to_batch(row: Row | None) -> AnnouncementBatch | None:
+    if row is None:
+        return None
+    return AnnouncementBatch(
+        id=int(row["id"]),
+        actor_user_id=int(row["actor_user_id"]),
+        from_chat_id=int(row["from_chat_id"]),
+        message_id=int(row["message_id"]),
+        status=str(row["status"]),
+        total_count=int(row["total_count"]),
+        success_count=int(row["success_count"]),
+        failed_count=int(row["failed_count"]),
+        skipped_count=int(row["skipped_count"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+        completed_at=row["completed_at"],
+    )
+
+
+def _row_to_delivery(row: Row | None) -> AnnouncementDelivery | None:
+    if row is None:
+        return None
+    return AnnouncementDelivery(
+        announcement_id=int(row["announcement_id"]),
+        user_id=int(row["user_id"]),
+        status=str(row["status"]),
+        error_text=row["error_text"],
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+class AnnouncementRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create_batch(
+        self,
+        *,
+        actor_user_id: int,
+        from_chat_id: int,
+        message_id: int,
+        recipient_ids: list[int],
+        now: str,
+    ) -> AnnouncementBatch:
+        async with self.db.transaction():
+            cursor = await self.db.conn.execute(
+                """
+                INSERT INTO announcement_batches (
+                  actor_user_id, from_chat_id, message_id, status, total_count,
+                  created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'pending', ?, ?, ?)
+                """,
+                (actor_user_id, from_chat_id, message_id, len(recipient_ids), now, now),
+            )
+            batch_id = int(cursor.lastrowid)
+            if recipient_ids:
+                await self.db.conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO announcement_deliveries (
+                      announcement_id, user_id, status, created_at, updated_at
+                    )
+                    VALUES (?, ?, 'pending', ?, ?)
+                    """,
+                    [(batch_id, user_id, now, now) for user_id in recipient_ids],
+                )
+        batch = await self.get_batch(batch_id)
+        if batch is None:
+            raise RuntimeError("Announcement batch insert failed")
+        return batch
+
+    async def get_batch(self, announcement_id: int) -> AnnouncementBatch | None:
+        cursor = await self.db.conn.execute("SELECT * FROM announcement_batches WHERE id = ?", (announcement_id,))
+        return _row_to_batch(await cursor.fetchone())
+
+    async def list_pending_deliveries(
+        self,
+        announcement_id: int,
+        limit: int,
+        *,
+        after_user_id: int = 0,
+        retry_failed: bool = False,
+    ) -> list[AnnouncementDelivery]:
+        statuses = ("pending", "failed") if retry_failed else ("pending",)
+        placeholders = ",".join("?" for _ in statuses)
+        cursor = await self.db.conn.execute(
+            f"""
+            SELECT * FROM announcement_deliveries
+            WHERE announcement_id = ?
+              AND status IN ({placeholders})
+              AND user_id > ?
+            ORDER BY user_id ASC
+            LIMIT ?
+            """,
+            (announcement_id, *statuses, after_user_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [delivery for row in rows if (delivery := _row_to_delivery(row)) is not None]
+
+    async def set_batch_status(self, announcement_id: int, status: str, now: str, *, completed: bool = False) -> None:
+        await self.db.conn.execute(
+            """
+            UPDATE announcement_batches
+            SET status = ?, updated_at = ?, completed_at = CASE WHEN ? THEN ? ELSE completed_at END
+            WHERE id = ?
+            """,
+            (status, now, 1 if completed else 0, now, announcement_id),
+        )
+        await self.db.commit()
+
+    async def mark_delivery(self, announcement_id: int, user_id: int, status: str, now: str, error_text: str | None = None) -> None:
+        await self.db.conn.execute(
+            """
+            UPDATE announcement_deliveries
+            SET status = ?, error_text = ?, updated_at = ?
+            WHERE announcement_id = ? AND user_id = ?
+            """,
+            (status, _truncate_error(error_text), now, announcement_id, user_id),
+        )
+        await self.db.commit()
+
+    async def refresh_batch_counts(self, announcement_id: int, now: str) -> None:
+        await self.db.conn.execute(
+            """
+            UPDATE announcement_batches
+            SET
+              success_count = (
+                SELECT COUNT(*) FROM announcement_deliveries
+                WHERE announcement_id = ? AND status = 'sent'
+              ),
+              failed_count = (
+                SELECT COUNT(*) FROM announcement_deliveries
+                WHERE announcement_id = ? AND status = 'failed'
+              ),
+              skipped_count = (
+                SELECT COUNT(*) FROM announcement_deliveries
+                WHERE announcement_id = ? AND status = 'skipped'
+              ),
+              updated_at = ?
+            WHERE id = ?
+            """,
+            (announcement_id, announcement_id, announcement_id, now, announcement_id),
+        )
+        await self.db.commit()
+
+    async def delivery_user_ids_by_status(self, announcement_id: int, status: str) -> tuple[int, ...]:
+        cursor = await self.db.conn.execute(
+            """
+            SELECT user_id FROM announcement_deliveries
+            WHERE announcement_id = ? AND status = ?
+            ORDER BY user_id ASC
+            """,
+            (announcement_id, status),
+        )
+        rows = await cursor.fetchall()
+        return tuple(int(row["user_id"]) for row in rows)
+
+
+def _truncate_error(value: str | None, limit: int = 256) -> str | None:
+    if value is None:
+        return None
+    clean = value.replace("\r", " ").replace("\n", " ").strip()
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 3].rstrip() + "..."

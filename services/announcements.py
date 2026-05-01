@@ -8,8 +8,10 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
 
 from models.enums import AuditEntityType
+from repositories.announcements import AnnouncementBatch, AnnouncementRepository
 from repositories.users import UserRepository
 from services.audit import AuditService
+from services.errors import NotFound
 from services.users import UserService
 
 logger = logging.getLogger(__name__)
@@ -17,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class AnnouncementResult:
+    announcement_id: int | None
     total: int
     success: int
     failed: int
@@ -32,12 +35,14 @@ class AnnouncementService:
         *,
         users: UserService,
         users_repo: UserRepository,
+        announcements: AnnouncementRepository | None = None,
         audit: AuditService,
         delay_seconds: float = 0.07,
         batch_size: int = 100,
     ) -> None:
         self.users = users
         self.users_repo = users_repo
+        self.announcements = announcements
         self.audit = audit
         self.delay_seconds = delay_seconds
         self.batch_size = max(batch_size, 1)
@@ -55,6 +60,47 @@ class AnnouncementService:
         message_id: int,
     ) -> AnnouncementResult:
         await self.users.require_superadmin(actor_user_id)
+        if self.announcements is None:
+            return await self._send_without_ledger(
+                actor_user_id=actor_user_id,
+                bot=bot,
+                from_chat_id=from_chat_id,
+                message_id=message_id,
+            )
+        recipients = await self._load_recipient_ids()
+        batch = await self.announcements.create_batch(
+            actor_user_id=actor_user_id,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+            recipient_ids=recipients,
+            now=self._now(),
+        )
+        return await self.resume_batch(actor_user_id=actor_user_id, bot=bot, announcement_id=batch.id, retry_failed=False)
+
+    async def resume_batch(
+        self,
+        *,
+        actor_user_id: int,
+        bot: Bot,
+        announcement_id: int,
+        retry_failed: bool = True,
+    ) -> AnnouncementResult:
+        await self.users.require_superadmin(actor_user_id)
+        if self.announcements is None:
+            raise RuntimeError("Announcement ledger is not configured")
+        batch = await self.announcements.get_batch(announcement_id)
+        if batch is None:
+            raise NotFound("Объявление не найдено")
+        return await self._send_batch(bot=bot, batch=batch, retry_failed=retry_failed)
+
+    async def _send_without_ledger(
+        self,
+        *,
+        actor_user_id: int,
+        bot: Bot,
+        from_chat_id: int,
+        message_id: int,
+    ) -> AnnouncementResult:
         total = 0
         success = 0
         failed = 0
@@ -75,7 +121,8 @@ class AnnouncementService:
                     skipped_user_ids.append(target_id)
                     logger.warning("Skipping announcement recipient with non-private chat id=%s", target_id)
                     continue
-                if await self._copy_message(bot, target_id, from_chat_id, message_id):
+                sent, _error = await self._copy_message(bot, target_id, from_chat_id, message_id)
+                if sent:
                     success += 1
                     delivered_user_ids.append(target_id)
                 else:
@@ -85,6 +132,7 @@ class AnnouncementService:
                     await asyncio.sleep(self.delay_seconds)
 
         result = AnnouncementResult(
+            announcement_id=None,
             total=total,
             success=success,
             failed=failed,
@@ -122,18 +170,126 @@ class AnnouncementService:
             logger.warning("Announcement was sent, but audit write failed", exc_info=True)
         return result
 
-    async def _copy_message(self, bot: Bot, target_id: int, from_chat_id: int, message_id: int) -> bool:
+    async def _send_batch(self, *, bot: Bot, batch: AnnouncementBatch, retry_failed: bool) -> AnnouncementResult:
+        if self.announcements is None:
+            raise RuntimeError("Announcement ledger is not configured")
+        now = self._now()
+        await self.announcements.set_batch_status(batch.id, "sending", now)
+        last_seen_id = 0
+        try:
+            while True:
+                deliveries = await self.announcements.list_pending_deliveries(
+                    batch.id,
+                    self.batch_size,
+                    after_user_id=last_seen_id,
+                    retry_failed=retry_failed,
+                )
+                if not deliveries:
+                    break
+                for delivery in deliveries:
+                    last_seen_id = delivery.user_id
+                    now = self._now()
+                    if delivery.user_id <= 0:
+                        logger.warning("Skipping announcement recipient with non-private chat id=%s", delivery.user_id)
+                        await self.announcements.mark_delivery(batch.id, delivery.user_id, "skipped", now, "non-private chat id")
+                        continue
+                    sent, error = await self._copy_message(bot, delivery.user_id, batch.from_chat_id, batch.message_id)
+                    if sent:
+                        await self.announcements.mark_delivery(batch.id, delivery.user_id, "sent", now)
+                    else:
+                        await self.announcements.mark_delivery(batch.id, delivery.user_id, "failed", now, error or "send failed")
+                    if self.delay_seconds > 0:
+                        await asyncio.sleep(self.delay_seconds)
+        except Exception:
+            await self.announcements.set_batch_status(batch.id, "failed", self._now())
+            raise
+
+        result = await self._ledger_result(batch.id, last_seen_id=last_seen_id)
+        completed = result.failed == 0
+        await self.announcements.set_batch_status(batch.id, "completed" if completed else "failed", self._now(), completed=completed)
+        await self.announcements.refresh_batch_counts(batch.id, self._now())
+        logger.info(
+            "Announcement completed: id=%s total=%s success=%s failed=%s last_seen_id=%s failed_user_ids=%s skipped_user_ids=%s",
+            result.announcement_id,
+            result.total,
+            result.success,
+            result.failed,
+            result.last_seen_id,
+            result.failed_user_ids,
+            result.skipped_user_ids,
+        )
+        try:
+            await self.audit.write(
+                actor_user_id=batch.actor_user_id,
+                action="admin_announcement_sent",
+                entity_type=AuditEntityType.SYSTEM,
+                entity_id=batch.id,
+                details={
+                    "announcement_id": batch.id,
+                    "total": result.total,
+                    "success": result.success,
+                    "failed": result.failed,
+                    "last_seen_id": result.last_seen_id,
+                    "delivered_user_ids": list(result.delivered_user_ids),
+                    "failed_user_ids": list(result.failed_user_ids),
+                    "skipped_user_ids": list(result.skipped_user_ids),
+                },
+            )
+        except Exception:
+            logger.warning("Announcement was sent, but audit write failed", exc_info=True)
+        return result
+
+    async def _ledger_result(self, announcement_id: int, *, last_seen_id: int | None) -> AnnouncementResult:
+        if self.announcements is None:
+            raise RuntimeError("Announcement ledger is not configured")
+        await self.announcements.refresh_batch_counts(announcement_id, self._now())
+        batch = await self.announcements.get_batch(announcement_id)
+        if batch is None:
+            raise NotFound("Объявление не найдено")
+        delivered = await self.announcements.delivery_user_ids_by_status(announcement_id, "sent")
+        failed = await self.announcements.delivery_user_ids_by_status(announcement_id, "failed")
+        skipped = await self.announcements.delivery_user_ids_by_status(announcement_id, "skipped")
+        return AnnouncementResult(
+            announcement_id=announcement_id,
+            total=batch.total_count,
+            success=len(delivered),
+            failed=len(failed) + len(skipped),
+            last_seen_id=last_seen_id,
+            delivered_user_ids=delivered,
+            failed_user_ids=failed,
+            skipped_user_ids=skipped,
+        )
+
+    async def _load_recipient_ids(self) -> list[int]:
+        recipients: list[int] = []
+        last_seen_id: int | None = None
+        while True:
+            batch = await self.users_repo.list_announcement_recipients_after(last_seen_id=last_seen_id, limit=self.batch_size)
+            if not batch:
+                break
+            recipients.extend(user.telegram_user_id for user in batch)
+            last_seen_id = batch[-1].telegram_user_id
+        return recipients
+
+    async def _copy_message(self, bot: Bot, target_id: int, from_chat_id: int, message_id: int) -> tuple[bool, str | None]:
         try:
             await bot.copy_message(chat_id=target_id, from_chat_id=from_chat_id, message_id=message_id)
-            return True
+            return True, None
         except TelegramRetryAfter as exc:
             await asyncio.sleep(max(exc.retry_after, 0))
             try:
                 await bot.copy_message(chat_id=target_id, from_chat_id=from_chat_id, message_id=message_id)
-                return True
-            except Exception:
+                return True, None
+            except Exception as retry_error:
                 logger.warning("Announcement copy retry failed for user_id=%s", target_id, exc_info=True)
-                return False
-        except Exception:
+                return False, _public_error_text(retry_error)
+        except Exception as error:
             logger.warning("Announcement copy failed for user_id=%s", target_id, exc_info=True)
-            return False
+            return False, _public_error_text(error)
+
+    def _now(self) -> str:
+        return self.audit.clock.now()
+
+
+def _public_error_text(error: Exception) -> str:
+    return type(error).__name__

@@ -11,13 +11,21 @@ from typing import Any, AsyncIterator
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 logger = logging.getLogger(__name__)
 
 
+def _normalize_synchronous(value: str) -> str:
+    normalized = value.strip().upper()
+    if normalized not in {"FULL", "NORMAL", "EXTRA"}:
+        raise ValueError("SQLite synchronous must be FULL, NORMAL, or EXTRA")
+    return normalized
+
+
 class Database:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, synchronous: str = "FULL") -> None:
         self.path = path
+        self.synchronous = _normalize_synchronous(synchronous)
         self._conn: aiosqlite.Connection | None = None
         self._conn_proxy = _ConnectionProxy(self)
         self._transaction_lock = asyncio.Lock()
@@ -45,7 +53,7 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._raw_conn().execute("PRAGMA foreign_keys = ON")
         await self._raw_conn().execute("PRAGMA journal_mode = WAL")
-        await self._raw_conn().execute("PRAGMA synchronous = NORMAL")
+        await self._raw_conn().execute(f"PRAGMA synchronous = {self.synchronous}")
         await self._raw_conn().execute("PRAGMA busy_timeout = 5000")
         await self._raw_conn().commit()
         if created or os.name == "posix":
@@ -160,8 +168,53 @@ class Database:
                 """
             )
             await self._set_schema_version(6)
+            version = 6
+        if version < 7:
+            await self._create_announcement_tables()
+            await self._set_schema_version(7)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
+
+    async def _create_announcement_tables(self) -> None:
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS announcement_batches (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              actor_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE RESTRICT,
+              from_chat_id INTEGER NOT NULL,
+              message_id INTEGER NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('pending','sending','completed','failed','cancelled')),
+              total_count INTEGER NOT NULL DEFAULT 0,
+              success_count INTEGER NOT NULL DEFAULT 0,
+              failed_count INTEGER NOT NULL DEFAULT 0,
+              skipped_count INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              completed_at TEXT
+            )
+            """
+        )
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS announcement_deliveries (
+              announcement_id INTEGER NOT NULL REFERENCES announcement_batches(id) ON DELETE CASCADE,
+              user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+              status TEXT NOT NULL CHECK(status IN ('pending','sent','failed','skipped')),
+              error_text TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (announcement_id, user_id)
+            )
+            """
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_announcement_batches_status "
+            "ON announcement_batches(status, updated_at)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_announcement_deliveries_status "
+            "ON announcement_deliveries(announcement_id, status, user_id)"
+        )
 
     async def _schema_version(self) -> int:
         await self.conn.execute(
@@ -302,6 +355,8 @@ class Database:
             ),
             ("proxy_entries", "proxy_type", ("socks5", "socks4", "http", "https")),
             ("proxy_entries", "status", ("active", "disabled")),
+            ("announcement_batches", "status", ("pending", "sending", "completed", "failed", "cancelled")),
+            ("announcement_deliveries", "status", ("pending", "sent", "failed", "skipped")),
         )
         for table, column, allowed_values in enum_checks:
             placeholders = ",".join("?" for _ in allowed_values)

@@ -210,7 +210,7 @@ def test_legacy_v3_duplicate_pending_migrates_before_unique_index(tmp_path: Path
             print("BOOTSTRAP_OK")
             cursor = await db.conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             version = await cursor.fetchone()
-            assert version["value"] == "6"
+            assert version["value"] == "7"
             cursor = await db.conn.execute(
                 "SELECT status, COUNT(*) AS cnt FROM access_requests GROUP BY status ORDER BY status"
             )
@@ -915,11 +915,11 @@ def test_announcement_recipients_exclude_blocked_predicate_users(tmp_path: Path)
                 )
             await db.commit()
 
-            assert await users_repo.count_announcement_recipients() == 3
+            assert await users_repo.count_announcement_recipients() == 2
             recipients = await users_repo.list_announcement_recipients_after(None, limit=20)
-            assert [user.telegram_user_id for user in recipients] == [1, 230, 231]
+            assert [user.telegram_user_id for user in recipients] == [1, 230]
             recipients_after_admin = await users_repo.list_announcement_recipients_after(1, limit=20)
-            assert [user.telegram_user_id for user in recipients_after_admin] == [230, 231]
+            assert [user.telegram_user_id for user in recipients_after_admin] == [230]
         finally:
             await db.close()
 

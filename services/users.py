@@ -139,37 +139,22 @@ class UserService:
                 else:
                     await self._revoke_all_access_keys(actor_user_id, target_user_id, revoked_key_ids, errors)
 
-            if errors:
-                await self._write_audit_best_effort(
-                    actor_user_id=actor_user_id,
-                    action="user_block_failed",
-                    entity_type=AuditEntityType.USER,
-                    entity_id=target_user_id,
-                    details={
-                        "revoke_active_keys": revoke_active_keys,
-                        "revoked_key_ids": revoked_key_ids,
-                        "error_count": len(errors),
-                        "errors": [{"key_id": item.key_id, "key_type": item.key_type.value, "error": item.error} for item in errors],
-                    },
-                )
-                user = await self.get_user(target_user_id)
-                return BlockUserResult(user=user, revoked_key_ids=tuple(revoked_key_ids), errors=tuple(errors))
-
             now = self.clock.now()
-            async with self.users.db.transaction():
-                await self.users.set_role(target_user_id, UserRole.BLOCKED_USER, now, blocked_at=now)
-                await self.audit.write(
-                    actor_user_id=actor_user_id,
-                    action="user_blocked",
-                    entity_type=AuditEntityType.USER,
-                    entity_id=target_user_id,
-                    details={
-                        "revoke_active_keys": revoke_active_keys,
-                        "revoked_key_ids": revoked_key_ids,
-                        "error_count": len(errors),
-                        "errors": [{"key_id": item.key_id, "key_type": item.key_type.value, "error": item.error} for item in errors],
-                    },
-                )
+            await self.users.set_role(target_user_id, UserRole.BLOCKED_USER, now, blocked_at=now)
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="user_blocked_with_revoke_errors" if errors else "user_blocked",
+                entity_type=AuditEntityType.USER,
+                entity_id=target_user_id,
+                details={
+                    "revoke_active_keys": revoke_active_keys,
+                    "revoked_key_ids": revoked_key_ids,
+                    "error_count": len(errors),
+                    "errors": [{"key_id": item.key_id, "key_type": item.key_type.value, "error": item.error} for item in errors],
+                    "bot_access_blocked": True,
+                    "vpn_revoke_complete": not errors,
+                },
+            )
             await self.clear_user_state(target_user_id)
             user = await self.get_user(target_user_id)
             return BlockUserResult(user=user, revoked_key_ids=tuple(revoked_key_ids), errors=tuple(errors))

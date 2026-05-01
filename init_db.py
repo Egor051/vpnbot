@@ -8,7 +8,7 @@ from db.database import Database
 
 async def main() -> None:
     settings = load_settings()
-    db = Database(settings.db_path)
+    db = Database(settings.db_path, synchronous=settings.sqlite_synchronous)
     await db.connect()
     try:
         await db.bootstrap()

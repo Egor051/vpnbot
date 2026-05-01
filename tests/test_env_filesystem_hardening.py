@@ -50,6 +50,24 @@ def test_strict_bool_env_accepts_explicit_false(monkeypatch: pytest.MonkeyPatch,
     assert settings.awg_use_preshared_key is False
 
 
+def test_sqlite_synchronous_defaults_full_and_accepts_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("SQLITE_SYNCHRONOUS", raising=False)
+
+    assert load_settings().sqlite_synchronous == "FULL"
+
+    monkeypatch.setenv("SQLITE_SYNCHRONOUS", "normal")
+    assert load_settings().sqlite_synchronous == "NORMAL"
+
+
+def test_sqlite_synchronous_rejects_invalid_value(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SQLITE_SYNCHRONOUS", "unsafe")
+
+    with pytest.raises(SettingsError, match="SQLITE_SYNCHRONOUS"):
+        load_settings()
+
+
 def test_xray_invalid_network_type_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("XRAY_NETWORK_TYPE", "ws")

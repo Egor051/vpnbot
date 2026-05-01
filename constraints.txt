@@ -1,0 +1,30 @@
+# Production constraints for Python 3.12 on Ubuntu 24.04 x86_64.
+# Generated with:
+#   python -m pip install --dry-run --ignore-installed --only-binary=:all: \
+#     --python-version 3.12 --implementation cp --abi cp312 \
+#     --platform manylinux_2_17_x86_64 -r requirements.txt
+#
+# Keep requirements.txt as the direct runtime dependency list and install with:
+#   pip install -r requirements.txt -c constraints.txt
+
+aiofiles==25.1.0
+aiogram==3.27.0
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.5
+aiosignal==1.4.0
+aiosqlite==0.22.1
+annotated-types==0.7.0
+attrs==26.1.0
+certifi==2026.4.22
+frozenlist==1.8.0
+idna==3.13
+magic-filter==1.0.12
+multidict==6.7.1
+propcache==0.4.1
+pydantic==2.12.5
+pydantic-core==2.41.5
+python-dotenv==1.2.2
+typing-extensions==4.15.0
+typing-inspection==0.4.2
+tzdata==2026.2
+yarl==1.23.0
