@@ -89,6 +89,31 @@ CREATE TABLE IF NOT EXISTS vpn_key_traffic_stats (
   FOREIGN KEY(key_id) REFERENCES vpn_keys(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS announcement_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE RESTRICT,
+  from_chat_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','sending','completed','failed','cancelled')),
+  total_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS announcement_deliveries (
+  announcement_id INTEGER NOT NULL REFERENCES announcement_batches(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK(status IN ('pending','sent','failed','skipped')),
+  error_text TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (announcement_id, user_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_access_requests_user_status ON access_requests(telegram_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_access_requests_pending_created ON access_requests(status, requested_at);
@@ -101,3 +126,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_public_key ON vpn_keys(public_key
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner_type_status ON vpn_keys(owner_user_id, key_type, status);
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);
+CREATE INDEX IF NOT EXISTS idx_announcement_batches_status ON announcement_batches(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_announcement_deliveries_status ON announcement_deliveries(announcement_id, status, user_id);

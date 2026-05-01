@@ -20,6 +20,7 @@ from db.database import Database
 from models.dto import TelegramUserProfile, User, VpnKey
 from models.enums import UserRole, VpnKeyStatus, VpnKeyType
 from repositories.users import UserRepository
+from repositories.announcements import AnnouncementRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.announcements import AnnouncementService
 from services.awg import AwgService
@@ -828,7 +829,7 @@ def test_announcement_waits_for_confirmation_before_sending() -> None:
         assert announcements.send_called is False
         assert state.data == {"from_chat_id": 1, "message_id": 55}
         assert message.answers
-        assert "Получателей: 2" in message.answers[0][0]
+        assert "Получателей среди одобренных пользователей: 2" in message.answers[0][0]
 
     asyncio.run(run())
 
@@ -1239,6 +1240,182 @@ def test_announcement_uses_copy_message_without_text_additions(tmp_path: Path) -
             {"chat_id": 2, "from_chat_id": 1, "message_id": 77},
         ]
         assert bot.sent_messages == []
+
+    asyncio.run(run())
+
+
+def test_announcement_creates_durable_batch_and_deliveries(tmp_path: Path) -> None:
+    class AuditWithClock:
+        def __init__(self) -> None:
+            self.clock = ClockProvider()
+            self.writes: list[dict[str, object]] = []
+
+        async def write(self, **kwargs: object) -> None:
+            self.writes.append(kwargs)
+
+    class Bot:
+        def __init__(self) -> None:
+            self.copied: list[int] = []
+
+        async def copy_message(self, *, chat_id: int, from_chat_id: int, message_id: int) -> None:
+            self.copied.append(chat_id)
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users_repo = UserRepository(db)
+            await users_repo.upsert_profile(TelegramUserProfile(1, "admin", "Admin"), UserRole.SUPERADMIN, "now")
+            await users_repo.upsert_profile(TelegramUserProfile(2, "approved", "Approved"), UserRole.APPROVED_USER, "now")
+            await users_repo.upsert_profile(TelegramUserProfile(3, "pending", "Pending"), UserRole.PENDING_USER, "now")
+            audit = AuditWithClock()
+            service = AnnouncementService(
+                users=Users(),  # type: ignore[arg-type]
+                users_repo=users_repo,
+                announcements=AnnouncementRepository(db),
+                audit=audit,  # type: ignore[arg-type]
+                delay_seconds=0,
+            )
+            bot = Bot()
+
+            result = await service.send_to_all(actor_user_id=1, bot=bot, from_chat_id=1, message_id=77)  # type: ignore[arg-type]
+
+            assert result.announcement_id is not None
+            assert result.total == 2
+            assert result.success == 2
+            assert result.failed == 0
+            assert bot.copied == [1, 2]
+            cursor = await db.conn.execute(
+                "SELECT status, total_count, success_count FROM announcement_batches WHERE id = ?",
+                (result.announcement_id,),
+            )
+            batch = await cursor.fetchone()
+            assert batch is not None
+            assert batch["status"] == "completed"
+            assert batch["total_count"] == 2
+            assert batch["success_count"] == 2
+            cursor = await db.conn.execute(
+                "SELECT user_id, status FROM announcement_deliveries WHERE announcement_id = ? ORDER BY user_id",
+                (result.announcement_id,),
+            )
+            rows = await cursor.fetchall()
+            assert [(row["user_id"], row["status"]) for row in rows] == [(1, "sent"), (2, "sent")]
+            assert audit.writes[-1]["details"]["announcement_id"] == result.announcement_id
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_announcement_resume_does_not_duplicate_already_sent_recipients(tmp_path: Path) -> None:
+    class AuditWithClock:
+        def __init__(self) -> None:
+            self.clock = ClockProvider()
+
+        async def write(self, **kwargs: object) -> None:
+            return None
+
+    class Bot:
+        pass
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users_repo = UserRepository(db)
+            for user_id in (1, 2, 3):
+                await users_repo.upsert_profile(
+                    TelegramUserProfile(user_id, f"user{user_id}", f"User {user_id}"),
+                    UserRole.SUPERADMIN if user_id == 1 else UserRole.APPROVED_USER,
+                    "now",
+                )
+            service = AnnouncementService(
+                users=Users(),  # type: ignore[arg-type]
+                users_repo=users_repo,
+                announcements=AnnouncementRepository(db),
+                audit=AuditWithClock(),  # type: ignore[arg-type]
+                delay_seconds=0,
+            )
+            calls: list[int] = []
+            crashed = False
+
+            async def copy_once(_bot: object, target_id: int, from_chat_id: int, message_id: int) -> tuple[bool, str | None]:
+                nonlocal crashed
+                calls.append(target_id)
+                if target_id == 3 and not crashed:
+                    crashed = True
+                    raise RuntimeError("crash")
+                return True, None
+
+            service._copy_message = copy_once  # type: ignore[method-assign]
+
+            with pytest.raises(RuntimeError, match="crash"):
+                await service.send_to_all(actor_user_id=1, bot=Bot(), from_chat_id=1, message_id=77)  # type: ignore[arg-type]
+
+            cursor = await db.conn.execute("SELECT id FROM announcement_batches ORDER BY id DESC LIMIT 1")
+            row = await cursor.fetchone()
+            assert row is not None
+            result = await service.resume_batch(actor_user_id=1, bot=Bot(), announcement_id=int(row["id"]))  # type: ignore[arg-type]
+
+            assert result.success == 3
+            assert result.failed == 0
+            assert calls == [1, 2, 3, 3]
+            assert calls.count(1) == 1
+            assert calls.count(2) == 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_announcement_records_failed_recipient(tmp_path: Path) -> None:
+    class AuditWithClock:
+        def __init__(self) -> None:
+            self.clock = ClockProvider()
+
+        async def write(self, **kwargs: object) -> None:
+            return None
+
+    class Bot:
+        async def copy_message(self, *, chat_id: int, from_chat_id: int, message_id: int) -> None:
+            if chat_id == 2:
+                raise RuntimeError("telegram forbidden token=secret")
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users_repo = UserRepository(db)
+            await users_repo.upsert_profile(TelegramUserProfile(1, "admin", "Admin"), UserRole.SUPERADMIN, "now")
+            await users_repo.upsert_profile(TelegramUserProfile(2, "approved", "Approved"), UserRole.APPROVED_USER, "now")
+            service = AnnouncementService(
+                users=Users(),  # type: ignore[arg-type]
+                users_repo=users_repo,
+                announcements=AnnouncementRepository(db),
+                audit=AuditWithClock(),  # type: ignore[arg-type]
+                delay_seconds=0,
+            )
+
+            result = await service.send_to_all(actor_user_id=1, bot=Bot(), from_chat_id=1, message_id=77)  # type: ignore[arg-type]
+
+            assert result.success == 1
+            assert result.failed == 1
+            cursor = await db.conn.execute(
+                """
+                SELECT status, error_text FROM announcement_deliveries
+                WHERE announcement_id = ? AND user_id = 2
+                """,
+                (result.announcement_id,),
+            )
+            delivery = await cursor.fetchone()
+            assert delivery is not None
+            assert delivery["status"] == "failed"
+            assert delivery["error_text"] == "RuntimeError"
+        finally:
+            await db.close()
 
     asyncio.run(run())
 

@@ -6,12 +6,18 @@ from aiosqlite import Row
 
 from db.database import Database
 from models.dto import TelegramUserProfile, User
-from models.enums import BLOCKED_USER_ROLE_VALUES, UserRole, parse_user_role
+from models.enums import UserRole, parse_user_role
 from services.errors import NotFound
 
 
-_BLOCKED_ROLE_SQL_VALUES = tuple(sorted(value.lower() for value in BLOCKED_USER_ROLE_VALUES))
-_BLOCKED_ROLE_SQL_PLACEHOLDERS = ", ".join("?" for _ in _BLOCKED_ROLE_SQL_VALUES)
+_ANNOUNCEMENT_ROLE_SQL_VALUES = (
+    UserRole.APPROVED_USER.value.lower(),
+    UserRole.SUPERADMIN.value.lower(),
+    "approved",
+    "superadmin",
+    "super_admin",
+)
+_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS = ", ".join("?" for _ in _ANNOUNCEMENT_ROLE_SQL_VALUES)
 
 
 def _row_to_user(row: Row | None) -> User | None:
@@ -118,9 +124,9 @@ class UserRepository:
             SELECT COUNT(*) AS cnt
             FROM users
             WHERE blocked_at IS NULL
-              AND LOWER(role) NOT IN ({_BLOCKED_ROLE_SQL_PLACEHOLDERS})
+              AND LOWER(role) IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
             """,
-            _BLOCKED_ROLE_SQL_VALUES,
+            _ANNOUNCEMENT_ROLE_SQL_VALUES,
         )
         row = await cursor.fetchone()
         return int(row["cnt"]) if row is not None else 0
@@ -131,23 +137,23 @@ class UserRepository:
                 f"""
                 SELECT * FROM users
                 WHERE blocked_at IS NULL
-                  AND LOWER(role) NOT IN ({_BLOCKED_ROLE_SQL_PLACEHOLDERS})
+                  AND LOWER(role) IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
                 ORDER BY telegram_user_id ASC
                 LIMIT ?
                 """,
-                (*_BLOCKED_ROLE_SQL_VALUES, limit),
+                (*_ANNOUNCEMENT_ROLE_SQL_VALUES, limit),
             )
         else:
             cursor = await self.db.conn.execute(
                 f"""
                 SELECT * FROM users
                 WHERE blocked_at IS NULL
-                  AND LOWER(role) NOT IN ({_BLOCKED_ROLE_SQL_PLACEHOLDERS})
+                  AND LOWER(role) IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
                   AND telegram_user_id > ?
                 ORDER BY telegram_user_id ASC
                 LIMIT ?
                 """,
-                (*_BLOCKED_ROLE_SQL_VALUES, last_seen_id, limit),
+                (*_ANNOUNCEMENT_ROLE_SQL_VALUES, last_seen_id, limit),
             )
         rows = await cursor.fetchall()
         return [user for row in rows if (user := _row_to_user(row)) is not None]

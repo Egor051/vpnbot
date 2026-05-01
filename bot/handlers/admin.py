@@ -12,11 +12,15 @@ from bot.formatters import (
     NOTE_CREATE_WARNING,
     ONE_KEY_ONE_DEVICE_WARNING,
     access_request_text,
+    access_request_decision_confirm_text,
     access_requests_page_text,
     admin_stats_page_text,
     audit_page_text,
+    block_user_confirm_text,
     create_confirm_text,
     keys_page_text,
+    unblock_user_confirm_text,
+    unblock_user_success_text,
     user_card_text,
     users_page_text,
 )
@@ -29,7 +33,10 @@ from bot.keyboards.admin import (
     admin_key_type_keyboard,
     admin_panel_keyboard,
     announcement_confirm_keyboard,
+    access_request_decision_confirm_keyboard,
+    block_user_confirm_keyboard,
     pending_requests_keyboard,
+    unblock_user_confirm_keyboard,
     user_actions_keyboard,
     users_keyboard,
 )
@@ -40,7 +47,8 @@ from bot.pagination import page_offset, split_page
 from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimitExceeded, RateLimiter
 from models.dto import TelegramUserProfile
-from models.enums import UserRole, VpnKeyType
+from models.access import is_blocked_user
+from models.enums import AccessRequestStatus, UserRole, VpnKeyType
 from services.user_locks import UserLockManager
 
 router = Router()
@@ -105,7 +113,7 @@ async def admin_announcement_start(callback: CallbackQuery, state: FSMContext, s
         await state.set_state(AdminAnnouncementStates.waiting_message)
         await safe_edit_message_text(
             callback.message,
-            "Отправьте сообщение объявления. Оно будет разослано пользователям без изменений после подтверждения.",
+            "Отправьте сообщение объявления. Оно будет разослано одобренным пользователям без изменений после подтверждения.",
             reply_markup=cancel_keyboard(),
         )
     except Exception as exc:
@@ -126,7 +134,7 @@ async def admin_announcement_message(message: Message, state: FSMContext, servic
         await message.answer(
             (
                 "Разослать это объявление пользователям?\n"
-                f"Получателей: {recipient_count}\n"
+                f"Получателей среди одобренных пользователей: {recipient_count}\n"
                 "Сообщение будет отправлено без дополнительных подписей."
             ),
             reply_markup=announcement_confirm_keyboard(),
@@ -238,39 +246,78 @@ async def admin_request_detail(callback: CallbackQuery, services: Any) -> None:
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(F.data.startswith("admin:approve:"))
+@router.callback_query(F.data.regexp(r"^admin:approve:\d+$"))
 async def admin_approve(callback: CallbackQuery, services: Any, bot: Bot) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
-    await safe_callback_answer(callback, "Обрабатываю...")
+    await safe_callback_answer(callback)
     try:
         request_id = int(callback.data.rsplit(":", 1)[-1])
-        request, changed = await services.access.approve(callback.from_user.id, request_id)
-        if changed:
-            await _safe_notify(bot, request.telegram_user_id, "Ваша заявка одобрена. Отправьте /start, чтобы открыть меню.")
+        request = await services.access.get_request(callback.from_user.id, request_id)
         if callback.message:
-            text = "Заявка одобрена." if changed else "Заявка уже была обработана."
-            await safe_edit_message_text(callback.message, text, reply_markup=admin_panel_keyboard())
+            if request.status != AccessRequestStatus.PENDING:
+                await safe_edit_message_text(callback.message, "Заявка уже была обработана.", reply_markup=admin_panel_keyboard())
+                return
+            await safe_edit_message_text(
+                callback.message,
+                access_request_decision_confirm_text(request, "approve"),
+                reply_markup=access_request_decision_confirm_keyboard(request.id, "approve"),
+            )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(F.data.startswith("admin:reject:"))
+@router.callback_query(F.data.regexp(r"^admin:reject:\d+$"))
 async def admin_reject(callback: CallbackQuery, services: Any, bot: Bot) -> None:
+    if callback.from_user is None or callback.data is None:
+        return
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback)
+    try:
+        request_id = int(callback.data.rsplit(":", 1)[-1])
+        request = await services.access.get_request(callback.from_user.id, request_id)
+        if callback.message:
+            if request.status != AccessRequestStatus.PENDING:
+                await safe_edit_message_text(callback.message, "Заявка уже была обработана.", reply_markup=admin_panel_keyboard())
+                return
+            await safe_edit_message_text(
+                callback.message,
+                access_request_decision_confirm_text(request, "reject"),
+                reply_markup=access_request_decision_confirm_keyboard(request.id, "reject"),
+            )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:(approve|reject):confirm:\d+$"))
+async def admin_access_decision_confirm(callback: CallbackQuery, services: Any, bot: Bot) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback, "Обрабатываю...")
     try:
-        request_id = int(callback.data.rsplit(":", 1)[-1])
-        request, changed = await services.access.reject(callback.from_user.id, request_id)
-        if changed:
-            await _safe_notify(bot, request.telegram_user_id, "Ваша заявка отклонена.")
-        if callback.message:
+        _admin, action, _confirm, raw_request_id = callback.data.split(":", 3)
+        request_id = int(raw_request_id)
+        current = await services.access.get_request(callback.from_user.id, request_id)
+        if current.status != AccessRequestStatus.PENDING:
+            if callback.message:
+                await safe_edit_message_text(callback.message, "Заявка уже была обработана.", reply_markup=admin_panel_keyboard())
+            return
+        if action == "approve":
+            request, changed = await services.access.approve(callback.from_user.id, request_id)
+            if changed:
+                await _safe_notify(bot, request.telegram_user_id, "Ваша заявка одобрена. Отправьте /start, чтобы открыть меню.")
+            text = "Заявка одобрена." if changed else "Заявка уже была обработана."
+        else:
+            request, changed = await services.access.reject(callback.from_user.id, request_id)
+            if changed:
+                await _safe_notify(bot, request.telegram_user_id, "Ваша заявка отклонена.")
             text = "Заявка отклонена." if changed else "Заявка уже была обработана."
+        if callback.message:
             await safe_edit_message_text(callback.message, text, reply_markup=admin_panel_keyboard())
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -340,24 +387,56 @@ async def admin_user_approve(callback: CallbackQuery, services: Any) -> None:
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(F.data.startswith("admin:block:"))
+@router.callback_query(F.data.regexp(r"^admin:block:\d+$"))
 async def admin_block_user(callback: CallbackQuery, services: Any) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
-    await safe_callback_answer(callback, "Обрабатываю...")
+    await safe_callback_answer(callback)
     try:
         user_id = int(callback.data.rsplit(":", 1)[-1])
+        await require_superadmin(services, callback.from_user.id)
+        user = await services.users.get_user(user_id)
+        if is_blocked_user(user):
+            if callback.message:
+                await safe_edit_message_text(callback.message, "Пользователь уже заблокирован.", reply_markup=user_actions_keyboard(user))
+            return
+        key_counts = await services.users.count_keys_for_users(callback.from_user.id, [user_id])
+        if callback.message:
+            await safe_edit_message_text(
+                callback.message,
+                block_user_confirm_text(user, key_counts.get(user_id, 0)),
+                reply_markup=block_user_confirm_keyboard(user),
+            )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:block:confirm:\d+$"))
+async def admin_block_user_confirm(callback: CallbackQuery, services: Any) -> None:
+    if callback.from_user is None or callback.data is None:
+        return
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback, "Блокирую...")
+    try:
+        user_id = int(callback.data.rsplit(":", 1)[-1])
+        await require_superadmin(services, callback.from_user.id)
+        current = await services.users.get_user(user_id)
+        if is_blocked_user(current):
+            if callback.message:
+                await safe_edit_message_text(callback.message, "Пользователь уже заблокирован.", reply_markup=user_actions_keyboard(current))
+            return
         result = await services.users.block_user(callback.from_user.id, user_id, revoke_active_keys=True)
         if callback.message:
             user = await services.users.get_user(user_id)
             if result.errors:
                 text = (
-                    "Блокировка не завершена: не удалось безопасно отключить все VPN-ключи.\n"
+                    "Пользователь заблокирован в боте, но не все VPN-ключи удалось отключить автоматически.\n"
                     f"Отключено ключей: {len(result.revoked_key_ids)}\n"
                     f"Ошибок: {len(result.errors)}\n"
-                    "Пользователь не переведён в статус заблокированного. Проверьте журнал действий."
+                    "Проверьте Xray/AWG runtime и config вручную."
                 )
             else:
                 text = (
@@ -371,21 +450,56 @@ async def admin_block_user(callback: CallbackQuery, services: Any) -> None:
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(F.data.startswith("admin:unblock:"))
+@router.callback_query(F.data.regexp(r"^admin:unblock:\d+$"))
 async def admin_unblock_user(callback: CallbackQuery, services: Any) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
-    await safe_callback_answer(callback, "Обрабатываю...")
+    await safe_callback_answer(callback)
     try:
         user_id = int(callback.data.rsplit(":", 1)[-1])
-        await services.users.unblock_user(callback.from_user.id, user_id)
+        warning = await services.users.inspect_unblock_risk(callback.from_user.id, user_id)
         if callback.message:
-            user = await services.users.get_user(user_id)
+            if not is_blocked_user(warning.user):
+                await safe_edit_message_text(
+                    callback.message,
+                    "Пользователь уже не заблокирован.",
+                    reply_markup=user_actions_keyboard(warning.user),
+                )
+                return
             await safe_edit_message_text(
                 callback.message,
-                "Пользователь разблокирован. FSM-состояние очищено, сценарии начнутся заново.",
+                unblock_user_confirm_text(warning),
+                reply_markup=unblock_user_confirm_keyboard(warning.user),
+            )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:unblock:confirm:\d+$"))
+async def admin_unblock_user_confirm(callback: CallbackQuery, services: Any) -> None:
+    if callback.from_user is None or callback.data is None:
+        return
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback, "Разблокирую...")
+    try:
+        user_id = int(callback.data.rsplit(":", 1)[-1])
+        warning = await services.users.inspect_unblock_risk(callback.from_user.id, user_id)
+        if not is_blocked_user(warning.user):
+            if callback.message:
+                await safe_edit_message_text(
+                    callback.message,
+                    "Пользователь уже не заблокирован.",
+                    reply_markup=user_actions_keyboard(warning.user),
+                )
+            return
+        user = await services.users.unblock_user(callback.from_user.id, user_id)
+        if callback.message:
+            await safe_edit_message_text(
+                callback.message,
+                unblock_user_success_text(warning),
                 reply_markup=user_actions_keyboard(user),
             )
     except Exception as exc:

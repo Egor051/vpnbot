@@ -140,8 +140,15 @@ class AwgService:
 
                 try:
                     await self.vpn_keys.mark_active(key.id, self.clock.now(), payload=payload, public_payload=public_payload)
-                except Exception:
-                    logger.critical("AWG peer applied, but DB mark_active failed for key_id=%s", key.id, exc_info=True)
+                except Exception as exc:
+                    await self._compensate_failed_create_after_apply(
+                        actor_user_id=actor_user_id,
+                        key_id=key.id,
+                        owner_user_id=owner.telegram_user_id,
+                        public_key=public_key,
+                        client_ip=client_ip,
+                        original_error=exc,
+                    )
                     raise
                 await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
@@ -391,6 +398,61 @@ class AwgService:
                 "и восстановить его из managed block не удалось."
             )
         await self.adapter.remove_peer(key_id=key.id, public_key=public_key)
+
+    async def _compensate_failed_create_after_apply(
+        self,
+        *,
+        actor_user_id: int,
+        key_id: int,
+        owner_user_id: int,
+        public_key: str,
+        client_ip: str,
+        original_error: Exception,
+    ) -> None:
+        logger.critical(
+            "AWG peer applied, but DB mark_active failed for key_id=%s; attempting compensation",
+            key_id,
+            exc_info=True,
+        )
+        try:
+            await self.adapter.remove_peer(key_id=key_id, public_key=public_key)
+        except Exception as compensation_error:
+            self.backend_health.mark_degraded(VpnKeyType.AWG, "post-apply mark_active failed and compensation failed")
+            logger.critical(
+                "AWG create compensation failed after DB mark_active failure for key_id=%s",
+                key_id,
+                exc_info=True,
+            )
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="awg_create_compensation_failed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={
+                    "owner_user_id": owner_user_id,
+                    "client_ip": client_ip,
+                    "original_error_type": type(original_error).__name__,
+                    "compensation_error_type": type(compensation_error).__name__,
+                    "backend_degraded": True,
+                },
+            )
+            return
+
+        try:
+            await self.vpn_keys.set_status(key_id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+        except Exception:
+            logger.warning("AWG create compensation succeeded, but failed to mark key apply_failed key_id=%s", key_id, exc_info=True)
+        await self._write_audit_best_effort(
+            actor_user_id=actor_user_id,
+            action="awg_create_compensated_after_db_failure",
+            entity_type=AuditEntityType.VPN_KEY,
+            entity_id=key_id,
+            details={
+                "owner_user_id": owner_user_id,
+                "client_ip": client_ip,
+                "original_error_type": type(original_error).__name__,
+            },
+        )
 
     async def _startup_reconcile_key(self, key: VpnKey) -> bool:
         if key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:

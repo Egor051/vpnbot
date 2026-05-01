@@ -83,6 +83,21 @@ class AuditService:
     async def recent(self, limit: int = 20, offset: int = 0) -> list[dict[str, object]]:
         return await self.audit_logs.list_recent(limit=limit, offset=offset)
 
+    async def recent_for_entity(
+        self,
+        *,
+        entity_type: AuditEntityType,
+        entity_id: str | int,
+        actions: set[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, object]]:
+        return await self.audit_logs.list_recent_for_entity(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            actions=actions,
+            limit=limit,
+        )
+
     async def prune_old_audit_logs(self, retention_days: int) -> int:
         if retention_days <= 0:
             return 0

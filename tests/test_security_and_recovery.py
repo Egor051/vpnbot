@@ -141,6 +141,29 @@ def test_readme_uses_env_example_as_canonical_source() -> None:
     assert "legacy alias" in readme
     assert "AWG_CLIENT_DNS=" not in readme
     assert "XRAY_APPLY_MODE=restart" in readme
+    assert "SQLITE_SYNCHRONOUS=FULL" in readme
+    assert "pip install -r requirements.txt -c constraints.txt" in readme
+    assert "Production Operations Runbook" in readme
+    assert "Backup" in readme
+    assert "Restore" in readme
+    assert "Firewall" in readme
+    assert "Read-only health checks" in readme
+    assert "Rollback after a bad deploy" in readme
+    assert "Never expose the Xray stats API to the internet" in readme
+
+
+def test_constraints_file_pins_runtime_dependency_tree() -> None:
+    constraints = Path("constraints.txt").read_text(encoding="utf-8")
+
+    for package in (
+        "aiogram==3.27.0",
+        "aiohttp==3.13.5",
+        "aiosqlite==0.22.1",
+        "python-dotenv==1.2.2",
+        "pydantic-core==2.41.5",
+        "yarl==1.23.0",
+    ):
+        assert package in constraints
 
 
 def test_audit_sanitizer_masks_nested_secrets() -> None:
@@ -330,13 +353,13 @@ def test_awg_delete_failed_retry_removes_access_before_deleted() -> None:
     assert repo.key is None
 
 
-def test_db_v6_prevents_two_pending_requests_and_tolerates_corrupted_json(tmp_path: Path) -> None:
+def test_db_v7_prevents_two_pending_requests_and_tolerates_corrupted_json(tmp_path: Path) -> None:
     async def run() -> None:
         db = Database(tmp_path / "vpn.db")
         await db.connect()
         try:
             await db.bootstrap()
-            assert CURRENT_SCHEMA_VERSION == 6
+            assert CURRENT_SCHEMA_VERSION == 7
             users = UserRepository(db)
             profile = TelegramUserProfile(telegram_user_id=100, username="user", first_name="User")
             await users.upsert_profile(profile, UserRole.PENDING_USER, "now")

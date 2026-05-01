@@ -25,6 +25,7 @@ from config.settings import Settings
 from db.database import Database
 from models.enums import AuditEntityType, VpnKeyType
 from repositories.access_requests import AccessRequestRepository
+from repositories.announcements import AnnouncementRepository
 from repositories.audit_log import AuditLogRepository
 from repositories.proxy_entries import ProxyRepository
 from repositories.traffic_stats import TrafficStatsRepository
@@ -64,7 +65,7 @@ class Services:
 
 
 async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
-    db = Database(settings.db_path)
+    db = Database(settings.db_path, synchronous=settings.sqlite_synchronous)
     await db.connect()
     await db.bootstrap()
 
@@ -78,6 +79,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
 
     users_repo = UserRepository(db)
     access_repo = AccessRequestRepository(db)
+    announcement_repo = AnnouncementRepository(db)
     vpn_keys_repo = VpnKeyRepository(db)
     proxy_repo = ProxyRepository(db)
     audit_repo = AuditLogRepository(db)
@@ -167,6 +169,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
     announcement_service = AnnouncementService(
         users=user_service,
         users_repo=users_repo,
+        announcements=announcement_repo,
         audit=audit_service,
     )
 

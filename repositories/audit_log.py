@@ -64,6 +64,48 @@ class AuditLogRepository:
             for row in rows
         ]
 
+    async def list_recent_for_entity(
+        self,
+        *,
+        entity_type: AuditEntityType,
+        entity_id: str | int,
+        actions: set[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, object]]:
+        safe_limit = max(1, min(limit, 50))
+        params: list[object] = [entity_type.value, str(entity_id)]
+        action_sql = ""
+        if actions:
+            action_values = sorted(actions)
+            placeholders = ",".join("?" for _ in action_values)
+            action_sql = f"AND action IN ({placeholders})"
+            params.extend(action_values)
+        params.append(safe_limit)
+        cursor = await self.db.conn.execute(
+            f"""
+            SELECT id, actor_user_id, action, entity_type, entity_id, details_json, created_at
+            FROM audit_log
+            WHERE entity_type = ? AND entity_id = ?
+              {action_sql}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "actor_user_id": row["actor_user_id"],
+                "action": row["action"],
+                "entity_type": row["entity_type"],
+                "entity_id": row["entity_id"],
+                "details": self._safe_details(row["details_json"], int(row["id"])),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
     async def prune_older_than(self, cutoff: str) -> int:
         cursor = await self.db.conn.execute(
             "DELETE FROM audit_log WHERE created_at < ?",

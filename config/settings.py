@@ -173,6 +173,7 @@ class Settings:
     default_proxy_note: str
     audit_retention_days: int
     config_backup_keep_last: int
+    sqlite_synchronous: str = "FULL"
 
     def validate_xray_ready(self) -> None:
         required = {
@@ -231,6 +232,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         bot_token=_required("BOT_TOKEN"),
         admin_ids=_admin_ids(_required("ADMIN_IDS")),
         db_path=Path(_optional("DB_PATH", "/opt/vpn-service/data/vpn.db")),
+        sqlite_synchronous=_choice("SQLITE_SYNCHRONOUS", "FULL", {"full", "normal", "extra"}).upper(),
         log_dir=Path(_optional("LOG_DIR", "/opt/vpn-service/logs")),
         bot_lock_path=Path(_optional("BOT_LOCK_PATH", "/run/vpn-bot.lock")),
         bot_drop_pending_updates=_bool("BOT_DROP_PENDING_UPDATES", False),

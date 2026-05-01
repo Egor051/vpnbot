@@ -107,6 +107,16 @@ class BlockUserResult:
 
 
 @dataclass(frozen=True, slots=True)
+class UnblockUserWarning:
+    user: User
+    has_warning: bool
+    active_or_problem_key_count: int
+    previous_revoke_error_count: int
+    last_block_error_at: str | None
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ProxyEntry:
     id: int
     proxy_type: str

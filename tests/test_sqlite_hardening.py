@@ -19,12 +19,12 @@ async def _create_user(db: Database, user_id: int = 100) -> None:
     await UserRepository(db).upsert_profile(TelegramUserProfile(user_id, "user", "User"), UserRole.PENDING_USER, "now")
 
 
-def test_existing_schema_version_6_bootstrap_and_init_db_succeed(
+def test_existing_schema_version_7_bootstrap_and_init_db_succeed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    db_path = tmp_path / "vpn-v6.db"
+    db_path = tmp_path / "vpn-v7.db"
 
     async def seed_and_bootstrap() -> None:
         async with aiosqlite.connect(db_path) as conn:
@@ -33,7 +33,7 @@ def test_existing_schema_version_6_bootstrap_and_init_db_succeed(
             await conn.execute(
                 """
                 INSERT INTO schema_meta (key, value)
-                VALUES ('schema_version', '6')
+                VALUES ('schema_version', '7')
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """
             )
@@ -46,7 +46,7 @@ def test_existing_schema_version_6_bootstrap_and_init_db_succeed(
             cursor = await db.conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             row = await cursor.fetchone()
             assert row is not None
-            assert int(row["value"]) == CURRENT_SCHEMA_VERSION == 6
+            assert int(row["value"]) == CURRENT_SCHEMA_VERSION == 7
         finally:
             await db.close()
 
@@ -94,6 +94,20 @@ def test_read_waits_for_other_task_transaction_and_does_not_see_rollback(tmp_pat
             user = await reader_task
             assert user is not None
             assert user.role == UserRole.PENDING_USER
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_database_applies_sqlite_synchronous_mode(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db", synchronous="EXTRA")
+        await db.connect()
+        try:
+            cursor = await db.conn.execute("PRAGMA synchronous")
+            row = await cursor.fetchone()
+            assert row[0] == 3
         finally:
             await db.close()
 

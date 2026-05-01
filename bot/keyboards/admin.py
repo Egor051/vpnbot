@@ -19,6 +19,15 @@ def access_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def access_request_decision_confirm_keyboard(request_id: int, action: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Подтвердить", callback_data=f"admin:{action}:confirm:{request_id}")],
+            [InlineKeyboardButton(text="Отмена", callback_data=f"admin:req:{request_id}")],
+        ]
+    )
+
+
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -107,6 +116,24 @@ def user_actions_keyboard(user: User) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="Ключи пользователя", callback_data=f"admin:ukeys:{user.telegram_user_id}:0")])
     rows.append([InlineKeyboardButton(text="К пользователям", callback_data="admin:users")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def block_user_confirm_keyboard(user: User) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Подтвердить блокировку", callback_data=f"admin:block:confirm:{user.telegram_user_id}")],
+            [InlineKeyboardButton(text="Отмена", callback_data=f"admin:user:{user.telegram_user_id}")],
+        ]
+    )
+
+
+def unblock_user_confirm_keyboard(user: User) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Подтвердить разблокировку", callback_data=f"admin:unblock:confirm:{user.telegram_user_id}")],
+            [InlineKeyboardButton(text="Отмена", callback_data=f"admin:user:{user.telegram_user_id}")],
+        ]
+    )
 
 
 def admin_key_type_keyboard(user_id: int) -> InlineKeyboardMarkup:
