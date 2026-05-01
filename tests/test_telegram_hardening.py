@@ -4,12 +4,20 @@ import asyncio
 from types import SimpleNamespace
 
 from bot.fsm.states import AdminCreateKeyStates, CreateKeyStates
-from bot.handlers.admin import admin_access_decision_confirm, admin_approve, admin_block_user, admin_block_user_confirm, admin_issue_type_selected
+from bot.handlers.admin import (
+    admin_access_decision_confirm,
+    admin_approve,
+    admin_block_user,
+    admin_block_user_confirm,
+    admin_issue_type_selected,
+    admin_unblock_user,
+    admin_unblock_user_confirm,
+)
 from bot.handlers.keys import confirm_key_action, create_key_choose, create_key_menu
 from bot.handlers.start import start_command
 from bot.keyboards.common import main_menu
 from bot.keyboards.keys import keys_list_keyboard
-from models.dto import AccessRequest, User, VpnKey
+from models.dto import AccessRequest, UnblockUserWarning, User, VpnKey
 from models.enums import AccessRequestStatus, UserRole, VpnKeyStatus, VpnKeyType
 from services.errors import AccessDenied, NotFound
 
@@ -290,6 +298,149 @@ def test_admin_block_confirm_already_blocked_does_not_block_again(monkeypatch) -
 
         assert users.block_calls == 0
         assert edits == ["Пользователь уже заблокирован."]
+
+    asyncio.run(run())
+
+
+def test_admin_unblock_first_callback_shows_warning_confirmation(monkeypatch) -> None:
+    edits: list[tuple[str, object]] = []
+
+    async def fake_edit(message: object, text: str, **kwargs: object) -> None:
+        edits.append((text, kwargs.get("reply_markup")))
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.admin.safe_edit_message_text", fake_edit)
+
+    blocked_user = User(200, "target", "Target", UserRole.BLOCKED_USER, "now", "now", "blocked")
+
+    class Users:
+        def __init__(self) -> None:
+            self.unblock_calls = 0
+
+        async def inspect_unblock_risk(self, actor_user_id: int, user_id: int) -> UnblockUserWarning:
+            return UnblockUserWarning(
+                user=blocked_user,
+                has_warning=True,
+                active_or_problem_key_count=1,
+                previous_revoke_error_count=1,
+                last_block_error_at="now",
+                reasons=("предыдущая блокировка завершилась с ошибками отзыва: 1",),
+            )
+
+        async def unblock_user(self, *args: object, **kwargs: object) -> None:
+            self.unblock_calls += 1
+
+    async def run() -> None:
+        users = Users()
+        callback = _Callback("admin:unblock:200")
+        await admin_unblock_user(callback, SimpleNamespace(users=users))  # type: ignore[arg-type]
+
+        assert users.unblock_calls == 0
+        assert "Подтвердите разблокировку пользователя" in edits[-1][0]
+        assert "Требуется ручная проверка VPN" in edits[-1][0]
+        markup = edits[-1][1]
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+        assert callbacks == ["admin:unblock:confirm:200", "admin:user:200"]
+
+    asyncio.run(run())
+
+
+def test_admin_unblock_confirm_after_warning_includes_manual_check(monkeypatch) -> None:
+    edits: list[str] = []
+
+    async def fake_edit(message: object, text: str, **kwargs: object) -> None:
+        edits.append(text)
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.admin.safe_edit_message_text", fake_edit)
+
+    blocked_user = User(200, "target", "Target", UserRole.BLOCKED_USER, "now", "now", "blocked")
+    approved_user = User(200, "target", "Target", UserRole.APPROVED_USER, "now", "now", None)
+
+    class Users:
+        def __init__(self) -> None:
+            self.unblock_calls = 0
+
+        async def inspect_unblock_risk(self, actor_user_id: int, user_id: int) -> UnblockUserWarning:
+            return UnblockUserWarning(
+                user=blocked_user,
+                has_warning=True,
+                active_or_problem_key_count=1,
+                previous_revoke_error_count=2,
+                last_block_error_at="now",
+                reasons=("ключей в статусах, где VPN-доступ мог сохраниться: 1",),
+            )
+
+        async def unblock_user(self, actor_user_id: int, user_id: int) -> User:
+            self.unblock_calls += 1
+            return approved_user
+
+    async def run() -> None:
+        users = Users()
+        callback = _Callback("admin:unblock:confirm:200")
+        await admin_unblock_user_confirm(callback, SimpleNamespace(users=users))  # type: ignore[arg-type]
+
+        assert users.unblock_calls == 1
+        assert "Пользователь разблокирован" in edits[-1]
+        assert "Проверьте Xray/AWG runtime" in edits[-1]
+
+    asyncio.run(run())
+
+
+def test_admin_unblock_confirm_without_warning_uses_normal_success_text(monkeypatch) -> None:
+    edits: list[str] = []
+
+    async def fake_edit(message: object, text: str, **kwargs: object) -> None:
+        edits.append(text)
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.admin.safe_edit_message_text", fake_edit)
+
+    blocked_user = User(200, "target", "Target", UserRole.BLOCKED_USER, "now", "now", "blocked")
+    approved_user = User(200, "target", "Target", UserRole.APPROVED_USER, "now", "now", None)
+
+    class Users:
+        async def inspect_unblock_risk(self, actor_user_id: int, user_id: int) -> UnblockUserWarning:
+            return UnblockUserWarning(
+                user=blocked_user,
+                has_warning=False,
+                active_or_problem_key_count=0,
+                previous_revoke_error_count=0,
+                last_block_error_at=None,
+                reasons=(),
+            )
+
+        async def unblock_user(self, actor_user_id: int, user_id: int) -> User:
+            return approved_user
+
+    async def run() -> None:
+        callback = _Callback("admin:unblock:confirm:200")
+        await admin_unblock_user_confirm(callback, SimpleNamespace(users=Users()))  # type: ignore[arg-type]
+
+        assert "Пользователь разблокирован" in edits[-1]
+        assert "Проверьте Xray/AWG runtime" not in edits[-1]
+
+    asyncio.run(run())
+
+
+def test_admin_unblock_non_superadmin_is_rejected(monkeypatch) -> None:
+    errors: list[str] = []
+
+    async def fake_error(callback: object, exc: Exception) -> None:
+        errors.append(str(exc))
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.admin.answer_callback_error", fake_error)
+
+    class Users:
+        async def inspect_unblock_risk(self, actor_user_id: int, user_id: int) -> UnblockUserWarning:
+            raise AccessDenied("Недостаточно прав")
+
+    async def run() -> None:
+        callback = _Callback("admin:unblock:200", user_id=2)
+        await admin_unblock_user(callback, SimpleNamespace(users=Users()))  # type: ignore[arg-type]
+
+        assert errors == ["Недостаточно прав"]
 
     asyncio.run(run())
 

@@ -9,11 +9,12 @@ from types import SimpleNamespace
 import pytest
 from aiogram.enums import ChatType
 
+from adapters.backup import BackupAdapter
 from adapters.clock import ClockProvider
 from adapters.errors import AwgIpAllocationError, XrayInboundNotFoundError
 from adapters.id_generator import IdGenerator
 from adapters.ip_allocator import IpAllocator
-from adapters.xray_config import XrayConfigAdapter
+from adapters.xray_config import XrayClientApplyResult, XrayConfigAdapter
 from bot.app import _startup_reconcile_keys
 from bot.handlers.admin import admin_announcement_send
 from bot.messages import awg_config_filename
@@ -21,9 +22,11 @@ from config.settings import Settings, SettingsError, load_settings
 from db.database import Database
 from models.dto import ShellResult, TelegramUserProfile, User, VpnKey
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
+from repositories.audit_log import AuditLogRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.awg import AwgService
+from services.audit import AuditService
 from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation
 from services.user_locks import UserLockManager
@@ -77,6 +80,41 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
     )
     values.update(overrides)
     return Settings(**values)
+
+
+def _write_xray_config(config_path: Path, short_ids: list[str] | None = None) -> None:
+    config_path.write_text(
+        json.dumps(
+            {
+                "inbounds": [
+                    {
+                        "protocol": "vless",
+                        "settings": {"clients": []},
+                        "streamSettings": {
+                            "security": "reality",
+                            "realitySettings": {"shortIds": list(short_ids or [])},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class _XraySystemctl:
+    async def xray_test_config(self, path: Path) -> ShellResult:
+        json.loads(path.read_text(encoding="utf-8"))
+        return ShellResult(("xray", "run", "-test", "-config", str(path)), 0, "", "")
+
+    async def reload(self, service_name: str) -> ShellResult:
+        return ShellResult(("systemctl", "reload", service_name), 0, "", "")
+
+    async def restart(self, service_name: str) -> ShellResult:
+        return ShellResult(("systemctl", "restart", service_name), 0, "", "")
+
+    async def is_active(self, service_name: str) -> ShellResult:
+        return ShellResult(("systemctl", "is-active", service_name), 0, "active", "")
 
 
 def _vpn_key(
@@ -377,8 +415,9 @@ def test_xray_create_mark_active_failure_removes_applied_client(tmp_path: Path) 
             self.added = False
             self.removed: list[dict[str, object]] = []
 
-        async def add_client(self, **kwargs: object) -> None:
+        async def add_client(self, **kwargs: object) -> XrayClientApplyResult:
             self.added = True
+            return XrayClientApplyResult(short_id_inserted=True)
 
         async def remove_client(self, **kwargs: object) -> None:
             self.removed.append(kwargs)
@@ -428,17 +467,22 @@ def test_xray_create_compensation_failure_degrades_backend(tmp_path: Path) -> No
             return None
 
     class Adapter:
-        async def add_client(self, **kwargs: object) -> None:
-            return None
+        def __init__(self) -> None:
+            self.remove_kwargs: dict[str, object] | None = None
+
+        async def add_client(self, **kwargs: object) -> XrayClientApplyResult:
+            return XrayClientApplyResult(short_id_inserted=True)
 
         async def remove_client(self, **kwargs: object) -> None:
+            self.remove_kwargs = kwargs
             raise RuntimeError("remove failed")
 
     health = BackendHealth()
+    adapter = Adapter()
     service = XrayService(
         vpn_keys=Repo(),  # type: ignore[arg-type]
         users=_Users(),  # type: ignore[arg-type]
-        adapter=Adapter(),  # type: ignore[arg-type]
+        adapter=adapter,  # type: ignore[arg-type]
         settings=_settings(tmp_path, xray_manage_short_ids=True),
         clock=ClockProvider(),
         ids=_Ids(["xray_A7kQz"]),  # type: ignore[arg-type]
@@ -451,6 +495,155 @@ def test_xray_create_compensation_failure_degrades_backend(tmp_path: Path) -> No
 
     with pytest.raises(InvalidOperation, match="Xray-операции временно заблокированы"):
         health.require_mutation_allowed(VpnKeyType.XRAY)
+    assert adapter.remove_kwargs is not None
+    assert adapter.remove_kwargs["remove_short_id"] is True
+
+
+def test_xray_create_compensation_keeps_pre_existing_short_id(tmp_path: Path) -> None:
+    async def run() -> None:
+        config_path = tmp_path / "xray.json"
+        _write_xray_config(config_path, short_ids=["abcd"])
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await UserRepository(db).upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            base_repo = VpnKeyRepository(db)
+
+            class Repo:
+                def __getattr__(self, name: str) -> object:
+                    return getattr(base_repo, name)
+
+                async def mark_active(self, *args: object, **kwargs: object) -> None:
+                    raise RuntimeError("db mark failed")
+
+            adapter = XrayConfigAdapter(
+                config_path=config_path,
+                service_name="xray",
+                apply_mode="reload",
+                inbound_tag="",
+                allow_restart_on_rollback=False,
+                backup=BackupAdapter(ClockProvider(), keep_last=0),
+                systemctl=_XraySystemctl(),  # type: ignore[arg-type]
+            )
+            service = XrayService(
+                vpn_keys=Repo(),  # type: ignore[arg-type]
+                users=_Users(),  # type: ignore[arg-type]
+                adapter=adapter,
+                settings=_settings(tmp_path, xray_manage_short_ids=True, xray_apply_mode="reload"),
+                clock=ClockProvider(),
+                ids=_Ids(["xray_A7kQz"]),  # type: ignore[arg-type]
+                audit=_Audit(),  # type: ignore[arg-type]
+            )
+
+            with pytest.raises(RuntimeError, match="db mark failed"):
+                await service.create_xray_key(100, TelegramUserProfile(100, "user", "User"), None)
+
+            inbound = json.loads(config_path.read_text(encoding="utf-8"))["inbounds"][0]
+            assert inbound["settings"]["clients"] == []
+            assert inbound["streamSettings"]["realitySettings"]["shortIds"] == ["abcd"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_xray_create_compensation_removes_newly_inserted_short_id(tmp_path: Path) -> None:
+    async def run() -> None:
+        config_path = tmp_path / "xray.json"
+        _write_xray_config(config_path, short_ids=[])
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await UserRepository(db).upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            base_repo = VpnKeyRepository(db)
+
+            class Repo:
+                def __getattr__(self, name: str) -> object:
+                    return getattr(base_repo, name)
+
+                async def mark_active(self, *args: object, **kwargs: object) -> None:
+                    raise RuntimeError("db mark failed")
+
+            adapter = XrayConfigAdapter(
+                config_path=config_path,
+                service_name="xray",
+                apply_mode="reload",
+                inbound_tag="",
+                allow_restart_on_rollback=False,
+                backup=BackupAdapter(ClockProvider(), keep_last=0),
+                systemctl=_XraySystemctl(),  # type: ignore[arg-type]
+            )
+            service = XrayService(
+                vpn_keys=Repo(),  # type: ignore[arg-type]
+                users=_Users(),  # type: ignore[arg-type]
+                adapter=adapter,
+                settings=_settings(tmp_path, xray_manage_short_ids=True, xray_apply_mode="reload"),
+                clock=ClockProvider(),
+                ids=_Ids(["xray_A7kQz"]),  # type: ignore[arg-type]
+                audit=_Audit(),  # type: ignore[arg-type]
+            )
+
+            with pytest.raises(RuntimeError, match="db mark failed"):
+                await service.create_xray_key(100, TelegramUserProfile(100, "user", "User"), None)
+
+            inbound = json.loads(config_path.read_text(encoding="utf-8"))["inbounds"][0]
+            assert inbound["settings"]["clients"] == []
+            assert inbound["streamSettings"]["realitySettings"]["shortIds"] == []
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_xray_create_compensation_keeps_static_short_id_when_management_disabled(tmp_path: Path) -> None:
+    async def run() -> None:
+        config_path = tmp_path / "xray.json"
+        _write_xray_config(config_path, short_ids=["abcd"])
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await UserRepository(db).upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+            base_repo = VpnKeyRepository(db)
+
+            class Repo:
+                def __getattr__(self, name: str) -> object:
+                    return getattr(base_repo, name)
+
+                async def mark_active(self, *args: object, **kwargs: object) -> None:
+                    raise RuntimeError("db mark failed")
+
+            adapter = XrayConfigAdapter(
+                config_path=config_path,
+                service_name="xray",
+                apply_mode="reload",
+                inbound_tag="",
+                allow_restart_on_rollback=False,
+                backup=BackupAdapter(ClockProvider(), keep_last=0),
+                systemctl=_XraySystemctl(),  # type: ignore[arg-type]
+            )
+            service = XrayService(
+                vpn_keys=Repo(),  # type: ignore[arg-type]
+                users=_Users(),  # type: ignore[arg-type]
+                adapter=adapter,
+                settings=_settings(tmp_path, xray_manage_short_ids=False, xray_apply_mode="reload"),
+                clock=ClockProvider(),
+                ids=_Ids(["xray_A7kQz"]),  # type: ignore[arg-type]
+                audit=_Audit(),  # type: ignore[arg-type]
+            )
+
+            with pytest.raises(RuntimeError, match="db mark failed"):
+                await service.create_xray_key(100, TelegramUserProfile(100, "user", "User"), None)
+
+            inbound = json.loads(config_path.read_text(encoding="utf-8"))["inbounds"][0]
+            assert inbound["settings"]["clients"] == []
+            assert inbound["streamSettings"]["realitySettings"]["shortIds"] == ["abcd"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
 
 
 def test_awg_create_mark_active_failure_removes_applied_peer(tmp_path: Path) -> None:
@@ -846,6 +1039,79 @@ def test_block_user_with_revoke_error_still_blocks_bot_access(tmp_path: Path) ->
             assert details["error_count"] == 1
             assert details["bot_access_blocked"] is True
             assert details["vpn_revoke_complete"] is False
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_inspect_unblock_risk_reports_previous_revoke_errors(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            settings = _settings(tmp_path)
+            users_repo = UserRepository(db)
+            await users_repo.upsert_profile(TelegramUserProfile(1, "admin", "Admin"), UserRole.SUPERADMIN, "now")
+            await users_repo.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.BLOCKED_USER, "now")
+            await users_repo.set_role(100, UserRole.BLOCKED_USER, "blocked", blocked_at="blocked")
+            audit = AuditService(AuditLogRepository(db), ClockProvider())
+            await audit.write(
+                actor_user_id=1,
+                action="user_blocked_with_revoke_errors",
+                entity_type=AuditEntityType.USER,
+                entity_id=100,
+                details={"error_count": 2, "errors": [{"key_id": 10, "error": "backend unreachable"}]},
+            )
+            service = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=audit)
+
+            warning = await service.inspect_unblock_risk(1, 100)
+
+            assert warning.has_warning is True
+            assert warning.previous_revoke_error_count == 2
+            assert warning.last_block_error_at is not None
+            assert warning.active_or_problem_key_count == 0
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_inspect_unblock_risk_reports_active_or_problem_keys(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            settings = _settings(tmp_path)
+            users_repo = UserRepository(db)
+            await users_repo.upsert_profile(TelegramUserProfile(1, "admin", "Admin"), UserRole.SUPERADMIN, "now")
+            await users_repo.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.BLOCKED_USER, "now")
+            await users_repo.set_role(100, UserRole.BLOCKED_USER, "blocked", blocked_at="blocked")
+            keys_repo = VpnKeyRepository(db)
+            key = await keys_repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.XRAY,
+                note=None,
+                payload={"short_id_managed": False},
+                public_payload={},
+                created_by=100,
+                now="now",
+                uuid="00000000-0000-4000-8000-000000000888",
+                email_label="xray_active",
+            )
+            await keys_repo.mark_active(key.id, "active")
+            audit = AuditService(AuditLogRepository(db), ClockProvider())
+            service = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=audit)
+            service.attach_key_management(keys_repo, {})
+
+            warning = await service.inspect_unblock_risk(1, 100)
+
+            assert warning.has_warning is True
+            assert warning.active_or_problem_key_count == 1
+            assert warning.previous_revoke_error_count == 0
         finally:
             await db.close()
 

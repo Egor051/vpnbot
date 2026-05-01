@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from adapters.clock import ClockProvider
 from config.settings import Settings
 from models.access import is_blocked_user
-from models.dto import BlockUserResult, KeyOperationError, TelegramUserProfile, User, VpnKey
+from models.dto import BlockUserResult, KeyOperationError, TelegramUserProfile, UnblockUserWarning, User, VpnKey
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
@@ -17,6 +17,17 @@ from services.user_locks import UserLockManager
 KeyRevoker = Callable[[int, int], Awaitable[VpnKey]]
 StateClearer = Callable[[int], Awaitable[None]]
 logger = logging.getLogger(__name__)
+
+UNBLOCK_ACCESS_MAY_EXIST_STATUSES = {
+    VpnKeyStatus.ACTIVE,
+    VpnKeyStatus.PENDING_APPLY,
+    VpnKeyStatus.APPLY_FAILED,
+    VpnKeyStatus.PENDING_REVOKE,
+    VpnKeyStatus.PENDING_DELETE,
+    VpnKeyStatus.DELETE_FAILED,
+}
+BLOCK_REVOKE_ERROR_ACTIONS = {"user_blocked_with_revoke_errors", "user_block_failed"}
+BLOCK_REVOKE_LOOKUP_ACTIONS = BLOCK_REVOKE_ERROR_ACTIONS | {"user_blocked"}
 
 
 class UserService:
@@ -218,6 +229,36 @@ class UserService:
         await self.clear_user_state(target_user_id)
         return await self.get_user(target_user_id)
 
+    async def inspect_unblock_risk(self, actor_user_id: int, target_user_id: int) -> UnblockUserWarning:
+        await self.require_superadmin(actor_user_id)
+        if target_user_id in self.settings.admin_ids:
+            raise InvalidOperation("Нельзя изменить роль superadmin из ADMIN_IDS")
+        target = await self.get_user(target_user_id)
+        if target.role == UserRole.SUPERADMIN:
+            raise InvalidOperation("Нельзя изменить роль superadmin")
+
+        active_or_problem_key_count = 0
+        if self._vpn_keys is not None:
+            active_or_problem_key_count = await self._vpn_keys.count_by_owner_statuses(
+                target_user_id,
+                UNBLOCK_ACCESS_MAY_EXIST_STATUSES,
+            )
+        previous_revoke_error_count, last_block_error_at = await self._last_block_revoke_error(target_user_id)
+
+        reasons: list[str] = []
+        if previous_revoke_error_count:
+            reasons.append(f"предыдущая блокировка завершилась с ошибками отзыва: {previous_revoke_error_count}")
+        if active_or_problem_key_count:
+            reasons.append(f"ключей в статусах, где VPN-доступ мог сохраниться: {active_or_problem_key_count}")
+        return UnblockUserWarning(
+            user=target,
+            has_warning=bool(reasons),
+            active_or_problem_key_count=active_or_problem_key_count,
+            previous_revoke_error_count=previous_revoke_error_count,
+            last_block_error_at=last_block_error_at,
+            reasons=tuple(reasons),
+        )
+
     async def list_users(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[User]:
         await self.require_superadmin(actor_user_id)
         return await self.users.list_users(limit=limit, offset=offset)
@@ -227,6 +268,32 @@ class UserService:
         if self._vpn_keys is None:
             return {}
         return await self._vpn_keys.count_by_owners(user_ids)
+
+    async def _last_block_revoke_error(self, target_user_id: int) -> tuple[int, str | None]:
+        reader = getattr(self.audit, "recent_for_entity", None)
+        if reader is None:
+            return 0, None
+        items = await reader(
+            entity_type=AuditEntityType.USER,
+            entity_id=target_user_id,
+            actions=BLOCK_REVOKE_LOOKUP_ACTIONS,
+            limit=5,
+        )
+        for item in items:
+            action = str(item.get("action") or "")
+            details = item.get("details")
+            details_dict = details if isinstance(details, dict) else {}
+            error_count = self._positive_int(details_dict.get("error_count"))
+            if action in BLOCK_REVOKE_ERROR_ACTIONS or error_count > 0:
+                return max(error_count, 1), str(item.get("created_at") or "") or None
+        return 0, None
+
+    def _positive_int(self, value: object) -> int:
+        try:
+            result = int(value) if value is not None else 0
+        except (TypeError, ValueError):
+            return 0
+        return max(result, 0)
 
     async def _write_audit_best_effort(
         self,

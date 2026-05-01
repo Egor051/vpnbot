@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,11 @@ from adapters.systemctl import SystemCtlAdapter
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class XrayClientApplyResult:
+    short_id_inserted: bool = False
 
 
 class XrayConfigAdapter:
@@ -55,7 +61,7 @@ class XrayConfigAdapter:
         short_id: str,
         flow: str,
         manage_short_id: bool,
-    ) -> None:
+    ) -> XrayClientApplyResult:
         with ConfigFileLock(self.config_path):
             await self._ensure_current_config_valid()
             snapshot = self._snapshot_config()
@@ -73,14 +79,16 @@ class XrayConfigAdapter:
                 if flow:
                     client["flow"] = flow
                 clients.append(client)
+                short_id_inserted = False
                 if manage_short_id:
-                    self._add_short_id(inbound, short_id)
+                    short_id_inserted = self._add_short_id(inbound, short_id)
 
                 temp_path = self._write_temp_config(config, self.config_path)
                 await self._test_config(temp_path)
                 self._assert_config_unchanged(snapshot)
                 self._replace_main_config(temp_path, self.config_path)
                 await self._apply_or_restore(backup_path)
+                return XrayClientApplyResult(short_id_inserted=short_id_inserted)
             except Exception:
                 self._cleanup_temp(temp_path)
                 raise
@@ -219,13 +227,15 @@ class XrayConfigAdapter:
             return client.get("id") == uuid_value
         return bool(email_label and client.get("email") == email_label)
 
-    def _add_short_id(self, inbound: dict[str, Any], short_id: str) -> None:
+    def _add_short_id(self, inbound: dict[str, Any], short_id: str) -> bool:
         reality = self._reality_settings(inbound)
         short_ids = reality.setdefault("shortIds", [])
         if not isinstance(short_ids, list):
             raise XrayConfigError("Xray realitySettings.shortIds должен быть списком")
         if short_id not in short_ids:
             short_ids.append(short_id)
+            return True
+        return False
 
     def _remove_short_id(self, inbound: dict[str, Any], short_id: str) -> bool:
         reality = self._reality_settings(inbound)

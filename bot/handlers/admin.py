@@ -19,6 +19,8 @@ from bot.formatters import (
     block_user_confirm_text,
     create_confirm_text,
     keys_page_text,
+    unblock_user_confirm_text,
+    unblock_user_success_text,
     user_card_text,
     users_page_text,
 )
@@ -34,6 +36,7 @@ from bot.keyboards.admin import (
     access_request_decision_confirm_keyboard,
     block_user_confirm_keyboard,
     pending_requests_keyboard,
+    unblock_user_confirm_keyboard,
     user_actions_keyboard,
     users_keyboard,
 )
@@ -447,21 +450,56 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Any) -> No
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(F.data.startswith("admin:unblock:"))
+@router.callback_query(F.data.regexp(r"^admin:unblock:\d+$"))
 async def admin_unblock_user(callback: CallbackQuery, services: Any) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
-    await safe_callback_answer(callback, "Обрабатываю...")
+    await safe_callback_answer(callback)
     try:
         user_id = int(callback.data.rsplit(":", 1)[-1])
-        await services.users.unblock_user(callback.from_user.id, user_id)
+        warning = await services.users.inspect_unblock_risk(callback.from_user.id, user_id)
         if callback.message:
-            user = await services.users.get_user(user_id)
+            if not is_blocked_user(warning.user):
+                await safe_edit_message_text(
+                    callback.message,
+                    "Пользователь уже не заблокирован.",
+                    reply_markup=user_actions_keyboard(warning.user),
+                )
+                return
             await safe_edit_message_text(
                 callback.message,
-                "Пользователь разблокирован. FSM-состояние очищено, сценарии начнутся заново.",
+                unblock_user_confirm_text(warning),
+                reply_markup=unblock_user_confirm_keyboard(warning.user),
+            )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:unblock:confirm:\d+$"))
+async def admin_unblock_user_confirm(callback: CallbackQuery, services: Any) -> None:
+    if callback.from_user is None or callback.data is None:
+        return
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback, "Разблокирую...")
+    try:
+        user_id = int(callback.data.rsplit(":", 1)[-1])
+        warning = await services.users.inspect_unblock_risk(callback.from_user.id, user_id)
+        if not is_blocked_user(warning.user):
+            if callback.message:
+                await safe_edit_message_text(
+                    callback.message,
+                    "Пользователь уже не заблокирован.",
+                    reply_markup=user_actions_keyboard(warning.user),
+                )
+            return
+        user = await services.users.unblock_user(callback.from_user.id, user_id)
+        if callback.message:
+            await safe_edit_message_text(
+                callback.message,
+                unblock_user_success_text(warning),
                 reply_markup=user_actions_keyboard(user),
             )
     except Exception as exc:

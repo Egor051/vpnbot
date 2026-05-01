@@ -106,9 +106,10 @@ class XrayService:
                     uuid=uuid_value,
                     email_label=email_label,
                 )
+                xray_apply_result = None
                 try:
                     await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
-                    await self.adapter.add_client(
+                    xray_apply_result = await self.adapter.add_client(
                         uuid_value=uuid_value,
                         email_label=email_label,
                         short_id=short_id,
@@ -137,6 +138,7 @@ class XrayService:
                         email_label=email_label,
                         short_id=short_id,
                         short_id_managed=short_id_managed,
+                        short_id_inserted=self._short_id_inserted_from_apply_result(xray_apply_result),
                         original_error=exc,
                     )
                     raise
@@ -365,6 +367,7 @@ class XrayService:
         email_label: str,
         short_id: str,
         short_id_managed: bool,
+        short_id_inserted: bool,
         original_error: Exception,
     ) -> None:
         logger.critical(
@@ -377,7 +380,7 @@ class XrayService:
                 uuid_value=uuid_value,
                 email_label=email_label,
                 short_id=short_id,
-                remove_short_id=short_id_managed,
+                remove_short_id=short_id_managed and short_id_inserted,
             )
         except Exception as compensation_error:
             self.backend_health.mark_degraded(VpnKeyType.XRAY, "post-apply mark_active failed and compensation failed")
@@ -411,6 +414,11 @@ class XrayService:
             entity_id=key_id,
             details={"owner_user_id": owner_user_id, "original_error_type": type(original_error).__name__},
         )
+
+    def _short_id_inserted_from_apply_result(self, result: object) -> bool:
+        if isinstance(result, dict):
+            return bool(result.get("short_id_inserted"))
+        return bool(getattr(result, "short_id_inserted", False))
 
     async def _startup_reconcile_key(self, key: VpnKey) -> bool:
         if key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:

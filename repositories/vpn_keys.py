@@ -218,6 +218,21 @@ class VpnKeyRepository:
         rows = await cursor.fetchall()
         return {int(row["owner_user_id"]): int(row["cnt"]) for row in rows}
 
+    async def count_by_owner_statuses(self, owner_user_id: int, statuses: set[VpnKeyStatus]) -> int:
+        if not statuses:
+            return 0
+        placeholders = ",".join("?" for _ in statuses)
+        cursor = await self.db.conn.execute(
+            f"""
+            SELECT COUNT(*) AS cnt
+            FROM vpn_keys
+            WHERE owner_user_id = ? AND status IN ({placeholders})
+            """,
+            (owner_user_id, *(status.value for status in statuses)),
+        )
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row is not None else 0
+
     async def list_recent_by_owner(self, owner_user_id: int, limit: int = 10) -> list[VpnKey]:
         return await self.list_by_owner(owner_user_id, limit=limit, offset=0)
 

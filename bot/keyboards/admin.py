@@ -127,6 +127,15 @@ def block_user_confirm_keyboard(user: User) -> InlineKeyboardMarkup:
     )
 
 
+def unblock_user_confirm_keyboard(user: User) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Подтвердить разблокировку", callback_data=f"admin:unblock:confirm:{user.telegram_user_id}")],
+            [InlineKeyboardButton(text="Отмена", callback_data=f"admin:user:{user.telegram_user_id}")],
+        ]
+    )
+
+
 def admin_key_type_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

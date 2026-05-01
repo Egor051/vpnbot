@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiogram.types import User as TgUser
 
-from models.dto import AccessRequest, KeyTrafficStatsView, ProxyEntry, TrafficStats, User, VpnKey
+from models.dto import AccessRequest, KeyTrafficStatsView, ProxyEntry, TrafficStats, UnblockUserWarning, User, VpnKey
 from models.enums import UserRole, VpnKeyStatus, VpnKeyType
 from utils.formatting import (
     code,
@@ -331,6 +331,46 @@ def block_user_confirm_text(user: User, key_count: int) -> str:
         f"Ключей к проверке/отзыву: {key_count}\n\n"
         "Действие заблокирует доступ к боту и попытается отозвать VPN-ключи. "
         "Если часть VPN-ключей не получится отключить автоматически, потребуется ручная проверка на сервере."
+    )
+
+
+def unblock_user_confirm_text(warning: UnblockUserWarning) -> str:
+    user = warning.user
+    username = f"@{user.username}" if user.username else "не указан"
+    lines = [
+        "<b>Подтвердите разблокировку пользователя</b>",
+        f"Telegram ID: {code(user.telegram_user_id)}",
+        f"Username: {h(username)}",
+        f"Имя: {h(user.first_name or 'не указано')}",
+        f"Текущая роль: {h(role_text(user.role))}",
+    ]
+    if warning.has_warning:
+        lines.extend(
+            [
+                "",
+                "<b>Требуется ручная проверка VPN</b>",
+                "Ранее могли остаться активные или проблемные VPN-ключи.",
+            ]
+        )
+        for reason in warning.reasons:
+            lines.append(f"• {h(reason)}")
+        if warning.last_block_error_at:
+            lines.append(f"Последняя ошибка блокировки: {h(format_msk_datetime(warning.last_block_error_at))}")
+        lines.append("Разблокировка восстановит доступ к боту, но не исправит Xray/AWG runtime автоматически.")
+    else:
+        lines.extend(["", "После подтверждения пользователь снова получит доступ к боту."])
+    return "\n".join(lines)
+
+
+def unblock_user_success_text(warning: UnblockUserWarning) -> str:
+    text = "Пользователь разблокирован. FSM-состояние очищено, сценарии начнутся заново."
+    if not warning.has_warning:
+        return text
+    return (
+        text
+        + "\n\n"
+        + "Внимание: перед разблокировкой были признаки неполного отзыва VPN-доступа. "
+        + "Проверьте Xray/AWG runtime и config вручную."
     )
 
 
