@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any
 
 from aiogram import Bot, F, Router
@@ -15,6 +16,7 @@ from bot.formatters import (
     access_request_decision_confirm_text,
     access_requests_page_text,
     admin_stats_page_text,
+    proxy_admin_status_text,
     audit_page_text,
     block_user_confirm_text,
     create_confirm_text,
@@ -609,6 +611,35 @@ async def admin_stats(callback: CallbackQuery, services: Any) -> None:
             callback.message,
             admin_stats_page_text(views, page, viewer_user_id=callback.from_user.id),
             reply_markup=_simple_nav(rows, "admin:panel"),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:proxy")
+async def admin_proxy_status(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback, "Обновляю статус...")
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        stats = await services.proxy.lifecycle_stats(callback.from_user.id)
+        status = services.proxy.service_status()
+        runtime_reader = getattr(getattr(services, "mtproto", None), "runtime_status", None)
+        if runtime_reader is not None:
+            runtime = await runtime_reader()
+            if runtime is not None:
+                status = replace(
+                    status,
+                    mtproto_systemd_active=runtime.systemd_active,
+                    mtproto_port_listening=runtime.port_listening,
+                )
+        await safe_edit_message_text(
+            callback.message,
+            proxy_admin_status_text(status, stats),
+            reply_markup=_simple_nav([], "admin:panel"),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)

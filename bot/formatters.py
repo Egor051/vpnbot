@@ -2,8 +2,19 @@ from __future__ import annotations
 
 from aiogram.types import User as TgUser
 
-from models.dto import AccessRequest, KeyTrafficStatsView, ProxyEntry, TrafficStats, UnblockUserWarning, User, VpnKey
-from models.enums import UserRole, VpnKeyStatus, VpnKeyType
+from models.dto import (
+    AccessRequest,
+    KeyTrafficStatsView,
+    ProxyAccess,
+    ProxyEntry,
+    ProxyLifecycleStats,
+    ProxyServiceStatus,
+    TrafficStats,
+    UnblockUserWarning,
+    User,
+    VpnKey,
+)
+from models.enums import ProxyAccessType, UserRole, VpnKeyStatus, VpnKeyType
 from utils.formatting import (
     code,
     format_bytes,
@@ -233,6 +244,114 @@ def xray_config_text(config_text: str) -> str:
 
 def awg_config_text(config_text: str) -> str:
     return f"{config_text}\n\nСкопируйте конфиг в клиент AmneziaWG."
+
+
+def proxy_section_separator() -> str:
+    return "\n\n<b>━━━━━━━━━━━━━━━━</b>\n\n"
+
+
+def socks5_proxy_text(payload: dict[str, object]) -> str:
+    return "\n".join(
+        [
+            "<b>SOCKS5</b>",
+            f"Host: {code(payload.get('host') or '')}",
+            f"Port: {code(payload.get('port') or '')}",
+            f"Login: {code(payload.get('login') or '')}",
+            f"Password: {code(payload.get('password') or '')}",
+            f"URL: {code(payload.get('url') or '')}",
+        ]
+    )
+
+
+def mtproto_proxy_text(payload: dict[str, object]) -> str:
+    mode = str(payload.get("mode") or "static")
+    mode_note = (
+        "Это индивидуальный MTProto-доступ. При блокировке пользователя этот MTProto secret будет отозван."
+        if mode == "managed"
+        else "Это общий MTProto-доступ. Индивидуальный серверный отзыв в static mode невозможен."
+    )
+    return "\n".join(
+        [
+            "<b>Telegram MTProto Proxy</b>",
+            "",
+            "Вариант 1 — обычный, попробуйте сначала:",
+            code(payload.get("link") or ""),
+            "",
+            "Вариант 2 — с random padding dd, если первый не работает:",
+            code(payload.get("link_dd") or ""),
+            "",
+            f"Server: {code(payload.get('host') or '')}",
+            f"Port: {code(payload.get('port') or '')}",
+            "",
+            "Сначала попробуйте первый вариант. Если он не работает или плохо грузит медиа — попробуйте второй вариант с dd.",
+            mode_note,
+        ]
+    )
+
+
+def proxy_access_text(accesses: list[ProxyAccess]) -> str:
+    socks5 = next((access for access in accesses if access.access_type == ProxyAccessType.SOCKS5), None)
+    mtproto = next((access for access in accesses if access.access_type == ProxyAccessType.MTPROTO), None)
+    parts: list[str] = []
+    if socks5 is not None:
+        parts.append(socks5_proxy_text(socks5.payload))
+    if mtproto is not None:
+        parts.append(mtproto_proxy_text(mtproto.payload))
+    if not parts:
+        return "<b>Прокси</b>\n\nУ вас пока нет прокси-доступов."
+    return proxy_section_separator().join(parts)
+
+
+def proxy_admin_status_text(status: ProxyServiceStatus, stats: ProxyLifecycleStats) -> str:
+    socks5_port = status.socks5_port if status.socks5_port is not None else "не задан"
+    mtproto_active = "unknown" if status.mtproto_systemd_active is None else ("yes" if status.mtproto_systemd_active else "no")
+    mtproto_listening = "unknown" if status.mtproto_port_listening is None else ("yes" if status.mtproto_port_listening else "no")
+    mtproto_traffic_text = (
+        "Traffic: per-user статистика недоступна для MTProto без надёжного server-side accounting по secret."
+    )
+    mtproto_revoke_note = (
+        "Managed mode: индивидуальный server-side revoke выполняется удалением secret из active list MTProxy."
+        if status.mtproto_mode == "managed"
+        else "Static mode: используется общий secret, индивидуальный server-side revoke невозможен без ротации secret."
+    )
+    lines = [
+        "<b>Статус прокси</b>",
+        "",
+        "<b>SOCKS5 / Dante</b>",
+        f"Enabled: {h('yes' if status.socks5_enabled else 'no')}",
+        f"Host: {code(status.socks5_host or 'не задан')}",
+        f"Port: {code(socks5_port)}",
+        f"Public name: {h(status.socks5_public_name)}",
+        f"Service: {code(status.socks5_service_name)}",
+        f"Issued: {h(stats.socks5_issued)}",
+        f"Active: {h(stats.socks5_active)}",
+        f"Revoked/blocked: {h(stats.socks5_revoked)}",
+        "Traffic: статистика трафика недоступна для этого типа прокси без per-login accounting Dante.",
+        "",
+        "<b>MTProto</b>",
+        f"Enabled: {h('yes' if status.mtproto_enabled else 'no')}",
+        f"Mode: {h(status.mtproto_mode)}",
+        f"Host: {code(status.mtproto_host or 'не задан')}",
+        f"Port: {code(status.mtproto_port)}",
+        f"Public name: {h(status.mtproto_public_name)}",
+        f"Service: {code(status.mtproto_service_name)}",
+        f"Systemd active: {h(mtproto_active)}",
+        f"Port listening: {h(mtproto_listening)}",
+        f"Stats URL configured: {h('yes' if status.mtproto_stats_url_configured else 'no')}",
+        f"Issued: {h(stats.mtproto_issued)}",
+        f"Active: {h(stats.mtproto_active)}",
+        f"Deactivated/blocked: {h(stats.mtproto_deactivated)}",
+        f"Managed issued: {h(stats.mtproto_managed_issued)}",
+        f"Managed active secrets: {h(stats.mtproto_managed_active)}",
+        f"Managed revoked: {h(stats.mtproto_managed_revoked)}",
+        f"Legacy/static records: {h(stats.mtproto_legacy_static)}",
+        f"Apply failed: {h(stats.mtproto_apply_failed)}",
+        f"Revoke failed: {h(stats.mtproto_revoke_failed)}",
+        mtproto_traffic_text,
+        "",
+        mtproto_revoke_note,
+    ]
+    return "\n".join(lines)
 
 
 def proxy_entry_text(entry: ProxyEntry) -> str:

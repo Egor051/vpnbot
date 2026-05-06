@@ -35,3 +35,23 @@ class AwgApplyError(AwgConfigError):
 
 class AwgIpAllocationError(AwgConfigError):
     pass
+
+
+class DanteUserError(AdapterError):
+    pass
+
+
+class DanteUserNotFoundError(DanteUserError):
+    pass
+
+
+class MtProxyError(AdapterError):
+    pass
+
+
+class MtProxyApplyError(MtProxyError):
+    pass
+
+
+class MtProxyRollbackError(MtProxyError):
+    pass

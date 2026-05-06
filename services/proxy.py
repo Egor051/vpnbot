@@ -1,79 +1,52 @@
 from __future__ import annotations
 
 from config.settings import Settings
-from models.dto import ProxyEntry
-from models.enums import AuditEntityType
-from repositories.proxy_entries import ProxyRepository
-from services.audit import AuditService
-from services.errors import NotFound
+from models.dto import ProxyAccess, ProxyLifecycleStats, ProxyServiceStatus
+from models.enums import ProxyAccessStatus
+from repositories.proxy_accesses import ProxyAccessRepository
 from services.users import UserService
-from utils.formatting import code, h
 
 
 class ProxyService:
     def __init__(
         self,
         *,
-        proxies: ProxyRepository,
+        accesses: ProxyAccessRepository,
         users: UserService,
         settings: Settings,
-        audit: AuditService,
     ) -> None:
-        self.proxies = proxies
+        self.accesses = accesses
         self.users = users
         self.settings = settings
-        self.audit = audit
 
     async def seed_default_from_env(self) -> None:
-        if await self.proxies.count() > 0:
-            return
-        if not (self.settings.default_proxy_type and self.settings.default_proxy_host and self.settings.default_proxy_port):
-            return
-        await self.proxies.create(
-            self.settings.default_proxy_type,
-            self.settings.default_proxy_host,
-            self.settings.default_proxy_port,
-            self.settings.default_proxy_login or None,
-            self.settings.default_proxy_password or None,
-            self.settings.default_proxy_note or None,
-            self.users.clock.now(),
-        )
-        await self.audit.write(
-            actor_user_id=None,
-            action="proxy_seeded",
-            entity_type=AuditEntityType.PROXY,
-            entity_id=None,
-            details={"host": self.settings.default_proxy_host, "type": self.settings.default_proxy_type},
-        )
+        return None
 
-    async def list_available(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[ProxyEntry]:
+    async def list_user_accesses(self, actor_user_id: int) -> list[ProxyAccess]:
         await self.users.require_approved_or_admin(actor_user_id)
-        return await self.proxies.list_active(limit=limit, offset=offset)
+        accesses = await self.accesses.list_by_owner(actor_user_id)
+        return [access for access in accesses if access.status == ProxyAccessStatus.ACTIVE]
 
-    async def format_for_user(self, actor_user_id: int) -> str:
-        entries = await self.list_available(actor_user_id)
-        if not entries:
-            raise NotFound("Доступные прокси не настроены")
-        parts = ["<b>Прокси</b>"]
-        for entry in entries:
-            lines = [
-                f"<b>{h(entry.proxy_type)}</b>",
-                f"Хост: {code(entry.host)}",
-                f"Порт: {code(entry.port)}",
-            ]
-            if entry.login:
-                lines.append(f"Логин: {code(entry.login)}")
-            if entry.password:
-                lines.append(f"Пароль: {code(entry.password)}")
-            if entry.note:
-                lines.append(f"Описание: {h(entry.note)}")
-            lines.append(f"Статус: {entry.status.value}")
-            parts.append("\n".join(lines))
-        await self.audit.write(
-            actor_user_id=actor_user_id,
-            action="proxy_shown",
-            entity_type=AuditEntityType.PROXY,
-            entity_id=None,
-            details={"count": len(entries)},
+    async def list_all_user_accesses_for_admin(self, actor_user_id: int, owner_user_id: int) -> list[ProxyAccess]:
+        await self.users.require_superadmin(actor_user_id)
+        return await self.accesses.list_by_owner(owner_user_id)
+
+    async def lifecycle_stats(self, actor_user_id: int) -> ProxyLifecycleStats:
+        await self.users.require_superadmin(actor_user_id)
+        return await self.accesses.lifecycle_stats()
+
+    def service_status(self) -> ProxyServiceStatus:
+        return ProxyServiceStatus(
+            socks5_enabled=self.settings.socks5_enabled,
+            socks5_host=self.settings.socks5_host,
+            socks5_port=self.settings.socks5_port,
+            socks5_public_name=self.settings.socks5_public_name,
+            socks5_service_name=self.settings.socks5_service_name,
+            mtproto_enabled=self.settings.mtproto_enabled,
+            mtproto_host=self.settings.mtproto_host,
+            mtproto_port=self.settings.mtproto_port,
+            mtproto_public_name=self.settings.mtproto_public_name,
+            mtproto_stats_url_configured=bool(self.settings.mtproto_stats_url),
+            mtproto_mode=self.settings.mtproto_mode,
+            mtproto_service_name=self.settings.mtproto_service_name,
         )
-        return "\n\n".join(parts)

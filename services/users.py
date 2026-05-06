@@ -6,8 +6,9 @@ from collections.abc import Awaitable, Callable
 from adapters.clock import ClockProvider
 from config.settings import Settings
 from models.access import is_blocked_user
-from models.dto import BlockUserResult, KeyOperationError, TelegramUserProfile, UnblockUserWarning, User, VpnKey
-from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
+from models.dto import BlockUserResult, KeyOperationError, ProxyAccess, TelegramUserProfile, UnblockUserWarning, User, VpnKey
+from models.enums import AuditEntityType, ProxyAccessStatus, ProxyAccessType, UserRole, VpnKeyStatus, VpnKeyType
+from repositories.proxy_accesses import ProxyAccessRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.audit import AuditService
@@ -15,6 +16,7 @@ from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.user_locks import UserLockManager
 
 KeyRevoker = Callable[[int, int], Awaitable[VpnKey]]
+ProxyRevoker = Callable[[int, int, str | None], Awaitable[ProxyAccess]]
 StateClearer = Callable[[int], Awaitable[None]]
 logger = logging.getLogger(__name__)
 
@@ -47,11 +49,21 @@ class UserService:
         self.user_locks = user_locks or UserLockManager()
         self._vpn_keys: VpnKeyRepository | None = None
         self._key_revokers: dict[VpnKeyType, KeyRevoker] = {}
+        self._proxy_accesses: ProxyAccessRepository | None = None
+        self._proxy_revokers: dict[ProxyAccessType, ProxyRevoker] = {}
         self._state_clearer: StateClearer | None = None
 
     def attach_key_management(self, vpn_keys: VpnKeyRepository, revokers: dict[VpnKeyType, KeyRevoker]) -> None:
         self._vpn_keys = vpn_keys
         self._key_revokers = dict(revokers)
+
+    def attach_proxy_access_management(
+        self,
+        proxy_accesses: ProxyAccessRepository,
+        revokers: dict[ProxyAccessType, ProxyRevoker],
+    ) -> None:
+        self._proxy_accesses = proxy_accesses
+        self._proxy_revokers = dict(revokers)
 
     def attach_state_clearer(self, clearer: StateClearer) -> None:
         self._state_clearer = clearer
@@ -143,12 +155,15 @@ class UserService:
                 raise InvalidOperation("Нельзя заблокировать superadmin")
 
             revoked_key_ids: list[int] = []
+            revoked_proxy_ids: list[int] = []
             errors: list[KeyOperationError] = []
             if revoke_active_keys:
                 if self._vpn_keys is None or not self._key_revokers:
                     errors.append(KeyOperationError(0, VpnKeyType.XRAY, "Сервисы отзыва ключей не подключены"))
                 else:
                     await self._revoke_all_access_keys(actor_user_id, target_user_id, revoked_key_ids, errors)
+                if self._proxy_accesses is not None and self._proxy_revokers:
+                    await self._revoke_all_proxy_accesses(actor_user_id, target_user_id, revoked_proxy_ids, errors)
 
             now = self.clock.now()
             await self.users.set_role(target_user_id, UserRole.BLOCKED_USER, now, blocked_at=now)
@@ -160,15 +175,22 @@ class UserService:
                 details={
                     "revoke_active_keys": revoke_active_keys,
                     "revoked_key_ids": revoked_key_ids,
+                    "revoked_proxy_ids": revoked_proxy_ids,
                     "error_count": len(errors),
                     "errors": [{"key_id": item.key_id, "key_type": item.key_type.value, "error": item.error} for item in errors],
                     "bot_access_blocked": True,
                     "vpn_revoke_complete": not errors,
+                    "proxy_revoke_complete": not any(getattr(item.key_type, "value", "") in {"socks5", "mtproto"} for item in errors),
                 },
             )
             await self.clear_user_state(target_user_id)
             user = await self.get_user(target_user_id)
-            return BlockUserResult(user=user, revoked_key_ids=tuple(revoked_key_ids), errors=tuple(errors))
+            return BlockUserResult(
+                user=user,
+                revoked_key_ids=tuple(revoked_key_ids),
+                errors=tuple(errors),
+                revoked_proxy_ids=tuple(revoked_proxy_ids),
+            )
 
     async def _revoke_all_access_keys(
         self,
@@ -210,6 +232,46 @@ class UserService:
             if errors:
                 return
 
+    async def _revoke_all_proxy_accesses(
+        self,
+        actor_user_id: int,
+        target_user_id: int,
+        revoked_proxy_ids: list[int],
+        errors: list[KeyOperationError],
+    ) -> None:
+        if self._proxy_accesses is None:
+            return
+        statuses = {
+            ProxyAccessStatus.ACTIVE,
+            ProxyAccessStatus.PENDING_APPLY,
+            ProxyAccessStatus.APPLY_FAILED,
+            ProxyAccessStatus.PENDING_REVOKE,
+            ProxyAccessStatus.REVOKE_FAILED,
+            ProxyAccessStatus.PENDING_DELETE,
+            ProxyAccessStatus.DELETE_FAILED,
+        }
+        processed_success_ids: set[int] = set()
+        while True:
+            accesses = await self._proxy_accesses.list_by_owner_statuses(target_user_id, statuses, limit=500)
+            if not accesses:
+                return
+            for access in accesses:
+                if access.id in processed_success_ids:
+                    errors.append(KeyOperationError(access.id, access.access_type, "Прокси-доступ остался активным после отзыва"))
+                    return
+                revoker = self._proxy_revokers.get(access.access_type)
+                if revoker is None:
+                    errors.append(KeyOperationError(access.id, access.access_type, "Нет сервиса для отзыва прокси-доступа"))
+                    continue
+                try:
+                    await revoker(actor_user_id, access.id, "hard_block")
+                    revoked_proxy_ids.append(access.id)
+                    processed_success_ids.add(access.id)
+                except Exception as exc:
+                    errors.append(KeyOperationError(access.id, access.access_type, str(exc)))
+            if errors:
+                return
+
     async def unblock_user(self, actor_user_id: int, target_user_id: int) -> User:
         await self.require_superadmin(actor_user_id)
         if target_user_id in self.settings.admin_ids:
@@ -243,6 +305,21 @@ class UserService:
                 target_user_id,
                 UNBLOCK_ACCESS_MAY_EXIST_STATUSES,
             )
+        if self._proxy_accesses is not None:
+            proxy_accesses = await self._proxy_accesses.list_by_owner_statuses(
+                target_user_id,
+                {
+                    ProxyAccessStatus.ACTIVE,
+                    ProxyAccessStatus.PENDING_APPLY,
+                    ProxyAccessStatus.APPLY_FAILED,
+                    ProxyAccessStatus.PENDING_REVOKE,
+                    ProxyAccessStatus.REVOKE_FAILED,
+                    ProxyAccessStatus.PENDING_DELETE,
+                    ProxyAccessStatus.DELETE_FAILED,
+                },
+                limit=500,
+            )
+            active_or_problem_key_count += len(proxy_accesses)
         previous_revoke_error_count, last_block_error_at = await self._last_block_revoke_error(target_user_id)
 
         reasons: list[str] = []

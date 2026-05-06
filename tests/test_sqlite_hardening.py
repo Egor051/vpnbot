@@ -46,7 +46,7 @@ def test_existing_schema_version_7_bootstrap_and_init_db_succeed(
             cursor = await db.conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             row = await cursor.fetchone()
             assert row is not None
-            assert int(row["value"]) == CURRENT_SCHEMA_VERSION == 7
+            assert int(row["value"]) == CURRENT_SCHEMA_VERSION == 9
         finally:
             await db.close()
 

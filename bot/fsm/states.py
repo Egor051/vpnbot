@@ -13,6 +13,10 @@ class EditNoteStates(StatesGroup):
     confirming = State()
 
 
+class ProxyStates(StatesGroup):
+    confirming = State()
+
+
 class AdminCreateKeyStates(StatesGroup):
     choosing_type = State()
     waiting_note = State()

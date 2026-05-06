@@ -210,7 +210,7 @@ def test_legacy_v3_duplicate_pending_migrates_before_unique_index(tmp_path: Path
             print("BOOTSTRAP_OK")
             cursor = await db.conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             version = await cursor.fetchone()
-            assert version["value"] == "7"
+            assert version["value"] == "9"
             cursor = await db.conn.execute(
                 "SELECT status, COUNT(*) AS cnt FROM access_requests GROUP BY status ORDER BY status"
             )

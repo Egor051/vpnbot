@@ -10,7 +10,9 @@ This project is designed for a single-server deployment without Docker, Redis, P
 - Admin panel for pending requests, users, key issuance, audit, stats, and announcements.
 - Xray VLESS Reality key creation, config delivery, revocation, deletion, and startup reconciliation.
 - AmneziaWG key creation, client config delivery, revocation, deletion, IP allocation, and startup reconciliation.
-- Optional proxy entry display seeded from `DEFAULT_PROXY_*` environment variables. The bot does not install or manage Dante by itself.
+- Separate one-page Telegram section "Прокси" for SOCKS5/Dante auto-issue and Telegram MTProto Proxy links.
+- MTProto supports `static` compatibility mode and `managed` mode with per-user secrets, safe apply, and rollback.
+- Optional legacy proxy entry table seeded from `DEFAULT_PROXY_*` remains internal/compatibility storage; the user-facing proxy UX uses `proxy_accesses`.
 - Ownership checks so users can only view and manage their own keys unless they are admins.
 - Audit log with recursive masking for sensitive values.
 - SQLite storage with migrations from `db/schema.sql`.
@@ -38,7 +40,9 @@ requirements.txt           # Runtime dependencies
 constraints.txt            # Pinned production dependency constraints
 .env.example               # Environment variable template
 db/schema.sql              # Database schema
-deploy/vpn-bot.service     # systemd unit template
+deploy/vpn-bot.service     # vpn-bot systemd unit template
+deploy/run-mtproxy-managed # MTProxy managed-mode wrapper installed during deploy
+deploy/mtproxy-vpnbot-managed.conf # MTProxy drop-in installed during deploy
 bot/                       # Telegram handlers, keyboards, FSM, formatting
 services/                  # Business workflows and permissions
 repositories/              # SQLite access layer
@@ -112,6 +116,41 @@ DEFAULT_PROXY_LOGIN=
 DEFAULT_PROXY_PASSWORD=
 DEFAULT_PROXY_NOTE=
 
+SOCKS5_ENABLED=false
+SOCKS5_HOST=
+SOCKS5_PORT=31337
+SOCKS5_LOGIN_PREFIX=vpn_socks_
+SOCKS5_SYSTEM_USER_SHELL=/usr/sbin/nologin
+SOCKS5_SERVICE_NAME=danted
+SOCKS5_PUBLIC_NAME=SOCKS5 Proxy
+SOCKS5_NOTE=SOCKS5 Dante proxy on VDS
+
+MTPROTO_ENABLED=false
+MTPROTO_MODE=static
+MTPROTO_HOST=
+MTPROTO_PORT=8443
+MTPROTO_SECRET=
+MTPROTO_PUBLIC_NAME=Telegram MTProto Proxy
+MTPROTO_NOTE=MTProto proxy for Telegram
+
+# Managed MTProto per-user secrets mode
+MTPROTO_SERVICE_NAME=mtproxy
+MTPROTO_BINARY_PATH=/usr/local/bin/mtproto-proxy
+MTPROTO_RUN_USER=mtproxy
+MTPROTO_RUN_GROUP=mtproxy
+MTPROTO_CONFIG_DIR=/etc/mtproxy
+MTPROTO_PROXY_SECRET_PATH=/etc/mtproxy/proxy-secret
+MTPROTO_PROXY_MULTI_CONF_PATH=/etc/mtproxy/proxy-multi.conf
+MTPROTO_MANAGED_SECRETS_PATH=/etc/mtproxy/vpnbot-managed-secrets.json
+MTPROTO_MANAGED_ENV_PATH=/etc/mtproxy/vpnbot-mtproxy.env
+MTPROTO_MANAGED_WRAPPER_PATH=/opt/vpn-service/scripts/run-mtproxy-managed
+MTPROTO_INTERNAL_STATS_PORT=8888
+MTPROTO_WORKERS=1
+MTPROTO_APPLY_TIMEOUT_SECONDS=10
+MTPROTO_ROLLBACK_ON_APPLY_FAILURE=true
+MTPROTO_KEEP_LAST_BACKUPS=10
+MTPROTO_STATS_URL=
+
 AUDIT_RETENTION_DAYS=180
 CONFIG_BACKUP_KEEP_LAST=20
 ```
@@ -124,7 +163,70 @@ Notes:
 - `SQLITE_SYNCHRONOUS=FULL` is the safer default for this control-plane database. `NORMAL` is faster but can lose the last committed transactions on OS or power failure while VPN backend state has already changed.
 - `AWG_CLIENT_DNS` is supported only as a legacy alias; use `AWG_DNS` for new deployments.
 - `AWG_ENDPOINT_HOST` and `AWG_ENDPOINT_PORT` should point to the public AWG endpoint clients will use.
-- `DEFAULT_PROXY_*` seeds one proxy entry only when the proxy table is empty.
+- `SOCKS5_ENABLED=true` requires `SOCKS5_HOST`, `SOCKS5_PORT`, and a safe `SOCKS5_LOGIN_PREFIX`. Dante must already be installed and listening; the bot only creates/locks/deletes managed Linux users with that prefix.
+- `MTPROTO_ENABLED=true` requires `MTPROTO_HOST`. `MTPROTO_MODE=static` also requires `MTPROTO_SECRET`.
+- `MTPROTO_MODE=static` is compatibility mode: the bot shows a shared MTProto secret and can only deactivate a user's SQLite record. True per-user server-side revoke is impossible in static mode without rotating the shared secret.
+- `MTPROTO_MODE=managed` creates one unique secret per user, writes managed secrets/env files under `/etc/mtproxy`, restarts `mtproxy`, verifies service/port health, and rolls back managed files if apply fails. The systemd drop-in and wrapper are installed during deploy, not written by the bot at runtime.
+- `MTPROTO_SECRET`, SOCKS5 passwords, and real production endpoints with credentials must never be committed. `.env.example` intentionally keeps proxy secrets empty.
+- `DEFAULT_PROXY_*` is legacy compatibility storage and does not drive the new user-facing proxy access flow.
+
+## Proxy Deployment Notes
+
+The bot does not install Dante or MTProxy. Prepare them on the VDS first, then enable the relevant env flags.
+
+SOCKS5/Dante expectations:
+
+- Dante listens on the configured public host/port, for example `0.0.0.0:31337`.
+- Authentication is Linux username/password.
+- The bot runs with enough permissions to call `getent`, `useradd`, `chpasswd`, `passwd -l`, and `userdel`.
+- The bot refuses to manage Linux users whose login does not start with `SOCKS5_LOGIN_PREFIX`.
+
+MTProto static mode:
+
+- Set `MTPROTO_MODE=static` and provide `MTPROTO_SECRET`.
+- MTProxy is managed outside the bot by its own systemd unit.
+- The bot does not edit MTProxy files in static mode.
+- User output always includes both Telegram links: plain secret first, then the `dd` random-padding variant.
+- Static mode uses a shared secret; blocking one user only deactivates the bot record and does not revoke that user server-side.
+
+MTProto managed mode:
+
+- Set `MTPROTO_MODE=managed`; do not set a shared production secret in `MTPROTO_SECRET` for new users.
+- MTProxy must already be installed and have valid `proxy-secret` and `proxy-multi.conf` files.
+- Install the managed wrapper/drop-in once during deploy:
+  ```bash
+  sudo install -m 700 -d /opt/vpn-service/scripts
+  sudo install -m 700 deploy/run-mtproxy-managed /opt/vpn-service/scripts/run-mtproxy-managed
+  sudo install -m 700 -d /etc/systemd/system/mtproxy.service.d
+  sudo install -m 600 deploy/mtproxy-vpnbot-managed.conf /etc/systemd/system/mtproxy.service.d/vpnbot-managed.conf
+  sudo systemctl daemon-reload
+  ```
+- If `MTPROTO_MANAGED_WRAPPER_PATH` or `MTPROTO_MANAGED_ENV_PATH` differs from the defaults, edit the installed wrapper/drop-in during deploy and run `systemctl daemon-reload` manually.
+- On a fresh managed install, do not restart `mtproxy` onto the wrapper until the managed secrets/env files exist. The first bot issue/revoke apply writes those files before restarting `mtproxy`. If you want to restart `mtproxy` immediately during setup, create valid placeholder managed secrets/env files first and keep them mode `0600`.
+- At runtime the bot writes only:
+  - `MTPROTO_MANAGED_SECRETS_PATH`, containing active per-user secrets and a private runtime placeholder when no user secrets exist.
+  - `MTPROTO_MANAGED_ENV_PATH`, containing non-secret runtime paths/options.
+  - `/etc/mtproxy/vpnbot-backups/<backup-id>/`, containing private backups of managed secrets/env.
+- On issue/revoke the bot backs up managed files, writes changes atomically, restarts `mtproxy`, checks `systemctl is-active`, checks that `MTPROTO_PORT` is listening, and restores the previous managed files on apply failure. It does not write `/etc/systemd/system` and does not run `systemctl daemon-reload` during normal issue/revoke.
+- Managed mode gives real per-user revoke by removing only that user's secret from the active MTProxy list. Other users' secrets remain in the managed file.
+- Raw MTProto secrets are not shown in admin status, audit, logs, README, or `.env.example`; admin diagnostics use counts and fingerprints only.
+- Managed secrets and env files are written with mode `0600`; backup directories use `0700`; backup files that may contain secrets use `0600`; the wrapper should be installed with mode `0700`; the systemd drop-in contains no secrets and can be `0600`.
+
+MTProto managed mode visibility checks:
+
+- `systemctl cat mtproxy` and `systemctl show mtproxy -p ExecStart -p Environment` should show only the wrapper/env paths, not raw secrets.
+- `journalctl -u vpn-bot` and `journalctl -u mtproxy` should not contain raw MTProto secrets; the bot redacts audit/error details and the wrapper does not print secrets. If your MTProxy build logs accepted secrets or generated links, do not use managed mode until that logging is disabled or the binary is replaced.
+- The official `mtproto-proxy` binary accepts client secrets as `-S <secret>` arguments. That means raw secrets can be visible in process argv to root, and to unprivileged users unless `/proc` is hardened. Restrict shell access, consider mounting `/proc` with `hidepid=2`, and do not enable managed mode with this binary if your requirement is "raw MTProto secrets are never visible to root-level process inspection".
+
+Manual rollback for managed MTProto:
+
+1. Stop `vpn-bot`.
+2. Inspect `/etc/mtproxy/vpnbot-backups/` under the directory configured by `MTPROTO_MANAGED_SECRETS_PATH`.
+3. Restore the previous managed secrets/env files from the latest known-good backup if automatic rollback did not recover.
+4. Run `sudo systemctl restart mtproxy`.
+5. Check `sudo systemctl status mtproxy --no-pager` and `sudo ss -tlnp | grep 8443`.
+
+Proxy statistics are lifecycle/accounting stats from SQLite: issued, active, revoked/deactivated, timestamps, status, reason, and error. The bot does not invent per-user traffic for Dante or MTProxy. Without Dante per-login accounting or a safe aggregate MTProxy stats endpoint, traffic is shown as unavailable.
 
 ## Deployment Overview
 
@@ -167,6 +269,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now vpn-bot
 sudo systemctl status vpn-bot
 ```
+
+If SOCKS5 auto-issue is enabled under the supplied hardened unit, keep the service running as root and allow the password database files in `ReadWritePaths`, as shown in `deploy/vpn-bot.service`.
+
+If `MTPROTO_MODE=managed` is enabled, keep the supplied unit's write access to `/etc/mtproxy` only for managed secrets/env/backups. Do not grant `vpn-bot.service` runtime write access to `/etc/systemd/system`; install or update the MTProxy drop-in and wrapper manually during deploy, then run `systemctl daemon-reload` outside the bot runtime.
 
 ## Maintenance
 
@@ -211,6 +317,8 @@ tail -f /opt/vpn-service/logs/bot.log
 - Firewall rules are known before opening VPN ports.
 - Backup destination exists and backup files are not world-readable.
 - Code and `.venv` are not writable by untrusted users.
+- If managed MTProto is enabled, `vpn-bot.service` does not have `ReadWritePaths=/etc/systemd/system`; the MTProxy wrapper/drop-in were installed manually and contain no raw secrets.
+- If managed MTProto is enabled, `/etc/mtproxy/vpnbot-managed-secrets.json`, `/etc/mtproxy/vpnbot-mtproxy.env`, and `/etc/mtproxy/vpnbot-backups/*` are readable only by root/service operators.
 
 ### Backup
 
@@ -222,7 +330,8 @@ sudo tar --xattrs --acls -czf /root/vpn-service-backups/vpn-service-$(date -u +%
   /opt/vpn-service/.env \
   /opt/vpn-service/data/vpn.db \
   /usr/local/etc/xray/config.json \
-  /etc/amnezia/amneziawg/awg0.conf
+  /etc/amnezia/amneziawg/awg0.conf \
+  /etc/mtproxy
 sudo chmod 600 /root/vpn-service-backups/vpn-service-*.tar.gz
 ```
 
@@ -266,6 +375,10 @@ sudo ss -tulnp
 ```bash
 sudo systemctl status vpn-bot --no-pager
 sudo systemctl status xray --no-pager
+sudo systemctl status danted --no-pager
+sudo ss -tlnp | grep 31337
+sudo systemctl status mtproxy --no-pager
+sudo ss -tlnp | grep 8443
 sudo journalctl -u vpn-bot -n 100 --no-pager
 sudo xray run -test -config /usr/local/etc/xray/config.json
 sudo awg show
@@ -297,8 +410,22 @@ On a staging user before production use:
 2. Revoke and delete the Xray key, verify DB/config/runtime no longer allow access.
 3. Create one AWG key, verify DB, `awg0.conf`, and `awg show` agree.
 4. Revoke and delete the AWG key, verify peer removal from config and runtime.
-5. Block an approved test user and confirm bot access is denied even if a backend revoke error is simulated on staging.
-6. Send an announcement with approved, pending, and blocked test users; only approved users and superadmins should receive it.
+5. Open "Прокси" as an approved test user, issue SOCKS5 after confirmation, and verify the message contains Host, Port, Login, Password, and URL.
+6. Issue MTProto after confirmation and verify the plain Telegram link appears before the `dd` link.
+7. In `MTPROTO_MODE=managed`, issue MTProto for test user A and record only the non-secret fingerprint/count from admin status.
+8. Issue MTProto for test user B and confirm admin status shows two active managed MTProto accesses.
+9. Hard-block or admin-revoke test user A, then confirm the managed secrets file no longer contains A's fingerprint while B's fingerprint remains active.
+10. Confirm user B's Telegram MTProto link still works after user A is revoked.
+11. Simulate a failed apply on staging, for example by temporarily pointing `MTPROTO_SERVICE_NAME` to a failing test unit or stopping the listener check path, then revoke/issue and confirm rollback restores the previous managed secrets/env files and `mtproxy` returns to active/listening.
+12. In `MTPROTO_MODE=static`, block the user and confirm MTProto is deactivated only in SQLite.
+13. Check that bot logs and audit output do not contain SOCKS5 passwords, `MTPROTO_SECRET`, or managed raw MTProto secrets.
+14. Check `systemctl cat mtproxy`, `systemctl show mtproxy -p ExecStart -p Environment`, and `journalctl -u mtproxy -n 100 --no-pager` for absence of raw MTProto secrets.
+15. Check managed file permissions:
+    ```bash
+    sudo stat -c '%a %n' /etc/mtproxy/vpnbot-managed-secrets.json /etc/mtproxy/vpnbot-mtproxy.env
+    sudo find /etc/mtproxy/vpnbot-backups -maxdepth 2 -printf '%m %p\n'
+    ```
+16. Send an announcement with approved, pending, and blocked test users; only approved users and superadmins should receive it.
 
 ## Database
 
@@ -316,6 +443,7 @@ Current schema tables include:
 - `access_requests`
 - `vpn_keys`
 - `proxy_entries`
+- `proxy_accesses`
 - `audit_log`
 - `vpn_key_traffic_stats`
 

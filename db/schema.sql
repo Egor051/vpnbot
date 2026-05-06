@@ -65,6 +65,33 @@ CREATE TABLE IF NOT EXISTS proxy_entries (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS proxy_accesses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+  username TEXT,
+  access_type TEXT NOT NULL CHECK(access_type IN ('socks5','mtproto')),
+  status TEXT NOT NULL CHECK(status IN (
+    'pending_apply','active','apply_failed','pending_revoke','revoked','revoke_failed','inactive',
+    'pending_delete','delete_failed','deleted'
+  )),
+  secret_fingerprint TEXT,
+  apply_generation INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL,
+  public_payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  activated_at TEXT,
+  last_apply_at TEXT,
+  last_shown_at TEXT,
+  revoked_at TEXT,
+  deleted_at TEXT,
+  created_by INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE RESTRICT,
+  revoked_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+  deleted_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+  reason TEXT,
+  error TEXT
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   actor_user_id INTEGER,
@@ -124,6 +151,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_uuid ON vpn_keys(uuid) WHERE uuid
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_email_label ON vpn_keys(email_label) WHERE email_label IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_public_key ON vpn_keys(public_key) WHERE public_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner_type_status ON vpn_keys(owner_user_id, key_type, status);
+CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner ON proxy_accesses(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner_type_status ON proxy_accesses(owner_user_id, access_type, status);
+CREATE INDEX IF NOT EXISTS idx_proxy_accesses_status_type ON proxy_accesses(status, access_type);
+CREATE INDEX IF NOT EXISTS idx_proxy_accesses_login ON proxy_accesses(json_extract(payload_json, '$.login')) WHERE access_type = 'socks5';
+CREATE INDEX IF NOT EXISTS idx_proxy_accesses_mtproto_fingerprint ON proxy_accesses(secret_fingerprint) WHERE access_type = 'mtproto' AND secret_fingerprint IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);
 CREATE INDEX IF NOT EXISTS idx_announcement_batches_status ON announcement_batches(status, updated_at);

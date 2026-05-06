@@ -1,0 +1,401 @@
+from __future__ import annotations
+
+import json
+import os
+import secrets as secrets_module
+import shutil
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from adapters.errors import MtProxyApplyError, MtProxyError, MtProxyRollbackError
+from adapters.shell_runner import ShellRunner
+from adapters.systemctl import SystemCtlAdapter
+
+
+@dataclass(frozen=True, slots=True)
+class MtProxyManagedSecret:
+    secret: str
+    fingerprint: str
+    owner_user_id: int | None = None
+    access_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MtProxyApplyResult:
+    changed: bool
+    generation: int
+    rollback_performed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class MtProxyRuntimeStatus:
+    systemd_active: bool | None
+    port_listening: bool | None
+
+
+class MtProxyAdapter:
+    def __init__(
+        self,
+        *,
+        shell: ShellRunner,
+        systemctl: SystemCtlAdapter,
+        service_name: str,
+        binary_path: Path,
+        run_user: str,
+        run_group: str,
+        proxy_secret_path: Path,
+        proxy_multi_conf_path: Path,
+        managed_secrets_path: Path,
+        managed_env_path: Path,
+        port: int,
+        internal_stats_port: int | None,
+        workers: int,
+        apply_timeout_seconds: int,
+        rollback_on_apply_failure: bool,
+        keep_last_backups: int,
+    ) -> None:
+        self.shell = shell
+        self.systemctl = systemctl
+        self.service_name = service_name
+        self.binary_path = binary_path
+        self.run_user = run_user
+        self.run_group = run_group
+        self.proxy_secret_path = proxy_secret_path
+        self.proxy_multi_conf_path = proxy_multi_conf_path
+        self.managed_secrets_path = managed_secrets_path
+        self.managed_env_path = managed_env_path
+        self.port = port
+        self.internal_stats_port = internal_stats_port
+        self.workers = workers
+        self.apply_timeout_seconds = apply_timeout_seconds
+        self.rollback_on_apply_failure = rollback_on_apply_failure
+        self.keep_last_backups = keep_last_backups
+
+    def read_current_managed_secrets(self) -> list[MtProxyManagedSecret]:
+        document = self._read_store_document()
+        return self._document_user_secrets(document)
+
+    def write_managed_secrets_atomically(self, secrets: list[MtProxyManagedSecret]) -> None:
+        current = self._read_store_document()
+        document = self._store_document(secrets, current)
+        self._atomic_write_text(self.managed_secrets_path, self._json_dump(document), mode=0o600)
+
+    def backup_managed_files(self) -> str:
+        backup_id = f"{int(time.time())}-{time.time_ns()}-{secrets_module.token_hex(4)}"
+        backup_dir = self._backup_dir(backup_id)
+        backup_dir.mkdir(parents=True, exist_ok=False)
+        self._chmod_dir(backup_dir)
+        manifest: dict[str, Any] = {"version": 1, "files": []}
+        for target in self._managed_files():
+            backup_path: Path | None = None
+            if target.exists():
+                backup_path = backup_dir / target.name
+                shutil.copy2(target, backup_path)
+                self._chmod_file(backup_path, executable=os.access(target, os.X_OK))
+            manifest["files"].append(
+                {
+                    "target": str(target),
+                    "backup": str(backup_path) if backup_path is not None else None,
+                }
+            )
+        self._atomic_write_text(backup_dir / "manifest.json", self._json_dump(manifest), mode=0o600)
+        self._cleanup_old_backups()
+        return backup_id
+
+    def restore_backup(self, backup_id: str) -> None:
+        backup_dir = self._backup_dir(backup_id)
+        manifest_path = backup_dir / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            raise MtProxyRollbackError("MTProxy backup manifest not found or invalid") from exc
+        for item in manifest.get("files", []):
+            target = Path(str(item.get("target") or ""))
+            backup_value = item.get("backup")
+            if not target:
+                continue
+            if backup_value is None:
+                target.unlink(missing_ok=True)
+                continue
+            backup_path = Path(str(backup_value))
+            if not backup_path.exists():
+                raise MtProxyRollbackError("MTProxy backup file is missing")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup_path, target)
+            self._chmod_file(target, executable=os.access(backup_path, os.X_OK))
+
+    async def apply_managed_secrets(self, secrets: list[MtProxyManagedSecret]) -> MtProxyApplyResult:
+        desired = self._normalize_secrets(secrets)
+        current_document = self._read_store_document()
+        current = self._document_user_secrets(current_document)
+        current_generation = int(current_document.get("generation") or 0)
+        current_runtime_document = self._store_document(current, current_document, generation=current_generation)
+        if self._same_secret_set(current, desired) and self._runtime_files_current(current_runtime_document):
+            return MtProxyApplyResult(changed=False, generation=current_generation)
+        next_generation = current_generation + 1
+        desired_document = self._store_document(desired, current_document, generation=next_generation)
+
+        backup_id = self.backup_managed_files()
+        try:
+            self._write_runtime_files(desired_document)
+            restart = await self.restart_mtproxy()
+            if not restart.ok:
+                raise MtProxyApplyError("MTProxy restart failed")
+            if not await self.check_mtproxy_active():
+                raise MtProxyApplyError("MTProxy service is not active after restart")
+            if not await self.check_mtproxy_listening():
+                raise MtProxyApplyError("MTProxy port is not listening after restart")
+            return MtProxyApplyResult(changed=True, generation=next_generation)
+        except Exception as exc:
+            if not self.rollback_on_apply_failure:
+                raise MtProxyApplyError(self._redact(f"MTProxy apply failed: {exc}", desired)) from exc
+            rollback_error: Exception | None = None
+            try:
+                self.restore_backup(backup_id)
+                await self.restart_mtproxy()
+                if not await self.check_mtproxy_active():
+                    raise MtProxyRollbackError("MTProxy rollback restart did not become active")
+            except Exception as rollback_exc:
+                rollback_error = rollback_exc
+            if rollback_error is not None:
+                message = self._redact(
+                    f"MTProxy apply failed: {exc}; rollback failed: {rollback_error}",
+                    desired,
+                )
+                raise MtProxyApplyError(message) from exc
+            message = self._redact(f"MTProxy apply failed: {exc}; rollback restored previous files", desired)
+            raise MtProxyApplyError(message) from exc
+
+    async def restart_mtproxy(self):
+        return await self.systemctl.restart(self.service_name)
+
+    async def check_mtproxy_active(self) -> bool:
+        result = await self.systemctl.is_active(self.service_name)
+        return result.ok and result.stdout.strip() == "active"
+
+    async def check_mtproxy_listening(self) -> bool:
+        result = await self.shell.run(["ss", "-tln"], timeout=self.apply_timeout_seconds, max_output_chars=65536)
+        if not result.ok:
+            return False
+        token = f":{self.port}"
+        return any(token in line for line in result.stdout.splitlines())
+
+    async def runtime_status(self) -> MtProxyRuntimeStatus:
+        active: bool | None
+        listening: bool | None
+        try:
+            active = await self.check_mtproxy_active()
+        except Exception:
+            active = None
+        try:
+            listening = await self.check_mtproxy_listening()
+        except Exception:
+            listening = None
+        return MtProxyRuntimeStatus(systemd_active=active, port_listening=listening)
+
+    def _managed_files(self) -> tuple[Path, ...]:
+        return (
+            self.managed_secrets_path,
+            self.managed_env_path,
+        )
+
+    def _read_store_document(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.managed_secrets_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"version": 1, "generation": 0, "secrets": [], "runtime_secrets": []}
+        except json.JSONDecodeError as exc:
+            raise MtProxyError("MTProxy managed secrets file contains invalid JSON") from exc
+        if not isinstance(data, dict):
+            raise MtProxyError("MTProxy managed secrets file must be a JSON object")
+        return data
+
+    def _document_user_secrets(self, document: dict[str, Any]) -> list[MtProxyManagedSecret]:
+        items = document.get("secrets")
+        if not isinstance(items, list):
+            return []
+        secrets: list[MtProxyManagedSecret] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            raw_secret = str(item.get("secret") or "")
+            fingerprint = str(item.get("fingerprint") or "")
+            if not raw_secret or not fingerprint:
+                continue
+            secrets.append(
+                MtProxyManagedSecret(
+                    secret=raw_secret,
+                    fingerprint=fingerprint,
+                    owner_user_id=self._optional_int(item.get("owner_user_id")),
+                    access_id=self._optional_int(item.get("access_id")),
+                )
+            )
+        return self._normalize_secrets(secrets)
+
+    def _store_document(
+        self,
+        secrets: list[MtProxyManagedSecret],
+        current_document: dict[str, Any],
+        *,
+        generation: int | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_secrets(secrets)
+        generation_value = int(current_document.get("generation") or 0) if generation is None else generation
+        runtime_items = [self._secret_dict(item) for item in normalized]
+        if not runtime_items:
+            placeholder = self._empty_runtime_placeholder(current_document)
+            runtime_items = [placeholder]
+        return {
+            "version": 1,
+            "generation": generation_value,
+            "managed_by": "vpn-bot",
+            "secrets": [self._secret_dict(item) for item in normalized],
+            "runtime_secrets": runtime_items,
+        }
+
+    def _empty_runtime_placeholder(self, current_document: dict[str, Any]) -> dict[str, Any]:
+        for item in current_document.get("runtime_secrets", []):
+            if isinstance(item, dict) and item.get("purpose") == "empty-placeholder" and item.get("secret"):
+                return dict(item)
+        secret = secrets_module.token_hex(16)
+        return {
+            "secret": secret,
+            "fingerprint": "empty-placeholder",
+            "purpose": "empty-placeholder",
+        }
+
+    def _runtime_files_current(self, document: dict[str, Any]) -> bool:
+        return (
+            self.managed_secrets_path.exists()
+            and self.managed_env_path.exists()
+            and self.managed_secrets_path.read_text(encoding="utf-8") == self._json_dump(document)
+            and self.managed_env_path.read_text(encoding="utf-8") == self._env_content()
+        )
+
+    def _write_runtime_files(self, document: dict[str, Any]) -> None:
+        self._atomic_write_text(self.managed_secrets_path, self._json_dump(document), mode=0o600)
+        self._atomic_write_text(self.managed_env_path, self._env_content(), mode=0o600)
+
+    def _env_content(self) -> str:
+        values = {
+            "MTPROTO_BINARY_PATH": str(self.binary_path),
+            "MTPROTO_RUN_USER": self.run_user,
+            "MTPROTO_RUN_GROUP": self.run_group,
+            "MTPROTO_PROXY_SECRET_PATH": str(self.proxy_secret_path),
+            "MTPROTO_PROXY_MULTI_CONF_PATH": str(self.proxy_multi_conf_path),
+            "MTPROTO_MANAGED_SECRETS_PATH": str(self.managed_secrets_path),
+            "MTPROTO_PORT": str(self.port),
+            "MTPROTO_INTERNAL_STATS_PORT": str(self.internal_stats_port or 8888),
+            "MTPROTO_WORKERS": str(self.workers),
+        }
+        return "".join(f"{key}={value}\n" for key, value in values.items())
+
+    def _json_dump(self, value: dict[str, Any]) -> str:
+        return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+    def _normalize_secrets(self, secrets: list[MtProxyManagedSecret]) -> list[MtProxyManagedSecret]:
+        seen: set[str] = set()
+        result: list[MtProxyManagedSecret] = []
+        for item in sorted(secrets, key=lambda value: (value.fingerprint, value.secret)):
+            self._validate_secret(item.secret)
+            if item.fingerprint in seen:
+                continue
+            seen.add(item.fingerprint)
+            result.append(item)
+        return result
+
+    def _same_secret_set(
+        self,
+        left: list[MtProxyManagedSecret],
+        right: list[MtProxyManagedSecret],
+    ) -> bool:
+        left_pairs = {(item.fingerprint, item.secret, item.owner_user_id, item.access_id) for item in left}
+        right_pairs = {(item.fingerprint, item.secret, item.owner_user_id, item.access_id) for item in right}
+        return left_pairs == right_pairs
+
+    def _secret_dict(self, item: MtProxyManagedSecret) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "secret": item.secret,
+            "fingerprint": item.fingerprint,
+        }
+        if item.owner_user_id is not None:
+            data["owner_user_id"] = item.owner_user_id
+        if item.access_id is not None:
+            data["access_id"] = item.access_id
+        return data
+
+    def _validate_secret(self, secret: str) -> None:
+        if len(secret) != 32:
+            raise MtProxyError("MTProto secret must be 32 hex characters")
+        try:
+            int(secret, 16)
+        except ValueError as exc:
+            raise MtProxyError("MTProto secret must be hex") from exc
+
+    def _redact(self, text: str, secrets: list[MtProxyManagedSecret]) -> str:
+        redacted = text
+        for item in secrets:
+            redacted = redacted.replace(item.secret, "***")
+        return redacted
+
+    def _backup_dir(self, backup_id: str) -> Path:
+        return self.managed_secrets_path.parent / "vpnbot-backups" / backup_id
+
+    def _cleanup_old_backups(self) -> None:
+        root = self.managed_secrets_path.parent / "vpnbot-backups"
+        if self.keep_last_backups <= 0 or not root.exists():
+            return
+        backups = sorted((path for path in root.iterdir() if path.is_dir()), key=lambda path: path.stat().st_mtime, reverse=True)
+        for path in backups[self.keep_last_backups :]:
+            shutil.rmtree(path, ignore_errors=True)
+
+    def _atomic_write_text(self, target: Path, content: str, *, mode: int) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = target.with_name(f".{target.name}.{time.time_ns()}.{secrets_module.token_hex(4)}.tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        fd = os.open(str(tmp_path), flags, mode)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                file.write(content)
+                file.flush()
+                os.fsync(file.fileno())
+            os.chmod(tmp_path, mode)
+            os.replace(tmp_path, target)
+            self._fsync_parent(target)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def _fsync_parent(self, target: Path) -> None:
+        if os.name == "nt":
+            return
+        fd = os.open(str(target.parent), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _chmod_file(self, path: Path, *, executable: bool = False) -> None:
+        if os.name != "posix":
+            return
+        try:
+            path.chmod(0o700 if executable else 0o600)
+        except OSError:
+            pass
+
+    def _chmod_dir(self, path: Path) -> None:
+        if os.name != "posix":
+            return
+        try:
+            path.chmod(0o700)
+        except OSError:
+            pass
+
+    def _optional_int(self, value: object) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from models.enums import AccessRequestStatus, ProxyStatus, UserRole, VpnKeyStatus, VpnKeyType
+from models.enums import AccessRequestStatus, ProxyAccessStatus, ProxyAccessType, ProxyStatus, UserRole, VpnKeyStatus, VpnKeyType
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +95,7 @@ class VpnKeyCreateResult:
 @dataclass(frozen=True, slots=True)
 class KeyOperationError:
     key_id: int
-    key_type: VpnKeyType
+    key_type: VpnKeyType | ProxyAccessType
     error: str
 
 
@@ -104,6 +104,7 @@ class BlockUserResult:
     user: User
     revoked_key_ids: tuple[int, ...]
     errors: tuple[KeyOperationError, ...]
+    revoked_proxy_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +129,65 @@ class ProxyEntry:
     status: ProxyStatus
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyAccess:
+    id: int
+    owner_user_id: int
+    username: str | None
+    access_type: ProxyAccessType
+    status: ProxyAccessStatus
+    payload: dict[str, object]
+    public_payload: dict[str, object]
+    created_at: str
+    updated_at: str
+    last_shown_at: str | None
+    revoked_at: str | None
+    deleted_at: str | None
+    created_by: int
+    revoked_by: int | None
+    deleted_by: int | None
+    reason: str | None
+    error: str | None
+    secret_fingerprint: str | None = None
+    apply_generation: int = 0
+    activated_at: str | None = None
+    last_apply_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyLifecycleStats:
+    socks5_issued: int
+    socks5_active: int
+    socks5_revoked: int
+    mtproto_issued: int
+    mtproto_active: int
+    mtproto_deactivated: int
+    mtproto_managed_issued: int = 0
+    mtproto_managed_active: int = 0
+    mtproto_managed_revoked: int = 0
+    mtproto_legacy_static: int = 0
+    mtproto_apply_failed: int = 0
+    mtproto_revoke_failed: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyServiceStatus:
+    socks5_enabled: bool
+    socks5_host: str
+    socks5_port: int | None
+    socks5_public_name: str
+    socks5_service_name: str
+    mtproto_enabled: bool
+    mtproto_host: str
+    mtproto_port: int
+    mtproto_public_name: str
+    mtproto_stats_url_configured: bool
+    mtproto_mode: str = "static"
+    mtproto_service_name: str = "mtproxy"
+    mtproto_systemd_active: bool | None = None
+    mtproto_port_listening: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
