@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -230,6 +231,18 @@ class MtProxyAdapter:
         return result.ok and result.stdout.strip() == "active"
 
     async def check_mtproxy_listening(self) -> bool:
+        deadline = time.monotonic() + self.apply_timeout_seconds
+        while True:
+            if await self._check_mtproxy_listening_once():
+                return True
+            now = time.monotonic()
+            if now >= deadline:
+                return False
+            await asyncio.sleep(min(0.25, deadline - now))
+            if time.monotonic() >= deadline:
+                return False
+
+    async def _check_mtproxy_listening_once(self) -> bool:
         result = await self.shell.run(["ss", "-tlnp"], timeout=self.apply_timeout_seconds, max_output_chars=65536)
         if not result.ok:
             return False
