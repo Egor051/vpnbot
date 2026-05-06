@@ -28,6 +28,21 @@ class _Shell:
         raise AssertionError(f"unexpected shell command: {args}")
 
 
+class _SequencedListeningShell:
+    def __init__(self, stdout: list[str]) -> None:
+        self.stdout = list(stdout)
+        self.calls: list[tuple[str, ...]] = []
+
+    async def run(self, args: list[str], **kwargs: object) -> ShellResult:
+        self.calls.append(tuple(args))
+        assert args == ["ss", "-tlnp"]
+        if self.stdout:
+            stdout = self.stdout.pop(0)
+        else:
+            stdout = ""
+        return ShellResult(tuple(args), 0, stdout, "")
+
+
 class _SystemCtl:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None]] = []
@@ -80,6 +95,10 @@ def _adapter(
 
 def _secret(value: str, access_id: int = 1) -> MtProxyManagedSecret:
     return MtProxyManagedSecret(secret=value, fingerprint=f"fp-{access_id}", owner_user_id=100 + access_id, access_id=access_id)
+
+
+def _ss_listener(port: int = 8443, process_name: str = "mtproto-proxy") -> str:
+    return f'LISTEN 0 4096 0.0.0.0:{port} 0.0.0.0:* users:(("{process_name}",pid=123,fd=7))'
 
 
 async def _init_baseline(adapter: MtProxyAdapter, systemctl: _SystemCtl | None = None) -> None:
@@ -268,8 +287,56 @@ def test_mtproxy_adapter_empty_desired_list_uses_private_runtime_placeholder(tmp
 def test_listening_check_rejects_wrong_process(tmp_path: Path) -> None:
     async def run() -> None:
         adapter = _adapter(tmp_path, shell=_Shell(process_name="nginx"))
+        adapter.apply_timeout_seconds = 0
 
         assert await adapter.check_mtproxy_listening() is False
+
+    asyncio.run(run())
+
+
+def test_listening_check_waits_for_listener_after_restart_without_rollback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> None:
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        systemctl = _SystemCtl()
+        adapter = _adapter(tmp_path, systemctl)
+        await _init_baseline(adapter, systemctl)
+        shell = _SequencedListeningShell(
+            [
+                "LISTEN 0 4096 127.0.0.1:22 0.0.0.0:*",
+                _ss_listener(),
+            ]
+        )
+        adapter.shell = shell  # type: ignore[assignment]
+
+        result = await adapter.apply_managed_secrets([_secret("b" * 32, access_id=2)])
+
+        assert result.changed is True
+        assert result.rollback_performed is False
+        assert shell.calls == [("ss", "-tlnp"), ("ss", "-tlnp")]
+        assert sleeps == [0.25]
+        assert [call for call in systemctl.calls if call == ("restart", "mtproxy")] == [("restart", "mtproxy")]
+
+    asyncio.run(run())
+
+
+def test_listening_check_returns_false_when_listener_appears_after_deadline(tmp_path: Path) -> None:
+    async def run() -> None:
+        shell = _SequencedListeningShell(
+            [
+                "LISTEN 0 4096 127.0.0.1:22 0.0.0.0:*",
+                _ss_listener(),
+            ]
+        )
+        adapter = _adapter(tmp_path, shell=shell)  # type: ignore[arg-type]
+        adapter.apply_timeout_seconds = 0
+
+        assert await adapter.check_mtproxy_listening() is False
+        assert shell.calls == [("ss", "-tlnp")]
 
     asyncio.run(run())
 
