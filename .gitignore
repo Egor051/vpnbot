@@ -263,6 +263,7 @@ config.json.bak*
 # Keep safe examples trackable
 !*.example
 !*.sample
+!deploy/mtproxy-vpnbot-managed.conf
 !docs/**/*.conf.example
 !docs/**/*.json.example
 

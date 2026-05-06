@@ -58,6 +58,24 @@ class VpnKeyStatus(StrEnum):
     FAILED = "failed"
 
 
+class ProxyAccessType(StrEnum):
+    SOCKS5 = "socks5"
+    MTPROTO = "mtproto"
+
+
+class ProxyAccessStatus(StrEnum):
+    PENDING_APPLY = "pending_apply"
+    ACTIVE = "active"
+    APPLY_FAILED = "apply_failed"
+    PENDING_REVOKE = "pending_revoke"
+    REVOKED = "revoked"
+    REVOKE_FAILED = "revoke_failed"
+    INACTIVE = "inactive"
+    PENDING_DELETE = "pending_delete"
+    DELETE_FAILED = "delete_failed"
+    DELETED = "deleted"
+
+
 class ProxyStatus(StrEnum):
     ACTIVE = "active"
     DISABLED = "disabled"

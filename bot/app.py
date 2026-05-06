@@ -12,8 +12,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from adapters.awg_config import AwgConfigAdapter
 from adapters.backup import BackupAdapter
 from adapters.clock import ClockProvider
+from adapters.dante_users import DanteUserAdapter
 from adapters.id_generator import IdGenerator
 from adapters.ip_allocator import IpAllocator
+from adapters.mtproxy import MtProxyAdapter
 from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter
@@ -23,11 +25,12 @@ from bot.middlewares.access import BlockedUserMiddleware
 from bot.rate_limit import RateLimiter
 from config.settings import Settings
 from db.database import Database
-from models.enums import AuditEntityType, VpnKeyType
+from models.enums import AuditEntityType, ProxyAccessType, VpnKeyType
 from repositories.access_requests import AccessRequestRepository
 from repositories.announcements import AnnouncementRepository
 from repositories.audit_log import AuditLogRepository
 from repositories.proxy_entries import ProxyRepository
+from repositories.proxy_accesses import ProxyAccessRepository
 from repositories.traffic_stats import TrafficStatsRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
@@ -38,6 +41,8 @@ from services.awg import AwgService
 from services.backend_health import BackendHealth
 from services.notes import NotesService
 from services.proxy import ProxyService
+from services.socks5 import Socks5Service
+from services.mtproto import MtProtoService
 from services.traffic_stats import TrafficStatsService
 from services.user_locks import UserLockManager
 from services.users import UserService
@@ -56,6 +61,8 @@ class Services:
     xray: XrayService
     awg: AwgService
     proxy: ProxyService
+    socks5: Socks5Service
+    mtproto: MtProtoService
     notes: NotesService
     vpn_keys: VpnKeyQueryService
     traffic_stats: TrafficStatsService
@@ -81,6 +88,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
     access_repo = AccessRequestRepository(db)
     announcement_repo = AnnouncementRepository(db)
     vpn_keys_repo = VpnKeyRepository(db)
+    proxy_accesses_repo = ProxyAccessRepository(db)
     proxy_repo = ProxyRepository(db)
     audit_repo = AuditLogRepository(db)
     traffic_stats_repo = TrafficStatsRepository(db)
@@ -114,6 +122,35 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         persistent_keepalive=settings.awg_persistent_keepalive,
     )
     ip_allocator = IpAllocator(vpn_keys_repo, settings.awg_network, settings.awg_server_address, awg_config=awg_adapter)
+    dante_adapter = DanteUserAdapter(
+        shell=shell,
+        login_prefix=settings.socks5_login_prefix,
+        system_user_shell=settings.socks5_system_user_shell,
+    )
+    mtproxy_adapter = (
+        MtProxyAdapter(
+            shell=shell,
+            systemctl=systemctl,
+            service_name=settings.mtproto_service_name,
+            binary_path=settings.mtproto_binary_path,
+            run_user=settings.mtproto_run_user,
+            run_group=settings.mtproto_run_group,
+            proxy_secret_path=settings.mtproto_proxy_secret_path,
+            proxy_multi_conf_path=settings.mtproto_proxy_multi_conf_path,
+            managed_secrets_path=settings.mtproto_managed_secrets_path,
+            managed_env_path=settings.mtproto_managed_env_path,
+            managed_wrapper_path=settings.mtproto_managed_wrapper_path,
+            backup_dir=settings.mtproto_backup_dir,
+            port=settings.mtproto_port,
+            internal_stats_port=settings.mtproto_internal_stats_port,
+            workers=settings.mtproto_workers,
+            apply_timeout_seconds=settings.mtproto_apply_timeout_seconds,
+            rollback_on_apply_failure=settings.mtproto_rollback_on_apply_failure,
+            keep_last_backups=settings.mtproto_keep_last_backups,
+        )
+        if settings.mtproto_mode == "managed"
+        else None
+    )
 
     xray_service = XrayService(
         vpn_keys=vpn_keys_repo,
@@ -145,11 +182,31 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
             VpnKeyType.AWG: awg_service.revoke_awg_key,
         },
     )
-    proxy_service = ProxyService(
-        proxies=proxy_repo,
+    proxy_service = ProxyService(accesses=proxy_accesses_repo, users=user_service, settings=settings)
+    socks5_service = Socks5Service(
+        accesses=proxy_accesses_repo,
+        users=user_service,
+        adapter=dante_adapter,
+        settings=settings,
+        clock=clock,
+        audit=audit_service,
+        user_locks=user_locks,
+    )
+    mtproto_service = MtProtoService(
+        accesses=proxy_accesses_repo,
         users=user_service,
         settings=settings,
+        clock=clock,
         audit=audit_service,
+        adapter=mtproxy_adapter,
+        user_locks=user_locks,
+    )
+    user_service.attach_proxy_access_management(
+        proxy_accesses_repo,
+        {
+            ProxyAccessType.SOCKS5: socks5_service.revoke_socks5_proxy,
+            ProxyAccessType.MTPROTO: mtproto_service.revoke_mtproto_proxy,
+        },
     )
     notes_service = NotesService(
         vpn_keys=vpn_keys_repo,
@@ -184,6 +241,8 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         xray=xray_service,
         awg=awg_service,
         proxy=proxy_service,
+        socks5=socks5_service,
+        mtproto=mtproto_service,
         notes=notes_service,
         vpn_keys=vpn_key_service,
         traffic_stats=traffic_stats_service,
@@ -219,21 +278,32 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
 async def _startup_reconcile_keys(services: Services) -> None:
     xray_summary = await _safe_startup_reconcile("Xray", services.xray.startup_reconcile)
     awg_summary = await _safe_startup_reconcile("AWG", services.awg.startup_reconcile)
+    mtproto_reconcile = getattr(getattr(services, "mtproto", None), "reconcile_mtproto_state", None)
+    mtproto_summary = (
+        await _safe_startup_reconcile("MTProto", mtproto_reconcile)
+        if mtproto_reconcile is not None
+        else {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "failed": 0}
+    )
     backend_health = getattr(services, "backend_health", None)
     if backend_health is not None:
         if xray_summary.get("failed", 0):
             backend_health.mark_degraded(VpnKeyType.XRAY, "startup reconciliation failed")
         if awg_summary.get("failed", 0):
             backend_health.mark_degraded(VpnKeyType.AWG, "startup reconciliation failed")
-    logger.info("Startup VPN key reconciliation: xray=%s awg=%s", xray_summary, awg_summary)
-    if xray_summary["checked"] or awg_summary["checked"]:
+    logger.info(
+        "Startup access reconciliation: xray=%s awg=%s mtproto=%s",
+        xray_summary,
+        awg_summary,
+        mtproto_summary,
+    )
+    if xray_summary["checked"] or awg_summary["checked"] or mtproto_summary["checked"]:
         try:
             await services.audit.write(
                 actor_user_id=None,
                 action="startup_reconciliation_completed",
                 entity_type=AuditEntityType.SYSTEM,
                 entity_id=None,
-                details={"xray": xray_summary, "awg": awg_summary},
+                details={"xray": xray_summary, "awg": awg_summary, "mtproto": mtproto_summary},
             )
         except Exception:
             logger.warning("Startup VPN key reconciliation completed, but audit write failed", exc_info=True)

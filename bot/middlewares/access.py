@@ -51,8 +51,13 @@ class BlockedUserMiddleware(BaseMiddleware):
 
 
 def _is_start_command(message: Message) -> bool:
-    text = message.text or ""
-    first = text.split(maxsplit=1)[0]
+    text = message.text
+    if text is None:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    first = stripped.split(maxsplit=1)[0]
     command, _, _bot_username = first.partition("@")
     return command == "/start"
 

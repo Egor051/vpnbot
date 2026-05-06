@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -11,8 +12,22 @@ from typing import Any, AsyncIterator
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 10
 logger = logging.getLogger(__name__)
+_ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
+
+
+def _proxy_access_default_expr(column: str) -> str:
+    defaults = {
+        "secret_fingerprint": "NULL AS secret_fingerprint",
+        "apply_generation": "0 AS apply_generation",
+        "activated_at": "NULL AS activated_at",
+        "last_apply_at": "NULL AS last_apply_at",
+    }
+    try:
+        return defaults[column]
+    except KeyError as exc:
+        raise RuntimeError(f"Unsupported proxy_accesses migration column: {column}") from exc
 
 
 def _normalize_synchronous(value: str) -> str:
@@ -172,6 +187,18 @@ class Database:
         if version < 7:
             await self._create_announcement_tables()
             await self._set_schema_version(7)
+            version = 7
+        if version < 8:
+            await self._create_proxy_access_tables()
+            await self._set_schema_version(8)
+            version = 8
+        if version < 9:
+            await self._migrate_proxy_accesses_v9()
+            await self._set_schema_version(9)
+            version = 9
+        if version < 10:
+            await self._create_proxy_access_live_unique_index()
+            await self._set_schema_version(10)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -215,6 +242,132 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_announcement_deliveries_status "
             "ON announcement_deliveries(announcement_id, status, user_id)"
         )
+
+    async def _create_proxy_access_tables(self) -> None:
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS proxy_accesses (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              owner_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+              username TEXT,
+              access_type TEXT NOT NULL CHECK(access_type IN ('socks5','mtproto')),
+              status TEXT NOT NULL CHECK(status IN (
+                'pending_apply','active','apply_failed','pending_revoke','revoked','revoke_failed','inactive',
+                'pending_delete','delete_failed','deleted'
+              )),
+              secret_fingerprint TEXT,
+              apply_generation INTEGER NOT NULL DEFAULT 0,
+              payload_json TEXT NOT NULL,
+              public_payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              activated_at TEXT,
+              last_apply_at TEXT,
+              last_shown_at TEXT,
+              revoked_at TEXT,
+              deleted_at TEXT,
+              created_by INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE RESTRICT,
+              revoked_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+              deleted_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+              reason TEXT,
+              error TEXT
+            )
+            """
+        )
+        await self._create_proxy_access_indexes()
+
+    async def _create_proxy_access_indexes(self) -> None:
+        await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner ON proxy_accesses(owner_user_id)")
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner_type_status "
+            "ON proxy_accesses(owner_user_id, access_type, status)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_proxy_accesses_status_type "
+            "ON proxy_accesses(status, access_type)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_proxy_accesses_login "
+            "ON proxy_accesses(json_extract(payload_json, '$.login')) WHERE access_type = 'socks5'"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_proxy_accesses_mtproto_fingerprint "
+            "ON proxy_accesses(secret_fingerprint) "
+            "WHERE access_type = 'mtproto' AND secret_fingerprint IS NOT NULL"
+        )
+
+    async def _create_proxy_access_live_unique_index(self) -> None:
+        await self._validate_proxy_live_duplicates()
+        await self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_accesses_one_live_per_user_type
+            ON proxy_accesses(owner_user_id, access_type)
+            WHERE status IN ('pending_apply','active','pending_revoke')
+            """
+        )
+
+    async def _migrate_proxy_accesses_v9(self) -> None:
+        table = await self.conn.execute_fetchone(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'proxy_accesses'"
+        )
+        if table is None:
+            await self._create_proxy_access_tables()
+            return
+        sql = str(table["sql"] or "")
+        columns = await self._table_columns("proxy_accesses")
+        required_columns = {"secret_fingerprint", "apply_generation", "activated_at", "last_apply_at"}
+        if required_columns.issubset(columns) and "revoke_failed" in sql:
+            await self._create_proxy_access_indexes()
+            return
+
+        await self.conn.execute("DROP INDEX IF EXISTS idx_proxy_accesses_owner")
+        await self.conn.execute("DROP INDEX IF EXISTS idx_proxy_accesses_owner_type_status")
+        await self.conn.execute("DROP INDEX IF EXISTS idx_proxy_accesses_status_type")
+        await self.conn.execute("DROP INDEX IF EXISTS idx_proxy_accesses_login")
+        await self.conn.execute("DROP INDEX IF EXISTS idx_proxy_accesses_mtproto_fingerprint")
+        await self.conn.execute("ALTER TABLE proxy_accesses RENAME TO proxy_accesses_v8")
+        await self._create_proxy_access_tables()
+
+        target_columns = [
+            "id",
+            "owner_user_id",
+            "username",
+            "access_type",
+            "status",
+            "secret_fingerprint",
+            "apply_generation",
+            "payload_json",
+            "public_payload_json",
+            "created_at",
+            "updated_at",
+            "activated_at",
+            "last_apply_at",
+            "last_shown_at",
+            "revoked_at",
+            "deleted_at",
+            "created_by",
+            "revoked_by",
+            "deleted_by",
+            "reason",
+            "error",
+        ]
+        source_expressions = [
+            column if column in columns else _proxy_access_default_expr(column) for column in target_columns
+        ]
+        await self.conn.execute(
+            f"""
+            INSERT INTO proxy_accesses ({",".join(target_columns)})
+            SELECT {",".join(source_expressions)}
+            FROM proxy_accesses_v8
+            """
+        )
+        await self.conn.execute("DROP TABLE proxy_accesses_v8")
+        await self._create_proxy_access_indexes()
+
+    async def _table_columns(self, table_name: str) -> set[str]:
+        cursor = await self.conn.execute(f"PRAGMA table_info({table_name})")
+        rows = await cursor.fetchall()
+        return {str(row["name"]) for row in rows}
 
     async def _schema_version(self) -> int:
         await self.conn.execute(
@@ -272,6 +425,10 @@ class Database:
             ("vpn_keys", "created_by", False),
             ("vpn_keys", "revoked_by", True),
             ("vpn_keys", "deleted_by", True),
+            ("proxy_accesses", "owner_user_id", False),
+            ("proxy_accesses", "created_by", False),
+            ("proxy_accesses", "revoked_by", True),
+            ("proxy_accesses", "deleted_by", True),
         )
         for table, column, nullable in checks:
             null_filter = f"{table}.{column} IS NOT NULL AND " if nullable else ""
@@ -355,6 +512,23 @@ class Database:
             ),
             ("proxy_entries", "proxy_type", ("socks5", "socks4", "http", "https")),
             ("proxy_entries", "status", ("active", "disabled")),
+            ("proxy_accesses", "access_type", ("socks5", "mtproto")),
+            (
+                "proxy_accesses",
+                "status",
+                (
+                    "pending_apply",
+                    "active",
+                    "apply_failed",
+                    "pending_revoke",
+                    "revoked",
+                    "revoke_failed",
+                    "inactive",
+                    "pending_delete",
+                    "delete_failed",
+                    "deleted",
+                ),
+            ),
             ("announcement_batches", "status", ("pending", "sending", "completed", "failed", "cancelled")),
             ("announcement_deliveries", "status", ("pending", "sent", "failed", "skipped")),
         )
@@ -394,6 +568,25 @@ class Database:
                 "Остановите запуск, сделайте backup SQLite DB и вручную разберите конфликт перед миграцией."
             )
 
+    async def _validate_proxy_live_duplicates(self) -> None:
+        cursor = await self.conn.execute(
+            """
+            SELECT owner_user_id, access_type, COUNT(*) AS cnt
+            FROM proxy_accesses
+            WHERE status IN ('pending_apply','active','pending_revoke')
+            GROUP BY owner_user_id, access_type
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
+        )
+        row = await cursor.fetchone()
+        if row is not None:
+            raise RuntimeError(
+                "Найдены дубли live proxy_accesses перед созданием unique index: "
+                f"owner_user_id={row['owner_user_id']} access_type={row['access_type']} count={row['cnt']}. "
+                "Остановите запуск, сделайте backup SQLite DB и вручную разберите конфликт перед миграцией."
+            )
+
     async def commit(self) -> None:
         current_task = asyncio.current_task()
         if self._transaction_owner is current_task and self._transaction_depth > 0:
@@ -429,6 +622,7 @@ class Database:
             raise RuntimeError("Database transaction requires an asyncio task")
 
         outermost = self._transaction_owner is not current_task
+        context_token = None
         if outermost:
             if self._implicit_write_owner is current_task:
                 raise RuntimeError("Нельзя открыть явную транзакцию после записи без commit/rollback")
@@ -437,6 +631,7 @@ class Database:
                 self._transaction_owner = current_task
                 self._transaction_depth = 0
                 await self._raw_conn().execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+                context_token = _ACTIVE_TRANSACTION_DB.set(self)
             except Exception:
                 self._transaction_owner = None
                 self._transaction_depth = 0
@@ -451,6 +646,8 @@ class Database:
                 try:
                     await self._raw_conn().rollback()
                 finally:
+                    if context_token is not None:
+                        _ACTIVE_TRANSACTION_DB.reset(context_token)
                     self._transaction_owner = None
                     self._transaction_lock.release()
             raise
@@ -460,6 +657,8 @@ class Database:
                 try:
                     await self._raw_conn().commit()
                 finally:
+                    if context_token is not None:
+                        _ACTIVE_TRANSACTION_DB.reset(context_token)
                     self._transaction_owner = None
                     self._transaction_lock.release()
 
@@ -469,6 +668,8 @@ class Database:
             raise RuntimeError("Database operation requires an asyncio task")
         is_write = _is_write_statement(sql) if write is None else write
         if self._transaction_owner is current_task:
+            return False
+        if _ACTIVE_TRANSACTION_DB.get() is self and not is_write:
             return False
         if self._implicit_write_owner is current_task:
             if is_write:

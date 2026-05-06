@@ -359,7 +359,7 @@ def test_db_v7_prevents_two_pending_requests_and_tolerates_corrupted_json(tmp_pa
         await db.connect()
         try:
             await db.bootstrap()
-            assert CURRENT_SCHEMA_VERSION == 7
+            assert CURRENT_SCHEMA_VERSION == 10
             users = UserRepository(db)
             profile = TelegramUserProfile(telegram_user_id=100, username="user", first_name="User")
             await users.upsert_profile(profile, UserRole.PENDING_USER, "now")

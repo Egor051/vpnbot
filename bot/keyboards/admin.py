@@ -34,6 +34,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Заявки на доступ", callback_data="admin:reqs")],
             [InlineKeyboardButton(text="Пользователи", callback_data="admin:users")],
             [InlineKeyboardButton(text="Статистика ключей", callback_data="admin:stats")],
+            [InlineKeyboardButton(text="Статус прокси", callback_data="admin:proxy")],
             [InlineKeyboardButton(text="Логи действий", callback_data="admin:audit")],
             [InlineKeyboardButton(text="Выдать ключ пользователю", callback_data="admin:issue")],
             [InlineKeyboardButton(text="Объявление", callback_data="admin:announce")],

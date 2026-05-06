@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+
+
+ENV_PATH = os.environ.get("MTPROTO_MANAGED_ENV_PATH", "/etc/mtproxy/vpnbot/mtproxy.env")
+
+
+def read_env(path: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    with open(path, "r", encoding="utf-8") as file:
+        for raw_line in file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            result[key] = value
+    return result
+
+
+def main() -> None:
+    env = read_env(ENV_PATH)
+    with open(env["MTPROTO_MANAGED_SECRETS_PATH"], "r", encoding="utf-8") as file:
+        document = json.load(file)
+    runtime_items = document.get("runtime_secrets") or document.get("secrets") or []
+    args = [
+        env["MTPROTO_BINARY_PATH"],
+        "-u",
+        env["MTPROTO_RUN_USER"],
+        "-p",
+        env["MTPROTO_INTERNAL_STATS_PORT"],
+        "-H",
+        env["MTPROTO_PORT"],
+    ]
+    for item in runtime_items:
+        secret = str(item.get("secret") or "")
+        if secret:
+            args.extend(["-S", secret])
+    args.extend(
+        [
+            "--aes-pwd",
+            env["MTPROTO_PROXY_SECRET_PATH"],
+            env["MTPROTO_PROXY_MULTI_CONF_PATH"],
+            "-M",
+            env["MTPROTO_WORKERS"],
+        ]
+    )
+    os.execv(args[0], args)
+
+
+if __name__ == "__main__":
+    main()
