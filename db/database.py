@@ -12,7 +12,7 @@ from typing import Any, AsyncIterator
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -195,6 +195,10 @@ class Database:
         if version < 9:
             await self._migrate_proxy_accesses_v9()
             await self._set_schema_version(9)
+            version = 9
+        if version < 10:
+            await self._create_proxy_access_live_unique_index()
+            await self._set_schema_version(10)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -290,6 +294,16 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_proxy_accesses_mtproto_fingerprint "
             "ON proxy_accesses(secret_fingerprint) "
             "WHERE access_type = 'mtproto' AND secret_fingerprint IS NOT NULL"
+        )
+
+    async def _create_proxy_access_live_unique_index(self) -> None:
+        await self._validate_proxy_live_duplicates()
+        await self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_accesses_one_live_per_user_type
+            ON proxy_accesses(owner_user_id, access_type)
+            WHERE status IN ('pending_apply','active','pending_revoke')
+            """
         )
 
     async def _migrate_proxy_accesses_v9(self) -> None:
@@ -551,6 +565,25 @@ class Database:
             raise RuntimeError(
                 "Найдены дубли AWG client_ip в reserved статусах: "
                 f"client_ip={row['client_ip']} count={row['cnt']}. "
+                "Остановите запуск, сделайте backup SQLite DB и вручную разберите конфликт перед миграцией."
+            )
+
+    async def _validate_proxy_live_duplicates(self) -> None:
+        cursor = await self.conn.execute(
+            """
+            SELECT owner_user_id, access_type, COUNT(*) AS cnt
+            FROM proxy_accesses
+            WHERE status IN ('pending_apply','active','pending_revoke')
+            GROUP BY owner_user_id, access_type
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
+        )
+        row = await cursor.fetchone()
+        if row is not None:
+            raise RuntimeError(
+                "Найдены дубли live proxy_accesses перед созданием unique index: "
+                f"owner_user_id={row['owner_user_id']} access_type={row['access_type']} count={row['cnt']}. "
                 "Остановите запуск, сделайте backup SQLite DB и вручную разберите конфликт перед миграцией."
             )
 

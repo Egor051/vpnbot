@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
+import sqlite3
 from dataclasses import replace
 
 from adapters.clock import ClockProvider
@@ -191,21 +192,30 @@ class MtProtoService:
                     await self._mark_shown(active, actor_user_id)
                     return self._with_current_payload(await self._get_access(existing.id))
 
+                self._managed_adapter().ensure_managed_runtime_ready()
                 secret = await self._unique_managed_secret()
                 fingerprint = mtproto_secret_fingerprint(secret)
                 payload = self._payload(secret=secret, mode="managed")
                 public_payload = self._public_payload(mode="managed")
-                access = await self.accesses.create(
-                    owner_user_id=profile.telegram_user_id,
-                    username=profile.username,
-                    access_type=ProxyAccessType.MTPROTO,
-                    status=ProxyAccessStatus.PENDING_APPLY,
-                    payload=payload,
-                    public_payload=public_payload,
-                    created_by=actor_user_id,
-                    now=self.clock.now(),
-                    secret_fingerprint=fingerprint,
-                )
+                try:
+                    access = await self.accesses.create(
+                        owner_user_id=profile.telegram_user_id,
+                        username=profile.username,
+                        access_type=ProxyAccessType.MTPROTO,
+                        status=ProxyAccessStatus.PENDING_APPLY,
+                        payload=payload,
+                        public_payload=public_payload,
+                        created_by=actor_user_id,
+                        now=self.clock.now(),
+                        secret_fingerprint=fingerprint,
+                    )
+                except sqlite3.IntegrityError as exc:
+                    existing_live = await self._live_access(profile.telegram_user_id)
+                    if existing_live is not None and existing_live.status == ProxyAccessStatus.ACTIVE:
+                        active = self._with_current_payload(existing_live)
+                        await self._mark_shown(active, actor_user_id)
+                        return self._with_current_payload(await self._get_access(existing_live.id))
+                    raise InvalidOperation("MTProto-доступ уже создаётся или отзывается") from exc
                 try:
                     desired = await self._desired_managed_secrets(extra=access)
                     result = await self._managed_adapter().apply_managed_secrets(desired)
@@ -272,6 +282,7 @@ class MtProtoService:
             access = await self._get_access(access.id)
             if access.status in {ProxyAccessStatus.REVOKED, ProxyAccessStatus.INACTIVE, ProxyAccessStatus.DELETED}:
                 return self._with_current_payload(access)
+            self._managed_adapter().ensure_managed_runtime_ready()
             await self.accesses.set_status(access.id, ProxyAccessStatus.PENDING_REVOKE, self.clock.now(), reason=reason)
             fingerprint = self._access_fingerprint(access)
             try:
@@ -341,6 +352,13 @@ class MtProtoService:
             owner_user_id,
             ProxyAccessType.MTPROTO,
             {ProxyAccessStatus.ACTIVE},
+        )
+
+    async def _live_access(self, owner_user_id: int) -> ProxyAccess | None:
+        return await self.accesses.find_user_access_by_type_statuses(
+            owner_user_id,
+            ProxyAccessType.MTPROTO,
+            {ProxyAccessStatus.ACTIVE, ProxyAccessStatus.PENDING_APPLY, ProxyAccessStatus.PENDING_REVOKE},
         )
 
     async def _active_managed_accesses(self) -> list[ProxyAccess]:
@@ -472,7 +490,12 @@ class MtProtoService:
         return "managed" if mode == "managed" else "static"
 
     def _access_secret(self, access: ProxyAccess) -> str:
-        return str(access.payload.get("secret") or self.settings.mtproto_secret or "")
+        secret = str(access.payload.get("secret") or "")
+        if secret:
+            return secret
+        if self._access_mode(access) == "static":
+            return str(self.settings.mtproto_secret or "")
+        raise InvalidOperation("MTProto access data is incomplete; contact admin")
 
     def _access_fingerprint(self, access: ProxyAccess) -> str:
         if access.secret_fingerprint:

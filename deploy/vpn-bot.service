@@ -18,7 +18,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/opt/vpn-service /run /usr/local/etc/xray /etc/amnezia/amneziawg /etc/mtproxy /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/.pwd.lock
+ReadWritePaths=/opt/vpn-service /run /usr/local/etc/xray /etc/amnezia/amneziawg /etc/mtproxy/vpnbot /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/.pwd.lock
 
 [Install]
 WantedBy=multi-user.target

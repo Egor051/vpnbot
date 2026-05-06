@@ -152,13 +152,19 @@ class _LockOnlyAdapter:
 
 
 class _MtProxyAdapter:
-    def __init__(self, *, fail_apply: bool = False) -> None:
+    def __init__(self, *, fail_apply: bool = False, ready: bool = True) -> None:
         self.current: list[MtProxyManagedSecret] = []
         self.applied: list[list[MtProxyManagedSecret]] = []
         self.fail_apply = fail_apply
+        self.ready = ready
 
     def read_current_managed_secrets(self) -> list[MtProxyManagedSecret]:
         return list(self.current)
+
+    def ensure_managed_runtime_ready(self) -> bool:
+        if not self.ready:
+            raise RuntimeError("MTProto managed runtime is not initialized; run manual setup/preflight first")
+        return False
 
     async def apply_managed_secrets(self, secrets: list[MtProxyManagedSecret]) -> MtProxyApplyResult:
         self.applied.append(list(secrets))
@@ -400,6 +406,31 @@ def test_mtproto_managed_apply_failure_marks_apply_failed(tmp_path: Path) -> Non
     asyncio.run(run())
 
 
+def test_managed_preflight_missing_baseline_blocks_issue(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            adapter = _MtProxyAdapter(ready=False)
+            service = MtProtoService(
+                accesses=repo,
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret=""),
+                clock=ClockProvider(),
+                audit=_Audit(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+            )
+
+            with pytest.raises(RuntimeError, match="managed runtime is not initialized"):
+                await service.issue_mtproto_proxy(100, TelegramUserProfile(100, "user", "User"))
+
+            assert await repo.list_by_owner(100) == []
+            assert adapter.applied == []
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_mtproto_managed_revoke_removes_only_target_secret(tmp_path: Path) -> None:
     async def run() -> None:
         db, repo = await _repo(tmp_path)
@@ -426,6 +457,71 @@ def test_mtproto_managed_revoke_removes_only_target_secret(tmp_path: Path) -> No
             assert second_after is not None and second_after.status == ProxyAccessStatus.ACTIVE
             assert [item.access_id for item in adapter.current] == [second.id]
             assert len([items for items in adapter.applied if len(items) == 1]) >= 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_mtproto_managed_missing_secret_does_not_fallback_to_static(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            service = MtProtoService(
+                accesses=repo,
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret="f" * 32),
+                clock=ClockProvider(),
+                audit=_Audit(),  # type: ignore[arg-type]
+                adapter=_MtProxyAdapter(),  # type: ignore[arg-type]
+            )
+            await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.MTPROTO,
+                status=ProxyAccessStatus.ACTIVE,
+                payload={"type": "mtproto", "mode": "managed"},
+                public_payload={"type": "mtproto", "mode": "managed"},
+                created_by=100,
+                now="now",
+            )
+
+            with pytest.raises(Exception) as exc_info:
+                await service.get_mtproto_proxy_config(100)
+
+            assert "incomplete" in str(exc_info.value)
+            assert "f" * 32 not in str(exc_info.value)
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_mtproto_static_missing_payload_secret_uses_static_secret(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            service = MtProtoService(
+                accesses=repo,
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="static", mtproto_secret="e" * 32),
+                clock=ClockProvider(),
+                audit=_Audit(),  # type: ignore[arg-type]
+            )
+            await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.MTPROTO,
+                status=ProxyAccessStatus.ACTIVE,
+                payload={"type": "mtproto", "mode": "static"},
+                public_payload={"type": "mtproto", "mode": "static"},
+                created_by=100,
+                now="now",
+            )
+
+            access = await service.get_mtproto_proxy_config(100)
+
+            assert access.payload["secret"] == "e" * 32
         finally:
             await db.close()
 
@@ -462,6 +558,8 @@ def test_proxy_lifecycle_stats_separate_managed_static_and_failures(tmp_path: Pa
     async def run() -> None:
         db, repo = await _repo(tmp_path)
         try:
+            users = UserRepository(db)
+            await users.upsert_profile(TelegramUserProfile(101, "other", "Other"), UserRole.APPROVED_USER, "now")
             await repo.create(
                 owner_user_id=100,
                 username="user",
@@ -473,7 +571,7 @@ def test_proxy_lifecycle_stats_separate_managed_static_and_failures(tmp_path: Pa
                 now="now",
             )
             await repo.create(
-                owner_user_id=100,
+                owner_user_id=101,
                 username="user",
                 access_type=ProxyAccessType.MTPROTO,
                 status=ProxyAccessStatus.ACTIVE,

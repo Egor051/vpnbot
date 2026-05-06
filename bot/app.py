@@ -139,6 +139,8 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
             proxy_multi_conf_path=settings.mtproto_proxy_multi_conf_path,
             managed_secrets_path=settings.mtproto_managed_secrets_path,
             managed_env_path=settings.mtproto_managed_env_path,
+            managed_wrapper_path=settings.mtproto_managed_wrapper_path,
+            backup_dir=settings.mtproto_backup_dir,
             port=settings.mtproto_port,
             internal_stats_port=settings.mtproto_internal_stats_port,
             workers=settings.mtproto_workers,

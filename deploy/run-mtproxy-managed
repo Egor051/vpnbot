@@ -5,7 +5,7 @@ import json
 import os
 
 
-ENV_PATH = os.environ.get("MTPROTO_MANAGED_ENV_PATH", "/etc/mtproxy/vpnbot-mtproxy.env")
+ENV_PATH = os.environ.get("MTPROTO_MANAGED_ENV_PATH", "/etc/mtproxy/vpnbot/mtproxy.env")
 
 
 def read_env(path: str) -> dict[str, str]:

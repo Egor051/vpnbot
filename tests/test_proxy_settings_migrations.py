@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -31,9 +32,11 @@ def _base_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "MTPROTO_CONFIG_DIR",
         "MTPROTO_PROXY_SECRET_PATH",
         "MTPROTO_PROXY_MULTI_CONF_PATH",
+        "MTPROTO_MANAGED_DIR",
         "MTPROTO_MANAGED_SECRETS_PATH",
         "MTPROTO_MANAGED_ENV_PATH",
         "MTPROTO_MANAGED_WRAPPER_PATH",
+        "MTPROTO_BACKUP_DIR",
         "MTPROTO_INTERNAL_STATS_PORT",
         "MTPROTO_WORKERS",
         "MTPROTO_APPLY_TIMEOUT_SECONDS",
@@ -125,6 +128,10 @@ def test_mtproto_managed_does_not_require_static_secret(monkeypatch: pytest.Monk
     assert settings.mtproto_mode == "managed"
     assert settings.mtproto_secret == ""
     assert settings.mtproto_service_name == "mtproxy"
+    assert settings.mtproto_managed_dir == Path("/etc/mtproxy/vpnbot")
+    assert settings.mtproto_managed_secrets_path == Path("/etc/mtproxy/vpnbot/managed-secrets.json")
+    assert settings.mtproto_managed_env_path == Path("/etc/mtproxy/vpnbot/mtproxy.env")
+    assert settings.mtproto_backup_dir == Path("/etc/mtproxy/vpnbot/backups")
 
 
 def test_mtproto_managed_requires_managed_paths_when_blank(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -183,7 +190,7 @@ def test_proxy_accesses_migration_from_legacy_schema_is_idempotent(tmp_path: Pat
         schema,
         flags=re.S,
     )
-    schema = re.sub(r"\nCREATE INDEX IF NOT EXISTS idx_proxy_accesses_[^;]+;", "\n", schema, flags=re.S)
+    schema = re.sub(r"\nCREATE(?: UNIQUE)? INDEX IF NOT EXISTS idx_proxy_accesses_[^;]+;", "\n", schema, flags=re.S)
     old_schema_path = tmp_path / "schema_v7.sql"
     old_schema_path.write_text(schema, encoding="utf-8")
 
@@ -195,7 +202,7 @@ def test_proxy_accesses_migration_from_legacy_schema_is_idempotent(tmp_path: Pat
             await db.bootstrap(old_schema_path)
             row = await db.conn.execute_fetchone("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             assert row is not None
-            assert int(row["value"]) == CURRENT_SCHEMA_VERSION == 9
+            assert int(row["value"]) == CURRENT_SCHEMA_VERSION == 10
             table = await db.conn.execute_fetchone(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'proxy_accesses'"
             )
@@ -212,6 +219,7 @@ def test_proxy_accesses_v9_migration_preserves_static_records_and_is_idempotent(
     old_schema = old_schema.replace("  secret_fingerprint TEXT,\n  apply_generation INTEGER NOT NULL DEFAULT 0,\n", "")
     old_schema = old_schema.replace("  activated_at TEXT,\n  last_apply_at TEXT,\n", "")
     old_schema = re.sub(r"\nCREATE INDEX IF NOT EXISTS idx_proxy_accesses_mtproto_fingerprint [^;]+;", "\n", old_schema)
+    old_schema = re.sub(r"\nCREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_accesses_one_live_per_user_type.*?;\n", "\n", old_schema, flags=re.S)
     old_schema_path = tmp_path / "schema_v8.sql"
     old_schema_path.write_text(old_schema, encoding="utf-8")
 
@@ -248,7 +256,7 @@ def test_proxy_accesses_v9_migration_preserves_static_records_and_is_idempotent(
 
             row = await db.conn.execute_fetchone("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             assert row is not None
-            assert int(row["value"]) == CURRENT_SCHEMA_VERSION == 9
+            assert int(row["value"]) == CURRENT_SCHEMA_VERSION == 10
             columns = await db.conn.execute_fetchall("PRAGMA table_info(proxy_accesses)")
             column_names = {str(item["name"]) for item in columns}
             assert {"secret_fingerprint", "apply_generation", "activated_at", "last_apply_at"} <= column_names
@@ -264,6 +272,98 @@ def test_proxy_accesses_v9_migration_preserves_static_records_and_is_idempotent(
                 VALUES (100, 'mtproto', 'revoke_failed', '{}', '{}', 'now', 'now', 1)
                 """
             )
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_proxy_access_unique_live_per_user_type(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await db.conn.execute(
+                """
+                INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
+                VALUES (1, 'admin', 'Admin', 'SUPERADMIN', 'now', 'now'),
+                       (100, 'user', 'User', 'APPROVED_USER', 'now', 'now')
+                """
+            )
+            await db.conn.execute(
+                """
+                INSERT INTO proxy_accesses (
+                  owner_user_id, access_type, status, payload_json, public_payload_json,
+                  created_at, updated_at, created_by
+                )
+                VALUES (100, 'mtproto', 'active', '{}', '{}', 'now', 'now', 1)
+                """
+            )
+            await db.commit()
+            with pytest.raises(sqlite3.IntegrityError):
+                await db.conn.execute(
+                    """
+                    INSERT INTO proxy_accesses (
+                      owner_user_id, access_type, status, payload_json, public_payload_json,
+                      created_at, updated_at, created_by
+                    )
+                    VALUES (100, 'mtproto', 'pending_apply', '{}', '{}', 'now', 'now', 1)
+                    """
+                )
+            await db.rollback()
+            await db.conn.execute(
+                """
+                INSERT INTO proxy_accesses (
+                  owner_user_id, access_type, status, payload_json, public_payload_json,
+                  created_at, updated_at, created_by
+                )
+                VALUES (100, 'socks5', 'active', '{}', '{}', 'now', 'now', 1),
+                       (100, 'mtproto', 'revoked', '{}', '{}', 'now', 'now', 1)
+                """
+            )
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_proxy_access_unique_live_migration_fails_on_existing_duplicates(tmp_path: Path) -> None:
+    old_schema = Path("db/schema.sql").read_text(encoding="utf-8")
+    old_schema = re.sub(r"\nCREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_accesses_one_live_per_user_type.*?;\n", "\n", old_schema, flags=re.S)
+    old_schema_path = tmp_path / "schema_v9_duplicate.sql"
+    old_schema_path.write_text(old_schema, encoding="utf-8")
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.conn.executescript(old_schema)
+            await db.conn.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', '9') "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            )
+            await db.conn.execute(
+                """
+                INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
+                VALUES (1, 'admin', 'Admin', 'SUPERADMIN', 'now', 'now'),
+                       (100, 'user', 'User', 'APPROVED_USER', 'now', 'now')
+                """
+            )
+            await db.conn.execute(
+                """
+                INSERT INTO proxy_accesses (
+                  owner_user_id, access_type, status, payload_json, public_payload_json,
+                  created_at, updated_at, created_by
+                )
+                VALUES (100, 'mtproto', 'active', '{}', '{}', 'now', 'now', 1),
+                       (100, 'mtproto', 'pending_revoke', '{}', '{}', 'now', 'now', 1)
+                """
+            )
+            await db.commit()
+
+            with pytest.raises(RuntimeError, match="дубли live proxy_accesses"):
+                await db.bootstrap(old_schema_path)
         finally:
             await db.close()
 

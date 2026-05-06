@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets as secrets_module
 import shutil
 import time
@@ -12,6 +13,10 @@ from typing import Any
 from adapters.errors import MtProxyApplyError, MtProxyError, MtProxyRollbackError
 from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
+
+_MANAGED_RUNTIME_NOT_INITIALIZED = (
+    "MTProto managed runtime is not initialized; run manual setup/preflight first"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +54,8 @@ class MtProxyAdapter:
         proxy_multi_conf_path: Path,
         managed_secrets_path: Path,
         managed_env_path: Path,
+        managed_wrapper_path: Path | None = None,
+        backup_dir: Path | None = None,
         port: int,
         internal_stats_port: int | None,
         workers: int,
@@ -66,6 +73,8 @@ class MtProxyAdapter:
         self.proxy_multi_conf_path = proxy_multi_conf_path
         self.managed_secrets_path = managed_secrets_path
         self.managed_env_path = managed_env_path
+        self.managed_wrapper_path = managed_wrapper_path
+        self.backup_root = backup_dir or managed_secrets_path.parent / "backups"
         self.port = port
         self.internal_stats_port = internal_stats_port
         self.workers = workers
@@ -81,6 +90,51 @@ class MtProxyAdapter:
         current = self._read_store_document()
         document = self._store_document(secrets, current)
         self._atomic_write_text(self.managed_secrets_path, self._json_dump(document), mode=0o600)
+
+    async def init_managed_runtime_baseline(self) -> MtProxyApplyResult:
+        """Create an empty managed runtime baseline and verify mtproxy can run it.
+
+        This is intended for deploy/manual setup. Normal issue/revoke requires this
+        baseline to already exist, so the first user apply always has known-good
+        files to roll back to.
+        """
+        self._ensure_wrapper_ready()
+        current = self._read_store_document()
+        generation = int(current.get("generation") or 0)
+        document = self._store_document([], current, generation=generation)
+        self._write_runtime_files(document)
+        self.ensure_managed_permissions()
+        restart = await self.restart_mtproxy()
+        if not restart.ok:
+            raise MtProxyApplyError("MTProxy baseline restart failed")
+        if not await self.check_mtproxy_active():
+            raise MtProxyApplyError("MTProxy baseline service is not active after restart")
+        if not await self.check_mtproxy_listening():
+            raise MtProxyApplyError("MTProxy baseline port is not listening after restart")
+        return MtProxyApplyResult(changed=True, generation=generation)
+
+    def ensure_managed_runtime_ready(self) -> bool:
+        missing = [str(path) for path in self._managed_files() if not path.exists()]
+        if missing:
+            raise MtProxyApplyError(_MANAGED_RUNTIME_NOT_INITIALIZED)
+        self._ensure_wrapper_ready()
+        self._read_store_document()
+        return self.ensure_managed_permissions()
+
+    def ensure_managed_permissions(self) -> bool:
+        changed = False
+        changed = self._chmod_dir(self.managed_secrets_path.parent) or changed
+        changed = self._chmod_dir(self.backup_root) or changed
+        for target in self._managed_files():
+            if target.exists():
+                changed = self._chmod_file(target) or changed
+        if self.backup_root.exists():
+            for path in self.backup_root.rglob("*"):
+                if path.is_dir():
+                    changed = self._chmod_dir(path) or changed
+                elif path.is_file():
+                    changed = self._chmod_file(path, executable=os.access(path, os.X_OK)) or changed
+        return changed
 
     def backup_managed_files(self) -> str:
         backup_id = f"{int(time.time())}-{time.time_ns()}-{secrets_module.token_hex(4)}"
@@ -117,8 +171,7 @@ class MtProxyAdapter:
             if not target:
                 continue
             if backup_value is None:
-                target.unlink(missing_ok=True)
-                continue
+                raise MtProxyRollbackError("MTProxy backup is incomplete")
             backup_path = Path(str(backup_value))
             if not backup_path.exists():
                 raise MtProxyRollbackError("MTProxy backup file is missing")
@@ -127,6 +180,7 @@ class MtProxyAdapter:
             self._chmod_file(target, executable=os.access(backup_path, os.X_OK))
 
     async def apply_managed_secrets(self, secrets: list[MtProxyManagedSecret]) -> MtProxyApplyResult:
+        self.ensure_managed_runtime_ready()
         desired = self._normalize_secrets(secrets)
         current_document = self._read_store_document()
         current = self._document_user_secrets(current_document)
@@ -176,11 +230,22 @@ class MtProxyAdapter:
         return result.ok and result.stdout.strip() == "active"
 
     async def check_mtproxy_listening(self) -> bool:
-        result = await self.shell.run(["ss", "-tln"], timeout=self.apply_timeout_seconds, max_output_chars=65536)
+        result = await self.shell.run(["ss", "-tlnp"], timeout=self.apply_timeout_seconds, max_output_chars=65536)
         if not result.ok:
             return False
         token = f":{self.port}"
-        return any(token in line for line in result.stdout.splitlines())
+        expected_names = {"mtproto-proxy", self.binary_path.name}
+        active_without_process_info = False
+        for line in result.stdout.splitlines():
+            if token not in line or not self._line_has_listen_port(line):
+                continue
+            if any(name and name in line for name in expected_names):
+                return True
+            if "users:(" not in line:
+                active_without_process_info = True
+                continue
+            return False
+        return active_without_process_info and await self.check_mtproxy_active()
 
     async def runtime_status(self) -> MtProxyRuntimeStatus:
         active: bool | None
@@ -277,6 +342,7 @@ class MtProxyAdapter:
     def _write_runtime_files(self, document: dict[str, Any]) -> None:
         self._atomic_write_text(self.managed_secrets_path, self._json_dump(document), mode=0o600)
         self._atomic_write_text(self.managed_env_path, self._env_content(), mode=0o600)
+        self.ensure_managed_permissions()
 
     def _env_content(self) -> str:
         values = {
@@ -341,10 +407,10 @@ class MtProxyAdapter:
         return redacted
 
     def _backup_dir(self, backup_id: str) -> Path:
-        return self.managed_secrets_path.parent / "vpnbot-backups" / backup_id
+        return self.backup_root / backup_id
 
     def _cleanup_old_backups(self) -> None:
-        root = self.managed_secrets_path.parent / "vpnbot-backups"
+        root = self.backup_root
         if self.keep_last_backups <= 0 or not root.exists():
             return
         backups = sorted((path for path in root.iterdir() if path.is_dir()), key=lambda path: path.stat().st_mtime, reverse=True)
@@ -353,6 +419,7 @@ class MtProxyAdapter:
 
     def _atomic_write_text(self, target: Path, content: str, *, mode: int) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
+        self._chmod_dir(target.parent)
         tmp_path = target.with_name(f".{target.name}.{time.time_ns()}.{secrets_module.token_hex(4)}.tmp")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         fd = os.open(str(tmp_path), flags, mode)
@@ -376,21 +443,44 @@ class MtProxyAdapter:
         finally:
             os.close(fd)
 
-    def _chmod_file(self, path: Path, *, executable: bool = False) -> None:
+    def _chmod_file(self, path: Path, *, executable: bool = False) -> bool:
         if os.name != "posix":
-            return
+            return False
+        mode = 0o700 if executable else 0o600
         try:
-            path.chmod(0o700 if executable else 0o600)
+            current = path.stat().st_mode & 0o777
+            if current == mode:
+                return False
+            path.chmod(mode)
+            return True
         except OSError:
-            pass
+            return False
 
-    def _chmod_dir(self, path: Path) -> None:
+    def _chmod_dir(self, path: Path) -> bool:
         if os.name != "posix":
-            return
+            return False
         try:
+            path.mkdir(parents=True, exist_ok=True)
+            current = path.stat().st_mode & 0o777
+            if current == 0o700:
+                return False
             path.chmod(0o700)
+            return True
         except OSError:
-            pass
+            return False
+
+    def _ensure_wrapper_ready(self) -> None:
+        if self.managed_wrapper_path is None:
+            return
+        if not self.managed_wrapper_path.exists():
+            raise MtProxyApplyError(_MANAGED_RUNTIME_NOT_INITIALIZED)
+        if os.name == "posix":
+            mode = self.managed_wrapper_path.stat().st_mode
+            if mode & 0o111 == 0:
+                raise MtProxyApplyError("MTProto managed wrapper is not executable")
+
+    def _line_has_listen_port(self, line: str) -> bool:
+        return re.search(rf":{re.escape(str(self.port))}(?:\s|$)", line) is not None
 
     def _optional_int(self, value: object) -> int | None:
         if value is None:

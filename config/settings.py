@@ -219,9 +219,11 @@ class Settings:
     mtproto_config_dir: Path = Path("/etc/mtproxy")
     mtproto_proxy_secret_path: Path = Path("/etc/mtproxy/proxy-secret")
     mtproto_proxy_multi_conf_path: Path = Path("/etc/mtproxy/proxy-multi.conf")
-    mtproto_managed_secrets_path: Path = Path("/etc/mtproxy/vpnbot-managed-secrets.json")
-    mtproto_managed_env_path: Path = Path("/etc/mtproxy/vpnbot-mtproxy.env")
+    mtproto_managed_dir: Path = Path("/etc/mtproxy/vpnbot")
+    mtproto_managed_secrets_path: Path = Path("/etc/mtproxy/vpnbot/managed-secrets.json")
+    mtproto_managed_env_path: Path = Path("/etc/mtproxy/vpnbot/mtproxy.env")
     mtproto_managed_wrapper_path: Path = Path("/opt/vpn-service/scripts/run-mtproxy-managed")
+    mtproto_backup_dir: Path = Path("/etc/mtproxy/vpnbot/backups")
     mtproto_internal_stats_port: int | None = 8888
     mtproto_workers: int = 1
     mtproto_apply_timeout_seconds: int = 10
@@ -298,23 +300,27 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
     mtproto_config_dir = _optional("MTPROTO_CONFIG_DIR", "/etc/mtproxy")
     mtproto_proxy_secret_path = _optional("MTPROTO_PROXY_SECRET_PATH", "/etc/mtproxy/proxy-secret")
     mtproto_proxy_multi_conf_path = _optional("MTPROTO_PROXY_MULTI_CONF_PATH", "/etc/mtproxy/proxy-multi.conf")
+    mtproto_managed_dir = _optional("MTPROTO_MANAGED_DIR", "/etc/mtproxy/vpnbot")
     mtproto_managed_secrets_path = _optional(
         "MTPROTO_MANAGED_SECRETS_PATH",
-        "/etc/mtproxy/vpnbot-managed-secrets.json",
+        str(Path(mtproto_managed_dir) / "managed-secrets.json"),
     )
-    mtproto_managed_env_path = _optional("MTPROTO_MANAGED_ENV_PATH", "/etc/mtproxy/vpnbot-mtproxy.env")
+    mtproto_managed_env_path = _optional("MTPROTO_MANAGED_ENV_PATH", str(Path(mtproto_managed_dir) / "mtproxy.env"))
     mtproto_managed_wrapper_path = _optional(
         "MTPROTO_MANAGED_WRAPPER_PATH",
         "/opt/vpn-service/scripts/run-mtproxy-managed",
     )
+    mtproto_backup_dir = _optional("MTPROTO_BACKUP_DIR", str(Path(mtproto_managed_dir) / "backups"))
     if mtproto_enabled and mtproto_mode == "managed":
         _non_empty("MTPROTO_SERVICE_NAME", mtproto_service_name)
         _non_empty("MTPROTO_BINARY_PATH", mtproto_binary_path)
         _non_empty("MTPROTO_PROXY_SECRET_PATH", mtproto_proxy_secret_path)
         _non_empty("MTPROTO_PROXY_MULTI_CONF_PATH", mtproto_proxy_multi_conf_path)
+        _non_empty("MTPROTO_MANAGED_DIR", mtproto_managed_dir)
         _non_empty("MTPROTO_MANAGED_SECRETS_PATH", mtproto_managed_secrets_path)
         _non_empty("MTPROTO_MANAGED_ENV_PATH", mtproto_managed_env_path)
         _non_empty("MTPROTO_MANAGED_WRAPPER_PATH", mtproto_managed_wrapper_path)
+        _non_empty("MTPROTO_BACKUP_DIR", mtproto_backup_dir)
     awg_network = _ipv4_network("AWG_NETWORK", _optional("AWG_NETWORK", "10.0.0.0/24"))
     awg_server_address = _ipv4_address_in_network(
         "AWG_SERVER_ADDRESS",
@@ -401,9 +407,11 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         else Path(mtproto_config_dir),
         mtproto_proxy_secret_path=Path(mtproto_proxy_secret_path),
         mtproto_proxy_multi_conf_path=Path(mtproto_proxy_multi_conf_path),
+        mtproto_managed_dir=Path(mtproto_managed_dir),
         mtproto_managed_secrets_path=Path(mtproto_managed_secrets_path),
         mtproto_managed_env_path=Path(mtproto_managed_env_path),
         mtproto_managed_wrapper_path=Path(mtproto_managed_wrapper_path),
+        mtproto_backup_dir=Path(mtproto_backup_dir),
         mtproto_internal_stats_port=_optional_int_range("MTPROTO_INTERNAL_STATS_PORT", 1, 65535) or 8888,
         mtproto_workers=_int_range("MTPROTO_WORKERS", 1, 1, 1024),
         mtproto_apply_timeout_seconds=_int_range("MTPROTO_APPLY_TIMEOUT_SECONDS", 10, 1, 3600),

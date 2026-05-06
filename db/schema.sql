@@ -156,6 +156,9 @@ CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner_type_status ON proxy_accesse
 CREATE INDEX IF NOT EXISTS idx_proxy_accesses_status_type ON proxy_accesses(status, access_type);
 CREATE INDEX IF NOT EXISTS idx_proxy_accesses_login ON proxy_accesses(json_extract(payload_json, '$.login')) WHERE access_type = 'socks5';
 CREATE INDEX IF NOT EXISTS idx_proxy_accesses_mtproto_fingerprint ON proxy_accesses(secret_fingerprint) WHERE access_type = 'mtproto' AND secret_fingerprint IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_accesses_one_live_per_user_type
+ON proxy_accesses(owner_user_id, access_type)
+WHERE status IN ('pending_apply','active','pending_revoke');
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);
 CREATE INDEX IF NOT EXISTS idx_announcement_batches_status ON announcement_batches(status, updated_at);
