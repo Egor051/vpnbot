@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from aiogram.exceptions import TelegramBadRequest
+
 from bot.fsm.states import AdminCreateKeyStates, CreateKeyStates
 from bot.handlers.admin import (
     admin_access_decision_confirm,
@@ -599,6 +601,42 @@ def test_pending_user_cannot_open_create_menu(monkeypatch) -> None:
         callback = _Callback("keys:create", user_id=100)
         await create_key_menu(callback, SimpleNamespace(users=Users()))  # type: ignore[arg-type]
         assert callback.answers == [("Доступ ещё не одобрен. Дождитесь решения администратора.", True)]
+
+    asyncio.run(run())
+
+
+def test_create_key_menu_ignores_stale_callback_answer(monkeypatch) -> None:
+    edits: list[str] = []
+
+    async def fake_edit(message: object, text: str, **kwargs: object) -> None:
+        edits.append(text)
+
+    monkeypatch.setattr("bot.handlers.keys.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.keys.safe_edit_message_text", fake_edit)
+
+    class Users:
+        async def require_approved_or_admin(self, actor_user_id: int) -> User:
+            return User(actor_user_id, "user", "User", UserRole.APPROVED_USER, "now", "now", None)
+
+    class Callback(_Callback):
+        def __init__(self) -> None:
+            super().__init__("keys:create", user_id=100)
+            self.answer_calls = 0
+
+        async def answer(self, text: str | None = None, show_alert: bool | None = None, **kwargs: object) -> None:
+            self.answer_calls += 1
+            raise TelegramBadRequest(
+                method=SimpleNamespace(),
+                message="Bad Request: query is too old and response timeout expired or query ID is invalid",
+            )
+
+    async def run() -> None:
+        callback = Callback()
+        await create_key_menu(callback, SimpleNamespace(users=Users()))  # type: ignore[arg-type]
+
+        assert callback.answer_calls == 1
+        assert len(edits) == 1
+        assert "Выберите тип ключа:" in edits[0]
 
     asyncio.run(run())
 

@@ -48,7 +48,7 @@ async def safe_callback_answer(
     try:
         await callback.answer(text=text, show_alert=show_alert, url=url, cache_time=cache_time)
     except TelegramBadRequest as exc:
-        if _is_stale_callback_query(exc):
+        if is_stale_callback_query_error(exc):
             logger.debug("Ignoring stale Telegram callback query answer: %s", exc)
             return False
         logger.warning("Telegram callback query answer failed", exc_info=True)
@@ -157,7 +157,9 @@ def _is_edit_unavailable(exc: TelegramBadRequest) -> bool:
     )
 
 
-def _is_stale_callback_query(exc: TelegramBadRequest) -> bool:
+def is_stale_callback_query_error(exc: Exception) -> bool:
+    if not isinstance(exc, TelegramBadRequest):
+        return False
     message = str(exc).lower()
     return any(
         text in message

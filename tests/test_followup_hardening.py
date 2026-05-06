@@ -2242,6 +2242,29 @@ def test_answer_callback_error_does_not_fail_again_for_stale_callback_query() ->
     asyncio.run(run())
 
 
+def test_answer_callback_error_skips_answer_when_original_error_is_stale_callback_query() -> None:
+    class CallbackStub:
+        def __init__(self) -> None:
+            self.answer_calls = 0
+
+        async def answer(self, **kwargs: object) -> None:
+            self.answer_calls += 1
+            raise AssertionError("stale callback errors should not be answered again")
+
+    async def run() -> None:
+        callback = CallbackStub()
+        exc = TelegramBadRequest(
+            method=SimpleNamespace(),
+            message="Bad Request: query is too old and response timeout expired or query ID is invalid",
+        )
+
+        await answer_callback_error(callback, exc)  # type: ignore[arg-type]
+
+        assert callback.answer_calls == 0
+
+    asyncio.run(run())
+
+
 def test_send_awg_config_still_sends_document_when_edit_text_is_not_modified() -> None:
     class MessageStub:
         def __init__(self) -> None:
