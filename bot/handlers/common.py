@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message, User as TgUser
 
 from bot.formatters import main_menu_text
 from bot.keyboards.common import back_to_menu, faq_answer_keyboard, faq_keyboard, main_menu
-from bot.messages import safe_callback_answer, safe_edit_message_text
+from bot.messages import is_stale_callback_query_error, safe_callback_answer, safe_edit_message_text
 from bot.rate_limit import RateLimitExceeded
 from config.settings import SettingsError
 from models.dto import TelegramUserProfile
@@ -44,6 +44,9 @@ def service_error_text(exc: Exception) -> str:
 
 
 async def answer_callback_error(callback: CallbackQuery, exc: Exception) -> None:
+    if is_stale_callback_query_error(exc):
+        logger.debug("Ignoring stale callback query error while handling callback: %s", exc)
+        return
     if not isinstance(exc, (AccessDenied, InvalidOperation, NotFound, ServiceError, SettingsError, ValueError, RateLimitExceeded)):
         logger.exception("Unhandled callback error")
     await safe_callback_answer(callback, service_error_text(exc), show_alert=True)
