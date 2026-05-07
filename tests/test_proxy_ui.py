@@ -53,6 +53,50 @@ def _access(access_type: ProxyAccessType, payload: dict[str, object] | None = No
     )
 
 
+def _stats_item(
+    access_id: int,
+    access_type: ProxyAccessType,
+    status: ProxyAccessStatus,
+    *,
+    created_at: str = "2026-05-06T18:19:00+00:00",
+    updated_at: str | None = None,
+) -> ProxyAccessStatsItem:
+    if access_type == ProxyAccessType.SOCKS5:
+        return ProxyAccessStatsItem(
+            id=access_id,
+            owner_user_id=100,
+            username="user",
+            access_type=access_type,
+            status=status,
+            created_at=created_at,
+            updated_at=updated_at or created_at,
+            activated_at=created_at if status == ProxyAccessStatus.ACTIVE else None,
+            last_shown_at=None,
+            revoked_at=created_at if status == ProxyAccessStatus.REVOKED else None,
+            deleted_at=created_at if status == ProxyAccessStatus.DELETED else None,
+            host="150.251.152.243",
+            port=31337,
+            login=f"vpn_socks_100_{access_id}",
+        )
+    return ProxyAccessStatsItem(
+        id=access_id,
+        owner_user_id=100,
+        username="user",
+        access_type=access_type,
+        status=status,
+        created_at=created_at,
+        updated_at=updated_at or created_at,
+        activated_at=created_at if status == ProxyAccessStatus.ACTIVE else None,
+        last_shown_at=None,
+        revoked_at=created_at if status == ProxyAccessStatus.REVOKED else None,
+        deleted_at=created_at if status == ProxyAccessStatus.DELETED else None,
+        host="150.251.152.243",
+        port=8443,
+        mtproto_mode="managed",
+        secret_fingerprint=f"fingerprint{access_id}",
+    )
+
+
 class _Callback:
     def __init__(self, data: str) -> None:
         self.from_user = SimpleNamespace(id=100, username="user", first_name="User")
@@ -291,6 +335,61 @@ def test_user_proxy_stats_mtproto_omits_secret_and_links() -> None:
     assert "t.me/proxy" not in text
 
 
+def test_user_proxy_stats_shows_active_and_limits_apply_failed_history() -> None:
+    accesses = (
+        _stats_item(10, ProxyAccessType.SOCKS5, ProxyAccessStatus.ACTIVE),
+        _stats_item(11, ProxyAccessType.MTPROTO, ProxyAccessStatus.ACTIVE),
+        _stats_item(12, ProxyAccessType.SOCKS5, ProxyAccessStatus.REVOKED),
+        _stats_item(13, ProxyAccessType.MTPROTO, ProxyAccessStatus.DELETED),
+        _stats_item(14, ProxyAccessType.SOCKS5, ProxyAccessStatus.INACTIVE),
+        _stats_item(1, ProxyAccessType.SOCKS5, ProxyAccessStatus.APPLY_FAILED, updated_at="2026-05-06T18:11:00+00:00"),
+        _stats_item(2, ProxyAccessType.MTPROTO, ProxyAccessStatus.APPLY_FAILED, updated_at="2026-05-06T18:12:00+00:00"),
+        _stats_item(3, ProxyAccessType.SOCKS5, ProxyAccessStatus.APPLY_FAILED, updated_at="2026-05-06T18:13:00+00:00"),
+        _stats_item(4, ProxyAccessType.MTPROTO, ProxyAccessStatus.APPLY_FAILED, updated_at="2026-05-06T18:14:00+00:00"),
+        _stats_item(5, ProxyAccessType.SOCKS5, ProxyAccessStatus.APPLY_FAILED, updated_at="2026-05-06T18:15:00+00:00"),
+        _stats_item(6, ProxyAccessType.MTPROTO, ProxyAccessStatus.APPLY_FAILED, updated_at="2026-05-06T18:16:00+00:00"),
+        _stats_item(7, ProxyAccessType.SOCKS5, ProxyAccessStatus.APPLY_FAILED, updated_at="2026-05-06T18:17:00+00:00"),
+        _stats_item(8, ProxyAccessType.MTPROTO, ProxyAccessStatus.APPLY_FAILED, updated_at="2026-05-06T18:18:00+00:00"),
+    )
+
+    text = user_proxy_stats_text(ProxyUserStats(owner_user_id=100, accesses=accesses))
+
+    assert "Активные прокси" in text
+    assert "SOCKS5 #10" in text
+    assert "MTProto #11" in text
+    assert "Последние ошибки выдачи" in text
+    assert "MTProto #8" in text
+    assert "SOCKS5 #7" in text
+    assert "MTProto #6" in text
+    assert "SOCKS5 #5" not in text
+    assert "Старые неудачные попытки скрыты: 5" in text
+    assert "revoked" not in text
+    assert "deleted" not in text
+    assert "inactive" not in text
+    assert "Ещё" not in text
+
+
+def test_user_proxy_stats_does_not_show_old_apply_failed_when_no_recent_slot() -> None:
+    accesses = tuple(
+        _stats_item(
+            access_id,
+            ProxyAccessType.SOCKS5 if access_id % 2 else ProxyAccessType.MTPROTO,
+            ProxyAccessStatus.APPLY_FAILED,
+            updated_at=f"2026-05-06T18:{access_id:02d}:00+00:00",
+        )
+        for access_id in range(1, 7)
+    )
+
+    text = user_proxy_stats_text(ProxyUserStats(owner_user_id=100, accesses=accesses))
+
+    assert text.count("apply_failed") == 3
+    assert "Старые неудачные попытки скрыты: 3" in text
+    assert "#3" not in text
+    assert "#4" in text
+    assert "#5" in text
+    assert "#6" in text
+
+
 def test_admin_proxy_stats_contains_aggregates_users_and_no_raw_credentials() -> None:
     text = admin_proxy_stats_text(
         ProxyAdminStats(
@@ -349,6 +448,7 @@ def test_admin_proxy_stats_contains_aggregates_users_and_no_raw_credentials() ->
     assert "total proxy accesses: 4" in text
     assert "active SOCKS5: 1" in text
     assert "active MTProto: 1" in text
+    assert "failed total: 1" in text
     assert "users with active proxies: 1" in text
     assert "1278023784" in text
     assert "@username" in text

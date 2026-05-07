@@ -796,6 +796,53 @@ def test_proxy_user_stats_are_sanitized_and_do_not_include_password_or_secret(tm
     asyncio.run(run())
 
 
+def test_proxy_admin_stats_keeps_all_failed_records_in_aggregate_and_user_summary(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            for index, status in enumerate(
+                (
+                    ProxyAccessStatus.APPLY_FAILED,
+                    ProxyAccessStatus.REVOKE_FAILED,
+                    ProxyAccessStatus.DELETE_FAILED,
+                ),
+                start=1,
+            ):
+                await repo.create(
+                    owner_user_id=100,
+                    username="user",
+                    access_type=ProxyAccessType.SOCKS5 if index != 2 else ProxyAccessType.MTPROTO,
+                    status=status,
+                    payload={"type": "socks5", "login": f"vpn_socks_failed_{index}", "password": "secret-password"},
+                    public_payload={"type": "socks5", "login": f"vpn_socks_failed_{index}"},
+                    created_by=100,
+                    now=f"2026-05-06T20:0{index}:00+00:00",
+                )
+
+            stats = await repo.get_admin_proxy_stats(user_limit=10)
+            failed_total = sum(
+                value
+                for status_counts in stats.type_status_counts.values()
+                for status, value in status_counts.items()
+                if status
+                in {
+                    ProxyAccessStatus.APPLY_FAILED,
+                    ProxyAccessStatus.REVOKE_FAILED,
+                    ProxyAccessStatus.DELETE_FAILED,
+                }
+            )
+
+            assert stats.apply_failed == 1
+            assert failed_total == 3
+            assert stats.last_failed_at == "2026-05-06T20:03:00+00:00"
+            assert len(stats.users) == 1
+            assert stats.users[0].failed_count == 3
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_proxy_service_exposes_user_and_admin_stats_with_rbac(tmp_path: Path) -> None:
     async def run() -> None:
         db, repo = await _repo(tmp_path)
