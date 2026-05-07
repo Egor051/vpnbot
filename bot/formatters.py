@@ -312,23 +312,35 @@ def user_proxy_stats_text(stats: ProxyUserStats) -> str:
     if not stats.accesses:
         return "\n\n".join([lines[0], "У вас пока нет выданных прокси."])
 
-    type_counts: dict[ProxyAccessType, int] = {}
-    for access in stats.accesses:
-        type_counts[access.access_type] = type_counts.get(access.access_type, 0) + 1
+    active_accesses = [access for access in stats.accesses if access.status == ProxyAccessStatus.ACTIVE]
+    active_accesses.sort(key=lambda item: (_proxy_type_order(item.access_type), item.id))
+    failed_accesses = [access for access in stats.accesses if access.status == ProxyAccessStatus.APPLY_FAILED]
+    failed_accesses.sort(key=lambda item: (item.updated_at, item.created_at, item.id), reverse=True)
+    recent_failed = failed_accesses[:3]
+    hidden_failed = max(len(failed_accesses) - len(recent_failed), 0)
 
-    max_items = 8
-    for access in stats.accesses[:max_items]:
+    lines.extend(["", "<b>Активные прокси:</b>"])
+    if active_accesses:
+        for access in active_accesses:
+            lines.append("")
+            lines.extend(_proxy_stats_access_lines(access, include_id=True))
+    else:
         lines.append("")
-        lines.extend(_proxy_stats_access_lines(access, include_id=type_counts.get(access.access_type, 0) > 1))
-    hidden = len(stats.accesses) - max_items
-    if hidden > 0:
+        lines.append("Активных прокси нет.")
+
+    if recent_failed:
         lines.append("")
-        lines.append(f"Ещё {h(hidden)} записей скрыто.")
+        lines.append("<b>Последние ошибки выдачи:</b>")
+        for access in recent_failed:
+            lines.append(_proxy_stats_error_line(access))
+    if hidden_failed > 0:
+        lines.append("")
+        lines.append(f"Старые неудачные попытки скрыты: {h(hidden_failed)}.")
     lines.extend(
         [
             "",
-            "<b>Трафик</b>",
-            "• Per-user traffic accounting для SOCKS5/MTProto сейчас недоступен и не фейкуется.",
+            "<b>Трафик:</b>",
+            "Per-user traffic accounting для SOCKS5/MTProto сейчас недоступен и не фейкуется.",
         ]
     )
     return "\n".join(lines)
@@ -344,6 +356,7 @@ def admin_proxy_stats_text(stats: ProxyAdminStats) -> str:
         f"• active SOCKS5: {h(stats.active_socks5)}",
         f"• active MTProto: {h(stats.active_mtproto)}",
         f"• apply_failed: {h(stats.apply_failed)}",
+        f"• failed total: {h(_admin_failed_total(stats))}",
         f"• revoked/inactive: {h(stats.revoked)}",
         f"• deleted: {h(stats.deleted)}",
         f"• pending: {h(stats.pending)}",
@@ -461,6 +474,28 @@ def _proxy_stats_access_lines(access: ProxyAccessStatsItem, *, include_id: bool)
     return lines
 
 
+def _proxy_stats_error_line(access: ProxyAccessStatsItem) -> str:
+    time_value = access.updated_at or access.created_at
+    return (
+        f"• {h(_proxy_type_title(access.access_type))} #{h(access.id)} — "
+        f"{h(access.status.value)}, {h(_format_proxy_datetime(time_value))}"
+    )
+
+
+def _admin_failed_total(stats: ProxyAdminStats) -> int:
+    failed_statuses = {
+        ProxyAccessStatus.APPLY_FAILED,
+        ProxyAccessStatus.REVOKE_FAILED,
+        ProxyAccessStatus.DELETE_FAILED,
+    }
+    return sum(
+        value
+        for status_counts in stats.type_status_counts.values()
+        for status, value in status_counts.items()
+        if status in failed_statuses
+    )
+
+
 def _format_proxy_datetime(value: str | None) -> str:
     if not value:
         return "нет данных"
@@ -477,6 +512,14 @@ def _proxy_type_title(access_type: ProxyAccessType) -> str:
     if access_type == ProxyAccessType.SOCKS5:
         return "SOCKS5"
     return "MTProto"
+
+
+def _proxy_type_order(access_type: ProxyAccessType) -> int:
+    if access_type == ProxyAccessType.SOCKS5:
+        return 0
+    if access_type == ProxyAccessType.MTPROTO:
+        return 1
+    return 2
 
 
 def _runtime_value(value: bool | None) -> str:
