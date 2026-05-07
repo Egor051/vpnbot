@@ -211,6 +211,7 @@ __marimo__/
 
 # Python/cache
 __pycache__/
+*.pyc
 *.py[cod]
 *.pyo
 *.pyd
@@ -222,6 +223,7 @@ htmlcov/
 
 # Virtual environments
 .venv/
+.venv*/
 venv/
 env/
 ENV/
