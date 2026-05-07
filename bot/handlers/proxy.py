@@ -7,7 +7,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot.formatters import main_menu_text, proxy_access_text
+from bot.formatters import main_menu_text, proxy_access_text, user_proxy_stats_text
 from bot.fsm.states import ProxyStates
 from bot.handlers.common import answer_callback_error, answer_message_error, is_admin, profile_from_tg
 from bot.keyboards.common import main_menu
@@ -80,6 +80,24 @@ async def proxy_get_prompt(callback: CallbackQuery, state: FSMContext, services:
             callback.message,
             _confirm_text(access_type, getattr(services.settings, "mtproto_mode", "static")),
             reply_markup=proxy_confirm_keyboard(access_type, nonce),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "proxy:stats")
+async def proxy_stats(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback):
+        return
+    await safe_callback_answer(callback)
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        stats = await services.proxy.get_user_proxy_stats(callback.from_user.id)
+        await safe_edit_message_text(
+            callback.message,
+            user_proxy_stats_text(stats),
+            reply_markup=proxy_back_keyboard(),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)

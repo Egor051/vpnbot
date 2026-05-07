@@ -19,6 +19,7 @@ from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.audit import AuditService
 from services.mtproto import MtProtoService
+from services.proxy import ProxyService
 from services.socks5 import Socks5Service
 from services.user_locks import UserLockManager
 from services.users import UserService
@@ -610,6 +611,214 @@ def test_proxy_lifecycle_stats_separate_managed_static_and_failures(tmp_path: Pa
             assert stats.mtproto_managed_active == 1
             assert stats.mtproto_apply_failed == 1
             assert stats.mtproto_revoke_failed == 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_proxy_admin_stats_counts_statuses_users_and_timestamps(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.SOCKS5,
+                status=ProxyAccessStatus.ACTIVE,
+                payload={
+                    "type": "socks5",
+                    "host": "150.251.152.243",
+                    "port": 31337,
+                    "login": "vpn_socks_100_abcd",
+                    "password": "secret-password",
+                },
+                public_payload={
+                    "type": "socks5",
+                    "host": "150.251.152.243",
+                    "port": 31337,
+                    "login": "vpn_socks_100_abcd",
+                },
+                created_by=100,
+                now="2026-05-06T20:19:00+00:00",
+            )
+            await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.MTPROTO,
+                status=ProxyAccessStatus.ACTIVE,
+                payload={
+                    "type": "mtproto",
+                    "mode": "managed",
+                    "host": "150.251.152.243",
+                    "port": 8443,
+                    "secret": "0123456789abcdef0123456789abcdef",
+                    "link": "https://t.me/proxy?secret=0123456789abcdef0123456789abcdef",
+                    "fingerprint": "f3bff43850e88441",
+                },
+                public_payload={
+                    "type": "mtproto",
+                    "mode": "managed",
+                    "host": "150.251.152.243",
+                    "port": 8443,
+                },
+                created_by=100,
+                now="2026-05-06T20:20:00+00:00",
+                secret_fingerprint="f3bff43850e88441",
+            )
+            await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.SOCKS5,
+                status=ProxyAccessStatus.APPLY_FAILED,
+                payload={"type": "socks5", "login": "vpn_socks_failed", "password": "failed-password"},
+                public_payload={"type": "socks5", "login": "vpn_socks_failed"},
+                created_by=100,
+                now="2026-05-06T20:21:00+00:00",
+            )
+            await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.MTPROTO,
+                status=ProxyAccessStatus.REVOKED,
+                payload={"type": "mtproto", "mode": "static", "secret": "ffffffffffffffffffffffffffffffff"},
+                public_payload={"type": "mtproto", "mode": "static"},
+                created_by=100,
+                now="2026-05-06T20:18:00+00:00",
+            )
+            await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.SOCKS5,
+                status=ProxyAccessStatus.DELETED,
+                payload={"type": "socks5", "login": "vpn_socks_deleted", "password": "deleted-password"},
+                public_payload={"type": "socks5", "login": "vpn_socks_deleted"},
+                created_by=100,
+                now="2026-05-06T20:17:00+00:00",
+            )
+
+            stats = await repo.get_admin_proxy_stats(user_limit=10)
+            type_status = await repo.count_by_type_status()
+
+            assert stats.total_accesses == 5
+            assert stats.active_total == 2
+            assert stats.active_socks5 == 1
+            assert stats.active_mtproto == 1
+            assert stats.apply_failed == 1
+            assert stats.revoked == 1
+            assert stats.deleted == 1
+            assert stats.users_with_active_proxies == 1
+            assert stats.last_issued_at == "2026-05-06T20:21:00+00:00"
+            assert stats.last_failed_at == "2026-05-06T20:21:00+00:00"
+            assert type_status[ProxyAccessType.SOCKS5][ProxyAccessStatus.ACTIVE] == 1
+            assert type_status[ProxyAccessType.MTPROTO][ProxyAccessStatus.ACTIVE] == 1
+            assert stats.mtproto_mode_counts["managed"] == 1
+            assert stats.mtproto_mode_counts["static"] == 1
+            assert len(stats.users) == 1
+            user = stats.users[0]
+            assert user.telegram_user_id == 100
+            assert user.active_socks5_count == 1
+            assert user.active_mtproto_count == 1
+            assert user.failed_count == 1
+            assert {ref.access_type for ref in user.active_accesses} == {
+                ProxyAccessType.SOCKS5,
+                ProxyAccessType.MTPROTO,
+            }
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_proxy_user_stats_are_sanitized_and_do_not_include_password_or_secret(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.SOCKS5,
+                status=ProxyAccessStatus.ACTIVE,
+                payload={
+                    "type": "socks5",
+                    "host": "150.251.152.243",
+                    "port": 31337,
+                    "login": "vpn_socks_100_abcd",
+                    "password": "secret-password",
+                    "url": "socks5://vpn_socks_100_abcd:secret-password@150.251.152.243:31337",
+                },
+                public_payload={
+                    "type": "socks5",
+                    "host": "150.251.152.243",
+                    "port": 31337,
+                    "login": "vpn_socks_100_abcd",
+                },
+                created_by=100,
+                now="2026-05-06T20:19:00+00:00",
+            )
+            await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.MTPROTO,
+                status=ProxyAccessStatus.ACTIVE,
+                payload={
+                    "type": "mtproto",
+                    "mode": "managed",
+                    "host": "150.251.152.243",
+                    "port": 8443,
+                    "secret": "0123456789abcdef0123456789abcdef",
+                    "link": "https://t.me/proxy?secret=0123456789abcdef0123456789abcdef",
+                    "fingerprint": "f3bff43850e88441",
+                },
+                public_payload={
+                    "type": "mtproto",
+                    "mode": "managed",
+                    "host": "150.251.152.243",
+                    "port": 8443,
+                },
+                created_by=100,
+                now="2026-05-06T20:20:00+00:00",
+                secret_fingerprint="f3bff43850e88441",
+            )
+
+            stats = await repo.get_user_proxy_stats(100)
+            rendered = str(stats)
+
+            assert len(stats.accesses) == 2
+            assert "vpn_socks_100_abcd" in rendered
+            assert "f3bff43850e88441" in rendered
+            assert "secret-password" not in rendered
+            assert "0123456789abcdef0123456789abcdef" not in rendered
+            assert "t.me/proxy" not in rendered
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_proxy_service_exposes_user_and_admin_stats_with_rbac(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.SOCKS5,
+                status=ProxyAccessStatus.ACTIVE,
+                payload={"type": "socks5", "login": "vpn_socks_100_abcd", "password": "secret-password"},
+                public_payload={"type": "socks5", "login": "vpn_socks_100_abcd"},
+                created_by=100,
+                now="2026-05-06T20:19:00+00:00",
+            )
+            service = ProxyService(accesses=repo, users=_Users(), settings=_settings())  # type: ignore[arg-type]
+
+            user_stats = await service.get_user_proxy_stats(100)
+            admin_stats = await service.get_admin_proxy_stats(1)
+
+            assert len(user_stats.accesses) == 1
+            assert admin_stats.total_accesses == 1
+            assert admin_stats.runtime is not None
+            assert admin_stats.runtime.socks5_host == "150.251.152.243"
         finally:
             await db.close()
 

@@ -157,6 +157,89 @@ class ProxyAccess:
 
 
 @dataclass(frozen=True, slots=True)
+class ProxyAccessStatsItem:
+    id: int
+    owner_user_id: int
+    username: str | None
+    access_type: ProxyAccessType
+    status: ProxyAccessStatus
+    created_at: str
+    updated_at: str
+    activated_at: str | None
+    last_shown_at: str | None
+    revoked_at: str | None
+    deleted_at: str | None
+    host: str | None = None
+    port: int | None = None
+    login: str | None = None
+    mtproto_mode: str | None = None
+    mtproto_source: str | None = None
+    secret_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyUserStats:
+    owner_user_id: int
+    accesses: tuple[ProxyAccessStatsItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyActiveAccessRef:
+    id: int
+    access_type: ProxyAccessType
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyAdminUserStats:
+    telegram_user_id: int
+    username: str | None
+    active_socks5_count: int
+    active_mtproto_count: int
+    failed_count: int
+    last_proxy_issued_at: str | None
+    active_accesses: tuple[ProxyActiveAccessRef, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyRuntimeStats:
+    socks5_enabled: bool = False
+    socks5_host: str = ""
+    socks5_port: int | None = None
+    socks5_service_name: str = ""
+    socks5_systemd_active: bool | None = None
+    socks5_port_listening: bool | None = None
+    mtproto_enabled: bool = False
+    mtproto_host: str = ""
+    mtproto_port: int | None = None
+    mtproto_mode: str = "static"
+    mtproto_service_name: str = "mtproxy"
+    mtproto_systemd_active: bool | None = None
+    mtproto_port_listening: bool | None = None
+    mtproto_runtime_secret_count: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyAdminStats:
+    total_accesses: int
+    active_total: int
+    active_socks5: int
+    active_mtproto: int
+    apply_failed: int
+    revoked: int
+    deleted: int
+    pending: int
+    users_with_active_proxies: int
+    last_issued_at: str | None
+    last_failed_at: str | None
+    type_status_counts: dict[ProxyAccessType, dict[ProxyAccessStatus, int]]
+    mtproto_mode_counts: dict[str, int]
+    users: tuple[ProxyAdminUserStats, ...]
+    total_users: int
+    hidden_users: int = 0
+    runtime: ProxyRuntimeStats | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ProxyLifecycleStats:
     socks5_issued: int
     socks5_active: int
