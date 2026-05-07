@@ -7,7 +7,15 @@ from typing import Any
 from aiosqlite import Row
 
 from db.database import Database
-from models.dto import ProxyAccess, ProxyLifecycleStats
+from models.dto import (
+    ProxyAccess,
+    ProxyAccessStatsItem,
+    ProxyActiveAccessRef,
+    ProxyAdminStats,
+    ProxyAdminUserStats,
+    ProxyLifecycleStats,
+    ProxyUserStats,
+)
 from models.enums import ProxyAccessStatus, ProxyAccessType
 
 logger = logging.getLogger(__name__)
@@ -63,6 +71,89 @@ def _row_to_proxy_access(row: Row | None) -> ProxyAccess | None:
         activated_at=row["activated_at"] if "activated_at" in keys else None,
         last_apply_at=row["last_apply_at"] if "last_apply_at" in keys else None,
     )
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    result = str(value)
+    return result if result else None
+
+
+def _row_to_proxy_stats_item(row: Row | None) -> ProxyAccessStatsItem | None:
+    if row is None:
+        return None
+    return ProxyAccessStatsItem(
+        id=int(row["id"]),
+        owner_user_id=int(row["owner_user_id"]),
+        username=row["username"],
+        access_type=_enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type"),  # type: ignore[arg-type]
+        status=_enum_value(ProxyAccessStatus, row["status"], "proxy_accesses.status"),  # type: ignore[arg-type]
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        activated_at=row["activated_at"],
+        last_shown_at=row["last_shown_at"],
+        revoked_at=row["revoked_at"],
+        deleted_at=row["deleted_at"],
+        host=_optional_str(row["host"]),
+        port=_optional_int(row["port"]),
+        login=_optional_str(row["login"]),
+        mtproto_mode=_optional_str(row["mtproto_mode"]),
+        mtproto_source=_optional_str(row["mtproto_source"]),
+        secret_fingerprint=_optional_str(row["secret_fingerprint"]),
+    )
+
+
+_SANITIZED_STATS_SELECT = """
+SELECT
+  pa.id,
+  pa.owner_user_id,
+  COALESCE(u.username, pa.username) AS username,
+  pa.access_type,
+  pa.status,
+  pa.created_at,
+  pa.updated_at,
+  pa.activated_at,
+  pa.last_shown_at,
+  pa.revoked_at,
+  pa.deleted_at,
+  COALESCE(
+    json_extract(pa.public_payload_json, '$.host'),
+    json_extract(pa.payload_json, '$.host')
+  ) AS host,
+  COALESCE(
+    json_extract(pa.public_payload_json, '$.port'),
+    json_extract(pa.payload_json, '$.port')
+  ) AS port,
+  COALESCE(
+    json_extract(pa.public_payload_json, '$.login'),
+    json_extract(pa.payload_json, '$.login')
+  ) AS login,
+  COALESCE(
+    json_extract(pa.public_payload_json, '$.mode'),
+    json_extract(pa.payload_json, '$.mode')
+  ) AS mtproto_mode,
+  COALESCE(
+    json_extract(pa.public_payload_json, '$.source'),
+    json_extract(pa.payload_json, '$.source')
+  ) AS mtproto_source,
+  COALESCE(
+    pa.secret_fingerprint,
+    json_extract(pa.public_payload_json, '$.fingerprint'),
+    json_extract(pa.payload_json, '$.fingerprint')
+  ) AS secret_fingerprint
+FROM proxy_accesses pa
+LEFT JOIN users u ON u.telegram_user_id = pa.owner_user_id
+"""
 
 
 class ProxyAccessRepository:
@@ -453,3 +544,236 @@ class ProxyAccessRepository:
             mtproto_apply_failed=count(ProxyAccessType.MTPROTO, {ProxyAccessStatus.APPLY_FAILED.value}),
             mtproto_revoke_failed=count(ProxyAccessType.MTPROTO, {ProxyAccessStatus.REVOKE_FAILED.value}),
         )
+
+    async def get_user_proxy_stats(self, owner_user_id: int) -> ProxyUserStats:
+        cursor = await self.db.conn.execute(
+            _SANITIZED_STATS_SELECT
+            + """
+            WHERE pa.owner_user_id = ?
+            ORDER BY
+              CASE pa.access_type WHEN 'socks5' THEN 0 WHEN 'mtproto' THEN 1 ELSE 2 END,
+              CASE pa.status WHEN 'active' THEN 0 ELSE 1 END,
+              pa.created_at DESC,
+              pa.id DESC
+            """,
+            (owner_user_id,),
+        )
+        rows = await cursor.fetchall()
+        accesses = tuple(item for row in rows if (item := _row_to_proxy_stats_item(row)) is not None)
+        return ProxyUserStats(owner_user_id=owner_user_id, accesses=accesses)
+
+    async def list_proxy_accesses_for_admin(self, *, limit: int = 50, offset: int = 0) -> list[ProxyAccessStatsItem]:
+        cursor = await self.db.conn.execute(
+            _SANITIZED_STATS_SELECT
+            + """
+            ORDER BY pa.created_at DESC, pa.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        )
+        rows = await cursor.fetchall()
+        return [item for row in rows if (item := _row_to_proxy_stats_item(row)) is not None]
+
+    async def count_by_type_status(self) -> dict[ProxyAccessType, dict[ProxyAccessStatus, int]]:
+        cursor = await self.db.conn.execute(
+            """
+            SELECT access_type, status, COUNT(*) AS cnt
+            FROM proxy_accesses
+            GROUP BY access_type, status
+            """
+        )
+        rows = await cursor.fetchall()
+        result: dict[ProxyAccessType, dict[ProxyAccessStatus, int]] = {}
+        for row in rows:
+            access_type = _enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type")  # type: ignore[arg-type]
+            status = _enum_value(ProxyAccessStatus, row["status"], "proxy_accesses.status")  # type: ignore[arg-type]
+            result.setdefault(access_type, {})[status] = int(row["cnt"])
+        return result
+
+    async def count_users_with_active_proxies(self) -> int:
+        row = await self.db.conn.execute_fetchone(
+            """
+            SELECT COUNT(DISTINCT owner_user_id) AS cnt
+            FROM proxy_accesses
+            WHERE status = ?
+            """,
+            (ProxyAccessStatus.ACTIVE.value,),
+        )
+        return int(row["cnt"]) if row is not None else 0
+
+    async def latest_timestamps(self) -> dict[str, str | None]:
+        failed_statuses = (
+            ProxyAccessStatus.APPLY_FAILED.value,
+            ProxyAccessStatus.REVOKE_FAILED.value,
+            ProxyAccessStatus.DELETE_FAILED.value,
+        )
+        row = await self.db.conn.execute_fetchone(
+            """
+            SELECT
+              MAX(created_at) AS last_issued_at,
+              MAX(CASE WHEN status IN (?, ?, ?) THEN updated_at ELSE NULL END) AS last_failed_at
+            FROM proxy_accesses
+            """,
+            failed_statuses,
+        )
+        if row is None:
+            return {"last_issued_at": None, "last_failed_at": None}
+        return {
+            "last_issued_at": row["last_issued_at"],
+            "last_failed_at": row["last_failed_at"],
+        }
+
+    async def get_admin_proxy_stats(self, *, user_limit: int = 12, user_offset: int = 0) -> ProxyAdminStats:
+        type_status_counts = await self.count_by_type_status()
+
+        def count(access_type: ProxyAccessType | None, statuses: set[ProxyAccessStatus]) -> int:
+            total = 0
+            type_items = (
+                type_status_counts.items()
+                if access_type is None
+                else ((access_type, type_status_counts.get(access_type, {})),)
+            )
+            for _item_type, status_counts in type_items:
+                total += sum(value for status, value in status_counts.items() if status in statuses)
+            return total
+
+        total_accesses = sum(
+            value
+            for status_counts in type_status_counts.values()
+            for value in status_counts.values()
+        )
+        active_statuses = {ProxyAccessStatus.ACTIVE}
+        failed_statuses = {
+            ProxyAccessStatus.APPLY_FAILED,
+            ProxyAccessStatus.REVOKE_FAILED,
+            ProxyAccessStatus.DELETE_FAILED,
+        }
+        inactive_statuses = {ProxyAccessStatus.REVOKED, ProxyAccessStatus.INACTIVE}
+        pending_statuses = {
+            ProxyAccessStatus.PENDING_APPLY,
+            ProxyAccessStatus.PENDING_REVOKE,
+            ProxyAccessStatus.PENDING_DELETE,
+        }
+
+        timestamps = await self.latest_timestamps()
+        users_with_active = await self.count_users_with_active_proxies()
+        total_users_row = await self.db.conn.execute_fetchone(
+            "SELECT COUNT(DISTINCT owner_user_id) AS cnt FROM proxy_accesses"
+        )
+        total_users = int(total_users_row["cnt"]) if total_users_row is not None else 0
+
+        mode_cursor = await self.db.conn.execute(
+            """
+            SELECT
+              COALESCE(
+                json_extract(public_payload_json, '$.mode'),
+                json_extract(payload_json, '$.mode'),
+                'static'
+              ) AS mode,
+              COUNT(*) AS cnt
+            FROM proxy_accesses
+            WHERE access_type = ?
+            GROUP BY mode
+            """,
+            (ProxyAccessType.MTPROTO.value,),
+        )
+        mode_rows = await mode_cursor.fetchall()
+        mtproto_mode_counts = {str(row["mode"] or "static"): int(row["cnt"]) for row in mode_rows}
+
+        user_rows = await self._admin_user_rows(limit=user_limit, offset=user_offset)
+        active_refs = await self._active_refs_for_users([row.telegram_user_id for row in user_rows])
+        users = tuple(
+            ProxyAdminUserStats(
+                telegram_user_id=row.telegram_user_id,
+                username=row.username,
+                active_socks5_count=row.active_socks5_count,
+                active_mtproto_count=row.active_mtproto_count,
+                failed_count=row.failed_count,
+                last_proxy_issued_at=row.last_proxy_issued_at,
+                active_accesses=tuple(active_refs.get(row.telegram_user_id, ())),
+            )
+            for row in user_rows
+        )
+        hidden_users = max(total_users - user_offset - len(users), 0)
+
+        return ProxyAdminStats(
+            total_accesses=total_accesses,
+            active_total=count(None, active_statuses),
+            active_socks5=count(ProxyAccessType.SOCKS5, active_statuses),
+            active_mtproto=count(ProxyAccessType.MTPROTO, active_statuses),
+            apply_failed=count(None, {ProxyAccessStatus.APPLY_FAILED}),
+            revoked=count(None, inactive_statuses),
+            deleted=count(None, {ProxyAccessStatus.DELETED}),
+            pending=count(None, pending_statuses),
+            users_with_active_proxies=users_with_active,
+            last_issued_at=timestamps["last_issued_at"],
+            last_failed_at=timestamps["last_failed_at"],
+            type_status_counts=type_status_counts,
+            mtproto_mode_counts=mtproto_mode_counts,
+            users=users,
+            total_users=total_users,
+            hidden_users=hidden_users,
+        )
+
+    async def _admin_user_rows(self, *, limit: int, offset: int) -> tuple[ProxyAdminUserStats, ...]:
+        cursor = await self.db.conn.execute(
+            """
+            SELECT
+              pa.owner_user_id AS telegram_user_id,
+              COALESCE(u.username, MAX(pa.username)) AS username,
+              SUM(CASE WHEN pa.access_type = ? AND pa.status = ? THEN 1 ELSE 0 END) AS active_socks5_count,
+              SUM(CASE WHEN pa.access_type = ? AND pa.status = ? THEN 1 ELSE 0 END) AS active_mtproto_count,
+              SUM(CASE WHEN pa.status IN (?, ?, ?) THEN 1 ELSE 0 END) AS failed_count,
+              MAX(pa.created_at) AS last_proxy_issued_at
+            FROM proxy_accesses pa
+            LEFT JOIN users u ON u.telegram_user_id = pa.owner_user_id
+            GROUP BY pa.owner_user_id
+            ORDER BY last_proxy_issued_at DESC, pa.owner_user_id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (
+                ProxyAccessType.SOCKS5.value,
+                ProxyAccessStatus.ACTIVE.value,
+                ProxyAccessType.MTPROTO.value,
+                ProxyAccessStatus.ACTIVE.value,
+                ProxyAccessStatus.APPLY_FAILED.value,
+                ProxyAccessStatus.REVOKE_FAILED.value,
+                ProxyAccessStatus.DELETE_FAILED.value,
+                limit,
+                offset,
+            ),
+        )
+        rows = await cursor.fetchall()
+        return tuple(
+            ProxyAdminUserStats(
+                telegram_user_id=int(row["telegram_user_id"]),
+                username=row["username"],
+                active_socks5_count=int(row["active_socks5_count"] or 0),
+                active_mtproto_count=int(row["active_mtproto_count"] or 0),
+                failed_count=int(row["failed_count"] or 0),
+                last_proxy_issued_at=row["last_proxy_issued_at"],
+            )
+            for row in rows
+        )
+
+    async def _active_refs_for_users(self, user_ids: list[int]) -> dict[int, tuple[ProxyActiveAccessRef, ...]]:
+        if not user_ids:
+            return {}
+        placeholders = ",".join("?" for _ in user_ids)
+        cursor = await self.db.conn.execute(
+            f"""
+            SELECT owner_user_id, id, access_type
+            FROM proxy_accesses
+            WHERE status = ?
+              AND owner_user_id IN ({placeholders})
+            ORDER BY owner_user_id ASC, id ASC
+            """,
+            (ProxyAccessStatus.ACTIVE.value, *user_ids),
+        )
+        rows = await cursor.fetchall()
+        refs: dict[int, list[ProxyActiveAccessRef]] = {}
+        for row in rows:
+            user_id = int(row["owner_user_id"])
+            access_type = _enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type")  # type: ignore[arg-type]
+            refs.setdefault(user_id, []).append(ProxyActiveAccessRef(id=int(row["id"]), access_type=access_type))
+        return {user_id: tuple(items) for user_id, items in refs.items()}

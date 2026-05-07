@@ -4,16 +4,31 @@ import asyncio
 from types import SimpleNamespace
 
 from bot.formatters import (
+    admin_proxy_stats_text,
     mtproto_proxy_text,
     proxy_access_text,
     proxy_admin_status_text,
     proxy_section_separator,
     socks5_proxy_text,
+    user_proxy_stats_text,
 )
-from bot.handlers.proxy import proxy_confirm
+from bot.handlers.admin import admin_proxy_stats
+from bot.handlers.proxy import proxy_confirm, proxy_stats
+from bot.keyboards.admin import admin_panel_keyboard
 from bot.keyboards.proxy import proxy_menu_keyboard
-from models.dto import ProxyAccess, ProxyLifecycleStats, ProxyServiceStatus
+from models.dto import (
+    ProxyAccess,
+    ProxyAccessStatsItem,
+    ProxyActiveAccessRef,
+    ProxyAdminStats,
+    ProxyAdminUserStats,
+    ProxyLifecycleStats,
+    ProxyRuntimeStats,
+    ProxyServiceStatus,
+    ProxyUserStats,
+)
 from models.enums import ProxyAccessStatus, ProxyAccessType
+from services.errors import AccessDenied
 
 
 def _access(access_type: ProxyAccessType, payload: dict[str, object] | None = None) -> ProxyAccess:
@@ -88,6 +103,7 @@ def test_proxy_keyboard_no_accesses_has_get_buttons_and_no_pagination_or_revoke(
     assert buttons == [
         ("Получить SOCKS5", "proxy:get:socks5"),
         ("Получить MTProto", "proxy:get:mtproto"),
+        ("📊 Статистика прокси", "proxy:stats"),
         ("Вернуться", "proxy:back"),
     ]
     assert all("show:" not in str(data) for _text, data in buttons)
@@ -99,7 +115,19 @@ def test_proxy_keyboard_hides_disabled_or_already_issued_types() -> None:
 
     buttons = _buttons(proxy_menu_keyboard([socks5], socks5_enabled=True, mtproto_enabled=False))
 
-    assert buttons == [("Вернуться", "proxy:back")]
+    assert buttons == [("📊 Статистика прокси", "proxy:stats"), ("Вернуться", "proxy:back")]
+
+
+def test_admin_keyboard_has_proxy_stats_button() -> None:
+    buttons = _buttons(admin_panel_keyboard())
+
+    assert ("📊 Статистика прокси", "admin:proxy_stats") in buttons
+
+
+def test_proxy_keyboard_stats_button_is_above_back() -> None:
+    buttons = _buttons(proxy_menu_keyboard([], socks5_enabled=False, mtproto_enabled=False))
+
+    assert buttons[-2:] == [("📊 Статистика прокси", "proxy:stats"), ("Вернуться", "proxy:back")]
 
 
 def test_socks5_proxy_text_contains_credentials_and_url() -> None:
@@ -189,6 +217,148 @@ def test_proxy_admin_status_does_not_show_secrets_and_marks_traffic_unavailable(
     assert "статистика трафика недоступна" in text
 
 
+def test_user_proxy_stats_empty_message() -> None:
+    text = user_proxy_stats_text(ProxyUserStats(owner_user_id=100, accesses=()))
+
+    assert "У вас пока нет выданных прокси" in text
+
+
+def test_user_proxy_stats_socks5_omits_password() -> None:
+    text = user_proxy_stats_text(
+        ProxyUserStats(
+            owner_user_id=100,
+            accesses=(
+                ProxyAccessStatsItem(
+                    id=10,
+                    owner_user_id=100,
+                    username="user",
+                    access_type=ProxyAccessType.SOCKS5,
+                    status=ProxyAccessStatus.ACTIVE,
+                    created_at="2026-05-06T20:19:00+00:00",
+                    updated_at="2026-05-06T20:19:00+00:00",
+                    activated_at="2026-05-06T20:19:00+00:00",
+                    last_shown_at="2026-05-06T20:20:00+00:00",
+                    revoked_at=None,
+                    deleted_at=None,
+                    host="150.251.152.243",
+                    port=31337,
+                    login="vpn_socks_100_abcd",
+                ),
+            ),
+        )
+    )
+
+    assert "SOCKS5" in text
+    assert "active" in text
+    assert "150.251.152.243" in text
+    assert "31337" in text
+    assert "vpn_socks_100_abcd" in text
+    assert "secret-password" not in text
+    assert "Password:" not in text
+
+
+def test_user_proxy_stats_mtproto_omits_secret_and_links() -> None:
+    raw_secret = "0123456789abcdef0123456789abcdef"
+    text = user_proxy_stats_text(
+        ProxyUserStats(
+            owner_user_id=100,
+            accesses=(
+                ProxyAccessStatsItem(
+                    id=11,
+                    owner_user_id=100,
+                    username="user",
+                    access_type=ProxyAccessType.MTPROTO,
+                    status=ProxyAccessStatus.ACTIVE,
+                    created_at="2026-05-06T20:19:00+00:00",
+                    updated_at="2026-05-06T20:19:00+00:00",
+                    activated_at="2026-05-06T20:19:00+00:00",
+                    last_shown_at=None,
+                    revoked_at=None,
+                    deleted_at=None,
+                    host="150.251.152.243",
+                    port=8443,
+                    mtproto_mode="managed",
+                    secret_fingerprint="f3bff43850e88441",
+                ),
+            ),
+        )
+    )
+
+    assert "MTProto" in text
+    assert "managed" in text
+    assert "f3bff43850e88441" in text
+    assert raw_secret not in text
+    assert "t.me/proxy" not in text
+
+
+def test_admin_proxy_stats_contains_aggregates_users_and_no_raw_credentials() -> None:
+    text = admin_proxy_stats_text(
+        ProxyAdminStats(
+            total_accesses=4,
+            active_total=2,
+            active_socks5=1,
+            active_mtproto=1,
+            apply_failed=1,
+            revoked=1,
+            deleted=0,
+            pending=0,
+            users_with_active_proxies=1,
+            last_issued_at="2026-05-06T20:19:00+00:00",
+            last_failed_at="2026-05-06T20:21:00+00:00",
+            type_status_counts={
+                ProxyAccessType.SOCKS5: {
+                    ProxyAccessStatus.ACTIVE: 1,
+                    ProxyAccessStatus.APPLY_FAILED: 1,
+                },
+                ProxyAccessType.MTPROTO: {
+                    ProxyAccessStatus.ACTIVE: 1,
+                    ProxyAccessStatus.REVOKED: 1,
+                },
+            },
+            mtproto_mode_counts={"managed": 1, "static": 1},
+            users=(
+                ProxyAdminUserStats(
+                    telegram_user_id=1278023784,
+                    username="username",
+                    active_socks5_count=1,
+                    active_mtproto_count=1,
+                    failed_count=1,
+                    last_proxy_issued_at="2026-05-06T20:19:00+00:00",
+                    active_accesses=(
+                        ProxyActiveAccessRef(10, ProxyAccessType.SOCKS5),
+                        ProxyActiveAccessRef(11, ProxyAccessType.MTPROTO),
+                    ),
+                ),
+            ),
+            total_users=1,
+            runtime=ProxyRuntimeStats(
+                socks5_enabled=True,
+                socks5_host="150.251.152.243",
+                socks5_port=31337,
+                mtproto_enabled=True,
+                mtproto_host="150.251.152.243",
+                mtproto_port=8443,
+                mtproto_mode="managed",
+                mtproto_systemd_active=True,
+                mtproto_port_listening=True,
+                mtproto_runtime_secret_count=1,
+            ),
+        )
+    )
+
+    assert "total proxy accesses: 4" in text
+    assert "active SOCKS5: 1" in text
+    assert "active MTProto: 1" in text
+    assert "users with active proxies: 1" in text
+    assert "1278023784" in text
+    assert "@username" in text
+    assert "SOCKS5 #10" in text
+    assert "MTProto #11" in text
+    assert "secret-password" not in text
+    assert "0123456789abcdef0123456789abcdef" not in text
+    assert "t.me/proxy" not in text
+
+
 def test_proxy_confirm_issues_socks5_and_edits_same_message(monkeypatch) -> None:
     monkeypatch.setattr("bot.handlers.proxy.ensure_private_callback", _allow_private)
 
@@ -231,6 +401,44 @@ def test_proxy_confirm_issues_socks5_and_edits_same_message(monkeypatch) -> None
         assert socks5.calls == 1
         assert callback.message.edits
         assert "SOCKS5" in callback.message.edits[-1][0]
+
+    asyncio.run(run())
+
+
+def test_proxy_stats_callback_shows_current_user_stats(monkeypatch) -> None:
+    monkeypatch.setattr("bot.handlers.proxy.ensure_private_callback", _allow_private)
+
+    class Proxy:
+        async def get_user_proxy_stats(self, user_id: int) -> ProxyUserStats:
+            assert user_id == 100
+            return ProxyUserStats(owner_user_id=100, accesses=())
+
+    async def run() -> None:
+        callback = _Callback("proxy:stats")
+        services = SimpleNamespace(proxy=Proxy())
+        await proxy_stats(callback, services)  # type: ignore[arg-type]
+
+        assert callback.message.edits
+        assert "У вас пока нет выданных прокси" in callback.message.edits[-1][0]
+        assert _buttons(callback.message.edits[-1][1]) == [("Вернуться в Прокси", "proxy:show")]
+
+    asyncio.run(run())
+
+
+def test_admin_proxy_stats_denies_non_admin(monkeypatch) -> None:
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
+
+    class Users:
+        async def require_superadmin(self, user_id: int) -> None:
+            raise AccessDenied("Нет доступа")
+
+    async def run() -> None:
+        callback = _Callback("admin:proxy_stats")
+        services = SimpleNamespace(users=Users())
+        await admin_proxy_stats(callback, services)  # type: ignore[arg-type]
+
+        assert callback.answers[-1] == ("Нет доступа", True)
+        assert callback.message.edits == []
 
     asyncio.run(run())
 

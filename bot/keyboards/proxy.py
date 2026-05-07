@@ -18,6 +18,7 @@ def proxy_menu_keyboard(
         rows.append([InlineKeyboardButton(text="Получить SOCKS5", callback_data="proxy:get:socks5")])
     if mtproto_enabled and ProxyAccessType.MTPROTO not in active_types:
         rows.append([InlineKeyboardButton(text="Получить MTProto", callback_data="proxy:get:mtproto")])
+    rows.append([InlineKeyboardButton(text="📊 Статистика прокси", callback_data="proxy:stats")])
     rows.append([InlineKeyboardButton(text="Вернуться", callback_data="proxy:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

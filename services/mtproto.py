@@ -110,6 +110,14 @@ class MtProtoService:
             return None
         return await self.adapter.runtime_status()
 
+    async def runtime_secret_count(self) -> int | None:
+        if self.settings.mtproto_mode != "managed" or self.adapter is None:
+            return None
+        try:
+            return len(self.adapter.read_current_managed_secrets())
+        except Exception:
+            return None
+
     async def reconcile_mtproto_state(self) -> dict[str, int]:
         if not self.settings.mtproto_enabled or self.settings.mtproto_mode != "managed" or self.adapter is None:
             return {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "failed": 0}

@@ -16,6 +16,7 @@ from bot.formatters import (
     access_request_decision_confirm_text,
     access_requests_page_text,
     admin_stats_page_text,
+    admin_proxy_stats_text,
     proxy_admin_status_text,
     audit_page_text,
     block_user_confirm_text,
@@ -60,6 +61,7 @@ _announcement_confirm_locks = UserLockManager()
 ADMIN_PAGE_SIZE = 8
 ADMIN_KEYS_PAGE_SIZE = 5
 AUDIT_PAGE_SIZE = 12
+ADMIN_PROXY_USER_LIMIT = 10
 
 
 @router.message(Command("admin"))
@@ -639,6 +641,42 @@ async def admin_proxy_status(callback: CallbackQuery, services: Any) -> None:
         await safe_edit_message_text(
             callback.message,
             proxy_admin_status_text(status, stats),
+            reply_markup=_simple_nav([], "admin:panel"),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:proxy_stats")
+async def admin_proxy_stats(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback, "Обновляю статистику прокси...")
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        runtime = services.proxy.runtime_stats()
+        runtime_reader = getattr(getattr(services, "mtproto", None), "runtime_status", None)
+        if runtime_reader is not None:
+            runtime_status = await runtime_reader()
+            if runtime_status is not None:
+                runtime = replace(
+                    runtime,
+                    mtproto_systemd_active=runtime_status.systemd_active,
+                    mtproto_port_listening=runtime_status.port_listening,
+                )
+        runtime_secret_counter = getattr(getattr(services, "mtproto", None), "runtime_secret_count", None)
+        if runtime_secret_counter is not None:
+            runtime = replace(runtime, mtproto_runtime_secret_count=await runtime_secret_counter())
+        stats = await services.proxy.get_admin_proxy_stats(
+            callback.from_user.id,
+            user_limit=ADMIN_PROXY_USER_LIMIT,
+            runtime=runtime,
+        )
+        await safe_edit_message_text(
+            callback.message,
+            admin_proxy_stats_text(stats),
             reply_markup=_simple_nav([], "admin:panel"),
         )
     except Exception as exc:

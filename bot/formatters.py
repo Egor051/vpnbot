@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from aiogram.types import User as TgUser
 
 from models.dto import (
     AccessRequest,
     KeyTrafficStatsView,
+    ProxyAccessStatsItem,
+    ProxyAdminStats,
     ProxyAccess,
     ProxyEntry,
     ProxyLifecycleStats,
     ProxyServiceStatus,
+    ProxyUserStats,
     TrafficStats,
     UnblockUserWarning,
     User,
     VpnKey,
 )
-from models.enums import ProxyAccessType, UserRole, VpnKeyStatus, VpnKeyType
+from models.enums import ProxyAccessStatus, ProxyAccessType, UserRole, VpnKeyStatus, VpnKeyType
 from utils.formatting import (
     code,
     format_bytes,
@@ -300,6 +305,207 @@ def proxy_access_text(accesses: list[ProxyAccess]) -> str:
     if not parts:
         return "<b>Прокси</b>\n\nУ вас пока нет прокси-доступов."
     return proxy_section_separator().join(parts)
+
+
+def user_proxy_stats_text(stats: ProxyUserStats) -> str:
+    lines = ["<b>📊 Статистика прокси</b>"]
+    if not stats.accesses:
+        return "\n\n".join([lines[0], "У вас пока нет выданных прокси."])
+
+    type_counts: dict[ProxyAccessType, int] = {}
+    for access in stats.accesses:
+        type_counts[access.access_type] = type_counts.get(access.access_type, 0) + 1
+
+    max_items = 8
+    for access in stats.accesses[:max_items]:
+        lines.append("")
+        lines.extend(_proxy_stats_access_lines(access, include_id=type_counts.get(access.access_type, 0) > 1))
+    hidden = len(stats.accesses) - max_items
+    if hidden > 0:
+        lines.append("")
+        lines.append(f"Ещё {h(hidden)} записей скрыто.")
+    lines.extend(
+        [
+            "",
+            "<b>Трафик</b>",
+            "• Per-user traffic accounting для SOCKS5/MTProto сейчас недоступен и не фейкуется.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def admin_proxy_stats_text(stats: ProxyAdminStats) -> str:
+    lines = [
+        "<b>📊 Статистика прокси</b>",
+        "",
+        "<b>Aggregate summary</b>",
+        f"• total proxy accesses: {h(stats.total_accesses)}",
+        f"• active total: {h(stats.active_total)}",
+        f"• active SOCKS5: {h(stats.active_socks5)}",
+        f"• active MTProto: {h(stats.active_mtproto)}",
+        f"• apply_failed: {h(stats.apply_failed)}",
+        f"• revoked/inactive: {h(stats.revoked)}",
+        f"• deleted: {h(stats.deleted)}",
+        f"• pending: {h(stats.pending)}",
+        f"• users with active proxies: {h(stats.users_with_active_proxies)}",
+        f"• last issued: {h(_format_proxy_datetime(stats.last_issued_at))}",
+        f"• last failed: {h(_format_proxy_datetime(stats.last_failed_at))}",
+        "",
+        "<b>By type/status</b>",
+    ]
+    for access_type in (ProxyAccessType.SOCKS5, ProxyAccessType.MTPROTO):
+        lines.append(f"{h(_proxy_type_title(access_type))}:")
+        status_counts = stats.type_status_counts.get(access_type, {})
+        for status in _status_display_order():
+            value = status_counts.get(status, 0)
+            if value or status in {
+                ProxyAccessStatus.ACTIVE,
+                ProxyAccessStatus.APPLY_FAILED,
+                ProxyAccessStatus.REVOKED,
+                ProxyAccessStatus.DELETED,
+            }:
+                lines.append(f"• {h(status.value)}: {h(value)}")
+    if stats.mtproto_mode_counts:
+        lines.append("MTProto modes:")
+        managed = stats.mtproto_mode_counts.get("managed", 0)
+        static_shared = sum(
+            value
+            for mode, value in stats.mtproto_mode_counts.items()
+            if mode != "managed"
+        )
+        lines.append(f"• managed: {h(managed)}")
+        lines.append(f"• static/shared: {h(static_shared)}")
+
+    lines.extend(["", "<b>Runtime status</b>"])
+    runtime = stats.runtime
+    if runtime is None:
+        lines.append("Runtime status: недоступно")
+    else:
+        lines.extend(
+            [
+                "<b>SOCKS5 / Dante</b>",
+                f"• enabled: {h(_yes_no(runtime.socks5_enabled))}",
+                f"• service active: {h(_runtime_value(runtime.socks5_systemd_active))}",
+                f"• listening: {h(_runtime_value(runtime.socks5_port_listening))}",
+                f"• host: {code(runtime.socks5_host or 'не задан')}",
+                f"• port: {code(runtime.socks5_port if runtime.socks5_port is not None else 'не задан')}",
+                "<b>MTProto</b>",
+                f"• enabled: {h(_yes_no(runtime.mtproto_enabled))}",
+                f"• service active: {h(_runtime_value(runtime.mtproto_systemd_active))}",
+                f"• listening: {h(_runtime_value(runtime.mtproto_port_listening))}",
+                f"• host: {code(runtime.mtproto_host or 'не задан')}",
+                f"• port: {code(runtime.mtproto_port if runtime.mtproto_port is not None else 'не задан')}",
+                f"• mode: {h(runtime.mtproto_mode)}",
+                f"• runtime managed secrets: {h(_count_or_unavailable(runtime.mtproto_runtime_secret_count))}",
+            ]
+        )
+
+    lines.extend(["", "<b>Users</b>"])
+    if not stats.users:
+        lines.append("Пользователей с proxy_accesses нет.")
+    for row in stats.users:
+        username = format_user_display(row.telegram_user_id, row.username)
+        active = ", ".join(
+            f"{_proxy_type_title(ref.access_type)} #{ref.id}"
+            for ref in row.active_accesses
+        ) or "нет"
+        lines.extend(
+            [
+                f"👤 {code(row.telegram_user_id)} {h(username)}",
+                f"• active: {h(active)}",
+                f"• failed: {h(row.failed_count)}",
+                f"• last issued: {h(_format_proxy_datetime(row.last_proxy_issued_at))}",
+            ]
+        )
+    if stats.hidden_users > 0:
+        lines.append(f"Ещё {h(stats.hidden_users)} пользователей скрыто.")
+    lines.extend(["", "Traffic: per-user traffic accounting для SOCKS5/MTProto сейчас недоступен и не фейкуется."])
+    return "\n".join(lines)
+
+
+def _proxy_stats_access_lines(access: ProxyAccessStatsItem, *, include_id: bool) -> list[str]:
+    title = _proxy_type_title(access.access_type)
+    if include_id:
+        title = f"{title} #{access.id}"
+    lines = [
+        f"<b>{h(title)}</b>",
+        f"• Статус: {h(access.status.value)}",
+        f"• Выдан: {h(_format_proxy_datetime(access.created_at))}",
+    ]
+    if access.activated_at:
+        lines.append(f"• Активирован: {h(_format_proxy_datetime(access.activated_at))}")
+    if access.last_shown_at:
+        lines.append(f"• Последний показ: {h(_format_proxy_datetime(access.last_shown_at))}")
+    if access.revoked_at:
+        lines.append(f"• Отозван: {h(_format_proxy_datetime(access.revoked_at))}")
+    if access.deleted_at:
+        lines.append(f"• Удалён: {h(_format_proxy_datetime(access.deleted_at))}")
+    if access.access_type == ProxyAccessType.SOCKS5:
+        if access.host:
+            lines.append(f"• Host: {code(access.host)}")
+        if access.port is not None:
+            lines.append(f"• Port: {code(access.port)}")
+        if access.login:
+            lines.append(f"• Login: {code(access.login)}")
+        return lines
+    mode = access.mtproto_mode or "static"
+    lines.append(f"• Тип: {h(mode)}")
+    if access.mtproto_source:
+        lines.append(f"• Source: {h(access.mtproto_source)}")
+    if access.secret_fingerprint:
+        lines.append(f"• Fingerprint: {code(access.secret_fingerprint)}")
+    if access.host:
+        lines.append(f"• Host: {code(access.host)}")
+    if access.port is not None:
+        lines.append(f"• Port: {code(access.port)}")
+    return lines
+
+
+def _format_proxy_datetime(value: str | None) -> str:
+    if not value:
+        return "нет данных"
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return str(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _proxy_type_title(access_type: ProxyAccessType) -> str:
+    if access_type == ProxyAccessType.SOCKS5:
+        return "SOCKS5"
+    return "MTProto"
+
+
+def _runtime_value(value: bool | None) -> str:
+    if value is None:
+        return "недоступно"
+    return "yes" if value else "no"
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
+
+
+def _count_or_unavailable(value: int | None) -> str:
+    return str(value) if value is not None else "недоступно"
+
+
+def _status_display_order() -> tuple[ProxyAccessStatus, ...]:
+    return (
+        ProxyAccessStatus.PENDING_APPLY,
+        ProxyAccessStatus.ACTIVE,
+        ProxyAccessStatus.APPLY_FAILED,
+        ProxyAccessStatus.PENDING_REVOKE,
+        ProxyAccessStatus.REVOKED,
+        ProxyAccessStatus.REVOKE_FAILED,
+        ProxyAccessStatus.INACTIVE,
+        ProxyAccessStatus.PENDING_DELETE,
+        ProxyAccessStatus.DELETE_FAILED,
+        ProxyAccessStatus.DELETED,
+    )
 
 
 def proxy_admin_status_text(status: ProxyServiceStatus, stats: ProxyLifecycleStats) -> str:
