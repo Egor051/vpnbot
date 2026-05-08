@@ -1,0 +1,27 @@
+# Package 5A example only. Do not install until Package 5B helpers exist.
+# Validate any installed copy with visudo.
+#
+# The vpn-bot user may call only fixed root-owned helper entrypoints.
+# The helpers must perform all argument validation, prefix checks, secret
+# redaction, canonical path checks, and service-specific apply logic.
+
+Defaults:vpn-bot env_reset
+Defaults:vpn-bot secure_path="/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+Cmnd_Alias VPNBOT_SOCKS5 = \
+    /usr/local/sbin/vpnbot-socks5-user exists *, \
+    /usr/local/sbin/vpnbot-socks5-user create *, \
+    /usr/local/sbin/vpnbot-socks5-user set-password *, \
+    /usr/local/sbin/vpnbot-socks5-user lock *, \
+    /usr/local/sbin/vpnbot-socks5-user delete *
+
+Cmnd_Alias VPNBOT_XRAY = \
+    /usr/local/sbin/vpnbot-xray-apply *
+
+Cmnd_Alias VPNBOT_AWG = \
+    /usr/local/sbin/vpnbot-awg-apply *
+
+Cmnd_Alias VPNBOT_MTPROTO = \
+    /usr/local/sbin/vpnbot-mtproxy-apply *
+
+vpn-bot ALL=(root) NOPASSWD: VPNBOT_SOCKS5, VPNBOT_XRAY, VPNBOT_AWG, VPNBOT_MTPROTO
