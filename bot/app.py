@@ -282,9 +282,9 @@ async def _startup_reconcile_keys(services: Services) -> None:
     awg_summary = await _safe_startup_reconcile("AWG", services.awg.startup_reconcile)
     mtproto_reconcile = getattr(getattr(services, "mtproto", None), "reconcile_mtproto_state", None)
     mtproto_summary = (
-        await _safe_startup_reconcile("MTProto", mtproto_reconcile)
+        await _safe_startup_reconcile("MTProto", mtproto_reconcile, fatal_on_error=True)
         if mtproto_reconcile is not None
-        else {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "failed": 0}
+        else {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "failed": 0, "fatal": 0}
     )
     backend_health = getattr(services, "backend_health", None)
     if backend_health is not None:
@@ -292,7 +292,7 @@ async def _startup_reconcile_keys(services: Services) -> None:
             backend_health.mark_degraded(VpnKeyType.XRAY, "startup reconciliation failed")
         if awg_summary.get("failed", 0):
             backend_health.mark_degraded(VpnKeyType.AWG, "startup reconciliation failed")
-        if mtproto_summary.get("failed", 0):
+        if mtproto_summary.get("fatal", 0):
             backend_health.mark_degraded(ProxyAccessType.MTPROTO, "startup reconciliation failed")
     logger.info(
         "Startup access reconciliation: xray=%s awg=%s mtproto=%s",
@@ -313,9 +313,12 @@ async def _startup_reconcile_keys(services: Services) -> None:
             logger.warning("Startup VPN key reconciliation completed, but audit write failed", exc_info=True)
 
 
-async def _safe_startup_reconcile(name: str, reconcile: Any) -> dict[str, int]:
+async def _safe_startup_reconcile(name: str, reconcile: Any, *, fatal_on_error: bool = False) -> dict[str, int]:
     try:
         return await reconcile()
     except Exception:
         logger.warning("Startup VPN key reconciliation for %s failed; bot startup continues", name, exc_info=True)
-        return {"checked": 0, "recovered": 0, "failed": 1}
+        summary = {"checked": 0, "recovered": 0, "failed": 1}
+        if fatal_on_error:
+            summary["fatal"] = 1
+        return summary

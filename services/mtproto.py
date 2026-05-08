@@ -131,8 +131,8 @@ class MtProtoService:
 
     async def reconcile_mtproto_state(self) -> dict[str, int]:
         if not self.settings.mtproto_enabled or self.settings.mtproto_mode != "managed" or self.adapter is None:
-            return {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "recovered": 0, "failed": 0}
-        summary = {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "recovered": 0, "failed": 0}
+            return {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "recovered": 0, "failed": 0, "fatal": 0}
+        summary = {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "recovered": 0, "failed": 0, "fatal": 0}
         async with self._apply_lock:
             try:
                 self._managed_adapter().ensure_managed_runtime_ready()
@@ -187,6 +187,7 @@ class MtProtoService:
                     )
             except Exception as exc:
                 summary["failed"] += 1
+                summary["fatal"] += 1
                 self.backend_health.mark_degraded(ProxyAccessType.MTPROTO, "startup reconciliation failed")
                 logger.critical(
                     "MTProto startup reconciliation failed; backend degraded error_type=%s",
