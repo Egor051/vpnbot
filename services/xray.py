@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import re
 from urllib.parse import quote, urlencode
 
 from adapters.clock import ClockProvider
@@ -38,6 +40,10 @@ XRAY_STARTUP_RECONCILE_STATUSES = {
     VpnKeyStatus.PENDING_DELETE,
     VpnKeyStatus.DELETE_FAILED,
 }
+
+XRAY_ACTIVE_STATUSES = {VpnKeyStatus.ACTIVE}
+XRAY_ALL_STATUSES = set(VpnKeyStatus)
+XRAY_MANAGED_LABEL_RE = re.compile(r"^xray_[A-Za-z0-9]{5}$")
 
 
 class XrayService:
@@ -222,27 +228,33 @@ class XrayService:
 
     async def startup_reconcile(self) -> dict[str, int]:
         summary = {"checked": 0, "recovered": 0, "failed": 0}
-        last_id = 0
-        while True:
-            keys = await self.vpn_keys.list_by_type_statuses(
-                VpnKeyType.XRAY,
-                XRAY_STARTUP_RECONCILE_STATUSES,
-                limit=500,
-                after_id=last_id,
-            )
-            if not keys:
-                break
-            for key in keys:
-                last_id = key.id
-                summary["checked"] += 1
-                try:
-                    changed = await self._startup_reconcile_key(key)
-                    if changed:
-                        summary["recovered"] += 1
-                except Exception as exc:
-                    summary["failed"] += 1
-                    logger.warning("Не удалось восстановить Xray-ключ key_id=%s: %s", key.id, exc, exc_info=True)
-                    await self._write_startup_reconcile_failure_audit(key, exc)
+        async with self._lock:
+            last_id = 0
+            while True:
+                keys = await self.vpn_keys.list_by_type_statuses(
+                    VpnKeyType.XRAY,
+                    XRAY_STARTUP_RECONCILE_STATUSES,
+                    limit=500,
+                    after_id=last_id,
+                )
+                if not keys:
+                    break
+                for key in keys:
+                    last_id = key.id
+                    summary["checked"] += 1
+                    try:
+                        changed = await self._startup_reconcile_key(key)
+                        if changed:
+                            summary["recovered"] += 1
+                    except Exception as exc:
+                        summary["failed"] += 1
+                        logger.warning("Не удалось восстановить Xray-ключ key_id=%s: %s", key.id, exc, exc_info=True)
+                        await self._write_startup_reconcile_failure_audit(key, exc)
+
+            if summary["failed"] == 0:
+                drift_summary = await self._startup_reconcile_drift()
+                for key, value in drift_summary.items():
+                    summary[key] += value
         return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
@@ -300,6 +312,7 @@ class XrayService:
 
     async def reconcile_key_status(self, actor_user_id: int, key_id: int) -> VpnKey:
         await self.users.require_superadmin(actor_user_id)
+        self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         key = await self._get_key(key_id)
         if key.key_type != VpnKeyType.XRAY:
             raise InvalidOperation("Это не Xray-ключ")
@@ -419,6 +432,224 @@ class XrayService:
         if isinstance(result, dict):
             return bool(result.get("short_id_inserted"))
         return bool(getattr(result, "short_id_inserted", False))
+
+    async def _startup_reconcile_drift(self) -> dict[str, int]:
+        summary = {"checked": 0, "recovered": 0, "failed": 0}
+        if not self._xray_drift_reconcile_supported():
+            return summary
+        try:
+            active_keys = await self._list_xray_keys_by_statuses(XRAY_ACTIVE_STATUSES)
+            all_keys = await self._list_xray_keys_by_statuses(XRAY_ALL_STATUSES)
+            summary["checked"] = len(active_keys)
+            summary["recovered"] += await self._remove_non_live_xray_clients(all_keys)
+
+            clients = self.adapter.list_clients()
+            summary["checked"] += len(clients)
+            orphan_result = await self._remove_or_degrade_xray_orphans(clients, active_keys)
+            summary["recovered"] += orphan_result["recovered"]
+            summary["failed"] += orphan_result["failed"]
+            if orphan_result["failed"]:
+                return summary
+
+            summary["recovered"] += await self._restore_missing_active_xray_clients(active_keys)
+        except Exception as exc:
+            summary["failed"] += 1
+            await self._mark_xray_degraded(
+                "startup drift reconciliation failed",
+                details={"error_type": type(exc).__name__},
+            )
+        return summary
+
+    def _xray_drift_reconcile_supported(self) -> bool:
+        required_adapter = ("list_clients", "find_client", "add_client", "remove_client")
+        required_repo = ("list_by_type_statuses", "find_by_uuid", "find_by_email_label")
+        return all(hasattr(self.adapter, name) for name in required_adapter) and all(
+            hasattr(self.vpn_keys, name) for name in required_repo
+        )
+
+    async def _list_xray_keys_by_statuses(self, statuses: set[VpnKeyStatus]) -> list[VpnKey]:
+        keys: list[VpnKey] = []
+        last_id = 0
+        while True:
+            batch = await self.vpn_keys.list_by_type_statuses(
+                VpnKeyType.XRAY,
+                statuses,
+                limit=500,
+                after_id=last_id,
+            )
+            if not batch:
+                break
+            keys.extend(batch)
+            last_id = batch[-1].id
+        return keys
+
+    async def _restore_missing_active_xray_clients(self, active_keys: list[VpnKey]) -> int:
+        recovered = 0
+        short_ids_reader = getattr(self.adapter, "list_short_ids", None)
+        short_ids = short_ids_reader() if short_ids_reader is not None else set()
+        for key in active_keys:
+            uuid_value, email_label, short_id, flow, short_id_managed = self._xray_restore_values(key)
+            client = self.adapter.find_client(uuid_value=uuid_value, email_label=email_label)
+            if client is None:
+                await self.adapter.add_client(
+                    uuid_value=uuid_value,
+                    email_label=email_label,
+                    short_id=short_id,
+                    flow=flow,
+                    manage_short_id=short_id_managed,
+                )
+                recovered += 1
+                await self._write_audit_best_effort(
+                    actor_user_id=None,
+                    action="xray_startup_active_restored",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key.id,
+                    details={"client_present": False, "short_id_managed": short_id_managed},
+                )
+                if short_ids_reader is not None:
+                    short_ids = short_ids_reader()
+                continue
+
+            if short_id_managed and short_id and short_id not in short_ids:
+                ensured = await self.adapter.ensure_short_id(short_id)
+                if ensured:
+                    recovered += 1
+                    short_ids = short_ids_reader() if short_ids_reader is not None else short_ids
+                    await self._write_audit_best_effort(
+                        actor_user_id=None,
+                        action="xray_startup_short_id_restored",
+                        entity_type=AuditEntityType.VPN_KEY,
+                        entity_id=key.id,
+                        details={"client_present": True, "short_id_managed": True},
+                    )
+        return recovered
+
+    async def _remove_non_live_xray_clients(self, keys: list[VpnKey]) -> int:
+        recovered = 0
+        for key in keys:
+            if key.status == VpnKeyStatus.ACTIVE:
+                continue
+            client = self.adapter.find_client(uuid_value=key.uuid, email_label=key.email_label)
+            if client is None:
+                continue
+            await self._remove_xray_access(key)
+            recovered += 1
+            await self._write_audit_best_effort(
+                actor_user_id=None,
+                action="xray_startup_non_live_removed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={"previous_status": key.status.value},
+            )
+        return recovered
+
+    async def _remove_or_degrade_xray_orphans(
+        self,
+        clients: list[dict[str, object]],
+        active_keys: list[VpnKey],
+    ) -> dict[str, int]:
+        recovered = 0
+        active_identities = self._xray_active_identities(active_keys)
+        for client in clients:
+            uuid_value = str(client.get("id") or "").strip()
+            email_label = str(client.get("email") or "").strip()
+            if self._xray_client_owned_by_active_key(uuid_value, email_label, active_identities):
+                continue
+
+            historical = await self._find_xray_historical_owner(uuid_value, email_label)
+            if historical is not None:
+                if historical.status == VpnKeyStatus.ACTIVE:
+                    continue
+                await self._remove_xray_access(historical)
+                recovered += 1
+                await self._write_audit_best_effort(
+                    actor_user_id=None,
+                    action="xray_startup_orphan_removed",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=historical.id,
+                    details={"historical_status": historical.status.value},
+                )
+                continue
+
+            if XRAY_MANAGED_LABEL_RE.fullmatch(email_label):
+                await self.adapter.remove_client(
+                    uuid_value=uuid_value or None,
+                    email_label=email_label or None,
+                    short_id=None,
+                    remove_short_id=False,
+                )
+                recovered += 1
+                await self._write_audit_best_effort(
+                    actor_user_id=None,
+                    action="xray_startup_orphan_removed",
+                    entity_type=AuditEntityType.SYSTEM,
+                    entity_id=None,
+                    details={"managed_label": True, "uuid_fingerprint": self._fingerprint(uuid_value)},
+                )
+                continue
+
+            await self._mark_xray_degraded(
+                "ambiguous orphan client in Xray config",
+                details={
+                    "managed_label": False,
+                    "uuid_fingerprint": self._fingerprint(uuid_value),
+                    "email_present": bool(email_label),
+                },
+            )
+            return {"recovered": recovered, "failed": 1}
+        return {"recovered": recovered, "failed": 0}
+
+    def _xray_restore_values(self, key: VpnKey) -> tuple[str, str, str, str, bool]:
+        uuid_value = str(key.payload.get("uuid") or key.uuid or "").strip()
+        email_label = str(key.payload.get("email_label") or key.email_label or "").strip()
+        short_id_managed = key.payload.get("short_id_managed") is True
+        short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "").strip()
+        if not short_id and not short_id_managed:
+            short_id = self.settings.xray_short_id
+        flow = str(key.payload.get("flow") or self.settings.xray_flow or "")
+        if not uuid_value or not email_label:
+            raise InvalidOperation("Xray active key cannot be restored: missing UUID or email label in DB")
+        if not short_id:
+            raise InvalidOperation("Xray active key cannot be restored: missing short_id in DB/settings")
+        return uuid_value, email_label, short_id, flow, short_id_managed
+
+    def _xray_active_identities(self, active_keys: list[VpnKey]) -> tuple[set[str], set[str]]:
+        uuids = {str(key.payload.get("uuid") or key.uuid or "").strip() for key in active_keys}
+        emails = {str(key.payload.get("email_label") or key.email_label or "").strip() for key in active_keys}
+        return {value for value in uuids if value}, {value for value in emails if value}
+
+    def _xray_client_owned_by_active_key(
+        self,
+        uuid_value: str,
+        email_label: str,
+        active_identities: tuple[set[str], set[str]],
+    ) -> bool:
+        active_uuids, active_emails = active_identities
+        return bool((uuid_value and uuid_value in active_uuids) or (email_label and email_label in active_emails))
+
+    async def _find_xray_historical_owner(self, uuid_value: str, email_label: str) -> VpnKey | None:
+        key = await self.vpn_keys.find_by_uuid(uuid_value) if uuid_value else None
+        if key is None and email_label:
+            key = await self.vpn_keys.find_by_email_label(email_label)
+        if key is None or key.key_type != VpnKeyType.XRAY:
+            return None
+        return key
+
+    async def _mark_xray_degraded(self, reason: str, *, details: dict[str, object]) -> None:
+        self.backend_health.mark_degraded(VpnKeyType.XRAY, reason)
+        logger.critical("Xray backend degraded during reconciliation: %s", reason)
+        await self._write_audit_best_effort(
+            actor_user_id=None,
+            action="xray_startup_drift_degraded",
+            entity_type=AuditEntityType.SYSTEM,
+            entity_id=None,
+            details={**details, "reason": reason, "backend_degraded": True},
+        )
+
+    def _fingerprint(self, value: str) -> str | None:
+        if not value:
+            return None
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
     async def _startup_reconcile_key(self, key: VpnKey) -> bool:
         if key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
