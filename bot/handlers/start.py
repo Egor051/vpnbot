@@ -12,6 +12,7 @@ from bot.handlers.common import answer_message_error, is_admin, profile_from_tg
 from bot.formatters import main_menu_text
 from bot.keyboards.admin import access_request_keyboard
 from bot.keyboards.common import main_menu
+from bot.private_chat import ensure_private_message
 from models.access import is_blocked_user
 from models.enums import UserRole
 from utils.formatting import h
@@ -23,6 +24,8 @@ logger = logging.getLogger(__name__)
 @router.message(CommandStart())
 async def start_command(message: Message, services: Any, bot: Bot) -> None:
     if message.from_user is None:
+        return
+    if not await ensure_private_message(message):
         return
     try:
         profile = profile_from_tg(message.from_user)

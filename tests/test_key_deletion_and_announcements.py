@@ -924,12 +924,24 @@ def test_create_key_confirm_keeps_fsm_data_when_rate_limited(monkeypatch: pytest
             self.created_notes.append(note)
             return SimpleNamespace(key=_key(VpnKeyType.XRAY), config_text="xray config")
 
+    class Users:
+        async def require_approved_or_admin(self, user_id: int) -> User:
+            return User(
+                telegram_user_id=user_id,
+                username="user",
+                first_name="User",
+                role=UserRole.APPROVED_USER,
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                blocked_at=None,
+            )
+
     async def run() -> None:
         state = State()
         callback = Callback()
         rate_limiter = RateLimiter()
         xray = Xray()
-        services = SimpleNamespace(xray=xray, awg=SimpleNamespace())
+        services = SimpleNamespace(users=Users(), xray=xray, awg=SimpleNamespace())
 
         await create_key_confirm(callback, state, services, rate_limiter)  # type: ignore[arg-type]
 
@@ -1046,6 +1058,20 @@ def test_admin_issue_confirm_keeps_fsm_data_when_rate_limited_after_owner_valida
                 blocked_at=None,
             )
 
+        async def require_superadmin(self, telegram_user_id: int) -> User:
+            return User(
+                telegram_user_id=telegram_user_id,
+                username="admin",
+                first_name="Admin",
+                role=UserRole.SUPERADMIN,
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                blocked_at=None,
+            )
+
+        async def require_approved_or_admin(self, telegram_user_id: int) -> User:
+            return await self.get_user(telegram_user_id)
+
     class RateLimiter:
         def __init__(self) -> None:
             self.calls = 0
@@ -1067,7 +1093,7 @@ def test_admin_issue_confirm_keeps_fsm_data_when_rate_limited_after_owner_valida
 
         await admin_issue_confirm(callback, state, services, rate_limiter)  # type: ignore[arg-type]
 
-        assert users.calls == 1
+        assert users.calls == 2
         assert rate_limiter.calls == 1
         assert state.current_state == AdminCreateKeyStates.confirming
         assert state.data == {"owner_user_id": 200, "key_type": VpnKeyType.XRAY.value, "note": "admin note"}

@@ -138,20 +138,24 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext, services
 
 
 @router.message(CreateKeyStates.waiting_note)
-async def create_key_note(message: Message, state: FSMContext) -> None:
+async def create_key_note(message: Message, state: FSMContext, services: Any) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
         return
-    data = await state.get_data()
-    key_type = str(data.get("key_type") or "")
-    note = _clean_note(message.text)
-    await state.update_data(note=note)
-    await state.set_state(CreateKeyStates.confirming)
-    await message.answer(
-        create_confirm_text(key_type, note),
-        reply_markup=confirm_cancel_keyboard("create:confirm"),
-    )
+    try:
+        await _ensure_can_enter_create(message.from_user.id, services)
+        data = await state.get_data()
+        key_type = str(data.get("key_type") or "")
+        note = _clean_note(message.text)
+        await state.update_data(note=note)
+        await state.set_state(CreateKeyStates.confirming)
+        await message.answer(
+            create_confirm_text(key_type, note),
+            reply_markup=confirm_cancel_keyboard("create:confirm"),
+        )
+    except Exception as exc:
+        await answer_message_error(message, exc)
 
 
 @router.callback_query(CreateKeyStates.confirming, F.data == "create:confirm")
@@ -164,6 +168,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
     key_type = str(data.get("key_type") or "")
     note = data.get("note")
     try:
+        await _ensure_can_enter_create(callback.from_user.id, services)
         profile = profile_from_tg(callback.from_user)
         rate_limiter.check(callback.from_user.id, "key_create", 20)
         await state.clear()

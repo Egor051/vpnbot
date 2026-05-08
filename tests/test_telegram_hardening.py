@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
 
 from bot.fsm.states import AdminCreateKeyStates, CreateKeyStates
@@ -111,6 +112,7 @@ def test_start_command_sends_inline_main_menu_for_approved_users() -> None:
     class Message:
         def __init__(self) -> None:
             self.from_user = SimpleNamespace(id=100, username="user", first_name="User")
+            self.chat = SimpleNamespace(type=ChatType.PRIVATE)
             self.answers: list[tuple[str, object]] = []
 
         async def answer(self, text: str, reply_markup: object = None) -> None:

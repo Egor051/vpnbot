@@ -170,11 +170,15 @@ async def proxy_back(callback: CallbackQuery, services: Any) -> None:
     await safe_callback_answer(callback)
     if callback.from_user is None or callback.message is None:
         return
-    await safe_edit_message_text(
-        callback.message,
-        main_menu_text(callback.from_user),
-        reply_markup=main_menu(await is_admin(services, callback.from_user.id)),
-    )
+    try:
+        await services.users.require_approved_or_admin(callback.from_user.id)
+        await safe_edit_message_text(
+            callback.message,
+            main_menu_text(callback.from_user),
+            reply_markup=main_menu(await is_admin(services, callback.from_user.id)),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
 
 
 async def _proxy_menu_view(services: Any, user_id: int, accesses: list[Any] | None = None) -> tuple[str, Any]:
