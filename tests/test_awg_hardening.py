@@ -433,6 +433,9 @@ def _service(tmp_path: Path, repo: object, adapter: object) -> AwgService:
         async def require_approved_or_admin(self, actor_user_id: int) -> User:
             return User(actor_user_id, "user", "User", UserRole.APPROVED_USER, "now", "now", None)
 
+        async def require_superadmin(self, actor_user_id: int) -> User:
+            return User(actor_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
+
     class Audit:
         async def write(self, **kwargs: object) -> None:
             return None

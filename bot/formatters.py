@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from aiogram.types import User as TgUser
@@ -20,6 +21,8 @@ from models.dto import (
     VpnKey,
 )
 from models.enums import ProxyAccessStatus, ProxyAccessType, UserRole, VpnKeyStatus, VpnKeyType
+from repositories.announcements import AnnouncementBatch
+from services.backend_health import BackendHealthStatus
 from utils.formatting import (
     code,
     format_bytes,
@@ -603,6 +606,50 @@ def proxy_admin_status_text(status: ProxyServiceStatus, stats: ProxyLifecycleSta
     return "\n".join(lines)
 
 
+def backend_diagnostics_text(statuses: tuple[BackendHealthStatus, ...], *, mtproto_mode: str = "static") -> str:
+    lines = [
+        "<b>Backend diagnostics</b>",
+        "",
+        "DEGRADED blocks only the affected backend create/revoke/delete/reconcile operations.",
+        "Other backends continue working unless they are also degraded.",
+        "",
+    ]
+    for status in statuses:
+        state = "DEGRADED" if status.degraded else "OK"
+        lines.append(f"{h(status.label)}: <b>{state}</b>")
+        if status.reason:
+            lines.append(f"• reason: {h(_redact_diagnostic_reason(status.reason))}")
+    lines.append("")
+    if mtproto_mode == "managed":
+        lines.append("MTProto mode: managed, per-user server-side revoke removes only that user's secret.")
+    else:
+        lines.append("MTProto mode: static/shared, per-user server-side revoke is impossible until the shared secret is rotated.")
+    return "\n".join(lines)
+
+
+def announcement_batches_text(batches: list[AnnouncementBatch]) -> str:
+    if not batches:
+        return "<b>Незавершённые объявления</b>\n\nНезавершённых batch-записей нет."
+    lines = ["<b>Незавершённые объявления</b>"]
+    for batch in batches:
+        pending = max(batch.total_count - batch.success_count - batch.failed_count - batch.skipped_count, 0)
+        lines.extend(
+            [
+                "",
+                f"<b>Batch #{h(batch.id)}</b>",
+                f"Status: {h(batch.status)}",
+                f"Total: {h(batch.total_count)}",
+                f"Sent: {h(batch.success_count)}",
+                f"Failed: {h(batch.failed_count)}",
+                f"Skipped: {h(batch.skipped_count)}",
+                f"Pending: {h(pending)}",
+                f"Created: {h(format_msk_datetime(batch.created_at))}",
+                f"Updated: {h(format_msk_datetime(batch.updated_at))}",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def proxy_entry_text(entry: ProxyEntry) -> str:
     lines = [
         f"<b>{h(entry.proxy_type)}</b>",
@@ -617,6 +664,24 @@ def proxy_entry_text(entry: ProxyEntry) -> str:
         lines.append(f"Описание: {h(entry.note)}")
     lines.append(f"Статус: {h(entry.status.value)}")
     return "\n".join(lines)
+
+
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b(bot_token|token|password|passwd|secret|mtproto_secret|private_key|preshared_key)\s*([:=])\s*[^,\s;]+",
+    re.IGNORECASE,
+)
+_SECRET_QUERY_RE = re.compile(r"(?i)(secret=)[^&\s]+")
+_HEX_SECRET_RE = re.compile(r"\b(?:dd)?[0-9a-fA-F]{32,}\b")
+
+
+def _redact_diagnostic_reason(value: str, limit: int = 180) -> str:
+    text = value.replace("\r", " ").replace("\n", " ").strip()
+    text = _SECRET_QUERY_RE.sub(r"\1***", text)
+    text = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}***", text)
+    text = _HEX_SECRET_RE.sub("***", text)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 def proxy_page_text(entries: list[ProxyEntry], page: int) -> str:

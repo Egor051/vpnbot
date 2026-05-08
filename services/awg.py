@@ -368,13 +368,13 @@ class AwgService:
             raise AccessDenied("Владелец ключа не имеет доступа")
 
     async def _get_awg_key_for_manage(self, actor_user_id: int, key_id: int, allow_read: bool = False) -> VpnKey:
-        actor = await self.users.require_approved_or_admin(actor_user_id)
+        actor = None if not allow_read else await self.users.require_approved_or_admin(actor_user_id)
+        if not allow_read:
+            await self.users.require_superadmin(actor_user_id)
         key = await self._get_key(key_id)
         if key.key_type != VpnKeyType.AWG:
             raise InvalidOperation("Это не AWG-ключ")
-        if actor.role != UserRole.SUPERADMIN and key.owner_user_id != actor_user_id:
-            raise AccessDenied("Нельзя управлять чужим ключом")
-        if not allow_read and actor.role != UserRole.SUPERADMIN and key.owner_user_id != actor_user_id:
+        if actor is not None and actor.role != UserRole.SUPERADMIN and key.owner_user_id != actor_user_id:
             raise AccessDenied("Нельзя управлять чужим ключом")
         return key
 

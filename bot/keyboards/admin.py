@@ -5,6 +5,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from models.access import is_blocked_user
 from models.dto import AccessRequest, User
 from models.enums import UserRole
+from repositories.announcements import AnnouncementBatch
 from utils.formatting import format_user_display
 
 
@@ -35,10 +36,12 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Пользователи", callback_data="admin:users")],
             [InlineKeyboardButton(text="Статистика ключей", callback_data="admin:stats")],
             [InlineKeyboardButton(text="Статус прокси", callback_data="admin:proxy")],
+            [InlineKeyboardButton(text="Диагностика backend", callback_data="admin:diagnostics")],
             [InlineKeyboardButton(text="📊 Статистика прокси", callback_data="admin:proxy_stats")],
             [InlineKeyboardButton(text="Логи действий", callback_data="admin:audit")],
             [InlineKeyboardButton(text="Выдать ключ пользователю", callback_data="admin:issue")],
             [InlineKeyboardButton(text="Объявление", callback_data="admin:announce")],
+            [InlineKeyboardButton(text="Восстановление объявлений", callback_data="admin:announce_batches")],
             [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
         ]
     )
@@ -51,6 +54,22 @@ def announcement_confirm_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Отмена", callback_data="admin:announce:cancel")],
         ]
     )
+
+
+def announcement_batches_keyboard(batches: list[AnnouncementBatch]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for batch in batches:
+        actions: list[InlineKeyboardButton] = []
+        if batch.status in {"pending", "sending"}:
+            actions.append(InlineKeyboardButton(text=f"Продолжить #{batch.id}", callback_data=f"admin:announce:resume:{batch.id}"))
+        if batch.status == "failed":
+            actions.append(InlineKeyboardButton(text=f"Повторить ошибки #{batch.id}", callback_data=f"admin:announce:retry:{batch.id}"))
+        if actions:
+            rows.append(actions)
+        rows.append([InlineKeyboardButton(text=f"Отменить #{batch.id}", callback_data=f"admin:announce:cancelbatch:{batch.id}")])
+    rows.append([InlineKeyboardButton(text="Обновить", callback_data="admin:announce_batches")])
+    rows.append([InlineKeyboardButton(text="Админ-панель", callback_data="admin:panel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def pending_requests_keyboard(requests: list[AccessRequest], page: int = 0, has_next: bool = False) -> InlineKeyboardMarkup:

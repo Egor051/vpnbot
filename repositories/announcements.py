@@ -109,6 +109,20 @@ class AnnouncementRepository:
         cursor = await self.db.conn.execute("SELECT * FROM announcement_batches WHERE id = ?", (announcement_id,))
         return _row_to_batch(await cursor.fetchone())
 
+    async def list_incomplete_batches(self, *, limit: int = 10) -> list[AnnouncementBatch]:
+        cursor = await self.db.conn.execute(
+            """
+            SELECT * FROM announcement_batches
+            WHERE completed_at IS NULL
+              AND status IN ('pending', 'sending', 'failed')
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [batch for row in rows if (batch := _row_to_batch(row)) is not None]
+
     async def list_pending_deliveries(
         self,
         announcement_id: int,
@@ -141,6 +155,17 @@ class AnnouncementRepository:
             WHERE id = ?
             """,
             (status, now, 1 if completed else 0, now, announcement_id),
+        )
+        await self.db.commit()
+
+    async def mark_cancelled(self, announcement_id: int, now: str) -> None:
+        await self.db.conn.execute(
+            """
+            UPDATE announcement_batches
+            SET status = 'cancelled', updated_at = ?, completed_at = COALESCE(completed_at, ?)
+            WHERE id = ?
+            """,
+            (now, now, announcement_id),
         )
         await self.db.commit()
 
