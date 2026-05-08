@@ -1,0 +1,33 @@
+# Package 5A example only.
+# Do not install as the active vpn-bot.service until Package 5B/5C helper
+# wiring and sudoers boundaries are implemented and tested.
+#
+# Code, deploy files, and .venv should remain root-owned and not writable by
+# the vpn-bot runtime user.
+
+[Unit]
+Description=VPN Telegram Bot (future non-root example)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vpn-service
+EnvironmentFile=/opt/vpn-service/.env
+Environment=BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock
+ExecStart=/opt/vpn-service/.venv/bin/python /opt/vpn-service/main.py
+Restart=on-failure
+RestartSec=5
+User=vpn-bot
+Group=vpn-bot
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RuntimeDirectory=vpn-bot
+RuntimeDirectoryMode=0700
+ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot
+
+[Install]
+WantedBy=multi-user.target
