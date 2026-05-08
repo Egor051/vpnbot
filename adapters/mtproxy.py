@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from adapters.errors import MtProxyApplyError, MtProxyError, MtProxyRollbackError
+from adapters.privileged_helpers import (
+    PrivilegedHelperRunner,
+    cleanup_staging_path,
+    create_private_staging_dir,
+    write_private_staging_file,
+)
 from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
 
@@ -63,6 +69,9 @@ class MtProxyAdapter:
         apply_timeout_seconds: int,
         rollback_on_apply_failure: bool,
         keep_last_backups: int,
+        helper_runner: PrivilegedHelperRunner | None = None,
+        helper_path: Path | None = None,
+        helper_staging_dir: Path | None = None,
     ) -> None:
         self.shell = shell
         self.systemctl = systemctl
@@ -82,6 +91,9 @@ class MtProxyAdapter:
         self.apply_timeout_seconds = apply_timeout_seconds
         self.rollback_on_apply_failure = rollback_on_apply_failure
         self.keep_last_backups = keep_last_backups
+        self.helper_runner = helper_runner
+        self.helper_path = helper_path or Path("/usr/local/sbin/vpnbot-mtproxy-apply")
+        self.helper_staging_dir = helper_staging_dir or Path("/run/vpn-bot/mtproxy")
 
     def read_current_managed_secrets(self) -> list[MtProxyManagedSecret]:
         document = self._read_store_document()
@@ -128,6 +140,9 @@ class MtProxyAdapter:
         current = self._read_store_document()
         generation = int(current.get("generation") or 0)
         document = self._store_document([], current, generation=generation)
+        if self._using_helper():
+            await self._apply_document_via_helper(document)
+            return MtProxyApplyResult(changed=True, generation=generation)
         self._write_runtime_files(document)
         self.ensure_managed_permissions()
         restart = await self.restart_mtproxy()
@@ -217,6 +232,13 @@ class MtProxyAdapter:
         next_generation = current_generation + 1
         desired_document = self._store_document(desired, current_document, generation=next_generation)
 
+        if self._using_helper():
+            try:
+                await self._apply_document_via_helper(desired_document)
+            except Exception as exc:
+                raise MtProxyApplyError(self._redact(f"MTProxy helper apply failed: {exc}", desired)) from exc
+            return MtProxyApplyResult(changed=True, generation=next_generation)
+
         backup_id = self.backup_managed_files()
         try:
             self._write_runtime_files(desired_document)
@@ -286,6 +308,12 @@ class MtProxyAdapter:
         return active_without_process_info and await self.check_mtproxy_active()
 
     async def runtime_status(self) -> MtProxyRuntimeStatus:
+        if self._using_helper():
+            result = await self._run_helper(["status"], timeout=self.apply_timeout_seconds)
+            if not result.ok:
+                return MtProxyRuntimeStatus(systemd_active=None, port_listening=None)
+            tokens = set(result.stdout.split())
+            return MtProxyRuntimeStatus(systemd_active="active" in tokens, port_listening="listening" in tokens)
         active: bool | None
         listening: bool | None
         try:
@@ -381,6 +409,41 @@ class MtProxyAdapter:
         self._atomic_write_text(self.managed_secrets_path, self._json_dump(document), mode=0o600)
         self._atomic_write_text(self.managed_env_path, self._env_content(), mode=0o600)
         self.ensure_managed_permissions()
+
+    async def _apply_document_via_helper(self, document: dict[str, Any]) -> None:
+        staging_dir: Path | None = None
+        try:
+            staging_dir = create_private_staging_dir(self.helper_staging_dir, prefix="apply-")
+            write_private_staging_file(
+                staging_dir,
+                prefix="",
+                suffix="managed-secrets.json",
+                content=self._json_dump(document),
+            ).rename(staging_dir / "managed-secrets.json")
+            write_private_staging_file(
+                staging_dir,
+                prefix="",
+                suffix="mtproxy.env",
+                content=self._env_content(),
+            ).rename(staging_dir / "mtproxy.env")
+            result = await self._run_helper(["apply", str(staging_dir)], timeout=self.apply_timeout_seconds + 30)
+            if not result.ok:
+                raise MtProxyApplyError(f"MTProxy helper apply failed: rc={result.returncode}")
+        finally:
+            cleanup_staging_path(staging_dir)
+
+    async def _run_helper(self, args: list[str], *, timeout: float) -> Any:
+        if self.helper_runner is None:
+            raise MtProxyApplyError("MTProxy privileged helper is not configured")
+        return await self.helper_runner.run(
+            self.helper_path,
+            args,
+            timeout=timeout,
+            max_output_chars=2048,
+        )
+
+    def _using_helper(self) -> bool:
+        return self.helper_runner is not None
 
     def _env_content(self) -> str:
         values = {

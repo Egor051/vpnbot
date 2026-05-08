@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import TextIO
+
+
+STAGING_ROOT = Path("/run/vpn-bot/awg")
+CANONICAL_CONFIG = Path("/etc/amnezia/amneziawg/awg0.conf")
+INTERFACE_NAME = "awg0"
+SERVICE_NAME = "awg-quick@awg0"
+FINAL_MODE = 0o600
+EXIT_VALIDATION = 64
+EXIT_COMMAND_FAILED = 70
+
+
+class HelperError(RuntimeError):
+    def __init__(self, message: str, code: int = EXIT_COMMAND_FAILED) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def validate_candidate_path(raw_path: str) -> Path:
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        raise HelperError("candidate path must be absolute", EXIT_VALIDATION)
+    if candidate.is_symlink():
+        raise HelperError("candidate path must not be a symlink", EXIT_VALIDATION)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise HelperError("candidate path does not exist", EXIT_VALIDATION) from exc
+    root = STAGING_ROOT.resolve(strict=False)
+    if not _is_relative_to(resolved, root):
+        raise HelperError("candidate path outside staging root", EXIT_VALIDATION)
+    if not resolved.is_file():
+        raise HelperError("candidate path must be a file", EXIT_VALIDATION)
+    return resolved
+
+
+def run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(args, 127, "", "command not found")
+
+
+def run_awg_or_wg(args: list[str]) -> subprocess.CompletedProcess[str]:
+    result = run_command(["awg", *args])
+    if result.returncode != 127:
+        return result
+    return run_command(["wg", *args])
+
+
+def quick_strip(path: Path) -> str:
+    result = run_command(["awg-quick", "strip", str(path)])
+    if result.returncode == 127:
+        result = run_command(["wg-quick", "strip", str(path)])
+    if result.returncode != 0:
+        raise HelperError("AWG config validation failed")
+    return result.stdout
+
+
+def _fsync_parent(path: Path) -> None:
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(path.parent, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _set_private_root(path: Path) -> None:
+    if os.name != "posix":
+        return
+    os.chown(path, 0, 0)
+    os.chmod(path, FINAL_MODE)
+
+
+def backup_current() -> Path | None:
+    if not CANONICAL_CONFIG.exists():
+        return None
+    backup_path = CANONICAL_CONFIG.with_name(f"{CANONICAL_CONFIG.name}.{time.time_ns()}.bak")
+    shutil.copy2(CANONICAL_CONFIG, backup_path)
+    if os.name == "posix":
+        os.chmod(backup_path, FINAL_MODE)
+    return backup_path
+
+
+def install_candidate(candidate: Path) -> None:
+    CANONICAL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = CANONICAL_CONFIG.with_name(f".{CANONICAL_CONFIG.name}.{time.time_ns()}.tmp")
+    try:
+        with candidate.open("rb") as source:
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FINAL_MODE)
+            with os.fdopen(fd, "wb") as target:
+                shutil.copyfileobj(source, target)
+                target.flush()
+                os.fsync(target.fileno())
+        _set_private_root(tmp_path)
+        os.replace(tmp_path, CANONICAL_CONFIG)
+        _fsync_parent(CANONICAL_CONFIG)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def write_stripped_config(stripped: str) -> Path:
+    tmp_path = CANONICAL_CONFIG.with_name(f".{CANONICAL_CONFIG.name}.{time.time_ns()}.stripped")
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FINAL_MODE)
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(stripped)
+            file.flush()
+            os.fsync(file.fileno())
+        _set_private_root(tmp_path)
+        return tmp_path
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def service_active() -> bool:
+    result = run_command(["systemctl", "is-active", SERVICE_NAME])
+    return result.returncode == 0 and result.stdout.strip() == "active"
+
+
+def sync_runtime(stripped: str) -> None:
+    stripped_path: Path | None = None
+    try:
+        stripped_path = write_stripped_config(stripped)
+        result = run_awg_or_wg(["syncconf", INTERFACE_NAME, str(stripped_path)])
+        if result.returncode != 0:
+            raise HelperError("AWG syncconf failed")
+    finally:
+        if stripped_path is not None:
+            stripped_path.unlink(missing_ok=True)
+    if not service_active():
+        raise HelperError("AWG service is not active")
+
+
+def restore_backup(backup_path: Path | None) -> None:
+    if backup_path is None:
+        CANONICAL_CONFIG.unlink(missing_ok=True)
+        _fsync_parent(CANONICAL_CONFIG)
+        return
+    install_candidate(backup_path)
+    sync_runtime(quick_strip(CANONICAL_CONFIG))
+
+
+def action_validate(raw_path: str) -> int:
+    candidate = validate_candidate_path(raw_path)
+    quick_strip(candidate)
+    return 0
+
+
+def action_apply(raw_path: str) -> int:
+    candidate = validate_candidate_path(raw_path)
+    stripped = quick_strip(candidate)
+    backup_path = backup_current()
+    try:
+        install_candidate(candidate)
+        sync_runtime(stripped)
+    except Exception as exc:
+        try:
+            restore_backup(backup_path)
+        except Exception as rollback_exc:
+            raise HelperError("AWG apply failed and rollback failed") from rollback_exc
+        raise HelperError("AWG apply failed; previous config restored") from exc
+    return 0
+
+
+def action_status(stdout: TextIO) -> int:
+    result = run_command(["systemctl", "is-active", SERVICE_NAME])
+    if result.stdout.strip():
+        print(result.stdout.strip(), file=stdout)
+    return result.returncode
+
+
+def action_show_peers(stdout: TextIO) -> int:
+    result = run_awg_or_wg(["show", INTERFACE_NAME])
+    if result.returncode == 0 and result.stdout:
+        print(result.stdout.rstrip(), file=stdout)
+    return result.returncode
+
+
+def action_show_transfer(stdout: TextIO) -> int:
+    result = run_awg_or_wg(["show", INTERFACE_NAME, "transfer"])
+    if result.returncode == 0 and result.stdout:
+        print(result.stdout.rstrip(), file=stdout)
+    return result.returncode
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="vpn-bot AWG config apply helper")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    for action in ("apply", "validate"):
+        subparser = subparsers.add_parser(action)
+        subparser.add_argument("candidate_config_path")
+    subparsers.add_parser("status")
+    subparsers.add_parser("show-peers")
+    subparsers.add_parser("show-transfer")
+    return parser
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    try:
+        if args.action == "apply":
+            return action_apply(args.candidate_config_path)
+        if args.action == "validate":
+            return action_validate(args.candidate_config_path)
+        if args.action == "status":
+            return action_status(stdout)
+        if args.action == "show-peers":
+            return action_show_peers(stdout)
+        if args.action == "show-transfer":
+            return action_show_transfer(stdout)
+    except HelperError as exc:
+        print(f"error: {exc}", file=stderr)
+        return exc.code
+    print("error: unsupported action", file=stderr)
+    return EXIT_VALIDATION
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

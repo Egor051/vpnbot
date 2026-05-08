@@ -1,6 +1,32 @@
 # Package 5 Privilege Separation Plan
 
-Status: Package 5A preparatory document. This package does not switch the production bot to a non-root user, does not install sudoers rules, and does not change live backend paths.
+Status: Package 5B helper implementation. Package 5B adds root-owned helper scripts and optional application helper-mode wiring, but it still does not switch the production bot to a non-root user, does not install sudoers rules, and does not change live backend paths unless helper mode is explicitly enabled for a staged test.
+
+Package 5B implemented helpers intended for `/usr/local/sbin`:
+
+- `/usr/local/sbin/vpnbot-socks5-user`
+- `/usr/local/sbin/vpnbot-xray-apply`
+- `/usr/local/sbin/vpnbot-awg-apply`
+- `/usr/local/sbin/vpnbot-mtproxy-apply`
+
+Default adapter behavior remains direct/root-compatible. Helper mode is controlled by `PRIVILEGE_HELPERS_ENABLED=false` by default plus fixed helper path and staging settings:
+
+- `HELPER_STAGING_ROOT=/run/vpn-bot`
+- `SOCKS5_USER_HELPER_PATH=/usr/local/sbin/vpnbot-socks5-user`
+- `XRAY_APPLY_HELPER_PATH=/usr/local/sbin/vpnbot-xray-apply`
+- `AWG_APPLY_HELPER_PATH=/usr/local/sbin/vpnbot-awg-apply`
+- `MTPROTO_APPLY_HELPER_PATH=/usr/local/sbin/vpnbot-mtproxy-apply`
+- `XRAY_HELPER_STAGING_DIR=/run/vpn-bot/xray`
+- `AWG_HELPER_STAGING_DIR=/run/vpn-bot/awg`
+- `MTPROTO_HELPER_STAGING_DIR=/run/vpn-bot/mtproxy`
+
+Validate the sudoers example before any installation:
+
+```bash
+visudo -cf /path/to/vpnbot.example
+```
+
+The active production unit remains root-run until Package 5C.
 
 ## Goals
 
@@ -18,7 +44,7 @@ Status: Package 5A preparatory document. This package does not switch the produc
   - `/opt/vpn-service/data`
   - `/opt/vpn-service/logs` if file logs remain enabled
   - `/run/vpn-bot` or another dedicated runtime lock directory
-  - `/etc/mtproxy/vpnbot` only if Package 5B explicitly accepts direct MTProto ownership; otherwise MTProto writes move to a helper.
+  - MTProto staged files under `/run/vpn-bot/mtproxy`; canonical `/etc/mtproxy/vpnbot` stays root-owned helper territory.
 - The bot must not directly write:
   - `/etc/passwd`
   - `/etc/shadow`
@@ -33,7 +59,7 @@ Status: Package 5A preparatory document. This package does not switch the produc
 
 | Component | Current operation | Current command or file path | Current privilege requirement | Current risk | Target Package 5B/5C design | Proposed helper or sudoers boundary | Must stay root-only | Telegram-facing bot direct access |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| vpn-bot systemd runtime | Runs the Telegram bot and all adapters as root. | `deploy/vpn-bot.service`; `User=root`; `Group=root`; `ReadWritePaths=/opt/vpn-service /run /usr/local/etc/xray /etc/amnezia/amneziawg /etc/mtproxy/vpnbot /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/.pwd.lock` | Root for Linux account mutation, backend config writes, and service control. | Bot token compromise, handler bug, dependency RCE, or local code execution can mutate system accounts and backend configs. | Active unit remains root in Package 5A. Future unit runs as `vpn-bot` with strict filesystem sandboxing and helpers for root-only changes. | `deploy/vpn-bot.nonroot.example.service` plus future helper sudoers. | No for the Python process; yes for helper operations. | No direct privileged backend access after cutover. |
+| vpn-bot systemd runtime | Runs the Telegram bot and all adapters as root. | `deploy/vpn-bot.service`; `User=root`; `Group=root`; `ReadWritePaths=/opt/vpn-service /run /usr/local/etc/xray /etc/amnezia/amneziawg /etc/mtproxy/vpnbot /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/.pwd.lock` | Root for Linux account mutation, backend config writes, and service control. | Bot token compromise, handler bug, dependency RCE, or local code execution can mutate system accounts and backend configs. | Active unit remains root in Package 5B. Future unit runs as `vpn-bot` with strict filesystem sandboxing and helpers for root-only changes. | `deploy/vpn-bot.nonroot.example.service` plus future helper sudoers. | No for the Python process; yes for helper operations. | No direct privileged backend access after cutover. |
 | SQLite data directory | Creates and writes the SQLite DB, WAL, and SHM files. | `DB_PATH`, default `/opt/vpn-service/data/vpn.db`; `db/database.py` creates parent and chmods files. | Write access to the data directory only. | If the bot remains root, DB compromise also runs with unnecessary root filesystem reach. | Own `/opt/vpn-service/data` by `vpn-bot:vpn-bot`, mode `0700`; keep DB files mode `0600`. | No sudoers needed. | No. | Yes, direct read/write to SQLite is expected. |
 | .env handling | systemd loads environment variables with bot token and backend settings. | `EnvironmentFile=/opt/vpn-service/.env`; loaded by systemd before Python starts. | Read access by systemd and effective service context; file should not be writable by `vpn-bot`. | Write access to `.env` would let a compromised bot change runtime settings or secrets for the next restart. | Keep `.env` root-owned. Make it readable to `vpn-bot` only if systemd/environment setup requires it; otherwise systemd reads it before dropping privileges. | No sudoers needed. Consider `LoadCredential` only if a later package chooses that migration. | File ownership and writes should remain root-only. | Read via inherited environment only; no direct write. |
 | Logs and runtime lock paths | Creates file logs and a single-instance lock. | `LOG_DIR`, default `/opt/vpn-service/logs`; `BOT_LOCK_PATH`, default `/run/vpn-bot.lock`; `utils/logging.py`; `utils/single_instance.py` | Write access to log and lock locations. | Root-owned log writes and broad `/run` write access increase damage from a compromised process. | Use `/opt/vpn-service/logs` and `/run/vpn-bot/vpn-bot.lock` owned by `vpn-bot:vpn-bot`; systemd `RuntimeDirectory=vpn-bot`. | No sudoers needed. | No. | Yes, direct write to these narrow paths. |
@@ -49,11 +75,11 @@ Status: Package 5A preparatory document. This package does not switch the produc
 | Backups created by adapters | Creates config backups beside sensitive config files or under MTProto backup root. | Xray `config.json.*.bak`; AWG `awg0.conf.*.bak`; MTProto `/etc/mtproxy/vpnbot/backups` | Same privilege as canonical config directory. | Backup files may contain private keys or secrets and can accumulate in sensitive directories. | Helper owns backup creation for canonical configs and enforces `0600` plus retention. Bot-owned SQLite/log backups, if any, remain under bot data/log paths. | Xray/AWG/MTProto helpers create and clean their own backups. | Yes for backend config backups. | No direct access to backend backup dirs unless helper returns sanitized status. |
 | Deployment scripts and ownership model | Deploy currently installs root-run service and MTProxy wrapper/drop-in assets. | `deploy/vpn-bot.service`; `deploy/run-mtproxy-managed`; `deploy/mtproxy-vpnbot-managed.conf`; `/opt/vpn-service` | Root for install, ownership, unit reloads, and service restarts. | Recursive ownership changes could make code writable by the bot or accidentally expose secrets. | Keep deploy as root/admin work. Add idempotent user creation and documented future ownership steps. Do not recursively chown `/opt/vpn-service` to `vpn-bot`. | `deploy/create-vpn-bot-user.sh`; `deploy/sudoers.d/vpnbot.example`; future helper install docs. | Install and unit management remain root-only. | No deploy-time write access to code or unit files. |
 
-## Future Helper Interfaces
+## Package 5B Helper Interfaces
 
 ### SOCKS5 helper
 
-Candidate path: `/usr/local/sbin/vpnbot-socks5-user`.
+Path: `/usr/local/sbin/vpnbot-socks5-user`.
 
 Required properties:
 
@@ -69,40 +95,40 @@ Required properties:
 
 ### Xray helper
 
-Candidate path: `/usr/local/sbin/vpnbot-xray-apply`.
+Path: `/usr/local/sbin/vpnbot-xray-apply`.
 
 Required properties:
 
-- Accepts a candidate config from a restricted staging directory or stdin.
+- Accepts a candidate config from `/run/vpn-bot/xray`.
 - Validates JSON before invoking Xray.
 - Runs `xray run -test -config <candidate>` against the candidate.
 - Atomically installs to `/usr/local/etc/xray/config.json`.
-- Preserves owner and mode expected by `xray.service`.
-- Applies by the configured policy: reload if reliable, otherwise restart.
+- Installs as `nobody:nogroup` mode `0600`, matching the current `xray.service` read model.
+- Applies by fixed restart of service `xray`.
 - Verifies Xray is active after apply.
-- Implements rollback inside the helper, or documents that rollback remains an adapter-level transaction. Preferred final decision: helper owns rollback because it owns canonical config installation and service apply.
+- Implements rollback inside the helper because it owns canonical config installation and service apply.
 
 ### AWG helper
 
-Candidate path: `/usr/local/sbin/vpnbot-awg-apply`.
+Path: `/usr/local/sbin/vpnbot-awg-apply`.
 
 Required properties:
 
-- Accepts a candidate `awg0.conf` from a restricted staging directory or stdin.
+- Accepts a candidate `awg0.conf` from `/run/vpn-bot/awg`.
 - Validates with `awg-quick strip` or the configured compatible tool.
 - Atomically installs `/etc/amnezia/amneziawg/awg0.conf`.
-- Preserves private key permissions.
-- Applies runtime using the selected policy from Package 5B: current adapter design favors runtime `syncconf`/peer changes; a restart of `awg-quick@awg0` is acceptable only if explicitly chosen.
-- Verifies the interface is active and the expected peer state is present.
-- Provides sanitized read-only status/transfer output if the unprivileged bot cannot run runtime inspection directly.
+- Preserves private key permissions as `root:root` mode `0600`.
+- Applies runtime with fixed-interface `syncconf` for `awg0`, consistent with the existing adapter design that avoids a full tunnel restart.
+- Verifies `awg-quick@awg0` is active.
+- Provides sanitized read-only status/peer/transfer output for the fixed interface.
 
 ### MTProto helper
 
-Candidate path: `/usr/local/sbin/vpnbot-mtproxy-apply`.
+Path: `/usr/local/sbin/vpnbot-mtproxy-apply`.
 
 Required properties:
 
-- Package 5B must decide whether direct `vpn-bot` ownership of `/etc/mtproxy/vpnbot` is acceptable. Preferred default: use a helper because files live under `/etc` and contain secrets.
+- Package 5B chooses the helper model; `/etc/mtproxy/vpnbot` remains root-owned helper territory.
 - Installs managed secret and env files atomically with mode `0600`.
 - Restarts `mtproxy` using a fixed service name.
 - Verifies service active state and listening port.
@@ -111,21 +137,29 @@ Required properties:
 
 ## Deploy And Ownership Plan
 
-Package 5A adds scaffolding only:
+Package 5A added scaffolding only:
 
 - `deploy/create-vpn-bot-user.sh` creates the future system user and group without switching the service.
 - `deploy/vpn-bot.nonroot.example.service` shows the future non-root unit and narrow writable paths.
 - `deploy/sudoers.d/vpnbot.example` shows a conservative helper-only sudoers boundary.
-- `deploy/helpers/README.md` specifies helper contracts and states that no helper is wired into production yet.
+- `deploy/helpers/README.md` specified helper contracts before implementation.
 
-Package 5B/5C should perform the cutover only after helpers are implemented and tested:
+Package 5B adds implemented helpers and helper-mode adapter wiring, but leaves the active unit unchanged. Package 5C should perform the cutover only after helpers are installed and tested:
 
 1. Install root-owned helpers under `/usr/local/sbin`, mode `0750` or stricter as appropriate.
 2. Validate helpers with unit tests and a VDS temp copy.
-3. Install sudoers with `visudo -cf` validation.
+3. Validate sudoers with `visudo -cf /path/to/vpnbot.example`, then install sudoers only for the cutover.
 4. Prepare `/opt/vpn-service/data`, `/opt/vpn-service/logs`, and `/run/vpn-bot` for `vpn-bot` writes.
 5. Keep `/opt/vpn-service`, `.venv`, deploy files, and service units root-owned and not writable by `vpn-bot`.
-6. Switch to the non-root unit only after Xray, AWG, SOCKS5, and MTProto helper paths are wired and tested.
+6. Enable `PRIVILEGE_HELPERS_ENABLED=true` and run staged issue/revoke tests for Xray, AWG, SOCKS5, and managed MTProto.
+7. Switch to the non-root unit only after Xray, AWG, SOCKS5, and MTProto helper paths are wired and tested.
+
+Rollback remains:
+
+1. Disable `PRIVILEGE_HELPERS_ENABLED`.
+2. Keep or restore the root-run direct `deploy/vpn-bot.service`.
+3. Restore the previous systemd unit if a cutover was attempted.
+4. Restart `vpn-bot`.
 
 ## Package 5A Non-Changes
 
@@ -135,3 +169,11 @@ Package 5B/5C should perform the cutover only after helpers are implemented and 
 - No live backend config path is changed.
 - No SQLite schema is changed.
 - No production service is restarted by the new scaffolding.
+
+## Package 5B Non-Changes
+
+- `deploy/vpn-bot.service` remains the active root-run production unit.
+- Sudoers is still example-only and is not installed automatically.
+- Helper mode is opt-in and disabled by default.
+- No SQLite schema changes are introduced.
+- Historical failed rows are not deleted.
