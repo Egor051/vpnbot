@@ -1,27 +1,43 @@
-# Package 5A example only. Do not install until Package 5B helpers exist.
-# Validate any installed copy with visudo.
+# Package 5B example only. Do not install until the Package 5C cutover.
+# Validate any installed copy first:
+#   visudo -cf /path/to/vpnbot.example
 #
-# The vpn-bot user may call only fixed root-owned helper entrypoints.
-# The helpers must perform all argument validation, prefix checks, secret
-# redaction, canonical path checks, and service-specific apply logic.
+# Install helpers as root-owned files under /usr/local/sbin before enabling
+# helper mode:
+#   install -o root -g root -m 0750 deploy/helpers/vpnbot-socks5-user /usr/local/sbin/vpnbot-socks5-user
+#   install -o root -g root -m 0750 deploy/helpers/vpnbot-xray-apply /usr/local/sbin/vpnbot-xray-apply
+#   install -o root -g root -m 0750 deploy/helpers/vpnbot-awg-apply /usr/local/sbin/vpnbot-awg-apply
+#   install -o root -g root -m 0750 deploy/helpers/vpnbot-mtproxy-apply /usr/local/sbin/vpnbot-mtproxy-apply
+#
+# Wildcard arguments below are limited to fixed helper entrypoints. The helpers
+# are the security boundary and must validate all actions, paths, prefixes, and
+# staged file contents strictly. This file grants no raw account-management,
+# service-manager, file-copy, Xray, AWG, WG, or MTProxy binaries.
 
 Defaults:vpn-bot env_reset
 Defaults:vpn-bot secure_path="/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 Cmnd_Alias VPNBOT_SOCKS5 = \
-    /usr/local/sbin/vpnbot-socks5-user exists *, \
-    /usr/local/sbin/vpnbot-socks5-user create *, \
-    /usr/local/sbin/vpnbot-socks5-user set-password *, \
-    /usr/local/sbin/vpnbot-socks5-user lock *, \
-    /usr/local/sbin/vpnbot-socks5-user delete *
+    /usr/local/sbin/vpnbot-socks5-user exists vpn_socks_*, \
+    /usr/local/sbin/vpnbot-socks5-user create vpn_socks_*, \
+    /usr/local/sbin/vpnbot-socks5-user set-password vpn_socks_*, \
+    /usr/local/sbin/vpnbot-socks5-user lock vpn_socks_*, \
+    /usr/local/sbin/vpnbot-socks5-user delete vpn_socks_*
 
 Cmnd_Alias VPNBOT_XRAY = \
-    /usr/local/sbin/vpnbot-xray-apply *
+    /usr/local/sbin/vpnbot-xray-apply apply /run/vpn-bot/xray/*, \
+    /usr/local/sbin/vpnbot-xray-apply validate /run/vpn-bot/xray/*, \
+    /usr/local/sbin/vpnbot-xray-apply status
 
 Cmnd_Alias VPNBOT_AWG = \
-    /usr/local/sbin/vpnbot-awg-apply *
+    /usr/local/sbin/vpnbot-awg-apply apply /run/vpn-bot/awg/*, \
+    /usr/local/sbin/vpnbot-awg-apply validate /run/vpn-bot/awg/*, \
+    /usr/local/sbin/vpnbot-awg-apply status, \
+    /usr/local/sbin/vpnbot-awg-apply show-peers, \
+    /usr/local/sbin/vpnbot-awg-apply show-transfer
 
 Cmnd_Alias VPNBOT_MTPROTO = \
-    /usr/local/sbin/vpnbot-mtproxy-apply *
+    /usr/local/sbin/vpnbot-mtproxy-apply apply /run/vpn-bot/mtproxy/*, \
+    /usr/local/sbin/vpnbot-mtproxy-apply status
 
 vpn-bot ALL=(root) NOPASSWD: VPNBOT_SOCKS5, VPNBOT_XRAY, VPNBOT_AWG, VPNBOT_MTPROTO

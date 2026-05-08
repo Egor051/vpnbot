@@ -42,6 +42,15 @@ def _base_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "MTPROTO_APPLY_TIMEOUT_SECONDS",
         "MTPROTO_ROLLBACK_ON_APPLY_FAILURE",
         "MTPROTO_KEEP_LAST_BACKUPS",
+        "PRIVILEGE_HELPERS_ENABLED",
+        "HELPER_STAGING_ROOT",
+        "SOCKS5_USER_HELPER_PATH",
+        "XRAY_APPLY_HELPER_PATH",
+        "AWG_APPLY_HELPER_PATH",
+        "MTPROTO_APPLY_HELPER_PATH",
+        "XRAY_HELPER_STAGING_DIR",
+        "AWG_HELPER_STAGING_DIR",
+        "MTPROTO_HELPER_STAGING_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -54,6 +63,23 @@ def test_socks5_disabled_does_not_require_host_or_port(monkeypatch: pytest.Monke
     assert settings.socks5_enabled is False
     assert settings.socks5_host == ""
     assert settings.socks5_port is None
+    assert settings.privilege_helpers_enabled is False
+
+
+def test_privilege_helper_settings_are_explicit_opt_in(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("PRIVILEGE_HELPERS_ENABLED", "true")
+    monkeypatch.setenv("HELPER_STAGING_ROOT", "/run/custom-vpn-bot")
+    monkeypatch.setenv("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/custom-socks")
+
+    settings = load_settings()
+
+    assert settings.privilege_helpers_enabled is True
+    assert settings.helper_staging_root == Path("/run/custom-vpn-bot")
+    assert settings.socks5_user_helper_path == Path("/usr/local/sbin/custom-socks")
+    assert settings.xray_helper_staging_dir == Path("/run/custom-vpn-bot/xray")
+    assert settings.awg_helper_staging_dir == Path("/run/custom-vpn-bot/awg")
+    assert settings.mtproto_helper_staging_dir == Path("/run/custom-vpn-bot/mtproxy")
 
 
 def test_socks5_enabled_requires_host_and_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

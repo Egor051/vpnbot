@@ -16,6 +16,7 @@ from adapters.dante_users import DanteUserAdapter
 from adapters.id_generator import IdGenerator
 from adapters.ip_allocator import IpAllocator
 from adapters.mtproxy import MtProxyAdapter
+from adapters.privileged_helpers import PrivilegedHelperRunner
 from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter
@@ -80,6 +81,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
     shell = ShellRunner(max_output_chars=4096)
     backup = BackupAdapter(clock, keep_last=settings.config_backup_keep_last)
     systemctl = SystemCtlAdapter(shell)
+    helper_runner = PrivilegedHelperRunner(shell=shell) if settings.privilege_helpers_enabled else None
     ids = IdGenerator()
     user_locks = UserLockManager()
     backend_health = BackendHealth()
@@ -112,6 +114,9 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         allow_restart_on_rollback=settings.xray_allow_restart_on_rollback,
         backup=backup,
         systemctl=systemctl,
+        helper_runner=helper_runner,
+        helper_path=settings.xray_apply_helper_path,
+        helper_staging_dir=settings.xray_helper_staging_dir,
     )
     xray_stats_adapter = XrayStatsAdapter(shell=shell, stats_server=settings.xray_stats_server)
     awg_adapter = AwgConfigAdapter(
@@ -120,12 +125,17 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         backup=backup,
         shell=shell,
         persistent_keepalive=settings.awg_persistent_keepalive,
+        helper_runner=helper_runner,
+        helper_path=settings.awg_apply_helper_path,
+        helper_staging_dir=settings.awg_helper_staging_dir,
     )
     ip_allocator = IpAllocator(vpn_keys_repo, settings.awg_network, settings.awg_server_address, awg_config=awg_adapter)
     dante_adapter = DanteUserAdapter(
         shell=shell,
         login_prefix=settings.socks5_login_prefix,
         system_user_shell=settings.socks5_system_user_shell,
+        helper_runner=helper_runner,
+        helper_path=settings.socks5_user_helper_path,
     )
     mtproxy_adapter = (
         MtProxyAdapter(
@@ -147,6 +157,9 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
             apply_timeout_seconds=settings.mtproto_apply_timeout_seconds,
             rollback_on_apply_failure=settings.mtproto_rollback_on_apply_failure,
             keep_last_backups=settings.mtproto_keep_last_backups,
+            helper_runner=helper_runner,
+            helper_path=settings.mtproto_apply_helper_path,
+            helper_staging_dir=settings.mtproto_helper_staging_dir,
         )
         if settings.mtproto_mode == "managed"
         else None

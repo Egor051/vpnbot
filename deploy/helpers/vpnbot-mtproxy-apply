@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, TextIO
+
+
+STAGING_ROOT = Path("/run/vpn-bot/mtproxy")
+TARGET_DIR = Path("/etc/mtproxy/vpnbot")
+TARGET_SECRETS = TARGET_DIR / "managed-secrets.json"
+TARGET_ENV = TARGET_DIR / "mtproxy.env"
+SERVICE_NAME = "mtproxy"
+DEFAULT_PORT = 8443
+FINAL_FILE_MODE = 0o600
+FINAL_DIR_MODE = 0o700
+EXIT_VALIDATION = 64
+EXIT_COMMAND_FAILED = 70
+ENV_KEYS = {
+    "MTPROTO_BINARY_PATH",
+    "MTPROTO_RUN_USER",
+    "MTPROTO_RUN_GROUP",
+    "MTPROTO_PROXY_SECRET_PATH",
+    "MTPROTO_PROXY_MULTI_CONF_PATH",
+    "MTPROTO_MANAGED_SECRETS_PATH",
+    "MTPROTO_PORT",
+    "MTPROTO_INTERNAL_STATS_PORT",
+    "MTPROTO_WORKERS",
+}
+
+
+class HelperError(RuntimeError):
+    def __init__(self, message: str, code: int = EXIT_COMMAND_FAILED) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def validate_candidate_dir(raw_path: str) -> Path:
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        raise HelperError("candidate path must be absolute", EXIT_VALIDATION)
+    if candidate.is_symlink():
+        raise HelperError("candidate path must not be a symlink", EXIT_VALIDATION)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise HelperError("candidate path does not exist", EXIT_VALIDATION) from exc
+    root = STAGING_ROOT.resolve(strict=False)
+    if not _is_relative_to(resolved, root):
+        raise HelperError("candidate path outside staging root", EXIT_VALIDATION)
+    if not resolved.is_dir():
+        raise HelperError("candidate path must be a directory", EXIT_VALIDATION)
+    return resolved
+
+
+def candidate_file(candidate_dir: Path, name: str) -> Path:
+    path = candidate_dir / name
+    if path.is_symlink():
+        raise HelperError("candidate file must not be a symlink", EXIT_VALIDATION)
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise HelperError("candidate file missing", EXIT_VALIDATION) from exc
+    if not _is_relative_to(resolved, candidate_dir):
+        raise HelperError("candidate file outside candidate directory", EXIT_VALIDATION)
+    if not resolved.is_file():
+        raise HelperError("candidate file must be a regular file", EXIT_VALIDATION)
+    return resolved
+
+
+def validate_secret_item(item: Any) -> None:
+    if not isinstance(item, dict):
+        raise HelperError("managed secrets item must be an object", EXIT_VALIDATION)
+    secret = item.get("secret")
+    fingerprint = item.get("fingerprint")
+    if secret is not None:
+        if not isinstance(secret, str) or re.fullmatch(r"[0-9a-fA-F]{32}", secret) is None:
+            raise HelperError("managed secrets JSON contains an invalid secret", EXIT_VALIDATION)
+    if fingerprint is not None and not isinstance(fingerprint, str):
+        raise HelperError("managed secrets JSON contains an invalid fingerprint", EXIT_VALIDATION)
+    for key in ("owner_user_id", "access_id"):
+        if key in item and item[key] is not None and not isinstance(item[key], int):
+            raise HelperError("managed secrets JSON contains an invalid integer", EXIT_VALIDATION)
+
+
+def validate_managed_secrets(path: Path) -> None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HelperError("managed secrets JSON is invalid", EXIT_VALIDATION) from exc
+    if not isinstance(data, dict):
+        raise HelperError("managed secrets JSON must be an object", EXIT_VALIDATION)
+    if data.get("version") != 1:
+        raise HelperError("managed secrets JSON has unsupported version", EXIT_VALIDATION)
+    if not isinstance(data.get("generation", 0), int):
+        raise HelperError("managed secrets JSON has invalid generation", EXIT_VALIDATION)
+    for list_name in ("secrets", "runtime_secrets"):
+        items = data.get(list_name)
+        if not isinstance(items, list):
+            raise HelperError("managed secrets JSON has invalid list", EXIT_VALIDATION)
+        for item in items:
+            validate_secret_item(item)
+
+
+def parse_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        if not raw_line:
+            continue
+        if "=" not in raw_line:
+            raise HelperError("MTProxy env file has invalid line", EXIT_VALIDATION)
+        key, value = raw_line.split("=", 1)
+        if key not in ENV_KEYS:
+            raise HelperError("MTProxy env file has unsupported key", EXIT_VALIDATION)
+        if "\x00" in value:
+            raise HelperError("MTProxy env file has invalid value", EXIT_VALIDATION)
+        values[key] = value
+    return values
+
+
+def port_from_env(values: dict[str, str]) -> int:
+    raw = values.get("MTPROTO_PORT", str(DEFAULT_PORT))
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise HelperError("MTProxy port is invalid", EXIT_VALIDATION) from exc
+    if not 1 <= port <= 65535:
+        raise HelperError("MTProxy port is invalid", EXIT_VALIDATION)
+    return port
+
+
+def run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except FileNotFoundError as exc:
+        raise HelperError("required command not found") from exc
+
+
+def _fsync_parent(path: Path) -> None:
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(path.parent, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _chmod_private(path: Path) -> None:
+    if os.name != "posix":
+        return
+    os.chown(path, 0, 0)
+    os.chmod(path, FINAL_FILE_MODE)
+
+
+def _prepare_target_dir() -> None:
+    TARGET_DIR.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        os.chown(TARGET_DIR, 0, 0)
+        os.chmod(TARGET_DIR, FINAL_DIR_MODE)
+
+
+def backup_targets() -> dict[Path, Path | None]:
+    backups: dict[Path, Path | None] = {}
+    for target in (TARGET_SECRETS, TARGET_ENV):
+        if not target.exists():
+            backups[target] = None
+            continue
+        backup = target.with_name(f"{target.name}.{time.time_ns()}.bak")
+        shutil.copy2(target, backup)
+        if os.name == "posix":
+            os.chmod(backup, FINAL_FILE_MODE)
+        backups[target] = backup
+    return backups
+
+
+def install_file(source: Path, target: Path) -> None:
+    _prepare_target_dir()
+    tmp_path = target.with_name(f".{target.name}.{time.time_ns()}.tmp")
+    try:
+        with source.open("rb") as input_file:
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FINAL_FILE_MODE)
+            with os.fdopen(fd, "wb") as output_file:
+                shutil.copyfileobj(input_file, output_file)
+                output_file.flush()
+                os.fsync(output_file.fileno())
+        _chmod_private(tmp_path)
+        os.replace(tmp_path, target)
+        _fsync_parent(target)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def restore_targets(backups: dict[Path, Path | None]) -> None:
+    _prepare_target_dir()
+    for target, backup in backups.items():
+        if backup is None:
+            target.unlink(missing_ok=True)
+            continue
+        install_file(backup, target)
+    _fsync_parent(TARGET_DIR)
+
+
+def service_active() -> bool:
+    result = run_command(["systemctl", "is-active", SERVICE_NAME])
+    return result.returncode == 0 and result.stdout.strip() == "active"
+
+
+def port_listening(port: int) -> bool:
+    result = run_command(["ss", "-tln"])
+    if result.returncode != 0:
+        return False
+    token = f":{port}"
+    for line in result.stdout.splitlines():
+        if "LISTEN" in line and token in line:
+            return True
+    return False
+
+
+def restart_and_verify(port: int) -> None:
+    result = run_command(["systemctl", "restart", SERVICE_NAME])
+    if result.returncode != 0:
+        raise HelperError("MTProxy restart failed")
+    if not service_active():
+        raise HelperError("MTProxy service is not active")
+    if not port_listening(port):
+        raise HelperError("MTProxy port is not listening")
+
+
+def existing_port() -> int:
+    if not TARGET_ENV.exists():
+        return DEFAULT_PORT
+    try:
+        return port_from_env(parse_env(TARGET_ENV))
+    except HelperError:
+        return DEFAULT_PORT
+
+
+def action_apply(raw_path: str) -> int:
+    candidate_dir = validate_candidate_dir(raw_path)
+    secrets_path = candidate_file(candidate_dir, "managed-secrets.json")
+    env_path = candidate_file(candidate_dir, "mtproxy.env")
+    validate_managed_secrets(secrets_path)
+    env_values = parse_env(env_path)
+    new_port = port_from_env(env_values)
+    old_port = existing_port()
+    backups = backup_targets()
+    try:
+        install_file(secrets_path, TARGET_SECRETS)
+        install_file(env_path, TARGET_ENV)
+        restart_and_verify(new_port)
+    except Exception as exc:
+        try:
+            restore_targets(backups)
+            restart_and_verify(old_port)
+        except Exception as rollback_exc:
+            raise HelperError("MTProxy apply failed and rollback failed") from rollback_exc
+        raise HelperError("MTProxy apply failed; previous files restored") from exc
+    return 0
+
+
+def action_status(stdout: TextIO) -> int:
+    active = service_active()
+    listening = port_listening(existing_port())
+    if active:
+        print("active", file=stdout)
+    if listening:
+        print("listening", file=stdout)
+    return 0 if active and listening else 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="vpn-bot MTProxy managed files apply helper")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    apply_parser = subparsers.add_parser("apply")
+    apply_parser.add_argument("candidate_dir")
+    subparsers.add_parser("status")
+    return parser
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    try:
+        if args.action == "apply":
+            return action_apply(args.candidate_dir)
+        if args.action == "status":
+            return action_status(stdout)
+    except HelperError as exc:
+        print(f"error: {exc}", file=stderr)
+        return exc.code
+    print("error: unsupported action", file=stderr)
+    return EXIT_VALIDATION
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

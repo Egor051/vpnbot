@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from typing import TextIO
+
+
+LOGIN_PREFIX = "vpn_socks_"
+LOGIN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
+NOLOGIN_SHELL = "/usr/sbin/nologin"
+EXIT_NOT_FOUND = 2
+EXIT_VALIDATION = 64
+EXIT_COMMAND_FAILED = 70
+
+
+class HelperError(RuntimeError):
+    def __init__(self, message: str, code: int = EXIT_COMMAND_FAILED) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def validate_login(login: str) -> str:
+    if not login or login.startswith("-"):
+        raise HelperError("invalid managed login", EXIT_VALIDATION)
+    if not login.isascii():
+        raise HelperError("invalid managed login", EXIT_VALIDATION)
+    if not login.startswith(LOGIN_PREFIX):
+        raise HelperError("login outside managed prefix", EXIT_VALIDATION)
+    if LOGIN_RE.fullmatch(login) is None:
+        raise HelperError("invalid managed login", EXIT_VALIDATION)
+    return login
+
+
+def run_command(args: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        input=input_text,
+        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def action_exists(login: str) -> int:
+    result = run_command(["getent", "passwd", validate_login(login)])
+    if result.returncode == 0:
+        return 0
+    if result.returncode == EXIT_NOT_FOUND:
+        return EXIT_NOT_FOUND
+    raise HelperError("account lookup failed")
+
+
+def action_create(login: str) -> int:
+    result = run_command(["useradd", "-r", "-s", NOLOGIN_SHELL, validate_login(login)])
+    if result.returncode != 0:
+        raise HelperError("account create failed")
+    return 0
+
+
+def action_set_password(login: str, stdin: TextIO) -> int:
+    safe_login = validate_login(login)
+    password = stdin.read()
+    if password.endswith("\n"):
+        password = password[:-1]
+    if not password:
+        raise HelperError("password input is empty", EXIT_VALIDATION)
+    result = run_command(["chpasswd"], input_text=f"{safe_login}:{password}\n")
+    if result.returncode != 0:
+        raise HelperError("password update failed")
+    return 0
+
+
+def action_lock(login: str) -> int:
+    result = run_command(["passwd", "-l", validate_login(login)])
+    if result.returncode != 0:
+        raise HelperError("account lock failed")
+    return 0
+
+
+def action_delete(login: str) -> int:
+    result = run_command(["userdel", validate_login(login)])
+    if result.returncode != 0:
+        raise HelperError("account delete failed")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="vpn-bot SOCKS5 Linux account helper")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    for action in ("exists", "create", "set-password", "lock", "delete"):
+        subparser = subparsers.add_parser(action)
+        subparser.add_argument("login")
+    return parser
+
+
+def main(argv: list[str] | None = None, *, stdin: TextIO | None = None, stderr: TextIO | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    stdin = stdin or sys.stdin
+    stderr = stderr or sys.stderr
+    try:
+        if args.action == "exists":
+            return action_exists(args.login)
+        if args.action == "create":
+            return action_create(args.login)
+        if args.action == "set-password":
+            return action_set_password(args.login, stdin)
+        if args.action == "lock":
+            return action_lock(args.login)
+        if args.action == "delete":
+            return action_delete(args.login)
+    except HelperError as exc:
+        print(f"error: {exc}", file=stderr)
+        return exc.code
+    print("error: unsupported action", file=stderr)
+    return EXIT_VALIDATION
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

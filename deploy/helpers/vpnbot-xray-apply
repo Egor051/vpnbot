@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import TextIO
+
+
+STAGING_ROOT = Path("/run/vpn-bot/xray")
+CANONICAL_CONFIG = Path("/usr/local/etc/xray/config.json")
+XRAY_BIN = "/usr/local/bin/xray"
+SERVICE_NAME = "xray"
+FINAL_OWNER = ("nobody", "nogroup")
+FINAL_MODE = 0o600
+EXIT_VALIDATION = 64
+EXIT_COMMAND_FAILED = 70
+
+
+class HelperError(RuntimeError):
+    def __init__(self, message: str, code: int = EXIT_COMMAND_FAILED) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def validate_candidate_path(raw_path: str) -> Path:
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        raise HelperError("candidate path must be absolute", EXIT_VALIDATION)
+    if candidate.is_symlink():
+        raise HelperError("candidate path must not be a symlink", EXIT_VALIDATION)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise HelperError("candidate path does not exist", EXIT_VALIDATION) from exc
+    root = STAGING_ROOT.resolve(strict=False)
+    if not _is_relative_to(resolved, root):
+        raise HelperError("candidate path outside staging root", EXIT_VALIDATION)
+    if not resolved.is_file():
+        raise HelperError("candidate path must be a file", EXIT_VALIDATION)
+    return resolved
+
+
+def validate_json(path: Path) -> None:
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise HelperError("candidate JSON is invalid", EXIT_VALIDATION) from exc
+    if not isinstance(data, dict):
+        raise HelperError("candidate JSON must be an object", EXIT_VALIDATION)
+
+
+def run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except FileNotFoundError as exc:
+        raise HelperError("required command not found") from exc
+
+
+def require_success(args: list[str], message: str) -> None:
+    result = run_command(args)
+    if result.returncode != 0:
+        raise HelperError(message)
+
+
+def xray_test_config(path: Path) -> None:
+    require_success([XRAY_BIN, "run", "-test", "-config", str(path)], "Xray config validation failed")
+
+
+def service_active() -> bool:
+    result = run_command(["systemctl", "is-active", SERVICE_NAME])
+    return result.returncode == 0 and result.stdout.strip() == "active"
+
+
+def restart_and_verify() -> None:
+    require_success(["systemctl", "restart", SERVICE_NAME], "Xray restart failed")
+    if not service_active():
+        raise HelperError("Xray service is not active")
+
+
+def _lookup_owner() -> tuple[int, int] | None:
+    if os.name != "posix":
+        return None
+    import grp
+    import pwd
+
+    try:
+        return pwd.getpwnam(FINAL_OWNER[0]).pw_uid, grp.getgrnam(FINAL_OWNER[1]).gr_gid
+    except KeyError:
+        return None
+
+
+def _set_final_stat(path: Path) -> None:
+    if os.name != "posix":
+        return
+    owner = _lookup_owner()
+    if owner is not None:
+        os.chown(path, owner[0], owner[1])
+    os.chmod(path, FINAL_MODE)
+
+
+def _fsync_parent(path: Path) -> None:
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(path.parent, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def backup_current() -> Path | None:
+    if not CANONICAL_CONFIG.exists():
+        return None
+    backup_path = CANONICAL_CONFIG.with_name(f"{CANONICAL_CONFIG.name}.{time.time_ns()}.bak")
+    shutil.copy2(CANONICAL_CONFIG, backup_path)
+    if os.name == "posix":
+        os.chmod(backup_path, FINAL_MODE)
+    return backup_path
+
+
+def install_candidate(candidate: Path) -> None:
+    CANONICAL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = CANONICAL_CONFIG.with_name(f".{CANONICAL_CONFIG.name}.{time.time_ns()}.tmp")
+    try:
+        with candidate.open("rb") as source:
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FINAL_MODE)
+            with os.fdopen(fd, "wb") as target:
+                shutil.copyfileobj(source, target)
+                target.flush()
+                os.fsync(target.fileno())
+        _set_final_stat(tmp_path)
+        os.replace(tmp_path, CANONICAL_CONFIG)
+        _fsync_parent(CANONICAL_CONFIG)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def restore_backup(backup_path: Path | None) -> None:
+    if backup_path is None:
+        CANONICAL_CONFIG.unlink(missing_ok=True)
+        _fsync_parent(CANONICAL_CONFIG)
+        return
+    install_candidate(backup_path)
+
+
+def action_validate(raw_path: str) -> int:
+    candidate = validate_candidate_path(raw_path)
+    validate_json(candidate)
+    xray_test_config(candidate)
+    return 0
+
+
+def action_apply(raw_path: str) -> int:
+    candidate = validate_candidate_path(raw_path)
+    validate_json(candidate)
+    xray_test_config(candidate)
+    backup_path = backup_current()
+    try:
+        install_candidate(candidate)
+        restart_and_verify()
+    except Exception as exc:
+        try:
+            restore_backup(backup_path)
+            restart_and_verify()
+        except Exception as rollback_exc:
+            raise HelperError("Xray apply failed and rollback failed") from rollback_exc
+        raise HelperError("Xray apply failed; previous config restored") from exc
+    return 0
+
+
+def action_status(stdout: TextIO) -> int:
+    result = run_command(["systemctl", "is-active", SERVICE_NAME])
+    if result.stdout.strip():
+        print(result.stdout.strip(), file=stdout)
+    return result.returncode
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="vpn-bot Xray config apply helper")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    for action in ("apply", "validate"):
+        subparser = subparsers.add_parser(action)
+        subparser.add_argument("candidate_config_path")
+    subparsers.add_parser("status")
+    return parser
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    stdout = stdout or sys.stdout
+    stderr = stderr or sys.stderr
+    try:
+        if args.action == "apply":
+            return action_apply(args.candidate_config_path)
+        if args.action == "validate":
+            return action_validate(args.candidate_config_path)
+        if args.action == "status":
+            return action_status(stdout)
+    except HelperError as exc:
+        print(f"error: {exc}", file=stderr)
+        return exc.code
+    print("error: unsupported action", file=stderr)
+    return EXIT_VALIDATION
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

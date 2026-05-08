@@ -9,6 +9,7 @@ from pathlib import Path
 from adapters.backup import BackupAdapter
 from adapters.errors import AwgApplyError, AwgConfigError, AwgPeerAlreadyExistsError
 from adapters.file_lock import ConfigFileLock
+from adapters.privileged_helpers import PrivilegedHelperRunner, cleanup_staging_path, write_private_staging_file
 from adapters.shell_runner import ShellRunner
 from models.dto import ShellResult
 
@@ -84,6 +85,9 @@ class AwgConfigAdapter:
         backup: BackupAdapter,
         shell: ShellRunner,
         persistent_keepalive: int,
+        helper_runner: PrivilegedHelperRunner | None = None,
+        helper_path: Path | None = None,
+        helper_staging_dir: Path | None = None,
     ) -> None:
         if config_path.is_symlink():
             raise AwgConfigError("AWG config path не должен быть symlink. Укажите реальный путь к awg0.conf.")
@@ -92,6 +96,9 @@ class AwgConfigAdapter:
         self.backup = backup
         self.shell = shell
         self.persistent_keepalive = persistent_keepalive
+        self.helper_runner = helper_runner
+        self.helper_path = helper_path or Path("/usr/local/sbin/vpnbot-awg-apply")
+        self.helper_staging_dir = helper_staging_dir or Path("/run/vpn-bot/awg")
 
     async def generate_private_key(self) -> str:
         result = await self._run_awg_or_wg(["genkey"], timeout=10)
@@ -146,6 +153,16 @@ class AwgConfigAdapter:
         client_ip: str,
         label: str | None = None,
     ) -> None:
+        if self._using_helper():
+            await self._add_peer_via_helper(
+                key_id=key_id,
+                owner_user_id=owner_user_id,
+                public_key=public_key,
+                preshared_key=preshared_key,
+                client_ip=client_ip,
+                label=label,
+            )
+            return
         with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             snapshot = self._snapshot_config()
@@ -193,6 +210,9 @@ class AwgConfigAdapter:
                 self._raise_with_rollback_summary("AWG peer add failed", exc, rollback_errors)
 
     async def remove_peer(self, *, key_id: int, public_key: str | None) -> None:
+        if self._using_helper():
+            await self._remove_peer_via_helper(key_id=key_id, public_key=public_key)
+            return
         with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             snapshot = self._snapshot_config()
@@ -225,6 +245,71 @@ class AwgConfigAdapter:
                     runtime_removed=runtime_removed,
                 )
                 self._raise_with_rollback_summary("AWG peer remove failed", exc, rollback_errors)
+
+    async def _add_peer_via_helper(
+        self,
+        *,
+        key_id: int,
+        owner_user_id: int,
+        public_key: str,
+        preshared_key: str | None,
+        client_ip: str,
+        label: str | None,
+    ) -> None:
+        with ConfigFileLock(self._lock_target()):
+            snapshot = self._snapshot_config()
+            original = self._read_text()
+            self._assert_config_unchanged(snapshot)
+            sections = self._parse_sections(original)
+            if self._managed_block_exists(original, key_id):
+                await self._apply_config_text_via_helper(original)
+                return
+            if self._find_peer(sections, public_key=public_key, client_ip=client_ip) is not None:
+                raise AwgPeerAlreadyExistsError("AWG peer с таким public key или client_ip уже есть в конфиге")
+
+            updated = original.rstrip() + "\n\n" + self._peer_block(
+                key_id=key_id,
+                owner_user_id=owner_user_id,
+                public_key=public_key,
+                preshared_key=preshared_key,
+                client_ip=client_ip,
+                label=label,
+            )
+            self._parse_sections(updated)
+            self._assert_config_unchanged(snapshot)
+            await self._apply_config_text_via_helper(updated)
+
+    async def _remove_peer_via_helper(self, *, key_id: int, public_key: str | None) -> None:
+        with ConfigFileLock(self._lock_target()):
+            snapshot = self._snapshot_config()
+            original = self._read_text()
+            self._assert_config_unchanged(snapshot)
+            updated = self._remove_managed_block(original, key_id)
+            if updated == original and public_key:
+                updated = self._remove_peer_section_by_identity(original, public_key=public_key)
+            if updated == original and public_key is None:
+                return
+            self._parse_sections(updated)
+            self._assert_config_unchanged(snapshot)
+            await self._apply_config_text_via_helper(updated)
+            if public_key and await self.verify_runtime_peer(public_key):
+                raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
+
+    async def _apply_config_text_via_helper(self, text: str) -> None:
+        self._parse_sections(text)
+        candidate_path: Path | None = None
+        try:
+            candidate_path = write_private_staging_file(
+                self.helper_staging_dir,
+                prefix=f".{self.config_path.name}.",
+                suffix=".conf",
+                content=text,
+            )
+            result = await self._run_helper(["apply", str(candidate_path)], timeout=90, max_output_chars=2048)
+            if not result.ok:
+                raise AwgApplyError(f"AWG helper apply failed: rc={result.returncode}")
+        finally:
+            cleanup_staging_path(candidate_path)
 
     def client_interface_options(self) -> dict[str, str]:
         if not self.config_path.exists():
@@ -264,29 +349,54 @@ class AwgConfigAdapter:
         return None
 
     async def ensure_interface_active(self) -> None:
+        if self._using_helper():
+            result = await self._run_helper(["status"], timeout=20)
+            if not result.ok:
+                raise AwgApplyError(f"AWG interface {self.interface} недоступен или не активен")
+            return
         result = await self._show_interface()
         if not result.ok:
             raise AwgApplyError(f"AWG interface {self.interface} недоступен или не активен")
 
     async def verify_runtime_peer(self, public_key: str) -> bool:
+        if self._using_helper():
+            result = await self._run_helper(["show-peers"], timeout=20, max_output_chars=MACHINE_OUTPUT_LIMIT)
+            if not result.ok:
+                return False
+            return any(line.strip() == f"peer: {public_key}" for line in result.stdout.splitlines())
         result = await self._show_interface()
         if not result.ok:
             return False
         return any(line.strip() == f"peer: {public_key}" for line in result.stdout.splitlines())
 
     async def list_runtime_peers(self) -> list[dict[str, str]]:
+        if self._using_helper():
+            result = await self._run_helper(["show-peers"], timeout=20, max_output_chars=MACHINE_OUTPUT_LIMIT)
+            if not result.ok:
+                raise AwgApplyError(f"Не удалось получить AWG runtime peers для {self.interface}")
+            return self._parse_runtime_peers(result.stdout)
         result = await self._show_interface()
         if not result.ok:
             raise AwgApplyError(f"Не удалось получить AWG runtime peers для {self.interface}")
         return self._parse_runtime_peers(result.stdout)
 
     async def sync_runtime_from_config(self) -> None:
+        if self._using_helper():
+            with ConfigFileLock(self._lock_target()):
+                await self._apply_config_text_via_helper(self._read_text())
+            return
         with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             await self._validate_candidate_config(self._read_text())
             await self._sync_runtime_from_config(self.config_path)
 
     async def remove_runtime_peer(self, public_key: str) -> None:
+        if self._using_helper():
+            with ConfigFileLock(self._lock_target()):
+                await self._apply_config_text_via_helper(self._read_text())
+                if await self.verify_runtime_peer(public_key):
+                    raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
+            return
         with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             if not await self._remove_peer_runtime(public_key):
@@ -295,6 +405,11 @@ class AwgConfigAdapter:
                 raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
 
     async def list_transfer(self) -> dict[str, tuple[int, int]]:
+        if self._using_helper():
+            result = await self._run_helper(["show-transfer"], timeout=20, max_output_chars=MACHINE_OUTPUT_LIMIT)
+            if not result.ok:
+                raise AwgApplyError("Не удалось получить AWG transfer через helper")
+            return self.parse_transfer_output(result.stdout, source="awg")
         result = await self.shell.run(
             ["awg", "show", self.interface, "transfer"],
             timeout=10,
@@ -715,6 +830,30 @@ class AwgConfigAdapter:
         if result.returncode != 127:
             return result
         return await self.shell.run(["wg", *args], input_text=input_text, timeout=timeout, sensitive_values=sensitive_values or [])
+
+    async def _run_helper(
+        self,
+        args: list[str],
+        *,
+        timeout: float,
+        max_output_chars: int = 2048,
+    ) -> ShellResult:
+        if self.helper_runner is None:
+            raise AwgApplyError("AWG privileged helper is not configured")
+        return await self.helper_runner.run(
+            self.helper_path,
+            args,
+            timeout=timeout,
+            max_output_chars=max_output_chars,
+        )
+
+    def _using_helper(self) -> bool:
+        return self.helper_runner is not None
+
+    def _lock_target(self) -> Path:
+        if self._using_helper():
+            return self.helper_staging_dir / "awg0.conf"
+        return self.config_path
 
     def _parse_int(self, value: str | None) -> int | None:
         if not value:

@@ -16,6 +16,7 @@ from adapters.errors import (
     XrayInboundNotFoundError,
 )
 from adapters.file_lock import ConfigFileLock
+from adapters.privileged_helpers import PrivilegedHelperRunner, cleanup_staging_path, write_private_staging_file
 from adapters.systemctl import SystemCtlAdapter
 
 
@@ -38,6 +39,9 @@ class XrayConfigAdapter:
         allow_restart_on_rollback: bool,
         backup: BackupAdapter,
         systemctl: SystemCtlAdapter,
+        helper_runner: PrivilegedHelperRunner | None = None,
+        helper_path: Path | None = None,
+        helper_staging_dir: Path | None = None,
     ) -> None:
         if config_path.is_symlink():
             raise XrayConfigError("Xray config path не должен быть symlink. Укажите реальный путь к config.json.")
@@ -50,6 +54,9 @@ class XrayConfigAdapter:
         self.allow_restart_on_rollback = allow_restart_on_rollback
         self.backup = backup
         self.systemctl = systemctl
+        self.helper_runner = helper_runner
+        self.helper_path = helper_path or Path("/usr/local/sbin/vpnbot-xray-apply")
+        self.helper_staging_dir = helper_staging_dir or Path("/run/vpn-bot/xray")
         if self.apply_mode == "restart":
             logger.warning("XRAY_APPLY_MODE=restart: Xray config changes will restart service %s", self.service_name)
 
@@ -62,10 +69,11 @@ class XrayConfigAdapter:
         flow: str,
         manage_short_id: bool,
     ) -> XrayClientApplyResult:
-        with ConfigFileLock(self.config_path):
-            await self._ensure_current_config_valid()
+        with ConfigFileLock(self._lock_target()):
+            if not self._using_helper():
+                await self._ensure_current_config_valid()
             snapshot = self._snapshot_config()
-            backup_path = self.backup.create_backup(self.config_path)
+            backup_path = None if self._using_helper() else self.backup.create_backup(self.config_path)
             temp_path: Path | None = None
             try:
                 config = self._read_config(self.config_path)
@@ -84,14 +92,10 @@ class XrayConfigAdapter:
                     short_id_inserted = self._add_short_id(inbound, short_id)
 
                 temp_path = self._write_temp_config(config, self.config_path)
-                await self._test_config(temp_path)
-                self._assert_config_unchanged(snapshot)
-                self._replace_main_config(temp_path, self.config_path)
-                await self._apply_or_restore(backup_path)
+                await self._install_candidate(temp_path, snapshot, backup_path)
                 return XrayClientApplyResult(short_id_inserted=short_id_inserted)
-            except Exception:
+            finally:
                 self._cleanup_temp(temp_path)
-                raise
 
     async def remove_client(
         self,
@@ -101,10 +105,11 @@ class XrayConfigAdapter:
         short_id: str | None,
         remove_short_id: bool,
     ) -> None:
-        with ConfigFileLock(self.config_path):
-            await self._ensure_current_config_valid()
+        with ConfigFileLock(self._lock_target()):
+            if not self._using_helper():
+                await self._ensure_current_config_valid()
             snapshot = self._snapshot_config()
-            backup_path = self.backup.create_backup(self.config_path)
+            backup_path = None if self._using_helper() else self.backup.create_backup(self.config_path)
             temp_path: Path | None = None
             try:
                 config = self._read_config(self.config_path)
@@ -124,21 +129,18 @@ class XrayConfigAdapter:
                     return
 
                 temp_path = self._write_temp_config(config, self.config_path)
-                await self._test_config(temp_path)
-                self._assert_config_unchanged(snapshot)
-                self._replace_main_config(temp_path, self.config_path)
-                await self._apply_or_restore(backup_path)
-            except Exception:
+                await self._install_candidate(temp_path, snapshot, backup_path)
+            finally:
                 self._cleanup_temp(temp_path)
-                raise
 
     async def ensure_short_id(self, short_id: str) -> bool:
         if not short_id:
             return False
-        with ConfigFileLock(self.config_path):
-            await self._ensure_current_config_valid()
+        with ConfigFileLock(self._lock_target()):
+            if not self._using_helper():
+                await self._ensure_current_config_valid()
             snapshot = self._snapshot_config()
-            backup_path = self.backup.create_backup(self.config_path)
+            backup_path = None if self._using_helper() else self.backup.create_backup(self.config_path)
             temp_path: Path | None = None
             try:
                 config = self._read_config(self.config_path)
@@ -148,14 +150,10 @@ class XrayConfigAdapter:
                     return False
 
                 temp_path = self._write_temp_config(config, self.config_path)
-                await self._test_config(temp_path)
-                self._assert_config_unchanged(snapshot)
-                self._replace_main_config(temp_path, self.config_path)
-                await self._apply_or_restore(backup_path)
+                await self._install_candidate(temp_path, snapshot, backup_path)
                 return True
-            except Exception:
+            finally:
                 self._cleanup_temp(temp_path)
-                raise
 
     def find_client(self, *, uuid_value: str | None = None, email_label: str | None = None) -> dict[str, Any] | None:
         config = self._read_config(self.config_path)
@@ -295,6 +293,13 @@ class XrayConfigAdapter:
     def _write_temp_config(self, config: dict[str, Any], mode_from: Path) -> Path:
         content = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
         json.loads(content)
+        if self._using_helper():
+            return write_private_staging_file(
+                self.helper_staging_dir,
+                prefix=f".{self.config_path.name}.",
+                suffix=".json",
+                content=content,
+            )
         with tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
@@ -310,6 +315,35 @@ class XrayConfigAdapter:
         if mode_from.exists():
             self._copy_stat(mode_from, temp_path)
         return temp_path
+
+    async def _install_candidate(
+        self,
+        temp_path: Path,
+        snapshot: tuple[int, int],
+        backup_path: Path | None,
+    ) -> None:
+        if self._using_helper():
+            self._assert_config_unchanged(snapshot)
+            await self._apply_helper(temp_path)
+            return
+        if backup_path is None:
+            raise XrayApplyError("Xray backup is not available for direct apply")
+        await self._test_config(temp_path)
+        self._assert_config_unchanged(snapshot)
+        self._replace_main_config(temp_path, self.config_path)
+        await self._apply_or_restore(backup_path)
+
+    async def _apply_helper(self, candidate_path: Path) -> None:
+        if self.helper_runner is None:
+            raise XrayApplyError("Xray privileged helper is not configured")
+        result = await self.helper_runner.run(
+            self.helper_path,
+            ["apply", str(candidate_path)],
+            timeout=90,
+            max_output_chars=2048,
+        )
+        if not result.ok:
+            raise XrayApplyError(f"Xray helper apply failed: rc={result.returncode}")
 
     async def _test_config(self, path: Path) -> None:
         result = await self.systemctl.xray_test_config(path)
@@ -371,8 +405,15 @@ class XrayConfigAdapter:
         return active.ok and active.stdout.strip() == "active"
 
     def _cleanup_temp(self, temp_path: Path | None) -> None:
-        if temp_path is not None and temp_path.exists():
-            temp_path.unlink(missing_ok=True)
+        cleanup_staging_path(temp_path)
+
+    def _using_helper(self) -> bool:
+        return self.helper_runner is not None
+
+    def _lock_target(self) -> Path:
+        if self._using_helper():
+            return self.helper_staging_dir / "config.json"
+        return self.config_path
 
     def _copy_stat(self, source: Path, target: Path) -> None:
         stat = source.stat()

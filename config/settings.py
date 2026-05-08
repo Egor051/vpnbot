@@ -229,6 +229,15 @@ class Settings:
     mtproto_apply_timeout_seconds: int = 10
     mtproto_rollback_on_apply_failure: bool = True
     mtproto_keep_last_backups: int = 10
+    privilege_helpers_enabled: bool = False
+    helper_staging_root: Path = Path("/run/vpn-bot")
+    socks5_user_helper_path: Path = Path("/usr/local/sbin/vpnbot-socks5-user")
+    xray_apply_helper_path: Path = Path("/usr/local/sbin/vpnbot-xray-apply")
+    awg_apply_helper_path: Path = Path("/usr/local/sbin/vpnbot-awg-apply")
+    mtproto_apply_helper_path: Path = Path("/usr/local/sbin/vpnbot-mtproxy-apply")
+    xray_helper_staging_dir: Path = Path("/run/vpn-bot/xray")
+    awg_helper_staging_dir: Path = Path("/run/vpn-bot/awg")
+    mtproto_helper_staging_dir: Path = Path("/run/vpn-bot/mtproxy")
 
     def validate_xray_ready(self) -> None:
         required = {
@@ -273,6 +282,7 @@ class Settings:
 
 def load_settings(env_path: str | Path | None = None) -> Settings:
     load_dotenv(env_path)
+    helper_staging_root = Path(_optional("HELPER_STAGING_ROOT", "/run/vpn-bot"))
     awg_dns = _optional("AWG_DNS") or _optional("AWG_CLIENT_DNS", "1.1.1.1")
     xray_manage_short_ids = _bool("XRAY_MANAGE_SHORT_IDS", False)
     xray_short_id = _xray_short_id(_optional("XRAY_SHORT_ID"), required=False)
@@ -417,4 +427,13 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         mtproto_apply_timeout_seconds=_int_range("MTPROTO_APPLY_TIMEOUT_SECONDS", 10, 1, 3600),
         mtproto_rollback_on_apply_failure=_bool("MTPROTO_ROLLBACK_ON_APPLY_FAILURE", True),
         mtproto_keep_last_backups=_int_range("MTPROTO_KEEP_LAST_BACKUPS", 10, 0, 1000),
+        privilege_helpers_enabled=_bool("PRIVILEGE_HELPERS_ENABLED", False),
+        helper_staging_root=helper_staging_root,
+        socks5_user_helper_path=Path(_optional("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/vpnbot-socks5-user")),
+        xray_apply_helper_path=Path(_optional("XRAY_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-xray-apply")),
+        awg_apply_helper_path=Path(_optional("AWG_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-awg-apply")),
+        mtproto_apply_helper_path=Path(_optional("MTPROTO_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-mtproxy-apply")),
+        xray_helper_staging_dir=Path(_optional("XRAY_HELPER_STAGING_DIR", str(helper_staging_root / "xray"))),
+        awg_helper_staging_dir=Path(_optional("AWG_HELPER_STAGING_DIR", str(helper_staging_root / "awg"))),
+        mtproto_helper_staging_dir=Path(_optional("MTPROTO_HELPER_STAGING_DIR", str(helper_staging_root / "mtproxy"))),
     )
