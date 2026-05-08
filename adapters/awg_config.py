@@ -203,6 +203,8 @@ class AwgConfigAdapter:
                 original = self._read_text()
                 self._assert_config_unchanged(snapshot)
                 updated = self._remove_managed_block(original, key_id)
+                if updated == original and public_key:
+                    updated = self._remove_peer_section_by_identity(original, public_key=public_key)
                 if updated != original:
                     await self._validate_candidate_config(updated)
                     self._assert_config_unchanged(snapshot)
@@ -231,6 +233,9 @@ class AwgConfigAdapter:
 
     def find_peer(self, *, public_key: str | None = None, client_ip: str | None = None) -> dict[str, str] | None:
         return self._find_peer(self._parse_sections(self._read_text()), public_key=public_key, client_ip=client_ip)
+
+    def list_config_peers(self) -> list[dict[str, str]]:
+        return self._parse_peer_blocks(self._read_text())
 
     def list_peer_allowed_ips(self) -> set[str]:
         ips: set[str] = set()
@@ -268,6 +273,26 @@ class AwgConfigAdapter:
         if not result.ok:
             return False
         return any(line.strip() == f"peer: {public_key}" for line in result.stdout.splitlines())
+
+    async def list_runtime_peers(self) -> list[dict[str, str]]:
+        result = await self._show_interface()
+        if not result.ok:
+            raise AwgApplyError(f"Не удалось получить AWG runtime peers для {self.interface}")
+        return self._parse_runtime_peers(result.stdout)
+
+    async def sync_runtime_from_config(self) -> None:
+        with ConfigFileLock(self.config_path):
+            await self.ensure_interface_active()
+            await self._validate_candidate_config(self._read_text())
+            await self._sync_runtime_from_config(self.config_path)
+
+    async def remove_runtime_peer(self, public_key: str) -> None:
+        with ConfigFileLock(self.config_path):
+            await self.ensure_interface_active()
+            if not await self._remove_peer_runtime(public_key):
+                raise AwgApplyError("Не удалось удалить AWG peer из runtime")
+            if await self.verify_runtime_peer(public_key):
+                raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
 
     async def list_transfer(self) -> dict[str, tuple[int, int]]:
         result = await self.shell.run(
@@ -417,6 +442,106 @@ class AwgConfigAdapter:
             if client_ip and self._allowed_ips_contains(allowed_ips, client_ip):
                 return dict(section.options)
         return None
+
+    def _parse_peer_blocks(self, text: str) -> list[dict[str, str]]:
+        peers: list[dict[str, str]] = []
+        lines = text.splitlines()
+        pending_marker: dict[str, str] = {}
+        index = 0
+        while index < len(lines):
+            stripped = lines[index].strip()
+            marker = self._managed_start_marker(stripped)
+            if marker:
+                pending_marker = marker
+                index += 1
+                continue
+            if stripped == "[Peer]":
+                block_lines = [lines[index]]
+                index += 1
+                while index < len(lines):
+                    next_stripped = lines[index].strip()
+                    if next_stripped.startswith("[") and next_stripped.endswith("]"):
+                        break
+                    block_lines.append(lines[index])
+                    index += 1
+                section = self._parse_sections("\n".join(["[Interface]", *block_lines]))[-1]
+                peer = dict(section.options)
+                peer.update(pending_marker)
+                peers.append(peer)
+                pending_marker = {}
+                continue
+            if stripped and not stripped.startswith("#"):
+                pending_marker = {}
+            index += 1
+        return peers
+
+    def _managed_start_marker(self, line: str) -> dict[str, str]:
+        prefix = "# vpn-bot peer start key_id="
+        if not line.startswith(prefix):
+            return {}
+        rest = line[len(prefix) :]
+        parts = rest.split()
+        if not parts:
+            return {}
+        try:
+            key_id = int(parts[0])
+        except ValueError:
+            return {}
+        marker = {"_managed_key_id": str(key_id)}
+        for part in parts[1:]:
+            if part.startswith("label="):
+                label = part.split("=", 1)[1].strip()
+                if label:
+                    marker["_managed_label"] = label
+        return marker
+
+    def _remove_peer_section_by_identity(self, text: str, *, public_key: str) -> str:
+        lines = text.splitlines()
+        updated_lines: list[str] = []
+        index = 0
+        removed = False
+        while index < len(lines):
+            if lines[index].strip() != "[Peer]":
+                updated_lines.append(lines[index])
+                index += 1
+                continue
+
+            start = index
+            block = [lines[index]]
+            index += 1
+            while index < len(lines):
+                stripped = lines[index].strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    break
+                block.append(lines[index])
+                index += 1
+            section = self._parse_sections("\n".join(["[Interface]", *block]))[-1]
+            if section.options.get("PublicKey") == public_key:
+                removed = True
+                continue
+            updated_lines.extend(lines[start:index])
+
+        if not removed:
+            return text
+        return "\n".join(updated_lines).rstrip() + "\n"
+
+    def _parse_runtime_peers(self, text: str) -> list[dict[str, str]]:
+        peers: list[dict[str, str]] = []
+        current: dict[str, str] | None = None
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("peer: "):
+                current = {"PublicKey": line.split("peer: ", 1)[1].strip()}
+                peers.append(current)
+                continue
+            if current is None or ":" not in line:
+                continue
+            key, value = [part.strip() for part in line.split(":", 1)]
+            if key == "allowed ips":
+                current["AllowedIPs"] = value
+        return peers
 
     def _allowed_ips_contains(self, allowed_ips: str, client_ip: str) -> bool:
         try:

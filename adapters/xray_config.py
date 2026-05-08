@@ -132,11 +132,49 @@ class XrayConfigAdapter:
                 self._cleanup_temp(temp_path)
                 raise
 
+    async def ensure_short_id(self, short_id: str) -> bool:
+        if not short_id:
+            return False
+        with ConfigFileLock(self.config_path):
+            await self._ensure_current_config_valid()
+            snapshot = self._snapshot_config()
+            backup_path = self.backup.create_backup(self.config_path)
+            temp_path: Path | None = None
+            try:
+                config = self._read_config(self.config_path)
+                self._assert_config_unchanged(snapshot)
+                inbound = self._target_inbound(config)
+                if not self._add_short_id(inbound, short_id):
+                    return False
+
+                temp_path = self._write_temp_config(config, self.config_path)
+                await self._test_config(temp_path)
+                self._assert_config_unchanged(snapshot)
+                self._replace_main_config(temp_path, self.config_path)
+                await self._apply_or_restore(backup_path)
+                return True
+            except Exception:
+                self._cleanup_temp(temp_path)
+                raise
+
     def find_client(self, *, uuid_value: str | None = None, email_label: str | None = None) -> dict[str, Any] | None:
         config = self._read_config(self.config_path)
         inbound = self._target_inbound(config)
         found = self._find_client_in_list(self._clients(inbound), uuid_value=uuid_value, email_label=email_label)
         return dict(found) if found is not None else None
+
+    def list_clients(self) -> list[dict[str, Any]]:
+        config = self._read_config(self.config_path)
+        inbound = self._target_inbound(config)
+        return [dict(client) for client in self._clients(inbound) if isinstance(client, dict)]
+
+    def list_short_ids(self) -> set[str]:
+        config = self._read_config(self.config_path)
+        inbound = self._target_inbound(config)
+        short_ids = self._reality_settings(inbound).get("shortIds")
+        if not isinstance(short_ids, list):
+            raise XrayConfigError("Xray realitySettings.shortIds должен быть списком")
+        return {str(short_id) for short_id in short_ids}
 
     def _read_config(self, path: Path) -> dict[str, Any]:
         try:

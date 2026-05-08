@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import ipaddress
 import logging
+import re
 
 from adapters.awg_config import AwgConfigAdapter
 from adapters.clock import ClockProvider
@@ -41,6 +43,10 @@ AWG_STARTUP_RECONCILE_STATUSES = {
     VpnKeyStatus.PENDING_DELETE,
     VpnKeyStatus.DELETE_FAILED,
 }
+
+AWG_ACTIVE_STATUSES = {VpnKeyStatus.ACTIVE}
+AWG_ALL_STATUSES = set(VpnKeyStatus)
+AWG_MANAGED_LABEL_RE = re.compile(r"^awg_[A-Za-z0-9]{5}$")
 
 
 class AwgService:
@@ -235,27 +241,33 @@ class AwgService:
 
     async def startup_reconcile(self) -> dict[str, int]:
         summary = {"checked": 0, "recovered": 0, "failed": 0}
-        last_id = 0
-        while True:
-            keys = await self.vpn_keys.list_by_type_statuses(
-                VpnKeyType.AWG,
-                AWG_STARTUP_RECONCILE_STATUSES,
-                limit=500,
-                after_id=last_id,
-            )
-            if not keys:
-                break
-            for key in keys:
-                last_id = key.id
-                summary["checked"] += 1
-                try:
-                    changed = await self._startup_reconcile_key(key)
-                    if changed:
-                        summary["recovered"] += 1
-                except Exception as exc:
-                    summary["failed"] += 1
-                    logger.warning("Не удалось восстановить AWG-ключ key_id=%s: %s", key.id, exc, exc_info=True)
-                    await self._write_startup_reconcile_failure_audit(key, exc)
+        async with self._lock:
+            last_id = 0
+            while True:
+                keys = await self.vpn_keys.list_by_type_statuses(
+                    VpnKeyType.AWG,
+                    AWG_STARTUP_RECONCILE_STATUSES,
+                    limit=500,
+                    after_id=last_id,
+                )
+                if not keys:
+                    break
+                for key in keys:
+                    last_id = key.id
+                    summary["checked"] += 1
+                    try:
+                        changed = await self._startup_reconcile_key(key)
+                        if changed:
+                            summary["recovered"] += 1
+                    except Exception as exc:
+                        summary["failed"] += 1
+                        logger.warning("Не удалось восстановить AWG-ключ key_id=%s: %s", key.id, exc, exc_info=True)
+                        await self._write_startup_reconcile_failure_audit(key, exc)
+
+            if summary["failed"] == 0:
+                drift_summary = await self._startup_reconcile_drift()
+                for key, value in drift_summary.items():
+                    summary[key] += value
         return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
@@ -329,6 +341,7 @@ class AwgService:
 
     async def reconcile_key_status(self, actor_user_id: int, key_id: int) -> VpnKey:
         await self.users.require_superadmin(actor_user_id)
+        self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         key = await self._get_key(key_id)
         if key.key_type != VpnKeyType.AWG:
             raise InvalidOperation("Это не AWG-ключ")
@@ -453,6 +466,342 @@ class AwgService:
                 "original_error_type": type(original_error).__name__,
             },
         )
+
+    async def _startup_reconcile_drift(self) -> dict[str, int]:
+        summary = {"checked": 0, "recovered": 0, "failed": 0}
+        if not self._awg_drift_reconcile_supported():
+            return summary
+        try:
+            active_keys = await self._list_awg_keys_by_statuses(AWG_ACTIVE_STATUSES)
+            all_keys = await self._list_awg_keys_by_statuses(AWG_ALL_STATUSES)
+            config_peers = self.adapter.list_config_peers()
+            runtime_peers = await self._list_runtime_peers()
+            summary["checked"] = len(active_keys) + len(config_peers) + len(runtime_peers)
+
+            summary["recovered"] += await self._remove_non_live_awg_peers(all_keys, runtime_peers)
+            config_peers = self.adapter.list_config_peers()
+            orphan_result = await self._remove_or_degrade_awg_config_orphans(config_peers, active_keys)
+            summary["recovered"] += orphan_result["recovered"]
+            summary["failed"] += orphan_result["failed"]
+            if orphan_result["failed"]:
+                return summary
+
+            runtime_peers = await self._list_runtime_peers()
+            summary["recovered"] += await self._restore_or_sync_active_awg_peers(active_keys, runtime_peers)
+            runtime_peers = await self._list_runtime_peers()
+            runtime_result = await self._remove_or_degrade_awg_runtime_orphans(runtime_peers, active_keys)
+            summary["recovered"] += runtime_result["recovered"]
+            summary["failed"] += runtime_result["failed"]
+        except Exception as exc:
+            summary["failed"] += 1
+            await self._mark_awg_degraded(
+                "startup drift reconciliation failed",
+                details={"error_type": type(exc).__name__},
+            )
+        return summary
+
+    def _awg_drift_reconcile_supported(self) -> bool:
+        required_adapter = ("list_config_peers", "find_peer", "add_peer", "remove_peer", "list_runtime_peers")
+        required_repo = ("list_by_type_statuses", "find_by_public_key", "find_by_client_ip")
+        return all(hasattr(self.adapter, name) for name in required_adapter) and all(
+            hasattr(self.vpn_keys, name) for name in required_repo
+        )
+
+    async def _list_awg_keys_by_statuses(self, statuses: set[VpnKeyStatus]) -> list[VpnKey]:
+        keys: list[VpnKey] = []
+        last_id = 0
+        while True:
+            batch = await self.vpn_keys.list_by_type_statuses(
+                VpnKeyType.AWG,
+                statuses,
+                limit=500,
+                after_id=last_id,
+            )
+            if not batch:
+                break
+            keys.extend(batch)
+            last_id = batch[-1].id
+        return keys
+
+    async def _list_runtime_peers(self) -> list[dict[str, str]]:
+        return await self.adapter.list_runtime_peers()
+
+    async def _remove_non_live_awg_peers(self, keys: list[VpnKey], runtime_peers: list[dict[str, str]]) -> int:
+        recovered = 0
+        runtime_public_keys = self._runtime_public_keys(runtime_peers)
+        for key in keys:
+            if key.status == VpnKeyStatus.ACTIVE:
+                continue
+            public_key, client_ip, _ = self._awg_restore_values(key, require_private=False)
+            config_peer = self.adapter.find_peer(public_key=public_key, client_ip=client_ip)
+            runtime_peer = self._runtime_peer_for_identity(runtime_peers, public_key=public_key, client_ip=client_ip)
+            peer_public_key = str((config_peer or {}).get("PublicKey") or (runtime_peer or {}).get("PublicKey") or public_key).strip()
+            runtime_present = runtime_peer is not None or bool(public_key and public_key in runtime_public_keys)
+            if config_peer is None and not runtime_present:
+                continue
+            await self._remove_awg_access_for_reconcile(key, fallback_public_key=peer_public_key)
+            recovered += 1
+            await self._write_audit_best_effort(
+                actor_user_id=None,
+                action="awg_startup_non_live_removed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key.id,
+                details={"previous_status": key.status.value, "client_ip": client_ip},
+            )
+        return recovered
+
+    async def _restore_or_sync_active_awg_peers(self, active_keys: list[VpnKey], runtime_peers: list[dict[str, str]]) -> int:
+        recovered = 0
+        runtime_public_keys = self._runtime_public_keys(runtime_peers)
+        for key in active_keys:
+            public_key, client_ip, preshared_key = self._awg_restore_values(key, require_private=False)
+            if not public_key or not client_ip:
+                raise InvalidOperation("AWG active key cannot be restored: missing public key or client IP in DB")
+            config_peer = self.adapter.find_peer(public_key=public_key, client_ip=client_ip)
+            runtime_present = public_key in runtime_public_keys
+            if config_peer is None:
+                await self.adapter.add_peer(
+                    key_id=key.id,
+                    owner_user_id=key.owner_user_id,
+                    public_key=public_key,
+                    preshared_key=preshared_key,
+                    client_ip=client_ip,
+                    label=key.email_label,
+                )
+                recovered += 1
+                await self._write_audit_best_effort(
+                    actor_user_id=None,
+                    action="awg_startup_active_restored",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key.id,
+                    details={"config_peer_present": False, "runtime_peer_present": runtime_present, "client_ip": client_ip},
+                )
+                runtime_public_keys.add(public_key)
+                continue
+
+            if not runtime_present:
+                await self.adapter.sync_runtime_from_config()
+                if not await self.adapter.verify_runtime_peer(public_key):
+                    raise InvalidOperation("AWG runtime sync completed but active peer is still missing")
+                recovered += 1
+                runtime_public_keys.add(public_key)
+                await self._write_audit_best_effort(
+                    actor_user_id=None,
+                    action="awg_startup_runtime_synced",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key.id,
+                    details={"config_peer_present": True, "runtime_peer_present": False, "client_ip": client_ip},
+                )
+        return recovered
+
+    async def _remove_or_degrade_awg_config_orphans(
+        self,
+        config_peers: list[dict[str, str]],
+        active_keys: list[VpnKey],
+    ) -> dict[str, int]:
+        recovered = 0
+        active_identities = self._awg_active_identities(active_keys)
+        for peer in config_peers:
+            public_key = str(peer.get("PublicKey") or "").strip()
+            client_ip = self._client_ip_from_peer(peer)
+            if self._awg_peer_owned_by_active_key(public_key, client_ip, active_identities):
+                continue
+
+            historical = await self._find_awg_historical_owner(public_key, client_ip)
+            if historical is not None:
+                if historical.status == VpnKeyStatus.ACTIVE:
+                    continue
+                await self._remove_awg_access_for_reconcile(historical, fallback_public_key=public_key)
+                recovered += 1
+                await self._write_audit_best_effort(
+                    actor_user_id=None,
+                    action="awg_startup_orphan_removed",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=historical.id,
+                    details={"historical_status": historical.status.value, "client_ip": client_ip},
+                )
+                continue
+
+            managed_key_id = self._managed_key_id_from_peer(peer)
+            managed_label = str(peer.get("_managed_label") or "").strip()
+            if managed_key_id is not None or AWG_MANAGED_LABEL_RE.fullmatch(managed_label):
+                if not public_key:
+                    await self._mark_awg_degraded(
+                        "bot-managed orphan AWG config peer has no public key",
+                        details={"client_ip": client_ip},
+                    )
+                    return {"recovered": recovered, "failed": 1}
+                await self.adapter.remove_peer(key_id=managed_key_id or 0, public_key=public_key)
+                recovered += 1
+                await self._write_audit_best_effort(
+                    actor_user_id=None,
+                    action="awg_startup_orphan_removed",
+                    entity_type=AuditEntityType.SYSTEM,
+                    entity_id=None,
+                    details={
+                        "managed_block": managed_key_id is not None,
+                        "managed_label": bool(AWG_MANAGED_LABEL_RE.fullmatch(managed_label)),
+                        "public_key_fingerprint": self._fingerprint(public_key),
+                        "client_ip": client_ip,
+                    },
+                )
+                continue
+
+            await self._mark_awg_degraded(
+                "ambiguous orphan AWG config peer",
+                details={
+                    "public_key_fingerprint": self._fingerprint(public_key),
+                    "client_ip": client_ip,
+                    "managed_block": False,
+                },
+            )
+            return {"recovered": recovered, "failed": 1}
+        return {"recovered": recovered, "failed": 0}
+
+    async def _remove_or_degrade_awg_runtime_orphans(
+        self,
+        runtime_peers: list[dict[str, str]],
+        active_keys: list[VpnKey],
+    ) -> dict[str, int]:
+        recovered = 0
+        active_public_keys, _ = self._awg_active_identities(active_keys)
+        config_public_keys = {str(peer.get("PublicKey") or "").strip() for peer in self.adapter.list_config_peers()}
+        for peer in runtime_peers:
+            public_key = str(peer.get("PublicKey") or "").strip()
+            if not public_key or public_key in active_public_keys:
+                continue
+            if public_key in config_public_keys:
+                continue
+
+            historical = await self._find_awg_historical_owner(public_key, "")
+            if historical is not None and historical.status != VpnKeyStatus.ACTIVE:
+                await self._remove_awg_access_for_reconcile(historical, fallback_public_key=public_key)
+                recovered += 1
+                await self._write_audit_best_effort(
+                    actor_user_id=None,
+                    action="awg_startup_runtime_orphan_removed",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=historical.id,
+                    details={
+                        "historical_status": historical.status.value,
+                        "public_key_fingerprint": self._fingerprint(public_key),
+                    },
+                )
+                continue
+
+            await self._mark_awg_degraded(
+                "ambiguous orphan AWG runtime peer",
+                details={"public_key_fingerprint": self._fingerprint(public_key)},
+            )
+            return {"recovered": recovered, "failed": 1}
+        return {"recovered": recovered, "failed": 0}
+
+    def _awg_restore_values(
+        self,
+        key: VpnKey,
+        *,
+        require_private: bool = True,
+    ) -> tuple[str, str, str | None]:
+        public_key = str(key.payload.get("public_key") or key.public_key or "").strip()
+        client_ip = str(key.payload.get("client_ip") or key.client_ip or "").strip()
+        preshared_key_raw = key.payload.get("preshared_key")
+        preshared_key = str(preshared_key_raw).strip() if preshared_key_raw else None
+        if require_private:
+            self._required_private_key(key)
+            if not public_key or not client_ip:
+                raise InvalidOperation("AWG key cannot be restored: missing public key or client IP in DB")
+            self._required_client_ip(key)
+        elif client_ip:
+            self._required_client_ip(key)
+        elif not public_key:
+            raise InvalidOperation("AWG key cannot be reconciled: missing public key and client IP in DB")
+        return public_key, client_ip, preshared_key
+
+    def _runtime_public_keys(self, runtime_peers: list[dict[str, str]]) -> set[str]:
+        return {str(peer.get("PublicKey") or "").strip() for peer in runtime_peers if peer.get("PublicKey")}
+
+    def _runtime_peer_for_identity(
+        self,
+        runtime_peers: list[dict[str, str]],
+        *,
+        public_key: str,
+        client_ip: str,
+    ) -> dict[str, str] | None:
+        for peer in runtime_peers:
+            peer_public_key = str(peer.get("PublicKey") or "").strip()
+            if public_key and peer_public_key == public_key:
+                return peer
+            if client_ip and self._client_ip_from_peer(peer) == client_ip:
+                return peer
+        return None
+
+    def _awg_active_identities(self, active_keys: list[VpnKey]) -> tuple[set[str], set[str]]:
+        public_keys = {str(key.payload.get("public_key") or key.public_key or "").strip() for key in active_keys}
+        client_ips = {str(key.payload.get("client_ip") or key.client_ip or "").strip() for key in active_keys}
+        return {value for value in public_keys if value}, {value for value in client_ips if value}
+
+    def _awg_peer_owned_by_active_key(
+        self,
+        public_key: str,
+        client_ip: str,
+        active_identities: tuple[set[str], set[str]],
+    ) -> bool:
+        active_public_keys, active_client_ips = active_identities
+        return bool((public_key and public_key in active_public_keys) or (client_ip and client_ip in active_client_ips))
+
+    async def _find_awg_historical_owner(self, public_key: str, client_ip: str) -> VpnKey | None:
+        key = await self.vpn_keys.find_by_public_key(public_key) if public_key else None
+        if key is None and client_ip:
+            key = await self.vpn_keys.find_by_client_ip(client_ip)
+        if key is None or key.key_type != VpnKeyType.AWG:
+            return None
+        return key
+
+    async def _remove_awg_access_for_reconcile(self, key: VpnKey, *, fallback_public_key: str) -> None:
+        key_public_key = str(key.payload.get("public_key") or key.public_key or "").strip()
+        if key_public_key or not fallback_public_key:
+            await self._remove_awg_access(key)
+            return
+        await self.adapter.remove_peer(key_id=key.id, public_key=fallback_public_key)
+
+    def _managed_key_id_from_peer(self, peer: dict[str, str]) -> int | None:
+        raw_value = str(peer.get("_managed_key_id") or "").strip()
+        if not raw_value:
+            return None
+        try:
+            return int(raw_value)
+        except ValueError:
+            return None
+
+    def _client_ip_from_peer(self, peer: dict[str, str]) -> str:
+        allowed_ips = str(peer.get("AllowedIPs") or "")
+        for part in allowed_ips.split(","):
+            value = part.strip()
+            if not value:
+                continue
+            try:
+                interface = ipaddress.ip_interface(value)
+            except ValueError:
+                continue
+            if interface.version == 4 and interface.network.prefixlen == 32:
+                return str(interface.ip)
+        return ""
+
+    async def _mark_awg_degraded(self, reason: str, *, details: dict[str, object]) -> None:
+        self.backend_health.mark_degraded(VpnKeyType.AWG, reason)
+        logger.critical("AWG backend degraded during reconciliation: %s", reason)
+        await self._write_audit_best_effort(
+            actor_user_id=None,
+            action="awg_startup_drift_degraded",
+            entity_type=AuditEntityType.SYSTEM,
+            entity_id=None,
+            details={**details, "reason": reason, "backend_degraded": True},
+        )
+
+    def _fingerprint(self, value: str) -> str | None:
+        if not value:
+            return None
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
     async def _startup_reconcile_key(self, key: VpnKey) -> bool:
         if key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:

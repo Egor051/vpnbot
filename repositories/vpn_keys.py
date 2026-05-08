@@ -458,6 +458,11 @@ class VpnKeyRepository:
         row = await cursor.fetchone()
         return _row_to_vpn_key(row)
 
+    async def find_by_client_ip(self, client_ip: str) -> VpnKey | None:
+        cursor = await self.db.conn.execute("SELECT * FROM vpn_keys WHERE client_ip = ? LIMIT 1", (client_ip,))
+        row = await cursor.fetchone()
+        return _row_to_vpn_key(row)
+
     async def count_active_managed_short_id(self, short_id: str, exclude_key_id: int | None = None) -> int:
         statuses = (
             VpnKeyStatus.ACTIVE,
