@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 from urllib.parse import quote
 
@@ -11,9 +12,12 @@ from models.dto import ProxyAccess, TelegramUserProfile
 from models.enums import AuditEntityType, ProxyAccessStatus, ProxyAccessType, UserRole
 from repositories.proxy_accesses import ProxyAccessRepository
 from services.audit import AuditService
+from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.user_locks import UserLockManager
 from services.users import UserService
+
+logger = logging.getLogger(__name__)
 
 SOCKS5_ACCESS_MAY_EXIST_STATUSES = {
     ProxyAccessStatus.ACTIVE,
@@ -36,6 +40,7 @@ class Socks5Service:
         clock: ClockProvider,
         audit: AuditService,
         user_locks: UserLockManager | None = None,
+        backend_health: BackendHealth | None = None,
     ) -> None:
         self.accesses = accesses
         self.users = users
@@ -44,9 +49,11 @@ class Socks5Service:
         self.clock = clock
         self.audit = audit
         self.user_locks = user_locks or getattr(users, "user_locks", UserLockManager())
+        self.backend_health = backend_health or BackendHealth()
 
     async def issue_socks5_proxy(self, actor_user_id: int, profile: TelegramUserProfile) -> ProxyAccess:
         self._ensure_enabled()
+        self.backend_health.require_mutation_allowed(ProxyAccessType.SOCKS5)
         async with self.user_locks.lock(profile.telegram_user_id):
             await self._ensure_can_issue(actor_user_id, profile.telegram_user_id)
             existing = await self._active_access(profile.telegram_user_id)
@@ -72,33 +79,31 @@ class Socks5Service:
                 await self._ensure_can_issue(actor_user_id, profile.telegram_user_id)
                 await self.adapter.create_user(login, password)
             except Exception as exc:
+                error = self._redact_value(str(exc), password)
                 await self.accesses.set_status(
                     access.id,
                     ProxyAccessStatus.APPLY_FAILED,
                     self.clock.now(),
-                    error=str(exc),
+                    error=error,
                 )
                 await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
                     action="socks5_proxy_apply_failed",
                     entity_id=access.id,
-                    details={"owner_user_id": profile.telegram_user_id, "login": login, "error": str(exc)},
+                    details={"owner_user_id": profile.telegram_user_id, "login": login, "error": error},
                 )
+                if error != str(exc):
+                    raise InvalidOperation("SOCKS5 apply failed; raw password was redacted. Contact admin.") from None
                 raise
             try:
                 await self.accesses.mark_active(access.id, self.clock.now(), payload=payload, public_payload=public_payload)
             except Exception as exc:
-                await self._write_audit_best_effort(
+                await self._compensate_failed_create_after_apply(
                     actor_user_id=actor_user_id,
-                    action="socks5_proxy_apply_failed",
-                    entity_id=access.id,
-                    details={
-                        "owner_user_id": profile.telegram_user_id,
-                        "login": login,
-                        "server_user_created": True,
-                        "db_mark_active_failed": True,
-                        "error": str(exc),
-                    },
+                    access_id=access.id,
+                    owner_user_id=profile.telegram_user_id,
+                    login=login,
+                    original_error=exc,
                 )
                 raise
 
@@ -131,6 +136,7 @@ class Socks5Service:
             raise InvalidOperation("Это не SOCKS5-доступ")
         if access.status in {ProxyAccessStatus.REVOKED, ProxyAccessStatus.INACTIVE, ProxyAccessStatus.DELETED}:
             return access
+        self.backend_health.require_mutation_allowed(ProxyAccessType.SOCKS5)
         previous_status = access.status
         await self.accesses.set_status(access.id, ProxyAccessStatus.PENDING_REVOKE, self.clock.now(), reason=reason)
         login = str(access.payload.get("login") or "")
@@ -164,6 +170,7 @@ class Socks5Service:
             raise InvalidOperation("Это не SOCKS5-доступ")
         if access.status == ProxyAccessStatus.DELETED:
             return access
+        self.backend_health.require_mutation_allowed(ProxyAccessType.SOCKS5)
         await self.accesses.set_status(access.id, ProxyAccessStatus.PENDING_DELETE, self.clock.now(), reason=reason)
         login = str(access.payload.get("login") or "")
         try:
@@ -267,6 +274,84 @@ class Socks5Service:
             entity_id=access.id,
             details={"owner_user_id": access.owner_user_id, "login": access.payload.get("login")},
         )
+
+    async def _compensate_failed_create_after_apply(
+        self,
+        *,
+        actor_user_id: int,
+        access_id: int,
+        owner_user_id: int,
+        login: str,
+        original_error: Exception,
+    ) -> None:
+        logger.critical(
+            "SOCKS5 Linux user created, but DB mark_active failed for access_id=%s login=%s; attempting compensation",
+            access_id,
+            login,
+            exc_info=True,
+        )
+        compensation_method = ""
+        try:
+            await self.adapter.delete_user(login)
+            compensation_method = "delete_user"
+        except Exception as delete_error:
+            try:
+                await self.adapter.lock_user(login)
+                compensation_method = "lock_user"
+            except Exception as lock_error:
+                self.backend_health.mark_degraded(
+                    ProxyAccessType.SOCKS5,
+                    "post-apply mark_active failed and compensation failed",
+                )
+                logger.critical(
+                    "SOCKS5 create compensation failed after DB mark_active failure for access_id=%s login=%s",
+                    access_id,
+                    login,
+                    exc_info=True,
+                )
+                await self._write_audit_best_effort(
+                    actor_user_id=actor_user_id,
+                    action="socks5_create_compensation_failed",
+                    entity_id=access_id,
+                    details={
+                        "owner_user_id": owner_user_id,
+                        "login": login,
+                        "original_error_type": type(original_error).__name__,
+                        "delete_error_type": type(delete_error).__name__,
+                        "lock_error_type": type(lock_error).__name__,
+                        "backend_degraded": True,
+                    },
+                )
+                return
+
+        try:
+            await self.accesses.set_status(
+                access_id,
+                ProxyAccessStatus.APPLY_FAILED,
+                self.clock.now(),
+                error="db mark_active failed after server-side apply; server-side SOCKS5 user was disabled",
+            )
+        except Exception:
+            logger.warning(
+                "SOCKS5 create compensation succeeded, but failed to mark access apply_failed access_id=%s",
+                access_id,
+                exc_info=True,
+            )
+
+        await self._write_audit_best_effort(
+            actor_user_id=actor_user_id,
+            action="socks5_create_compensated_after_db_failure",
+            entity_id=access_id,
+            details={
+                "owner_user_id": owner_user_id,
+                "login": login,
+                "compensation_method": compensation_method,
+                "original_error_type": type(original_error).__name__,
+            },
+        )
+
+    def _redact_value(self, text: str, value: str) -> str:
+        return text.replace(value, "***") if value else text
 
     async def _write_audit_best_effort(
         self,

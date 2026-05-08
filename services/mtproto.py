@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import secrets
 import sqlite3
 from dataclasses import replace
@@ -13,9 +14,12 @@ from models.dto import ProxyAccess, TelegramUserProfile
 from models.enums import AuditEntityType, ProxyAccessStatus, ProxyAccessType, UserRole
 from repositories.proxy_accesses import ProxyAccessRepository
 from services.audit import AuditService
+from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.user_locks import UserLockManager
 from services.users import UserService
+
+logger = logging.getLogger(__name__)
 
 MTPROTO_ACCESS_MAY_EXIST_STATUSES = {
     ProxyAccessStatus.ACTIVE,
@@ -32,6 +36,8 @@ MTPROTO_STARTUP_RECONCILE_STATUSES = {
     ProxyAccessStatus.APPLY_FAILED,
     ProxyAccessStatus.PENDING_REVOKE,
     ProxyAccessStatus.REVOKE_FAILED,
+    ProxyAccessStatus.PENDING_DELETE,
+    ProxyAccessStatus.DELETE_FAILED,
 }
 
 
@@ -50,6 +56,7 @@ class MtProtoService:
         audit: AuditService,
         adapter: MtProxyAdapter | None = None,
         user_locks: UserLockManager | None = None,
+        backend_health: BackendHealth | None = None,
     ) -> None:
         self.accesses = accesses
         self.users = users
@@ -58,10 +65,12 @@ class MtProtoService:
         self.audit = audit
         self.adapter = adapter
         self.user_locks = user_locks or getattr(users, "user_locks", UserLockManager())
+        self.backend_health = backend_health or BackendHealth()
         self._apply_lock = asyncio.Lock()
 
     async def issue_mtproto_proxy(self, actor_user_id: int, profile: TelegramUserProfile) -> ProxyAccess:
         self._ensure_enabled()
+        self.backend_health.require_mutation_allowed(ProxyAccessType.MTPROTO)
         if self.settings.mtproto_mode == "managed":
             return await self._issue_managed(actor_user_id, profile)
         return await self._issue_static(actor_user_id, profile)
@@ -82,6 +91,7 @@ class MtProtoService:
             raise InvalidOperation("Это не MTProto-доступ")
         if access.status in {ProxyAccessStatus.REVOKED, ProxyAccessStatus.INACTIVE, ProxyAccessStatus.DELETED}:
             return self._with_current_payload(access)
+        self.backend_health.require_mutation_allowed(ProxyAccessType.MTPROTO)
         if self._access_mode(access) != "managed":
             return await self._deactivate_static(access, actor_user_id, reason)
         return await self._revoke_managed(access, actor_user_id, reason)
@@ -91,6 +101,7 @@ class MtProtoService:
         access = await self.revoke_mtproto_proxy(actor_user_id, access_id, reason=reason)
         if access.status == ProxyAccessStatus.DELETED:
             return access
+        self.backend_health.require_mutation_allowed(ProxyAccessType.MTPROTO)
         await self.accesses.mark_deleted(access.id, actor_user_id, self.clock.now(), reason=reason)
         await self._write_audit_best_effort(
             actor_user_id=actor_user_id,
@@ -120,29 +131,74 @@ class MtProtoService:
 
     async def reconcile_mtproto_state(self) -> dict[str, int]:
         if not self.settings.mtproto_enabled or self.settings.mtproto_mode != "managed" or self.adapter is None:
-            return {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "failed": 0}
-        active = await self._active_managed_accesses()
-        store = self.adapter.read_current_managed_secrets()
-        db_fingerprints = {self._access_fingerprint(access) for access in active if self._access_fingerprint(access)}
-        store_fingerprints = {item.fingerprint for item in store}
-        pending = await self.accesses.list_by_type_statuses(
-            ProxyAccessType.MTPROTO,
-            MTPROTO_STARTUP_RECONCILE_STATUSES,
-        )
-        summary = {
-            "checked": len(active),
-            "missing": len(db_fingerprints - store_fingerprints),
-            "orphaned": len(store_fingerprints - db_fingerprints),
-            "pending": len([access for access in pending if self._access_mode(access) == "managed"]),
-            "failed": len(
-                [
-                    access
-                    for access in pending
-                    if access.status in {ProxyAccessStatus.APPLY_FAILED, ProxyAccessStatus.REVOKE_FAILED}
-                    and self._access_mode(access) == "managed"
-                ]
-            ),
-        }
+            return {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "recovered": 0, "failed": 0}
+        summary = {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "recovered": 0, "failed": 0}
+        async with self._apply_lock:
+            try:
+                self._managed_adapter().ensure_managed_runtime_ready()
+                store = self._read_all_runtime_managed_secrets()
+                pending = await self._managed_accesses_by_statuses(MTPROTO_STARTUP_RECONCILE_STATUSES)
+                pending = [access for access in pending if self._access_mode(access) == "managed"]
+                summary["pending"] = len(pending)
+                summary["failed"] = len(
+                    [
+                        access
+                        for access in pending
+                        if access.status
+                        in {
+                            ProxyAccessStatus.APPLY_FAILED,
+                            ProxyAccessStatus.REVOKE_FAILED,
+                            ProxyAccessStatus.DELETE_FAILED,
+                        }
+                    ]
+                )
+
+                for access in pending:
+                    changed = await self._startup_reconcile_managed_access(access, store)
+                    if changed:
+                        summary["recovered"] += 1
+                        store = self._read_all_runtime_managed_secrets()
+
+                active = await self._active_managed_accesses()
+                desired = self._managed_secrets_from_accesses(active)
+                desired_fingerprints = {item.fingerprint for item in desired}
+                store_fingerprints = {item.fingerprint for item in store}
+                missing = desired_fingerprints - store_fingerprints
+                orphaned = store_fingerprints - desired_fingerprints
+                summary["checked"] = len(active)
+                summary["missing"] = len(missing)
+                summary["orphaned"] = len(orphaned)
+
+                if missing or orphaned:
+                    result = await self._managed_adapter().apply_managed_secrets(desired)
+                    summary["recovered"] += 1
+                    await self._write_audit_best_effort(
+                        actor_user_id=None,
+                        action="mtproto_startup_drift_repaired",
+                        entity_id=None,
+                        details={
+                            "missing": len(missing),
+                            "orphaned": len(orphaned),
+                            "desired_count": len(desired),
+                            "generation": result.generation,
+                            "missing_fingerprints": sorted(missing),
+                            "orphaned_fingerprints": sorted(orphaned),
+                        },
+                    )
+            except Exception as exc:
+                summary["failed"] += 1
+                self.backend_health.mark_degraded(ProxyAccessType.MTPROTO, "startup reconciliation failed")
+                logger.critical(
+                    "MTProto startup reconciliation failed; backend degraded error_type=%s",
+                    type(exc).__name__,
+                )
+                await self._write_audit_best_effort(
+                    actor_user_id=None,
+                    action="mtproto_startup_reconcile_failed",
+                    entity_id=None,
+                    details={"error_type": type(exc).__name__, "backend_degraded": True},
+                )
+
         if any(summary.values()):
             await self._write_audit_best_effort(
                 actor_user_id=None,
@@ -228,11 +284,12 @@ class MtProtoService:
                     desired = await self._desired_managed_secrets(extra=access)
                     result = await self._managed_adapter().apply_managed_secrets(desired)
                 except Exception as exc:
+                    error = self._redact_secrets(str(exc), secret)
                     await self.accesses.set_status(
                         access.id,
                         ProxyAccessStatus.APPLY_FAILED,
                         self.clock.now(),
-                        error=str(exc),
+                        error=error,
                     )
                     await self._write_audit_best_effort(
                         actor_user_id=actor_user_id,
@@ -241,9 +298,11 @@ class MtProtoService:
                         details={
                             "owner_user_id": profile.telegram_user_id,
                             "fingerprint": fingerprint,
-                            "error": str(exc),
+                            "error": error,
                         },
                     )
+                    if error != str(exc):
+                        raise InvalidOperation("MTProto apply failed; raw secret was redacted. Contact admin.") from None
                     raise
 
                 try:
@@ -255,17 +314,12 @@ class MtProtoService:
                         apply_generation=result.generation,
                     )
                 except Exception as exc:
-                    await self._write_audit_best_effort(
+                    await self._compensate_failed_managed_create_after_apply(
                         actor_user_id=actor_user_id,
-                        action="mtproto_proxy_apply_failed",
-                        entity_id=access.id,
-                        details={
-                            "owner_user_id": profile.telegram_user_id,
-                            "fingerprint": fingerprint,
-                            "mtproxy_applied": True,
-                            "db_mark_active_failed": True,
-                            "error": str(exc),
-                        },
+                        access_id=access.id,
+                        owner_user_id=profile.telegram_user_id,
+                        fingerprint=fingerprint,
+                        original_error=exc,
                     )
                     raise
 
@@ -297,11 +351,12 @@ class MtProtoService:
                 desired = await self._desired_managed_secrets(exclude_access_id=access.id)
                 result = await self._managed_adapter().apply_managed_secrets(desired)
             except Exception as exc:
+                error = self._redact_secrets(str(exc), self._access_secret_optional(access))
                 await self.accesses.set_status(
                     access.id,
                     ProxyAccessStatus.REVOKE_FAILED,
                     self.clock.now(),
-                    error=str(exc),
+                    error=error,
                     reason=reason,
                 )
                 await self._write_audit_best_effort(
@@ -312,9 +367,11 @@ class MtProtoService:
                         "owner_user_id": access.owner_user_id,
                         "fingerprint": fingerprint,
                         "reason": reason,
-                        "error": str(exc),
+                        "error": error,
                     },
                 )
+                if error != str(exc):
+                    raise InvalidOperation("MTProto revoke failed; raw secret was redacted. Contact admin.") from None
                 raise
             await self.accesses.mark_revoked(access.id, actor_user_id, self.clock.now(), reason=reason)
             await self._write_audit_best_effort(
@@ -370,29 +427,49 @@ class MtProtoService:
         )
 
     async def _active_managed_accesses(self) -> list[ProxyAccess]:
-        active = await self.accesses.list_by_type_statuses(
-            ProxyAccessType.MTPROTO,
+        active = await self._managed_accesses_by_statuses(
             {ProxyAccessStatus.ACTIVE},
         )
         return [access for access in active if self._access_mode(access) == "managed"]
 
-    async def _desired_managed_secrets(
-        self,
-        *,
-        extra: ProxyAccess | None = None,
-        exclude_access_id: int | None = None,
-    ) -> list[MtProxyManagedSecret]:
-        accesses = await self._active_managed_accesses()
-        if extra is not None:
-            accesses.append(extra)
+    async def _managed_accesses_by_statuses(self, statuses: set[ProxyAccessStatus]) -> list[ProxyAccess]:
+        result: list[ProxyAccess] = []
+        last_id = 0
+        while True:
+            batch = await self.accesses.list_by_type_statuses(
+                ProxyAccessType.MTPROTO,
+                statuses,
+                limit=500,
+                after_id=last_id,
+            )
+            if not batch:
+                break
+            result.extend(batch)
+            last_id = batch[-1].id
+        return result
+
+    def _read_all_runtime_managed_secrets(self) -> list[MtProxyManagedSecret]:
+        adapter = self._managed_adapter()
+        config_items = adapter.read_current_managed_secrets()
+        runtime_reader = getattr(adapter, "read_runtime_managed_secrets", None)
+        runtime_items = runtime_reader() if runtime_reader is not None else config_items
+        by_fingerprint: dict[str, MtProxyManagedSecret] = {}
+        for item in [*config_items, *runtime_items]:
+            if item.fingerprint == "empty-placeholder":
+                continue
+            by_fingerprint.setdefault(item.fingerprint, item)
+        return list(by_fingerprint.values())
+
+    def _managed_secrets_from_accesses(self, accesses: list[ProxyAccess]) -> list[MtProxyManagedSecret]:
         result: list[MtProxyManagedSecret] = []
         for access in accesses:
-            if exclude_access_id is not None and access.id == exclude_access_id:
+            if self._access_mode(access) != "managed":
                 continue
             secret = self._access_secret(access)
             fingerprint = self._access_fingerprint(access)
-            if not secret or not fingerprint:
-                continue
+            expected_fingerprint = mtproto_secret_fingerprint(secret)
+            if fingerprint != expected_fingerprint:
+                raise InvalidOperation("MTProto access fingerprint mismatch; contact admin")
             result.append(
                 MtProxyManagedSecret(
                     secret=secret,
@@ -403,9 +480,239 @@ class MtProtoService:
             )
         return result
 
+    async def _startup_reconcile_managed_access(
+        self,
+        access: ProxyAccess,
+        store: list[MtProxyManagedSecret],
+    ) -> bool:
+        if access.status == ProxyAccessStatus.PENDING_APPLY:
+            return await self._startup_reconcile_pending_apply(access, store)
+        if access.status in {ProxyAccessStatus.PENDING_REVOKE, ProxyAccessStatus.REVOKE_FAILED}:
+            return await self._startup_complete_managed_removal(access, delete=False)
+        if access.status in {ProxyAccessStatus.PENDING_DELETE, ProxyAccessStatus.DELETE_FAILED}:
+            return await self._startup_complete_managed_removal(access, delete=True)
+        return False
+
+    async def _startup_reconcile_pending_apply(
+        self,
+        access: ProxyAccess,
+        store: list[MtProxyManagedSecret],
+    ) -> bool:
+        fingerprint = self._access_fingerprint(access)
+        store_by_fingerprint = {item.fingerprint: item for item in store}
+        store_item = store_by_fingerprint.get(fingerprint)
+        if store_item is None:
+            await self.accesses.set_status(
+                access.id,
+                ProxyAccessStatus.APPLY_FAILED,
+                self.clock.now(),
+                error="startup reconciliation did not find applied MTProto secret",
+            )
+            await self._write_audit_best_effort(
+                actor_user_id=None,
+                action="mtproto_startup_pending_apply_failed",
+                entity_id=access.id,
+                details={"fingerprint": fingerprint, "secret_present": False},
+            )
+            return True
+
+        if mtproto_secret_fingerprint(store_item.secret) != fingerprint:
+            raise InvalidOperation("MTProto runtime secret fingerprint mismatch; contact admin")
+        secret = store_item.secret
+        payload = self._payload(secret=secret, mode="managed")
+        public_payload = self._public_payload(mode="managed", fingerprint=fingerprint)
+        try:
+            await self.accesses.mark_active(
+                access.id,
+                self.clock.now(),
+                payload=payload,
+                public_payload=public_payload,
+            )
+        except Exception as exc:
+            await self._compensate_failed_startup_pending_apply(
+                access=access,
+                fingerprint=fingerprint,
+                original_error=exc,
+            )
+            return True
+        await self._write_audit_best_effort(
+            actor_user_id=None,
+            action="mtproto_startup_apply_recovered",
+            entity_id=access.id,
+            details={"fingerprint": fingerprint, "secret_present": True},
+        )
+        return True
+
+    async def _startup_complete_managed_removal(self, access: ProxyAccess, *, delete: bool) -> bool:
+        desired = self._managed_secrets_from_accesses(await self._active_managed_accesses())
+        result = await self._managed_adapter().apply_managed_secrets(desired)
+        actor_user_id = access.deleted_by or access.revoked_by or access.created_by
+        if delete:
+            await self.accesses.mark_deleted(access.id, actor_user_id, self.clock.now(), reason=access.reason)
+            action = "mtproto_startup_delete_completed"
+        else:
+            await self.accesses.mark_revoked(access.id, actor_user_id, self.clock.now(), reason=access.reason)
+            action = "mtproto_startup_revoke_completed"
+        await self._write_audit_best_effort(
+            actor_user_id=None,
+            action=action,
+            entity_id=access.id,
+            details={
+                "owner_user_id": access.owner_user_id,
+                "fingerprint": self._access_fingerprint(access),
+                "previous_status": access.status.value,
+                "generation": result.generation,
+            },
+        )
+        return True
+
+    async def _compensate_failed_startup_pending_apply(
+        self,
+        *,
+        access: ProxyAccess,
+        fingerprint: str,
+        original_error: Exception,
+    ) -> None:
+        try:
+            desired = await self._desired_managed_secrets(exclude_access_id=access.id)
+            result = await self._managed_adapter().apply_managed_secrets(desired)
+        except Exception as rollback_error:
+            self.backend_health.mark_degraded(
+                ProxyAccessType.MTPROTO,
+                "startup pending_apply mark_active failed and rollback failed",
+            )
+            logger.critical(
+                "MTProto startup pending_apply compensation failed for access_id=%s fingerprint=%s error_type=%s rollback_error_type=%s",
+                access.id,
+                fingerprint,
+                type(original_error).__name__,
+                type(rollback_error).__name__,
+            )
+            await self._write_audit_best_effort(
+                actor_user_id=None,
+                action="mtproto_startup_pending_apply_compensation_failed",
+                entity_id=access.id,
+                details={
+                    "owner_user_id": access.owner_user_id,
+                    "fingerprint": fingerprint,
+                    "original_error_type": type(original_error).__name__,
+                    "rollback_error_type": type(rollback_error).__name__,
+                    "backend_degraded": True,
+                },
+            )
+            return
+
+        try:
+            await self.accesses.set_status(
+                access.id,
+                ProxyAccessStatus.APPLY_FAILED,
+                self.clock.now(),
+                error="startup mark_active failed; applied MTProto secret was removed",
+            )
+        except Exception:
+            self.backend_health.mark_degraded(
+                ProxyAccessType.MTPROTO,
+                "startup pending_apply rollback succeeded but DB status update failed",
+            )
+            logger.warning(
+                "MTProto startup pending_apply rollback succeeded, but DB status update failed access_id=%s",
+                access.id,
+            )
+        await self._write_audit_best_effort(
+            actor_user_id=None,
+            action="mtproto_startup_pending_apply_compensated",
+            entity_id=access.id,
+            details={
+                "owner_user_id": access.owner_user_id,
+                "fingerprint": fingerprint,
+                "generation": result.generation,
+                "original_error_type": type(original_error).__name__,
+            },
+        )
+
+    async def _compensate_failed_managed_create_after_apply(
+        self,
+        *,
+        actor_user_id: int,
+        access_id: int,
+        owner_user_id: int,
+        fingerprint: str,
+        original_error: Exception,
+    ) -> None:
+        logger.critical(
+            "MTProto secret applied, but DB mark_active failed for access_id=%s fingerprint=%s; attempting rollback",
+            access_id,
+            fingerprint,
+        )
+        try:
+            desired = await self._desired_managed_secrets(exclude_access_id=access_id)
+            result = await self._managed_adapter().apply_managed_secrets(desired)
+        except Exception as rollback_error:
+            self.backend_health.mark_degraded(
+                ProxyAccessType.MTPROTO,
+                "post-apply mark_active failed and rollback failed",
+            )
+            logger.critical(
+                "MTProto create rollback failed after DB mark_active failure for access_id=%s fingerprint=%s error_type=%s rollback_error_type=%s",
+                access_id,
+                fingerprint,
+                type(original_error).__name__,
+                type(rollback_error).__name__,
+            )
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="mtproto_create_rollback_failed",
+                entity_id=access_id,
+                details={
+                    "owner_user_id": owner_user_id,
+                    "fingerprint": fingerprint,
+                    "original_error_type": type(original_error).__name__,
+                    "rollback_error_type": type(rollback_error).__name__,
+                    "backend_degraded": True,
+                },
+            )
+            return
+
+        try:
+            await self.accesses.set_status(
+                access_id,
+                ProxyAccessStatus.APPLY_FAILED,
+                self.clock.now(),
+                error="db mark_active failed after server-side apply; MTProto secret was removed",
+            )
+        except Exception:
+            logger.warning(
+                "MTProto create rollback succeeded, but failed to mark access apply_failed access_id=%s",
+                access_id,
+            )
+        await self._write_audit_best_effort(
+            actor_user_id=actor_user_id,
+            action="mtproto_create_rolled_back_after_db_failure",
+            entity_id=access_id,
+            details={
+                "owner_user_id": owner_user_id,
+                "fingerprint": fingerprint,
+                "generation": result.generation,
+                "original_error_type": type(original_error).__name__,
+            },
+        )
+
+    async def _desired_managed_secrets(
+        self,
+        *,
+        extra: ProxyAccess | None = None,
+        exclude_access_id: int | None = None,
+    ) -> list[MtProxyManagedSecret]:
+        accesses = await self._active_managed_accesses()
+        if extra is not None:
+            accesses.append(extra)
+        if exclude_access_id is not None:
+            accesses = [access for access in accesses if access.id != exclude_access_id]
+        return self._managed_secrets_from_accesses(accesses)
+
     async def _unique_managed_secret(self) -> str:
         store_fingerprints = {
-            item.fingerprint for item in self._managed_adapter().read_current_managed_secrets()
+            item.fingerprint for item in self._read_all_runtime_managed_secrets()
         }
         for _ in range(20):
             secret = secrets.token_hex(16)
@@ -505,6 +812,12 @@ class MtProtoService:
             return str(self.settings.mtproto_secret or "")
         raise InvalidOperation("MTProto access data is incomplete; contact admin")
 
+    def _access_secret_optional(self, access: ProxyAccess) -> str:
+        try:
+            return self._access_secret(access)
+        except InvalidOperation:
+            return ""
+
     def _access_fingerprint(self, access: ProxyAccess) -> str:
         if access.secret_fingerprint:
             return access.secret_fingerprint
@@ -513,6 +826,14 @@ class MtProtoService:
             return value
         secret = self._access_secret(access)
         return mtproto_secret_fingerprint(secret) if secret else ""
+
+    def _redact_secrets(self, text: str, *values: str) -> str:
+        redacted = text
+        for value in values:
+            if value:
+                redacted = redacted.replace(value, "***")
+                redacted = redacted.replace(f"dd{value}", "dd***")
+        return redacted
 
     async def _write_audit_best_effort(
         self,

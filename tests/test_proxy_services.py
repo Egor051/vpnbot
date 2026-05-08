@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,9 @@ from repositories.audit_log import AuditLogRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.audit import AuditService
-from services.mtproto import MtProtoService
+from services.backend_health import BackendHealth
+from services.errors import InvalidOperation
+from services.mtproto import MtProtoService, mtproto_secret_fingerprint
 from services.proxy import ProxyService
 from services.socks5 import Socks5Service
 from services.user_locks import UserLockManager
@@ -175,6 +178,15 @@ class _MtProxyAdapter:
         return MtProxyApplyResult(changed=True, generation=len(self.applied))
 
 
+def _managed_secret(secret: str, *, owner_user_id: int | None = None, access_id: int | None = None) -> MtProxyManagedSecret:
+    return MtProxyManagedSecret(
+        secret=secret,
+        fingerprint=mtproto_secret_fingerprint(secret),
+        owner_user_id=owner_user_id,
+        access_id=access_id,
+    )
+
+
 async def _repo(tmp_path: Path) -> tuple[Database, ProxyAccessRepository]:
     db = Database(tmp_path / "vpn.db")
     await db.connect()
@@ -265,6 +277,99 @@ def test_socks5_create_failure_marks_apply_failed(tmp_path: Path) -> None:
                 await service.issue_socks5_proxy(100, TelegramUserProfile(100, "user", "User"))
             accesses = await repo.list_by_owner(100)
             assert accesses[0].status == ProxyAccessStatus.APPLY_FAILED
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_socks5_mark_active_failure_deletes_user_and_marks_apply_failed(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, base_repo = await _repo(tmp_path)
+        try:
+            class Repo:
+                def __getattr__(self, name: str) -> object:
+                    return getattr(base_repo, name)
+
+                async def mark_active(self, *args: object, **kwargs: object) -> None:
+                    raise RuntimeError("db mark failed")
+
+            shell = _Shell()
+            audit = _Audit()
+            service = Socks5Service(
+                accesses=Repo(),  # type: ignore[arg-type]
+                users=_Users(),  # type: ignore[arg-type]
+                adapter=DanteUserAdapter(shell=shell, login_prefix="vpn_socks_", system_user_shell="/usr/sbin/nologin"),  # type: ignore[arg-type]
+                settings=_settings(),
+                clock=ClockProvider(),
+                audit=audit,  # type: ignore[arg-type]
+            )
+
+            with pytest.raises(RuntimeError, match="db mark failed"):
+                await service.issue_socks5_proxy(100, TelegramUserProfile(100, "user", "User"))
+
+            accesses = await base_repo.list_by_owner(100)
+            assert accesses[0].status == ProxyAccessStatus.APPLY_FAILED
+            assert shell.existing == set()
+            assert any(call[0][0] == "userdel" for call in shell.calls)
+            assert str(accesses[0].payload["password"]) not in str(audit.items)
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_socks5_compensation_failure_degrades_and_blocks_mutations(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, base_repo = await _repo(tmp_path)
+        try:
+            class Repo:
+                def __getattr__(self, name: str) -> object:
+                    return getattr(base_repo, name)
+
+                async def mark_active(self, *args: object, **kwargs: object) -> None:
+                    raise RuntimeError("db mark failed")
+
+            class Adapter:
+                def __init__(self) -> None:
+                    self.created_login = ""
+
+                async def exists(self, login: str) -> bool:
+                    return False
+
+                async def create_user(self, login: str, password: str) -> None:
+                    self.created_login = login
+
+                async def delete_user(self, login: str) -> None:
+                    raise RuntimeError("delete failed")
+
+                async def lock_user(self, login: str) -> None:
+                    raise RuntimeError("lock failed")
+
+            health = BackendHealth()
+            adapter = Adapter()
+            service = Socks5Service(
+                accesses=Repo(),  # type: ignore[arg-type]
+                users=_Users(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+                settings=_settings(),
+                clock=ClockProvider(),
+                audit=_Audit(),  # type: ignore[arg-type]
+                backend_health=health,
+            )
+
+            with pytest.raises(RuntimeError, match="db mark failed"):
+                await service.issue_socks5_proxy(100, TelegramUserProfile(100, "user", "User"))
+
+            accesses = await base_repo.list_by_owner(100)
+            assert accesses[0].status == ProxyAccessStatus.PENDING_APPLY
+            with pytest.raises(InvalidOperation, match="SOCKS5-операции временно заблокированы"):
+                await service.issue_socks5_proxy(100, TelegramUserProfile(100, "user", "User"))
+            with pytest.raises(InvalidOperation, match="SOCKS5-операции временно заблокированы"):
+                await service.revoke_socks5_proxy(1, accesses[0].id, "manual")
+            with pytest.raises(InvalidOperation, match="SOCKS5-операции временно заблокированы"):
+                await service.delete_socks5_proxy(1, accesses[0].id, "manual")
+            health.require_mutation_allowed(ProxyAccessType.MTPROTO)
         finally:
             await db.close()
 
@@ -401,6 +506,126 @@ def test_mtproto_managed_apply_failure_marks_apply_failed(tmp_path: Path) -> Non
                 await service.issue_mtproto_proxy(100, TelegramUserProfile(100, "user", "User"))
             accesses = await repo.list_by_owner(100)
             assert accesses[0].status == ProxyAccessStatus.APPLY_FAILED
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_mtproto_managed_mark_active_failure_rolls_back_secret_and_marks_apply_failed(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def run() -> None:
+        db, base_repo = await _repo(tmp_path)
+        try:
+            users = UserRepository(db)
+            await users.upsert_profile(TelegramUserProfile(101, "other", "Other"), UserRole.APPROVED_USER, "now")
+            existing_secret = "a" * 32
+            existing = await base_repo.create(
+                owner_user_id=101,
+                username="other",
+                access_type=ProxyAccessType.MTPROTO,
+                status=ProxyAccessStatus.ACTIVE,
+                payload={"type": "mtproto", "mode": "managed", "secret": existing_secret},
+                public_payload={
+                    "type": "mtproto",
+                    "mode": "managed",
+                    "fingerprint": mtproto_secret_fingerprint(existing_secret),
+                },
+                created_by=101,
+                now="now",
+                secret_fingerprint=mtproto_secret_fingerprint(existing_secret),
+            )
+
+            class Repo:
+                def __getattr__(self, name: str) -> object:
+                    return getattr(base_repo, name)
+
+                async def mark_active(self, *args: object, **kwargs: object) -> None:
+                    raise RuntimeError("db mark failed")
+
+            audit = _Audit()
+            adapter = _MtProxyAdapter()
+            adapter.current = [_managed_secret(existing_secret, owner_user_id=101, access_id=existing.id)]
+            service = MtProtoService(
+                accesses=Repo(),  # type: ignore[arg-type]
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret=""),
+                clock=ClockProvider(),
+                audit=audit,  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+            )
+
+            caplog.set_level(logging.CRITICAL)
+            with pytest.raises(RuntimeError, match="db mark failed"):
+                await service.issue_mtproto_proxy(100, TelegramUserProfile(100, "user", "User"))
+
+            failed = (await base_repo.list_by_owner(100))[0]
+            new_secret = str(failed.payload["secret"])
+            assert failed.status == ProxyAccessStatus.APPLY_FAILED
+            assert [item.access_id for item in adapter.current] == [existing.id]
+            assert new_secret not in [item.secret for item in adapter.current]
+            assert new_secret not in str(audit.items)
+            assert new_secret not in caplog.text
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_mtproto_managed_rollback_failure_degrades_and_blocks_mutations(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def run() -> None:
+        db, base_repo = await _repo(tmp_path)
+        try:
+            class Repo:
+                def __getattr__(self, name: str) -> object:
+                    return getattr(base_repo, name)
+
+                async def mark_active(self, *args: object, **kwargs: object) -> None:
+                    raise RuntimeError("db mark failed")
+
+            class RollbackFailAdapter(_MtProxyAdapter):
+                async def apply_managed_secrets(self, secrets: list[MtProxyManagedSecret]) -> MtProxyApplyResult:
+                    if self.applied:
+                        self.applied.append(list(secrets))
+                        leaked = self.current[-1].secret if self.current else ""
+                        raise RuntimeError(f"rollback failed for {leaked}")
+                    return await super().apply_managed_secrets(secrets)
+
+            health = BackendHealth()
+            audit = _Audit()
+            adapter = RollbackFailAdapter()
+            service = MtProtoService(
+                accesses=Repo(),  # type: ignore[arg-type]
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret=""),
+                clock=ClockProvider(),
+                audit=audit,  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+                backend_health=health,
+            )
+
+            caplog.set_level(logging.CRITICAL)
+            with pytest.raises(RuntimeError, match="db mark failed"):
+                await service.issue_mtproto_proxy(100, TelegramUserProfile(100, "user", "User"))
+
+            access = (await base_repo.list_by_owner(100))[0]
+            raw_secret = str(access.payload["secret"])
+            assert access.status == ProxyAccessStatus.PENDING_APPLY
+            assert raw_secret in [item.secret for item in adapter.current]
+            assert raw_secret not in str(audit.items)
+            assert raw_secret not in caplog.text
+            with pytest.raises(InvalidOperation, match="MTProto-операции временно заблокированы"):
+                await service.issue_mtproto_proxy(100, TelegramUserProfile(100, "user", "User"))
+            with pytest.raises(InvalidOperation, match="MTProto-операции временно заблокированы"):
+                await service.revoke_mtproto_proxy(1, access.id, "manual")
+            with pytest.raises(InvalidOperation, match="MTProto-операции временно заблокированы"):
+                await service.delete_mtproto_proxy(1, access.id, "manual")
+            health.require_mutation_allowed(ProxyAccessType.SOCKS5)
         finally:
             await db.close()
 
@@ -549,6 +774,242 @@ def test_mtproto_managed_revoke_failure_marks_revoke_failed(tmp_path: Path) -> N
             after = await repo.get_by_id(access.id)
             assert after is not None and after.status == ProxyAccessStatus.REVOKE_FAILED
             assert [item.access_id for item in adapter.current] == [access.id]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_mtproto_startup_reconcile_removes_orphan_secret(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            orphan_secret = "b" * 32
+            audit = _Audit()
+            adapter = _MtProxyAdapter()
+            adapter.current = [_managed_secret(orphan_secret)]
+            service = MtProtoService(
+                accesses=repo,
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret=""),
+                clock=ClockProvider(),
+                audit=audit,  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+            )
+
+            summary = await service.reconcile_mtproto_state()
+
+            assert summary["orphaned"] == 1
+            assert summary["recovered"] == 1
+            assert adapter.current == []
+            assert orphan_secret not in str(audit.items)
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_mtproto_startup_reconcile_restores_missing_active_secret(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            secret = "c" * 32
+            fingerprint = mtproto_secret_fingerprint(secret)
+            access = await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.MTPROTO,
+                status=ProxyAccessStatus.ACTIVE,
+                payload={"type": "mtproto", "mode": "managed", "secret": secret},
+                public_payload={"type": "mtproto", "mode": "managed", "fingerprint": fingerprint},
+                created_by=100,
+                now="now",
+                secret_fingerprint=fingerprint,
+            )
+            adapter = _MtProxyAdapter()
+            service = MtProtoService(
+                accesses=repo,
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret=""),
+                clock=ClockProvider(),
+                audit=_Audit(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+            )
+
+            summary = await service.reconcile_mtproto_state()
+
+            assert summary["missing"] == 1
+            assert [item.access_id for item in adapter.current] == [access.id]
+            assert adapter.current[0].secret == secret
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_mtproto_startup_pending_apply_present_becomes_active(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            secret = "d" * 32
+            fingerprint = mtproto_secret_fingerprint(secret)
+            access = await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.MTPROTO,
+                status=ProxyAccessStatus.PENDING_APPLY,
+                payload={"type": "mtproto", "mode": "managed", "secret": secret},
+                public_payload={"type": "mtproto", "mode": "managed", "fingerprint": fingerprint},
+                created_by=100,
+                now="now",
+                secret_fingerprint=fingerprint,
+            )
+            adapter = _MtProxyAdapter()
+            adapter.current = [_managed_secret(secret, owner_user_id=100, access_id=access.id)]
+            service = MtProtoService(
+                accesses=repo,
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret=""),
+                clock=ClockProvider(),
+                audit=_Audit(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+            )
+
+            summary = await service.reconcile_mtproto_state()
+            after = await repo.get_by_id(access.id)
+
+            assert summary["pending"] == 1
+            assert summary["recovered"] == 1
+            assert after is not None and after.status == ProxyAccessStatus.ACTIVE
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_mtproto_startup_pending_apply_absent_becomes_apply_failed(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            secret = "e" * 32
+            fingerprint = mtproto_secret_fingerprint(secret)
+            access = await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.MTPROTO,
+                status=ProxyAccessStatus.PENDING_APPLY,
+                payload={"type": "mtproto", "mode": "managed", "secret": secret},
+                public_payload={"type": "mtproto", "mode": "managed", "fingerprint": fingerprint},
+                created_by=100,
+                now="now",
+                secret_fingerprint=fingerprint,
+            )
+            adapter = _MtProxyAdapter()
+            service = MtProtoService(
+                accesses=repo,
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret=""),
+                clock=ClockProvider(),
+                audit=_Audit(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+            )
+
+            summary = await service.reconcile_mtproto_state()
+            after = await repo.get_by_id(access.id)
+
+            assert summary["pending"] == 1
+            assert summary["recovered"] == 1
+            assert after is not None and after.status == ProxyAccessStatus.APPLY_FAILED
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("start_status", "expected_status"),
+    [
+        (ProxyAccessStatus.PENDING_REVOKE, ProxyAccessStatus.REVOKED),
+        (ProxyAccessStatus.PENDING_DELETE, ProxyAccessStatus.DELETED),
+    ],
+)
+def test_mtproto_startup_pending_removal_completes(
+    tmp_path: Path,
+    start_status: ProxyAccessStatus,
+    expected_status: ProxyAccessStatus,
+) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            secret = "f" * 32
+            fingerprint = mtproto_secret_fingerprint(secret)
+            access = await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.MTPROTO,
+                status=start_status,
+                payload={"type": "mtproto", "mode": "managed", "secret": secret},
+                public_payload={"type": "mtproto", "mode": "managed", "fingerprint": fingerprint},
+                created_by=100,
+                now="now",
+                secret_fingerprint=fingerprint,
+            )
+            adapter = _MtProxyAdapter()
+            adapter.current = [_managed_secret(secret, owner_user_id=100, access_id=access.id)]
+            service = MtProtoService(
+                accesses=repo,
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret=""),
+                clock=ClockProvider(),
+                audit=_Audit(),  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+            )
+
+            summary = await service.reconcile_mtproto_state()
+            after = await repo.get_by_id(access.id)
+
+            assert summary["pending"] == 1
+            assert adapter.current == []
+            assert after is not None and after.status == expected_status
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_mtproto_startup_reconcile_failure_degrades_and_blocks_issue(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            orphan_secret = "1" * 32
+            health = BackendHealth()
+            audit = _Audit()
+            adapter = _MtProxyAdapter(fail_apply=True)
+            adapter.current = [_managed_secret(orphan_secret)]
+            service = MtProtoService(
+                accesses=repo,
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret=""),
+                clock=ClockProvider(),
+                audit=audit,  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+                backend_health=health,
+            )
+
+            caplog.set_level(logging.CRITICAL)
+            summary = await service.reconcile_mtproto_state()
+
+            assert summary["orphaned"] == 1
+            assert summary["failed"] == 1
+            assert adapter.current == [_managed_secret(orphan_secret)]
+            assert orphan_secret not in str(audit.items)
+            assert orphan_secret not in caplog.text
+            with pytest.raises(InvalidOperation, match="MTProto-операции временно заблокированы"):
+                await service.issue_mtproto_proxy(100, TelegramUserProfile(100, "user", "User"))
+            health.require_mutation_allowed(ProxyAccessType.SOCKS5)
         finally:
             await db.close()
 
