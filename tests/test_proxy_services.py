@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,9 +11,11 @@ from adapters.clock import ClockProvider
 from adapters.dante_users import DanteUserAdapter
 from adapters.errors import DanteUserError
 from adapters.mtproxy import MtProxyApplyResult, MtProxyManagedSecret
+from bot.app import _startup_reconcile_keys
+from bot.formatters import backend_diagnostics_text
 from config.settings import Settings
 from db.database import Database
-from models.dto import ShellResult, TelegramUserProfile, User
+from models.dto import ProxyAccess, ShellResult, TelegramUserProfile, User
 from models.enums import ProxyAccessStatus, ProxyAccessType, UserRole, VpnKeyType
 from repositories.proxy_accesses import ProxyAccessRepository
 from repositories.audit_log import AuditLogRepository
@@ -185,6 +188,41 @@ def _managed_secret(secret: str, *, owner_user_id: int | None = None, access_id:
         owner_user_id=owner_user_id,
         access_id=access_id,
     )
+
+
+async def _seed_managed_mtproto_with_failed_history(
+    repo: ProxyAccessRepository,
+    *,
+    failed_count: int = 5,
+) -> tuple[ProxyAccess, str]:
+    active_secret = f"{1:032x}"
+    active_fingerprint = mtproto_secret_fingerprint(active_secret)
+    active = await repo.create(
+        owner_user_id=100,
+        username="user",
+        access_type=ProxyAccessType.MTPROTO,
+        status=ProxyAccessStatus.ACTIVE,
+        payload={"type": "mtproto", "mode": "managed", "secret": active_secret},
+        public_payload={"type": "mtproto", "mode": "managed", "fingerprint": active_fingerprint},
+        created_by=100,
+        now="now",
+        secret_fingerprint=active_fingerprint,
+    )
+    for index in range(failed_count):
+        failed_secret = f"{index + 2:032x}"
+        failed_fingerprint = mtproto_secret_fingerprint(failed_secret)
+        await repo.create(
+            owner_user_id=100,
+            username="user",
+            access_type=ProxyAccessType.MTPROTO,
+            status=ProxyAccessStatus.APPLY_FAILED,
+            payload={"type": "mtproto", "mode": "managed", "secret": failed_secret},
+            public_payload={"type": "mtproto", "mode": "managed", "fingerprint": failed_fingerprint},
+            created_by=100,
+            now=f"failed-{index}",
+            secret_fingerprint=failed_fingerprint,
+        )
+    return active, active_secret
 
 
 async def _repo(tmp_path: Path) -> tuple[Database, ProxyAccessRepository]:
@@ -847,6 +885,125 @@ def test_mtproto_startup_reconcile_restores_missing_active_secret(tmp_path: Path
     asyncio.run(run())
 
 
+def test_mtproto_historical_apply_failed_summary_is_not_backend_fatal(tmp_path: Path) -> None:
+    class OkBackend:
+        async def startup_reconcile(self) -> dict[str, int]:
+            return {"checked": 0, "recovered": 0, "failed": 0}
+
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            active, active_secret = await _seed_managed_mtproto_with_failed_history(repo)
+            health = BackendHealth()
+            adapter = _MtProxyAdapter()
+            adapter.current = [_managed_secret(active_secret, owner_user_id=100, access_id=active.id)]
+            audit = _Audit()
+            service = MtProtoService(
+                accesses=repo,
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret=""),
+                clock=ClockProvider(),
+                audit=audit,  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+                backend_health=health,
+            )
+
+            summary = await service.reconcile_mtproto_state()
+            assert summary["checked"] == 1
+            assert summary["missing"] == 0
+            assert summary["orphaned"] == 0
+            assert summary["pending"] == 5
+            assert summary["failed"] == 5
+            assert summary["fatal"] == 0
+
+            services = SimpleNamespace(
+                xray=OkBackend(),
+                awg=OkBackend(),
+                mtproto=service,
+                audit=audit,
+                backend_health=health,
+            )
+            await _startup_reconcile_keys(services)  # type: ignore[arg-type]
+
+            health.require_mutation_allowed(ProxyAccessType.MTPROTO)
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_mtproto_startup_reconcile_exception_degrades_backend() -> None:
+    class OkBackend:
+        async def startup_reconcile(self) -> dict[str, int]:
+            return {"checked": 0, "recovered": 0, "failed": 0}
+
+    class FailingMtProto:
+        async def reconcile_mtproto_state(self) -> dict[str, int]:
+            raise RuntimeError("runtime read failed")
+
+    class Audit:
+        async def write(self, **kwargs: object) -> None:
+            return None
+
+    health = BackendHealth()
+    services = SimpleNamespace(
+        xray=OkBackend(),
+        awg=OkBackend(),
+        mtproto=FailingMtProto(),
+        audit=Audit(),
+        backend_health=health,
+    )
+
+    asyncio.run(_startup_reconcile_keys(services))  # type: ignore[arg-type]
+
+    with pytest.raises(InvalidOperation, match="MTProto-операции временно заблокированы"):
+        health.require_mutation_allowed(ProxyAccessType.MTPROTO)
+    health.require_mutation_allowed(VpnKeyType.XRAY)
+    health.require_mutation_allowed(VpnKeyType.AWG)
+
+
+def test_mtproto_admin_diagnostics_ok_with_failed_history_and_matching_runtime(tmp_path: Path) -> None:
+    class OkBackend:
+        async def startup_reconcile(self) -> dict[str, int]:
+            return {"checked": 0, "recovered": 0, "failed": 0}
+
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            active, active_secret = await _seed_managed_mtproto_with_failed_history(repo)
+            health = BackendHealth()
+            adapter = _MtProxyAdapter()
+            adapter.current = [_managed_secret(active_secret, owner_user_id=100, access_id=active.id)]
+            audit = _Audit()
+            service = MtProtoService(
+                accesses=repo,
+                users=_Users(),  # type: ignore[arg-type]
+                settings=_settings(mtproto_mode="managed", mtproto_secret=""),
+                clock=ClockProvider(),
+                audit=audit,  # type: ignore[arg-type]
+                adapter=adapter,  # type: ignore[arg-type]
+                backend_health=health,
+            )
+            services = SimpleNamespace(
+                xray=OkBackend(),
+                awg=OkBackend(),
+                mtproto=service,
+                audit=audit,
+                backend_health=health,
+            )
+
+            await _startup_reconcile_keys(services)  # type: ignore[arg-type]
+            text = backend_diagnostics_text(health.snapshot(), mtproto_mode="managed")
+
+            assert "MTProto: <b>OK</b>" in text
+            assert "startup reconciliation failed" not in text
+            assert active_secret not in text
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_mtproto_startup_pending_apply_present_becomes_active(tmp_path: Path) -> None:
     async def run() -> None:
         db, repo = await _repo(tmp_path)
@@ -1004,6 +1161,7 @@ def test_mtproto_startup_reconcile_failure_degrades_and_blocks_issue(
 
             assert summary["orphaned"] == 1
             assert summary["failed"] == 1
+            assert summary["fatal"] == 1
             assert adapter.current == [_managed_secret(orphan_secret)]
             assert orphan_secret not in str(audit.items)
             assert orphan_secret not in caplog.text
