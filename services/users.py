@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 
 from adapters.clock import ClockProvider
 from config.settings import Settings
@@ -140,6 +141,39 @@ class UserService:
         if role in {UserRole.BLOCKED_USER, UserRole.APPROVED_USER, UserRole.PENDING_USER}:
             await self.clear_user_state(target_user_id)
 
+    async def approve_access_request_user(
+        self,
+        actor_user_id: int,
+        target_user_id: int,
+        *,
+        requested_at: str,
+    ) -> tuple[User, bool, bool]:
+        await self.require_superadmin(actor_user_id)
+        current = await self.get_user(target_user_id)
+        if target_user_id in self.settings.admin_ids or current.role == UserRole.SUPERADMIN:
+            return current, False, False
+        repeat_after_block = is_blocked_user(current)
+        if repeat_after_block and not self._request_is_after_block(current.blocked_at, requested_at):
+            raise InvalidOperation("Пользователь заблокирован. Сначала разблокируйте пользователя.")
+        if current.role == UserRole.APPROVED_USER and not repeat_after_block:
+            return current, False, False
+        if current.role not in {UserRole.PENDING_USER, UserRole.APPROVED_USER, UserRole.BLOCKED_USER}:
+            raise InvalidOperation("Нельзя одобрить пользователя в текущей роли")
+        await self.users.set_role(target_user_id, UserRole.APPROVED_USER, self.clock.now(), blocked_at=None)
+        await self.clear_user_state(target_user_id)
+        return await self.get_user(target_user_id), True, repeat_after_block
+
+    async def reject_access_request_user(self, actor_user_id: int, target_user_id: int) -> tuple[User | None, bool]:
+        await self.require_superadmin(actor_user_id)
+        user = await self.users.get_by_id(target_user_id)
+        if user is None:
+            return None, False
+        if user.role == UserRole.SUPERADMIN or is_blocked_user(user) or user.role == UserRole.APPROVED_USER:
+            return user, False
+        if user.role != UserRole.PENDING_USER:
+            raise InvalidOperation("Нельзя отклонить пользователя в текущей роли")
+        return user, False
+
     async def block_user(
         self,
         actor_user_id: int,
@@ -157,6 +191,20 @@ class UserService:
             revoked_key_ids: list[int] = []
             revoked_proxy_ids: list[int] = []
             errors: list[KeyOperationError] = []
+            now = self.clock.now()
+            await self.users.set_role(target_user_id, UserRole.BLOCKED_USER, now, blocked_at=now)
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="user_blocked",
+                entity_type=AuditEntityType.USER,
+                entity_id=target_user_id,
+                details={
+                    "revoke_active_keys": revoke_active_keys,
+                    "bot_access_blocked": True,
+                    "revoke_pending": revoke_active_keys,
+                },
+            )
+            await self.clear_user_state(target_user_id)
             if revoke_active_keys:
                 if self._vpn_keys is None or not self._key_revokers:
                     errors.append(KeyOperationError(0, VpnKeyType.XRAY, "Сервисы отзыва ключей не подключены"))
@@ -165,8 +213,6 @@ class UserService:
                 if self._proxy_accesses is not None and self._proxy_revokers:
                     await self._revoke_all_proxy_accesses(actor_user_id, target_user_id, revoked_proxy_ids, errors)
 
-            now = self.clock.now()
-            await self.users.set_role(target_user_id, UserRole.BLOCKED_USER, now, blocked_at=now)
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action="user_blocked_with_revoke_errors" if errors else "user_blocked",
@@ -183,7 +229,6 @@ class UserService:
                     "proxy_revoke_complete": not any(getattr(item.key_type, "value", "") in {"socks5", "mtproto"} for item in errors),
                 },
             )
-            await self.clear_user_state(target_user_id)
             user = await self.get_user(target_user_id)
             return BlockUserResult(
                 user=user,
@@ -371,6 +416,16 @@ class UserService:
         except (TypeError, ValueError):
             return 0
         return max(result, 0)
+
+    def _request_is_after_block(self, blocked_at: str | None, requested_at: str) -> bool:
+        if not blocked_at:
+            return False
+        try:
+            blocked = datetime.fromisoformat(blocked_at)
+            requested = datetime.fromisoformat(requested_at)
+        except ValueError:
+            return False
+        return requested > blocked
 
     async def _write_audit_best_effort(
         self,

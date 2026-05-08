@@ -69,14 +69,21 @@ class AccessApprovalService:
                 self.clock.now(),
             )
             if changed:
-                await self.users.users.set_role(request.telegram_user_id, UserRole.APPROVED_USER, self.clock.now(), blocked_at=None)
-                await self.users.clear_user_state(request.telegram_user_id)
+                _user, role_changed, repeat_after_block = await self.users.approve_access_request_user(
+                    actor_user_id,
+                    request.telegram_user_id,
+                    requested_at=request.requested_at,
+                )
                 await self.audit.write(
                     actor_user_id=actor_user_id,
                     action="access_approved",
                     entity_type=AuditEntityType.ACCESS_REQUEST,
                     entity_id=request_id,
-                    details={"telegram_user_id": request.telegram_user_id},
+                    details={
+                        "telegram_user_id": request.telegram_user_id,
+                        "role_changed": role_changed,
+                        "repeat_after_block": repeat_after_block,
+                    },
                 )
             refreshed = await self.requests.get_by_id(request_id)
             if refreshed is None:
@@ -96,15 +103,13 @@ class AccessApprovalService:
                 self.clock.now(),
             )
             if changed:
-                user = await self.users.users.get_by_id(request.telegram_user_id)
-                if user is not None and not is_blocked_user(user):
-                    await self.users.users.set_role(request.telegram_user_id, UserRole.PENDING_USER, self.clock.now(), blocked_at=None)
+                _user, role_changed = await self.users.reject_access_request_user(actor_user_id, request.telegram_user_id)
                 await self.audit.write(
                     actor_user_id=actor_user_id,
                     action="access_rejected",
                     entity_type=AuditEntityType.ACCESS_REQUEST,
                     entity_id=request_id,
-                    details={"telegram_user_id": request.telegram_user_id},
+                    details={"telegram_user_id": request.telegram_user_id, "role_changed": role_changed},
                 )
             refreshed = await self.requests.get_by_id(request_id)
             if refreshed is None:

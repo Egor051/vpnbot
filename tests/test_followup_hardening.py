@@ -1093,7 +1093,7 @@ def test_superadmin_is_not_blocked_by_stale_blocked_at() -> None:
     assert is_blocked_user(user) is False
 
 
-def test_reject_rolls_back_request_if_role_update_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reject_does_not_demote_already_approved_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
         db = Database(tmp_path / "vpn.db")
         await db.connect()
@@ -1108,23 +1108,18 @@ def test_reject_rolls_back_request_if_role_update_fails(tmp_path: Path, monkeypa
             await users_repo.upsert_profile(TelegramUserProfile(telegram_user_id=200, username="user", first_name="User"), UserRole.APPROVED_USER, "now")
             request = await requests_repo.create(200, "user", "now")
 
-            original_set_role = users_repo.set_role
-
-            async def fail_target_role(telegram_user_id: int, role: UserRole, now: str, blocked_at: str | None = None) -> None:
-                if telegram_user_id == 200:
-                    raise RuntimeError("role update failed")
-                await original_set_role(telegram_user_id, role, now, blocked_at)
+            async def fail_target_role(*args: object, **kwargs: object) -> None:
+                raise AssertionError("rejecting a stale request must not rewrite an approved user's role")
 
             monkeypatch.setattr(users_repo, "set_role", fail_target_role)
             service = AccessApprovalService(requests=requests_repo, users=users, clock=ClockProvider(), audit=audit)
 
-            with pytest.raises(RuntimeError, match="role update failed"):
-                await service.reject(1, request.id)
+            refreshed_request, changed = await service.reject(1, request.id)
 
-            refreshed_request = await requests_repo.get_by_id(request.id)
             refreshed_user = await users_repo.get_by_id(200)
             assert refreshed_request is not None
-            assert refreshed_request.status == AccessRequestStatus.PENDING
+            assert refreshed_request.status == AccessRequestStatus.REJECTED
+            assert changed is True
             assert refreshed_user is not None
             assert refreshed_user.role == UserRole.APPROVED_USER
         finally:

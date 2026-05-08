@@ -435,17 +435,20 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Any) -> No
         result = await services.users.block_user(callback.from_user.id, user_id, revoke_active_keys=True)
         if callback.message:
             user = await services.users.get_user(user_id)
+            revoked_proxy_ids = getattr(result, "revoked_proxy_ids", ())
             if result.errors:
                 text = (
-                    "Пользователь заблокирован в боте, но не все VPN-ключи удалось отключить автоматически.\n"
-                    f"Отключено ключей: {len(result.revoked_key_ids)}\n"
+                    "Пользователь заблокирован в боте, но не весь серверный доступ удалось отключить автоматически.\n"
+                    f"Отключено VPN-ключей: {len(result.revoked_key_ids)}\n"
+                    f"Отключено прокси-доступов: {len(revoked_proxy_ids)}\n"
                     f"Ошибок: {len(result.errors)}\n"
-                    "Проверьте Xray/AWG runtime и config вручную."
+                    "Проверьте Xray/AWG/SOCKS5/MTProto runtime и config вручную."
                 )
             else:
                 text = (
                     "Пользователь заблокирован.\n"
-                    f"Отключено ключей: {len(result.revoked_key_ids)}\n"
+                    f"Отключено VPN-ключей: {len(result.revoked_key_ids)}\n"
+                    f"Отключено прокси-доступов: {len(revoked_proxy_ids)}\n"
                     "Ошибок: 0\n"
                     "Теперь пользователю доступен только /start для повторной заявки."
                 )
@@ -739,6 +742,7 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
         await require_superadmin(services, callback.from_user.id)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         user = await services.users.get_user(user_id)
+        await services.users.require_approved_or_admin(user.telegram_user_id)
         await state.set_state(AdminCreateKeyStates.choosing_type)
         await state.update_data(owner_user_id=user.telegram_user_id)
         text = f"{user_card_text(user)}\n\n{ONE_KEY_ONE_DEVICE_WARNING}\n\nВыберите тип ключа:"
@@ -790,6 +794,7 @@ async def admin_issue_note(message: Message, state: FSMContext, services: Any) -
     try:
         owner_user_id = int(data["owner_user_id"])
         owner = await services.users.get_user(owner_user_id)
+        await services.users.require_approved_or_admin(owner.telegram_user_id)
         key_type = str(data["key_type"])
         note = _clean_note(message.text)
         await state.update_data(note=note)
@@ -812,6 +817,8 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
         key_type = str(data["key_type"])
         note = data.get("note")
         owner = await services.users.get_user(owner_user_id)
+        await require_superadmin(services, callback.from_user.id)
+        await services.users.require_approved_or_admin(owner.telegram_user_id)
         profile = TelegramUserProfile(owner.telegram_user_id, owner.username, owner.first_name)
         rate_limiter.check(callback.from_user.id, "key_create", 20)
         await state.clear()

@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, Message, User as TgUser
 from bot.formatters import main_menu_text
 from bot.keyboards.common import back_to_menu, faq_answer_keyboard, faq_keyboard, main_menu
 from bot.messages import is_stale_callback_query_error, safe_callback_answer, safe_edit_message_text
+from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimitExceeded
 from config.settings import SettingsError
 from models.dto import TelegramUserProfile
@@ -86,11 +87,24 @@ FAQ_ANSWERS = {
 async def help_command(message: Message, services: Any) -> None:
     if message.from_user is None:
         return
+    if not await ensure_private_message(message):
+        return
+    await message.answer(FAQ_TEXT, reply_markup=faq_keyboard())
+
+
+@router.message(Command("faq"))
+async def faq_command(message: Message, services: Any) -> None:
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message):
+        return
     await message.answer(FAQ_TEXT, reply_markup=faq_keyboard())
 
 
 @router.callback_query(F.data == "help")
 async def help_callback(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback):
+        return
     await safe_callback_answer(callback)
     if callback.message and callback.from_user:
         await safe_edit_message_text(callback.message, FAQ_TEXT, reply_markup=faq_keyboard())
@@ -98,6 +112,8 @@ async def help_callback(callback: CallbackQuery, services: Any) -> None:
 
 @router.callback_query(F.data.startswith("faq:"))
 async def faq_answer_callback(callback: CallbackQuery) -> None:
+    if not await ensure_private_callback(callback):
+        return
     await safe_callback_answer(callback)
     if callback.message is None or callback.data is None:
         return
@@ -112,22 +128,48 @@ async def faq_answer_callback(callback: CallbackQuery) -> None:
 async def help_menu_message(message: Message, services: Any) -> None:
     if message.from_user is None:
         return
+    if not await ensure_private_message(message):
+        return
     await message.answer(FAQ_TEXT, reply_markup=faq_keyboard())
+
+
+@router.message(Command("menu"))
+async def menu_command(message: Message, services: Any) -> None:
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message):
+        return
+    try:
+        await services.users.require_approved_or_admin(message.from_user.id)
+        await message.answer(
+            main_menu_text(message.from_user),
+            reply_markup=main_menu(await is_admin(services, message.from_user.id)),
+        )
+    except Exception as exc:
+        await answer_message_error(message, exc)
 
 
 @router.callback_query(F.data == "menu:main")
 async def menu_callback(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback):
+        return
     await safe_callback_answer(callback)
     if callback.from_user is None or callback.message is None:
         return
-    await safe_edit_message_text(
-        callback.message,
-        main_menu_text(callback.from_user),
-        reply_markup=main_menu(await is_admin(services, callback.from_user.id)),
-    )
+    try:
+        await services.users.require_approved_or_admin(callback.from_user.id)
+        await safe_edit_message_text(
+            callback.message,
+            main_menu_text(callback.from_user),
+            reply_markup=main_menu(await is_admin(services, callback.from_user.id)),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
 
 
 @router.message(Command("cancel"))
 async def cancel_command(message: Message, state: FSMContext) -> None:
+    if not await ensure_private_message(message):
+        return
     await state.clear()
     await message.answer("Операция отменена.", reply_markup=back_to_menu())
