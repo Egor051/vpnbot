@@ -323,6 +323,9 @@ def test_awg_delete_failed_retry_removes_access_before_deleted() -> None:
         async def require_approved_or_admin(self, actor_user_id: int) -> User:
             return User(actor_user_id, "user", "User", UserRole.APPROVED_USER, "now", "now", None)
 
+        async def require_superadmin(self, actor_user_id: int) -> User:
+            return User(actor_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
+
     class Adapter:
         def __init__(self) -> None:
             self.removed = False

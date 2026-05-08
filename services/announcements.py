@@ -11,7 +11,7 @@ from models.enums import AuditEntityType
 from repositories.announcements import AnnouncementBatch, AnnouncementRepository
 from repositories.users import UserRepository
 from services.audit import AuditService
-from services.errors import NotFound
+from services.errors import InvalidOperation, NotFound
 from services.users import UserService
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,12 @@ class AnnouncementResult:
     delivered_user_ids: tuple[int, ...] = ()
     failed_user_ids: tuple[int, ...] = ()
     skipped_user_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AnnouncementCancelResult:
+    batch: AnnouncementBatch
+    changed: bool
 
 
 class AnnouncementService:
@@ -50,6 +56,15 @@ class AnnouncementService:
     async def count_recipients(self, actor_user_id: int) -> int:
         await self.users.require_superadmin(actor_user_id)
         return await self.users_repo.count_announcement_recipients()
+
+    async def list_incomplete_batches(self, actor_user_id: int, *, limit: int = 10) -> list[AnnouncementBatch]:
+        await self.users.require_superadmin(actor_user_id)
+        if self.announcements is None:
+            return []
+        batches = await self.announcements.list_incomplete_batches(limit=limit)
+        for batch in batches:
+            await self.announcements.refresh_batch_counts(batch.id, self._now())
+        return await self.announcements.list_incomplete_batches(limit=limit)
 
     async def send_to_all(
         self,
@@ -91,7 +106,28 @@ class AnnouncementService:
         batch = await self.announcements.get_batch(announcement_id)
         if batch is None:
             raise NotFound("Объявление не найдено")
+        if batch.status == "cancelled":
+            raise InvalidOperation("Объявление отменено")
+        if batch.status == "completed" or batch.completed_at is not None:
+            raise InvalidOperation("Объявление уже завершено")
         return await self._send_batch(bot=bot, batch=batch, retry_failed=retry_failed)
+
+    async def cancel_batch(self, *, actor_user_id: int, announcement_id: int) -> AnnouncementCancelResult:
+        await self.users.require_superadmin(actor_user_id)
+        if self.announcements is None:
+            raise RuntimeError("Announcement ledger is not configured")
+        batch = await self.announcements.get_batch(announcement_id)
+        if batch is None:
+            raise NotFound("Объявление не найдено")
+        if batch.status == "cancelled":
+            return AnnouncementCancelResult(batch=batch, changed=False)
+        if batch.status == "completed" or batch.completed_at is not None:
+            raise InvalidOperation("Объявление уже завершено")
+        await self.announcements.mark_cancelled(batch.id, self._now())
+        cancelled = await self.announcements.get_batch(batch.id)
+        if cancelled is None:
+            raise NotFound("Объявление не найдено")
+        return AnnouncementCancelResult(batch=cancelled, changed=True)
 
     async def _send_without_ledger(
         self,

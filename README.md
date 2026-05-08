@@ -13,7 +13,7 @@ This project is designed for a single-server deployment without Docker, Redis, P
 - Separate one-page Telegram section "Прокси" for SOCKS5/Dante auto-issue and Telegram MTProto Proxy links.
 - MTProto supports `static` compatibility mode and `managed` mode with per-user secrets, safe apply, and rollback.
 - Optional legacy proxy entry table seeded from `DEFAULT_PROXY_*` remains internal/compatibility storage; the user-facing proxy UX uses `proxy_accesses`.
-- Ownership checks so users can only view and manage their own keys unless they are admins.
+- Ownership checks so users can view their own configs/stats; destructive VPN and proxy lifecycle actions are admin-only.
 - Audit log with recursive masking for sensitive values.
 - SQLite storage with migrations from `db/schema.sql`.
 - Rotating local logs in `LOG_DIR`.
@@ -172,6 +172,28 @@ Notes:
 - `MTPROTO_SECRET`, SOCKS5 passwords, and real production endpoints with credentials must never be committed. `.env.example` intentionally keeps proxy secrets empty.
 - `DEFAULT_PROXY_*` is legacy compatibility storage and does not drive the new user-facing proxy access flow.
 
+## Access Lifecycle Policy
+
+- Approved users may create their own Xray/AWG keys, view their own active configs, view stats, and edit their own key notes.
+- Approved users may issue and view their own SOCKS5/MTProto proxy access when the backend is enabled.
+- Revoke/delete for Xray and AWG keys is admin-only. Normal users do not get revoke/delete buttons, and direct callbacks/service calls are rejected.
+- Revoke/delete for SOCKS5 and MTProto proxy access is admin-only. The user-facing proxy page only issues/shows active access and stats.
+- Blocking a user is an admin action. It blocks bot access and attempts to revoke active/problem VPN keys and SOCKS5/MTProto proxy access.
+- In `MTPROTO_MODE=static`, blocking/revoking only deactivates the bot/SQLite record; a copied shared secret keeps working until the shared secret is rotated.
+- In `MTPROTO_MODE=managed`, admin revoke removes that user's MTProto secret from the managed active list while other users remain active.
+
+## Backend Degraded Mode
+
+The bot marks a backend DEGRADED when reconciliation or post-apply compensation cannot prove that SQLite and the server runtime are safe to mutate automatically. DEGRADED is backend-specific:
+
+- Xray DEGRADED blocks Xray create/revoke/delete/manual reconcile only.
+- AWG DEGRADED blocks AWG create/revoke/delete/manual reconcile only.
+- SOCKS5 DEGRADED blocks SOCKS5 issue/revoke/delete only.
+- MTProto DEGRADED blocks MTProto issue/revoke/delete only.
+- Other backends continue working unless they are also DEGRADED.
+
+The admin panel has `Диагностика backend`, which shows `OK` or `DEGRADED` for Xray, AWG, SOCKS5, and MTProto plus a non-secret reason. For full context, check `journalctl -u vpn-bot`, audit rows, SQLite lifecycle statuses, and the backend config/runtime listed in the runbooks below. Recover by fixing the server state from backups or manual inspection, then restart `vpn-bot` so startup reconciliation can re-check the backend.
+
 ## Proxy Deployment Notes
 
 The bot does not install Dante or MTProxy. Prepare them on the VDS first, then enable the relevant env flags.
@@ -327,6 +349,13 @@ python -m pytest
 python -m pip_audit -r requirements.txt -r constraints.txt --no-deps
 ```
 
+## CI Checks
+
+GitHub Actions runs the local gates without production secrets or live services:
+
+- Python 3.11 and 3.12: install runtime/dev dependencies, `python -m ruff check . --select=E9,F63,F7,F82`, `python -m compileall .`, and `python -m pytest`.
+- Dependency audit on Python 3.12: `python -m pip_audit -r requirements.txt -r constraints.txt --no-deps`.
+
 ## Maintenance
 
 Update from GitHub:
@@ -372,6 +401,17 @@ tail -f /opt/vpn-service/logs/bot.log
 - Code and `.venv` are not writable by untrusted users.
 - If managed MTProto is enabled, `vpn-bot.service` does not have `ReadWritePaths=/etc/systemd/system`; the MTProxy wrapper/drop-in were installed manually and contain no raw secrets.
 - If managed MTProto is enabled, `/etc/mtproxy/vpnbot/managed-secrets.json`, `/etc/mtproxy/vpnbot/mtproxy.env`, and `/etc/mtproxy/vpnbot/backups/*` are readable only by root/service operators.
+
+### General bot health check
+
+```bash
+sudo systemctl status vpn-bot --no-pager
+sudo journalctl -u vpn-bot -n 100 --no-pager
+sqlite3 /opt/vpn-service/data/vpn.db "PRAGMA quick_check;"
+cd /opt/vpn-service
+.venv/bin/python -m compileall .
+.venv/bin/python -m pytest
+```
 
 ### Backup
 
@@ -440,6 +480,60 @@ sqlite3 /opt/vpn-service/data/vpn.db "PRAGMA quick_check; SELECT status, key_typ
 ```
 
 If `XRAY_STATS_SERVER` is configured locally, query it only from the server or localhost. Confirm that bot DB status, Xray config clients, AWG config peers, and AWG runtime peers agree after create/revoke/delete operations.
+
+### Xray degraded recovery
+
+Xray DEGRADED blocks only Xray create/revoke/delete/manual reconcile. AWG, SOCKS5, and MTProto continue unless separately degraded.
+
+```bash
+sudo systemctl status xray --no-pager
+sudo xray run -test -config /usr/local/etc/xray/config.json
+sudo jq '[.inbounds[]?.settings.clients[]? | {email}]' /usr/local/etc/xray/config.json
+sqlite3 /opt/vpn-service/data/vpn.db "SELECT status, key_type, COUNT(*) FROM vpn_keys WHERE key_type='xray' GROUP BY status, key_type;"
+sudo journalctl -u vpn-bot -n 150 --no-pager
+```
+
+Check for manual clients/orphans, failed pending statuses, and config syntax errors. Restore from backup or remove only confirmed bot-managed drift, then restart `vpn-bot` and re-open admin backend diagnostics.
+
+### AWG degraded recovery
+
+AWG DEGRADED blocks only AWG create/revoke/delete/manual reconcile. Xray, SOCKS5, and MTProto continue unless separately degraded.
+
+```bash
+sudo systemctl status awg-quick@awg0 --no-pager
+sudo awg show
+sudo awk '/^# vpnbot key_id=|^PublicKey =|^AllowedIPs =/{print}' /etc/amnezia/amneziawg/awg0.conf
+sqlite3 /opt/vpn-service/data/vpn.db "SELECT status, key_type, COUNT(*) FROM vpn_keys WHERE key_type='awg' GROUP BY status, key_type;"
+sudo journalctl -u vpn-bot -n 150 --no-pager
+```
+
+Do not print AWG private keys or preshared keys into tickets/chat. Compare public keys/client IPs only, fix confirmed drift from backup or manual state, then restart `vpn-bot`.
+
+### SOCKS5 degraded recovery
+
+SOCKS5 DEGRADED blocks only SOCKS5 issue/revoke/delete. Xray, AWG, and MTProto continue unless separately degraded.
+
+```bash
+sudo systemctl status danted --no-pager
+getent passwd | awk -F: '$1 ~ /^vpn_socks_/ {print $1}'
+sqlite3 /opt/vpn-service/data/vpn.db "SELECT status, access_type, COUNT(*) FROM proxy_accesses WHERE access_type='socks5' GROUP BY status, access_type;"
+sudo journalctl -u vpn-bot -n 150 --no-pager
+```
+
+Check that every managed Linux user starts with `SOCKS5_LOGIN_PREFIX`; do not print SOCKS5 passwords. Lock/delete only confirmed bot-managed stray users, restore SQLite from backup if needed, then restart `vpn-bot`.
+
+### MTProto degraded recovery
+
+MTProto DEGRADED blocks only MTProto issue/revoke/delete. Xray, AWG, and SOCKS5 continue unless separately degraded.
+
+```bash
+sudo systemctl status mtproxy --no-pager
+sudo jq '{secret_count: (.secrets | length), fingerprints: [.secrets[]?.fingerprint]}' /etc/mtproxy/vpnbot/managed-secrets.json
+sqlite3 /opt/vpn-service/data/vpn.db "SELECT status, access_type, COUNT(*) FROM proxy_accesses WHERE access_type='mtproto' GROUP BY status, access_type;"
+sudo journalctl -u vpn-bot -n 150 --no-pager
+```
+
+Do not print raw MTProto secrets. In static mode, per-user server-side revoke is impossible; rotate `MTPROTO_SECRET` if a copied shared secret must be invalidated. In managed mode, compare counts/fingerprints, restore managed files from `/etc/mtproxy/vpnbot/backups` if needed, restart `mtproxy`, then restart `vpn-bot`.
 
 ### Rollback after a bad deploy
 

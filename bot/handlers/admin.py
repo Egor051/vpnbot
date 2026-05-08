@@ -15,8 +15,10 @@ from bot.formatters import (
     access_request_text,
     access_request_decision_confirm_text,
     access_requests_page_text,
+    announcement_batches_text,
     admin_stats_page_text,
     admin_proxy_stats_text,
+    backend_diagnostics_text,
     proxy_admin_status_text,
     audit_page_text,
     block_user_confirm_text,
@@ -35,6 +37,7 @@ from bot.keyboards.admin import (
     admin_issue_users_keyboard,
     admin_key_type_keyboard,
     admin_panel_keyboard,
+    announcement_batches_keyboard,
     announcement_confirm_keyboard,
     access_request_decision_confirm_keyboard,
     block_user_confirm_keyboard,
@@ -207,6 +210,54 @@ async def admin_announcement_cancel(callback: CallbackQuery, state: FSMContext, 
     try:
         await require_superadmin(services, callback.from_user.id)
         await safe_edit_message_text(callback.message, "Админ-панель:", reply_markup=admin_panel_keyboard())
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:announce_batches")
+async def admin_announcement_batches(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback, "Обновляю список...")
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await _show_announcement_batches(callback, services)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:announce:(resume|retry|cancelbatch):\d+$"))
+async def admin_announcement_batch_action(callback: CallbackQuery, services: Any, bot: Bot) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        _admin, _announce, action, raw_batch_id = callback.data.split(":", 3)
+        batch_id = int(raw_batch_id)
+        if action == "cancelbatch":
+            await safe_callback_answer(callback, "Отменяю...")
+            result = await services.announcements.cancel_batch(
+                actor_user_id=callback.from_user.id,
+                announcement_id=batch_id,
+            )
+            prefix = f"Batch #{result.batch.id} отменён." if result.changed else f"Batch #{result.batch.id} уже был отменён."
+        else:
+            await safe_callback_answer(callback, "Восстанавливаю отправку...")
+            result = await services.announcements.resume_batch(
+                actor_user_id=callback.from_user.id,
+                bot=bot,
+                announcement_id=batch_id,
+                retry_failed=action == "retry",
+            )
+            prefix = (
+                f"Batch #{result.announcement_id} обработан.\n"
+                f"Получателей: {result.total}; успешно: {result.success}; ошибок: {result.failed}."
+            )
+        await _show_announcement_batches(callback, services, prefix=prefix)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -650,6 +701,27 @@ async def admin_proxy_status(callback: CallbackQuery, services: Any) -> None:
         await answer_callback_error(callback, exc)
 
 
+@router.callback_query(F.data == "admin:diagnostics")
+async def admin_backend_diagnostics(callback: CallbackQuery, services: Any) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback, "Обновляю диагностику...")
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await safe_edit_message_text(
+            callback.message,
+            backend_diagnostics_text(
+                services.backend_health.snapshot(),
+                mtproto_mode=getattr(services.settings, "mtproto_mode", "static"),
+            ),
+            reply_markup=_simple_nav([], "admin:panel"),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
 @router.callback_query(F.data == "admin:proxy_stats")
 async def admin_proxy_stats(callback: CallbackQuery, services: Any) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -869,6 +941,20 @@ def _clean_note(value: str | None) -> str | None:
         return None
     note = value.strip()
     return None if note in {"", "-"} else note
+
+
+async def _show_announcement_batches(callback: CallbackQuery, services: Any, *, prefix: str | None = None) -> None:
+    if callback.from_user is None or callback.message is None:
+        return
+    batches = await services.announcements.list_incomplete_batches(callback.from_user.id, limit=10)
+    text = announcement_batches_text(batches)
+    if prefix:
+        text = f"{prefix}\n\n{text}"
+    await safe_edit_message_text(
+        callback.message,
+        text,
+        reply_markup=announcement_batches_keyboard(batches),
+    )
 
 
 def _simple_nav(rows: list[tuple[str, str]], back_data: str):

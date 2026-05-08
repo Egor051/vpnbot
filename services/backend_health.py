@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from models.enums import ProxyAccessType, VpnKeyType
 from services.errors import InvalidOperation
 
 BackendType = VpnKeyType | ProxyAccessType
+
+
+@dataclass(frozen=True, slots=True)
+class BackendHealthStatus:
+    backend_type: BackendType
+    label: str
+    degraded: bool
+    reason: str | None
 
 
 class BackendHealth:
@@ -16,17 +26,31 @@ class BackendHealth:
     def mark_healthy(self, backend_type: BackendType) -> None:
         self._degraded.pop(backend_type, None)
 
+    def snapshot(self) -> tuple[BackendHealthStatus, ...]:
+        return tuple(
+            BackendHealthStatus(
+                backend_type=backend_type,
+                label=label,
+                degraded=backend_type in self._degraded,
+                reason=self._degraded.get(backend_type),
+            )
+            for backend_type, label in _BACKEND_LABELS.items()
+        )
+
     def require_mutation_allowed(self, backend_type: BackendType) -> None:
         reason = self._degraded.get(backend_type)
         if reason is None:
             return
-        label = {
-            VpnKeyType.XRAY: "Xray",
-            VpnKeyType.AWG: "AWG",
-            ProxyAccessType.SOCKS5: "SOCKS5",
-            ProxyAccessType.MTPROTO: "MTProto",
-        }.get(backend_type, str(backend_type))
+        label = _BACKEND_LABELS.get(backend_type, str(backend_type))
         raise InvalidOperation(
             f"{label}-операции временно заблокированы: backend degraded ({reason}). "
             "Проверьте конфиг/runtime на сервере и перезапустите бота после восстановления."
         )
+
+
+_BACKEND_LABELS: dict[BackendType, str] = {
+    VpnKeyType.XRAY: "Xray",
+    VpnKeyType.AWG: "AWG",
+    ProxyAccessType.SOCKS5: "SOCKS5",
+    ProxyAccessType.MTPROTO: "MTProto",
+}
