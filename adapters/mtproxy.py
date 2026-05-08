@@ -87,6 +87,31 @@ class MtProxyAdapter:
         document = self._read_store_document()
         return self._document_user_secrets(document)
 
+    def read_runtime_managed_secrets(self) -> list[MtProxyManagedSecret]:
+        document = self._read_store_document()
+        items = document.get("runtime_secrets")
+        if not isinstance(items, list):
+            return self._document_user_secrets(document)
+        secrets: list[MtProxyManagedSecret] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("purpose") == "empty-placeholder" or item.get("fingerprint") == "empty-placeholder":
+                continue
+            raw_secret = str(item.get("secret") or "")
+            fingerprint = str(item.get("fingerprint") or "")
+            if not raw_secret or not fingerprint:
+                continue
+            secrets.append(
+                MtProxyManagedSecret(
+                    secret=raw_secret,
+                    fingerprint=fingerprint,
+                    owner_user_id=self._optional_int(item.get("owner_user_id")),
+                    access_id=self._optional_int(item.get("access_id")),
+                )
+            )
+        return self._normalize_secrets(secrets)
+
     def write_managed_secrets_atomically(self, secrets: list[MtProxyManagedSecret]) -> None:
         current = self._read_store_document()
         document = self._store_document(secrets, current)

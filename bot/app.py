@@ -191,6 +191,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         clock=clock,
         audit=audit_service,
         user_locks=user_locks,
+        backend_health=backend_health,
     )
     mtproto_service = MtProtoService(
         accesses=proxy_accesses_repo,
@@ -200,6 +201,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
         audit=audit_service,
         adapter=mtproxy_adapter,
         user_locks=user_locks,
+        backend_health=backend_health,
     )
     user_service.attach_proxy_access_management(
         proxy_accesses_repo,
@@ -290,6 +292,8 @@ async def _startup_reconcile_keys(services: Services) -> None:
             backend_health.mark_degraded(VpnKeyType.XRAY, "startup reconciliation failed")
         if awg_summary.get("failed", 0):
             backend_health.mark_degraded(VpnKeyType.AWG, "startup reconciliation failed")
+        if mtproto_summary.get("failed", 0):
+            backend_health.mark_degraded(ProxyAccessType.MTPROTO, "startup reconciliation failed")
     logger.info(
         "Startup access reconciliation: xray=%s awg=%s mtproto=%s",
         xray_summary,
