@@ -231,12 +231,15 @@ ENV/
 # Environment/secrets
 .env
 .env.*
+*.env
 !.env.example
 
 # Databases/data
 *.db
 *.sqlite
 *.sqlite3
+data/
+!data/.gitkeep
 data/*.db
 data/*.sqlite
 data/*.sqlite3
@@ -246,6 +249,7 @@ logs/
 *.log
 *.pid
 *.lock
+backups/
 
 # VPN/security-sensitive files
 *.key

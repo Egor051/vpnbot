@@ -309,6 +309,24 @@ If SOCKS5 auto-issue is enabled under the supplied hardened unit, keep the servi
 
 If `MTPROTO_MODE=managed` is enabled, keep the supplied unit's write access narrowed to `/etc/mtproxy/vpnbot` for managed secrets/env/backups. Do not grant `vpn-bot.service` runtime write access to `/etc/systemd/system` or broad write access to `/etc/mtproxy`; install or update the MTProxy drop-in and wrapper manually during deploy, then run `systemctl daemon-reload` outside the bot runtime.
 
+## Local Checks
+
+Install runtime and development dependencies before running checks:
+
+```bash
+python -m pip install -r requirements.txt -c constraints.txt
+python -m pip install -r requirements-dev.txt
+```
+
+Run the same core gates used by CI:
+
+```bash
+python -m ruff check . --select=E9,F63,F7,F82
+python -m compileall .
+python -m pytest
+python -m pip_audit -r requirements.txt -r constraints.txt --no-deps
+```
+
 ## Maintenance
 
 Update from GitHub:
