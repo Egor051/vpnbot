@@ -501,6 +501,44 @@ def test_awg_revoked_peer_present_in_config_and_runtime_is_removed(tmp_path: Pat
     asyncio.run(run())
 
 
+def test_awg_revoked_row_missing_public_key_reused_ip_does_not_remove_active_peer(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            stale = await repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.AWG,
+                note=None,
+                payload={"client_ip": "10.0.0.3", "email_label": "awg_old"},
+                public_payload={"client_ip": "10.0.0.3", "email_label": "awg_old"},
+                created_by=100,
+                now="now",
+                email_label="awg_old",
+                public_key=None,
+                client_ip="10.0.0.3",
+            )
+            await repo.mark_revoked(stale.id, 100, "revoked")
+            active = await _awg_key(repo, VpnKeyStatus.ACTIVE, public_key="public-active-reused", client_ip="10.0.0.3")
+            config_path = tmp_path / "awg.conf"
+            _write_awg_config(config_path, _managed_awg_peer(active.id, "public-active-reused", "10.0.0.3"))
+            shell = _AwgShell({"public-active-reused": "10.0.0.3/32"})
+            audit = _Audit()
+            service = _awg_service(tmp_path, repo, _awg_adapter(config_path, shell), audit)
+
+            summary = await service.startup_reconcile()
+
+            assert summary["failed"] == 0
+            assert shell.runtime == {"public-active-reused": "10.0.0.3/32"}
+            assert "PublicKey = public-active-reused" in config_path.read_text(encoding="utf-8")
+            assert "awg_startup_non_live_skipped_missing_public_key" in audit.actions
+            assert "awg_startup_non_live_removed" not in audit.actions
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_awg_bot_managed_orphan_removed_and_manual_orphan_degrades(tmp_path: Path) -> None:
     async def run() -> None:
         db, repo = await _repo(tmp_path)

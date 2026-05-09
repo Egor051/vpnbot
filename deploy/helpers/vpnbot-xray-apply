@@ -16,8 +16,9 @@ STAGING_ROOT = Path("/run/vpn-bot/xray")
 CANONICAL_CONFIG = Path("/usr/local/etc/xray/config.json")
 XRAY_BIN = "/usr/local/bin/xray"
 SERVICE_NAME = "xray"
-FINAL_OWNER = ("nobody", "nogroup")
-FINAL_MODE = 0o600
+FINAL_USER = "nobody"
+FINAL_GROUP = "vpn-bot"
+FINAL_MODE = 0o640
 EXIT_VALIDATION = 64
 EXIT_COMMAND_FAILED = 70
 
@@ -92,24 +93,21 @@ def restart_and_verify() -> None:
         raise HelperError("Xray service is not active")
 
 
-def _lookup_owner() -> tuple[int, int] | None:
-    if os.name != "posix":
-        return None
+def _lookup_final_ids() -> tuple[int, int]:
     import grp
     import pwd
 
     try:
-        return pwd.getpwnam(FINAL_OWNER[0]).pw_uid, grp.getgrnam(FINAL_OWNER[1]).gr_gid
-    except KeyError:
-        return None
+        return pwd.getpwnam(FINAL_USER).pw_uid, grp.getgrnam(FINAL_GROUP).gr_gid
+    except KeyError as exc:
+        raise HelperError("required final owner/group is missing", EXIT_VALIDATION) from exc
 
 
 def _set_final_stat(path: Path) -> None:
     if os.name != "posix":
         return
-    owner = _lookup_owner()
-    if owner is not None:
-        os.chown(path, owner[0], owner[1])
+    owner = _lookup_final_ids()
+    os.chown(path, owner[0], owner[1])
     os.chmod(path, FINAL_MODE)
 
 
@@ -131,8 +129,7 @@ def backup_current() -> Path | None:
         return None
     backup_path = CANONICAL_CONFIG.with_name(f"{CANONICAL_CONFIG.name}.{time.time_ns()}.bak")
     shutil.copy2(CANONICAL_CONFIG, backup_path)
-    if os.name == "posix":
-        os.chmod(backup_path, FINAL_MODE)
+    _set_final_stat(backup_path)
     return backup_path
 
 

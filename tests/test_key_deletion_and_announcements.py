@@ -24,7 +24,7 @@ from repositories.announcements import AnnouncementRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.announcements import AnnouncementService
 from services.awg import AwgService
-from services.errors import AccessDenied, NotFound
+from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.xray import XrayService
 
 
@@ -1390,6 +1390,118 @@ def test_announcement_resume_does_not_duplicate_already_sent_recipients(tmp_path
             assert calls == [1, 2, 3, 3]
             assert calls.count(1) == 1
             assert calls.count(2) == 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_announcement_cancel_sending_stops_before_next_recipient_and_stays_cancelled(tmp_path: Path) -> None:
+    class AuditWithClock:
+        def __init__(self) -> None:
+            self.clock = ClockProvider()
+
+        async def write(self, **kwargs: object) -> None:
+            return None
+
+    class Bot:
+        pass
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users_repo = UserRepository(db)
+            for user_id in (1, 2, 3):
+                await users_repo.upsert_profile(
+                    TelegramUserProfile(user_id, f"user{user_id}", f"User {user_id}"),
+                    UserRole.SUPERADMIN if user_id == 1 else UserRole.APPROVED_USER,
+                    "now",
+                )
+            announcements = AnnouncementRepository(db)
+            service = AnnouncementService(
+                users=Users(),  # type: ignore[arg-type]
+                users_repo=users_repo,
+                announcements=announcements,
+                audit=AuditWithClock(),  # type: ignore[arg-type]
+                delay_seconds=0,
+            )
+            calls: list[int] = []
+
+            async def copy_and_cancel(_bot: object, target_id: int, from_chat_id: int, message_id: int) -> tuple[bool, str | None]:
+                calls.append(target_id)
+                if len(calls) == 1:
+                    cursor = await db.conn.execute("SELECT id FROM announcement_batches ORDER BY id DESC LIMIT 1")
+                    row = await cursor.fetchone()
+                    assert row is not None
+                    await announcements.mark_cancelled(int(row["id"]), "cancelled")
+                return True, None
+
+            service._copy_message = copy_and_cancel  # type: ignore[method-assign]
+
+            result = await service.send_to_all(actor_user_id=1, bot=Bot(), from_chat_id=1, message_id=77)  # type: ignore[arg-type]
+
+            assert result.cancelled is True
+            assert result.success == 1
+            assert result.failed == 0
+            assert calls == [1]
+            assert result.announcement_id is not None
+            batch = await announcements.get_batch(result.announcement_id)
+            assert batch is not None
+            assert batch.status == "cancelled"
+            cursor = await db.conn.execute(
+                "SELECT user_id, status FROM announcement_deliveries WHERE announcement_id = ? ORDER BY user_id",
+                (result.announcement_id,),
+            )
+            rows = await cursor.fetchall()
+            assert [(row["user_id"], row["status"]) for row in rows] == [(1, "sent"), (2, "pending"), (3, "pending")]
+            with pytest.raises(InvalidOperation, match="отменено"):
+                await service.resume_batch(actor_user_id=1, bot=Bot(), announcement_id=result.announcement_id)  # type: ignore[arg-type]
+            assert await service.list_incomplete_batches(1) == []
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_announcement_resume_rejects_completed_batch(tmp_path: Path) -> None:
+    class AuditWithClock:
+        def __init__(self) -> None:
+            self.clock = ClockProvider()
+
+        async def write(self, **kwargs: object) -> None:
+            return None
+
+    class Bot:
+        pass
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users_repo = UserRepository(db)
+            await users_repo.upsert_profile(TelegramUserProfile(1, "admin", "Admin"), UserRole.SUPERADMIN, "now")
+            announcements = AnnouncementRepository(db)
+            batch = await announcements.create_batch(
+                actor_user_id=1,
+                from_chat_id=1,
+                message_id=77,
+                recipient_ids=[1],
+                now="now",
+            )
+            await announcements.set_batch_status(batch.id, "completed", "done", completed=True)
+            service = AnnouncementService(
+                users=Users(),  # type: ignore[arg-type]
+                users_repo=users_repo,
+                announcements=announcements,
+                audit=AuditWithClock(),  # type: ignore[arg-type]
+                delay_seconds=0,
+            )
+
+            with pytest.raises(InvalidOperation, match="уже завершено"):
+                await service.resume_batch(actor_user_id=1, bot=Bot(), announcement_id=batch.id)  # type: ignore[arg-type]
         finally:
             await db.close()
 

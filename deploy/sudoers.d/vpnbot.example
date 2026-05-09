@@ -1,4 +1,4 @@
-# Package 5B example only. Do not install until the Package 5C cutover.
+# Package 5C sudo-helper cutover example.
 # Validate any installed copy first:
 #   visudo -cf /path/to/vpnbot.example
 #

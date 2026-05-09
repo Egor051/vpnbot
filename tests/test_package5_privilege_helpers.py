@@ -196,6 +196,81 @@ def test_awg_helper_uses_fixed_target_and_interface() -> None:
     assert helper.SERVICE_NAME == "awg-quick@awg0"
 
 
+def test_helper_installed_permissions_preserve_vpn_bot_read_access() -> None:
+    xray = _load_helper("vpnbot-xray-apply")
+    awg = _load_helper("vpnbot-awg-apply")
+    mtproxy = _load_helper("vpnbot-mtproxy-apply")
+
+    assert xray.FINAL_USER == "nobody"
+    assert xray.FINAL_GROUP == "vpn-bot"
+    assert xray.FINAL_MODE == 0o640
+    assert awg.FINAL_GROUP == "vpn-bot"
+    assert awg.FINAL_MODE == 0o640
+    assert mtproxy.FINAL_GROUP == "vpn-bot"
+    assert mtproxy.FINAL_DIR_MODE == 0o750
+    assert mtproxy.FINAL_FILE_MODE == 0o640
+
+
+def test_xray_helper_install_and_restore_use_final_stat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    helper = _load_helper("vpnbot-xray-apply")
+    helper.CANONICAL_CONFIG = tmp_path / "config.json"
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text("{}", encoding="utf-8")
+    stat_calls: list[Path] = []
+    monkeypatch.setattr(helper, "_set_final_stat", lambda path: stat_calls.append(path))
+    monkeypatch.setattr(helper, "_fsync_parent", lambda path: None)
+
+    helper.install_candidate(candidate)
+    backup = helper.backup_current()
+    helper.restore_backup(backup)
+
+    assert helper.CANONICAL_CONFIG.read_text(encoding="utf-8") == "{}"
+    assert backup is not None
+    assert len(stat_calls) == 3
+
+
+def test_awg_helper_install_and_restore_use_final_stat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    helper = _load_helper("vpnbot-awg-apply")
+    helper.CANONICAL_CONFIG = tmp_path / "awg0.conf"
+    candidate = tmp_path / "candidate.conf"
+    candidate.write_text("[Interface]\nPrivateKey = server\n", encoding="utf-8")
+    stat_calls: list[Path] = []
+    monkeypatch.setattr(helper, "_set_final_stat", lambda path: stat_calls.append(path))
+    monkeypatch.setattr(helper, "_fsync_parent", lambda path: None)
+    monkeypatch.setattr(helper, "quick_strip", lambda path: "")
+    monkeypatch.setattr(helper, "sync_runtime", lambda stripped: None)
+
+    helper.install_candidate(candidate)
+    backup = helper.backup_current()
+    helper.restore_backup(backup)
+
+    assert "PrivateKey = server" in helper.CANONICAL_CONFIG.read_text(encoding="utf-8")
+    assert backup is not None
+    assert len(stat_calls) == 3
+
+
+def test_mtproxy_helper_install_and_restore_use_group_readable_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper("vpnbot-mtproxy-apply")
+    helper.TARGET_DIR = tmp_path / "vpnbot"
+    helper.TARGET_SECRETS = helper.TARGET_DIR / "managed-secrets.json"
+    helper.TARGET_ENV = helper.TARGET_DIR / "mtproxy.env"
+    source = tmp_path / "source.json"
+    source.write_text('{"version":1,"generation":0,"secrets":[],"runtime_secrets":[]}', encoding="utf-8")
+    stat_calls: list[Path] = []
+    monkeypatch.setattr(helper, "_set_final_file_stat", lambda path: stat_calls.append(path))
+    monkeypatch.setattr(helper, "_fsync_parent", lambda path: None)
+
+    helper.install_file(source, helper.TARGET_SECRETS)
+    backups = helper.backup_targets()
+    helper.restore_targets(backups)
+
+    assert helper.TARGET_SECRETS.exists()
+    assert len(stat_calls) == 3
+
+
 def test_awg_helper_redacts_private_config_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     helper = _load_helper("vpnbot-awg-apply")
     helper.STAGING_ROOT = tmp_path / "staging"

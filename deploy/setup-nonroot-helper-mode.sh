@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Idempotent Package 5C preparation for the sudo-helper non-root cutover.
+# This script installs helpers and permissions only; it does not switch or
+# restart the active vpn-bot systemd service.
+
+BOT_USER="${BOT_USER:-vpn-bot}"
+BOT_GROUP="${BOT_GROUP:-vpn-bot}"
+BOT_HOME="${BOT_HOME:-/var/lib/vpn-bot}"
+BOT_SHELL="${BOT_SHELL:-/usr/sbin/nologin}"
+APP_DIR="${APP_DIR:-/opt/vpn-service}"
+ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
+XRAY_CONFIG_PATH="${XRAY_CONFIG_PATH:-/usr/local/etc/xray/config.json}"
+AWG_CONFIG_PATH="${AWG_CONFIG_PATH:-/etc/amnezia/amneziawg/awg0.conf}"
+MTPROTO_MANAGED_DIR="${MTPROTO_MANAGED_DIR:-/etc/mtproxy/vpnbot}"
+HELPER_SOURCE_DIR="${HELPER_SOURCE_DIR:-deploy/helpers}"
+SUDOERS_SOURCE="${SUDOERS_SOURCE:-deploy/sudoers.d/vpnbot.example}"
+SUDOERS_TARGET="${SUDOERS_TARGET:-/etc/sudoers.d/vpnbot}"
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run this script as root on the VDS." >&2
+  exit 1
+fi
+
+if getent group "${BOT_GROUP}" >/dev/null; then
+  echo "Group ${BOT_GROUP} already exists."
+else
+  groupadd --system "${BOT_GROUP}"
+  echo "Created system group ${BOT_GROUP}."
+fi
+
+if id -u "${BOT_USER}" >/dev/null 2>&1; then
+  echo "User ${BOT_USER} already exists."
+else
+  useradd \
+    --system \
+    --gid "${BOT_GROUP}" \
+    --home-dir "${BOT_HOME}" \
+    --no-create-home \
+    --shell "${BOT_SHELL}" \
+    --comment "VPN Telegram Bot" \
+    "${BOT_USER}"
+  echo "Created system user ${BOT_USER}."
+fi
+
+install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 "${APP_DIR}/data"
+install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 "${APP_DIR}/logs"
+install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 /run/vpn-bot
+install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 /run/vpn-bot/xray
+install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 /run/vpn-bot/awg
+install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 /run/vpn-bot/mtproxy
+
+if [[ -f "${ENV_FILE}" ]]; then
+  chown root:"${BOT_GROUP}" "${ENV_FILE}"
+  chmod 0640 "${ENV_FILE}"
+fi
+
+install -o root -g root -m 0750 "${HELPER_SOURCE_DIR}/vpnbot-socks5-user" /usr/local/sbin/vpnbot-socks5-user
+install -o root -g root -m 0750 "${HELPER_SOURCE_DIR}/vpnbot-xray-apply" /usr/local/sbin/vpnbot-xray-apply
+install -o root -g root -m 0750 "${HELPER_SOURCE_DIR}/vpnbot-awg-apply" /usr/local/sbin/vpnbot-awg-apply
+install -o root -g root -m 0750 "${HELPER_SOURCE_DIR}/vpnbot-mtproxy-apply" /usr/local/sbin/vpnbot-mtproxy-apply
+
+if [[ -f "${XRAY_CONFIG_PATH}" ]]; then
+  chown nobody:"${BOT_GROUP}" "${XRAY_CONFIG_PATH}"
+  chmod 0640 "${XRAY_CONFIG_PATH}"
+fi
+
+if [[ -f "${AWG_CONFIG_PATH}" ]]; then
+  chown root:"${BOT_GROUP}" "${AWG_CONFIG_PATH}"
+  chmod 0640 "${AWG_CONFIG_PATH}"
+fi
+
+if [[ -d "${MTPROTO_MANAGED_DIR}" ]]; then
+  chown root:"${BOT_GROUP}" "${MTPROTO_MANAGED_DIR}"
+  chmod 0750 "${MTPROTO_MANAGED_DIR}"
+  find "${MTPROTO_MANAGED_DIR}" -maxdepth 1 -type f -name 'managed-secrets.json' -exec chown root:"${BOT_GROUP}" {} \; -exec chmod 0640 {} \;
+  find "${MTPROTO_MANAGED_DIR}" -maxdepth 1 -type f -name 'mtproxy.env' -exec chown root:"${BOT_GROUP}" {} \; -exec chmod 0640 {} \;
+fi
+
+visudo -cf "${SUDOERS_SOURCE}"
+install -o root -g root -m 0440 "${SUDOERS_SOURCE}" "${SUDOERS_TARGET}"
+visudo -cf "${SUDOERS_TARGET}"
+
+cat <<EOF
+
+Package 5C helper-mode preparation is installed.
+
+Next manual steps:
+- set PRIVILEGE_HELPERS_ENABLED=true and helper paths in ${ENV_FILE};
+- run: python3 deploy/check-nonroot-helper-mode.py
+- only then switch vpn-bot.service to the non-root unit.
+
+This script did not restart vpn-bot or switch the active systemd unit.
+EOF

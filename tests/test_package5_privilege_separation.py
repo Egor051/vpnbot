@@ -28,7 +28,8 @@ def test_future_nonroot_service_uses_unprivileged_user_and_hardening() -> None:
     assert "Group=vpn-bot" in text
     assert "User=root" not in text
     assert "Group=root" not in text
-    assert "NoNewPrivileges=true" in text
+    assert "NoNewPrivileges=true" not in text
+    assert "sudo-based helpers require privilege elevation" in text.lower()
     assert "PrivateTmp=true" in text
     assert "ProtectHome=true" in text
     assert "ProtectSystem=strict" in text
@@ -76,6 +77,21 @@ def test_create_user_script_is_non_destructive_scaffold() -> None:
     assert "systemctl" not in text
 
 
+def test_package5c_setup_and_preflight_assets_cover_cutover_controls() -> None:
+    setup = _read("deploy/setup-nonroot-helper-mode.sh")
+    preflight = _read("deploy/check-nonroot-helper-mode.py")
+
+    assert "install -o root -g root -m 0750" in setup
+    assert "visudo -cf" in setup
+    assert "PRIVILEGE_HELPERS_ENABLED=true" in setup
+    assert "did not restart vpn-bot or switch the active systemd unit" in setup
+    assert "run_helper_as_vpn_bot" in preflight
+    assert '"sudo", "-n"' in preflight
+    assert '"validate"' in preflight
+    assert '"status"' in preflight
+    assert "MTPROTO_MANAGED_SECRETS_PATH" in preflight
+
+
 def test_privilege_plan_mentions_required_components() -> None:
     text = _read("docs/security/privilege-separation-plan.md").lower()
 
@@ -87,6 +103,9 @@ def test_privilege_plan_mentions_required_components() -> None:
         "sqlite",
         ".env",
         "systemd",
+        "nonewprivileges=true",
+        "privilege elevation",
+        "visudo -cf",
     ):
         assert term in text
 

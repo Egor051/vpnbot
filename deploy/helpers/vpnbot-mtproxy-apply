@@ -19,8 +19,9 @@ TARGET_SECRETS = TARGET_DIR / "managed-secrets.json"
 TARGET_ENV = TARGET_DIR / "mtproxy.env"
 SERVICE_NAME = "mtproxy"
 DEFAULT_PORT = 8443
-FINAL_FILE_MODE = 0o600
-FINAL_DIR_MODE = 0o700
+FINAL_GROUP = "vpn-bot"
+FINAL_FILE_MODE = 0o640
+FINAL_DIR_MODE = 0o750
 EXIT_VALIDATION = 64
 EXIT_COMMAND_FAILED = 70
 ENV_KEYS = {
@@ -164,17 +165,26 @@ def _fsync_parent(path: Path) -> None:
         os.close(fd)
 
 
-def _chmod_private(path: Path) -> None:
+def _lookup_final_gid() -> int:
+    import grp
+
+    try:
+        return grp.getgrnam(FINAL_GROUP).gr_gid
+    except KeyError as exc:
+        raise HelperError("required final group is missing", EXIT_VALIDATION) from exc
+
+
+def _set_final_file_stat(path: Path) -> None:
     if os.name != "posix":
         return
-    os.chown(path, 0, 0)
+    os.chown(path, 0, _lookup_final_gid())
     os.chmod(path, FINAL_FILE_MODE)
 
 
 def _prepare_target_dir() -> None:
     TARGET_DIR.mkdir(parents=True, exist_ok=True)
     if os.name == "posix":
-        os.chown(TARGET_DIR, 0, 0)
+        os.chown(TARGET_DIR, 0, _lookup_final_gid())
         os.chmod(TARGET_DIR, FINAL_DIR_MODE)
 
 
@@ -186,8 +196,7 @@ def backup_targets() -> dict[Path, Path | None]:
             continue
         backup = target.with_name(f"{target.name}.{time.time_ns()}.bak")
         shutil.copy2(target, backup)
-        if os.name == "posix":
-            os.chmod(backup, FINAL_FILE_MODE)
+        _set_final_file_stat(backup)
         backups[target] = backup
     return backups
 
@@ -202,7 +211,7 @@ def install_file(source: Path, target: Path) -> None:
                 shutil.copyfileobj(input_file, output_file)
                 output_file.flush()
                 os.fsync(output_file.fileno())
-        _chmod_private(tmp_path)
+        _set_final_file_stat(tmp_path)
         os.replace(tmp_path, target)
         _fsync_parent(target)
     finally:
