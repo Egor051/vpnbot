@@ -69,19 +69,20 @@ def test_legacy_root_unit_is_fallback_only() -> None:
     assert "Group=root" in text
 
 
-def test_recommended_service_readwrite_paths_exclude_account_databases() -> None:
+def test_recommended_service_readwrite_paths_include_socks5_account_databases() -> None:
     text = _read("deploy/vpn-bot.service")
     read_write_paths = _read_write_paths(text)
 
-    forbidden_paths = {
+    required_paths = {
         "/etc/passwd",
         "/etc/shadow",
         "/etc/group",
         "/etc/gshadow",
         "/etc/.pwd.lock",
     }
-    for path in forbidden_paths:
-        assert path not in read_write_paths
+    assert required_paths <= read_write_paths
+    assert "SOCKS5 helper" in text
+    assert "mount namespace" in text
 
 
 def test_recommended_service_readwrite_paths_cover_helper_backends_narrowly() -> None:
@@ -95,6 +96,11 @@ def test_recommended_service_readwrite_paths_cover_helper_backends_narrowly() ->
         "/usr/local/etc/xray",
         "/etc/amnezia/amneziawg",
         "/etc/mtproxy/vpnbot",
+        "/etc/passwd",
+        "/etc/shadow",
+        "/etc/group",
+        "/etc/gshadow",
+        "/etc/.pwd.lock",
     }
     assert required_paths <= read_write_paths
     assert "/etc" not in read_write_paths

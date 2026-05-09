@@ -54,6 +54,8 @@ SOCKS5:
 
 The SOCKS5 helper enforces `vpn_socks_` and `^[A-Za-z_][A-Za-z0-9_]{0,31}$`, uses `/usr/sbin/nologin`, never accepts password material in argv, and must never print passwords.
 
+Because sudo-launched helpers inherit the `vpn-bot.service` mount namespace, the production unit keeps `ProtectSystem=strict` but exposes `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`, and `/etc/.pwd.lock` in `ReadWritePaths`. Those paths are for the fixed SOCKS5 helper account operations only; sudoers must still grant no broad account-management commands.
+
 Xray:
 
 - `vpnbot-xray-apply apply <candidate_config_path>`

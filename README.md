@@ -411,6 +411,7 @@ tail -f /opt/vpn-service/logs/bot.log
 - The installed systemd unit matches `deploy/vpn-bot.service` and runs as `vpn-bot:vpn-bot`.
 - `RuntimeDirectory=vpn-bot`, `RuntimeDirectoryMode=0700`, and `BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock` are present.
 - `NoNewPrivileges=true` is not set on the sudo-helper unit.
+- `ReadWritePaths` keeps `ProtectSystem=strict` and includes `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`, and `/etc/.pwd.lock` only because sudo-launched SOCKS5 helpers inherit the service mount namespace and need those files for fixed account operations.
 - Helpers are installed as `root:root` mode `0755` under `/usr/local/sbin`.
 - `/etc/sudoers.d/vpnbot` is `root:root` mode `0440` and passes `visudo -cf`.
 - Xray canonical config, AWG canonical config, and MTProxy managed secrets/env are readable by `vpn-bot` where those backends are enabled, but not writable by it.

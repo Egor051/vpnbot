@@ -35,6 +35,7 @@ BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock
 - `RuntimeDirectory=vpn-bot`
 - `RuntimeDirectoryMode=0700`
 - no `NoNewPrivileges=true`, because sudo helpers require privilege elevation through the sudo/setuid boundary
+- `ProtectSystem=strict` remains enabled. `ReadWritePaths` includes the local account database files only because sudo-launched SOCKS5 helper processes inherit the service mount namespace and need those exact files for `useradd`, `chpasswd`, `passwd -l`, and `userdel`.
 
 `deploy/vpn-bot.root-legacy.example.service` is kept only for rollback to root/direct mode. Do not treat the root/direct unit as the normal production deployment.
 
@@ -56,7 +57,7 @@ BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock
 | `/etc/mtproxy/vpnbot/mtproxy.env` | `root` | `vpn-bot` | `0640` | read only |
 | `/etc/sudoers.d/vpnbot` | `root` | `root` | `0440` | sudo policy only |
 
-The bot must not directly write account databases, canonical Xray config, canonical AWG config, or canonical MTProxy managed state. It stages candidates under `/run/vpn-bot`, then calls fixed helpers through `sudo -n`.
+The bot must not directly write account databases, canonical Xray config, canonical AWG config, or canonical MTProxy managed state. It stages candidates under `/run/vpn-bot`, then calls fixed helpers through `sudo -n`. The unit exposes account database paths as writable to the mount namespace for the SOCKS5 helper, but normal bot access is still blocked by Unix ownership and the sudoers policy remains helper-only.
 
 ## Helper Contracts
 
