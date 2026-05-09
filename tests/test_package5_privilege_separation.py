@@ -19,34 +19,58 @@ def _read_write_paths(unit_text: str) -> set[str]:
     return paths
 
 
-def test_active_service_still_root_until_helpers_are_wired() -> None:
-    service_path = ROOT / "deploy" / "vpn-bot.service"
-    assert service_path.exists()
-
+def test_recommended_service_uses_unprivileged_user_and_hardening() -> None:
     text = _read("deploy/vpn-bot.service")
-    assert "User=root" in text
-    assert "Group=root" in text
-    assert "ReadWritePaths=" in text
 
-
-def test_future_nonroot_service_uses_unprivileged_user_and_hardening() -> None:
-    text = _read("deploy/vpn-bot.nonroot.example.service")
-
+    assert "Description=VPN Telegram Bot" in text
     assert "User=vpn-bot" in text
     assert "Group=vpn-bot" in text
     assert "User=root" not in text
     assert "Group=root" not in text
+    assert "Environment=BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock" in text
     assert "NoNewPrivileges=true" not in text
-    assert "sudo-based helpers require privilege elevation" in text.lower()
     assert "PrivateTmp=true" in text
     assert "ProtectHome=true" in text
     assert "ProtectSystem=strict" in text
     assert "RuntimeDirectory=vpn-bot" in text
+    assert "RuntimeDirectoryMode=0700" in text
     assert "UMask=0077" in text
 
 
-def test_future_nonroot_service_readwrite_paths_exclude_account_databases() -> None:
-    text = _read("deploy/vpn-bot.nonroot.example.service")
+def test_recommended_service_has_no_misleading_cutover_wording() -> None:
+    text = _read("deploy/vpn-bot.service").lower()
+
+    for forbidden in (
+        "future non-root",
+        "cutover example",
+        "do not install as the active",
+        "active production unit remains root",
+    ):
+        assert forbidden not in text
+
+
+def test_compat_nonroot_template_has_no_misleading_cutover_wording() -> None:
+    text = _read("deploy/vpn-bot.nonroot.example.service").lower()
+
+    for forbidden in (
+        "future non-root",
+        "cutover example",
+        "do not install as the active",
+        "active production unit remains root",
+    ):
+        assert forbidden not in text
+
+
+def test_legacy_root_unit_is_fallback_only() -> None:
+    text = _read("deploy/vpn-bot.root-legacy.example.service")
+
+    assert "legacy root/direct fallback" in text
+    assert "User=root" in text
+    assert "Group=root" in text
+
+
+def test_recommended_service_readwrite_paths_exclude_account_databases() -> None:
+    text = _read("deploy/vpn-bot.service")
     read_write_paths = _read_write_paths(text)
 
     forbidden_paths = {
@@ -60,8 +84,8 @@ def test_future_nonroot_service_readwrite_paths_exclude_account_databases() -> N
         assert path not in read_write_paths
 
 
-def test_future_nonroot_service_readwrite_paths_cover_helper_backends_narrowly() -> None:
-    text = _read("deploy/vpn-bot.nonroot.example.service")
+def test_recommended_service_readwrite_paths_cover_helper_backends_narrowly() -> None:
+    text = _read("deploy/vpn-bot.service")
     read_write_paths = _read_write_paths(text)
 
     required_paths = {
@@ -108,10 +132,10 @@ def test_package5c_setup_and_preflight_assets_cover_cutover_controls() -> None:
     setup = _read("deploy/setup-nonroot-helper-mode.sh")
     preflight = _read("deploy/check-nonroot-helper-mode.py")
 
-    assert "install -o root -g root -m 0750" in setup
+    assert "install -o root -g root -m 0755" in setup
     assert "visudo -cf" in setup
     assert "PRIVILEGE_HELPERS_ENABLED=true" in setup
-    assert "did not restart vpn-bot or switch the active systemd unit" in setup
+    assert "did not restart vpn-bot or replace the active systemd unit" in setup
     assert "run_helper_as_vpn_bot" in preflight
     assert '"sudo", "-n"' in preflight
     assert '"validate"' in preflight
@@ -133,8 +157,60 @@ def test_privilege_plan_mentions_required_components() -> None:
         "nonewprivileges=true",
         "privilege elevation",
         "visudo -cf",
+        "post-reboot backup",
     ):
         assert term in text
+
+
+def test_docs_record_production_helper_install_and_runtime_permissions() -> None:
+    text = (
+        _read("README.md")
+        + "\n"
+        + _read("docs/security/privilege-separation-plan.md")
+        + "\n"
+        + _read("deploy/helpers/README.md")
+    ).lower()
+
+    for term in (
+        "root:root` mode `0755`",
+        "root:vpn-bot` mode `0640`",
+        "/etc/sudoers.d/vpnbot` is `root:root` mode `0440`",
+        "runtimedirectorymode=0700",
+        "bot_lock_path=/run/vpn-bot/vpn-bot.lock",
+        "reboot verification passed",
+        "post-reboot backup",
+    ):
+        assert term in text
+
+
+def test_env_example_uses_recommended_nonroot_helper_defaults() -> None:
+    text = _read(".env.example")
+
+    assert "BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock" in text
+    assert "PRIVILEGE_HELPERS_ENABLED=true" in text
+    assert "HELPER_STAGING_ROOT=/run/vpn-bot" in text
+
+
+def test_docs_and_sudoers_do_not_advise_broad_sudo_access() -> None:
+    text = (
+        _read("deploy/sudoers.d/vpnbot.example")
+        + "\n"
+        + _read("docs/security/privilege-separation-plan.md")
+        + "\n"
+        + _read("deploy/helpers/README.md")
+    )
+
+    assert "NOPASSWD: ALL" not in text
+    assert "ALL=(ALL)" not in text
+    for forbidden in (
+        "NOPASSWD: /bin/systemctl",
+        "NOPASSWD: /usr/bin/systemctl",
+        "NOPASSWD: /usr/sbin/useradd",
+        "NOPASSWD: /usr/sbin/chpasswd",
+        "NOPASSWD: /usr/bin/passwd",
+        "NOPASSWD: /usr/sbin/passwd",
+    ):
+        assert forbidden not in text
 
 
 def test_helper_contracts_require_socks5_prefix_password_stdin_and_secret_redaction() -> None:

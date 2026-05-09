@@ -1,15 +1,11 @@
-# Package 5C sudo-helper cutover example.
-# Do not install as the active vpn-bot.service until helper scripts,
-# sudoers, runtime directories, and backend read permissions pass preflight.
-#
+# Production sudo-helper non-root unit for vpn-bot.
 # Code, deploy files, and .venv should remain root-owned and not writable by
 # the vpn-bot runtime user.
 # Sudo-based helpers require privilege elevation through sudo/setuid; do not
-# enable the no-new-privileges hardening flag on this unit. Use that hardening
-# only for a future non-sudo privileged-daemon or IPC model.
+# enable the no-new-privileges hardening flag on this unit.
 
 [Unit]
-Description=VPN Telegram Bot (future non-root example)
+Description=VPN Telegram Bot
 After=network-online.target
 Wants=network-online.target
 
