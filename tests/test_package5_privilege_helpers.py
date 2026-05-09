@@ -259,8 +259,29 @@ def test_mtproxy_helper_install_and_restore_use_group_readable_stat(
     helper.TARGET_ENV = helper.TARGET_DIR / "mtproxy.env"
     source = tmp_path / "source.json"
     source.write_text('{"version":1,"generation":0,"secrets":[],"runtime_secrets":[]}', encoding="utf-8")
-    stat_calls: list[Path] = []
-    monkeypatch.setattr(helper, "_set_final_file_stat", lambda path: stat_calls.append(path))
+    chown_calls: list[tuple[str, int, int]] = []
+    chmod_calls: list[tuple[str, int]] = []
+
+    def fake_chown(path: Path | str, uid: int, gid: int) -> None:
+        chown_calls.append((str(path), uid, gid))
+
+    def fake_chmod(path: Path | str, mode: int) -> None:
+        chmod_calls.append((str(path), mode))
+
+    class PosixOsProxy:
+        name = "posix"
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+        def chown(self, path: Path | str, uid: int, gid: int) -> None:
+            fake_chown(path, uid, gid)
+
+        def chmod(self, path: Path | str, mode: int) -> None:
+            fake_chmod(path, mode)
+
+    monkeypatch.setattr(helper, "os", PosixOsProxy())
+    monkeypatch.setattr(helper, "_lookup_final_gid", lambda: 12345)
     monkeypatch.setattr(helper, "_fsync_parent", lambda path: None)
 
     helper.install_file(source, helper.TARGET_SECRETS)
@@ -268,7 +289,15 @@ def test_mtproxy_helper_install_and_restore_use_group_readable_stat(
     helper.restore_targets(backups)
 
     assert helper.TARGET_SECRETS.exists()
-    assert len(stat_calls) == 3
+    target_dir = str(helper.TARGET_DIR)
+    assert (target_dir, 0, 12345) in chown_calls
+    file_chowns = [call for call in chown_calls if call[0] != target_dir]
+    assert len(file_chowns) == 3
+    assert all(uid == 0 and gid == 12345 for _path, uid, gid in file_chowns)
+    assert (target_dir, helper.FINAL_DIR_MODE) in chmod_calls
+    file_modes = [mode for path, mode in chmod_calls if path != target_dir]
+    assert file_modes == [helper.FINAL_FILE_MODE, helper.FINAL_FILE_MODE, helper.FINAL_FILE_MODE]
+    assert all(mode & 0o007 == 0 for mode in file_modes)
 
 
 def test_awg_helper_redacts_private_config_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

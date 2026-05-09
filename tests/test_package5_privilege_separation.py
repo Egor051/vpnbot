@@ -11,6 +11,14 @@ def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
+def _read_write_paths(unit_text: str) -> set[str]:
+    paths: set[str] = set()
+    for line in unit_text.splitlines():
+        if line.startswith("ReadWritePaths="):
+            paths.update(line.removeprefix("ReadWritePaths=").split())
+    return paths
+
+
 def test_active_service_still_root_until_helpers_are_wired() -> None:
     service_path = ROOT / "deploy" / "vpn-bot.service"
     assert service_path.exists()
@@ -39,7 +47,7 @@ def test_future_nonroot_service_uses_unprivileged_user_and_hardening() -> None:
 
 def test_future_nonroot_service_readwrite_paths_exclude_account_databases() -> None:
     text = _read("deploy/vpn-bot.nonroot.example.service")
-    read_write_lines = "\n".join(line for line in text.splitlines() if line.startswith("ReadWritePaths="))
+    read_write_paths = _read_write_paths(text)
 
     forbidden_paths = {
         "/etc/passwd",
@@ -49,7 +57,26 @@ def test_future_nonroot_service_readwrite_paths_exclude_account_databases() -> N
         "/etc/.pwd.lock",
     }
     for path in forbidden_paths:
-        assert path not in read_write_lines
+        assert path not in read_write_paths
+
+
+def test_future_nonroot_service_readwrite_paths_cover_helper_backends_narrowly() -> None:
+    text = _read("deploy/vpn-bot.nonroot.example.service")
+    read_write_paths = _read_write_paths(text)
+
+    required_paths = {
+        "/opt/vpn-service/data",
+        "/opt/vpn-service/logs",
+        "/run/vpn-bot",
+        "/usr/local/etc/xray",
+        "/etc/amnezia/amneziawg",
+        "/etc/mtproxy/vpnbot",
+    }
+    assert required_paths <= read_write_paths
+    assert "/etc" not in read_write_paths
+    assert "/usr/local/etc" not in read_write_paths
+    assert "/etc/amnezia" not in read_write_paths
+    assert "/etc/mtproxy" not in read_write_paths
 
 
 def test_sudoers_example_grants_only_fixed_helpers() -> None:

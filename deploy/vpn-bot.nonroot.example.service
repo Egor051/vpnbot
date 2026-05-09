@@ -29,7 +29,9 @@ ProtectHome=true
 ProtectSystem=strict
 RuntimeDirectory=vpn-bot
 RuntimeDirectoryMode=0700
-ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot
+# Sudo-launched helpers inherit this service mount namespace, so keep
+# ProtectSystem=strict and expose only the exact backend trees helpers update.
+ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot /usr/local/etc/xray /etc/amnezia/amneziawg /etc/mtproxy/vpnbot
 
 [Install]
 WantedBy=multi-user.target
