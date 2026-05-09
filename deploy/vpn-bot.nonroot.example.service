@@ -1,11 +1,12 @@
-# Production sudo-helper non-root unit for vpn-bot.
+# Compatibility reference for older Package 5A/5B rollout notes.
+# The production unit is now deploy/vpn-bot.service; keep this file aligned with
+# that non-root sudo-helper model if retained.
+#
 # Code, deploy files, and .venv should remain root-owned and not writable by
 # the vpn-bot runtime user.
-# Sudo-based helpers require privilege elevation through sudo/setuid; do not
-# enable the no-new-privileges hardening flag on this unit.
 
 [Unit]
-Description=VPN Telegram Bot
+Description=VPN Telegram Bot (non-root helper-mode reference)
 After=network-online.target
 Wants=network-online.target
 
@@ -20,16 +21,14 @@ RestartSec=5
 User=vpn-bot
 Group=vpn-bot
 UMask=0077
+# NoNewPrivileges must stay disabled/omitted: sudo helper entrypoints need sudo's
+# setuid privilege transition while the bot itself remains unprivileged.
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 RuntimeDirectory=vpn-bot
 RuntimeDirectoryMode=0700
-# Sudo-launched helpers inherit this service mount namespace, so keep
-# ProtectSystem=strict and expose only exact helper write targets. The account
-# database files are writable only for the sudo SOCKS5 helper's useradd,
-# chpasswd, passwd -l, and userdel operations.
-ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot /usr/local/etc/xray /etc/amnezia/amneziawg /etc/mtproxy/vpnbot /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/.pwd.lock
+ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot
 
 [Install]
 WantedBy=multi-user.target

@@ -161,7 +161,8 @@ def test_vpn_bot_service_write_paths_are_narrow() -> None:
     read_write_lines = [line for line in unit.splitlines() if line.startswith("ReadWritePaths=")]
     assert read_write_lines
     read_write = read_write_lines[0]
-    assert "/etc/mtproxy/vpnbot" in read_write
+    assert "/run/vpn-bot" in read_write
+    assert "/etc/mtproxy/vpnbot" not in read_write
     assert " /etc/mtproxy " not in f" {read_write} "
 
 
