@@ -1,0 +1,24 @@
+[Unit]
+Description=VPN Telegram Bot (legacy root/direct fallback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vpn-service
+EnvironmentFile=/opt/vpn-service/.env
+Environment=BOT_LOCK_PATH=/run/vpn-bot.lock
+ExecStart=/opt/vpn-service/.venv/bin/python /opt/vpn-service/main.py
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/vpn-service /run /usr/local/etc/xray /etc/amnezia/amneziawg /etc/mtproxy/vpnbot /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/.pwd.lock
+
+[Install]
+WantedBy=multi-user.target

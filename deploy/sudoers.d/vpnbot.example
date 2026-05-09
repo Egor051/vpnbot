@@ -1,13 +1,13 @@
-# Package 5C sudo-helper cutover example.
+# vpn-bot sudo-helper production policy.
 # Validate any installed copy first:
 #   visudo -cf /path/to/vpnbot.example
 #
 # Install helpers as root-owned files under /usr/local/sbin before enabling
 # helper mode:
-#   install -o root -g root -m 0750 deploy/helpers/vpnbot-socks5-user /usr/local/sbin/vpnbot-socks5-user
-#   install -o root -g root -m 0750 deploy/helpers/vpnbot-xray-apply /usr/local/sbin/vpnbot-xray-apply
-#   install -o root -g root -m 0750 deploy/helpers/vpnbot-awg-apply /usr/local/sbin/vpnbot-awg-apply
-#   install -o root -g root -m 0750 deploy/helpers/vpnbot-mtproxy-apply /usr/local/sbin/vpnbot-mtproxy-apply
+#   install -o root -g root -m 0755 deploy/helpers/vpnbot-socks5-user /usr/local/sbin/vpnbot-socks5-user
+#   install -o root -g root -m 0755 deploy/helpers/vpnbot-xray-apply /usr/local/sbin/vpnbot-xray-apply
+#   install -o root -g root -m 0755 deploy/helpers/vpnbot-awg-apply /usr/local/sbin/vpnbot-awg-apply
+#   install -o root -g root -m 0755 deploy/helpers/vpnbot-mtproxy-apply /usr/local/sbin/vpnbot-mtproxy-apply
 #
 # Wildcard arguments below are limited to fixed helper entrypoints. The helpers
 # are the security boundary and must validate all actions, paths, prefixes, and

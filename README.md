@@ -17,7 +17,7 @@ This project is designed for a single-server deployment without Docker, Redis, P
 - Audit log with recursive masking for sensitive values.
 - SQLite storage with migrations from `db/schema.sql`.
 - Rotating local logs in `LOG_DIR`.
-- systemd deployment using `deploy/vpn-bot.service`.
+- systemd deployment using `deploy/vpn-bot.service` in non-root sudo-helper mode.
 - Intended target: Ubuntu VDS with existing Xray and/or AmneziaWG installation.
 
 ## Stack
@@ -40,7 +40,8 @@ requirements.txt           # Runtime dependencies
 constraints.txt            # Pinned production dependency constraints
 .env.example               # Environment variable template
 db/schema.sql              # Database schema
-deploy/vpn-bot.service     # vpn-bot systemd unit template
+deploy/vpn-bot.service     # recommended non-root sudo-helper systemd unit
+deploy/vpn-bot.root-legacy.example.service # legacy root/direct fallback unit
 deploy/run-mtproxy-managed # MTProxy managed-mode wrapper installed during deploy
 deploy/mtproxy-vpnbot-managed.conf # MTProxy drop-in installed during deploy
 bot/                       # Telegram handlers, keyboards, FSM, formatting
@@ -79,7 +80,17 @@ ADMIN_IDS=<telegram_user_id>,<telegram_user_id>
 DB_PATH=/opt/vpn-service/data/vpn.db
 SQLITE_SYNCHRONOUS=FULL
 LOG_DIR=/opt/vpn-service/logs
-BOT_LOCK_PATH=/run/vpn-bot.lock
+BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock
+
+PRIVILEGE_HELPERS_ENABLED=true
+HELPER_STAGING_ROOT=/run/vpn-bot
+SOCKS5_USER_HELPER_PATH=/usr/local/sbin/vpnbot-socks5-user
+XRAY_APPLY_HELPER_PATH=/usr/local/sbin/vpnbot-xray-apply
+AWG_APPLY_HELPER_PATH=/usr/local/sbin/vpnbot-awg-apply
+MTPROTO_APPLY_HELPER_PATH=/usr/local/sbin/vpnbot-mtproxy-apply
+XRAY_HELPER_STAGING_DIR=/run/vpn-bot/xray
+AWG_HELPER_STAGING_DIR=/run/vpn-bot/awg
+MTPROTO_HELPER_STAGING_DIR=/run/vpn-bot/mtproxy
 
 XRAY_CONFIG_PATH=/usr/local/etc/xray/config.json
 XRAY_SERVICE_NAME=xray
@@ -159,6 +170,7 @@ CONFIG_BACKUP_KEEP_LAST=20
 
 Notes:
 
+- Recommended production mode is `deploy/vpn-bot.service` running as `vpn-bot:vpn-bot` with `PRIVILEGE_HELPERS_ENABLED=true` and fixed sudo helpers installed. Use `deploy/vpn-bot.root-legacy.example.service` only as a legacy rollback/fallback unit.
 - If `XRAY_INBOUND_TAG` is empty, the adapter uses the first inbound with `settings.clients`.
 - If `XRAY_MANAGE_SHORT_IDS=false`, `XRAY_SHORT_ID` must be set.
 - `XRAY_APPLY_MODE=restart` is the default production apply mode; use `reload` only when your Xray unit reliably applies reload.
@@ -202,7 +214,7 @@ SOCKS5/Dante expectations:
 
 - Dante listens on the configured public host/port, for example `0.0.0.0:31337`.
 - Authentication is Linux username/password.
-- The bot runs with enough permissions to call `getent`, `useradd`, `chpasswd`, `passwd -l`, and `userdel`.
+- In recommended production mode the bot calls `/usr/local/sbin/vpnbot-socks5-user` through `sudo -n`; sudoers grants only that fixed helper and actions.
 - The bot refuses to manage Linux users whose login does not start with `SOCKS5_LOGIN_PREFIX`.
 
 MTProto static mode:
@@ -223,8 +235,9 @@ MTProto managed mode:
   sudo install -m 700 deploy/run-mtproxy-managed /opt/vpn-service/scripts/run-mtproxy-managed
   sudo install -m 700 -d /etc/systemd/system/mtproxy.service.d
   sudo install -m 600 deploy/mtproxy-vpnbot-managed.conf /etc/systemd/system/mtproxy.service.d/vpnbot-managed.conf
-  sudo install -m 700 -d /etc/mtproxy/vpnbot /etc/mtproxy/vpnbot/backups
-  sudo chown root:root /opt/vpn-service/scripts/run-mtproxy-managed /etc/mtproxy/vpnbot /etc/mtproxy/vpnbot/backups
+  sudo install -m 750 -o root -g vpn-bot -d /etc/mtproxy/vpnbot
+  sudo install -m 700 -o root -g root -d /etc/mtproxy/vpnbot/backups
+  sudo chown root:root /opt/vpn-service/scripts/run-mtproxy-managed
   sudo /opt/vpn-service/.venv/bin/python - <<'PY'
   import json, secrets
   from pathlib import Path
@@ -250,8 +263,8 @@ MTProto managed mode:
       encoding="utf-8",
   )
   PY
-  sudo chmod 600 /etc/mtproxy/vpnbot/managed-secrets.json /etc/mtproxy/vpnbot/mtproxy.env
-  sudo chown root:root /etc/mtproxy/vpnbot/managed-secrets.json /etc/mtproxy/vpnbot/mtproxy.env
+  sudo chmod 640 /etc/mtproxy/vpnbot/managed-secrets.json /etc/mtproxy/vpnbot/mtproxy.env
+  sudo chown root:vpn-bot /etc/mtproxy/vpnbot/managed-secrets.json /etc/mtproxy/vpnbot/mtproxy.env
   sudo systemctl daemon-reload
   sudo systemctl restart mtproxy
   sudo systemctl status mtproxy --no-pager
@@ -267,7 +280,7 @@ MTProto managed mode:
 - On issue/revoke the bot backs up managed files, writes changes atomically, restarts `mtproxy`, checks `systemctl is-active`, checks that `MTPROTO_PORT` is listening, and restores the previous managed files on apply failure. It does not write `/etc/systemd/system` and does not run `systemctl daemon-reload` during normal issue/revoke.
 - Managed mode gives real per-user revoke by removing only that user's secret from the active MTProxy list. Other users' secrets remain in the managed file.
 - Raw MTProto secrets are not shown in admin status, audit, logs, README, or `.env.example`; admin diagnostics use counts and fingerprints only.
-- Managed secrets and env files are root:root `0600`; backup directories are root:root `0700`; backup files that may contain secrets are root:root `0600`; the wrapper is root:root `0700`; the systemd drop-in contains no secrets and can be root:root `0600`.
+- In recommended non-root mode, managed secrets and env files are `root:vpn-bot` `0640`, and `/etc/mtproxy/vpnbot` is `root:vpn-bot` `0750`, so the bot can read before staging but cannot write canonical state. Backup directories remain root-only, and backup files that may contain secrets stay root-only. The wrapper is `root:root` `0700`; the systemd drop-in contains no secrets and can be `root:root` `0600`.
 
 MTProto managed mode visibility checks:
 
@@ -289,47 +302,48 @@ Proxy statistics are lifecycle/accounting stats from SQLite: issued, active, rev
 
 The supplied systemd unit expects the project in `/opt/vpn-service`. If you deploy elsewhere, update `deploy/vpn-bot.service` before installing it.
 
+Recommended production mode is non-root `vpn-bot:vpn-bot` with fixed sudo helpers. The root/direct unit is kept only as `deploy/vpn-bot.root-legacy.example.service` for rollback.
+
 Short order:
 
-1. Clone the repository.
+1. Clone the repository and keep code plus `.venv` root-owned.
 2. Create a virtual environment.
 3. Install `requirements.txt`.
 4. Copy `.env.example` to `.env`.
-5. Fill `.env`.
-6. Initialize the database.
-7. Run the bot manually.
-8. Install the systemd service.
+5. Fill `.env`, keeping `PRIVILEGE_HELPERS_ENABLED=true`.
+6. Install the `vpn-bot` identity, helpers, sudoers, runtime directories, and backend read permissions.
+7. Initialize the database as `vpn-bot`.
+8. Run non-root helper preflight.
+9. Install the systemd service.
 
 ```bash
 sudo mkdir -p /opt/vpn-service
-sudo chown -R "$USER":"$USER" /opt/vpn-service
-git clone https://github.com/Egor051/vpnbot.git /opt/vpn-service
+sudo git clone https://github.com/Egor051/vpnbot.git /opt/vpn-service
 cd /opt/vpn-service
 
-python3 -m venv .venv
-. .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt -c constraints.txt
+sudo python3 -m venv .venv
+sudo .venv/bin/pip install --upgrade pip
+sudo .venv/bin/pip install -r requirements.txt -c constraints.txt
 
-cp .env.example .env
-nano .env
+sudo cp .env.example .env
+sudo nano .env
 
-python init_db.py
-python main.py
+sudo chown -R root:root /opt/vpn-service
+sudo bash deploy/setup-nonroot-helper-mode.sh
+sudo -u vpn-bot .venv/bin/python init_db.py
+sudo python3 deploy/check-nonroot-helper-mode.py
 ```
 
 Install and start the systemd service:
 
 ```bash
-sudo cp deploy/vpn-bot.service /etc/systemd/system/vpn-bot.service
+sudo install -o root -g root -m 0644 deploy/vpn-bot.service /etc/systemd/system/vpn-bot.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now vpn-bot
-sudo systemctl status vpn-bot
+sudo systemctl status vpn-bot --no-pager
 ```
 
-If SOCKS5 auto-issue is enabled under the supplied hardened unit, keep the service running as root and allow the password database files in `ReadWritePaths`, as shown in `deploy/vpn-bot.service`.
-
-If `MTPROTO_MODE=managed` is enabled, keep the supplied unit's write access narrowed to `/etc/mtproxy/vpnbot` for managed secrets/env/backups. Do not grant `vpn-bot.service` runtime write access to `/etc/systemd/system` or broad write access to `/etc/mtproxy`; install or update the MTProxy drop-in and wrapper manually during deploy, then run `systemctl daemon-reload` outside the bot runtime.
+If `MTPROTO_MODE=managed` is enabled, keep the supplied unit's write access narrowed to `/etc/mtproxy/vpnbot` for helper-owned managed secrets/env/backups. Do not grant `vpn-bot.service` runtime write access to `/etc/systemd/system` or broad write access to `/etc/mtproxy`; install or update the MTProxy drop-in and wrapper manually during deploy, then run `systemctl daemon-reload` outside the bot runtime.
 
 ## Local Checks
 
@@ -391,16 +405,20 @@ tail -f /opt/vpn-service/logs/bot.log
 
 ### Pre-deploy checklist
 
-- `.env` exists, is not committed, and is readable only by the service operator/root.
-- `DB_PATH` parent and `LOG_DIR` exist and are not world-readable.
-- The systemd unit is installed and matches the paths in `.env`.
-- Xray config exists at `XRAY_CONFIG_PATH` and validates before the bot writes to it.
-- AWG config/interface exist if AWG keys will be issued.
+- `.env` exists, is not committed, and is `root:vpn-bot` mode `0640`.
+- `PRIVILEGE_HELPERS_ENABLED=true` and helper paths point to `/usr/local/sbin/vpnbot-*`.
+- `DB_PATH` parent, `LOG_DIR`, and `/run/vpn-bot` are writable by `vpn-bot:vpn-bot` and not world-readable.
+- The installed systemd unit matches `deploy/vpn-bot.service` and runs as `vpn-bot:vpn-bot`.
+- `RuntimeDirectory=vpn-bot`, `RuntimeDirectoryMode=0700`, and `BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock` are present.
+- `NoNewPrivileges=true` is not set on the sudo-helper unit.
+- `ReadWritePaths` keeps `ProtectSystem=strict` and includes `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`, and `/etc/.pwd.lock` only because sudo-launched SOCKS5 helpers inherit the service mount namespace and need those files for fixed account operations.
+- Helpers are installed as `root:root` mode `0755` under `/usr/local/sbin`.
+- `/etc/sudoers.d/vpnbot` is `root:root` mode `0440` and passes `visudo -cf`.
+- Xray canonical config, AWG canonical config, and MTProxy managed secrets/env are readable by `vpn-bot` where those backends are enabled, but not writable by it.
 - Firewall rules are known before opening VPN ports.
 - Backup destination exists and backup files are not world-readable.
-- Code and `.venv` are not writable by untrusted users.
+- Code and `.venv` are not writable by untrusted users or by `vpn-bot`.
 - If managed MTProto is enabled, `vpn-bot.service` does not have `ReadWritePaths=/etc/systemd/system`; the MTProxy wrapper/drop-in were installed manually and contain no raw secrets.
-- If managed MTProto is enabled, `/etc/mtproxy/vpnbot/managed-secrets.json`, `/etc/mtproxy/vpnbot/mtproxy.env`, and `/etc/mtproxy/vpnbot/backups/*` are readable only by root/service operators.
 
 ### General bot health check
 
@@ -412,6 +430,15 @@ cd /opt/vpn-service
 .venv/bin/python -m compileall .
 .venv/bin/python -m pytest
 ```
+
+### Post-cutover checklist
+
+- `python3 deploy/check-nonroot-helper-mode.py` reports `failures=0 warnings=0`.
+- `vpn-bot` process user is `vpn-bot:vpn-bot`.
+- `vpn-bot`, `xray`, `awg-quick@awg0`, `danted`, and `mtproxy` are active when those backends are enabled.
+- `journalctl -b -u vpn-bot` contains no `degraded`, `critical`, `error`, `traceback`, `permission denied`, or `not permitted` entries.
+- Reboot verification passed after a full host reboot.
+- Post-reboot backup made after the verified boot.
 
 ### Backup
 
@@ -548,6 +575,19 @@ sudo journalctl -u vpn-bot -n 100 --no-pager
 ```
 
 Only use `git reset --hard` when you intentionally discard local code changes on the server. Restore `.env`, SQLite DB, Xray config, and AWG config from backup if the failed deploy changed runtime state.
+
+Rollback to the legacy root/direct unit only when helper mode cannot be repaired quickly:
+
+```bash
+sudo sed -i 's/^PRIVILEGE_HELPERS_ENABLED=.*/PRIVILEGE_HELPERS_ENABLED=false/' /opt/vpn-service/.env
+sudo install -o root -g root -m 0644 deploy/vpn-bot.root-legacy.example.service /etc/systemd/system/vpn-bot.service
+sudo systemctl daemon-reload
+sudo systemctl restart vpn-bot
+sudo systemctl status vpn-bot --no-pager
+sudo journalctl -u vpn-bot -n 100 --no-pager
+```
+
+Keep or remove `/etc/sudoers.d/vpnbot` only after validating the final sudoers state with `visudo -cf`.
 
 ### Manual VDS verification after fixes
 

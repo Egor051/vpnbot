@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Package 5A scaffold only.
-# This script creates the future unprivileged runtime identity.
+# vpn-bot service-account helper.
+# This script creates the unprivileged runtime identity.
 # It intentionally does not modify deploy/vpn-bot.service, restart services,
 # install sudoers files, or change ownership of the application tree.
 #
@@ -31,7 +31,7 @@ if id -u "${BOT_USER}" >/dev/null 2>&1; then
   primary_group="$(id -gn "${BOT_USER}")"
   if [[ "${primary_group}" != "${BOT_GROUP}" ]]; then
     echo "Warning: ${BOT_USER} primary group is ${primary_group}, expected ${BOT_GROUP}." >&2
-    echo "Review manually before any Package 5B/5C cutover." >&2
+    echo "Review manually before enabling the non-root production unit." >&2
   fi
 else
   useradd \
@@ -47,7 +47,7 @@ fi
 
 cat <<'EOF'
 
-Package 5A completed only the identity preparation step.
+vpn-bot identity preparation is complete.
 
 This script did not:
 - switch vpn-bot.service to User=vpn-bot;
@@ -55,10 +55,10 @@ This script did not:
 - install sudoers rules;
 - change ownership of /opt/vpn-service or .venv.
 
-Future Package 5B/5C steps after helper implementation:
+Production helper-mode requirements:
 - keep /opt/vpn-service and .venv root-owned and not writable by vpn-bot;
 - grant vpn-bot write access only to /opt/vpn-service/data, /opt/vpn-service/logs if file logs remain enabled, and /run/vpn-bot;
 - install root-owned helper scripts under /usr/local/sbin;
 - validate a narrow sudoers file with visudo;
-- switch to deploy/vpn-bot.nonroot.example.service only after helper wiring is tested.
+- install deploy/vpn-bot.service after helper wiring is tested.
 EOF

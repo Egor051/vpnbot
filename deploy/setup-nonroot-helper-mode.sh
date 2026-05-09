@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Idempotent Package 5C preparation for the sudo-helper non-root cutover.
-# This script installs helpers and permissions only; it does not switch or
-# restart the active vpn-bot systemd service.
+# Idempotent sudo-helper non-root production preparation.
+# This script installs helpers and permissions only; it does not restart the
+# active vpn-bot systemd service.
 
 BOT_USER="${BOT_USER:-vpn-bot}"
 BOT_GROUP="${BOT_GROUP:-vpn-bot}"
@@ -56,10 +56,10 @@ if [[ -f "${ENV_FILE}" ]]; then
   chmod 0640 "${ENV_FILE}"
 fi
 
-install -o root -g root -m 0750 "${HELPER_SOURCE_DIR}/vpnbot-socks5-user" /usr/local/sbin/vpnbot-socks5-user
-install -o root -g root -m 0750 "${HELPER_SOURCE_DIR}/vpnbot-xray-apply" /usr/local/sbin/vpnbot-xray-apply
-install -o root -g root -m 0750 "${HELPER_SOURCE_DIR}/vpnbot-awg-apply" /usr/local/sbin/vpnbot-awg-apply
-install -o root -g root -m 0750 "${HELPER_SOURCE_DIR}/vpnbot-mtproxy-apply" /usr/local/sbin/vpnbot-mtproxy-apply
+install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-socks5-user" /usr/local/sbin/vpnbot-socks5-user
+install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-xray-apply" /usr/local/sbin/vpnbot-xray-apply
+install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-awg-apply" /usr/local/sbin/vpnbot-awg-apply
+install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-mtproxy-apply" /usr/local/sbin/vpnbot-mtproxy-apply
 
 if [[ -f "${XRAY_CONFIG_PATH}" ]]; then
   chown nobody:"${BOT_GROUP}" "${XRAY_CONFIG_PATH}"
@@ -84,12 +84,12 @@ visudo -cf "${SUDOERS_TARGET}"
 
 cat <<EOF
 
-Package 5C helper-mode preparation is installed.
+sudo-helper non-root production preparation is installed.
 
 Next manual steps:
 - set PRIVILEGE_HELPERS_ENABLED=true and helper paths in ${ENV_FILE};
 - run: python3 deploy/check-nonroot-helper-mode.py
-- only then switch vpn-bot.service to the non-root unit.
+- install deploy/vpn-bot.service if the active unit is not already non-root.
 
-This script did not restart vpn-bot or switch the active systemd unit.
+This script did not restart vpn-bot or replace the active systemd unit.
 EOF
