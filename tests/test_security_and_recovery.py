@@ -136,7 +136,7 @@ def test_readme_uses_env_example_as_canonical_source() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 
     assert ".env.example" in readme
-    assert "cp .env.example .env" in readme
+    assert "install -o root -g root -m 0600 .env.example .env" in readme
     assert "AWG_DNS" in readme
     assert "legacy alias" in readme
     assert "AWG_CLIENT_DNS=" not in readme

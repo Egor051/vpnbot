@@ -14,17 +14,14 @@ RestartSec=5
 User=vpn-bot
 Group=vpn-bot
 UMask=0077
+# NoNewPrivileges must stay disabled/omitted: sudo helper entrypoints need sudo's
+# setuid privilege transition while the bot itself remains unprivileged.
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 RuntimeDirectory=vpn-bot
 RuntimeDirectoryMode=0700
-# Sudo-launched helpers inherit this service mount namespace, so keep
-# ProtectSystem=strict and expose only exact helper write targets. The account
-# database files are writable only for the sudo SOCKS5 helper's useradd,
-# chpasswd, passwd -l, and userdel operations.
-# Do not enable no-new-privileges: sudo helpers require privilege elevation.
-ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot /usr/local/etc/xray /etc/amnezia/amneziawg /etc/mtproxy/vpnbot /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/.pwd.lock
+ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot
 
 [Install]
 WantedBy=multi-user.target

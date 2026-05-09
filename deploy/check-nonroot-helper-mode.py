@@ -1,259 +1,218 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import os
-import shutil
+import stat
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 
-APP_USER = "vpn-bot"
-APP_GROUP = "vpn-bot"
-ENV_PATH = Path("/opt/vpn-service/.env")
-SUDOERS_EXAMPLE = Path(__file__).resolve().parent / "sudoers.d" / "vpnbot.example"
-SUDOERS_INSTALLED = Path("/etc/sudoers.d/vpnbot")
-HELPERS = {
-    "socks5": Path("/usr/local/sbin/vpnbot-socks5-user"),
-    "xray": Path("/usr/local/sbin/vpnbot-xray-apply"),
-    "awg": Path("/usr/local/sbin/vpnbot-awg-apply"),
-    "mtproxy": Path("/usr/local/sbin/vpnbot-mtproxy-apply"),
-}
-DEFAULT_PATHS = {
-    "DB_PATH": "/opt/vpn-service/data/vpn.db",
-    "LOG_DIR": "/opt/vpn-service/logs",
-    "HELPER_STAGING_ROOT": "/run/vpn-bot",
-    "XRAY_CONFIG_PATH": "/usr/local/etc/xray/config.json",
-    "AWG_CONFIG_PATH": "/etc/amnezia/amneziawg/awg0.conf",
-    "MTPROTO_MANAGED_SECRETS_PATH": "/etc/mtproxy/vpnbot/managed-secrets.json",
-    "MTPROTO_MANAGED_ENV_PATH": "/etc/mtproxy/vpnbot/mtproxy.env",
-}
-SAFE_ENV_KEYS = set(DEFAULT_PATHS) | {
-    "PRIVILEGE_HELPERS_ENABLED",
-    "XRAY_HELPER_STAGING_DIR",
-    "AWG_HELPER_STAGING_DIR",
-    "MTPROTO_HELPER_STAGING_DIR",
-}
+HELPERS = (
+    Path("/usr/local/sbin/vpnbot-socks5-user"),
+    Path("/usr/local/sbin/vpnbot-xray-apply"),
+    Path("/usr/local/sbin/vpnbot-awg-apply"),
+    Path("/usr/local/sbin/vpnbot-mtproxy-apply"),
+)
+FORBIDDEN_WRITE_PATHS = (
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/group",
+    "/etc/gshadow",
+    "/etc/.pwd.lock",
+    "/usr/local/etc/xray",
+    "/etc/amnezia/amneziawg",
+    "/etc/mtproxy",
+    "/etc/systemd/system",
+)
 
 
-@dataclass(slots=True)
-class CheckSummary:
-    failures: int = 0
-    warnings: int = 0
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CheckError(f"{path}: cannot read: {exc}") from exc
+
+
+class CheckError(Exception):
+    pass
+
+
+class Reporter:
+    def __init__(self) -> None:
+        self.failures: list[str] = []
+        self.warnings: list[str] = []
 
     def ok(self, message: str) -> None:
-        print(f"[OK] {message}")
-
-    def warn(self, message: str) -> None:
-        self.warnings += 1
-        print(f"[WARN] {message}")
+        print(f"OK: {message}")
 
     def fail(self, message: str) -> None:
-        self.failures += 1
-        print(f"[FAIL] {message}")
+        self.failures.append(message)
+        print(f"FAIL: {message}")
+
+    def warn(self, message: str) -> None:
+        self.warnings.append(message)
+        print(f"WARN: {message}")
 
 
-def run(args: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
-    except FileNotFoundError:
-        return subprocess.CompletedProcess(args, 127, "", "command not found")
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(args, 124, "", "timeout")
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
 
 
-def current_user() -> str:
-    result = run(["id", "-un"])
-    if result.returncode == 0:
-        return result.stdout.strip()
-    return ""
-
-
-def run_as_vpn_bot(args: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    if current_user() == APP_USER:
-        return run(args, timeout=timeout)
-    geteuid = getattr(os, "geteuid", None)
-    if callable(geteuid) and geteuid() == 0 and shutil.which("runuser"):
-        return run(["runuser", "-u", APP_USER, "--", *args], timeout=timeout)
-    return run(["sudo", "-n", "-u", APP_USER, *args], timeout=timeout)
-
-
-def run_helper_as_vpn_bot(helper: Path, args: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    return run_as_vpn_bot(["sudo", "-n", str(helper), *args], timeout=timeout)
-
-
-def parse_env_file(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        return values
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if key in SAFE_ENV_KEYS:
-            values[key] = value.strip().strip("'\"")
-    return values
-
-
-def path_from_env(env: dict[str, str], key: str) -> Path:
-    return Path(env.get(key) or DEFAULT_PATHS[key])
-
-
-def check_user(summary: CheckSummary) -> None:
-    user = run(["id", "-u", APP_USER])
-    group = run(["getent", "group", APP_GROUP])
-    if user.returncode == 0 and group.returncode == 0:
-        summary.ok(f"{APP_USER} user and group exist")
-    else:
-        summary.fail(f"{APP_USER} user/group missing")
-
-
-def check_helper_files(summary: CheckSummary) -> None:
-    for name, path in HELPERS.items():
-        try:
-            st = path.stat()
-        except FileNotFoundError:
-            summary.fail(f"{name} helper missing at {path}")
-            continue
-        mode = st.st_mode & 0o777
-        if st.st_uid != 0 or st.st_gid != 0:
-            summary.fail(f"{name} helper must be root:root: {path}")
-            continue
-        if mode & 0o022:
-            summary.fail(f"{name} helper must not be group/other writable: {path} mode {mode:o}")
-            continue
-        if mode & 0o100 == 0:
-            summary.fail(f"{name} helper must be executable by root: {path} mode {mode:o}")
-            continue
-        summary.ok(f"{name} helper ownership/mode look constrained: {path} mode {mode:o}")
-
-
-def check_sudoers(summary: CheckSummary) -> None:
-    visudo = shutil.which("visudo")
-    if not visudo:
-        summary.warn("visudo not found; sudoers syntax was not validated")
-        return
-    for path in (SUDOERS_EXAMPLE, SUDOERS_INSTALLED):
-        if not path.exists():
-            if path == SUDOERS_INSTALLED:
-                summary.warn(f"installed sudoers file not found yet: {path}")
-            else:
-                summary.fail(f"sudoers example missing: {path}")
-            continue
-        result = run([visudo, "-cf", str(path)])
-        if result.returncode == 0:
-            summary.ok(f"sudoers syntax valid: {path}")
-        else:
-            summary.fail(f"sudoers syntax invalid: {path}")
-
-
-def check_path_access(summary: CheckSummary, path: Path, flag: str, label: str) -> None:
-    result = run_as_vpn_bot(["test", flag, str(path)])
-    if result.returncode == 0:
-        summary.ok(f"{label}: vpn-bot access ok ({flag})")
-    else:
-        summary.fail(f"{label}: vpn-bot access failed ({flag})")
-
-
-def ensure_staging_file(source: Path, staging_dir: Path, name: str) -> Path | None:
-    try:
-        staging_dir.mkdir(parents=True, exist_ok=True)
-        target = staging_dir / name
-        target.write_bytes(source.read_bytes())
-        os.chmod(target, 0o600)
-        try:
-            shutil.chown(staging_dir, user=APP_USER, group=APP_GROUP)
-            shutil.chown(target, user=APP_USER, group=APP_GROUP)
-        except LookupError:
-            return None
-        return target
-    except OSError:
+def _uid_gid_for_user(user: str) -> tuple[int, int] | None:
+    if os.name != "posix":
         return None
+    try:
+        uid = int(subprocess.check_output(["id", "-u", user], text=True).strip())
+        gid = int(subprocess.check_output(["id", "-g", user], text=True).strip())
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return None
+    return uid, gid
 
 
-def check_helper_actions(summary: CheckSummary, env: dict[str, str]) -> None:
-    socks = run_helper_as_vpn_bot(HELPERS["socks5"], ["exists", "vpn_socks_preflight"])
-    if socks.returncode in {0, 2}:
-        summary.ok("SOCKS5 helper safe exists check works through sudo -n")
+def _would_be_writable(path: Path, uid: int, gid: int) -> bool:
+    st = path.stat()
+    mode = stat.S_IMODE(st.st_mode)
+    if st.st_uid == uid:
+        return bool(mode & stat.S_IWUSR)
+    if st.st_gid == gid:
+        return bool(mode & stat.S_IWGRP)
+    return bool(mode & stat.S_IWOTH)
+
+
+def _resolve_unit_path(raw_path: str | None, repo_root: Path) -> Path:
+    if raw_path:
+        return Path(raw_path)
+    installed = Path("/etc/systemd/system/vpn-bot.service")
+    if installed.exists():
+        return installed
+    return repo_root / "deploy" / "vpn-bot.service"
+
+
+def check_unit(path: Path, reporter: Reporter) -> None:
+    try:
+        text = _read(path)
+    except CheckError as exc:
+        reporter.fail(str(exc))
+        return
+
+    required = (
+        "User=vpn-bot",
+        "Group=vpn-bot",
+        "Environment=BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock",
+        "RuntimeDirectory=vpn-bot",
+        "RuntimeDirectoryMode=0700",
+        "ProtectSystem=strict",
+    )
+    for item in required:
+        if item in text:
+            reporter.ok(f"{path}: contains {item}")
+        else:
+            reporter.fail(f"{path}: missing {item}")
+
+    forbidden = ("User=root", "Group=root", "NoNewPrivileges=true", "future example")
+    for item in forbidden:
+        if item in text:
+            reporter.fail(f"{path}: contains forbidden {item}")
+        else:
+            reporter.ok(f"{path}: does not contain {item}")
+
+    read_write = "\n".join(line for line in text.splitlines() if line.startswith("ReadWritePaths="))
+    if not read_write:
+        reporter.fail(f"{path}: missing ReadWritePaths")
+        return
+    for item in FORBIDDEN_WRITE_PATHS:
+        if item in read_write:
+            reporter.fail(f"{path}: ReadWritePaths includes forbidden {item}")
+    reporter.ok(f"{path}: ReadWritePaths checked")
+
+
+def check_sudoers(path: Path, reporter: Reporter) -> None:
+    try:
+        text = _read(path)
+    except CheckError as exc:
+        reporter.fail(str(exc))
+        return
+
+    forbidden = ("NOPASSWD: ALL", "ALL=(ALL) ALL", "ALL=(ALL:ALL) ALL")
+    for item in forbidden:
+        if item in text:
+            reporter.fail(f"{path}: contains forbidden {item}")
+        else:
+            reporter.ok(f"{path}: does not contain {item}")
+    for helper in HELPERS:
+        if str(helper) in text:
+            reporter.ok(f"{path}: grants {helper}")
+        else:
+            reporter.fail(f"{path}: missing {helper}")
+
+    if os.name == "posix" and path.exists():
+        st = path.stat()
+        if st.st_uid == 0 and st.st_gid == 0 and _mode(path) == 0o440:
+            reporter.ok(f"{path}: root:root 0440")
+        else:
+            reporter.fail(f"{path}: expected root:root 0440")
+
+
+def check_helpers(reporter: Reporter) -> None:
+    for helper in HELPERS:
+        if not helper.exists():
+            reporter.fail(f"{helper}: missing")
+            continue
+        if os.name != "posix":
+            reporter.warn(f"{helper}: ownership/mode check skipped on non-POSIX host")
+            continue
+        st = helper.stat()
+        if st.st_uid == 0 and st.st_gid == 0 and _mode(helper) == 0o755:
+            reporter.ok(f"{helper}: root:root 0755")
+        else:
+            reporter.fail(f"{helper}: expected root:root 0755")
+
+
+def check_runtime_ownership(repo_path: Path, reporter: Reporter) -> None:
+    ids = _uid_gid_for_user("vpn-bot")
+    if ids is None:
+        reporter.warn("vpn-bot user not found; skipped code writability checks")
+        return
+    uid, gid = ids
+    for relative in (".", ".venv", "deploy"):
+        path = repo_path / relative
+        if not path.exists():
+            reporter.warn(f"{path}: missing; skipped writability check")
+            continue
+        if _would_be_writable(path, uid, gid):
+            reporter.fail(f"{path}: writable by vpn-bot")
+        else:
+            reporter.ok(f"{path}: not writable by vpn-bot")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Validate production non-root sudo-helper deployment")
+    parser.add_argument("--unit", help="systemd unit path; defaults to installed unit or deploy/vpn-bot.service")
+    parser.add_argument("--sudoers", default="/etc/sudoers.d/vpnbot", help="installed sudoers file")
+    parser.add_argument("--repo", default="/opt/vpn-service", help="production checkout path")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    repo_root = Path(__file__).resolve().parents[1]
+    reporter = Reporter()
+
+    check_unit(_resolve_unit_path(args.unit, repo_root), reporter)
+    check_sudoers(Path(args.sudoers), reporter)
+    check_helpers(reporter)
+    if os.name == "posix":
+        check_runtime_ownership(Path(args.repo), reporter)
     else:
-        summary.fail("SOCKS5 helper safe exists check failed through sudo -n")
+        reporter.warn("runtime ownership checks skipped on non-POSIX host")
 
-    xray_config = path_from_env(env, "XRAY_CONFIG_PATH")
-    xray_staging = Path(env.get("XRAY_HELPER_STAGING_DIR") or "/run/vpn-bot/xray")
-    xray_candidate = ensure_staging_file(xray_config, xray_staging, "preflight-config.json")
-    if xray_candidate is None:
-        summary.fail("Xray candidate staging failed")
-    else:
-        try:
-            xray = run_helper_as_vpn_bot(HELPERS["xray"], ["validate", str(xray_candidate)], timeout=60)
-            if xray.returncode == 0:
-                summary.ok("Xray helper validate works through sudo -n")
-            else:
-                summary.fail("Xray helper validate failed through sudo -n")
-        finally:
-            xray_candidate.unlink(missing_ok=True)
-    xray_status = run_helper_as_vpn_bot(HELPERS["xray"], ["status"])
-    if xray_status.returncode == 0:
-        summary.ok("Xray helper status works through sudo -n")
-    else:
-        summary.fail("Xray helper status failed through sudo -n")
-
-    awg_config = path_from_env(env, "AWG_CONFIG_PATH")
-    awg_staging = Path(env.get("AWG_HELPER_STAGING_DIR") or "/run/vpn-bot/awg")
-    awg_candidate = ensure_staging_file(awg_config, awg_staging, "preflight-awg0.conf")
-    if awg_candidate is None:
-        summary.fail("AWG candidate staging failed")
-    else:
-        try:
-            awg = run_helper_as_vpn_bot(HELPERS["awg"], ["validate", str(awg_candidate)], timeout=60)
-            if awg.returncode == 0:
-                summary.ok("AWG helper validate works through sudo -n")
-            else:
-                summary.fail("AWG helper validate failed through sudo -n")
-        finally:
-            awg_candidate.unlink(missing_ok=True)
-    awg_status = run_helper_as_vpn_bot(HELPERS["awg"], ["status"])
-    if awg_status.returncode == 0:
-        summary.ok("AWG helper status works through sudo -n")
-    else:
-        summary.fail("AWG helper status failed through sudo -n")
-
-    mtproxy_status = run_helper_as_vpn_bot(HELPERS["mtproxy"], ["status"])
-    if mtproxy_status.returncode == 0:
-        summary.ok("MTProxy helper status works through sudo -n")
-    else:
-        summary.fail("MTProxy helper status failed through sudo -n")
-
-
-def main() -> int:
-    summary = CheckSummary()
-    env = parse_env_file(ENV_PATH)
-
-    check_user(summary)
-    check_helper_files(summary)
-    check_sudoers(summary)
-
-    check_path_access(summary, ENV_PATH, "-r", "/opt/vpn-service/.env")
-    staging_root = path_from_env(env, "HELPER_STAGING_ROOT")
-    check_path_access(summary, staging_root, "-w", str(staging_root))
-    check_path_access(summary, path_from_env(env, "DB_PATH").parent, "-w", "SQLite data directory")
-    check_path_access(summary, path_from_env(env, "LOG_DIR"), "-w", "log directory")
-    check_path_access(summary, path_from_env(env, "XRAY_CONFIG_PATH"), "-r", "Xray canonical config")
-    check_path_access(summary, path_from_env(env, "AWG_CONFIG_PATH"), "-r", "AWG canonical config")
-    check_path_access(summary, path_from_env(env, "MTPROTO_MANAGED_SECRETS_PATH"), "-r", "MTProxy managed secrets")
-    check_path_access(summary, path_from_env(env, "MTPROTO_MANAGED_ENV_PATH"), "-r", "MTProxy managed env")
-    check_helper_actions(summary, env)
-
-    if env.get("PRIVILEGE_HELPERS_ENABLED") != "true":
-        summary.warn("PRIVILEGE_HELPERS_ENABLED is not true in parsed environment")
-
-    print(f"preflight completed: failures={summary.failures} warnings={summary.warnings}")
-    return 1 if summary.failures else 0
+    if reporter.failures:
+        print(f"\n{len(reporter.failures)} failure(s), {len(reporter.warnings)} warning(s)")
+        return 1
+    print(f"\nAll non-root helper-mode checks passed ({len(reporter.warnings)} warning(s)).")
+    return 0
 
 
 if __name__ == "__main__":

@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# vpn-bot service-account helper.
-# This script creates the unprivileged runtime identity.
-# It intentionally does not modify deploy/vpn-bot.service, restart services,
-# install sudoers files, or change ownership of the application tree.
+# This script creates the unprivileged production runtime identity.
+# It intentionally does not install or restart deploy/vpn-bot.service, install
+# sudoers files, or change ownership of the application tree.
 #
 # Keep /opt/vpn-service, the repository checkout, and .venv root-owned so a
 # compromised bot process cannot rewrite its own code or dependencies.
@@ -31,7 +30,7 @@ if id -u "${BOT_USER}" >/dev/null 2>&1; then
   primary_group="$(id -gn "${BOT_USER}")"
   if [[ "${primary_group}" != "${BOT_GROUP}" ]]; then
     echo "Warning: ${BOT_USER} primary group is ${primary_group}, expected ${BOT_GROUP}." >&2
-    echo "Review manually before enabling the non-root production unit." >&2
+    echo "Review manually before installing the non-root production unit." >&2
   fi
 else
   useradd \
@@ -47,18 +46,18 @@ fi
 
 cat <<'EOF'
 
-vpn-bot identity preparation is complete.
+Completed only the runtime identity preparation step.
 
 This script did not:
-- switch vpn-bot.service to User=vpn-bot;
+- install or restart vpn-bot.service;
 - restart any production service;
 - install sudoers rules;
 - change ownership of /opt/vpn-service or .venv.
 
-Production helper-mode requirements:
+Required production helper-mode steps:
 - keep /opt/vpn-service and .venv root-owned and not writable by vpn-bot;
 - grant vpn-bot write access only to /opt/vpn-service/data, /opt/vpn-service/logs if file logs remain enabled, and /run/vpn-bot;
 - install root-owned helper scripts under /usr/local/sbin;
 - validate a narrow sudoers file with visudo;
-- install deploy/vpn-bot.service after helper wiring is tested.
+- install deploy/vpn-bot.service only after helper wiring is tested.
 EOF
