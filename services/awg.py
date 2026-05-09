@@ -345,7 +345,8 @@ class AwgService:
         key = await self._get_key(key_id)
         if key.key_type != VpnKeyType.AWG:
             raise InvalidOperation("Это не AWG-ключ")
-        peer = self.adapter.find_peer(public_key=key.public_key, client_ip=key.client_ip)
+        public_key = self._stored_awg_public_key(key)
+        peer = self.adapter.find_peer(public_key=public_key, client_ip=None) if public_key else None
         if peer is not None and key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
             await self.vpn_keys.mark_active(key.id, self.clock.now())
         elif peer is None and key.status == VpnKeyStatus.PENDING_APPLY:
@@ -400,11 +401,9 @@ class AwgService:
         raise InvalidOperation("Не удалось сгенерировать уникальный label для AWG-ключа")
 
     async def _remove_awg_access(self, key: VpnKey) -> None:
-        public_key = key.public_key
+        public_key = self._stored_awg_public_key(key)
         if not public_key:
-            finder = getattr(self.adapter, "find_managed_peer_public_key", None)
-            if finder is not None:
-                public_key = finder(key.id)
+            public_key = self._managed_awg_public_key(key)
         if not public_key:
             raise InvalidOperation(
                 "Нельзя безопасно удалить AWG peer: в БД нет public key, "
@@ -533,13 +532,22 @@ class AwgService:
             if key.status == VpnKeyStatus.ACTIVE:
                 continue
             public_key, client_ip, _ = self._awg_restore_values(key, require_private=False)
-            config_peer = self.adapter.find_peer(public_key=public_key, client_ip=client_ip)
-            runtime_peer = self._runtime_peer_for_identity(runtime_peers, public_key=public_key, client_ip=client_ip)
-            peer_public_key = str((config_peer or {}).get("PublicKey") or (runtime_peer or {}).get("PublicKey") or public_key).strip()
-            runtime_present = runtime_peer is not None or bool(public_key and public_key in runtime_public_keys)
+            safe_public_key = public_key or self._managed_awg_public_key(key)
+            if not safe_public_key:
+                await self._write_audit_best_effort(
+                    actor_user_id=None,
+                    action="awg_startup_non_live_skipped_missing_public_key",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key.id,
+                    details={"previous_status": key.status.value, "client_ip": client_ip},
+                )
+                continue
+            config_peer = self.adapter.find_peer(public_key=safe_public_key, client_ip=None)
+            runtime_peer = self._runtime_peer_for_identity(runtime_peers, public_key=safe_public_key, client_ip="")
+            runtime_present = runtime_peer is not None or safe_public_key in runtime_public_keys
             if config_peer is None and not runtime_present:
                 continue
-            await self._remove_awg_access_for_reconcile(key, fallback_public_key=peer_public_key)
+            await self._remove_awg_access_for_reconcile(key, fallback_public_key=safe_public_key)
             recovered += 1
             await self._write_audit_best_effort(
                 actor_user_id=None,
@@ -549,6 +557,15 @@ class AwgService:
                 details={"previous_status": key.status.value, "client_ip": client_ip},
             )
         return recovered
+
+    def _stored_awg_public_key(self, key: VpnKey) -> str:
+        return str(key.payload.get("public_key") or key.public_key or "").strip()
+
+    def _managed_awg_public_key(self, key: VpnKey) -> str:
+        finder = getattr(self.adapter, "find_managed_peer_public_key", None)
+        if finder is None:
+            return ""
+        return str(finder(key.id) or "").strip()
 
     async def _restore_or_sync_active_awg_peers(self, active_keys: list[VpnKey], runtime_peers: list[dict[str, str]]) -> int:
         recovered = 0
@@ -758,10 +775,13 @@ class AwgService:
         return key
 
     async def _remove_awg_access_for_reconcile(self, key: VpnKey, *, fallback_public_key: str) -> None:
-        key_public_key = str(key.payload.get("public_key") or key.public_key or "").strip()
+        key_public_key = self._stored_awg_public_key(key)
         if key_public_key or not fallback_public_key:
             await self._remove_awg_access(key)
             return
+        owner = await self.vpn_keys.find_by_public_key(fallback_public_key)
+        if owner is not None and owner.id != key.id:
+            raise InvalidOperation("Unsafe AWG reconcile fallback public key belongs to another DB row")
         await self.adapter.remove_peer(key_id=key.id, public_key=fallback_public_key)
 
     def _managed_key_id_from_peer(self, peer: dict[str, str]) -> int | None:

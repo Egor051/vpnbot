@@ -152,7 +152,7 @@ class AnnouncementRepository:
             """
             UPDATE announcement_batches
             SET status = ?, updated_at = ?, completed_at = CASE WHEN ? THEN ? ELSE completed_at END
-            WHERE id = ?
+            WHERE id = ? AND status != 'cancelled'
             """,
             (status, now, 1 if completed else 0, now, announcement_id),
         )

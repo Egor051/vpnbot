@@ -1,6 +1,6 @@
-# Package 5B Privileged Helpers
+# Package 5C Privileged Helpers
 
-Package 5B adds real helper scripts and optional application helper-mode wiring. It still does not switch the production `vpn-bot.service` to `User=vpn-bot`, does not install sudoers automatically, and does not require operators to enable helper mode yet.
+Package 5C prepares the real sudo-helper non-root cutover. The repository still does not switch a production host by itself: helpers, sudoers, permissions, `.env`, preflight, and the systemd unit must be applied manually on the VDS.
 
 Helpers are intended to be installed as root-owned files under `/usr/local/sbin`, not executed from the application checkout:
 
@@ -12,7 +12,7 @@ install -o root -g root -m 0750 deploy/helpers/vpnbot-mtproxy-apply /usr/local/s
 visudo -cf /path/to/vpnbot.example
 ```
 
-Install the sudoers file only during the Package 5C cutover or a deliberate manual helper-mode test.
+`deploy/setup-nonroot-helper-mode.sh` performs those idempotent install steps, prepares runtime/data/log directories, validates sudoers, and preserves `vpn-bot` read access to canonical backend files. It does not switch or restart the active bot unit.
 
 ## Helper Mode Settings
 
@@ -50,7 +50,7 @@ Xray:
 - `vpnbot-xray-apply validate <candidate_config_path>`
 - `vpnbot-xray-apply status`
 
-Candidates must live under `/run/vpn-bot/xray`. The helper validates JSON, runs `/usr/local/bin/xray run -test -config <candidate>`, installs `/usr/local/etc/xray/config.json` atomically with mode `0600` for `nobody:nogroup`, restarts fixed service `xray`, verifies active state, and restores the previous config on failure.
+Candidates must live under `/run/vpn-bot/xray`. The helper validates JSON, runs `/usr/local/bin/xray run -test -config <candidate>`, installs `/usr/local/etc/xray/config.json` atomically with owner `nobody`, group `vpn-bot`, mode `0640`, restarts fixed service `xray`, verifies active state, and restores the previous config on failure.
 
 AWG:
 
@@ -60,14 +60,14 @@ AWG:
 - `vpnbot-awg-apply show-peers`
 - `vpnbot-awg-apply show-transfer`
 
-Candidates must live under `/run/vpn-bot/awg`. The helper validates with `awg-quick strip` or `wg-quick strip`, installs `/etc/amnezia/amneziawg/awg0.conf` atomically as `root:root` mode `0600`, applies runtime with fixed-interface `syncconf` for `awg0`, checks `awg-quick@awg0`, and restores the previous config on failure.
+Candidates must live under `/run/vpn-bot/awg`. The helper validates with `awg-quick strip` or `wg-quick strip`, installs `/etc/amnezia/amneziawg/awg0.conf` atomically as `root:vpn-bot` mode `0640`, applies runtime with fixed-interface `syncconf` for `awg0`, checks `awg-quick@awg0`, and restores the previous config on failure.
 
 MTProxy:
 
 - `vpnbot-mtproxy-apply apply <candidate_dir>`
 - `vpnbot-mtproxy-apply status`
 
-The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpnbot/managed-secrets.json` and `/etc/mtproxy/vpnbot/mtproxy.env` atomically as `root:root` mode `0600`, restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure.
+The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpnbot` as `root:vpn-bot` mode `0750`, installs `managed-secrets.json` and `mtproxy.env` as `root:vpn-bot` mode `0640`, restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure.
 
 ## Package 5C Rollout
 
@@ -75,8 +75,12 @@ The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `mana
 2. Validate `deploy/sudoers.d/vpnbot.example` with `visudo -cf`.
 3. Install the sudoers file with only the helper commands.
 4. Create and own `/run/vpn-bot`, `/opt/vpn-service/data`, and `/opt/vpn-service/logs` for `vpn-bot:vpn-bot`.
-5. Enable helper mode in `.env`.
-6. Run a staged issue/revoke test for Xray, AWG, SOCKS5, and managed MTProxy.
-7. Switch to `deploy/vpn-bot.nonroot.example.service` only after the helper-mode test passes.
+5. Ensure `/opt/vpn-service/.env` and canonical Xray/AWG/MTProxy managed files are readable by group `vpn-bot`, but not writable by it.
+6. Enable helper mode in `.env`.
+7. Run `python3 deploy/check-nonroot-helper-mode.py`.
+8. Run a staged issue/revoke test for Xray, AWG, SOCKS5, and managed MTProxy.
+9. Switch to `deploy/vpn-bot.nonroot.example.service` only after the helper-mode test passes.
 
-Rollback is to disable `PRIVILEGE_HELPERS_ENABLED`, keep or restore the root-run direct unit, restore the previous systemd unit if needed, and restart `vpn-bot`. Package 5B keeps the active production unit root-run specifically so this rollback remains available.
+Rollback is to disable `PRIVILEGE_HELPERS_ENABLED`, keep or restore the root-run direct unit, restore the previous systemd unit if needed, and restart `vpn-bot`. Package 5C keeps the repository's active production unit root-run specifically so this rollback remains available until an operator performs the manual VDS cutover.
+
+The sudo-helper non-root unit must not set `NoNewPrivileges=true`: sudo needs privilege elevation through its setuid boundary. Keep that hardening for a future non-sudo privileged-daemon or IPC design.

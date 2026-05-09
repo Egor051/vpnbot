@@ -196,6 +196,110 @@ def test_awg_helper_uses_fixed_target_and_interface() -> None:
     assert helper.SERVICE_NAME == "awg-quick@awg0"
 
 
+def test_helper_installed_permissions_preserve_vpn_bot_read_access() -> None:
+    xray = _load_helper("vpnbot-xray-apply")
+    awg = _load_helper("vpnbot-awg-apply")
+    mtproxy = _load_helper("vpnbot-mtproxy-apply")
+
+    assert xray.FINAL_USER == "nobody"
+    assert xray.FINAL_GROUP == "vpn-bot"
+    assert xray.FINAL_MODE == 0o640
+    assert awg.FINAL_GROUP == "vpn-bot"
+    assert awg.FINAL_MODE == 0o640
+    assert mtproxy.FINAL_GROUP == "vpn-bot"
+    assert mtproxy.FINAL_DIR_MODE == 0o750
+    assert mtproxy.FINAL_FILE_MODE == 0o640
+
+
+def test_xray_helper_install_and_restore_use_final_stat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    helper = _load_helper("vpnbot-xray-apply")
+    helper.CANONICAL_CONFIG = tmp_path / "config.json"
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text("{}", encoding="utf-8")
+    stat_calls: list[Path] = []
+    monkeypatch.setattr(helper, "_set_final_stat", lambda path: stat_calls.append(path))
+    monkeypatch.setattr(helper, "_fsync_parent", lambda path: None)
+
+    helper.install_candidate(candidate)
+    backup = helper.backup_current()
+    helper.restore_backup(backup)
+
+    assert helper.CANONICAL_CONFIG.read_text(encoding="utf-8") == "{}"
+    assert backup is not None
+    assert len(stat_calls) == 3
+
+
+def test_awg_helper_install_and_restore_use_final_stat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    helper = _load_helper("vpnbot-awg-apply")
+    helper.CANONICAL_CONFIG = tmp_path / "awg0.conf"
+    candidate = tmp_path / "candidate.conf"
+    candidate.write_text("[Interface]\nPrivateKey = server\n", encoding="utf-8")
+    stat_calls: list[Path] = []
+    monkeypatch.setattr(helper, "_set_final_stat", lambda path: stat_calls.append(path))
+    monkeypatch.setattr(helper, "_fsync_parent", lambda path: None)
+    monkeypatch.setattr(helper, "quick_strip", lambda path: "")
+    monkeypatch.setattr(helper, "sync_runtime", lambda stripped: None)
+
+    helper.install_candidate(candidate)
+    backup = helper.backup_current()
+    helper.restore_backup(backup)
+
+    assert "PrivateKey = server" in helper.CANONICAL_CONFIG.read_text(encoding="utf-8")
+    assert backup is not None
+    assert len(stat_calls) == 3
+
+
+def test_mtproxy_helper_install_and_restore_use_group_readable_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper("vpnbot-mtproxy-apply")
+    helper.TARGET_DIR = tmp_path / "vpnbot"
+    helper.TARGET_SECRETS = helper.TARGET_DIR / "managed-secrets.json"
+    helper.TARGET_ENV = helper.TARGET_DIR / "mtproxy.env"
+    source = tmp_path / "source.json"
+    source.write_text('{"version":1,"generation":0,"secrets":[],"runtime_secrets":[]}', encoding="utf-8")
+    chown_calls: list[tuple[str, int, int]] = []
+    chmod_calls: list[tuple[str, int]] = []
+
+    def fake_chown(path: Path | str, uid: int, gid: int) -> None:
+        chown_calls.append((str(path), uid, gid))
+
+    def fake_chmod(path: Path | str, mode: int) -> None:
+        chmod_calls.append((str(path), mode))
+
+    class PosixOsProxy:
+        name = "posix"
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+        def chown(self, path: Path | str, uid: int, gid: int) -> None:
+            fake_chown(path, uid, gid)
+
+        def chmod(self, path: Path | str, mode: int) -> None:
+            fake_chmod(path, mode)
+
+    monkeypatch.setattr(helper, "os", PosixOsProxy())
+    monkeypatch.setattr(helper, "_lookup_final_gid", lambda: 12345)
+    monkeypatch.setattr(helper, "_fsync_parent", lambda path: None)
+
+    helper.install_file(source, helper.TARGET_SECRETS)
+    backups = helper.backup_targets()
+    helper.restore_targets(backups)
+
+    assert helper.TARGET_SECRETS.exists()
+    target_dir = str(helper.TARGET_DIR)
+    assert (target_dir, 0, 12345) in chown_calls
+    file_chowns = [call for call in chown_calls if call[0] != target_dir]
+    assert len(file_chowns) == 3
+    assert all(uid == 0 and gid == 12345 for _path, uid, gid in file_chowns)
+    assert (target_dir, helper.FINAL_DIR_MODE) in chmod_calls
+    file_modes = [mode for path, mode in chmod_calls if path != target_dir]
+    assert file_modes == [helper.FINAL_FILE_MODE, helper.FINAL_FILE_MODE, helper.FINAL_FILE_MODE]
+    assert all(mode & 0o007 == 0 for mode in file_modes)
+
+
 def test_awg_helper_redacts_private_config_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     helper = _load_helper("vpnbot-awg-apply")
     helper.STAGING_ROOT = tmp_path / "staging"

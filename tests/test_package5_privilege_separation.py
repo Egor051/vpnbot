@@ -11,6 +11,14 @@ def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
+def _read_write_paths(unit_text: str) -> set[str]:
+    paths: set[str] = set()
+    for line in unit_text.splitlines():
+        if line.startswith("ReadWritePaths="):
+            paths.update(line.removeprefix("ReadWritePaths=").split())
+    return paths
+
+
 def test_active_service_still_root_until_helpers_are_wired() -> None:
     service_path = ROOT / "deploy" / "vpn-bot.service"
     assert service_path.exists()
@@ -28,7 +36,8 @@ def test_future_nonroot_service_uses_unprivileged_user_and_hardening() -> None:
     assert "Group=vpn-bot" in text
     assert "User=root" not in text
     assert "Group=root" not in text
-    assert "NoNewPrivileges=true" in text
+    assert "NoNewPrivileges=true" not in text
+    assert "sudo-based helpers require privilege elevation" in text.lower()
     assert "PrivateTmp=true" in text
     assert "ProtectHome=true" in text
     assert "ProtectSystem=strict" in text
@@ -38,7 +47,7 @@ def test_future_nonroot_service_uses_unprivileged_user_and_hardening() -> None:
 
 def test_future_nonroot_service_readwrite_paths_exclude_account_databases() -> None:
     text = _read("deploy/vpn-bot.nonroot.example.service")
-    read_write_lines = "\n".join(line for line in text.splitlines() if line.startswith("ReadWritePaths="))
+    read_write_paths = _read_write_paths(text)
 
     forbidden_paths = {
         "/etc/passwd",
@@ -48,7 +57,26 @@ def test_future_nonroot_service_readwrite_paths_exclude_account_databases() -> N
         "/etc/.pwd.lock",
     }
     for path in forbidden_paths:
-        assert path not in read_write_lines
+        assert path not in read_write_paths
+
+
+def test_future_nonroot_service_readwrite_paths_cover_helper_backends_narrowly() -> None:
+    text = _read("deploy/vpn-bot.nonroot.example.service")
+    read_write_paths = _read_write_paths(text)
+
+    required_paths = {
+        "/opt/vpn-service/data",
+        "/opt/vpn-service/logs",
+        "/run/vpn-bot",
+        "/usr/local/etc/xray",
+        "/etc/amnezia/amneziawg",
+        "/etc/mtproxy/vpnbot",
+    }
+    assert required_paths <= read_write_paths
+    assert "/etc" not in read_write_paths
+    assert "/usr/local/etc" not in read_write_paths
+    assert "/etc/amnezia" not in read_write_paths
+    assert "/etc/mtproxy" not in read_write_paths
 
 
 def test_sudoers_example_grants_only_fixed_helpers() -> None:
@@ -76,6 +104,21 @@ def test_create_user_script_is_non_destructive_scaffold() -> None:
     assert "systemctl" not in text
 
 
+def test_package5c_setup_and_preflight_assets_cover_cutover_controls() -> None:
+    setup = _read("deploy/setup-nonroot-helper-mode.sh")
+    preflight = _read("deploy/check-nonroot-helper-mode.py")
+
+    assert "install -o root -g root -m 0750" in setup
+    assert "visudo -cf" in setup
+    assert "PRIVILEGE_HELPERS_ENABLED=true" in setup
+    assert "did not restart vpn-bot or switch the active systemd unit" in setup
+    assert "run_helper_as_vpn_bot" in preflight
+    assert '"sudo", "-n"' in preflight
+    assert '"validate"' in preflight
+    assert '"status"' in preflight
+    assert "MTPROTO_MANAGED_SECRETS_PATH" in preflight
+
+
 def test_privilege_plan_mentions_required_components() -> None:
     text = _read("docs/security/privilege-separation-plan.md").lower()
 
@@ -87,6 +130,9 @@ def test_privilege_plan_mentions_required_components() -> None:
         "sqlite",
         ".env",
         "systemd",
+        "nonewprivileges=true",
+        "privilege elevation",
+        "visudo -cf",
     ):
         assert term in text
 

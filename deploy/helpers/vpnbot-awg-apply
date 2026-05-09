@@ -15,7 +15,9 @@ STAGING_ROOT = Path("/run/vpn-bot/awg")
 CANONICAL_CONFIG = Path("/etc/amnezia/amneziawg/awg0.conf")
 INTERFACE_NAME = "awg0"
 SERVICE_NAME = "awg-quick@awg0"
-FINAL_MODE = 0o600
+FINAL_GROUP = "vpn-bot"
+FINAL_MODE = 0o640
+PRIVATE_TEMP_MODE = 0o600
 EXIT_VALIDATION = 64
 EXIT_COMMAND_FAILED = 70
 
@@ -88,11 +90,27 @@ def _fsync_parent(path: Path) -> None:
         os.close(fd)
 
 
+def _lookup_final_gid() -> int:
+    import grp
+
+    try:
+        return grp.getgrnam(FINAL_GROUP).gr_gid
+    except KeyError as exc:
+        raise HelperError("required final group is missing", EXIT_VALIDATION) from exc
+
+
+def _set_final_stat(path: Path) -> None:
+    if os.name != "posix":
+        return
+    os.chown(path, 0, _lookup_final_gid())
+    os.chmod(path, FINAL_MODE)
+
+
 def _set_private_root(path: Path) -> None:
     if os.name != "posix":
         return
     os.chown(path, 0, 0)
-    os.chmod(path, FINAL_MODE)
+    os.chmod(path, PRIVATE_TEMP_MODE)
 
 
 def backup_current() -> Path | None:
@@ -100,8 +118,7 @@ def backup_current() -> Path | None:
         return None
     backup_path = CANONICAL_CONFIG.with_name(f"{CANONICAL_CONFIG.name}.{time.time_ns()}.bak")
     shutil.copy2(CANONICAL_CONFIG, backup_path)
-    if os.name == "posix":
-        os.chmod(backup_path, FINAL_MODE)
+    _set_final_stat(backup_path)
     return backup_path
 
 
@@ -115,7 +132,7 @@ def install_candidate(candidate: Path) -> None:
                 shutil.copyfileobj(source, target)
                 target.flush()
                 os.fsync(target.fileno())
-        _set_private_root(tmp_path)
+        _set_final_stat(tmp_path)
         os.replace(tmp_path, CANONICAL_CONFIG)
         _fsync_parent(CANONICAL_CONFIG)
     finally:
@@ -125,7 +142,7 @@ def install_candidate(candidate: Path) -> None:
 def write_stripped_config(stripped: str) -> Path:
     tmp_path = CANONICAL_CONFIG.with_name(f".{CANONICAL_CONFIG.name}.{time.time_ns()}.stripped")
     try:
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FINAL_MODE)
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_TEMP_MODE)
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             file.write(stripped)
             file.flush()

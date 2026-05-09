@@ -27,6 +27,7 @@ class AnnouncementResult:
     delivered_user_ids: tuple[int, ...] = ()
     failed_user_ids: tuple[int, ...] = ()
     skipped_user_ids: tuple[int, ...] = ()
+    cancelled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,9 +212,13 @@ class AnnouncementService:
             raise RuntimeError("Announcement ledger is not configured")
         now = self._now()
         await self.announcements.set_batch_status(batch.id, "sending", now)
+        if await self._batch_cancelled(batch.id):
+            return await self._cancelled_ledger_result(batch.id, last_seen_id=None)
         last_seen_id = 0
         try:
             while True:
+                if await self._batch_cancelled(batch.id):
+                    return await self._cancelled_ledger_result(batch.id, last_seen_id=last_seen_id or None)
                 deliveries = await self.announcements.list_pending_deliveries(
                     batch.id,
                     self.batch_size,
@@ -223,6 +228,8 @@ class AnnouncementService:
                 if not deliveries:
                     break
                 for delivery in deliveries:
+                    if await self._batch_cancelled(batch.id):
+                        return await self._cancelled_ledger_result(batch.id, last_seen_id=last_seen_id or None)
                     last_seen_id = delivery.user_id
                     now = self._now()
                     if delivery.user_id <= 0:
@@ -274,6 +281,34 @@ class AnnouncementService:
         except Exception:
             logger.warning("Announcement was sent, but audit write failed", exc_info=True)
         return result
+
+    async def _batch_cancelled(self, announcement_id: int) -> bool:
+        if self.announcements is None:
+            raise RuntimeError("Announcement ledger is not configured")
+        batch = await self.announcements.get_batch(announcement_id)
+        return batch is not None and batch.status == "cancelled"
+
+    async def _cancelled_ledger_result(self, announcement_id: int, *, last_seen_id: int | None) -> AnnouncementResult:
+        result = await self._ledger_result(announcement_id, last_seen_id=last_seen_id)
+        logger.info(
+            "Announcement cancelled: id=%s total=%s success=%s failed=%s last_seen_id=%s",
+            result.announcement_id,
+            result.total,
+            result.success,
+            result.failed,
+            result.last_seen_id,
+        )
+        return AnnouncementResult(
+            announcement_id=result.announcement_id,
+            total=result.total,
+            success=result.success,
+            failed=result.failed,
+            last_seen_id=result.last_seen_id,
+            delivered_user_ids=result.delivered_user_ids,
+            failed_user_ids=result.failed_user_ids,
+            skipped_user_ids=result.skipped_user_ids,
+            cancelled=True,
+        )
 
     async def _ledger_result(self, announcement_id: int, *, last_seen_id: int | None) -> AnnouncementResult:
         if self.announcements is None:
