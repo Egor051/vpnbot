@@ -18,17 +18,18 @@ from bot.formatters import (
     announcement_batches_text,
     admin_stats_page_text,
     admin_proxy_stats_text,
-    backend_diagnostics_text,
     proxy_admin_status_text,
     audit_page_text,
     block_user_confirm_text,
     create_confirm_text,
     keys_page_text,
+    system_diagnostics_text,
     unblock_user_confirm_text,
     unblock_user_success_text,
     user_card_text,
     users_page_text,
 )
+from services.health import run_bot_health
 from bot.fsm.states import AdminCreateKeyStates
 from bot.fsm.states import AdminAnnouncementStates
 from bot.guards import require_superadmin
@@ -710,12 +711,23 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Services)
         return
     try:
         await require_superadmin(services, callback.from_user.id)
+        awg_iface = getattr(services.settings, "awg_interface", "awg0")
+        service_names = [
+            "vpn-bot",
+            getattr(services.settings, "xray_service_name", "xray"),
+            f"awg-quick@{awg_iface}",
+            getattr(services.settings, "socks5_service_name", "danted"),
+            getattr(services.settings, "mtproto_service_name", "mtproxy"),
+        ]
+        result = await run_bot_health(
+            backend_health=services.backend_health,
+            db=services.db,
+            privilege_helpers_enabled=getattr(services.settings, "privilege_helpers_enabled", False),
+            service_names=service_names,
+        )
         await safe_edit_message_text(
             callback.message,
-            backend_diagnostics_text(
-                services.backend_health.snapshot(),
-                mtproto_mode=getattr(services.settings, "mtproto_mode", "static"),
-            ),
+            system_diagnostics_text(result),
             reply_markup=_simple_nav([], "admin:panel"),
         )
     except Exception as exc:

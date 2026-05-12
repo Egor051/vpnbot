@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import json as _json_mod
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -40,20 +42,40 @@ class CheckError(Exception):
 
 
 class Reporter:
-    def __init__(self) -> None:
+    def __init__(self, json_mode: bool = False) -> None:
         self.failures: list[str] = []
         self.warnings: list[str] = []
+        self._json_mode = json_mode
+        self._checks: list[dict] = []
 
     def ok(self, message: str) -> None:
-        print(f"OK: {message}")
+        self._checks.append({"status": "ok", "message": message})
+        if not self._json_mode:
+            print(f"OK: {message}")
 
     def fail(self, message: str) -> None:
         self.failures.append(message)
-        print(f"FAIL: {message}")
+        self._checks.append({"status": "failed", "message": message})
+        if not self._json_mode:
+            print(f"FAIL: {message}")
 
     def warn(self, message: str) -> None:
         self.warnings.append(message)
-        print(f"WARN: {message}")
+        self._checks.append({"status": "warning", "message": message})
+        if not self._json_mode:
+            print(f"WARN: {message}")
+
+    def to_json(self) -> str:
+        overall = "failed" if self.failures else ("warning" if self.warnings else "ok")
+        return _json_mod.dumps(
+            {
+                "overall": overall,
+                "failures": len(self.failures),
+                "warnings": len(self.warnings),
+                "checks": self._checks,
+            },
+            indent=2,
+        )
 
 
 def _mode(path: Path) -> int:
@@ -187,19 +209,226 @@ def check_runtime_ownership(repo_path: Path, reporter: Reporter) -> None:
             reporter.ok(f"{path}: not writable by vpn-bot")
 
 
+def check_run_dir(reporter: Reporter, mode: str) -> None:
+    run_dir = Path("/run/vpn-bot")
+    if not run_dir.exists():
+        if mode == "post-start":
+            reporter.fail(f"{run_dir}: missing — expected after 'systemctl start vpn-bot'")
+        else:
+            reporter.warn(
+                f"{run_dir}: does not exist (expected before service start; "
+                "systemd creates RuntimeDirectory on service start)"
+            )
+        return
+    ids = _uid_gid_for_user("vpn-bot")
+    if ids is None:
+        reporter.warn(f"{run_dir}: vpn-bot user not found; skipped writability check")
+        return
+    uid, gid = ids
+    if _would_be_writable(run_dir, uid, gid):
+        reporter.ok(f"{run_dir}: writable by vpn-bot")
+    else:
+        reporter.fail(f"{run_dir}: exists but not writable by vpn-bot")
+
+
+def check_env_file(repo_path: Path, reporter: Reporter) -> None:
+    env_path = repo_path / ".env"
+    if not env_path.exists():
+        reporter.warn(f"{env_path}: not found; skipped")
+        return
+    if os.name != "posix":
+        reporter.warn(f"{env_path}: permission check skipped on non-POSIX")
+        return
+    st = env_path.stat()
+    file_mode = stat.S_IMODE(st.st_mode)
+    if file_mode & stat.S_IROTH:
+        reporter.fail(f"{env_path}: world-readable (mode={oct(file_mode)}) — must not be world-readable")
+    else:
+        reporter.ok(f"{env_path}: not world-readable (mode={oct(file_mode)})")
+    ids = _uid_gid_for_user("vpn-bot")
+    if ids is None:
+        reporter.warn(f"{env_path}: vpn-bot user not found; skipped readability check")
+        return
+    uid, gid = ids
+    can_read = False
+    if st.st_uid == uid and (file_mode & stat.S_IRUSR):
+        can_read = True
+    elif st.st_gid == gid and (file_mode & stat.S_IRGRP):
+        can_read = True
+    if can_read:
+        reporter.ok(f"{env_path}: readable by vpn-bot")
+    else:
+        reporter.warn(f"{env_path}: may not be readable by vpn-bot — check manually")
+
+
+def check_sqlite(db_path: Path, reporter: Reporter) -> None:
+    if not db_path.exists():
+        reporter.warn(f"{db_path}: not found; skipped SQLite quick_check")
+        return
+    try:
+        with sqlite3.connect(str(db_path), timeout=5) as conn:
+            row = conn.execute("PRAGMA quick_check").fetchone()
+            result = str(row[0]) if row else "no result"
+        if result == "ok":
+            reporter.ok(f"{db_path}: PRAGMA quick_check OK")
+        else:
+            reporter.fail(f"{db_path}: PRAGMA quick_check: {result[:80]}")
+    except Exception as exc:
+        reporter.fail(f"{db_path}: PRAGMA quick_check failed: {type(exc).__name__}: {str(exc)[:80]}")
+
+
+def check_xray_config(config_path: Path, reporter: Reporter) -> None:
+    if not config_path.exists():
+        reporter.warn(f"{config_path}: not found; skipped xray config test")
+        return
+    try:
+        result = subprocess.run(
+            ["xray", "run", "-test", "-config", str(config_path)],
+            capture_output=True,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            reporter.ok(f"{config_path}: xray config test OK")
+        else:
+            reporter.fail(f"{config_path}: xray config test failed (rc={result.returncode})")
+    except FileNotFoundError:
+        reporter.warn(f"{config_path}: xray binary not found; skipped config test")
+    except subprocess.TimeoutExpired:
+        reporter.warn(f"{config_path}: xray config test timed out")
+    except OSError as exc:
+        reporter.warn(f"{config_path}: xray config test error: {type(exc).__name__}")
+
+
+def check_awg_config(config_path: Path, reporter: Reporter) -> None:
+    if not config_path.exists():
+        reporter.warn(f"{config_path}: not found; skipped AWG config strip")
+        return
+    for binary in ("awg-quick", "wg-quick"):
+        try:
+            result = subprocess.run(
+                [binary, "strip", str(config_path)],
+                capture_output=True,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                reporter.ok(f"{config_path}: {binary} strip OK")
+            else:
+                reporter.fail(f"{config_path}: {binary} strip failed (rc={result.returncode})")
+            return
+        except FileNotFoundError:
+            continue
+        except subprocess.TimeoutExpired:
+            reporter.warn(f"{config_path}: {binary} strip timed out")
+            return
+        except OSError as exc:
+            reporter.warn(f"{config_path}: {binary} strip error: {type(exc).__name__}")
+            return
+    reporter.warn(f"{config_path}: awg-quick/wg-quick not found; skipped AWG config strip")
+
+
+def check_mtproxy_managed_files(managed_dir: Path, reporter: Reporter) -> None:
+    if not managed_dir.exists():
+        reporter.warn(f"{managed_dir}: not found; skipped MTProxy managed files check")
+        return
+    secrets_file = managed_dir / "managed-secrets.json"
+    env_file = managed_dir / "mtproxy.env"
+    for path in (secrets_file, env_file):
+        if not path.exists():
+            reporter.warn(f"{path}: not found")
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+            if path.suffix == ".json":
+                _json_mod.loads(content)
+                reporter.ok(f"{path}: readable, valid JSON")
+            else:
+                reporter.ok(f"{path}: readable")
+        except _json_mod.JSONDecodeError:
+            reporter.fail(f"{path}: invalid JSON")
+        except OSError as exc:
+            reporter.fail(f"{path}: cannot read: {type(exc).__name__}")
+
+
+def check_sudo_helpers(reporter: Reporter) -> None:
+    if os.name != "posix":
+        reporter.warn("sudo helper checks skipped on non-POSIX")
+        return
+    for helper in HELPERS:
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", str(helper), "status"],
+                capture_output=True,
+                timeout=10,
+            )
+            # rc=0: service active; rc=3: service inactive but helper reachable via sudo
+            if result.returncode in (0, 3):
+                reporter.ok(f"sudo -n {helper} status: accessible (rc={result.returncode})")
+            else:
+                reporter.warn(f"sudo -n {helper} status: rc={result.returncode} (check sudoers/helper)")
+        except FileNotFoundError:
+            reporter.warn("sudo not found; skipped helper accessibility check")
+            return
+        except subprocess.TimeoutExpired:
+            reporter.warn(f"sudo -n {helper} status: timed out")
+        except OSError as exc:
+            reporter.warn(f"sudo -n {helper} status: {type(exc).__name__}")
+
+
+def check_active_services(reporter: Reporter) -> None:
+    if os.name != "posix":
+        reporter.warn("systemctl service checks skipped on non-POSIX")
+        return
+    services = ("vpn-bot", "xray", "awg-quick@awg0", "danted", "mtproxy")
+    for service in services:
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", "--quiet", service],
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                reporter.ok(f"systemctl: {service} active")
+            else:
+                reporter.warn(f"systemctl: {service} not active (rc={result.returncode})")
+        except FileNotFoundError:
+            reporter.warn("systemctl not found; skipped service checks")
+            return
+        except subprocess.TimeoutExpired:
+            reporter.warn(f"systemctl: {service} check timed out")
+        except OSError as exc:
+            reporter.warn(f"systemctl: {service} check error: {type(exc).__name__}")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate production non-root sudo-helper deployment")
     parser.add_argument("--unit", help="systemd unit path; defaults to installed unit or deploy/vpn-bot.service")
     parser.add_argument("--sudoers", default="/etc/sudoers.d/vpnbot", help="installed sudoers file")
     parser.add_argument("--repo", default="/opt/vpn-service", help="production checkout path")
+    parser.add_argument("--db", help="SQLite DB path (default: <repo>/data/vpn.db)")
+    parser.add_argument(
+        "--mode",
+        choices=["pre-start", "post-start"],
+        default="pre-start",
+        help=(
+            "pre-start: /run/vpn-bot absence is expected (service not yet started); "
+            "post-start: /run/vpn-bot must exist and be writable by vpn-bot"
+        ),
+    )
+    parser.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        help="machine-readable JSON output (overall/failures/warnings/checks[])",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     repo_root = Path(__file__).resolve().parents[1]
-    reporter = Reporter()
+    reporter = Reporter(json_mode=args.json_output)
 
+    # Package 5D checks
     check_unit(_resolve_unit_path(args.unit, repo_root), reporter)
     check_sudoers(Path(args.sudoers), reporter)
     check_helpers(reporter)
@@ -208,11 +437,25 @@ def main(argv: list[str] | None = None) -> int:
     else:
         reporter.warn("runtime ownership checks skipped on non-POSIX host")
 
-    if reporter.failures:
+    # Package 7 checks
+    check_run_dir(reporter, args.mode)
+    check_env_file(Path(args.repo), reporter)
+    db_path = Path(args.db) if args.db else Path(args.repo) / "data" / "vpn.db"
+    check_sqlite(db_path, reporter)
+    check_xray_config(Path("/usr/local/etc/xray/config.json"), reporter)
+    check_awg_config(Path("/etc/amnezia/amneziawg/awg0.conf"), reporter)
+    check_mtproxy_managed_files(Path("/etc/mtproxy/vpnbot"), reporter)
+    check_sudo_helpers(reporter)
+    check_active_services(reporter)
+
+    if args.json_output:
+        print(reporter.to_json())
+    elif reporter.failures:
         print(f"\n{len(reporter.failures)} failure(s), {len(reporter.warnings)} warning(s)")
-        return 1
-    print(f"\nAll non-root helper-mode checks passed ({len(reporter.warnings)} warning(s)).")
-    return 0
+    else:
+        print(f"\nAll non-root helper-mode checks passed ({len(reporter.warnings)} warning(s)).")
+
+    return 1 if reporter.failures else 0
 
 
 if __name__ == "__main__":

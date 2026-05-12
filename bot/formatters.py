@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 
 from aiogram.types import User as TgUser
@@ -23,6 +22,7 @@ from models.dto import (
 from models.enums import ProxyAccessStatus, ProxyAccessType, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.announcements import AnnouncementBatch
 from services.backend_health import BackendHealthStatus
+from services.health import HealthCheckResult
 from utils.formatting import (
     code,
     format_bytes,
@@ -31,6 +31,7 @@ from utils.formatting import (
     format_user_display,
     h,
 )
+from utils.redact import redact as _redact
 
 
 ONE_KEY_ONE_DEVICE_WARNING = "<b>⚠️ 1 КЛЮЧ = 1 УСТРОЙСТВО</b>"
@@ -627,6 +628,30 @@ def backend_diagnostics_text(statuses: tuple[BackendHealthStatus, ...], *, mtpro
     return "\n".join(lines)
 
 
+_STATUS_ICONS: dict[str, str] = {
+    "ok": "✓",
+    "warning": "⚠",
+    "degraded": "✗",
+    "failed": "✗",
+}
+
+
+def system_diagnostics_text(result: HealthCheckResult) -> str:
+    overall = result.overall.upper()
+    ts = result.timestamp[:19].replace("T", " ") + " UTC"
+    lines = [
+        f"<b>Diagnostics</b>  <b>{h(overall)}</b>",
+        f"<i>{h(ts)}</i>",
+        "",
+    ]
+    for item in result.checks:
+        icon = _STATUS_ICONS.get(item.status, "?")
+        lines.append(f"{icon} {h(item.message)}")
+        if item.details:
+            lines.append(f"  └ {h(item.details)}")
+    return "\n".join(lines)
+
+
 def announcement_batches_text(batches: list[AnnouncementBatch]) -> str:
     if not batches:
         return "<b>Незавершённые объявления</b>\n\nНезавершённых batch-записей нет."
@@ -666,22 +691,8 @@ def proxy_entry_text(entry: ProxyEntry) -> str:
     return "\n".join(lines)
 
 
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"\b(bot_token|token|password|passwd|secret|mtproto_secret|private_key|preshared_key)\s*([:=])\s*[^,\s;]+",
-    re.IGNORECASE,
-)
-_SECRET_QUERY_RE = re.compile(r"(?i)(secret=)[^&\s]+")
-_HEX_SECRET_RE = re.compile(r"\b(?:dd)?[0-9a-fA-F]{32,}\b")
-
-
 def _redact_diagnostic_reason(value: str, limit: int = 180) -> str:
-    text = value.replace("\r", " ").replace("\n", " ").strip()
-    text = _SECRET_QUERY_RE.sub(r"\1***", text)
-    text = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}***", text)
-    text = _HEX_SECRET_RE.sub("***", text)
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3].rstrip() + "..."
+    return _redact(value, limit)
 
 
 def proxy_page_text(entries: list[ProxyEntry], page: int) -> str:
