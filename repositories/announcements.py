@@ -89,6 +89,7 @@ class AnnouncementRepository:
                 """,
                 (actor_user_id, from_chat_id, message_id, len(recipient_ids), now, now),
             )
+            assert cursor.lastrowid is not None
             batch_id = int(cursor.lastrowid)
             if recipient_ids:
                 await self.db.conn.executemany(

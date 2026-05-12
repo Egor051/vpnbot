@@ -108,6 +108,7 @@ class VpnKeyRepository:
             ),
         )
         await self.db.commit()
+        assert cursor.lastrowid is not None
         key = await self.get_by_id(int(cursor.lastrowid))
         if key is None:
             raise RuntimeError("VPN key insert failed")

@@ -40,8 +40,8 @@ XRAY_STARTUP_RECONCILE_STATUSES = {
     VpnKeyStatus.DELETE_FAILED,
 }
 
-XRAY_ACTIVE_STATUSES = {VpnKeyStatus.ACTIVE}
-XRAY_ALL_STATUSES = set(VpnKeyStatus)
+XRAY_ACTIVE_STATUSES: set[VpnKeyStatus] = {VpnKeyStatus.ACTIVE}
+XRAY_ALL_STATUSES: set[VpnKeyStatus] = set(VpnKeyStatus)
 XRAY_MANAGED_LABEL_RE = re.compile(r"^xray_[A-Za-z0-9]{5}$")
 
 

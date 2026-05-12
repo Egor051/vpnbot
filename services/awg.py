@@ -43,8 +43,8 @@ AWG_STARTUP_RECONCILE_STATUSES = {
     VpnKeyStatus.DELETE_FAILED,
 }
 
-AWG_ACTIVE_STATUSES = {VpnKeyStatus.ACTIVE}
-AWG_ALL_STATUSES = set(VpnKeyStatus)
+AWG_ACTIVE_STATUSES: set[VpnKeyStatus] = {VpnKeyStatus.ACTIVE}
+AWG_ALL_STATUSES: set[VpnKeyStatus] = set(VpnKeyStatus)
 AWG_MANAGED_LABEL_RE = re.compile(r"^awg_[A-Za-z0-9]{5}$")
 
 

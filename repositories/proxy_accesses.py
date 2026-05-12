@@ -199,6 +199,7 @@ class ProxyAccessRepository:
             ),
         )
         await self.db.commit()
+        assert cursor.lastrowid is not None
         access = await self.get_by_id(int(cursor.lastrowid))
         if access is None:
             raise RuntimeError("Proxy access insert failed")

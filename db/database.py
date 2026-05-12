@@ -662,7 +662,7 @@ class Database:
                 raise
         self._transaction_depth += 1
         try:
-            yield self.conn
+            yield self.conn  # type: ignore[misc]
         except Exception:
             self._transaction_depth -= 1
             if outermost:
@@ -811,7 +811,7 @@ class _ConnectionProxy:
     async def execute_fetchall(self, sql: str, parameters: Any = None, /) -> list[aiosqlite.Row]:
         cursor = await self.execute(sql) if parameters is None else await self.execute(sql, parameters)
         try:
-            return await cursor.fetchall()
+            return await cursor.fetchall()  # type: ignore[return-value]
         except Exception:
             if self._db._implicit_write_owner is asyncio.current_task():
                 await self._db._rollback_implicit_write_owner()
