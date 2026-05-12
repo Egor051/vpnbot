@@ -22,7 +22,7 @@ This project is designed for a single-server deployment without Docker, Redis, P
 
 ## Stack
 
-- Python 3
+- Python 3.12+
 - aiogram 3
 - SQLite via aiosqlite
 - python-dotenv
