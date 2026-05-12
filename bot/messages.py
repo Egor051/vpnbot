@@ -23,7 +23,7 @@ async def safe_edit_message_text(
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
-    if not isinstance(message, Message):
+    if message is None or isinstance(message, InaccessibleMessage):
         return False
     text = cap_telegram_html(text)
     try:
@@ -67,7 +67,7 @@ async def send_awg_config(
     edit_text: bool = False,
     send_document: bool = True,
 ) -> None:
-    if not isinstance(message, Message):
+    if message is None or isinstance(message, InaccessibleMessage):
         return
     if len(config_text) <= MAX_TEXT_CONFIG_LEN:
         text = cap_telegram_html(f"<b>{h(title)}</b>\n\n{pre(config_text)}")
