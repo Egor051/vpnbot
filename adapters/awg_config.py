@@ -162,7 +162,7 @@ class AwgConfigAdapter:
                 label=label,
             )
             return
-        with ConfigFileLock(self.config_path):
+        async with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             snapshot = self._snapshot_config()
             backup_path = self.backup.create_backup(self.config_path)
@@ -212,7 +212,7 @@ class AwgConfigAdapter:
         if self._using_helper():
             await self._remove_peer_via_helper(key_id=key_id, public_key=public_key)
             return
-        with ConfigFileLock(self.config_path):
+        async with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             snapshot = self._snapshot_config()
             backup_path = self.backup.create_backup(self.config_path)
@@ -255,7 +255,7 @@ class AwgConfigAdapter:
         client_ip: str,
         label: str | None,
     ) -> None:
-        with ConfigFileLock(self._lock_target()):
+        async with ConfigFileLock(self._lock_target()):
             snapshot = self._snapshot_config()
             original = self._read_text()
             self._assert_config_unchanged(snapshot)
@@ -279,7 +279,7 @@ class AwgConfigAdapter:
             await self._apply_config_text_via_helper(updated)
 
     async def _remove_peer_via_helper(self, *, key_id: int, public_key: str | None) -> None:
-        with ConfigFileLock(self._lock_target()):
+        async with ConfigFileLock(self._lock_target()):
             snapshot = self._snapshot_config()
             original = self._read_text()
             self._assert_config_unchanged(snapshot)
@@ -381,22 +381,22 @@ class AwgConfigAdapter:
 
     async def sync_runtime_from_config(self) -> None:
         if self._using_helper():
-            with ConfigFileLock(self._lock_target()):
+            async with ConfigFileLock(self._lock_target()):
                 await self._apply_config_text_via_helper(self._read_text())
             return
-        with ConfigFileLock(self.config_path):
+        async with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             await self._validate_candidate_config(self._read_text())
             await self._sync_runtime_from_config(self.config_path)
 
     async def remove_runtime_peer(self, public_key: str) -> None:
         if self._using_helper():
-            with ConfigFileLock(self._lock_target()):
+            async with ConfigFileLock(self._lock_target()):
                 await self._apply_config_text_via_helper(self._read_text())
                 if await self.verify_runtime_peer(public_key):
                     raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
             return
-        with ConfigFileLock(self.config_path):
+        async with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             if not await self._remove_peer_runtime(public_key):
                 raise AwgApplyError("Не удалось удалить AWG peer из runtime")

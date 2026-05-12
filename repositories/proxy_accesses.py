@@ -340,38 +340,38 @@ class ProxyAccessRepository:
         public_payload: dict[str, Any] | None = None,
         apply_generation: int | None = None,
     ) -> None:
-        current = await self.get_by_id(access_id)
-        if current is None:
-            raise RuntimeError("Proxy access not found")
-        await self.db.conn.execute(
-            """
-            UPDATE proxy_accesses
-            SET status = ?,
-                updated_at = ?,
-                activated_at = COALESCE(activated_at, ?),
-                last_apply_at = ?,
-                apply_generation = COALESCE(?, apply_generation),
-                error = NULL,
-                payload_json = ?,
-                public_payload_json = ?
-            WHERE id = ?
-            """,
-            (
-                ProxyAccessStatus.ACTIVE.value,
-                now,
-                now,
-                now,
-                apply_generation,
-                json.dumps(payload if payload is not None else current.payload, ensure_ascii=False, separators=(",", ":")),
-                json.dumps(
-                    public_payload if public_payload is not None else current.public_payload,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+        async with self.db.transaction():
+            current = await self.get_by_id(access_id)
+            if current is None:
+                raise RuntimeError("Proxy access not found")
+            await self.db.conn.execute(
+                """
+                UPDATE proxy_accesses
+                SET status = ?,
+                    updated_at = ?,
+                    activated_at = COALESCE(activated_at, ?),
+                    last_apply_at = ?,
+                    apply_generation = COALESCE(?, apply_generation),
+                    error = NULL,
+                    payload_json = ?,
+                    public_payload_json = ?
+                WHERE id = ?
+                """,
+                (
+                    ProxyAccessStatus.ACTIVE.value,
+                    now,
+                    now,
+                    now,
+                    apply_generation,
+                    json.dumps(payload if payload is not None else current.payload, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(
+                        public_payload if public_payload is not None else current.public_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    access_id,
                 ),
-                access_id,
-            ),
-        )
-        await self.db.commit()
+            )
 
     async def update_payloads(
         self,

@@ -343,28 +343,28 @@ class VpnKeyRepository:
         payload: dict[str, Any] | None = None,
         public_payload: dict[str, Any] | None = None,
     ) -> None:
-        current = await self.get_by_id(key_id)
-        if current is None:
-            raise RuntimeError("VPN key not found")
-        await self.db.conn.execute(
-            """
-            UPDATE vpn_keys
-            SET status = ?, updated_at = ?, payload_json = ?, public_payload_json = ?
-            WHERE id = ?
-            """,
-            (
-                VpnKeyStatus.ACTIVE.value,
-                now,
-                json.dumps(payload if payload is not None else current.payload, ensure_ascii=False, separators=(",", ":")),
-                json.dumps(
-                    public_payload if public_payload is not None else current.public_payload,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+        async with self.db.transaction():
+            current = await self.get_by_id(key_id)
+            if current is None:
+                raise RuntimeError("VPN key not found")
+            await self.db.conn.execute(
+                """
+                UPDATE vpn_keys
+                SET status = ?, updated_at = ?, payload_json = ?, public_payload_json = ?
+                WHERE id = ?
+                """,
+                (
+                    VpnKeyStatus.ACTIVE.value,
+                    now,
+                    json.dumps(payload if payload is not None else current.payload, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(
+                        public_payload if public_payload is not None else current.public_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    key_id,
                 ),
-                key_id,
-            ),
-        )
-        await self.db.commit()
+            )
 
     async def set_status(self, key_id: int, status: VpnKeyStatus, now: str) -> None:
         await self.db.conn.execute(

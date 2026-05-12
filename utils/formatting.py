@@ -54,7 +54,7 @@ def format_user_display(telegram_user_id: int | None, username: str | None) -> s
     if username:
         clean = username.lstrip("@")
         if clean:
-            return f"@{clean}"
+            return f"@{h(clean)}"
     if telegram_user_id is None:
         return "неизвестный пользователь"
     return f"tg{telegram_user_id}"
@@ -62,7 +62,7 @@ def format_user_display(telegram_user_id: int | None, username: str | None) -> s
 
 def format_greeting_name(telegram_user_id: int, first_name: str | None, username: str | None) -> str:
     if first_name:
-        return str(first_name)
+        return h(str(first_name))
     if username:
-        return username.lstrip("@")
+        return h(username.lstrip("@"))
     return str(telegram_user_id)

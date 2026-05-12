@@ -6,6 +6,7 @@ from datetime import timedelta
 from adapters.clock import ClockProvider
 from models.enums import AuditEntityType
 from repositories.audit_log import AuditLogRepository
+from utils.redact import redact_value
 
 logger = logging.getLogger(__name__)
 
@@ -134,8 +135,10 @@ class AuditService:
             return {str(item_key): self._sanitize_value(item_value, str(item_key)) for item_key, item_value in value.items()}
         if isinstance(value, (list, tuple)):
             return [self._sanitize_value(item) for item in value]
-        if isinstance(value, str) and len(value) > 256:
-            return value[:256] + "...[truncated]"
+        if isinstance(value, str):
+            if len(value) > 256:
+                value = value[:256] + "...[truncated]"
+            value = redact_value(value)
         return value
 
     def _is_secret_key(self, key: str) -> bool:
