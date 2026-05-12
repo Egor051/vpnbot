@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, User as TgUser
 
+from bot.container import Services
 from bot.formatters import main_menu_text
 from bot.keyboards.common import back_to_menu, faq_answer_keyboard, faq_keyboard, main_menu
 from bot.messages import is_stale_callback_query_error, safe_callback_answer, safe_edit_message_text
@@ -30,7 +30,7 @@ def profile_from_tg(user: TgUser) -> TelegramUserProfile:
     )
 
 
-async def is_admin(services: Any, user_id: int) -> bool:
+async def is_admin(services: Services, user_id: int) -> bool:
     try:
         user = await services.users.get_user(user_id)
     except NotFound:
@@ -84,7 +84,7 @@ FAQ_ANSWERS = {
 
 
 @router.message(Command("help"))
-async def help_command(message: Message, services: Any) -> None:
+async def help_command(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -93,7 +93,7 @@ async def help_command(message: Message, services: Any) -> None:
 
 
 @router.message(Command("faq"))
-async def faq_command(message: Message, services: Any) -> None:
+async def faq_command(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -102,7 +102,7 @@ async def faq_command(message: Message, services: Any) -> None:
 
 
 @router.callback_query(F.data == "help")
-async def help_callback(callback: CallbackQuery, services: Any) -> None:
+async def help_callback(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -125,7 +125,7 @@ async def faq_answer_callback(callback: CallbackQuery) -> None:
 
 
 @router.message(F.text == "Помощь")
-async def help_menu_message(message: Message, services: Any) -> None:
+async def help_menu_message(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -134,7 +134,7 @@ async def help_menu_message(message: Message, services: Any) -> None:
 
 
 @router.message(Command("menu"))
-async def menu_command(message: Message, services: Any) -> None:
+async def menu_command(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -150,7 +150,7 @@ async def menu_command(message: Message, services: Any) -> None:
 
 
 @router.callback_query(F.data == "menu:main")
-async def menu_callback(callback: CallbackQuery, services: Any) -> None:
+async def menu_callback(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)

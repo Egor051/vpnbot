@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -16,6 +14,7 @@ from bot.formatters import (
     traffic_stats_text,
     xray_config_text,
 )
+from bot.container import Services
 from bot.fsm.states import CreateKeyStates, EditNoteStates
 from bot.handlers.common import answer_callback_error, answer_message_error, profile_from_tg
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
@@ -38,7 +37,7 @@ KEYS_PAGE_SIZE = 5
 
 
 @router.callback_query(F.data.regexp(r"^keys:list(?::\d+)?$"))
-async def list_keys(callback: CallbackQuery, services: Any) -> None:
+async def list_keys(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -63,7 +62,7 @@ async def list_keys(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.message(F.text == "Мои ключи")
-async def list_keys_message(message: Message, services: Any) -> None:
+async def list_keys_message(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -84,7 +83,7 @@ async def list_keys_message(message: Message, services: Any) -> None:
 
 
 @router.callback_query(F.data == "keys:create")
-async def create_key_menu(callback: CallbackQuery, services: Any) -> None:
+async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     try:
@@ -104,7 +103,7 @@ async def create_key_menu(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.message(F.text == "Создать ключ")
-async def create_key_menu_message(message: Message, services: Any) -> None:
+async def create_key_menu_message(message: Message, services: Services) -> None:
     if not await ensure_private_message(message):
         return
     if message.from_user is None:
@@ -117,7 +116,7 @@ async def create_key_menu_message(message: Message, services: Any) -> None:
 
 
 @router.callback_query(F.data.in_({"keys:create:xray", "keys:create:awg"}))
-async def create_key_choose(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+async def create_key_choose(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -138,7 +137,7 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext, services
 
 
 @router.message(CreateKeyStates.waiting_note)
-async def create_key_note(message: Message, state: FSMContext, services: Any) -> None:
+async def create_key_note(message: Message, state: FSMContext, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -159,7 +158,7 @@ async def create_key_note(message: Message, state: FSMContext, services: Any) ->
 
 
 @router.callback_query(CreateKeyStates.confirming, F.data == "create:confirm")
-async def create_key_confirm(callback: CallbackQuery, state: FSMContext, services: Any, rate_limiter: RateLimiter) -> None:
+async def create_key_confirm(callback: CallbackQuery, state: FSMContext, services: Services, rate_limiter: RateLimiter) -> None:
     if callback.from_user is None or callback.message is None:
         return
     if not await ensure_private_callback(callback):
@@ -201,7 +200,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
 
 
 @router.callback_query(F.data.startswith("key:open:"))
-async def open_key(callback: CallbackQuery, services: Any) -> None:
+async def open_key(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -224,7 +223,7 @@ async def open_key(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.startswith("key:show:"))
-async def show_key_config(callback: CallbackQuery, services: Any, rate_limiter: RateLimiter) -> None:
+async def show_key_config(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -257,7 +256,7 @@ async def show_key_config(callback: CallbackQuery, services: Any, rate_limiter: 
 
 
 @router.callback_query(F.data.startswith("key:stats:"))
-async def show_key_stats(callback: CallbackQuery, services: Any) -> None:
+async def show_key_stats(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -289,7 +288,7 @@ async def show_key_stats(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.startswith("key:revoke:"))
-async def revoke_key_prompt(callback: CallbackQuery, services: Any) -> None:
+async def revoke_key_prompt(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -309,7 +308,7 @@ async def revoke_key_prompt(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.startswith("key:delete:"))
-async def delete_key_prompt(callback: CallbackQuery, services: Any) -> None:
+async def delete_key_prompt(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -334,7 +333,7 @@ async def delete_key_prompt(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.startswith("confirm:"))
-async def confirm_key_action(callback: CallbackQuery, services: Any, rate_limiter: RateLimiter) -> None:
+async def confirm_key_action(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     if not await ensure_private_callback(callback):
@@ -400,7 +399,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Any, rate_limite
 
 
 @router.callback_query(F.data.startswith("key:note:"))
-async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -421,7 +420,7 @@ async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services:
 
 
 @router.message(EditNoteStates.waiting_note)
-async def edit_note_waiting(message: Message, state: FSMContext, services: Any) -> None:
+async def edit_note_waiting(message: Message, state: FSMContext, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -440,7 +439,7 @@ async def edit_note_waiting(message: Message, state: FSMContext, services: Any) 
 
 
 @router.callback_query(EditNoteStates.confirming, F.data == "note:confirm")
-async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     if callback.from_user is None or callback.message is None:
         return
     if not await ensure_private_callback(callback):
@@ -473,7 +472,7 @@ def _admin_owner_context(key, actor_user_id: int) -> int | None:
     return key.owner_user_id if key.owner_user_id != actor_user_id else None
 
 
-async def _ensure_can_enter_create(actor_user_id: int, services: Any) -> None:
+async def _ensure_can_enter_create(actor_user_id: int, services: Services) -> None:
     try:
         await services.users.require_approved_or_admin(actor_user_id)
     except NotFound as exc:
@@ -509,7 +508,7 @@ def _parse_confirm_context(data: str) -> tuple[str, int, int | None, int]:
 
 
 async def _load_keys_page(
-    services: Any,
+    services: Services,
     actor_user_id: int,
     *,
     owner_user_id: int | None = None,

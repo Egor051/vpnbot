@@ -16,6 +16,8 @@ class PrivilegedHelperError(RuntimeError):
 
 
 class PrivilegedHelperRunner:
+    """Invokes fixed sudo helper scripts that perform privileged VPN/proxy operations."""
+
     def __init__(self, *, shell: ShellRunner, use_sudo: bool = True) -> None:
         self.shell = shell
         self.use_sudo = use_sudo
@@ -30,6 +32,7 @@ class PrivilegedHelperRunner:
         timeout: float = 60.0,
         max_output_chars: int = 2048,
     ) -> ShellResult:
+        """Run the helper at helper_path with optional sudo; raises PrivilegedHelperError on bad path."""
         if not helper_path.is_absolute():
             raise PrivilegedHelperError("Privileged helper path must be absolute")
         command = [str(helper_path), *args]

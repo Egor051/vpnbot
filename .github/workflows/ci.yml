@@ -42,8 +42,11 @@ jobs:
       - name: Compile Python files
         run: python -m compileall .
 
-      - name: Run tests
-        run: python -m pytest
+      - name: Type check with mypy
+        run: python -m mypy bot/ services/ adapters/ config/ models/ utils/ repositories/
+
+      - name: Run tests with coverage
+        run: python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=50
 
   dependency-audit:
     name: Dependency Audit

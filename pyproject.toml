@@ -1,0 +1,50 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+omit = ["tests/*", "init_db.py", "main.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+check_untyped_defs = true
+strict_optional = true
+ignore_missing_imports = true
+
+# New clean modules — strict checking
+[[tool.mypy.overrides]]
+module = ["config.*", "models.*", "utils.*", "bot.container", "bot.guards"]
+disallow_untyped_defs = true
+
+# Legacy files with pre-existing errors — suppressed until fixed separately
+[[tool.mypy.overrides]]
+module = [
+    "db.*",
+    "adapters.xray_stats",
+    "adapters.mtproxy",
+    "repositories.proxy_entries",
+    "repositories.proxy_accesses",
+    "repositories.vpn_keys",
+    "repositories.announcements",
+    "repositories.access_requests",
+    "bot.formatters",
+    "bot.app",
+    "bot.handlers.*",
+    "bot.middlewares.*",
+    "services.users",
+    "services.socks5",
+    "services.mtproto",
+    "services.xray",
+    "services.awg",
+]
+ignore_errors = true
