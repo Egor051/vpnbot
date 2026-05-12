@@ -64,7 +64,7 @@ class MtProtoService:
         self.clock = clock
         self.audit = audit
         self.adapter = adapter
-        self.user_locks = user_locks or getattr(users, "user_locks", UserLockManager())
+        self.user_locks: UserLockManager = user_locks if user_locks is not None else users.user_locks
         self.backend_health = backend_health or BackendHealth()
         self._apply_lock = asyncio.Lock()
 
@@ -116,7 +116,7 @@ class MtProtoService:
         accesses = await self.accesses.list_by_owner(actor_user_id)
         return [access for access in accesses if access.access_type == ProxyAccessType.MTPROTO]
 
-    async def runtime_status(self):
+    async def runtime_status(self) -> object:
         if self.settings.mtproto_mode != "managed" or self.adapter is None:
             return None
         return await self.adapter.runtime_status()
@@ -205,7 +205,7 @@ class MtProtoService:
                 actor_user_id=None,
                 action="mtproto_startup_reconcile_checked",
                 entity_id=None,
-                details=summary,
+                details=dict(summary),  # type: ignore[arg-type]
             )
         return summary
 

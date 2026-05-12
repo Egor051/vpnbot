@@ -19,6 +19,7 @@ from adapters.privileged_helpers import (
 )
 from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
+from models.dto import ShellResult
 
 _MANAGED_RUNTIME_NOT_INITIALIZED = (
     "MTProto managed runtime is not initialized; run manual setup/preflight first"
@@ -269,7 +270,7 @@ class MtProxyAdapter:
             message = self._redact(f"MTProxy apply failed: {exc}; rollback restored previous files", desired)
             raise MtProxyApplyError(message) from exc
 
-    async def restart_mtproxy(self):
+    async def restart_mtproxy(self) -> ShellResult:
         return await self.systemctl.restart(self.service_name)
 
     async def check_mtproxy_active(self) -> bool:
@@ -586,6 +587,6 @@ class MtProxyAdapter:
         if value is None:
             return None
         try:
-            return int(value)
+            return int(value)  # type: ignore[call-overload]
         except (TypeError, ValueError):
             return None

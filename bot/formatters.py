@@ -843,11 +843,11 @@ def audit_page_text(items: list[dict[str, object]], page: int, users: dict[int, 
 
 def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
     actor_id = item.get("actor_user_id")
-    actor: User | None = users.get(int(actor_id)) if actor_id is not None else None
+    actor: User | None = users.get(int(actor_id)) if actor_id is not None else None  # type: ignore[call-overload]
     actor_text = (
         format_user_display(actor.telegram_user_id, actor.username)
         if actor is not None
-        else format_user_display(int(actor_id), None) if actor_id is not None else "система"
+        else format_user_display(int(actor_id), None) if actor_id is not None else "система"  # type: ignore[call-overload]
     )
     action = str(item.get("action") or "")
     details = item.get("details")
@@ -860,7 +860,7 @@ def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
         str(owner_username) if owner_username else None,
     )
     owner_suffix = ""
-    if owner_user_id is not None and actor_id is not None and int(owner_user_id) != int(actor_id):
+    if owner_user_id is not None and actor_id is not None and int(owner_user_id) != int(actor_id):  # type: ignore[call-overload]
         owner_suffix = f" для {owner_text}"
     time_text = h(format_msk_datetime(str(item.get("created_at") or "")))
     if action == "xray_key_created":

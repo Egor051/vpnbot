@@ -76,7 +76,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     audit_repo = AuditLogRepository(db)
     traffic_stats_repo = TrafficStatsRepository(db)
 
-    audit_service = AuditService(audit_repo, clock)
+    audit_service = AuditService(audit_repo, clock, users_repo)
     user_service = UserService(users=users_repo, settings=settings, clock=clock, audit=audit_service, user_locks=user_locks)
     await user_service.bootstrap_admins()
 

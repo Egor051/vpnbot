@@ -66,7 +66,7 @@ class XrayService:
         self.clock = clock
         self.ids = ids
         self.audit = audit
-        self.user_locks = user_locks or getattr(users, "user_locks", UserLockManager())
+        self.user_locks: UserLockManager = user_locks if user_locks is not None else users.user_locks
         self.backend_health = backend_health or BackendHealth()
         self._lock = asyncio.Lock()
 
@@ -252,8 +252,8 @@ class XrayService:
 
             if summary["failed"] == 0:
                 drift_summary = await self._startup_reconcile_drift()
-                for key, value in drift_summary.items():
-                    summary[key] += value
+                for drift_key, drift_val in drift_summary.items():
+                    summary[drift_key] += drift_val
         return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:

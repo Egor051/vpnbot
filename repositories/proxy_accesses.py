@@ -77,7 +77,7 @@ def _optional_int(value: object) -> int | None:
     if value is None:
         return None
     try:
-        return int(value)
+        return int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -596,7 +596,7 @@ class ProxyAccessRepository:
         for row in rows:
             access_type = _enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type")  # type: ignore[arg-type]
             status = _enum_value(ProxyAccessStatus, row["status"], "proxy_accesses.status")  # type: ignore[arg-type]
-            result.setdefault(access_type, {})[status] = int(row["cnt"])
+            result.setdefault(access_type, {})[status] = int(row["cnt"])  # type: ignore[arg-type,index]
         return result
 
     async def count_users_with_active_proxies(self) -> int:
@@ -784,5 +784,5 @@ class ProxyAccessRepository:
         for row in rows:
             user_id = int(row["owner_user_id"])
             access_type = _enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type")  # type: ignore[arg-type]
-            refs.setdefault(user_id, []).append(ProxyActiveAccessRef(id=int(row["id"]), access_type=access_type))
+            refs.setdefault(user_id, []).append(ProxyActiveAccessRef(id=int(row["id"]), access_type=access_type))  # type: ignore[arg-type]
         return {user_id: tuple(items) for user_id, items in refs.items()}

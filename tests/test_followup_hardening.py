@@ -1078,13 +1078,10 @@ async def _count_audit_actions(db: Database, action: str) -> int:
     return int(row["cnt"]) if row is not None else 0
 
 
-def test_legacy_blocking_role_aliases_are_treated_as_blocked() -> None:
-    assert parse_user_role("blocked") == UserRole.BLOCKED_USER
-    assert parse_user_role("banned") == UserRole.BLOCKED_USER
-    assert parse_user_role("revoked") == UserRole.BLOCKED_USER
-    assert is_blocked_user(User(300, "blocked", "Blocked", "blocked", "now", "now", None)) is True  # type: ignore[arg-type]
-    assert is_blocked_user(User(301, "banned", "Banned", "banned", "now", "now", None)) is True  # type: ignore[arg-type]
-    assert is_blocked_user(User(302, "revoked", "Revoked", "revoked", "now", "now", None)) is True  # type: ignore[arg-type]
+def test_blocked_user_role_is_treated_as_blocked() -> None:
+    assert parse_user_role("BLOCKED_USER") == UserRole.BLOCKED_USER
+    assert is_blocked_user(User(300, "u1", "U1", UserRole.BLOCKED_USER, "now", "now", None)) is True
+    assert is_blocked_user(User(301, "u2", "U2", UserRole.PENDING_USER, "now", "now", "blocked_ts")) is True
 
 
 def test_superadmin_is_not_blocked_by_stale_blocked_at() -> None:

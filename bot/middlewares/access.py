@@ -64,5 +64,7 @@ def _is_start_command(message: Message) -> bool:
 
 async def _clear_state(data: dict[str, Any]) -> None:
     state = data.get("state")
-    if isinstance(state, FSMContext) or hasattr(state, "clear"):
+    if isinstance(state, FSMContext):
         await state.clear()
+    elif state is not None and hasattr(state, "clear"):
+        await state.clear()  # type: ignore[union-attr]

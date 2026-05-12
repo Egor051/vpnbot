@@ -5,7 +5,7 @@ from dataclasses import replace
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.container import Services
 from bot.formatters import (
@@ -247,15 +247,15 @@ async def admin_announcement_batch_action(callback: CallbackQuery, services: Ser
             prefix = f"Batch #{result.batch.id} отменён." if result.changed else f"Batch #{result.batch.id} уже был отменён."
         else:
             await safe_callback_answer(callback, "Восстанавливаю отправку...")
-            result = await services.announcements.resume_batch(
+            resume_result = await services.announcements.resume_batch(
                 actor_user_id=callback.from_user.id,
                 bot=bot,
                 announcement_id=batch_id,
                 retry_failed=action == "retry",
             )
             prefix = (
-                f"Batch #{result.announcement_id} обработан.\n"
-                f"Получателей: {result.total}; успешно: {result.success}; ошибок: {result.failed}."
+                f"Batch #{resume_result.announcement_id} обработан.\n"
+                f"Получателей: {resume_result.total}; успешно: {resume_result.success}; ошибок: {resume_result.failed}."
             )
         await _show_announcement_batches(callback, services, prefix=prefix)
     except Exception as exc:
@@ -621,11 +621,10 @@ async def admin_audit(callback: CallbackQuery, services: Services) -> None:
         return
     page = _page_from_callback(callback.data)
     try:
-        await require_superadmin(services, callback.from_user.id)
-        items = await services.audit.recent(limit=AUDIT_PAGE_SIZE + 1, offset=page_offset(page, AUDIT_PAGE_SIZE))
+        items = await services.audit.recent(actor_user_id=callback.from_user.id, limit=AUDIT_PAGE_SIZE + 1, offset=page_offset(page, AUDIT_PAGE_SIZE))
         audit_items, has_next = split_page(items, AUDIT_PAGE_SIZE)
         actor_ids = [
-            int(item["actor_user_id"])
+            int(item["actor_user_id"])  # type: ignore[call-overload]
             for item in audit_items
             if item.get("actor_user_id") is not None
         ]
@@ -972,7 +971,7 @@ async def _show_announcement_batches(callback: CallbackQuery, services: Services
     )
 
 
-def _simple_nav(rows: list[tuple[str, str]], back_data: str):
+def _simple_nav(rows: list[tuple[str, str]], back_data: str) -> InlineKeyboardMarkup:
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
     keyboard = []

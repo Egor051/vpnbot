@@ -1,4 +1,6 @@
 
+from typing import Any
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -469,7 +471,7 @@ def _clean_note(value: str | None) -> str | None:
     return None if note in {"", "-"} else note
 
 
-def _admin_owner_context(key, actor_user_id: int) -> int | None:
+def _admin_owner_context(key: Any, actor_user_id: int) -> int | None:
     return key.owner_user_id if key.owner_user_id != actor_user_id else None
 
 
@@ -515,7 +517,7 @@ async def _load_keys_page(
     owner_user_id: int | None = None,
     page: int,
     page_size: int,
-):
+) -> tuple[Any, int, int, bool]:
     total_count = await services.vpn_keys.count_for_actor(actor_user_id, owner_user_id=owner_user_id)
     total_pages = max(1, (total_count + page_size - 1) // page_size)
     current_page = min(max(page, 0), total_pages - 1)

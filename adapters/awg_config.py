@@ -1,4 +1,5 @@
 
+import ipaddress
 import os
 import tempfile
 import logging
@@ -874,14 +875,10 @@ class AwgConfigAdapter:
         except ValueError as exc:
             raise AwgConfigError(f"AWG integer parameter has invalid value: {value}") from exc
 
-    def _ip_network(self, value: str):
-        import ipaddress
-
+    def _ip_network(self, value: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
         return ipaddress.ip_network(value, strict=False)
 
-    def _ip_address(self, value: str):
-        import ipaddress
-
+    def _ip_address(self, value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
         return ipaddress.ip_address(value)
 
 

@@ -411,7 +411,7 @@ class UserService:
 
     def _positive_int(self, value: object) -> int:
         try:
-            result = int(value) if value is not None else 0
+            result = int(value) if value is not None else 0  # type: ignore[call-overload]
         except (TypeError, ValueError):
             return 0
         return max(result, 0)
