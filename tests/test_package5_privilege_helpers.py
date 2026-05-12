@@ -93,7 +93,7 @@ def test_socks5_set_password_reads_secret_from_stdin_and_uses_argv(monkeypatch: 
 
     assert calls == [
         (
-            ["chpasswd"],
+            ["nsenter", "--mount=/proc/1/ns/mnt", "--", "chpasswd"],
             {
                 "input": "vpn_socks_100_abcd:secret-password\n",
                 "text": True,

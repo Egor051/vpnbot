@@ -22,9 +22,6 @@ ProtectSystem=strict
 RuntimeDirectory=vpn-bot
 RuntimeDirectoryMode=0700
 ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot
-# passwd databases must be writable so the sudo SOCKS5 helper can run
-# useradd/userdel/chpasswd inside the ProtectSystem=strict namespace
-ReadWritePaths=/etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/pwd.lock
 
 [Install]
 WantedBy=multi-user.target
