@@ -174,13 +174,13 @@ class AnnouncementRepository:
             """
             UPDATE announcement_deliveries
             SET status = ?, error_text = ?, updated_at = ?
-            WHERE announcement_id = ? AND user_id = ? AND status = 'pending'
+            WHERE announcement_id = ? AND user_id = ? AND status IN ('pending', 'failed')
             """,
             (status, _truncate_error(error_text), now, announcement_id, user_id),
         )
         await self.db.commit()
         if cursor.rowcount != 1:
-            raise InvalidTransition(f"Announcement delivery {announcement_id}/{user_id} is not in pending state")
+            raise InvalidTransition(f"Announcement delivery {announcement_id}/{user_id} is not in pending/failed state")
 
     async def refresh_batch_counts(self, announcement_id: int, now: str) -> None:
         await self.db.conn.execute(
