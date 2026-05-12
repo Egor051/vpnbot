@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 from bot.pagination import page_offset, split_page
 

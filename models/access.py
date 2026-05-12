@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 from models.dto import User
 from models.enums import UserRole, parse_user_role

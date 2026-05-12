@@ -1,9 +1,8 @@
-from __future__ import annotations
 
 import os
 from pathlib import Path
 from types import TracebackType
-from typing import TextIO
+from typing import Self, TextIO
 
 
 class SingleInstanceError(RuntimeError):
@@ -15,7 +14,7 @@ class SingleInstanceLock:
         self.lock_path = lock_path
         self._file: TextIO | None = None
 
-    def __enter__(self) -> SingleInstanceLock:
+    def __enter__(self) -> Self:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         file = self.lock_path.open("a+", encoding="utf-8")
         try:

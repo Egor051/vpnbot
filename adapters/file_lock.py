@@ -1,10 +1,9 @@
-from __future__ import annotations
 
 import os
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import TextIO
+from typing import Self, TextIO
 
 
 class ConfigLockBusyError(TimeoutError):
@@ -18,7 +17,7 @@ class ConfigFileLock:
         self.poll_interval = max(poll_interval, 0.01)
         self._file: TextIO | None = None
 
-    def __enter__(self) -> ConfigFileLock:
+    def __enter__(self) -> Self:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         file = self.lock_path.open("a+", encoding="utf-8")
         if os.name == "posix":

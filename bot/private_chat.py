@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 from aiogram.enums import ChatType
 from aiogram.types import CallbackQuery, Message
