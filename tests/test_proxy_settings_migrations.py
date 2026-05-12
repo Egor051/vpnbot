@@ -227,7 +227,7 @@ def test_proxy_accesses_migration_from_legacy_schema_is_idempotent(tmp_path: Pat
             await db.bootstrap(old_schema_path)
             row = await db.conn.execute_fetchone("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             assert row is not None
-            assert int(row["value"]) == CURRENT_SCHEMA_VERSION == 10
+            assert int(row["value"]) == CURRENT_SCHEMA_VERSION
             table = await db.conn.execute_fetchone(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'proxy_accesses'"
             )
@@ -281,7 +281,7 @@ def test_proxy_accesses_v9_migration_preserves_static_records_and_is_idempotent(
 
             row = await db.conn.execute_fetchone("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             assert row is not None
-            assert int(row["value"]) == CURRENT_SCHEMA_VERSION == 10
+            assert int(row["value"]) == CURRENT_SCHEMA_VERSION
             columns = await db.conn.execute_fetchall("PRAGMA table_info(proxy_accesses)")
             column_names = {str(item["name"]) for item in columns}
             assert {"secret_fingerprint", "apply_generation", "activated_at", "last_apply_at"} <= column_names
