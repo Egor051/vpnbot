@@ -14,3 +14,7 @@ class NotFound(ServiceError):
 
 class InvalidOperation(ServiceError):
     pass
+
+
+class InvalidTransition(ServiceError):
+    pass

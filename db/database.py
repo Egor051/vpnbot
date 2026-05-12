@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 12
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -199,6 +199,14 @@ class Database:
         if version < 10:
             await self._create_proxy_access_live_unique_index()
             await self._set_schema_version(10)
+            version = 10
+        if version < 11:
+            await self._normalize_user_roles()
+            await self._set_schema_version(11)
+            version = 11
+        if version < 12:
+            await self._create_performance_indexes()
+            await self._set_schema_version(12)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -471,23 +479,7 @@ class Database:
             (
                 "users",
                 "role",
-                (
-                    "SUPERADMIN",
-                    "APPROVED_USER",
-                    "PENDING_USER",
-                    "BLOCKED_USER",
-                    "superadmin",
-                    "super_admin",
-                    "approved",
-                    "approved_user",
-                    "pending",
-                    "pending_user",
-                    "blocked",
-                    "blocked_user",
-                    "banned",
-                    "ban",
-                    "revoked",
-                ),
+                ("SUPERADMIN", "APPROVED_USER", "PENDING_USER", "BLOCKED_USER"),
             ),
             ("access_requests", "status", ("pending", "approved", "rejected")),
             (
@@ -568,6 +560,37 @@ class Database:
                 "Остановите запуск, сделайте backup SQLite DB и вручную разберите конфликт перед миграцией."
             )
 
+    async def _create_performance_indexes(self) -> None:
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_active_role "
+            "ON users(role) WHERE blocked_at IS NULL"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vpn_keys_short_id "
+            "ON vpn_keys(json_extract(payload_json, '$.short_id')) "
+            "WHERE key_type = 'xray' AND json_valid(payload_json) AND json_extract(payload_json, '$.short_id') IS NOT NULL"
+        )
+
+    async def _normalize_user_roles(self) -> None:
+        legacy_map = {
+            "superadmin": "SUPERADMIN",
+            "super_admin": "SUPERADMIN",
+            "approved": "APPROVED_USER",
+            "approved_user": "APPROVED_USER",
+            "pending": "PENDING_USER",
+            "pending_user": "PENDING_USER",
+            "blocked": "BLOCKED_USER",
+            "blocked_user": "BLOCKED_USER",
+            "banned": "BLOCKED_USER",
+            "ban": "BLOCKED_USER",
+            "revoked": "BLOCKED_USER",
+        }
+        for legacy, canonical in legacy_map.items():
+            await self.conn.execute(
+                "UPDATE users SET role = ? WHERE role = ?",
+                (canonical, legacy),
+            )
+
     async def _validate_proxy_live_duplicates(self) -> None:
         cursor = await self.conn.execute(
             """
@@ -639,7 +662,7 @@ class Database:
                 raise
         self._transaction_depth += 1
         try:
-            yield self.conn
+            yield self.conn  # type: ignore[misc]
         except Exception:
             self._transaction_depth -= 1
             if outermost:
@@ -788,7 +811,7 @@ class _ConnectionProxy:
     async def execute_fetchall(self, sql: str, parameters: Any = None, /) -> list[aiosqlite.Row]:
         cursor = await self.execute(sql) if parameters is None else await self.execute(sql, parameters)
         try:
-            return await cursor.fetchall()
+            return await cursor.fetchall()  # type: ignore[return-value]
         except Exception:
             if self._db._implicit_write_owner is asyncio.current_task():
                 await self._db._rollback_implicit_write_owner()

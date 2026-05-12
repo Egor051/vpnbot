@@ -47,7 +47,7 @@ class Socks5Service:
         self.settings = settings
         self.clock = clock
         self.audit = audit
-        self.user_locks = user_locks or getattr(users, "user_locks", UserLockManager())
+        self.user_locks: UserLockManager = user_locks if user_locks is not None else getattr(users, "user_locks", UserLockManager())
         self.backend_health = backend_health or BackendHealth()
 
     async def issue_socks5_proxy(self, actor_user_id: int, profile: TelegramUserProfile) -> ProxyAccess:

@@ -24,7 +24,7 @@ async def main() -> None:
                 health_app = create_health_app(backend_health)
                 runner = web.AppRunner(health_app)
                 await runner.setup()
-                site = web.TCPSite(runner, "0.0.0.0", settings.health_port)
+                site = web.TCPSite(runner, settings.health_host, settings.health_port)
                 await site.start()
                 logger.info("Health check endpoint started on port %d", settings.health_port)
             await bot.delete_webhook(drop_pending_updates=settings.bot_drop_pending_updates)

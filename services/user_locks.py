@@ -1,5 +1,6 @@
 
 import asyncio
+import weakref
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
@@ -7,7 +8,7 @@ from collections.abc import AsyncIterator
 class UserLockManager:
     def __init__(self) -> None:
         self._guard = asyncio.Lock()
-        self._locks: dict[int, asyncio.Lock] = {}
+        self._locks: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
 
     @asynccontextmanager
     async def lock(self, user_id: int) -> AsyncIterator[None]:

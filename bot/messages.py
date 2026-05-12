@@ -3,7 +3,7 @@ import logging
 import re
 
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from models.dto import VpnKey
 from utils.formatting import h, pre
@@ -18,11 +18,13 @@ _TRUNCATED_SUFFIX = "\n...обрезано"
 
 
 async def safe_edit_message_text(
-    message: Message,
+    message: Message | InaccessibleMessage | None,
     text: str,
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
+    if message is None or isinstance(message, InaccessibleMessage):
+        return False
     text = cap_telegram_html(text)
     try:
         await message.edit_text(text, reply_markup=reply_markup)
@@ -56,7 +58,7 @@ async def safe_callback_answer(
 
 
 async def send_awg_config(
-    message: Message,
+    message: Message | InaccessibleMessage | None,
     *,
     title: str,
     config_text: str,
@@ -65,6 +67,8 @@ async def send_awg_config(
     edit_text: bool = False,
     send_document: bool = True,
 ) -> None:
+    if message is None or isinstance(message, InaccessibleMessage):
+        return
     if len(config_text) <= MAX_TEXT_CONFIG_LEN:
         text = cap_telegram_html(f"<b>{h(title)}</b>\n\n{pre(config_text)}")
         if edit_text:

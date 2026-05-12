@@ -36,6 +36,7 @@ class AccessRequestRepository:
             (telegram_user_id, username, AccessRequestStatus.PENDING.value, now),
         )
         await self.db.commit()
+        assert cursor.lastrowid is not None
         request = await self.get_by_id(int(cursor.lastrowid))
         if request is None:
             raise RuntimeError("Access request insert failed")

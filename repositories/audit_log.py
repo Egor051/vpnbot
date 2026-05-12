@@ -8,6 +8,8 @@ from models.enums import AuditEntityType
 
 logger = logging.getLogger(__name__)
 
+_DETAILS_JSON_MAX_BYTES = 32 * 1024
+
 
 class AuditLogRepository:
     def __init__(self, db: Database) -> None:
@@ -23,6 +25,9 @@ class AuditLogRepository:
         details: dict[str, Any] | None,
         now: str,
     ) -> None:
+        details_json = json.dumps(details or {}, ensure_ascii=False, separators=(",", ":"))
+        if len(details_json.encode()) > _DETAILS_JSON_MAX_BYTES:
+            details_json = json.dumps({"truncated": True}, ensure_ascii=False)
         await self.db.conn.execute(
             """
             INSERT INTO audit_log (actor_user_id, action, entity_type, entity_id, details_json, created_at)
@@ -33,7 +38,7 @@ class AuditLogRepository:
                 action,
                 entity_type.value,
                 entity_id,
-                json.dumps(details or {}, ensure_ascii=False, separators=(",", ":")),
+                details_json,
                 now,
             ),
         )
@@ -107,7 +112,7 @@ class AuditLogRepository:
 
     async def prune_older_than(self, cutoff: str) -> int:
         cursor = await self.db.conn.execute(
-            "DELETE FROM audit_log WHERE created_at < ?",
+            "DELETE FROM audit_log WHERE datetime(created_at) < datetime(?)",
             (cutoff,),
         )
         await self.db.commit()

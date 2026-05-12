@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from aiosqlite import Row
 
 from db.database import Database
+from services.errors import InvalidTransition
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +89,7 @@ class AnnouncementRepository:
                 """,
                 (actor_user_id, from_chat_id, message_id, len(recipient_ids), now, now),
             )
+            assert cursor.lastrowid is not None
             batch_id = int(cursor.lastrowid)
             if recipient_ids:
                 await self.db.conn.executemany(
@@ -169,15 +171,17 @@ class AnnouncementRepository:
         await self.db.commit()
 
     async def mark_delivery(self, announcement_id: int, user_id: int, status: str, now: str, error_text: str | None = None) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE announcement_deliveries
             SET status = ?, error_text = ?, updated_at = ?
-            WHERE announcement_id = ? AND user_id = ?
+            WHERE announcement_id = ? AND user_id = ? AND status IN ('pending', 'failed')
             """,
             (status, _truncate_error(error_text), now, announcement_id, user_id),
         )
         await self.db.commit()
+        if cursor.rowcount != 1:
+            raise InvalidTransition(f"Announcement delivery {announcement_id}/{user_id} is not in pending/failed state")
 
     async def refresh_batch_counts(self, announcement_id: int, now: str) -> None:
         await self.db.conn.execute(

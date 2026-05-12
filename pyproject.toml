@@ -24,30 +24,15 @@ check_untyped_defs = true
 strict_optional = true
 ignore_missing_imports = true
 
-# New clean modules — strict checking
-[[tool.mypy.overrides]]
-module = ["config.*", "models.*", "utils.*", "bot.container", "bot.guards"]
-disallow_untyped_defs = true
-
-# Legacy files with pre-existing errors — suppressed until fixed separately
 [[tool.mypy.overrides]]
 module = [
+    "adapters.*",
+    "bot.*",
+    "config.*",
     "db.*",
-    "adapters.xray_stats",
-    "adapters.mtproxy",
-    "repositories.proxy_entries",
-    "repositories.proxy_accesses",
-    "repositories.vpn_keys",
-    "repositories.announcements",
-    "repositories.access_requests",
-    "bot.formatters",
-    "bot.app",
-    "bot.handlers.*",
-    "bot.middlewares.*",
-    "services.users",
-    "services.socks5",
-    "services.mtproto",
-    "services.xray",
-    "services.awg",
+    "models.*",
+    "repositories.*",
+    "services.*",
+    "utils.*",
 ]
-ignore_errors = true
+disallow_untyped_defs = true

@@ -98,7 +98,7 @@ def key_display_label(key: VpnKey, viewer_user_id: int | None = None) -> str:
 
 def main_menu_text(user: TgUser) -> str:
     name = format_greeting_name(user.id, user.first_name, user.username)
-    return f"Доброго времени суток, {h(name)}\n\n{SERVER_RESTART_WARNING}\n\nВыберите действие."
+    return f"Доброго времени суток, {name}\n\n{SERVER_RESTART_WARNING}\n\nВыберите действие."
 
 
 def key_list_card(key: VpnKey, *, viewer_user_id: int) -> str:
@@ -163,7 +163,7 @@ def traffic_stats_text(view: KeyTrafficStatsView, *, viewer_user_id: int) -> str
         f"<b>Статистика {h(key_title(key))}</b>",
         f"Тип: {h(key.key_type.value.upper())}",
         f"Метка: {code(label)}",
-        f"Владелец: {h(owner_text)}",
+        f"Владелец: {owner_text}",
     ]
     note = key_note_for_viewer(key, viewer_user_id)
     if note and label != note:
@@ -218,7 +218,7 @@ def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer
         label = key_display_label(view.key, viewer_user_id=viewer_user_id)
         line = (
             f"{h(view.key.key_type.value.upper())} · {code(label)} · "
-            f"{h(owner_text)} · {h(traffic + updated)}"
+            f"{owner_text} · {h(traffic + updated)}"
         )
         note = key_note_for_viewer(view.key, viewer_user_id)
         if note and label != note:
@@ -234,7 +234,7 @@ def create_confirm_text(key_type: str, note: str | None, owner: User | None = No
         f"Заметка: {h(note or 'нет')}",
     ]
     if owner is not None:
-        lines.append(f"Владелец: {h(format_user_display(owner.telegram_user_id, owner.username))}")
+        lines.append(f"Владелец: {format_user_display(owner.telegram_user_id, owner.username)}")
     return "\n".join(lines)
 
 
@@ -427,7 +427,7 @@ def admin_proxy_stats_text(stats: ProxyAdminStats) -> str:
         ) or "нет"
         lines.extend(
             [
-                f"👤 {code(row.telegram_user_id)} {h(username)}",
+                f"👤 {code(row.telegram_user_id)} {username}",
                 f"• active: {h(active)}",
                 f"• failed: {h(row.failed_count)}",
                 f"• last issued: {h(_format_proxy_datetime(row.last_proxy_issued_at))}",
@@ -826,7 +826,7 @@ def users_page_text(users: list[User], page: int, key_counts: dict[int, int] | N
         username = format_user_display(user.telegram_user_id, user.username)
         key_count = key_counts.get(user.telegram_user_id, 0)
         lines.append(
-            f"{code(user.telegram_user_id)} · {h(username)} · {h(role_text(user.role))} · ключей: {key_count}"
+            f"{code(user.telegram_user_id)} · {username} · {h(role_text(user.role))} · ключей: {key_count}"
         )
     return "\n".join(lines)
 
@@ -837,22 +837,22 @@ def audit_page_text(items: list[dict[str, object]], page: int, users: dict[int, 
     lines = [f"<b>Логи действий</b> · страница {page + 1}"]
     users = users or {}
     for item in items:
-        lines.append(h(_human_audit_line(item, users)))
+        lines.append(_human_audit_line(item, users))
     return "\n".join(lines)
 
 
 def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
     actor_id = item.get("actor_user_id")
-    actor: User | None = users.get(int(actor_id)) if actor_id is not None else None
+    actor: User | None = users.get(int(actor_id)) if actor_id is not None else None  # type: ignore[call-overload]
     actor_text = (
         format_user_display(actor.telegram_user_id, actor.username)
         if actor is not None
-        else format_user_display(int(actor_id), None) if actor_id is not None else "система"
+        else format_user_display(int(actor_id), None) if actor_id is not None else "система"  # type: ignore[call-overload]
     )
     action = str(item.get("action") or "")
     details = item.get("details")
     details_dict = details if isinstance(details, dict) else {}
-    label = str(details_dict.get("label") or details_dict.get("email_label") or details_dict.get("key_label") or "")
+    label = h(str(details_dict.get("label") or details_dict.get("email_label") or details_dict.get("key_label") or ""))
     owner_user_id = details_dict.get("owner_user_id")
     owner_username = details_dict.get("owner_username")
     owner_text = format_user_display(
@@ -860,9 +860,9 @@ def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
         str(owner_username) if owner_username else None,
     )
     owner_suffix = ""
-    if owner_user_id is not None and actor_id is not None and int(owner_user_id) != int(actor_id):
+    if owner_user_id is not None and actor_id is not None and int(owner_user_id) != int(actor_id):  # type: ignore[call-overload]
         owner_suffix = f" для {owner_text}"
-    time_text = format_msk_datetime(str(item.get("created_at") or ""))
+    time_text = h(format_msk_datetime(str(item.get("created_at") or "")))
     if action == "xray_key_created":
         suffix = (f" создал Xray-ключ {label}" if label else " создал Xray-ключ") + owner_suffix
     elif action == "awg_key_created":
@@ -891,5 +891,5 @@ def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
     elif action == "access_rejected":
         suffix = " отклонил заявку на доступ"
     else:
-        suffix = f" выполнил действие {action}"
+        suffix = f" выполнил действие {h(action)}"
     return f"{time_text} — {actor_text}{suffix}"

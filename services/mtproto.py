@@ -15,6 +15,7 @@ from repositories.proxy_accesses import ProxyAccessRepository
 from services.audit import AuditService
 from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation, NotFound
+from utils.redact import redact_value
 from services.user_locks import UserLockManager
 from services.users import UserService
 
@@ -63,7 +64,7 @@ class MtProtoService:
         self.clock = clock
         self.audit = audit
         self.adapter = adapter
-        self.user_locks = user_locks or getattr(users, "user_locks", UserLockManager())
+        self.user_locks: UserLockManager = user_locks if user_locks is not None else getattr(users, "user_locks", UserLockManager())
         self.backend_health = backend_health or BackendHealth()
         self._apply_lock = asyncio.Lock()
 
@@ -115,7 +116,7 @@ class MtProtoService:
         accesses = await self.accesses.list_by_owner(actor_user_id)
         return [access for access in accesses if access.access_type == ProxyAccessType.MTPROTO]
 
-    async def runtime_status(self):
+    async def runtime_status(self) -> object:
         if self.settings.mtproto_mode != "managed" or self.adapter is None:
             return None
         return await self.adapter.runtime_status()
@@ -204,7 +205,7 @@ class MtProtoService:
                 actor_user_id=None,
                 action="mtproto_startup_reconcile_checked",
                 entity_id=None,
-                details=summary,
+                details=dict(summary),  # type: ignore[arg-type]
             )
         return summary
 
@@ -833,7 +834,7 @@ class MtProtoService:
             if value:
                 redacted = redacted.replace(value, "***")
                 redacted = redacted.replace(f"dd{value}", "dd***")
-        return redacted
+        return redact_value(redacted)
 
     async def _write_audit_best_effort(
         self,

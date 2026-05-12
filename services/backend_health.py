@@ -16,7 +16,14 @@ class BackendHealthStatus:
 
 
 class BackendHealth:
-    """Tracks which backends are degraded and blocks mutations on them."""
+    """Tracks which backends are degraded and blocks mutations on them.
+
+    State is in-memory only — bot restart resets all backends to healthy.
+    On restart the background reconciliation loop re-discovers degraded state
+    within one polling cycle, so the window of incorrect health is bounded.
+    Persisting to SQLite would reduce that window to zero but is not yet
+    implemented.
+    """
 
     def __init__(self) -> None:
         self._degraded: dict[BackendType, str] = {}

@@ -1,4 +1,5 @@
 
+import ipaddress
 import os
 import tempfile
 import logging
@@ -162,7 +163,7 @@ class AwgConfigAdapter:
                 label=label,
             )
             return
-        with ConfigFileLock(self.config_path):
+        async with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             snapshot = self._snapshot_config()
             backup_path = self.backup.create_backup(self.config_path)
@@ -212,7 +213,7 @@ class AwgConfigAdapter:
         if self._using_helper():
             await self._remove_peer_via_helper(key_id=key_id, public_key=public_key)
             return
-        with ConfigFileLock(self.config_path):
+        async with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             snapshot = self._snapshot_config()
             backup_path = self.backup.create_backup(self.config_path)
@@ -255,7 +256,7 @@ class AwgConfigAdapter:
         client_ip: str,
         label: str | None,
     ) -> None:
-        with ConfigFileLock(self._lock_target()):
+        async with ConfigFileLock(self._lock_target()):
             snapshot = self._snapshot_config()
             original = self._read_text()
             self._assert_config_unchanged(snapshot)
@@ -279,7 +280,7 @@ class AwgConfigAdapter:
             await self._apply_config_text_via_helper(updated)
 
     async def _remove_peer_via_helper(self, *, key_id: int, public_key: str | None) -> None:
-        with ConfigFileLock(self._lock_target()):
+        async with ConfigFileLock(self._lock_target()):
             snapshot = self._snapshot_config()
             original = self._read_text()
             self._assert_config_unchanged(snapshot)
@@ -381,22 +382,22 @@ class AwgConfigAdapter:
 
     async def sync_runtime_from_config(self) -> None:
         if self._using_helper():
-            with ConfigFileLock(self._lock_target()):
+            async with ConfigFileLock(self._lock_target()):
                 await self._apply_config_text_via_helper(self._read_text())
             return
-        with ConfigFileLock(self.config_path):
+        async with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             await self._validate_candidate_config(self._read_text())
             await self._sync_runtime_from_config(self.config_path)
 
     async def remove_runtime_peer(self, public_key: str) -> None:
         if self._using_helper():
-            with ConfigFileLock(self._lock_target()):
+            async with ConfigFileLock(self._lock_target()):
                 await self._apply_config_text_via_helper(self._read_text())
                 if await self.verify_runtime_peer(public_key):
                     raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
             return
-        with ConfigFileLock(self.config_path):
+        async with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
             if not await self._remove_peer_runtime(public_key):
                 raise AwgApplyError("Не удалось удалить AWG peer из runtime")
@@ -467,11 +468,15 @@ class AwgConfigAdapter:
         self._parse_sections(text)
         tmp_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.config_path.parent, suffix=".conf", delete=False) as tmp:
-                tmp.write(text)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-                tmp_path = Path(tmp.name)
+            old_umask = os.umask(0o177)
+            try:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.config_path.parent, suffix=".conf", delete=False) as tmp:
+                    tmp.write(text)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                    tmp_path = Path(tmp.name)
+            finally:
+                os.umask(old_umask)
             result = await self._quick_strip(tmp_path)
             if not result.ok:
                 raise AwgConfigError("AWG config не прошёл проверку awg-quick/wg-quick strip")
@@ -494,11 +499,15 @@ class AwgConfigAdapter:
             stripped = await self._quick_strip(config_path)
             if not stripped.ok:
                 raise AwgApplyError("Не удалось подготовить AWG config для syncconf")
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=config_path.parent, suffix=".conf", delete=False) as tmp:
-                tmp.write(stripped.stdout)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-                stripped_path = Path(tmp.name)
+            old_umask = os.umask(0o177)
+            try:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=config_path.parent, suffix=".conf", delete=False) as tmp:
+                    tmp.write(stripped.stdout)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                    stripped_path = Path(tmp.name)
+            finally:
+                os.umask(old_umask)
             result = await self._run_awg_or_wg(["syncconf", self.interface, str(stripped_path)], timeout=15)
             if not result.ok:
                 raise AwgApplyError("Не удалось синхронизировать AWG runtime из восстановленного config")
@@ -797,11 +806,15 @@ class AwgConfigAdapter:
         temp_path: str | None = None
         try:
             if preshared_key:
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
-                    tmp.write(preshared_key + "\n")
-                    tmp.flush()
-                    os.fsync(tmp.fileno())
-                    temp_path = tmp.name
+                old_umask = os.umask(0o177)
+                try:
+                    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+                        tmp.write(preshared_key + "\n")
+                        tmp.flush()
+                        os.fsync(tmp.fileno())
+                        temp_path = tmp.name
+                finally:
+                    os.umask(old_umask)
                 args.extend(["preshared-key", temp_path])
             args.extend(["allowed-ips", f"{client_ip}/32", "persistent-keepalive", str(self.persistent_keepalive)])
             result = await self._run_awg_or_wg(args, timeout=15, sensitive_values=[preshared_key or ""])
@@ -862,14 +875,10 @@ class AwgConfigAdapter:
         except ValueError as exc:
             raise AwgConfigError(f"AWG integer parameter has invalid value: {value}") from exc
 
-    def _ip_network(self, value: str):
-        import ipaddress
-
+    def _ip_network(self, value: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
         return ipaddress.ip_network(value, strict=False)
 
-    def _ip_address(self, value: str):
-        import ipaddress
-
+    def _ip_address(self, value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
         return ipaddress.ip_address(value)
 
 

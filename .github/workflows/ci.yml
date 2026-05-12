@@ -46,7 +46,7 @@ jobs:
         run: python -m mypy bot/ services/ adapters/ config/ models/ utils/ repositories/
 
       - name: Run tests with coverage
-        run: python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=50
+        run: python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=60
 
   dependency-audit:
     name: Dependency Audit
@@ -73,4 +73,4 @@ jobs:
           python -m pip install -r requirements-dev.txt
 
       - name: Audit pinned runtime dependency set
-        run: python -m pip_audit -r requirements.txt -r constraints.txt --no-deps
+        run: python -m pip_audit -r requirements.txt -r constraints.txt

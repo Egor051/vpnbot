@@ -10,11 +10,8 @@ from services.errors import NotFound
 
 
 _ANNOUNCEMENT_ROLE_SQL_VALUES = (
-    UserRole.APPROVED_USER.value.lower(),
-    UserRole.SUPERADMIN.value.lower(),
-    "approved",
-    "superadmin",
-    "super_admin",
+    UserRole.APPROVED_USER.value,
+    UserRole.SUPERADMIN.value,
 )
 _ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS = ", ".join("?" for _ in _ANNOUNCEMENT_ROLE_SQL_VALUES)
 
@@ -78,8 +75,11 @@ class UserRepository:
         return user
 
     async def create_admin_placeholders(self, admin_ids: Iterable[int], now: str) -> None:
-        for admin_id in admin_ids:
-            await self.db.conn.execute(
+        rows = [(admin_id, UserRole.SUPERADMIN.value, now, now) for admin_id in admin_ids]
+        if not rows:
+            return
+        async with self.db.transaction():
+            await self.db.conn.executemany(
                 """
                 INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
                 VALUES (?, NULL, NULL, ?, ?, ?)
@@ -88,9 +88,8 @@ class UserRepository:
                   blocked_at = NULL,
                   updated_at = excluded.updated_at
                 """,
-                (admin_id, UserRole.SUPERADMIN.value, now, now),
+                rows,
             )
-        await self.db.commit()
 
     async def set_role(self, telegram_user_id: int, role: UserRole, now: str, blocked_at: str | None = None) -> None:
         cursor = await self.db.conn.execute(
@@ -123,7 +122,7 @@ class UserRepository:
             SELECT COUNT(*) AS cnt
             FROM users
             WHERE blocked_at IS NULL
-              AND LOWER(role) IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
+              AND role IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
             """,
             _ANNOUNCEMENT_ROLE_SQL_VALUES,
         )
@@ -136,7 +135,7 @@ class UserRepository:
                 f"""
                 SELECT * FROM users
                 WHERE blocked_at IS NULL
-                  AND LOWER(role) IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
+                  AND role IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
                 ORDER BY telegram_user_id ASC
                 LIMIT ?
                 """,
@@ -147,7 +146,7 @@ class UserRepository:
                 f"""
                 SELECT * FROM users
                 WHERE blocked_at IS NULL
-                  AND LOWER(role) IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
+                  AND role IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
                   AND telegram_user_id > ?
                 ORDER BY telegram_user_id ASC
                 LIMIT ?

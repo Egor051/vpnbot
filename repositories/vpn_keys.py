@@ -8,6 +8,7 @@ from aiosqlite import Row
 from db.database import Database
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
+from services.errors import InvalidTransition
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,7 @@ class VpnKeyRepository:
             ),
         )
         await self.db.commit()
+        assert cursor.lastrowid is not None
         key = await self.get_by_id(int(cursor.lastrowid))
         if key is None:
             raise RuntimeError("VPN key insert failed")
@@ -343,28 +345,28 @@ class VpnKeyRepository:
         payload: dict[str, Any] | None = None,
         public_payload: dict[str, Any] | None = None,
     ) -> None:
-        current = await self.get_by_id(key_id)
-        if current is None:
-            raise RuntimeError("VPN key not found")
-        await self.db.conn.execute(
-            """
-            UPDATE vpn_keys
-            SET status = ?, updated_at = ?, payload_json = ?, public_payload_json = ?
-            WHERE id = ?
-            """,
-            (
-                VpnKeyStatus.ACTIVE.value,
-                now,
-                json.dumps(payload if payload is not None else current.payload, ensure_ascii=False, separators=(",", ":")),
-                json.dumps(
-                    public_payload if public_payload is not None else current.public_payload,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+        async with self.db.transaction():
+            current = await self.get_by_id(key_id)
+            if current is None:
+                raise RuntimeError("VPN key not found")
+            await self.db.conn.execute(
+                """
+                UPDATE vpn_keys
+                SET status = ?, updated_at = ?, payload_json = ?, public_payload_json = ?
+                WHERE id = ?
+                """,
+                (
+                    VpnKeyStatus.ACTIVE.value,
+                    now,
+                    json.dumps(payload if payload is not None else current.payload, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(
+                        public_payload if public_payload is not None else current.public_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    key_id,
                 ),
-                key_id,
-            ),
-        )
-        await self.db.commit()
+            )
 
     async def set_status(self, key_id: int, status: VpnKeyStatus, now: str) -> None:
         await self.db.conn.execute(
@@ -377,26 +379,31 @@ class VpnKeyRepository:
         await self.set_status(key_id, status, now)
 
     async def mark_revoked(self, key_id: int, actor_user_id: int, now: str) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE vpn_keys
             SET status = ?, updated_at = ?, revoked_at = COALESCE(revoked_at, ?), revoked_by = COALESCE(revoked_by, ?)
-            WHERE id = ?
+            WHERE id = ? AND status NOT IN (?, ?)
             """,
-            (VpnKeyStatus.REVOKED.value, now, now, actor_user_id, key_id),
+            (VpnKeyStatus.REVOKED.value, now, now, actor_user_id, key_id,
+             VpnKeyStatus.REVOKED.value, VpnKeyStatus.DELETED.value),
         )
         await self.db.commit()
+        if cursor.rowcount != 1:
+            raise InvalidTransition(f"VPN key {key_id} is already revoked or deleted")
 
     async def mark_deleted(self, key_id: int, actor_user_id: int, now: str) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE vpn_keys
             SET status = ?, updated_at = ?, deleted_at = COALESCE(deleted_at, ?), deleted_by = COALESCE(deleted_by, ?)
-            WHERE id = ?
+            WHERE id = ? AND status != ?
             """,
-            (VpnKeyStatus.DELETED.value, now, now, actor_user_id, key_id),
+            (VpnKeyStatus.DELETED.value, now, now, actor_user_id, key_id, VpnKeyStatus.DELETED.value),
         )
         await self.db.commit()
+        if cursor.rowcount != 1:
+            raise InvalidTransition(f"VPN key {key_id} is already deleted")
 
     async def soft_delete_key(self, key_id: int, actor_user_id: int, now: str) -> None:
         await self.mark_deleted(key_id, actor_user_id, now)
@@ -443,17 +450,26 @@ class VpnKeyRepository:
         return await self.get_occupied_awg_ips()
 
     async def find_by_uuid(self, uuid_value: str) -> VpnKey | None:
-        cursor = await self.db.conn.execute("SELECT * FROM vpn_keys WHERE uuid = ? LIMIT 1", (uuid_value,))
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM vpn_keys WHERE uuid = ? LIMIT 1",
+            (uuid_value,),
+        )
         row = await cursor.fetchone()
         return _row_to_vpn_key(row)
 
     async def find_by_email_label(self, email_label: str) -> VpnKey | None:
-        cursor = await self.db.conn.execute("SELECT * FROM vpn_keys WHERE email_label = ? LIMIT 1", (email_label,))
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM vpn_keys WHERE email_label = ? LIMIT 1",
+            (email_label,),
+        )
         row = await cursor.fetchone()
         return _row_to_vpn_key(row)
 
     async def find_by_public_key(self, public_key: str) -> VpnKey | None:
-        cursor = await self.db.conn.execute("SELECT * FROM vpn_keys WHERE public_key = ? LIMIT 1", (public_key,))
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM vpn_keys WHERE public_key = ? LIMIT 1",
+            (public_key,),
+        )
         row = await cursor.fetchone()
         return _row_to_vpn_key(row)
 

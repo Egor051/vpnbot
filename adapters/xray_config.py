@@ -68,7 +68,7 @@ class XrayConfigAdapter:
         flow: str,
         manage_short_id: bool,
     ) -> XrayClientApplyResult:
-        with ConfigFileLock(self._lock_target()):
+        async with ConfigFileLock(self._lock_target()):
             if not self._using_helper():
                 await self._ensure_current_config_valid()
             snapshot = self._snapshot_config()
@@ -104,7 +104,7 @@ class XrayConfigAdapter:
         short_id: str | None,
         remove_short_id: bool,
     ) -> None:
-        with ConfigFileLock(self._lock_target()):
+        async with ConfigFileLock(self._lock_target()):
             if not self._using_helper():
                 await self._ensure_current_config_valid()
             snapshot = self._snapshot_config()
@@ -135,7 +135,7 @@ class XrayConfigAdapter:
     async def ensure_short_id(self, short_id: str) -> bool:
         if not short_id:
             return False
-        with ConfigFileLock(self._lock_target()):
+        async with ConfigFileLock(self._lock_target()):
             if not self._using_helper():
                 await self._ensure_current_config_valid()
             snapshot = self._snapshot_config()
@@ -299,18 +299,22 @@ class XrayConfigAdapter:
                 suffix=".json",
                 content=content,
             )
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=self.config_path.parent,
-            prefix=f".{self.config_path.name}.",
-            suffix=".json",
-            delete=False,
-        ) as file:
-            file.write(content)
-            file.flush()
-            os.fsync(file.fileno())
-            temp_path = Path(file.name)
+        old_umask = os.umask(0o177)
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=self.config_path.parent,
+                prefix=f".{self.config_path.name}.",
+                suffix=".json",
+                delete=False,
+            ) as file:
+                file.write(content)
+                file.flush()
+                os.fsync(file.fileno())
+                temp_path = Path(file.name)
+        finally:
+            os.umask(old_umask)
         if mode_from.exists():
             self._copy_stat(mode_from, temp_path)
         return temp_path

@@ -22,4 +22,6 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query()
 async def unknown_callback(callback: CallbackQuery) -> None:
+    if not await ensure_private_callback(callback):
+        return
     await safe_callback_answer(callback, "Действие недоступно или устарело.", show_alert=True)

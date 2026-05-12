@@ -25,7 +25,7 @@ from bot.messages import MAX_TEXT_CONFIG_LEN, safe_callback_answer, safe_edit_me
 from bot.middlewares.access import BLOCKED_CALLBACK_TEXT, BLOCKED_MESSAGE_TEXT, BlockedUserMiddleware
 from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
 from config.settings import Settings
-from db.database import Database
+from db.database import CURRENT_SCHEMA_VERSION, Database
 from models.access import is_blocked_user
 from models.dto import ShellResult, TelegramUserProfile, User, VpnKey
 from models.enums import AccessRequestStatus, AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType, parse_user_role
@@ -209,7 +209,7 @@ def test_legacy_v3_duplicate_pending_migrates_before_unique_index(tmp_path: Path
             print("BOOTSTRAP_OK")
             cursor = await db.conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             version = await cursor.fetchone()
-            assert version["value"] == "10"
+            assert int(version["value"]) >= 10
             cursor = await db.conn.execute(
                 "SELECT status, COUNT(*) AS cnt FROM access_requests GROUP BY status ORDER BY status"
             )
@@ -339,7 +339,7 @@ def test_connection_proxy_raw_commit_and_rollback_do_not_break_foreign_transacti
                 await db.conn.execute(
                     """
                     INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
-                    VALUES (401, 'commit', 'Commit', 'pending', 'now', 'now')
+                    VALUES (401, 'commit', 'Commit', 'PENDING_USER', 'now', 'now')
                     """
                 )
                 commit_task = asyncio.create_task(db.conn.commit())
@@ -351,7 +351,7 @@ def test_connection_proxy_raw_commit_and_rollback_do_not_break_foreign_transacti
                 await db.conn.execute(
                     """
                     INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
-                    VALUES (402, 'rollback', 'Rollback', 'pending', 'now', 'now')
+                    VALUES (402, 'rollback', 'Rollback', 'PENDING_USER', 'now', 'now')
                     """
                 )
                 rollback_task = asyncio.create_task(db.conn.rollback())
@@ -396,7 +396,7 @@ def test_connection_proxy_treats_with_mutation_as_gated_write(tmp_path: Path) ->
                     """
                     WITH src(id, username) AS (SELECT 501, 'cte')
                     INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
-                    SELECT id, username, 'CTE', 'pending', 'now', 'now' FROM src
+                    SELECT id, username, 'CTE', 'PENDING_USER', 'now', 'now' FROM src
                     """
                 )
                 await db.commit()
@@ -704,14 +704,12 @@ def test_require_approved_or_admin_uses_blocked_predicate(tmp_path: Path) -> Non
             await db.conn.execute("UPDATE users SET blocked_at = ? WHERE telegram_user_id = ?", ("blocked", 201))
             await users_repo.upsert_profile(TelegramUserProfile(telegram_user_id=202, username="blocked", first_name="Blocked"), UserRole.BLOCKED_USER, "now")
             await users_repo.set_role(202, UserRole.BLOCKED_USER, "now", blocked_at="blocked")
-            for telegram_user_id, role in ((203, "banned"), (204, "revoked"), (205, "blocked")):
-                await db.conn.execute(
-                    """
-                    INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at, blocked_at)
-                    VALUES (?, ?, ?, ?, ?, ?, NULL)
-                    """,
-                    (telegram_user_id, role, role.title(), role, "now", "now"),
+            for telegram_user_id in (203, 204, 205):
+                await users_repo.upsert_profile(
+                    TelegramUserProfile(telegram_user_id=telegram_user_id, username=str(telegram_user_id), first_name=str(telegram_user_id)),
+                    UserRole.BLOCKED_USER, "now",
                 )
+                await users_repo.set_role(telegram_user_id, UserRole.BLOCKED_USER, "now", blocked_at="blocked")
             await db.commit()
 
             assert (await users.require_approved_or_admin(1)).role == UserRole.SUPERADMIN
@@ -846,18 +844,15 @@ def test_reject_preserves_all_blocked_user_variants(tmp_path: Path) -> None:
             await users_repo.upsert_profile(canonical_profile, UserRole.BLOCKED_USER, "now")
             await users_repo.set_role(221, UserRole.BLOCKED_USER, "now", blocked_at="blocked")
 
-            for telegram_user_id, role in ((222, "banned"), (223, "revoked")):
-                await db.conn.execute(
-                    """
-                    INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at, blocked_at)
-                    VALUES (?, ?, ?, ?, ?, ?, NULL)
-                    """,
-                    (telegram_user_id, role, role.title(), role, "now", "now"),
+            for telegram_user_id in (222, 223):
+                await users_repo.upsert_profile(
+                    TelegramUserProfile(telegram_user_id=telegram_user_id, username=str(telegram_user_id), first_name=str(telegram_user_id)),
+                    UserRole.BLOCKED_USER, "now",
                 )
             await db.commit()
 
             request_ids: dict[int, int] = {}
-            for telegram_user_id, username in ((220, "blocked_at"), (221, "canonical"), (222, "banned"), (223, "revoked")):
+            for telegram_user_id, username in ((220, "blocked_at"), (221, "canonical"), (222, "blocked_222"), (223, "blocked_223")):
                 request = await requests_repo.create(telegram_user_id, username, "now")
                 request_ids[telegram_user_id] = request.id
 
@@ -882,7 +877,7 @@ def test_reject_preserves_all_blocked_user_variants(tmp_path: Path) -> None:
                 assert is_blocked_user(user) is True
                 cursor = await db.conn.execute("SELECT role, blocked_at FROM users WHERE telegram_user_id = ?", (telegram_user_id,))
                 row = await cursor.fetchone()
-                assert row["role"] in {"banned", "revoked"}
+                assert row["role"] == UserRole.BLOCKED_USER
                 assert row["blocked_at"] is None
         finally:
             await db.close()
@@ -904,14 +899,12 @@ def test_announcement_recipients_exclude_blocked_predicate_users(tmp_path: Path)
             await users_repo.set_role(232, UserRole.BLOCKED_USER, "now", blocked_at="blocked")
             await users_repo.upsert_profile(TelegramUserProfile(telegram_user_id=236, username="blocked_at", first_name="BlockedAt"), UserRole.APPROVED_USER, "now")
             await db.conn.execute("UPDATE users SET blocked_at = ? WHERE telegram_user_id = ?", ("blocked", 236))
-            for telegram_user_id, role in ((233, "banned"), (234, "revoked"), (235, "blocked")):
-                await db.conn.execute(
-                    """
-                    INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at, blocked_at)
-                    VALUES (?, ?, ?, ?, ?, ?, NULL)
-                    """,
-                    (telegram_user_id, role, role.title(), role, "now", "now"),
+            for telegram_user_id in (233, 234, 235):
+                await users_repo.upsert_profile(
+                    TelegramUserProfile(telegram_user_id=telegram_user_id, username=str(telegram_user_id), first_name=str(telegram_user_id)),
+                    UserRole.BLOCKED_USER, "now",
                 )
+                await users_repo.set_role(telegram_user_id, UserRole.BLOCKED_USER, "now", blocked_at="blocked")
             await db.commit()
 
             assert await users_repo.count_announcement_recipients() == 2
@@ -969,8 +962,7 @@ def test_blocked_at_only_owner_cannot_update_key_note(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("legacy_role", ["banned", "revoked", "blocked", "ban"])
-def test_legacy_blocked_owner_cannot_update_key_note(legacy_role: str, tmp_path: Path) -> None:
+def test_blocked_owner_cannot_update_key_note(tmp_path: Path) -> None:
     async def run() -> None:
         db = Database(tmp_path / "vpn.db")
         await db.connect()
@@ -984,17 +976,14 @@ def test_legacy_blocked_owner_cannot_update_key_note(legacy_role: str, tmp_path:
             await users.bootstrap_admins()
             notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, audit=audit)
 
-            await db.conn.execute(
-                """
-                INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at, blocked_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL)
-                """,
-                (241, legacy_role, legacy_role.title(), legacy_role, "now", "now"),
+            await users_repo.upsert_profile(
+                TelegramUserProfile(telegram_user_id=241, username="blocked_owner", first_name="Blocked"),
+                UserRole.BLOCKED_USER, "now",
             )
-            await db.commit()
+            await users_repo.set_role(241, UserRole.BLOCKED_USER, "now", blocked_at="blocked")
             key = await vpn_keys.create_pending(
                 owner_user_id=241,
-                username=legacy_role,
+                username="blocked_owner",
                 key_type=VpnKeyType.XRAY,
                 note="old",
                 payload={},
@@ -1002,7 +991,7 @@ def test_legacy_blocked_owner_cannot_update_key_note(legacy_role: str, tmp_path:
                 created_by=241,
                 now="now",
                 uuid="00000000-0000-4000-8000-000000000241",
-                email_label=legacy_role,
+                email_label="blocked_owner",
             )
 
             with pytest.raises(AccessDenied):
@@ -1078,13 +1067,10 @@ async def _count_audit_actions(db: Database, action: str) -> int:
     return int(row["cnt"]) if row is not None else 0
 
 
-def test_legacy_blocking_role_aliases_are_treated_as_blocked() -> None:
-    assert parse_user_role("blocked") == UserRole.BLOCKED_USER
-    assert parse_user_role("banned") == UserRole.BLOCKED_USER
-    assert parse_user_role("revoked") == UserRole.BLOCKED_USER
-    assert is_blocked_user(User(300, "blocked", "Blocked", "blocked", "now", "now", None)) is True  # type: ignore[arg-type]
-    assert is_blocked_user(User(301, "banned", "Banned", "banned", "now", "now", None)) is True  # type: ignore[arg-type]
-    assert is_blocked_user(User(302, "revoked", "Revoked", "revoked", "now", "now", None)) is True  # type: ignore[arg-type]
+def test_blocked_user_role_is_treated_as_blocked() -> None:
+    assert parse_user_role("BLOCKED_USER") == UserRole.BLOCKED_USER
+    assert is_blocked_user(User(300, "u1", "U1", UserRole.BLOCKED_USER, "now", "now", None)) is True
+    assert is_blocked_user(User(301, "u2", "U2", UserRole.PENDING_USER, "now", "now", "blocked_ts")) is True
 
 
 def test_superadmin_is_not_blocked_by_stale_blocked_at() -> None:

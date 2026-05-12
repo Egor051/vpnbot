@@ -9,28 +9,12 @@ class UserRole(StrEnum):
     BLOCKED_USER = "BLOCKED_USER"
 
 
-LEGACY_BLOCKED_USER_ROLE_VALUES = frozenset({"blocked", "blocked_user", "banned", "ban", "revoked"})
-BLOCKED_USER_ROLE_VALUES = frozenset({UserRole.BLOCKED_USER.value, *LEGACY_BLOCKED_USER_ROLE_VALUES})
-
-
 def parse_user_role(value: str | UserRole) -> UserRole:
     if isinstance(value, UserRole):
         return value
     try:
         return UserRole(value)
     except ValueError:
-        normalized = value.strip().lower()
-        aliases = {
-            "superadmin": UserRole.SUPERADMIN,
-            "super_admin": UserRole.SUPERADMIN,
-            "approved": UserRole.APPROVED_USER,
-            "approved_user": UserRole.APPROVED_USER,
-            "pending": UserRole.PENDING_USER,
-            "pending_user": UserRole.PENDING_USER,
-            **{role: UserRole.BLOCKED_USER for role in LEGACY_BLOCKED_USER_ROLE_VALUES},
-        }
-        if normalized in aliases:
-            return aliases[normalized]
         raise
 
 

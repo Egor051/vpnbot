@@ -70,6 +70,7 @@ class ProxyRepository:
             (proxy_type, host, port, login, password, note, ProxyStatus.ACTIVE.value, now, now),
         )
         await self.db.commit()
+        assert cursor.lastrowid is not None
         entry = await self.get_by_id(int(cursor.lastrowid))
         if entry is None:
             raise RuntimeError("Proxy insert failed")

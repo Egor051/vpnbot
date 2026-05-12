@@ -16,6 +16,7 @@ from models.dto import (
     ProxyUserStats,
 )
 from models.enums import ProxyAccessStatus, ProxyAccessType
+from services.errors import InvalidTransition
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def _optional_int(value: object) -> int | None:
     if value is None:
         return None
     try:
-        return int(value)
+        return int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -198,6 +199,7 @@ class ProxyAccessRepository:
             ),
         )
         await self.db.commit()
+        assert cursor.lastrowid is not None
         access = await self.get_by_id(int(cursor.lastrowid))
         if access is None:
             raise RuntimeError("Proxy access insert failed")
@@ -340,38 +342,38 @@ class ProxyAccessRepository:
         public_payload: dict[str, Any] | None = None,
         apply_generation: int | None = None,
     ) -> None:
-        current = await self.get_by_id(access_id)
-        if current is None:
-            raise RuntimeError("Proxy access not found")
-        await self.db.conn.execute(
-            """
-            UPDATE proxy_accesses
-            SET status = ?,
-                updated_at = ?,
-                activated_at = COALESCE(activated_at, ?),
-                last_apply_at = ?,
-                apply_generation = COALESCE(?, apply_generation),
-                error = NULL,
-                payload_json = ?,
-                public_payload_json = ?
-            WHERE id = ?
-            """,
-            (
-                ProxyAccessStatus.ACTIVE.value,
-                now,
-                now,
-                now,
-                apply_generation,
-                json.dumps(payload if payload is not None else current.payload, ensure_ascii=False, separators=(",", ":")),
-                json.dumps(
-                    public_payload if public_payload is not None else current.public_payload,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+        async with self.db.transaction():
+            current = await self.get_by_id(access_id)
+            if current is None:
+                raise RuntimeError("Proxy access not found")
+            await self.db.conn.execute(
+                """
+                UPDATE proxy_accesses
+                SET status = ?,
+                    updated_at = ?,
+                    activated_at = COALESCE(activated_at, ?),
+                    last_apply_at = ?,
+                    apply_generation = COALESCE(?, apply_generation),
+                    error = NULL,
+                    payload_json = ?,
+                    public_payload_json = ?
+                WHERE id = ?
+                """,
+                (
+                    ProxyAccessStatus.ACTIVE.value,
+                    now,
+                    now,
+                    now,
+                    apply_generation,
+                    json.dumps(payload if payload is not None else current.payload, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(
+                        public_payload if public_payload is not None else current.public_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    access_id,
                 ),
-                access_id,
-            ),
-        )
-        await self.db.commit()
+            )
 
     async def update_payloads(
         self,
@@ -428,7 +430,7 @@ class ProxyAccessRepository:
         await self.db.commit()
 
     async def mark_revoked(self, access_id: int, actor_user_id: int, now: str, *, reason: str | None = None) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE proxy_accesses
             SET status = ?,
@@ -438,14 +440,17 @@ class ProxyAccessRepository:
                 reason = COALESCE(?, reason),
                 last_apply_at = ?,
                 error = NULL
-            WHERE id = ?
+            WHERE id = ? AND status NOT IN (?, ?)
             """,
-            (ProxyAccessStatus.REVOKED.value, now, now, actor_user_id, reason, now, access_id),
+            (ProxyAccessStatus.REVOKED.value, now, now, actor_user_id, reason, now, access_id,
+             ProxyAccessStatus.REVOKED.value, ProxyAccessStatus.DELETED.value),
         )
         await self.db.commit()
+        if cursor.rowcount != 1:
+            raise InvalidTransition(f"Proxy access {access_id} is already revoked or deleted")
 
     async def mark_inactive(self, access_id: int, actor_user_id: int, now: str, *, reason: str | None = None) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE proxy_accesses
             SET status = ?,
@@ -454,14 +459,17 @@ class ProxyAccessRepository:
                 revoked_by = COALESCE(revoked_by, ?),
                 reason = COALESCE(?, reason),
                 error = NULL
-            WHERE id = ?
+            WHERE id = ? AND status NOT IN (?, ?, ?)
             """,
-            (ProxyAccessStatus.INACTIVE.value, now, now, actor_user_id, reason, access_id),
+            (ProxyAccessStatus.INACTIVE.value, now, now, actor_user_id, reason, access_id,
+             ProxyAccessStatus.INACTIVE.value, ProxyAccessStatus.REVOKED.value, ProxyAccessStatus.DELETED.value),
         )
         await self.db.commit()
+        if cursor.rowcount != 1:
+            raise InvalidTransition(f"Proxy access {access_id} is already inactive, revoked or deleted")
 
     async def mark_deleted(self, access_id: int, actor_user_id: int, now: str, *, reason: str | None = None) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE proxy_accesses
             SET status = ?,
@@ -470,11 +478,14 @@ class ProxyAccessRepository:
                 deleted_by = COALESCE(deleted_by, ?),
                 reason = COALESCE(?, reason),
                 error = NULL
-            WHERE id = ?
+            WHERE id = ? AND status != ?
             """,
-            (ProxyAccessStatus.DELETED.value, now, now, actor_user_id, reason, access_id),
+            (ProxyAccessStatus.DELETED.value, now, now, actor_user_id, reason, access_id,
+             ProxyAccessStatus.DELETED.value),
         )
         await self.db.commit()
+        if cursor.rowcount != 1:
+            raise InvalidTransition(f"Proxy access {access_id} is already deleted")
 
     async def lifecycle_stats(self) -> ProxyLifecycleStats:
         cursor = await self.db.conn.execute(
@@ -586,7 +597,7 @@ class ProxyAccessRepository:
         for row in rows:
             access_type = _enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type")  # type: ignore[arg-type]
             status = _enum_value(ProxyAccessStatus, row["status"], "proxy_accesses.status")  # type: ignore[arg-type]
-            result.setdefault(access_type, {})[status] = int(row["cnt"])
+            result.setdefault(access_type, {})[status] = int(row["cnt"])  # type: ignore[arg-type,index]
         return result
 
     async def count_users_with_active_proxies(self) -> int:
@@ -774,5 +785,5 @@ class ProxyAccessRepository:
         for row in rows:
             user_id = int(row["owner_user_id"])
             access_type = _enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type")  # type: ignore[arg-type]
-            refs.setdefault(user_id, []).append(ProxyActiveAccessRef(id=int(row["id"]), access_type=access_type))
+            refs.setdefault(user_id, []).append(ProxyActiveAccessRef(id=int(row["id"]), access_type=access_type))  # type: ignore[arg-type]
         return {user_id: tuple(items) for user_id, items in refs.items()}

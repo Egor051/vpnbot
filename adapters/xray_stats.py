@@ -47,7 +47,7 @@ class XrayStatsAdapter:
             if not isinstance(name, str):
                 continue
             try:
-                result[name] = int(value)
+                result[name] = int(value)  # type: ignore[arg-type]
             except (TypeError, ValueError):
                 result[name] = 0
         return result

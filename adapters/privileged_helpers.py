@@ -15,7 +15,21 @@ class PrivilegedHelperError(RuntimeError):
 
 
 class PrivilegedHelperRunner:
-    """Invokes fixed sudo helper scripts that perform privileged VPN/proxy operations."""
+    """Invokes fixed sudo helper scripts that perform privileged VPN/proxy operations.
+
+    Allowed commands: only absolute-path scripts listed in the sudo policy file
+    (typically /etc/sudoers.d/vpnbot or a drop-in under /etc/sudoers.d/).  Each
+    script must be owned by root:root with mode 0o755 and must not be writable by
+    the bot user.
+
+    Sudo policy template (non-interactive, no-password for specific scripts):
+        vpnbot ALL=(root) NOPASSWD: /opt/vpnbot/scripts/awg_apply.sh, \\
+                                    /opt/vpnbot/scripts/xray_apply.sh, \\
+                                    ...
+
+    To add a new helper: (1) write the script, (2) chmod/chown it, (3) add it to
+    the sudoers drop-in, (4) pass its absolute path to `PrivilegedHelperRunner.run`.
+    """
 
     def __init__(self, *, shell: ShellRunner, use_sudo: bool = True) -> None:
         self.shell = shell

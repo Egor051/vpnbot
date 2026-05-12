@@ -4,8 +4,11 @@ from typing import Any
 from datetime import timedelta
 
 from adapters.clock import ClockProvider
-from models.enums import AuditEntityType
+from models.enums import AuditEntityType, UserRole
 from repositories.audit_log import AuditLogRepository
+from repositories.users import UserRepository
+from services.errors import AccessDenied
+from utils.redact import redact_value
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +41,10 @@ class AuditService:
         "shortId",
     }
 
-    def __init__(self, audit_logs: AuditLogRepository, clock: ClockProvider) -> None:
+    def __init__(self, audit_logs: AuditLogRepository, clock: ClockProvider, users: UserRepository | None = None) -> None:
         self.audit_logs = audit_logs
         self.clock = clock
+        self.users = users
 
     async def write(
         self,
@@ -87,7 +91,13 @@ class AuditService:
                 entity_id,
             )
 
-    async def recent(self, limit: int = 20, offset: int = 0) -> list[dict[str, object]]:
+    async def recent(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[dict[str, object]]:
+        """Return recent audit log entries; raises AccessDenied if actor is not a superadmin."""
+        if self.users is None:
+            raise RuntimeError("AuditService.recent requires a UserRepository; pass users= to AuditService()")
+        user = await self.users.get_by_id(actor_user_id)
+        if user is None or user.role != UserRole.SUPERADMIN:
+            raise AccessDenied("Недостаточно прав")
         return await self.audit_logs.list_recent(limit=limit, offset=offset)
 
     async def recent_for_entity(
@@ -134,8 +144,10 @@ class AuditService:
             return {str(item_key): self._sanitize_value(item_value, str(item_key)) for item_key, item_value in value.items()}
         if isinstance(value, (list, tuple)):
             return [self._sanitize_value(item) for item in value]
-        if isinstance(value, str) and len(value) > 256:
-            return value[:256] + "...[truncated]"
+        if isinstance(value, str):
+            if len(value) > 256:
+                value = value[:256] + "...[truncated]"
+            value = redact_value(value)
         return value
 
     def _is_secret_key(self, key: str) -> bool:
