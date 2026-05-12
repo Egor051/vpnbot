@@ -444,6 +444,106 @@ sqlite3 /opt/vpn-service/data/vpn.db "PRAGMA quick_check;"
 .venv/bin/python -m pytest
 ```
 
+### Package 7 Healthcheck — preflight, postflight, and admin diagnostics
+
+`deploy/check-nonroot-helper-mode.py` is the mandatory preflight and postflight tool for the non-root privilege-separated deployment. Run it before and after every deploy.
+
+**Human-readable output (default):**
+
+```bash
+cd /opt/vpn-service
+python deploy/check-nonroot-helper-mode.py
+```
+
+Exit codes:
+- `0` — all checks passed (warnings are informational, not failures)
+- `1` — one or more checks failed; address failures before starting or restarting the service
+
+**Machine-readable JSON output (for automation/CI):**
+
+```bash
+python deploy/check-nonroot-helper-mode.py --json
+```
+
+JSON format: `{"overall": "ok|warning|failed", "failures": N, "warnings": N, "checks": [{"status": "ok|warning|failed", "message": "..."}]}`
+
+**Pre-start mode (default — before `systemctl start vpn-bot`):**
+
+```bash
+python deploy/check-nonroot-helper-mode.py --mode pre-start
+```
+
+In `pre-start` mode, `/run/vpn-bot` absence is expected (systemd creates the `RuntimeDirectory` when the service starts) and will produce a warning, not a failure.
+
+**Post-start mode (after `systemctl start vpn-bot`):**
+
+```bash
+python deploy/check-nonroot-helper-mode.py --mode post-start
+```
+
+In `post-start` mode, `/run/vpn-bot` must exist and be writable by `vpn-bot`. Absence is a failure.
+
+**What the checker validates (Package 5D + Package 7):**
+
+- `vpn-bot.service` contains `User=vpn-bot`, `Group=vpn-bot`, `RuntimeDirectory=vpn-bot`, `RuntimeDirectoryMode=0700`, `ProtectSystem=strict`
+- `vpn-bot.service` does not contain `User=root`, `Group=root`, `NoNewPrivileges=true`
+- `/etc/sudoers.d/vpnbot` is root:root 0440, grants only the 4 fixed helpers, no broad grants (`NOPASSWD: ALL`, `ALL=(ALL)`)
+- Helper binaries are root:root 0755
+- `/opt/vpn-service`, `.venv`, `deploy` are not writable by `vpn-bot`
+- `/run/vpn-bot` existence and writability (mode-dependent)
+- `.env` is not world-readable and is readable by `vpn-bot`
+- SQLite `PRAGMA quick_check`
+- Xray config syntax test (`xray run -test -config`)
+- AWG config strip (`awg-quick strip`)
+- MTProxy managed files readable and structurally valid JSON
+- `sudo -n <helper> status` calls succeed (verifies sudoers grants work end-to-end)
+- `systemctl is-active` for: `vpn-bot`, `xray`, `awg-quick@awg0`, `danted`, `mtproxy`
+
+**Admin diagnostics in the bot (on-demand):**
+
+Open the admin panel in Telegram → *Диагностика backend*. This runs a live read-only health check and shows:
+
+```
+Diagnostics  OK
+2026-05-12 10:30:00 UTC
+
+✓ Non-root OK (uid=1001)
+✓ PRIVILEGE_HELPERS_ENABLED=true
+✓ Xray: OK
+✓ AWG: OK
+✓ SOCKS5: OK
+✓ MTProto: OK
+✓ SQLite PRAGMA quick_check: ok
+✓ vpn-bot: active
+✓ xray: active
+✓ awg-quick@awg0: active
+...
+```
+
+Overall status is `OK / WARNING / DEGRADED / FAILED`. Secrets, tokens, private keys, and raw hex values are never shown — only the sanitised status and reason.
+
+**Expected sudo log entries:**
+
+When `PRIVILEGE_HELPERS_ENABLED=true`, every privileged operation (Xray/AWG config apply, SOCKS5 user create/delete, MTProto secret apply) produces a sudo log entry like:
+
+```
+vpn-bot : TTY=... ; PWD=... ; USER=root ; COMMAND=/usr/local/sbin/vpnbot-xray-apply apply ...
+```
+
+These entries are **expected and normal**. They confirm the least-privilege model is working correctly.
+
+**Signs that require rollback:**
+
+- `FAIL: ... User=root` in checker output — the service is configured to run as root
+- `FAIL: ... NOPASSWD: ALL` — broad sudo grant is present
+- `FAIL: ... writable by vpn-bot` on code/venv/deploy directories
+- SQLite `PRAGMA quick_check` returns anything other than `ok`
+- Bot starts, issues one key, but Xray/AWG service is immediately DEGRADED with a config apply error
+- `sudo -n <helper> status` returns permission errors — sudoers file is incorrect
+- Any helper binary not root:root 0755 — must be fixed before the bot can use them
+
+If rollback is needed, see the "Rollback after a bad deploy" section below.
+
 ### Backup
 
 Back up at least these files before deploys, migrations, and manual backend edits:
