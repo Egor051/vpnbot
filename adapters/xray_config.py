@@ -299,18 +299,22 @@ class XrayConfigAdapter:
                 suffix=".json",
                 content=content,
             )
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=self.config_path.parent,
-            prefix=f".{self.config_path.name}.",
-            suffix=".json",
-            delete=False,
-        ) as file:
-            file.write(content)
-            file.flush()
-            os.fsync(file.fileno())
-            temp_path = Path(file.name)
+        old_umask = os.umask(0o177)
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=self.config_path.parent,
+                prefix=f".{self.config_path.name}.",
+                suffix=".json",
+                delete=False,
+            ) as file:
+                file.write(content)
+                file.flush()
+                os.fsync(file.fileno())
+                temp_path = Path(file.name)
+        finally:
+            os.umask(old_umask)
         if mode_from.exists():
             self._copy_stat(mode_from, temp_path)
         return temp_path

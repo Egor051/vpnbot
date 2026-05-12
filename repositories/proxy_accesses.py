@@ -16,6 +16,7 @@ from models.dto import (
     ProxyUserStats,
 )
 from models.enums import ProxyAccessStatus, ProxyAccessType
+from services.errors import InvalidTransition
 
 logger = logging.getLogger(__name__)
 
@@ -428,7 +429,7 @@ class ProxyAccessRepository:
         await self.db.commit()
 
     async def mark_revoked(self, access_id: int, actor_user_id: int, now: str, *, reason: str | None = None) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE proxy_accesses
             SET status = ?,
@@ -438,14 +439,17 @@ class ProxyAccessRepository:
                 reason = COALESCE(?, reason),
                 last_apply_at = ?,
                 error = NULL
-            WHERE id = ?
+            WHERE id = ? AND status NOT IN (?, ?)
             """,
-            (ProxyAccessStatus.REVOKED.value, now, now, actor_user_id, reason, now, access_id),
+            (ProxyAccessStatus.REVOKED.value, now, now, actor_user_id, reason, now, access_id,
+             ProxyAccessStatus.REVOKED.value, ProxyAccessStatus.DELETED.value),
         )
         await self.db.commit()
+        if cursor.rowcount != 1:
+            raise InvalidTransition(f"Proxy access {access_id} is already revoked or deleted")
 
     async def mark_inactive(self, access_id: int, actor_user_id: int, now: str, *, reason: str | None = None) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE proxy_accesses
             SET status = ?,
@@ -454,14 +458,17 @@ class ProxyAccessRepository:
                 revoked_by = COALESCE(revoked_by, ?),
                 reason = COALESCE(?, reason),
                 error = NULL
-            WHERE id = ?
+            WHERE id = ? AND status NOT IN (?, ?, ?)
             """,
-            (ProxyAccessStatus.INACTIVE.value, now, now, actor_user_id, reason, access_id),
+            (ProxyAccessStatus.INACTIVE.value, now, now, actor_user_id, reason, access_id,
+             ProxyAccessStatus.INACTIVE.value, ProxyAccessStatus.REVOKED.value, ProxyAccessStatus.DELETED.value),
         )
         await self.db.commit()
+        if cursor.rowcount != 1:
+            raise InvalidTransition(f"Proxy access {access_id} is already inactive, revoked or deleted")
 
     async def mark_deleted(self, access_id: int, actor_user_id: int, now: str, *, reason: str | None = None) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE proxy_accesses
             SET status = ?,
@@ -470,11 +477,14 @@ class ProxyAccessRepository:
                 deleted_by = COALESCE(deleted_by, ?),
                 reason = COALESCE(?, reason),
                 error = NULL
-            WHERE id = ?
+            WHERE id = ? AND status != ?
             """,
-            (ProxyAccessStatus.DELETED.value, now, now, actor_user_id, reason, access_id),
+            (ProxyAccessStatus.DELETED.value, now, now, actor_user_id, reason, access_id,
+             ProxyAccessStatus.DELETED.value),
         )
         await self.db.commit()
+        if cursor.rowcount != 1:
+            raise InvalidTransition(f"Proxy access {access_id} is already deleted")
 
     async def lifecycle_stats(self) -> ProxyLifecycleStats:
         cursor = await self.db.conn.execute(

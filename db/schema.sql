@@ -9,11 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
   telegram_user_id INTEGER PRIMARY KEY,
   username TEXT,
   first_name TEXT,
-  role TEXT NOT NULL CHECK(role IN (
-    'SUPERADMIN','APPROVED_USER','PENDING_USER','BLOCKED_USER',
-    'superadmin','super_admin','approved','approved_user','pending','pending_user',
-    'blocked','blocked_user','banned','ban','revoked'
-  )),
+  role TEXT NOT NULL CHECK(role IN ('SUPERADMIN','APPROVED_USER','PENDING_USER','BLOCKED_USER')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   blocked_at TEXT

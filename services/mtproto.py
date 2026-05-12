@@ -15,6 +15,7 @@ from repositories.proxy_accesses import ProxyAccessRepository
 from services.audit import AuditService
 from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation, NotFound
+from utils.redact import redact_value
 from services.user_locks import UserLockManager
 from services.users import UserService
 
@@ -833,7 +834,7 @@ class MtProtoService:
             if value:
                 redacted = redacted.replace(value, "***")
                 redacted = redacted.replace(f"dd{value}", "dd***")
-        return redacted
+        return redact_value(redacted)
 
     async def _write_audit_best_effort(
         self,

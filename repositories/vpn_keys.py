@@ -8,6 +8,7 @@ from aiosqlite import Row
 from db.database import Database
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
+from services.errors import InvalidTransition
 
 logger = logging.getLogger(__name__)
 
@@ -377,26 +378,31 @@ class VpnKeyRepository:
         await self.set_status(key_id, status, now)
 
     async def mark_revoked(self, key_id: int, actor_user_id: int, now: str) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE vpn_keys
             SET status = ?, updated_at = ?, revoked_at = COALESCE(revoked_at, ?), revoked_by = COALESCE(revoked_by, ?)
-            WHERE id = ?
+            WHERE id = ? AND status NOT IN (?, ?)
             """,
-            (VpnKeyStatus.REVOKED.value, now, now, actor_user_id, key_id),
+            (VpnKeyStatus.REVOKED.value, now, now, actor_user_id, key_id,
+             VpnKeyStatus.REVOKED.value, VpnKeyStatus.DELETED.value),
         )
         await self.db.commit()
+        if cursor.rowcount != 1:
+            raise InvalidTransition(f"VPN key {key_id} is already revoked or deleted")
 
     async def mark_deleted(self, key_id: int, actor_user_id: int, now: str) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE vpn_keys
             SET status = ?, updated_at = ?, deleted_at = COALESCE(deleted_at, ?), deleted_by = COALESCE(deleted_by, ?)
-            WHERE id = ?
+            WHERE id = ? AND status != ?
             """,
-            (VpnKeyStatus.DELETED.value, now, now, actor_user_id, key_id),
+            (VpnKeyStatus.DELETED.value, now, now, actor_user_id, key_id, VpnKeyStatus.DELETED.value),
         )
         await self.db.commit()
+        if cursor.rowcount != 1:
+            raise InvalidTransition(f"VPN key {key_id} is already deleted")
 
     async def soft_delete_key(self, key_id: int, actor_user_id: int, now: str) -> None:
         await self.mark_deleted(key_id, actor_user_id, now)

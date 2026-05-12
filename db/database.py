@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -199,6 +199,10 @@ class Database:
         if version < 10:
             await self._create_proxy_access_live_unique_index()
             await self._set_schema_version(10)
+            version = 10
+        if version < 11:
+            await self._normalize_user_roles()
+            await self._set_schema_version(11)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -471,23 +475,7 @@ class Database:
             (
                 "users",
                 "role",
-                (
-                    "SUPERADMIN",
-                    "APPROVED_USER",
-                    "PENDING_USER",
-                    "BLOCKED_USER",
-                    "superadmin",
-                    "super_admin",
-                    "approved",
-                    "approved_user",
-                    "pending",
-                    "pending_user",
-                    "blocked",
-                    "blocked_user",
-                    "banned",
-                    "ban",
-                    "revoked",
-                ),
+                ("SUPERADMIN", "APPROVED_USER", "PENDING_USER", "BLOCKED_USER"),
             ),
             ("access_requests", "status", ("pending", "approved", "rejected")),
             (
@@ -566,6 +554,26 @@ class Database:
                 "Найдены дубли AWG client_ip в reserved статусах: "
                 f"client_ip={row['client_ip']} count={row['cnt']}. "
                 "Остановите запуск, сделайте backup SQLite DB и вручную разберите конфликт перед миграцией."
+            )
+
+    async def _normalize_user_roles(self) -> None:
+        legacy_map = {
+            "superadmin": "SUPERADMIN",
+            "super_admin": "SUPERADMIN",
+            "approved": "APPROVED_USER",
+            "approved_user": "APPROVED_USER",
+            "pending": "PENDING_USER",
+            "pending_user": "PENDING_USER",
+            "blocked": "BLOCKED_USER",
+            "blocked_user": "BLOCKED_USER",
+            "banned": "BLOCKED_USER",
+            "ban": "BLOCKED_USER",
+            "revoked": "BLOCKED_USER",
+        }
+        for legacy, canonical in legacy_map.items():
+            await self.conn.execute(
+                "UPDATE users SET role = ? WHERE role = ?",
+                (canonical, legacy),
             )
 
     async def _validate_proxy_live_duplicates(self) -> None:

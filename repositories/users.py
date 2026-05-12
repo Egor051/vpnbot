@@ -78,8 +78,11 @@ class UserRepository:
         return user
 
     async def create_admin_placeholders(self, admin_ids: Iterable[int], now: str) -> None:
-        for admin_id in admin_ids:
-            await self.db.conn.execute(
+        rows = [(admin_id, UserRole.SUPERADMIN.value, now, now) for admin_id in admin_ids]
+        if not rows:
+            return
+        async with self.db.transaction():
+            await self.db.conn.executemany(
                 """
                 INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
                 VALUES (?, NULL, NULL, ?, ?, ?)
@@ -88,9 +91,8 @@ class UserRepository:
                   blocked_at = NULL,
                   updated_at = excluded.updated_at
                 """,
-                (admin_id, UserRole.SUPERADMIN.value, now, now),
+                rows,
             )
-        await self.db.commit()
 
     async def set_role(self, telegram_user_id: int, role: UserRole, now: str, blocked_at: str | None = None) -> None:
         cursor = await self.db.conn.execute(

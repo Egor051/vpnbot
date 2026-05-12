@@ -297,6 +297,8 @@ async def revoke_key_prompt(callback: CallbackQuery, services: Services) -> None
         key_id, owner_context, page_context = _parse_key_context(callback.data, "key:revoke")
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         owner_context = owner_context or _admin_owner_context(key, callback.from_user.id)
+        if owner_context is not None and owner_context != key.owner_user_id:
+            raise AccessDenied("Контекст отзыва устарел, откройте список ключей заново")
         await safe_edit_message_text(
             callback.message,
             f"Отозвать ключ #{key_id}? Доступ по нему будет отключён.",

@@ -467,11 +467,15 @@ class AwgConfigAdapter:
         self._parse_sections(text)
         tmp_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.config_path.parent, suffix=".conf", delete=False) as tmp:
-                tmp.write(text)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-                tmp_path = Path(tmp.name)
+            old_umask = os.umask(0o177)
+            try:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.config_path.parent, suffix=".conf", delete=False) as tmp:
+                    tmp.write(text)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                    tmp_path = Path(tmp.name)
+            finally:
+                os.umask(old_umask)
             result = await self._quick_strip(tmp_path)
             if not result.ok:
                 raise AwgConfigError("AWG config не прошёл проверку awg-quick/wg-quick strip")
@@ -494,11 +498,15 @@ class AwgConfigAdapter:
             stripped = await self._quick_strip(config_path)
             if not stripped.ok:
                 raise AwgApplyError("Не удалось подготовить AWG config для syncconf")
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=config_path.parent, suffix=".conf", delete=False) as tmp:
-                tmp.write(stripped.stdout)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-                stripped_path = Path(tmp.name)
+            old_umask = os.umask(0o177)
+            try:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=config_path.parent, suffix=".conf", delete=False) as tmp:
+                    tmp.write(stripped.stdout)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                    stripped_path = Path(tmp.name)
+            finally:
+                os.umask(old_umask)
             result = await self._run_awg_or_wg(["syncconf", self.interface, str(stripped_path)], timeout=15)
             if not result.ok:
                 raise AwgApplyError("Не удалось синхронизировать AWG runtime из восстановленного config")
@@ -797,11 +805,15 @@ class AwgConfigAdapter:
         temp_path: str | None = None
         try:
             if preshared_key:
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
-                    tmp.write(preshared_key + "\n")
-                    tmp.flush()
-                    os.fsync(tmp.fileno())
-                    temp_path = tmp.name
+                old_umask = os.umask(0o177)
+                try:
+                    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+                        tmp.write(preshared_key + "\n")
+                        tmp.flush()
+                        os.fsync(tmp.fileno())
+                        temp_path = tmp.name
+                finally:
+                    os.umask(old_umask)
                 args.extend(["preshared-key", temp_path])
             args.extend(["allowed-ips", f"{client_ip}/32", "persistent-keepalive", str(self.persistent_keepalive)])
             result = await self._run_awg_or_wg(args, timeout=15, sensitive_values=[preshared_key or ""])

@@ -271,6 +271,7 @@ async def admin_requests(callback: CallbackQuery, services: Services) -> None:
         return
     page = _page_from_callback(callback.data)
     try:
+        await services.users.require_superadmin(callback.from_user.id)
         items = await services.access.list_pending(
             callback.from_user.id,
             limit=ADMIN_PAGE_SIZE + 1,
@@ -294,6 +295,7 @@ async def admin_request_detail(callback: CallbackQuery, services: Services) -> N
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
+        await services.users.require_superadmin(callback.from_user.id)
         request_id = int(callback.data.rsplit(":", 1)[-1])
         request = await services.access.get_request(callback.from_user.id, request_id)
         await safe_edit_message_text(callback.message, access_request_text(request), reply_markup=pending_requests_keyboard([request]))
