@@ -45,6 +45,9 @@ else
 fi
 
 install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 "${APP_DIR}/data"
+# Fix ownership of existing DB files left behind by a previous root-owned install.
+find "${APP_DIR}/data" -maxdepth 1 -type f \( -name 'vpn.db' -o -name 'vpn.db-wal' -o -name 'vpn.db-shm' \) \
+  -exec chown "${BOT_USER}:${BOT_GROUP}" {} \;
 install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 "${APP_DIR}/logs"
 install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 /run/vpn-bot
 install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 /run/vpn-bot/xray
