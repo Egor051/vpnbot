@@ -449,17 +449,26 @@ class VpnKeyRepository:
         return await self.get_occupied_awg_ips()
 
     async def find_by_uuid(self, uuid_value: str) -> VpnKey | None:
-        cursor = await self.db.conn.execute("SELECT * FROM vpn_keys WHERE uuid = ? LIMIT 1", (uuid_value,))
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM vpn_keys WHERE uuid = ? AND status NOT IN (?, ?) LIMIT 1",
+            (uuid_value, VpnKeyStatus.REVOKED.value, VpnKeyStatus.DELETED.value),
+        )
         row = await cursor.fetchone()
         return _row_to_vpn_key(row)
 
     async def find_by_email_label(self, email_label: str) -> VpnKey | None:
-        cursor = await self.db.conn.execute("SELECT * FROM vpn_keys WHERE email_label = ? LIMIT 1", (email_label,))
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM vpn_keys WHERE email_label = ? AND status NOT IN (?, ?) LIMIT 1",
+            (email_label, VpnKeyStatus.REVOKED.value, VpnKeyStatus.DELETED.value),
+        )
         row = await cursor.fetchone()
         return _row_to_vpn_key(row)
 
     async def find_by_public_key(self, public_key: str) -> VpnKey | None:
-        cursor = await self.db.conn.execute("SELECT * FROM vpn_keys WHERE public_key = ? LIMIT 1", (public_key,))
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM vpn_keys WHERE public_key = ? AND status NOT IN (?, ?) LIMIT 1",
+            (public_key, VpnKeyStatus.REVOKED.value, VpnKeyStatus.DELETED.value),
+        )
         row = await cursor.fetchone()
         return _row_to_vpn_key(row)
 

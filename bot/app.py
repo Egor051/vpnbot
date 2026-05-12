@@ -250,6 +250,10 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     await _startup_reconcile_keys(services)
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # FSM state is in-memory only — bot restart clears in-progress wizards.
+    # Switching to a persistent SQLite-backed storage would preserve state across
+    # restarts but is not yet implemented (see aiogram_sqlite_storage or a custom
+    # aiosqlite adapter).
     dp = Dispatcher(storage=MemoryStorage())
     dp.workflow_data["services"] = services
     dp.workflow_data["rate_limiter"] = RateLimiter()

@@ -10,11 +10,8 @@ from services.errors import NotFound
 
 
 _ANNOUNCEMENT_ROLE_SQL_VALUES = (
-    UserRole.APPROVED_USER.value.lower(),
-    UserRole.SUPERADMIN.value.lower(),
-    "approved",
-    "superadmin",
-    "super_admin",
+    UserRole.APPROVED_USER.value,
+    UserRole.SUPERADMIN.value,
 )
 _ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS = ", ".join("?" for _ in _ANNOUNCEMENT_ROLE_SQL_VALUES)
 
@@ -125,7 +122,7 @@ class UserRepository:
             SELECT COUNT(*) AS cnt
             FROM users
             WHERE blocked_at IS NULL
-              AND LOWER(role) IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
+              AND role IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
             """,
             _ANNOUNCEMENT_ROLE_SQL_VALUES,
         )
@@ -138,7 +135,7 @@ class UserRepository:
                 f"""
                 SELECT * FROM users
                 WHERE blocked_at IS NULL
-                  AND LOWER(role) IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
+                  AND role IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
                 ORDER BY telegram_user_id ASC
                 LIMIT ?
                 """,
@@ -149,7 +146,7 @@ class UserRepository:
                 f"""
                 SELECT * FROM users
                 WHERE blocked_at IS NULL
-                  AND LOWER(role) IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
+                  AND role IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
                   AND telegram_user_id > ?
                 ORDER BY telegram_user_id ASC
                 LIMIT ?

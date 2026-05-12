@@ -112,7 +112,7 @@ class AuditLogRepository:
 
     async def prune_older_than(self, cutoff: str) -> int:
         cursor = await self.db.conn.execute(
-            "DELETE FROM audit_log WHERE created_at < ?",
+            "DELETE FROM audit_log WHERE datetime(created_at) < datetime(?)",
             (cutoff,),
         )
         await self.db.commit()

@@ -19,7 +19,7 @@ class BackupAdapter:
             raise AdapterError(f"Файл не найден для backup: {target}")
         stamp = self.clock.now().replace(":", "").replace("+", "_").replace(".", "")
         for _ in range(10):
-            backup_path = target.with_name(f"{target.name}.{stamp}.{time.time_ns()}.{secrets.token_hex(4)}.bak")
+            backup_path = target.with_name(f"{target.name}.{stamp}.{time.time_ns()}.{secrets.token_urlsafe(16)}.bak")
             if not backup_path.exists():
                 break
         else:
@@ -34,7 +34,7 @@ class BackupAdapter:
         if not backup_path.exists():
             raise AdapterError(f"Backup не найден: {backup_path}")
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = target.with_name(f".{target.name}.restore.{time.time_ns()}.{secrets.token_hex(4)}")
+        tmp_path = target.with_name(f".{target.name}.restore.{time.time_ns()}.{secrets.token_urlsafe(16)}")
         try:
             shutil.copy2(backup_path, tmp_path)
             if mode_from is not None and mode_from.exists():
@@ -51,7 +51,7 @@ class BackupAdapter:
 
     def atomic_write_text(self, target: Path, content: str, mode_from: Path | None = None) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = target.with_name(f".{target.name}.{time.time_ns()}.{secrets.token_hex(4)}.tmp")
+        tmp_path = target.with_name(f".{target.name}.{time.time_ns()}.{secrets.token_urlsafe(16)}.tmp")
         data = content.encode("utf-8")
         try:
             with tmp_path.open("wb") as file:

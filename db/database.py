@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -203,6 +203,10 @@ class Database:
         if version < 11:
             await self._normalize_user_roles()
             await self._set_schema_version(11)
+            version = 11
+        if version < 12:
+            await self._create_performance_indexes()
+            await self._set_schema_version(12)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -555,6 +559,17 @@ class Database:
                 f"client_ip={row['client_ip']} count={row['cnt']}. "
                 "Остановите запуск, сделайте backup SQLite DB и вручную разберите конфликт перед миграцией."
             )
+
+    async def _create_performance_indexes(self) -> None:
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_active_role "
+            "ON users(role) WHERE blocked_at IS NULL"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vpn_keys_short_id "
+            "ON vpn_keys(json_extract(payload_json, '$.short_id')) "
+            "WHERE key_type = 'xray' AND json_extract(payload_json, '$.short_id') IS NOT NULL"
+        )
 
     async def _normalize_user_roles(self) -> None:
         legacy_map = {
