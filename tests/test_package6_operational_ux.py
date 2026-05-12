@@ -103,9 +103,9 @@ def test_admin_key_keyboards_keep_revoke_and_delete_actions() -> None:
     callbacks = _callbacks(keys_list_keyboard([_key(owner_user_id=200)], owner_user_id=200))
     detail_callbacks = _callbacks(key_actions_keyboard(_key(owner_user_id=200), owner_user_id=200))
 
-    assert "key:revoke:10" in callbacks
+    assert "key:revoke:10:200:0" in callbacks
     assert "key:delete:10:200:0" in callbacks
-    assert "key:revoke:10" in detail_callbacks
+    assert "key:revoke:10:200:0" in detail_callbacks
     assert "key:delete:10:200:0" in detail_callbacks
 
 

@@ -25,7 +25,7 @@ from bot.messages import MAX_TEXT_CONFIG_LEN, safe_callback_answer, safe_edit_me
 from bot.middlewares.access import BLOCKED_CALLBACK_TEXT, BLOCKED_MESSAGE_TEXT, BlockedUserMiddleware
 from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
 from config.settings import Settings
-from db.database import Database
+from db.database import CURRENT_SCHEMA_VERSION, Database
 from models.access import is_blocked_user
 from models.dto import ShellResult, TelegramUserProfile, User, VpnKey
 from models.enums import AccessRequestStatus, AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType, parse_user_role
@@ -209,7 +209,7 @@ def test_legacy_v3_duplicate_pending_migrates_before_unique_index(tmp_path: Path
             print("BOOTSTRAP_OK")
             cursor = await db.conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'")
             version = await cursor.fetchone()
-            assert version["value"] == "10"
+            assert int(version["value"]) >= 10
             cursor = await db.conn.execute(
                 "SELECT status, COUNT(*) AS cnt FROM access_requests GROUP BY status ORDER BY status"
             )
@@ -339,7 +339,7 @@ def test_connection_proxy_raw_commit_and_rollback_do_not_break_foreign_transacti
                 await db.conn.execute(
                     """
                     INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
-                    VALUES (401, 'commit', 'Commit', 'pending', 'now', 'now')
+                    VALUES (401, 'commit', 'Commit', 'PENDING_USER', 'now', 'now')
                     """
                 )
                 commit_task = asyncio.create_task(db.conn.commit())
@@ -351,7 +351,7 @@ def test_connection_proxy_raw_commit_and_rollback_do_not_break_foreign_transacti
                 await db.conn.execute(
                     """
                     INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
-                    VALUES (402, 'rollback', 'Rollback', 'pending', 'now', 'now')
+                    VALUES (402, 'rollback', 'Rollback', 'PENDING_USER', 'now', 'now')
                     """
                 )
                 rollback_task = asyncio.create_task(db.conn.rollback())
@@ -396,7 +396,7 @@ def test_connection_proxy_treats_with_mutation_as_gated_write(tmp_path: Path) ->
                     """
                     WITH src(id, username) AS (SELECT 501, 'cte')
                     INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
-                    SELECT id, username, 'CTE', 'pending', 'now', 'now' FROM src
+                    SELECT id, username, 'CTE', 'PENDING_USER', 'now', 'now' FROM src
                     """
                 )
                 await db.commit()

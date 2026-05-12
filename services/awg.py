@@ -71,7 +71,7 @@ class AwgService:
         self.clock = clock
         self.ids = ids
         self.audit = audit
-        self.user_locks: UserLockManager = user_locks if user_locks is not None else users.user_locks
+        self.user_locks: UserLockManager = user_locks if user_locks is not None else getattr(users, "user_locks", UserLockManager())
         self.backend_health = backend_health or BackendHealth()
         self._lock = asyncio.Lock()
 

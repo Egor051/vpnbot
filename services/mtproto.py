@@ -64,7 +64,7 @@ class MtProtoService:
         self.clock = clock
         self.audit = audit
         self.adapter = adapter
-        self.user_locks: UserLockManager = user_locks if user_locks is not None else users.user_locks
+        self.user_locks: UserLockManager = user_locks if user_locks is not None else getattr(users, "user_locks", UserLockManager())
         self.backend_health = backend_health or BackendHealth()
         self._apply_lock = asyncio.Lock()
 

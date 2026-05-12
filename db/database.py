@@ -568,7 +568,7 @@ class Database:
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_vpn_keys_short_id "
             "ON vpn_keys(json_extract(payload_json, '$.short_id')) "
-            "WHERE key_type = 'xray' AND json_extract(payload_json, '$.short_id') IS NOT NULL"
+            "WHERE key_type = 'xray' AND json_valid(payload_json) AND json_extract(payload_json, '$.short_id') IS NOT NULL"
         )
 
     async def _normalize_user_roles(self) -> None:
