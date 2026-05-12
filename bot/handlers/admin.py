@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from bot.container import Services
 from bot.formatters import (
     NOTE_CREATE_WARNING,
     ONE_KEY_ONE_DEVICE_WARNING,
@@ -68,7 +68,7 @@ ADMIN_PROXY_USER_LIMIT = 10
 
 
 @router.message(Command("admin"))
-async def admin_command(message: Message, services: Any) -> None:
+async def admin_command(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
@@ -81,7 +81,7 @@ async def admin_command(message: Message, services: Any) -> None:
 
 
 @router.message(F.text == "Админ-панель")
-async def admin_menu_message(message: Message, services: Any) -> None:
+async def admin_menu_message(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
@@ -94,7 +94,7 @@ async def admin_menu_message(message: Message, services: Any) -> None:
 
 
 @router.callback_query(F.data == "admin:panel")
-async def admin_panel(callback: CallbackQuery, services: Any) -> None:
+async def admin_panel(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback)
@@ -108,7 +108,7 @@ async def admin_panel(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data == "admin:announce")
-async def admin_announcement_start(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+async def admin_announcement_start(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback)
@@ -128,7 +128,7 @@ async def admin_announcement_start(callback: CallbackQuery, state: FSMContext, s
 
 
 @router.message(AdminAnnouncementStates.waiting_message)
-async def admin_announcement_message(message: Message, state: FSMContext, services: Any) -> None:
+async def admin_announcement_message(message: Message, state: FSMContext, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
@@ -155,7 +155,7 @@ async def admin_announcement_message(message: Message, state: FSMContext, servic
 async def admin_announcement_send(
     callback: CallbackQuery,
     state: FSMContext,
-    services: Any,
+    services: Services,
     bot: Bot,
     rate_limiter: RateLimiter | None = None,
 ) -> None:
@@ -200,7 +200,7 @@ async def admin_announcement_send(
 
 
 @router.callback_query(AdminAnnouncementStates.confirming, F.data == "admin:announce:cancel")
-async def admin_announcement_cancel(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+async def admin_announcement_cancel(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await state.clear()
@@ -215,7 +215,7 @@ async def admin_announcement_cancel(callback: CallbackQuery, state: FSMContext, 
 
 
 @router.callback_query(F.data == "admin:announce_batches")
-async def admin_announcement_batches(callback: CallbackQuery, services: Any) -> None:
+async def admin_announcement_batches(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback, "Обновляю список...")
@@ -229,7 +229,7 @@ async def admin_announcement_batches(callback: CallbackQuery, services: Any) -> 
 
 
 @router.callback_query(F.data.regexp(r"^admin:announce:(resume|retry|cancelbatch):\d+$"))
-async def admin_announcement_batch_action(callback: CallbackQuery, services: Any, bot: Bot) -> None:
+async def admin_announcement_batch_action(callback: CallbackQuery, services: Services, bot: Bot) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -263,7 +263,7 @@ async def admin_announcement_batch_action(callback: CallbackQuery, services: Any
 
 
 @router.callback_query(F.data.regexp(r"^admin:reqs(?::\d+)?$"))
-async def admin_requests(callback: CallbackQuery, services: Any) -> None:
+async def admin_requests(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback)
@@ -287,7 +287,7 @@ async def admin_requests(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.startswith("admin:req:"))
-async def admin_request_detail(callback: CallbackQuery, services: Any) -> None:
+async def admin_request_detail(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback)
@@ -302,7 +302,7 @@ async def admin_request_detail(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.regexp(r"^admin:approve:\d+$"))
-async def admin_approve(callback: CallbackQuery, services: Any, bot: Bot) -> None:
+async def admin_approve(callback: CallbackQuery, services: Services, bot: Bot) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -325,7 +325,7 @@ async def admin_approve(callback: CallbackQuery, services: Any, bot: Bot) -> Non
 
 
 @router.callback_query(F.data.regexp(r"^admin:reject:\d+$"))
-async def admin_reject(callback: CallbackQuery, services: Any, bot: Bot) -> None:
+async def admin_reject(callback: CallbackQuery, services: Services, bot: Bot) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -348,7 +348,7 @@ async def admin_reject(callback: CallbackQuery, services: Any, bot: Bot) -> None
 
 
 @router.callback_query(F.data.regexp(r"^admin:(approve|reject):confirm:\d+$"))
-async def admin_access_decision_confirm(callback: CallbackQuery, services: Any, bot: Bot) -> None:
+async def admin_access_decision_confirm(callback: CallbackQuery, services: Services, bot: Bot) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -379,7 +379,7 @@ async def admin_access_decision_confirm(callback: CallbackQuery, services: Any, 
 
 
 @router.callback_query(F.data.regexp(r"^admin:users(?::\d+)?$"))
-async def admin_users(callback: CallbackQuery, services: Any) -> None:
+async def admin_users(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback)
@@ -404,7 +404,7 @@ async def admin_users(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.startswith("admin:user:"))
-async def admin_user_detail(callback: CallbackQuery, services: Any) -> None:
+async def admin_user_detail(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback)
@@ -426,7 +426,7 @@ async def admin_user_detail(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.startswith("admin:userapprove:"))
-async def admin_user_approve(callback: CallbackQuery, services: Any) -> None:
+async def admin_user_approve(callback: CallbackQuery, services: Services) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -443,7 +443,7 @@ async def admin_user_approve(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.regexp(r"^admin:block:\d+$"))
-async def admin_block_user(callback: CallbackQuery, services: Any) -> None:
+async def admin_block_user(callback: CallbackQuery, services: Services) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -469,7 +469,7 @@ async def admin_block_user(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.regexp(r"^admin:block:confirm:\d+$"))
-async def admin_block_user_confirm(callback: CallbackQuery, services: Any) -> None:
+async def admin_block_user_confirm(callback: CallbackQuery, services: Services) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -509,7 +509,7 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Any) -> No
 
 
 @router.callback_query(F.data.regexp(r"^admin:unblock:\d+$"))
-async def admin_unblock_user(callback: CallbackQuery, services: Any) -> None:
+async def admin_unblock_user(callback: CallbackQuery, services: Services) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -536,7 +536,7 @@ async def admin_unblock_user(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.regexp(r"^admin:unblock:confirm:\d+$"))
-async def admin_unblock_user_confirm(callback: CallbackQuery, services: Any) -> None:
+async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -565,7 +565,7 @@ async def admin_unblock_user_confirm(callback: CallbackQuery, services: Any) -> 
 
 
 @router.callback_query(F.data.regexp(r"^admin:ukeys:\d+:\d+$"))
-async def admin_user_keys(callback: CallbackQuery, services: Any) -> None:
+async def admin_user_keys(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback)
@@ -611,7 +611,7 @@ async def admin_user_keys(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.regexp(r"^admin:audit(?::\d+)?$"))
-async def admin_audit(callback: CallbackQuery, services: Any) -> None:
+async def admin_audit(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback)
@@ -643,7 +643,7 @@ async def admin_audit(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.regexp(r"^admin:stats(?::\d+)?$"))
-async def admin_stats(callback: CallbackQuery, services: Any) -> None:
+async def admin_stats(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback, "Обновляю статистику...")
@@ -673,7 +673,7 @@ async def admin_stats(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data == "admin:proxy")
-async def admin_proxy_status(callback: CallbackQuery, services: Any) -> None:
+async def admin_proxy_status(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback, "Обновляю статус...")
@@ -702,7 +702,7 @@ async def admin_proxy_status(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data == "admin:diagnostics")
-async def admin_backend_diagnostics(callback: CallbackQuery, services: Any) -> None:
+async def admin_backend_diagnostics(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback, "Обновляю диагностику...")
@@ -723,7 +723,7 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Any) -> N
 
 
 @router.callback_query(F.data == "admin:proxy_stats")
-async def admin_proxy_stats(callback: CallbackQuery, services: Any) -> None:
+async def admin_proxy_stats(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback, "Обновляю статистику прокси...")
@@ -759,7 +759,7 @@ async def admin_proxy_stats(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data == "admin:issue")
-async def admin_issue_choose_user(callback: CallbackQuery, services: Any) -> None:
+async def admin_issue_choose_user(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback)
@@ -779,7 +779,7 @@ async def admin_issue_choose_user(callback: CallbackQuery, services: Any) -> Non
 
 
 @router.callback_query(F.data.regexp(r"^admin:issuepage:\d+$"))
-async def admin_issue_choose_user_page(callback: CallbackQuery, services: Any) -> None:
+async def admin_issue_choose_user_page(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback)
@@ -804,7 +804,7 @@ async def admin_issue_choose_user_page(callback: CallbackQuery, services: Any) -
 
 
 @router.callback_query(F.data.regexp(r"^admin:issue:\d+$"))
-async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     await safe_callback_answer(callback)
@@ -824,7 +824,7 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
 
 
 @router.callback_query(AdminCreateKeyStates.choosing_type, F.data.regexp(r"^admin:ctype:(xray|awg):\d+$"))
-async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -857,7 +857,7 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
 
 
 @router.message(AdminCreateKeyStates.waiting_note)
-async def admin_issue_note(message: Message, state: FSMContext, services: Any) -> None:
+async def admin_issue_note(message: Message, state: FSMContext, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
@@ -878,7 +878,7 @@ async def admin_issue_note(message: Message, state: FSMContext, services: Any) -
 
 
 @router.callback_query(AdminCreateKeyStates.confirming, F.data == "admin:cconfirm")
-async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, services: Any, rate_limiter: RateLimiter) -> None:
+async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, services: Services, rate_limiter: RateLimiter) -> None:
     if callback.from_user is None or callback.message is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -943,7 +943,7 @@ def _clean_note(value: str | None) -> str | None:
     return None if note in {"", "-"} else note
 
 
-async def _show_announcement_batches(callback: CallbackQuery, services: Any, *, prefix: str | None = None) -> None:
+async def _show_announcement_batches(callback: CallbackQuery, services: Services, *, prefix: str | None = None) -> None:
     if callback.from_user is None or callback.message is None:
         return
     batches = await services.announcements.list_incomplete_batches(callback.from_user.id, limit=10)

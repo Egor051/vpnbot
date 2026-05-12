@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 
 
 class ShellRunner:
+    """Runs shell commands asynchronously, redacting sensitive values from logs and error output."""
+
     def __init__(self, max_output_chars: int = 4096) -> None:
         self.max_output_chars = max_output_chars
 
@@ -22,6 +24,7 @@ class ShellRunner:
         sensitive_values: Sequence[str] = (),
         max_output_chars: int | None = None,
     ) -> ShellResult:
+        """Execute a subprocess; redact sensitive_values from all logged output."""
         if not args:
             raise ValueError("args must not be empty")
 

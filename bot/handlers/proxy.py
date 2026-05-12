@@ -4,9 +4,11 @@ import secrets
 from typing import Any
 
 from aiogram import F, Router
+
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from bot.container import Services
 from bot.formatters import main_menu_text, proxy_access_text, user_proxy_stats_text
 from bot.fsm.states import ProxyStates
 from bot.handlers.common import answer_callback_error, answer_message_error, is_admin, profile_from_tg
@@ -22,7 +24,7 @@ _proxy_confirm_locks = UserLockManager()
 
 
 @router.message(F.text == "Прокси")
-async def show_proxy_message(message: Message, services: Any) -> None:
+async def show_proxy_message(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -35,7 +37,7 @@ async def show_proxy_message(message: Message, services: Any) -> None:
 
 
 @router.callback_query(F.data.in_({"proxy:show", "proxy:menu"}))
-async def show_proxy(callback: CallbackQuery, services: Any) -> None:
+async def show_proxy(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -49,7 +51,7 @@ async def show_proxy(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.in_({"proxy:get:socks5", "proxy:get:mtproto"}))
-async def proxy_get_prompt(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+async def proxy_get_prompt(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -86,7 +88,7 @@ async def proxy_get_prompt(callback: CallbackQuery, state: FSMContext, services:
 
 
 @router.callback_query(F.data == "proxy:stats")
-async def proxy_stats(callback: CallbackQuery, services: Any) -> None:
+async def proxy_stats(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -104,7 +106,7 @@ async def proxy_stats(callback: CallbackQuery, services: Any) -> None:
 
 
 @router.callback_query(F.data.regexp(r"^proxy:confirm:(socks5|mtproto):[-_A-Za-z0-9]+$"))
-async def proxy_confirm(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+async def proxy_confirm(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -149,7 +151,7 @@ async def proxy_confirm(callback: CallbackQuery, state: FSMContext, services: An
 
 
 @router.callback_query(F.data == "proxy:cancel")
-async def proxy_cancel(callback: CallbackQuery, state: FSMContext, services: Any) -> None:
+async def proxy_cancel(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     await state.clear()
@@ -164,7 +166,7 @@ async def proxy_cancel(callback: CallbackQuery, state: FSMContext, services: Any
 
 
 @router.callback_query(F.data == "proxy:back")
-async def proxy_back(callback: CallbackQuery, services: Any) -> None:
+async def proxy_back(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -181,7 +183,7 @@ async def proxy_back(callback: CallbackQuery, services: Any) -> None:
         await answer_callback_error(callback, exc)
 
 
-async def _proxy_menu_view(services: Any, user_id: int, accesses: list[Any] | None = None) -> tuple[str, Any]:
+async def _proxy_menu_view(services: Services, user_id: int, accesses: list[Any] | None = None) -> tuple[str, Any]:
     if accesses is None:
         accesses = await services.proxy.list_user_accesses(user_id)
     if not accesses and not services.settings.socks5_enabled and not services.settings.mtproto_enabled:

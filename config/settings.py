@@ -238,6 +238,7 @@ class Settings:
     xray_helper_staging_dir: Path = Path("/run/vpn-bot/xray")
     awg_helper_staging_dir: Path = Path("/run/vpn-bot/awg")
     mtproto_helper_staging_dir: Path = Path("/run/vpn-bot/mtproxy")
+    health_port: int | None = None
 
     def validate_xray_ready(self) -> None:
         required = {
@@ -427,6 +428,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         mtproto_apply_timeout_seconds=_int_range("MTPROTO_APPLY_TIMEOUT_SECONDS", 10, 1, 3600),
         mtproto_rollback_on_apply_failure=_bool("MTPROTO_ROLLBACK_ON_APPLY_FAILURE", True),
         mtproto_keep_last_backups=_int_range("MTPROTO_KEEP_LAST_BACKUPS", 10, 0, 1000),
+        health_port=_optional_int_range("HEALTH_PORT", 1, 65535),
         privilege_helpers_enabled=_bool("PRIVILEGE_HELPERS_ENABLED", False),
         helper_staging_root=helper_staging_root,
         socks5_user_helper_path=Path(_optional("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/vpnbot-socks5-user")),

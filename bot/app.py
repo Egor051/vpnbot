@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Any
 
 from aiogram import Bot, Dispatcher
@@ -21,6 +20,7 @@ from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter
 from adapters.xray_stats import XrayStatsAdapter
+from bot.container import Services
 from bot.handlers import admin, callbacks, common, keys, proxy, start
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.rate_limit import RateLimiter
@@ -53,26 +53,8 @@ from services.xray import XrayService
 logger = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)
-class Services:
-    settings: Settings
-    db: Database
-    users: UserService
-    access: AccessApprovalService
-    xray: XrayService
-    awg: AwgService
-    proxy: ProxyService
-    socks5: Socks5Service
-    mtproto: MtProtoService
-    notes: NotesService
-    vpn_keys: VpnKeyQueryService
-    traffic_stats: TrafficStatsService
-    audit: AuditService
-    announcements: AnnouncementService
-    backend_health: BackendHealth
 
-
-async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
+async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, BackendHealth]:
     db = Database(settings.db_path, synchronous=settings.sqlite_synchronous)
     await db.connect()
     await db.bootstrap()
@@ -287,7 +269,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database]:
     dp.include_router(proxy.router)
     dp.include_router(callbacks.router)
 
-    return bot, dp, db
+    return bot, dp, db, backend_health
 
 
 async def _startup_reconcile_keys(services: Services) -> None:

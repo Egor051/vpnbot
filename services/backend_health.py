@@ -17,16 +17,21 @@ class BackendHealthStatus:
 
 
 class BackendHealth:
+    """Tracks which backends are degraded and blocks mutations on them."""
+
     def __init__(self) -> None:
         self._degraded: dict[BackendType, str] = {}
 
     def mark_degraded(self, backend_type: BackendType, reason: str) -> None:
+        """Record a backend as degraded with a human-readable reason."""
         self._degraded[backend_type] = reason
 
     def mark_healthy(self, backend_type: BackendType) -> None:
+        """Clear degraded status for a backend."""
         self._degraded.pop(backend_type, None)
 
     def snapshot(self) -> tuple[BackendHealthStatus, ...]:
+        """Return current health status for all known backends."""
         return tuple(
             BackendHealthStatus(
                 backend_type=backend_type,
@@ -38,6 +43,7 @@ class BackendHealth:
         )
 
     def require_mutation_allowed(self, backend_type: BackendType) -> None:
+        """Raise InvalidOperation if the backend is currently degraded."""
         reason = self._degraded.get(backend_type)
         if reason is None:
             return

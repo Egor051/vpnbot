@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from aiogram import Bot, Router
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
+from bot.container import Services
 from bot.middlewares.access import BLOCKED_START_TEXT
 from bot.handlers.common import answer_message_error, is_admin, profile_from_tg
 from bot.formatters import main_menu_text
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.message(CommandStart())
-async def start_command(message: Message, services: Any, bot: Bot) -> None:
+async def start_command(message: Message, services: Services, bot: Bot) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -61,7 +61,7 @@ async def start_command(message: Message, services: Any, bot: Bot) -> None:
         await answer_message_error(message, exc)
 
 
-async def _notify_admins(services: Any, bot: Bot, request_id: int, user_id: int, username: str | None) -> None:
+async def _notify_admins(services: Services, bot: Bot, request_id: int, user_id: int, username: str | None) -> None:
     text = (
         "<b>Новая заявка на доступ</b>\n"
         f"Telegram ID: <code>{user_id}</code>\n"

@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class AuditService:
+    """Writes audit records with automatic redaction of secrets from details."""
     _SECRET_KEYS = {
         "private_key",
         "privatekey",
@@ -51,6 +52,7 @@ class AuditService:
         entity_id: str | int | None,
         details: dict[str, Any] | None = None,
     ) -> None:
+        """Write an audit record; raises on DB failure."""
         await self.audit_logs.create(
             actor_user_id=actor_user_id,
             action=action,
@@ -69,6 +71,7 @@ class AuditService:
         entity_id: str | int | None,
         details: dict[str, Any] | None = None,
     ) -> None:
+        """Write an audit record; silently logs and swallows DB failures so they never interrupt business operations."""
         try:
             await self.write(
                 actor_user_id=actor_user_id,
@@ -104,6 +107,7 @@ class AuditService:
         )
 
     async def prune_old_audit_logs(self, retention_days: int) -> int:
+        """Delete audit records older than retention_days; no-op if retention_days <= 0."""
         if retention_days <= 0:
             return 0
         from datetime import datetime, timezone
