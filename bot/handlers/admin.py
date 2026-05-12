@@ -716,9 +716,11 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Services)
             "vpn-bot",
             getattr(services.settings, "xray_service_name", "xray"),
             f"awg-quick@{awg_iface}",
-            getattr(services.settings, "socks5_service_name", "danted"),
-            getattr(services.settings, "mtproto_service_name", "mtproxy"),
         ]
+        if getattr(services.settings, "socks5_enabled", False):
+            service_names.append(getattr(services.settings, "socks5_service_name", "danted"))
+        if getattr(services.settings, "mtproto_enabled", False):
+            service_names.append(getattr(services.settings, "mtproto_service_name", "mtproxy"))
         result = await run_bot_health(
             backend_health=services.backend_health,
             db=services.db,

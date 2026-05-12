@@ -535,7 +535,9 @@ def test_admin_diagnostics_handler_uses_run_bot_health(monkeypatch: pytest.Monke
         settings = SimpleNamespace(
             awg_interface="awg0",
             xray_service_name="xray",
+            socks5_enabled=True,
             socks5_service_name="danted",
+            mtproto_enabled=True,
             mtproto_service_name="mtproxy",
             privilege_helpers_enabled=True,
         )
@@ -554,6 +556,78 @@ def test_admin_diagnostics_handler_uses_run_bot_health(monkeypatch: pytest.Monke
         text, _ = callback.message.edits[0]
         assert "Diagnostics" in text
         assert "Non-root OK" in text
+
+    asyncio.run(run())
+
+
+def test_admin_diagnostics_excludes_disabled_proxy_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When socks5_enabled=False and mtproto_enabled=False, those service names are omitted."""
+    from bot.handlers.admin import admin_backend_diagnostics
+
+    captured_service_names: list = []
+
+    async def fake_run_bot_health(**kwargs):
+        captured_service_names.extend(kwargs.get("service_names", []))
+        return build_result([
+            HealthCheckItem(name="bot_runtime", status="ok", severity="info", message="ok"),
+        ])
+
+    monkeypatch.setattr("bot.handlers.admin.run_bot_health", fake_run_bot_health)
+
+    async def allow_private(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", allow_private)
+
+    class _StrictUsers:
+        async def require_superadmin(self, actor_user_id: int):
+            from models.dto import User
+            from models.enums import UserRole
+            return User(actor_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
+
+        async def require_approved_or_admin(self, actor_user_id: int):
+            return await self.require_superadmin(actor_user_id)
+
+    class _Callback:
+        def __init__(self):
+            self.from_user = SimpleNamespace(id=1, username="admin", first_name="Admin")
+            self.message = _Message()
+            self.data = "admin:diagnostics"
+            self.answers = []
+
+        async def answer(self, text=None, show_alert=None, **kwargs):
+            self.answers.append((text or "", show_alert))
+
+    class _Message:
+        def __init__(self):
+            self.edits = []
+
+        async def edit_text(self, text, reply_markup=None):
+            self.edits.append((text, reply_markup))
+
+    async def run():
+        callback = _Callback()
+        # Both optional proxies disabled
+        settings = SimpleNamespace(
+            awg_interface="awg0",
+            xray_service_name="xray",
+            socks5_enabled=False,
+            socks5_service_name="danted",
+            mtproto_enabled=False,
+            mtproto_service_name="mtproxy",
+            privilege_helpers_enabled=True,
+        )
+        services = SimpleNamespace(
+            users=_StrictUsers(),
+            backend_health=BackendHealth(),
+            settings=settings,
+            db=MagicMock(),
+        )
+        await admin_backend_diagnostics(callback, services)
+        assert "danted" not in captured_service_names
+        assert "mtproxy" not in captured_service_names
+        assert "xray" in captured_service_names
+        assert "vpn-bot" in captured_service_names
 
     asyncio.run(run())
 
