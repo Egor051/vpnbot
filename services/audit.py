@@ -41,7 +41,7 @@ class AuditService:
         "shortId",
     }
 
-    def __init__(self, audit_logs: AuditLogRepository, clock: ClockProvider, users: UserRepository) -> None:
+    def __init__(self, audit_logs: AuditLogRepository, clock: ClockProvider, users: UserRepository | None = None) -> None:
         self.audit_logs = audit_logs
         self.clock = clock
         self.users = users
@@ -93,6 +93,8 @@ class AuditService:
 
     async def recent(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[dict[str, object]]:
         """Return recent audit log entries; raises AccessDenied if actor is not a superadmin."""
+        if self.users is None:
+            raise RuntimeError("AuditService.recent requires a UserRepository; pass users= to AuditService()")
         user = await self.users.get_by_id(actor_user_id)
         if user is None or user.role != UserRole.SUPERADMIN:
             raise AccessDenied("Недостаточно прав")
