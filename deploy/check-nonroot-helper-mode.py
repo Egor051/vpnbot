@@ -265,6 +265,18 @@ def check_sqlite(db_path: Path, reporter: Reporter) -> None:
     if not db_path.exists():
         reporter.warn(f"{db_path}: not found; skipped SQLite quick_check")
         return
+    if os.name == "posix":
+        ids = _uid_gid_for_user("vpn-bot")
+        if ids is not None:
+            uid, gid = ids
+            for suffix in ("", "-wal", "-shm"):
+                p = db_path.parent / (db_path.name + suffix)
+                if p.exists() and not _would_be_writable(p, uid, gid):
+                    reporter.fail(
+                        f"{p}: not writable by vpn-bot — run setup-nonroot-helper-mode.sh to fix ownership"
+                    )
+                elif p.exists():
+                    reporter.ok(f"{p}: writable by vpn-bot")
     try:
         with sqlite3.connect(str(db_path), timeout=5) as conn:
             row = conn.execute("PRAGMA quick_check").fetchone()
