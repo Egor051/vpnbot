@@ -15,6 +15,10 @@ EXIT_NOT_FOUND = 2
 EXIT_VALIDATION = 64
 EXIT_COMMAND_FAILED = 70
 
+# Escape the service's ProtectSystem=strict mount namespace so that
+# useradd/userdel/chpasswd can write to /etc/passwd and /etc/shadow.
+_NSENTER_HOST_MNT = ["nsenter", "--mount=/proc/1/ns/mnt", "--"]
+
 
 class HelperError(RuntimeError):
     def __init__(self, message: str, code: int = EXIT_COMMAND_FAILED) -> None:
@@ -55,7 +59,7 @@ def action_exists(login: str) -> int:
 
 
 def action_create(login: str) -> int:
-    result = run_command(["useradd", "-r", "-s", NOLOGIN_SHELL, validate_login(login)])
+    result = run_command([*_NSENTER_HOST_MNT, "useradd", "-r", "-s", NOLOGIN_SHELL, validate_login(login)])
     if result.returncode != 0:
         raise HelperError("account create failed")
     return 0
@@ -68,21 +72,21 @@ def action_set_password(login: str, stdin: TextIO) -> int:
         password = password[:-1]
     if not password:
         raise HelperError("password input is empty", EXIT_VALIDATION)
-    result = run_command(["chpasswd"], input_text=f"{safe_login}:{password}\n")
+    result = run_command([*_NSENTER_HOST_MNT, "chpasswd"], input_text=f"{safe_login}:{password}\n")
     if result.returncode != 0:
         raise HelperError("password update failed")
     return 0
 
 
 def action_lock(login: str) -> int:
-    result = run_command(["passwd", "-l", validate_login(login)])
+    result = run_command([*_NSENTER_HOST_MNT, "passwd", "-l", validate_login(login)])
     if result.returncode != 0:
         raise HelperError("account lock failed")
     return 0
 
 
 def action_delete(login: str) -> int:
-    result = run_command(["userdel", validate_login(login)])
+    result = run_command([*_NSENTER_HOST_MNT, "userdel", validate_login(login)])
     if result.returncode != 0:
         raise HelperError("account delete failed")
     return 0
