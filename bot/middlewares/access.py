@@ -1,7 +1,6 @@
-from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, override
 
 from aiogram import BaseMiddleware
 from aiogram.fsm.context import FSMContext
@@ -25,6 +24,7 @@ class BlockedUserMiddleware(BaseMiddleware):
     def __init__(self, users: UserService) -> None:
         self.users = users
 
+    @override
     async def __call__(
         self,
         handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],

@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 from adapters.clock import ClockProvider
 from models.access import is_blocked_user

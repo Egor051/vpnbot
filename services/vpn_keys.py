@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 from models.dto import VpnKey
 from models.enums import UserRole, VpnKeyStatus

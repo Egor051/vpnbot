@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 from bot.container import Services
 from models.dto import User
