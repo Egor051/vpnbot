@@ -7,6 +7,7 @@ from pathlib import Path
 
 from adapters.clock import ClockProvider
 from adapters.errors import AdapterError
+from adapters.file_ops import copy_stat, fsync_parent
 
 
 class BackupAdapter:
@@ -38,14 +39,14 @@ class BackupAdapter:
         try:
             shutil.copy2(backup_path, tmp_path)
             if mode_from is not None and mode_from.exists():
-                self._copy_stat(mode_from, tmp_path)
+                copy_stat(mode_from, tmp_path)
             else:
                 self._chmod_private_file(tmp_path)
             with tmp_path.open("rb+") as file:
                 file.flush()
                 os.fsync(file.fileno())
             os.replace(tmp_path, target)
-            self._fsync_parent(target)
+            fsync_parent(target)
         finally:
             tmp_path.unlink(missing_ok=True)
 
@@ -59,11 +60,11 @@ class BackupAdapter:
                 file.flush()
                 os.fsync(file.fileno())
             if mode_from and mode_from.exists():
-                self._copy_stat(mode_from, tmp_path)
+                copy_stat(mode_from, tmp_path)
             else:
                 self._chmod_private_file(tmp_path)
             os.replace(tmp_path, target)
-            self._fsync_parent(target)
+            fsync_parent(target)
         finally:
             tmp_path.unlink(missing_ok=True)
 
@@ -79,29 +80,10 @@ class BackupAdapter:
             removed += 1
         return removed
 
-    def _fsync_parent(self, target: Path) -> None:
-        if os.name == "nt":
-            return
-        fd = os.open(str(target.parent), os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-
     def _chmod_private_file(self, path: Path) -> None:
         if os.name != "posix":
             return
         try:
             path.chmod(0o600)
-        except OSError:
-            pass
-
-    def _copy_stat(self, source: Path, target: Path) -> None:
-        shutil.copystat(source, target)
-        if os.name != "posix":
-            return
-        stat = source.stat()
-        try:
-            os.chown(target, stat.st_uid, stat.st_gid)
         except OSError:
             pass

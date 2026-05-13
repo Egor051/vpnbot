@@ -201,7 +201,10 @@ async def run_bot_health(
     checks.append(check_bot_non_root())
     checks.append(check_helper_mode(privilege_helpers_enabled))
     checks.extend(check_backends(backend_health.snapshot()))
-    checks.append(await check_sqlite_quick(db))
-    for name in service_names:
-        checks.append(await check_service_active(name))
+    sqlite_result, *service_results = await asyncio.gather(
+        check_sqlite_quick(db),
+        *(check_service_active(name) for name in service_names),
+    )
+    checks.append(sqlite_result)
+    checks.extend(service_results)
     return build_result(checks)

@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import replace
 
 from adapters.clock import ClockProvider
-from adapters.mtproxy import MtProxyAdapter, MtProxyManagedSecret
+from adapters.mtproxy import MtProxyAdapter, MtProxyManagedSecret, MtProxyRuntimeStatus
 from config.settings import Settings
 from models.dto import ProxyAccess, TelegramUserProfile
 from models.enums import AuditEntityType, ProxyAccessStatus, ProxyAccessType, UserRole
@@ -116,7 +116,7 @@ class MtProtoService:
         accesses = await self.accesses.list_by_owner(actor_user_id)
         return [access for access in accesses if access.access_type == ProxyAccessType.MTPROTO]
 
-    async def runtime_status(self) -> object:
+    async def runtime_status(self) -> MtProxyRuntimeStatus | None:
         if self.settings.mtproto_mode != "managed" or self.adapter is None:
             return None
         return await self.adapter.runtime_status()

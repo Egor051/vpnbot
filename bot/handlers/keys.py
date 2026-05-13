@@ -46,7 +46,7 @@ async def list_keys(callback: CallbackQuery, services: Services) -> None:
         return
     page = _page_from_callback(callback.data, default=0)
     try:
-        keys, current_page, total_pages, has_next = await _load_keys_page(
+        keys, current_page, total_pages, has_next = await load_keys_page(
             services,
             callback.from_user.id,
             page=page,
@@ -69,7 +69,7 @@ async def list_keys_message(message: Message, services: Services) -> None:
     if not await ensure_private_message(message):
         return
     try:
-        keys, current_page, total_pages, has_next = await _load_keys_page(
+        keys, current_page, total_pages, has_next = await load_keys_page(
             services,
             message.from_user.id,
             page=0,
@@ -368,7 +368,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
             else:
                 await services.awg.delete_awg_key(callback.from_user.id, key_id)
             if owner_context is not None:
-                keys, current_page, total_pages, has_next = await _load_keys_page(
+                keys, current_page, total_pages, has_next = await load_keys_page(
                     services,
                     callback.from_user.id,
                     owner_user_id=owner_context,
@@ -510,7 +510,7 @@ def _parse_confirm_context(data: str) -> tuple[str, int, int | None, int]:
     return action, key_id, int(parts[3]), max(int(parts[4]), 0)
 
 
-async def _load_keys_page(
+async def load_keys_page(
     services: Services,
     actor_user_id: int,
     *,

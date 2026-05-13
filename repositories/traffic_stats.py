@@ -61,6 +61,10 @@ class TrafficStatsRepository:
         now: str,
         source: str,
     ) -> TrafficStats:
+        downloaded = max(downloaded_bytes, 0)
+        uploaded = max(uploaded_bytes, 0)
+        raw_down = max(raw_downloaded_bytes, 0) if raw_downloaded_bytes is not None else None
+        raw_up = max(raw_uploaded_bytes, 0) if raw_uploaded_bytes is not None else None
         await self.db.conn.execute(
             """
             INSERT INTO vpn_key_traffic_stats (
@@ -81,22 +85,21 @@ class TrafficStatsRepository:
               unavailable_reason = NULL,
               source = excluded.source
             """,
-            (
-                key_id,
-                max(downloaded_bytes, 0),
-                max(uploaded_bytes, 0),
-                max(raw_downloaded_bytes, 0) if raw_downloaded_bytes is not None else None,
-                max(raw_uploaded_bytes, 0) if raw_uploaded_bytes is not None else None,
-                now,
-                now,
-                source,
-            ),
+            (key_id, downloaded, uploaded, raw_down, raw_up, now, now, source),
         )
         await self.db.commit()
-        stats = await self.get_by_key_id(key_id)
-        if stats is None:
-            raise RuntimeError("Traffic stats upsert failed")
-        return stats
+        return TrafficStats(
+            key_id=key_id,
+            downloaded_bytes=downloaded,
+            uploaded_bytes=uploaded,
+            last_raw_downloaded_bytes=raw_down,
+            last_raw_uploaded_bytes=raw_up,
+            last_success_at=now,
+            last_attempt_at=now,
+            available=True,
+            unavailable_reason=None,
+            source=source,
+        )
 
     async def upsert_unavailable(
         self,

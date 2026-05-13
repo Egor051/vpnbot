@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from adapters.errors import MtProxyApplyError, MtProxyError, MtProxyRollbackError
+from adapters.file_ops import fsync_parent
 from adapters.privileged_helpers import (
     PrivilegedHelperRunner,
     cleanup_staging_path,
@@ -531,18 +532,9 @@ class MtProxyAdapter:
                 os.fsync(file.fileno())
             os.chmod(tmp_path, mode)
             os.replace(tmp_path, target)
-            self._fsync_parent(target)
+            fsync_parent(target)
         finally:
             tmp_path.unlink(missing_ok=True)
-
-    def _fsync_parent(self, target: Path) -> None:
-        if os.name == "nt":
-            return
-        fd = os.open(str(target.parent), os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
 
     def _chmod_file(self, path: Path, *, executable: bool = False) -> bool:
         if os.name != "posix":

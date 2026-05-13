@@ -15,6 +15,7 @@ from adapters.errors import (
     XrayInboundNotFoundError,
 )
 from adapters.file_lock import ConfigFileLock
+from adapters.file_ops import copy_stat, fsync_parent
 from adapters.privileged_helpers import PrivilegedHelperRunner, cleanup_staging_path, write_private_staging_file
 from adapters.systemctl import SystemCtlAdapter
 
@@ -316,7 +317,7 @@ class XrayConfigAdapter:
         finally:
             os.umask(old_umask)
         if mode_from.exists():
-            self._copy_stat(mode_from, temp_path)
+            copy_stat(mode_from, temp_path)
         return temp_path
 
     async def _install_candidate(
@@ -362,9 +363,9 @@ class XrayConfigAdapter:
 
     def _replace_main_config(self, temp_path: Path, mode_from: Path) -> None:
         if mode_from.exists():
-            self._copy_stat(mode_from, temp_path)
+            copy_stat(mode_from, temp_path)
         os.replace(temp_path, self.config_path)
-        self._fsync_parent(self.config_path)
+        fsync_parent(self.config_path)
 
     async def _apply_or_restore(self, backup_path: Path) -> None:
         if self.apply_mode == "restart":
@@ -418,28 +419,3 @@ class XrayConfigAdapter:
             return self.helper_staging_dir / "config.json"
         return self.config_path
 
-    def _copy_stat(self, source: Path, target: Path) -> None:
-        stat = source.stat()
-        os.chmod(target, stat.st_mode)
-        if os.name != "posix":
-            return
-        try:
-            os.chown(target, stat.st_uid, stat.st_gid)
-        except OSError:
-            pass
-
-    def _fsync_parent(self, path: Path) -> None:
-        if os.name != "posix":
-            return
-        flags = os.O_RDONLY
-        if hasattr(os, "O_DIRECTORY"):
-            flags |= os.O_DIRECTORY
-        fd: int | None = None
-        try:
-            fd = os.open(path.parent, flags)
-            os.fsync(fd)
-        except OSError:
-            pass
-        finally:
-            if fd is not None:
-                os.close(fd)

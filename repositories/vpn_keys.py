@@ -1,6 +1,5 @@
 
 import json
-import logging
 from typing import Any
 
 from aiosqlite import Row
@@ -8,30 +7,12 @@ from aiosqlite import Row
 from db.database import Database
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
+from repositories._helpers import enum_value, json_loads_dict
 from services.errors import InvalidTransition
-
-logger = logging.getLogger(__name__)
 
 
 def _json_loads(value: str) -> dict[str, object]:
-    try:
-        data = json.loads(value)
-    except json.JSONDecodeError:
-        logger.warning("Некорректный JSON в vpn_keys payload/public_payload")
-        return {"_corrupted": True}
-    if not isinstance(data, dict):
-        return {}
-    return data
-
-
-def _enum_value(enum_cls: type[VpnKeyType] | type[VpnKeyStatus], value: str, field: str) -> VpnKeyType | VpnKeyStatus:
-    try:
-        return enum_cls(value)
-    except ValueError as exc:
-        raise RuntimeError(
-            f"Некорректное значение {field} в SQLite: {value!r}. "
-            "Сделайте backup DB и исправьте повреждённую запись вручную."
-        ) from exc
+    return json_loads_dict(value, "vpn_keys payload/public_payload")
 
 
 def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
@@ -41,8 +22,8 @@ def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
         id=int(row["id"]),
         owner_user_id=int(row["owner_user_id"]),
         username=row["username"],
-        key_type=_enum_value(VpnKeyType, row["key_type"], "vpn_keys.key_type"),  # type: ignore[arg-type]
-        status=_enum_value(VpnKeyStatus, row["status"], "vpn_keys.status"),  # type: ignore[arg-type]
+        key_type=enum_value(VpnKeyType, row["key_type"], "vpn_keys.key_type"),
+        status=enum_value(VpnKeyStatus, row["status"], "vpn_keys.status"),
         note=row["note"],
         uuid=row["uuid"],
         email_label=row["email_label"],
