@@ -378,7 +378,7 @@ python -m pip_audit -r requirements.txt -r constraints.txt --no-deps
 
 GitHub Actions runs the local gates without production secrets or live services:
 
-- Python 3.11 and 3.12: install runtime/dev dependencies, `python -m ruff check . --select=E9,F63,F7,F82`, `python -m compileall .`, and `python -m pytest`.
+- Python 3.12: install runtime/dev dependencies, `python -m ruff check . --select=E9,F63,F7,F82`, `python -m compileall .`, `python -m mypy`, and `python -m pytest`.
 - Dependency audit on Python 3.12: `python -m pip_audit -r requirements.txt -r constraints.txt --no-deps`.
 
 ## Maintenance

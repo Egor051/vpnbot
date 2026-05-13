@@ -1,8 +1,8 @@
 ---
 name: Bug report
 about: Report a reproducible problem in the VPN Telegram bot
-title: "[Bug]: "
-labels: bug
+title: "[BUG] "
+labels: bug, triage
 assignees: ""
 ---
 
@@ -51,9 +51,10 @@ Do not paste Telegram tokens, private keys, `.env` files, full VPN configs, SQLi
 
 ## Environment
 
-- OS:
+- OS and version:
 - Python version:
 - Bot commit/branch:
+- Relevant protocol/component: (Xray / AWG / SOCKS5 / MTProto / other)
 - Deployment path:
 - Running under systemd: yes/no
 - Xray version, if relevant:
