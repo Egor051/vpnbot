@@ -1,4 +1,5 @@
 
+import asyncio
 import logging
 
 from adapters.awg_config import AwgConfigAdapter
@@ -51,10 +52,17 @@ class TrafficStatsService:
         return await self.refresh_views(keys)
 
     async def refresh_views(self, keys: list[VpnKey]) -> list[KeyTrafficStatsView]:
-        owners = await self.users_repo.list_by_ids(sorted({key.owner_user_id for key in keys}))
-        current_stats = await self.stats.list_by_key_ids([key.id for key in keys])
-        awg_transfers, awg_error = await self._load_awg_transfers(keys)
-        xray_stats, xray_error = await self._load_xray_stats(keys)
+        owner_ids: set[int] = set()
+        key_ids: list[int] = []
+        for key in keys:
+            owner_ids.add(key.owner_user_id)
+            key_ids.append(key.id)
+        owners, current_stats, (awg_transfers, awg_error), (xray_stats, xray_error) = await asyncio.gather(
+            self.users_repo.list_by_ids(sorted(owner_ids)),
+            self.stats.list_by_key_ids(key_ids),
+            self._load_awg_transfers(keys),
+            self._load_xray_stats(keys),
+        )
 
         views: list[KeyTrafficStatsView] = []
         for key in keys:

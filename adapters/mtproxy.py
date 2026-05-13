@@ -95,6 +95,7 @@ class MtProxyAdapter:
         self.helper_runner = helper_runner
         self.helper_path = helper_path or Path("/usr/local/sbin/vpnbot-mtproxy-apply")
         self.helper_staging_dir = helper_staging_dir or Path("/run/vpn-bot/mtproxy")
+        self._listen_port_re = re.compile(rf":{re.escape(str(port))}(?:\s|$)")
 
     def read_current_managed_secrets(self) -> list[MtProxyManagedSecret]:
         document = self._read_store_document()
@@ -573,7 +574,7 @@ class MtProxyAdapter:
                 raise MtProxyApplyError("MTProto managed wrapper is not executable")
 
     def _line_has_listen_port(self, line: str) -> bool:
-        return re.search(rf":{re.escape(str(self.port))}(?:\s|$)", line) is not None
+        return self._listen_port_re.search(line) is not None
 
     def _optional_int(self, value: object) -> int | None:
         if value is None:

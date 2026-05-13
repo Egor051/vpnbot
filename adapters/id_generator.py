@@ -5,6 +5,8 @@ import uuid
 
 
 KEY_NAME_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+_LABEL_NON_WORD_RE = re.compile(r"[^a-z0-9_]+")
+_LABEL_UNDERSCORE_RUN_RE = re.compile(r"_+")
 
 
 class IdGenerator:
@@ -27,8 +29,8 @@ class IdGenerator:
     def _label_base(self, telegram_user_id: int, username: str | None) -> str:
         if username:
             value = username.lstrip("@").strip().lower()
-            value = re.sub(r"[^a-z0-9_]+", "_", value)
-            value = re.sub(r"_+", "_", value).strip("_")
+            value = _LABEL_NON_WORD_RE.sub("_", value)
+            value = _LABEL_UNDERSCORE_RUN_RE.sub("_", value).strip("_")
             if value:
                 return value[:32]
         return f"tg{telegram_user_id}"
