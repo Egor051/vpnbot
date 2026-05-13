@@ -48,6 +48,11 @@ class ProxyRepository:
         return [entry for row in rows if (entry := _row_to_proxy(row)) is not None]
 
     async def get_by_id(self, proxy_id: int) -> ProxyEntry | None:
+        """Return proxy entry by primary key, or None if not found.
+
+        Does NOT filter by status — caller must check entry.status when
+        only ACTIVE entries are acceptable.
+        """
         cursor = await self.db.conn.execute("SELECT * FROM proxy_entries WHERE id = ?", (proxy_id,))
         row = await cursor.fetchone()
         return _row_to_proxy(row)
