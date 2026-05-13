@@ -24,7 +24,7 @@ from services.health import (
     check_helper_mode,
     run_bot_health,
 )
-from utils.redact import redact
+from utils.redact import redact, redact_value
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -656,3 +656,17 @@ def test_redact_truncates_long_messages() -> None:
     result = redact(long, limit=180)
     assert len(result) <= 180
     assert result.endswith("...")
+
+
+def test_redact_value_masks_bot_token_in_payload() -> None:
+    payload = '{"bot_token": "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"}'
+    result = redact_value(payload)
+    assert "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi" not in result
+    assert "***" in result
+
+
+def test_redact_value_does_not_truncate() -> None:
+    long = "z" * 300
+    result = redact_value(long)
+    assert len(result) == 300
+    assert "..." not in result

@@ -127,6 +127,11 @@ class VpnKeyRepository:
         )
 
     async def get_by_id(self, key_id: int) -> VpnKey | None:
+        """Return VPN key by primary key, or None if not found.
+
+        Does NOT filter by status. Caller must check key.status when only
+        ACTIVE or non-revoked keys are acceptable.
+        """
         cursor = await self.db.conn.execute("SELECT * FROM vpn_keys WHERE id = ?", (key_id,))
         row = await cursor.fetchone()
         return _row_to_vpn_key(row)
@@ -431,6 +436,11 @@ class VpnKeyRepository:
         return await self.get_occupied_awg_ips()
 
     async def find_by_uuid(self, uuid_value: str) -> VpnKey | None:
+        """Return VPN key by UUID, or None if not found.
+
+        Does NOT filter by status — caller must check key.status when only
+        active or non-revoked keys are acceptable.
+        """
         cursor = await self.db.conn.execute(
             "SELECT * FROM vpn_keys WHERE uuid = ? LIMIT 1",
             (uuid_value,),
@@ -439,6 +449,11 @@ class VpnKeyRepository:
         return _row_to_vpn_key(row)
 
     async def find_by_email_label(self, email_label: str) -> VpnKey | None:
+        """Return VPN key by email label, or None if not found.
+
+        Does NOT filter by status — caller must check key.status when only
+        active or non-revoked keys are acceptable.
+        """
         cursor = await self.db.conn.execute(
             "SELECT * FROM vpn_keys WHERE email_label = ? LIMIT 1",
             (email_label,),
@@ -447,6 +462,11 @@ class VpnKeyRepository:
         return _row_to_vpn_key(row)
 
     async def find_by_public_key(self, public_key: str) -> VpnKey | None:
+        """Return VPN key by WireGuard public key, or None if not found.
+
+        Does NOT filter by status — caller must check key.status when only
+        active or non-revoked keys are acceptable.
+        """
         cursor = await self.db.conn.execute(
             "SELECT * FROM vpn_keys WHERE public_key = ? LIMIT 1",
             (public_key,),
@@ -455,6 +475,11 @@ class VpnKeyRepository:
         return _row_to_vpn_key(row)
 
     async def find_by_client_ip(self, client_ip: str) -> VpnKey | None:
+        """Return VPN key by assigned client IP, or None if not found.
+
+        Does NOT filter by status — caller must check key.status when only
+        active or non-revoked keys are acceptable.
+        """
         cursor = await self.db.conn.execute("SELECT * FROM vpn_keys WHERE client_ip = ? LIMIT 1", (client_ip,))
         row = await cursor.fetchone()
         return _row_to_vpn_key(row)

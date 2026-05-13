@@ -149,3 +149,21 @@ def test_format_greeting_name_id_fallback() -> None:
 def test_format_greeting_name_empty_first_name_falls_through() -> None:
     # Empty string is falsy → falls through to username
     assert format_greeting_name(1, "", "@bob") == "bob"
+
+
+def test_format_user_display_html_in_username_escaped() -> None:
+    result = format_user_display(123, "<b>injection</b>")
+    assert "<b>" not in result
+    assert "&lt;b&gt;" in result
+
+
+def test_format_greeting_name_html_in_first_name_escaped() -> None:
+    result = format_greeting_name(1, "<b>injection</b>", None)
+    assert "<b>" not in result
+    assert "&lt;b&gt;" in result
+
+
+def test_format_greeting_name_html_in_username_escaped() -> None:
+    result = format_greeting_name(1, None, "<script>xss</script>")
+    assert "<script>" not in result
+    assert "&lt;script&gt;" in result

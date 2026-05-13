@@ -54,6 +54,11 @@ class AccessRequestRepository:
             return pending, False
 
     async def get_by_id(self, request_id: int) -> AccessRequest | None:
+        """Return access request by primary key, or None if not found.
+
+        Does NOT filter by status — caller must check request.status when
+        only PENDING requests are acceptable.
+        """
         cursor = await self.db.conn.execute("SELECT * FROM access_requests WHERE id = ?", (request_id,))
         row = await cursor.fetchone()
         return _row_to_access_request(row)

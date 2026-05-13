@@ -185,6 +185,11 @@ class ProxyAccessRepository:
         return access
 
     async def get_by_id(self, access_id: int) -> ProxyAccess | None:
+        """Return proxy access by primary key, or None if not found.
+
+        Does NOT filter by status — caller must check access.status when
+        only non-deleted accesses are acceptable.
+        """
         cursor = await self.db.conn.execute("SELECT * FROM proxy_accesses WHERE id = ?", (access_id,))
         row = await cursor.fetchone()
         return _row_to_proxy_access(row)
@@ -262,6 +267,11 @@ class ProxyAccessRepository:
         return _row_to_proxy_access(row)
 
     async def find_by_socks5_login(self, login: str) -> ProxyAccess | None:
+        """Return SOCKS5 proxy access by login, or None if not found.
+
+        Does NOT filter by status — caller must check access.status when
+        only active accesses are acceptable.
+        """
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM proxy_accesses
@@ -275,6 +285,11 @@ class ProxyAccessRepository:
         return _row_to_proxy_access(row)
 
     async def find_by_secret_fingerprint(self, fingerprint: str) -> ProxyAccess | None:
+        """Return MTProto proxy access by secret fingerprint, or None if not found.
+
+        Does NOT filter by status — caller must check access.status when
+        only active accesses are acceptable.
+        """
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM proxy_accesses
