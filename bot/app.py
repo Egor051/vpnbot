@@ -226,7 +226,6 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         audit=audit_service,
     )
 
-    await proxy_service.seed_default_from_env()
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
 
     services = Services(

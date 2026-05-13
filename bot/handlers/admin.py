@@ -46,6 +46,7 @@ from bot.keyboards.admin import (
     user_actions_keyboard,
     users_keyboard,
 )
+from bot.handlers.keys import load_keys_page
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import key_actions_keyboard, keys_list_keyboard
 from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text, send_awg_config
@@ -577,26 +578,13 @@ async def admin_user_keys(callback: CallbackQuery, services: Services) -> None:
         _, _, raw_user_id, raw_page = callback.data.split(":", 3)
         user_id = int(raw_user_id)
         page = max(int(raw_page), 0)
-        total_count = await services.vpn_keys.count_for_actor(callback.from_user.id, owner_user_id=user_id)
-        total_pages = max(1, (total_count + ADMIN_KEYS_PAGE_SIZE - 1) // ADMIN_KEYS_PAGE_SIZE)
-        current_page = min(page, total_pages - 1)
-        keys = await services.vpn_keys.list_for_actor(
+        keys, current_page, total_pages, has_next = await load_keys_page(
+            services,
             callback.from_user.id,
             owner_user_id=user_id,
-            limit=ADMIN_KEYS_PAGE_SIZE,
-            offset=page_offset(current_page, ADMIN_KEYS_PAGE_SIZE),
+            page=page,
+            page_size=ADMIN_KEYS_PAGE_SIZE,
         )
-        if not keys and current_page > 0:
-            total_count = await services.vpn_keys.count_for_actor(callback.from_user.id, owner_user_id=user_id)
-            total_pages = max(1, (total_count + ADMIN_KEYS_PAGE_SIZE - 1) // ADMIN_KEYS_PAGE_SIZE)
-            current_page = max(0, min(current_page - 1, total_pages - 1))
-            keys = await services.vpn_keys.list_for_actor(
-                callback.from_user.id,
-                owner_user_id=user_id,
-                limit=ADMIN_KEYS_PAGE_SIZE,
-                offset=page_offset(current_page, ADMIN_KEYS_PAGE_SIZE),
-            )
-        has_next = current_page + 1 < total_pages
         await safe_edit_message_text(
             callback.message,
             keys_page_text(keys, current_page, viewer_user_id=callback.from_user.id, owner_user_id=user_id),
@@ -711,20 +699,20 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Services)
         return
     try:
         await require_superadmin(services, callback.from_user.id)
-        awg_iface = getattr(services.settings, "awg_interface", "awg0")
+        settings = services.settings
         service_names = [
             "vpn-bot",
-            getattr(services.settings, "xray_service_name", "xray"),
-            f"awg-quick@{awg_iface}",
+            settings.xray_service_name,
+            f"awg-quick@{settings.awg_interface}",
         ]
-        if getattr(services.settings, "socks5_enabled", False):
-            service_names.append(getattr(services.settings, "socks5_service_name", "danted"))
-        if getattr(services.settings, "mtproto_enabled", False):
-            service_names.append(getattr(services.settings, "mtproto_service_name", "mtproxy"))
+        if settings.socks5_enabled:
+            service_names.append(settings.socks5_service_name)
+        if settings.mtproto_enabled:
+            service_names.append(settings.mtproto_service_name)
         result = await run_bot_health(
             backend_health=services.backend_health,
             db=services.db,
-            privilege_helpers_enabled=getattr(services.settings, "privilege_helpers_enabled", False),
+            privilege_helpers_enabled=settings.privilege_helpers_enabled,
             service_names=service_names,
         )
         await safe_edit_message_text(
@@ -746,18 +734,14 @@ async def admin_proxy_stats(callback: CallbackQuery, services: Services) -> None
     try:
         await require_superadmin(services, callback.from_user.id)
         runtime = services.proxy.runtime_stats()
-        runtime_reader = getattr(getattr(services, "mtproto", None), "runtime_status", None)
-        if runtime_reader is not None:
-            runtime_status = await runtime_reader()
-            if runtime_status is not None:
-                runtime = replace(
-                    runtime,
-                    mtproto_systemd_active=runtime_status.systemd_active,
-                    mtproto_port_listening=runtime_status.port_listening,
-                )
-        runtime_secret_counter = getattr(getattr(services, "mtproto", None), "runtime_secret_count", None)
-        if runtime_secret_counter is not None:
-            runtime = replace(runtime, mtproto_runtime_secret_count=await runtime_secret_counter())
+        runtime_status = await services.mtproto.runtime_status()
+        if runtime_status is not None:
+            runtime = replace(
+                runtime,
+                mtproto_systemd_active=runtime_status.systemd_active,
+                mtproto_port_listening=runtime_status.port_listening,
+            )
+        runtime = replace(runtime, mtproto_runtime_secret_count=await services.mtproto.runtime_secret_count())
         stats = await services.proxy.get_admin_proxy_stats(
             callback.from_user.id,
             user_limit=ADMIN_PROXY_USER_LIMIT,

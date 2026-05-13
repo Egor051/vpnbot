@@ -20,9 +20,6 @@ class ProxyService:
         self.users = users
         self.settings = settings
 
-    async def seed_default_from_env(self) -> None:
-        return None
-
     async def list_user_accesses(self, actor_user_id: int) -> list[ProxyAccess]:
         await self.users.require_approved_or_admin(actor_user_id)
         accesses = await self.accesses.list_by_owner(actor_user_id)

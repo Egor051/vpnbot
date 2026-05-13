@@ -748,7 +748,11 @@ class XrayService:
         for _ in range(5):
             uuid_value = self.ids.uuid4()
             email_label = self.ids.generated_key_name("xray")
-            if await self.vpn_keys.find_by_uuid(uuid_value) is None and await self.vpn_keys.find_by_email_label(email_label) is None:
+            by_uuid, by_label = await asyncio.gather(
+                self.vpn_keys.find_by_uuid(uuid_value),
+                self.vpn_keys.find_by_email_label(email_label),
+            )
+            if by_uuid is None and by_label is None:
                 return uuid_value, email_label
         raise InvalidOperation("Не удалось сгенерировать уникальные Xray-идентификаторы")
 
