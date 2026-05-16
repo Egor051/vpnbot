@@ -1,4 +1,5 @@
 
+import asyncio
 import json
 import logging
 import os
@@ -346,8 +347,18 @@ class XrayConfigAdapter:
             timeout=90,
             max_output_chars=2048,
         )
+        if result.ok:
+            return
+        logger.warning("Xray helper apply failed on attempt 1: rc=%s; retrying in 2s", result.returncode)
+        await asyncio.sleep(2)
+        result = await self.helper_runner.run(
+            self.helper_path,
+            ["apply", str(candidate_path)],
+            timeout=90,
+            max_output_chars=2048,
+        )
         if not result.ok:
-            raise XrayApplyError(f"Xray helper apply failed: rc={result.returncode}")
+            raise XrayApplyError(f"Xray helper apply failed after 2 attempts: rc={result.returncode}")
 
     async def _test_config(self, path: Path) -> None:
         result = await self.systemctl.xray_test_config(path)
