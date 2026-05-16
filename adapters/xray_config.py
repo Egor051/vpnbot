@@ -329,7 +329,7 @@ class XrayConfigAdapter:
     ) -> None:
         if self._using_helper():
             self._assert_config_unchanged(snapshot)
-            await self._apply_helper(temp_path)
+            await self._apply_helper(temp_path, snapshot)
             return
         if backup_path is None:
             raise XrayApplyError("Xray backup is not available for direct apply")
@@ -338,7 +338,7 @@ class XrayConfigAdapter:
         self._replace_main_config(temp_path, self.config_path)
         await self._apply_or_restore(backup_path)
 
-    async def _apply_helper(self, candidate_path: Path) -> None:
+    async def _apply_helper(self, candidate_path: Path, snapshot: tuple[int, int]) -> None:
         if self.helper_runner is None:
             raise XrayApplyError("Xray privileged helper is not configured")
         result = await self.helper_runner.run(
@@ -351,6 +351,7 @@ class XrayConfigAdapter:
             return
         logger.warning("Xray helper apply failed on attempt 1: rc=%s; retrying in 2s", result.returncode)
         await asyncio.sleep(2)
+        self._assert_config_unchanged(snapshot)
         result = await self.helper_runner.run(
             self.helper_path,
             ["apply", str(candidate_path)],
