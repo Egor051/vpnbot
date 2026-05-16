@@ -88,15 +88,17 @@ class _AuditWithClock:
         return None
 
 
-def test_regular_key_keyboards_hide_revoke_and_delete_actions() -> None:
+def test_regular_key_keyboards_show_revoke_and_delete_actions() -> None:
     callbacks = _callbacks(keys_list_keyboard([_key()]))
     detail_callbacks = _callbacks(key_actions_keyboard(_key()))
 
     assert "key:show:10" in callbacks
     assert "key:stats:10" in callbacks
     assert "key:note:10" in callbacks
-    assert all("revoke" not in str(item) and "delete" not in str(item) for item in callbacks)
-    assert all("revoke" not in str(item) and "delete" not in str(item) for item in detail_callbacks)
+    assert "key:revoke:10" in callbacks
+    assert "key:delete:10" in callbacks
+    assert "key:revoke:10" in detail_callbacks
+    assert "key:delete:10" in detail_callbacks
 
 
 def test_admin_key_keyboards_keep_revoke_and_delete_actions() -> None:
@@ -109,10 +111,10 @@ def test_admin_key_keyboards_keep_revoke_and_delete_actions() -> None:
     assert "key:delete:10:200:0" in detail_callbacks
 
 
-def test_regular_user_cannot_revoke_or_delete_vpn_key_service(tmp_path) -> None:
+def test_user_cannot_revoke_or_delete_another_users_key_service(tmp_path) -> None:
     class Repo:
         async def get_by_id(self, key_id: int) -> VpnKey:
-            return _key()
+            return _key(owner_user_id=999)  # key belongs to user 999
 
     service = XrayService(
         vpn_keys=Repo(),  # type: ignore[arg-type]
@@ -125,9 +127,9 @@ def test_regular_user_cannot_revoke_or_delete_vpn_key_service(tmp_path) -> None:
     )
 
     async def run() -> None:
-        with pytest.raises(AccessDenied, match="Недостаточно прав"):
-            await service.revoke_xray_key(100, 10)
-        with pytest.raises(AccessDenied, match="Недостаточно прав"):
+        with pytest.raises(AccessDenied, match="Нельзя управлять чужим ключом"):
+            await service.revoke_xray_key(100, 10)  # user 100 tries to manage key owned by 999
+        with pytest.raises(AccessDenied, match="Нельзя управлять чужим ключом"):
             await service.delete_xray_key(100, 10)
 
     asyncio.run(run())
