@@ -35,9 +35,8 @@ def keys_list_keyboard(
                 InlineKeyboardButton(text="Конфиг", callback_data=f"key:show:{key.id}"),
                 InlineKeyboardButton(text="Статистика", callback_data=f"key:stats:{key.id}"),
             ]
-            if owner_user_id is not None:
-                revoke_data = f"key:revoke:{key.id}:{owner_user_id}:{page}"
-                buttons.append(InlineKeyboardButton(text="Отозвать", callback_data=revoke_data))
+            revoke_data = f"key:revoke:{key.id}" if owner_user_id is None else f"key:revoke:{key.id}:{owner_user_id}:{page}"
+            buttons.append(InlineKeyboardButton(text="Отозвать", callback_data=revoke_data))
             rows.append(buttons)
         else:
             rows.append([InlineKeyboardButton(text="Статистика", callback_data=f"key:stats:{key.id}")])
@@ -45,9 +44,8 @@ def keys_list_keyboard(
             note_buttons: list[InlineKeyboardButton] = []
             if owner_user_id is None:
                 note_buttons.append(InlineKeyboardButton(text="Заметка", callback_data=f"key:note:{key.id}"))
-            if owner_user_id is not None:
-                delete_data = f"key:delete:{key.id}:{owner_user_id}:{page}"
-                note_buttons.append(InlineKeyboardButton(text="Удалить", callback_data=delete_data))
+            delete_data = f"key:delete:{key.id}" if owner_user_id is None else f"key:delete:{key.id}:{owner_user_id}:{page}"
+            note_buttons.append(InlineKeyboardButton(text="Удалить", callback_data=delete_data))
             rows.append(note_buttons)
 
     prev_page = page - 1
@@ -71,16 +69,14 @@ def key_actions_keyboard(key: VpnKey, owner_user_id: int | None = None, page: in
     rows: list[list[InlineKeyboardButton]] = []
     if key.status == VpnKeyStatus.ACTIVE:
         rows.append([InlineKeyboardButton(text="Показать конфиг", callback_data=f"key:show:{key.id}")])
-        if owner_user_id is not None:
-            revoke_data = f"key:revoke:{key.id}:{owner_user_id}:{page}"
-            rows.append([InlineKeyboardButton(text="Отозвать", callback_data=revoke_data)])
+        revoke_data = f"key:revoke:{key.id}" if owner_user_id is None else f"key:revoke:{key.id}:{owner_user_id}:{page}"
+        rows.append([InlineKeyboardButton(text="Отозвать", callback_data=revoke_data)])
     rows.append([InlineKeyboardButton(text="Статистика", callback_data=f"key:stats:{key.id}")])
     if key.status != VpnKeyStatus.DELETED:
         if owner_user_id is None:
             rows.append([InlineKeyboardButton(text="Редактировать заметку", callback_data=f"key:note:{key.id}")])
-        if owner_user_id is not None:
-            delete_data = f"key:delete:{key.id}:{owner_user_id}:{page}"
-            rows.append([InlineKeyboardButton(text="Удалить", callback_data=delete_data)])
+        delete_data = f"key:delete:{key.id}" if owner_user_id is None else f"key:delete:{key.id}:{owner_user_id}:{page}"
+        rows.append([InlineKeyboardButton(text="Удалить", callback_data=delete_data)])
     back_data = f"admin:ukeys:{owner_user_id}:{page}" if owner_user_id is not None else "keys:list"
     rows.append([InlineKeyboardButton(text="К списку", callback_data=back_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
