@@ -51,20 +51,23 @@ def test_production_service_readwrite_paths_are_narrow() -> None:
     text = _read("deploy/vpn-bot.service")
     read_write_lines = "\n".join(line for line in text.splitlines() if line.startswith("ReadWritePaths="))
 
+    # These paths must never be writable by the bot process itself
     forbidden_paths = {
         "/etc/passwd",
         "/etc/shadow",
         "/etc/group",
         "/etc/gshadow",
         "/etc/.pwd.lock",
-        "/usr/local/etc/xray",
-        "/etc/amnezia/amneziawg",
-        "/etc/mtproxy",
         "/etc/systemd/system",
     }
     for path in forbidden_paths:
         assert path not in read_write_lines
-    assert read_write_lines == "ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot"
+    # Helpers inherit bot's mount namespace (ProtectSystem=strict), so their
+    # writable paths must be declared here. Keep this list in sync with eef9bd6.
+    assert read_write_lines == (
+        "ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot"
+        " /usr/local/etc/xray /var/log/xray /etc/amnezia/amneziawg /etc/mtproxy"
+    )
 
 
 def test_sudoers_example_grants_only_fixed_helpers() -> None:

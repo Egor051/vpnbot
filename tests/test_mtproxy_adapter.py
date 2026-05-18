@@ -161,8 +161,12 @@ def test_vpn_bot_service_write_paths_are_narrow() -> None:
     assert read_write_lines
     read_write = read_write_lines[0]
     assert "/run/vpn-bot" in read_write
+    # /etc/mtproxy is required so privileged helpers (which inherit bot's mount
+    # namespace under ProtectSystem=strict) can write there. The bot itself
+    # only writes through the helper, but the path must be declared here.
+    assert "/etc/mtproxy" in read_write
     assert "/etc/mtproxy/vpnbot" not in read_write
-    assert " /etc/mtproxy " not in f" {read_write} "
+    assert "/etc/systemd/system" not in read_write
 
 
 def test_mtproxy_systemd_dropin_template_contains_no_raw_secret_surface() -> None:
