@@ -58,6 +58,13 @@ class XrayConfigAdapter:
                 raise XrayConfigError("XRAY_APPLY_MODE=api требует stats_server (XRAY_STATS_SERVER)")
             if shell is None:
                 raise XrayConfigError("XRAY_APPLY_MODE=api требует ShellRunner")
+            if not inbound_tag:
+                raise XrayConfigError("XRAY_APPLY_MODE=api требует inbound_tag (XRAY_INBOUND_TAG)")
+            if helper_runner is not None:
+                raise XrayConfigError(
+                    "XRAY_APPLY_MODE=api несовместим с privilege helpers. "
+                    "Отключите PRIVILEGE_HELPERS_ENABLED или используйте другой apply mode."
+                )
         self.apply_mode = apply_mode
         self.inbound_tag = inbound_tag
         self.allow_restart_on_rollback = allow_restart_on_rollback
@@ -103,7 +110,7 @@ class XrayConfigAdapter:
                     short_id_inserted = self._add_short_id(inbound, short_id)
 
                 temp_path = self._write_temp_config(config, self.config_path)
-                if not self._using_helper() and self.apply_mode == "api":
+                if not self._using_helper() and self.apply_mode == "api" and not short_id_inserted:
                     await self._install_candidate_api(
                         temp_path, snapshot, backup_path,
                         action="add", uuid_value=uuid_value,
