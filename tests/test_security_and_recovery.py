@@ -131,6 +131,45 @@ def test_settings_reject_invalid_xray_apply_mode(monkeypatch: pytest.MonkeyPatch
         load_settings()
 
 
+def test_settings_allow_xray_apply_mode_api(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("ADMIN_IDS", "1")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
+    monkeypatch.setenv("XRAY_APPLY_MODE", "api")
+
+    settings = load_settings()
+    assert settings.xray_apply_mode == "api"
+
+
+def test_validate_xray_ready_api_mode_requires_inbound_tag() -> None:
+    settings = _settings(
+        xray_apply_mode="api",
+        xray_stats_server="127.0.0.1:10085",
+        xray_inbound_tag="",
+    )
+    with pytest.raises(SettingsError, match="XRAY_INBOUND_TAG"):
+        settings.validate_xray_ready()
+
+
+def test_validate_xray_ready_api_mode_requires_stats_server() -> None:
+    settings = _settings(
+        xray_apply_mode="api",
+        xray_stats_server="",
+        xray_inbound_tag="vless-in",
+    )
+    with pytest.raises(SettingsError, match="XRAY_STATS_SERVER"):
+        settings.validate_xray_ready()
+
+
+def test_validate_xray_ready_api_mode_passes_with_required_fields() -> None:
+    settings = _settings(
+        xray_apply_mode="api",
+        xray_stats_server="127.0.0.1:10085",
+        xray_inbound_tag="vless-in",
+    )
+    settings.validate_xray_ready()
+
+
 def test_readme_uses_env_example_as_canonical_source() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 

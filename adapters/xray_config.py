@@ -18,6 +18,7 @@ from adapters.errors import (
 from adapters.file_lock import ConfigFileLock
 from adapters.file_ops import copy_stat, fsync_parent
 from adapters.privileged_helpers import PrivilegedHelperRunner, cleanup_staging_path, write_private_staging_file
+from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
 
 
@@ -40,6 +41,8 @@ class XrayConfigAdapter:
         allow_restart_on_rollback: bool,
         backup: BackupAdapter,
         systemctl: SystemCtlAdapter,
+        shell: ShellRunner | None = None,
+        stats_server: str = "",
         helper_runner: PrivilegedHelperRunner | None = None,
         helper_path: Path | None = None,
         helper_staging_dir: Path | None = None,
@@ -48,13 +51,20 @@ class XrayConfigAdapter:
             raise XrayConfigError("Xray config path не должен быть symlink. Укажите реальный путь к config.json.")
         self.config_path = config_path
         self.service_name = service_name
-        if apply_mode not in {"reload", "restart"}:
-            raise XrayConfigError("Xray apply mode должен быть reload или restart")
+        if apply_mode not in {"reload", "restart", "api"}:
+            raise XrayConfigError("Xray apply mode должен быть reload, restart или api")
+        if apply_mode == "api":
+            if not stats_server:
+                raise XrayConfigError("XRAY_APPLY_MODE=api требует stats_server (XRAY_STATS_SERVER)")
+            if shell is None:
+                raise XrayConfigError("XRAY_APPLY_MODE=api требует ShellRunner")
         self.apply_mode = apply_mode
         self.inbound_tag = inbound_tag
         self.allow_restart_on_rollback = allow_restart_on_rollback
         self.backup = backup
         self.systemctl = systemctl
+        self.shell = shell
+        self.stats_server = stats_server
         self.helper_runner = helper_runner
         self.helper_path = helper_path or Path("/usr/local/sbin/vpnbot-xray-apply")
         self.helper_staging_dir = helper_staging_dir or Path("/run/vpn-bot/xray")
@@ -93,7 +103,14 @@ class XrayConfigAdapter:
                     short_id_inserted = self._add_short_id(inbound, short_id)
 
                 temp_path = self._write_temp_config(config, self.config_path)
-                await self._install_candidate(temp_path, snapshot, backup_path)
+                if not self._using_helper() and self.apply_mode == "api":
+                    await self._install_candidate_api(
+                        temp_path, snapshot, backup_path,
+                        action="add", uuid_value=uuid_value,
+                        email_label=email_label, flow=flow,
+                    )
+                else:
+                    await self._install_candidate(temp_path, snapshot, backup_path)
                 return XrayClientApplyResult(short_id_inserted=short_id_inserted)
             finally:
                 self._cleanup_temp(temp_path)
@@ -119,6 +136,11 @@ class XrayConfigAdapter:
                 clients = self._clients(inbound)
                 changed = False
 
+                _api_email = ""
+                if not self._using_helper() and self.apply_mode == "api":
+                    found = self._find_client_in_list(clients, uuid_value=uuid_value, email_label=email_label)
+                    _api_email = found.get("email", "") if found else (email_label or "")
+
                 new_clients = [client for client in clients if not self._matches_client_for_remove(client, uuid_value, email_label)]
                 if len(new_clients) != len(clients):
                     inbound["settings"]["clients"] = new_clients
@@ -130,7 +152,13 @@ class XrayConfigAdapter:
                     return
 
                 temp_path = self._write_temp_config(config, self.config_path)
-                await self._install_candidate(temp_path, snapshot, backup_path)
+                if not self._using_helper() and self.apply_mode == "api":
+                    await self._install_candidate_api(
+                        temp_path, snapshot, backup_path,
+                        action="remove", email_label=_api_email,
+                    )
+                else:
+                    await self._install_candidate(temp_path, snapshot, backup_path)
             finally:
                 self._cleanup_temp(temp_path)
 
@@ -419,6 +447,72 @@ class XrayConfigAdapter:
             return False
         active = await self.systemctl.is_active(self.service_name)
         return active.ok and active.stdout.strip() == "active"
+
+    async def _install_candidate_api(
+        self,
+        temp_path: Path,
+        snapshot: tuple[int, int],
+        backup_path: Path | None,
+        *,
+        action: str,
+        uuid_value: str = "",
+        email_label: str = "",
+        flow: str = "",
+    ) -> None:
+        if backup_path is None:
+            raise XrayApplyError("Xray backup is not available for API apply")
+        await self._test_config(temp_path)
+        self._assert_config_unchanged(snapshot)
+        self._replace_main_config(temp_path, self.config_path)
+        try:
+            if action == "add":
+                await self._api_add_user(uuid_value, email_label, flow)
+            else:
+                await self._api_remove_user(email_label)
+        except Exception as exc:
+            self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
+            raise XrayApplyError(f"xray api {action} failed, config restored from backup") from exc
+
+    async def _api_add_user(self, uuid_value: str, email_label: str, flow: str) -> None:
+        assert self.shell is not None
+        user_json = {
+            "inboundTag": self.inbound_tag,
+            "user": {
+                "email": email_label,
+                "level": 0,
+                "account": {
+                    "@type": "type.googleapis.com/xray.proxy.vless.Account",
+                    "id": uuid_value,
+                    "flow": flow,
+                },
+            },
+        }
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                json.dump(user_json, f)
+                tmp_path = Path(f.name)
+            result = await self.shell.run(
+                ["xray", "api", "adu", f"--server={self.stats_server}", str(tmp_path)],
+                timeout=10,
+            )
+            if not result.ok:
+                raise XrayApplyError(f"xray api adu failed: {result.stderr or result.stdout}")
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    async def _api_remove_user(self, email_label: str) -> None:
+        assert self.shell is not None
+        result = await self.shell.run(
+            ["xray", "api", "rmu",
+             f"--server={self.stats_server}",
+             f"-tag={self.inbound_tag}",
+             email_label],
+            timeout=10,
+        )
+        if not result.ok:
+            raise XrayApplyError(f"xray api rmu failed: {result.stderr or result.stdout}")
 
     def _cleanup_temp(self, temp_path: Path | None) -> None:
         cleanup_staging_path(temp_path)
