@@ -98,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     for action in ("exists", "create", "set-password", "lock", "delete"):
         subparser = subparsers.add_parser(action)
         subparser.add_argument("login")
+    subparsers.add_parser("status")
     return parser
 
 
@@ -107,6 +108,8 @@ def main(argv: list[str] | None = None, *, stdin: TextIO | None = None, stderr: 
     stdin = stdin or sys.stdin
     stderr = stderr or sys.stderr
     try:
+        if args.action == "status":
+            return 0
         if args.action == "exists":
             return action_exists(args.login)
         if args.action == "create":

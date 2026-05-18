@@ -19,6 +19,7 @@ Defaults:vpn-bot env_reset
 Defaults:vpn-bot secure_path="/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 Cmnd_Alias VPNBOT_SOCKS5 = \
+    /usr/local/sbin/vpnbot-socks5-user status, \
     /usr/local/sbin/vpnbot-socks5-user exists vpn_socks_*, \
     /usr/local/sbin/vpnbot-socks5-user create vpn_socks_*, \
     /usr/local/sbin/vpnbot-socks5-user set-password vpn_socks_*, \
