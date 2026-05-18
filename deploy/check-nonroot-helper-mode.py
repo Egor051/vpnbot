@@ -22,9 +22,6 @@ FORBIDDEN_WRITE_PATHS = (
     "/etc/group",
     "/etc/gshadow",
     "/etc/.pwd.lock",
-    "/usr/local/etc/xray",
-    "/etc/amnezia/amneziawg",
-    "/etc/mtproxy",
     "/etc/systemd/system",
 )
 

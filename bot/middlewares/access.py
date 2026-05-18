@@ -1,6 +1,11 @@
 
 from collections.abc import Awaitable, Callable
-from typing import Any, override
+from typing import Any
+
+try:
+    from typing import override
+except ImportError:
+    from typing_extensions import override
 
 from aiogram import BaseMiddleware
 from aiogram.fsm.context import FSMContext
