@@ -21,7 +21,7 @@ ProtectHome=true
 ProtectSystem=strict
 RuntimeDirectory=vpn-bot
 RuntimeDirectoryMode=0700
-ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot
+ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot /usr/local/etc/xray /var/log/xray /etc/amnezia/amneziawg /etc/mtproxy
 
 [Install]
 WantedBy=multi-user.target

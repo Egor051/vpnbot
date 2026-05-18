@@ -69,9 +69,15 @@ def run_awg_or_wg(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def quick_strip(path: Path) -> str:
-    result = run_command(["awg-quick", "strip", str(path)])
-    if result.returncode == 127:
-        result = run_command(["wg-quick", "strip", str(path)])
+    import shutil
+    named = path.parent / "awg0.conf"
+    shutil.copy2(str(path), str(named))
+    try:
+        result = run_command(["awg-quick", "strip", str(named)])
+        if result.returncode == 127:
+            result = run_command(["wg-quick", "strip", str(named)])
+    finally:
+        named.unlink(missing_ok=True)
     if result.returncode != 0:
         raise HelperError("AWG config validation failed")
     return result.stdout
