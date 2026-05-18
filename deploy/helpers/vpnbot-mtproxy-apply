@@ -244,14 +244,19 @@ def port_listening(port: int) -> bool:
     return False
 
 
-def restart_and_verify(port: int) -> None:
+def restart_and_verify(port: int, *, timeout: float = 5.0, interval: float = 0.2) -> None:
     result = run_command(["systemctl", "restart", SERVICE_NAME])
     if result.returncode != 0:
         raise HelperError("MTProxy restart failed")
     if not service_active():
         raise HelperError("MTProxy service is not active")
-    if not port_listening(port):
-        raise HelperError("MTProxy port is not listening")
+    deadline = time.monotonic() + timeout
+    while True:
+        if port_listening(port):
+            return
+        if time.monotonic() >= deadline:
+            raise HelperError("MTProxy port is not listening")
+        time.sleep(interval)
 
 
 def existing_port() -> int:
