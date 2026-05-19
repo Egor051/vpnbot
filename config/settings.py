@@ -195,6 +195,7 @@ class Settings:
     audit_retention_days: int
     config_backup_keep_last: int
     sqlite_synchronous: str = "FULL"
+    awg_stats_interval: int = 60
     socks5_enabled: bool = False
     socks5_host: str = ""
     socks5_port: int | None = None
@@ -386,6 +387,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         awg_allowed_ips=_optional("AWG_ALLOWED_IPS", "0.0.0.0/0, ::/0"),
         awg_persistent_keepalive=_int_range("AWG_PERSISTENT_KEEPALIVE", 25, 0, 86400),
         awg_use_preshared_key=_bool("AWG_USE_PRESHARED_KEY", True),
+        awg_stats_interval=_int_range("AWG_STATS_INTERVAL", 60, 0, 3600),
         default_proxy_type=_optional("DEFAULT_PROXY_TYPE"),
         default_proxy_host=_optional("DEFAULT_PROXY_HOST"),
         default_proxy_port=_optional_int_range("DEFAULT_PROXY_PORT", 1, 65535),

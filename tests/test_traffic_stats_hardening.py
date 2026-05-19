@@ -85,8 +85,8 @@ def _stats(
 
 
 class _StatsRepo:
-    def __init__(self) -> None:
-        self.last: TrafficStats | None = None
+    def __init__(self, initial: TrafficStats | None = None) -> None:
+        self.last: TrafficStats | None = initial
 
     async def upsert_success(
         self,
@@ -109,6 +109,30 @@ class _StatsRepo:
             last_attempt_at=now,
             available=True,
             unavailable_reason=None,
+            source=source,
+        )
+        return self.last
+
+    async def upsert_unavailable(
+        self,
+        *,
+        key_id: int,
+        reason: str,
+        now: str,
+        source: str,
+    ) -> TrafficStats:
+        # Mirror real repo: preserve accumulated byte totals, only flip availability.
+        prev = self.last
+        self.last = TrafficStats(
+            key_id=key_id if prev is None else prev.key_id,
+            downloaded_bytes=0 if prev is None else prev.downloaded_bytes,
+            uploaded_bytes=0 if prev is None else prev.uploaded_bytes,
+            last_raw_downloaded_bytes=None if prev is None else prev.last_raw_downloaded_bytes,
+            last_raw_uploaded_bytes=None if prev is None else prev.last_raw_uploaded_bytes,
+            last_success_at=None if prev is None else prev.last_success_at,
+            last_attempt_at=now,
+            available=False,
+            unavailable_reason=reason,
             source=source,
         )
         return self.last
@@ -273,6 +297,73 @@ def test_xray_stats_internal_error_is_not_returned_as_public_reason() -> None:
         assert "xray" not in reason.lower()
         assert "secret" not in reason
         assert "/usr/local" not in reason
+
+    asyncio.run(run())
+
+
+def test_awg_peer_not_in_transfer_marks_unavailable_and_preserves_total() -> None:
+    # wg/awg show transfer lists all configured peers; a missing peer means runtime drift.
+    # upsert_unavailable preserves the existing byte totals so historical data is kept.
+    async def run() -> None:
+        previous = TrafficStats(
+            key_id=11,
+            downloaded_bytes=1000,
+            uploaded_bytes=500,
+            last_raw_downloaded_bytes=1000,
+            last_raw_uploaded_bytes=500,
+            last_success_at="old",
+            last_attempt_at="old",
+            available=True,
+            unavailable_reason=None,
+            source="awg/wg transfer",
+        )
+        repo = _StatsRepo(previous)
+        service = _service(repo)
+        result = await service._refresh_awg_key(  # noqa: SLF001
+            _awg_key(),
+            previous,
+            {},
+            None,
+        )
+        assert not result.available
+        assert result.downloaded_bytes == 1000
+        assert result.uploaded_bytes == 500
+        assert result.last_raw_downloaded_bytes == 1000
+        assert result.last_raw_uploaded_bytes == 500
+
+    asyncio.run(run())
+
+
+def test_awg_peer_reappears_after_drift_accumulates_correctly() -> None:
+    # When a peer returns to the runtime after being absent, the reset-detection
+    # logic correctly adds new bytes on top of the preserved historical total.
+    async def run() -> None:
+        previous = TrafficStats(
+            key_id=11,
+            downloaded_bytes=1000,
+            uploaded_bytes=500,
+            last_raw_downloaded_bytes=1000,
+            last_raw_uploaded_bytes=500,
+            last_success_at="old",
+            last_attempt_at="old",
+            available=True,
+            unavailable_reason=None,
+            source="awg/wg transfer",
+        )
+        repo = _StatsRepo(previous)
+        service = _service(repo)
+        unavailable = await service._refresh_awg_key(  # noqa: SLF001
+            _awg_key(), previous, {}, None
+        )
+        reconnected = await service._refresh_awg_key(  # noqa: SLF001
+            _awg_key(),
+            unavailable,
+            {"public": (200, 300)},  # received=200 (upload), sent=300 (download)
+            None,
+        )
+        assert reconnected.available
+        assert reconnected.downloaded_bytes == 1300  # 1000 + 300 (reset detected)
+        assert reconnected.uploaded_bytes == 700     # 500 + 200 (reset detected)
 
     asyncio.run(run())
 
