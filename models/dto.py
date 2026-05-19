@@ -58,11 +58,11 @@ class VpnKey:
     created_at: str
     updated_at: str
     revoked_at: str | None
-    expires_at: str | None
     deleted_at: str | None
     created_by: int
     revoked_by: int | None
     deleted_by: int | None
+    expires_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

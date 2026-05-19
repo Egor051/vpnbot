@@ -919,7 +919,7 @@ def test_create_key_confirm_keeps_fsm_data_when_rate_limited(monkeypatch: pytest
         def __init__(self) -> None:
             self.created_notes: list[str | None] = []
 
-        async def create_xray_key(self, user_id: int, profile: TelegramUserProfile, note: str | None) -> SimpleNamespace:
+        async def create_xray_key(self, user_id: int, profile: TelegramUserProfile, note: str | None, **kwargs: object) -> SimpleNamespace:
             self.created_notes.append(note)
             return SimpleNamespace(key=_key(VpnKeyType.XRAY), config_text="xray config")
 
@@ -1002,7 +1002,7 @@ def test_admin_issue_confirm_validates_owner_before_rate_limit(monkeypatch: pyte
         callback = Callback()
         services = SimpleNamespace(users=Users(), xray=SimpleNamespace(), awg=SimpleNamespace())
 
-        await admin_issue_confirm(callback, state, services, RateLimiter())  # type: ignore[arg-type]
+        await admin_issue_confirm(callback, state, services, RateLimiter(), None)  # type: ignore[arg-type]
 
         assert state.current_state == AdminCreateKeyStates.confirming
         assert state.data == {"owner_user_id": 404, "key_type": VpnKeyType.XRAY.value, "note": "admin note"}
@@ -1080,7 +1080,7 @@ def test_admin_issue_confirm_keeps_fsm_data_when_rate_limited_after_owner_valida
             raise RateLimitExceeded(9)
 
     class Xray:
-        async def create_xray_key(self, user_id: int, profile: TelegramUserProfile, note: str | None) -> SimpleNamespace:
+        async def create_xray_key(self, user_id: int, profile: TelegramUserProfile, note: str | None, **kwargs: object) -> SimpleNamespace:
             raise AssertionError("key should not be created while rate limited")
 
     async def run() -> None:
@@ -1090,9 +1090,9 @@ def test_admin_issue_confirm_keeps_fsm_data_when_rate_limited_after_owner_valida
         rate_limiter = RateLimiter()
         services = SimpleNamespace(users=users, xray=Xray(), awg=SimpleNamespace())
 
-        await admin_issue_confirm(callback, state, services, rate_limiter)  # type: ignore[arg-type]
+        await admin_issue_confirm(callback, state, services, rate_limiter, None)  # type: ignore[arg-type]
 
-        assert users.calls == 2
+        assert users.calls == 1
         assert rate_limiter.calls == 1
         assert state.current_state == AdminCreateKeyStates.confirming
         assert state.data == {"owner_user_id": 200, "key_type": VpnKeyType.XRAY.value, "note": "admin note"}
