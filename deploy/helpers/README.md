@@ -1,6 +1,8 @@
 # Privileged Helpers
 
-The production deployment runs `vpn-bot.service` as `User=vpn-bot` and `Group=vpn-bot`. Privileged backend mutation is restricted to fixed sudo helper entrypoints installed under `/usr/local/sbin`; the application checkout copy is source material only.
+> ⚠️ **Note:** These helpers are for the **non-root privilege-separated deployment model** (`User=vpn-bot` + `PRIVILEGE_HELPERS_ENABLED=true`). If you are running the **root+api mode** (`User=root` + `XRAY_APPLY_MODE=api`), helpers are not used and this README does not apply. See the main README [Xray API Mode](../../README.md#xray-api-mode) section.
+
+The non-root deployment runs `vpn-bot.service` as `User=vpn-bot` and `Group=vpn-bot`. Privileged backend mutation is restricted to fixed sudo helper entrypoints installed under `/usr/local/sbin`; the application checkout copy is source material only.
 
 Install helpers and sudoers as root:
 
@@ -86,4 +88,4 @@ The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `mana
 5. Run `python deploy/check-nonroot-helper-mode.py` before and after restarting the service.
 6. Run a staged issue/revoke test for Xray, AWG, SOCKS5, and managed MTProxy.
 
-Emergency rollback is to restore the backed-up pre-cutover unit and matching `.env`, disable `PRIVILEGE_HELPERS_ENABLED`, and restart `vpn-bot`. Treat root-run mode only as a temporary incident path while recovering helper-mode deployment.
+Emergency rollback from non-root mode is to restore the backed-up pre-cutover unit and matching `.env`, disable `PRIVILEGE_HELPERS_ENABLED`, and restart `vpn-bot`.
