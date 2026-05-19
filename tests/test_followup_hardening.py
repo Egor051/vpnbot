@@ -17,7 +17,7 @@ from aiogram.types import CallbackQuery, Chat, Message, User as TgUser
 from adapters.awg_config import AwgServerConfig
 from adapters.backup import BackupAdapter
 from adapters.clock import ClockProvider
-from adapters.errors import XrayApplyError
+from adapters.errors import XrayApplyError, XrayConfigError
 from adapters.xray_config import XrayConfigAdapter
 from bot.app import _startup_reconcile_keys
 from bot.handlers.common import answer_callback_error
@@ -2341,5 +2341,401 @@ def test_awg_client_config_skips_empty_interface_options(tmp_path: Path) -> None
         assert "Jc = 4" in config
         assert "DNS = 1.1.1.1" in config
         assert "DNS = 9.9.9.9" not in config
+
+
+def test_xray_api_mode_add_client_calls_xray_adu_not_systemctl(tmp_path: Path) -> None:
+    class FakeShell:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        async def run(self, args: list[str], **kwargs: object) -> ShellResult:
+            self.calls.append(list(args))
+            return ShellResult(tuple(args), 0, "", "")
+
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.reload_called = False
+            self.restart_called = False
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray",), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            self.reload_called = True
+            return ShellResult(("systemctl",), 0, "", "")
+
+        async def restart(self, service_name: str) -> ShellResult:
+            self.restart_called = True
+            return ShellResult(("systemctl",), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl",), 0, "active", "")
+
+    async def run() -> None:
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps({
+                "inbounds": [{
+                    "tag": "vless-in",
+                    "protocol": "vless",
+                    "settings": {"clients": []},
+                    "streamSettings": {"security": "reality", "realitySettings": {"shortIds": []}},
+                }]
+            }),
+            encoding="utf-8",
+        )
+        shell = FakeShell()
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="api",
+            inbound_tag="vless-in",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+            shell=shell,  # type: ignore[arg-type]
+            stats_server="127.0.0.1:10085",
+        )
+
+        await adapter.add_client(
+            uuid_value="00000000-0000-4000-8000-000000000000",
+            email_label="user",
+            short_id="abcd",
+            flow="xtls-rprx-vision",
+            manage_short_id=False,
+        )
+
+        updated = json.loads(config_path.read_text(encoding="utf-8"))
+        assert updated["inbounds"][0]["settings"]["clients"][0]["email"] == "user"
+        assert any(c[:3] == ["xray", "api", "adu"] for c in shell.calls)
+        assert "--server=127.0.0.1:10085" in shell.calls[0]
+        assert not systemctl.reload_called
+        assert not systemctl.restart_called
+
+    asyncio.run(run())
+
+
+def test_xray_api_mode_remove_client_calls_xray_rmu_not_systemctl(tmp_path: Path) -> None:
+    class FakeShell:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        async def run(self, args: list[str], **kwargs: object) -> ShellResult:
+            self.calls.append(list(args))
+            return ShellResult(tuple(args), 0, "", "")
+
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.systemctl_called = False
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray",), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            self.systemctl_called = True
+            return ShellResult(("systemctl",), 0, "", "")
+
+        async def restart(self, service_name: str) -> ShellResult:
+            self.systemctl_called = True
+            return ShellResult(("systemctl",), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl",), 0, "active", "")
+
+    async def run() -> None:
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps({
+                "inbounds": [{
+                    "tag": "vless-in",
+                    "protocol": "vless",
+                    "settings": {"clients": [{"id": "00000000-0000-4000-8000-000000000000", "email": "user@example"}]},
+                    "streamSettings": {"security": "reality", "realitySettings": {"shortIds": []}},
+                }]
+            }),
+            encoding="utf-8",
+        )
+        shell = FakeShell()
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="api",
+            inbound_tag="vless-in",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+            shell=shell,  # type: ignore[arg-type]
+            stats_server="127.0.0.1:10085",
+        )
+
+        await adapter.remove_client(
+            uuid_value="00000000-0000-4000-8000-000000000000",
+            email_label=None,
+            short_id=None,
+            remove_short_id=False,
+        )
+
+        updated = json.loads(config_path.read_text(encoding="utf-8"))
+        assert updated["inbounds"][0]["settings"]["clients"] == []
+        rmu_call = next((c for c in shell.calls if c[:3] == ["xray", "api", "rmu"]), None)
+        assert rmu_call is not None
+        assert "--server=127.0.0.1:10085" in rmu_call
+        assert "user@example" in rmu_call
+        assert not systemctl.systemctl_called
+
+    asyncio.run(run())
+
+
+def test_xray_api_mode_add_client_restores_backup_on_api_failure(tmp_path: Path) -> None:
+    class FakeShell:
+        async def run(self, args: list[str], **kwargs: object) -> ShellResult:
+            return ShellResult(tuple(args), 1, "", "gRPC error")
+
+    class FakeSystemctl:
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray",), 0, "", "")
+
+    async def run() -> None:
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps({
+                "inbounds": [{
+                    "tag": "vless-in",
+                    "protocol": "vless",
+                    "settings": {"clients": []},
+                    "streamSettings": {"security": "reality", "realitySettings": {"shortIds": []}},
+                }]
+            }),
+            encoding="utf-8",
+        )
+        original_content = config_path.read_text(encoding="utf-8")
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="api",
+            inbound_tag="vless-in",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=FakeSystemctl(),  # type: ignore[arg-type]
+            shell=FakeShell(),  # type: ignore[arg-type]
+            stats_server="127.0.0.1:10085",
+        )
+
+        with pytest.raises(XrayApplyError, match="xray api add failed"):
+            await adapter.add_client(
+                uuid_value="00000000-0000-4000-8000-000000000000",
+                email_label="user",
+                short_id="abcd",
+                flow="",
+                manage_short_id=False,
+            )
+
+        assert config_path.read_text(encoding="utf-8") == original_content
+
+    asyncio.run(run())
+
+
+def test_xray_api_mode_constructor_requires_stats_server(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(XrayConfigError, match="stats_server"):
+        XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="api",
+            inbound_tag="vless-in",
+            allow_restart_on_rollback=False,
+            backup=SimpleNamespace(),  # type: ignore[arg-type]
+            systemctl=SimpleNamespace(),  # type: ignore[arg-type]
+            shell=SimpleNamespace(),  # type: ignore[arg-type]
+        )
+
+
+def test_xray_api_mode_constructor_requires_shell(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(XrayConfigError, match="ShellRunner"):
+        XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="api",
+            inbound_tag="vless-in",
+            allow_restart_on_rollback=False,
+            backup=SimpleNamespace(),  # type: ignore[arg-type]
+            systemctl=SimpleNamespace(),  # type: ignore[arg-type]
+            stats_server="127.0.0.1:10085",
+        )
+
+
+def test_xray_api_mode_constructor_requires_inbound_tag(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(XrayConfigError, match="inbound_tag"):
+        XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="api",
+            inbound_tag="",
+            allow_restart_on_rollback=False,
+            backup=SimpleNamespace(),  # type: ignore[arg-type]
+            systemctl=SimpleNamespace(),  # type: ignore[arg-type]
+            shell=SimpleNamespace(),  # type: ignore[arg-type]
+            stats_server="127.0.0.1:10085",
+        )
+
+
+def test_xray_api_mode_constructor_rejects_helper_runner(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(XrayConfigError, match="privilege helpers"):
+        XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="api",
+            inbound_tag="vless-in",
+            allow_restart_on_rollback=False,
+            backup=SimpleNamespace(),  # type: ignore[arg-type]
+            systemctl=SimpleNamespace(),  # type: ignore[arg-type]
+            shell=SimpleNamespace(),  # type: ignore[arg-type]
+            stats_server="127.0.0.1:10085",
+            helper_runner=SimpleNamespace(),  # type: ignore[arg-type]
+        )
+
+
+def test_xray_api_mode_add_client_uses_systemctl_when_short_id_inserted(tmp_path: Path) -> None:
+    """When manage_short_id=True and a new short_id is inserted, api mode falls back to systemctl."""
+
+    class FakeShell:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        async def run(self, args: list[str], **kwargs: object) -> ShellResult:
+            self.calls.append(list(args))
+            return ShellResult(tuple(args), 0, "", "")
+
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.reload_called = False
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray",), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            self.reload_called = True
+            return ShellResult(("systemctl",), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl",), 0, "active", "")
+
+    async def run() -> None:
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps({
+                "inbounds": [{
+                    "tag": "vless-in",
+                    "protocol": "vless",
+                    "settings": {"clients": []},
+                    "streamSettings": {"security": "reality", "realitySettings": {"shortIds": []}},
+                }]
+            }),
+            encoding="utf-8",
+        )
+        shell = FakeShell()
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="api",
+            inbound_tag="vless-in",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+            shell=shell,  # type: ignore[arg-type]
+            stats_server="127.0.0.1:10085",
+        )
+
+        result = await adapter.add_client(
+            uuid_value="00000000-0000-4000-8000-000000000000",
+            email_label="user",
+            short_id="abcd",
+            flow="",
+            manage_short_id=True,
+        )
+
+        assert result.short_id_inserted is True
+        assert systemctl.reload_called, "systemctl reload должен вызываться когда вставлен short_id"
+        assert not any(c[:3] == ["xray", "api", "adu"] for c in shell.calls), "xray api adu не должен вызываться при short_id fallback"
+
+    asyncio.run(run())
+
+
+def test_xray_api_mode_remove_client_uses_systemctl_when_short_id_removed(tmp_path: Path) -> None:
+    """When remove_short_id=True removes an entry, api mode falls back to systemctl."""
+
+    class FakeShell:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        async def run(self, args: list[str], **kwargs: object) -> ShellResult:
+            self.calls.append(list(args))
+            return ShellResult(tuple(args), 0, "", "")
+
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.reload_called = False
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray",), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            self.reload_called = True
+            return ShellResult(("systemctl",), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl",), 0, "active", "")
+
+    async def run() -> None:
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps({
+                "inbounds": [{
+                    "tag": "vless-in",
+                    "protocol": "vless",
+                    "settings": {"clients": [{"id": "00000000-0000-4000-8000-000000000000", "email": "user@example"}]},
+                    "streamSettings": {"security": "reality", "realitySettings": {"shortIds": ["abcd1234"]}},
+                }]
+            }),
+            encoding="utf-8",
+        )
+        shell = FakeShell()
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="api",
+            inbound_tag="vless-in",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+            shell=shell,  # type: ignore[arg-type]
+            stats_server="127.0.0.1:10085",
+        )
+
+        await adapter.remove_client(
+            uuid_value="00000000-0000-4000-8000-000000000000",
+            email_label=None,
+            short_id="abcd1234",
+            remove_short_id=True,
+        )
+
+        assert systemctl.reload_called, "systemctl reload должен вызываться когда удаляется short_id"
+        assert not any(c[:3] == ["xray", "api", "rmu"] for c in shell.calls), "xray api rmu не должен вызываться при short_id fallback"
 
     asyncio.run(run())

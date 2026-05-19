@@ -241,6 +241,11 @@ class Settings:
     health_host: str = "127.0.0.1"
 
     def validate_xray_ready(self) -> None:
+        if self.xray_apply_mode == "api":
+            if not self.xray_inbound_tag:
+                raise SettingsError("XRAY_APPLY_MODE=api требует XRAY_INBOUND_TAG")
+            if not self.xray_stats_server:
+                raise SettingsError("XRAY_APPLY_MODE=api требует XRAY_STATS_SERVER")
         required = {
             "XRAY_PUBLIC_HOST/XRAY_SERVER_ADDRESS": self.xray_public_host,
             "XRAY_REALITY_PUBLIC_KEY/XRAY_PUBLIC_KEY": self.xray_reality_public_key,
@@ -348,7 +353,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         bot_drop_pending_updates=_bool("BOT_DROP_PENDING_UPDATES", False),
         xray_config_path=Path(_optional("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")),
         xray_service_name=_optional("XRAY_SERVICE_NAME", "xray"),
-        xray_apply_mode=_choice("XRAY_APPLY_MODE", "restart", {"reload", "restart"}),
+        xray_apply_mode=_choice("XRAY_APPLY_MODE", "restart", {"reload", "restart", "api"}),
         xray_inbound_tag=_optional("XRAY_INBOUND_TAG"),
         xray_public_host=_optional("XRAY_PUBLIC_HOST") or _optional("XRAY_SERVER_ADDRESS"),
         xray_public_port=(

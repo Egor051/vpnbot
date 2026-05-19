@@ -95,6 +95,8 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         allow_restart_on_rollback=settings.xray_allow_restart_on_rollback,
         backup=backup,
         systemctl=systemctl,
+        shell=shell,
+        stats_server=settings.xray_stats_server,
         helper_runner=helper_runner,
         helper_path=settings.xray_apply_helper_path,
         helper_staging_dir=settings.xray_helper_staging_dir,
