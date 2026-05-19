@@ -58,15 +58,20 @@ class TrafficStatsService:
         for key in keys:
             owner_ids.add(key.owner_user_id)
             key_ids.append(key.id)
-        # Fetch external data outside the lock to avoid holding it during slow I/O.
-        owners, (awg_transfers, awg_error), (xray_stats, xray_error) = await asyncio.gather(
+        # Xray stats are persistent and monotonically increasing within a run;
+        # no background Xray collector races against on-demand refreshes, so
+        # sampling outside the lock is safe.
+        owners, (xray_stats, xray_error) = await asyncio.gather(
             self.users_repo.list_by_ids(sorted(owner_ids)),
-            self._load_awg_transfers(keys),
             self._load_xray_stats(keys),
         )
-        # Serialize the DB read-modify-write so concurrent on-demand and background
-        # refreshes don't overwrite each other with stale previous values.
+        # AWG transfer counters reset to 0 on interface restart, and a background
+        # collector runs concurrently with user-triggered refreshes. A stale AWG
+        # sample committed after a fresher one would see stored_raw > sample_raw and
+        # falsely trigger reset-detection, inflating the cumulative total. Sampling
+        # inside the lock ensures the snapshot is always newer than whatever is stored.
         async with self._refresh_lock:
+            awg_transfers, awg_error = await self._load_awg_transfers(keys)
             current_stats = await self.stats.list_by_key_ids(key_ids)
             views: list[KeyTrafficStatsView] = []
             for key in keys:
