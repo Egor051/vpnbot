@@ -170,6 +170,7 @@ Notes:
 - If `XRAY_INBOUND_TAG` is empty, the adapter uses the first inbound with `settings.clients`.
 - If `XRAY_MANAGE_SHORT_IDS=false`, `XRAY_SHORT_ID` must be set.
 - `XRAY_APPLY_MODE=restart` is the default production apply mode; use `reload` only when your Xray unit reliably applies reload.
+- `XRAY_APPLY_MODE=api` is incompatible with `PRIVILEGE_HELPERS_ENABLED=true`. When privilege helpers are enabled the bot applies Xray config changes through the `vpnbot-xray-apply` sudo helper, which always calls `systemctl restart xray` regardless of `XRAY_APPLY_MODE`. Use `restart` mode with privilege helpers; `reload` and `api` modes are not honoured by the helper.
 - `SQLITE_SYNCHRONOUS=FULL` is the safer default for this control-plane database. `NORMAL` is faster but can lose the last committed transactions on OS or power failure while VPN backend state has already changed.
 - `AWG_CLIENT_DNS` is supported only as a legacy alias; use `AWG_DNS` for new deployments.
 - `AWG_ENDPOINT_HOST` and `AWG_ENDPOINT_PORT` should point to the public AWG endpoint clients will use.
@@ -179,7 +180,7 @@ Notes:
 - `MTPROTO_MODE=managed` creates one unique secret per user. In production helper mode the bot stages managed files under `/run/vpn-bot/mtproxy`; `/usr/local/sbin/vpnbot-mtproxy-apply` writes `/etc/mtproxy/vpnbot`, restarts `mtproxy`, verifies service/port health, and rolls back managed files if apply fails. The systemd drop-in and wrapper are installed during deploy, not written by the bot at runtime.
 - `MTPROTO_SECRET`, SOCKS5 passwords, and real production endpoints with credentials must never be committed. `.env.example` intentionally keeps proxy secrets empty.
 - `DEFAULT_PROXY_*` is legacy compatibility storage and does not drive the new user-facing proxy access flow.
-- Production deployment runs the bot as `vpn-bot:vpn-bot` with `PRIVILEGE_HELPERS_ENABLED=true`. Root-only backend changes go through the fixed sudo helpers documented in `deploy/helpers/README.md`.
+- Production deployment runs the bot as `vpn-bot:vpn-bot` with `PRIVILEGE_HELPERS_ENABLED=true`. Root-only backend changes go through the fixed sudo helpers documented in `deploy/helpers/README.md`. Enabling privilege helpers disables `XRAY_APPLY_MODE=api` support — use `restart` or `reload` mode instead.
 - Keep project code, deploy files, `.env`, and `.venv` outside `vpn-bot` write access. Only `/opt/vpn-service/data`, `/opt/vpn-service/logs` if file logs are enabled, and `/run/vpn-bot` should be writable by the service user.
 
 ## Access Lifecycle Policy
