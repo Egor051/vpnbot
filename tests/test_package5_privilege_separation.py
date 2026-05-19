@@ -10,15 +10,15 @@ def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_production_service_uses_nonroot_helper_mode() -> None:
+def test_production_service_uses_root_api_mode() -> None:
     service_path = ROOT / "deploy" / "vpn-bot.service"
     assert service_path.exists()
 
     text = _read("deploy/vpn-bot.service")
-    assert "User=vpn-bot" in text
-    assert "Group=vpn-bot" in text
-    assert "User=root" not in text
-    assert "Group=root" not in text
+    assert "User=root" in text
+    assert "Group=root" in text
+    assert "User=vpn-bot" not in text
+    assert "Group=vpn-bot" not in text
     assert "future example" not in text.lower()
     assert "NoNewPrivileges=true" not in text
     assert "Environment=BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock" in text
@@ -26,9 +26,10 @@ def test_production_service_uses_nonroot_helper_mode() -> None:
     assert "RuntimeDirectoryMode=0700" in text
     assert "PrivateTmp=true" in text
     assert "ProtectHome=true" in text
-    assert "ProtectSystem=strict" in text
+    assert "ProtectSystem=false" in text
     assert "UMask=0077" in text
-    assert "ReadWritePaths=" in text
+    # Root mode needs no ReadWritePaths restrictions
+    assert "ReadWritePaths=" not in text
 
 
 def test_nonroot_example_is_compatibility_reference_not_future_cutover() -> None:
@@ -47,11 +48,20 @@ def test_nonroot_example_is_compatibility_reference_not_future_cutover() -> None
     assert "UMask=0077" in text
 
 
-def test_production_service_readwrite_paths_are_narrow() -> None:
+def test_production_service_root_mode_has_no_readwrite_paths() -> None:
+    # Root+api mode runs as root with ProtectSystem=false, so no ReadWritePaths
+    # restrictions are needed or present.
     text = _read("deploy/vpn-bot.service")
-    read_write_lines = "\n".join(line for line in text.splitlines() if line.startswith("ReadWritePaths="))
+    read_write_lines = [line for line in text.splitlines() if line.startswith("ReadWritePaths=")]
+    assert read_write_lines == [], (
+        "deploy/vpn-bot.service should have no ReadWritePaths in root+api mode"
+    )
 
-    # These paths must never be writable by the bot process itself
+    # The nonroot example still carries the narrow list for reference.
+    nonroot_text = _read("deploy/vpn-bot.nonroot.example.service")
+    nonroot_rw = "\n".join(
+        line for line in nonroot_text.splitlines() if line.startswith("ReadWritePaths=")
+    )
     forbidden_paths = {
         "/etc/passwd",
         "/etc/shadow",
@@ -61,13 +71,7 @@ def test_production_service_readwrite_paths_are_narrow() -> None:
         "/etc/systemd/system",
     }
     for path in forbidden_paths:
-        assert path not in read_write_lines
-    # Helpers inherit bot's mount namespace (ProtectSystem=strict), so their
-    # writable paths must be declared here. Keep this list in sync with eef9bd6.
-    assert read_write_lines == (
-        "ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot"
-        " /usr/local/etc/xray /var/log/xray /etc/amnezia/amneziawg /etc/mtproxy"
-    )
+        assert path not in nonroot_rw
 
 
 def test_sudoers_example_grants_only_fixed_helpers() -> None:
