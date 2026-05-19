@@ -56,11 +56,11 @@ logger = logging.getLogger(__name__)
 
 async def _awg_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> None:
     while True:
-        await asyncio.sleep(interval)
         try:
             await traffic_stats.refresh_all_awg()
         except Exception:
             logger.warning("AWG background stats collection failed", exc_info=True)
+        await asyncio.sleep(interval)
 
 
 async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, BackendHealth, Services]:

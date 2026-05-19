@@ -33,6 +33,7 @@ class TrafficStatsService:
         self.users = users
         self.awg = awg
         self.xray = xray
+        self._refresh_lock = asyncio.Lock()
 
     async def refresh_for_actor(self, actor_user_id: int, key_id: int) -> KeyTrafficStatsView:
         actor = await self.users.require_approved_or_admin(actor_user_id)
@@ -57,33 +58,49 @@ class TrafficStatsService:
         for key in keys:
             owner_ids.add(key.owner_user_id)
             key_ids.append(key.id)
-        owners, current_stats, (awg_transfers, awg_error), (xray_stats, xray_error) = await asyncio.gather(
+        # Fetch external data outside the lock to avoid holding it during slow I/O.
+        owners, (awg_transfers, awg_error), (xray_stats, xray_error) = await asyncio.gather(
             self.users_repo.list_by_ids(sorted(owner_ids)),
-            self.stats.list_by_key_ids(key_ids),
             self._load_awg_transfers(keys),
             self._load_xray_stats(keys),
         )
-
-        views: list[KeyTrafficStatsView] = []
-        for key in keys:
-            stats: TrafficStats | None
-            if key.key_type == VpnKeyType.AWG:
-                stats = await self._refresh_awg_key(key, current_stats.get(key.id), awg_transfers, awg_error)
-            elif key.key_type == VpnKeyType.XRAY:
-                stats = await self._refresh_xray_key(key, current_stats.get(key.id), xray_stats, xray_error)
-            else:
-                stats = None
-            views.append(KeyTrafficStatsView(key=key, owner=owners.get(key.owner_user_id), stats=stats))
+        # Serialize the DB read-modify-write so concurrent on-demand and background
+        # refreshes don't overwrite each other with stale previous values.
+        async with self._refresh_lock:
+            current_stats = await self.stats.list_by_key_ids(key_ids)
+            views: list[KeyTrafficStatsView] = []
+            for key in keys:
+                stats: TrafficStats | None
+                if key.key_type == VpnKeyType.AWG:
+                    stats = await self._refresh_awg_key(key, current_stats.get(key.id), awg_transfers, awg_error)
+                elif key.key_type == VpnKeyType.XRAY:
+                    stats = await self._refresh_xray_key(key, current_stats.get(key.id), xray_stats, xray_error)
+                else:
+                    stats = None
+                views.append(KeyTrafficStatsView(key=key, owner=owners.get(key.owner_user_id), stats=stats))
         return views
 
     async def refresh_all_awg(self) -> None:
-        keys = await self.vpn_keys.list_by_type_statuses(
-            key_type=VpnKeyType.AWG,
-            statuses={VpnKeyStatus.ACTIVE, VpnKeyStatus.PENDING_REVOKE},
-        )
-        if not keys:
-            return
-        await self.refresh_views(keys)
+        # Include all statuses where the peer may still exist in the AWG runtime.
+        statuses = {
+            VpnKeyStatus.ACTIVE,
+            VpnKeyStatus.PENDING_REVOKE,
+            VpnKeyStatus.APPLY_FAILED,
+            VpnKeyStatus.PENDING_DELETE,
+            VpnKeyStatus.DELETE_FAILED,
+        }
+        after_id: int | None = None
+        while True:
+            batch = await self.vpn_keys.list_by_type_statuses(
+                key_type=VpnKeyType.AWG,
+                statuses=statuses,
+                limit=200,
+                after_id=after_id,
+            )
+            if not batch:
+                break
+            await self.refresh_views(batch)
+            after_id = batch[-1].id
 
     async def cached_for_keys(self, keys: list[VpnKey]) -> dict[int, TrafficStats]:
         return await self.stats.list_by_key_ids([key.id for key in keys])
