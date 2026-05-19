@@ -67,7 +67,7 @@ class TrialKeyRequestRepository:
         cursor = await self.db.conn.execute(
             """
             SELECT COUNT(*) AS cnt FROM trial_key_requests
-            WHERE telegram_user_id = ? AND requested_at > ?
+            WHERE telegram_user_id = ? AND requested_at > ? AND status != 'rejected'
             """,
             (telegram_user_id, threshold),
         )

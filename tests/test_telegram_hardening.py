@@ -24,6 +24,11 @@ from models.enums import AccessRequestStatus, UserRole, VpnKeyStatus, VpnKeyType
 from services.errors import AccessDenied, NotFound
 
 
+class _FakeTrialAccess:
+    async def can_request_trial(self, user_id: int) -> bool:
+        return False
+
+
 def _key(key_id: int, owner_user_id: int = 200) -> VpnKey:
     return VpnKey(
         id=key_id,
@@ -264,7 +269,7 @@ def test_admin_block_confirm_performs_block(monkeypatch) -> None:
     async def run() -> None:
         users = Users()
         callback = _Callback("admin:block:confirm:200")
-        await admin_block_user_confirm(callback, SimpleNamespace(users=users))  # type: ignore[arg-type]
+        await admin_block_user_confirm(callback, SimpleNamespace(users=users, trial_access=_FakeTrialAccess()))  # type: ignore[arg-type]
 
         assert users.block_calls == 1
         assert "Пользователь заблокирован." in edits[-1]
@@ -297,7 +302,7 @@ def test_admin_block_confirm_already_blocked_does_not_block_again(monkeypatch) -
     async def run() -> None:
         users = Users()
         callback = _Callback("admin:block:confirm:200")
-        await admin_block_user_confirm(callback, SimpleNamespace(users=users))  # type: ignore[arg-type]
+        await admin_block_user_confirm(callback, SimpleNamespace(users=users, trial_access=_FakeTrialAccess()))  # type: ignore[arg-type]
 
         assert users.block_calls == 0
         assert edits == ["Пользователь уже заблокирован."]
@@ -381,7 +386,7 @@ def test_admin_unblock_confirm_after_warning_includes_manual_check(monkeypatch) 
     async def run() -> None:
         users = Users()
         callback = _Callback("admin:unblock:confirm:200")
-        await admin_unblock_user_confirm(callback, SimpleNamespace(users=users))  # type: ignore[arg-type]
+        await admin_unblock_user_confirm(callback, SimpleNamespace(users=users, trial_access=_FakeTrialAccess()))  # type: ignore[arg-type]
 
         assert users.unblock_calls == 1
         assert "Пользователь разблокирован" in edits[-1]
@@ -418,7 +423,7 @@ def test_admin_unblock_confirm_without_warning_uses_normal_success_text(monkeypa
 
     async def run() -> None:
         callback = _Callback("admin:unblock:confirm:200")
-        await admin_unblock_user_confirm(callback, SimpleNamespace(users=Users()))  # type: ignore[arg-type]
+        await admin_unblock_user_confirm(callback, SimpleNamespace(users=Users(), trial_access=_FakeTrialAccess()))  # type: ignore[arg-type]
 
         assert "Пользователь разблокирован" in edits[-1]
         assert "Проверьте Xray/AWG runtime" not in edits[-1]
