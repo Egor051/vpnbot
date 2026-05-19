@@ -58,20 +58,20 @@ class TrafficStatsService:
         for key in keys:
             owner_ids.add(key.owner_user_id)
             key_ids.append(key.id)
-        # Xray stats are persistent and monotonically increasing within a run;
-        # no background Xray collector races against on-demand refreshes, so
-        # sampling outside the lock is safe.
-        owners, (xray_stats, xray_error) = await asyncio.gather(
-            self.users_repo.list_by_ids(sorted(owner_ids)),
-            self._load_xray_stats(keys),
-        )
-        # AWG transfer counters reset to 0 on interface restart, and a background
-        # collector runs concurrently with user-triggered refreshes. A stale AWG
-        # sample committed after a fresher one would see stored_raw > sample_raw and
-        # falsely trigger reset-detection, inflating the cumulative total. Sampling
-        # inside the lock ensures the snapshot is always newer than whatever is stored.
+        # Owner info does not affect the monotonicity invariant; fetch it in parallel
+        # outside the lock to avoid holding the lock during a DB round-trip.
+        owners = await self.users_repo.list_by_ids(sorted(owner_ids))
+        # Both AWG and Xray counters are sampled inside the lock so that a stale
+        # snapshot from a concurrent refresh can never be committed after a fresher
+        # one: doing so would see stored_raw > stale_raw and falsely trigger
+        # reset-detection in _next_total, inflating the cumulative total.
+        # AWG and Xray queries run in parallel to keep the lock time bounded by
+        # max(awg_latency, xray_latency) rather than their sum.
         async with self._refresh_lock:
-            awg_transfers, awg_error = await self._load_awg_transfers(keys)
+            (awg_transfers, awg_error), (xray_stats, xray_error) = await asyncio.gather(
+                self._load_awg_transfers(keys),
+                self._load_xray_stats(keys),
+            )
             current_stats = await self.stats.list_by_key_ids(key_ids)
             views: list[KeyTrafficStatsView] = []
             for key in keys:
@@ -147,19 +147,24 @@ class TrafficStatsService:
             )
         raw = transfers.get(key.public_key)
         if raw is None:
-            # Peer not listed: not yet connected or AWG restarted before first handshake.
-            # Treat as 0 bytes so the delta logic preserves the historical total on restart.
-            logger.debug("AWG peer %.8s… not in transfer output; assuming 0 bytes", key.public_key)
-            raw_downloaded_bytes, raw_uploaded_bytes = 0, 0
-        else:
-            received_bytes, sent_bytes = raw
-            raw_downloaded_bytes = sent_bytes
-            raw_uploaded_bytes = received_bytes
+            # wg/awg show transfer lists ALL configured peers, even idle ones (0 0).
+            # A missing peer means the peer is absent from the runtime (drift or
+            # apply failure), not merely idle. Surface this so admins can act.
+            # upsert_unavailable preserves the accumulated byte totals in the DB,
+            # so historical data is safe and accumulation resumes when the peer
+            # reappears.
+            return await self.stats.upsert_unavailable(
+                key_id=key.id,
+                reason="AWG peer не найден в выводе transfer",
+                now=now,
+                source="awg/wg transfer",
+            )
+        received_bytes, sent_bytes = raw
         return await self._store_success(
             key=key,
             previous=previous,
-            raw_downloaded_bytes=raw_downloaded_bytes,
-            raw_uploaded_bytes=raw_uploaded_bytes,
+            raw_downloaded_bytes=sent_bytes,
+            raw_uploaded_bytes=received_bytes,
             source="awg/wg transfer",
             now=now,
         )
