@@ -170,7 +170,7 @@ Notes:
 - If `XRAY_INBOUND_TAG` is empty, the adapter uses the first inbound with `settings.clients`.
 - If `XRAY_MANAGE_SHORT_IDS=false`, `XRAY_SHORT_ID` must be set.
 - `XRAY_APPLY_MODE=restart` is the default production apply mode; use `reload` only when your Xray unit reliably applies reload.
-- `XRAY_APPLY_MODE=api` is incompatible with `PRIVILEGE_HELPERS_ENABLED=true`. When privilege helpers are enabled the bot applies Xray config changes through the `vpnbot-xray-apply` sudo helper (which calls `systemctl restart` or `reload` internally), so `api` mode cannot be used. If you need `api` mode, set `PRIVILEGE_HELPERS_ENABLED=false` and run the bot as root.
+- `XRAY_APPLY_MODE=api` is incompatible with `PRIVILEGE_HELPERS_ENABLED=true`. When privilege helpers are enabled the bot applies Xray config changes through the `vpnbot-xray-apply` sudo helper, which always calls `systemctl restart xray` regardless of `XRAY_APPLY_MODE`. Use `restart` mode with privilege helpers; `reload` and `api` modes are not honoured by the helper.
 - `SQLITE_SYNCHRONOUS=FULL` is the safer default for this control-plane database. `NORMAL` is faster but can lose the last committed transactions on OS or power failure while VPN backend state has already changed.
 - `AWG_CLIENT_DNS` is supported only as a legacy alias; use `AWG_DNS` for new deployments.
 - `AWG_ENDPOINT_HOST` and `AWG_ENDPOINT_PORT` should point to the public AWG endpoint clients will use.
