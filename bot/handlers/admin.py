@@ -42,7 +42,6 @@ from bot.keyboards.admin import (
     access_request_decision_confirm_keyboard,
     block_user_confirm_keyboard,
     pending_requests_keyboard,
-    trial_request_keyboard,
     unblock_user_confirm_keyboard,
     user_actions_keyboard,
     users_keyboard,
@@ -442,7 +441,8 @@ async def admin_user_approve(callback: CallbackQuery, services: Services) -> Non
         await services.users.set_role(callback.from_user.id, user_id, UserRole.APPROVED_USER)
         if callback.message:
             user = await services.users.get_user(user_id)
-            await safe_edit_message_text(callback.message, "Пользователь одобрен.", reply_markup=user_actions_keyboard(user))
+            has_used_trial = not await services.trial_access.can_request_trial(user_id)
+            await safe_edit_message_text(callback.message, "Пользователь одобрен.", reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -460,7 +460,8 @@ async def admin_block_user(callback: CallbackQuery, services: Services) -> None:
         user = await services.users.get_user(user_id)
         if is_blocked_user(user):
             if callback.message:
-                await safe_edit_message_text(callback.message, "Пользователь уже заблокирован.", reply_markup=user_actions_keyboard(user))
+                has_used_trial = not await services.trial_access.can_request_trial(user_id)
+                await safe_edit_message_text(callback.message, "Пользователь уже заблокирован.", reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial))
             return
         key_counts = await services.users.count_keys_for_users(callback.from_user.id, [user_id])
         if callback.message:
@@ -486,7 +487,8 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Services) 
         current = await services.users.get_user(user_id)
         if is_blocked_user(current):
             if callback.message:
-                await safe_edit_message_text(callback.message, "Пользователь уже заблокирован.", reply_markup=user_actions_keyboard(current))
+                has_used_trial = not await services.trial_access.can_request_trial(user_id)
+                await safe_edit_message_text(callback.message, "Пользователь уже заблокирован.", reply_markup=user_actions_keyboard(current, has_used_trial=has_used_trial))
             return
         result = await services.users.block_user(callback.from_user.id, user_id, revoke_active_keys=True)
         if callback.message:
@@ -508,7 +510,8 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Services) 
                     "Ошибок: 0\n"
                     "Теперь пользователю доступен только /start для повторной заявки."
                 )
-            await safe_edit_message_text(callback.message, text, reply_markup=user_actions_keyboard(user))
+            has_used_trial = not await services.trial_access.can_request_trial(user_id)
+            await safe_edit_message_text(callback.message, text, reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -525,10 +528,11 @@ async def admin_unblock_user(callback: CallbackQuery, services: Services) -> Non
         warning = await services.users.inspect_unblock_risk(callback.from_user.id, user_id)
         if callback.message:
             if not is_blocked_user(warning.user):
+                has_used_trial = not await services.trial_access.can_request_trial(user_id)
                 await safe_edit_message_text(
                     callback.message,
                     "Пользователь уже не заблокирован.",
-                    reply_markup=user_actions_keyboard(warning.user),
+                    reply_markup=user_actions_keyboard(warning.user, has_used_trial=has_used_trial),
                 )
                 return
             await safe_edit_message_text(
@@ -550,12 +554,13 @@ async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services
     try:
         user_id = int(callback.data.rsplit(":", 1)[-1])
         warning = await services.users.inspect_unblock_risk(callback.from_user.id, user_id)
+        has_used_trial = not await services.trial_access.can_request_trial(user_id)
         if not is_blocked_user(warning.user):
             if callback.message:
                 await safe_edit_message_text(
                     callback.message,
                     "Пользователь уже не заблокирован.",
-                    reply_markup=user_actions_keyboard(warning.user),
+                    reply_markup=user_actions_keyboard(warning.user, has_used_trial=has_used_trial),
                 )
             return
         user = await services.users.unblock_user(callback.from_user.id, user_id)
@@ -563,7 +568,7 @@ async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services
             await safe_edit_message_text(
                 callback.message,
                 unblock_user_success_text(warning),
-                reply_markup=user_actions_keyboard(user),
+                reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial),
             )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -865,7 +870,6 @@ async def admin_issue_note(message: Message, state: FSMContext, services: Servic
         return
     if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
         return
-    data = await state.get_data()
     try:
         note = _clean_note(message.text)
         await state.update_data(note=note)
