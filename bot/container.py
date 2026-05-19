@@ -8,11 +8,13 @@ from services.announcements import AnnouncementService
 from services.audit import AuditService
 from services.awg import AwgService
 from services.backend_health import BackendHealth
+from services.key_expiry import KeyExpiryService
 from services.mtproto import MtProtoService
 from services.notes import NotesService
 from services.proxy import ProxyService
 from services.socks5 import Socks5Service
 from services.traffic_stats import TrafficStatsService
+from services.trial_access import TrialAccessService
 from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
 from services.xray import XrayService
@@ -35,3 +37,5 @@ class Services:
     audit: AuditService
     announcements: AnnouncementService
     backend_health: BackendHealth
+    key_expiry: KeyExpiryService
+    trial_access: TrialAccessService

@@ -216,7 +216,8 @@ def test_user_actions_keyboard_hides_issue_key_for_pending_and_blocked_users() -
     def callbacks(user: User) -> set[str | None]:
         return {button.callback_data for row in user_actions_keyboard(user).inline_keyboard for button in row}
 
-    assert f"admin:issue:{pending.telegram_user_id}" not in callbacks(pending)
+    # Admins can now issue keys to PENDING users (trial/early access)
+    assert f"admin:issue:{pending.telegram_user_id}" in callbacks(pending)
     assert f"admin:issue:{blocked.telegram_user_id}" not in callbacks(blocked)
     assert f"admin:issue:{approved.telegram_user_id}" in callbacks(approved)
     assert f"admin:issue:{superadmin.telegram_user_id}" in callbacks(superadmin)

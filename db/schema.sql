@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL CHECK(role IN ('SUPERADMIN','APPROVED_USER','PENDING_USER','BLOCKED_USER')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  blocked_at TEXT
+  blocked_at TEXT,
+  trial_quota_reset_at TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS access_requests (
@@ -42,10 +43,22 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   revoked_at TEXT,
+  expires_at TEXT DEFAULT NULL,
   deleted_at TEXT,
   created_by INTEGER NOT NULL,
   revoked_by INTEGER,
   deleted_by INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS trial_key_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  telegram_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+  key_type TEXT NOT NULL CHECK(key_type IN ('xray','awg')),
+  status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+  key_id INTEGER REFERENCES vpn_keys(id) ON DELETE SET NULL,
+  requested_at TEXT NOT NULL,
+  decided_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+  decided_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS proxy_entries (

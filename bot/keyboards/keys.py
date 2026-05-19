@@ -106,6 +106,43 @@ def after_key_created_keyboard(key: VpnKey) -> InlineKeyboardMarkup:
     )
 
 
+def expiry_choice_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="Бессрочный", callback_data="expiry:permanent")],
+        [InlineKeyboardButton(text="7 дней", callback_data="expiry:7")],
+        [InlineKeyboardButton(text="30 дней", callback_data="expiry:30")],
+        [InlineKeyboardButton(text="Ввести количество дней", callback_data="expiry:custom")],
+        [InlineKeyboardButton(text="Отмена", callback_data="cancel")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def trial_key_show_keyboard(key_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Получить конфиг", callback_data=f"trial:show:{key_id}")],
+        ]
+    )
+
+
+def request_trial_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Запросить пробный доступ (7 дней)", callback_data="trial:request")],
+        ]
+    )
+
+
+def trial_protocol_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Xray", callback_data="trial:proto:xray")],
+            [InlineKeyboardButton(text="AWG", callback_data="trial:proto:awg")],
+            [InlineKeyboardButton(text="Отмена", callback_data="cancel")],
+        ]
+    )
+
+
 def after_key_deleted_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

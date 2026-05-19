@@ -31,11 +31,16 @@ class VpnKeyQueryService:
             raise AccessDenied("Нельзя смотреть чужие ключи")
         return await self.vpn_keys.count_by_owner(target)
 
+    async def list_active_trial_by_owner(self, owner_user_id: int) -> list[VpnKey]:
+        return await self.vpn_keys.list_active_trial_by_owner(owner_user_id)
+
     async def get_for_actor(self, actor_user_id: int, key_id: int) -> VpnKey:
-        actor = await self.users.require_approved_or_admin(actor_user_id)
         key = await self.vpn_keys.get_by_id(key_id)
         if key is None or key.status == VpnKeyStatus.DELETED:
             raise NotFound("Ключ не найден")
-        if actor.role != UserRole.SUPERADMIN and key.owner_user_id != actor_user_id:
+        if key.owner_user_id == actor_user_id:
+            return key
+        actor = await self.users.require_approved_or_admin(actor_user_id)
+        if actor.role != UserRole.SUPERADMIN:
             raise AccessDenied("Нельзя смотреть чужой ключ")
         return key

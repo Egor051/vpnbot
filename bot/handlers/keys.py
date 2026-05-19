@@ -1,7 +1,9 @@
 
+from __future__ import annotations
+
 from typing import Any
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -16,21 +18,25 @@ from bot.formatters import (
     xray_config_text,
 )
 from bot.container import Services
-from bot.fsm.states import CreateKeyStates, EditNoteStates
+from bot.fsm.states import CreateKeyStates, EditNoteStates, TrialRequestStates
 from bot.handlers.common import answer_callback_error, answer_message_error, profile_from_tg
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import (
     after_key_deleted_keyboard,
     confirm_keyboard,
     create_key_keyboard,
+    expiry_choice_keyboard,
     key_actions_keyboard,
     keys_list_keyboard,
+    request_trial_keyboard,
+    trial_key_show_keyboard,
+    trial_protocol_keyboard,
 )
 from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text, send_awg_config
 from bot.pagination import page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
-from models.enums import AuditEntityType, VpnKeyType
+from models.enums import AuditEntityType, VpnKeyStatus, VpnKeyType
 from services.errors import AccessDenied, NotFound
 
 router = Router()
@@ -145,16 +151,97 @@ async def create_key_note(message: Message, state: FSMContext, services: Service
         return
     try:
         await _ensure_can_enter_create(message.from_user.id, services)
-        data = await state.get_data()
-        key_type = str(data.get("key_type") or "")
         note = _clean_note(message.text)
         await state.update_data(note=note)
-        await state.set_state(CreateKeyStates.confirming)
+        await state.set_state(CreateKeyStates.waiting_expiry)
         await message.answer(
-            create_confirm_text(key_type, note),
+            "Выберите срок действия ключа:",
+            reply_markup=expiry_choice_keyboard(),
+        )
+    except Exception as exc:
+        await answer_message_error(message, exc)
+
+
+@router.callback_query(CreateKeyStates.waiting_expiry, F.data.regexp(r"^expiry:(permanent|\d+)$"))
+async def create_key_expiry(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        raw = callback.data.split(":", 1)[1]
+        if raw == "permanent":
+            expires_at = None
+        else:
+            days = int(raw)
+            if days < 1 or days > services.settings.key_max_trial_days:
+                await safe_callback_answer(callback, f"Недопустимый срок: 1–{services.settings.key_max_trial_days} дней", show_alert=True)
+                return
+            from datetime import datetime, timedelta, timezone
+            expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).replace(microsecond=0).isoformat()
+        await state.update_data(expires_at=expires_at)
+        await state.set_state(CreateKeyStates.confirming)
+        await safe_callback_answer(callback)
+        data = await state.get_data()
+        key_type = str(data.get("key_type") or "")
+        note = data.get("note")
+        from bot.keyboards.common import confirm_cancel_keyboard
+        await safe_edit_message_text(
+            callback.message,
+            create_confirm_text(key_type, note, expires_at=expires_at),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(CreateKeyStates.waiting_expiry, F.data == "expiry:custom")
+async def create_key_expiry_custom(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await ensure_private_callback(callback):
+        return
+    if callback.message is None:
+        return
+    await safe_callback_answer(callback)
+    await state.set_state(CreateKeyStates.waiting_custom_days)
+    await safe_edit_message_text(
+        callback.message,
+        "Введите количество дней (от 1 до 365):",
+        reply_markup=None,
+    )
+
+
+@router.message(CreateKeyStates.waiting_custom_days)
+async def create_key_custom_days(message: Message, state: FSMContext, services: Services) -> None:
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message):
+        return
+    try:
+        await _ensure_can_enter_create(message.from_user.id, services)
+        text = (message.text or "").strip()
+        if not text.isdigit():
+            await message.answer("Введите целое число дней (от 1 до 365):")
+            return
+        days = int(text)
+        max_days = services.settings.key_max_trial_days
+        if days < 1 or days > max_days:
+            await message.answer(f"Введите число от 1 до {max_days}:")
+            return
+        from datetime import datetime, timedelta, timezone
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).replace(microsecond=0).isoformat()
+        await state.update_data(expires_at=expires_at)
+        await state.set_state(CreateKeyStates.confirming)
+        data = await state.get_data()
+        key_type = str(data.get("key_type") or "")
+        note = data.get("note")
+        from bot.keyboards.common import confirm_cancel_keyboard
+        await message.answer(
+            create_confirm_text(key_type, note, expires_at=expires_at),
+            reply_markup=confirm_cancel_keyboard("create:confirm"),
+        )
+    except Exception as exc:
+        await state.clear()
         await answer_message_error(message, exc)
 
 
@@ -167,6 +254,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
     data = await state.get_data()
     key_type = str(data.get("key_type") or "")
     note = data.get("note")
+    expires_at: str | None = data.get("expires_at")
     try:
         await _ensure_can_enter_create(callback.from_user.id, services)
         profile = profile_from_tg(callback.from_user)
@@ -174,9 +262,9 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         await state.clear()
         await safe_callback_answer(callback, "Создаю ключ...")
         if key_type == VpnKeyType.XRAY.value:
-            result = await services.xray.create_xray_key(callback.from_user.id, profile, note)
+            result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at)
         elif key_type == VpnKeyType.AWG.value:
-            result = await services.awg.create_awg_key(callback.from_user.id, profile, note)
+            result = await services.awg.create_awg_key(callback.from_user.id, profile, note, expires_at=expires_at)
         else:
             await safe_edit_message_text(callback.message, "Неизвестный тип ключа.")
             return
@@ -460,6 +548,96 @@ async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services
             "Заметка обновлена.",
             reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
         )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "trial:request")
+async def trial_request_start(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        can = await services.trial_access.can_request_trial(callback.from_user.id)
+        if not can:
+            await safe_callback_answer(callback, "Вы уже использовали свой пробный доступ.", show_alert=True)
+            return
+        await safe_callback_answer(callback)
+        await state.set_state(TrialRequestStates.choosing_protocol)
+        await safe_edit_message_text(
+            callback.message,
+            "Выберите протокол для пробного ключа (7 дней):",
+            reply_markup=trial_protocol_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(TrialRequestStates.choosing_protocol, F.data.regexp(r"^trial:proto:(xray|awg)$"))
+async def trial_request_proto(callback: CallbackQuery, state: FSMContext, services: Services, bot: Bot) -> None:
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        proto = callback.data.rsplit(":", 1)[-1]
+        key_type = VpnKeyType(proto)
+        can = await services.trial_access.can_request_trial(callback.from_user.id)
+        if not can:
+            await state.clear()
+            await safe_callback_answer(callback, "Вы уже использовали свой пробный доступ.", show_alert=True)
+            return
+        req = await services.trial_access.create_trial_request(callback.from_user.id, key_type)
+        await state.clear()
+        await safe_callback_answer(callback, "Заявка отправлена!")
+        type_label = "Xray" if proto == "xray" else "AWG"
+        await safe_edit_message_text(
+            callback.message,
+            "Заявка на пробный доступ отправлена. Ожидайте решения администратора.",
+        )
+        from bot.keyboards.admin import trial_request_keyboard
+        text = (
+            "<b>Новая заявка на пробный ключ</b>\n"
+            f"Telegram ID: <code>{callback.from_user.id}</code>\n"
+            f"Протокол: {type_label}\n"
+            f"Заявка: #{req.id}"
+        )
+        for admin_id in services.settings.admin_ids:
+            try:
+                await bot.send_message(admin_id, text, reply_markup=trial_request_keyboard(req.id))
+            except Exception:
+                pass
+    except Exception as exc:
+        await state.clear()
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^trial:show:\d+$"))
+async def trial_key_show(callback: CallbackQuery, services: Services) -> None:
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        key_id = int(callback.data.rsplit(":", 1)[-1])
+        key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
+        if key.owner_user_id != callback.from_user.id:
+            await safe_callback_answer(callback, "Нет доступа к этому ключу.", show_alert=True)
+            return
+        await safe_callback_answer(callback)
+        if key.key_type == VpnKeyType.XRAY:
+            text = xray_config_text(await services.xray.get_xray_key_config_for_owner(callback.from_user.id, key_id))
+            await safe_edit_message_text(callback.message, text)
+        else:
+            config = await services.awg.get_awg_client_config_for_owner(callback.from_user.id, key_id)
+            await send_awg_config(
+                callback.message,
+                title=f"AWG-ключ #{key.id}",
+                config_text=config,
+                filename=awg_config_filename(key),
+                edit_text=True,
+            )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
