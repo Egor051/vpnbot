@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # ---------------------------------------------------------------------------
 
 _DEPLOY_UNIT = ROOT / "deploy" / "vpn-bot.service"
+_NONROOT_UNIT = ROOT / "deploy" / "vpn-bot.nonroot.example.service"
 _HEX_SECRET = "0123456789abcdef0123456789abcdef"
 _HEX_SECRET_AWG = "abcdef1234567890abcdef1234567890"
 
@@ -412,9 +413,11 @@ def test_cli_returns_zero_on_ok_or_warnings(
     monkeypatch.setattr(checker, "check_awg_config", _warn_path)
     monkeypatch.setattr(checker, "check_mtproxy_managed_files", _warn_path)
 
+    # The nonroot checker validates User=vpn-bot layout; use the nonroot example
+    # service because the production service now runs as root (api mode).
     with captured_cli_output():
         ret = checker.main([
-            "--unit", str(_DEPLOY_UNIT),
+            "--unit", str(_NONROOT_UNIT),
             "--repo", str(tmp_path),
             "--db", str(tmp_path / "vpn.db"),
             "--sudoers", str(tmp_path / "vpnbot"),

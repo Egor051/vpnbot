@@ -149,24 +149,31 @@ def test_mtproxy_adapter_backups_with_secrets_are_private(tmp_path: Path) -> Non
 
 
 def test_vpn_bot_unit_does_not_allow_runtime_write_to_systemd_system() -> None:
+    # Root+api mode: no ReadWritePaths at all (root runs without sandbox path
+    # restrictions). The nonroot example still must not list /etc/systemd/system.
     unit = Path("deploy/vpn-bot.service").read_text(encoding="utf-8")
     read_write_lines = [line for line in unit.splitlines() if line.startswith("ReadWritePaths=")]
-    assert read_write_lines
-    assert "/etc/systemd/system" not in read_write_lines[0]
+    assert read_write_lines == [], "production (root+api) service should have no ReadWritePaths"
+
+    nonroot = Path("deploy/vpn-bot.nonroot.example.service").read_text(encoding="utf-8")
+    nonroot_rw = [line for line in nonroot.splitlines() if line.startswith("ReadWritePaths=")]
+    if nonroot_rw:
+        assert "/etc/systemd/system" not in nonroot_rw[0]
 
 
 def test_vpn_bot_service_write_paths_are_narrow() -> None:
+    # Root+api mode has no ReadWritePaths; the nonroot example's paths are the
+    # reference for what a narrowly-scoped non-root deployment should declare.
     unit = Path("deploy/vpn-bot.service").read_text(encoding="utf-8")
     read_write_lines = [line for line in unit.splitlines() if line.startswith("ReadWritePaths=")]
-    assert read_write_lines
-    read_write = read_write_lines[0]
-    assert "/run/vpn-bot" in read_write
-    # /etc/mtproxy is required so privileged helpers (which inherit bot's mount
-    # namespace under ProtectSystem=strict) can write there. The bot itself
-    # only writes through the helper, but the path must be declared here.
-    assert "/etc/mtproxy" in read_write
-    assert "/etc/mtproxy/vpnbot" not in read_write
-    assert "/etc/systemd/system" not in read_write
+    assert read_write_lines == [], "production (root+api) service should have no ReadWritePaths"
+
+    nonroot = Path("deploy/vpn-bot.nonroot.example.service").read_text(encoding="utf-8")
+    nonroot_rw = [line for line in nonroot.splitlines() if line.startswith("ReadWritePaths=")]
+    if nonroot_rw:
+        read_write = nonroot_rw[0]
+        assert "/etc/mtproxy/vpnbot" not in read_write
+        assert "/etc/systemd/system" not in read_write
 
 
 def test_mtproxy_systemd_dropin_template_contains_no_raw_secret_surface() -> None:

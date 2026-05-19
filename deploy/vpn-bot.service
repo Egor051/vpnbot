@@ -11,17 +11,14 @@ Environment=BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock
 ExecStart=/opt/vpn-service/.venv/bin/python /opt/vpn-service/main.py
 Restart=on-failure
 RestartSec=5
-User=vpn-bot
-Group=vpn-bot
+User=root
+Group=root
 UMask=0077
-# NoNewPrivileges must stay disabled/omitted: sudo helper entrypoints need sudo's
-# setuid privilege transition while the bot itself remains unprivileged.
 PrivateTmp=true
 ProtectHome=true
-ProtectSystem=strict
+ProtectSystem=false
 RuntimeDirectory=vpn-bot
 RuntimeDirectoryMode=0700
-ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot /usr/local/etc/xray /var/log/xray /etc/amnezia/amneziawg /etc/mtproxy
 
 [Install]
 WantedBy=multi-user.target
