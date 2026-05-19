@@ -76,6 +76,15 @@ class TrafficStatsService:
             views.append(KeyTrafficStatsView(key=key, owner=owners.get(key.owner_user_id), stats=stats))
         return views
 
+    async def refresh_all_awg(self) -> None:
+        keys = await self.vpn_keys.list_by_type_statuses(
+            key_type=VpnKeyType.AWG,
+            statuses={VpnKeyStatus.ACTIVE, VpnKeyStatus.PENDING_REVOKE},
+        )
+        if not keys:
+            return
+        await self.refresh_views(keys)
+
     async def cached_for_keys(self, keys: list[VpnKey]) -> dict[int, TrafficStats]:
         return await self.stats.list_by_key_ids([key.id for key in keys])
 
@@ -116,18 +125,19 @@ class TrafficStatsService:
             )
         raw = transfers.get(key.public_key)
         if raw is None:
-            return await self.stats.upsert_unavailable(
-                key_id=key.id,
-                reason="AWG peer не найден в выводе transfer",
-                now=now,
-                source="awg/wg transfer",
-            )
-        received_bytes, sent_bytes = raw
+            # Peer not listed: not yet connected or AWG restarted before first handshake.
+            # Treat as 0 bytes so the delta logic preserves the historical total on restart.
+            logger.debug("AWG peer %.8s… not in transfer output; assuming 0 bytes", key.public_key)
+            raw_downloaded_bytes, raw_uploaded_bytes = 0, 0
+        else:
+            received_bytes, sent_bytes = raw
+            raw_downloaded_bytes = sent_bytes
+            raw_uploaded_bytes = received_bytes
         return await self._store_success(
             key=key,
             previous=previous,
-            raw_downloaded_bytes=sent_bytes,
-            raw_uploaded_bytes=received_bytes,
+            raw_downloaded_bytes=raw_downloaded_bytes,
+            raw_uploaded_bytes=raw_uploaded_bytes,
             source="awg/wg transfer",
             now=now,
         )

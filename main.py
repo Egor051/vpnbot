@@ -5,7 +5,7 @@ import logging
 from aiohttp import web
 
 from adapters.health_server import create_health_app
-from bot.app import create_app
+from bot.app import _awg_stats_loop, create_app
 from config.settings import load_settings
 from utils.logging import setup_logging
 from utils.single_instance import SingleInstanceError, SingleInstanceLock
@@ -17,9 +17,16 @@ async def main() -> None:
     settings = load_settings()
     setup_logging(settings.log_dir)
     with SingleInstanceLock(settings.bot_lock_path):
-        bot, dp, db, backend_health = await create_app(settings)
+        bot, dp, db, backend_health, services = await create_app(settings)
         runner: web.AppRunner | None = None
+        awg_stats_task: asyncio.Task | None = None
         try:
+            if settings.awg_stats_interval > 0:
+                awg_stats_task = asyncio.create_task(
+                    _awg_stats_loop(services.traffic_stats, settings.awg_stats_interval),
+                    name="awg-stats-collector",
+                )
+                logger.info("AWG stats collector started (interval=%ds)", settings.awg_stats_interval)
             if settings.health_port is not None:
                 health_app = create_health_app(backend_health)
                 runner = web.AppRunner(health_app)
@@ -31,6 +38,9 @@ async def main() -> None:
             logger.info("VPN bot started")
             await dp.start_polling(bot)
         finally:
+            if awg_stats_task is not None:
+                awg_stats_task.cancel()
+                await asyncio.gather(awg_stats_task, return_exceptions=True)
             if runner is not None:
                 await runner.cleanup()
             await db.close()

@@ -1,4 +1,5 @@
 
+import asyncio
 import logging
 from typing import Any
 
@@ -53,7 +54,16 @@ logger = logging.getLogger(__name__)
 
 
 
-async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, BackendHealth]:
+async def _awg_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await traffic_stats.refresh_all_awg()
+        except Exception:
+            logger.warning("AWG background stats collection failed", exc_info=True)
+
+
+async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, BackendHealth, Services]:
     db = Database(settings.db_path, synchronous=settings.sqlite_synchronous)
     await db.connect()
     await db.bootstrap()
@@ -273,7 +283,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     dp.include_router(proxy.router)
     dp.include_router(callbacks.router)
 
-    return bot, dp, db, backend_health
+    return bot, dp, db, backend_health, services
 
 
 async def _startup_reconcile_keys(services: Services) -> None:

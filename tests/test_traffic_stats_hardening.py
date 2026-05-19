@@ -277,6 +277,90 @@ def test_xray_stats_internal_error_is_not_returned_as_public_reason() -> None:
     asyncio.run(run())
 
 
+def test_awg_peer_not_in_transfer_output_stores_zero_bytes_first_reading() -> None:
+    async def run() -> None:
+        repo = _StatsRepo()
+        service = _service(repo)
+        result = await service._refresh_awg_key(  # noqa: SLF001
+            _awg_key(),
+            None,
+            {},
+            None,
+        )
+        assert result.available
+        assert result.downloaded_bytes == 0
+        assert result.uploaded_bytes == 0
+        assert result.last_raw_downloaded_bytes == 0
+        assert result.last_raw_uploaded_bytes == 0
+
+    asyncio.run(run())
+
+
+def test_awg_peer_not_in_transfer_output_preserves_previous_total_after_restart() -> None:
+    async def run() -> None:
+        repo = _StatsRepo()
+        service = _service(repo)
+        previous = TrafficStats(
+            key_id=11,
+            downloaded_bytes=1000,
+            uploaded_bytes=500,
+            last_raw_downloaded_bytes=1000,
+            last_raw_uploaded_bytes=500,
+            last_success_at="old",
+            last_attempt_at="old",
+            available=True,
+            unavailable_reason=None,
+            source="awg/wg transfer",
+        )
+        result = await service._refresh_awg_key(  # noqa: SLF001
+            _awg_key(),
+            previous,
+            {},
+            None,
+        )
+        assert result.available
+        assert result.downloaded_bytes == 1000
+        assert result.uploaded_bytes == 500
+        assert result.last_raw_downloaded_bytes == 0
+        assert result.last_raw_uploaded_bytes == 0
+
+    asyncio.run(run())
+
+
+def test_awg_peer_accumulates_after_restart_and_reconnect() -> None:
+    async def run() -> None:
+        repo = _StatsRepo()
+        service = _service(repo)
+        previous = TrafficStats(
+            key_id=11,
+            downloaded_bytes=1000,
+            uploaded_bytes=500,
+            last_raw_downloaded_bytes=1000,
+            last_raw_uploaded_bytes=500,
+            last_success_at="old",
+            last_attempt_at="old",
+            available=True,
+            unavailable_reason=None,
+            source="awg/wg transfer",
+        )
+        after_restart = await service._refresh_awg_key(  # noqa: SLF001
+            _awg_key(),
+            previous,
+            {},
+            None,
+        )
+        reconnected = await service._refresh_awg_key(  # noqa: SLF001
+            _awg_key(),
+            after_restart,
+            {"public": (200, 300)},
+            None,
+        )
+        assert reconnected.downloaded_bytes == 1300
+        assert reconnected.uploaded_bytes == 700
+
+    asyncio.run(run())
+
+
 def test_awg_stats_internal_error_is_not_returned_as_public_reason() -> None:
     class Awg:
         async def list_transfer(self) -> dict[str, tuple[int, int]]:
