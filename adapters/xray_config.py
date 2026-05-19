@@ -152,14 +152,15 @@ class XrayConfigAdapter:
                 if len(new_clients) != len(clients):
                     inbound["settings"]["clients"] = new_clients
                     changed = True
-                if remove_short_id and short_id and self._remove_short_id(inbound, short_id):
+                short_id_removed = bool(remove_short_id and short_id and self._remove_short_id(inbound, short_id))
+                if short_id_removed:
                     changed = True
 
                 if not changed:
                     return
 
                 temp_path = self._write_temp_config(config, self.config_path)
-                if not self._using_helper() and self.apply_mode == "api":
+                if not self._using_helper() and self.apply_mode == "api" and not short_id_removed:
                     await self._install_candidate_api(
                         temp_path, snapshot, backup_path,
                         action="remove", email_label=_api_email,

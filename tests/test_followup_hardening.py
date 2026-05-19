@@ -2673,3 +2673,69 @@ def test_xray_api_mode_add_client_uses_systemctl_when_short_id_inserted(tmp_path
         assert not any(c[:3] == ["xray", "api", "adu"] for c in shell.calls), "xray api adu не должен вызываться при short_id fallback"
 
     asyncio.run(run())
+
+
+def test_xray_api_mode_remove_client_uses_systemctl_when_short_id_removed(tmp_path: Path) -> None:
+    """When remove_short_id=True removes an entry, api mode falls back to systemctl."""
+
+    class FakeShell:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        async def run(self, args: list[str], **kwargs: object) -> ShellResult:
+            self.calls.append(list(args))
+            return ShellResult(tuple(args), 0, "", "")
+
+    class FakeSystemctl:
+        def __init__(self) -> None:
+            self.reload_called = False
+
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray",), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            self.reload_called = True
+            return ShellResult(("systemctl",), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl",), 0, "active", "")
+
+    async def run() -> None:
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps({
+                "inbounds": [{
+                    "tag": "vless-in",
+                    "protocol": "vless",
+                    "settings": {"clients": [{"id": "00000000-0000-4000-8000-000000000000", "email": "user@example"}]},
+                    "streamSettings": {"security": "reality", "realitySettings": {"shortIds": ["abcd1234"]}},
+                }]
+            }),
+            encoding="utf-8",
+        )
+        shell = FakeShell()
+        systemctl = FakeSystemctl()
+        adapter = XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="api",
+            inbound_tag="vless-in",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider()),
+            systemctl=systemctl,  # type: ignore[arg-type]
+            shell=shell,  # type: ignore[arg-type]
+            stats_server="127.0.0.1:10085",
+        )
+
+        await adapter.remove_client(
+            uuid_value="00000000-0000-4000-8000-000000000000",
+            email_label=None,
+            short_id="abcd1234",
+            remove_short_id=True,
+        )
+
+        assert systemctl.reload_called, "systemctl reload должен вызываться когда удаляется short_id"
+        assert not any(c[:3] == ["xray", "api", "rmu"] for c in shell.calls), "xray api rmu не должен вызываться при short_id fallback"
+
+    asyncio.run(run())
