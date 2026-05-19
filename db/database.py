@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 12
+CURRENT_SCHEMA_VERSION = 13
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -207,6 +207,10 @@ class Database:
         if version < 12:
             await self._create_performance_indexes()
             await self._set_schema_version(12)
+            version = 12
+        if version < 13:
+            await self._migrate_v13()
+            await self._set_schema_version(13)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -559,6 +563,36 @@ class Database:
                 f"client_ip={row['client_ip']} count={row['cnt']}. "
                 "Остановите запуск, сделайте backup SQLite DB и вручную разберите конфликт перед миграцией."
             )
+
+    async def _migrate_v13(self) -> None:
+        vpn_cols = await self._table_columns("vpn_keys")
+        if "expires_at" not in vpn_cols:
+            await self.conn.execute("ALTER TABLE vpn_keys ADD COLUMN expires_at TEXT DEFAULT NULL")
+        user_cols = await self._table_columns("users")
+        if "trial_quota_reset_at" not in user_cols:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN trial_quota_reset_at TEXT DEFAULT NULL")
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trial_key_requests (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              telegram_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+              key_type TEXT NOT NULL CHECK(key_type IN ('xray','awg')),
+              status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+              key_id INTEGER REFERENCES vpn_keys(id) ON DELETE SET NULL,
+              requested_at TEXT NOT NULL,
+              decided_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+              decided_at TEXT
+            )
+            """
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vpn_keys_expires_at "
+            "ON vpn_keys(expires_at) WHERE expires_at IS NOT NULL AND status = 'active'"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trial_requests_user "
+            "ON trial_key_requests(telegram_user_id, status)"
+        )
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(

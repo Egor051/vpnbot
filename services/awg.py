@@ -78,16 +78,23 @@ class AwgService:
     async def create_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
         return await self.create_awg_key(actor_user_id, owner, note)
 
-    async def create_awg_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
+    async def create_awg_key(
+        self,
+        actor_user_id: int,
+        owner: TelegramUserProfile,
+        note: str | None,
+        expires_at: str | None = None,
+        allow_pending_owner: bool = False,
+    ) -> VpnKeyCreateResult:
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         self.settings.validate_awg_ready()
         self._ensure_ipv4_network()
         clean_note = normalize_note(note)
 
         async with self.user_locks.lock(owner.telegram_user_id):
-            await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+            await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
             async with self._lock:
-                await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+                await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
                 server_config = self.adapter.read_server_config()
                 self._ensure_server_address_matches_config(server_config)
                 self._server_public_key(server_config.public_key)
@@ -121,6 +128,7 @@ class AwgService:
                     email_label=email_label,
                     public_key=public_key,
                     client_ip=client_ip,
+                    expires_at=expires_at,
                 )
                 try:
                     await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
@@ -165,6 +173,7 @@ class AwgService:
                         "owner_username": owner.username,
                         "client_ip": client_ip,
                         "label": email_label,
+                        "expires_at": expires_at,
                     },
                 )
                 active_key = await self._get_key(key.id)
@@ -204,6 +213,34 @@ class AwgService:
                 entity_type=AuditEntityType.VPN_KEY,
                 entity_id=key_id,
                 details={"client_ip": key.client_ip},
+            )
+            return await self._get_key(key_id)
+
+    async def revoke_awg_key_system(self, key_id: int) -> VpnKey:
+        """Revoke triggered by expiry job — bypasses actor role check."""
+        self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
+        async with self._lock:
+            key = await self._get_key(key_id)
+            if key.key_type != VpnKeyType.AWG:
+                raise InvalidOperation("Это не AWG-ключ")
+            if key.status in {VpnKeyStatus.REVOKED, VpnKeyStatus.DELETED}:
+                return key
+            if key.status not in AWG_ACCESS_MAY_EXIST_STATUSES:
+                raise InvalidOperation("Отозвать можно только активный AWG-ключ")
+            previous_status = key.status
+            await self.vpn_keys.set_status(key_id, VpnKeyStatus.PENDING_REVOKE, self.clock.now())
+            try:
+                await self._remove_awg_access(key)
+            except Exception:
+                await self.vpn_keys.set_status(key_id, previous_status, self.clock.now())
+                raise
+            await self.vpn_keys.mark_revoked(key_id, key.created_by, self.clock.now())
+            await self._write_audit_best_effort(
+                actor_user_id=None,
+                action="awg_key_expired",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={"owner_user_id": key.owner_user_id, "expires_at": key.expires_at, "client_ip": key.client_ip},
             )
             return await self._get_key(key_id)
 
@@ -301,6 +338,17 @@ class AwgService:
             )
         return self._client_config(key)
 
+    async def get_awg_client_config_for_owner(self, owner_user_id: int, key_id: int) -> str:
+        key = await self._get_key(key_id)
+        if key.key_type != VpnKeyType.AWG:
+            raise InvalidOperation("Это не AWG-ключ")
+        if key.owner_user_id != owner_user_id:
+            raise AccessDenied("Нельзя смотреть чужой ключ")
+        if key.status != VpnKeyStatus.ACTIVE:
+            raise InvalidOperation("Конфигурация доступна только для активного ключа")
+        await self._ensure_client_payload_valid(owner_user_id, key)
+        return self._client_config(key)
+
     async def list_user_keys(
         self,
         actor_user_id: int,
@@ -359,13 +407,23 @@ class AwgService:
         )
         return await self._get_key(key_id)
 
-    async def _ensure_can_create(self, actor_user_id: int, owner_user_id: int) -> None:
-        owner = await self.users.require_approved_or_admin(owner_user_id)
+    async def _ensure_can_create(
+        self, actor_user_id: int, owner_user_id: int, *, allow_pending_owner: bool = False
+    ) -> None:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         if actor.role != UserRole.SUPERADMIN and actor_user_id != owner_user_id:
             raise AccessDenied("Нельзя создавать ключи для другого пользователя")
-        if owner.role not in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
-            raise AccessDenied("Владелец ключа не имеет доступа")
+        if allow_pending_owner:
+            if actor.role != UserRole.SUPERADMIN:
+                raise AccessDenied("Только администратор может выдавать ключи гостям")
+            owner = await self.users.get_user(owner_user_id)
+            from models.access import is_blocked_user
+            if is_blocked_user(owner):
+                raise AccessDenied("Нельзя выдать ключ заблокированному пользователю")
+        else:
+            owner = await self.users.require_approved_or_admin(owner_user_id)
+            if owner.role not in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
+                raise AccessDenied("Владелец ключа не имеет доступа")
 
     async def _get_awg_key_for_manage(self, actor_user_id: int, key_id: int, allow_read: bool = False) -> VpnKey:
         actor = await self.users.require_approved_or_admin(actor_user_id)

@@ -1,6 +1,7 @@
 
 import logging
 from dataclasses import replace
+from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -29,8 +30,7 @@ from bot.formatters import (
     users_page_text,
 )
 from services.health import run_bot_health
-from bot.fsm.states import AdminCreateKeyStates
-from bot.fsm.states import AdminAnnouncementStates
+from bot.fsm.states import AdminCreateKeyStates, AdminAnnouncementStates
 from bot.guards import require_superadmin
 from bot.handlers.common import answer_callback_error, answer_message_error
 from bot.keyboards.admin import (
@@ -42,13 +42,14 @@ from bot.keyboards.admin import (
     access_request_decision_confirm_keyboard,
     block_user_confirm_keyboard,
     pending_requests_keyboard,
+    trial_request_keyboard,
     unblock_user_confirm_keyboard,
     user_actions_keyboard,
     users_keyboard,
 )
 from bot.handlers.keys import load_keys_page
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
-from bot.keyboards.keys import key_actions_keyboard, keys_list_keyboard
+from bot.keyboards.keys import expiry_choice_keyboard, key_actions_keyboard, keys_list_keyboard
 from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text, send_awg_config
 from bot.pagination import page_offset, split_page
 from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
@@ -419,10 +420,11 @@ async def admin_user_detail(callback: CallbackQuery, services: Services) -> None
         user = await services.users.get_user(user_id)
         keys = await services.vpn_keys.list_for_actor(callback.from_user.id, owner_user_id=user_id, limit=10)
         stats_by_key_id = await services.traffic_stats.cached_for_keys(keys)
+        has_used_trial = not await services.trial_access.can_request_trial(user_id)
         await safe_edit_message_text(
             callback.message,
             user_card_text(user, keys, stats_by_key_id, viewer_user_id=callback.from_user.id),
-            reply_markup=user_actions_keyboard(user),
+            reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -812,9 +814,12 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
         await require_superadmin(services, callback.from_user.id)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         user = await services.users.get_user(user_id)
-        await services.users.require_approved_or_admin(user.telegram_user_id)
+        if is_blocked_user(user):
+            from services.errors import AccessDenied
+            raise AccessDenied("Нельзя выдать ключ заблокированному пользователю")
+        owner_is_pending = user.role == UserRole.PENDING_USER
         await state.set_state(AdminCreateKeyStates.choosing_type)
-        await state.update_data(owner_user_id=user.telegram_user_id)
+        await state.update_data(owner_user_id=user.telegram_user_id, owner_is_pending=owner_is_pending)
         text = f"{user_card_text(user)}\n\n{ONE_KEY_ONE_DEVICE_WARNING}\n\nВыберите тип ключа:"
         await safe_edit_message_text(callback.message, text, reply_markup=admin_key_type_keyboard(user.telegram_user_id))
     except Exception as exc:
@@ -862,21 +867,102 @@ async def admin_issue_note(message: Message, state: FSMContext, services: Servic
         return
     data = await state.get_data()
     try:
-        owner_user_id = int(data["owner_user_id"])
-        owner = await services.users.get_user(owner_user_id)
-        await services.users.require_approved_or_admin(owner.telegram_user_id)
-        key_type = str(data["key_type"])
         note = _clean_note(message.text)
         await state.update_data(note=note)
+        await state.set_state(AdminCreateKeyStates.waiting_expiry)
+        await message.answer("Выберите срок действия ключа:", reply_markup=expiry_choice_keyboard())
+    except Exception as exc:
+        await state.clear()
+        await answer_message_error(message, exc)
+
+
+@router.callback_query(AdminCreateKeyStates.waiting_expiry, F.data.regexp(r"^expiry:(permanent|\d+)$"))
+async def admin_issue_expiry(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        raw = callback.data.split(":", 1)[1]
+        if raw == "permanent":
+            expires_at = None
+        else:
+            days = int(raw)
+            if days < 1 or days > services.settings.key_max_trial_days:
+                await safe_callback_answer(callback, f"Недопустимый срок: 1–{services.settings.key_max_trial_days} дней", show_alert=True)
+                return
+            from datetime import datetime, timedelta, timezone
+            expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).replace(microsecond=0).isoformat()
+        await state.update_data(expires_at=expires_at)
+        data = await state.get_data()
+        owner_user_id = int(data["owner_user_id"])
+        owner = await services.users.get_user(owner_user_id)
+        key_type = str(data["key_type"])
+        note = data.get("note")
         await state.set_state(AdminCreateKeyStates.confirming)
-        await message.answer(create_confirm_text(key_type, note, owner=owner), reply_markup=confirm_cancel_keyboard("admin:cconfirm"))
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at),
+            reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminCreateKeyStates.waiting_expiry, F.data == "expiry:custom")
+async def admin_issue_expiry_custom(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    if callback.message is None:
+        return
+    await safe_callback_answer(callback)
+    await state.set_state(AdminCreateKeyStates.waiting_custom_days)
+    await safe_edit_message_text(
+        callback.message,
+        "Введите количество дней (от 1 до 365):",
+        reply_markup=None,
+    )
+
+
+@router.message(AdminCreateKeyStates.waiting_custom_days)
+async def admin_issue_custom_days(message: Message, state: FSMContext, services: Services) -> None:
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    try:
+        await require_superadmin(services, message.from_user.id)
+        text = (message.text or "").strip()
+        if not text.isdigit():
+            await message.answer("Введите целое число дней (от 1 до 365):")
+            return
+        days = int(text)
+        max_days = services.settings.key_max_trial_days
+        if days < 1 or days > max_days:
+            await message.answer(f"Введите число от 1 до {max_days}:")
+            return
+        from datetime import datetime, timedelta, timezone
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).replace(microsecond=0).isoformat()
+        await state.update_data(expires_at=expires_at)
+        data = await state.get_data()
+        owner_user_id = int(data["owner_user_id"])
+        owner = await services.users.get_user(owner_user_id)
+        key_type = str(data["key_type"])
+        note = data.get("note")
+        await state.set_state(AdminCreateKeyStates.confirming)
+        await message.answer(
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at),
+            reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
+        )
     except Exception as exc:
         await state.clear()
         await answer_message_error(message, exc)
 
 
 @router.callback_query(AdminCreateKeyStates.confirming, F.data == "admin:cconfirm")
-async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, services: Services, rate_limiter: RateLimiter) -> None:
+async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, services: Services, rate_limiter: RateLimiter, bot: Bot) -> None:
     if callback.from_user is None or callback.message is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -886,17 +972,26 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
         owner_user_id = int(data["owner_user_id"])
         key_type = str(data["key_type"])
         note = data.get("note")
+        expires_at: str | None = data.get("expires_at")
+        owner_is_pending = bool(data.get("owner_is_pending", False))
         owner = await services.users.get_user(owner_user_id)
         await require_superadmin(services, callback.from_user.id)
-        await services.users.require_approved_or_admin(owner.telegram_user_id)
         profile = TelegramUserProfile(owner.telegram_user_id, owner.username, owner.first_name)
         rate_limiter.check(callback.from_user.id, "key_create", 20)
         await state.clear()
         await safe_callback_answer(callback, "Создаю ключ...")
         if key_type == VpnKeyType.XRAY.value:
-            result = await services.xray.create_xray_key(callback.from_user.id, profile, note)
+            result = await services.xray.create_xray_key(
+                callback.from_user.id, profile, note,
+                expires_at=expires_at,
+                allow_pending_owner=owner_is_pending,
+            )
         elif key_type == VpnKeyType.AWG.value:
-            result = await services.awg.create_awg_key(callback.from_user.id, profile, note)
+            result = await services.awg.create_awg_key(
+                callback.from_user.id, profile, note,
+                expires_at=expires_at,
+                allow_pending_owner=owner_is_pending,
+            )
         else:
             await safe_edit_message_text(callback.message, "Неизвестный тип ключа.")
             return
@@ -916,6 +1011,139 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
                 result.config_text,
                 reply_markup=key_actions_keyboard(result.key, owner_user_id=result.key.owner_user_id),
             )
+        if owner_is_pending:
+            await _deliver_key_to_pending_user(bot, result, owner_user_id)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+async def _deliver_key_to_pending_user(bot: Bot, result: Any, user_id: int) -> None:
+    try:
+        if result.key.key_type == VpnKeyType.AWG:
+            from aiogram.types import BufferedInputFile
+            from bot.messages import awg_config_filename
+            config_bytes = result.config_text.encode("utf-8")
+            filename = awg_config_filename(result.key)
+            await bot.send_document(
+                user_id,
+                document=BufferedInputFile(config_bytes, filename=filename),
+                caption=f"Ваш AWG-ключ #{result.key.id} выдан администратором.",
+            )
+        else:
+            await bot.send_message(
+                user_id,
+                f"Администратор выдал вам Xray-ключ #{result.key.id}.\n\n{result.config_text}",
+            )
+    except Exception:
+        logger.warning("Не удалось доставить ключ PENDING-пользователю %s", user_id, exc_info=True)
+
+
+@router.callback_query(F.data.regexp(r"^admin:trial(?::\d+)?$"))
+async def admin_trial_list(callback: CallbackQuery, services: Services) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback)
+    if callback.from_user is None or callback.message is None:
+        return
+    page = _page_from_callback(callback.data)
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        items = await services.trial_access.list_pending_requests(
+            limit=ADMIN_PAGE_SIZE + 1,
+            offset=page_offset(page, ADMIN_PAGE_SIZE),
+        )
+        requests, has_next = split_page(items, ADMIN_PAGE_SIZE)
+        if not requests:
+            await safe_edit_message_text(
+                callback.message,
+                "Нет ожидающих заявок на пробный доступ.",
+                reply_markup=_simple_nav([], "admin:panel"),
+            )
+            return
+        lines = ["<b>Заявки на пробный доступ:</b>"]
+        for req in requests:
+            lines.append(f"#{req.id} — tg{req.telegram_user_id} ({req.key_type.value.upper()})")
+        nav_rows: list[tuple[str, str]] = []
+        if page > 0:
+            nav_rows.append(("Назад", f"admin:trial:{page - 1}"))
+        if has_next:
+            nav_rows.append(("Дальше", f"admin:trial:{page + 1}"))
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        keyboard: list[list[InlineKeyboardButton]] = []
+        for req in requests:
+            keyboard.append([
+                InlineKeyboardButton(text=f"Одобрить #{req.id}", callback_data=f"admin:trial:approve:{req.id}"),
+                InlineKeyboardButton(text=f"Отклонить #{req.id}", callback_data=f"admin:trial:reject:{req.id}"),
+            ])
+        if nav_rows:
+            keyboard.append([InlineKeyboardButton(text=text, callback_data=data) for text, data in nav_rows])
+        keyboard.append([InlineKeyboardButton(text="Назад", callback_data="admin:panel")])
+        await safe_edit_message_text(
+            callback.message,
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:trial:approve:\d+$"))
+async def admin_trial_approve(callback: CallbackQuery, services: Services) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        request_id = int(callback.data.rsplit(":", 1)[-1])
+        await safe_callback_answer(callback, "Обрабатываю...")
+        await services.trial_access.approve_trial_request(callback.from_user.id, request_id)
+        await safe_edit_message_text(
+            callback.message,
+            "Пробный ключ выдан. Конфиг отправлен пользователю.",
+            reply_markup=_simple_nav([], "admin:panel"),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:trial:reject:\d+$"))
+async def admin_trial_reject(callback: CallbackQuery, services: Services) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        request_id = int(callback.data.rsplit(":", 1)[-1])
+        await safe_callback_answer(callback, "Отклоняю...")
+        await services.trial_access.reject_trial_request(callback.from_user.id, request_id)
+        await safe_edit_message_text(
+            callback.message,
+            "Заявка на пробный доступ отклонена.",
+            reply_markup=_simple_nav([], "admin:panel"),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:trial:reset:\d+$"))
+async def admin_trial_reset(callback: CallbackQuery, services: Services) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        user_id = int(callback.data.rsplit(":", 1)[-1])
+        await safe_callback_answer(callback, "Сбрасываю квоту...")
+        await services.trial_access.admin_reset_trial_quota(callback.from_user.id, user_id)
+        user = await services.users.get_user(user_id)
+        await safe_edit_message_text(
+            callback.message,
+            "Квота пробных доступов сброшена.",
+            reply_markup=user_actions_keyboard(user, has_used_trial=False),
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

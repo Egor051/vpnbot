@@ -73,15 +73,22 @@ class XrayService:
     async def create_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
         return await self.create_xray_key(actor_user_id, owner, note)
 
-    async def create_xray_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
+    async def create_xray_key(
+        self,
+        actor_user_id: int,
+        owner: TelegramUserProfile,
+        note: str | None,
+        expires_at: str | None = None,
+        allow_pending_owner: bool = False,
+    ) -> VpnKeyCreateResult:
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         self.settings.validate_xray_ready()
         clean_note = normalize_note(note)
 
         async with self.user_locks.lock(owner.telegram_user_id):
-            await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+            await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
             async with self._lock:
-                await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+                await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
                 uuid_value, email_label = await self._unique_identity(owner.telegram_user_id, owner.username)
                 short_id_managed = self.settings.xray_manage_short_ids
                 short_id = self.ids.xray_short_id() if short_id_managed else self.settings.xray_short_id
@@ -110,6 +117,7 @@ class XrayService:
                     now=self.clock.now(),
                     uuid=uuid_value,
                     email_label=email_label,
+                    expires_at=expires_at,
                 )
                 xray_apply_result = None
                 try:
@@ -152,7 +160,12 @@ class XrayService:
                     action="xray_key_created",
                     entity_type=AuditEntityType.VPN_KEY,
                     entity_id=key.id,
-                    details={"owner_user_id": owner.telegram_user_id, "owner_username": owner.username, "label": email_label},
+                    details={
+                        "owner_user_id": owner.telegram_user_id,
+                        "owner_username": owner.username,
+                        "label": email_label,
+                        "expires_at": expires_at,
+                    },
                 )
                 active_key = await self._get_key(key.id)
                 return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key, viewer_user_id=actor_user_id))
@@ -191,6 +204,34 @@ class XrayService:
                 entity_type=AuditEntityType.VPN_KEY,
                 entity_id=key_id,
                 details={},
+            )
+            return await self._get_key(key_id)
+
+    async def revoke_xray_key_system(self, key_id: int) -> VpnKey:
+        """Revoke triggered by expiry job — bypasses actor role check."""
+        self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
+        async with self._lock:
+            key = await self._get_key(key_id)
+            if key.key_type != VpnKeyType.XRAY:
+                raise InvalidOperation("Это не Xray-ключ")
+            if key.status in {VpnKeyStatus.REVOKED, VpnKeyStatus.DELETED}:
+                return key
+            if key.status not in XRAY_ACCESS_MAY_EXIST_STATUSES:
+                raise InvalidOperation("Отозвать можно только активный Xray-ключ")
+            previous_status = key.status
+            await self.vpn_keys.set_status(key_id, VpnKeyStatus.PENDING_REVOKE, self.clock.now())
+            try:
+                await self._remove_xray_access(key)
+            except Exception:
+                await self.vpn_keys.set_status(key_id, previous_status, self.clock.now())
+                raise
+            await self.vpn_keys.mark_revoked(key_id, key.created_by, self.clock.now())
+            await self._write_audit_best_effort(
+                actor_user_id=None,
+                action="xray_key_expired",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={"owner_user_id": key.owner_user_id, "expires_at": key.expires_at},
             )
             return await self._get_key(key_id)
 
@@ -272,6 +313,16 @@ class XrayService:
         )
         return self._format_config(key, viewer_user_id=actor_user_id)
 
+    async def get_xray_key_config_for_owner(self, owner_user_id: int, key_id: int) -> str:
+        key = await self._get_key(key_id)
+        if key.key_type != VpnKeyType.XRAY:
+            raise InvalidOperation("Это не Xray-ключ")
+        if key.owner_user_id != owner_user_id:
+            raise AccessDenied("Нельзя смотреть чужой ключ")
+        if key.status != VpnKeyStatus.ACTIVE:
+            raise InvalidOperation("Конфигурация доступна только для активного ключа")
+        return self._format_config(key, viewer_user_id=owner_user_id)
+
     async def list_user_keys(
         self,
         actor_user_id: int,
@@ -329,13 +380,23 @@ class XrayService:
         )
         return await self._get_key(key_id)
 
-    async def _ensure_can_create(self, actor_user_id: int, owner_user_id: int) -> None:
-        owner = await self.users.require_approved_or_admin(owner_user_id)
+    async def _ensure_can_create(
+        self, actor_user_id: int, owner_user_id: int, *, allow_pending_owner: bool = False
+    ) -> None:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         if actor.role != UserRole.SUPERADMIN and actor_user_id != owner_user_id:
             raise AccessDenied("Нельзя создавать ключи для другого пользователя")
-        if owner.role not in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
-            raise AccessDenied("Владелец ключа не имеет доступа")
+        if allow_pending_owner:
+            if actor.role != UserRole.SUPERADMIN:
+                raise AccessDenied("Только администратор может выдавать ключи гостям")
+            owner = await self.users.get_user(owner_user_id)
+            from models.access import is_blocked_user
+            if is_blocked_user(owner):
+                raise AccessDenied("Нельзя выдать ключ заблокированному пользователю")
+        else:
+            owner = await self.users.require_approved_or_admin(owner_user_id)
+            if owner.role not in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
+                raise AccessDenied("Владелец ключа не имеет доступа")
 
     async def _get_xray_key_for_manage(self, actor_user_id: int, key_id: int, allow_read: bool = False) -> VpnKey:
         actor = await self.users.require_approved_or_admin(actor_user_id)

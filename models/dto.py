@@ -58,10 +58,23 @@ class VpnKey:
     created_at: str
     updated_at: str
     revoked_at: str | None
+    expires_at: str | None
     deleted_at: str | None
     created_by: int
     revoked_by: int | None
     deleted_by: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class TrialKeyRequest:
+    id: int
+    telegram_user_id: int
+    key_type: VpnKeyType
+    status: str
+    key_id: int | None
+    requested_at: str
+    decided_by: int | None
+    decided_at: str | None
 
 
 @dataclass(frozen=True, slots=True)

@@ -25,6 +25,7 @@ from services.health import HealthCheckResult
 from utils.formatting import (
     code,
     format_bytes,
+    format_expiry_date,
     format_greeting_name,
     format_msk_datetime,
     format_user_display,
@@ -110,6 +111,8 @@ def key_list_card(key: VpnKey, *, viewer_user_id: int) -> str:
         f"Метка: {code(label)}",
         f"Создан: {h(format_msk_datetime(key.created_at))}",
     ]
+    if key.expires_at:
+        parts.append(f"Действует до: {h(format_expiry_date(key.expires_at))}")
     if not note or label != note:
         parts.append(f"Заметка: {h(short_note(note))}")
     if key.client_ip:
@@ -141,6 +144,8 @@ def key_detail_text(key: VpnKey, *, viewer_user_id: int) -> str:
         f"Создан: {h(format_msk_datetime(key.created_at))}",
         f"Обновлён: {h(format_msk_datetime(key.updated_at))}",
     ]
+    if key.expires_at:
+        lines.append(f"Действует до: {h(format_expiry_date(key.expires_at))}")
     if not note or label != note:
         lines.append(f"Заметка: {h(note or 'нет')}")
     if key.client_ip:
@@ -227,11 +232,17 @@ def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer
     return "\n".join(lines)
 
 
-def create_confirm_text(key_type: str, note: str | None, owner: User | None = None) -> str:
+def create_confirm_text(
+    key_type: str,
+    note: str | None,
+    owner: User | None = None,
+    expires_at: str | None = None,
+) -> str:
     lines = [
         "<b>Подтверждение создания ключа</b>",
         f"Тип: {h(key_type.upper())}",
         f"Заметка: {h(note or 'нет')}",
+        f"Срок действия: {h(format_expiry_date(expires_at))}",
     ]
     if owner is not None:
         lines.append(f"Владелец: {format_user_display(owner.telegram_user_id, owner.username)}")

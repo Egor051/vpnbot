@@ -240,6 +240,8 @@ class Settings:
     mtproto_helper_staging_dir: Path = Path("/run/vpn-bot/mtproxy")
     health_port: int | None = None
     health_host: str = "127.0.0.1"
+    key_expiry_check_interval: int = 1800
+    key_max_trial_days: int = 365
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -437,6 +439,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         mtproto_keep_last_backups=_int_range("MTPROTO_KEEP_LAST_BACKUPS", 10, 0, 1000),
         health_port=_optional_int_range("HEALTH_PORT", 1, 65535),
         health_host=_optional("HEALTH_HOST", "127.0.0.1"),
+        key_expiry_check_interval=_int_range("KEY_EXPIRY_CHECK_INTERVAL", 1800, 0, 86400),
+        key_max_trial_days=_int_range("KEY_MAX_TRIAL_DAYS", 365, 1, 3650),
         privilege_helpers_enabled=_bool("PRIVILEGE_HELPERS_ENABLED", False),
         helper_staging_root=helper_staging_root,
         socks5_user_helper_path=Path(_optional("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/vpnbot-socks5-user")),

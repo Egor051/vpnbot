@@ -38,6 +38,27 @@ def format_bytes(value: int | None) -> str:
     return f"{amount:.2f} {unit}"
 
 
+_MONTHS_RU = [
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+]
+
+
+def format_expiry_date(value: str | None) -> str:
+    if not value:
+        return "бессрочный"
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return str(value)
+    if dt.tzinfo is None:
+        from datetime import timezone
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt_msk = dt.astimezone(MSK_TZ)
+    month = _MONTHS_RU[dt_msk.month - 1]
+    return f"{dt_msk.day} {month} {dt_msk.year}"
+
+
 def format_msk_datetime(value: str | None) -> str:
     if not value:
         return "нет данных"

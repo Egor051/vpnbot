@@ -156,6 +156,23 @@ class UserRepository:
         rows = await cursor.fetchall()
         return [user for row in rows if (user := _row_to_user(row)) is not None]
 
+    async def reset_trial_quota(self, telegram_user_id: int, now: str) -> None:
+        await self.db.conn.execute(
+            "UPDATE users SET trial_quota_reset_at = ?, updated_at = ? WHERE telegram_user_id = ?",
+            (now, now, telegram_user_id),
+        )
+        await self.db.commit()
+
+    async def get_trial_quota_reset_at(self, telegram_user_id: int) -> str | None:
+        cursor = await self.db.conn.execute(
+            "SELECT trial_quota_reset_at FROM users WHERE telegram_user_id = ?",
+            (telegram_user_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return row["trial_quota_reset_at"]
+
     async def list_by_ids(self, telegram_user_ids: list[int]) -> dict[int, User]:
         if not telegram_user_ids:
             return {}

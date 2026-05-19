@@ -39,6 +39,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📊 Статистика прокси", callback_data="admin:proxy_stats")],
             [InlineKeyboardButton(text="Логи действий", callback_data="admin:audit")],
             [InlineKeyboardButton(text="Выдать ключ пользователю", callback_data="admin:issue")],
+            [InlineKeyboardButton(text="Пробные доступы", callback_data="admin:trial")],
             [InlineKeyboardButton(text="Объявление", callback_data="admin:announce")],
             [InlineKeyboardButton(text="Восстановление объявлений", callback_data="admin:announce_batches")],
             [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
@@ -122,7 +123,7 @@ def users_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def user_actions_keyboard(user: User) -> InlineKeyboardMarkup:
+def user_actions_keyboard(user: User, *, has_used_trial: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     blocked = is_blocked_user(user)
     if user.role != UserRole.APPROVED_USER and not blocked:
@@ -131,8 +132,10 @@ def user_actions_keyboard(user: User) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="Заблокировать", callback_data=f"admin:block:{user.telegram_user_id}")])
     if blocked:
         rows.append([InlineKeyboardButton(text="Разблокировать", callback_data=f"admin:unblock:{user.telegram_user_id}")])
-    if user.role in {UserRole.APPROVED_USER, UserRole.SUPERADMIN} and not blocked:
+    if user.role in {UserRole.APPROVED_USER, UserRole.SUPERADMIN, UserRole.PENDING_USER} and not blocked:
         rows.append([InlineKeyboardButton(text="Выдать ключ", callback_data=f"admin:issue:{user.telegram_user_id}")])
+    if has_used_trial:
+        rows.append([InlineKeyboardButton(text="Сбросить пробный доступ", callback_data=f"admin:trial:reset:{user.telegram_user_id}")])
     rows.append([InlineKeyboardButton(text="Ключи пользователя", callback_data=f"admin:ukeys:{user.telegram_user_id}:0")])
     rows.append([InlineKeyboardButton(text="К пользователям", callback_data="admin:users")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -162,6 +165,17 @@ def admin_key_type_keyboard(user_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Xray", callback_data=f"admin:ctype:xray:{user_id}")],
             [InlineKeyboardButton(text="AWG", callback_data=f"admin:ctype:awg:{user_id}")],
             [InlineKeyboardButton(text="Отмена", callback_data="cancel")],
+        ]
+    )
+
+
+def trial_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Одобрить", callback_data=f"admin:trial:approve:{request_id}"),
+                InlineKeyboardButton(text="Отклонить", callback_data=f"admin:trial:reject:{request_id}"),
+            ]
         ]
     )
 

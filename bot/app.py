@@ -33,6 +33,7 @@ from repositories.audit_log import AuditLogRepository
 from repositories.proxy_entries import ProxyRepository
 from repositories.proxy_accesses import ProxyAccessRepository
 from repositories.traffic_stats import TrafficStatsRepository
+from repositories.trial_requests import TrialKeyRequestRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.access_approval import AccessApprovalService
@@ -40,11 +41,13 @@ from services.announcements import AnnouncementService
 from services.audit import AuditService
 from services.awg import AwgService
 from services.backend_health import BackendHealth
+from services.key_expiry import KeyExpiryService, key_expiry_loop
 from services.notes import NotesService
 from services.proxy import ProxyService
 from services.socks5 import Socks5Service
 from services.mtproto import MtProtoService
 from services.traffic_stats import TrafficStatsService
+from services.trial_access import TrialAccessService
 from services.user_locks import UserLockManager
 from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
@@ -85,6 +88,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     proxy_repo = ProxyRepository(db)
     audit_repo = AuditLogRepository(db)
     traffic_stats_repo = TrafficStatsRepository(db)
+    trial_requests_repo = TrialKeyRequestRepository(db)
 
     audit_service = AuditService(audit_repo, clock, users_repo)
     user_service = UserService(users=users_repo, settings=settings, clock=clock, audit=audit_service, user_locks=user_locks)
@@ -237,6 +241,21 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         announcements=announcement_repo,
         audit=audit_service,
     )
+    key_expiry_service = KeyExpiryService(
+        vpn_keys=vpn_keys_repo,
+        xray=xray_service,
+        awg=awg_service,
+        audit=audit_service,
+        clock=clock,
+    )
+    trial_access_service = TrialAccessService(
+        trial_requests=trial_requests_repo,
+        users_repo=users_repo,
+        xray=xray_service,
+        awg=awg_service,
+        audit=audit_service,
+        clock=clock,
+    )
 
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
 
@@ -256,11 +275,15 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         audit=audit_service,
         announcements=announcement_service,
         backend_health=backend_health,
+        key_expiry=key_expiry_service,
+        trial_access=trial_access_service,
     )
 
     await _startup_reconcile_keys(services)
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    key_expiry_service.bot = bot
+    trial_access_service.bot = bot
     # FSM state is in-memory only — bot restart clears in-progress wizards.
     # Switching to a persistent SQLite-backed storage would preserve state across
     # restarts but is not yet implemented (see aiogram_sqlite_storage or a custom

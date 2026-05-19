@@ -18,6 +18,7 @@ def _json_loads(value: str) -> dict[str, object]:
 def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
     if row is None:
         return None
+    keys = row.keys() if hasattr(row, "keys") else []
     return VpnKey(
         id=int(row["id"]),
         owner_user_id=int(row["owner_user_id"]),
@@ -34,6 +35,7 @@ def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         revoked_at=row["revoked_at"],
+        expires_at=row["expires_at"] if "expires_at" in keys else None,
         deleted_at=row["deleted_at"],
         created_by=int(row["created_by"]),
         revoked_by=row["revoked_by"],
@@ -60,6 +62,7 @@ class VpnKeyRepository:
         email_label: str | None = None,
         public_key: str | None = None,
         client_ip: str | None = None,
+        expires_at: str | None = None,
     ) -> VpnKey:
         cursor = await self.db.conn.execute(
             """
@@ -67,9 +70,9 @@ class VpnKeyRepository:
               owner_user_id, username, key_type, status, note,
               uuid, email_label, public_key, client_ip,
               payload_json, public_payload_json,
-              created_at, updated_at, created_by
+              created_at, updated_at, created_by, expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 owner_user_id,
@@ -86,6 +89,7 @@ class VpnKeyRepository:
                 now,
                 now,
                 created_by,
+                expires_at,
             ),
         )
         await self.db.commit()
@@ -110,6 +114,7 @@ class VpnKeyRepository:
         email_label: str | None = None,
         public_key: str | None = None,
         client_ip: str | None = None,
+        expires_at: str | None = None,
     ) -> VpnKey:
         return await self.create_pending(
             owner_user_id=owner_user_id,
@@ -124,6 +129,7 @@ class VpnKeyRepository:
             email_label=email_label,
             public_key=public_key,
             client_ip=client_ip,
+            expires_at=expires_at,
         )
 
     async def get_by_id(self, key_id: int) -> VpnKey | None:
@@ -483,6 +489,31 @@ class VpnKeyRepository:
         cursor = await self.db.conn.execute("SELECT * FROM vpn_keys WHERE client_ip = ? LIMIT 1", (client_ip,))
         row = await cursor.fetchone()
         return _row_to_vpn_key(row)
+
+    async def list_expired_active(self, now: str, limit: int = 100) -> list[VpnKey]:
+        cursor = await self.db.conn.execute(
+            """
+            SELECT * FROM vpn_keys
+            WHERE status = ? AND expires_at IS NOT NULL AND expires_at <= ?
+            ORDER BY expires_at ASC
+            LIMIT ?
+            """,
+            (VpnKeyStatus.ACTIVE.value, now, limit),
+        )
+        rows = await cursor.fetchall()
+        return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
+
+    async def list_active_trial_by_owner(self, owner_user_id: int) -> list[VpnKey]:
+        cursor = await self.db.conn.execute(
+            """
+            SELECT * FROM vpn_keys
+            WHERE owner_user_id = ? AND status = ? AND expires_at IS NOT NULL
+            ORDER BY created_at DESC
+            """,
+            (owner_user_id, VpnKeyStatus.ACTIVE.value),
+        )
+        rows = await cursor.fetchall()
+        return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
     async def count_active_managed_short_id(self, short_id: str, exclude_key_id: int | None = None) -> int:
         statuses = (

@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL CHECK(role IN ('SUPERADMIN','APPROVED_USER','PENDING_USER','BLOCKED_USER')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  blocked_at TEXT
+  blocked_at TEXT,
+  trial_quota_reset_at TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS access_requests (
@@ -42,10 +43,22 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   revoked_at TEXT,
+  expires_at TEXT DEFAULT NULL,
   deleted_at TEXT,
   created_by INTEGER NOT NULL,
   revoked_by INTEGER,
   deleted_by INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS trial_key_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  telegram_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+  key_type TEXT NOT NULL CHECK(key_type IN ('xray','awg')),
+  status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+  key_id INTEGER REFERENCES vpn_keys(id) ON DELETE SET NULL,
+  requested_at TEXT NOT NULL,
+  decided_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+  decided_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS proxy_entries (
@@ -157,6 +170,8 @@ CREATE INDEX IF NOT EXISTS idx_proxy_accesses_mtproto_fingerprint ON proxy_acces
 CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_accesses_one_live_per_user_type
 ON proxy_accesses(owner_user_id, access_type)
 WHERE status IN ('pending_apply','active','pending_revoke');
+CREATE INDEX IF NOT EXISTS idx_vpn_keys_expires_at ON vpn_keys(expires_at) WHERE expires_at IS NOT NULL AND status = 'active';
+CREATE INDEX IF NOT EXISTS idx_trial_requests_user ON trial_key_requests(telegram_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);
 CREATE INDEX IF NOT EXISTS idx_announcement_batches_status ON announcement_batches(status, updated_at);
