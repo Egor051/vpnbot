@@ -146,7 +146,6 @@ def test_proxy_keyboard_no_accesses_has_get_buttons_and_no_pagination_or_revoke(
     assert buttons == [
         ("Получить SOCKS5", "proxy:get:socks5"),
         ("Получить MTProto", "proxy:get:mtproto"),
-        ("📊 Статистика прокси", "proxy:stats"),
         ("Вернуться", "proxy:back"),
     ]
     assert all("show:" not in str(data) for _text, data in buttons)
@@ -158,7 +157,7 @@ def test_proxy_keyboard_hides_disabled_or_already_issued_types() -> None:
 
     buttons = _buttons(proxy_menu_keyboard([socks5], socks5_enabled=True, mtproto_enabled=False))
 
-    assert buttons == [("📊 Статистика прокси", "proxy:stats"), ("Вернуться", "proxy:back")]
+    assert buttons == [("Вернуться", "proxy:back")]
 
 
 def test_admin_keyboard_has_proxy_stats_button() -> None:
@@ -166,11 +165,6 @@ def test_admin_keyboard_has_proxy_stats_button() -> None:
 
     assert ("📊 Статистика прокси", "admin:proxy_stats") in buttons
 
-
-def test_proxy_keyboard_stats_button_is_above_back() -> None:
-    buttons = _buttons(proxy_menu_keyboard([], socks5_enabled=False, mtproto_enabled=False))
-
-    assert buttons[-2:] == [("📊 Статистика прокси", "proxy:stats"), ("Вернуться", "proxy:back")]
 
 
 def test_socks5_proxy_text_contains_credentials_and_url() -> None:
