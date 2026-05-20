@@ -1075,7 +1075,7 @@ class AwgService:
         interface_options = self.adapter.client_interface_options()
         key_mtu = key.payload.get("mtu")
         if key_mtu is not None:
-            interface_options["MTU"] = str(int(key_mtu))
+            interface_options["MTU"] = str(int(str(key_mtu)))
         elif self.settings.awg_mtu is not None:
             interface_options["MTU"] = str(self.settings.awg_mtu)
         for option, value in interface_options.items():
