@@ -29,6 +29,10 @@ class _FakeTrialAccess:
         return False
 
 
+async def _noop_send(*args: object, **kwargs: object) -> None:
+    pass
+
+
 def _key(key_id: int, owner_user_id: int = 200) -> VpnKey:
     return VpnKey(
         id=key_id,
@@ -269,7 +273,8 @@ def test_admin_block_confirm_performs_block(monkeypatch) -> None:
     async def run() -> None:
         users = Users()
         callback = _Callback("admin:block:confirm:200")
-        await admin_block_user_confirm(callback, SimpleNamespace(users=users, trial_access=_FakeTrialAccess()))  # type: ignore[arg-type]
+        fake_bot = SimpleNamespace(send_message=_noop_send)
+        await admin_block_user_confirm(callback, SimpleNamespace(users=users, trial_access=_FakeTrialAccess()), fake_bot)  # type: ignore[arg-type]
 
         assert users.block_calls == 1
         assert "Пользователь заблокирован." in edits[-1]
@@ -302,7 +307,8 @@ def test_admin_block_confirm_already_blocked_does_not_block_again(monkeypatch) -
     async def run() -> None:
         users = Users()
         callback = _Callback("admin:block:confirm:200")
-        await admin_block_user_confirm(callback, SimpleNamespace(users=users, trial_access=_FakeTrialAccess()))  # type: ignore[arg-type]
+        fake_bot = SimpleNamespace(send_message=_noop_send)
+        await admin_block_user_confirm(callback, SimpleNamespace(users=users, trial_access=_FakeTrialAccess()), fake_bot)  # type: ignore[arg-type]
 
         assert users.block_calls == 0
         assert edits == ["Пользователь уже заблокирован."]
