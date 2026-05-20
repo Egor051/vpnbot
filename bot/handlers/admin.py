@@ -1153,6 +1153,33 @@ async def admin_trial_reset(callback: CallbackQuery, services: Services) -> None
         await answer_callback_error(callback, exc)
 
 
+@router.callback_query(F.data == "admin:backup")
+async def admin_backup_now(callback: CallbackQuery, services: Services, bot: Bot) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        if not services.offsite_backup.enabled:
+            await safe_callback_answer(
+                callback,
+                "OFFSITE_BACKUP_ENCRYPTION_KEY не настроен — бэкап отключён.",
+                show_alert=True,
+            )
+            return
+        await safe_callback_answer(callback, "Создаю бэкап...")
+        result = await services.offsite_backup.send_to_admins(bot, services.settings.admin_ids)
+        text = (
+            "Бэкап отправлен.\n"
+            f"Успешно: {result['success']}\n"
+            f"Ошибок: {result['failed']}"
+        )
+        await safe_edit_message_text(callback.message, text, reply_markup=admin_panel_keyboard())
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
 async def _safe_notify(bot: Bot, user_id: int, text: str) -> None:
     try:
         await bot.send_message(user_id, text)

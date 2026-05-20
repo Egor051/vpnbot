@@ -97,6 +97,20 @@ def _socks5_login_prefix(value: str) -> str:
     return value
 
 
+def _fernet_key(name: str) -> str:
+    value = _optional(name)
+    if not value:
+        return ""
+    import re
+    if len(value) != 44 or not re.fullmatch(r"[A-Za-z0-9_\-=]+", value):
+        raise SettingsError(
+            f"{name} должен быть корректным Fernet-ключом "
+            "(44-символьный URL-safe base64, сгенерируйте командой: "
+            'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")'
+        )
+    return value
+
+
 def _admin_ids(raw: str) -> frozenset[int]:
     values: set[int] = set()
     for item in raw.split(","):
@@ -242,6 +256,8 @@ class Settings:
     health_host: str = "127.0.0.1"
     key_expiry_check_interval: int = 1800
     key_max_trial_days: int = 365
+    offsite_backup_encryption_key: str = field(default="", repr=False)
+    offsite_backup_interval: int = 604800
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -443,6 +459,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         key_max_trial_days=_int_range("KEY_MAX_TRIAL_DAYS", 365, 1, 3650),
         privilege_helpers_enabled=_bool("PRIVILEGE_HELPERS_ENABLED", False),
         helper_staging_root=helper_staging_root,
+        offsite_backup_encryption_key=_fernet_key("OFFSITE_BACKUP_ENCRYPTION_KEY"),
+        offsite_backup_interval=_int_range("OFFSITE_BACKUP_INTERVAL", 604800, 0, 365 * 24 * 3600),
         socks5_user_helper_path=Path(_optional("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/vpnbot-socks5-user")),
         xray_apply_helper_path=Path(_optional("XRAY_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-xray-apply")),
         awg_apply_helper_path=Path(_optional("AWG_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-awg-apply")),

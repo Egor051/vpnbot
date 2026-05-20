@@ -16,6 +16,7 @@ aiosqlite==0.22.1
 annotated-types==0.7.0
 attrs==26.1.0
 certifi==2026.4.22
+cryptography==46.0.7
 frozenlist==1.8.0
 idna==3.15
 magic-filter==1.0.12

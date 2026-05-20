@@ -1,5 +1,6 @@
 aiogram==3.27.0
 aiohttp==3.13.5
 aiosqlite==0.22.1
+cryptography>=46.0.7
 python-dotenv==1.2.2
 tzdata==2026.2
