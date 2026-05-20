@@ -475,7 +475,7 @@ async def admin_block_user(callback: CallbackQuery, services: Services) -> None:
 
 
 @router.callback_query(F.data.regexp(r"^admin:block:confirm:\d+$"))
-async def admin_block_user_confirm(callback: CallbackQuery, services: Services) -> None:
+async def admin_block_user_confirm(callback: CallbackQuery, services: Services, bot: Bot) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -491,6 +491,7 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Services) 
                 await safe_edit_message_text(callback.message, "Пользователь уже заблокирован.", reply_markup=user_actions_keyboard(current, has_used_trial=has_used_trial))
             return
         result = await services.users.block_user(callback.from_user.id, user_id, revoke_active_keys=True)
+        await _safe_notify(bot, user_id, "Ваш доступ был заблокирован администратором.")
         if callback.message:
             user = await services.users.get_user(user_id)
             revoked_proxy_ids = getattr(result, "revoked_proxy_ids", ())

@@ -8,7 +8,7 @@ from aiogram.types import Message
 from bot.container import Services
 from bot.middlewares.access import BLOCKED_START_TEXT
 from bot.handlers.common import answer_message_error, is_admin, profile_from_tg
-from bot.formatters import main_menu_text
+from bot.formatters import key_detail_text, main_menu_text
 from bot.keyboards.admin import access_request_keyboard
 from bot.keyboards.common import main_menu
 from bot.keyboards.keys import request_trial_keyboard, trial_key_show_keyboard
@@ -40,6 +40,7 @@ async def start_command(message: Message, services: Services, bot: Bot) -> None:
                 await _notify_admins(services, bot, result.request.id, profile.telegram_user_id, profile.username)
             else:
                 await message.answer("Ваша повторная заявка уже ожидает решения администратора.")
+            await _send_trial_offer(message, services, profile.telegram_user_id)
             return
         if result.user.role in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
             await message.answer(
@@ -56,21 +57,24 @@ async def start_command(message: Message, services: Services, bot: Bot) -> None:
         else:
             await message.answer("Ваша заявка уже ожидает решения администратора.")
 
-        trial_keys = await services.vpn_keys.list_active_trial_by_owner(profile.telegram_user_id)
-        if trial_keys:
-            from bot.formatters import key_detail_text
-            key = trial_keys[0]
-            await message.answer(
-                f"У вас есть активный пробный ключ:\n\n{key_detail_text(key, viewer_user_id=profile.telegram_user_id)}",
-                reply_markup=trial_key_show_keyboard(key.id),
-            )
-        elif await services.trial_access.can_request_trial(profile.telegram_user_id):
-            await message.answer(
-                "Вы можете запросить пробный доступ на 7 дней. Администратор рассмотрит вашу заявку.",
-                reply_markup=request_trial_keyboard(),
-            )
+        await _send_trial_offer(message, services, profile.telegram_user_id)
     except Exception as exc:
         await answer_message_error(message, exc)
+
+
+async def _send_trial_offer(message: Message, services: Services, user_id: int) -> None:
+    trial_keys = await services.vpn_keys.list_active_trial_by_owner(user_id)
+    if trial_keys:
+        key = trial_keys[0]
+        await message.answer(
+            f"У вас есть активный пробный ключ:\n\n{key_detail_text(key, viewer_user_id=user_id)}",
+            reply_markup=trial_key_show_keyboard(key.id),
+        )
+    elif await services.trial_access.can_request_trial(user_id):
+        await message.answer(
+            "Вы можете запросить пробный доступ на 7 дней. Администратор рассмотрит вашу заявку.",
+            reply_markup=request_trial_keyboard(),
+        )
 
 
 async def _notify_admins(services: Services, bot: Bot, request_id: int, user_id: int, username: str | None) -> None:
