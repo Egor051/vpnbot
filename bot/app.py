@@ -250,6 +250,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         awg=awg_service,
         audit=audit_service,
         clock=clock,
+        notify_days=settings.key_expiry_notify_days,
     )
     trial_access_service = TrialAccessService(
         trial_requests=trial_requests_repo,

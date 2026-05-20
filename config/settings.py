@@ -97,6 +97,25 @@ def _socks5_login_prefix(value: str) -> str:
     return value
 
 
+def _int_list_positive(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    raw = _optional(name)
+    if not raw:
+        return default
+    result: list[int] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            v = int(item)
+        except ValueError as exc:
+            raise SettingsError(f"Переменная {name} должна быть списком целых чисел через запятую") from exc
+        if v <= 0:
+            raise SettingsError(f"Переменная {name}: все значения должны быть положительными числами")
+        result.append(v)
+    return tuple(sorted(set(result), reverse=True))
+
+
 def _fernet_key(name: str) -> str:
     value = _optional(name)
     if not value:
@@ -255,6 +274,7 @@ class Settings:
     health_port: int | None = None
     health_host: str = "127.0.0.1"
     key_expiry_check_interval: int = 1800
+    key_expiry_notify_days: tuple[int, ...] = ()
     key_max_trial_days: int = 365
     offsite_backup_encryption_key: str = field(default="", repr=False)
     offsite_backup_interval: int = 604800
@@ -462,6 +482,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         health_port=_optional_int_range("HEALTH_PORT", 1, 65535),
         health_host=_optional("HEALTH_HOST", "127.0.0.1"),
         key_expiry_check_interval=_int_range("KEY_EXPIRY_CHECK_INTERVAL", 1800, 0, 86400),
+        key_expiry_notify_days=_int_list_positive("KEY_EXPIRY_NOTIFY_DAYS", ()),
         key_max_trial_days=_int_range("KEY_MAX_TRIAL_DAYS", 365, 1, 3650),
         privilege_helpers_enabled=_bool("PRIVILEGE_HELPERS_ENABLED", False),
         helper_staging_root=helper_staging_root,

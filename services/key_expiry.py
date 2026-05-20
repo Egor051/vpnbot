@@ -1,6 +1,7 @@
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 
@@ -13,6 +14,13 @@ from services.audit import AuditService
 logger = logging.getLogger(__name__)
 
 
+def _add_days(iso_str: str, days: int) -> str:
+    dt = datetime.fromisoformat(iso_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (dt + timedelta(days=days)).isoformat()
+
+
 class KeyExpiryService:
     def __init__(
         self,
@@ -23,6 +31,7 @@ class KeyExpiryService:
         audit: AuditService,
         clock: ClockProvider,
         bot: Bot | None = None,
+        notify_days: tuple[int, ...] = (),
     ) -> None:
         self.vpn_keys = vpn_keys
         self.xray = xray
@@ -30,6 +39,7 @@ class KeyExpiryService:
         self.audit = audit
         self.clock = clock
         self.bot = bot
+        self.notify_days = notify_days
 
     async def revoke_expired_keys(self) -> int:
         now = self.clock.now()
@@ -52,6 +62,41 @@ class KeyExpiryService:
                 )
         return count
 
+    async def notify_expiring_keys(self) -> int:
+        if not self.notify_days or self.bot is None:
+            return 0
+        now = self.clock.now()
+        count = 0
+        for days in self.notify_days:
+            deadline = _add_days(now, days)
+            keys = await self.vpn_keys.list_not_notified_expiring(now, deadline, days)
+            for key in keys:
+                try:
+                    await self._notify_owner_expiring_soon(key, days)
+                    await self.vpn_keys.mark_expiry_notified(key.id, days)
+                    count += 1
+                except Exception:
+                    logger.warning(
+                        "Не удалось отправить уведомление об истечении key_id=%s days=%s",
+                        key.id,
+                        days,
+                        exc_info=True,
+                    )
+        return count
+
+    async def _notify_owner_expiring_soon(self, key: VpnKey, days: int) -> None:
+        if self.bot is None:
+            return
+        type_label = key.key_type.value.upper()
+        noun = _days_noun(days)
+        try:
+            await self.bot.send_message(
+                key.owner_user_id,
+                f"Срок действия {type_label}-ключа #{key.id} истекает через {days} {noun}.",
+            )
+        except Exception:
+            pass
+
     async def _notify_owner_expired(self, key: VpnKey) -> None:
         if self.bot is None:
             return
@@ -65,9 +110,23 @@ class KeyExpiryService:
             pass
 
 
+def _days_noun(days: int) -> str:
+    if days % 100 in range(11, 20):
+        return "дней"
+    rem = days % 10
+    if rem == 1:
+        return "день"
+    if rem in (2, 3, 4):
+        return "дня"
+    return "дней"
+
+
 async def key_expiry_loop(service: KeyExpiryService, interval: int) -> None:
     while True:
         try:
+            notify_count = await service.notify_expiring_keys()
+            if notify_count:
+                logger.info("Key expiry job: отправлено %d уведомлений об истечении", notify_count)
             count = await service.revoke_expired_keys()
             if count:
                 logger.info("Key expiry job: отозвано %d истёкших ключей", count)

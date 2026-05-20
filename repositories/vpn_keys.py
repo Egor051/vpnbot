@@ -490,6 +490,43 @@ class VpnKeyRepository:
         row = await cursor.fetchone()
         return _row_to_vpn_key(row)
 
+    async def list_not_notified_expiring(
+        self, now: str, deadline: str, threshold_days: int, limit: int = 200
+    ) -> list[VpnKey]:
+        """Return active keys expiring between now and deadline that haven't been notified at threshold_days."""
+        cursor = await self.db.conn.execute(
+            """
+            SELECT * FROM vpn_keys
+            WHERE status = ?
+              AND expires_at IS NOT NULL
+              AND expires_at > ?
+              AND expires_at <= ?
+              AND (
+                expiry_notified_days IS NULL
+                OR (',' || expiry_notified_days || ',') NOT LIKE ('%,' || ? || ',%')
+              )
+            ORDER BY expires_at ASC
+            LIMIT ?
+            """,
+            (VpnKeyStatus.ACTIVE.value, now, deadline, str(threshold_days), limit),
+        )
+        rows = await cursor.fetchall()
+        return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
+
+    async def mark_expiry_notified(self, key_id: int, threshold_days: int) -> None:
+        await self.db.conn.execute(
+            """
+            UPDATE vpn_keys
+            SET expiry_notified_days = CASE
+              WHEN expiry_notified_days IS NULL THEN ?
+              ELSE expiry_notified_days || ',' || ?
+            END
+            WHERE id = ?
+            """,
+            (str(threshold_days), str(threshold_days), key_id),
+        )
+        await self.db.commit()
+
     async def list_expired_active(self, now: str, limit: int = 100) -> list[VpnKey]:
         cursor = await self.db.conn.execute(
             """

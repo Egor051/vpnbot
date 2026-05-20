@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 15
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -215,6 +215,10 @@ class Database:
         if version < 14:
             await self._migrate_v14()
             await self._set_schema_version(14)
+            version = 14
+        if version < 15:
+            await self._migrate_v15()
+            await self._set_schema_version(15)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -602,6 +606,13 @@ class Database:
         user_cols = await self._table_columns("users")
         if "note" not in user_cols:
             await self.conn.execute("ALTER TABLE users ADD COLUMN note TEXT DEFAULT NULL")
+
+    async def _migrate_v15(self) -> None:
+        vpn_cols = await self._table_columns("vpn_keys")
+        if "expiry_notified_days" not in vpn_cols:
+            await self.conn.execute(
+                "ALTER TABLE vpn_keys ADD COLUMN expiry_notified_days TEXT DEFAULT NULL"
+            )
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(
