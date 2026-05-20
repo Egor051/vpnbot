@@ -110,7 +110,43 @@ class AnnouncementService:
             raise InvalidOperation("Объявление отменено")
         if batch.status == "completed" or batch.completed_at is not None:
             raise InvalidOperation("Объявление уже завершено")
+        if batch.status not in {"pending", "sending", "failed", "scheduled"}:
+            raise InvalidOperation("Объявление нельзя возобновить в текущем статусе")
         return await self._send_batch(bot=bot, batch=batch, retry_failed=retry_failed)
+
+    async def schedule_to_all(
+        self,
+        *,
+        actor_user_id: int,
+        from_chat_id: int,
+        message_id: int,
+        scheduled_at: str,
+    ) -> AnnouncementBatch:
+        await self.users.require_superadmin(actor_user_id)
+        if self.announcements is None:
+            raise RuntimeError("Announcement ledger is not configured")
+        recipients = await self._load_recipient_ids()
+        return await self.announcements.create_batch(
+            actor_user_id=actor_user_id,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+            recipient_ids=recipients,
+            now=self._now(),
+            scheduled_at=scheduled_at,
+        )
+
+    async def check_and_send_due(self, bot: Bot) -> list[AnnouncementResult]:
+        if self.announcements is None:
+            return []
+        due = await self.announcements.list_due_scheduled_batches(self._now())
+        results = []
+        for batch in due:
+            try:
+                result = await self._send_batch(bot=bot, batch=batch, retry_failed=False)
+                results.append(result)
+            except Exception:
+                logger.warning("Failed to send scheduled announcement batch id=%s", batch.id, exc_info=True)
+        return results
 
     async def cancel_batch(self, *, actor_user_id: int, announcement_id: int) -> AnnouncementCancelResult:
         await self.users.require_superadmin(actor_user_id)
@@ -123,6 +159,8 @@ class AnnouncementService:
             return AnnouncementCancelResult(batch=batch, changed=False)
         if batch.status == "completed" or batch.completed_at is not None:
             raise InvalidOperation("Объявление уже завершено")
+        if batch.status not in {"pending", "sending", "failed", "scheduled"}:
+            raise InvalidOperation("Нельзя отменить объявление в текущем статусе")
         await self.announcements.mark_cancelled(batch.id, self._now())
         cancelled = await self.announcements.get_batch(batch.id)
         if cancelled is None:

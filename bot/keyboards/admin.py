@@ -51,7 +51,8 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
 def announcement_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Отправить", callback_data="admin:announce:send")],
+            [InlineKeyboardButton(text="Отправить сейчас", callback_data="admin:announce:send")],
+            [InlineKeyboardButton(text="Запланировать", callback_data="admin:announce:schedule")],
             [InlineKeyboardButton(text="Отмена", callback_data="admin:announce:cancel")],
         ]
     )
@@ -61,6 +62,8 @@ def announcement_batches_keyboard(batches: list[AnnouncementBatch]) -> InlineKey
     rows: list[list[InlineKeyboardButton]] = []
     for batch in batches:
         actions: list[InlineKeyboardButton] = []
+        if batch.status == "scheduled":
+            actions.append(InlineKeyboardButton(text=f"Отправить сейчас #{batch.id}", callback_data=f"admin:announce:resume:{batch.id}"))
         if batch.status in {"pending", "sending"}:
             actions.append(InlineKeyboardButton(text=f"Продолжить #{batch.id}", callback_data=f"admin:announce:resume:{batch.id}"))
         if batch.status == "failed":

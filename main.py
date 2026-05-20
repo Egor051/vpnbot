@@ -9,6 +9,7 @@ from bot.app import _awg_stats_loop, create_app
 from services.anomaly_detection import anomaly_detection_loop
 from services.key_expiry import key_expiry_loop
 from services.offsite_backup import offsite_backup_loop
+from services.scheduled_announcements import scheduled_announcements_loop
 from config.settings import load_settings
 from utils.logging import setup_logging
 from utils.single_instance import SingleInstanceError, SingleInstanceLock
@@ -26,6 +27,7 @@ async def main() -> None:
         expiry_task: asyncio.Task | None = None
         backup_task: asyncio.Task | None = None
         anomaly_task: asyncio.Task | None = None
+        scheduled_announcements_task: asyncio.Task | None = None
         try:
             if settings.awg_stats_interval > 0:
                 awg_stats_task = asyncio.create_task(
@@ -56,6 +58,12 @@ async def main() -> None:
                     name="offsite-backup",
                 )
                 logger.info("Offsite backup scheduler started (interval=%ds)", settings.offsite_backup_interval)
+            if services.announcements.announcements is not None:
+                scheduled_announcements_task = asyncio.create_task(
+                    scheduled_announcements_loop(services.announcements, bot, 60),
+                    name="scheduled-announcements",
+                )
+                logger.info("Scheduled announcements checker started (interval=60s)")
             if settings.health_port is not None:
                 health_app = create_health_app(backend_health)
                 runner = web.AppRunner(health_app)
@@ -79,6 +87,9 @@ async def main() -> None:
             if anomaly_task is not None:
                 anomaly_task.cancel()
                 await asyncio.gather(anomaly_task, return_exceptions=True)
+            if scheduled_announcements_task is not None:
+                scheduled_announcements_task.cancel()
+                await asyncio.gather(scheduled_announcements_task, return_exceptions=True)
             if runner is not None:
                 await runner.cleanup()
             await db.close()
