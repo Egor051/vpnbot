@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import ipaddress
+import json
 import logging
 import re
 
@@ -22,7 +23,7 @@ from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.notes import normalize_note
 from services.user_locks import UserLockManager
 from services.users import UserService
-from utils.formatting import h, pre
+from utils.formatting import code, h
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ class AwgService:
         note: str | None,
         expires_at: str | None = None,
         allow_pending_owner: bool = False,
+        mtu: int | None = None,
     ) -> VpnKeyCreateResult:
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         self.settings.validate_awg_ready()
@@ -103,13 +105,15 @@ class AwgService:
                 private_key, public_key = await self._generate_unique_keypair()
                 email_label = await self._generate_unique_label(owner.telegram_user_id, owner.username)
                 preshared_key = await self.adapter.generate_preshared_key() if self.settings.awg_use_preshared_key else None
-                payload = {
+                payload: dict[str, object] = {
                     "private_key": private_key,
                     "public_key": public_key,
                     "preshared_key": preshared_key,
                     "client_ip": client_ip,
                     "email_label": email_label,
                 }
+                if mtu is not None:
+                    payload["mtu"] = mtu
                 public_payload = {
                     "public_key": public_key,
                     "client_ip": client_ip,
@@ -348,6 +352,17 @@ class AwgService:
             raise InvalidOperation("Конфигурация доступна только для активного ключа")
         await self._ensure_client_payload_valid(owner_user_id, key)
         return self._client_config(key)
+
+    async def get_awg_formatted_config_for_owner(self, owner_user_id: int, key_id: int) -> str:
+        key = await self._get_key(key_id)
+        if key.key_type != VpnKeyType.AWG:
+            raise InvalidOperation("Это не AWG-ключ")
+        if key.owner_user_id != owner_user_id:
+            raise AccessDenied("Нельзя смотреть чужой ключ")
+        if key.status != VpnKeyStatus.ACTIVE:
+            raise InvalidOperation("Конфигурация доступна только для активного ключа")
+        await self._ensure_client_payload_valid(owner_user_id, key)
+        return self._format_config(key, viewer_user_id=owner_user_id)
 
     async def list_user_keys(
         self,
@@ -1033,14 +1048,14 @@ class AwgService:
             raise InvalidOperation("AWG_SERVER_ADDRESS не совпадает с IPv4 Address в AWG config")
 
     def _format_config(self, key: VpnKey, *, viewer_user_id: int | None = None) -> str:
-        config = self._client_config(key)
+        link = self._build_amnezia_link(key)
         visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
         note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
         label = f"\nМетка: {h(key.email_label)}" if key.email_label else ""
         return (
             f"<b>AWG-ключ #{key.id}</b>\n"
             f"Статус: {status_text(key.status)}{label}{note}\n\n"
-            f"{pre(config)}"
+            f"{code(link)}"
         )
 
     def _client_config(self, key: VpnKey) -> str:
@@ -1058,7 +1073,10 @@ class AwgService:
             f"DNS = {self.settings.awg_client_dns}",
         ]
         interface_options = self.adapter.client_interface_options()
-        if self.settings.awg_mtu is not None:
+        key_mtu = key.payload.get("mtu")
+        if key_mtu is not None:
+            interface_options["MTU"] = str(int(key_mtu))
+        elif self.settings.awg_mtu is not None:
             interface_options["MTU"] = str(self.settings.awg_mtu)
         for option, value in interface_options.items():
             if option == "DNS":
@@ -1083,6 +1101,22 @@ class AwgService:
             ]
         )
         return "\n".join(lines)
+
+    def _build_amnezia_link(self, key: VpnKey) -> str:
+        config_text = self._client_config(key)
+        dns_parts = [s.strip() for s in self.settings.awg_client_dns.split(",")]
+        dns1 = dns_parts[0] if dns_parts else "1.1.1.1"
+        dns2 = dns_parts[1] if len(dns_parts) > 1 else dns1
+        payload = {
+            "containers": [{"container": "amnezia-awg", "awg": {"last_config": config_text}}],
+            "defaultContainer": "amnezia-awg",
+            "description": key.email_label or "vpnbot",
+            "dns1": dns1,
+            "dns2": dns2,
+            "hostName": self.settings.awg_endpoint_host,
+        }
+        encoded = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+        return f"amnezia://{encoded}"
 
     async def _ensure_client_payload_valid(self, actor_user_id: int, key: VpnKey) -> None:
         try:

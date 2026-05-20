@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from bot.formatters import (
     NOTE_CREATE_WARNING,
     ONE_KEY_ONE_DEVICE_WARNING,
+    awg_config_text,
     create_confirm_text,
     key_detail_text,
     keys_page_text,
@@ -28,10 +29,12 @@ from bot.keyboards.keys import (
     expiry_choice_keyboard,
     key_actions_keyboard,
     keys_list_keyboard,
+    mtu_choice_keyboard,
     request_trial_keyboard,
     trial_key_show_keyboard,
     trial_protocol_keyboard,
 )
+from aiogram.types import BufferedInputFile
 from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text, send_awg_config
 from bot.pagination import page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
@@ -152,12 +155,70 @@ async def create_key_note(message: Message, state: FSMContext, services: Service
     try:
         await _ensure_can_enter_create(message.from_user.id, services)
         note = _clean_note(message.text)
+        data = await state.get_data()
+        key_type = str(data.get("key_type") or "")
         await state.update_data(note=note)
+        if key_type == VpnKeyType.AWG.value:
+            await state.set_state(CreateKeyStates.waiting_mtu)
+            await message.answer("Выберите MTU для ключа:", reply_markup=mtu_choice_keyboard())
+        else:
+            await state.set_state(CreateKeyStates.waiting_expiry)
+            await message.answer("Выберите срок действия ключа:", reply_markup=expiry_choice_keyboard())
+    except Exception as exc:
+        await answer_message_error(message, exc)
+
+
+@router.callback_query(CreateKeyStates.waiting_mtu, F.data.regexp(r"^mtu:\d+$"))
+async def create_key_mtu(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        raw = callback.data.split(":", 1)[1]
+        mtu = int(raw)
+        if mtu < 1 or mtu > 1500:
+            await safe_callback_answer(callback, "Недопустимое значение MTU: 1–1500", show_alert=True)
+            return
+        await state.update_data(mtu=mtu)
         await state.set_state(CreateKeyStates.waiting_expiry)
-        await message.answer(
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
             "Выберите срок действия ключа:",
             reply_markup=expiry_choice_keyboard(),
         )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(CreateKeyStates.waiting_mtu, F.data == "mtu:custom")
+async def create_key_mtu_custom_request(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await ensure_private_callback(callback):
+        return
+    if callback.message is None:
+        return
+    await safe_callback_answer(callback)
+    await state.set_state(CreateKeyStates.waiting_mtu_custom)
+    await safe_edit_message_text(callback.message, "Введите MTU (от 1 до 1500):", reply_markup=None)
+
+
+@router.message(CreateKeyStates.waiting_mtu_custom)
+async def create_key_mtu_custom(message: Message, state: FSMContext, services: Services) -> None:
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message):
+        return
+    try:
+        await _ensure_can_enter_create(message.from_user.id, services)
+        mtu = _parse_mtu(message.text or "")
+        if mtu is None:
+            await message.answer("Введите целое число от 1 до 1500:")
+            return
+        await state.update_data(mtu=mtu)
+        await state.set_state(CreateKeyStates.waiting_expiry)
+        await message.answer("Выберите срок действия ключа:", reply_markup=expiry_choice_keyboard())
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -186,10 +247,11 @@ async def create_key_expiry(callback: CallbackQuery, state: FSMContext, services
         data = await state.get_data()
         key_type = str(data.get("key_type") or "")
         note = data.get("note")
+        mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         from bot.keyboards.common import confirm_cancel_keyboard
         await safe_edit_message_text(
             callback.message,
-            create_confirm_text(key_type, note, expires_at=expires_at),
+            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -235,9 +297,10 @@ async def create_key_custom_days(message: Message, state: FSMContext, services: 
         data = await state.get_data()
         key_type = str(data.get("key_type") or "")
         note = data.get("note")
+        mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         from bot.keyboards.common import confirm_cancel_keyboard
         await message.answer(
-            create_confirm_text(key_type, note, expires_at=expires_at),
+            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -255,6 +318,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
     key_type = str(data.get("key_type") or "")
     note = data.get("note")
     expires_at: str | None = data.get("expires_at")
+    mtu = int(data["mtu"]) if data.get("mtu") is not None else None
     try:
         await _ensure_can_enter_create(callback.from_user.id, services)
         profile = profile_from_tg(callback.from_user)
@@ -264,26 +328,20 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         if key_type == VpnKeyType.XRAY.value:
             result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at)
         elif key_type == VpnKeyType.AWG.value:
-            result = await services.awg.create_awg_key(callback.from_user.id, profile, note, expires_at=expires_at)
+            result = await services.awg.create_awg_key(callback.from_user.id, profile, note, expires_at=expires_at, mtu=mtu)
         else:
             await safe_edit_message_text(callback.message, "Неизвестный тип ключа.")
             return
+        owner_ctx = _admin_owner_context(result.key, callback.from_user.id)
+        await safe_edit_message_text(
+            callback.message,
+            result.config_text,
+            reply_markup=key_actions_keyboard(result.key, owner_user_id=owner_ctx),
+        )
         if result.key.key_type == VpnKeyType.AWG:
-            config = await services.awg.get_awg_client_config_plain(callback.from_user.id, result.key.id, audit=False)
-            await send_awg_config(
-                callback.message,
-                title=f"AWG-ключ #{result.key.id}",
-                config_text=config,
-                filename=awg_config_filename(result.key),
-                reply_markup=key_actions_keyboard(result.key, owner_user_id=_admin_owner_context(result.key, callback.from_user.id)),
-                edit_text=True,
-            )
-        else:
-            await safe_edit_message_text(
-                callback.message,
-                result.config_text,
-                reply_markup=key_actions_keyboard(result.key, owner_user_id=_admin_owner_context(result.key, callback.from_user.id)),
-            )
+            plain = await services.awg.get_awg_client_config_plain(callback.from_user.id, result.key.id, audit=False)
+            filename = awg_config_filename(result.key)
+            await callback.message.answer_document(BufferedInputFile(plain.encode("utf-8"), filename=filename))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -330,15 +388,15 @@ async def show_key_config(callback: CallbackQuery, services: Services, rate_limi
                 reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
             )
         else:
-            config = await services.awg.get_awg_client_config_plain(callback.from_user.id, key_id)
-            await send_awg_config(
+            text = awg_config_text(await services.awg.get_awg_client_config(callback.from_user.id, key_id))
+            plain = await services.awg.get_awg_client_config_plain(callback.from_user.id, key_id)
+            await safe_edit_message_text(
                 callback.message,
-                title=f"AWG-ключ #{key.id}",
-                config_text=config,
-                filename=awg_config_filename(key),
+                text,
                 reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
-                edit_text=True,
-                send_document=False,
+            )
+            await callback.message.answer_document(
+                BufferedInputFile(plain.encode("utf-8"), filename=awg_config_filename(key))
             )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -630,16 +688,22 @@ async def trial_key_show(callback: CallbackQuery, services: Services) -> None:
             text = xray_config_text(await services.xray.get_xray_key_config_for_owner(callback.from_user.id, key_id))
             await safe_edit_message_text(callback.message, text)
         else:
-            config = await services.awg.get_awg_client_config_for_owner(callback.from_user.id, key_id)
-            await send_awg_config(
-                callback.message,
-                title=f"AWG-ключ #{key.id}",
-                config_text=config,
-                filename=awg_config_filename(key),
-                edit_text=True,
+            text = awg_config_text(await services.awg.get_awg_formatted_config_for_owner(callback.from_user.id, key_id))
+            plain = await services.awg.get_awg_client_config_for_owner(callback.from_user.id, key_id)
+            await safe_edit_message_text(callback.message, text)
+            await callback.message.answer_document(
+                BufferedInputFile(plain.encode("utf-8"), filename=awg_config_filename(key))
             )
     except Exception as exc:
         await answer_callback_error(callback, exc)
+
+
+def _parse_mtu(text: str) -> int | None:
+    text = text.strip()
+    if not text.isdigit():
+        return None
+    value = int(text)
+    return value if 1 <= value <= 1500 else None
 
 
 def _clean_note(value: str | None) -> str | None:

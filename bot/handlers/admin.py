@@ -6,7 +6,7 @@ from typing import Any
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.container import Services
 from bot.formatters import (
@@ -48,7 +48,7 @@ from bot.keyboards.admin import (
 )
 from bot.handlers.keys import load_keys_page
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
-from bot.keyboards.keys import expiry_choice_keyboard, key_actions_keyboard, keys_list_keyboard
+from bot.keyboards.keys import expiry_choice_keyboard, key_actions_keyboard, keys_list_keyboard, mtu_choice_keyboard
 from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text, send_awg_config
 from bot.pagination import page_offset, split_page
 from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
@@ -873,7 +873,69 @@ async def admin_issue_note(message: Message, state: FSMContext, services: Servic
         return
     try:
         note = _clean_note(message.text)
+        data = await state.get_data()
+        key_type = str(data.get("key_type") or "")
         await state.update_data(note=note)
+        if key_type == VpnKeyType.AWG.value:
+            await state.set_state(AdminCreateKeyStates.waiting_mtu)
+            await message.answer("Выберите MTU для ключа:", reply_markup=mtu_choice_keyboard())
+        else:
+            await state.set_state(AdminCreateKeyStates.waiting_expiry)
+            await message.answer("Выберите срок действия ключа:", reply_markup=expiry_choice_keyboard())
+    except Exception as exc:
+        await state.clear()
+        await answer_message_error(message, exc)
+
+
+@router.callback_query(AdminCreateKeyStates.waiting_mtu, F.data.regexp(r"^mtu:\d+$"))
+async def admin_issue_mtu(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        raw = callback.data.split(":", 1)[1]
+        mtu = int(raw)
+        if mtu < 1 or mtu > 1500:
+            await safe_callback_answer(callback, "Недопустимое значение MTU: 1–1500", show_alert=True)
+            return
+        await state.update_data(mtu=mtu)
+        await state.set_state(AdminCreateKeyStates.waiting_expiry)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            "Выберите срок действия ключа:",
+            reply_markup=expiry_choice_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminCreateKeyStates.waiting_mtu, F.data == "mtu:custom")
+async def admin_issue_mtu_custom_request(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    if callback.message is None:
+        return
+    await safe_callback_answer(callback)
+    await state.set_state(AdminCreateKeyStates.waiting_mtu_custom)
+    await safe_edit_message_text(callback.message, "Введите MTU (от 1 до 1500):", reply_markup=None)
+
+
+@router.message(AdminCreateKeyStates.waiting_mtu_custom)
+async def admin_issue_mtu_custom(message: Message, state: FSMContext, services: Services) -> None:
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    try:
+        await require_superadmin(services, message.from_user.id)
+        mtu = _parse_mtu(message.text or "")
+        if mtu is None:
+            await message.answer("Введите целое число от 1 до 1500:")
+            return
+        await state.update_data(mtu=mtu)
         await state.set_state(AdminCreateKeyStates.waiting_expiry)
         await message.answer("Выберите срок действия ключа:", reply_markup=expiry_choice_keyboard())
     except Exception as exc:
@@ -905,11 +967,12 @@ async def admin_issue_expiry(callback: CallbackQuery, state: FSMContext, service
         owner = await services.users.get_user(owner_user_id)
         key_type = str(data["key_type"])
         note = data.get("note")
+        mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         await state.set_state(AdminCreateKeyStates.confirming)
         await safe_callback_answer(callback)
         await safe_edit_message_text(
             callback.message,
-            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at),
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu),
             reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
         )
     except Exception as exc:
@@ -956,9 +1019,10 @@ async def admin_issue_custom_days(message: Message, state: FSMContext, services:
         owner = await services.users.get_user(owner_user_id)
         key_type = str(data["key_type"])
         note = data.get("note")
+        mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         await state.set_state(AdminCreateKeyStates.confirming)
         await message.answer(
-            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at),
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu),
             reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
         )
     except Exception as exc:
@@ -978,6 +1042,7 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
         key_type = str(data["key_type"])
         note = data.get("note")
         expires_at: str | None = data.get("expires_at")
+        mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         owner_is_pending = bool(data.get("owner_is_pending", False))
         owner = await services.users.get_user(owner_user_id)
         await require_superadmin(services, callback.from_user.id)
@@ -996,44 +1061,41 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
                 callback.from_user.id, profile, note,
                 expires_at=expires_at,
                 allow_pending_owner=owner_is_pending,
+                mtu=mtu,
             )
         else:
             await safe_edit_message_text(callback.message, "Неизвестный тип ключа.")
             return
+        await safe_edit_message_text(
+            callback.message,
+            result.config_text,
+            reply_markup=key_actions_keyboard(result.key, owner_user_id=result.key.owner_user_id),
+        )
+        plain_awg_config: str | None = None
         if result.key.key_type == VpnKeyType.AWG:
-            config = await services.awg.get_awg_client_config_plain(callback.from_user.id, result.key.id, audit=False)
-            await send_awg_config(
-                callback.message,
-                title=f"AWG-ключ #{result.key.id}",
-                config_text=config,
-                filename=awg_config_filename(result.key),
-                reply_markup=key_actions_keyboard(result.key, owner_user_id=result.key.owner_user_id),
-                edit_text=True,
-            )
-        else:
-            await safe_edit_message_text(
-                callback.message,
-                result.config_text,
-                reply_markup=key_actions_keyboard(result.key, owner_user_id=result.key.owner_user_id),
-            )
+            plain_awg_config = await services.awg.get_awg_client_config_plain(callback.from_user.id, result.key.id, audit=False)
+            filename = awg_config_filename(result.key)
+            await callback.message.answer_document(BufferedInputFile(plain_awg_config.encode("utf-8"), filename=filename))
         if owner_is_pending:
-            await _deliver_key_to_pending_user(bot, result, owner_user_id)
+            await _deliver_key_to_pending_user(bot, result, owner_user_id, plain_awg_config=plain_awg_config)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
-async def _deliver_key_to_pending_user(bot: Bot, result: Any, user_id: int) -> None:
+async def _deliver_key_to_pending_user(bot: Bot, result: Any, user_id: int, plain_awg_config: str | None = None) -> None:
     try:
         if result.key.key_type == VpnKeyType.AWG:
-            from aiogram.types import BufferedInputFile
-            from bot.messages import awg_config_filename
-            config_bytes = result.config_text.encode("utf-8")
-            filename = awg_config_filename(result.key)
-            await bot.send_document(
+            await bot.send_message(
                 user_id,
-                document=BufferedInputFile(config_bytes, filename=filename),
-                caption=f"Ваш AWG-ключ #{result.key.id} выдан администратором.",
+                f"Администратор выдал вам AWG-ключ #{result.key.id}.\n\n{result.config_text}",
             )
+            if plain_awg_config is not None:
+                from bot.messages import awg_config_filename
+                filename = awg_config_filename(result.key)
+                await bot.send_document(
+                    user_id,
+                    document=BufferedInputFile(plain_awg_config.encode("utf-8"), filename=filename),
+                )
         else:
             await bot.send_message(
                 user_id,
@@ -1199,6 +1261,14 @@ def _clean_note(value: str | None) -> str | None:
         return None
     note = value.strip()
     return None if note in {"", "-"} else note
+
+
+def _parse_mtu(text: str) -> int | None:
+    text = text.strip()
+    if not text.isdigit():
+        return None
+    value = int(text)
+    return value if 1 <= value <= 1500 else None
 
 
 async def _show_announcement_batches(callback: CallbackQuery, services: Services, *, prefix: str | None = None) -> None:
