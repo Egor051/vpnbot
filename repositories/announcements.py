@@ -21,6 +21,7 @@ class AnnouncementBatch:
     created_at: str
     updated_at: str
     completed_at: str | None
+    scheduled_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +50,7 @@ def _row_to_batch(row: Row | None) -> AnnouncementBatch | None:
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
         completed_at=row["completed_at"],
+        scheduled_at=row["scheduled_at"] if "scheduled_at" in row.keys() else None,
     )
 
 
@@ -77,17 +79,19 @@ class AnnouncementRepository:
         message_id: int,
         recipient_ids: list[int],
         now: str,
+        scheduled_at: str | None = None,
     ) -> AnnouncementBatch:
+        status = "scheduled" if scheduled_at is not None else "pending"
         async with self.db.transaction():
             cursor = await self.db.conn.execute(
                 """
                 INSERT INTO announcement_batches (
                   actor_user_id, from_chat_id, message_id, status, total_count,
-                  created_at, updated_at
+                  created_at, updated_at, scheduled_at
                 )
-                VALUES (?, ?, ?, 'pending', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (actor_user_id, from_chat_id, message_id, len(recipient_ids), now, now),
+                (actor_user_id, from_chat_id, message_id, status, len(recipient_ids), now, now, scheduled_at),
             )
             assert cursor.lastrowid is not None
             batch_id = int(cursor.lastrowid)
@@ -115,11 +119,25 @@ class AnnouncementRepository:
             """
             SELECT * FROM announcement_batches
             WHERE completed_at IS NULL
-              AND status IN ('pending', 'sending', 'failed')
+              AND status IN ('pending', 'sending', 'failed', 'scheduled')
             ORDER BY updated_at DESC, id DESC
             LIMIT ?
             """,
             (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [batch for row in rows if (batch := _row_to_batch(row)) is not None]
+
+    async def list_due_scheduled_batches(self, now: str, *, limit: int = 10) -> list[AnnouncementBatch]:
+        cursor = await self.db.conn.execute(
+            """
+            SELECT * FROM announcement_batches
+            WHERE status = 'scheduled'
+              AND scheduled_at <= ?
+            ORDER BY scheduled_at ASC, id ASC
+            LIMIT ?
+            """,
+            (now, limit),
         )
         rows = await cursor.fetchall()
         return [batch for row in rows if (batch := _row_to_batch(row)) is not None]

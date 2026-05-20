@@ -671,20 +671,21 @@ def announcement_batches_text(batches: list[AnnouncementBatch]) -> str:
     lines = ["<b>Незавершённые объявления</b>"]
     for batch in batches:
         pending = max(batch.total_count - batch.success_count - batch.failed_count - batch.skipped_count, 0)
-        lines.extend(
-            [
-                "",
-                f"<b>Batch #{h(batch.id)}</b>",
-                f"Status: {h(batch.status)}",
-                f"Total: {h(batch.total_count)}",
-                f"Sent: {h(batch.success_count)}",
-                f"Failed: {h(batch.failed_count)}",
-                f"Skipped: {h(batch.skipped_count)}",
-                f"Pending: {h(pending)}",
-                f"Created: {h(format_msk_datetime(batch.created_at))}",
-                f"Updated: {h(format_msk_datetime(batch.updated_at))}",
-            ]
-        )
+        entry = [
+            "",
+            f"<b>Batch #{h(batch.id)}</b>",
+            f"Status: {h(batch.status)}",
+            f"Total: {h(batch.total_count)}",
+            f"Sent: {h(batch.success_count)}",
+            f"Failed: {h(batch.failed_count)}",
+            f"Skipped: {h(batch.skipped_count)}",
+            f"Pending: {h(pending)}",
+            f"Created: {h(format_msk_datetime(batch.created_at))}",
+            f"Updated: {h(format_msk_datetime(batch.updated_at))}",
+        ]
+        if batch.scheduled_at:
+            entry.append(f"Scheduled: {h(format_msk_datetime(batch.scheduled_at))}")
+        lines.extend(entry)
     return "\n".join(lines)
 
 

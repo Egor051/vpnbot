@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 15
+CURRENT_SCHEMA_VERSION = 16
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -219,6 +219,10 @@ class Database:
         if version < 15:
             await self._migrate_v15()
             await self._set_schema_version(15)
+            version = 15
+        if version < 16:
+            await self._migrate_v16()
+            await self._set_schema_version(16)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -533,7 +537,7 @@ class Database:
                     "deleted",
                 ),
             ),
-            ("announcement_batches", "status", ("pending", "sending", "completed", "failed", "cancelled")),
+            ("announcement_batches", "status", ("pending", "sending", "completed", "failed", "cancelled", "scheduled")),
             ("announcement_deliveries", "status", ("pending", "sent", "failed", "skipped")),
         )
         for table, column, allowed_values in enum_checks:
@@ -613,6 +617,65 @@ class Database:
             await self.conn.execute(
                 "ALTER TABLE vpn_keys ADD COLUMN expiry_notified_days TEXT DEFAULT NULL"
             )
+
+    async def _migrate_v16(self) -> None:
+        cols = await self._table_columns("announcement_batches")
+        if "scheduled_at" in cols:
+            return
+        # SQLite always rewrites FK references in sibling tables when renaming,
+        # regardless of PRAGMA foreign_keys state in 3.26+. Instead we:
+        # 1. create a _new table with the updated schema;
+        # 2. copy data;
+        # 3. drop the old table (FK OFF to avoid cascade complications);
+        # 4. rename _new → original (no sibling FK references _new, so nothing to rewrite).
+        await self._raw_conn().execute("PRAGMA foreign_keys = OFF")
+        try:
+            await self.conn.execute("DROP INDEX IF EXISTS idx_announcement_batches_status")
+            await self.conn.execute(
+                """
+                CREATE TABLE announcement_batches_new (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  actor_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE RESTRICT,
+                  from_chat_id INTEGER NOT NULL,
+                  message_id INTEGER NOT NULL,
+                  status TEXT NOT NULL CHECK(status IN ('pending','sending','completed','failed','cancelled','scheduled')),
+                  total_count INTEGER NOT NULL DEFAULT 0,
+                  success_count INTEGER NOT NULL DEFAULT 0,
+                  failed_count INTEGER NOT NULL DEFAULT 0,
+                  skipped_count INTEGER NOT NULL DEFAULT 0,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  completed_at TEXT,
+                  scheduled_at TEXT
+                )
+                """
+            )
+            await self.conn.execute(
+                """
+                INSERT INTO announcement_batches_new (
+                  id, actor_user_id, from_chat_id, message_id, status,
+                  total_count, success_count, failed_count, skipped_count,
+                  created_at, updated_at, completed_at, scheduled_at
+                )
+                SELECT id, actor_user_id, from_chat_id, message_id, status,
+                       total_count, success_count, failed_count, skipped_count,
+                       created_at, updated_at, completed_at, NULL
+                FROM announcement_batches
+                """
+            )
+            await self.conn.execute("DROP TABLE announcement_batches")
+            await self.conn.execute("ALTER TABLE announcement_batches_new RENAME TO announcement_batches")
+            await self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_announcement_batches_status "
+                "ON announcement_batches(status, updated_at)"
+            )
+            await self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_announcement_batches_scheduled "
+                "ON announcement_batches(scheduled_at) "
+                "WHERE status = 'scheduled' AND scheduled_at IS NOT NULL"
+            )
+        finally:
+            await self._raw_conn().execute("PRAGMA foreign_keys = ON")
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(

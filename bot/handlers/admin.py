@@ -200,6 +200,69 @@ async def admin_announcement_send(
         await answer_callback_error(callback, exc)
 
 
+@router.callback_query(AdminAnnouncementStates.confirming, F.data == "admin:announce:schedule")
+async def admin_announcement_schedule_request(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await state.set_state(AdminAnnouncementStates.waiting_schedule_time)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            "Введите дату и время отправки в формате ДД.ММ.ГГГГ ЧЧ:ММ (московское время):",
+            reply_markup=cancel_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.message(AdminAnnouncementStates.waiting_schedule_time)
+async def admin_announcement_schedule_time(message: Message, state: FSMContext, services: Services) -> None:
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    try:
+        await require_superadmin(services, message.from_user.id)
+        scheduled_at = _parse_schedule_time(message.text or "")
+        if scheduled_at is None:
+            await message.answer(
+                "Неверный формат или время в прошлом.\n"
+                "Введите дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ (московское время):"
+            )
+            return
+        data = await state.get_data()
+        if "from_chat_id" not in data or "message_id" not in data:
+            await state.clear()
+            await message.answer("Сессия устарела, начните заново.", reply_markup=admin_panel_keyboard())
+            return
+        from_chat_id = int(data["from_chat_id"])
+        message_id = int(data["message_id"])
+        await state.clear()
+        batch = await services.announcements.schedule_to_all(
+            actor_user_id=message.from_user.id,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+            scheduled_at=scheduled_at,
+        )
+        from datetime import datetime, timezone, timedelta
+        dt = datetime.fromisoformat(scheduled_at).replace(tzinfo=timezone.utc)
+        msk_str = (dt + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
+        await message.answer(
+            f"Объявление запланировано.\n"
+            f"Batch #{batch.id}\n"
+            f"Получателей: {batch.total_count}\n"
+            f"Время отправки: {msk_str} МСК",
+            reply_markup=admin_panel_keyboard(),
+        )
+    except Exception as exc:
+        await state.clear()
+        await answer_message_error(message, exc)
+
+
 @router.callback_query(AdminAnnouncementStates.confirming, F.data == "admin:announce:cancel")
 async def admin_announcement_cancel(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
@@ -1311,6 +1374,21 @@ def _clean_note(value: str | None) -> str | None:
         return None
     note = value.strip()
     return None if note in {"", "-"} else note
+
+
+def _parse_schedule_time(text: str) -> str | None:
+    """Parse "DD.MM.YYYY HH:MM" Moscow time (UTC+3) to UTC ISO string. Returns None if invalid or in the past."""
+    from datetime import datetime, timezone, timedelta
+    text = text.strip()
+    try:
+        dt_msk = datetime.strptime(text, "%d.%m.%Y %H:%M")
+    except ValueError:
+        return None
+    msk_tz = timezone(timedelta(hours=3))
+    dt_utc = dt_msk.replace(tzinfo=msk_tz).astimezone(timezone.utc)
+    if dt_utc <= datetime.now(timezone.utc):
+        return None
+    return dt_utc.replace(microsecond=0).isoformat()
 
 
 def _parse_mtu(text: str) -> int | None:

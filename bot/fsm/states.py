@@ -37,6 +37,7 @@ class AdminEditUserNoteStates(StatesGroup):
 class AdminAnnouncementStates(StatesGroup):
     waiting_message = State()
     confirming = State()
+    waiting_schedule_time = State()
 
 
 class TrialRequestStates(StatesGroup):
