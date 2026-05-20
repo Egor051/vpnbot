@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 17
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -223,6 +223,10 @@ class Database:
         if version < 16:
             await self._migrate_v16()
             await self._set_schema_version(16)
+            version = 16
+        if version < 17:
+            await self._migrate_v17()
+            await self._set_schema_version(17)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -495,7 +499,7 @@ class Database:
             (
                 "users",
                 "role",
-                ("SUPERADMIN", "APPROVED_USER", "PENDING_USER", "BLOCKED_USER"),
+                ("SUPERADMIN", "MODERATOR", "APPROVED_USER", "PENDING_USER", "BLOCKED_USER"),
             ),
             ("access_requests", "status", ("pending", "approved", "rejected")),
             (
@@ -673,6 +677,38 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_announcement_batches_scheduled "
                 "ON announcement_batches(scheduled_at) "
                 "WHERE status = 'scheduled' AND scheduled_at IS NOT NULL"
+            )
+        finally:
+            await self._raw_conn().execute("PRAGMA foreign_keys = ON")
+
+    async def _migrate_v17(self) -> None:
+        # Add MODERATOR to the users.role CHECK constraint by recreating the table.
+        # Same pattern as _migrate_v16: FK OFF to avoid cascade complications.
+        await self._raw_conn().execute("PRAGMA foreign_keys = OFF")
+        try:
+            await self.conn.execute("DROP INDEX IF EXISTS idx_users_role")
+            await self.conn.execute("DROP INDEX IF EXISTS idx_users_active_role")
+            await self.conn.execute(
+                """
+                CREATE TABLE users_new (
+                  telegram_user_id INTEGER PRIMARY KEY,
+                  username TEXT,
+                  first_name TEXT,
+                  role TEXT NOT NULL CHECK(role IN ('SUPERADMIN','MODERATOR','APPROVED_USER','PENDING_USER','BLOCKED_USER')),
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  blocked_at TEXT,
+                  trial_quota_reset_at TEXT DEFAULT NULL,
+                  note TEXT DEFAULT NULL
+                )
+                """
+            )
+            await self.conn.execute("INSERT INTO users_new SELECT * FROM users")
+            await self.conn.execute("DROP TABLE users")
+            await self.conn.execute("ALTER TABLE users_new RENAME TO users")
+            await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
+            await self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_users_active_role ON users(role) WHERE blocked_at IS NULL"
             )
         finally:
             await self._raw_conn().execute("PRAGMA foreign_keys = ON")

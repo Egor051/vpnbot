@@ -105,9 +105,15 @@ class UserService:
             raise AccessDenied("Недостаточно прав")
         return user
 
+    async def require_moderator_or_admin(self, actor_user_id: int) -> User:
+        user = await self.get_user(actor_user_id)
+        if user.role in {UserRole.SUPERADMIN, UserRole.MODERATOR}:
+            return user
+        raise AccessDenied("Недостаточно прав")
+
     async def require_approved_or_admin(self, actor_user_id: int) -> User:
         user = await self.get_user(actor_user_id)
-        if user.role == UserRole.SUPERADMIN:
+        if user.role in {UserRole.SUPERADMIN, UserRole.MODERATOR}:
             return user
         if is_blocked_user(user):
             raise AccessDenied("Доступ заблокирован")
@@ -147,7 +153,7 @@ class UserService:
         *,
         requested_at: str,
     ) -> tuple[User, bool, bool]:
-        await self.require_superadmin(actor_user_id)
+        await self.require_moderator_or_admin(actor_user_id)
         current = await self.get_user(target_user_id)
         if target_user_id in self.settings.admin_ids or current.role == UserRole.SUPERADMIN:
             return current, False, False
@@ -163,7 +169,7 @@ class UserService:
         return await self.get_user(target_user_id), True, repeat_after_block
 
     async def reject_access_request_user(self, actor_user_id: int, target_user_id: int) -> tuple[User | None, bool]:
-        await self.require_superadmin(actor_user_id)
+        await self.require_moderator_or_admin(actor_user_id)
         user = await self.users.get_by_id(target_user_id)
         if user is None:
             return None, False
@@ -179,13 +185,15 @@ class UserService:
         target_user_id: int,
         revoke_active_keys: bool = True,
     ) -> BlockUserResult:
-        await self.require_superadmin(actor_user_id)
+        actor = await self.require_moderator_or_admin(actor_user_id)
         async with self.user_locks.lock(target_user_id):
             if target_user_id in self.settings.admin_ids:
                 raise InvalidOperation("Нельзя заблокировать superadmin из ADMIN_IDS")
             target = await self.get_user(target_user_id)
             if target.role == UserRole.SUPERADMIN:
                 raise InvalidOperation("Нельзя заблокировать superadmin")
+            if actor.role == UserRole.MODERATOR and target.role == UserRole.MODERATOR:
+                raise AccessDenied("Модератор не может заблокировать другого модератора")
 
             revoked_key_ids: list[int] = []
             revoked_proxy_ids: list[int] = []
@@ -317,7 +325,7 @@ class UserService:
                 return
 
     async def unblock_user(self, actor_user_id: int, target_user_id: int) -> User:
-        await self.require_superadmin(actor_user_id)
+        await self.require_moderator_or_admin(actor_user_id)
         if target_user_id in self.settings.admin_ids:
             raise InvalidOperation("Нельзя изменить роль superadmin из ADMIN_IDS")
         target = await self.get_user(target_user_id)
@@ -336,7 +344,7 @@ class UserService:
         return await self.get_user(target_user_id)
 
     async def inspect_unblock_risk(self, actor_user_id: int, target_user_id: int) -> UnblockUserWarning:
-        await self.require_superadmin(actor_user_id)
+        await self.require_moderator_or_admin(actor_user_id)
         if target_user_id in self.settings.admin_ids:
             raise InvalidOperation("Нельзя изменить роль superadmin из ADMIN_IDS")
         target = await self.get_user(target_user_id)
@@ -381,11 +389,11 @@ class UserService:
         )
 
     async def list_users(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[User]:
-        await self.require_superadmin(actor_user_id)
+        await self.require_moderator_or_admin(actor_user_id)
         return await self.users.list_users(limit=limit, offset=offset)
 
     async def count_keys_for_users(self, actor_user_id: int, user_ids: list[int]) -> dict[int, int]:
-        await self.require_superadmin(actor_user_id)
+        await self.require_moderator_or_admin(actor_user_id)
         if self._vpn_keys is None:
             return {}
         return await self._vpn_keys.count_by_owners(user_ids)

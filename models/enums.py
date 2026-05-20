@@ -4,6 +4,7 @@ from enum import StrEnum
 
 class UserRole(StrEnum):
     SUPERADMIN = "SUPERADMIN"
+    MODERATOR = "MODERATOR"
     APPROVED_USER = "APPROVED_USER"
     PENDING_USER = "PENDING_USER"
     BLOCKED_USER = "BLOCKED_USER"
