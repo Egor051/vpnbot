@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
 
-from bot.fsm.states import AdminCreateKeyStates, CreateKeyStates
+from bot.fsm.states import AdminCreateKeyStates
 from bot.handlers.admin import (
     admin_access_decision_confirm,
     admin_approve,
@@ -716,6 +716,120 @@ def test_admin_delete_returns_same_page_when_still_valid(monkeypatch) -> None:
 
         assert xray.deleted == [10]
         assert "страница 3" in edits[-1][0]
+
+    asyncio.run(run())
+
+
+def test_pending_user_with_null_request_still_sees_trial_button() -> None:
+    """PENDING_USER with no active access_request (request=None) must still get trial CTA."""
+
+    class Message:
+        def __init__(self) -> None:
+            self.from_user = SimpleNamespace(id=200, username="user", first_name="User")
+            self.chat = SimpleNamespace(type=ChatType.PRIVATE)
+            self.answers: list[tuple[str, object]] = []
+
+        async def answer(self, text: str, reply_markup: object = None) -> None:
+            self.answers.append((text, reply_markup))
+
+    class Access:
+        async def create_or_get_request(self, profile: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                user=User(200, "user", "User", UserRole.PENDING_USER, "now", "now", None),
+                request=None,
+                created=False,
+            )
+
+    class VpnKeys:
+        async def list_active_trial_by_owner(self, user_id: int) -> list[VpnKey]:
+            return []
+
+    class TrialAccess:
+        async def can_request_trial(self, user_id: int) -> bool:
+            return True
+
+    async def run() -> None:
+        message = Message()
+        services = SimpleNamespace(
+            access=Access(),
+            vpn_keys=VpnKeys(),
+            trial_access=TrialAccess(),
+            settings=SimpleNamespace(admin_ids=[]),
+        )
+        await start_command(message, services, SimpleNamespace())  # type: ignore[arg-type]
+
+        texts = [t for t, _ in message.answers]
+        assert any("обработана" in t for t in texts), "должно быть сообщение об уже обработанной заявке"
+        markups = [mk for _, mk in message.answers if mk is not None]
+        assert markups, "должна быть клавиатура с кнопкой пробного доступа"
+
+    asyncio.run(run())
+
+
+def test_pending_user_with_null_request_and_active_trial_shows_key() -> None:
+    """PENDING_USER with no access_request but existing active trial key shows the key."""
+
+    class Message:
+        def __init__(self) -> None:
+            self.from_user = SimpleNamespace(id=200, username="user", first_name="User")
+            self.chat = SimpleNamespace(type=ChatType.PRIVATE)
+            self.answers: list[tuple[str, object]] = []
+
+        async def answer(self, text: str, reply_markup: object = None) -> None:
+            self.answers.append((text, reply_markup))
+
+    active_key = VpnKey(
+        id=7,
+        owner_user_id=200,
+        username="user",
+        key_type=VpnKeyType.XRAY,
+        status=VpnKeyStatus.ACTIVE,
+        note=None,
+        uuid="uuid-7",
+        email_label="xray_00007",
+        public_key=None,
+        client_ip=None,
+        payload={},
+        public_payload={},
+        created_at="now",
+        updated_at="now",
+        revoked_at=None,
+        expires_at="2099-01-01T00:00:00",
+        deleted_at=None,
+        created_by=200,
+        revoked_by=None,
+        deleted_by=None,
+    )
+
+    class Access:
+        async def create_or_get_request(self, profile: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                user=User(200, "user", "User", UserRole.PENDING_USER, "now", "now", None),
+                request=None,
+                created=False,
+            )
+
+    class VpnKeys:
+        async def list_active_trial_by_owner(self, user_id: int) -> list[VpnKey]:
+            return [active_key]
+
+    class TrialAccess:
+        async def can_request_trial(self, user_id: int) -> bool:
+            return False
+
+    async def run() -> None:
+        message = Message()
+        services = SimpleNamespace(
+            access=Access(),
+            vpn_keys=VpnKeys(),
+            trial_access=TrialAccess(),
+            settings=SimpleNamespace(admin_ids=[]),
+        )
+        await start_command(message, services, SimpleNamespace())  # type: ignore[arg-type]
+
+        texts = [t for t, _ in message.answers]
+        assert any("обработана" in t for t in texts)
+        assert any("пробный ключ" in t for t in texts), "должно отобразиться сообщение с активным ключом"
 
     asyncio.run(run())
 

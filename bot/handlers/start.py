@@ -50,9 +50,7 @@ async def start_command(message: Message, services: Services, bot: Bot) -> None:
 
         if result.request is None:
             await message.answer("Заявка уже обработана. Дождитесь решения администратора.")
-            return
-
-        if result.created:
+        elif result.created:
             await message.answer("Заявка на доступ создана. Дождитесь решения администратора.")
             await _notify_admins(services, bot, result.request.id, profile.telegram_user_id, profile.username)
         else:

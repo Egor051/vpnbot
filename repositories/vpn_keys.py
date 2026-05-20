@@ -506,9 +506,10 @@ class VpnKeyRepository:
     async def list_active_trial_by_owner(self, owner_user_id: int) -> list[VpnKey]:
         cursor = await self.db.conn.execute(
             """
-            SELECT * FROM vpn_keys
-            WHERE owner_user_id = ? AND status = ? AND expires_at IS NOT NULL
-            ORDER BY created_at DESC
+            SELECT vk.* FROM vpn_keys vk
+            JOIN trial_key_requests tkr ON tkr.key_id = vk.id AND tkr.status = 'approved'
+            WHERE vk.owner_user_id = ? AND vk.status = ?
+            ORDER BY vk.created_at DESC
             """,
             (owner_user_id, VpnKeyStatus.ACTIVE.value),
         )
