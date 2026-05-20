@@ -121,7 +121,7 @@ class XrayService:
                 )
                 xray_apply_result = None
                 try:
-                    await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+                    await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
                     xray_apply_result = await self.adapter.add_client(
                         uuid_value=uuid_value,
                         email_label=email_label,

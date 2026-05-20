@@ -131,7 +131,7 @@ class AwgService:
                     expires_at=expires_at,
                 )
                 try:
-                    await self._ensure_can_create(actor_user_id, owner.telegram_user_id)
+                    await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
                     await self.adapter.add_peer(
                         key_id=key.id,
                         owner_user_id=owner.telegram_user_id,
