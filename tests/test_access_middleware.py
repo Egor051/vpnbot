@@ -1,7 +1,7 @@
 
 from types import SimpleNamespace
 
-from bot.middlewares.access import _is_start_command
+from bot.middlewares.access import _is_start_command, _is_trial_callback
 
 
 def test_is_start_command_handles_empty_text() -> None:
@@ -21,3 +21,16 @@ def test_is_start_command_detects_start_with_payload() -> None:
 def test_is_start_command_rejects_non_start_text() -> None:
     assert _is_start_command(SimpleNamespace(text="/startfoo")) is False
     assert _is_start_command(SimpleNamespace(text="hello")) is False
+
+
+def test_is_trial_callback_allows_trial_request() -> None:
+    assert _is_trial_callback(SimpleNamespace(data="trial:request")) is True
+    assert _is_trial_callback(SimpleNamespace(data="trial:proto:xray")) is True
+    assert _is_trial_callback(SimpleNamespace(data="trial:proto:awg")) is True
+
+
+def test_is_trial_callback_rejects_other_data() -> None:
+    assert _is_trial_callback(SimpleNamespace(data=None)) is False
+    assert _is_trial_callback(SimpleNamespace(data="keys:list")) is False
+    assert _is_trial_callback(SimpleNamespace(data="trial:show:42")) is False
+    assert _is_trial_callback(SimpleNamespace(data="admin:panel")) is False
