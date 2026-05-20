@@ -6,6 +6,7 @@ from aiohttp import web
 
 from adapters.health_server import create_health_app
 from bot.app import _awg_stats_loop, create_app
+from services.anomaly_detection import anomaly_detection_loop
 from services.key_expiry import key_expiry_loop
 from services.offsite_backup import offsite_backup_loop
 from config.settings import load_settings
@@ -24,6 +25,7 @@ async def main() -> None:
         awg_stats_task: asyncio.Task | None = None
         expiry_task: asyncio.Task | None = None
         backup_task: asyncio.Task | None = None
+        anomaly_task: asyncio.Task | None = None
         try:
             if settings.awg_stats_interval > 0:
                 awg_stats_task = asyncio.create_task(
@@ -37,6 +39,12 @@ async def main() -> None:
                     name="key-expiry-checker",
                 )
                 logger.info("Key expiry checker started (interval=%ds)", settings.key_expiry_check_interval)
+            if settings.anomaly_check_interval > 0:
+                anomaly_task = asyncio.create_task(
+                    anomaly_detection_loop(services.anomaly_detection, settings.anomaly_check_interval),
+                    name="anomaly-detector",
+                )
+                logger.info("Anomaly detector started (interval=%ds)", settings.anomaly_check_interval)
             if settings.offsite_backup_interval > 0 and services.offsite_backup.enabled:
                 backup_task = asyncio.create_task(
                     offsite_backup_loop(
@@ -68,6 +76,9 @@ async def main() -> None:
             if backup_task is not None:
                 backup_task.cancel()
                 await asyncio.gather(backup_task, return_exceptions=True)
+            if anomaly_task is not None:
+                anomaly_task.cancel()
+                await asyncio.gather(anomaly_task, return_exceptions=True)
             if runner is not None:
                 await runner.cleanup()
             await db.close()

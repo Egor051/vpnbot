@@ -37,6 +37,7 @@ from repositories.trial_requests import TrialKeyRequestRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.access_approval import AccessApprovalService
+from services.anomaly_detection import AnomalyDetectionService
 from services.announcements import AnnouncementService
 from services.audit import AuditService
 from services.awg import AwgService
@@ -264,6 +265,19 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         clock=clock,
     )
 
+    anomaly_detection_service = AnomalyDetectionService(
+        vpn_keys=vpn_keys_repo,
+        awg=awg_adapter,
+        xray_service=xray_service,
+        awg_service=awg_service,
+        admin_ids=settings.admin_ids,
+        window_seconds=settings.anomaly_window_seconds,
+        min_unique_ips=settings.anomaly_min_unique_ips,
+        auto_revoke=settings.anomaly_auto_revoke,
+        cooldown_seconds=settings.anomaly_cooldown_seconds,
+        xray_access_log_path=settings.xray_access_log_path,
+    )
+
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
 
     services = Services(
@@ -285,6 +299,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         key_expiry=key_expiry_service,
         trial_access=trial_access_service,
         offsite_backup=offsite_backup_service,
+        anomaly_detection=anomaly_detection_service,
     )
 
     await _startup_reconcile_keys(services)
@@ -292,6 +307,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     key_expiry_service.bot = bot
     trial_access_service.bot = bot
+    anomaly_detection_service.bot = bot
     # FSM state is in-memory only — bot restart clears in-progress wizards.
     # Switching to a persistent SQLite-backed storage would preserve state across
     # restarts but is not yet implemented (see aiogram_sqlite_storage or a custom
