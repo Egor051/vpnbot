@@ -96,6 +96,19 @@ def confirm_keyboard(action: str, key_id: int, owner_user_id: int | None = None,
     )
 
 
+def mtu_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="1360 (рекомендуемый)", callback_data="mtu:1360")],
+            [InlineKeyboardButton(text="1280", callback_data="mtu:1280")],
+            [InlineKeyboardButton(text="1420", callback_data="mtu:1420")],
+            [InlineKeyboardButton(text="1500", callback_data="mtu:1500")],
+            [InlineKeyboardButton(text="Ввести вручную", callback_data="mtu:custom")],
+            [InlineKeyboardButton(text="Отмена", callback_data="cancel")],
+        ]
+    )
+
+
 def after_key_created_keyboard(key: VpnKey) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

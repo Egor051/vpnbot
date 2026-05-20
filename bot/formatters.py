@@ -237,6 +237,7 @@ def create_confirm_text(
     note: str | None,
     owner: User | None = None,
     expires_at: str | None = None,
+    mtu: int | None = None,
 ) -> str:
     lines = [
         "<b>Подтверждение создания ключа</b>",
@@ -244,6 +245,8 @@ def create_confirm_text(
         f"Заметка: {h(note or 'нет')}",
         f"Срок действия: {h(format_expiry_date(expires_at))}",
     ]
+    if mtu is not None:
+        lines.append(f"MTU: {h(str(mtu))}")
     if owner is not None:
         lines.append(f"Владелец: {format_user_display(owner.telegram_user_id, owner.username)}")
     return "\n".join(lines)
@@ -262,7 +265,7 @@ def xray_config_text(config_text: str) -> str:
 
 
 def awg_config_text(config_text: str) -> str:
-    return f"{config_text}\n\nСкопируйте конфиг в клиент AmneziaWG."
+    return f"{config_text}\n\nДобавьте ссылку в клиент AmneziaWG или используйте файл конфигурации."
 
 
 def proxy_section_separator() -> str:
