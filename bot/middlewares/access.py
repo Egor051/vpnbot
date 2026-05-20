@@ -41,6 +41,8 @@ class BlockedUserMiddleware(BaseMiddleware):
             return await handler(event, data)
         if isinstance(event, Message) and _is_start_command(event):
             return await handler(event, data)
+        if isinstance(event, CallbackQuery) and _is_trial_callback(event):
+            return await handler(event, data)
         try:
             user = await self.users.get_user(tg_user.id)
         except NotFound:
@@ -53,6 +55,13 @@ class BlockedUserMiddleware(BaseMiddleware):
         elif isinstance(event, CallbackQuery):
             await safe_callback_answer(event, BLOCKED_CALLBACK_TEXT, show_alert=True)
         return None
+
+
+def _is_trial_callback(callback: CallbackQuery) -> bool:
+    data = callback.data
+    if data is None:
+        return False
+    return data == "trial:request" or data.startswith("trial:proto:")
 
 
 def _is_start_command(message: Message) -> bool:
