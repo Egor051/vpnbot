@@ -42,6 +42,7 @@ from services.audit import AuditService
 from services.awg import AwgService
 from services.backend_health import BackendHealth
 from services.key_expiry import KeyExpiryService, key_expiry_loop
+from services.offsite_backup import OffsiteBackupService
 from services.notes import NotesService
 from services.proxy import ProxyService
 from services.socks5 import Socks5Service
@@ -257,6 +258,12 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         clock=clock,
     )
 
+    offsite_backup_service = OffsiteBackupService(
+        db_path=settings.db_path,
+        encryption_key=settings.offsite_backup_encryption_key,
+        clock=clock,
+    )
+
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
 
     services = Services(
@@ -277,6 +284,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         backend_health=backend_health,
         key_expiry=key_expiry_service,
         trial_access=trial_access_service,
+        offsite_backup=offsite_backup_service,
     )
 
     await _startup_reconcile_keys(services)

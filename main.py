@@ -7,6 +7,7 @@ from aiohttp import web
 from adapters.health_server import create_health_app
 from bot.app import _awg_stats_loop, create_app
 from services.key_expiry import key_expiry_loop
+from services.offsite_backup import offsite_backup_loop
 from config.settings import load_settings
 from utils.logging import setup_logging
 from utils.single_instance import SingleInstanceError, SingleInstanceLock
@@ -22,6 +23,7 @@ async def main() -> None:
         runner: web.AppRunner | None = None
         awg_stats_task: asyncio.Task | None = None
         expiry_task: asyncio.Task | None = None
+        backup_task: asyncio.Task | None = None
         try:
             if settings.awg_stats_interval > 0:
                 awg_stats_task = asyncio.create_task(
@@ -35,6 +37,17 @@ async def main() -> None:
                     name="key-expiry-checker",
                 )
                 logger.info("Key expiry checker started (interval=%ds)", settings.key_expiry_check_interval)
+            if settings.offsite_backup_interval > 0 and services.offsite_backup.enabled:
+                backup_task = asyncio.create_task(
+                    offsite_backup_loop(
+                        services.offsite_backup,
+                        bot,
+                        settings.admin_ids,
+                        settings.offsite_backup_interval,
+                    ),
+                    name="offsite-backup",
+                )
+                logger.info("Offsite backup scheduler started (interval=%ds)", settings.offsite_backup_interval)
             if settings.health_port is not None:
                 health_app = create_health_app(backend_health)
                 runner = web.AppRunner(health_app)
@@ -52,6 +65,9 @@ async def main() -> None:
             if expiry_task is not None:
                 expiry_task.cancel()
                 await asyncio.gather(expiry_task, return_exceptions=True)
+            if backup_task is not None:
+                backup_task.cancel()
+                await asyncio.gather(backup_task, return_exceptions=True)
             if runner is not None:
                 await runner.cleanup()
             await db.close()

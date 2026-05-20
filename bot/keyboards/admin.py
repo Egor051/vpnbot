@@ -42,6 +42,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Пробные доступы", callback_data="admin:trial")],
             [InlineKeyboardButton(text="Объявление", callback_data="admin:announce")],
             [InlineKeyboardButton(text="Восстановление объявлений", callback_data="admin:announce_batches")],
+            [InlineKeyboardButton(text="Бэкап БД", callback_data="admin:backup")],
             [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
         ]
     )

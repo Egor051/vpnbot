@@ -11,6 +11,7 @@ from services.backend_health import BackendHealth
 from services.key_expiry import KeyExpiryService
 from services.mtproto import MtProtoService
 from services.notes import NotesService
+from services.offsite_backup import OffsiteBackupService
 from services.proxy import ProxyService
 from services.socks5 import Socks5Service
 from services.traffic_stats import TrafficStatsService
@@ -39,3 +40,4 @@ class Services:
     backend_health: BackendHealth
     key_expiry: KeyExpiryService
     trial_access: TrialAccessService
+    offsite_backup: OffsiteBackupService
