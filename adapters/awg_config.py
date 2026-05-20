@@ -648,6 +648,21 @@ class AwgConfigAdapter:
             return text
         return "\n".join(updated_lines).rstrip() + "\n"
 
+    async def list_peer_endpoints(self) -> dict[str, str]:
+        """Return {public_key: source_ip} for peers that have an active endpoint."""
+        peers = await self.list_runtime_peers()
+        result: dict[str, str] = {}
+        for peer in peers:
+            pub = peer.get("PublicKey")
+            endpoint = peer.get("Endpoint")
+            if not pub or not endpoint:
+                continue
+            # endpoint is "ip:port" for IPv4 or "[ipv6]:port" for IPv6
+            ip = endpoint.rsplit(":", 1)[0].strip("[]")
+            if ip:
+                result[pub] = ip
+        return result
+
     def _parse_runtime_peers(self, text: str) -> list[dict[str, str]]:
         peers: list[dict[str, str]] = []
         current: dict[str, str] | None = None
@@ -664,6 +679,8 @@ class AwgConfigAdapter:
             key, value = [part.strip() for part in line.split(":", 1)]
             if key == "allowed ips":
                 current["AllowedIPs"] = value
+            elif key == "endpoint":
+                current["Endpoint"] = value
         return peers
 
     def _allowed_ips_contains(self, allowed_ips: str, client_ip: str) -> bool:

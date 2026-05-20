@@ -258,6 +258,12 @@ class Settings:
     key_max_trial_days: int = 365
     offsite_backup_encryption_key: str = field(default="", repr=False)
     offsite_backup_interval: int = 604800
+    anomaly_check_interval: int = 300
+    anomaly_window_seconds: int = 3600
+    anomaly_min_unique_ips: int = 3
+    anomaly_auto_revoke: bool = False
+    anomaly_cooldown_seconds: int = 7200
+    xray_access_log_path: str = ""
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -461,6 +467,12 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         helper_staging_root=helper_staging_root,
         offsite_backup_encryption_key=_fernet_key("OFFSITE_BACKUP_ENCRYPTION_KEY"),
         offsite_backup_interval=_int_range("OFFSITE_BACKUP_INTERVAL", 604800, 0, 365 * 24 * 3600),
+        anomaly_check_interval=_int_range("ANOMALY_CHECK_INTERVAL", 300, 0, 86400),
+        anomaly_window_seconds=_int_range("ANOMALY_WINDOW_SECONDS", 3600, 60, 86400),
+        anomaly_min_unique_ips=_int_range("ANOMALY_MIN_UNIQUE_IPS", 3, 1, 1000),
+        anomaly_auto_revoke=_bool("ANOMALY_AUTO_REVOKE", False),
+        anomaly_cooldown_seconds=_int_range("ANOMALY_COOLDOWN_SECONDS", 7200, 0, 86400),
+        xray_access_log_path=_optional("XRAY_ACCESS_LOG_PATH"),
         socks5_user_helper_path=Path(_optional("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/vpnbot-socks5-user")),
         xray_apply_helper_path=Path(_optional("XRAY_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-xray-apply")),
         awg_apply_helper_path=Path(_optional("AWG_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-awg-apply")),
