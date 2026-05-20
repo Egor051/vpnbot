@@ -30,6 +30,10 @@ class AdminCreateKeyStates(StatesGroup):
     confirming = State()
 
 
+class AdminEditUserNoteStates(StatesGroup):
+    waiting_note = State()
+
+
 class AdminAnnouncementStates(StatesGroup):
     waiting_message = State()
     confirming = State()

@@ -119,7 +119,7 @@ def test_note_update_succeeds_when_non_critical_audit_fails(tmp_path: Path) -> N
                 uuid="00000000-0000-4000-8000-000000000100",
                 email_label="xray_A7kQz",
             )
-            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, audit=_FailingAudit())  # type: ignore[arg-type]
+            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, users_repo=users_repo, audit=_FailingAudit())  # type: ignore[arg-type]
 
             await notes.update_key_note(100, key.id, "new")
 
@@ -181,7 +181,7 @@ def test_superadmin_cannot_update_foreign_private_note(tmp_path: Path) -> None:
                 uuid="00000000-0000-4000-8000-000000000101",
                 email_label="xray_Z7kQz",
             )
-            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, audit=audit)
+            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, users_repo=users_repo, audit=audit)
 
             with pytest.raises(AccessDenied):
                 await notes.update_key_note(1, key.id, "admin overwrite")

@@ -107,7 +107,7 @@ def test_note_used_as_fallback_label_is_not_duplicated_in_key_list_or_details() 
 
 def test_admin_user_card_hides_foreign_note_fallback_label() -> None:
     text = user_card_text(
-        SimpleNamespace(telegram_user_id=100, username="owner", role=UserRole.APPROVED_USER, updated_at="now"),
+        SimpleNamespace(telegram_user_id=100, username="owner", role=UserRole.APPROVED_USER, updated_at="now", note=None),
         keys=[_key(note="foreign note", email_label=None, public_key=None)],
         viewer_user_id=1,
     )

@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   blocked_at TEXT,
-  trial_quota_reset_at TEXT DEFAULT NULL
+  trial_quota_reset_at TEXT DEFAULT NULL,
+  note TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS access_requests (

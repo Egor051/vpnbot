@@ -30,7 +30,7 @@ from bot.formatters import (
     users_page_text,
 )
 from services.health import run_bot_health
-from bot.fsm.states import AdminCreateKeyStates, AdminAnnouncementStates
+from bot.fsm.states import AdminCreateKeyStates, AdminAnnouncementStates, AdminEditUserNoteStates
 from bot.guards import require_superadmin
 from bot.handlers.common import answer_callback_error, answer_message_error
 from bot.keyboards.admin import (
@@ -1213,6 +1213,56 @@ async def admin_trial_reset(callback: CallbackQuery, services: Services) -> None
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:unote:\d+$"))
+async def admin_edit_user_note(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback)
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        user_id = int(callback.data.rsplit(":", 1)[-1])
+        user = await services.users.get_user(user_id)
+        await state.set_state(AdminEditUserNoteStates.waiting_note)
+        await state.update_data(target_user_id=user_id)
+        current = f" Текущая: <code>{user.note}</code>" if user.note else ""
+        await safe_edit_message_text(
+            callback.message,
+            f"Введите заметку для пользователя <code>{user_id}</code> или отправьте <code>-</code>, чтобы очистить.{current}",
+            reply_markup=cancel_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.message(AdminEditUserNoteStates.waiting_note)
+async def admin_edit_user_note_input(message: Message, state: FSMContext, services: Services) -> None:
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    try:
+        await require_superadmin(services, message.from_user.id)
+        data = await state.get_data()
+        user_id = int(data["target_user_id"])
+        await services.notes.update_user_note(message.from_user.id, user_id, message.text)
+        await state.clear()
+        user = await services.users.get_user(user_id)
+        keys = await services.vpn_keys.list_for_actor(message.from_user.id, owner_user_id=user_id, limit=10)
+        stats_by_key_id = await services.traffic_stats.cached_for_keys(keys)
+        has_used_trial = not await services.trial_access.can_request_trial(user_id)
+        await message.answer(
+            user_card_text(user, keys, stats_by_key_id, viewer_user_id=message.from_user.id),
+            reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial),
+        )
+    except ValueError as exc:
+        await answer_message_error(message, exc)
+    except Exception as exc:
+        await state.clear()
+        await answer_message_error(message, exc)
 
 
 @router.callback_query(F.data == "admin:backup")
