@@ -6,7 +6,6 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message
 
 from bot.container import Services
-from bot.middlewares.access import BLOCKED_START_TEXT
 from bot.handlers.common import answer_message_error, is_admin, profile_from_tg
 from bot.formatters import key_detail_text, main_menu_text
 from bot.keyboards.admin import access_request_keyboard
@@ -31,7 +30,6 @@ async def start_command(message: Message, services: Services, bot: Bot) -> None:
         profile = profile_from_tg(message.from_user)
         result = await services.access.create_or_get_request(profile)
         if is_blocked_user(result.user):
-            await message.answer(BLOCKED_START_TEXT)
             if result.request is None:
                 await message.answer("Повторная заявка пока не создана. Дождитесь решения администратора.")
                 return
