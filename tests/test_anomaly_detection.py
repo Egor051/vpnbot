@@ -5,8 +5,6 @@ import time as time_module
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 from services.anomaly_detection import (
@@ -150,8 +148,7 @@ def test_awg_peer_no_endpoint():
 # ------------------------------------------------------------------ list_peer_endpoints helper
 
 
-@pytest.mark.asyncio
-async def test_list_peer_endpoints_extracts_ips():
+def test_list_peer_endpoints_extracts_ips():
     from adapters.awg_config import AwgConfigAdapter
 
     svc = MagicMock(spec=AwgConfigAdapter)
@@ -162,7 +159,11 @@ async def test_list_peer_endpoints_extracts_ips():
             {"PublicKey": "pk3"},  # no endpoint
         ]
     )
-    result = await AwgConfigAdapter.list_peer_endpoints(svc)
+
+    async def run():
+        return await AwgConfigAdapter.list_peer_endpoints(svc)
+
+    result = asyncio.run(run())
     assert result == {"pk1": "1.2.3.4", "pk2": "::1"}
 
 
@@ -221,8 +222,7 @@ def test_parse_xray_log_tail_missing_file(tmp_path):
 # ------------------------------------------------------------------ check_all / thresholds
 
 
-@pytest.mark.asyncio
-async def test_alert_fires_when_threshold_exceeded():
+def test_alert_fires_when_threshold_exceeded():
     key = _awg_key(key_id=5, public_key="pkX")
     vpn_keys_mock = AsyncMock()
     vpn_keys_mock.list_by_type_statuses.return_value = [key]
@@ -241,18 +241,16 @@ async def test_alert_fires_when_threshold_exceeded():
     svc.bot = AsyncMock()
 
     now = time_module.time()
-    # Pre-seed observations with 3 unique IPs
     svc._record_ip(5, now - 100, "10.0.0.1")
     svc._record_ip(5, now - 80, "10.0.0.2")
     svc._record_ip(5, now - 60, "10.0.0.3")
 
-    await svc._check_thresholds(now)
+    asyncio.run(svc._check_thresholds(now))
 
     svc.bot.send_message.assert_called_once_with(999, svc.bot.send_message.call_args[0][1])
 
 
-@pytest.mark.asyncio
-async def test_alert_respects_cooldown():
+def test_alert_respects_cooldown():
     key = _awg_key(key_id=6, public_key="pkY")
     vpn_keys_mock = AsyncMock()
     vpn_keys_mock.get_by_id.return_value = key
@@ -268,12 +266,11 @@ async def test_alert_respects_cooldown():
     svc._record_ip(6, now - 10, "1.2.3.4")
     svc._last_alerted[6] = now - 100  # alerted 100s ago, cooldown=3600
 
-    await svc._check_thresholds(now)
+    asyncio.run(svc._check_thresholds(now))
     svc.bot.send_message.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_no_alert_below_threshold():
+def test_no_alert_below_threshold():
     key = _awg_key(key_id=7)
     vpn_keys_mock = AsyncMock()
     vpn_keys_mock.get_by_id.return_value = key
@@ -285,5 +282,5 @@ async def test_no_alert_below_threshold():
     svc._record_ip(7, now, "1.1.1.1")
     svc._record_ip(7, now, "2.2.2.2")
 
-    await svc._check_thresholds(now)
+    asyncio.run(svc._check_thresholds(now))
     svc.bot.send_message.assert_not_called()
