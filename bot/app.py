@@ -226,6 +226,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         vpn_keys=vpn_keys_repo,
         proxies=proxy_repo,
         users=user_service,
+        users_repo=users_repo,
         audit=audit_service,
     )
     vpn_key_service = VpnKeyQueryService(vpn_keys=vpn_keys_repo, users=user_service)

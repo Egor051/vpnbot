@@ -759,6 +759,8 @@ def user_card_text(
         f"Роль: {h(role_text(user.role))}",
         f"Обновлён: {h(format_msk_datetime(user.updated_at))}",
     ]
+    if user.note:
+        lines.append(f"Заметка: {h(user.note)}")
     if keys is not None:
         lines.append("")
         lines.append("<b>Ключи</b>")

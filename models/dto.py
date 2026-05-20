@@ -20,6 +20,7 @@ class User:
     created_at: str
     updated_at: str
     blocked_at: str | None
+    note: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

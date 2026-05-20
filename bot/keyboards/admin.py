@@ -138,6 +138,7 @@ def user_actions_keyboard(user: User, *, has_used_trial: bool = False) -> Inline
     if has_used_trial:
         rows.append([InlineKeyboardButton(text="Сбросить пробный доступ", callback_data=f"admin:trial:reset:{user.telegram_user_id}")])
     rows.append([InlineKeyboardButton(text="Ключи пользователя", callback_data=f"admin:ukeys:{user.telegram_user_id}:0")])
+    rows.append([InlineKeyboardButton(text="Редактировать заметку", callback_data=f"admin:unote:{user.telegram_user_id}")])
     rows.append([InlineKeyboardButton(text="К пользователям", callback_data="admin:users")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

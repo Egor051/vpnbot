@@ -931,7 +931,7 @@ def test_blocked_at_only_owner_cannot_update_key_note(tmp_path: Path) -> None:
             audit = AuditService(audit_repo, ClockProvider())
             users = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=audit)
             await users.bootstrap_admins()
-            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, audit=audit)
+            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, users_repo=users_repo, audit=audit)
 
             await users_repo.upsert_profile(TelegramUserProfile(telegram_user_id=240, username="owner", first_name="Owner"), UserRole.APPROVED_USER, "now")
             key = await vpn_keys.create_pending(
@@ -974,7 +974,7 @@ def test_blocked_owner_cannot_update_key_note(tmp_path: Path) -> None:
             audit = AuditService(AuditLogRepository(db), ClockProvider())
             users = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=audit)
             await users.bootstrap_admins()
-            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, audit=audit)
+            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, users_repo=users_repo, audit=audit)
 
             await users_repo.upsert_profile(
                 TelegramUserProfile(telegram_user_id=241, username="blocked_owner", first_name="Blocked"),
@@ -1019,7 +1019,7 @@ def test_key_note_update_preserves_owner_private_note_rules(tmp_path: Path) -> N
             audit = AuditService(AuditLogRepository(db), ClockProvider())
             users = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=audit)
             await users.bootstrap_admins()
-            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, audit=audit)
+            notes = NotesService(vpn_keys=vpn_keys, proxies=ProxyRepository(db), users=users, users_repo=users_repo, audit=audit)
 
             await users_repo.upsert_profile(TelegramUserProfile(telegram_user_id=250, username="owner", first_name="Owner"), UserRole.APPROVED_USER, "now")
             await users_repo.upsert_profile(TelegramUserProfile(telegram_user_id=251, username="other", first_name="Other"), UserRole.APPROVED_USER, "now")

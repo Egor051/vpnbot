@@ -26,6 +26,7 @@ def _row_to_user(row: Row | None) -> User | None:
             f"Некорректное значение users.role в SQLite: {row['role']!r}. "
             "Сделайте backup DB и исправьте повреждённую запись вручную."
         ) from exc
+    keys = row.keys()
     return User(
         telegram_user_id=int(row["telegram_user_id"]),
         username=row["username"],
@@ -34,6 +35,7 @@ def _row_to_user(row: Row | None) -> User | None:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         blocked_at=row["blocked_at"],
+        note=row["note"] if "note" in keys else None,
     )
 
 
@@ -155,6 +157,15 @@ class UserRepository:
             )
         rows = await cursor.fetchall()
         return [user for row in rows if (user := _row_to_user(row)) is not None]
+
+    async def update_note(self, telegram_user_id: int, note: str | None, now: str) -> None:
+        cursor = await self.db.conn.execute(
+            "UPDATE users SET note = ?, updated_at = ? WHERE telegram_user_id = ?",
+            (note, now, telegram_user_id),
+        )
+        await self.db.commit()
+        if cursor.rowcount != 1:
+            raise NotFound("Пользователь не найден")
 
     async def reset_trial_quota(self, telegram_user_id: int, now: str) -> None:
         await self.db.conn.execute(

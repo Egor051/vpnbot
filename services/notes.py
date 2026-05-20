@@ -3,6 +3,7 @@ import logging
 
 from models.enums import AuditEntityType
 from repositories.proxy_entries import ProxyRepository
+from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.audit import AuditService
 from services.errors import AccessDenied, NotFound
@@ -31,11 +32,13 @@ class NotesService:
         vpn_keys: VpnKeyRepository,
         proxies: ProxyRepository,
         users: UserService,
+        users_repo: UserRepository,
         audit: AuditService,
     ) -> None:
         self.vpn_keys = vpn_keys
         self.proxies = proxies
         self.users = users
+        self.users_repo = users_repo
         self.audit = audit
 
     async def update_key_note(self, actor_user_id: int, key_id: int, note: str | None) -> None:
@@ -53,6 +56,21 @@ class NotesService:
             entity_type=AuditEntityType.VPN_KEY,
             entity_id=key_id,
             details={"key_type": key.key_type.value},
+        )
+
+    async def update_user_note(self, actor_user_id: int, target_user_id: int, note: str | None) -> None:
+        await self.users.require_superadmin(actor_user_id)
+        user = await self.users_repo.get_by_id(target_user_id)
+        if user is None:
+            raise NotFound("Пользователь не найден")
+        clean_note = normalize_note(note)
+        await self.users_repo.update_note(target_user_id, clean_note, self.users.clock.now())
+        await self._write_audit_best_effort(
+            actor_user_id=actor_user_id,
+            action="user_note_updated",
+            entity_type=AuditEntityType.USER,
+            entity_id=target_user_id,
+            details={},
         )
 
     async def update_proxy_note(self, actor_user_id: int, proxy_id: int, note: str | None) -> None:

@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -211,6 +211,10 @@ class Database:
         if version < 13:
             await self._migrate_v13()
             await self._set_schema_version(13)
+            version = 13
+        if version < 14:
+            await self._migrate_v14()
+            await self._set_schema_version(14)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -593,6 +597,11 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_trial_requests_user "
             "ON trial_key_requests(telegram_user_id, status)"
         )
+
+    async def _migrate_v14(self) -> None:
+        user_cols = await self._table_columns("users")
+        if "note" not in user_cols:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN note TEXT DEFAULT NULL")
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(
