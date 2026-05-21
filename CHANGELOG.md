@@ -7,6 +7,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **MODERATOR role** — new role between `APPROVED_USER` and `ADMIN`; moderators
+  can approve/block pending users without full admin access.
+- **Scheduled announcements** — admins can create announcements with a future
+  delivery time; a background scheduler dispatches them at the configured moment.
+- **Key expiry notifications** — `KEY_EXPIRY_NOTIFY_DAYS` env var; bot
+  proactively notifies users N days before their VPN key expires.
+- **User notes** — admins can attach free-text memos to any user card; notes are
+  stored per-user and shown in the admin panel.
+- **AWG `amnezia://` link format** — AmneziaWG key delivery now includes an
+  `amnezia://` deep-link alongside the existing INI config; MTU is selected
+  interactively during key creation.
+- **Anomaly detection for VPN keys** — background monitor flags keys with
+  suspiciously high traffic deltas (potential credential sharing); flagged keys
+  appear in the admin panel.
+- **Encrypted off-site DB backups via Telegram** — periodic database snapshots
+  are encrypted with `cryptography` (Fernet) and uploaded to a configured
+  Telegram chat for off-site storage.
+- **Trial access for pending/blocked users** — time-limited VPN keys can be
+  issued to `PENDING_USER` and `BLOCKED_USER` accounts; trial state tracked in
+  DB with admin reset capability.
+- **`XRAY_APPLY_MODE=api`** — optional mode that patches the running Xray config
+  via the management API instead of restarting the service; incompatible with
+  `PRIVILEGE_HELPERS_ENABLED` (validated at startup).
+- **AWG traffic accounting** — background collector periodically samples
+  AmneziaWG transfer counters; sampling runs inside the refresh lock to prevent
+  stale-snapshot inflation.
+- **User self-service key management** — approved users can revoke or delete
+  their own VPN keys without admin intervention.
+- **Root + API deployment mode** — `deploy/` docs and service file updated to
+  cover running the bot as root with `XRAY_APPLY_MODE=api`.
 - `CONTRIBUTING.md` — development setup, code quality gates, commit format, branch
   naming, security considerations, and PR process.
 - `CODE_OF_CONDUCT.md` — Contributor Covenant 2.1.
@@ -14,12 +44,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reports to GitHub Security Advisories.
 
 ### Changed
+- Proxy stats button removed from the user-facing proxy menu (admin-only
+  operation; was surfaced by mistake).
+- Emoji removed from proxy stats button labels and section headers for a
+  cleaner, consistent UI.
+- Redundant "you are blocked" message on `/start` removed; the inline keyboard
+  already conveys blocked status.
+- Traffic-stats refresh parallelised; hot-path regex patterns pre-compiled at
+  module load — measurable latency reduction on large user bases.
+- Codebase simplification: duplicated helpers merged, sequential `await` chains
+  parallelised, dead `getattr` branches removed.
 - `README.md` CI section: corrected Python version matrix to 3.12 only (matches
   the workflow).
 - `.github/ISSUE_TEMPLATE/bug_report.md`: added `triage` label; added
   "Relevant protocol/component" field to the Environment section.
 - `.gitignore`: fixed UTF-16/CRLF encoding corruption on the last line; normalised
   all line endings to LF.
+
+### Fixed
+- `ProtectSystem=strict` in `vpn-bot.service` was blocking helper writes and AWG
+  config validation; `ReadWritePaths` entries added for all affected paths.
+- `XRAY_APPLY_MODE=api`: fallback to `systemctl restart` when a `short_id` is
+  absent in `remove_client`; `inbound_tag` now enforced; helper + api combination
+  rejected at startup.
+- Trial button shown to `PENDING_USER` with no active `access_request` (was
+  hidden incorrectly).
+- Trial-reset button missing from admin panel; rejected trials could not be
+  retried — both corrected.
+- `allow_pending_owner` flag not forwarded to the third `_ensure_can_create` call
+  in the Xray and AWG adapters.
+- Blocked users were unable to submit trial access requests.
+- MTProxy helper: bot now waits for the proxy port to become reachable after a
+  restart before running the post-apply verification.
+- `vpnbot-socks5-user` helper: added `status` subcommand and corresponding
+  sudoers grant (required by health-check script).
+
+### Security
+- `cryptography` bumped to **46.0.7** (fixes PYSEC-2026-35 / CVE-2026-26007).
 
 ## [0.1.0] — 2026-05-13
 
