@@ -526,6 +526,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
                         has_next=has_next,
                         owner_user_id=owner_context,
                         total_pages=total_pages,
+                        back_data=f"admin:user:{owner_context}",
                     ),
                 )
                 return
