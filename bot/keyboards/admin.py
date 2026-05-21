@@ -28,6 +28,16 @@ def access_request_decision_confirm_keyboard(request_id: int, action: str) -> In
     )
 
 
+def moderator_panel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Заявки на доступ", callback_data="admin:reqs")],
+            [InlineKeyboardButton(text="Пользователи", callback_data="admin:users")],
+            [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
+        ]
+    )
+
+
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -127,21 +137,33 @@ def users_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def user_actions_keyboard(user: User, *, has_used_trial: bool = False) -> InlineKeyboardMarkup:
+def user_actions_keyboard(
+    user: User,
+    *,
+    has_used_trial: bool = False,
+    actor_role: UserRole = UserRole.SUPERADMIN,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     blocked = is_blocked_user(user)
-    if user.role != UserRole.APPROVED_USER and not blocked:
+    is_moderator_actor = actor_role == UserRole.MODERATOR
+
+    if not is_moderator_actor and user.role not in {UserRole.APPROVED_USER, UserRole.MODERATOR} and not blocked:
         rows.append([InlineKeyboardButton(text="Одобрить пользователя", callback_data=f"admin:userapprove:{user.telegram_user_id}")])
     if not blocked:
         rows.append([InlineKeyboardButton(text="Заблокировать", callback_data=f"admin:block:{user.telegram_user_id}")])
     if blocked:
         rows.append([InlineKeyboardButton(text="Разблокировать", callback_data=f"admin:unblock:{user.telegram_user_id}")])
-    if user.role in {UserRole.APPROVED_USER, UserRole.SUPERADMIN, UserRole.PENDING_USER} and not blocked:
-        rows.append([InlineKeyboardButton(text="Выдать ключ", callback_data=f"admin:issue:{user.telegram_user_id}")])
-    if has_used_trial:
-        rows.append([InlineKeyboardButton(text="Сбросить пробный доступ", callback_data=f"admin:trial:reset:{user.telegram_user_id}")])
-    rows.append([InlineKeyboardButton(text="Ключи пользователя", callback_data=f"admin:ukeys:{user.telegram_user_id}:0")])
-    rows.append([InlineKeyboardButton(text="Редактировать заметку", callback_data=f"admin:unote:{user.telegram_user_id}")])
+    if not is_moderator_actor:
+        if user.role in {UserRole.APPROVED_USER, UserRole.MODERATOR, UserRole.SUPERADMIN, UserRole.PENDING_USER} and not blocked:
+            rows.append([InlineKeyboardButton(text="Выдать ключ", callback_data=f"admin:issue:{user.telegram_user_id}")])
+        if has_used_trial:
+            rows.append([InlineKeyboardButton(text="Сбросить пробный доступ", callback_data=f"admin:trial:reset:{user.telegram_user_id}")])
+        rows.append([InlineKeyboardButton(text="Ключи пользователя", callback_data=f"admin:ukeys:{user.telegram_user_id}:0")])
+        rows.append([InlineKeyboardButton(text="Редактировать заметку", callback_data=f"admin:unote:{user.telegram_user_id}")])
+    if not is_moderator_actor and not blocked and user.role == UserRole.APPROVED_USER:
+        rows.append([InlineKeyboardButton(text="Назначить модератором", callback_data=f"admin:setmoderator:{user.telegram_user_id}")])
+    if not is_moderator_actor and user.role == UserRole.MODERATOR:
+        rows.append([InlineKeyboardButton(text="Снять роль модератора", callback_data=f"admin:setmoderator:{user.telegram_user_id}")])
     rows.append([InlineKeyboardButton(text="К пользователям", callback_data="admin:users")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 17
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -223,6 +223,10 @@ class Database:
         if version < 16:
             await self._migrate_v16()
             await self._set_schema_version(16)
+            version = 16
+        if version < 17:
+            await self._migrate_v17()
+            await self._set_schema_version(17)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -495,7 +499,7 @@ class Database:
             (
                 "users",
                 "role",
-                ("SUPERADMIN", "APPROVED_USER", "PENDING_USER", "BLOCKED_USER"),
+                ("SUPERADMIN", "MODERATOR", "APPROVED_USER", "PENDING_USER", "BLOCKED_USER"),
             ),
             ("access_requests", "status", ("pending", "approved", "rejected")),
             (
@@ -676,6 +680,47 @@ class Database:
             )
         finally:
             await self._raw_conn().execute("PRAGMA foreign_keys = ON")
+
+    async def _migrate_v17(self) -> None:
+        # Commit any writes buffered by previous migrations so that
+        # PRAGMA foreign_keys = OFF takes effect (SQLite silently ignores
+        # the pragma when a transaction is already open).
+        await self.commit()
+        raw = self._raw_conn()
+        await raw.execute("PRAGMA foreign_keys = OFF")
+        try:
+            await raw.execute("DROP INDEX IF EXISTS idx_users_role")
+            await raw.execute("DROP INDEX IF EXISTS idx_users_active_role")
+            await raw.execute(
+                """
+                CREATE TABLE users_new (
+                  telegram_user_id INTEGER PRIMARY KEY,
+                  username TEXT,
+                  first_name TEXT,
+                  role TEXT NOT NULL CHECK(role IN ('SUPERADMIN','MODERATOR','APPROVED_USER','PENDING_USER','BLOCKED_USER')),
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  blocked_at TEXT,
+                  trial_quota_reset_at TEXT DEFAULT NULL,
+                  note TEXT DEFAULT NULL
+                )
+                """
+            )
+            await raw.execute("INSERT INTO users_new SELECT * FROM users")
+            await raw.execute("DROP TABLE users")
+            await raw.execute("ALTER TABLE users_new RENAME TO users")
+            await raw.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
+            await raw.execute(
+                "CREATE INDEX IF NOT EXISTS idx_users_active_role ON users(role) WHERE blocked_at IS NULL"
+            )
+            await raw.commit()
+        except Exception:
+            await raw.rollback()
+            raise
+        finally:
+            # Re-enable FK after committing so the pragma takes effect
+            # (SQLite ignores it inside a transaction).
+            await raw.execute("PRAGMA foreign_keys = ON")
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(

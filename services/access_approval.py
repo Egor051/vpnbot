@@ -56,7 +56,7 @@ class AccessApprovalService:
             return AccessRequestResult(user=user, request=request, created=created)
 
     async def approve(self, actor_user_id: int, request_id: int) -> tuple[AccessRequest, bool]:
-        await self.users.require_superadmin(actor_user_id)
+        await self.users.require_moderator_or_admin(actor_user_id)
         async with self.requests.db.transaction():
             request = await self.requests.get_by_id(request_id)
             if request is None:
@@ -90,7 +90,7 @@ class AccessApprovalService:
             return refreshed, changed
 
     async def reject(self, actor_user_id: int, request_id: int) -> tuple[AccessRequest, bool]:
-        await self.users.require_superadmin(actor_user_id)
+        await self.users.require_moderator_or_admin(actor_user_id)
         async with self.requests.db.transaction():
             request = await self.requests.get_by_id(request_id)
             if request is None:
@@ -116,11 +116,11 @@ class AccessApprovalService:
             return refreshed, changed
 
     async def list_pending(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[AccessRequest]:
-        await self.users.require_superadmin(actor_user_id)
+        await self.users.require_moderator_or_admin(actor_user_id)
         return await self.requests.list_by_status(AccessRequestStatus.PENDING, limit=limit, offset=offset)
 
     async def get_request(self, actor_user_id: int, request_id: int) -> AccessRequest:
-        await self.users.require_superadmin(actor_user_id)
+        await self.users.require_moderator_or_admin(actor_user_id)
         request = await self.requests.get_by_id(request_id)
         if request is None:
             raise NotFound("Заявка не найдена")

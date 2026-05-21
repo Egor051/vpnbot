@@ -221,7 +221,7 @@ def test_admin_block_first_callback_only_shows_confirmation(monkeypatch) -> None
         def __init__(self) -> None:
             self.block_calls = 0
 
-        async def require_superadmin(self, telegram_user_id: int) -> User:
+        async def require_moderator_or_admin(self, telegram_user_id: int) -> User:
             return User(telegram_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
 
         async def get_user(self, telegram_user_id: int) -> User:
@@ -260,7 +260,7 @@ def test_admin_block_confirm_performs_block(monkeypatch) -> None:
         def __init__(self) -> None:
             self.block_calls = 0
 
-        async def require_superadmin(self, telegram_user_id: int) -> User:
+        async def require_moderator_or_admin(self, telegram_user_id: int) -> User:
             return User(telegram_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
 
         async def get_user(self, telegram_user_id: int) -> User:
@@ -295,7 +295,7 @@ def test_admin_block_confirm_already_blocked_does_not_block_again(monkeypatch) -
         def __init__(self) -> None:
             self.block_calls = 0
 
-        async def require_superadmin(self, telegram_user_id: int) -> User:
+        async def require_moderator_or_admin(self, telegram_user_id: int) -> User:
             return User(telegram_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
 
         async def get_user(self, telegram_user_id: int) -> User:
@@ -330,6 +330,9 @@ def test_admin_unblock_first_callback_shows_warning_confirmation(monkeypatch) ->
     class Users:
         def __init__(self) -> None:
             self.unblock_calls = 0
+
+        async def require_moderator_or_admin(self, telegram_user_id: int) -> User:
+            return User(telegram_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
 
         async def inspect_unblock_risk(self, actor_user_id: int, user_id: int) -> UnblockUserWarning:
             return UnblockUserWarning(
@@ -375,6 +378,9 @@ def test_admin_unblock_confirm_after_warning_includes_manual_check(monkeypatch) 
         def __init__(self) -> None:
             self.unblock_calls = 0
 
+        async def require_moderator_or_admin(self, telegram_user_id: int) -> User:
+            return User(telegram_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
+
         async def inspect_unblock_risk(self, actor_user_id: int, user_id: int) -> UnblockUserWarning:
             return UnblockUserWarning(
                 user=blocked_user,
@@ -414,6 +420,9 @@ def test_admin_unblock_confirm_without_warning_uses_normal_success_text(monkeypa
     approved_user = User(200, "target", "Target", UserRole.APPROVED_USER, "now", "now", None)
 
     class Users:
+        async def require_moderator_or_admin(self, telegram_user_id: int) -> User:
+            return User(telegram_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
+
         async def inspect_unblock_risk(self, actor_user_id: int, user_id: int) -> UnblockUserWarning:
             return UnblockUserWarning(
                 user=blocked_user,
@@ -447,7 +456,7 @@ def test_admin_unblock_non_superadmin_is_rejected(monkeypatch) -> None:
     monkeypatch.setattr("bot.handlers.admin.answer_callback_error", fake_error)
 
     class Users:
-        async def inspect_unblock_risk(self, actor_user_id: int, user_id: int) -> UnblockUserWarning:
+        async def require_moderator_or_admin(self, telegram_user_id: int) -> User:
             raise AccessDenied("Недостаточно прав")
 
     async def run() -> None:

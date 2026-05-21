@@ -31,12 +31,13 @@ from bot.formatters import (
 )
 from services.health import run_bot_health
 from bot.fsm.states import AdminCreateKeyStates, AdminAnnouncementStates, AdminEditUserNoteStates
-from bot.guards import require_superadmin
+from bot.guards import require_superadmin, require_moderator_or_admin
 from bot.handlers.common import answer_callback_error, answer_message_error
 from bot.keyboards.admin import (
     admin_issue_users_keyboard,
     admin_key_type_keyboard,
     admin_panel_keyboard,
+    moderator_panel_keyboard,
     announcement_batches_keyboard,
     announcement_confirm_keyboard,
     access_request_decision_confirm_keyboard,
@@ -104,6 +105,46 @@ async def admin_panel(callback: CallbackQuery, services: Services) -> None:
     try:
         await require_superadmin(services, callback.from_user.id)
         await safe_edit_message_text(callback.message, "Админ-панель:", reply_markup=admin_panel_keyboard())
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.message(Command("moderator"))
+async def moderator_command(message: Message, services: Services) -> None:
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    try:
+        await require_moderator_or_admin(services, message.from_user.id)
+        await message.answer("Панель модератора:", reply_markup=moderator_panel_keyboard())
+    except Exception as exc:
+        await answer_message_error(message, exc)
+
+
+@router.message(F.text == "Панель модератора")
+async def moderator_menu_message(message: Message, services: Services) -> None:
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    try:
+        await require_moderator_or_admin(services, message.from_user.id)
+        await message.answer("Панель модератора:", reply_markup=moderator_panel_keyboard())
+    except Exception as exc:
+        await answer_message_error(message, exc)
+
+
+@router.callback_query(F.data == "admin:moderator_panel")
+async def moderator_panel_callback(callback: CallbackQuery, services: Services) -> None:
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback)
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_moderator_or_admin(services, callback.from_user.id)
+        await safe_edit_message_text(callback.message, "Панель модератора:", reply_markup=moderator_panel_keyboard())
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -335,7 +376,7 @@ async def admin_requests(callback: CallbackQuery, services: Services) -> None:
         return
     page = _page_from_callback(callback.data)
     try:
-        await services.users.require_superadmin(callback.from_user.id)
+        await services.users.require_moderator_or_admin(callback.from_user.id)
         items = await services.access.list_pending(
             callback.from_user.id,
             limit=ADMIN_PAGE_SIZE + 1,
@@ -359,7 +400,7 @@ async def admin_request_detail(callback: CallbackQuery, services: Services) -> N
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        await services.users.require_superadmin(callback.from_user.id)
+        await services.users.require_moderator_or_admin(callback.from_user.id)
         request_id = int(callback.data.rsplit(":", 1)[-1])
         request = await services.access.get_request(callback.from_user.id, request_id)
         await safe_edit_message_text(callback.message, access_request_text(request), reply_markup=pending_requests_keyboard([request]))
@@ -379,7 +420,7 @@ async def admin_approve(callback: CallbackQuery, services: Services, bot: Bot) -
         request = await services.access.get_request(callback.from_user.id, request_id)
         if callback.message:
             if request.status != AccessRequestStatus.PENDING:
-                await safe_edit_message_text(callback.message, "Заявка уже была обработана.", reply_markup=admin_panel_keyboard())
+                await safe_edit_message_text(callback.message, "Заявка уже была обработана.", reply_markup=pending_requests_keyboard([], page=0))
                 return
             await safe_edit_message_text(
                 callback.message,
@@ -402,7 +443,7 @@ async def admin_reject(callback: CallbackQuery, services: Services, bot: Bot) ->
         request = await services.access.get_request(callback.from_user.id, request_id)
         if callback.message:
             if request.status != AccessRequestStatus.PENDING:
-                await safe_edit_message_text(callback.message, "Заявка уже была обработана.", reply_markup=admin_panel_keyboard())
+                await safe_edit_message_text(callback.message, "Заявка уже была обработана.", reply_markup=pending_requests_keyboard([], page=0))
                 return
             await safe_edit_message_text(
                 callback.message,
@@ -426,7 +467,7 @@ async def admin_access_decision_confirm(callback: CallbackQuery, services: Servi
         current = await services.access.get_request(callback.from_user.id, request_id)
         if current.status != AccessRequestStatus.PENDING:
             if callback.message:
-                await safe_edit_message_text(callback.message, "Заявка уже была обработана.", reply_markup=admin_panel_keyboard())
+                await safe_edit_message_text(callback.message, "Заявка уже была обработана.", reply_markup=pending_requests_keyboard([], page=0))
             return
         if action == "approve":
             request, changed = await services.access.approve(callback.from_user.id, request_id)
@@ -439,7 +480,7 @@ async def admin_access_decision_confirm(callback: CallbackQuery, services: Servi
                 await _safe_notify(bot, request.telegram_user_id, "Ваша заявка отклонена.")
             text = "Заявка отклонена." if changed else "Заявка уже была обработана."
         if callback.message:
-            await safe_edit_message_text(callback.message, text, reply_markup=admin_panel_keyboard())
+            await safe_edit_message_text(callback.message, text, reply_markup=pending_requests_keyboard([], page=0))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -477,7 +518,7 @@ async def admin_user_detail(callback: CallbackQuery, services: Services) -> None
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        await require_superadmin(services, callback.from_user.id)
+        actor = await require_moderator_or_admin(services, callback.from_user.id)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         user = await services.users.get_user(user_id)
         keys = await services.vpn_keys.list_for_actor(callback.from_user.id, owner_user_id=user_id, limit=10)
@@ -486,7 +527,7 @@ async def admin_user_detail(callback: CallbackQuery, services: Services) -> None
         await safe_edit_message_text(
             callback.message,
             user_card_text(user, keys, stats_by_key_id, viewer_user_id=callback.from_user.id),
-            reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial),
+            reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -510,6 +551,31 @@ async def admin_user_approve(callback: CallbackQuery, services: Services) -> Non
         await answer_callback_error(callback, exc)
 
 
+@router.callback_query(F.data.startswith("admin:setmoderator:"))
+async def admin_set_moderator(callback: CallbackQuery, services: Services) -> None:
+    if callback.from_user is None or callback.data is None:
+        return
+    if not await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT):
+        return
+    await safe_callback_answer(callback, "Обрабатываю...")
+    try:
+        user_id = int(callback.data.rsplit(":", 1)[-1])
+        target = await services.users.get_user(user_id)
+        if target.role == UserRole.MODERATOR:
+            new_role = UserRole.APPROVED_USER
+            result_text = "Роль модератора снята. Пользователь стал обычным одобренным пользователем."
+        else:
+            new_role = UserRole.MODERATOR
+            result_text = "Пользователь назначен модератором."
+        await services.users.set_role(callback.from_user.id, user_id, new_role)
+        if callback.message:
+            user = await services.users.get_user(user_id)
+            has_used_trial = not await services.trial_access.can_request_trial(user_id)
+            await safe_edit_message_text(callback.message, result_text, reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
 @router.callback_query(F.data.regexp(r"^admin:block:\d+$"))
 async def admin_block_user(callback: CallbackQuery, services: Services) -> None:
     if callback.from_user is None or callback.data is None:
@@ -519,12 +585,12 @@ async def admin_block_user(callback: CallbackQuery, services: Services) -> None:
     await safe_callback_answer(callback)
     try:
         user_id = int(callback.data.rsplit(":", 1)[-1])
-        await require_superadmin(services, callback.from_user.id)
+        actor = await require_moderator_or_admin(services, callback.from_user.id)
         user = await services.users.get_user(user_id)
         if is_blocked_user(user):
             if callback.message:
                 has_used_trial = not await services.trial_access.can_request_trial(user_id)
-                await safe_edit_message_text(callback.message, "Пользователь уже заблокирован.", reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial))
+                await safe_edit_message_text(callback.message, "Пользователь уже заблокирован.", reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role))
             return
         key_counts = await services.users.count_keys_for_users(callback.from_user.id, [user_id])
         if callback.message:
@@ -546,12 +612,12 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Services, 
     await safe_callback_answer(callback, "Блокирую...")
     try:
         user_id = int(callback.data.rsplit(":", 1)[-1])
-        await require_superadmin(services, callback.from_user.id)
+        actor = await require_moderator_or_admin(services, callback.from_user.id)
         current = await services.users.get_user(user_id)
         if is_blocked_user(current):
             if callback.message:
                 has_used_trial = not await services.trial_access.can_request_trial(user_id)
-                await safe_edit_message_text(callback.message, "Пользователь уже заблокирован.", reply_markup=user_actions_keyboard(current, has_used_trial=has_used_trial))
+                await safe_edit_message_text(callback.message, "Пользователь уже заблокирован.", reply_markup=user_actions_keyboard(current, has_used_trial=has_used_trial, actor_role=actor.role))
             return
         result = await services.users.block_user(callback.from_user.id, user_id, revoke_active_keys=True)
         await _safe_notify(bot, user_id, "Ваш доступ был заблокирован администратором.")
@@ -575,7 +641,7 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Services, 
                     "Теперь пользователю доступен только /start для повторной заявки."
                 )
             has_used_trial = not await services.trial_access.can_request_trial(user_id)
-            await safe_edit_message_text(callback.message, text, reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial))
+            await safe_edit_message_text(callback.message, text, reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -589,6 +655,7 @@ async def admin_unblock_user(callback: CallbackQuery, services: Services) -> Non
     await safe_callback_answer(callback)
     try:
         user_id = int(callback.data.rsplit(":", 1)[-1])
+        actor = await require_moderator_or_admin(services, callback.from_user.id)
         warning = await services.users.inspect_unblock_risk(callback.from_user.id, user_id)
         if callback.message:
             if not is_blocked_user(warning.user):
@@ -596,7 +663,7 @@ async def admin_unblock_user(callback: CallbackQuery, services: Services) -> Non
                 await safe_edit_message_text(
                     callback.message,
                     "Пользователь уже не заблокирован.",
-                    reply_markup=user_actions_keyboard(warning.user, has_used_trial=has_used_trial),
+                    reply_markup=user_actions_keyboard(warning.user, has_used_trial=has_used_trial, actor_role=actor.role),
                 )
                 return
             await safe_edit_message_text(
@@ -617,6 +684,7 @@ async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services
     await safe_callback_answer(callback, "Разблокирую...")
     try:
         user_id = int(callback.data.rsplit(":", 1)[-1])
+        actor = await require_moderator_or_admin(services, callback.from_user.id)
         warning = await services.users.inspect_unblock_risk(callback.from_user.id, user_id)
         has_used_trial = not await services.trial_access.can_request_trial(user_id)
         if not is_blocked_user(warning.user):
@@ -624,7 +692,7 @@ async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services
                 await safe_edit_message_text(
                     callback.message,
                     "Пользователь уже не заблокирован.",
-                    reply_markup=user_actions_keyboard(warning.user, has_used_trial=has_used_trial),
+                    reply_markup=user_actions_keyboard(warning.user, has_used_trial=has_used_trial, actor_role=actor.role),
                 )
             return
         user = await services.users.unblock_user(callback.from_user.id, user_id)
@@ -632,7 +700,7 @@ async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services
             await safe_edit_message_text(
                 callback.message,
                 unblock_user_success_text(warning),
-                reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial),
+                reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role),
             )
     except Exception as exc:
         await answer_callback_error(callback, exc)
