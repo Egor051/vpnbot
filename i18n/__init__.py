@@ -9,10 +9,11 @@ _strings: dict[str, str] = dict(_ru_module.STRINGS)
 def configure(locale: str) -> None:
     global _strings
     if locale == "en":
-        from i18n import en as _mod
+        from i18n import en as _en
+        _strings = dict(_en.STRINGS)
     else:
-        from i18n import ru as _mod
-    _strings = dict(_mod.STRINGS)
+        from i18n import ru as _ru
+        _strings = dict(_ru.STRINGS)
 
 
 def t(key: str, **kwargs: object) -> str:
