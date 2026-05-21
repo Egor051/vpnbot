@@ -135,7 +135,7 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext, services
         await safe_callback_answer(callback)
         key_type = callback.data.rsplit(":", 1)[-1]
         await state.set_state(CreateKeyStates.waiting_note)
-        await state.update_data(key_type=key_type)
+        await state.update_data(key_type=key_type, cancel_target="keys:create")
         await safe_edit_message_text(
             callback.message,
             f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
@@ -200,7 +200,7 @@ async def create_key_mtu_custom_request(callback: CallbackQuery, state: FSMConte
         return
     await safe_callback_answer(callback)
     await state.set_state(CreateKeyStates.waiting_mtu_custom)
-    await safe_edit_message_text(callback.message, t("mtu_custom_prompt"), reply_markup=None)
+    await safe_edit_message_text(callback.message, t("mtu_custom_prompt"), reply_markup=cancel_keyboard())
 
 
 @router.message(CreateKeyStates.waiting_mtu_custom)
@@ -268,7 +268,7 @@ async def create_key_expiry_custom(callback: CallbackQuery, state: FSMContext) -
     await safe_edit_message_text(
         callback.message,
         t("expiry_custom_prompt"),
-        reply_markup=None,
+        reply_markup=cancel_keyboard(),
     )
 
 
@@ -552,7 +552,7 @@ async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services:
         key_id = int(callback.data.rsplit(":", 1)[-1])
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await state.set_state(EditNoteStates.waiting_note)
-        await state.update_data(key_id=key_id)
+        await state.update_data(key_id=key_id, cancel_target=f"key:open:{key_id}")
         await safe_edit_message_text(
             callback.message,
             t("edit_note_prompt", type=key.key_type.value.upper(), id=key.id),
