@@ -16,7 +16,7 @@ router = Router()
 
 
 @router.callback_query(lambda callback: callback.data == "cancel")
-async def cancel_callback(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+async def cancel_callback(callback: CallbackQuery, state: FSMContext, services: Services | None = None) -> None:
     if not await ensure_private_callback(callback):
         return
     data = await state.get_data()
@@ -37,7 +37,7 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext, services: 
         try:
             key_id = int(cancel_target.rsplit(":", 1)[-1])
             user_id = callback.from_user.id if callback.from_user else None
-            if user_id is None:
+            if user_id is None or services is None:
                 raise ValueError
             key = await services.vpn_keys.get_for_actor(user_id, key_id)
             await safe_edit_message_text(
