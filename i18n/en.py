@@ -188,21 +188,62 @@ STRINGS: dict[str, str] = {
     "admin_private_only_text": "Admin panel is available in private chat with the bot only.",
     # ── FAQ ───────────────────────────────────────────────────────────────────
     "faq_title": "<b>Frequently Asked Questions</b>",
+    "faq_page_title": "<b>Frequently Asked Questions</b> · page {page} of {total}",
     "faq_connect": (
         "After creating a key, the bot will provide the configuration. Copy it into a suitable VPN app "
         "or import the file if available. AWG typically uses a .conf config file; "
         "Xray uses a link/profile. After importing, enable the connection in your app."
     ),
-    "faq_device": (
-        "Yes. One key is intended for one device. Using the same key on multiple devices "
-        "may cause unstable connections and mixed-up statistics and access management."
-    ),
-    "faq_choice": "If you're not sure what to choose, start with XRay.",
     "faq_trouble": (
         "Check your internet, the imported profile, the access expiry date, and whether the same key "
         "is being used on another device. Also try toggling the VPN app off and on. If that doesn't help, "
         "try enabling and disabling airplane mode or restarting the device. If the problem persists, "
         "contact support."
+    ),
+    "faq_key_statuses": (
+        "<b>Active</b> — the key is working.\n"
+        "<b>Applying / Revoking / Deleting</b> — an operation is in progress, please wait.\n"
+        "<b>Revoked</b> — the key is disabled on the server; stats and note are kept in the bot.\n"
+        "<b>Deleted</b> — the key is fully removed along with its statistics.\n"
+        "<b>Failed</b> — something went wrong; contact support."
+    ),
+    "faq_revoke_delete": (
+        "<b>Revoke</b> — irreversibly disables the key on the server. "
+        "Stats and note are kept in the bot; the key remains visible in the list with the «Revoked» status.\n\n"
+        "<b>Delete</b> — irreversibly removes the key along with its stats and note from the bot."
+    ),
+    "faq_expired": (
+        "Create a new key via «Create key». "
+        "The validity period is chosen at creation time: 7 days, 30 days, custom, or permanent. "
+        "Extending an existing key is not possible."
+    ),
+    "faq_device": (
+        "Yes. One key is intended for one device. Using the same key on multiple devices "
+        "may cause unstable connections and mixed-up statistics and access management."
+    ),
+    "faq_stats": (
+        "Open «My keys», select the key, and tap «Statistics». "
+        "You'll see incoming and outgoing traffic volumes. Data is updated automatically."
+    ),
+    "faq_choice": "If you're not sure what to choose, start with XRay.",
+    "faq_mtu": (
+        "MTU is the maximum network packet size. It applies only to AWG keys.\n\n"
+        "The recommended value of 1360 works in most cases. "
+        "Lower it (e.g. to 1280) if you experience dropped connections or slow page loads."
+    ),
+    "faq_note_why": (
+        "A note helps you identify which device a key belongs to — for example, «Laptop» or «Phone». "
+        "Without a note, it's easy to mix up multiple keys."
+    ),
+    "faq_proxy": (
+        "The Proxy section offers two types:\n"
+        "<b>SOCKS5</b> — a universal proxy for browsers and apps that support manual proxy settings.\n"
+        "<b>MTProto</b> — a proxy specifically for Telegram when it's blocked without VPN.\n\n"
+        "Proxies work independently from VPN keys."
+    ),
+    "faq_server_restart": (
+        "Yes, this is expected. The server restarts on even-numbered dates at 04:00 MSK. "
+        "The restart takes a few minutes — the connection briefly drops and reconnects automatically."
     ),
     "faq_notes": "No. Your notes are not visible to anyone.",
     "faq_support": "Support: @ktotakmoje",
@@ -359,9 +400,17 @@ STRINGS: dict[str, str] = {
     "btn_prev": "Previous",
     "btn_next": "Next",
     "btn_faq_connect": "How to connect?",
-    "btn_faq_device": "1 key = 1 device?",
-    "btn_faq_choice": "What to choose: AWG or Xray?",
     "btn_faq_trouble": "Why doesn't it work?",
+    "btn_faq_key_statuses": "What do key statuses mean?",
+    "btn_faq_revoke_delete": "Revoke vs delete a key?",
+    "btn_faq_expired": "What if my key has expired?",
+    "btn_faq_device": "1 key = 1 device?",
+    "btn_faq_stats": "How to check traffic stats?",
+    "btn_faq_choice": "What to choose: AWG or Xray?",
+    "btn_faq_mtu": "What is MTU?",
+    "btn_faq_note_why": "Why add a note to a key?",
+    "btn_faq_proxy": "What is a proxy?",
+    "btn_faq_server_restart": "Server restarting — is that normal?",
     "btn_faq_notes": "Can anyone see my notes?",
     "btn_faq_support": "Support",
     "btn_keyboard_placeholder": "Choose an action",
