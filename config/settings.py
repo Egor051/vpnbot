@@ -284,6 +284,7 @@ class Settings:
     anomaly_auto_revoke: bool = False
     anomaly_cooldown_seconds: int = 7200
     xray_access_log_path: str = ""
+    bot_language: str = "ru"
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -501,4 +502,5 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_helper_staging_dir=Path(_optional("XRAY_HELPER_STAGING_DIR", str(helper_staging_root / "xray"))),
         awg_helper_staging_dir=Path(_optional("AWG_HELPER_STAGING_DIR", str(helper_staging_root / "awg"))),
         mtproto_helper_staging_dir=Path(_optional("MTPROTO_HELPER_STAGING_DIR", str(helper_staging_root / "mtproxy"))),
+        bot_language=_choice("BOT_LANGUAGE", "ru", {"ru", "en"}),
     )

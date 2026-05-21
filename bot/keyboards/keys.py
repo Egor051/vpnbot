@@ -2,6 +2,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.formatters import status_text
+from i18n import t
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 
@@ -11,7 +12,7 @@ def create_key_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Xray", callback_data="keys:create:xray")],
             [InlineKeyboardButton(text="AWG", callback_data="keys:create:awg")],
-            [InlineKeyboardButton(text="Назад", callback_data="menu:main")],
+            [InlineKeyboardButton(text=t("btn_back"), callback_data="menu:main")],
         ]
     )
 
@@ -32,20 +33,20 @@ def keys_list_keyboard(
         rows.append([InlineKeyboardButton(text=f"{prefix} #{key.id} · {status_text(key.status)}", callback_data=open_data)])
         if key.status == VpnKeyStatus.ACTIVE:
             buttons = [
-                InlineKeyboardButton(text="Конфиг", callback_data=f"key:show:{key.id}"),
-                InlineKeyboardButton(text="Статистика", callback_data=f"key:stats:{key.id}"),
+                InlineKeyboardButton(text=t("btn_config"), callback_data=f"key:show:{key.id}"),
+                InlineKeyboardButton(text=t("btn_stats"), callback_data=f"key:stats:{key.id}"),
             ]
             revoke_data = f"key:revoke:{key.id}" if owner_user_id is None else f"key:revoke:{key.id}:{owner_user_id}:{page}"
-            buttons.append(InlineKeyboardButton(text="Отозвать", callback_data=revoke_data))
+            buttons.append(InlineKeyboardButton(text=t("btn_revoke"), callback_data=revoke_data))
             rows.append(buttons)
         else:
-            rows.append([InlineKeyboardButton(text="Статистика", callback_data=f"key:stats:{key.id}")])
+            rows.append([InlineKeyboardButton(text=t("btn_stats"), callback_data=f"key:stats:{key.id}")])
         if key.status != VpnKeyStatus.DELETED:
             note_buttons: list[InlineKeyboardButton] = []
             if owner_user_id is None:
-                note_buttons.append(InlineKeyboardButton(text="Заметка", callback_data=f"key:note:{key.id}"))
+                note_buttons.append(InlineKeyboardButton(text=t("btn_note"), callback_data=f"key:note:{key.id}"))
             delete_data = f"key:delete:{key.id}" if owner_user_id is None else f"key:delete:{key.id}:{owner_user_id}:{page}"
-            note_buttons.append(InlineKeyboardButton(text="Удалить", callback_data=delete_data))
+            note_buttons.append(InlineKeyboardButton(text=t("btn_delete"), callback_data=delete_data))
             rows.append(note_buttons)
 
     prev_page = page - 1
@@ -53,32 +54,32 @@ def keys_list_keyboard(
     page_prefix = f"admin:ukeys:{owner_user_id}" if owner_user_id is not None else "keys:list"
     nav: list[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text=f"Назад {page}/{total_pages}", callback_data=f"{page_prefix}:{prev_page}"))
+        nav.append(InlineKeyboardButton(text=f"{t('btn_prev')} {page}/{total_pages}", callback_data=f"{page_prefix}:{prev_page}"))
     if has_next:
-        nav.append(InlineKeyboardButton(text=f"Далее {page + 2}/{total_pages}", callback_data=f"{page_prefix}:{next_page}"))
+        nav.append(InlineKeyboardButton(text=f"{t('btn_next')} {page + 2}/{total_pages}", callback_data=f"{page_prefix}:{next_page}"))
     if nav:
         rows.append(nav)
 
     create_callback = f"admin:issue:{owner_user_id}" if owner_user_id is not None else "keys:create"
-    rows.append([InlineKeyboardButton(text="Создать ключ", callback_data=create_callback)])
-    rows.append([InlineKeyboardButton(text="В меню", callback_data="menu:main")])
+    rows.append([InlineKeyboardButton(text=t("btn_create_key"), callback_data=create_callback)])
+    rows.append([InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def key_actions_keyboard(key: VpnKey, owner_user_id: int | None = None, page: int = 0) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if key.status == VpnKeyStatus.ACTIVE:
-        rows.append([InlineKeyboardButton(text="Показать конфиг", callback_data=f"key:show:{key.id}")])
+        rows.append([InlineKeyboardButton(text=t("btn_show_config"), callback_data=f"key:show:{key.id}")])
         revoke_data = f"key:revoke:{key.id}" if owner_user_id is None else f"key:revoke:{key.id}:{owner_user_id}:{page}"
-        rows.append([InlineKeyboardButton(text="Отозвать", callback_data=revoke_data)])
-    rows.append([InlineKeyboardButton(text="Статистика", callback_data=f"key:stats:{key.id}")])
+        rows.append([InlineKeyboardButton(text=t("btn_revoke"), callback_data=revoke_data)])
+    rows.append([InlineKeyboardButton(text=t("btn_stats"), callback_data=f"key:stats:{key.id}")])
     if key.status != VpnKeyStatus.DELETED:
         if owner_user_id is None:
-            rows.append([InlineKeyboardButton(text="Редактировать заметку", callback_data=f"key:note:{key.id}")])
+            rows.append([InlineKeyboardButton(text=t("btn_edit_note_key"), callback_data=f"key:note:{key.id}")])
         delete_data = f"key:delete:{key.id}" if owner_user_id is None else f"key:delete:{key.id}:{owner_user_id}:{page}"
-        rows.append([InlineKeyboardButton(text="Удалить", callback_data=delete_data)])
+        rows.append([InlineKeyboardButton(text=t("btn_delete"), callback_data=delete_data)])
     back_data = f"admin:ukeys:{owner_user_id}:{page}" if owner_user_id is not None else "keys:list"
-    rows.append([InlineKeyboardButton(text="К списку", callback_data=back_data)])
+    rows.append([InlineKeyboardButton(text=t("btn_to_list"), callback_data=back_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -90,8 +91,8 @@ def confirm_keyboard(action: str, key_id: int, owner_user_id: int | None = None,
         cancel_data = f"{cancel_data}:{owner_user_id}:{page}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Подтвердить", callback_data=confirm_data)],
-            [InlineKeyboardButton(text="Отмена", callback_data=cancel_data)],
+            [InlineKeyboardButton(text=t("btn_confirm"), callback_data=confirm_data)],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data=cancel_data)],
         ]
     )
 
@@ -99,12 +100,12 @@ def confirm_keyboard(action: str, key_id: int, owner_user_id: int | None = None,
 def mtu_choice_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="1360 (рекомендуемый)", callback_data="mtu:1360")],
+            [InlineKeyboardButton(text=t("btn_mtu_recommended"), callback_data="mtu:1360")],
             [InlineKeyboardButton(text="1280", callback_data="mtu:1280")],
             [InlineKeyboardButton(text="1420", callback_data="mtu:1420")],
             [InlineKeyboardButton(text="1500", callback_data="mtu:1500")],
-            [InlineKeyboardButton(text="Ввести вручную", callback_data="mtu:custom")],
-            [InlineKeyboardButton(text="Отмена", callback_data="cancel")],
+            [InlineKeyboardButton(text=t("btn_enter_manually"), callback_data="mtu:custom")],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
         ]
     )
 
@@ -112,20 +113,20 @@ def mtu_choice_keyboard() -> InlineKeyboardMarkup:
 def after_key_created_keyboard(key: VpnKey) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть ключ", callback_data=f"key:open:{key.id}")],
-            [InlineKeyboardButton(text="Мои ключи", callback_data="keys:list")],
-            [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
+            [InlineKeyboardButton(text=t("btn_open_key"), callback_data=f"key:open:{key.id}")],
+            [InlineKeyboardButton(text=t("btn_my_keys"), callback_data="keys:list")],
+            [InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data="menu:main")],
         ]
     )
 
 
 def expiry_choice_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="Бессрочный", callback_data="expiry:permanent")],
-        [InlineKeyboardButton(text="7 дней", callback_data="expiry:7")],
-        [InlineKeyboardButton(text="30 дней", callback_data="expiry:30")],
-        [InlineKeyboardButton(text="Ввести количество дней", callback_data="expiry:custom")],
-        [InlineKeyboardButton(text="Отмена", callback_data="cancel")],
+        [InlineKeyboardButton(text=t("btn_permanent"), callback_data="expiry:permanent")],
+        [InlineKeyboardButton(text=t("btn_7_days"), callback_data="expiry:7")],
+        [InlineKeyboardButton(text=t("btn_30_days"), callback_data="expiry:30")],
+        [InlineKeyboardButton(text=t("btn_enter_days"), callback_data="expiry:custom")],
+        [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -133,7 +134,7 @@ def expiry_choice_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
 def trial_key_show_keyboard(key_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Получить конфиг", callback_data=f"trial:show:{key_id}")],
+            [InlineKeyboardButton(text=t("btn_get_config"), callback_data=f"trial:show:{key_id}")],
         ]
     )
 
@@ -141,7 +142,7 @@ def trial_key_show_keyboard(key_id: int) -> InlineKeyboardMarkup:
 def request_trial_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Запросить пробный доступ (7 дней)", callback_data="trial:request")],
+            [InlineKeyboardButton(text=t("btn_request_trial"), callback_data="trial:request")],
         ]
     )
 
@@ -151,7 +152,7 @@ def trial_protocol_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Xray", callback_data="trial:proto:xray")],
             [InlineKeyboardButton(text="AWG", callback_data="trial:proto:awg")],
-            [InlineKeyboardButton(text="Отмена", callback_data="cancel")],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
         ]
     )
 
@@ -159,7 +160,7 @@ def trial_protocol_keyboard() -> InlineKeyboardMarkup:
 def after_key_deleted_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Мои ключи", callback_data="keys:list")],
-            [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
+            [InlineKeyboardButton(text=t("btn_my_keys"), callback_data="keys:list")],
+            [InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data="menu:main")],
         ]
     )

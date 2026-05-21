@@ -4,12 +4,7 @@ import logging
 
 from aiohttp import web
 
-from adapters.health_server import create_health_app
-from bot.app import _awg_stats_loop, create_app
-from services.anomaly_detection import anomaly_detection_loop
-from services.key_expiry import key_expiry_loop
-from services.offsite_backup import offsite_backup_loop
-from services.scheduled_announcements import scheduled_announcements_loop
+import i18n
 from config.settings import load_settings
 from utils.logging import setup_logging
 from utils.single_instance import SingleInstanceError, SingleInstanceLock
@@ -19,7 +14,16 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     settings = load_settings()
+    i18n.configure(settings.bot_language)
     setup_logging(settings.log_dir)
+
+    from adapters.health_server import create_health_app
+    from bot.app import _awg_stats_loop, create_app
+    from services.anomaly_detection import anomaly_detection_loop
+    from services.key_expiry import key_expiry_loop
+    from services.offsite_backup import offsite_backup_loop
+    from services.scheduled_announcements import scheduled_announcements_loop
+
     with SingleInstanceLock(settings.bot_lock_path):
         bot, dp, db, backend_health, services = await create_app(settings)
         runner: web.AppRunner | None = None
