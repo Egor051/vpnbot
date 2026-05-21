@@ -283,6 +283,7 @@ class Settings:
     anomaly_min_unique_ips: int = 3
     anomaly_auto_revoke: bool = False
     anomaly_cooldown_seconds: int = 7200
+    anomaly_concurrent_window_seconds: int = 600
     xray_access_log_path: str = ""
     bot_language: str = "ru"
 
@@ -494,6 +495,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         anomaly_min_unique_ips=_int_range("ANOMALY_MIN_UNIQUE_IPS", 3, 1, 1000),
         anomaly_auto_revoke=_bool("ANOMALY_AUTO_REVOKE", False),
         anomaly_cooldown_seconds=_int_range("ANOMALY_COOLDOWN_SECONDS", 7200, 0, 86400),
+        anomaly_concurrent_window_seconds=_int_range("ANOMALY_CONCURRENT_WINDOW_SECONDS", 600, 0, 86400),
         xray_access_log_path=_optional("XRAY_ACCESS_LOG_PATH"),
         socks5_user_helper_path=Path(_optional("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/vpnbot-socks5-user")),
         xray_apply_helper_path=Path(_optional("XRAY_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-xray-apply")),

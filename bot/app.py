@@ -278,6 +278,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         auto_revoke=settings.anomaly_auto_revoke,
         cooldown_seconds=settings.anomaly_cooldown_seconds,
         xray_access_log_path=settings.xray_access_log_path,
+        concurrent_window_seconds=settings.anomaly_concurrent_window_seconds,
     )
 
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)

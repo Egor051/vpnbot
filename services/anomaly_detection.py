@@ -47,6 +47,7 @@ class AnomalyDetectionService:
         auto_revoke: bool = False,
         cooldown_seconds: int = 7200,
         xray_access_log_path: str = "",
+        concurrent_window_seconds: int = 0,
         bot: Bot | None = None,
     ) -> None:
         self._vpn_keys = vpn_keys
@@ -59,6 +60,9 @@ class AnomalyDetectionService:
         self._auto_revoke = auto_revoke
         self._cooldown_seconds = cooldown_seconds
         self._xray_access_log_path = xray_access_log_path
+        # When > 0, threshold is checked against this shorter window instead of the full window.
+        # Prevents false positives from mobile users whose IPs rotate over time.
+        self._concurrent_window_seconds = concurrent_window_seconds
         self.bot = bot
         # {key_id: deque of (wall_clock_float, source_ip)}
         self._observations: dict[int, collections.deque[tuple[float, str]]] = {}
@@ -147,13 +151,17 @@ class AnomalyDetectionService:
 
     async def _check_thresholds(self, now: float) -> None:
         for key_id in list(self._observations):
-            unique_ips = self._unique_ips_in_window(key_id, now)
+            all_ips = self._unique_ips_in_window(key_id, now)
             if not self._observations[key_id]:
                 # All samples aged out of the window; drop the key so the
                 # observation maps don't accumulate an entry per key seen.
                 del self._observations[key_id]
                 self._last_alerted.pop(key_id, None)
-            if len(unique_ips) < self._min_unique_ips:
+            if self._concurrent_window_seconds > 0:
+                trigger_ips = self._unique_ips_in_concurrent_window(key_id, now)
+            else:
+                trigger_ips = all_ips
+            if len(trigger_ips) < self._min_unique_ips:
                 continue
             last = self._last_alerted.get(key_id, 0.0)
             if now - last < self._cooldown_seconds:
@@ -162,18 +170,24 @@ class AnomalyDetectionService:
             if key is None or key.status not in {VpnKeyStatus.ACTIVE}:
                 continue
             self._last_alerted[key_id] = now
-            await self._fire_alert(key, unique_ips)
+            await self._fire_alert(key, trigger_ips, all_ips)
 
     # ------------------------------------------------------------------ Alert
 
-    async def _fire_alert(self, key: VpnKey, unique_ips: frozenset[str]) -> None:
+    async def _fire_alert(
+        self,
+        key: VpnKey,
+        trigger_ips: frozenset[str],
+        all_ips: frozenset[str],
+    ) -> None:
         logger.warning(
-            "Anomaly: key #%d (%s) owner=%d unique_ips=%d ips=%s",
+            "Anomaly: key #%d (%s) owner=%d trigger_ips=%d all_ips=%d ips=%s",
             key.id,
             key.key_type.value.upper(),
             key.owner_user_id,
-            len(unique_ips),
-            sorted(unique_ips),
+            len(trigger_ips),
+            len(all_ips),
+            sorted(trigger_ips),
         )
         auto_revoked = False
         revoke_error: str | None = None
@@ -188,22 +202,32 @@ class AnomalyDetectionService:
         if self.bot is None:
             return
 
-        if self._window_seconds % 60 == 0:
-            window_str = f"{self._window_seconds // 60} мин"
-        else:
-            window_str = f"{self._window_seconds} сек"
+        def _window_str(seconds: int) -> str:
+            return f"{seconds // 60} мин" if seconds % 60 == 0 else f"{seconds} сек"
 
-        ips_sorted = sorted(unique_ips)
+        using_concurrent = self._concurrent_window_seconds > 0 and trigger_ips != all_ips
+        ips_for_display = trigger_ips if using_concurrent else all_ips
+        ips_sorted = sorted(ips_for_display)
         ips_preview = ", ".join(ips_sorted[:10])
-        if len(unique_ips) > 10:
-            ips_preview += f" + ещё {len(unique_ips) - 10}"
+        if len(ips_for_display) > 10:
+            ips_preview += f" + ещё {len(ips_for_display) - 10}"
+
+        if using_concurrent:
+            count_line = (
+                f"За последние {_window_str(self._concurrent_window_seconds)}: "
+                f"<b>{len(trigger_ips)} уник. IP</b> "
+                f"(всего за {_window_str(self._window_seconds)}: {len(all_ips)})"
+            )
+        else:
+            count_line = f"За последние {_window_str(self._window_seconds)}: <b>{len(all_ips)} уник. IP</b>"
 
         owner_str = f"@{key.username}" if key.username else f"user_id={key.owner_user_id}"
+        ip_label = f"IP ({_window_str(self._concurrent_window_seconds)})" if using_concurrent else "IP"
         lines = [
             f"⚠️ <b>Аномалия: ключ #{key.id} ({key.key_type.value.upper()})</b>",
-            f"За последние {window_str}: <b>{len(unique_ips)} уник. IP</b>",
+            count_line,
             f"Владелец: {owner_str}",
-            f"IP: <code>{ips_preview}</code>",
+            f"{ip_label}: <code>{ips_preview}</code>",
         ]
         if auto_revoked:
             lines.append("🔒 <b>Ключ автоматически отозван</b>")
@@ -238,6 +262,13 @@ class AnomalyDetectionService:
         while obs and obs[0][0] < cutoff:
             obs.popleft()
         return frozenset(ip for _, ip in obs)
+
+    def _unique_ips_in_concurrent_window(self, key_id: int, now: float) -> frozenset[str]:
+        obs = self._observations.get(key_id)
+        if not obs:
+            return frozenset()
+        cutoff = now - self._concurrent_window_seconds
+        return frozenset(ip for ts, ip in obs if ts >= cutoff)
 
     async def _list_active_keys(self, key_type: VpnKeyType) -> list[VpnKey]:
         keys: list[VpnKey] = []

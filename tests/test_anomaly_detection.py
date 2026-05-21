@@ -76,6 +76,7 @@ def _make_service(**kwargs) -> AnomalyDetectionService:
         auto_revoke=False,
         cooldown_seconds=7200,
         xray_access_log_path="",
+        concurrent_window_seconds=0,
     )
     defaults.update(kwargs)
     svc = AnomalyDetectionService(**defaults)
@@ -284,3 +285,94 @@ def test_no_alert_below_threshold():
 
     asyncio.run(svc._check_thresholds(now))
     svc.bot.send_message.assert_not_called()
+
+
+# ------------------------------------------------------------------ concurrent window
+
+
+def test_no_alert_mobile_roaming():
+    """Mobile user: 4 unique IPs over 60 min but only 1 IP in the last 10 min."""
+    key = _awg_key(key_id=10, public_key="pkMobile")
+    vpn_keys_mock = AsyncMock()
+    vpn_keys_mock.get_by_id.return_value = key
+
+    svc = _make_service(
+        vpn_keys=vpn_keys_mock,
+        min_unique_ips=3,
+        cooldown_seconds=0,
+        window_seconds=3600,
+        concurrent_window_seconds=600,
+    )
+    svc.bot = AsyncMock()
+
+    now = time_module.time()
+    # Four sequential IPs from different carrier NAT sessions — all older than 10 min
+    svc._record_ip(10, now - 3000, "31.135.76.185")
+    svc._record_ip(10, now - 2400, "31.173.84.186")
+    svc._record_ip(10, now - 1800, "31.173.84.228")
+    svc._record_ip(10, now - 700, "31.173.85.7")
+    # Only the current IP is within the 10-min concurrent window
+    svc._record_ip(10, now - 60, "31.173.85.7")
+
+    asyncio.run(svc._check_thresholds(now))
+    svc.bot.send_message.assert_not_called()
+
+
+def test_alert_fires_concurrent_sharing():
+    """Key sharing: 3 different IPs active within the last 10 min."""
+    key = _awg_key(key_id=11, public_key="pkShared")
+    vpn_keys_mock = AsyncMock()
+    vpn_keys_mock.get_by_id.return_value = key
+
+    svc = _make_service(
+        vpn_keys=vpn_keys_mock,
+        min_unique_ips=3,
+        cooldown_seconds=0,
+        window_seconds=3600,
+        concurrent_window_seconds=600,
+    )
+    svc.bot = AsyncMock()
+
+    now = time_module.time()
+    svc._record_ip(11, now - 120, "10.0.0.1")
+    svc._record_ip(11, now - 90, "10.0.0.2")
+    svc._record_ip(11, now - 60, "10.0.0.3")
+
+    asyncio.run(svc._check_thresholds(now))
+    svc.bot.send_message.assert_called_once()
+
+
+def test_concurrent_window_disabled_falls_back_to_full_window():
+    """concurrent_window_seconds=0 restores original full-window behavior."""
+    key = _awg_key(key_id=12, public_key="pkLegacy")
+    vpn_keys_mock = AsyncMock()
+    vpn_keys_mock.get_by_id.return_value = key
+
+    svc = _make_service(
+        vpn_keys=vpn_keys_mock,
+        min_unique_ips=3,
+        cooldown_seconds=0,
+        window_seconds=3600,
+        concurrent_window_seconds=0,
+    )
+    svc.bot = AsyncMock()
+
+    now = time_module.time()
+    # Three IPs spread over the last hour (no concurrent overlap) — still triggers
+    svc._record_ip(12, now - 3000, "1.1.1.1")
+    svc._record_ip(12, now - 2000, "2.2.2.2")
+    svc._record_ip(12, now - 1000, "3.3.3.3")
+
+    asyncio.run(svc._check_thresholds(now))
+    svc.bot.send_message.assert_called_once()
+
+
+def test_unique_ips_in_concurrent_window():
+    svc = _make_service(window_seconds=3600, concurrent_window_seconds=600)
+    now = time_module.time()
+    svc._record_ip(1, now - 700, "old.ip")    # outside concurrent window
+    svc._record_ip(1, now - 300, "new.ip.1")  # inside
+    svc._record_ip(1, now - 100, "new.ip.2")  # inside
+    # Prune main window first
+    svc._unique_ips_in_window(1, now)
+    assert svc._unique_ips_in_concurrent_window(1, now) == frozenset({"new.ip.1", "new.ip.2"})
