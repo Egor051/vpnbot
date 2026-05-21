@@ -682,13 +682,16 @@ class Database:
             await self._raw_conn().execute("PRAGMA foreign_keys = ON")
 
     async def _migrate_v17(self) -> None:
-        # Add MODERATOR to the users.role CHECK constraint by recreating the table.
-        # Same pattern as _migrate_v16: FK OFF to avoid cascade complications.
-        await self._raw_conn().execute("PRAGMA foreign_keys = OFF")
+        # Commit any writes buffered by previous migrations so that
+        # PRAGMA foreign_keys = OFF takes effect (SQLite silently ignores
+        # the pragma when a transaction is already open).
+        await self.commit()
+        raw = self._raw_conn()
+        await raw.execute("PRAGMA foreign_keys = OFF")
         try:
-            await self.conn.execute("DROP INDEX IF EXISTS idx_users_role")
-            await self.conn.execute("DROP INDEX IF EXISTS idx_users_active_role")
-            await self.conn.execute(
+            await raw.execute("DROP INDEX IF EXISTS idx_users_role")
+            await raw.execute("DROP INDEX IF EXISTS idx_users_active_role")
+            await raw.execute(
                 """
                 CREATE TABLE users_new (
                   telegram_user_id INTEGER PRIMARY KEY,
@@ -703,15 +706,21 @@ class Database:
                 )
                 """
             )
-            await self.conn.execute("INSERT INTO users_new SELECT * FROM users")
-            await self.conn.execute("DROP TABLE users")
-            await self.conn.execute("ALTER TABLE users_new RENAME TO users")
-            await self.conn.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
-            await self.conn.execute(
+            await raw.execute("INSERT INTO users_new SELECT * FROM users")
+            await raw.execute("DROP TABLE users")
+            await raw.execute("ALTER TABLE users_new RENAME TO users")
+            await raw.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
+            await raw.execute(
                 "CREATE INDEX IF NOT EXISTS idx_users_active_role ON users(role) WHERE blocked_at IS NULL"
             )
+            await raw.commit()
+        except Exception:
+            await raw.rollback()
+            raise
         finally:
-            await self._raw_conn().execute("PRAGMA foreign_keys = ON")
+            # Re-enable FK after committing so the pragma takes effect
+            # (SQLite ignores it inside a transaction).
+            await raw.execute("PRAGMA foreign_keys = ON")
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(
