@@ -49,6 +49,13 @@ class TrialKeyRequestRepository:
         row = await cursor.fetchone()
         return _row_to_request(row)
 
+    async def count_pending(self) -> int:
+        cursor = await self.db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM trial_key_requests WHERE status = 'pending'"
+        )
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row is not None else 0
+
     async def list_pending(self, limit: int = 20, offset: int = 0) -> list[TrialKeyRequest]:
         cursor = await self.db.conn.execute(
             """

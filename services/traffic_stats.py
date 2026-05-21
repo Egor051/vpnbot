@@ -47,6 +47,10 @@ class TrafficStatsService:
             raise NotFound("Ключ не найден")
         return views[0]
 
+    async def count_for_superadmin(self, actor_user_id: int) -> int:
+        await self.users.require_superadmin(actor_user_id)
+        return await self.vpn_keys.count_traffic_supported()
+
     async def list_for_superadmin(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[KeyTrafficStatsView]:
         await self.users.require_superadmin(actor_user_id)
         keys = await self.vpn_keys.list_traffic_supported(limit=limit, offset=offset)

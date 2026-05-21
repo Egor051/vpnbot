@@ -115,6 +115,10 @@ class AccessApprovalService:
                 raise NotFound("Заявка не найдена")
             return refreshed, changed
 
+    async def count_pending(self, actor_user_id: int) -> int:
+        await self.users.require_moderator_or_admin(actor_user_id)
+        return await self.requests.count_by_status(AccessRequestStatus.PENDING)
+
     async def list_pending(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[AccessRequest]:
         await self.users.require_moderator_or_admin(actor_user_id)
         return await self.requests.list_by_status(AccessRequestStatus.PENDING, limit=limit, offset=offset)

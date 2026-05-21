@@ -115,6 +115,14 @@ class AccessRequestRepository:
         await self.db.commit()
         return cursor.rowcount == 1
 
+    async def count_by_status(self, status: AccessRequestStatus) -> int:
+        cursor = await self.db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM access_requests WHERE status = ?",
+            (status.value,),
+        )
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row is not None else 0
+
     async def list_by_status(self, status: AccessRequestStatus, limit: int = 20, offset: int = 0) -> list[AccessRequest]:
         cursor = await self.db.conn.execute(
             """

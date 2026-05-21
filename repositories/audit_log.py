@@ -44,6 +44,11 @@ class AuditLogRepository:
         )
         await self.db.commit()
 
+    async def count_all(self) -> int:
+        cursor = await self.db.conn.execute("SELECT COUNT(*) AS cnt FROM audit_log")
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row is not None else 0
+
     async def list_recent(self, limit: int = 20, offset: int = 0) -> list[dict[str, object]]:
         cursor = await self.db.conn.execute(
             """
