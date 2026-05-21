@@ -6,6 +6,7 @@ from aiogram.types import CallbackQuery
 from bot.keyboards.common import back_to_menu
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
+from i18n import t
 
 router = Router()
 
@@ -15,13 +16,13 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
     if not await ensure_private_callback(callback):
         return
     await state.clear()
-    await safe_callback_answer(callback, "Отменено")
+    await safe_callback_answer(callback, t("announce_cancelled"))
     if callback.message:
-        await safe_edit_message_text(callback.message, "Операция отменена.", reply_markup=back_to_menu())
+        await safe_edit_message_text(callback.message, t("cancel_done"), reply_markup=back_to_menu())
 
 
 @router.callback_query()
 async def unknown_callback(callback: CallbackQuery) -> None:
     if not await ensure_private_callback(callback):
         return
-    await safe_callback_answer(callback, "Действие недоступно или устарело.", show_alert=True)
+    await safe_callback_answer(callback, t("action_stale"), show_alert=True)

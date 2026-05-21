@@ -8,8 +8,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.formatters import (
-    NOTE_CREATE_WARNING,
-    ONE_KEY_ONE_DEVICE_WARNING,
     awg_config_text,
     create_confirm_text,
     key_detail_text,
@@ -39,6 +37,7 @@ from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_me
 from bot.pagination import page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
+from i18n import t
 from models.enums import AuditEntityType, VpnKeyStatus, VpnKeyType
 from services.errors import AccessDenied, NotFound
 
@@ -71,7 +70,7 @@ async def list_keys(callback: CallbackQuery, services: Services) -> None:
         await answer_callback_error(callback, exc)
 
 
-@router.message(F.text == "Мои ключи")
+@router.message(F.text == t("btn_my_keys"))
 async def list_keys_message(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
@@ -107,12 +106,12 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
     if callback.message:
         await safe_edit_message_text(
             callback.message,
-            f"{ONE_KEY_ONE_DEVICE_WARNING}\n\nВыберите тип ключа:",
+            f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
             reply_markup=create_key_keyboard(),
         )
 
 
-@router.message(F.text == "Создать ключ")
+@router.message(F.text == t("btn_create_key"))
 async def create_key_menu_message(message: Message, services: Services) -> None:
     if not await ensure_private_message(message):
         return
@@ -120,7 +119,7 @@ async def create_key_menu_message(message: Message, services: Services) -> None:
         return
     try:
         await _ensure_can_enter_create(message.from_user.id, services)
-        await message.answer(f"{ONE_KEY_ONE_DEVICE_WARNING}\n\nВыберите тип ключа:", reply_markup=create_key_keyboard())
+        await message.answer(f"{t('one_key_one_device')}\n\n{t('choose_key_type')}", reply_markup=create_key_keyboard())
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -139,7 +138,7 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext, services
         await state.update_data(key_type=key_type)
         await safe_edit_message_text(
             callback.message,
-            f"{NOTE_CREATE_WARNING}\n\nВведите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
+            f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
             reply_markup=cancel_keyboard(),
         )
     except Exception as exc:
@@ -160,10 +159,10 @@ async def create_key_note(message: Message, state: FSMContext, services: Service
         await state.update_data(note=note)
         if key_type == VpnKeyType.AWG.value:
             await state.set_state(CreateKeyStates.waiting_mtu)
-            await message.answer("Выберите MTU для ключа:", reply_markup=mtu_choice_keyboard())
+            await message.answer(t("mtu_prompt"), reply_markup=mtu_choice_keyboard())
         else:
             await state.set_state(CreateKeyStates.waiting_expiry)
-            await message.answer("Выберите срок действия ключа:", reply_markup=expiry_choice_keyboard())
+            await message.answer(t("expiry_prompt"), reply_markup=expiry_choice_keyboard())
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -179,14 +178,14 @@ async def create_key_mtu(callback: CallbackQuery, state: FSMContext, services: S
         raw = callback.data.split(":", 1)[1]
         mtu = int(raw)
         if mtu < 1 or mtu > 1500:
-            await safe_callback_answer(callback, "Недопустимое значение MTU: 1–1500", show_alert=True)
+            await safe_callback_answer(callback, t("mtu_invalid"), show_alert=True)
             return
         await state.update_data(mtu=mtu)
         await state.set_state(CreateKeyStates.waiting_expiry)
         await safe_callback_answer(callback)
         await safe_edit_message_text(
             callback.message,
-            "Выберите срок действия ключа:",
+            t("expiry_prompt"),
             reply_markup=expiry_choice_keyboard(),
         )
     except Exception as exc:
@@ -201,7 +200,7 @@ async def create_key_mtu_custom_request(callback: CallbackQuery, state: FSMConte
         return
     await safe_callback_answer(callback)
     await state.set_state(CreateKeyStates.waiting_mtu_custom)
-    await safe_edit_message_text(callback.message, "Введите MTU (от 1 до 1500):", reply_markup=None)
+    await safe_edit_message_text(callback.message, t("mtu_custom_prompt"), reply_markup=None)
 
 
 @router.message(CreateKeyStates.waiting_mtu_custom)
@@ -214,11 +213,11 @@ async def create_key_mtu_custom(message: Message, state: FSMContext, services: S
         await _ensure_can_enter_create(message.from_user.id, services)
         mtu = _parse_mtu(message.text or "")
         if mtu is None:
-            await message.answer("Введите целое число от 1 до 1500:")
+            await message.answer(t("mtu_enter_integer"))
             return
         await state.update_data(mtu=mtu)
         await state.set_state(CreateKeyStates.waiting_expiry)
-        await message.answer("Выберите срок действия ключа:", reply_markup=expiry_choice_keyboard())
+        await message.answer(t("expiry_prompt"), reply_markup=expiry_choice_keyboard())
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -237,7 +236,7 @@ async def create_key_expiry(callback: CallbackQuery, state: FSMContext, services
         else:
             days = int(raw)
             if days < 1 or days > services.settings.key_max_trial_days:
-                await safe_callback_answer(callback, f"Недопустимый срок: 1–{services.settings.key_max_trial_days} дней", show_alert=True)
+                await safe_callback_answer(callback, t("expiry_invalid", max=services.settings.key_max_trial_days), show_alert=True)
                 return
             from datetime import datetime, timedelta, timezone
             expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).replace(microsecond=0).isoformat()
@@ -268,7 +267,7 @@ async def create_key_expiry_custom(callback: CallbackQuery, state: FSMContext) -
     await state.set_state(CreateKeyStates.waiting_custom_days)
     await safe_edit_message_text(
         callback.message,
-        "Введите количество дней (от 1 до 365):",
+        t("expiry_custom_prompt"),
         reply_markup=None,
     )
 
@@ -283,12 +282,12 @@ async def create_key_custom_days(message: Message, state: FSMContext, services: 
         await _ensure_can_enter_create(message.from_user.id, services)
         text = (message.text or "").strip()
         if not text.isdigit():
-            await message.answer("Введите целое число дней (от 1 до 365):")
+            await message.answer(t("days_enter_integer"))
             return
         days = int(text)
         max_days = services.settings.key_max_trial_days
         if days < 1 or days > max_days:
-            await message.answer(f"Введите число от 1 до {max_days}:")
+            await message.answer(t("days_enter_range", max=max_days))
             return
         from datetime import datetime, timedelta, timezone
         expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).replace(microsecond=0).isoformat()
@@ -324,13 +323,13 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         profile = profile_from_tg(callback.from_user)
         rate_limiter.check(callback.from_user.id, "key_create", 20)
         await state.clear()
-        await safe_callback_answer(callback, "Создаю ключ...")
+        await safe_callback_answer(callback, t("creating_key"))
         if key_type == VpnKeyType.XRAY.value:
             result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at)
         elif key_type == VpnKeyType.AWG.value:
             result = await services.awg.create_awg_key(callback.from_user.id, profile, note, expires_at=expires_at, mtu=mtu)
         else:
-            await safe_edit_message_text(callback.message, "Неизвестный тип ключа.")
+            await safe_edit_message_text(callback.message, t("key_unknown_type"))
             return
         owner_ctx = _admin_owner_context(result.key, callback.from_user.id)
         await safe_edit_message_text(
@@ -410,7 +409,7 @@ async def show_key_stats(callback: CallbackQuery, services: Services) -> None:
         return
     try:
         key_id = int(callback.data.rsplit(":", 1)[-1])
-        await safe_callback_answer(callback, "Обновляю статистику...")
+        await safe_callback_answer(callback, t("updating_stats"))
         view = await services.traffic_stats.refresh_for_actor(callback.from_user.id, key_id)
         owner = view.owner
         await services.audit.write(
@@ -446,10 +445,10 @@ async def revoke_key_prompt(callback: CallbackQuery, services: Services) -> None
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         owner_context = owner_context or _admin_owner_context(key, callback.from_user.id)
         if owner_context is not None and owner_context != key.owner_user_id:
-            raise AccessDenied("Контекст отзыва устарел, откройте список ключей заново")
+            raise AccessDenied(t("revoke_context_stale"))
         await safe_edit_message_text(
             callback.message,
-            f"Отозвать ключ #{key_id}? Доступ по нему будет отключён.",
+            t("revoke_prompt", key_id=key_id),
             reply_markup=confirm_keyboard("revoke", key_id, owner_user_id=owner_context, page=page_context),
         )
     except Exception as exc:
@@ -468,13 +467,10 @@ async def delete_key_prompt(callback: CallbackQuery, services: Services) -> None
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         owner_context = owner_context or _admin_owner_context(key, callback.from_user.id)
         if owner_context is not None and owner_context != key.owner_user_id:
-            raise AccessDenied("Контекст удаления устарел, откройте список ключей заново")
+            raise AccessDenied(t("delete_context_stale"))
         await safe_edit_message_text(
             callback.message,
-            (
-                f"Полностью удалить ключ #{key_id}? Доступ будет отключён на сервере, "
-                "запись ключа и его статистика будут удалены из бота. Это действие нельзя отменить."
-            ),
+            t("delete_prompt", key_id=key_id),
             reply_markup=confirm_keyboard("delete", key_id, owner_user_id=owner_context, page=page_context),
         )
     except Exception as exc:
@@ -492,7 +488,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         if action == "revoke":
             rate_limiter.check(callback.from_user.id, "key_revoke", 10)
-            await safe_callback_answer(callback, "Выполняю...")
+            await safe_callback_answer(callback, t("executing"))
             updated = (
                 await services.xray.revoke_xray_key(callback.from_user.id, key_id)
                 if key.key_type == VpnKeyType.XRAY
@@ -500,15 +496,15 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
             )
             await safe_edit_message_text(
                 callback.message,
-                "Ключ отозван.",
+                t("key_revoked"),
                 reply_markup=key_actions_keyboard(updated, owner_user_id=_admin_owner_context(updated, callback.from_user.id)),
             )
         elif action == "delete":
             rate_limiter.check(callback.from_user.id, "key_delete", 10)
-            await safe_callback_answer(callback, "Выполняю...")
+            await safe_callback_answer(callback, t("executing"))
             owner_context = owner_context_from_callback or _admin_owner_context(key, callback.from_user.id)
             if owner_context is not None and owner_context != key.owner_user_id:
-                raise AccessDenied("Контекст удаления устарел, откройте список ключей заново")
+                raise AccessDenied(t("delete_context_stale"))
             if key.key_type == VpnKeyType.XRAY:
                 await services.xray.delete_xray_key(callback.from_user.id, key_id)
             else:
@@ -523,10 +519,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
                 )
                 await safe_edit_message_text(
                     callback.message,
-                    (
-                        "Ключ полностью удалён.\n\n"
-                        f"{keys_page_text(keys, current_page, viewer_user_id=callback.from_user.id, owner_user_id=owner_context)}"
-                    ),
+                    t("key_deleted_with_list", list=keys_page_text(keys, current_page, viewer_user_id=callback.from_user.id, owner_user_id=owner_context)),
                     reply_markup=keys_list_keyboard(
                         keys,
                         page=current_page,
@@ -538,11 +531,11 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
                 return
             await safe_edit_message_text(
                 callback.message,
-                "Ключ полностью удалён.",
+                t("key_deleted"),
                 reply_markup=after_key_deleted_keyboard(),
             )
         else:
-            await safe_callback_answer(callback, "Неизвестное действие", show_alert=True)
+            await safe_callback_answer(callback, t("unknown_action"), show_alert=True)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -561,7 +554,7 @@ async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services:
         await state.update_data(key_id=key_id)
         await safe_edit_message_text(
             callback.message,
-            f"Новая заметка для {key.key_type.value.upper()} #{key.id}. Отправьте <code>-</code>, чтобы очистить.",
+            t("edit_note_prompt", type=key.key_type.value.upper(), id=key.id),
             reply_markup=cancel_keyboard(),
         )
     except Exception as exc:
@@ -593,7 +586,7 @@ async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services
         return
     if not await ensure_private_callback(callback):
         return
-    await safe_callback_answer(callback, "Сохраняю...")
+    await safe_callback_answer(callback, t("saving"))
     data = await state.get_data()
     await state.clear()
     try:
@@ -603,7 +596,7 @@ async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await safe_edit_message_text(
             callback.message,
-            "Заметка обновлена.",
+            t("note_updated"),
             reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
         )
     except Exception as exc:
@@ -619,13 +612,13 @@ async def trial_request_start(callback: CallbackQuery, state: FSMContext, servic
     try:
         can = await services.trial_access.can_request_trial(callback.from_user.id)
         if not can:
-            await safe_callback_answer(callback, "Вы уже использовали свой пробный доступ.", show_alert=True)
+            await safe_callback_answer(callback, t("trial_already_used"), show_alert=True)
             return
         await safe_callback_answer(callback)
         await state.set_state(TrialRequestStates.choosing_protocol)
         await safe_edit_message_text(
             callback.message,
-            "Выберите протокол для пробного ключа (7 дней):",
+            t("trial_choose_protocol"),
             reply_markup=trial_protocol_keyboard(),
         )
     except Exception as exc:
@@ -644,22 +637,22 @@ async def trial_request_proto(callback: CallbackQuery, state: FSMContext, servic
         can = await services.trial_access.can_request_trial(callback.from_user.id)
         if not can:
             await state.clear()
-            await safe_callback_answer(callback, "Вы уже использовали свой пробный доступ.", show_alert=True)
+            await safe_callback_answer(callback, t("trial_already_used"), show_alert=True)
             return
         req = await services.trial_access.create_trial_request(callback.from_user.id, key_type)
         await state.clear()
-        await safe_callback_answer(callback, "Заявка отправлена!")
+        await safe_callback_answer(callback, t("trial_request_sent"))
         type_label = "Xray" if proto == "xray" else "AWG"
         await safe_edit_message_text(
             callback.message,
-            "Заявка на пробный доступ отправлена. Ожидайте решения администратора.",
+            t("trial_request_submitted"),
         )
         from bot.keyboards.admin import trial_request_keyboard
-        text = (
-            "<b>Новая заявка на пробный ключ</b>\n"
-            f"Telegram ID: <code>{callback.from_user.id}</code>\n"
-            f"Протокол: {type_label}\n"
-            f"Заявка: #{req.id}"
+        text = t(
+            "trial_admin_notify",
+            user_id=callback.from_user.id,
+            protocol=type_label,
+            req_id=req.id,
         )
         for admin_id in services.settings.admin_ids:
             try:
@@ -681,7 +674,7 @@ async def trial_key_show(callback: CallbackQuery, services: Services) -> None:
         key_id = int(callback.data.rsplit(":", 1)[-1])
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         if key.owner_user_id != callback.from_user.id:
-            await safe_callback_answer(callback, "Нет доступа к этому ключу.", show_alert=True)
+            await safe_callback_answer(callback, t("trial_no_access"), show_alert=True)
             return
         await safe_callback_answer(callback)
         if key.key_type == VpnKeyType.XRAY:
@@ -721,20 +714,20 @@ async def _ensure_can_enter_create(actor_user_id: int, services: Services) -> No
     try:
         await services.users.require_approved_or_admin(actor_user_id)
     except NotFound as exc:
-        raise AccessDenied("Сначала отправьте /start, чтобы создать заявку на доступ") from exc
+        raise AccessDenied(t("ensure_send_start")) from exc
     except AccessDenied as exc:
-        if "не одобрен" in str(exc):
-            raise AccessDenied("Доступ ещё не одобрен. Дождитесь решения администратора.") from exc
+        if "не одобрен" in str(exc) or "not approved" in str(exc).lower():
+            raise AccessDenied(t("access_not_approved")) from exc
         raise
 
 
 def _parse_key_context(data: str | None, prefix: str) -> tuple[int, int | None, int]:
     if not data:
-        raise ValueError("Некорректная callback-кнопка")
+        raise ValueError(t("invalid_callback_btn"))
     parts = data.split(":")
     expected = prefix.split(":")
     if parts[: len(expected)] != expected or len(parts) not in {len(expected) + 1, len(expected) + 3}:
-        raise ValueError("Некорректная callback-кнопка")
+        raise ValueError(t("invalid_callback_btn"))
     key_id = int(parts[len(expected)])
     if len(parts) == len(expected) + 1:
         return key_id, None, 0
@@ -744,7 +737,7 @@ def _parse_key_context(data: str | None, prefix: str) -> tuple[int, int | None, 
 def _parse_confirm_context(data: str) -> tuple[str, int, int | None, int]:
     parts = data.split(":")
     if len(parts) not in {3, 5} or parts[0] != "confirm":
-        raise ValueError("Некорректная callback-кнопка")
+        raise ValueError(t("invalid_callback_btn"))
     action = parts[1]
     key_id = int(parts[2])
     if len(parts) == 3:

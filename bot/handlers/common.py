@@ -13,6 +13,7 @@ from bot.messages import is_stale_callback_query_error, safe_callback_answer, sa
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimitExceeded
 from config.settings import SettingsError
+from i18n import t
 from models.dto import TelegramUserProfile
 from models.enums import UserRole
 from services.errors import AccessDenied, InvalidOperation, NotFound, ServiceError
@@ -40,7 +41,7 @@ async def is_admin(services: Services, user_id: int) -> bool:
 def service_error_text(exc: Exception) -> str:
     if isinstance(exc, (AccessDenied, InvalidOperation, NotFound, ServiceError, SettingsError, ValueError, RateLimitExceeded)):
         return str(exc)
-    return "Произошла внутренняя ошибка. Попробуйте позже."
+    return t("internal_error")
 
 
 async def answer_callback_error(callback: CallbackQuery, exc: Exception) -> None:
@@ -58,37 +59,13 @@ async def answer_message_error(message: Message, exc: Exception) -> None:
     await message.answer(service_error_text(exc), reply_markup=back_to_menu())
 
 
-FAQ_TEXT = "<b>Часто задаваемые вопросы</b>"
-
-FAQ_ANSWERS = {
-    "connect": (
-        "После создания ключа бот выдаст конфигурацию. Скопируйте её в подходящее VPN-приложение "
-        "или импортируйте файл, если он доступен. Для AWG обычно используется конфиг .conf, "
-        "для Xray — ссылка/профиль. После импорта включите подключение в приложении."
-    ),
-    "device": (
-        "Да. Один ключ рассчитан на одно устройство. Если использовать один и тот же ключ на нескольких "
-        "устройствах, подключение может работать нестабильно, а статистика и управление доступом будут путаться."
-    ),
-    "choice": "Если не знаете, что выбрать, начните с XRay.",
-    "trouble": (
-        "Проверьте интернет, правильность импортированного профиля, дату окончания доступа и не используется ли "
-        "этот же ключ на другом устройстве. Также попробуйте выключить и включить VPN-приложение. Если и это не "
-        "помогло, попробуйте включить и выключить \"режим самолета\" или перезагрузить устройство. Если проблема "
-        "осталась — напишите в техподдержку."
-    ),
-    "notes": "Нет. Ваши заметки никто не видит.",
-    "support": "Техподдержка: @ktotakmoje",
-}
-
-
 @router.message(Command("help"))
 async def help_command(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
         return
-    await message.answer(FAQ_TEXT, reply_markup=faq_keyboard())
+    await message.answer(t("faq_title"), reply_markup=faq_keyboard())
 
 
 @router.message(Command("faq"))
@@ -97,7 +74,7 @@ async def faq_command(message: Message, services: Services) -> None:
         return
     if not await ensure_private_message(message):
         return
-    await message.answer(FAQ_TEXT, reply_markup=faq_keyboard())
+    await message.answer(t("faq_title"), reply_markup=faq_keyboard())
 
 
 @router.callback_query(F.data == "help")
@@ -106,7 +83,7 @@ async def help_callback(callback: CallbackQuery, services: Services) -> None:
         return
     await safe_callback_answer(callback)
     if callback.message and callback.from_user:
-        await safe_edit_message_text(callback.message, FAQ_TEXT, reply_markup=faq_keyboard())
+        await safe_edit_message_text(callback.message, t("faq_title"), reply_markup=faq_keyboard())
 
 
 @router.callback_query(F.data.startswith("faq:"))
@@ -117,19 +94,20 @@ async def faq_answer_callback(callback: CallbackQuery) -> None:
     if callback.message is None or callback.data is None:
         return
     topic = callback.data.split(":", 1)[1]
-    text = FAQ_ANSWERS.get(topic)
-    if text is None:
-        text = "Ответ не найден."
+    key = f"faq_{topic}"
+    text = t(key) if key in (
+        "faq_connect", "faq_device", "faq_choice", "faq_trouble", "faq_notes", "faq_support"
+    ) else t("faq_not_found")
     await safe_edit_message_text(callback.message, text, reply_markup=faq_answer_keyboard())
 
 
-@router.message(F.text == "Помощь")
+@router.message(F.text == t("btn_help"))
 async def help_menu_message(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
         return
-    await message.answer(FAQ_TEXT, reply_markup=faq_keyboard())
+    await message.answer(t("faq_title"), reply_markup=faq_keyboard())
 
 
 @router.message(Command("menu"))
@@ -171,4 +149,4 @@ async def cancel_command(message: Message, state: FSMContext) -> None:
     if not await ensure_private_message(message):
         return
     await state.clear()
-    await message.answer("Операция отменена.", reply_markup=back_to_menu())
+    await message.answer(t("cancel_done"), reply_markup=back_to_menu())

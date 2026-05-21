@@ -15,6 +15,7 @@ from bot.keyboards.common import main_menu
 from bot.keyboards.proxy import proxy_back_keyboard, proxy_confirm_keyboard, proxy_menu_keyboard
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
+from i18n import t
 from models.enums import ProxyAccessType
 from services.user_locks import UserLockManager
 
@@ -22,7 +23,7 @@ router = Router()
 _proxy_confirm_locks = UserLockManager()
 
 
-@router.message(F.text == "Прокси")
+@router.message(F.text == t("btn_proxy"))
 async def show_proxy_message(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
@@ -65,12 +66,12 @@ async def proxy_get_prompt(callback: CallbackQuery, state: FSMContext, services:
             return
         if access_type == ProxyAccessType.SOCKS5.value and not services.settings.socks5_enabled:
             text, markup = await _proxy_menu_view(services, callback.from_user.id, accesses=accesses)
-            await safe_callback_answer(callback, "SOCKS5 сейчас недоступен", show_alert=True)
+            await safe_callback_answer(callback, t("socks5_unavailable"), show_alert=True)
             await safe_edit_message_text(callback.message, text, reply_markup=markup)
             return
         if access_type == ProxyAccessType.MTPROTO.value and not services.settings.mtproto_enabled:
             text, markup = await _proxy_menu_view(services, callback.from_user.id, accesses=accesses)
-            await safe_callback_answer(callback, "MTProto сейчас недоступен", show_alert=True)
+            await safe_callback_answer(callback, t("mtproto_unavailable"), show_alert=True)
             await safe_edit_message_text(callback.message, text, reply_markup=markup)
             return
         nonce = secrets.token_urlsafe(8)
@@ -124,23 +125,23 @@ async def proxy_confirm(callback: CallbackQuery, state: FSMContext, services: Se
                 return
             if stale and not _has_access(accesses, access_type):
                 await state.clear()
-                await safe_callback_answer(callback, "Действие устарело", show_alert=True)
+                await safe_callback_answer(callback, t("proxy_action_stale"), show_alert=True)
                 await safe_edit_message_text(
                     callback.message,
-                    "Действие устарело. Вернитесь в раздел «Прокси» и попробуйте снова.",
+                    t("proxy_stale_retry"),
                     reply_markup=proxy_back_keyboard(),
                 )
                 return
 
             await state.clear()
-            await safe_callback_answer(callback, "Выполняю...")
+            await safe_callback_answer(callback, t("executing_proxy"))
             profile = profile_from_tg(callback.from_user)
             if access_type == ProxyAccessType.SOCKS5.value:
                 await services.socks5.issue_socks5_proxy(callback.from_user.id, profile)
             elif access_type == ProxyAccessType.MTPROTO.value:
                 await services.mtproto.issue_mtproto_proxy(callback.from_user.id, profile)
             else:
-                await safe_edit_message_text(callback.message, "Неизвестный тип прокси.", reply_markup=proxy_back_keyboard())
+                await safe_edit_message_text(callback.message, t("proxy_unknown_type"), reply_markup=proxy_back_keyboard())
                 return
 
             text, markup = await _proxy_menu_view(services, callback.from_user.id)
@@ -154,7 +155,7 @@ async def proxy_cancel(callback: CallbackQuery, state: FSMContext, services: Ser
     if not await ensure_private_callback(callback):
         return
     await state.clear()
-    await safe_callback_answer(callback, "Отменено")
+    await safe_callback_answer(callback, t("proxy_cancelled"))
     if callback.from_user is None or callback.message is None:
         return
     try:
@@ -186,9 +187,9 @@ async def _proxy_menu_view(services: Services, user_id: int, accesses: list[Any]
     if accesses is None:
         accesses = await services.proxy.list_user_accesses(user_id)
     if not accesses and not services.settings.socks5_enabled and not services.settings.mtproto_enabled:
-        text = "<b>Прокси</b>\n\nПрокси сейчас недоступны."
+        text = t("proxy_unavailable")
     elif not accesses:
-        text = "<b>Прокси</b>\n\nУ вас пока нет прокси-доступов."
+        text = t("proxy_no_accesses")
     else:
         text = proxy_access_text(accesses)
     return text, proxy_menu_keyboard(
@@ -208,18 +209,7 @@ def _has_access(accesses: list[Any], access_type: str) -> bool:
 
 def _confirm_text(access_type: str, mtproto_mode: str = "static") -> str:
     if access_type == ProxyAccessType.SOCKS5.value:
-        return (
-            "<b>Подтвердите выдачу SOCKS5</b>\n\n"
-            "Будет создан персональный Linux-пользователь Dante и пароль для SOCKS5-доступа."
-        )
+        return t("proxy_confirm_socks5")
     if mtproto_mode == "managed":
-        return (
-            "<b>Подтвердите выдачу MTProto</b>\n\n"
-            "Будет создан индивидуальный MTProto secret. После применения MTProxy пользователь получит обычную ссылку "
-            "и ссылку с random padding dd."
-        )
-    return (
-        "<b>Подтвердите выдачу MTProto</b>\n\n"
-        "Бот покажет статические ссылки Telegram MTProto Proxy. "
-        "При общем secret индивидуальный серверный revoke для MTProto невозможен."
-    )
+        return t("proxy_confirm_mtproto_managed")
+    return t("proxy_confirm_mtproto_static")

@@ -6,12 +6,13 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message
 
 from bot.container import Services
-from bot.handlers.common import answer_message_error, is_admin, profile_from_tg
 from bot.formatters import key_detail_text, main_menu_text
+from bot.handlers.common import answer_message_error, is_admin, profile_from_tg
 from bot.keyboards.admin import access_request_keyboard
 from bot.keyboards.common import main_menu
 from bot.keyboards.keys import request_trial_keyboard, trial_key_show_keyboard
 from bot.private_chat import ensure_private_message
+from i18n import t
 from models.access import is_blocked_user
 from models.enums import UserRole
 from utils.formatting import h
@@ -31,13 +32,13 @@ async def start_command(message: Message, services: Services, bot: Bot) -> None:
         result = await services.access.create_or_get_request(profile)
         if is_blocked_user(result.user):
             if result.request is None:
-                await message.answer("Повторная заявка пока не создана. Дождитесь решения администратора.")
+                await message.answer(t("blocked_no_request"))
                 return
             if result.created:
-                await message.answer("Повторная заявка на доступ создана. Дождитесь решения администратора.")
+                await message.answer(t("blocked_request_created"))
                 await _notify_admins(services, bot, result.request.id, profile.telegram_user_id, profile.username)
             else:
-                await message.answer("Ваша повторная заявка уже ожидает решения администратора.")
+                await message.answer(t("blocked_request_pending"))
             await _send_trial_offer(message, services, profile.telegram_user_id)
             return
         if result.user.role in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
@@ -48,12 +49,12 @@ async def start_command(message: Message, services: Services, bot: Bot) -> None:
             return
 
         if result.request is None:
-            await message.answer("Заявка уже обработана. Дождитесь решения администратора.")
+            await message.answer(t("request_already_processed"))
         elif result.created:
-            await message.answer("Заявка на доступ создана. Дождитесь решения администратора.")
+            await message.answer(t("request_created"))
             await _notify_admins(services, bot, result.request.id, profile.telegram_user_id, profile.username)
         else:
-            await message.answer("Ваша заявка уже ожидает решения администратора.")
+            await message.answer(t("request_pending"))
 
         await _send_trial_offer(message, services, profile.telegram_user_id)
     except Exception as exc:
@@ -65,25 +66,22 @@ async def _send_trial_offer(message: Message, services: Services, user_id: int) 
     if trial_keys:
         key = trial_keys[0]
         await message.answer(
-            f"У вас есть активный пробный ключ:\n\n{key_detail_text(key, viewer_user_id=user_id)}",
+            t("trial_key_active", key_text=key_detail_text(key, viewer_user_id=user_id)),
             reply_markup=trial_key_show_keyboard(key.id),
         )
     elif await services.trial_access.can_request_trial(user_id):
-        await message.answer(
-            "Вы можете запросить пробный доступ на 7 дней. Администратор рассмотрит вашу заявку.",
-            reply_markup=request_trial_keyboard(),
-        )
+        await message.answer(t("trial_offer"), reply_markup=request_trial_keyboard())
 
 
 async def _notify_admins(services: Services, bot: Bot, request_id: int, user_id: int, username: str | None) -> None:
-    text = (
-        "<b>Новая заявка на доступ</b>\n"
-        f"Telegram ID: <code>{user_id}</code>\n"
-        f"Username: {h('@' + username if username else 'не указан')}\n"
-        f"Заявка: #{request_id}"
+    text = t(
+        "notify_admin_new_request",
+        user_id=user_id,
+        username=h("@" + username if username else t("not_specified")),
+        request_id=request_id,
     )
     for admin_id in services.settings.admin_ids:
         try:
             await bot.send_message(admin_id, text, reply_markup=access_request_keyboard(request_id))
         except Exception:
-            logger.warning("Не удалось отправить уведомление админу %s", admin_id, exc_info=True)
+            logger.warning("Failed to notify admin %s", admin_id, exc_info=True)

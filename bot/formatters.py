@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from aiogram.types import User as TgUser
 
+from i18n import t
 from models.dto import (
     AccessRequest,
     KeyTrafficStatsView,
@@ -34,17 +35,9 @@ from utils.formatting import (
 from utils.redact import redact as _redact
 
 
-ONE_KEY_ONE_DEVICE_WARNING = "<b>⚠️ 1 КЛЮЧ = 1 УСТРОЙСТВО</b>"
-NOTE_CREATE_WARNING = "<b>Рекомендуем не оставлять поле пустым, чтобы не запутаться в ключах.</b>"
-SERVER_RESTART_WARNING = (
-    "<b>⚠️ Сервер перезагружается по чётным числам в 04:00 по МСК. "
-    "Перезагрузка занимает несколько минут, в это время соединение может кратковременно прерваться.</b>"
-)
-
-
 def short_note(note: str | None, limit: int = 42) -> str:
     if not note:
-        return "нет"
+        return t("none")
     value = note.strip()
     if len(value) <= limit:
         return value
@@ -53,24 +46,24 @@ def short_note(note: str | None, limit: int = 42) -> str:
 
 def role_text(role: UserRole) -> str:
     return {
-        UserRole.SUPERADMIN: "superadmin",
-        UserRole.APPROVED_USER: "одобрен",
-        UserRole.PENDING_USER: "ожидает",
-        UserRole.BLOCKED_USER: "заблокирован",
+        UserRole.SUPERADMIN: t("role_superadmin"),
+        UserRole.APPROVED_USER: t("role_approved"),
+        UserRole.PENDING_USER: t("role_pending"),
+        UserRole.BLOCKED_USER: t("role_blocked"),
     }.get(role, role.value)
 
 
 def status_text(status: VpnKeyStatus) -> str:
     return {
-        VpnKeyStatus.PENDING_APPLY: "применяется",
-        VpnKeyStatus.ACTIVE: "активен",
-        VpnKeyStatus.APPLY_FAILED: "ошибка применения",
-        VpnKeyStatus.PENDING_REVOKE: "отзывается",
-        VpnKeyStatus.REVOKED: "отозван",
-        VpnKeyStatus.PENDING_DELETE: "удаляется",
-        VpnKeyStatus.DELETE_FAILED: "ошибка удаления",
-        VpnKeyStatus.DELETED: "удалён",
-        VpnKeyStatus.FAILED: "ошибка",
+        VpnKeyStatus.PENDING_APPLY: t("key_status_pending_apply"),
+        VpnKeyStatus.ACTIVE: t("key_status_active"),
+        VpnKeyStatus.APPLY_FAILED: t("key_status_apply_failed"),
+        VpnKeyStatus.PENDING_REVOKE: t("key_status_pending_revoke"),
+        VpnKeyStatus.REVOKED: t("key_status_revoked"),
+        VpnKeyStatus.PENDING_DELETE: t("key_status_pending_delete"),
+        VpnKeyStatus.DELETE_FAILED: t("key_status_delete_failed"),
+        VpnKeyStatus.DELETED: t("key_status_deleted"),
+        VpnKeyStatus.FAILED: t("key_status_failed"),
     }.get(status, status.value)
 
 
@@ -99,7 +92,7 @@ def key_display_label(key: VpnKey, viewer_user_id: int | None = None) -> str:
 
 def main_menu_text(user: TgUser) -> str:
     name = format_greeting_name(user.id, user.first_name, user.username)
-    return f"Доброго времени суток, {name}\n\n{SERVER_RESTART_WARNING}\n\nВыберите действие."
+    return t("main_menu_text", name=name, warning=t("server_restart_warning"))
 
 
 def key_list_card(key: VpnKey, *, viewer_user_id: int) -> str:
@@ -107,26 +100,26 @@ def key_list_card(key: VpnKey, *, viewer_user_id: int) -> str:
     label = key_display_label(key, viewer_user_id=viewer_user_id)
     parts = [
         f"<b>{key_title(key)}</b>",
-        f"Статус: {h(status_text(key.status))}",
-        f"Метка: {code(label)}",
-        f"Создан: {h(format_msk_datetime(key.created_at))}",
+        f"{t('field_status')}: {h(status_text(key.status))}",
+        f"{t('field_label')}: {code(label)}",
+        f"{t('field_created')}: {h(format_msk_datetime(key.created_at))}",
     ]
     if key.expires_at:
-        parts.append(f"Действует до: {h(format_expiry_date(key.expires_at))}")
+        parts.append(f"{t('field_expires')}: {h(format_expiry_date(key.expires_at))}")
     if not note or label != note:
-        parts.append(f"Заметка: {h(short_note(note))}")
+        parts.append(f"{t('field_note')}: {h(short_note(note))}")
     if key.client_ip:
-        parts.append(f"IP: {code(key.client_ip)}")
+        parts.append(f"{t('field_ip')}: {code(key.client_ip)}")
     return "\n".join(parts)
 
 
 def keys_page_text(keys: list[VpnKey], page: int, *, viewer_user_id: int, owner_user_id: int | None = None) -> str:
-    title = "<b>Ключи пользователя</b>" if owner_user_id else "<b>Мои ключи</b>"
+    title = t("keys_user_title") if owner_user_id else t("keys_my_title")
     if not keys:
-        return f"{title}\n\n{ONE_KEY_ONE_DEVICE_WARNING}\n\nНа этой странице ключей нет."
+        return f"{title}\n\n{t('one_key_one_device')}\n\n{t('keys_page_empty')}"
     xray = [key for key in keys if key.key_type == VpnKeyType.XRAY]
     awg = [key for key in keys if key.key_type == VpnKeyType.AWG]
-    sections = [f"{title} · страница {page + 1}", ONE_KEY_ONE_DEVICE_WARNING]
+    sections = [t("keys_page_title", title=title, page=page + 1), t("one_key_one_device")]
     if xray:
         sections.append("<b>Xray</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in xray))
     if awg:
@@ -139,19 +132,19 @@ def key_detail_text(key: VpnKey, *, viewer_user_id: int) -> str:
     label = key_display_label(key, viewer_user_id=viewer_user_id)
     lines = [
         f"<b>{key_title(key)}</b>",
-        f"Статус: {h(status_text(key.status))}",
-        f"Метка: {code(label)}",
-        f"Создан: {h(format_msk_datetime(key.created_at))}",
-        f"Обновлён: {h(format_msk_datetime(key.updated_at))}",
+        f"{t('field_status')}: {h(status_text(key.status))}",
+        f"{t('field_label')}: {code(label)}",
+        f"{t('field_created')}: {h(format_msk_datetime(key.created_at))}",
+        f"{t('field_updated')}: {h(format_msk_datetime(key.updated_at))}",
     ]
     if key.expires_at:
-        lines.append(f"Действует до: {h(format_expiry_date(key.expires_at))}")
+        lines.append(f"{t('field_expires')}: {h(format_expiry_date(key.expires_at))}")
     if not note or label != note:
-        lines.append(f"Заметка: {h(note or 'нет')}")
+        lines.append(f"{t('field_note')}: {h(note or t('none'))}")
     if key.client_ip:
-        lines.append(f"IP: {code(key.client_ip)}")
+        lines.append(f"{t('field_ip')}: {code(key.client_ip)}")
     if key.public_key:
-        lines.append(f"Публичный ключ: {code(key.public_key)}")
+        lines.append(f"{t('field_pubkey')}: {code(key.public_key)}")
     return "\n".join(lines)
 
 
@@ -165,32 +158,32 @@ def traffic_stats_text(view: KeyTrafficStatsView, *, viewer_user_id: int) -> str
     )
     label = key_display_label(key, viewer_user_id=viewer_user_id)
     lines = [
-        f"<b>Статистика {h(key_title(key))}</b>",
-        f"Тип: {h(key.key_type.value.upper())}",
-        f"Метка: {code(label)}",
-        f"Владелец: {owner_text}",
+        t("stats_title", key_title=key_title(key)),
+        f"{t('field_type')}: {h(key.key_type.value.upper())}",
+        f"{t('field_label')}: {code(label)}",
+        f"{t('field_owner')}: {owner_text}",
     ]
     note = key_note_for_viewer(key, viewer_user_id)
     if note and label != note:
-        lines.append(f"Заметка: {h(note)}")
+        lines.append(f"{t('field_note')}: {h(note)}")
     stats = view.stats
     if stats is None or not stats.available:
         lines.append("")
         if stats and stats.last_success_at:
-            lines.append("Статистика сейчас недоступна. Последний успешный снимок:")
-            lines.append(f"Скачано: {h(format_bytes(stats.downloaded_bytes))}")
-            lines.append(f"Отправлено: {h(format_bytes(stats.uploaded_bytes))}")
-            lines.append(f"Обновлено: {h(format_msk_datetime(stats.last_success_at))}")
+            lines.append(t("stats_unavailable_now"))
+            lines.append(f"{t('field_downloaded')}: {h(format_bytes(stats.downloaded_bytes))}")
+            lines.append(f"{t('field_uploaded')}: {h(format_bytes(stats.uploaded_bytes))}")
+            lines.append(f"{t('field_updated_at')}: {h(format_msk_datetime(stats.last_success_at))}")
         else:
-            lines.append("Статистика пока недоступна.")
+            lines.append(t("stats_not_available_yet"))
         if stats and stats.unavailable_reason:
-            lines.append(f"Причина: {h(stats.unavailable_reason)}")
+            lines.append(f"{t('field_reason')}: {h(stats.unavailable_reason)}")
         return "\n".join(lines)
     lines.extend(
         [
-            f"Скачано: {h(format_bytes(stats.downloaded_bytes))}",
-            f"Отправлено: {h(format_bytes(stats.uploaded_bytes))}",
-            f"Обновлено: {h(format_msk_datetime(stats.last_success_at))}",
+            f"{t('field_downloaded')}: {h(format_bytes(stats.downloaded_bytes))}",
+            f"{t('field_uploaded')}: {h(format_bytes(stats.uploaded_bytes))}",
+            f"{t('field_updated_at')}: {h(format_msk_datetime(stats.last_success_at))}",
         ]
     )
     return "\n".join(lines)
@@ -198,8 +191,8 @@ def traffic_stats_text(view: KeyTrafficStatsView, *, viewer_user_id: int) -> str
 
 def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer_user_id: int) -> str:
     if not views:
-        return "<b>Статистика ключей</b>\n\nНа этой странице ключей нет."
-    lines = [f"<b>Статистика ключей</b> · страница {page + 1}"]
+        return t("stats_keys_empty")
+    lines = [f"{t('stats_keys_title')} · page {page + 1}"]
     for view in views:
         stats = view.stats
         owner = view.owner
@@ -210,16 +203,16 @@ def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer
         )
         if stats is None or not stats.available:
             if stats and stats.last_success_at:
-                traffic = f"последнее: ↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
+                traffic = f"{t('stats_last_prefix')}: ↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
             else:
-                traffic = "статистика пока недоступна"
+                traffic = t("stats_unavailable_short")
         else:
             traffic = f"↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
         updated = ""
         if stats and stats.last_success_at:
-            updated = f" · обновлено {format_msk_datetime(stats.last_success_at)}"
+            updated = t("stats_updated_fmt", at=format_msk_datetime(stats.last_success_at))
         elif stats and stats.last_attempt_at:
-            updated = f" · попытка {format_msk_datetime(stats.last_attempt_at)}"
+            updated = t("stats_attempt_fmt", at=format_msk_datetime(stats.last_attempt_at))
         label = key_display_label(view.key, viewer_user_id=viewer_user_id)
         line = (
             f"{h(view.key.key_type.value.upper())} · {code(label)} · "
@@ -227,7 +220,7 @@ def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer
         )
         note = key_note_for_viewer(view.key, viewer_user_id)
         if note and label != note:
-            line += f" · Заметка: {h(short_note(note))}"
+            line += f" · {t('stats_note')}: {h(short_note(note))}"
         lines.append(line)
     return "\n".join(lines)
 
@@ -240,32 +233,32 @@ def create_confirm_text(
     mtu: int | None = None,
 ) -> str:
     lines = [
-        "<b>Подтверждение создания ключа</b>",
-        f"Тип: {h(key_type.upper())}",
-        f"Заметка: {h(note or 'нет')}",
-        f"Срок действия: {h(format_expiry_date(expires_at))}",
+        t("create_confirm_title"),
+        f"{t('field_type')}: {h(key_type.upper())}",
+        f"{t('field_note')}: {h(note or t('none'))}",
+        f"{t('field_expires_at')}: {h(format_expiry_date(expires_at))}",
     ]
     if mtu is not None:
         lines.append(f"MTU: {h(str(mtu))}")
     if owner is not None:
-        lines.append(f"Владелец: {format_user_display(owner.telegram_user_id, owner.username)}")
+        lines.append(f"{t('field_owner')}: {format_user_display(owner.telegram_user_id, owner.username)}")
     return "\n".join(lines)
 
 
 def note_confirm_text(key: VpnKey, note: str | None) -> str:
     return (
-        "<b>Подтверждение заметки</b>\n"
-        f"Ключ: {h(key_title(key))}\n"
-        f"Новая заметка: {h(note or 'нет')}"
+        f"{t('note_confirm_title')}\n"
+        f"{t('note_confirm_key')}: {h(key_title(key))}\n"
+        f"{t('note_confirm_new_note')}: {h(note or t('none'))}"
     )
 
 
 def xray_config_text(config_text: str) -> str:
-    return f"{config_text}\n\nДобавьте ссылку в клиент с поддержкой VLESS/REALITY."
+    return f"{config_text}\n\n{t('xray_config_hint')}"
 
 
 def awg_config_text(config_text: str) -> str:
-    return f"{config_text}\n\nДобавьте ссылку в клиент AmneziaWG или используйте файл конфигурации."
+    return f"{config_text}\n\n{t('awg_config_hint')}"
 
 
 def proxy_section_separator() -> str:
@@ -288,24 +281,24 @@ def socks5_proxy_text(payload: dict[str, object]) -> str:
 def mtproto_proxy_text(payload: dict[str, object]) -> str:
     mode = str(payload.get("mode") or "static")
     mode_note = (
-        "Это индивидуальный MTProto-доступ. При блокировке пользователя этот MTProto secret будет отозван."
+        t("mtproto_managed_note")
         if mode == "managed"
-        else "Это общий MTProto-доступ. Индивидуальный серверный отзыв в static mode невозможен."
+        else t("mtproto_static_note")
     )
     return "\n".join(
         [
             "<b>Telegram MTProto Proxy</b>",
             "",
-            "Вариант 1 — обычный, попробуйте сначала:",
+            t("mtproto_variant1"),
             code(payload.get("link") or ""),
             "",
-            "Вариант 2 — с random padding dd, если первый не работает:",
+            t("mtproto_variant2"),
             code(payload.get("link_dd") or ""),
             "",
             f"Server: {code(payload.get('host') or '')}",
             f"Port: {code(payload.get('port') or '')}",
             "",
-            "Сначала попробуйте первый вариант. Если он не работает или плохо грузит медиа — попробуйте второй вариант с dd.",
+            t("mtproto_try_note"),
             mode_note,
         ]
     )
@@ -320,14 +313,14 @@ def proxy_access_text(accesses: list[ProxyAccess]) -> str:
     if mtproto is not None:
         parts.append(mtproto_proxy_text(mtproto.payload))
     if not parts:
-        return "<b>Прокси</b>\n\nУ вас пока нет прокси-доступов."
+        return t("proxy_no_accesses")
     return proxy_section_separator().join(parts)
 
 
 def user_proxy_stats_text(stats: ProxyUserStats) -> str:
-    lines = ["<b>Статистика прокси</b>"]
+    lines = [t("proxy_user_stats_title")]
     if not stats.accesses:
-        return "\n\n".join([lines[0], "У вас пока нет выданных прокси."])
+        return "\n\n".join([lines[0], t("proxy_no_issued")])
 
     active_accesses = [access for access in stats.accesses if access.status == ProxyAccessStatus.ACTIVE]
     active_accesses.sort(key=lambda item: (_proxy_type_order(item.access_type), item.id))
@@ -336,28 +329,28 @@ def user_proxy_stats_text(stats: ProxyUserStats) -> str:
     recent_failed = failed_accesses[:3]
     hidden_failed = max(len(failed_accesses) - len(recent_failed), 0)
 
-    lines.extend(["", "<b>Активные прокси:</b>"])
+    lines.extend(["", t("proxy_active_header")])
     if active_accesses:
         for access in active_accesses:
             lines.append("")
             lines.extend(_proxy_stats_access_lines(access, include_id=True))
     else:
         lines.append("")
-        lines.append("Активных прокси нет.")
+        lines.append(t("proxy_no_active"))
 
     if recent_failed:
         lines.append("")
-        lines.append("<b>Последние ошибки выдачи:</b>")
+        lines.append(t("proxy_recent_errors_header"))
         for access in recent_failed:
             lines.append(_proxy_stats_error_line(access))
     if hidden_failed > 0:
         lines.append("")
-        lines.append(f"Старые неудачные попытки скрыты: {h(hidden_failed)}.")
+        lines.append(t("proxy_hidden_old", n=hidden_failed))
     lines.extend(
         [
             "",
-            "<b>Трафик:</b>",
-            "Per-user traffic accounting для SOCKS5/MTProto сейчас недоступен и не фейкуется.",
+            t("proxy_traffic_header"),
+            t("proxy_traffic_unavailable"),
         ]
     )
     return "\n".join(lines)
@@ -365,7 +358,7 @@ def user_proxy_stats_text(stats: ProxyUserStats) -> str:
 
 def admin_proxy_stats_text(stats: ProxyAdminStats) -> str:
     lines = [
-        "<b>Статистика прокси</b>",
+        t("proxy_user_stats_title"),
         "",
         "<b>Aggregate summary</b>",
         f"• total proxy accesses: {h(stats.total_accesses)}",
@@ -409,7 +402,7 @@ def admin_proxy_stats_text(stats: ProxyAdminStats) -> str:
     lines.extend(["", "<b>Runtime status</b>"])
     runtime = stats.runtime
     if runtime is None:
-        lines.append("Runtime status: недоступно")
+        lines.append(t("proxy_runtime_unavailable"))
     else:
         lines.extend(
             [
@@ -417,14 +410,14 @@ def admin_proxy_stats_text(stats: ProxyAdminStats) -> str:
                 f"• enabled: {h(_yes_no(runtime.socks5_enabled))}",
                 f"• service active: {h(_runtime_value(runtime.socks5_systemd_active))}",
                 f"• listening: {h(_runtime_value(runtime.socks5_port_listening))}",
-                f"• host: {code(runtime.socks5_host or 'не задан')}",
-                f"• port: {code(runtime.socks5_port if runtime.socks5_port is not None else 'не задан')}",
+                f"• host: {code(runtime.socks5_host or t('not_set'))}",
+                f"• port: {code(runtime.socks5_port if runtime.socks5_port is not None else t('not_set'))}",
                 "<b>MTProto</b>",
                 f"• enabled: {h(_yes_no(runtime.mtproto_enabled))}",
                 f"• service active: {h(_runtime_value(runtime.mtproto_systemd_active))}",
                 f"• listening: {h(_runtime_value(runtime.mtproto_port_listening))}",
-                f"• host: {code(runtime.mtproto_host or 'не задан')}",
-                f"• port: {code(runtime.mtproto_port if runtime.mtproto_port is not None else 'не задан')}",
+                f"• host: {code(runtime.mtproto_host or t('not_set'))}",
+                f"• port: {code(runtime.mtproto_port if runtime.mtproto_port is not None else t('not_set'))}",
                 f"• mode: {h(runtime.mtproto_mode)}",
                 f"• runtime managed secrets: {h(_count_or_unavailable(runtime.mtproto_runtime_secret_count))}",
             ]
@@ -432,13 +425,13 @@ def admin_proxy_stats_text(stats: ProxyAdminStats) -> str:
 
     lines.extend(["", "<b>Users</b>"])
     if not stats.users:
-        lines.append("Пользователей с proxy_accesses нет.")
+        lines.append(t("proxy_stats_no_users"))
     for row in stats.users:
         username = format_user_display(row.telegram_user_id, row.username)
         active = ", ".join(
             f"{_proxy_type_title(ref.access_type)} #{ref.id}"
             for ref in row.active_accesses
-        ) or "нет"
+        ) or t("none")
         lines.extend(
             [
                 f"👤 {code(row.telegram_user_id)} {username}",
@@ -448,8 +441,8 @@ def admin_proxy_stats_text(stats: ProxyAdminStats) -> str:
             ]
         )
     if stats.hidden_users > 0:
-        lines.append(f"Ещё {h(stats.hidden_users)} пользователей скрыто.")
-    lines.extend(["", "Traffic: per-user traffic accounting для SOCKS5/MTProto сейчас недоступен и не фейкуется."])
+        lines.append(t("proxy_stats_hidden_users", n=stats.hidden_users))
+    lines.extend(["", t("proxy_stats_traffic_note")])
     return "\n".join(lines)
 
 
@@ -459,17 +452,17 @@ def _proxy_stats_access_lines(access: ProxyAccessStatsItem, *, include_id: bool)
         title = f"{title} #{access.id}"
     lines = [
         f"<b>{h(title)}</b>",
-        f"• Статус: {h(access.status.value)}",
-        f"• Выдан: {h(_format_proxy_datetime(access.created_at))}",
+        f"• {t('proxy_stat_status')}: {h(access.status.value)}",
+        f"• {t('proxy_stat_issued')}: {h(_format_proxy_datetime(access.created_at))}",
     ]
     if access.activated_at:
-        lines.append(f"• Активирован: {h(_format_proxy_datetime(access.activated_at))}")
+        lines.append(f"• {t('proxy_stat_activated')}: {h(_format_proxy_datetime(access.activated_at))}")
     if access.last_shown_at:
-        lines.append(f"• Последний показ: {h(_format_proxy_datetime(access.last_shown_at))}")
+        lines.append(f"• {t('proxy_stat_last_shown')}: {h(_format_proxy_datetime(access.last_shown_at))}")
     if access.revoked_at:
-        lines.append(f"• Отозван: {h(_format_proxy_datetime(access.revoked_at))}")
+        lines.append(f"• {t('proxy_stat_revoked')}: {h(_format_proxy_datetime(access.revoked_at))}")
     if access.deleted_at:
-        lines.append(f"• Удалён: {h(_format_proxy_datetime(access.deleted_at))}")
+        lines.append(f"• {t('proxy_stat_deleted')}: {h(_format_proxy_datetime(access.deleted_at))}")
     if access.access_type == ProxyAccessType.SOCKS5:
         if access.host:
             lines.append(f"• Host: {code(access.host)}")
@@ -479,7 +472,7 @@ def _proxy_stats_access_lines(access: ProxyAccessStatsItem, *, include_id: bool)
             lines.append(f"• Login: {code(access.login)}")
         return lines
     mode = access.mtproto_mode or "static"
-    lines.append(f"• Тип: {h(mode)}")
+    lines.append(f"• {t('proxy_stat_type')}: {h(mode)}")
     if access.mtproto_source:
         lines.append(f"• Source: {h(access.mtproto_source)}")
     if access.secret_fingerprint:
@@ -515,7 +508,7 @@ def _admin_failed_total(stats: ProxyAdminStats) -> int:
 
 def _format_proxy_datetime(value: str | None) -> str:
     if not value:
-        return "нет данных"
+        return t("no_data")
     try:
         dt = datetime.fromisoformat(value)
     except ValueError:
@@ -541,7 +534,7 @@ def _proxy_type_order(access_type: ProxyAccessType) -> int:
 
 def _runtime_value(value: bool | None) -> str:
     if value is None:
-        return "недоступно"
+        return t("unavailable")
     return "yes" if value else "no"
 
 
@@ -550,7 +543,7 @@ def _yes_no(value: bool) -> str:
 
 
 def _count_or_unavailable(value: int | None) -> str:
-    return str(value) if value is not None else "недоступно"
+    return str(value) if value is not None else t("unavailable")
 
 
 def _status_display_order() -> tuple[ProxyAccessStatus, ...]:
@@ -569,35 +562,35 @@ def _status_display_order() -> tuple[ProxyAccessStatus, ...]:
 
 
 def proxy_admin_status_text(status: ProxyServiceStatus, stats: ProxyLifecycleStats) -> str:
-    socks5_port = status.socks5_port if status.socks5_port is not None else "не задан"
+    socks5_port = status.socks5_port if status.socks5_port is not None else t("not_set")
     mtproto_active = "unknown" if status.mtproto_systemd_active is None else ("yes" if status.mtproto_systemd_active else "no")
     mtproto_listening = "unknown" if status.mtproto_port_listening is None else ("yes" if status.mtproto_port_listening else "no")
     mtproto_traffic_text = (
-        "Traffic: per-user статистика недоступна для MTProto без надёжного server-side accounting по secret."
+        "Traffic: per-user stats for MTProto not available without reliable server-side accounting by secret."
     )
     mtproto_revoke_note = (
-        "Managed mode: индивидуальный server-side revoke выполняется удалением secret из active list MTProxy."
+        "Managed mode: individual server-side revoke by removing secret from active MTProxy list."
         if status.mtproto_mode == "managed"
-        else "Static mode: используется общий secret, индивидуальный server-side revoke невозможен без ротации secret."
+        else "Static mode: shared secret in use, individual server-side revoke impossible without secret rotation."
     )
     lines = [
-        "<b>Статус прокси</b>",
+        t("proxy_title").replace("<b>", "").replace("</b>", "") + " " + "status",
         "",
         "<b>SOCKS5 / Dante</b>",
         f"Enabled: {h('yes' if status.socks5_enabled else 'no')}",
-        f"Host: {code(status.socks5_host or 'не задан')}",
+        f"Host: {code(status.socks5_host or t('not_set'))}",
         f"Port: {code(socks5_port)}",
         f"Public name: {h(status.socks5_public_name)}",
         f"Service: {code(status.socks5_service_name)}",
         f"Issued: {h(stats.socks5_issued)}",
         f"Active: {h(stats.socks5_active)}",
         f"Revoked/blocked: {h(stats.socks5_revoked)}",
-        "Traffic: статистика трафика недоступна для этого типа прокси без per-login accounting Dante.",
+        t("proxy_socks5_traffic_note"),
         "",
         "<b>MTProto</b>",
         f"Enabled: {h('yes' if status.mtproto_enabled else 'no')}",
         f"Mode: {h(status.mtproto_mode)}",
-        f"Host: {code(status.mtproto_host or 'не задан')}",
+        f"Host: {code(status.mtproto_host or t('not_set'))}",
         f"Port: {code(status.mtproto_port)}",
         f"Public name: {h(status.mtproto_public_name)}",
         f"Service: {code(status.mtproto_service_name)}",
@@ -667,8 +660,8 @@ def system_diagnostics_text(result: HealthCheckResult) -> str:
 
 def announcement_batches_text(batches: list[AnnouncementBatch]) -> str:
     if not batches:
-        return "<b>Незавершённые объявления</b>\n\nНезавершённых batch-записей нет."
-    lines = ["<b>Незавершённые объявления</b>"]
+        return t("announce_batches_empty")
+    lines = [t("announce_batches_title")]
     for batch in batches:
         pending = max(batch.total_count - batch.success_count - batch.failed_count - batch.skipped_count, 0)
         entry = [
@@ -692,16 +685,16 @@ def announcement_batches_text(batches: list[AnnouncementBatch]) -> str:
 def proxy_entry_text(entry: ProxyEntry) -> str:
     lines = [
         f"<b>{h(entry.proxy_type)}</b>",
-        f"Хост: {code(entry.host)}",
-        f"Порт: {code(entry.port)}",
+        f"{t('field_host')}: {code(entry.host)}",
+        f"{t('field_port')}: {code(entry.port)}",
     ]
     if entry.login:
-        lines.append(f"Логин: {code(entry.login)}")
+        lines.append(f"{t('field_login')}: {code(entry.login)}")
     if entry.password:
-        lines.append(f"Пароль: {code(entry.password)}")
+        lines.append(f"{t('field_password')}: {code(entry.password)}")
     if entry.note:
-        lines.append(f"Описание: {h(entry.note)}")
-    lines.append(f"Статус: {h(entry.status.value)}")
+        lines.append(f"{t('field_description')}: {h(entry.note)}")
+    lines.append(f"{t('field_status')}: {h(entry.status.value)}")
     return "\n".join(lines)
 
 
@@ -711,38 +704,37 @@ def _redact_diagnostic_reason(value: str, limit: int = 180) -> str:
 
 def proxy_page_text(entries: list[ProxyEntry], page: int) -> str:
     if not entries:
-        return "<b>Прокси</b>\n\nДоступные прокси не настроены."
-    return f"<b>Прокси</b> · страница {page + 1}\n\n" + "\n\n".join(proxy_entry_text(entry) for entry in entries)
+        return f"{t('proxy_title')}\n\n{t('proxy_not_configured')}"
+    return f"{t('proxy_title')} · page {page + 1}\n\n" + "\n\n".join(proxy_entry_text(entry) for entry in entries)
 
 
 def access_request_text(request: AccessRequest) -> str:
-    username = f"@{request.username}" if request.username else "не указан"
+    username = f"@{request.username}" if request.username else t("not_specified")
     return (
-        f"<b>Заявка #{request.id}</b>\n"
-        f"Telegram ID: {code(request.telegram_user_id)}\n"
-        f"Username: {h(username)}\n"
-        f"Статус: {h(request.status.value)}\n"
-        f"Создана: {h(format_msk_datetime(request.requested_at))}"
+        f"{t('request_title', id=request.id)}\n"
+        f"{t('field_tg_id')}: {code(request.telegram_user_id)}\n"
+        f"{t('field_username')}: {h(username)}\n"
+        f"{t('field_status')}: {h(request.status.value)}\n"
+        f"{t('field_created')}: {h(format_msk_datetime(request.requested_at))}"
     )
 
 
 def access_request_decision_confirm_text(request: AccessRequest, action: str) -> str:
-    action_text = "одобрить" if action == "approve" else "отклонить"
-    username = f"@{request.username}" if request.username else "не указан"
+    action_text = t("decision_confirm_approve") if action == "approve" else t("decision_confirm_reject")
+    username = f"@{request.username}" if request.username else t("not_specified")
     return (
-        f"<b>Подтвердите действие: {h(action_text)}</b>\n"
-        f"Заявка: #{request.id}\n"
-        f"Telegram ID: {code(request.telegram_user_id)}\n"
-        f"Username: {h(username)}\n"
-        f"Статус: {h(request.status.value)}\n"
-        f"Создана: {h(format_msk_datetime(request.requested_at))}"
+        f"{t('decision_confirm_title', action=action_text)}\n"
+        f"{t('field_tg_id')}: {code(request.telegram_user_id)}\n"
+        f"{t('field_username')}: {h(username)}\n"
+        f"{t('field_status')}: {h(request.status.value)}\n"
+        f"{t('field_created')}: {h(format_msk_datetime(request.requested_at))}"
     )
 
 
 def access_requests_page_text(requests: list[AccessRequest], page: int) -> str:
     if not requests:
-        return "<b>Заявки на доступ</b>\n\nНовых заявок нет."
-    return f"<b>Заявки на доступ</b> · страница {page + 1}\n\n" + "\n\n".join(access_request_text(req) for req in requests)
+        return t("requests_page_empty")
+    return t("requests_page_title", page=page + 1) + "\n\n" + "\n\n".join(access_request_text(req) for req in requests)
 
 
 def user_card_text(
@@ -752,21 +744,21 @@ def user_card_text(
     *,
     viewer_user_id: int | None = None,
 ) -> str:
-    username = f"@{user.username}" if user.username else "не указан"
+    username = f"@{user.username}" if user.username else t("not_specified")
     lines = [
-        "<b>Пользователь</b>",
-        f"Telegram ID: {code(user.telegram_user_id)}",
-        f"Username: {h(username)}",
-        f"Роль: {h(role_text(user.role))}",
-        f"Обновлён: {h(format_msk_datetime(user.updated_at))}",
+        t("user_card_title"),
+        f"{t('field_tg_id')}: {code(user.telegram_user_id)}",
+        f"{t('field_username')}: {h(username)}",
+        f"{t('field_role')}: {h(role_text(user.role))}",
+        f"{t('field_updated')}: {h(format_msk_datetime(user.updated_at))}",
     ]
     if user.note:
-        lines.append(f"Заметка: {h(user.note)}")
+        lines.append(f"{t('field_note')}: {h(user.note)}")
     if keys is not None:
         lines.append("")
-        lines.append("<b>Ключи</b>")
+        lines.append(t("user_keys_title"))
         if not keys:
-            lines.append("Ключей нет.")
+            lines.append(t("user_no_keys"))
         else:
             stats_by_key_id = stats_by_key_id or {}
             for key in keys:
@@ -775,83 +767,77 @@ def user_card_text(
                 if stats and stats.available:
                     traffic = f" · ↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
                 elif stats:
-                    traffic = " · статистика пока недоступна"
+                    traffic = f" · {t('user_stats_unavailable')}"
                 lines.append(f"{h(key.key_type.value.upper())} · {code(key_display_label(key, viewer_user_id=viewer_user_id))}{traffic}")
     return "\n".join(lines)
 
 
 def block_user_confirm_text(user: User, key_count: int) -> str:
-    username = f"@{user.username}" if user.username else "не указан"
+    username = f"@{user.username}" if user.username else t("not_specified")
     return (
-        "<b>Подтвердите блокировку пользователя</b>\n"
-        f"Telegram ID: {code(user.telegram_user_id)}\n"
-        f"Username: {h(username)}\n"
-        f"Имя: {h(user.first_name or 'не указано')}\n"
-        f"Текущая роль: {h(role_text(user.role))}\n"
-        f"Ключей к проверке/отзыву: {key_count}\n\n"
-        "Действие заблокирует доступ к боту и попытается отозвать VPN-ключи. "
-        "Если часть VPN-ключей не получится отключить автоматически, потребуется ручная проверка на сервере."
+        f"{t('block_confirm_title')}\n"
+        f"{t('field_tg_id')}: {code(user.telegram_user_id)}\n"
+        f"{t('field_username')}: {h(username)}\n"
+        f"{t('field_name')}: {h(user.first_name or t('not_specified'))}\n"
+        f"{t('field_current_role')}: {h(role_text(user.role))}\n"
+        f"{t('block_keys_to_check', count=key_count)}\n\n"
+        f"{t('block_action_warning')}"
     )
 
 
 def unblock_user_confirm_text(warning: UnblockUserWarning) -> str:
     user = warning.user
-    username = f"@{user.username}" if user.username else "не указан"
+    username = f"@{user.username}" if user.username else t("not_specified")
     lines = [
-        "<b>Подтвердите разблокировку пользователя</b>",
-        f"Telegram ID: {code(user.telegram_user_id)}",
-        f"Username: {h(username)}",
-        f"Имя: {h(user.first_name or 'не указано')}",
-        f"Текущая роль: {h(role_text(user.role))}",
+        t("unblock_confirm_title"),
+        f"{t('field_tg_id')}: {code(user.telegram_user_id)}",
+        f"{t('field_username')}: {h(username)}",
+        f"{t('field_name')}: {h(user.first_name or t('not_specified'))}",
+        f"{t('field_current_role')}: {h(role_text(user.role))}",
     ]
     if warning.has_warning:
         lines.extend(
             [
                 "",
-                "<b>Требуется ручная проверка VPN</b>",
-                "Ранее могли остаться активные или проблемные VPN-ключи.",
+                t("unblock_manual_check"),
+                t("unblock_manual_check_desc"),
             ]
         )
         for reason in warning.reasons:
             lines.append(f"• {h(reason)}")
         if warning.last_block_error_at:
-            lines.append(f"Последняя ошибка блокировки: {h(format_msk_datetime(warning.last_block_error_at))}")
-        lines.append("Разблокировка восстановит доступ к боту, но не исправит Xray/AWG runtime автоматически.")
+            lines.append(t("unblock_warning_last_error", at=format_msk_datetime(warning.last_block_error_at)))
+        lines.append(t("unblock_no_auto_fix"))
     else:
-        lines.extend(["", "После подтверждения пользователь снова получит доступ к боту."])
+        lines.extend(["", t("unblock_confirm_success")])
     return "\n".join(lines)
 
 
 def unblock_user_success_text(warning: UnblockUserWarning) -> str:
-    text = "Пользователь разблокирован. FSM-состояние очищено, сценарии начнутся заново."
+    text = t("unblock_success")
     if not warning.has_warning:
         return text
-    return (
-        text
-        + "\n\n"
-        + "Внимание: перед разблокировкой были признаки неполного отзыва VPN-доступа. "
-        + "Проверьте Xray/AWG runtime и config вручную."
-    )
+    return text + "\n\n" + t("unblock_vpn_check_warning")
 
 
 def users_page_text(users: list[User], page: int, key_counts: dict[int, int] | None = None) -> str:
     if not users:
-        return "<b>Пользователи</b>\n\nНа этой странице пользователей нет."
-    lines = [f"<b>Пользователи</b> · страница {page + 1}"]
+        return f"{t('users_title')}\n\n{t('users_empty')}"
+    lines = [t("users_page_title", page=page + 1)]
     key_counts = key_counts or {}
     for user in users:
         username = format_user_display(user.telegram_user_id, user.username)
         key_count = key_counts.get(user.telegram_user_id, 0)
         lines.append(
-            f"{code(user.telegram_user_id)} · {username} · {h(role_text(user.role))} · ключей: {key_count}"
+            f"{code(user.telegram_user_id)} · {username} · {h(role_text(user.role))} · {t('users_key_count')}: {key_count}"
         )
     return "\n".join(lines)
 
 
 def audit_page_text(items: list[dict[str, object]], page: int, users: dict[int, User] | None = None) -> str:
     if not items:
-        return "<b>Логи действий</b>\n\nНа этой странице записей нет."
-    lines = [f"<b>Логи действий</b> · страница {page + 1}"]
+        return f"{t('audit_title')}\n\n{t('audit_empty')}"
+    lines = [t("audit_page_title", page=page + 1)]
     users = users or {}
     for item in items:
         lines.append(_human_audit_line(item, users))
@@ -864,7 +850,7 @@ def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
     actor_text = (
         format_user_display(actor.telegram_user_id, actor.username)
         if actor is not None
-        else format_user_display(int(actor_id), None) if actor_id is not None else "система"  # type: ignore[call-overload]
+        else format_user_display(int(actor_id), None) if actor_id is not None else t("audit_system")  # type: ignore[call-overload]
     )
     action = str(item.get("action") or "")
     details = item.get("details")
@@ -878,12 +864,12 @@ def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
     )
     owner_suffix = ""
     if owner_user_id is not None and actor_id is not None and int(owner_user_id) != int(actor_id):  # type: ignore[call-overload]
-        owner_suffix = f" для {owner_text}"
+        owner_suffix = t("audit_owner_suffix", owner=owner_text)
     time_text = h(format_msk_datetime(str(item.get("created_at") or "")))
     if action == "xray_key_created":
-        suffix = (f" создал Xray-ключ {label}" if label else " создал Xray-ключ") + owner_suffix
+        suffix = (t("audit_created_xray", label=label) if label else t("audit_created_xray_nolabel")) + owner_suffix
     elif action == "awg_key_created":
-        suffix = (f" создал AWG-ключ {label}" if label else " создал AWG-ключ") + owner_suffix
+        suffix = (t("audit_created_awg", label=label) if label else t("audit_created_awg_nolabel")) + owner_suffix
     elif action == "stats_viewed":
         target_user_id = details_dict.get("target_user_id")
         target_username = details_dict.get("target_username")
@@ -891,22 +877,22 @@ def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
             int(target_user_id) if target_user_id is not None else None,
             str(target_username) if target_username else None,
         )
-        suffix = f" открыл статистику пользователя {target_text}"
+        suffix = t("audit_viewed_user_stats", user=target_text)
     elif action == "user_role_changed":
-        suffix = " изменил роль пользователя"
+        suffix = t("audit_changed_role")
     elif action == "user_blocked":
-        suffix = " заблокировал пользователя"
+        suffix = t("audit_blocked_user")
     elif action == "user_unblocked":
-        suffix = " разблокировал пользователя"
+        suffix = t("audit_unblocked_user")
     elif action == "access_requested":
         if details_dict.get("repeat_after_block"):
-            suffix = " отправил повторную заявку на доступ"
+            suffix = t("audit_access_request_repeat")
         else:
-            suffix = " отправил заявку на доступ"
+            suffix = t("audit_access_request")
     elif action == "access_approved":
-        suffix = " одобрил заявку на доступ"
+        suffix = t("audit_access_approved")
     elif action == "access_rejected":
-        suffix = " отклонил заявку на доступ"
+        suffix = t("audit_access_rejected")
     else:
-        suffix = f" выполнил действие {h(action)}"
+        suffix = t("audit_action_generic", action=h(action))
     return f"{time_text} — {actor_text}{suffix}"
