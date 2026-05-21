@@ -159,6 +159,7 @@ async def admin_announcement_start(callback: CallbackQuery, state: FSMContext, s
         await require_superadmin(services, callback.from_user.id)
         await state.clear()
         await state.set_state(AdminAnnouncementStates.waiting_message)
+        await state.update_data(cancel_target="admin:panel")
         await safe_edit_message_text(
             callback.message,
             t("announce_prompt"),
@@ -721,6 +722,7 @@ async def admin_user_keys(callback: CallbackQuery, services: Services) -> None:
                 has_next=has_next,
                 owner_user_id=user_id,
                 total_pages=total_pages,
+                back_data=f"admin:user:{user_id}",
             ),
         )
     except Exception as exc:
@@ -952,7 +954,7 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
             raise AccessDenied(t("cannot_issue_to_blocked"))
         owner_is_pending = user.role == UserRole.PENDING_USER
         await state.set_state(AdminCreateKeyStates.choosing_type)
-        await state.update_data(owner_user_id=user.telegram_user_id, owner_is_pending=owner_is_pending)
+        await state.update_data(owner_user_id=user.telegram_user_id, owner_is_pending=owner_is_pending, cancel_target="admin:panel")
         text = f"{user_card_text(user)}\n\n{t('one_key_one_device')}\n\n{t('choose_key_type')}"
         await safe_edit_message_text(callback.message, text, reply_markup=admin_key_type_keyboard(user.telegram_user_id))
     except Exception as exc:

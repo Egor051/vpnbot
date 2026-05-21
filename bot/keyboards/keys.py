@@ -12,7 +12,7 @@ def create_key_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Xray", callback_data="keys:create:xray")],
             [InlineKeyboardButton(text="AWG", callback_data="keys:create:awg")],
-            [InlineKeyboardButton(text=t("btn_back"), callback_data="menu:main")],
+            [InlineKeyboardButton(text=t("btn_back"), callback_data="keys:list")],
         ]
     )
 
@@ -23,6 +23,7 @@ def keys_list_keyboard(
     has_next: bool = False,
     owner_user_id: int | None = None,
     total_pages: int = 1,
+    back_data: str = "menu:main",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for key in keys:
@@ -63,7 +64,7 @@ def keys_list_keyboard(
 
     create_callback = f"admin:issue:{owner_user_id}" if owner_user_id is not None else "keys:create"
     rows.append([InlineKeyboardButton(text=t("btn_create_key"), callback_data=create_callback)])
-    rows.append([InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data="menu:main")])
+    rows.append([InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data=back_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
