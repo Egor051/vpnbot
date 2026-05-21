@@ -354,9 +354,10 @@ class AnnouncementService:
         batch = await self.announcements.get_batch(announcement_id)
         if batch is None:
             raise NotFound("Объявление не найдено")
-        delivered = await self.announcements.delivery_user_ids_by_status(announcement_id, "sent")
-        failed = await self.announcements.delivery_user_ids_by_status(announcement_id, "failed")
-        skipped = await self.announcements.delivery_user_ids_by_status(announcement_id, "skipped")
+        grouped = await self.announcements.delivery_user_ids_grouped(announcement_id)
+        delivered = grouped.get("sent", ())
+        failed = grouped.get("failed", ())
+        skipped = grouped.get("skipped", ())
         return AnnouncementResult(
             announcement_id=announcement_id,
             total=batch.total_count,

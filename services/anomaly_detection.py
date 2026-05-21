@@ -148,6 +148,11 @@ class AnomalyDetectionService:
     async def _check_thresholds(self, now: float) -> None:
         for key_id in list(self._observations):
             unique_ips = self._unique_ips_in_window(key_id, now)
+            if not self._observations[key_id]:
+                # All samples aged out of the window; drop the key so the
+                # observation maps don't accumulate an entry per key seen.
+                del self._observations[key_id]
+                self._last_alerted.pop(key_id, None)
             if len(unique_ips) < self._min_unique_ips:
                 continue
             last = self._last_alerted.get(key_id, 0.0)

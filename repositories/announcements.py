@@ -206,36 +206,40 @@ class AnnouncementRepository:
             """
             UPDATE announcement_batches
             SET
-              success_count = (
-                SELECT COUNT(*) FROM announcement_deliveries
-                WHERE announcement_id = ? AND status = 'sent'
-              ),
-              failed_count = (
-                SELECT COUNT(*) FROM announcement_deliveries
-                WHERE announcement_id = ? AND status = 'failed'
-              ),
-              skipped_count = (
-                SELECT COUNT(*) FROM announcement_deliveries
-                WHERE announcement_id = ? AND status = 'skipped'
-              ),
+              success_count = agg.sent,
+              failed_count = agg.failed,
+              skipped_count = agg.skipped,
               updated_at = ?
+            FROM (
+              SELECT
+                COALESCE(SUM(status = 'sent'), 0) AS sent,
+                COALESCE(SUM(status = 'failed'), 0) AS failed,
+                COALESCE(SUM(status = 'skipped'), 0) AS skipped
+              FROM announcement_deliveries
+              WHERE announcement_id = ?
+            ) AS agg
             WHERE id = ?
             """,
-            (announcement_id, announcement_id, announcement_id, now, announcement_id),
+            (now, announcement_id, announcement_id),
         )
         await self.db.commit()
 
-    async def delivery_user_ids_by_status(self, announcement_id: int, status: str) -> tuple[int, ...]:
+    async def delivery_user_ids_grouped(
+        self, announcement_id: int
+    ) -> dict[str, tuple[int, ...]]:
         cursor = await self.db.conn.execute(
             """
-            SELECT user_id FROM announcement_deliveries
-            WHERE announcement_id = ? AND status = ?
+            SELECT user_id, status FROM announcement_deliveries
+            WHERE announcement_id = ?
             ORDER BY user_id ASC
             """,
-            (announcement_id, status),
+            (announcement_id,),
         )
         rows = await cursor.fetchall()
-        return tuple(int(row["user_id"]) for row in rows)
+        grouped: dict[str, list[int]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["status"]), []).append(int(row["user_id"]))
+        return {status: tuple(ids) for status, ids in grouped.items()}
 
 
 def _truncate_error(value: str | None, limit: int = 256) -> str | None:
