@@ -325,7 +325,7 @@ def proxy_access_text(accesses: list[ProxyAccess]) -> str:
 
 
 def user_proxy_stats_text(stats: ProxyUserStats) -> str:
-    lines = ["<b>📊 Статистика прокси</b>"]
+    lines = ["<b>Статистика прокси</b>"]
     if not stats.accesses:
         return "\n\n".join([lines[0], "У вас пока нет выданных прокси."])
 
@@ -365,7 +365,7 @@ def user_proxy_stats_text(stats: ProxyUserStats) -> str:
 
 def admin_proxy_stats_text(stats: ProxyAdminStats) -> str:
     lines = [
-        "<b>📊 Статистика прокси</b>",
+        "<b>Статистика прокси</b>",
         "",
         "<b>Aggregate summary</b>",
         f"• total proxy accesses: {h(stats.total_accesses)}",
