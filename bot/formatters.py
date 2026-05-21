@@ -585,7 +585,7 @@ def proxy_admin_status_text(status: ProxyServiceStatus, stats: ProxyLifecycleSta
         f"Issued: {h(stats.socks5_issued)}",
         f"Active: {h(stats.socks5_active)}",
         f"Revoked/blocked: {h(stats.socks5_revoked)}",
-        "Traffic: stats unavailable for this proxy type without per-login Dante accounting.",
+        t("proxy_socks5_traffic_note"),
         "",
         "<b>MTProto</b>",
         f"Enabled: {h('yes' if status.mtproto_enabled else 'no')}",

@@ -170,6 +170,7 @@ STRINGS: dict[str, str] = {
     "proxy_stats_no_users": "No users with proxy accesses.",
     "proxy_stats_hidden_users": "{n} more users hidden.",
     "proxy_stats_traffic_note": "Traffic: per-user traffic accounting for SOCKS5/MTProto is not available and is not faked.",
+    "proxy_socks5_traffic_note": "Traffic: stats unavailable for this proxy type without per-login Dante accounting.",
     "proxy_runtime_unavailable": "Runtime status: unavailable",
     # ── proxy stat access lines ───────────────────────────────────────────────
     "proxy_stat_status": "Status",

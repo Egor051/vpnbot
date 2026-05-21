@@ -170,6 +170,7 @@ STRINGS: dict[str, str] = {
     "proxy_stats_no_users": "Пользователей с proxy_accesses нет.",
     "proxy_stats_hidden_users": "Ещё {n} пользователей скрыто.",
     "proxy_stats_traffic_note": "Traffic: per-user traffic accounting для SOCKS5/MTProto сейчас недоступен и не фейкуется.",
+    "proxy_socks5_traffic_note": "Traffic: статистика трафика недоступна для этого типа прокси без per-login accounting Dante.",
     "proxy_runtime_unavailable": "Runtime status: недоступно",
     # ── proxy stat access lines ───────────────────────────────────────────────
     "proxy_stat_status": "Статус",
@@ -356,7 +357,7 @@ STRINGS: dict[str, str] = {
     "btn_cancel": "Отмена",
     "btn_confirm": "Подтвердить",
     "btn_prev": "Назад",
-    "btn_next": "Дальше",
+    "btn_next": "Далее",
     "btn_faq_connect": "Как подключиться?",
     "btn_faq_device": "1 ключ = 1 устройство?",
     "btn_faq_choice": "Что выбрать: AWG или Xray?",

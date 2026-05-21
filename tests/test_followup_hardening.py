@@ -23,7 +23,8 @@ from bot.app import _startup_reconcile_keys
 from bot.handlers.common import answer_callback_error
 from bot.messages import MAX_TEXT_CONFIG_LEN, safe_callback_answer, safe_edit_message_text, send_awg_config
 from bot.middlewares.access import BLOCKED_CALLBACK_TEXT, BLOCKED_MESSAGE_TEXT, BlockedUserMiddleware
-from bot.private_chat import ADMIN_PRIVATE_ONLY_TEXT, ensure_private_callback, ensure_private_message
+import i18n
+from bot.private_chat import ensure_private_callback, ensure_private_message
 from config.settings import Settings
 from db.database import CURRENT_SCHEMA_VERSION, Database
 from models.access import is_blocked_user
@@ -1951,13 +1952,16 @@ def test_admin_private_chat_guard_rejects_group_message_and_callback(monkeypatch
         data="admin:panel",
     )
 
+    i18n.configure("ru")
+    admin_text = i18n.t("admin_private_only_text")
+
     async def run() -> None:
-        assert await ensure_private_message(GroupMessage(), ADMIN_PRIVATE_ONLY_TEXT) is False  # type: ignore[arg-type]
-        assert await ensure_private_callback(callback, ADMIN_PRIVATE_ONLY_TEXT) is False
+        assert await ensure_private_message(GroupMessage(), admin_text) is False  # type: ignore[arg-type]
+        assert await ensure_private_callback(callback, admin_text) is False
 
     asyncio.run(run())
-    assert message_calls == [ADMIN_PRIVATE_ONLY_TEXT]
-    assert callback_calls == [(ADMIN_PRIVATE_ONLY_TEXT, True)]
+    assert message_calls == [admin_text]
+    assert callback_calls == [(admin_text, True)]
 
 
 @pytest.mark.parametrize(
