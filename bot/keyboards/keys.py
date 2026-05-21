@@ -52,12 +52,13 @@ def keys_list_keyboard(
     prev_page = page - 1
     next_page = page + 1
     page_prefix = f"admin:ukeys:{owner_user_id}" if owner_user_id is not None else "keys:list"
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text=f"{t('btn_prev')} {page}/{total_pages}", callback_data=f"{page_prefix}:{prev_page}"))
-    if has_next:
-        nav.append(InlineKeyboardButton(text=f"{t('btn_next')} {page + 2}/{total_pages}", callback_data=f"{page_prefix}:{next_page}"))
-    if nav:
+    if page > 0 or has_next:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=f"{page_prefix}:{prev_page}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1} / {total_pages}", callback_data="noop"))
+        if has_next:
+            nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"{page_prefix}:{next_page}"))
         rows.append(nav)
 
     create_callback = f"admin:issue:{owner_user_id}" if owner_user_id is not None else "keys:create"

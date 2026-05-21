@@ -777,8 +777,9 @@ def test_keys_list_keyboard_target_page_labels() -> None:
     buttons = [button for row in keyboard.inline_keyboard for button in row]
     by_text = {button.text: button.callback_data for button in buttons}
 
-    assert by_text["Назад 1/4"] == "keys:list:0"
-    assert by_text["Далее 3/4"] == "keys:list:2"
+    assert by_text["Назад"] == "keys:list:0"
+    assert by_text["2 / 4"] == "noop"
+    assert by_text["Далее"] == "keys:list:2"
 
 
 def test_announcement_waits_for_confirmation_before_sending() -> None:
