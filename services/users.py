@@ -388,6 +388,10 @@ class UserService:
             reasons=tuple(reasons),
         )
 
+    async def count_users(self, actor_user_id: int) -> int:
+        await self.require_moderator_or_admin(actor_user_id)
+        return await self.users.count_users()
+
     async def list_users(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[User]:
         await self.require_moderator_or_admin(actor_user_id)
         return await self.users.list_users(limit=limit, offset=offset)

@@ -73,6 +73,9 @@ class TrialAccessService:
             raise NotFound("Заявка на пробный доступ не найдена")
         return req
 
+    async def count_pending_requests(self) -> int:
+        return await self.trial_requests.count_pending()
+
     async def list_pending_requests(self, limit: int = 20, offset: int = 0) -> list[TrialKeyRequest]:
         return await self.trial_requests.list_pending(limit=limit, offset=offset)
 

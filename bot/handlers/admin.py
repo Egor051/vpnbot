@@ -364,6 +364,8 @@ async def admin_requests(callback: CallbackQuery, services: Services) -> None:
     page = _page_from_callback(callback.data)
     try:
         await services.users.require_moderator_or_admin(callback.from_user.id)
+        total = await services.access.count_pending(callback.from_user.id)
+        total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
         items = await services.access.list_pending(
             callback.from_user.id,
             limit=ADMIN_PAGE_SIZE + 1,
@@ -373,7 +375,7 @@ async def admin_requests(callback: CallbackQuery, services: Services) -> None:
         await safe_edit_message_text(
             callback.message,
             access_requests_page_text(requests, page),
-            reply_markup=pending_requests_keyboard(requests, page=page, has_next=has_next),
+            reply_markup=pending_requests_keyboard(requests, page=page, has_next=has_next, total_pages=total_pages),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -481,6 +483,8 @@ async def admin_users(callback: CallbackQuery, services: Services) -> None:
         return
     page = _page_from_callback(callback.data)
     try:
+        total = await services.users.count_users(callback.from_user.id)
+        total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
         items = await services.users.list_users(
             callback.from_user.id,
             limit=ADMIN_PAGE_SIZE + 1,
@@ -491,7 +495,7 @@ async def admin_users(callback: CallbackQuery, services: Services) -> None:
         await safe_edit_message_text(
             callback.message,
             users_page_text(users, page, key_counts),
-            reply_markup=users_keyboard(users, page=page, has_next=has_next),
+            reply_markup=users_keyboard(users, page=page, has_next=has_next, total_pages=total_pages),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -732,6 +736,8 @@ async def admin_audit(callback: CallbackQuery, services: Services) -> None:
         return
     page = _page_from_callback(callback.data)
     try:
+        total = await services.audit.count_all(callback.from_user.id)
+        total_pages = max(1, (total + AUDIT_PAGE_SIZE - 1) // AUDIT_PAGE_SIZE)
         items = await services.audit.recent(actor_user_id=callback.from_user.id, limit=AUDIT_PAGE_SIZE + 1, offset=page_offset(page, AUDIT_PAGE_SIZE))
         audit_items, has_next = split_page(items, AUDIT_PAGE_SIZE)
         actor_ids = [
@@ -748,7 +754,7 @@ async def admin_audit(callback: CallbackQuery, services: Services) -> None:
         await safe_edit_message_text(
             callback.message,
             audit_page_text(audit_items, page, audit_users),
-            reply_markup=_simple_nav(rows, "admin:panel"),
+            reply_markup=_simple_nav(rows, "admin:panel", page=page, total_pages=total_pages),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -764,6 +770,8 @@ async def admin_stats(callback: CallbackQuery, services: Services) -> None:
     page = _page_from_callback(callback.data)
     try:
         await require_superadmin(services, callback.from_user.id)
+        total = await services.traffic_stats.count_for_superadmin(callback.from_user.id)
+        total_pages = max(1, (total + ADMIN_KEYS_PAGE_SIZE - 1) // ADMIN_KEYS_PAGE_SIZE)
         items = await services.traffic_stats.list_for_superadmin(
             callback.from_user.id,
             limit=ADMIN_KEYS_PAGE_SIZE + 1,
@@ -778,7 +786,7 @@ async def admin_stats(callback: CallbackQuery, services: Services) -> None:
         await safe_edit_message_text(
             callback.message,
             admin_stats_page_text(views, page, viewer_user_id=callback.from_user.id),
-            reply_markup=_simple_nav(rows, "admin:panel"),
+            reply_markup=_simple_nav(rows, "admin:panel", page=page, total_pages=total_pages),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -888,12 +896,14 @@ async def admin_issue_choose_user(callback: CallbackQuery, services: Services) -
         return
     try:
         await require_superadmin(services, callback.from_user.id)
+        total = await services.users.count_users(callback.from_user.id)
+        total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
         items = await services.users.list_users(callback.from_user.id, limit=ADMIN_PAGE_SIZE + 1)
         users, has_next = split_page(items, ADMIN_PAGE_SIZE)
         await safe_edit_message_text(
             callback.message,
             t("choose_user_for_key"),
-            reply_markup=admin_issue_users_keyboard(users, page=0, has_next=has_next),
+            reply_markup=admin_issue_users_keyboard(users, page=0, has_next=has_next, total_pages=total_pages),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -909,6 +919,8 @@ async def admin_issue_choose_user_page(callback: CallbackQuery, services: Servic
     page = _page_from_callback(callback.data)
     try:
         await require_superadmin(services, callback.from_user.id)
+        total = await services.users.count_users(callback.from_user.id)
+        total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
         items = await services.users.list_users(
             callback.from_user.id,
             limit=ADMIN_PAGE_SIZE + 1,
@@ -918,7 +930,7 @@ async def admin_issue_choose_user_page(callback: CallbackQuery, services: Servic
         await safe_edit_message_text(
             callback.message,
             t("issue_select_user"),
-            reply_markup=admin_issue_users_keyboard(users, page=page, has_next=has_next),
+            reply_markup=admin_issue_users_keyboard(users, page=page, has_next=has_next, total_pages=total_pages),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1230,6 +1242,8 @@ async def admin_trial_list(callback: CallbackQuery, services: Services) -> None:
     page = _page_from_callback(callback.data)
     try:
         await require_superadmin(services, callback.from_user.id)
+        total = await services.trial_access.count_pending_requests()
+        total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
         items = await services.trial_access.list_pending_requests(
             limit=ADMIN_PAGE_SIZE + 1,
             offset=page_offset(page, ADMIN_PAGE_SIZE),
@@ -1245,19 +1259,20 @@ async def admin_trial_list(callback: CallbackQuery, services: Services) -> None:
         lines = [t("trial_list_title")]
         for req in requests:
             lines.append(f"#{req.id} — tg{req.telegram_user_id} ({req.key_type.value.upper()})")
-        nav_rows: list[tuple[str, str]] = []
-        if page > 0:
-            nav_rows.append((t("btn_prev"), f"admin:trial:{page - 1}"))
-        if has_next:
-            nav_rows.append((t("btn_next"), f"admin:trial:{page + 1}"))
         keyboard: list[list[InlineKeyboardButton]] = []
         for req in requests:
             keyboard.append([
                 InlineKeyboardButton(text=f"{t('btn_approve')} #{req.id}", callback_data=f"admin:trial:approve:{req.id}"),
                 InlineKeyboardButton(text=f"{t('btn_reject')} #{req.id}", callback_data=f"admin:trial:reject:{req.id}"),
             ])
-        if nav_rows:
-            keyboard.append([InlineKeyboardButton(text=text, callback_data=data) for text, data in nav_rows])
+        if page > 0 or has_next:
+            nav: list[InlineKeyboardButton] = []
+            if page > 0:
+                nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=f"admin:trial:{page - 1}"))
+            nav.append(InlineKeyboardButton(text=f"{page + 1} / {total_pages}", callback_data="noop"))
+            if has_next:
+                nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"admin:trial:{page + 1}"))
+            keyboard.append(nav)
         keyboard.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")])
         await safe_edit_message_text(
             callback.message,
@@ -1460,9 +1475,20 @@ async def _show_announcement_batches(callback: CallbackQuery, services: Services
     )
 
 
-def _simple_nav(rows: list[tuple[str, str]], back_data: str) -> InlineKeyboardMarkup:
+def _simple_nav(
+    rows: list[tuple[str, str]],
+    back_data: str,
+    *,
+    page: int | None = None,
+    total_pages: int | None = None,
+) -> InlineKeyboardMarkup:
     keyboard = []
     if rows:
-        keyboard.append([InlineKeyboardButton(text=text, callback_data=data) for text, data in rows])
+        nav = [InlineKeyboardButton(text=text, callback_data=data) for text, data in rows]
+        if page is not None and total_pages is not None:
+            counter = InlineKeyboardButton(text=f"{page + 1} / {total_pages}", callback_data="noop")
+            insert_pos = 1 if page > 0 else 0
+            nav.insert(insert_pos, counter)
+        keyboard.append(nav)
     keyboard.append([InlineKeyboardButton(text=t("btn_back"), callback_data=back_data)])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)

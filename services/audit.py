@@ -91,6 +91,14 @@ class AuditService:
                 entity_id,
             )
 
+    async def count_all(self, actor_user_id: int) -> int:
+        if self.users is None:
+            raise RuntimeError("AuditService.count_all requires a UserRepository; pass users= to AuditService()")
+        user = await self.users.get_by_id(actor_user_id)
+        if user is None or user.role != UserRole.SUPERADMIN:
+            raise AccessDenied("Недостаточно прав")
+        return await self.audit_logs.count_all()
+
     async def recent(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[dict[str, object]]:
         """Return recent audit log entries; raises AccessDenied if actor is not a superadmin."""
         if self.users is None:

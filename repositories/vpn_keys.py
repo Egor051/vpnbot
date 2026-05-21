@@ -158,6 +158,14 @@ class VpnKeyRepository:
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
+    async def count_traffic_supported(self) -> int:
+        cursor = await self.db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM vpn_keys WHERE key_type IN (?, ?) AND status != ?",
+            (VpnKeyType.XRAY.value, VpnKeyType.AWG.value, VpnKeyStatus.DELETED.value),
+        )
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row is not None else 0
+
     async def list_traffic_supported(self, limit: int = 20, offset: int = 0) -> list[VpnKey]:
         cursor = await self.db.conn.execute(
             """

@@ -87,7 +87,7 @@ def announcement_batches_keyboard(batches: list[AnnouncementBatch]) -> InlineKey
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def pending_requests_keyboard(requests: list[AccessRequest], page: int = 0, has_next: bool = False) -> InlineKeyboardMarkup:
+def pending_requests_keyboard(requests: list[AccessRequest], page: int = 0, has_next: bool = False, total_pages: int = 1) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for request in requests:
         title = request.username or str(request.telegram_user_id)
@@ -98,12 +98,13 @@ def pending_requests_keyboard(requests: list[AccessRequest], page: int = 0, has_
                 InlineKeyboardButton(text=t("btn_reject"), callback_data=f"admin:reject:{request.id}"),
             ]
         )
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=f"admin:reqs:{page - 1}"))
-    if has_next:
-        nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"admin:reqs:{page + 1}"))
-    if nav:
+    if page > 0 or has_next:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=f"admin:reqs:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1} / {total_pages}", callback_data="noop"))
+        if has_next:
+            nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"admin:reqs:{page + 1}"))
         rows.append(nav)
     rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -115,6 +116,7 @@ def users_keyboard(
     has_next: bool = False,
     prefix: str = "admin:user",
     nav_prefix: str = "admin:users",
+    total_pages: int = 1,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for user in users:
@@ -127,12 +129,13 @@ def users_keyboard(
                 )
             ]
         )
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=f"{nav_prefix}:{page - 1}"))
-    if has_next:
-        nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"{nav_prefix}:{page + 1}"))
-    if nav:
+    if page > 0 or has_next:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=f"{nav_prefix}:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1} / {total_pages}", callback_data="noop"))
+        if has_next:
+            nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"{nav_prefix}:{page + 1}"))
         rows.append(nav)
     rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -208,17 +211,18 @@ def trial_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def admin_issue_users_keyboard(users: list[User], page: int = 0, has_next: bool = False) -> InlineKeyboardMarkup:
+def admin_issue_users_keyboard(users: list[User], page: int = 0, has_next: bool = False, total_pages: int = 1) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for user in users:
         title = format_user_display(user.telegram_user_id, user.username)
         rows.append([InlineKeyboardButton(text=title, callback_data=f"admin:issue:{user.telegram_user_id}")])
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=f"admin:issuepage:{page - 1}"))
-    if has_next:
-        nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"admin:issuepage:{page + 1}"))
-    if nav:
+    if page > 0 or has_next:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=f"admin:issuepage:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1} / {total_pages}", callback_data="noop"))
+        if has_next:
+            nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"admin:issuepage:{page + 1}"))
         rows.append(nav)
     rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -106,6 +106,11 @@ class UserRepository:
         if cursor.rowcount != 1:
             raise NotFound("Пользователь не найден")
 
+    async def count_users(self) -> int:
+        cursor = await self.db.conn.execute("SELECT COUNT(*) AS cnt FROM users")
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row is not None else 0
+
     async def list_users(self, limit: int = 20, offset: int = 0) -> list[User]:
         cursor = await self.db.conn.execute(
             """
