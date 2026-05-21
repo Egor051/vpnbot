@@ -60,7 +60,7 @@ STRINGS: dict[str, str] = {
     "field_revoked": "Revoked",
     "field_deleted": "Deleted",
     # ── main menu ─────────────────────────────────────────────────────────────
-    "main_menu_text": "Hello, {name}\n\n{warning}\n\nChoose an action.",
+    "main_menu_text": "Hello, {name}!\n\n{warning}\n\nChoose an action.",
     # ── keys page ─────────────────────────────────────────────────────────────
     "keys_user_title": "<b>User's keys</b>",
     "keys_my_title": "<b>My keys</b>",
