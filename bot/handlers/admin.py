@@ -6,7 +6,7 @@ from typing import Any
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.container import Services
 from bot.formatters import (
@@ -1266,7 +1266,6 @@ async def admin_trial_list(callback: CallbackQuery, services: Services) -> None:
             nav_rows.append(("Назад", f"admin:trial:{page - 1}"))
         if has_next:
             nav_rows.append(("Дальше", f"admin:trial:{page + 1}"))
-        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         keyboard: list[list[InlineKeyboardButton]] = []
         for req in requests:
             keyboard.append([
@@ -1482,7 +1481,6 @@ async def _show_announcement_batches(callback: CallbackQuery, services: Services
 
 
 def _simple_nav(rows: list[tuple[str, str]], back_data: str) -> InlineKeyboardMarkup:
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
     keyboard = []
     if rows:

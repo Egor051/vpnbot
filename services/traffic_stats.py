@@ -74,15 +74,19 @@ class TrafficStatsService:
             )
             current_stats = await self.stats.list_by_key_ids(key_ids)
             views: list[KeyTrafficStatsView] = []
-            for key in keys:
-                stats: TrafficStats | None
-                if key.key_type == VpnKeyType.AWG:
-                    stats = await self._refresh_awg_key(key, current_stats.get(key.id), awg_transfers, awg_error)
-                elif key.key_type == VpnKeyType.XRAY:
-                    stats = await self._refresh_xray_key(key, current_stats.get(key.id), xray_stats, xray_error)
-                else:
-                    stats = None
-                views.append(KeyTrafficStatsView(key=key, owner=owners.get(key.owner_user_id), stats=stats))
+            # Coalesce the per-key upserts into a single commit. Each upsert's own
+            # commit() is a no-op inside an explicit transaction, so a batch of N
+            # keys flushes once instead of issuing N fsyncs (synchronous=FULL).
+            async with self.stats.db.transaction():
+                for key in keys:
+                    stats: TrafficStats | None
+                    if key.key_type == VpnKeyType.AWG:
+                        stats = await self._refresh_awg_key(key, current_stats.get(key.id), awg_transfers, awg_error)
+                    elif key.key_type == VpnKeyType.XRAY:
+                        stats = await self._refresh_xray_key(key, current_stats.get(key.id), xray_stats, xray_error)
+                    else:
+                        stats = None
+                    views.append(KeyTrafficStatsView(key=key, owner=owners.get(key.owner_user_id), stats=stats))
         return views
 
     async def refresh_all_awg(self) -> None:
