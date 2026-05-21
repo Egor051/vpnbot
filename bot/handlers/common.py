@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, Message, User as TgUser
 
 from bot.container import Services
 from bot.formatters import main_menu_text
-from bot.keyboards.common import back_to_menu, faq_answer_keyboard, faq_keyboard, main_menu
+from bot.keyboards.common import FAQ_PER_PAGE, FAQ_TOPICS, back_to_menu, faq_answer_keyboard, faq_keyboard, main_menu
 from bot.messages import is_stale_callback_query_error, safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimitExceeded
@@ -59,13 +59,18 @@ async def answer_message_error(message: Message, exc: Exception) -> None:
     await message.answer(service_error_text(exc), reply_markup=back_to_menu())
 
 
+def _faq_page_title(page: int) -> str:
+    total = (len(FAQ_TOPICS) + FAQ_PER_PAGE - 1) // FAQ_PER_PAGE
+    return t("faq_page_title").format(page=page, total=total)
+
+
 @router.message(Command("help"))
 async def help_command(message: Message, services: Services) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
         return
-    await message.answer(t("faq_title"), reply_markup=faq_keyboard())
+    await message.answer(_faq_page_title(1), reply_markup=faq_keyboard(1))
 
 
 @router.message(Command("faq"))
@@ -74,7 +79,7 @@ async def faq_command(message: Message, services: Services) -> None:
         return
     if not await ensure_private_message(message):
         return
-    await message.answer(t("faq_title"), reply_markup=faq_keyboard())
+    await message.answer(_faq_page_title(1), reply_markup=faq_keyboard(1))
 
 
 @router.callback_query(F.data == "help")
@@ -83,7 +88,28 @@ async def help_callback(callback: CallbackQuery, services: Services) -> None:
         return
     await safe_callback_answer(callback)
     if callback.message and callback.from_user:
-        await safe_edit_message_text(callback.message, t("faq_title"), reply_markup=faq_keyboard())
+        await safe_edit_message_text(callback.message, _faq_page_title(1), reply_markup=faq_keyboard(1))
+
+
+@router.callback_query(F.data == "noop")
+async def noop_callback(callback: CallbackQuery) -> None:
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith("faq_page:"))
+async def faq_page_callback(callback: CallbackQuery) -> None:
+    if not await ensure_private_callback(callback):
+        return
+    await safe_callback_answer(callback)
+    if callback.message is None or callback.data is None:
+        return
+    try:
+        page = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        page = 1
+    total = (len(FAQ_TOPICS) + FAQ_PER_PAGE - 1) // FAQ_PER_PAGE
+    page = max(1, min(page, total))
+    await safe_edit_message_text(callback.message, _faq_page_title(page), reply_markup=faq_keyboard(page))
 
 
 @router.callback_query(F.data.startswith("faq:"))
@@ -93,12 +119,15 @@ async def faq_answer_callback(callback: CallbackQuery) -> None:
     await safe_callback_answer(callback)
     if callback.message is None or callback.data is None:
         return
-    topic = callback.data.split(":", 1)[1]
-    key = f"faq_{topic}"
-    text = t(key) if key in (
-        "faq_connect", "faq_device", "faq_choice", "faq_trouble", "faq_notes", "faq_support"
-    ) else t("faq_not_found")
-    await safe_edit_message_text(callback.message, text, reply_markup=faq_answer_keyboard())
+    parts = callback.data.split(":")
+    topic = parts[1] if len(parts) > 1 else ""
+    try:
+        page = int(parts[2]) if len(parts) > 2 else 1
+    except ValueError:
+        page = 1
+    valid_topics = {key for key, _ in FAQ_TOPICS}
+    text = t(f"faq_{topic}") if topic in valid_topics else t("faq_not_found")
+    await safe_edit_message_text(callback.message, text, reply_markup=faq_answer_keyboard(page))
 
 
 @router.message(F.text == t("btn_help"))
@@ -107,7 +136,7 @@ async def help_menu_message(message: Message, services: Services) -> None:
         return
     if not await ensure_private_message(message):
         return
-    await message.answer(t("faq_title"), reply_markup=faq_keyboard())
+    await message.answer(_faq_page_title(1), reply_markup=faq_keyboard(1))
 
 
 @router.message(Command("menu"))

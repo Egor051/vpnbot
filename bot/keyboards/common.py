@@ -3,6 +3,24 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 
 from i18n import t
 
+FAQ_TOPICS: list[tuple[str, str]] = [
+    ("connect",        "btn_faq_connect"),
+    ("trouble",        "btn_faq_trouble"),
+    ("key_statuses",   "btn_faq_key_statuses"),
+    ("revoke_delete",  "btn_faq_revoke_delete"),
+    ("expired",        "btn_faq_expired"),
+    ("device",         "btn_faq_device"),
+    ("stats",          "btn_faq_stats"),
+    ("choice",         "btn_faq_choice"),
+    ("mtu",            "btn_faq_mtu"),
+    ("note_why",       "btn_faq_note_why"),
+    ("proxy",          "btn_faq_proxy"),
+    ("server_restart", "btn_faq_server_restart"),
+    ("notes",          "btn_faq_notes"),
+    ("support",        "btn_faq_support"),
+]
+FAQ_PER_PAGE = 5
+
 
 def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     rows = [
@@ -32,24 +50,32 @@ def back_to_menu() -> InlineKeyboardMarkup:
     )
 
 
-def faq_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=t("btn_faq_connect"), callback_data="faq:connect")],
-            [InlineKeyboardButton(text=t("btn_faq_device"), callback_data="faq:device")],
-            [InlineKeyboardButton(text=t("btn_faq_choice"), callback_data="faq:choice")],
-            [InlineKeyboardButton(text=t("btn_faq_trouble"), callback_data="faq:trouble")],
-            [InlineKeyboardButton(text=t("btn_faq_notes"), callback_data="faq:notes")],
-            [InlineKeyboardButton(text=t("btn_faq_support"), callback_data="faq:support")],
-            [InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data="menu:main")],
-        ]
-    )
+def faq_keyboard(page: int = 1) -> InlineKeyboardMarkup:
+    total = (len(FAQ_TOPICS) + FAQ_PER_PAGE - 1) // FAQ_PER_PAGE
+    page = max(1, min(page, total))
+    start = (page - 1) * FAQ_PER_PAGE
+    page_topics = FAQ_TOPICS[start : start + FAQ_PER_PAGE]
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for topic_key, btn_key in page_topics:
+        rows.append([InlineKeyboardButton(text=t(btn_key), callback_data=f"faq:{topic_key}:{page}")])
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=f"faq_page:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page} / {total}", callback_data="noop"))
+    if page < total:
+        nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"faq_page:{page + 1}"))
+    rows.append(nav)
+
+    rows.append([InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def faq_answer_keyboard() -> InlineKeyboardMarkup:
+def faq_answer_keyboard(page: int = 1) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t("btn_back_to_faq"), callback_data="help")],
+            [InlineKeyboardButton(text=t("btn_back_to_faq"), callback_data=f"faq_page:{page}")],
             [InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data="menu:main")],
         ]
     )
