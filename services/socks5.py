@@ -136,7 +136,7 @@ class Socks5Service:
             raise InvalidOperation("Это не SOCKS5-доступ")
         # Serialises revoke/issue for the same owner: prevents races between
         # Dante-adapter calls and DB status writes.
-        async with self._user_locks.lock(pre_access.owner_user_id):
+        async with self.user_locks.lock(pre_access.owner_user_id):
             access = await self._get_access(access_id)  # re-fetch under lock
             if access.status in {ProxyAccessStatus.REVOKED, ProxyAccessStatus.INACTIVE, ProxyAccessStatus.DELETED}:
                 return access
@@ -175,7 +175,7 @@ class Socks5Service:
             raise InvalidOperation("Это не SOCKS5-доступ")
         # Serialises delete/issue for the same owner: prevents races between
         # Dante-adapter calls and DB status writes.
-        async with self._user_locks.lock(pre_access.owner_user_id):
+        async with self.user_locks.lock(pre_access.owner_user_id):
             access = await self._get_access(access_id)  # re-fetch under lock
             if access.status == ProxyAccessStatus.DELETED:
                 return access
