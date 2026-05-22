@@ -359,6 +359,8 @@ async def _startup_reconcile_keys(services: Services) -> None:
             backend_health.mark_degraded(VpnKeyType.AWG, "startup reconciliation failed")
         if mtproto_summary.get("fatal", 0):
             backend_health.mark_degraded(ProxyAccessType.MTPROTO, "startup reconciliation failed")
+        if socks5_summary.get("failed", 0):
+            backend_health.mark_degraded(ProxyAccessType.SOCKS5, "startup reconciliation failed")
     logger.info(
         "Startup access reconciliation: xray=%s awg=%s mtproto=%s socks5=%s",
         xray_summary,
