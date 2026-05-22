@@ -1,3 +1,5 @@
+-- auto-generated from migrations, do not edit manually
+-- reflects schema after all migrations up to CURRENT_SCHEMA_VERSION
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -45,6 +47,7 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   updated_at TEXT NOT NULL,
   revoked_at TEXT,
   expires_at TEXT DEFAULT NULL,
+  expiry_notified_days TEXT DEFAULT NULL,
   deleted_at TEXT,
   created_by INTEGER NOT NULL,
   revoked_by INTEGER,
@@ -131,14 +134,15 @@ CREATE TABLE IF NOT EXISTS announcement_batches (
   actor_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE RESTRICT,
   from_chat_id INTEGER NOT NULL,
   message_id INTEGER NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('pending','sending','completed','failed','cancelled')),
+  status TEXT NOT NULL CHECK(status IN ('pending','sending','completed','failed','cancelled','scheduled')),
   total_count INTEGER NOT NULL DEFAULT 0,
   success_count INTEGER NOT NULL DEFAULT 0,
   failed_count INTEGER NOT NULL DEFAULT 0,
   skipped_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  completed_at TEXT
+  completed_at TEXT,
+  scheduled_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS announcement_deliveries (
@@ -173,5 +177,7 @@ ON proxy_accesses(owner_user_id, access_type)
 WHERE status IN ('pending_apply','active','pending_revoke');
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);
+CREATE INDEX IF NOT EXISTS idx_trial_requests_user ON trial_key_requests(telegram_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_announcement_batches_status ON announcement_batches(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_announcement_batches_scheduled ON announcement_batches(scheduled_at) WHERE status = 'scheduled' AND scheduled_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_announcement_deliveries_status ON announcement_deliveries(announcement_id, status, user_id);

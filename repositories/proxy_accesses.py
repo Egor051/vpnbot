@@ -1,10 +1,12 @@
 
 import json
+import logging
 from typing import Any
 
 from aiosqlite import Row
 
 from db.database import Database
+from db.exceptions import ConcurrentModificationError
 from models.dto import (
     ProxyAccess,
     ProxyAccessStatsItem,
@@ -15,8 +17,10 @@ from models.dto import (
     ProxyUserStats,
 )
 from models.enums import ProxyAccessStatus, ProxyAccessType
-from repositories._helpers import enum_value, json_loads_dict
+from repositories._helpers import _clamp_limit, _clamp_offset, enum_value, json_loads_dict
 from services.errors import InvalidTransition
+
+logger = logging.getLogger(__name__)
 
 
 def _json_loads(value: str) -> dict[str, object]:
@@ -206,7 +210,7 @@ class ProxyAccessRepository:
         params: list[object] = [owner_user_id]
         if not include_deleted:
             params.append(ProxyAccessStatus.DELETED.value)
-        params.extend([limit, offset])
+        params.extend([_clamp_limit(limit), _clamp_offset(offset)])
         cursor = await self.db.conn.execute(
             f"""
             SELECT * FROM proxy_accesses
@@ -238,7 +242,7 @@ class ProxyAccessRepository:
             ORDER BY updated_at ASC, id ASC
             LIMIT ? OFFSET ?
             """,
-            (owner_user_id, *(status.value for status in statuses), limit, offset),
+            (owner_user_id, *(status.value for status in statuses), _clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [access for row in rows if (access := _row_to_proxy_access(row)) is not None]
@@ -267,37 +271,35 @@ class ProxyAccessRepository:
         return _row_to_proxy_access(row)
 
     async def find_by_socks5_login(self, login: str) -> ProxyAccess | None:
-        """Return SOCKS5 proxy access by login, or None if not found.
-
-        Does NOT filter by status — caller must check access.status when
-        only active accesses are acceptable.
-        """
+        """Return the most recent non-deleted/inactive SOCKS5 proxy access by login, or None."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM proxy_accesses
             WHERE access_type = ?
               AND json_extract(payload_json, '$.login') = ?
+              AND status NOT IN (?, ?)
+            ORDER BY created_at DESC
             LIMIT 1
             """,
-            (ProxyAccessType.SOCKS5.value, login),
+            (ProxyAccessType.SOCKS5.value, login,
+             ProxyAccessStatus.DELETED.value, ProxyAccessStatus.INACTIVE.value),
         )
         row = await cursor.fetchone()
         return _row_to_proxy_access(row)
 
     async def find_by_secret_fingerprint(self, fingerprint: str) -> ProxyAccess | None:
-        """Return MTProto proxy access by secret fingerprint, or None if not found.
-
-        Does NOT filter by status — caller must check access.status when
-        only active accesses are acceptable.
-        """
+        """Return the most recent non-deleted/inactive MTProto proxy access by fingerprint, or None."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM proxy_accesses
             WHERE access_type = ?
               AND secret_fingerprint = ?
+              AND status NOT IN (?, ?)
+            ORDER BY created_at DESC
             LIMIT 1
             """,
-            (ProxyAccessType.MTPROTO.value, fingerprint),
+            (ProxyAccessType.MTPROTO.value, fingerprint,
+             ProxyAccessStatus.DELETED.value, ProxyAccessStatus.INACTIVE.value),
         )
         row = await cursor.fetchone()
         return _row_to_proxy_access(row)
@@ -322,7 +324,7 @@ class ProxyAccessRepository:
             ORDER BY id ASC
             LIMIT ?
             """,
-            (access_type.value, *(status.value for status in statuses), after_id, limit),
+            (access_type.value, *(status.value for status in statuses), after_id, _clamp_limit(limit)),
         )
         rows = await cursor.fetchall()
         return [access for row in rows if (access := _row_to_proxy_access(row)) is not None]
@@ -340,7 +342,7 @@ class ProxyAccessRepository:
             current = await self.get_by_id(access_id)
             if current is None:
                 raise RuntimeError("Proxy access not found")
-            await self.db.conn.execute(
+            cursor = await self.db.conn.execute(
                 """
                 UPDATE proxy_accesses
                 SET status = ?,
@@ -351,7 +353,7 @@ class ProxyAccessRepository:
                     error = NULL,
                     payload_json = ?,
                     public_payload_json = ?
-                WHERE id = ?
+                WHERE id = ? AND status IN (?, ?)
                 """,
                 (
                     ProxyAccessStatus.ACTIVE.value,
@@ -366,8 +368,15 @@ class ProxyAccessRepository:
                         separators=(",", ":"),
                     ),
                     access_id,
+                    ProxyAccessStatus.PENDING_APPLY.value,
+                    ProxyAccessStatus.APPLY_FAILED.value,
                 ),
             )
+            if cursor.rowcount == 0:
+                logger.warning(
+                    "mark_active: proxy access %s skipped — not in a transitionable status (concurrent modification?)",
+                    access_id,
+                )
 
     async def update_payloads(
         self,
@@ -405,16 +414,35 @@ class ProxyAccessRepository:
         *,
         error: str | None = None,
         reason: str | None = None,
+        allowed_from_statuses: tuple[ProxyAccessStatus, ...] | None = None,
     ) -> None:
-        await self.db.conn.execute(
-            """
-            UPDATE proxy_accesses
-            SET status = ?, updated_at = ?, error = ?, reason = COALESCE(?, reason)
-            WHERE id = ?
-            """,
-            (status.value, now, error[:512] if error else None, reason, access_id),
-        )
-        await self.db.commit()
+        if allowed_from_statuses:
+            placeholders = ",".join("?" for _ in allowed_from_statuses)
+            cursor = await self.db.conn.execute(
+                f"""
+                UPDATE proxy_accesses
+                SET status = ?, updated_at = ?, error = ?, reason = COALESCE(?, reason)
+                WHERE id = ? AND status IN ({placeholders})
+                """,
+                (status.value, now, error[:512] if error else None, reason, access_id,
+                 *(s.value for s in allowed_from_statuses)),
+            )
+            await self.db.commit()
+            if cursor.rowcount == 0:
+                raise ConcurrentModificationError(
+                    f"Proxy access {access_id} is not in an allowed status for this transition "
+                    f"(concurrent modification?)"
+                )
+        else:
+            await self.db.conn.execute(
+                """
+                UPDATE proxy_accesses
+                SET status = ?, updated_at = ?, error = ?, reason = COALESCE(?, reason)
+                WHERE id = ?
+                """,
+                (status.value, now, error[:512] if error else None, reason, access_id),
+            )
+            await self.db.commit()
 
     async def mark_shown(self, access_id: int, now: str) -> None:
         await self.db.conn.execute(
@@ -573,7 +601,7 @@ class ProxyAccessRepository:
             ORDER BY pa.created_at DESC, pa.id DESC
             LIMIT ? OFFSET ?
             """,
-            (limit, offset),
+            (_clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [item for row in rows if (item := _row_to_proxy_stats_item(row)) is not None]

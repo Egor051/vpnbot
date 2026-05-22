@@ -6,6 +6,7 @@ from aiosqlite import Row
 from db.database import Database
 from models.dto import AccessRequest
 from models.enums import AccessRequestStatus
+from repositories._helpers import _clamp_limit, _clamp_offset
 
 
 def _row_to_access_request(row: Row | None) -> AccessRequest | None:
@@ -131,7 +132,7 @@ class AccessRequestRepository:
             ORDER BY requested_at ASC
             LIMIT ? OFFSET ?
             """,
-            (status.value, limit, offset),
+            (status.value, _clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [request for row in rows if (request := _row_to_access_request(row)) is not None]

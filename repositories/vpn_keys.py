@@ -1,14 +1,18 @@
 
 import json
+import logging
 from typing import Any
 
 from aiosqlite import Row
 
 from db.database import Database
+from db.exceptions import ConcurrentModificationError
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
-from repositories._helpers import enum_value, json_loads_dict
+from repositories._helpers import _clamp_limit, _clamp_offset, enum_value, json_loads_dict
 from services.errors import InvalidTransition
+
+logger = logging.getLogger(__name__)
 
 
 def _json_loads(value: str) -> dict[str, object]:
@@ -153,7 +157,7 @@ class VpnKeyRepository:
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
             """,
-            (owner_user_id, VpnKeyStatus.DELETED.value, limit, offset),
+            (owner_user_id, VpnKeyStatus.DELETED.value, _clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
@@ -174,7 +178,7 @@ class VpnKeyRepository:
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
             """,
-            (VpnKeyType.XRAY.value, VpnKeyType.AWG.value, VpnKeyStatus.DELETED.value, limit, offset),
+            (VpnKeyType.XRAY.value, VpnKeyType.AWG.value, VpnKeyStatus.DELETED.value, _clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
@@ -260,7 +264,7 @@ class VpnKeyRepository:
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
             """,
-            (owner_user_id, key_type.value, VpnKeyStatus.DELETED.value, limit, offset),
+            (owner_user_id, key_type.value, VpnKeyStatus.DELETED.value, _clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
@@ -282,7 +286,7 @@ class VpnKeyRepository:
             ORDER BY created_at ASC
             LIMIT ? OFFSET ?
             """,
-            (owner_user_id, *(status.value for status in statuses), limit, offset),
+            (owner_user_id, *(status.value for status in statuses), _clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
@@ -303,7 +307,7 @@ class VpnKeyRepository:
             ORDER BY updated_at ASC, id ASC
             LIMIT ? OFFSET ?
             """,
-            (*(status.value for status in statuses), limit, offset),
+            (*(status.value for status in statuses), _clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
@@ -324,7 +328,7 @@ class VpnKeyRepository:
         if after_id is not None:
             after_sql = "AND id > ?"
             params.append(after_id)
-        params.extend([limit, offset])
+        params.extend([_clamp_limit(limit), _clamp_offset(offset)])
         cursor = await self.db.conn.execute(
             f"""
             SELECT * FROM vpn_keys
@@ -349,11 +353,11 @@ class VpnKeyRepository:
             current = await self.get_by_id(key_id)
             if current is None:
                 raise RuntimeError("VPN key not found")
-            await self.db.conn.execute(
+            cursor = await self.db.conn.execute(
                 """
                 UPDATE vpn_keys
                 SET status = ?, updated_at = ?, payload_json = ?, public_payload_json = ?
-                WHERE id = ?
+                WHERE id = ? AND status IN (?, ?)
                 """,
                 (
                     VpnKeyStatus.ACTIVE.value,
@@ -365,15 +369,41 @@ class VpnKeyRepository:
                         separators=(",", ":"),
                     ),
                     key_id,
+                    VpnKeyStatus.PENDING_APPLY.value,
+                    VpnKeyStatus.APPLY_FAILED.value,
                 ),
             )
+            if cursor.rowcount == 0:
+                logger.warning(
+                    "mark_active: VPN key %s skipped — not in a transitionable status (concurrent modification?)",
+                    key_id,
+                )
 
-    async def set_status(self, key_id: int, status: VpnKeyStatus, now: str) -> None:
-        await self.db.conn.execute(
-            "UPDATE vpn_keys SET status = ?, updated_at = ? WHERE id = ?",
-            (status.value, now, key_id),
-        )
-        await self.db.commit()
+    async def set_status(
+        self,
+        key_id: int,
+        status: VpnKeyStatus,
+        now: str,
+        *,
+        allowed_from_statuses: tuple[VpnKeyStatus, ...] | None = None,
+    ) -> None:
+        if allowed_from_statuses:
+            placeholders = ",".join("?" for _ in allowed_from_statuses)
+            cursor = await self.db.conn.execute(
+                f"UPDATE vpn_keys SET status = ?, updated_at = ? WHERE id = ? AND status IN ({placeholders})",
+                (status.value, now, key_id, *(s.value for s in allowed_from_statuses)),
+            )
+            await self.db.commit()
+            if cursor.rowcount == 0:
+                raise ConcurrentModificationError(
+                    f"VPN key {key_id} is not in an allowed status for this transition (concurrent modification?)"
+                )
+        else:
+            await self.db.conn.execute(
+                "UPDATE vpn_keys SET status = ?, updated_at = ? WHERE id = ?",
+                (status.value, now, key_id),
+            )
+            await self.db.commit()
 
     async def update_key_status(self, key_id: int, status: VpnKeyStatus, now: str) -> None:
         await self.set_status(key_id, status, now)
@@ -516,24 +546,24 @@ class VpnKeyRepository:
             ORDER BY expires_at ASC
             LIMIT ?
             """,
-            (VpnKeyStatus.ACTIVE.value, now, deadline, str(threshold_days), limit),
+            (VpnKeyStatus.ACTIVE.value, now, deadline, str(threshold_days), _clamp_limit(limit)),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
     async def mark_expiry_notified(self, key_id: int, threshold_days: int) -> None:
-        await self.db.conn.execute(
-            """
-            UPDATE vpn_keys
-            SET expiry_notified_days = CASE
-              WHEN expiry_notified_days IS NULL THEN ?
-              ELSE expiry_notified_days || ',' || ?
-            END
-            WHERE id = ?
-            """,
-            (str(threshold_days), str(threshold_days), key_id),
-        )
-        await self.db.commit()
+        async with self.db.transaction():
+            row = await self.db.conn.execute_fetchone(
+                "SELECT expiry_notified_days FROM vpn_keys WHERE id = ?", (key_id,)
+            )
+            current_raw = str(row["expiry_notified_days"]) if row and row["expiry_notified_days"] else ""
+            existing = {int(d) for d in current_raw.split(",") if d.strip().isdigit()}
+            existing.add(threshold_days)
+            new_value = ",".join(str(d) for d in sorted(existing))
+            await self.db.conn.execute(
+                "UPDATE vpn_keys SET expiry_notified_days = ? WHERE id = ?",
+                (new_value, key_id),
+            )
 
     async def list_expired_active(self, now: str, limit: int = 100) -> list[VpnKey]:
         cursor = await self.db.conn.execute(
@@ -543,7 +573,7 @@ class VpnKeyRepository:
             ORDER BY expires_at ASC
             LIMIT ?
             """,
-            (VpnKeyStatus.ACTIVE.value, now, limit),
+            (VpnKeyStatus.ACTIVE.value, now, _clamp_limit(limit)),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
