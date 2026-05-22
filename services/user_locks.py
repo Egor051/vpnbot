@@ -17,6 +17,11 @@ class UserLockManager:
             if lock is None:
                 lock = asyncio.Lock()
                 self._locks[user_id] = lock
+        # `lock` is a strong reference held for the entire lifetime of this
+        # context manager (the coroutine is suspended at `yield`, not exited).
+        # WeakValueDictionary cannot GC the Lock while any caller is waiting to
+        # enter or is inside the `async with` block — so two coroutines for the
+        # same user_id always contend on the exact same Lock object.
         await lock.acquire()
         try:
             yield

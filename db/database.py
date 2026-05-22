@@ -12,7 +12,7 @@ from typing import Any
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 17
+CURRENT_SCHEMA_VERSION = 18
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -227,6 +227,10 @@ class Database:
         if version < 17:
             await self._migrate_v17()
             await self._set_schema_version(17)
+            version = 17
+        if version < 18:
+            await self._migrate_v18()
+            await self._set_schema_version(18)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -724,6 +728,18 @@ class Database:
             # Re-enable FK after committing so the pragma takes effect
             # (SQLite ignores it inside a transaction).
             await raw.execute("PRAGMA foreign_keys = ON")
+
+    async def _migrate_v18(self) -> None:
+        # Prevents double-grant at the DB level: a second INSERT while a pending
+        # row already exists for the same user raises IntegrityError instead of
+        # silently creating a duplicate pending trial request.
+        await self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_trial_requests_one_pending
+            ON trial_key_requests(telegram_user_id)
+            WHERE status = 'pending'
+            """
+        )
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(

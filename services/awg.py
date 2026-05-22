@@ -314,55 +314,59 @@ class AwgService:
         return await self.get_awg_client_config(actor_user_id, key_id)
 
     async def get_awg_client_config(self, actor_user_id: int, key_id: int) -> str:
-        key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
-        if key.status != VpnKeyStatus.ACTIVE:
-            raise InvalidOperation("Конфигурация доступна только для активного ключа")
-        await self._ensure_client_payload_valid(actor_user_id, key)
-        await self._write_audit_best_effort(
-            actor_user_id=actor_user_id,
-            action="awg_config_shown",
-            entity_type=AuditEntityType.VPN_KEY,
-            entity_id=key_id,
-            details={"client_ip": key.client_ip},
-        )
-        return self._format_config(key, viewer_user_id=actor_user_id)
-
-    async def get_awg_client_config_plain(self, actor_user_id: int, key_id: int, audit: bool = True) -> str:
-        key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
-        if key.status != VpnKeyStatus.ACTIVE:
-            raise InvalidOperation("Конфигурация доступна только для активного ключа")
-        await self._ensure_client_payload_valid(actor_user_id, key)
-        if audit:
+        async with self._lock:  # Prevents returning config for a key being concurrently deleted
+            key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
+            if key.status != VpnKeyStatus.ACTIVE:
+                raise InvalidOperation("Конфигурация доступна только для активного ключа")
+            await self._ensure_client_payload_valid(actor_user_id, key)
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
-                action="awg_config_file_shown",
+                action="awg_config_shown",
                 entity_type=AuditEntityType.VPN_KEY,
                 entity_id=key_id,
                 details={"client_ip": key.client_ip},
             )
-        return self._client_config(key)
+            return self._format_config(key, viewer_user_id=actor_user_id)
+
+    async def get_awg_client_config_plain(self, actor_user_id: int, key_id: int, audit: bool = True) -> str:
+        async with self._lock:  # Prevents returning config for a key being concurrently deleted
+            key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
+            if key.status != VpnKeyStatus.ACTIVE:
+                raise InvalidOperation("Конфигурация доступна только для активного ключа")
+            await self._ensure_client_payload_valid(actor_user_id, key)
+            if audit:
+                await self._write_audit_best_effort(
+                    actor_user_id=actor_user_id,
+                    action="awg_config_file_shown",
+                    entity_type=AuditEntityType.VPN_KEY,
+                    entity_id=key_id,
+                    details={"client_ip": key.client_ip},
+                )
+            return self._client_config(key)
 
     async def get_awg_client_config_for_owner(self, owner_user_id: int, key_id: int) -> str:
-        key = await self._get_key(key_id)
-        if key.key_type != VpnKeyType.AWG:
-            raise InvalidOperation("Это не AWG-ключ")
-        if key.owner_user_id != owner_user_id:
-            raise AccessDenied("Нельзя смотреть чужой ключ")
-        if key.status != VpnKeyStatus.ACTIVE:
-            raise InvalidOperation("Конфигурация доступна только для активного ключа")
-        await self._ensure_client_payload_valid(owner_user_id, key)
-        return self._client_config(key)
+        async with self._lock:  # Prevents returning config for a key being concurrently deleted
+            key = await self._get_key(key_id)
+            if key.key_type != VpnKeyType.AWG:
+                raise InvalidOperation("Это не AWG-ключ")
+            if key.owner_user_id != owner_user_id:
+                raise AccessDenied("Нельзя смотреть чужой ключ")
+            if key.status != VpnKeyStatus.ACTIVE:
+                raise InvalidOperation("Конфигурация доступна только для активного ключа")
+            await self._ensure_client_payload_valid(owner_user_id, key)
+            return self._client_config(key)
 
     async def get_awg_formatted_config_for_owner(self, owner_user_id: int, key_id: int) -> str:
-        key = await self._get_key(key_id)
-        if key.key_type != VpnKeyType.AWG:
-            raise InvalidOperation("Это не AWG-ключ")
-        if key.owner_user_id != owner_user_id:
-            raise AccessDenied("Нельзя смотреть чужой ключ")
-        if key.status != VpnKeyStatus.ACTIVE:
-            raise InvalidOperation("Конфигурация доступна только для активного ключа")
-        await self._ensure_client_payload_valid(owner_user_id, key)
-        return self._format_config(key, viewer_user_id=owner_user_id)
+        async with self._lock:  # Prevents returning config for a key being concurrently deleted
+            key = await self._get_key(key_id)
+            if key.key_type != VpnKeyType.AWG:
+                raise InvalidOperation("Это не AWG-ключ")
+            if key.owner_user_id != owner_user_id:
+                raise AccessDenied("Нельзя смотреть чужой ключ")
+            if key.status != VpnKeyStatus.ACTIVE:
+                raise InvalidOperation("Конфигурация доступна только для активного ключа")
+            await self._ensure_client_payload_valid(owner_user_id, key)
+            return self._format_config(key, viewer_user_id=owner_user_id)
 
     async def list_user_keys(
         self,
@@ -387,19 +391,20 @@ class AwgService:
         return await self.vpn_keys.list_by_owner_and_type(target, VpnKeyType.AWG, limit=limit, offset=offset)
 
     async def update_awg_note(self, actor_user_id: int, key_id: int, note: str | None) -> VpnKey:
-        key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
-        if key.owner_user_id != actor_user_id:
-            raise AccessDenied("Можно менять заметку только своих ключей")
-        clean_note = normalize_note(note)
-        await self.vpn_keys.update_note(key.id, clean_note, self.clock.now())
-        await self._write_audit_best_effort(
-            actor_user_id=actor_user_id,
-            action="awg_note_updated",
-            entity_type=AuditEntityType.VPN_KEY,
-            entity_id=key_id,
-            details={"client_ip": key.client_ip},
-        )
-        return await self._get_key(key_id)
+        async with self._lock:  # Prevents note update racing with concurrent key deletion
+            key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
+            if key.owner_user_id != actor_user_id:
+                raise AccessDenied("Можно менять заметку только своих ключей")
+            clean_note = normalize_note(note)
+            await self.vpn_keys.update_note(key.id, clean_note, self.clock.now())
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="awg_note_updated",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={"client_ip": key.client_ip},
+            )
+            return await self._get_key(key_id)
 
     async def reconcile_key_status(self, actor_user_id: int, key_id: int) -> VpnKey:
         await self.users.require_superadmin(actor_user_id)
