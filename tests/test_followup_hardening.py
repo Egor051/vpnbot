@@ -2504,6 +2504,9 @@ def test_xray_api_mode_add_client_restores_backup_on_api_failure(tmp_path: Path)
             json.loads(path.read_text(encoding="utf-8"))
             return ShellResult(("xray",), 0, "", "")
 
+        async def reload(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "reload", service_name), 0, "", "")
+
     async def run() -> None:
         config_path = tmp_path / "config.json"
         config_path.write_text(
