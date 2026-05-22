@@ -632,6 +632,9 @@ class Database:
         # 2. copy data;
         # 3. drop the old table (FK OFF to avoid cascade complications);
         # 4. rename _new → original (no sibling FK references _new, so nothing to rewrite).
+        # Commit any pending writes so PRAGMA foreign_keys = OFF takes effect
+        # (SQLite silently ignores the pragma inside an open transaction).
+        await self.commit()
         await self._raw_conn().execute("PRAGMA foreign_keys = OFF")
         try:
             await self.conn.execute("DROP INDEX IF EXISTS idx_announcement_batches_status")
@@ -1010,7 +1013,7 @@ def _is_write_statement(sql: str) -> bool:
     if first == "PRAGMA":
         return _pragma_mutates(stripped)
     if first == "WITH":
-        return True
+        return _cte_is_write(stripped)
     if first in {
         "INSERT",
         "UPDATE",
@@ -1048,6 +1051,61 @@ def _strip_leading_sql_noise(sql: str) -> str:
             stripped = stripped[end + 2 :].lstrip()
             continue
         return stripped
+
+
+def _cte_is_write(sql: str) -> bool:
+    """Return True if a WITH/CTE statement's final DML clause is a write operation.
+
+    Walks past balanced parentheses (CTE bodies) and inspects the first token
+    of the statement that follows.  A read-only ``WITH … SELECT`` returns False;
+    ``WITH … INSERT/UPDATE/DELETE/REPLACE`` returns True.
+    """
+    depth = 0
+    i = 0
+    n = len(sql)
+    while i < n:
+        c = sql[i]
+        if c in ("'", '"', "`"):
+            # Skip quoted string / identifier — they may contain parens.
+            q = c
+            i += 1
+            while i < n:
+                if sql[i] == q:
+                    # SQLite uses doubled-quote for escaping.
+                    if i + 1 < n and sql[i + 1] == q:
+                        i += 2
+                        continue
+                    break
+                i += 1
+        elif c == "[":
+            # SQLite bracket-quoted identifier.
+            while i < n and sql[i] != "]":
+                i += 1
+        elif c == "-" and i + 1 < n and sql[i + 1] == "-":
+            while i < n and sql[i] != "\n":
+                i += 1
+            continue
+        elif c == "/" and i + 1 < n and sql[i + 1] == "*":
+            i += 2
+            while i < n - 1 and not (sql[i] == "*" and sql[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                rest = sql[i + 1 :].lstrip()
+                if rest.startswith(","):
+                    # Comma separates CTE definitions — keep scanning.
+                    i += 1
+                    continue
+                # Whatever follows is the main DML statement.
+                first_token = rest.split(None, 1)[0].upper().rstrip(";") if rest else ""
+                return first_token in {"INSERT", "UPDATE", "DELETE", "REPLACE"}
+        i += 1
+    return True  # Cannot parse — conservatively treat as write.
 
 
 def _pragma_mutates(sql: str) -> bool:

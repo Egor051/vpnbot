@@ -6,6 +6,7 @@ from aiosqlite import Row
 from db.database import Database
 from models.dto import TelegramUserProfile, User
 from models.enums import UserRole, parse_user_role
+from repositories._helpers import _clamp_limit, _clamp_offset
 from services.errors import NotFound
 
 
@@ -83,12 +84,8 @@ class UserRepository:
         async with self.db.transaction():
             await self.db.conn.executemany(
                 """
-                INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
+                INSERT OR IGNORE INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
                 VALUES (?, NULL, NULL, ?, ?, ?)
-                ON CONFLICT(telegram_user_id) DO UPDATE SET
-                  role = excluded.role,
-                  blocked_at = NULL,
-                  updated_at = excluded.updated_at
                 """,
                 rows,
             )
@@ -118,7 +115,7 @@ class UserRepository:
             ORDER BY updated_at DESC
             LIMIT ? OFFSET ?
             """,
-            (limit, offset),
+            (_clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [user for row in rows if (user := _row_to_user(row)) is not None]
@@ -137,6 +134,7 @@ class UserRepository:
         return int(row["cnt"]) if row is not None else 0
 
     async def list_announcement_recipients_after(self, last_seen_id: int | None, limit: int = 100) -> list[User]:
+        safe_limit = _clamp_limit(limit)
         if last_seen_id is None:
             cursor = await self.db.conn.execute(
                 f"""
@@ -146,7 +144,7 @@ class UserRepository:
                 ORDER BY telegram_user_id ASC
                 LIMIT ?
                 """,
-                (*_ANNOUNCEMENT_ROLE_SQL_VALUES, limit),
+                (*_ANNOUNCEMENT_ROLE_SQL_VALUES, safe_limit),
             )
         else:
             cursor = await self.db.conn.execute(
@@ -158,7 +156,7 @@ class UserRepository:
                 ORDER BY telegram_user_id ASC
                 LIMIT ?
                 """,
-                (*_ANNOUNCEMENT_ROLE_SQL_VALUES, last_seen_id, limit),
+                (*_ANNOUNCEMENT_ROLE_SQL_VALUES, last_seen_id, safe_limit),
             )
         rows = await cursor.fetchall()
         return [user for row in rows if (user := _row_to_user(row)) is not None]

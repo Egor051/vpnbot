@@ -1,3 +1,5 @@
+-- auto-generated from migrations, do not edit manually
+-- reflects schema after all migrations up to CURRENT_SCHEMA_VERSION
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -45,6 +47,7 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   updated_at TEXT NOT NULL,
   revoked_at TEXT,
   expires_at TEXT DEFAULT NULL,
+  expiry_notified_days TEXT DEFAULT NULL,
   deleted_at TEXT,
   created_by INTEGER NOT NULL,
   revoked_by INTEGER,
@@ -131,14 +134,15 @@ CREATE TABLE IF NOT EXISTS announcement_batches (
   actor_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE RESTRICT,
   from_chat_id INTEGER NOT NULL,
   message_id INTEGER NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('pending','sending','completed','failed','cancelled')),
+  status TEXT NOT NULL CHECK(status IN ('pending','sending','completed','failed','cancelled','scheduled')),
   total_count INTEGER NOT NULL DEFAULT 0,
   success_count INTEGER NOT NULL DEFAULT 0,
   failed_count INTEGER NOT NULL DEFAULT 0,
   skipped_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  completed_at TEXT
+  completed_at TEXT,
+  scheduled_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS announcement_deliveries (
@@ -155,12 +159,15 @@ CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_active_role ON users(role) WHERE blocked_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_access_requests_user_status ON access_requests(telegram_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_access_requests_pending_created ON access_requests(status, requested_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_access_requests_one_pending ON access_requests(telegram_user_id) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner ON vpn_keys(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_type_status ON vpn_keys(key_type, status);
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_status_type ON vpn_keys(status, key_type);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_uuid ON vpn_keys(uuid) WHERE uuid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_email_label ON vpn_keys(email_label) WHERE email_label IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_public_key ON vpn_keys(public_key) WHERE public_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_client_ip_reserved ON vpn_keys(client_ip) WHERE client_ip IS NOT NULL AND key_type = 'awg' AND status IN ('pending_apply','active','apply_failed','pending_revoke','pending_delete','delete_failed');
+CREATE INDEX IF NOT EXISTS idx_vpn_keys_expires_at ON vpn_keys(expires_at) WHERE expires_at IS NOT NULL AND status = 'active';
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_short_id ON vpn_keys(json_extract(payload_json, '$.short_id')) WHERE key_type = 'xray' AND json_valid(payload_json) AND json_extract(payload_json, '$.short_id') IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner_type_status ON vpn_keys(owner_user_id, key_type, status);
 CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner ON proxy_accesses(owner_user_id);
@@ -173,5 +180,7 @@ ON proxy_accesses(owner_user_id, access_type)
 WHERE status IN ('pending_apply','active','pending_revoke');
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);
+CREATE INDEX IF NOT EXISTS idx_trial_requests_user ON trial_key_requests(telegram_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_announcement_batches_status ON announcement_batches(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_announcement_batches_scheduled ON announcement_batches(scheduled_at) WHERE status = 'scheduled' AND scheduled_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_announcement_deliveries_status ON announcement_deliveries(announcement_id, status, user_id);

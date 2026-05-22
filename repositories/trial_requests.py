@@ -2,9 +2,10 @@
 from aiosqlite import Row
 
 from db.database import Database
+from db.exceptions import ConcurrentModificationError
 from models.dto import TrialKeyRequest
 from models.enums import VpnKeyType
-from repositories._helpers import enum_value
+from repositories._helpers import _clamp_limit, _clamp_offset, enum_value
 
 
 def _row_to_request(row: Row | None) -> TrialKeyRequest | None:
@@ -64,7 +65,7 @@ class TrialKeyRequestRepository:
             ORDER BY requested_at ASC
             LIMIT ? OFFSET ?
             """,
-            (limit, offset),
+            (_clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [r for row in rows if (r := _row_to_request(row)) is not None]
@@ -82,23 +83,31 @@ class TrialKeyRequestRepository:
         return int(row["cnt"]) if row is not None else 0
 
     async def approve(self, *, request_id: int, key_id: int, decided_by: int, decided_at: str) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE trial_key_requests
             SET status = 'approved', key_id = ?, decided_by = ?, decided_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status = 'pending'
             """,
             (key_id, decided_by, decided_at, request_id),
         )
         await self.db.commit()
+        if cursor.rowcount == 0:
+            raise ConcurrentModificationError(
+                f"Trial request {request_id} is not in pending status (concurrent modification?)"
+            )
 
     async def reject(self, *, request_id: int, decided_by: int, decided_at: str) -> None:
-        await self.db.conn.execute(
+        cursor = await self.db.conn.execute(
             """
             UPDATE trial_key_requests
             SET status = 'rejected', decided_by = ?, decided_at = ?
-            WHERE id = ?
+            WHERE id = ? AND status = 'pending'
             """,
             (decided_by, decided_at, request_id),
         )
         await self.db.commit()
+        if cursor.rowcount == 0:
+            raise ConcurrentModificationError(
+                f"Trial request {request_id} is not in pending status (concurrent modification?)"
+            )

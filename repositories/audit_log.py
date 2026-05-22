@@ -5,6 +5,7 @@ from typing import Any
 
 from db.database import Database
 from models.enums import AuditEntityType
+from repositories._helpers import _clamp_limit, _clamp_offset
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ class AuditLogRepository:
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
             """,
-            (limit, offset),
+            (_clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [
@@ -116,8 +117,12 @@ class AuditLogRepository:
         ]
 
     async def prune_older_than(self, cutoff: str) -> int:
+        # SQLite datetime() returns NULL for ISO-8601 strings with the '+00:00'
+        # timezone offset (e.g. '2024-01-01T12:00:00+00:00'), so the WHERE
+        # clause would always be false and no rows would ever be deleted.
+        # Strip the offset before comparing so both sides are plain UTC strings.
         cursor = await self.db.conn.execute(
-            "DELETE FROM audit_log WHERE datetime(created_at) < datetime(?)",
+            "DELETE FROM audit_log WHERE REPLACE(created_at, '+00:00', '') < REPLACE(?, '+00:00', '')",
             (cutoff,),
         )
         await self.db.commit()

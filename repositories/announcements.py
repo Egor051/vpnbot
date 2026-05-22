@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from aiosqlite import Row
 
 from db.database import Database
+from repositories._helpers import _clamp_limit
 from services.errors import InvalidTransition
 
 
@@ -123,7 +124,7 @@ class AnnouncementRepository:
             ORDER BY updated_at DESC, id DESC
             LIMIT ?
             """,
-            (limit,),
+            (_clamp_limit(limit),),
         )
         rows = await cursor.fetchall()
         return [batch for row in rows if (batch := _row_to_batch(row)) is not None]
@@ -137,7 +138,7 @@ class AnnouncementRepository:
             ORDER BY scheduled_at ASC, id ASC
             LIMIT ?
             """,
-            (now, limit),
+            (now, _clamp_limit(limit)),
         )
         rows = await cursor.fetchall()
         return [batch for row in rows if (batch := _row_to_batch(row)) is not None]
@@ -161,7 +162,7 @@ class AnnouncementRepository:
             ORDER BY user_id ASC
             LIMIT ?
             """,
-            (announcement_id, *statuses, after_user_id, limit),
+            (announcement_id, *statuses, after_user_id, _clamp_limit(limit)),
         )
         rows = await cursor.fetchall()
         return [delivery for row in rows if (delivery := _row_to_delivery(row)) is not None]
