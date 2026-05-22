@@ -69,10 +69,16 @@ def run_awg_or_wg(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def quick_strip(path: Path) -> str:
-    import shutil
     named = path.parent / "awg0.conf"
-    shutil.copy2(str(path), str(named))
+    # O_NOFOLLOW prevents TOCTOU: if path was swapped to a symlink, open raises OSError
     try:
+        raw_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise HelperError(f"cannot open candidate: {exc}", EXIT_VALIDATION) from exc
+    try:
+        with os.fdopen(raw_fd, "rb") as src:
+            with named.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
         result = run_command(["awg-quick", "strip", str(named)])
         if result.returncode == 127:
             result = run_command(["wg-quick", "strip", str(named)])
@@ -119,6 +125,23 @@ def _set_private_root(path: Path) -> None:
     os.chmod(path, PRIVATE_TEMP_MODE)
 
 
+def _prepare_target_dir() -> None:
+    target_dir = CANONICAL_CONFIG.parent
+    if os.name != "posix":
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return
+    # Collect each directory that must be created (walk up until we reach an existing ancestor)
+    to_create: list[Path] = []
+    p = target_dir
+    while not p.exists():
+        to_create.append(p)
+        p = p.parent
+    # Create from root to leaf, chmoding each immediately to avoid the world-traversable umask window
+    for d in reversed(to_create):
+        d.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
+
+
 def backup_current() -> Path | None:
     if not CANONICAL_CONFIG.exists():
         return None
@@ -129,10 +152,15 @@ def backup_current() -> Path | None:
 
 
 def install_candidate(candidate: Path) -> None:
-    CANONICAL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_target_dir()
     tmp_path = CANONICAL_CONFIG.with_name(f".{CANONICAL_CONFIG.name}.{time.time_ns()}.tmp")
     try:
-        with candidate.open("rb") as source:
+        # O_NOFOLLOW prevents TOCTOU: if candidate was replaced by a symlink after validate, open raises OSError
+        try:
+            raw_fd = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise HelperError(f"cannot open candidate: {exc}", EXIT_VALIDATION) from exc
+        with os.fdopen(raw_fd, "rb") as source:
             fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FINAL_MODE)
             with os.fdopen(fd, "wb") as target:
                 shutil.copyfileobj(source, target)

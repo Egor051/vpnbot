@@ -3,9 +3,15 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 
 ENV_PATH = os.environ.get("MTPROTO_MANAGED_ENV_PATH", "/etc/mtproxy/vpnbot/mtproxy.env")
+
+# Security: only these binaries may be exec'd; guards against a tampered env file causing arbitrary RCE
+_ALLOWED_BINARY_PATHS: frozenset[str] = frozenset({
+    "/usr/local/bin/mtproto-proxy",
+})
 
 
 def read_env(path: str) -> dict[str, str]:
@@ -22,11 +28,16 @@ def read_env(path: str) -> dict[str, str]:
 
 def main() -> None:
     env = read_env(ENV_PATH)
+    binary_path = env["MTPROTO_BINARY_PATH"]
+    # Security: validate binary path against allowlist before execv
+    if binary_path not in _ALLOWED_BINARY_PATHS:
+        print(f"error: MTPROTO_BINARY_PATH not in allowlist: {binary_path!r}", file=sys.stderr)
+        raise SystemExit(1)
     with open(env["MTPROTO_MANAGED_SECRETS_PATH"], "r", encoding="utf-8") as file:
         document = json.load(file)
     runtime_items = document.get("runtime_secrets") or document.get("secrets") or []
     args = [
-        env["MTPROTO_BINARY_PATH"],
+        binary_path,
         "-u",
         env["MTPROTO_RUN_USER"],
         "-p",
@@ -47,7 +58,7 @@ def main() -> None:
             env["MTPROTO_WORKERS"],
         ]
     )
-    os.execv(args[0], args)
+    os.execv(binary_path, args)
 
 
 if __name__ == "__main__":

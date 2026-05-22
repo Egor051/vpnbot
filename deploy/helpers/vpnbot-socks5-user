@@ -72,6 +72,9 @@ def action_set_password(login: str, stdin: TextIO) -> int:
         password = password[:-1]
     if not password:
         raise HelperError("password input is empty", EXIT_VALIDATION)
+    # Security: newline/CR/null/colon in password would inject extra chpasswd records or corrupt the input line
+    if any(c in password for c in ("\n", "\r", "\x00", ":")):
+        raise HelperError("invalid password characters", EXIT_VALIDATION)
     result = run_command([*_NSENTER_HOST_MNT, "chpasswd"], input_text=f"{safe_login}:{password}\n")
     if result.returncode != 0:
         raise HelperError("password update failed")

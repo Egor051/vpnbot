@@ -24,6 +24,10 @@ FINAL_FILE_MODE = 0o640
 FINAL_DIR_MODE = 0o750
 EXIT_VALIDATION = 64
 EXIT_COMMAND_FAILED = 70
+# Security: only these binaries may be exec'd via MTPROTO_BINARY_PATH
+ALLOWED_BINARY_PATHS: frozenset[str] = frozenset({
+    "/usr/local/bin/mtproto-proxy",
+})
 ENV_KEYS = {
     "MTPROTO_BINARY_PATH",
     "MTPROTO_RUN_USER",
@@ -101,7 +105,13 @@ def validate_secret_item(item: Any) -> None:
 
 def validate_managed_secrets(path: Path) -> None:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        # O_NOFOLLOW prevents TOCTOU: if path was swapped to a symlink, open raises OSError
+        raw_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise HelperError(f"cannot open managed secrets: {exc}", EXIT_VALIDATION) from exc
+    try:
+        with os.fdopen(raw_fd, "r", encoding="utf-8") as f:
+            data = json.loads(f.read())
     except json.JSONDecodeError as exc:
         raise HelperError("managed secrets JSON is invalid", EXIT_VALIDATION) from exc
     if not isinstance(data, dict):
@@ -120,7 +130,14 @@ def validate_managed_secrets(path: Path) -> None:
 
 def parse_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    # O_NOFOLLOW prevents TOCTOU: if path was swapped to a symlink, open raises OSError
+    try:
+        raw_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise HelperError(f"cannot open env file: {exc}", EXIT_VALIDATION) from exc
+    with os.fdopen(raw_fd, "r", encoding="utf-8") as f:
+        content = f.read()
+    for raw_line in content.splitlines():
         if not raw_line:
             continue
         if "=" not in raw_line:
@@ -130,6 +147,9 @@ def parse_env(path: Path) -> dict[str, str]:
             raise HelperError("MTProxy env file has unsupported key", EXIT_VALIDATION)
         if "\x00" in value:
             raise HelperError("MTProxy env file has invalid value", EXIT_VALIDATION)
+        # Security: allowlist binary path to prevent arbitrary execv RCE
+        if key == "MTPROTO_BINARY_PATH" and value not in ALLOWED_BINARY_PATHS:
+            raise HelperError("MTPROTO_BINARY_PATH is not in the allowlist", EXIT_VALIDATION)
         values[key] = value
     return values
 
@@ -182,10 +202,21 @@ def _set_final_file_stat(path: Path) -> None:
 
 
 def _prepare_target_dir() -> None:
-    TARGET_DIR.mkdir(parents=True, exist_ok=True)
-    if os.name == "posix":
-        os.chown(TARGET_DIR, 0, _lookup_final_gid())
-        os.chmod(TARGET_DIR, FINAL_DIR_MODE)
+    if os.name != "posix":
+        TARGET_DIR.mkdir(parents=True, exist_ok=True)
+        return
+    # Collect each directory that must be created (walk up until we reach an existing ancestor)
+    to_create: list[Path] = []
+    p = TARGET_DIR
+    while not p.exists():
+        to_create.append(p)
+        p = p.parent
+    # Create from root to leaf, chmoding each immediately to avoid the world-traversable umask window
+    for d in reversed(to_create):
+        d.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
+    os.chown(TARGET_DIR, 0, _lookup_final_gid())
+    os.chmod(TARGET_DIR, FINAL_DIR_MODE)
 
 
 def backup_targets() -> dict[Path, Path | None]:
@@ -205,7 +236,12 @@ def install_file(source: Path, target: Path) -> None:
     _prepare_target_dir()
     tmp_path = target.with_name(f".{target.name}.{time.time_ns()}.tmp")
     try:
-        with source.open("rb") as input_file:
+        # O_NOFOLLOW prevents TOCTOU: if source was replaced by a symlink after validate, open raises OSError
+        try:
+            raw_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise HelperError(f"cannot open source file: {exc}", EXIT_VALIDATION) from exc
+        with os.fdopen(raw_fd, "rb") as input_file:
             fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FINAL_FILE_MODE)
             with os.fdopen(fd, "wb") as output_file:
                 shutil.copyfileobj(input_file, output_file)
