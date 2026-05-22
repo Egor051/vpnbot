@@ -49,6 +49,7 @@ class AnomalyDetectionService:
         xray_access_log_path: str = "",
         concurrent_window_seconds: int = 0,
         bot: Bot | None = None,
+        backend_health: object | None = None,
     ) -> None:
         self._vpn_keys = vpn_keys
         self._awg = awg
@@ -64,6 +65,7 @@ class AnomalyDetectionService:
         # Prevents false positives from mobile users whose IPs rotate over time.
         self._concurrent_window_seconds = concurrent_window_seconds
         self.bot = bot
+        self._backend_health = backend_health
         # {key_id: deque of (wall_clock_float, source_ip)}
         self._observations: dict[int, collections.deque[tuple[float, str]]] = {}
         # {key_id: last_alerted_wall_clock_float}
@@ -197,7 +199,18 @@ class AnomalyDetectionService:
                 auto_revoked = True
             except Exception as exc:
                 revoke_error = str(exc)
-                logger.warning("Anomaly auto-revoke failed for key #%d: %s", key.id, exc, exc_info=True)
+                logger.warning(
+                    "Anomaly auto-revoke failed key_id=%s owner_user_id=%s key_type=%s reason=%s",
+                    key.id,
+                    key.owner_user_id,
+                    key.key_type.value,
+                    exc,
+                    exc_info=True,
+                )
+                if self._backend_health is not None:
+                    record = getattr(self._backend_health, "record_skipped_revocation", None)
+                    if record is not None:
+                        record()
 
         if self.bot is None:
             return

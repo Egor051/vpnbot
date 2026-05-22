@@ -394,6 +394,17 @@ class MtProtoService:
             return self._with_current_payload(await self._get_access(access.id))
 
     async def _deactivate_static(self, access: ProxyAccess, actor_user_id: int, reason: str | None) -> ProxyAccess:
+        # static mode: shared secret cannot be selectively revoked —
+        # deactivating marks the DB row INACTIVE but the shared MTPROTO_SECRET
+        # continues to work for all users until it is rotated.
+        logger.warning(
+            "user %s blocked but shared MTProto secret still active — "
+            "rotate MTPROTO_SECRET to invalidate "
+            "user_id=%s access_id=%s",
+            access.owner_user_id,
+            access.owner_user_id,
+            access.id,
+        )
         await self.accesses.mark_inactive(access.id, actor_user_id, self.clock.now(), reason=reason)
         await self._write_audit_best_effort(
             actor_user_id=actor_user_id,
@@ -404,6 +415,7 @@ class MtProtoService:
                 "reason": reason,
                 "mode": "static",
                 "server_side_revoke": False,
+                "shared_secret_still_active": True,
             },
         )
         return self._with_current_payload(await self._get_access(access.id))

@@ -345,6 +345,12 @@ async def _startup_reconcile_keys(services: Services) -> None:
         if mtproto_reconcile is not None
         else {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "failed": 0, "fatal": 0}
     )
+    socks5_reconcile = getattr(getattr(services, "socks5", None), "reconcile_socks5_state", None)
+    socks5_summary = (
+        await _safe_startup_reconcile("SOCKS5", socks5_reconcile)
+        if socks5_reconcile is not None
+        else {"checked": 0, "recovered": 0, "failed": 0}
+    )
     backend_health = getattr(services, "backend_health", None)
     if backend_health is not None:
         if xray_summary.get("failed", 0):
@@ -354,19 +360,31 @@ async def _startup_reconcile_keys(services: Services) -> None:
         if mtproto_summary.get("fatal", 0):
             backend_health.mark_degraded(ProxyAccessType.MTPROTO, "startup reconciliation failed")
     logger.info(
-        "Startup access reconciliation: xray=%s awg=%s mtproto=%s",
+        "Startup access reconciliation: xray=%s awg=%s mtproto=%s socks5=%s",
         xray_summary,
         awg_summary,
         mtproto_summary,
+        socks5_summary,
     )
-    if xray_summary["checked"] or awg_summary["checked"] or mtproto_summary["checked"]:
+    any_checked = (
+        xray_summary["checked"]
+        or awg_summary["checked"]
+        or mtproto_summary["checked"]
+        or socks5_summary["checked"]
+    )
+    if any_checked:
         try:
             await services.audit.write(
                 actor_user_id=None,
                 action="startup_reconciliation_completed",
                 entity_type=AuditEntityType.SYSTEM,
                 entity_id=None,
-                details={"xray": xray_summary, "awg": awg_summary, "mtproto": mtproto_summary},
+                details={
+                    "xray": xray_summary,
+                    "awg": awg_summary,
+                    "mtproto": mtproto_summary,
+                    "socks5": socks5_summary,
+                },
             )
         except Exception:
             logger.warning("Startup VPN key reconciliation completed, but audit write failed", exc_info=True)

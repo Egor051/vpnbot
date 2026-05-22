@@ -27,6 +27,7 @@ class BackendHealth:
 
     def __init__(self) -> None:
         self._degraded: dict[BackendType, str] = {}
+        self._skipped_revocations: int = 0
 
     def mark_degraded(self, backend_type: BackendType, reason: str) -> None:
         """Record a backend as degraded with a human-readable reason."""
@@ -47,6 +48,15 @@ class BackendHealth:
             )
             for backend_type, label in _BACKEND_LABELS.items()
         )
+
+    def record_skipped_revocation(self) -> None:
+        """Increment the counter of revocations skipped due to a degraded backend."""
+        self._skipped_revocations += 1
+
+    @property
+    def skipped_revocation_count(self) -> int:
+        """Total revocations skipped since bot start (resets on restart)."""
+        return self._skipped_revocations
 
     def require_mutation_allowed(self, backend_type: BackendType) -> None:
         """Raise InvalidOperation if the backend is currently degraded."""

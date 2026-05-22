@@ -629,6 +629,14 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Services, 
                     keys=len(result.revoked_key_ids),
                     proxies=len(revoked_proxy_ids),
                 )
+            mtproto = getattr(services, "mtproto", None)
+            if (
+                mtproto is not None
+                and getattr(mtproto.settings, "mtproto_enabled", False)
+                and getattr(mtproto.settings, "mtproto_mode", "static") == "static"
+                and revoked_proxy_ids
+            ):
+                text += "\n\n" + t("static_mtproto_block_warning")
             has_used_trial = not await services.trial_access.can_request_trial(user_id)
             await safe_edit_message_text(callback.message, text, reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role))
     except Exception as exc:

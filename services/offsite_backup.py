@@ -2,7 +2,6 @@
 import asyncio
 import logging
 import sqlite3
-import tempfile
 from pathlib import Path
 
 from aiogram import Bot
@@ -14,6 +13,22 @@ logger = logging.getLogger(__name__)
 
 
 class OffsiteBackupService:
+    """Encrypted offsite backup service.
+
+    Key rotation recommendation: rotate OFFSITE_BACKUP_ENCRYPTION_KEY periodically
+    (e.g. every 90 days) to limit the window of compromise.  To rotate:
+      1. Generate a new key:
+           python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      2. Update OFFSITE_BACKUP_ENCRYPTION_KEY in the environment / .env file.
+      3. Re-download the latest backup and re-encrypt it with the new key if
+         you want to be able to restore from it after the old key is discarded.
+      4. Restart the bot — the next scheduled backup will use the new key.
+    """
+
+    # Backups older than this are rejected by decrypt_backup() to reduce the
+    # window during which a compromised key can be used to decrypt old data.
+    BACKUP_MAX_AGE_DAYS = 30
+
     def __init__(self, *, db_path: Path, encryption_key: str, clock: ClockProvider) -> None:
         self.db_path = db_path
         self.clock = clock
@@ -33,26 +48,60 @@ class OffsiteBackupService:
         fernet = Fernet(self._encryption_key.encode())
         encrypted = fernet.encrypt(raw_data)
 
+        # The Fernet token already embeds a creation timestamp used by
+        # decrypt_backup() to enforce the TTL; the filename stamp is for
+        # human reference only.
         stamp = self.clock.now().replace(":", "").replace("+", "_").replace(".", "")[:15]
         filename = f"vpnbot_backup_{stamp}.db.enc"
         return encrypted, filename
 
-    def _snapshot_db(self) -> bytes:
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
+    def decrypt_backup(self, encrypted_data: bytes, *, max_age_days: int = BACKUP_MAX_AGE_DAYS) -> bytes:
+        """Decrypt a backup blob and enforce a TTL based on the Fernet timestamp.
+
+        Raises RuntimeError if the backup is older than *max_age_days* or if
+        decryption fails.  Rotate OFFSITE_BACKUP_ENCRYPTION_KEY before the TTL
+        expires to ensure you can always restore from recent backups.
+        """
+        import time
+
+        from cryptography.fernet import Fernet, InvalidToken
+
+        if not self._encryption_key:
+            raise RuntimeError("OFFSITE_BACKUP_ENCRYPTION_KEY не настроен")
+
+        fernet = Fernet(self._encryption_key.encode())
         try:
-            src = sqlite3.connect(str(self.db_path))
+            token_ts = fernet.extract_timestamp(encrypted_data)
+        except (InvalidToken, Exception) as exc:
+            raise RuntimeError(f"Не удалось прочитать метку времени из бэкапа: {exc}") from exc
+
+        age_seconds = time.time() - token_ts
+        max_age_seconds = max_age_days * 86400
+        if age_seconds > max_age_seconds:
+            age_days = age_seconds / 86400
+            raise RuntimeError(
+                f"Бэкап устарел: возраст {age_days:.1f} д. (лимит {max_age_days} д.). "
+                "Ротируйте OFFSITE_BACKUP_ENCRYPTION_KEY и создайте новый бэкап."
+            )
+
+        try:
+            return fernet.decrypt(encrypted_data)
+        except InvalidToken as exc:
+            raise RuntimeError("Не удалось расшифровать бэкап: неверный ключ или повреждённые данные") from exc
+
+    def _snapshot_db(self) -> bytes:
+        # Backup into an in-memory database so no plaintext ever touches disk.
+        # serialize() is available since Python 3.12 (required by this project).
+        src = sqlite3.connect(str(self.db_path))
+        try:
+            dst = sqlite3.connect(":memory:")
             try:
-                dst = sqlite3.connect(str(tmp_path))
-                try:
-                    src.backup(dst)
-                finally:
-                    dst.close()
+                src.backup(dst)
+                return dst.serialize()
             finally:
-                src.close()
-            return tmp_path.read_bytes()
+                dst.close()
         finally:
-            tmp_path.unlink(missing_ok=True)
+            src.close()
 
     async def send_to_admins(self, bot: Bot, admin_ids: frozenset[int]) -> dict[str, int]:
         encrypted, filename = await self.create_encrypted_backup()
@@ -81,8 +130,9 @@ async def offsite_backup_loop(
     admin_ids: frozenset[int],
     interval: int,
 ) -> None:
+    # Short startup delay so the bot finishes initialising before the first backup.
+    await asyncio.sleep(60)
     while True:
-        await asyncio.sleep(interval)
         try:
             result = await service.send_to_admins(bot, admin_ids)
             logger.info(
@@ -93,3 +143,4 @@ async def offsite_backup_loop(
             )
         except Exception:
             logger.warning("Offsite backup job упал с ошибкой", exc_info=True)
+        await asyncio.sleep(interval)
