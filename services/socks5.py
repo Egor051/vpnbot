@@ -1,4 +1,5 @@
 
+import asyncio
 import logging
 import secrets
 from urllib.parse import quote
@@ -49,6 +50,7 @@ class Socks5Service:
         self.audit = audit
         self.user_locks: UserLockManager = user_locks if user_locks is not None else getattr(users, "user_locks", UserLockManager())
         self.backend_health = backend_health or BackendHealth()
+        self._lock = asyncio.Lock()
 
     async def issue_socks5_proxy(self, actor_user_id: int, profile: TelegramUserProfile) -> ProxyAccess:
         self._ensure_enabled()
@@ -59,62 +61,65 @@ class Socks5Service:
             if existing is not None:
                 await self._mark_shown(existing, actor_user_id)
                 return await self._get_access(existing.id)
-
-            login = await self._unique_login(profile.telegram_user_id)
-            password = self._generate_password()
-            payload = self._payload(login, password)
-            public_payload = self._public_payload(login)
-            access = await self.accesses.create(
-                owner_user_id=profile.telegram_user_id,
-                username=profile.username,
-                access_type=ProxyAccessType.SOCKS5,
-                status=ProxyAccessStatus.PENDING_APPLY,
-                payload=payload,
-                public_payload=public_payload,
-                created_by=actor_user_id,
-                now=self.clock.now(),
-            )
-            try:
+            # _lock serialises Dante adapter calls against concurrent revoke/delete.
+            # Lock order: user_lock (per-user dedup) → _lock (Dante serialisation).
+            async with self._lock:
                 await self._ensure_can_issue(actor_user_id, profile.telegram_user_id)
-                await self.adapter.create_user(login, password)
-            except Exception as exc:
-                error = self._redact_value(str(exc), password)
-                await self.accesses.set_status(
-                    access.id,
-                    ProxyAccessStatus.APPLY_FAILED,
-                    self.clock.now(),
-                    error=error,
+                login = await self._unique_login(profile.telegram_user_id)
+                password = self._generate_password()
+                payload = self._payload(login, password)
+                public_payload = self._public_payload(login)
+                access = await self.accesses.create(
+                    owner_user_id=profile.telegram_user_id,
+                    username=profile.username,
+                    access_type=ProxyAccessType.SOCKS5,
+                    status=ProxyAccessStatus.PENDING_APPLY,
+                    payload=payload,
+                    public_payload=public_payload,
+                    created_by=actor_user_id,
+                    now=self.clock.now(),
                 )
+                try:
+                    await self._ensure_can_issue(actor_user_id, profile.telegram_user_id)
+                    await self.adapter.create_user(login, password)
+                except Exception as exc:
+                    error = self._redact_value(str(exc), password)
+                    await self.accesses.set_status(
+                        access.id,
+                        ProxyAccessStatus.APPLY_FAILED,
+                        self.clock.now(),
+                        error=error,
+                    )
+                    await self._write_audit_best_effort(
+                        actor_user_id=actor_user_id,
+                        action="socks5_proxy_apply_failed",
+                        entity_id=access.id,
+                        details={"owner_user_id": profile.telegram_user_id, "login": login, "error": error},
+                    )
+                    if error != str(exc):
+                        raise InvalidOperation("SOCKS5 apply failed; raw password was redacted. Contact admin.") from None
+                    raise
+                try:
+                    await self.accesses.mark_active(access.id, self.clock.now(), payload=payload, public_payload=public_payload)
+                except Exception as exc:
+                    await self._compensate_failed_create_after_apply(
+                        actor_user_id=actor_user_id,
+                        access_id=access.id,
+                        owner_user_id=profile.telegram_user_id,
+                        login=login,
+                        original_error=exc,
+                    )
+                    raise
+
                 await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
-                    action="socks5_proxy_apply_failed",
+                    action="socks5_proxy_created",
                     entity_id=access.id,
-                    details={"owner_user_id": profile.telegram_user_id, "login": login, "error": error},
+                    details={"owner_user_id": profile.telegram_user_id, "login": login, "host": self.settings.socks5_host},
                 )
-                if error != str(exc):
-                    raise InvalidOperation("SOCKS5 apply failed; raw password was redacted. Contact admin.") from None
-                raise
-            try:
-                await self.accesses.mark_active(access.id, self.clock.now(), payload=payload, public_payload=public_payload)
-            except Exception as exc:
-                await self._compensate_failed_create_after_apply(
-                    actor_user_id=actor_user_id,
-                    access_id=access.id,
-                    owner_user_id=profile.telegram_user_id,
-                    login=login,
-                    original_error=exc,
-                )
-                raise
-
-            await self._write_audit_best_effort(
-                actor_user_id=actor_user_id,
-                action="socks5_proxy_created",
-                entity_id=access.id,
-                details={"owner_user_id": profile.telegram_user_id, "login": login, "host": self.settings.socks5_host},
-            )
-            active = await self._get_access(access.id)
-            await self._mark_shown(active, actor_user_id)
-            return await self._get_access(access.id)
+                active = await self._get_access(access.id)
+                await self._mark_shown(active, actor_user_id)
+                return await self._get_access(access.id)
 
     async def get_socks5_proxy_config(self, actor_user_id: int) -> ProxyAccess:
         await self.users.require_approved_or_admin(actor_user_id)
@@ -130,13 +135,13 @@ class Socks5Service:
 
     async def revoke_socks5_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
         await self.users.require_superadmin(actor_user_id)
-        # Fetch before lock to get owner_user_id; access_type never changes.
-        pre_access = await self._get_access(access_id)
-        if pre_access.access_type != ProxyAccessType.SOCKS5:
+        access = await self._get_access(access_id)
+        if access.access_type != ProxyAccessType.SOCKS5:
             raise InvalidOperation("Это не SOCKS5-доступ")
-        # Serialises revoke/issue for the same owner: prevents races between
-        # Dante-adapter calls and DB status writes.
-        async with self.user_locks.lock(pre_access.owner_user_id):
+        # _lock serialises revoke against concurrent issue/delete.
+        # Does NOT acquire user_lock: block_user already holds user_lock for
+        # the owner and would deadlock if we tried to re-acquire it here.
+        async with self._lock:
             access = await self._get_access(access_id)  # re-fetch under lock
             if access.status in {ProxyAccessStatus.REVOKED, ProxyAccessStatus.INACTIVE, ProxyAccessStatus.DELETED}:
                 return access
@@ -169,13 +174,13 @@ class Socks5Service:
 
     async def delete_socks5_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
         await self.users.require_superadmin(actor_user_id)
-        # Fetch before lock to get owner_user_id; access_type never changes.
-        pre_access = await self._get_access(access_id)
-        if pre_access.access_type != ProxyAccessType.SOCKS5:
+        access = await self._get_access(access_id)
+        if access.access_type != ProxyAccessType.SOCKS5:
             raise InvalidOperation("Это не SOCKS5-доступ")
-        # Serialises delete/issue for the same owner: prevents races between
-        # Dante-adapter calls and DB status writes.
-        async with self.user_locks.lock(pre_access.owner_user_id):
+        # _lock serialises delete against concurrent issue/revoke.
+        # Does NOT acquire user_lock: block_user already holds user_lock for
+        # the owner and would deadlock if we tried to re-acquire it here.
+        async with self._lock:
             access = await self._get_access(access_id)  # re-fetch under lock
             if access.status == ProxyAccessStatus.DELETED:
                 return access
