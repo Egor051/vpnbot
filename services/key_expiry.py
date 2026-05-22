@@ -32,6 +32,7 @@ class KeyExpiryService:
         clock: ClockProvider,
         bot: Bot | None = None,
         notify_days: tuple[int, ...] = (),
+        backend_health: object | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
         self.xray = xray
@@ -40,6 +41,7 @@ class KeyExpiryService:
         self.clock = clock
         self.bot = bot
         self.notify_days = notify_days
+        self._backend_health = backend_health
 
     async def revoke_expired_keys(self) -> int:
         now = self.clock.now()
@@ -53,13 +55,19 @@ class KeyExpiryService:
                     await self.awg.revoke_awg_key_system(key.id)  # type: ignore[attr-defined]
                 count += 1
                 await self._notify_owner_expired(key)
-            except Exception:
+            except Exception as exc:
                 logger.warning(
-                    "Не удалось отозвать истёкший ключ key_id=%s owner=%s",
+                    "Не удалось отозвать истёкший ключ key_id=%s owner_user_id=%s key_type=%s reason=%s",
                     key.id,
                     key.owner_user_id,
+                    key.key_type.value,
+                    exc,
                     exc_info=True,
                 )
+                if self._backend_health is not None:
+                    record = getattr(self._backend_health, "record_skipped_revocation", None)
+                    if record is not None:
+                        record()
         return count
 
     async def notify_expiring_keys(self) -> int:
@@ -73,12 +81,14 @@ class KeyExpiryService:
             for key in keys:
                 try:
                     await self._notify_owner_expiring_soon(key, days)
+                    # mark_expiry_notified is called only if send succeeded
                     await self.vpn_keys.mark_expiry_notified(key.id, days)
                     count += 1
                 except Exception:
                     logger.warning(
-                        "Не удалось отправить уведомление об истечении key_id=%s days=%s",
+                        "Не удалось отправить уведомление об истечении key_id=%s owner_user_id=%s days=%s",
                         key.id,
+                        key.owner_user_id,
                         days,
                         exc_info=True,
                     )
@@ -89,13 +99,11 @@ class KeyExpiryService:
             return
         type_label = key.key_type.value.upper()
         noun = _days_noun(days)
-        try:
-            await self.bot.send_message(
-                key.owner_user_id,
-                f"Срок действия {type_label}-ключа #{key.id} истекает через {days} {noun}.",
-            )
-        except Exception:
-            pass
+        # Let send errors propagate so mark_expiry_notified is not called on failure.
+        await self.bot.send_message(
+            key.owner_user_id,
+            f"Срок действия {type_label}-ключа #{key.id} истекает через {days} {noun}.",
+        )
 
     async def _notify_owner_expired(self, key: VpnKey) -> None:
         if self.bot is None:

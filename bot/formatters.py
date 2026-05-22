@@ -613,7 +613,12 @@ def proxy_admin_status_text(status: ProxyServiceStatus, stats: ProxyLifecycleSta
     return "\n".join(lines)
 
 
-def backend_diagnostics_text(statuses: tuple[BackendHealthStatus, ...], *, mtproto_mode: str = "static") -> str:
+def backend_diagnostics_text(
+    statuses: tuple[BackendHealthStatus, ...],
+    *,
+    mtproto_mode: str = "static",
+    skipped_revocation_count: int = 0,
+) -> str:
     lines = [
         "<b>Backend diagnostics</b>",
         "",
@@ -627,6 +632,11 @@ def backend_diagnostics_text(statuses: tuple[BackendHealthStatus, ...], *, mtpro
         if status.reason:
             lines.append(f"• reason: {h(_redact_diagnostic_reason(status.reason))}")
     lines.append("")
+    if skipped_revocation_count:
+        lines.append(
+            f"⚠️ Skipped revocations (degraded backend, since last restart): {skipped_revocation_count}"
+        )
+        lines.append("")
     if mtproto_mode == "managed":
         lines.append("MTProto mode: managed, per-user server-side revoke removes only that user's secret.")
     else:

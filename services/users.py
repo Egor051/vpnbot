@@ -269,8 +269,8 @@ class UserService:
                 return
             for key in keys:
                 if key.id in processed_success_ids:
-                    errors.append(KeyOperationError(key.id, key.key_type, "Ключ остался в активном статусе после отзыва"))
-                    return
+                    errors.append(KeyOperationError(key.id, key.key_type, "Ключ застрял в активном статусе после отзыва (stuck in re-list)"))
+                    continue
                 revoker = self._key_revokers.get(key.key_type)
                 if revoker is None:
                     errors.append(KeyOperationError(key.id, key.key_type, "Нет сервиса для отзыва ключа"))
@@ -309,8 +309,8 @@ class UserService:
                 return
             for access in accesses:
                 if access.id in processed_success_ids:
-                    errors.append(KeyOperationError(access.id, access.access_type, "Прокси-доступ остался активным после отзыва"))
-                    return
+                    errors.append(KeyOperationError(access.id, access.access_type, "Прокси-доступ застрял в активном статусе после отзыва (stuck in re-list)"))
+                    continue
                 revoker = self._proxy_revokers.get(access.access_type)
                 if revoker is None:
                     errors.append(KeyOperationError(access.id, access.access_type, "Нет сервиса для отзыва прокси-доступа"))

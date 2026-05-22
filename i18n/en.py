@@ -297,6 +297,7 @@ STRINGS: dict[str, str] = {
     "user_already_unblocked": "User is not blocked.",
     "user_blocked_success": "User blocked.\nVPN keys disabled: {keys}\nProxy accesses disabled: {proxies}\nErrors: 0\nThe user can now only use /start to submit a new request.",
     "user_blocked_with_errors": "User blocked in the bot, but not all server access could be revoked automatically.\nVPN keys disabled: {keys}\nProxy accesses disabled: {proxies}\nErrors: {errors}\nCheck Xray/AWG/SOCKS5/MTProto runtime and config manually.",
+    "static_mtproto_block_warning": "⚠️ MTProto is running in static mode: the shared secret remains active for all users. To revoke access rotate MTPROTO_SECRET and restart the proxy.",
     "notify_user_blocked": "Your access has been blocked by the admin.",
     "choose_user_for_key": "Choose a user to issue a key to:",
     "action_stale": "Action expired, please start over",

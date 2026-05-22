@@ -201,6 +201,17 @@ async def run_bot_health(
     checks.append(check_bot_non_root())
     checks.append(check_helper_mode(privilege_helpers_enabled))
     checks.extend(check_backends(backend_health.snapshot()))
+    skipped = getattr(backend_health, "skipped_revocation_count", 0)
+    if skipped:
+        checks.append(
+            HealthCheckItem(
+                name="skipped_revocations",
+                status="warning",
+                severity="warning",
+                message=f"Skipped revocations since last restart: {skipped}",
+                details="Auto-revoke or expiry-revoke was skipped because a backend was degraded. Check logs for key_id details.",
+            )
+        )
     sqlite_result, *service_results = await asyncio.gather(
         check_sqlite_quick(db),
         *(check_service_active(name) for name in service_names),

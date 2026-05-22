@@ -28,6 +28,14 @@ SOCKS5_ACCESS_MAY_EXIST_STATUSES = {
     ProxyAccessStatus.DELETE_FAILED,
 }
 
+SOCKS5_STARTUP_RECONCILE_STATUSES = {
+    ProxyAccessStatus.PENDING_APPLY,
+    ProxyAccessStatus.APPLY_FAILED,
+    ProxyAccessStatus.PENDING_REVOKE,
+    ProxyAccessStatus.PENDING_DELETE,
+    ProxyAccessStatus.DELETE_FAILED,
+}
+
 
 class Socks5Service:
     def __init__(
@@ -207,6 +215,134 @@ class Socks5Service:
                 details={"owner_user_id": access.owner_user_id, "login": login, "reason": reason},
             )
             return await self._get_access(access.id)
+
+    async def reconcile_socks5_state(self) -> dict[str, int]:
+        """Idempotent startup reconcile: brings SOCKS5 DB state in line with the Linux user database.
+
+        Safe to call multiple times. Acquires _lock so it is serialised against
+        concurrent issue/revoke/delete operations.
+        """
+        summary = {"checked": 0, "recovered": 0, "failed": 0}
+        async with self._lock:
+            last_id = 0
+            while True:
+                accesses = await self.accesses.list_by_type_statuses(
+                    ProxyAccessType.SOCKS5,
+                    SOCKS5_STARTUP_RECONCILE_STATUSES,
+                    limit=500,
+                    after_id=last_id,
+                )
+                if not accesses:
+                    break
+                for access in accesses:
+                    last_id = access.id
+                    summary["checked"] += 1
+                    try:
+                        changed = await self._startup_reconcile_access(access)
+                        if changed:
+                            summary["recovered"] += 1
+                    except Exception as exc:
+                        summary["failed"] += 1
+                        logger.warning(
+                            "SOCKS5 reconcile failed for access_id=%s owner_user_id=%s: %s",
+                            access.id,
+                            access.owner_user_id,
+                            exc,
+                            exc_info=True,
+                        )
+        return summary
+
+    async def _startup_reconcile_access(self, access: ProxyAccess) -> bool:
+        login = str(access.payload.get("login") or "")
+        if not login:
+            logger.warning(
+                "SOCKS5 reconcile: access_id=%s owner_user_id=%s has no login in payload — skipping",
+                access.id,
+                access.owner_user_id,
+            )
+            return False
+
+        linux_user_exists = await self.adapter.exists(login)
+
+        if access.status in {ProxyAccessStatus.PENDING_APPLY, ProxyAccessStatus.APPLY_FAILED}:
+            if linux_user_exists:
+                await self.accesses.mark_active(
+                    access.id,
+                    self.clock.now(),
+                    payload=access.payload,
+                    public_payload=access.public_payload,
+                )
+                await self._write_audit_best_effort(
+                    actor_user_id=None,
+                    action="socks5_startup_apply_recovered",
+                    entity_id=access.id,
+                    details={
+                        "owner_user_id": access.owner_user_id,
+                        "login": login,
+                        "previous_status": access.status.value,
+                    },
+                )
+                return True
+            else:
+                if access.status != ProxyAccessStatus.APPLY_FAILED:
+                    await self.accesses.set_status(
+                        access.id,
+                        ProxyAccessStatus.APPLY_FAILED,
+                        self.clock.now(),
+                        error="startup reconciliation: Linux user not found",
+                    )
+                logger.warning(
+                    "SOCKS5 reconcile: access_id=%s owner_user_id=%s login=%s — "
+                    "Linux user missing, marked APPLY_FAILED for admin review",
+                    access.id,
+                    access.owner_user_id,
+                    login,
+                )
+                return access.status != ProxyAccessStatus.APPLY_FAILED
+
+        if access.status in {ProxyAccessStatus.PENDING_REVOKE}:
+            if linux_user_exists:
+                try:
+                    await self.adapter.lock_user(login)
+                except DanteUserNotFoundError:
+                    linux_user_exists = False
+            actor_user_id = access.revoked_by or access.created_by
+            await self.accesses.mark_revoked(access.id, actor_user_id, self.clock.now(), reason=access.reason)
+            await self._write_audit_best_effort(
+                actor_user_id=None,
+                action="socks5_startup_revoke_completed",
+                entity_id=access.id,
+                details={
+                    "owner_user_id": access.owner_user_id,
+                    "login": login,
+                    "linux_user_existed": linux_user_exists,
+                    "previous_status": access.status.value,
+                },
+            )
+            return True
+
+        if access.status in {ProxyAccessStatus.PENDING_DELETE, ProxyAccessStatus.DELETE_FAILED}:
+            if linux_user_exists:
+                try:
+                    await self.adapter.delete_user(login)
+                except DanteUserNotFoundError:
+                    linux_user_exists = False
+            actor_user_id = access.deleted_by or access.revoked_by or access.created_by
+            await self.accesses.mark_deleted(access.id, actor_user_id, self.clock.now(), reason=access.reason)
+            await self._write_audit_best_effort(
+                actor_user_id=None,
+                action="socks5_startup_delete_completed",
+                entity_id=access.id,
+                details={
+                    "owner_user_id": access.owner_user_id,
+                    "login": login,
+                    "linux_user_existed": linux_user_exists,
+                    "previous_status": access.status.value,
+                },
+            )
+            return True
+
+        return False
 
     async def _ensure_can_issue(self, actor_user_id: int, owner_user_id: int) -> None:
         actor = await self.users.require_approved_or_admin(actor_user_id)
