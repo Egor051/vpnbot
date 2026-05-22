@@ -1,8 +1,10 @@
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,13 +18,17 @@ from adapters.errors import (
     XrayInboundNotFoundError,
 )
 from adapters.file_lock import ConfigFileLock
-from adapters.file_ops import copy_stat, fsync_parent
+from adapters.file_ops import async_copy_stat, async_fsync_parent, copy_stat, fsync_parent
 from adapters.privileged_helpers import PrivilegedHelperRunner, cleanup_staging_path, write_private_staging_file
 from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
 
 
 logger = logging.getLogger(__name__)
+
+# Allows printable email-safe characters; leading '-' is forbidden to prevent
+# flag injection when email_label is passed as a positional CLI argument.
+_EMAIL_SAFE_RE = re.compile(r'^[a-zA-Z0-9@._+][a-zA-Z0-9@._+-]*$')
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,15 +93,18 @@ class XrayConfigAdapter:
         flow: str,
         manage_short_id: bool,
     ) -> XrayClientApplyResult:
-        async with ConfigFileLock(self._lock_target()):
+        lock_dir = self.helper_staging_dir if self._using_helper() else None
+        async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
             if not self._using_helper():
                 await self._ensure_current_config_valid()
-            snapshot = self._snapshot_config()
-            backup_path = None if self._using_helper() else self.backup.create_backup(self.config_path)
+            snapshot = await self._snapshot_config()
+            backup_path = None if self._using_helper() else await asyncio.to_thread(
+                self.backup.create_backup, self.config_path
+            )
             temp_path: Path | None = None
             try:
-                config = self._read_config(self.config_path)
-                self._assert_config_unchanged(snapshot)
+                config = await asyncio.to_thread(self._read_config, self.config_path)
+                await self._assert_config_unchanged(snapshot)
                 inbound = self._target_inbound(config)
                 clients = self._clients(inbound)
                 if self._find_client_in_list(clients, uuid_value=uuid_value, email_label=email_label) is not None:
@@ -109,7 +118,7 @@ class XrayConfigAdapter:
                 if manage_short_id:
                     short_id_inserted = self._add_short_id(inbound, short_id)
 
-                temp_path = self._write_temp_config(config, self.config_path)
+                temp_path = await self._write_temp_config(config, self.config_path)
                 if not self._using_helper() and self.apply_mode == "api" and not short_id_inserted:
                     await self._install_candidate_api(
                         temp_path, snapshot, backup_path,
@@ -130,15 +139,18 @@ class XrayConfigAdapter:
         short_id: str | None,
         remove_short_id: bool,
     ) -> None:
-        async with ConfigFileLock(self._lock_target()):
+        lock_dir = self.helper_staging_dir if self._using_helper() else None
+        async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
             if not self._using_helper():
                 await self._ensure_current_config_valid()
-            snapshot = self._snapshot_config()
-            backup_path = None if self._using_helper() else self.backup.create_backup(self.config_path)
+            snapshot = await self._snapshot_config()
+            backup_path = None if self._using_helper() else await asyncio.to_thread(
+                self.backup.create_backup, self.config_path
+            )
             temp_path: Path | None = None
             try:
-                config = self._read_config(self.config_path)
-                self._assert_config_unchanged(snapshot)
+                config = await asyncio.to_thread(self._read_config, self.config_path)
+                await self._assert_config_unchanged(snapshot)
                 inbound = self._target_inbound(config)
                 clients = self._clients(inbound)
                 changed = False
@@ -159,7 +171,7 @@ class XrayConfigAdapter:
                 if not changed:
                     return
 
-                temp_path = self._write_temp_config(config, self.config_path)
+                temp_path = await self._write_temp_config(config, self.config_path)
                 if not self._using_helper() and self.apply_mode == "api" and not short_id_removed:
                     await self._install_candidate_api(
                         temp_path, snapshot, backup_path,
@@ -173,20 +185,23 @@ class XrayConfigAdapter:
     async def ensure_short_id(self, short_id: str) -> bool:
         if not short_id:
             return False
-        async with ConfigFileLock(self._lock_target()):
+        lock_dir = self.helper_staging_dir if self._using_helper() else None
+        async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
             if not self._using_helper():
                 await self._ensure_current_config_valid()
-            snapshot = self._snapshot_config()
-            backup_path = None if self._using_helper() else self.backup.create_backup(self.config_path)
+            snapshot = await self._snapshot_config()
+            backup_path = None if self._using_helper() else await asyncio.to_thread(
+                self.backup.create_backup, self.config_path
+            )
             temp_path: Path | None = None
             try:
-                config = self._read_config(self.config_path)
-                self._assert_config_unchanged(snapshot)
+                config = await asyncio.to_thread(self._read_config, self.config_path)
+                await self._assert_config_unchanged(snapshot)
                 inbound = self._target_inbound(config)
                 if not self._add_short_id(inbound, short_id):
                     return False
 
-                temp_path = self._write_temp_config(config, self.config_path)
+                temp_path = await self._write_temp_config(config, self.config_path)
                 await self._install_candidate(temp_path, snapshot, backup_path)
                 return True
             finally:
@@ -222,17 +237,35 @@ class XrayConfigAdapter:
             raise XrayConfigError("Xray config должен быть JSON-объектом")
         return data
 
-    def _snapshot_config(self) -> tuple[int, int]:
-        try:
-            stat = self.config_path.stat()
-        except FileNotFoundError as exc:
-            raise XrayConfigError(f"Xray config не найден: {self.config_path}") from exc
-        return stat.st_mtime_ns, stat.st_size
+    async def _snapshot_config(self) -> tuple[int, int, bytes]:
+        def _do() -> tuple[int, int, bytes]:
+            try:
+                stat = self.config_path.stat()
+                raw = self.config_path.read_bytes()
+            except FileNotFoundError as exc:
+                raise XrayConfigError(f"Xray config не найден: {self.config_path}") from exc
+            return stat.st_mtime_ns, stat.st_size, hashlib.blake2b(raw[:65536]).digest()
+        return await asyncio.to_thread(_do)
 
-    def _assert_config_unchanged(self, snapshot: tuple[int, int]) -> None:
-        current = self._snapshot_config()
-        if current != snapshot:
-            raise XrayConfigError("Xray config изменился во время операции. Изменения не применены.")
+    async def _assert_config_unchanged(self, snapshot: tuple[int, int, bytes]) -> None:
+        mtime_ns, size, expected_hash = snapshot
+
+        def _do() -> None:
+            try:
+                current_stat = self.config_path.stat()
+            except FileNotFoundError as exc:
+                raise XrayConfigError(f"Xray config не найден: {self.config_path}") from exc
+            if (current_stat.st_mtime_ns, current_stat.st_size) != (mtime_ns, size):
+                raise XrayConfigError("Xray config изменился во время операции. Изменения не применены.")
+            # mtime+size match: verify content hash to catch same-size same-mtime substitutions
+            try:
+                current_raw = self.config_path.read_bytes()
+            except FileNotFoundError as exc:
+                raise XrayConfigError(f"Xray config не найден: {self.config_path}") from exc
+            if hashlib.blake2b(current_raw[:65536]).digest() != expected_hash:
+                raise XrayConfigError("Xray config изменился во время операции. Изменения не применены.")
+
+        await asyncio.to_thread(_do)
 
     def _target_inbound(self, config: dict[str, Any]) -> dict[str, Any]:
         inbounds = config.get("inbounds")
@@ -327,11 +360,12 @@ class XrayConfigAdapter:
             raise XrayConfigError("Xray inbound.streamSettings.realitySettings должен быть объектом")
         return reality
 
-    def _write_temp_config(self, config: dict[str, Any], mode_from: Path) -> Path:
+    async def _write_temp_config(self, config: dict[str, Any], mode_from: Path) -> Path:
         content = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
         json.loads(content)
         if self._using_helper():
-            return write_private_staging_file(
+            return await asyncio.to_thread(
+                write_private_staging_file,
                 self.helper_staging_dir,
                 prefix=f".{self.config_path.name}.",
                 suffix=".json",
@@ -349,32 +383,32 @@ class XrayConfigAdapter:
             ) as file:
                 file.write(content)
                 file.flush()
-                os.fsync(file.fileno())
+                await asyncio.to_thread(os.fsync, file.fileno())
                 temp_path = Path(file.name)
         finally:
             os.umask(old_umask)
         if mode_from.exists():
-            copy_stat(mode_from, temp_path)
+            await async_copy_stat(mode_from, temp_path)
         return temp_path
 
     async def _install_candidate(
         self,
         temp_path: Path,
-        snapshot: tuple[int, int],
+        snapshot: tuple[int, int, bytes],
         backup_path: Path | None,
     ) -> None:
         if self._using_helper():
-            self._assert_config_unchanged(snapshot)
+            await self._assert_config_unchanged(snapshot)
             await self._apply_helper(temp_path, snapshot)
             return
         if backup_path is None:
             raise XrayApplyError("Xray backup is not available for direct apply")
         await self._test_config(temp_path)
-        self._assert_config_unchanged(snapshot)
-        self._replace_main_config(temp_path, self.config_path)
+        await self._assert_config_unchanged(snapshot)
+        await self._replace_main_config(temp_path, self.config_path)
         await self._apply_or_restore(backup_path)
 
-    async def _apply_helper(self, candidate_path: Path, snapshot: tuple[int, int]) -> None:
+    async def _apply_helper(self, candidate_path: Path, snapshot: tuple[int, int, bytes]) -> None:
         if self.helper_runner is None:
             raise XrayApplyError("Xray privileged helper is not configured")
         result = await self.helper_runner.run(
@@ -387,7 +421,7 @@ class XrayConfigAdapter:
             return
         logger.warning("Xray helper apply failed on attempt 1: rc=%s; retrying in 2s", result.returncode)
         await asyncio.sleep(2)
-        self._assert_config_unchanged(snapshot)
+        await self._assert_config_unchanged(snapshot)
         result = await self.helper_runner.run(
             self.helper_path,
             ["apply", str(candidate_path)],
@@ -409,11 +443,11 @@ class XrayConfigAdapter:
                 "Текущий Xray config не проходит проверку. Операция отменена без backup, reload или restart."
             )
 
-    def _replace_main_config(self, temp_path: Path, mode_from: Path) -> None:
+    async def _replace_main_config(self, temp_path: Path, mode_from: Path) -> None:
         if mode_from.exists():
-            copy_stat(mode_from, temp_path)
-        os.replace(temp_path, self.config_path)
-        fsync_parent(self.config_path)
+            await async_copy_stat(mode_from, temp_path)
+        await asyncio.to_thread(os.replace, temp_path, self.config_path)
+        await async_fsync_parent(self.config_path)
 
     async def _apply_or_restore(self, backup_path: Path) -> None:
         if self.apply_mode == "restart":
@@ -427,7 +461,7 @@ class XrayConfigAdapter:
             active = await self.systemctl.is_active(self.service_name)
             if active.ok and active.stdout.strip() == "active":
                 return
-        self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
+        await asyncio.to_thread(self.backup.restore, backup_path, self.config_path, mode_from=self.config_path)
         restored_test = await self.systemctl.xray_test_config(self.config_path)
         if not restored_test.ok:
             raise XrayApplyError("Xray reload failed, backup restored, но восстановленный config не прошёл проверку")
@@ -441,7 +475,7 @@ class XrayConfigAdapter:
         logger.info("Applying Xray config via systemctl restart %s", self.service_name)
         if await self._restart_service():
             return
-        self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
+        await asyncio.to_thread(self.backup.restore, backup_path, self.config_path, mode_from=self.config_path)
         restored_test = await self.systemctl.xray_test_config(self.config_path)
         if not restored_test.ok:
             raise XrayApplyError("Xray restart failed, backup restored, но восстановленный config не прошёл проверку")
@@ -459,7 +493,7 @@ class XrayConfigAdapter:
     async def _install_candidate_api(
         self,
         temp_path: Path,
-        snapshot: tuple[int, int],
+        snapshot: tuple[int, int, bytes],
         backup_path: Path | None,
         *,
         action: str,
@@ -470,15 +504,22 @@ class XrayConfigAdapter:
         if backup_path is None:
             raise XrayApplyError("Xray backup is not available for API apply")
         await self._test_config(temp_path)
-        self._assert_config_unchanged(snapshot)
-        self._replace_main_config(temp_path, self.config_path)
+        await self._assert_config_unchanged(snapshot)
+        await self._replace_main_config(temp_path, self.config_path)
         try:
             if action == "add":
                 await self._api_add_user(uuid_value, email_label, flow)
             else:
                 await self._api_remove_user(email_label)
         except Exception as exc:
-            self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
+            await asyncio.to_thread(self.backup.restore, backup_path, self.config_path, mode_from=self.config_path)
+            # Sync xray runtime with the restored on-disk config
+            reload_result = await self.systemctl.reload(self.service_name)
+            if not reload_result.ok and self.allow_restart_on_rollback:
+                try:
+                    await self.systemctl.restart(self.service_name)
+                except Exception:
+                    logger.error("Xray restart after API rollback also failed", exc_info=True)
             raise XrayApplyError(f"xray api {action} failed, config restored from backup") from exc
 
     async def _api_add_user(self, uuid_value: str, email_label: str, flow: str) -> None:
@@ -512,6 +553,11 @@ class XrayConfigAdapter:
 
     async def _api_remove_user(self, email_label: str) -> None:
         assert self.shell is not None
+        if not email_label or not _EMAIL_SAFE_RE.fullmatch(email_label):
+            logger.error("Refusing xray api rmu: email_label fails safety check: %r", email_label)
+            raise XrayApplyError(
+                f"xray api rmu: email_label contains unsafe characters or leading '-': {email_label!r}"
+            )
         result = await self.shell.run(
             ["xray", "api", "rmu",
              f"--server={self.stats_server}",
@@ -527,9 +573,3 @@ class XrayConfigAdapter:
 
     def _using_helper(self) -> bool:
         return self.helper_runner is not None
-
-    def _lock_target(self) -> Path:
-        if self._using_helper():
-            return self.helper_staging_dir / "config.json"
-        return self.config_path
-

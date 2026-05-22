@@ -525,8 +525,8 @@ class MtProxyAdapter:
         self._chmod_dir(target.parent)
         tmp_path = target.with_name(f".{target.name}.{time.time_ns()}.{secrets_module.token_hex(4)}.tmp")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        fd = os.open(str(tmp_path), flags, mode)
         try:
+            fd = os.open(str(tmp_path), flags, mode)
             with os.fdopen(fd, "w", encoding="utf-8") as file:
                 file.write(content)
                 file.flush()

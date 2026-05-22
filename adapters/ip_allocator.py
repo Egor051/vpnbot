@@ -33,6 +33,7 @@ class IpAllocator:
             raise AwgIpAllocationError("AWG_SERVER_ADDRESS не должен быть network или broadcast address")
         self.awg_config = awg_config
 
+    # NOT THREAD-SAFE: caller must hold awg service lock
     async def next_free_ip(self) -> str:
         occupied = {ipaddress.ip_address(value) for value in await self.vpn_keys.get_occupied_awg_ips()}
         occupied_networks: list[ipaddress.IPv4Network] = []
@@ -60,8 +61,7 @@ class IpAllocator:
                 continue
             if any(candidate in network for network in occupied_networks):
                 continue
-            if candidate not in occupied:
-                return str(candidate)
+            return str(candidate)
         raise AwgIpAllocationError("В AWG-пуле не осталось свободных IP")
 
 

@@ -1,4 +1,6 @@
 
+import asyncio
+import hashlib
 import ipaddress
 import os
 import tempfile
@@ -165,13 +167,13 @@ class AwgConfigAdapter:
             return
         async with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
-            snapshot = self._snapshot_config()
-            backup_path = self.backup.create_backup(self.config_path)
+            snapshot = await self._snapshot_config()
+            backup_path = await asyncio.to_thread(self.backup.create_backup, self.config_path)
             wrote_config = False
             touched_runtime = False
             try:
-                original = self._read_text()
-                self._assert_config_unchanged(snapshot)
+                original = await self._read_text_async()
+                await self._assert_config_unchanged(snapshot)
                 sections = self._parse_sections(original)
                 if self._managed_block_exists(original, key_id):
                     if not await self.verify_runtime_peer(public_key):
@@ -191,8 +193,10 @@ class AwgConfigAdapter:
                     label=label,
                 )
                 await self._validate_candidate_config(updated)
-                self._assert_config_unchanged(snapshot)
-                self.backup.atomic_write_text(self.config_path, updated, mode_from=self.config_path)
+                await self._assert_config_unchanged(snapshot)
+                await asyncio.to_thread(
+                    self.backup.atomic_write_text, self.config_path, updated, mode_from=self.config_path
+                )
                 wrote_config = True
 
                 touched_runtime = True
@@ -215,20 +219,22 @@ class AwgConfigAdapter:
             return
         async with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
-            snapshot = self._snapshot_config()
-            backup_path = self.backup.create_backup(self.config_path)
+            snapshot = await self._snapshot_config()
+            backup_path = await asyncio.to_thread(self.backup.create_backup, self.config_path)
             wrote_config = False
             runtime_removed = False
             try:
-                original = self._read_text()
-                self._assert_config_unchanged(snapshot)
+                original = await self._read_text_async()
+                await self._assert_config_unchanged(snapshot)
                 updated = self._remove_managed_block(original, key_id)
                 if updated == original and public_key:
                     updated = self._remove_peer_section_by_identity(original, public_key=public_key)
                 if updated != original:
                     await self._validate_candidate_config(updated)
-                    self._assert_config_unchanged(snapshot)
-                    self.backup.atomic_write_text(self.config_path, updated, mode_from=self.config_path)
+                    await self._assert_config_unchanged(snapshot)
+                    await asyncio.to_thread(
+                        self.backup.atomic_write_text, self.config_path, updated, mode_from=self.config_path
+                    )
                     wrote_config = True
 
                 if public_key and not await self._remove_peer_runtime(public_key):
@@ -256,10 +262,11 @@ class AwgConfigAdapter:
         client_ip: str,
         label: str | None,
     ) -> None:
-        async with ConfigFileLock(self._lock_target()):
-            snapshot = self._snapshot_config()
-            original = self._read_text()
-            self._assert_config_unchanged(snapshot)
+        lock_dir = self.helper_staging_dir
+        async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
+            snapshot = await self._snapshot_config()
+            original = await self._read_text_async()
+            await self._assert_config_unchanged(snapshot)
             sections = self._parse_sections(original)
             if self._managed_block_exists(original, key_id):
                 await self._apply_config_text_via_helper(original)
@@ -276,21 +283,22 @@ class AwgConfigAdapter:
                 label=label,
             )
             self._parse_sections(updated)
-            self._assert_config_unchanged(snapshot)
+            await self._assert_config_unchanged(snapshot)
             await self._apply_config_text_via_helper(updated)
 
     async def _remove_peer_via_helper(self, *, key_id: int, public_key: str | None) -> None:
-        async with ConfigFileLock(self._lock_target()):
-            snapshot = self._snapshot_config()
-            original = self._read_text()
-            self._assert_config_unchanged(snapshot)
+        lock_dir = self.helper_staging_dir
+        async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
+            snapshot = await self._snapshot_config()
+            original = await self._read_text_async()
+            await self._assert_config_unchanged(snapshot)
             updated = self._remove_managed_block(original, key_id)
             if updated == original and public_key:
                 updated = self._remove_peer_section_by_identity(original, public_key=public_key)
             if updated == original and public_key is None:
                 return
             self._parse_sections(updated)
-            self._assert_config_unchanged(snapshot)
+            await self._assert_config_unchanged(snapshot)
             await self._apply_config_text_via_helper(updated)
             if public_key and await self.verify_runtime_peer(public_key):
                 raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
@@ -299,7 +307,8 @@ class AwgConfigAdapter:
         self._parse_sections(text)
         candidate_path: Path | None = None
         try:
-            candidate_path = write_private_staging_file(
+            candidate_path = await asyncio.to_thread(
+                write_private_staging_file,
                 self.helper_staging_dir,
                 prefix=f".{self.config_path.name}.",
                 suffix=".conf",
@@ -382,18 +391,20 @@ class AwgConfigAdapter:
 
     async def sync_runtime_from_config(self) -> None:
         if self._using_helper():
-            async with ConfigFileLock(self._lock_target()):
-                await self._apply_config_text_via_helper(self._read_text())
+            lock_dir = self.helper_staging_dir
+            async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
+                await self._apply_config_text_via_helper(await self._read_text_async())
             return
         async with ConfigFileLock(self.config_path):
             await self.ensure_interface_active()
-            await self._validate_candidate_config(self._read_text())
+            await self._validate_candidate_config(await self._read_text_async())
             await self._sync_runtime_from_config(self.config_path)
 
     async def remove_runtime_peer(self, public_key: str) -> None:
         if self._using_helper():
-            async with ConfigFileLock(self._lock_target()):
-                await self._apply_config_text_via_helper(self._read_text())
+            lock_dir = self.helper_staging_dir
+            async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
+                await self._apply_config_text_via_helper(await self._read_text_async())
                 if await self.verify_runtime_peer(public_key):
                     raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
             return
@@ -452,17 +463,38 @@ class AwgConfigAdapter:
         except FileNotFoundError as exc:
             raise AwgConfigError(f"AWG config не найден: {self.config_path}") from exc
 
-    def _snapshot_config(self) -> tuple[int, int]:
-        try:
-            stat = self.config_path.stat()
-        except FileNotFoundError as exc:
-            raise AwgConfigError(f"AWG config не найден: {self.config_path}") from exc
-        return stat.st_mtime_ns, stat.st_size
+    async def _read_text_async(self) -> str:
+        return await asyncio.to_thread(self._read_text)
 
-    def _assert_config_unchanged(self, snapshot: tuple[int, int]) -> None:
-        current = self._snapshot_config()
-        if current != snapshot:
-            raise AwgConfigError("AWG config изменился во время операции. Изменения не применены.")
+    async def _snapshot_config(self) -> tuple[int, int, bytes]:
+        def _do() -> tuple[int, int, bytes]:
+            try:
+                stat = self.config_path.stat()
+                raw = self.config_path.read_bytes()
+            except FileNotFoundError as exc:
+                raise AwgConfigError(f"AWG config не найден: {self.config_path}") from exc
+            return stat.st_mtime_ns, stat.st_size, hashlib.blake2b(raw[:65536]).digest()
+        return await asyncio.to_thread(_do)
+
+    async def _assert_config_unchanged(self, snapshot: tuple[int, int, bytes]) -> None:
+        mtime_ns, size, expected_hash = snapshot
+
+        def _do() -> None:
+            try:
+                current_stat = self.config_path.stat()
+            except FileNotFoundError as exc:
+                raise AwgConfigError(f"AWG config не найден: {self.config_path}") from exc
+            if (current_stat.st_mtime_ns, current_stat.st_size) != (mtime_ns, size):
+                raise AwgConfigError("AWG config изменился во время операции. Изменения не применены.")
+            # mtime+size match: verify content hash to catch same-size same-mtime substitutions
+            try:
+                current_raw = self.config_path.read_bytes()
+            except FileNotFoundError as exc:
+                raise AwgConfigError(f"AWG config не найден: {self.config_path}") from exc
+            if hashlib.blake2b(current_raw[:65536]).digest() != expected_hash:
+                raise AwgConfigError("AWG config изменился во время операции. Изменения не применены.")
+
+        await asyncio.to_thread(_do)
 
     async def _validate_candidate_config(self, text: str) -> None:
         self._parse_sections(text)
@@ -473,7 +505,7 @@ class AwgConfigAdapter:
                 with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.config_path.parent, suffix=".conf", delete=False) as tmp:
                     tmp.write(text)
                     tmp.flush()
-                    os.fsync(tmp.fileno())
+                    await asyncio.to_thread(os.fsync, tmp.fileno())
                     tmp_path = Path(tmp.name)
             finally:
                 os.umask(old_umask)
@@ -504,7 +536,7 @@ class AwgConfigAdapter:
                 with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=config_path.parent, suffix=".conf", delete=False) as tmp:
                     tmp.write(stripped.stdout)
                     tmp.flush()
-                    os.fsync(tmp.fileno())
+                    await asyncio.to_thread(os.fsync, tmp.fileno())
                     stripped_path = Path(tmp.name)
             finally:
                 os.umask(old_umask)
@@ -602,7 +634,7 @@ class AwgConfigAdapter:
         prefix = "# vpn-bot peer start key_id="
         if not line.startswith(prefix):
             return {}
-        rest = line[len(prefix) :]
+        rest = line[len(prefix):]
         parts = rest.split()
         if not parts:
             return {}
@@ -750,7 +782,7 @@ class AwgConfigAdapter:
         if end_index is None:
             raise AwgConfigError(f"Найден start-marker key_id={key_id}, но не найден end-marker")
 
-        updated_lines = lines[:start_index] + lines[end_index + 1 :]
+        updated_lines = lines[:start_index] + lines[end_index + 1:]
         return "\n".join(updated_lines).rstrip() + "\n"
 
     def _managed_block_lines(self, text: str, key_id: int) -> list[str] | None:
@@ -764,7 +796,7 @@ class AwgConfigAdapter:
                 start_index = index
                 continue
             if start_index is not None and stripped == end_marker:
-                return lines[start_index : index + 1]
+                return lines[start_index: index + 1]
         return None
 
     async def _rollback_add_peer(
@@ -778,7 +810,7 @@ class AwgConfigAdapter:
         errors: list[str] = []
         if wrote_config:
             try:
-                self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
+                await asyncio.to_thread(self.backup.restore, backup_path, self.config_path, mode_from=self.config_path)
             except Exception:
                 logger.error("AWG rollback failed: restore config after add_peer error", exc_info=True)
                 errors.append("restore config")
@@ -800,7 +832,7 @@ class AwgConfigAdapter:
         errors: list[str] = []
         if wrote_config:
             try:
-                self.backup.restore(backup_path, self.config_path, mode_from=self.config_path)
+                await asyncio.to_thread(self.backup.restore, backup_path, self.config_path, mode_from=self.config_path)
             except Exception:
                 logger.error("AWG rollback failed: restore config after remove_peer error", exc_info=True)
                 errors.append("restore config")
@@ -828,7 +860,7 @@ class AwgConfigAdapter:
                     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
                         tmp.write(preshared_key + "\n")
                         tmp.flush()
-                        os.fsync(tmp.fileno())
+                        await asyncio.to_thread(os.fsync, tmp.fileno())
                         temp_path = tmp.name
                 finally:
                     os.umask(old_umask)
@@ -878,11 +910,6 @@ class AwgConfigAdapter:
 
     def _using_helper(self) -> bool:
         return self.helper_runner is not None
-
-    def _lock_target(self) -> Path:
-        if self._using_helper():
-            return self.helper_staging_dir / "awg0.conf"
-        return self.config_path
 
     def _parse_int(self, value: str | None) -> int | None:
         if not value:
