@@ -102,7 +102,10 @@ class MtProtoService:
         if access.status == ProxyAccessStatus.DELETED:
             return access
         self.backend_health.require_mutation_allowed(ProxyAccessType.MTPROTO)
-        await self.accesses.mark_deleted(access.id, actor_user_id, self.clock.now(), reason=reason)
+        # Acquire _apply_lock so reconcile cannot observe a REVOKED/INACTIVE row
+        # in the gap between revoke_mtproto_proxy returning and mark_deleted.
+        async with self._apply_lock:
+            await self.accesses.mark_deleted(access.id, actor_user_id, self.clock.now(), reason=reason)
         await self._write_audit_best_effort(
             actor_user_id=actor_user_id,
             action="mtproto_proxy_deleted",

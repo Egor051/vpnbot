@@ -50,14 +50,21 @@ class TrialAccessService:
     async def create_trial_request(
         self, telegram_user_id: int, key_type: VpnKeyType
     ) -> TrialKeyRequest:
-        if not await self.can_request_trial(telegram_user_id):
-            raise AccessDenied("Вы уже использовали свой пробный доступ")
-        now = self.clock.now()
-        req = await self.trial_requests.create(
-            telegram_user_id=telegram_user_id,
-            key_type=key_type,
-            requested_at=now,
-        )
+        # BEGIN IMMEDIATE serialises the quota check (SELECT) and the INSERT so
+        # that two concurrent double-taps cannot both pass can_request_trial and
+        # then both succeed at create.  The idx_trial_requests_one_pending
+        # partial unique index provides an additional DB-level guard.
+        async with self.trial_requests.db.transaction():
+            if not await self.can_request_trial(telegram_user_id):
+                raise AccessDenied("Вы уже использовали свой пробный доступ")
+            now = self.clock.now()
+            req = await self.trial_requests.create(
+                telegram_user_id=telegram_user_id,
+                key_type=key_type,
+                requested_at=now,
+            )
+        # Audit write is outside the transaction — best-effort, no need to hold
+        # the write lock while talking to the audit backend.
         await self.audit.write(
             actor_user_id=telegram_user_id,
             action="trial_key_requested",

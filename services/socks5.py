@@ -130,68 +130,78 @@ class Socks5Service:
 
     async def revoke_socks5_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
         await self.users.require_superadmin(actor_user_id)
-        access = await self._get_access(access_id)
-        if access.access_type != ProxyAccessType.SOCKS5:
+        # Fetch before lock to get owner_user_id; access_type never changes.
+        pre_access = await self._get_access(access_id)
+        if pre_access.access_type != ProxyAccessType.SOCKS5:
             raise InvalidOperation("Это не SOCKS5-доступ")
-        if access.status in {ProxyAccessStatus.REVOKED, ProxyAccessStatus.INACTIVE, ProxyAccessStatus.DELETED}:
-            return access
-        self.backend_health.require_mutation_allowed(ProxyAccessType.SOCKS5)
-        previous_status = access.status
-        await self.accesses.set_status(access.id, ProxyAccessStatus.PENDING_REVOKE, self.clock.now(), reason=reason)
-        login = str(access.payload.get("login") or "")
-        try:
-            if login:
-                await self.adapter.lock_user(login)
-        except DanteUserNotFoundError:
-            pass
-        except Exception as exc:
-            await self.accesses.set_status(access.id, previous_status, self.clock.now(), error=str(exc), reason=reason)
+        # Serialises revoke/issue for the same owner: prevents races between
+        # Dante-adapter calls and DB status writes.
+        async with self._user_locks.lock(pre_access.owner_user_id):
+            access = await self._get_access(access_id)  # re-fetch under lock
+            if access.status in {ProxyAccessStatus.REVOKED, ProxyAccessStatus.INACTIVE, ProxyAccessStatus.DELETED}:
+                return access
+            self.backend_health.require_mutation_allowed(ProxyAccessType.SOCKS5)
+            previous_status = access.status
+            await self.accesses.set_status(access.id, ProxyAccessStatus.PENDING_REVOKE, self.clock.now(), reason=reason)
+            login = str(access.payload.get("login") or "")
+            try:
+                if login:
+                    await self.adapter.lock_user(login)
+            except DanteUserNotFoundError:
+                pass
+            except Exception as exc:
+                await self.accesses.set_status(access.id, previous_status, self.clock.now(), error=str(exc), reason=reason)
+                await self._write_audit_best_effort(
+                    actor_user_id=actor_user_id,
+                    action="socks5_proxy_revoke_failed",
+                    entity_id=access.id,
+                    details={"owner_user_id": access.owner_user_id, "login": login, "error": str(exc)},
+                )
+                raise
+            await self.accesses.mark_revoked(access.id, actor_user_id, self.clock.now(), reason=reason)
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
-                action="socks5_proxy_revoke_failed",
+                action="socks5_proxy_revoked",
                 entity_id=access.id,
-                details={"owner_user_id": access.owner_user_id, "login": login, "error": str(exc)},
+                details={"owner_user_id": access.owner_user_id, "login": login, "reason": reason},
             )
-            raise
-        await self.accesses.mark_revoked(access.id, actor_user_id, self.clock.now(), reason=reason)
-        await self._write_audit_best_effort(
-            actor_user_id=actor_user_id,
-            action="socks5_proxy_revoked",
-            entity_id=access.id,
-            details={"owner_user_id": access.owner_user_id, "login": login, "reason": reason},
-        )
-        return await self._get_access(access.id)
+            return await self._get_access(access.id)
 
     async def delete_socks5_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
         await self.users.require_superadmin(actor_user_id)
-        access = await self._get_access(access_id)
-        if access.access_type != ProxyAccessType.SOCKS5:
+        # Fetch before lock to get owner_user_id; access_type never changes.
+        pre_access = await self._get_access(access_id)
+        if pre_access.access_type != ProxyAccessType.SOCKS5:
             raise InvalidOperation("Это не SOCKS5-доступ")
-        if access.status == ProxyAccessStatus.DELETED:
-            return access
-        self.backend_health.require_mutation_allowed(ProxyAccessType.SOCKS5)
-        await self.accesses.set_status(access.id, ProxyAccessStatus.PENDING_DELETE, self.clock.now(), reason=reason)
-        login = str(access.payload.get("login") or "")
-        try:
-            if login:
-                await self.adapter.delete_user(login)
-        except Exception as exc:
-            await self.accesses.set_status(access.id, ProxyAccessStatus.DELETE_FAILED, self.clock.now(), error=str(exc), reason=reason)
+        # Serialises delete/issue for the same owner: prevents races between
+        # Dante-adapter calls and DB status writes.
+        async with self._user_locks.lock(pre_access.owner_user_id):
+            access = await self._get_access(access_id)  # re-fetch under lock
+            if access.status == ProxyAccessStatus.DELETED:
+                return access
+            self.backend_health.require_mutation_allowed(ProxyAccessType.SOCKS5)
+            await self.accesses.set_status(access.id, ProxyAccessStatus.PENDING_DELETE, self.clock.now(), reason=reason)
+            login = str(access.payload.get("login") or "")
+            try:
+                if login:
+                    await self.adapter.delete_user(login)
+            except Exception as exc:
+                await self.accesses.set_status(access.id, ProxyAccessStatus.DELETE_FAILED, self.clock.now(), error=str(exc), reason=reason)
+                await self._write_audit_best_effort(
+                    actor_user_id=actor_user_id,
+                    action="socks5_proxy_delete_failed",
+                    entity_id=access.id,
+                    details={"owner_user_id": access.owner_user_id, "login": login, "error": str(exc)},
+                )
+                raise
+            await self.accesses.mark_deleted(access.id, actor_user_id, self.clock.now(), reason=reason)
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
-                action="socks5_proxy_delete_failed",
+                action="socks5_proxy_deleted",
                 entity_id=access.id,
-                details={"owner_user_id": access.owner_user_id, "login": login, "error": str(exc)},
+                details={"owner_user_id": access.owner_user_id, "login": login, "reason": reason},
             )
-            raise
-        await self.accesses.mark_deleted(access.id, actor_user_id, self.clock.now(), reason=reason)
-        await self._write_audit_best_effort(
-            actor_user_id=actor_user_id,
-            action="socks5_proxy_deleted",
-            entity_id=access.id,
-            details={"owner_user_id": access.owner_user_id, "login": login, "reason": reason},
-        )
-        return await self._get_access(access.id)
+            return await self._get_access(access.id)
 
     async def _ensure_can_issue(self, actor_user_id: int, owner_user_id: int) -> None:
         actor = await self.users.require_approved_or_admin(actor_user_id)

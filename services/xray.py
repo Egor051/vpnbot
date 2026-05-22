@@ -301,27 +301,29 @@ class XrayService:
         return await self.get_xray_key_config(actor_user_id, key_id)
 
     async def get_xray_key_config(self, actor_user_id: int, key_id: int) -> str:
-        key = await self._get_xray_key_for_manage(actor_user_id, key_id, allow_read=True)
-        if key.status != VpnKeyStatus.ACTIVE:
-            raise InvalidOperation("Конфигурация доступна только для активного ключа")
-        await self._write_audit_best_effort(
-            actor_user_id=actor_user_id,
-            action="xray_config_shown",
-            entity_type=AuditEntityType.VPN_KEY,
-            entity_id=key_id,
-            details={},
-        )
-        return self._format_config(key, viewer_user_id=actor_user_id)
+        async with self._lock:  # Prevents returning config for a key being concurrently deleted
+            key = await self._get_xray_key_for_manage(actor_user_id, key_id, allow_read=True)
+            if key.status != VpnKeyStatus.ACTIVE:
+                raise InvalidOperation("Конфигурация доступна только для активного ключа")
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="xray_config_shown",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={},
+            )
+            return self._format_config(key, viewer_user_id=actor_user_id)
 
     async def get_xray_key_config_for_owner(self, owner_user_id: int, key_id: int) -> str:
-        key = await self._get_key(key_id)
-        if key.key_type != VpnKeyType.XRAY:
-            raise InvalidOperation("Это не Xray-ключ")
-        if key.owner_user_id != owner_user_id:
-            raise AccessDenied("Нельзя смотреть чужой ключ")
-        if key.status != VpnKeyStatus.ACTIVE:
-            raise InvalidOperation("Конфигурация доступна только для активного ключа")
-        return self._format_config(key, viewer_user_id=owner_user_id)
+        async with self._lock:  # Prevents returning config for a key being concurrently deleted
+            key = await self._get_key(key_id)
+            if key.key_type != VpnKeyType.XRAY:
+                raise InvalidOperation("Это не Xray-ключ")
+            if key.owner_user_id != owner_user_id:
+                raise AccessDenied("Нельзя смотреть чужой ключ")
+            if key.status != VpnKeyStatus.ACTIVE:
+                raise InvalidOperation("Конфигурация доступна только для активного ключа")
+            return self._format_config(key, viewer_user_id=owner_user_id)
 
     async def list_user_keys(
         self,
@@ -346,19 +348,20 @@ class XrayService:
         return await self.vpn_keys.list_by_owner_and_type(target, VpnKeyType.XRAY, limit=limit, offset=offset)
 
     async def update_xray_note(self, actor_user_id: int, key_id: int, note: str | None) -> VpnKey:
-        key = await self._get_xray_key_for_manage(actor_user_id, key_id, allow_read=True)
-        if key.owner_user_id != actor_user_id:
-            raise AccessDenied("Можно менять заметку только своих ключей")
-        clean_note = normalize_note(note)
-        await self.vpn_keys.update_note(key.id, clean_note, self.clock.now())
-        await self._write_audit_best_effort(
-            actor_user_id=actor_user_id,
-            action="xray_note_updated",
-            entity_type=AuditEntityType.VPN_KEY,
-            entity_id=key_id,
-            details={},
-        )
-        return await self._get_key(key_id)
+        async with self._lock:  # Prevents note update racing with concurrent key deletion
+            key = await self._get_xray_key_for_manage(actor_user_id, key_id, allow_read=True)
+            if key.owner_user_id != actor_user_id:
+                raise AccessDenied("Можно менять заметку только своих ключей")
+            clean_note = normalize_note(note)
+            await self.vpn_keys.update_note(key.id, clean_note, self.clock.now())
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="xray_note_updated",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={},
+            )
+            return await self._get_key(key_id)
 
     async def reconcile_key_status(self, actor_user_id: int, key_id: int) -> VpnKey:
         await self.users.require_superadmin(actor_user_id)

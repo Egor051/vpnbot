@@ -28,6 +28,9 @@ class TrialKeyRequestRepository:
         self.db = db
 
     async def create(self, *, telegram_user_id: int, key_type: VpnKeyType, requested_at: str) -> TrialKeyRequest:
+        # idx_trial_requests_one_pending (WHERE status='pending') is a DB-level
+        # guard: a second INSERT while a pending row already exists raises
+        # IntegrityError instead of silently creating a duplicate pending request.
         cursor = await self.db.conn.execute(
             """
             INSERT INTO trial_key_requests (telegram_user_id, key_type, status, requested_at)
