@@ -228,8 +228,8 @@ STRINGS: dict[str, str] = {
     "faq_choice": "If you're not sure what to choose, start with XRay.",
     "faq_mtu": (
         "MTU is the maximum network packet size. It applies only to AWG keys.\n\n"
-        "The recommended value of 1360 works in most cases. "
-        "Lower it (e.g. to 1280) if you experience dropped connections or slow page loads."
+        "The recommended value of 1280 works in most cases. "
+        "Increase it (e.g. to 1380 or 1420) if the connection is stable but speed seems low."
     ),
     "faq_note_why": (
         "A note helps you identify which device a key belongs to — for example, «Laptop» or «Phone». "
@@ -455,7 +455,7 @@ STRINGS: dict[str, str] = {
     "btn_show_config": "Show config",
     "btn_edit_note_key": "Edit note",
     "btn_to_list": "Back to list",
-    "btn_mtu_recommended": "1360 (recommended)",
+    "btn_mtu_recommended": "1280 (recommended)",
     "btn_enter_manually": "Enter manually",
     "btn_open_key": "Open key",
     "btn_permanent": "Permanent",
