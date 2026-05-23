@@ -30,7 +30,7 @@ from bot.formatters import (
 from services.health import run_bot_health
 from bot.fsm.states import AdminCreateKeyStates, AdminAnnouncementStates, AdminEditUserNoteStates
 from bot.guards import require_superadmin, require_moderator_or_admin
-from bot.handlers.common import answer_callback_error, answer_message_error
+from bot.handlers.common import InvalidCallbackData, answer_callback_error, answer_message_error, parse_int_callback
 from bot.keyboards.admin import (
     admin_issue_users_keyboard,
     admin_key_type_keyboard,
@@ -49,13 +49,14 @@ from bot.handlers.keys import load_keys_page
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import expiry_choice_keyboard, key_actions_keyboard, keys_list_keyboard, mtu_choice_keyboard
 from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text, send_awg_config
-from bot.pagination import page_offset, split_page
+from bot.pagination import MAX_PAGE, page_offset, split_page
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimitExceeded, RateLimiter
 from i18n import t
 from models.dto import TelegramUserProfile
 from models.access import is_blocked_user
 from models.enums import AccessRequestStatus, UserRole, VpnKeyType
+from services.errors import AccessDenied
 from services.user_locks import UserLockManager
 
 router = Router()
@@ -319,12 +320,13 @@ async def admin_announcement_batches(callback: CallbackQuery, services: Services
 
 
 @router.callback_query(F.data.regexp(r"^admin:announce:(resume|retry|cancelbatch):\d+$"))
-async def admin_announcement_batch_action(callback: CallbackQuery, services: Services, bot: Bot) -> None:
+async def admin_announcement_batch_action(callback: CallbackQuery, services: Services, bot: Bot, rate_limiter: RateLimiter) -> None:
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
+        rate_limiter.check(callback.from_user.id, "announcement_batch_action", 30)
         await require_superadmin(services, callback.from_user.id)
         _admin, _announce, action, raw_batch_id = callback.data.split(":", 3)
         batch_id = int(raw_batch_id)
@@ -391,7 +393,10 @@ async def admin_request_detail(callback: CallbackQuery, services: Services) -> N
         return
     try:
         await services.users.require_moderator_or_admin(callback.from_user.id)
-        request_id = int(callback.data.rsplit(":", 1)[-1])
+        request_id = parse_int_callback(callback.data.rsplit(":", 1)[-1])
+        if request_id is None:
+            await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
+            return
         request = await services.access.get_request(callback.from_user.id, request_id)
         await safe_edit_message_text(callback.message, access_request_text(request), reply_markup=pending_requests_keyboard([request]))
     except Exception as exc:
@@ -511,9 +516,15 @@ async def admin_user_detail(callback: CallbackQuery, services: Services) -> None
         return
     try:
         actor = await require_moderator_or_admin(services, callback.from_user.id)
-        user_id = int(callback.data.rsplit(":", 1)[-1])
+        user_id = parse_int_callback(callback.data.rsplit(":", 1)[-1])
+        if user_id is None:
+            await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
+            return
         user = await services.users.get_user(user_id)
-        keys = await services.vpn_keys.list_for_actor(callback.from_user.id, owner_user_id=user_id, limit=10)
+        try:
+            keys = await services.vpn_keys.list_for_actor(callback.from_user.id, owner_user_id=user_id, limit=10)
+        except AccessDenied:
+            keys = []
         stats_by_key_id = await services.traffic_stats.cached_for_keys(keys)
         has_used_trial = not await services.trial_access.can_request_trial(user_id)
         await safe_edit_message_text(
@@ -526,13 +537,14 @@ async def admin_user_detail(callback: CallbackQuery, services: Services) -> None
 
 
 @router.callback_query(F.data.startswith("admin:userapprove:"))
-async def admin_user_approve(callback: CallbackQuery, services: Services) -> None:
+async def admin_user_approve(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("processing"))
     try:
+        rate_limiter.check(callback.from_user.id, "admin_user_approve", 5)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         await services.users.set_role(callback.from_user.id, user_id, UserRole.APPROVED_USER)
         if callback.message:
@@ -544,13 +556,14 @@ async def admin_user_approve(callback: CallbackQuery, services: Services) -> Non
 
 
 @router.callback_query(F.data.startswith("admin:setmoderator:"))
-async def admin_set_moderator(callback: CallbackQuery, services: Services) -> None:
+async def admin_set_moderator(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("processing"))
     try:
+        rate_limiter.check(callback.from_user.id, "admin_set_moderator", 10)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         target = await services.users.get_user(user_id)
         if target.role == UserRole.MODERATOR:
@@ -596,13 +609,14 @@ async def admin_block_user(callback: CallbackQuery, services: Services) -> None:
 
 
 @router.callback_query(F.data.regexp(r"^admin:block:confirm:\d+$"))
-async def admin_block_user_confirm(callback: CallbackQuery, services: Services, bot: Bot) -> None:
+async def admin_block_user_confirm(callback: CallbackQuery, services: Services, bot: Bot, rate_limiter: RateLimiter) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("blocking"))
     try:
+        rate_limiter.check(callback.from_user.id, "admin_block_user", 5)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         actor = await require_moderator_or_admin(services, callback.from_user.id)
         current = await services.users.get_user(user_id)
@@ -673,13 +687,14 @@ async def admin_unblock_user(callback: CallbackQuery, services: Services) -> Non
 
 
 @router.callback_query(F.data.regexp(r"^admin:unblock:confirm:\d+$"))
-async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services) -> None:
+async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("unblocking"))
     try:
+        rate_limiter.check(callback.from_user.id, "admin_unblock_user", 5)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         actor = await require_moderator_or_admin(services, callback.from_user.id)
         warning = await services.users.inspect_unblock_risk(callback.from_user.id, user_id)
@@ -958,7 +973,6 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
         user_id = int(callback.data.rsplit(":", 1)[-1])
         user = await services.users.get_user(user_id)
         if is_blocked_user(user):
-            from services.errors import AccessDenied
             raise AccessDenied(t("cannot_issue_to_blocked"))
         owner_is_pending = user.role == UserRole.PENDING_USER
         await state.set_state(AdminCreateKeyStates.choosing_type)
@@ -1438,7 +1452,10 @@ def _page_from_callback(data: str | None) -> int:
     if not data:
         return 0
     last = data.split(":")[-1]
-    return max(int(last), 0) if last.isdigit() else 0
+    try:
+        return max(min(int(last), MAX_PAGE), 0) if last.isdigit() else 0
+    except (ValueError, OverflowError):
+        return 0
 
 
 def _clean_note(value: str | None) -> str | None:

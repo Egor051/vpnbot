@@ -18,7 +18,7 @@ from bot.formatters import (
 )
 from bot.container import Services
 from bot.fsm.states import CreateKeyStates, EditNoteStates, TrialRequestStates
-from bot.handlers.common import answer_callback_error, answer_message_error, profile_from_tg
+from bot.handlers.common import InvalidCallbackData, answer_callback_error, answer_message_error, parse_int_callback, profile_from_tg
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import (
     after_key_deleted_keyboard,
@@ -34,7 +34,7 @@ from bot.keyboards.keys import (
 )
 from aiogram.types import BufferedInputFile
 from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text, send_awg_config
-from bot.pagination import page_offset
+from bot.pagination import MAX_PAGE, page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
 from i18n import t
@@ -375,7 +375,10 @@ async def show_key_config(callback: CallbackQuery, services: Services, rate_limi
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        key_id = int(callback.data.rsplit(":", 1)[-1])
+        key_id = parse_int_callback(callback.data.rsplit(":", 1)[-1])
+        if key_id is None:
+            await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
+            return
         rate_limiter.check(callback.from_user.id, "key_show", 5)
         await safe_callback_answer(callback)
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
@@ -408,7 +411,10 @@ async def show_key_stats(callback: CallbackQuery, services: Services) -> None:
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        key_id = int(callback.data.rsplit(":", 1)[-1])
+        key_id = parse_int_callback(callback.data.rsplit(":", 1)[-1])
+        if key_id is None:
+            await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
+            return
         await safe_callback_answer(callback, t("updating_stats"))
         view = await services.traffic_stats.refresh_for_actor(callback.from_user.id, key_id)
         owner = view.owner
@@ -549,7 +555,10 @@ async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services:
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        key_id = int(callback.data.rsplit(":", 1)[-1])
+        key_id = parse_int_callback(callback.data.rsplit(":", 1)[-1])
+        if key_id is None:
+            await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
+            return
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await state.set_state(EditNoteStates.waiting_note)
         await state.update_data(key_id=key_id, cancel_target=f"key:open:{key_id}")
@@ -627,12 +636,13 @@ async def trial_request_start(callback: CallbackQuery, state: FSMContext, servic
 
 
 @router.callback_query(TrialRequestStates.choosing_protocol, F.data.regexp(r"^trial:proto:(xray|awg)$"))
-async def trial_request_proto(callback: CallbackQuery, state: FSMContext, services: Services, bot: Bot) -> None:
+async def trial_request_proto(callback: CallbackQuery, state: FSMContext, services: Services, bot: Bot, rate_limiter: RateLimiter) -> None:
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
+        rate_limiter.check(callback.from_user.id, "trial_request", 300)
         proto = callback.data.rsplit(":", 1)[-1]
         key_type = VpnKeyType(proto)
         can = await services.trial_access.can_request_trial(callback.from_user.id)
@@ -724,26 +734,32 @@ async def _ensure_can_enter_create(actor_user_id: int, services: Services) -> No
 
 def _parse_key_context(data: str | None, prefix: str) -> tuple[int, int | None, int]:
     if not data:
-        raise ValueError(t("invalid_callback_btn"))
+        raise InvalidCallbackData(t("invalid_callback_btn"))
     parts = data.split(":")
     expected = prefix.split(":")
     if parts[: len(expected)] != expected or len(parts) not in {len(expected) + 1, len(expected) + 3}:
-        raise ValueError(t("invalid_callback_btn"))
-    key_id = int(parts[len(expected)])
-    if len(parts) == len(expected) + 1:
-        return key_id, None, 0
-    return key_id, int(parts[len(expected) + 1]), max(int(parts[len(expected) + 2]), 0)
+        raise InvalidCallbackData(t("invalid_callback_btn"))
+    try:
+        key_id = int(parts[len(expected)])
+        if len(parts) == len(expected) + 1:
+            return key_id, None, 0
+        return key_id, int(parts[len(expected) + 1]), max(int(parts[len(expected) + 2]), 0)
+    except (ValueError, OverflowError):
+        raise InvalidCallbackData(t("invalid_callback_btn"))
 
 
 def _parse_confirm_context(data: str) -> tuple[str, int, int | None, int]:
     parts = data.split(":")
     if len(parts) not in {3, 5} or parts[0] != "confirm":
-        raise ValueError(t("invalid_callback_btn"))
+        raise InvalidCallbackData(t("invalid_callback_btn"))
     action = parts[1]
-    key_id = int(parts[2])
-    if len(parts) == 3:
-        return action, key_id, None, 0
-    return action, key_id, int(parts[3]), max(int(parts[4]), 0)
+    try:
+        key_id = int(parts[2])
+        if len(parts) == 3:
+            return action, key_id, None, 0
+        return action, key_id, int(parts[3]), max(int(parts[4]), 0)
+    except (ValueError, OverflowError):
+        raise InvalidCallbackData(t("invalid_callback_btn"))
 
 
 async def load_keys_page(
@@ -782,5 +798,8 @@ def _page_from_callback(data: str | None, default: int = 0) -> int:
         return default
     parts = data.split(":")
     if parts and parts[-1].isdigit():
-        return max(int(parts[-1]), 0)
+        try:
+            return max(min(int(parts[-1]), MAX_PAGE), 0)
+        except (ValueError, OverflowError):
+            return default
     return default

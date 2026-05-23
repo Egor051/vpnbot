@@ -38,8 +38,31 @@ async def is_admin(services: Services, user_id: int) -> bool:
     return user.role == UserRole.SUPERADMIN
 
 
+class InvalidCallbackData(ValueError):
+    """Raised when a callback payload cannot be parsed; shown to the user verbatim."""
+
+
+def parse_int_callback(value: str) -> int | None:
+    """Parse an integer from a callback suffix; returns None instead of raising."""
+    try:
+        return int(value)
+    except (ValueError, OverflowError):
+        return None
+
+
+_SAFE_EXCEPTIONS = (
+    AccessDenied,
+    InvalidOperation,
+    NotFound,
+    ServiceError,
+    SettingsError,
+    InvalidCallbackData,
+    RateLimitExceeded,
+)
+
+
 def service_error_text(exc: Exception) -> str:
-    if isinstance(exc, (AccessDenied, InvalidOperation, NotFound, ServiceError, SettingsError, ValueError, RateLimitExceeded)):
+    if isinstance(exc, _SAFE_EXCEPTIONS):
         return str(exc)
     return t("internal_error")
 
@@ -48,13 +71,13 @@ async def answer_callback_error(callback: CallbackQuery, exc: Exception) -> None
     if is_stale_callback_query_error(exc):
         logger.debug("Ignoring stale callback query error while handling callback: %s", exc)
         return
-    if not isinstance(exc, (AccessDenied, InvalidOperation, NotFound, ServiceError, SettingsError, ValueError, RateLimitExceeded)):
+    if not isinstance(exc, _SAFE_EXCEPTIONS):
         logger.exception("Unhandled callback error")
     await safe_callback_answer(callback, service_error_text(exc), show_alert=True)
 
 
 async def answer_message_error(message: Message, exc: Exception) -> None:
-    if not isinstance(exc, (AccessDenied, InvalidOperation, NotFound, ServiceError, SettingsError, ValueError, RateLimitExceeded)):
+    if not isinstance(exc, _SAFE_EXCEPTIONS):
         logger.exception("Unhandled message error")
     await message.answer(service_error_text(exc), reply_markup=back_to_menu())
 

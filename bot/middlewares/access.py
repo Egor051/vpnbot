@@ -9,7 +9,7 @@ except ImportError:
 
 from aiogram import BaseMiddleware
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import CallbackQuery, InlineQuery, Message, TelegramObject
 
 from bot.messages import safe_callback_answer
 from models.access import is_blocked_user
@@ -54,6 +54,8 @@ class BlockedUserMiddleware(BaseMiddleware):
             await event.answer(BLOCKED_MESSAGE_TEXT)
         elif isinstance(event, CallbackQuery):
             await safe_callback_answer(event, BLOCKED_CALLBACK_TEXT, show_alert=True)
+        elif isinstance(event, InlineQuery):
+            await event.answer(results=[], cache_time=60, is_personal=True)
         return None
 
 
