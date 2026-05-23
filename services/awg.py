@@ -1114,18 +1114,19 @@ class AwgService:
         dns_parts = [s.strip() for s in self.settings.awg_client_dns.split(",")]
         dns1 = dns_parts[0] if dns_parts else "1.1.1.1"
         dns2 = dns_parts[1] if len(dns_parts) > 1 else dns1
+        last_config_str = json.dumps({"config": config_text}, separators=(",", ":"))
         payload = {
-            "containers": [{"container": "amnezia-awg", "awg": {"last_config": config_text}}],
+            "containers": [{"container": "amnezia-awg", "awg": {"last_config": last_config_str}}],
             "defaultContainer": "amnezia-awg",
             "description": key.email_label or "vpnbot",
             "dns1": dns1,
             "dns2": dns2,
             "hostName": self.settings.awg_endpoint_host,
         }
-        json_bytes = json.dumps(payload, separators=(",", ":")).encode()
+        json_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         packed = struct.pack(">I", len(json_bytes)) + zlib.compress(json_bytes)
-        encoded = base64.urlsafe_b64encode(packed).decode().rstrip("=")
-        return f"amnezia://{encoded}"
+        encoded = base64.urlsafe_b64encode(packed).decode("utf-8")
+        return f"vpn://{encoded}"
 
     async def _ensure_client_payload_valid(self, actor_user_id: int, key: VpnKey) -> None:
         try:
