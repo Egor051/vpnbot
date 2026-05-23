@@ -24,11 +24,11 @@ from services.awg import AwgService
 from services.xray import XrayService
 
 
-def _settings(**overrides: object) -> Settings:
+def _settings(tmp_path: Path | None = None, **overrides: object) -> Settings:
     values = dict(
         bot_token="token",
         admin_ids=frozenset({1}),
-        db_path=Path("/tmp/vpn.db"),
+        db_path=tmp_path / "vpn.db" if tmp_path is not None else Path("/tmp/vpn.db"),
         log_dir=Path("/tmp/logs"),
         bot_lock_path=Path("/tmp/vpn.lock"),
         bot_drop_pending_updates=False,

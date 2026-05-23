@@ -242,6 +242,45 @@ def test_mark_expiry_notified_stores_and_deduplicates(tmp_path: Path) -> None:
 # _days_noun unit tests
 # ---------------------------------------------------------------------------
 
+def test_notify_expired_key_calls_bot_send_message(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, repo = await _setup_db(tmp_path)
+        try:
+            key_id = await _make_active_key(repo, "2026-01-09T12:00:00+00:00")  # expired (now is Jan 10)
+
+            bot = MagicMock()
+            bot.send_message = AsyncMock()
+
+            xray_mock = MagicMock()
+            xray_mock.revoke_xray_key_system = AsyncMock()
+
+            clock = MagicMock()
+            clock.now.return_value = "2026-01-10T00:00:00+00:00"
+            service = KeyExpiryService(
+                vpn_keys=repo,
+                xray=xray_mock,
+                awg=MagicMock(),
+                audit=MagicMock(),
+                clock=clock,
+                bot=bot,
+                notify_days=(3,),
+            )
+
+            count = await service.revoke_expired_keys()
+
+            assert count == 1
+            xray_mock.revoke_xray_key_system.assert_awaited_once_with(key_id)
+            bot.send_message.assert_awaited_once()
+            call_args = bot.send_message.call_args
+            assert call_args[0][0] == 100
+            assert str(key_id) in call_args[0][1]
+            assert "истёк" in call_args[0][1]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "days,expected",
     [

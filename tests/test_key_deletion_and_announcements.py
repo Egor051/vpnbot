@@ -152,10 +152,12 @@ class XrayAdapter:
         self.fail = fail
         self.removed = False
         self.remove_calls = 0
+        self.remove_kwargs: dict[str, object] = {}
 
     async def remove_client(self, **kwargs: object) -> None:
         self.removed = True
         self.remove_calls += 1
+        self.remove_kwargs = dict(kwargs)
         if self.fail:
             raise RuntimeError("remove failed")
 
@@ -165,10 +167,12 @@ class AwgAdapter:
         self.fail = fail
         self.removed = False
         self.remove_calls = 0
+        self.remove_kwargs: dict[str, object] = {}
 
     async def remove_peer(self, **kwargs: object) -> None:
         self.removed = True
         self.remove_calls += 1
+        self.remove_kwargs = dict(kwargs)
         if self.fail:
             raise RuntimeError("remove failed")
 
@@ -346,6 +350,15 @@ def test_hard_delete_active_key_removes_server_access(key_type: VpnKeyType, tmp_
         assert adapter.removed is True
         assert repo.hard_deleted is True
         assert repo.key is None
+        if key_type == VpnKeyType.XRAY:
+            assert adapter.remove_kwargs == {
+                "uuid_value": "00000000-0000-4000-8000-000000000000",
+                "email_label": "label",
+                "short_id": "",
+                "remove_short_id": False,
+            }
+        else:
+            assert adapter.remove_kwargs == {"key_id": 10, "public_key": "public"}
 
     asyncio.run(run())
 
@@ -384,6 +397,15 @@ def test_hard_delete_apply_failed_key_still_attempts_server_cleanup(key_type: Vp
         assert adapter.removed is True
         assert repo.hard_deleted is True
         assert repo.key is None
+        if key_type == VpnKeyType.XRAY:
+            assert adapter.remove_kwargs == {
+                "uuid_value": "00000000-0000-4000-8000-000000000000",
+                "email_label": "label",
+                "short_id": "",
+                "remove_short_id": False,
+            }
+        else:
+            assert adapter.remove_kwargs == {"key_id": 10, "public_key": "public"}
 
     asyncio.run(run())
 
@@ -728,6 +750,7 @@ def test_revoke_still_leaves_key_revoked_in_db(tmp_path: Path) -> None:
         assert result.status == VpnKeyStatus.REVOKED
         assert repo.key is not None
         assert repo.key.status == VpnKeyStatus.REVOKED
+        assert adapter.remove_kwargs == {"key_id": 10, "public_key": "public"}
 
     asyncio.run(run())
 
@@ -768,6 +791,15 @@ def test_revoke_succeeds_when_post_revoke_audit_fails(key_type: VpnKeyType, tmp_
         assert repo.key is not None
         assert repo.key.status == VpnKeyStatus.REVOKED
         assert audit.actions == [f"{key_type.value}_key_revoked"]
+        if key_type == VpnKeyType.XRAY:
+            assert adapter.remove_kwargs == {
+                "uuid_value": "00000000-0000-4000-8000-000000000000",
+                "email_label": "label",
+                "short_id": "",
+                "remove_short_id": False,
+            }
+        else:
+            assert adapter.remove_kwargs == {"key_id": 10, "public_key": "public"}
 
     asyncio.run(run())
 

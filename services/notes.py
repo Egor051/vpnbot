@@ -20,6 +20,8 @@ def normalize_note(note: str | None) -> str | None:
     value = note.strip()
     if value in {"", "-"}:
         return None
+    if "\n" in value or "\r" in value:
+        raise ValueError("Заметка не должна содержать переводы строк")
     if len(value) > MAX_NOTE_LENGTH:
         raise ValueError(f"Заметка не должна быть длиннее {MAX_NOTE_LENGTH} символов")
     return value
