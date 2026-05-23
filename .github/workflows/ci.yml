@@ -27,14 +27,15 @@ jobs:
           cache: pip
           cache-dependency-path: |
             requirements.txt
-            constraints.txt
+            constraints-hashed.txt
             requirements-dev.txt
+            constraints-dev-hashed.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -c constraints.txt
-          python -m pip install -r requirements-dev.txt
+          python -m pip install --require-hashes -r requirements.txt -c constraints-hashed.txt
+          python -m pip install --require-hashes -r requirements-dev.txt -c constraints-dev-hashed.txt
 
       - name: Audit pinned runtime dependency set
         run: python -m pip_audit -r requirements.txt -r constraints.txt
@@ -59,14 +60,15 @@ jobs:
           cache: pip
           cache-dependency-path: |
             requirements.txt
-            constraints.txt
+            constraints-hashed.txt
             requirements-dev.txt
+            constraints-dev-hashed.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -c constraints.txt
-          python -m pip install -r requirements-dev.txt
+          python -m pip install --require-hashes -r requirements.txt -c constraints-hashed.txt
+          python -m pip install --require-hashes -r requirements-dev.txt -c constraints-dev-hashed.txt
 
       - name: Run static checks (ruff — style, security, bugbear)
         run: python -m ruff check .

@@ -641,7 +641,17 @@ python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ reposito
 python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=60
 ```
 
-> **TODO (supply-chain hardening):** CI currently installs without `--require-hashes`. To detect tampered packages on PyPI, generate a hashed constraints file with `pip-compile --generate-hashes` and use `pip install --require-hashes -c constraints-hashed.txt`. Track as a follow-up issue.
+### Updating dependencies
+
+After changing `requirements.txt` or `requirements-dev.txt`, regenerate the hashed constraints files and commit them:
+
+```bash
+make update-hashes
+git add constraints-hashed.txt constraints-dev-hashed.txt
+git commit -m "chore: update hashed constraints"
+```
+
+CI installs packages with `--require-hashes` and will fail if the committed hashes do not match what PyPI serves, protecting against supply-chain tampering.
 
 ## CI Checks
 
