@@ -513,60 +513,61 @@ class XrayConfigAdapter:
                 await self._api_remove_user(email_label)
         except Exception as exc:
             await asyncio.to_thread(self.backup.restore, backup_path, self.config_path, mode_from=self.config_path)
-            # Sync xray runtime with the restored on-disk config
-            reload_result = await self.systemctl.reload(self.service_name)
-            if not reload_result.ok and self.allow_restart_on_rollback:
-                try:
-                    await self.systemctl.restart(self.service_name)
-                except Exception:
-                    logger.error("Xray restart after API rollback also failed", exc_info=True)
+            # Restore xray runtime from the backup inbound config via adi.
+            # After rmi+adi failure the inbound may be absent from runtime;
+            # adi with the just-restored disk config brings it back.
+            try:
+                await self._api_reload_inbound()
+            except Exception:
+                logger.error("xray api adi rollback failed; falling back to reload/restart", exc_info=True)
+                reload_result = await self.systemctl.reload(self.service_name)
+                if not reload_result.ok and self.allow_restart_on_rollback:
+                    try:
+                        await self.systemctl.restart(self.service_name)
+                    except Exception:
+                        logger.error("Xray restart after API rollback also failed", exc_info=True)
             raise XrayApplyError(f"xray api {action} failed, config restored from backup") from exc
 
     async def _api_add_user(self, uuid_value: str, email_label: str, flow: str) -> None:
+        await self._api_reload_inbound()
+
+    async def _api_remove_user(self, email_label: str) -> None:
+        await self._api_reload_inbound()
+
+    async def _api_reload_inbound(self) -> None:
+        """Sync the running xray inbound with the current on-disk config via rmi + adi."""
         assert self.shell is not None
-        user_json = {
-            "inboundTag": self.inbound_tag,
-            "user": {
-                "email": email_label,
-                "level": 0,
-                "account": {
-                    "@type": "type.googleapis.com/xray.proxy.vless.Account",
-                    "id": uuid_value,
-                    "flow": flow,
-                },
-            },
-        }
+        config = await asyncio.to_thread(self._read_config, self.config_path)
+        inbound = self._target_inbound(config)
+        inbound_payload = {"inbounds": [inbound]}
+
         tmp_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-                json.dump(user_json, f)
+                json.dump(inbound_payload, f, ensure_ascii=False)
                 tmp_path = Path(f.name)
-            result = await self.shell.run(
-                ["xray", "api", "adu", f"--server={self.stats_server}", str(tmp_path)],
+
+            rmi_result = await self.shell.run(
+                ["xray", "api", "rmi", f"--server={self.stats_server}", self.inbound_tag],
                 timeout=10,
             )
-            if not result.ok:
-                raise XrayApplyError(f"xray api adu failed: {result.stderr or result.stdout}")
+            if not rmi_result.ok:
+                # Normal on first run or when inbound is not yet loaded in runtime.
+                logger.debug(
+                    "xray api rmi returned non-ok for tag=%r (may be normal): %s",
+                    self.inbound_tag,
+                    rmi_result.stderr or rmi_result.stdout,
+                )
+
+            adi_result = await self.shell.run(
+                ["xray", "api", "adi", f"--server={self.stats_server}", str(tmp_path)],
+                timeout=10,
+            )
+            if not adi_result.ok:
+                raise XrayApplyError(f"xray api adi failed: {adi_result.stderr or adi_result.stdout}")
         finally:
             if tmp_path is not None:
                 tmp_path.unlink(missing_ok=True)
-
-    async def _api_remove_user(self, email_label: str) -> None:
-        assert self.shell is not None
-        if not email_label or not _EMAIL_SAFE_RE.fullmatch(email_label):
-            logger.error("Refusing xray api rmu: email_label fails safety check: %r", email_label)
-            raise XrayApplyError(
-                f"xray api rmu: email_label contains unsafe characters or leading '-': {email_label!r}"
-            )
-        result = await self.shell.run(
-            ["xray", "api", "rmu",
-             f"--server={self.stats_server}",
-             f"-tag={self.inbound_tag}",
-             email_label],
-            timeout=10,
-        )
-        if not result.ok:
-            raise XrayApplyError(f"xray api rmu failed: {result.stderr or result.stdout}")
 
     def _cleanup_temp(self, temp_path: Path | None) -> None:
         cleanup_staging_path(temp_path)
