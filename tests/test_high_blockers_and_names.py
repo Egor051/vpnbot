@@ -1118,15 +1118,32 @@ def test_inspect_unblock_risk_reports_active_or_problem_keys(tmp_path: Path) -> 
 
 
 def test_concurrent_xray_create_vs_block_finishes_without_active_key(tmp_path: Path) -> None:
-    class Adapter:
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    class TrackingLockMgr(UserLockManager):
         def __init__(self) -> None:
+            super().__init__()
+            self.contended = asyncio.Event()
+
+        @asynccontextmanager
+        async def lock(self, user_id: int) -> AsyncIterator[None]:
+            async with self._guard:
+                existing = self._locks.get(user_id)
+                if existing is not None and existing.locked():
+                    self.contended.set()
+            async with super().lock(user_id):
+                yield
+
+    class Adapter:
+        def __init__(self, contended: asyncio.Event) -> None:
             self.started = asyncio.Event()
-            self.release = asyncio.Event()
             self.removed = False
+            self._contended = contended
 
         async def add_client(self, **kwargs: object) -> None:
             self.started.set()
-            await self.release.wait()
+            await self._contended.wait()
 
         async def remove_client(self, **kwargs: object) -> None:
             self.removed = True
@@ -1141,8 +1158,9 @@ def test_concurrent_xray_create_vs_block_finishes_without_active_key(tmp_path: P
             await users_repo.upsert_profile(TelegramUserProfile(1, "admin", "Admin"), UserRole.SUPERADMIN, "now")
             await users_repo.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
             keys_repo = VpnKeyRepository(db)
-            user_service = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=_Audit())  # type: ignore[arg-type]
-            adapter = Adapter()
+            lock_mgr = TrackingLockMgr()
+            user_service = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=_Audit(), user_locks=lock_mgr)  # type: ignore[arg-type]
+            adapter = Adapter(lock_mgr.contended)
             xray = XrayService(
                 vpn_keys=keys_repo,
                 users=user_service,
@@ -1157,9 +1175,6 @@ def test_concurrent_xray_create_vs_block_finishes_without_active_key(tmp_path: P
             create_task = asyncio.create_task(xray.create_xray_key(100, TelegramUserProfile(100, "user", "User"), None))
             await adapter.started.wait()
             block_task = asyncio.create_task(user_service.block_user(1, 100))
-            await asyncio.sleep(0)
-            adapter.release.set()
-
             created = await create_task
             blocked = await block_task
             stored = await keys_repo.get_by_id(created.key.id)
@@ -1176,11 +1191,28 @@ def test_concurrent_xray_create_vs_block_finishes_without_active_key(tmp_path: P
 
 
 def test_concurrent_awg_create_vs_block_finishes_without_active_key(tmp_path: Path) -> None:
-    class Adapter:
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    class TrackingLockMgr(UserLockManager):
         def __init__(self) -> None:
+            super().__init__()
+            self.contended = asyncio.Event()
+
+        @asynccontextmanager
+        async def lock(self, user_id: int) -> AsyncIterator[None]:
+            async with self._guard:
+                existing = self._locks.get(user_id)
+                if existing is not None and existing.locked():
+                    self.contended.set()
+            async with super().lock(user_id):
+                yield
+
+    class Adapter:
+        def __init__(self, contended: asyncio.Event) -> None:
             self.started = asyncio.Event()
-            self.release = asyncio.Event()
             self.removed = False
+            self._contended = contended
 
         def read_server_config(self) -> SimpleNamespace:
             return SimpleNamespace(listen_port=443, public_key="server-public", interface_options={}, address=None)
@@ -1199,7 +1231,7 @@ def test_concurrent_awg_create_vs_block_finishes_without_active_key(tmp_path: Pa
 
         async def add_peer(self, **kwargs: object) -> None:
             self.started.set()
-            await self.release.wait()
+            await self._contended.wait()
 
         async def remove_peer(self, **kwargs: object) -> None:
             self.removed = True
@@ -1218,8 +1250,9 @@ def test_concurrent_awg_create_vs_block_finishes_without_active_key(tmp_path: Pa
             await users_repo.upsert_profile(TelegramUserProfile(1, "admin", "Admin"), UserRole.SUPERADMIN, "now")
             await users_repo.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
             keys_repo = VpnKeyRepository(db)
-            user_service = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=_Audit())  # type: ignore[arg-type]
-            adapter = Adapter()
+            lock_mgr = TrackingLockMgr()
+            user_service = UserService(users=users_repo, settings=settings, clock=ClockProvider(), audit=_Audit(), user_locks=lock_mgr)  # type: ignore[arg-type]
+            adapter = Adapter(lock_mgr.contended)
             awg = AwgService(
                 vpn_keys=keys_repo,
                 users=user_service,
@@ -1235,9 +1268,6 @@ def test_concurrent_awg_create_vs_block_finishes_without_active_key(tmp_path: Pa
             create_task = asyncio.create_task(awg.create_awg_key(100, TelegramUserProfile(100, "user", "User"), None))
             await adapter.started.wait()
             block_task = asyncio.create_task(user_service.block_user(1, 100))
-            await asyncio.sleep(0)
-            adapter.release.set()
-
             created = await create_task
             blocked = await block_task
             stored = await keys_repo.get_by_id(created.key.id)

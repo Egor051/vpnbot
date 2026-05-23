@@ -1,9 +1,25 @@
 
+import os
 import re
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_helper(name: str) -> object:
+    import importlib.util
+    import sys
+
+    path = ROOT / "deploy" / "helpers" / name
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
 
 
 def _read(relative_path: str) -> str:
@@ -166,3 +182,50 @@ def test_helper_contracts_require_socks5_prefix_password_stdin_and_secret_redact
     assert "never print passwords" in text
     assert "never prints raw mtproto secrets" in text or "never print raw mtproto secrets" in text
     assert "redact" in text
+
+
+# ---------------------------------------------------------------------------
+# Behavioral unit tests for helper validation functions
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    os.environ.get("PRIVILEGE_HELPERS_ENABLED") != "true",
+    reason="Set PRIVILEGE_HELPERS_ENABLED=true to run privilege helper behavioral tests",
+)
+def test_socks5_helper_validate_login_rejects_forbidden_names_behavioral() -> None:
+    """validate_login raises HelperError for reserved and structurally invalid logins."""
+    helper = _load_helper("vpnbot-socks5-user")
+    HelperError = getattr(helper, "HelperError")
+    validate_login = getattr(helper, "validate_login")
+
+    for bad in ("root", "vpn_socks_bad:name", "", "../root", "vpn_socks_\x00null"):
+        try:
+            validate_login(bad)
+            raise AssertionError(f"Expected HelperError for login {bad!r}")
+        except HelperError:
+            pass
+
+
+@pytest.mark.skipif(
+    os.environ.get("PRIVILEGE_HELPERS_ENABLED") != "true",
+    reason="Set PRIVILEGE_HELPERS_ENABLED=true to run privilege helper behavioral tests",
+)
+def test_xray_helper_validate_candidate_rejects_path_traversal_behavioral(tmp_path: Path) -> None:
+    """validate_candidate_path raises HelperError when the path is outside the staging root."""
+    helper = _load_helper("vpnbot-xray-apply")
+    HelperError = getattr(helper, "HelperError")
+    validate_candidate_path = getattr(helper, "validate_candidate_path")
+
+    helper_mod = helper  # type: ignore[assignment]
+    original_staging = getattr(helper_mod, "STAGING_ROOT")
+    try:
+        setattr(helper_mod, "STAGING_ROOT", tmp_path / "staging")
+        outside = tmp_path / "outside.json"
+        outside.write_text("{}", encoding="utf-8")
+        try:
+            validate_candidate_path(str(outside))
+            raise AssertionError("Expected HelperError for path outside staging root")
+        except HelperError:
+            pass
+    finally:
+        setattr(helper_mod, "STAGING_ROOT", original_staging)

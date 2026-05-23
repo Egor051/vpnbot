@@ -30,11 +30,11 @@ from services.user_locks import UserLockManager
 from services.users import UserService
 
 
-def _settings(**overrides: object) -> Settings:
+def _settings(tmp_path: Path | None = None, **overrides: object) -> Settings:
     values = dict(
         bot_token="token",
         admin_ids=frozenset({1}),
-        db_path=Path("/tmp/vpn.db"),
+        db_path=tmp_path / "vpn.db" if tmp_path is not None else Path("/tmp/vpn.db"),
         log_dir=Path("/tmp/logs"),
         bot_lock_path=Path("/tmp/vpn.lock"),
         bot_drop_pending_updates=False,
@@ -74,11 +74,11 @@ def _settings(**overrides: object) -> Settings:
         audit_retention_days=180,
         config_backup_keep_last=20,
         socks5_enabled=True,
-        socks5_host="150.251.152.243",
+        socks5_host="203.0.113.1",
         socks5_port=31337,
         socks5_login_prefix="vpn_socks_",
         mtproto_enabled=True,
-        mtproto_host="150.251.152.243",
+        mtproto_host="203.0.113.1",
         mtproto_port=8443,
         mtproto_secret="0123456789abcdef0123456789abcdef",
     )
@@ -455,10 +455,10 @@ def test_mtproto_issue_outputs_both_links_and_audit_has_no_secret(tmp_path: Path
             access = await service.issue_mtproto_proxy(100, TelegramUserProfile(100, "user", "User"))
 
             assert access.payload["link"] == (
-                "https://t.me/proxy?server=150.251.152.243&port=8443&secret=0123456789abcdef0123456789abcdef"
+                "https://t.me/proxy?server=203.0.113.1&port=8443&secret=0123456789abcdef0123456789abcdef"
             )
             assert access.payload["link_dd"] == (
-                "https://t.me/proxy?server=150.251.152.243&port=8443&secret=dd0123456789abcdef0123456789abcdef"
+                "https://t.me/proxy?server=203.0.113.1&port=8443&secret=dd0123456789abcdef0123456789abcdef"
             )
             assert str(access.payload["secret"]) not in str(audit.items)
             assert "secret" not in access.public_payload
@@ -514,8 +514,8 @@ def test_mtproto_managed_issue_is_idempotent_and_secret_is_private(tmp_path: Pat
             assert first.payload["mode"] == "managed"
             assert len(secret) == 32
             int(secret, 16)
-            assert first.payload["link"] == f"https://t.me/proxy?server=150.251.152.243&port=8443&secret={secret}"
-            assert first.payload["link_dd"] == f"https://t.me/proxy?server=150.251.152.243&port=8443&secret=dd{secret}"
+            assert first.payload["link"] == f"https://t.me/proxy?server=203.0.113.1&port=8443&secret={secret}"
+            assert first.payload["link_dd"] == f"https://t.me/proxy?server=203.0.113.1&port=8443&secret=dd{secret}"
             assert "secret" not in first.public_payload
             assert secret not in str(first.public_payload)
             assert len(adapter.applied) == 1
@@ -1246,14 +1246,14 @@ def test_proxy_admin_stats_counts_statuses_users_and_timestamps(tmp_path: Path) 
                 status=ProxyAccessStatus.ACTIVE,
                 payload={
                     "type": "socks5",
-                    "host": "150.251.152.243",
+                    "host": "203.0.113.1",
                     "port": 31337,
                     "login": "vpn_socks_100_abcd",
                     "password": "secret-password",
                 },
                 public_payload={
                     "type": "socks5",
-                    "host": "150.251.152.243",
+                    "host": "203.0.113.1",
                     "port": 31337,
                     "login": "vpn_socks_100_abcd",
                 },
@@ -1268,7 +1268,7 @@ def test_proxy_admin_stats_counts_statuses_users_and_timestamps(tmp_path: Path) 
                 payload={
                     "type": "mtproto",
                     "mode": "managed",
-                    "host": "150.251.152.243",
+                    "host": "203.0.113.1",
                     "port": 8443,
                     "secret": "0123456789abcdef0123456789abcdef",
                     "link": "https://t.me/proxy?secret=0123456789abcdef0123456789abcdef",
@@ -1277,7 +1277,7 @@ def test_proxy_admin_stats_counts_statuses_users_and_timestamps(tmp_path: Path) 
                 public_payload={
                     "type": "mtproto",
                     "mode": "managed",
-                    "host": "150.251.152.243",
+                    "host": "203.0.113.1",
                     "port": 8443,
                 },
                 created_by=100,
@@ -1359,15 +1359,15 @@ def test_proxy_user_stats_are_sanitized_and_do_not_include_password_or_secret(tm
                 status=ProxyAccessStatus.ACTIVE,
                 payload={
                     "type": "socks5",
-                    "host": "150.251.152.243",
+                    "host": "203.0.113.1",
                     "port": 31337,
                     "login": "vpn_socks_100_abcd",
                     "password": "secret-password",
-                    "url": "socks5://vpn_socks_100_abcd:secret-password@150.251.152.243:31337",
+                    "url": "socks5://vpn_socks_100_abcd:secret-password@203.0.113.1:31337",
                 },
                 public_payload={
                     "type": "socks5",
-                    "host": "150.251.152.243",
+                    "host": "203.0.113.1",
                     "port": 31337,
                     "login": "vpn_socks_100_abcd",
                 },
@@ -1382,7 +1382,7 @@ def test_proxy_user_stats_are_sanitized_and_do_not_include_password_or_secret(tm
                 payload={
                     "type": "mtproto",
                     "mode": "managed",
-                    "host": "150.251.152.243",
+                    "host": "203.0.113.1",
                     "port": 8443,
                     "secret": "0123456789abcdef0123456789abcdef",
                     "link": "https://t.me/proxy?secret=0123456789abcdef0123456789abcdef",
@@ -1391,7 +1391,7 @@ def test_proxy_user_stats_are_sanitized_and_do_not_include_password_or_secret(tm
                 public_payload={
                     "type": "mtproto",
                     "mode": "managed",
-                    "host": "150.251.152.243",
+                    "host": "203.0.113.1",
                     "port": 8443,
                 },
                 created_by=100,
@@ -1483,7 +1483,7 @@ def test_proxy_service_exposes_user_and_admin_stats_with_rbac(tmp_path: Path) ->
             assert len(user_stats.accesses) == 1
             assert admin_stats.total_accesses == 1
             assert admin_stats.runtime is not None
-            assert admin_stats.runtime.socks5_host == "150.251.152.243"
+            assert admin_stats.runtime.socks5_host == "203.0.113.1"
         finally:
             await db.close()
 
