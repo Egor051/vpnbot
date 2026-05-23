@@ -7,6 +7,8 @@ import ipaddress
 import json
 import logging
 import re
+import struct
+import zlib
 
 from adapters.awg_config import AwgConfigAdapter
 from adapters.clock import ClockProvider
@@ -1120,7 +1122,9 @@ class AwgService:
             "dns2": dns2,
             "hostName": self.settings.awg_endpoint_host,
         }
-        encoded = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+        json_bytes = json.dumps(payload, separators=(",", ":")).encode()
+        packed = struct.pack(">I", len(json_bytes)) + zlib.compress(json_bytes)
+        encoded = base64.urlsafe_b64encode(packed).decode().rstrip("=")
         return f"amnezia://{encoded}"
 
     async def _ensure_client_payload_valid(self, actor_user_id: int, key: VpnKey) -> None:
