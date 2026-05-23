@@ -1111,12 +1111,22 @@ class AwgService:
 
     def _build_amnezia_link(self, key: VpnKey) -> str:
         config_text = self._client_config(key)
+        server_config = self.adapter.read_server_config()
+        endpoint_port = str(self._endpoint_port(server_config.listen_port))
         dns_parts = [s.strip() for s in self.settings.awg_client_dns.split(",")]
         dns1 = dns_parts[0] if dns_parts else "1.1.1.1"
         dns2 = dns_parts[1] if len(dns_parts) > 1 else dns1
-        last_config_str = json.dumps({"config": config_text}, separators=(",", ":"))
         payload = {
-            "containers": [{"container": "amnezia-awg", "awg": {"last_config": last_config_str}}],
+            "containers": [
+                {
+                    "container": "amnezia-awg",
+                    "awg": {
+                        "port": endpoint_port,
+                        "transport_proto": "udp",
+                        "last_config": config_text,
+                    },
+                }
+            ],
             "defaultContainer": "amnezia-awg",
             "description": key.email_label or "vpnbot",
             "dns1": dns1,
