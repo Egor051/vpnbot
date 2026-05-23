@@ -6,7 +6,7 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
+from bot.fsm.ttl_storage import TTLMemoryStorage
 
 from adapters.awg_config import AwgConfigAdapter
 from adapters.backup import BackupAdapter
@@ -312,10 +312,9 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     trial_access_service.bot = bot
     anomaly_detection_service.bot = bot
     # FSM state is in-memory only — bot restart clears in-progress wizards.
-    # Switching to a persistent SQLite-backed storage would preserve state across
-    # restarts but is not yet implemented (see aiogram_sqlite_storage or a custom
-    # aiosqlite adapter).
-    dp = Dispatcher(storage=MemoryStorage())
+    # TTLMemoryStorage expires sessions idle for >30 min via the fsm_cleanup_loop
+    # background task started in main.py.
+    dp = Dispatcher(storage=TTLMemoryStorage(ttl_seconds=1800))
     dp.workflow_data["services"] = services
     dp.workflow_data["rate_limiter"] = RateLimiter()
     user_service.attach_state_clearer(
@@ -323,8 +322,15 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     )
 
     blocked_middleware = BlockedUserMiddleware(user_service)
-    dp.message.outer_middleware(blocked_middleware)
-    dp.callback_query.outer_middleware(blocked_middleware)
+    for _observer in (
+        dp.message,
+        dp.callback_query,
+        dp.edited_message,
+        dp.inline_query,
+        dp.channel_post,
+        dp.my_chat_member,
+    ):
+        _observer.outer_middleware(blocked_middleware)
 
     dp.include_router(start.router)
     dp.include_router(common.router)

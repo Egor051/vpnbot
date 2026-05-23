@@ -12,6 +12,7 @@ from bot.keyboards.admin import access_request_keyboard
 from bot.keyboards.common import main_menu
 from bot.keyboards.keys import request_trial_keyboard, trial_key_show_keyboard
 from bot.private_chat import ensure_private_message
+from bot.rate_limit import RateLimiter
 from i18n import t
 from models.access import is_blocked_user
 from models.enums import UserRole
@@ -22,12 +23,14 @@ logger = logging.getLogger(__name__)
 
 
 @router.message(CommandStart())
-async def start_command(message: Message, services: Services, bot: Bot) -> None:
+async def start_command(message: Message, services: Services, bot: Bot, rate_limiter: RateLimiter | None = None) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
         return
     try:
+        if rate_limiter is not None:
+            rate_limiter.check(message.from_user.id, "start", 20)
         profile = profile_from_tg(message.from_user)
         result = await services.access.create_or_get_request(profile)
         if is_blocked_user(result.user):

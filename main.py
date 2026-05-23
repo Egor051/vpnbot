@@ -19,6 +19,7 @@ async def main() -> None:
 
     from adapters.health_server import create_health_app
     from bot.app import _awg_stats_loop, create_app
+    from bot.fsm.ttl_storage import TTLMemoryStorage, fsm_cleanup_loop
     from services.anomaly_detection import anomaly_detection_loop
     from services.key_expiry import key_expiry_loop
     from services.offsite_backup import offsite_backup_loop
@@ -32,7 +33,14 @@ async def main() -> None:
         backup_task: asyncio.Task | None = None
         anomaly_task: asyncio.Task | None = None
         scheduled_announcements_task: asyncio.Task | None = None
+        fsm_cleanup_task: asyncio.Task | None = None
         try:
+            if isinstance(dp.storage, TTLMemoryStorage):
+                fsm_cleanup_task = asyncio.create_task(
+                    fsm_cleanup_loop(dp.storage, interval_seconds=3600),
+                    name="fsm-cleanup",
+                )
+                logger.info("FSM session cleanup started (TTL=1800s, interval=3600s)")
             if settings.awg_stats_interval > 0:
                 awg_stats_task = asyncio.create_task(
                     _awg_stats_loop(services.traffic_stats, settings.awg_stats_interval),
@@ -79,6 +87,9 @@ async def main() -> None:
             logger.info("VPN bot started")
             await dp.start_polling(bot)
         finally:
+            if fsm_cleanup_task is not None:
+                fsm_cleanup_task.cancel()
+                await asyncio.gather(fsm_cleanup_task, return_exceptions=True)
             if awg_stats_task is not None:
                 awg_stats_task.cancel()
                 await asyncio.gather(awg_stats_task, return_exceptions=True)
