@@ -8,7 +8,7 @@
 #   pip install -r requirements.txt -c constraints.txt
 
 aiofiles==25.1.0
-aiogram==3.27.0
+aiogram==3.28.2
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.5
 aiosignal==1.4.0
