@@ -229,7 +229,7 @@ STRINGS: dict[str, str] = {
     "faq_mtu": (
         "MTU is the maximum network packet size. It applies only to AWG keys.\n\n"
         "The recommended value of 1280 works in most cases. "
-        "Increase it (e.g. to 1380 or 1420) if the connection is stable but speed seems low."
+        "Increase it (e.g. to 1370 or 1420) if the connection is stable but speed seems low."
     ),
     "faq_note_why": (
         "A note helps you identify which device a key belongs to — for example, «Laptop» or «Phone». "
