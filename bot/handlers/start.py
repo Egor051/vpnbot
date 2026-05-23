@@ -23,13 +23,14 @@ logger = logging.getLogger(__name__)
 
 
 @router.message(CommandStart())
-async def start_command(message: Message, services: Services, bot: Bot, rate_limiter: RateLimiter) -> None:
+async def start_command(message: Message, services: Services, bot: Bot, rate_limiter: RateLimiter | None = None) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
         return
     try:
-        rate_limiter.check(message.from_user.id, "start", 20)
+        if rate_limiter is not None:
+            rate_limiter.check(message.from_user.id, "start", 20)
         profile = profile_from_tg(message.from_user)
         result = await services.access.create_or_get_request(profile)
         if is_blocked_user(result.user):

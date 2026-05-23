@@ -320,13 +320,14 @@ async def admin_announcement_batches(callback: CallbackQuery, services: Services
 
 
 @router.callback_query(F.data.regexp(r"^admin:announce:(resume|retry|cancelbatch):\d+$"))
-async def admin_announcement_batch_action(callback: CallbackQuery, services: Services, bot: Bot, rate_limiter: RateLimiter) -> None:
+async def admin_announcement_batch_action(callback: CallbackQuery, services: Services, bot: Bot, rate_limiter: RateLimiter | None = None) -> None:
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        rate_limiter.check(callback.from_user.id, "announcement_batch_action", 30)
+        if rate_limiter is not None:
+            rate_limiter.check(callback.from_user.id, "announcement_batch_action", 30)
         await require_superadmin(services, callback.from_user.id)
         _admin, _announce, action, raw_batch_id = callback.data.split(":", 3)
         batch_id = int(raw_batch_id)
@@ -537,14 +538,15 @@ async def admin_user_detail(callback: CallbackQuery, services: Services) -> None
 
 
 @router.callback_query(F.data.startswith("admin:userapprove:"))
-async def admin_user_approve(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
+async def admin_user_approve(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("processing"))
     try:
-        rate_limiter.check(callback.from_user.id, "admin_user_approve", 5)
+        if rate_limiter is not None:
+            rate_limiter.check(callback.from_user.id, "admin_user_approve", 5)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         await services.users.set_role(callback.from_user.id, user_id, UserRole.APPROVED_USER)
         if callback.message:
@@ -556,14 +558,15 @@ async def admin_user_approve(callback: CallbackQuery, services: Services, rate_l
 
 
 @router.callback_query(F.data.startswith("admin:setmoderator:"))
-async def admin_set_moderator(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
+async def admin_set_moderator(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("processing"))
     try:
-        rate_limiter.check(callback.from_user.id, "admin_set_moderator", 10)
+        if rate_limiter is not None:
+            rate_limiter.check(callback.from_user.id, "admin_set_moderator", 10)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         target = await services.users.get_user(user_id)
         if target.role == UserRole.MODERATOR:
@@ -609,14 +612,15 @@ async def admin_block_user(callback: CallbackQuery, services: Services) -> None:
 
 
 @router.callback_query(F.data.regexp(r"^admin:block:confirm:\d+$"))
-async def admin_block_user_confirm(callback: CallbackQuery, services: Services, bot: Bot, rate_limiter: RateLimiter) -> None:
+async def admin_block_user_confirm(callback: CallbackQuery, services: Services, bot: Bot, rate_limiter: RateLimiter | None = None) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("blocking"))
     try:
-        rate_limiter.check(callback.from_user.id, "admin_block_user", 5)
+        if rate_limiter is not None:
+            rate_limiter.check(callback.from_user.id, "admin_block_user", 5)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         actor = await require_moderator_or_admin(services, callback.from_user.id)
         current = await services.users.get_user(user_id)
@@ -687,14 +691,15 @@ async def admin_unblock_user(callback: CallbackQuery, services: Services) -> Non
 
 
 @router.callback_query(F.data.regexp(r"^admin:unblock:confirm:\d+$"))
-async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
+async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("unblocking"))
     try:
-        rate_limiter.check(callback.from_user.id, "admin_unblock_user", 5)
+        if rate_limiter is not None:
+            rate_limiter.check(callback.from_user.id, "admin_unblock_user", 5)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         actor = await require_moderator_or_admin(services, callback.from_user.id)
         warning = await services.users.inspect_unblock_risk(callback.from_user.id, user_id)
