@@ -102,10 +102,9 @@ def confirm_keyboard(action: str, key_id: int, owner_user_id: int | None = None,
 def mtu_choice_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t("btn_mtu_recommended"), callback_data="mtu:1360")],
-            [InlineKeyboardButton(text="1280", callback_data="mtu:1280")],
+            [InlineKeyboardButton(text=t("btn_mtu_recommended"), callback_data="mtu:1280")],
+            [InlineKeyboardButton(text="1380", callback_data="mtu:1380")],
             [InlineKeyboardButton(text="1420", callback_data="mtu:1420")],
-            [InlineKeyboardButton(text="1500", callback_data="mtu:1500")],
             [InlineKeyboardButton(text=t("btn_enter_manually"), callback_data="mtu:custom")],
             [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
         ]
