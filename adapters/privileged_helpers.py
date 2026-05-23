@@ -60,10 +60,24 @@ class PrivilegedHelperRunner:
         )
 
 
+def _mkdir_private(path: Path) -> None:
+    """Create path and all missing ancestors, chmoding each to 0700 immediately."""
+    to_create: list[Path] = []
+    p = path
+    while not p.exists():
+        to_create.append(p)
+        p = p.parent
+    for d in reversed(to_create):
+        d.mkdir(mode=0o700, exist_ok=True)
+        if os.name == "posix":
+            os.chmod(d, 0o700)
+
+
 def write_private_staging_file(staging_dir: Path, *, prefix: str, suffix: str, content: str) -> Path:
-    staging_dir.mkdir(parents=True, exist_ok=True)
     if os.name == "posix":
-        staging_dir.chmod(0o700)
+        _mkdir_private(staging_dir)
+    else:
+        staging_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",
@@ -82,9 +96,12 @@ def write_private_staging_file(staging_dir: Path, *, prefix: str, suffix: str, c
 
 
 def create_private_staging_dir(staging_root: Path, *, prefix: str) -> Path:
-    staging_root.mkdir(parents=True, exist_ok=True)
     if os.name == "posix":
-        staging_root.chmod(0o700)
+        _mkdir_private(staging_root)
+    else:
+        staging_root.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        os.chmod(staging_root, 0o700)
     path = staging_root / f"{prefix}{secrets.token_hex(8)}"
     path.mkdir(mode=0o700, exist_ok=False)
     return path

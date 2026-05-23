@@ -12,14 +12,31 @@ class ConfigLockBusyError(TimeoutError):
 
 
 class ConfigFileLock:
-    def __init__(self, target: Path, timeout: float = 5.0, poll_interval: float = 0.05) -> None:
-        self.lock_path = target.with_name(f".{target.name}.lock")
+    def __init__(
+        self,
+        target: Path,
+        timeout: float = 5.0,
+        poll_interval: float = 0.05,
+        *,
+        lock_dir: Path | None = None,
+    ) -> None:
+        if lock_dir is not None:
+            self.lock_path = lock_dir / f".{target.name}.lock"
+            self._lock_dir_private = True
+        else:
+            self.lock_path = target.with_name(f".{target.name}.lock")
+            self._lock_dir_private = False
         self.timeout = max(timeout, 0.0)
         self.poll_interval = max(poll_interval, 0.01)
         self._file: TextIO | None = None
 
-    def _acquire_sync(self) -> None:
+    def _ensure_lock_dir(self) -> None:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._lock_dir_private and os.name == "posix":
+            os.chmod(self.lock_path.parent, 0o700)
+
+    def _acquire_sync(self) -> None:
+        self._ensure_lock_dir()
         file = self.lock_path.open("a+", encoding="utf-8")
         if os.name == "posix":
             import fcntl
@@ -61,7 +78,7 @@ class ConfigFileLock:
         self._release_sync()
 
     async def __aenter__(self) -> Self:
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(self._ensure_lock_dir)
         file = self.lock_path.open("a+", encoding="utf-8")
         if os.name == "posix":
             import fcntl
