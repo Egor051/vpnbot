@@ -2347,7 +2347,7 @@ def test_awg_client_config_skips_empty_interface_options(tmp_path: Path) -> None
         assert "DNS = 9.9.9.9" not in config
 
 
-def test_xray_api_mode_add_client_calls_xray_adu_not_systemctl(tmp_path: Path) -> None:
+def test_xray_api_mode_add_client_calls_xray_rmi_adi_not_systemctl(tmp_path: Path) -> None:
     class FakeShell:
         def __init__(self) -> None:
             self.calls: list[list[str]] = []
@@ -2413,15 +2413,19 @@ def test_xray_api_mode_add_client_calls_xray_adu_not_systemctl(tmp_path: Path) -
 
         updated = json.loads(config_path.read_text(encoding="utf-8"))
         assert updated["inbounds"][0]["settings"]["clients"][0]["email"] == "user"
-        assert any(c[:3] == ["xray", "api", "adu"] for c in shell.calls)
-        assert "--server=127.0.0.1:10085" in shell.calls[0]
+        rmi_call = next((c for c in shell.calls if c[:3] == ["xray", "api", "rmi"]), None)
+        adi_call = next((c for c in shell.calls if c[:3] == ["xray", "api", "adi"]), None)
+        assert rmi_call is not None, "xray api rmi должен вызываться"
+        assert adi_call is not None, "xray api adi должен вызываться"
+        assert "--server=127.0.0.1:10085" in rmi_call
+        assert "--server=127.0.0.1:10085" in adi_call
         assert not systemctl.reload_called
         assert not systemctl.restart_called
 
     asyncio.run(run())
 
 
-def test_xray_api_mode_remove_client_calls_xray_rmu_not_systemctl(tmp_path: Path) -> None:
+def test_xray_api_mode_remove_client_calls_xray_rmi_adi_not_systemctl(tmp_path: Path) -> None:
     class FakeShell:
         def __init__(self) -> None:
             self.calls: list[list[str]] = []
@@ -2485,10 +2489,13 @@ def test_xray_api_mode_remove_client_calls_xray_rmu_not_systemctl(tmp_path: Path
 
         updated = json.loads(config_path.read_text(encoding="utf-8"))
         assert updated["inbounds"][0]["settings"]["clients"] == []
-        rmu_call = next((c for c in shell.calls if c[:3] == ["xray", "api", "rmu"]), None)
-        assert rmu_call is not None
-        assert "--server=127.0.0.1:10085" in rmu_call
-        assert "user@example" in rmu_call
+        rmi_call = next((c for c in shell.calls if c[:3] == ["xray", "api", "rmi"]), None)
+        adi_call = next((c for c in shell.calls if c[:3] == ["xray", "api", "adi"]), None)
+        assert rmi_call is not None, "xray api rmi должен вызываться"
+        assert "--server=127.0.0.1:10085" in rmi_call
+        assert "vless-in" in rmi_call
+        assert adi_call is not None, "xray api adi должен вызываться"
+        assert "--server=127.0.0.1:10085" in adi_call
         assert not systemctl.systemctl_called
 
     asyncio.run(run())
@@ -2677,7 +2684,7 @@ def test_xray_api_mode_add_client_uses_systemctl_when_short_id_inserted(tmp_path
 
         assert result.short_id_inserted is True
         assert systemctl.reload_called, "systemctl reload должен вызываться когда вставлен short_id"
-        assert not any(c[:3] == ["xray", "api", "adu"] for c in shell.calls), "xray api adu не должен вызываться при short_id fallback"
+        assert not any(c[:3] in [["xray", "api", "rmi"], ["xray", "api", "adi"]] for c in shell.calls), "xray api rmi/adi не должны вызываться при short_id fallback"
 
     asyncio.run(run())
 
@@ -2743,6 +2750,6 @@ def test_xray_api_mode_remove_client_uses_systemctl_when_short_id_removed(tmp_pa
         )
 
         assert systemctl.reload_called, "systemctl reload должен вызываться когда удаляется short_id"
-        assert not any(c[:3] == ["xray", "api", "rmu"] for c in shell.calls), "xray api rmu не должен вызываться при short_id fallback"
+        assert not any(c[:3] in [["xray", "api", "rmi"], ["xray", "api", "adi"]] for c in shell.calls), "xray api rmi/adi не должны вызываться при short_id fallback"
 
     asyncio.run(run())
