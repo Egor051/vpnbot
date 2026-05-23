@@ -4,7 +4,6 @@ import base64
 import binascii
 import hashlib
 import ipaddress
-import json
 import logging
 import re
 import struct
@@ -1111,30 +1110,8 @@ class AwgService:
 
     def _build_amnezia_link(self, key: VpnKey) -> str:
         config_text = self._client_config(key)
-        server_config = self.adapter.read_server_config()
-        endpoint_port = str(self._endpoint_port(server_config.listen_port))
-        dns_parts = [s.strip() for s in self.settings.awg_client_dns.split(",")]
-        dns1 = dns_parts[0] if dns_parts else "1.1.1.1"
-        dns2 = dns_parts[1] if len(dns_parts) > 1 else dns1
-        payload = {
-            "containers": [
-                {
-                    "container": "amnezia-awg",
-                    "awg": {
-                        "port": endpoint_port,
-                        "transport_proto": "udp",
-                        "last_config": config_text,
-                    },
-                }
-            ],
-            "defaultContainer": "amnezia-awg",
-            "description": key.email_label or "vpnbot",
-            "dns1": dns1,
-            "dns2": dns2,
-            "hostName": self.settings.awg_endpoint_host,
-        }
-        json_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        packed = struct.pack(">I", len(json_bytes)) + zlib.compress(json_bytes)
+        config_bytes = config_text.encode("utf-8")
+        packed = struct.pack(">I", len(config_bytes)) + zlib.compress(config_bytes)
         encoded = base64.urlsafe_b64encode(packed).decode("utf-8")
         return f"vpn://{encoded}"
 
