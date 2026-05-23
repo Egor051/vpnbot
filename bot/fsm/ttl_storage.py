@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import time
+from collections.abc import Mapping
 from typing import Any
 
 from aiogram.fsm.storage.base import StateType, StorageKey
@@ -25,7 +26,7 @@ class TTLMemoryStorage(MemoryStorage):
             self._touched[key] = time.monotonic()
         await super().set_state(key, state)
 
-    async def set_data(self, key: StorageKey, data: dict[str, Any]) -> None:
+    async def set_data(self, key: StorageKey, data: Mapping[str, Any]) -> None:
         self._touched[key] = time.monotonic()
         await super().set_data(key, data)
 
