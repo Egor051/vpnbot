@@ -30,7 +30,7 @@ from bot.formatters import (
 from services.health import run_bot_health
 from bot.fsm.states import AdminCreateKeyStates, AdminAnnouncementStates, AdminEditUserNoteStates
 from bot.guards import require_superadmin, require_moderator_or_admin
-from bot.handlers.common import InvalidCallbackData, answer_callback_error, answer_message_error, parse_int_callback
+from bot.handlers.common import answer_callback_error, answer_message_error, parse_int_callback
 from bot.keyboards.admin import (
     admin_issue_users_keyboard,
     admin_key_type_keyboard,
@@ -48,7 +48,7 @@ from bot.keyboards.admin import (
 from bot.handlers.keys import load_keys_page
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import expiry_choice_keyboard, key_actions_keyboard, keys_list_keyboard, mtu_choice_keyboard
-from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text, send_awg_config
+from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text
 from bot.pagination import MAX_PAGE, page_offset, split_page
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimitExceeded, RateLimiter

@@ -42,7 +42,7 @@ from services.announcements import AnnouncementService
 from services.audit import AuditService
 from services.awg import AwgService
 from services.backend_health import BackendHealth
-from services.key_expiry import KeyExpiryService, key_expiry_loop
+from services.key_expiry import KeyExpiryService
 from services.offsite_backup import OffsiteBackupService
 from services.notes import NotesService
 from services.proxy import ProxyService
@@ -56,7 +56,6 @@ from services.vpn_keys import VpnKeyQueryService
 from services.xray import XrayService
 
 logger = logging.getLogger(__name__)
-
 
 
 async def _awg_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> None:
@@ -322,7 +321,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     )
 
     blocked_middleware = BlockedUserMiddleware(user_service)
-    for _observer in (
+    for observer in (
         dp.message,
         dp.callback_query,
         dp.edited_message,
@@ -330,7 +329,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         dp.channel_post,
         dp.my_chat_member,
     ):
-        _observer.outer_middleware(blocked_middleware)
+        observer.outer_middleware(blocked_middleware)
 
     dp.include_router(start.router)
     dp.include_router(common.router)
@@ -400,7 +399,7 @@ async def _startup_reconcile_keys(services: Services) -> None:
 
 async def _safe_startup_reconcile(name: str, reconcile: Any, *, fatal_on_error: bool = False) -> dict[str, int]:
     try:
-        return await reconcile()
+        return await reconcile()  # type: ignore[no-any-return]
     except Exception:
         logger.warning("Startup VPN key reconciliation for %s failed; bot startup continues", name, exc_info=True)
         summary = {"checked": 0, "recovered": 0, "failed": 1}

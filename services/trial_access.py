@@ -1,11 +1,11 @@
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from aiogram import Bot
 
 from adapters.clock import ClockProvider
-from models.dto import TelegramUserProfile, TrialKeyRequest, VpnKey, VpnKeyCreateResult
+from models.dto import TelegramUserProfile, TrialKeyRequest, VpnKeyCreateResult
 from models.enums import AuditEntityType, VpnKeyType
 from repositories.trial_requests import TrialKeyRequestRepository
 from repositories.users import UserRepository
@@ -176,10 +176,8 @@ class TrialAccessService:
             return
         try:
             if result.key.key_type == VpnKeyType.AWG:
-                from bot.messages import send_awg_config
                 from bot.messages import awg_config_filename
                 # Send AWG config as document
-                import io
                 from aiogram.types import BufferedInputFile
                 config_bytes = result.config_text.encode("utf-8")
                 filename = awg_config_filename(result.key)
@@ -204,5 +202,5 @@ class TrialAccessService:
                 user_id,
                 "К сожалению, ваша заявка на пробный доступ была отклонена.",
             )
-        except Exception:
+        except Exception:  # noqa: S110
             pass

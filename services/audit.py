@@ -1,6 +1,6 @@
 
 import logging
-from typing import Any
+from typing import Any, ClassVar
 from datetime import timedelta
 
 from adapters.clock import ClockProvider
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class AuditService:
     """Writes audit records with automatic redaction of secrets from details."""
-    _SECRET_KEYS = {
+    _SECRET_KEYS: ClassVar[set[str]] = {
         "private_key",
         "privatekey",
         "preshared_key",

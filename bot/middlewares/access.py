@@ -83,4 +83,4 @@ async def _clear_state(data: dict[str, Any]) -> None:
     if isinstance(state, FSMContext):
         await state.clear()
     elif state is not None and hasattr(state, "clear"):
-        await state.clear()  # type: ignore[union-attr]
+        await state.clear()

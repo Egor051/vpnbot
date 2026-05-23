@@ -18,7 +18,7 @@ from adapters.errors import (
     XrayInboundNotFoundError,
 )
 from adapters.file_lock import ConfigFileLock
-from adapters.file_ops import async_copy_stat, async_fsync_parent, copy_stat, fsync_parent
+from adapters.file_ops import async_copy_stat, async_fsync_parent
 from adapters.privileged_helpers import PrivilegedHelperRunner, cleanup_staging_path, write_private_staging_file
 from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
@@ -155,10 +155,10 @@ class XrayConfigAdapter:
                 clients = self._clients(inbound)
                 changed = False
 
-                _api_email = ""
+                api_email = ""
                 if not self._using_helper() and self.apply_mode == "api":
                     found = self._find_client_in_list(clients, uuid_value=uuid_value, email_label=email_label)
-                    _api_email = found.get("email", "") if found else (email_label or "")
+                    api_email = found.get("email", "") if found else (email_label or "")
 
                 new_clients = [client for client in clients if not self._matches_client_for_remove(client, uuid_value, email_label)]
                 if len(new_clients) != len(clients):
@@ -175,7 +175,7 @@ class XrayConfigAdapter:
                 if not self._using_helper() and self.apply_mode == "api" and not short_id_removed:
                     await self._install_candidate_api(
                         temp_path, snapshot, backup_path,
-                        action="remove", email_label=_api_email,
+                        action="remove", email_label=api_email,
                     )
                 else:
                     await self._install_candidate(temp_path, snapshot, backup_path)

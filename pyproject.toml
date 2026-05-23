@@ -1,5 +1,7 @@
 [project]
+name = "vpnbot"
 requires-python = ">=3.12"
+version = "1.0.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -20,20 +22,33 @@ exclude_lines = [
 
 [tool.mypy]
 python_version = "3.12"
+strict = true
 warn_unused_configs = true
-check_untyped_defs = true
-strict_optional = true
-ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = [
-    "adapters.*",
-    "bot.*",
-    "config.*",
-    "db.*",
-    "models.*",
-    "repositories.*",
-    "services.*",
-    "utils.*",
+    "aiogram.*",
+    "aiosqlite.*",
+    "aiohttp.*",
+    "magic_filter.*",
 ]
-disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.ruff.lint]
+select = ["E", "F", "S", "B", "RUF"]
+preview = true
+ignore = [
+    "E241",   # multiple spaces after comma — formatting; dedicate a separate formatting PR
+    "E501",   # line too long — dedicate a separate formatting PR
+    "RUF001", # ambiguous unicode character — project intentionally uses Cyrillic strings
+    "RUF029", # async without await — framework handlers must be async even without internal awaits
+    "RUF067", # __init__ module logic — i18n design intentional
+    "S101",   # assert used in tests
+    "S404",   # subprocess import — required by deploy scripts and test helpers
+    "S603",   # subprocess without shell=True — controlled internal tooling
+    "S607",   # partial executable path — controlled internal paths
+    "S608",   # SQL injection — all f-string SQL uses internal column/table constants, never user input
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S108", "F401", "B009", "B010", "RUF043", "RUF015", "RUF100", "E303", "E306"]

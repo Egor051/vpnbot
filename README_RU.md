@@ -168,6 +168,39 @@ CONFIG_BACKUP_KEEP_LAST=20
 BOT_LANGUAGE=ru
 ```
 
+### Полный справочник переменных окружения
+
+Все переменные из `config/settings.py`. Переменные, помеченные **Обязательна**, должны быть заданы до запуска; остальные имеют указанное значение по умолчанию.
+
+> ⚠️ **Security-sensitive переменные** помечены 🔒. Никогда не коммитьте их; храните на сервере в `.env` (режим `0600`, только root).
+
+Полная таблица переменных — в [английском README](README.md#complete-environment-variable-reference).
+
+Переменные, не указанные в `.env.example` выше:
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `BOT_DROP_PENDING_UPDATES` | `false` | Сбросить очередь Telegram-обновлений при запуске. |
+| `BOT_LANGUAGE` | `ru` | Язык UI бота: `ru` или `en`. |
+| `HEALTH_HOST` | `127.0.0.1` | Хост HTTP-эндпоинта проверки работоспособности (опционально). |
+| `HEALTH_PORT` | _(отключён)_ | Порт HTTP-эндпоинта. Не указывать для отключения. |
+| `AWG_STATS_INTERVAL` | `60` | Интервал (сек) сбора статистики трафика AWG (0–3600). |
+| `KEY_EXPIRY_CHECK_INTERVAL` | `1800` | Как часто (сек) проверять истечение ключей (0–86400). |
+| `KEY_EXPIRY_NOTIFY_DAYS` | _(пусто)_ | Дни до истечения для уведомления пользователя, через запятую. Например: `7,3,1`. |
+| `KEY_MAX_TRIAL_DAYS` | `365` | Максимальная длительность (дней) пробных VPN-ключей (1–3650). |
+| `OFFSITE_BACKUP_ENCRYPTION_KEY` | _(отключён)_ | 🔒 Fernet-ключ для шифрования резервных копий DB. Оставьте пустым для отключения. |
+| `OFFSITE_BACKUP_INTERVAL` | `604800` | Интервал (сек) между загрузками резервных копий. По умолчанию — 7 дней. |
+| `ANOMALY_CHECK_INTERVAL` | `300` | Как часто (сек) запускать анализ аномалий (0–86400). |
+| `ANOMALY_WINDOW_SECONDS` | `3600` | Окно наблюдения за трафиком (сек). |
+| `ANOMALY_MIN_UNIQUE_IPS` | `3` | Мин. уникальных source IP в окне для флага. |
+| `ANOMALY_AUTO_REVOKE` | `false` | Автоматически отзывать помеченные ключи без подтверждения администратора. |
+| `ANOMALY_COOLDOWN_SECONDS` | `7200` | Cooldown перед повторным флагом того же ключа (сек). |
+| `ANOMALY_CONCURRENT_WINDOW_SECONDS` | `600` | Окно для обнаружения одновременных соединений (сек). |
+| `XRAY_ACCESS_LOG_PATH` | _(пусто)_ | Путь к access-логу Xray для обнаружения аномалий. |
+| `XRAY_HELPER_STAGING_DIR` | `$HELPER_STAGING_ROOT/xray` | Staging-каталог для файлов Xray-хелпера. |
+| `AWG_HELPER_STAGING_DIR` | `$HELPER_STAGING_ROOT/awg` | Staging-каталог для файлов AWG-хелпера. |
+| `MTPROTO_HELPER_STAGING_DIR` | `$HELPER_STAGING_ROOT/mtproxy` | Staging-каталог для файлов MTProto-хелпера. |
+
 Примечания:
 
 - Если `XRAY_INBOUND_TAG` пустой, адаптер использует первый inbound с `settings.clients`.
@@ -472,18 +505,19 @@ python -m pip install -r requirements-dev.txt
 Запустите те же проверки, что использует CI:
 
 ```bash
-python -m ruff check . --select=E9,F63,F7,F82
+python -m pip_audit -r requirements.txt -r constraints.txt
+python -m ruff check .
 python -m compileall .
-python -m pytest
-python -m pip_audit -r requirements.txt -r constraints.txt --no-deps
+python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/
+python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=60
 ```
 
 ## CI
 
 GitHub Actions запускает локальные проверки без production-секретов и живых сервисов:
 
-- Python 3.12: установка runtime/dev-зависимостей, `python -m ruff check . --select=E9,F63,F7,F82`, `python -m compileall .`, `python -m mypy` и `python -m pytest`.
-- Dependency audit на Python 3.12: `python -m pip_audit -r requirements.txt -r constraints.txt --no-deps`.
+- `dependency-audit`: `python -m pip_audit -r requirements.txt -r constraints.txt` — блокирует job `tests` при обнаружении уязвимостей.
+- `tests` (needs `dependency-audit`): Python 3.12 — установка зависимостей, `ruff check .` (стиль, безопасность, bugbear), `compileall`, `mypy --strict`, `pytest ≥60% coverage`.
 
 ## Обслуживание
 
@@ -775,17 +809,54 @@ sudo journalctl -u vpn-bot -n 150 --no-pager
 
 ### Rollback после неудачного деплоя
 
+> ⚠️ **Сначала сделайте backup.** Всегда создавайте резервную копию перед откатом кода (см. раздел [Резервное копирование](#резервное-копирование)). Откат кода не откатывает runtime-состояние — SQLite, конфигурация Xray и AWG требуют отдельного восстановления, если деплой уже их изменил.
+
+**Шаг 1 — остановите сервис и создайте backup:**
+
+```bash
+sudo systemctl stop vpn-bot
+sudo tar --xattrs --acls -czf /root/vpn-service-backups/pre-rollback-$(date -u +%Y%m%dT%H%M%SZ).tar.gz \
+  /opt/vpn-service/.env \
+  /opt/vpn-service/data/vpn.db \
+  /usr/local/etc/xray/config.json \
+  /etc/amnezia/amneziawg/awg0.conf
+sudo chmod 600 /root/vpn-service-backups/pre-rollback-*.tar.gz
+```
+
+**Шаг 2 — откатите код:**
+
 ```bash
 cd /opt/vpn-service
 git log --oneline -5
 git reset --hard <previous_commit>
 .venv/bin/pip install -r requirements.txt -c constraints.txt
-.venv/bin/python init_db.py
-sudo systemctl restart vpn-bot
-sudo journalctl -u vpn-bot -n 100 --no-pager
 ```
 
-Используйте `git reset --hard` только когда намеренно отбрасываете локальные изменения кода на сервере. Восстановите `.env`, SQLite, конфигурацию Xray и AWG из backup, если неудачный деплой изменил runtime-состояние.
+`git reset --hard` отбрасывает все локальные изменения кода на сервере. Используйте только для отката нежелательного деплоя.
+
+> **`init_db.py` только для чистых установок.** НЕ запускайте `init_db.py` при откате — он требует `BOT_TOKEN`/`ADMIN_IDS` и попытается применить прямые миграции к существующей базе данных. Бот сам применяет схему при старте; если предыдущая версия совместима по схеме, достаточно просто перезапустить сервис.
+
+**Шаг 3 — восстановите runtime-состояние из backup, если деплой его изменил:**
+
+```bash
+# Восстановить SQLite DB
+sudo tar -xzf /root/vpn-service-backups/pre-rollback-<timestamp>.tar.gz -C / opt/vpn-service/data/vpn.db
+
+# Восстановить конфигурацию Xray и проверить
+sudo tar -xzf /root/vpn-service-backups/pre-rollback-<timestamp>.tar.gz -C / usr/local/etc/xray/config.json
+sudo xray run -test -config /usr/local/etc/xray/config.json
+
+# Восстановить конфигурацию AWG
+sudo tar -xzf /root/vpn-service-backups/pre-rollback-<timestamp>.tar.gz -C / etc/amnezia/amneziawg/awg0.conf
+```
+
+**Шаг 4 — запустите и проверьте:**
+
+```bash
+sudo systemctl start vpn-bot
+sudo systemctl status vpn-bot
+sudo journalctl -u vpn-bot -n 100 --no-pager
+```
 
 ### Ручная проверка на VDS после исправлений
 
