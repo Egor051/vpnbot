@@ -185,7 +185,7 @@ class UserRepository:
         row = await cursor.fetchone()
         if row is None:
             return None
-        return row["trial_quota_reset_at"]
+        return row["trial_quota_reset_at"]  # type: ignore[no-any-return]
 
     async def list_by_ids(self, telegram_user_ids: list[int]) -> dict[int, User]:
         if not telegram_user_ids:

@@ -35,8 +35,8 @@ def _row_to_proxy_access(row: Row | None) -> ProxyAccess | None:
         id=int(row["id"]),
         owner_user_id=int(row["owner_user_id"]),
         username=row["username"],
-        access_type=enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type"),  # type: ignore[arg-type]
-        status=enum_value(ProxyAccessStatus, row["status"], "proxy_accesses.status"),  # type: ignore[arg-type]
+        access_type=enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type"),
+        status=enum_value(ProxyAccessStatus, row["status"], "proxy_accesses.status"),
         payload=_json_loads(row["payload_json"]),
         public_payload=_json_loads(row["public_payload_json"]),
         created_at=row["created_at"],
@@ -60,7 +60,7 @@ def _optional_int(value: object) -> int | None:
     if value is None:
         return None
     try:
-        return int(value)  # type: ignore[call-overload]
+        return int(value)  # type: ignore[call-overload, no-any-return]
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -79,8 +79,8 @@ def _row_to_proxy_stats_item(row: Row | None) -> ProxyAccessStatsItem | None:
         id=int(row["id"]),
         owner_user_id=int(row["owner_user_id"]),
         username=row["username"],
-        access_type=enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type"),  # type: ignore[arg-type]
-        status=enum_value(ProxyAccessStatus, row["status"], "proxy_accesses.status"),  # type: ignore[arg-type]
+        access_type=enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type"),
+        status=enum_value(ProxyAccessStatus, row["status"], "proxy_accesses.status"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         activated_at=row["activated_at"],
@@ -617,9 +617,9 @@ class ProxyAccessRepository:
         rows = await cursor.fetchall()
         result: dict[ProxyAccessType, dict[ProxyAccessStatus, int]] = {}
         for row in rows:
-            access_type = enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type")  # type: ignore[arg-type]
-            status = enum_value(ProxyAccessStatus, row["status"], "proxy_accesses.status")  # type: ignore[arg-type]
-            result.setdefault(access_type, {})[status] = int(row["cnt"])  # type: ignore[arg-type,index]
+            access_type = enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type")
+            status = enum_value(ProxyAccessStatus, row["status"], "proxy_accesses.status")
+            result.setdefault(access_type, {})[status] = int(row["cnt"])
         return result
 
     async def count_users_with_active_proxies(self) -> int:
@@ -675,11 +675,6 @@ class ProxyAccessRepository:
             for value in status_counts.values()
         )
         active_statuses = {ProxyAccessStatus.ACTIVE}
-        failed_statuses = {
-            ProxyAccessStatus.APPLY_FAILED,
-            ProxyAccessStatus.REVOKE_FAILED,
-            ProxyAccessStatus.DELETE_FAILED,
-        }
         inactive_statuses = {ProxyAccessStatus.REVOKED, ProxyAccessStatus.INACTIVE}
         pending_statuses = {
             ProxyAccessStatus.PENDING_APPLY,
@@ -806,6 +801,6 @@ class ProxyAccessRepository:
         refs: dict[int, list[ProxyActiveAccessRef]] = {}
         for row in rows:
             user_id = int(row["owner_user_id"])
-            access_type = enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type")  # type: ignore[arg-type]
-            refs.setdefault(user_id, []).append(ProxyActiveAccessRef(id=int(row["id"]), access_type=access_type))  # type: ignore[arg-type]
+            access_type = enum_value(ProxyAccessType, row["access_type"], "proxy_accesses.access_type")
+            refs.setdefault(user_id, []).append(ProxyActiveAccessRef(id=int(row["id"]), access_type=access_type))
         return {user_id: tuple(items) for user_id, items in refs.items()}

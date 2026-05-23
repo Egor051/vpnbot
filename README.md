@@ -166,6 +166,171 @@ AUDIT_RETENTION_DAYS=180
 CONFIG_BACKUP_KEEP_LAST=20
 ```
 
+### Complete Environment Variable Reference
+
+All variables parsed by `config/settings.py`. Variables marked **Required** must be set before startup; variables not marked are optional with the shown default.
+
+> ⚠️ **Security-sensitive variables** are marked with 🔒. Never commit them; keep them on the server in `.env` (mode `0600`, root-only).
+
+#### Core
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `BOT_TOKEN` | **Yes** | — | Telegram Bot API token from BotFather. 🔒 | `123456:ABC-DEF...` |
+| `ADMIN_IDS` | **Yes** | — | Comma-separated list of Telegram user IDs with full admin access. | `123456,789012` |
+| `DB_PATH` | No | `/opt/vpn-service/data/vpn.db` | Path to the SQLite database file. | `/opt/vpn-service/data/vpn.db` |
+| `SQLITE_SYNCHRONOUS` | No | `FULL` | SQLite synchronous mode: `FULL`, `NORMAL`, or `EXTRA`. `FULL` is safest. | `FULL` |
+| `LOG_DIR` | No | `/opt/vpn-service/logs` | Directory for rotating log files. | `/opt/vpn-service/logs` |
+| `BOT_LOCK_PATH` | No | `/run/vpn-bot.lock` | Path to the single-instance PID lock file. | `/run/vpn-bot/vpn-bot.lock` |
+| `BOT_DROP_PENDING_UPDATES` | No | `false` | Drop queued Telegram updates on startup. Useful after downtime. | `false` |
+| `BOT_LANGUAGE` | No | `ru` | Bot UI language. Supported: `ru`, `en`. | `ru` |
+| `AUDIT_RETENTION_DAYS` | No | `180` | Days to retain audit log entries (0 = forever, max 3650). | `180` |
+| `CONFIG_BACKUP_KEEP_LAST` | No | `20` | Number of config backups to keep per backend (1–500). | `20` |
+
+#### Health Endpoint
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `HEALTH_HOST` | No | `127.0.0.1` | Host for the optional HTTP health endpoint. | `127.0.0.1` |
+| `HEALTH_PORT` | No | _(disabled)_ | Port for the HTTP health endpoint. Omit to disable. | `8080` |
+
+#### Privilege Helpers (non-root deployment)
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `PRIVILEGE_HELPERS_ENABLED` | No | `false` | Enable non-root deployment via sudo helpers. Incompatible with `XRAY_APPLY_MODE=api`. | `false` |
+| `HELPER_STAGING_ROOT` | No | `/run/vpn-bot` | Root directory for staging files passed to sudo helpers. | `/run/vpn-bot` |
+| `SOCKS5_USER_HELPER_PATH` | No | `/usr/local/sbin/vpnbot-socks5-user` | Absolute path to the SOCKS5 user management sudo helper. | `/usr/local/sbin/vpnbot-socks5-user` |
+| `XRAY_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpnbot-xray-apply` | Absolute path to the Xray config apply sudo helper. | `/usr/local/sbin/vpnbot-xray-apply` |
+| `AWG_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpnbot-awg-apply` | Absolute path to the AWG config apply sudo helper. | `/usr/local/sbin/vpnbot-awg-apply` |
+| `MTPROTO_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpnbot-mtproxy-apply` | Absolute path to the MTProto apply sudo helper. | `/usr/local/sbin/vpnbot-mtproxy-apply` |
+| `XRAY_HELPER_STAGING_DIR` | No | `$HELPER_STAGING_ROOT/xray` | Staging directory for Xray helper files. | `/run/vpn-bot/xray` |
+| `AWG_HELPER_STAGING_DIR` | No | `$HELPER_STAGING_ROOT/awg` | Staging directory for AWG helper files. | `/run/vpn-bot/awg` |
+| `MTPROTO_HELPER_STAGING_DIR` | No | `$HELPER_STAGING_ROOT/mtproxy` | Staging directory for MTProto helper files. | `/run/vpn-bot/mtproxy` |
+
+#### Xray VLESS Reality
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `XRAY_CONFIG_PATH` | No | `/usr/local/etc/xray/config.json` | Path to the Xray config file. | `/usr/local/etc/xray/config.json` |
+| `XRAY_SERVICE_NAME` | No | `xray` | systemd service name for Xray. | `xray` |
+| `XRAY_APPLY_MODE` | No | `restart` | How to apply Xray config changes: `restart`, `reload`, or `api`. `api` requires root and is incompatible with helpers. | `api` |
+| `XRAY_INBOUND_TAG` | No* | _(first inbound)_ | Tag of the VLESS inbound in `config.json`. Required for `api` mode. | `vless-in` |
+| `XRAY_PUBLIC_HOST` | No* | — | Public hostname/IP clients use to connect. Required to issue keys. | `vpn.example.com` |
+| `XRAY_PUBLIC_PORT` | No | `443` | Public TCP port for VLESS connections. | `443` |
+| `XRAY_REALITY_PUBLIC_KEY` | No* | — | Xray Reality public key (base64url). Required to issue keys. | `ABC123...` |
+| `XRAY_SNI` | No* | — | SNI (Server Name Indication) for Reality. Required to issue keys. | `www.microsoft.com` |
+| `XRAY_FLOW` | No | `xtls-rprx-vision` | VLESS flow control. | `xtls-rprx-vision` |
+| `XRAY_FINGERPRINT` | No | `chrome` | TLS fingerprint. One of: `chrome`, `firefox`, `safari`, `ios`, `android`, `edge`, `randomized`, `randomizedalpn`, `randomizednoalpn`. | `chrome` |
+| `XRAY_NETWORK_TYPE` | No | `tcp` | Network type: `tcp` or `raw`. | `tcp` |
+| `XRAY_SHORT_ID` | No* | — | Hex short ID (≤16 chars). Required if `XRAY_MANAGE_SHORT_IDS=false`. | `abcd1234` |
+| `XRAY_MANAGE_SHORT_IDS` | No | `false` | Let the bot manage short IDs automatically. | `false` |
+| `XRAY_ALLOW_RESTART_ON_ROLLBACK` | No | `false` | Allow service restart during config rollback. | `false` |
+| `XRAY_STATS_SERVER` | No* | — | Address of the Xray gRPC stats/API server. Required for `api` mode. | `127.0.0.1:10085` |
+| `XRAY_ACCESS_LOG_PATH` | No | _(empty)_ | Path to the Xray access log for anomaly detection. Leave empty to disable. | `/var/log/xray/access.log` |
+
+_Legacy aliases accepted: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SERVER_PORT` (= `XRAY_PUBLIC_PORT`), `XRAY_PUBLIC_KEY` (= `XRAY_REALITY_PUBLIC_KEY`), `XRAY_SERVER_NAME` (= `XRAY_SNI`)._
+
+#### AmneziaWG
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `AWG_CONFIG_PATH` | No | `/etc/amnezia/amneziawg/awg0.conf` | Path to the AWG server config file. | `/etc/amnezia/amneziawg/awg0.conf` |
+| `AWG_INTERFACE` | No | `awg0` | AWG/WireGuard network interface name. | `awg0` |
+| `AWG_NETWORK` | No | `10.0.0.0/24` | IPv4 subnet for the VPN. | `10.0.0.0/24` |
+| `AWG_SERVER_ADDRESS` | No | `10.0.0.1` | Server's IPv4 address inside the VPN subnet. | `10.0.0.1` |
+| `AWG_ENDPOINT_HOST` | No* | — | Public hostname/IP for AWG endpoint. Required to issue keys. | `vpn.example.com` |
+| `AWG_ENDPOINT_PORT` | No | `0` | Public UDP port for AWG endpoint. | `51820` |
+| `AWG_SERVER_PUBLIC_KEY` | No | _(empty)_ | AWG server public key (base64). Shown in client configs. | `ABC123...` |
+| `AWG_DNS` | No | `1.1.1.1` | DNS server for AWG clients. | `1.1.1.1` |
+| `AWG_MTU` | No | _(auto)_ | MTU for AWG client interface (576–1500). Omit to let client decide. | `1280` |
+| `AWG_ALLOWED_IPS` | No | `0.0.0.0/0, ::/0` | Allowed IPs for AWG client routing (full-tunnel by default). | `0.0.0.0/0, ::/0` |
+| `AWG_PERSISTENT_KEEPALIVE` | No | `25` | Keepalive interval in seconds (0–86400). | `25` |
+| `AWG_USE_PRESHARED_KEY` | No | `true` | Generate and include a preshared key per client. | `true` |
+| `AWG_STATS_INTERVAL` | No | `60` | Background traffic stats sampling interval in seconds (0–3600). | `60` |
+
+_Legacy alias: `AWG_CLIENT_DNS` (= `AWG_DNS`)._
+
+#### SOCKS5 / Dante
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `SOCKS5_ENABLED` | No | `false` | Enable SOCKS5 proxy backend. | `false` |
+| `SOCKS5_HOST` | No* | _(empty)_ | Public host for SOCKS5 (required if `SOCKS5_ENABLED=true`). | `vpn.example.com` |
+| `SOCKS5_PORT` | No | `31337` | Public port for SOCKS5 connections. | `31337` |
+| `SOCKS5_LOGIN_PREFIX` | No | `vpn_socks_` | Prefix for all managed Linux users. Must be unique and non-generic. | `vpn_socks_` |
+| `SOCKS5_SYSTEM_USER_SHELL` | No | `/usr/sbin/nologin` | Shell for managed SOCKS5 Linux users. | `/usr/sbin/nologin` |
+| `SOCKS5_SERVICE_NAME` | No | `danted` | systemd service name for Dante. | `danted` |
+| `SOCKS5_PUBLIC_NAME` | No | `SOCKS5 Proxy` | Display name shown in the bot UI. | `SOCKS5 Proxy` |
+| `SOCKS5_NOTE` | No | `SOCKS5 Dante proxy on VDS` | Description shown in proxy access cards. | `SOCKS5 Dante proxy on VDS` |
+
+#### MTProto Proxy
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `MTPROTO_ENABLED` | No | `false` | Enable MTProto proxy backend. | `false` |
+| `MTPROTO_MODE` | No | `static` | Proxy mode: `static` (shared secret) or `managed` (per-user secrets). | `static` |
+| `MTPROTO_HOST` | No* | _(empty)_ | Public host for MTProto (required if `MTPROTO_ENABLED=true`). | `vpn.example.com` |
+| `MTPROTO_PORT` | No | `8443` | Public port for MTProto connections. | `8443` |
+| `MTPROTO_SECRET` | No* | _(empty)_ | 🔒 Shared MTProto secret (required if `MTPROTO_MODE=static` and enabled). | _(hex string)_ |
+| `MTPROTO_PUBLIC_NAME` | No | `Telegram MTProto Proxy` | Display name shown in the bot UI. | `Telegram MTProto Proxy` |
+| `MTPROTO_NOTE` | No | `MTProto proxy for Telegram` | Description shown in proxy access cards. | `MTProto proxy for Telegram` |
+| `MTPROTO_STATS_URL` | No | _(empty)_ | URL for MTProto statistics endpoint. | `http://127.0.0.1:8888/stats` |
+| `MTPROTO_SERVICE_NAME` | No | `mtproxy` | systemd service name for MTProxy. | `mtproxy` |
+| `MTPROTO_BINARY_PATH` | No | `/usr/local/bin/mtproto-proxy` | Path to the MTProto proxy binary. | `/usr/local/bin/mtproto-proxy` |
+| `MTPROTO_RUN_USER` | No | `mtproxy` | User to run the MTProto proxy process as. | `mtproxy` |
+| `MTPROTO_RUN_GROUP` | No | `mtproxy` | Group to run the MTProto proxy process as. | `mtproxy` |
+| `MTPROTO_CONFIG_DIR` | No | `/etc/mtproxy` | Directory containing MTProxy base config files. | `/etc/mtproxy` |
+| `MTPROTO_PROXY_SECRET_PATH` | No | `/etc/mtproxy/proxy-secret` | Path to the MTProxy `proxy-secret` file. | `/etc/mtproxy/proxy-secret` |
+| `MTPROTO_PROXY_MULTI_CONF_PATH` | No | `/etc/mtproxy/proxy-multi.conf` | Path to the MTProxy `proxy-multi.conf` file. | `/etc/mtproxy/proxy-multi.conf` |
+| `MTPROTO_MANAGED_DIR` | No | `/etc/mtproxy/vpnbot` | Directory for bot-managed MTProto files. | `/etc/mtproxy/vpnbot` |
+| `MTPROTO_MANAGED_SECRETS_PATH` | No | `$MTPROTO_MANAGED_DIR/managed-secrets.json` | 🔒 Path to managed secrets JSON. | `/etc/mtproxy/vpnbot/managed-secrets.json` |
+| `MTPROTO_MANAGED_ENV_PATH` | No | `$MTPROTO_MANAGED_DIR/mtproxy.env` | Path to managed MTProxy env file. | `/etc/mtproxy/vpnbot/mtproxy.env` |
+| `MTPROTO_MANAGED_WRAPPER_PATH` | No | `/opt/vpn-service/scripts/run-mtproxy-managed` | Path to the managed-mode wrapper script. | `/opt/vpn-service/scripts/run-mtproxy-managed` |
+| `MTPROTO_BACKUP_DIR` | No | `$MTPROTO_MANAGED_DIR/backups` | Directory for MTProto managed-file backups. | `/etc/mtproxy/vpnbot/backups` |
+| `MTPROTO_INTERNAL_STATS_PORT` | No | `8888` | Internal MTProxy stats port (1–65535). | `8888` |
+| `MTPROTO_WORKERS` | No | `1` | Number of MTProxy worker processes (1–1024). | `1` |
+| `MTPROTO_APPLY_TIMEOUT_SECONDS` | No | `10` | Timeout in seconds for apply + health check (1–3600). | `10` |
+| `MTPROTO_ROLLBACK_ON_APPLY_FAILURE` | No | `true` | Automatically restore backup on apply failure. | `true` |
+| `MTPROTO_KEEP_LAST_BACKUPS` | No | `10` | Number of managed-file backups to retain (0–1000). | `10` |
+
+#### Key Expiry and Trial Access
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `KEY_EXPIRY_CHECK_INTERVAL` | No | `1800` | How often (seconds) to check for expiring/expired keys (0–86400). | `1800` |
+| `KEY_EXPIRY_NOTIFY_DAYS` | No | _(empty)_ | Comma-separated list of days before expiry to send user notifications. | `7,3,1` |
+| `KEY_MAX_TRIAL_DAYS` | No | `365` | Maximum duration (days) for trial VPN keys (1–3650). | `30` |
+
+#### Off-site Encrypted Backup
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `OFFSITE_BACKUP_ENCRYPTION_KEY` | No | _(disabled)_ | 🔒 Fernet key for encrypting off-site DB backups. Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Leave empty to disable off-site backups. | _(44-char base64url)_ |
+| `OFFSITE_BACKUP_INTERVAL` | No | `604800` | Interval (seconds) between off-site backup uploads (0 = disabled). Default is 7 days. | `604800` |
+
+#### Anomaly Detection
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `ANOMALY_CHECK_INTERVAL` | No | `300` | How often (seconds) to run the anomaly detection scan (0–86400). | `300` |
+| `ANOMALY_WINDOW_SECONDS` | No | `3600` | Traffic observation window in seconds (60–86400). | `3600` |
+| `ANOMALY_MIN_UNIQUE_IPS` | No | `3` | Minimum unique source IPs within the window to flag a key (1–1000). | `3` |
+| `ANOMALY_AUTO_REVOKE` | No | `false` | Automatically revoke flagged keys without admin confirmation. | `false` |
+| `ANOMALY_COOLDOWN_SECONDS` | No | `7200` | Cooldown before re-flagging the same key (0–86400). | `7200` |
+| `ANOMALY_CONCURRENT_WINDOW_SECONDS` | No | `600` | Window for concurrent-connection anomaly detection (0–86400). | `600` |
+
+#### Legacy / Compatibility
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `DEFAULT_PROXY_TYPE` | No | _(empty)_ | Legacy proxy entry type (internal use only; does not drive user-facing proxy flow). |
+| `DEFAULT_PROXY_HOST` | No | _(empty)_ | Legacy proxy host. |
+| `DEFAULT_PROXY_PORT` | No | _(empty)_ | Legacy proxy port. |
+| `DEFAULT_PROXY_LOGIN` | No | _(empty)_ | Legacy proxy login. |
+| `DEFAULT_PROXY_PASSWORD` | No | _(empty)_ | 🔒 Legacy proxy password. |
+| `DEFAULT_PROXY_NOTE` | No | _(empty)_ | Legacy proxy note. |
+
 Notes:
 
 - If `XRAY_INBOUND_TAG` is empty, the adapter uses the first inbound with `settings.clients`.
@@ -469,18 +634,21 @@ python -m pip install -r requirements-dev.txt
 Run the same core gates used by CI:
 
 ```bash
-python -m ruff check . --select=E9,F63,F7,F82
+python -m pip_audit -r requirements.txt -r constraints.txt
+python -m ruff check .
 python -m compileall .
-python -m pytest
-python -m pip_audit -r requirements.txt -r constraints.txt --no-deps
+python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/
+python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=60
 ```
+
+> **TODO (supply-chain hardening):** CI currently installs without `--require-hashes`. To detect tampered packages on PyPI, generate a hashed constraints file with `pip-compile --generate-hashes` and use `pip install --require-hashes -c constraints-hashed.txt`. Track as a follow-up issue.
 
 ## CI Checks
 
 GitHub Actions runs the local gates without production secrets or live services:
 
-- Python 3.12: install runtime/dev dependencies, `python -m ruff check . --select=E9,F63,F7,F82`, `python -m compileall .`, `python -m mypy`, and `python -m pytest`.
-- Dependency audit on Python 3.12: `python -m pip_audit -r requirements.txt -r constraints.txt --no-deps`.
+- `dependency-audit`: `python -m pip_audit -r requirements.txt -r constraints.txt` — blocks the `tests` job if vulnerabilities are found.
+- `tests` (needs `dependency-audit`): Python 3.12 — install runtime/dev dependencies, `ruff check .` (style + security + bugbear rules), `compileall`, `mypy --strict`, and `pytest ≥60% coverage`.
 
 ## Maintenance
 
@@ -772,17 +940,55 @@ Do not print raw MTProto secrets. In static mode, per-user server-side revoke is
 
 ### Rollback after a bad deploy
 
+> ⚠️ **Back up first.** Always create a backup before rolling back code (see [Backup](#backup)). A code rollback does not roll back runtime state — SQLite, Xray config, and AWG config need separate restoration if the deploy already modified them.
+
+**Step 1 — stop the service and back up runtime state:**
+
+```bash
+sudo systemctl stop vpn-bot
+sudo tar --xattrs --acls -czf /root/vpn-service-backups/pre-rollback-$(date -u +%Y%m%dT%H%M%SZ).tar.gz \
+  /opt/vpn-service/.env \
+  /opt/vpn-service/data/vpn.db \
+  /usr/local/etc/xray/config.json \
+  /etc/amnezia/amneziawg/awg0.conf
+sudo chmod 600 /root/vpn-service-backups/pre-rollback-*.tar.gz
+```
+
+**Step 2 — roll back the code:**
+
 ```bash
 cd /opt/vpn-service
 git log --oneline -5
 git reset --hard <previous_commit>
 .venv/bin/pip install -r requirements.txt -c constraints.txt
-.venv/bin/python init_db.py
-sudo systemctl restart vpn-bot
-sudo journalctl -u vpn-bot -n 100 --no-pager
 ```
 
-Only use `git reset --hard` when you intentionally discard local code changes on the server. Restore `.env`, SQLite DB, Xray config, and AWG config from backup if the failed deploy changed runtime state.
+`git reset --hard` discards all local code changes on the server. Only use it when rolling back an unwanted deploy.
+
+> **`init_db.py` is for fresh installs only.** Do NOT run `init_db.py` during rollback — it requires `BOT_TOKEN`/`ADMIN_IDS` and will attempt forward migrations on the existing database. The bot bootstraps the schema on startup; if the previous version is schema-compatible, simply restarting the service is sufficient.
+
+**Step 3 — restore runtime state from backup if the failed deploy modified it:**
+
+```bash
+# Restore SQLite DB if the failed deploy changed DB schema or data
+sudo cp /root/vpn-service-backups/<backup>.tar.gz /tmp/
+sudo tar -xzf /tmp/<backup>.tar.gz -C / opt/vpn-service/data/vpn.db
+
+# Restore Xray config if changed
+sudo tar -xzf /tmp/<backup>.tar.gz -C / usr/local/etc/xray/config.json
+sudo xray run -test -config /usr/local/etc/xray/config.json
+
+# Restore AWG config if changed
+sudo tar -xzf /tmp/<backup>.tar.gz -C / etc/amnezia/amneziawg/awg0.conf
+```
+
+**Step 4 — restart and verify:**
+
+```bash
+sudo systemctl start vpn-bot
+sudo systemctl status vpn-bot
+sudo journalctl -u vpn-bot -n 100 --no-pager
+```
 
 ### Manual VDS verification after fixes
 

@@ -257,10 +257,17 @@ backups/
 *.p12
 *.crt
 *.csr
-*.conf
 *.ovpn
+# Ignore WireGuard/AWG server interface configs (contain private keys)
 wg0.conf
 awg0.conf
+/etc/**/*.conf
+/usr/local/etc/**/*.conf
+# Ignore MTProxy runtime configs (contain secrets)
+/etc/mtproxy/**/*.conf
+# Keep tracked deploy and docs configs
+!deploy/*.conf
+!docs/**/*.conf.example
 xray-config.json
 config.json.bak*
 *.bak
@@ -269,8 +276,6 @@ config.json.bak*
 # Keep safe examples trackable
 !*.example
 !*.sample
-!deploy/mtproxy-vpnbot-managed.conf
-!docs/**/*.conf.example
 !docs/**/*.json.example
 
 # Local IDE/editor files

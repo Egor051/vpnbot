@@ -7,6 +7,7 @@ import tempfile
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 from adapters.backup import BackupAdapter
 from adapters.errors import AwgApplyError, AwgConfigError, AwgPeerAlreadyExistsError
@@ -36,7 +37,7 @@ class _AwgSection:
 
 
 class AwgConfigAdapter:
-    _CLIENT_INTERFACE_KEYS = {
+    _CLIENT_INTERFACE_KEYS: ClassVar[set[str]] = {
         "DNS",
         "MTU",
         "Jc",
@@ -56,8 +57,8 @@ class AwgConfigAdapter:
         "I4",
         "I5",
     }
-    _CRITICAL_PEER_KEYS = {"PublicKey", "AllowedIPs", "PresharedKey"}
-    _CRITICAL_INTERFACE_KEYS = {
+    _CRITICAL_PEER_KEYS: ClassVar[set[str]] = {"PublicKey", "AllowedIPs", "PresharedKey"}
+    _CRITICAL_INTERFACE_KEYS: ClassVar[set[str]] = {
         "PrivateKey",
         "Address",
         "ListenPort",
@@ -941,7 +942,7 @@ PublicKey = b
 AllowedIPs = 10.0.0.3/32
 """
     adapter = AwgConfigAdapter(
-        config_path=Path("/tmp/unused-awg.conf"),
+        config_path=Path("/tmp/unused-awg.conf"),  # noqa: S108
         interface="unused",
         backup=BackupAdapter.__new__(BackupAdapter),
         shell=ShellRunner(),

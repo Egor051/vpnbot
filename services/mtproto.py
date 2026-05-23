@@ -208,7 +208,7 @@ class MtProtoService:
                 actor_user_id=None,
                 action="mtproto_startup_reconcile_checked",
                 entity_id=None,
-                details=dict(summary),  # type: ignore[arg-type]
+                details=dict(summary),
             )
         return summary
 

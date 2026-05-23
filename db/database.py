@@ -7,7 +7,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, ClassVar
 
 import aiosqlite
 
@@ -935,7 +935,7 @@ class Database:
 
 
 class _ConnectionProxy:
-    _GATED_METHODS = {
+    _GATED_METHODS: ClassVar[set[str]] = {
         "execute",
         "executemany",
         "executescript",

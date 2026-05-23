@@ -114,7 +114,7 @@ class KeyExpiryService:
                 key.owner_user_id,
                 f"Срок действия {type_label}-ключа #{key.id} истёк — доступ автоматически отозван.",
             )
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
 

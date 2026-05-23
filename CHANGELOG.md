@@ -129,5 +129,6 @@ at time of first changelog entry.
 - Managed MTProto secrets and env files are `root:root 0600`; backup dirs are
   `root:root 0700`.
 
-[Unreleased]: https://github.com/Egor051/vpnbot/compare/main...HEAD
+[Unreleased]: https://github.com/Egor051/vpnbot/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Egor051/vpnbot/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/Egor051/vpnbot/releases/tag/v0.1.0

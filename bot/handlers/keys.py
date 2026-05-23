@@ -28,17 +28,15 @@ from bot.keyboards.keys import (
     key_actions_keyboard,
     keys_list_keyboard,
     mtu_choice_keyboard,
-    request_trial_keyboard,
-    trial_key_show_keyboard,
     trial_protocol_keyboard,
 )
 from aiogram.types import BufferedInputFile
-from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text, send_awg_config
+from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text
 from bot.pagination import MAX_PAGE, page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
 from i18n import t
-from models.enums import AuditEntityType, VpnKeyStatus, VpnKeyType
+from models.enums import AuditEntityType, VpnKeyType
 from services.errors import AccessDenied, NotFound
 
 router = Router()
@@ -668,7 +666,7 @@ async def trial_request_proto(callback: CallbackQuery, state: FSMContext, servic
         for admin_id in services.settings.admin_ids:
             try:
                 await bot.send_message(admin_id, text, reply_markup=trial_request_keyboard(req.id))
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
     except Exception as exc:
         await state.clear()
@@ -745,7 +743,7 @@ def _parse_key_context(data: str | None, prefix: str) -> tuple[int, int | None, 
             return key_id, None, 0
         return key_id, int(parts[len(expected) + 1]), max(int(parts[len(expected) + 2]), 0)
     except (ValueError, OverflowError):
-        raise InvalidCallbackData(t("invalid_callback_btn"))
+        raise InvalidCallbackData(t("invalid_callback_btn")) from None
 
 
 def _parse_confirm_context(data: str) -> tuple[str, int, int | None, int]:
@@ -759,7 +757,7 @@ def _parse_confirm_context(data: str) -> tuple[str, int, int | None, int]:
             return action, key_id, None, 0
         return action, key_id, int(parts[3]), max(int(parts[4]), 0)
     except (ValueError, OverflowError):
-        raise InvalidCallbackData(t("invalid_callback_btn"))
+        raise InvalidCallbackData(t("invalid_callback_btn")) from None
 
 
 async def load_keys_page(
