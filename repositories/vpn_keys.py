@@ -412,7 +412,8 @@ class VpnKeyRepository:
         cursor = await self.db.conn.execute(
             """
             UPDATE vpn_keys
-            SET status = ?, updated_at = ?, revoked_at = COALESCE(revoked_at, ?), revoked_by = COALESCE(revoked_by, ?)
+            SET status = ?, updated_at = ?, revoked_at = COALESCE(revoked_at, ?), revoked_by = COALESCE(revoked_by, ?),
+                client_ip = NULL
             WHERE id = ? AND status NOT IN (?, ?)
             """,
             (VpnKeyStatus.REVOKED.value, now, now, actor_user_id, key_id,

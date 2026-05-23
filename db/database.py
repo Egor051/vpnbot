@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 19
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -231,6 +231,10 @@ class Database:
         if version < 18:
             await self._migrate_v18()
             await self._set_schema_version(18)
+            version = 18
+        if version < 19:
+            await self._migrate_v19()
+            await self._set_schema_version(19)
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -738,6 +742,32 @@ class Database:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_trial_requests_one_pending
             ON trial_key_requests(telegram_user_id)
             WHERE status = 'pending'
+            """
+        )
+
+    async def _migrate_v19(self) -> None:
+        # Repair installations where the IP allocator reused the client_ip of a
+        # revoked-but-not-deleted AWG key before that key was cleaned up.  When
+        # such a row later transitions from 'revoked' (outside the partial unique
+        # index) to 'pending_delete' (inside it) it would collide with the active
+        # key that now owns the same IP.  Nulling the IP here is safe: the AWG
+        # peer was already removed from the config when the key was revoked.
+        await self.conn.execute(
+            """
+            UPDATE vpn_keys
+            SET client_ip = NULL
+            WHERE key_type = 'awg'
+              AND status = 'revoked'
+              AND client_ip IS NOT NULL
+              AND client_ip IN (
+                SELECT client_ip FROM vpn_keys
+                WHERE key_type = 'awg'
+                  AND status IN (
+                    'pending_apply','active','apply_failed',
+                    'pending_revoke','pending_delete','delete_failed'
+                  )
+                  AND client_ip IS NOT NULL
+              )
             """
         )
 
