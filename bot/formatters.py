@@ -141,10 +141,15 @@ def key_detail_text(key: VpnKey, *, viewer_user_id: int) -> str:
         lines.append(f"{t('field_expires')}: {h(format_expiry_date(key.expires_at))}")
     if not note or label != note:
         lines.append(f"{t('field_note')}: {h(note or t('none'))}")
-    if key.client_ip:
-        lines.append(f"{t('field_ip')}: {code(key.client_ip)}")
-    if key.public_key:
-        lines.append(f"{t('field_pubkey')}: {code(key.public_key)}")
+    if key.key_type == VpnKeyType.AWG:
+        mtu = key.payload.get("mtu")
+        if mtu is not None:
+            lines.append(f"MTU: {h(str(int(str(mtu))))}")
+    else:
+        if key.client_ip:
+            lines.append(f"{t('field_ip')}: {code(key.client_ip)}")
+        if key.public_key:
+            lines.append(f"{t('field_pubkey')}: {code(key.public_key)}")
     return "\n".join(lines)
 
 
