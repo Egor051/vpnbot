@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Any
 
 from aiogram import Bot, F, Router
@@ -133,7 +134,7 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext, services
         await safe_callback_answer(callback)
         key_type = callback.data.rsplit(":", 1)[-1]
         await state.set_state(CreateKeyStates.waiting_note)
-        await state.update_data(key_type=key_type, cancel_target="keys:create")
+        await state.update_data(key_type=key_type, cancel_target="keys:create", note_prompt_msg_id=callback.message.message_id)
         await safe_edit_message_text(
             callback.message,
             f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
@@ -144,7 +145,7 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext, services
 
 
 @router.message(CreateKeyStates.waiting_note)
-async def create_key_note(message: Message, state: FSMContext, services: Services) -> None:
+async def create_key_note(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -154,7 +155,11 @@ async def create_key_note(message: Message, state: FSMContext, services: Service
         note = _clean_note(message.text)
         data = await state.get_data()
         key_type = str(data.get("key_type") or "")
+        note_prompt_msg_id = data.get("note_prompt_msg_id")
         await state.update_data(note=note)
+        if note_prompt_msg_id:
+            with suppress(Exception):
+                await bot.delete_message(chat_id=message.chat.id, message_id=note_prompt_msg_id)
         if key_type == VpnKeyType.AWG.value:
             await state.set_state(CreateKeyStates.waiting_mtu)
             await message.answer(t("mtu_prompt"), reply_markup=mtu_choice_keyboard())
@@ -198,11 +203,12 @@ async def create_key_mtu_custom_request(callback: CallbackQuery, state: FSMConte
         return
     await safe_callback_answer(callback)
     await state.set_state(CreateKeyStates.waiting_mtu_custom)
+    await state.update_data(mtu_prompt_msg_id=callback.message.message_id)
     await safe_edit_message_text(callback.message, t("mtu_custom_prompt"), reply_markup=cancel_keyboard())
 
 
 @router.message(CreateKeyStates.waiting_mtu_custom)
-async def create_key_mtu_custom(message: Message, state: FSMContext, services: Services) -> None:
+async def create_key_mtu_custom(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -213,7 +219,12 @@ async def create_key_mtu_custom(message: Message, state: FSMContext, services: S
         if mtu is None:
             await message.answer(t("mtu_enter_integer"))
             return
+        data = await state.get_data()
+        mtu_prompt_msg_id = data.get("mtu_prompt_msg_id")
         await state.update_data(mtu=mtu)
+        if mtu_prompt_msg_id:
+            with suppress(Exception):
+                await bot.delete_message(chat_id=message.chat.id, message_id=mtu_prompt_msg_id)
         await state.set_state(CreateKeyStates.waiting_expiry)
         await message.answer(t("expiry_prompt"), reply_markup=expiry_choice_keyboard())
     except Exception as exc:
@@ -559,7 +570,7 @@ async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services:
             return
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await state.set_state(EditNoteStates.waiting_note)
-        await state.update_data(key_id=key_id, cancel_target=f"key:open:{key_id}")
+        await state.update_data(key_id=key_id, cancel_target=f"key:open:{key_id}", note_prompt_msg_id=callback.message.message_id)
         await safe_edit_message_text(
             callback.message,
             t("edit_note_prompt", type=key.key_type.value.upper(), id=key.id),
@@ -570,7 +581,7 @@ async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services:
 
 
 @router.message(EditNoteStates.waiting_note)
-async def edit_note_waiting(message: Message, state: FSMContext, services: Services) -> None:
+async def edit_note_waiting(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -578,9 +589,13 @@ async def edit_note_waiting(message: Message, state: FSMContext, services: Servi
     data = await state.get_data()
     try:
         key_id = int(data["key_id"])
+        note_prompt_msg_id = data.get("note_prompt_msg_id")
         key = await services.vpn_keys.get_for_actor(message.from_user.id, key_id)
         note = _clean_note(message.text)
         await state.update_data(note=note)
+        if note_prompt_msg_id:
+            with suppress(Exception):
+                await bot.delete_message(chat_id=message.chat.id, message_id=note_prompt_msg_id)
         await state.set_state(EditNoteStates.confirming)
         await message.answer(note_confirm_text(key, note), reply_markup=confirm_cancel_keyboard("note:confirm"))
     except Exception as exc:
