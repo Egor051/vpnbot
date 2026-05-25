@@ -1,5 +1,6 @@
 
 import logging
+from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 
@@ -1011,7 +1012,7 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
             return
         await safe_callback_answer(callback)
         await state.set_state(AdminCreateKeyStates.waiting_note)
-        await state.update_data(owner_user_id=owner_user_id, key_type=key_type)
+        await state.update_data(owner_user_id=owner_user_id, key_type=key_type, note_prompt_msg_id=callback.message.message_id)
         await safe_edit_message_text(
             callback.message,
             f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
@@ -1022,7 +1023,7 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
 
 
 @router.message(AdminCreateKeyStates.waiting_note)
-async def admin_issue_note(message: Message, state: FSMContext, services: Services) -> None:
+async def admin_issue_note(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -1031,7 +1032,11 @@ async def admin_issue_note(message: Message, state: FSMContext, services: Servic
         note = _clean_note(message.text)
         data = await state.get_data()
         key_type = str(data.get("key_type") or "")
+        note_prompt_msg_id = data.get("note_prompt_msg_id")
         await state.update_data(note=note)
+        if note_prompt_msg_id:
+            with suppress(Exception):
+                await bot.delete_message(chat_id=message.chat.id, message_id=note_prompt_msg_id)
         if key_type == VpnKeyType.AWG.value:
             await state.set_state(AdminCreateKeyStates.waiting_mtu)
             await message.answer(t("mtu_prompt"), reply_markup=mtu_choice_keyboard())
