@@ -75,7 +75,7 @@ STRINGS: dict[str, str] = {
     "note_confirm_new_note": "New note",
     # ── config hints ─────────────────────────────────────────────────────────
     "xray_config_hint": "Add the link to a VLESS/REALITY-compatible client.",
-    "awg_config_hint": "Add the link to an AmneziaWG client or use the configuration file.",
+    "awg_config_hint": "Add the link to an AmneziaVPN client or use the configuration file.",
     # ── traffic stats ─────────────────────────────────────────────────────────
     "stats_title": "<b>Stats for {key_title}</b>",
     "stats_unavailable_now": "Stats are currently unavailable. Last successful snapshot:",
