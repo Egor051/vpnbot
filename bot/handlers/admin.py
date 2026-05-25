@@ -1,5 +1,6 @@
 
 import logging
+from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 
@@ -1011,7 +1012,7 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
             return
         await safe_callback_answer(callback)
         await state.set_state(AdminCreateKeyStates.waiting_note)
-        await state.update_data(owner_user_id=owner_user_id, key_type=key_type)
+        await state.update_data(owner_user_id=owner_user_id, key_type=key_type, note_prompt_msg_id=callback.message.message_id)
         await safe_edit_message_text(
             callback.message,
             f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
@@ -1022,7 +1023,7 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
 
 
 @router.message(AdminCreateKeyStates.waiting_note)
-async def admin_issue_note(message: Message, state: FSMContext, services: Services) -> None:
+async def admin_issue_note(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -1031,7 +1032,11 @@ async def admin_issue_note(message: Message, state: FSMContext, services: Servic
         note = _clean_note(message.text)
         data = await state.get_data()
         key_type = str(data.get("key_type") or "")
+        note_prompt_msg_id = data.get("note_prompt_msg_id")
         await state.update_data(note=note)
+        if note_prompt_msg_id:
+            with suppress(Exception):
+                await bot.delete_message(chat_id=message.chat.id, message_id=note_prompt_msg_id)
         if key_type == VpnKeyType.AWG.value:
             await state.set_state(AdminCreateKeyStates.waiting_mtu)
             await message.answer(t("mtu_prompt"), reply_markup=mtu_choice_keyboard())
@@ -1076,11 +1081,12 @@ async def admin_issue_mtu_custom_request(callback: CallbackQuery, state: FSMCont
         return
     await safe_callback_answer(callback)
     await state.set_state(AdminCreateKeyStates.waiting_mtu_custom)
+    await state.update_data(mtu_prompt_msg_id=callback.message.message_id)
     await safe_edit_message_text(callback.message, t("mtu_custom_prompt"), reply_markup=None)
 
 
 @router.message(AdminCreateKeyStates.waiting_mtu_custom)
-async def admin_issue_mtu_custom(message: Message, state: FSMContext, services: Services) -> None:
+async def admin_issue_mtu_custom(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -1091,7 +1097,12 @@ async def admin_issue_mtu_custom(message: Message, state: FSMContext, services: 
         if mtu is None:
             await message.answer(t("mtu_enter_integer"))
             return
+        data = await state.get_data()
+        mtu_prompt_msg_id = data.get("mtu_prompt_msg_id")
         await state.update_data(mtu=mtu)
+        if mtu_prompt_msg_id:
+            with suppress(Exception):
+                await bot.delete_message(chat_id=message.chat.id, message_id=mtu_prompt_msg_id)
         await state.set_state(AdminCreateKeyStates.waiting_expiry)
         await message.answer(t("expiry_prompt"), reply_markup=expiry_choice_keyboard())
     except Exception as exc:
@@ -1385,7 +1396,7 @@ async def admin_edit_user_note(callback: CallbackQuery, state: FSMContext, servi
         user_id = int(callback.data.rsplit(":", 1)[-1])
         user = await services.users.get_user(user_id)
         await state.set_state(AdminEditUserNoteStates.waiting_note)
-        await state.update_data(target_user_id=user_id)
+        await state.update_data(target_user_id=user_id, note_prompt_msg_id=callback.message.message_id)
         current = t("admin_unote_current", note=user.note) if user.note else ""
         await safe_edit_message_text(
             callback.message,
@@ -1397,7 +1408,7 @@ async def admin_edit_user_note(callback: CallbackQuery, state: FSMContext, servi
 
 
 @router.message(AdminEditUserNoteStates.waiting_note)
-async def admin_edit_user_note_input(message: Message, state: FSMContext, services: Services) -> None:
+async def admin_edit_user_note_input(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -1406,6 +1417,10 @@ async def admin_edit_user_note_input(message: Message, state: FSMContext, servic
         await require_superadmin(services, message.from_user.id)
         data = await state.get_data()
         user_id = int(data["target_user_id"])
+        note_prompt_msg_id = data.get("note_prompt_msg_id")
+        if note_prompt_msg_id:
+            with suppress(Exception):
+                await bot.delete_message(chat_id=message.chat.id, message_id=note_prompt_msg_id)
         await services.notes.update_user_note(message.from_user.id, user_id, message.text)
         await state.clear()
         user = await services.users.get_user(user_id)
