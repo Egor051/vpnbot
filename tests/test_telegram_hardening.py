@@ -60,7 +60,7 @@ def _key(key_id: int, owner_user_id: int = 200) -> VpnKey:
 class _Callback:
     def __init__(self, data: str, user_id: int = 1) -> None:
         self.from_user = SimpleNamespace(id=user_id, username="user", first_name="User")
-        self.message = SimpleNamespace()
+        self.message = SimpleNamespace(message_id=1)
         self.data = data
         self.answers: list[tuple[str, bool | None]] = []
 
