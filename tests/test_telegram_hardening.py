@@ -657,7 +657,7 @@ def test_create_key_menu_ignores_stale_callback_answer(monkeypatch) -> None:
 
         assert callback.answer_calls == 1
         assert len(edits) == 1
-        assert "Выберите тип ключа:" in edits[0]
+        assert "Выберите протокол:" in edits[0]
 
     asyncio.run(run())
 

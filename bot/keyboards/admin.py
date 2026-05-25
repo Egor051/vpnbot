@@ -193,8 +193,8 @@ def unblock_user_confirm_keyboard(user: User) -> InlineKeyboardMarkup:
 def admin_key_type_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Xray", callback_data=f"admin:ctype:xray:{user_id}")],
-            [InlineKeyboardButton(text="AWG", callback_data=f"admin:ctype:awg:{user_id}")],
+            [InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data=f"admin:ctype:xray:{user_id}")],
+            [InlineKeyboardButton(text="AmneziaWG 2.0", callback_data=f"admin:ctype:awg:{user_id}")],
             [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
         ]
     )

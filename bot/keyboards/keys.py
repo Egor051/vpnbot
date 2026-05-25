@@ -10,8 +10,8 @@ from models.enums import VpnKeyStatus, VpnKeyType
 def create_key_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Xray", callback_data="keys:create:xray")],
-            [InlineKeyboardButton(text="AWG", callback_data="keys:create:awg")],
+            [InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data="keys:create:xray")],
+            [InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="keys:create:awg")],
             [InlineKeyboardButton(text=t("btn_back"), callback_data="keys:list")],
         ]
     )
@@ -151,8 +151,8 @@ def request_trial_keyboard() -> InlineKeyboardMarkup:
 def trial_protocol_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Xray", callback_data="trial:proto:xray")],
-            [InlineKeyboardButton(text="AWG", callback_data="trial:proto:awg")],
+            [InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data="trial:proto:xray")],
+            [InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="trial:proto:awg")],
             [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
         ]
     )

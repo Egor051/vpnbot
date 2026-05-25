@@ -312,7 +312,7 @@ STRINGS: dict[str, str] = {
     "days_enter_integer": "Enter an integer number of days (1 to 365):",
     "days_enter_range": "Enter a number from 1 to {max}:",
     "key_note_prompt": "Enter a note for the key or send <code>-</code> to leave it empty.",
-    "choose_key_type": "Choose key type:",
+    "choose_key_type": "Choose protocol:",
     "creating_key": "Creating key...",
     "key_unknown_type": "Unknown key type.",
     "admin_delivered_awg": "Admin has issued you AWG key #{id}.\n\n{config_text}",

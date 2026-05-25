@@ -313,7 +313,7 @@ STRINGS: dict[str, str] = {
     "days_enter_integer": "Введите целое число дней (от 1 до 365):",
     "days_enter_range": "Введите число от 1 до {max}:",
     "key_note_prompt": "Введите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
-    "choose_key_type": "Выберите тип ключа:",
+    "choose_key_type": "Выберите протокол:",
     "creating_key": "Создаю ключ...",
     "key_unknown_type": "Неизвестный тип ключа.",
     "admin_delivered_awg": "Администратор выдал вам AWG-ключ #{id}.\n\n{config_text}",
