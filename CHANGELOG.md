@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.1] — 2026-05-25
+
+### Fixed
+
+- **Xray API mode** — `xray api adu` / `xray api rmu` silently fail for VLESS in Xray 26.3.27 (exit 0, «Added 0 user(s)»). Replaced both with `_api_reload_inbound`: reads the target inbound from the on-disk config, then calls `rmi` + `adi` to atomically replace it in the running Xray process. `rmi` errors on first run (inbound not yet loaded) are logged at DEBUG and ignored; an exception is raised only when `adi` fails. Rollback in `_install_candidate_api` now also goes through `_api_reload_inbound` after restoring the backup, falling back to `systemctl reload/restart` only if `adi` itself fails. (#103)
+
+### Changed
+
+- **Protocol selection menu** — menu heading «Выберите тип ключа:» renamed to «Выберите протокол:» (ru/en); button labels updated: «Xray» → «Xray (VLESS+XReality)», «AWG» → «AmneziaWG 2.0» across all three keyboards. (#104)
+
 ## [1.0.0] — 2026-05-23
 
 ### Added
@@ -88,4 +98,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Managed MTProto secrets and env files are `root:root 0600`; backup directories are `root:root 0700`.
 - `XRAY_APPLY_MODE=api` + `PRIVILEGE_HELPERS_ENABLED=true` combination rejected at startup.
 
+[1.0.1]: https://github.com/Egor051/vpnbot/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Egor051/vpnbot/releases/tag/v1.0.0
