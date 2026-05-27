@@ -12,6 +12,7 @@ def proxy_menu_keyboard(
     socks5_enabled: bool,
     mtproto_enabled: bool,
 ) -> InlineKeyboardMarkup:
+    """Build the proxy menu keyboard offering proxy types the user lacks."""
     active_types = {access.access_type for access in accesses}
     rows: list[list[InlineKeyboardButton]] = []
     if socks5_enabled and ProxyAccessType.SOCKS5 not in active_types:
@@ -23,6 +24,7 @@ def proxy_menu_keyboard(
 
 
 def proxy_confirm_keyboard(access_type: str, nonce: str) -> InlineKeyboardMarkup:
+    """Build the confirm/cancel keyboard for issuing a proxy access."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_confirm"), callback_data=f"proxy:confirm:{access_type}:{nonce}")],
@@ -32,6 +34,7 @@ def proxy_confirm_keyboard(access_type: str, nonce: str) -> InlineKeyboardMarkup
 
 
 def proxy_back_keyboard() -> InlineKeyboardMarkup:
+    """Build a keyboard with a single back-to-proxy button."""
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=t("btn_back_to_proxy"), callback_data="proxy:show")]]
     )

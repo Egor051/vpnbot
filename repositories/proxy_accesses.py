@@ -157,6 +157,7 @@ class ProxyAccessRepository:
         secret_fingerprint: str | None = None,
         apply_generation: int = 0,
     ) -> ProxyAccess:
+        """Insert a new proxy access record and return it."""
         cursor = await self.db.conn.execute(
             """
             INSERT INTO proxy_accesses (
@@ -206,6 +207,7 @@ class ProxyAccessRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> list[ProxyAccess]:
+        """Return a paginated list of proxy accesses for an owner, excluding deleted by default."""
         deleted_filter = "" if include_deleted else "AND status != ?"
         params: list[object] = [owner_user_id]
         if not include_deleted:
@@ -232,6 +234,7 @@ class ProxyAccessRepository:
         limit: int = 500,
         offset: int = 0,
     ) -> list[ProxyAccess]:
+        """Return a paginated list of an owner's proxy accesses filtered by the given statuses."""
         if not statuses:
             return []
         placeholders = ",".join("?" for _ in statuses)
@@ -253,6 +256,7 @@ class ProxyAccessRepository:
         access_type: ProxyAccessType,
         statuses: set[ProxyAccessStatus],
     ) -> ProxyAccess | None:
+        """Return the first proxy access matching the owner, type, and statuses, or None."""
         if not statuses:
             return None
         placeholders = ",".join("?" for _ in statuses)
@@ -312,6 +316,7 @@ class ProxyAccessRepository:
         limit: int = 500,
         after_id: int = 0,
     ) -> list[ProxyAccess]:
+        """Return proxy accesses of a type with the given statuses, keyset-paginated by id."""
         if not statuses:
             return []
         placeholders = ",".join("?" for _ in statuses)
@@ -338,6 +343,7 @@ class ProxyAccessRepository:
         public_payload: dict[str, Any] | None = None,
         apply_generation: int | None = None,
     ) -> None:
+        """Transition a pending or apply-failed proxy access to active, updating payloads."""
         async with self.db.transaction():
             current = await self.get_by_id(access_id)
             if current is None:
@@ -387,6 +393,7 @@ class ProxyAccessRepository:
         public_payload: dict[str, Any],
         secret_fingerprint: str | None = None,
     ) -> None:
+        """Replace a proxy access's payload and public payload, optionally setting its fingerprint."""
         await self.db.conn.execute(
             """
             UPDATE proxy_accesses
@@ -416,6 +423,7 @@ class ProxyAccessRepository:
         reason: str | None = None,
         allowed_from_statuses: tuple[ProxyAccessStatus, ...] | None = None,
     ) -> None:
+        """Set a proxy access's status, raising if it is not in an allowed source status."""
         if allowed_from_statuses:
             placeholders = ",".join("?" for _ in allowed_from_statuses)
             cursor = await self.db.conn.execute(
@@ -445,6 +453,7 @@ class ProxyAccessRepository:
             await self.db.commit()
 
     async def mark_shown(self, access_id: int, now: str) -> None:
+        """Record the time a proxy access was last shown to its owner."""
         await self.db.conn.execute(
             "UPDATE proxy_accesses SET last_shown_at = ?, updated_at = ? WHERE id = ?",
             (now, now, access_id),
@@ -452,6 +461,7 @@ class ProxyAccessRepository:
         await self.db.commit()
 
     async def mark_revoked(self, access_id: int, actor_user_id: int, now: str, *, reason: str | None = None) -> None:
+        """Mark a proxy access as revoked, raising if already revoked or deleted."""
         cursor = await self.db.conn.execute(
             """
             UPDATE proxy_accesses
@@ -472,6 +482,7 @@ class ProxyAccessRepository:
             raise InvalidTransition(f"Proxy access {access_id} is already revoked or deleted")
 
     async def mark_inactive(self, access_id: int, actor_user_id: int, now: str, *, reason: str | None = None) -> None:
+        """Mark a proxy access as inactive, raising if already inactive, revoked, or deleted."""
         cursor = await self.db.conn.execute(
             """
             UPDATE proxy_accesses
@@ -491,6 +502,7 @@ class ProxyAccessRepository:
             raise InvalidTransition(f"Proxy access {access_id} is already inactive, revoked or deleted")
 
     async def mark_deleted(self, access_id: int, actor_user_id: int, now: str, *, reason: str | None = None) -> None:
+        """Mark a proxy access as deleted, raising if already deleted."""
         cursor = await self.db.conn.execute(
             """
             UPDATE proxy_accesses
@@ -510,6 +522,7 @@ class ProxyAccessRepository:
             raise InvalidTransition(f"Proxy access {access_id} is already deleted")
 
     async def lifecycle_stats(self) -> ProxyLifecycleStats:
+        """Return aggregate proxy lifecycle counts broken down by type, status, and MTProto mode."""
         cursor = await self.db.conn.execute(
             """
             SELECT access_type, status, COUNT(*) AS cnt
@@ -578,6 +591,7 @@ class ProxyAccessRepository:
         )
 
     async def get_user_proxy_stats(self, owner_user_id: int) -> ProxyUserStats:
+        """Return sanitized proxy access stats for a single user, ordered by type and status."""
         cursor = await self.db.conn.execute(
             _SANITIZED_STATS_SELECT
             + """
@@ -595,6 +609,7 @@ class ProxyAccessRepository:
         return ProxyUserStats(owner_user_id=owner_user_id, accesses=accesses)
 
     async def list_proxy_accesses_for_admin(self, *, limit: int = 50, offset: int = 0) -> list[ProxyAccessStatsItem]:
+        """Return a paginated list of sanitized proxy access stats items for admin views, newest first."""
         cursor = await self.db.conn.execute(
             _SANITIZED_STATS_SELECT
             + """
@@ -607,6 +622,7 @@ class ProxyAccessRepository:
         return [item for row in rows if (item := _row_to_proxy_stats_item(row)) is not None]
 
     async def count_by_type_status(self) -> dict[ProxyAccessType, dict[ProxyAccessStatus, int]]:
+        """Return proxy access counts grouped by access type and status."""
         cursor = await self.db.conn.execute(
             """
             SELECT access_type, status, COUNT(*) AS cnt
@@ -623,6 +639,7 @@ class ProxyAccessRepository:
         return result
 
     async def count_users_with_active_proxies(self) -> int:
+        """Return the number of distinct users with at least one active proxy access."""
         row = await self.db.conn.execute_fetchone(
             """
             SELECT COUNT(DISTINCT owner_user_id) AS cnt
@@ -634,6 +651,7 @@ class ProxyAccessRepository:
         return int(row["cnt"]) if row is not None else 0
 
     async def latest_timestamps(self) -> dict[str, str | None]:
+        """Return the most recent issued and failed proxy access timestamps."""
         failed_statuses = (
             ProxyAccessStatus.APPLY_FAILED.value,
             ProxyAccessStatus.REVOKE_FAILED.value,
@@ -656,6 +674,7 @@ class ProxyAccessRepository:
         }
 
     async def get_admin_proxy_stats(self, *, user_limit: int = 12, user_offset: int = 0) -> ProxyAdminStats:
+        """Return aggregated proxy stats plus a paginated per-user breakdown for the admin dashboard."""
         type_status_counts = await self.count_by_type_status()
 
         def count(access_type: ProxyAccessType | None, statuses: set[ProxyAccessStatus]) -> int:

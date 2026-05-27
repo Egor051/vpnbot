@@ -20,6 +20,7 @@ def _clamp_offset(offset: int) -> int:
 
 
 def json_loads_dict(value: str, source: str) -> dict[str, object]:
+    """Parse a JSON object string, returning a sentinel dict on corruption."""
     try:
         data = json.loads(value)
     except json.JSONDecodeError:
@@ -29,6 +30,7 @@ def json_loads_dict(value: str, source: str) -> dict[str, object]:
 
 
 def enum_value(enum_cls: type[EnumT], value: str, field: str) -> EnumT:
+    """Convert a stored string into an enum member, raising on invalid values."""
     try:
         return enum_cls(value)
     except ValueError as exc:

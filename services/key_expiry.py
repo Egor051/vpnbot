@@ -44,6 +44,7 @@ class KeyExpiryService:
         self._backend_health = backend_health
 
     async def revoke_expired_keys(self) -> int:
+        """Revoke all active keys whose expiry has passed and notify their owners."""
         now = self.clock.now()
         expired = await self.vpn_keys.list_expired_active(now)
         count = 0
@@ -71,6 +72,7 @@ class KeyExpiryService:
         return count
 
     async def notify_expiring_keys(self) -> int:
+        """Send reminders to owners of keys expiring within the configured lead times."""
         if not self.notify_days or self.bot is None:
             return 0
         now = self.clock.now()
@@ -130,6 +132,7 @@ def _days_noun(days: int) -> str:
 
 
 async def key_expiry_loop(service: KeyExpiryService, interval: int) -> None:
+    """Run expiry notifications and revocations repeatedly at the given interval."""
     while True:
         try:
             notify_count = await service.notify_expiring_keys()

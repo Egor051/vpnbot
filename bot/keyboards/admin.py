@@ -10,6 +10,7 @@ from utils.formatting import format_user_display
 
 
 def access_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    """Build the approve/reject inline keyboard for an access request."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -21,6 +22,7 @@ def access_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
 
 
 def access_request_decision_confirm_keyboard(request_id: int, action: str) -> InlineKeyboardMarkup:
+    """Build the confirm/cancel keyboard for an access request decision."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_confirm"), callback_data=f"admin:{action}:confirm:{request_id}")],
@@ -30,6 +32,7 @@ def access_request_decision_confirm_keyboard(request_id: int, action: str) -> In
 
 
 def moderator_panel_keyboard() -> InlineKeyboardMarkup:
+    """Build the moderator panel inline keyboard."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_access_requests"), callback_data="admin:reqs")],
@@ -40,6 +43,7 @@ def moderator_panel_keyboard() -> InlineKeyboardMarkup:
 
 
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
+    """Build the full admin panel inline keyboard."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_access_requests"), callback_data="admin:reqs")],
@@ -60,6 +64,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
 
 
 def announcement_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Build the send/schedule/cancel keyboard for an announcement."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_send_now"), callback_data="admin:announce:send")],
@@ -70,6 +75,7 @@ def announcement_confirm_keyboard() -> InlineKeyboardMarkup:
 
 
 def announcement_batches_keyboard(batches: list[AnnouncementBatch]) -> InlineKeyboardMarkup:
+    """Build the keyboard listing announcement batches with status-based actions."""
     rows: list[list[InlineKeyboardButton]] = []
     for batch in batches:
         actions: list[InlineKeyboardButton] = []
@@ -88,6 +94,7 @@ def announcement_batches_keyboard(batches: list[AnnouncementBatch]) -> InlineKey
 
 
 def pending_requests_keyboard(requests: list[AccessRequest], page: int = 0, has_next: bool = False, total_pages: int = 1) -> InlineKeyboardMarkup:
+    """Build the paginated keyboard listing pending access requests."""
     rows: list[list[InlineKeyboardButton]] = []
     for request in requests:
         title = request.username or str(request.telegram_user_id)
@@ -118,6 +125,7 @@ def users_keyboard(
     nav_prefix: str = "admin:users",
     total_pages: int = 1,
 ) -> InlineKeyboardMarkup:
+    """Build the paginated keyboard listing users."""
     rows: list[list[InlineKeyboardButton]] = []
     for user in users:
         title = format_user_display(user.telegram_user_id, user.username)
@@ -147,6 +155,7 @@ def user_actions_keyboard(
     has_used_trial: bool = False,
     actor_role: UserRole = UserRole.SUPERADMIN,
 ) -> InlineKeyboardMarkup:
+    """Build the user management actions keyboard scoped to the actor's role."""
     rows: list[list[InlineKeyboardButton]] = []
     blocked = is_blocked_user(user)
     is_moderator_actor = actor_role == UserRole.MODERATOR
@@ -173,6 +182,7 @@ def user_actions_keyboard(
 
 
 def block_user_confirm_keyboard(user: User) -> InlineKeyboardMarkup:
+    """Build the confirm/cancel keyboard for blocking a user."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_block_confirm"), callback_data=f"admin:block:confirm:{user.telegram_user_id}")],
@@ -182,6 +192,7 @@ def block_user_confirm_keyboard(user: User) -> InlineKeyboardMarkup:
 
 
 def unblock_user_confirm_keyboard(user: User) -> InlineKeyboardMarkup:
+    """Build the confirm/cancel keyboard for unblocking a user."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_unblock_confirm"), callback_data=f"admin:unblock:confirm:{user.telegram_user_id}")],
@@ -191,6 +202,7 @@ def unblock_user_confirm_keyboard(user: User) -> InlineKeyboardMarkup:
 
 
 def admin_key_type_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Build the key type selection keyboard for issuing a key to a user."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data=f"admin:ctype:xray:{user_id}")],
@@ -201,6 +213,7 @@ def admin_key_type_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 
 def trial_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    """Build the approve/reject keyboard for a trial access request."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -212,6 +225,7 @@ def trial_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
 
 
 def admin_issue_users_keyboard(users: list[User], page: int = 0, has_next: bool = False, total_pages: int = 1) -> InlineKeyboardMarkup:
+    """Build the paginated keyboard for selecting a user to issue a key to."""
     rows: list[list[InlineKeyboardButton]] = []
     for user in users:
         title = format_user_display(user.telegram_user_id, user.username)

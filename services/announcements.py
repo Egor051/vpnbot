@@ -54,10 +54,12 @@ class AnnouncementService:
         self.batch_size = max(batch_size, 1)
 
     async def count_recipients(self, actor_user_id: int) -> int:
+        """Return the number of users eligible to receive an announcement."""
         await self.users.require_superadmin(actor_user_id)
         return await self.users_repo.count_announcement_recipients()
 
     async def list_incomplete_batches(self, actor_user_id: int, *, limit: int = 10) -> list[AnnouncementBatch]:
+        """Return announcement batches that have not yet completed, with refreshed counts."""
         await self.users.require_superadmin(actor_user_id)
         if self.announcements is None:
             return []
@@ -74,6 +76,7 @@ class AnnouncementService:
         from_chat_id: int,
         message_id: int,
     ) -> AnnouncementResult:
+        """Broadcast a message to all eligible recipients and return the delivery result."""
         await self.users.require_superadmin(actor_user_id)
         if self.announcements is None:
             return await self._send_without_ledger(
@@ -100,6 +103,7 @@ class AnnouncementService:
         announcement_id: int,
         retry_failed: bool = True,
     ) -> AnnouncementResult:
+        """Resume sending an unfinished announcement batch and return the delivery result."""
         await self.users.require_superadmin(actor_user_id)
         if self.announcements is None:
             raise RuntimeError("Announcement ledger is not configured")
@@ -122,6 +126,7 @@ class AnnouncementService:
         message_id: int,
         scheduled_at: str,
     ) -> AnnouncementBatch:
+        """Create an announcement batch scheduled for later delivery to all recipients."""
         await self.users.require_superadmin(actor_user_id)
         if self.announcements is None:
             raise RuntimeError("Announcement ledger is not configured")
@@ -136,6 +141,7 @@ class AnnouncementService:
         )
 
     async def check_and_send_due(self, bot: Bot) -> list[AnnouncementResult]:
+        """Send all scheduled announcement batches whose time has arrived."""
         if self.announcements is None:
             return []
         due = await self.announcements.list_due_scheduled_batches(self._now())
@@ -149,6 +155,7 @@ class AnnouncementService:
         return results
 
     async def cancel_batch(self, *, actor_user_id: int, announcement_id: int) -> AnnouncementCancelResult:
+        """Cancel an in-progress or scheduled announcement batch."""
         await self.users.require_superadmin(actor_user_id)
         if self.announcements is None:
             raise RuntimeError("Announcement ledger is not configured")

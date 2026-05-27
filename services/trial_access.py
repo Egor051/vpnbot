@@ -43,6 +43,7 @@ class TrialAccessService:
         self.bot = bot
 
     async def can_request_trial(self, telegram_user_id: int) -> bool:
+        """Return whether the user still has an unused trial quota."""
         reset_at = await self.users_repo.get_trial_quota_reset_at(telegram_user_id)
         used = await self.trial_requests.count_used_since_reset(telegram_user_id, reset_at)
         return used == 0
@@ -50,6 +51,7 @@ class TrialAccessService:
     async def create_trial_request(
         self, telegram_user_id: int, key_type: VpnKeyType
     ) -> TrialKeyRequest:
+        """Create a pending trial key request after verifying the user's quota."""
         # BEGIN IMMEDIATE serialises the quota check (SELECT) and the INSERT so
         # that two concurrent double-taps cannot both pass can_request_trial and
         # then both succeed at create.  The idx_trial_requests_one_pending
@@ -75,15 +77,18 @@ class TrialAccessService:
         return req
 
     async def get_request(self, request_id: int) -> TrialKeyRequest:
+        """Return a trial key request by id."""
         req = await self.trial_requests.get_by_id(request_id)
         if req is None:
             raise NotFound("Заявка на пробный доступ не найдена")
         return req
 
     async def count_pending_requests(self) -> int:
+        """Return the number of pending trial key requests."""
         return await self.trial_requests.count_pending()
 
     async def list_pending_requests(self, limit: int = 20, offset: int = 0) -> list[TrialKeyRequest]:
+        """Return a paginated list of pending trial key requests."""
         return await self.trial_requests.list_pending(limit=limit, offset=offset)
 
     async def approve_trial_request(
@@ -91,6 +96,7 @@ class TrialAccessService:
         actor_user_id: int,
         request_id: int,
     ) -> VpnKeyCreateResult:
+        """Approve a trial request, provision the key, and deliver it to the user."""
         req = await self.get_request(request_id)
         if req.status != "pending":
             raise AccessDenied("Заявка уже обработана")
@@ -142,6 +148,7 @@ class TrialAccessService:
         return result
 
     async def reject_trial_request(self, actor_user_id: int, request_id: int) -> None:
+        """Reject a pending trial request and notify the requester."""
         req = await self.get_request(request_id)
         if req.status != "pending":
             raise AccessDenied("Заявка уже обработана")
@@ -161,6 +168,7 @@ class TrialAccessService:
         await self._notify_user_rejected(req.telegram_user_id)
 
     async def admin_reset_trial_quota(self, actor_user_id: int, target_user_id: int) -> None:
+        """Reset a user's trial quota so they can request another trial."""
         now = self.clock.now()
         await self.users_repo.reset_trial_quota(target_user_id, now)
         await self.audit.write(

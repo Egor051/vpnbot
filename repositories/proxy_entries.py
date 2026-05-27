@@ -35,6 +35,7 @@ class ProxyRepository:
         self.db = db
 
     async def list_active(self, limit: int = 10, offset: int = 0) -> list[ProxyEntry]:
+        """Return a paginated list of active proxy entries, ordered by id."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM proxy_entries
@@ -67,6 +68,7 @@ class ProxyRepository:
         note: str | None,
         now: str,
     ) -> ProxyEntry:
+        """Insert a new active proxy entry and return it."""
         cursor = await self.db.conn.execute(
             """
             INSERT INTO proxy_entries (proxy_type, host, port, login, password, note, status, created_at, updated_at)
@@ -82,11 +84,13 @@ class ProxyRepository:
         return entry
 
     async def count(self) -> int:
+        """Return the total number of proxy entries."""
         cursor = await self.db.conn.execute("SELECT COUNT(*) AS cnt FROM proxy_entries")
         row = await cursor.fetchone()
         return int(row["cnt"]) if row is not None else 0
 
     async def update_note(self, proxy_id: int, note: str | None, now: str) -> None:
+        """Update the note text for a proxy entry."""
         await self.db.conn.execute(
             "UPDATE proxy_entries SET note = ?, updated_at = ? WHERE id = ?",
             (note, now, proxy_id),

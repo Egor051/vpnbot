@@ -45,6 +45,7 @@ class UserRepository:
         self.db = db
 
     async def get_by_id(self, telegram_user_id: int) -> User | None:
+        """Return a user by Telegram user id, or None if not found."""
         cursor = await self.db.conn.execute(
             "SELECT * FROM users WHERE telegram_user_id = ?",
             (telegram_user_id,),
@@ -53,6 +54,7 @@ class UserRepository:
         return _row_to_user(row)
 
     async def upsert_profile(self, profile: TelegramUserProfile, role: UserRole, now: str) -> User:
+        """Insert or update a user's profile and return the stored user."""
         await self.db.conn.execute(
             """
             INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at)
@@ -78,6 +80,7 @@ class UserRepository:
         return user
 
     async def create_admin_placeholders(self, admin_ids: Iterable[int], now: str) -> None:
+        """Insert placeholder superadmin rows for the given admin ids if absent."""
         rows = [(admin_id, UserRole.SUPERADMIN.value, now, now) for admin_id in admin_ids]
         if not rows:
             return
@@ -91,6 +94,7 @@ class UserRepository:
             )
 
     async def set_role(self, telegram_user_id: int, role: UserRole, now: str, blocked_at: str | None = None) -> None:
+        """Set a user's role and blocked timestamp, raising NotFound if absent."""
         cursor = await self.db.conn.execute(
             """
             UPDATE users
@@ -104,11 +108,13 @@ class UserRepository:
             raise NotFound("Пользователь не найден")
 
     async def count_users(self) -> int:
+        """Return the total number of users."""
         cursor = await self.db.conn.execute("SELECT COUNT(*) AS cnt FROM users")
         row = await cursor.fetchone()
         return int(row["cnt"]) if row is not None else 0
 
     async def list_users(self, limit: int = 20, offset: int = 0) -> list[User]:
+        """Return a paginated list of users, most recently updated first."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM users
@@ -121,6 +127,7 @@ class UserRepository:
         return [user for row in rows if (user := _row_to_user(row)) is not None]
 
     async def count_announcement_recipients(self) -> int:
+        """Return the number of non-blocked users eligible to receive announcements."""
         cursor = await self.db.conn.execute(
             f"""
             SELECT COUNT(*) AS cnt
@@ -134,6 +141,7 @@ class UserRepository:
         return int(row["cnt"]) if row is not None else 0
 
     async def list_announcement_recipients_after(self, last_seen_id: int | None, limit: int = 100) -> list[User]:
+        """Return announcement-eligible users keyset-paginated by user id after last_seen_id."""
         safe_limit = _clamp_limit(limit)
         if last_seen_id is None:
             cursor = await self.db.conn.execute(
@@ -162,6 +170,7 @@ class UserRepository:
         return [user for row in rows if (user := _row_to_user(row)) is not None]
 
     async def update_note(self, telegram_user_id: int, note: str | None, now: str) -> None:
+        """Update a user's note, raising NotFound if the user is absent."""
         cursor = await self.db.conn.execute(
             "UPDATE users SET note = ?, updated_at = ? WHERE telegram_user_id = ?",
             (note, now, telegram_user_id),
@@ -171,6 +180,7 @@ class UserRepository:
             raise NotFound("Пользователь не найден")
 
     async def reset_trial_quota(self, telegram_user_id: int, now: str) -> None:
+        """Reset a user's trial quota by recording the current reset time."""
         await self.db.conn.execute(
             "UPDATE users SET trial_quota_reset_at = ?, updated_at = ? WHERE telegram_user_id = ?",
             (now, now, telegram_user_id),
@@ -178,6 +188,7 @@ class UserRepository:
         await self.db.commit()
 
     async def get_trial_quota_reset_at(self, telegram_user_id: int) -> str | None:
+        """Return a user's trial quota reset timestamp, or None if unset."""
         cursor = await self.db.conn.execute(
             "SELECT trial_quota_reset_at FROM users WHERE telegram_user_id = ?",
             (telegram_user_id,),
@@ -188,6 +199,7 @@ class UserRepository:
         return row["trial_quota_reset_at"]  # type: ignore[no-any-return]
 
     async def list_by_ids(self, telegram_user_ids: list[int]) -> dict[int, User]:
+        """Return users for the given Telegram user ids keyed by user id."""
         if not telegram_user_ids:
             return {}
         placeholders = ",".join("?" for _ in telegram_user_ids)

@@ -16,6 +16,7 @@ class BackupAdapter:
         self.keep_last = max(0, keep_last)
 
     def create_backup(self, target: Path) -> Path:
+        """Create a timestamped private backup copy of the target file."""
         if not target.exists():
             raise AdapterError(f"Файл не найден для backup: {target}")
         stamp = self.clock.now().replace(":", "").replace("+", "_").replace(".", "")
@@ -32,6 +33,7 @@ class BackupAdapter:
         return backup_path
 
     def restore(self, backup_path: Path, target: Path, mode_from: Path | None = None) -> None:
+        """Atomically restore the target file from a backup copy."""
         if not backup_path.exists():
             raise AdapterError(f"Backup не найден: {backup_path}")
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -51,6 +53,7 @@ class BackupAdapter:
             tmp_path.unlink(missing_ok=True)
 
     def atomic_write_text(self, target: Path, content: str, mode_from: Path | None = None) -> None:
+        """Atomically write text content to the target file."""
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = target.with_name(f".{target.name}.{time.time_ns()}.{secrets.token_urlsafe(16)}.tmp")
         data = content.encode("utf-8")
@@ -69,6 +72,7 @@ class BackupAdapter:
             tmp_path.unlink(missing_ok=True)
 
     def cleanup_old_backups(self, directory: Path, pattern: str = "*.bak", keep_last: int = 20) -> int:
+        """Delete old backup files, keeping only the most recent ones."""
         backups = sorted(
             (path for path in directory.glob(pattern) if path.is_file()),
             key=lambda path: path.stat().st_mtime,

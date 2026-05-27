@@ -8,6 +8,7 @@ from models.enums import VpnKeyStatus, VpnKeyType
 
 
 def create_key_keyboard() -> InlineKeyboardMarkup:
+    """Build the key type selection keyboard for creating a new key."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data="keys:create:xray")],
@@ -25,6 +26,7 @@ def keys_list_keyboard(
     total_pages: int = 1,
     back_data: str = "menu:main",
 ) -> InlineKeyboardMarkup:
+    """Build the paginated keyboard listing keys with per-key actions."""
     rows: list[list[InlineKeyboardButton]] = []
     for key in keys:
         prefix = "Xray" if key.key_type == VpnKeyType.XRAY else "AWG"
@@ -69,6 +71,7 @@ def keys_list_keyboard(
 
 
 def key_actions_keyboard(key: VpnKey, owner_user_id: int | None = None, page: int = 0) -> InlineKeyboardMarkup:
+    """Build the actions keyboard for a single key based on its status."""
     rows: list[list[InlineKeyboardButton]] = []
     if key.status == VpnKeyStatus.ACTIVE:
         rows.append([InlineKeyboardButton(text=t("btn_show_config"), callback_data=f"key:show:{key.id}")])
@@ -86,6 +89,7 @@ def key_actions_keyboard(key: VpnKey, owner_user_id: int | None = None, page: in
 
 
 def confirm_keyboard(action: str, key_id: int, owner_user_id: int | None = None, page: int = 0) -> InlineKeyboardMarkup:
+    """Build a confirm/cancel keyboard for an action on a key."""
     confirm_data = f"confirm:{action}:{key_id}"
     cancel_data = f"key:open:{key_id}"
     if owner_user_id is not None:
@@ -100,6 +104,7 @@ def confirm_keyboard(action: str, key_id: int, owner_user_id: int | None = None,
 
 
 def mtu_choice_keyboard() -> InlineKeyboardMarkup:
+    """Build the MTU value selection keyboard."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_mtu_recommended"), callback_data="mtu:1280")],
@@ -112,6 +117,7 @@ def mtu_choice_keyboard() -> InlineKeyboardMarkup:
 
 
 def after_key_created_keyboard(key: VpnKey) -> InlineKeyboardMarkup:
+    """Build the keyboard shown after a key is created."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_open_key"), callback_data=f"key:open:{key.id}")],
@@ -122,6 +128,7 @@ def after_key_created_keyboard(key: VpnKey) -> InlineKeyboardMarkup:
 
 
 def expiry_choice_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Build the key expiry duration selection keyboard."""
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text=t("btn_permanent"), callback_data="expiry:permanent")],
         [InlineKeyboardButton(text=t("btn_7_days"), callback_data="expiry:7")],
@@ -133,6 +140,7 @@ def expiry_choice_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
 
 
 def trial_key_show_keyboard(key_id: int) -> InlineKeyboardMarkup:
+    """Build the keyboard to reveal a trial key's config."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_get_config"), callback_data=f"trial:show:{key_id}")],
@@ -141,6 +149,7 @@ def trial_key_show_keyboard(key_id: int) -> InlineKeyboardMarkup:
 
 
 def request_trial_keyboard() -> InlineKeyboardMarkup:
+    """Build the keyboard to request a trial access."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_request_trial"), callback_data="trial:request")],
@@ -149,6 +158,7 @@ def request_trial_keyboard() -> InlineKeyboardMarkup:
 
 
 def trial_protocol_keyboard() -> InlineKeyboardMarkup:
+    """Build the protocol selection keyboard for a trial key."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data="trial:proto:xray")],
@@ -159,6 +169,7 @@ def trial_protocol_keyboard() -> InlineKeyboardMarkup:
 
 
 def after_key_deleted_keyboard() -> InlineKeyboardMarkup:
+    """Build the keyboard shown after a key is deleted."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_my_keys"), callback_data="keys:list")],

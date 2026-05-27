@@ -42,6 +42,7 @@ MTPROTO_STARTUP_RECONCILE_STATUSES = {
 
 
 def mtproto_secret_fingerprint(secret: str) -> str:
+    """Return a short stable fingerprint for an MTProto secret."""
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
 
 
@@ -69,6 +70,7 @@ class MtProtoService:
         self._apply_lock = asyncio.Lock()
 
     async def issue_mtproto_proxy(self, actor_user_id: int, profile: TelegramUserProfile) -> ProxyAccess:
+        """Issue or return an MTProto proxy access for the user in the configured mode."""
         self._ensure_enabled()
         self.backend_health.require_mutation_allowed(ProxyAccessType.MTPROTO)
         if self.settings.mtproto_mode == "managed":
@@ -76,6 +78,7 @@ class MtProtoService:
         return await self._issue_static(actor_user_id, profile)
 
     async def get_mtproto_proxy_config(self, actor_user_id: int) -> ProxyAccess:
+        """Return the user's active MTProto proxy access with current connection details."""
         await self.users.require_approved_or_admin(actor_user_id)
         access = await self._active_access(actor_user_id)
         if access is None:
@@ -85,6 +88,7 @@ class MtProtoService:
         return self._with_current_payload(await self._get_access(access.id))
 
     async def revoke_mtproto_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
+        """Revoke an MTProto proxy access, removing its managed secret when applicable."""
         await self.users.require_superadmin(actor_user_id)
         access = await self._get_access(access_id)
         if access.access_type != ProxyAccessType.MTPROTO:
@@ -97,6 +101,7 @@ class MtProtoService:
         return await self._revoke_managed(access, actor_user_id, reason)
 
     async def delete_mtproto_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
+        """Revoke and then hard-delete an MTProto proxy access."""
         await self.users.require_superadmin(actor_user_id)
         access = await self.revoke_mtproto_proxy(actor_user_id, access_id, reason=reason)
         if access.status == ProxyAccessStatus.DELETED:
@@ -115,16 +120,19 @@ class MtProtoService:
         return await self._get_access(access.id)
 
     async def list_user_mtproto_accesses(self, actor_user_id: int) -> list[ProxyAccess]:
+        """Return the user's MTProto proxy accesses."""
         await self.users.require_approved_or_admin(actor_user_id)
         accesses = await self.accesses.list_by_owner(actor_user_id)
         return [access for access in accesses if access.access_type == ProxyAccessType.MTPROTO]
 
     async def runtime_status(self) -> MtProxyRuntimeStatus | None:
+        """Return the managed MTProxy runtime status, or None when not in managed mode."""
         if self.settings.mtproto_mode != "managed" or self.adapter is None:
             return None
         return await self.adapter.runtime_status()
 
     async def runtime_secret_count(self) -> int | None:
+        """Return the number of managed secrets in the runtime, or None when unavailable."""
         if self.settings.mtproto_mode != "managed" or self.adapter is None:
             return None
         try:
@@ -133,6 +141,7 @@ class MtProtoService:
             return None
 
     async def reconcile_mtproto_state(self) -> dict[str, int]:
+        """Reconcile pending and drifted managed MTProto secrets against the runtime on startup."""
         if not self.settings.mtproto_enabled or self.settings.mtproto_mode != "managed" or self.adapter is None:
             return {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "recovered": 0, "failed": 0, "fatal": 0}
         summary = {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "recovered": 0, "failed": 0, "fatal": 0}

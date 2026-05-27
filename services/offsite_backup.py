@@ -39,6 +39,7 @@ class OffsiteBackupService:
         return bool(self._encryption_key)
 
     async def create_encrypted_backup(self) -> tuple[bytes, str]:
+        """Create an encrypted snapshot of the database and return it with a filename."""
         if not self._encryption_key:
             raise RuntimeError("OFFSITE_BACKUP_ENCRYPTION_KEY не настроен")
 
@@ -104,6 +105,7 @@ class OffsiteBackupService:
             src.close()
 
     async def send_to_admins(self, bot: Bot, admin_ids: frozenset[int]) -> dict[str, int]:
+        """Send an encrypted backup to all admins and return delivery counts."""
         encrypted, filename = await self.create_encrypted_backup()
         success = 0
         failed = 0
@@ -130,6 +132,7 @@ async def offsite_backup_loop(
     admin_ids: frozenset[int],
     interval: int,
 ) -> None:
+    """Send encrypted offsite backups to admins repeatedly at the given interval."""
     # Short startup delay so the bot finishes initialising before the first backup.
     await asyncio.sleep(60)
     while True:

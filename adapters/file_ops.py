@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def fsync_parent(path: Path) -> None:
+    """Fsync the parent directory of the given path to persist renames."""
     if os.name != "posix":
         return
     flags = os.O_RDONLY
@@ -26,10 +27,12 @@ def fsync_parent(path: Path) -> None:
 
 
 async def async_fsync_parent(path: Path) -> None:
+    """Fsync the parent directory of the given path off the event loop."""
     await asyncio.to_thread(fsync_parent, path)
 
 
 def copy_stat(source: Path, target: Path, *, suppress_chown_warning: bool = False) -> None:
+    """Copy permission, timestamp, and ownership metadata from source to target."""
     shutil.copystat(source, target)
     if os.name != "posix":
         return
@@ -45,4 +48,5 @@ def copy_stat(source: Path, target: Path, *, suppress_chown_warning: bool = Fals
 
 
 async def async_copy_stat(source: Path, target: Path, *, suppress_chown_warning: bool = False) -> None:
+    """Copy file metadata from source to target off the event loop."""
     await asyncio.to_thread(copy_stat, source, target, suppress_chown_warning=suppress_chown_warning)

@@ -54,6 +54,7 @@ class UserService:
         self._state_clearer: StateClearer | None = None
 
     def attach_key_management(self, vpn_keys: VpnKeyRepository, revokers: dict[VpnKeyType, KeyRevoker]) -> None:
+        """Wire in the VPN key repository and per-type revokers."""
         self._vpn_keys = vpn_keys
         self._key_revokers = dict(revokers)
 
@@ -62,16 +63,20 @@ class UserService:
         proxy_accesses: ProxyAccessRepository,
         revokers: dict[ProxyAccessType, ProxyRevoker],
     ) -> None:
+        """Wire in the proxy access repository and per-type revokers."""
         self._proxy_accesses = proxy_accesses
         self._proxy_revokers = dict(revokers)
 
     def attach_state_clearer(self, clearer: StateClearer) -> None:
+        """Wire in the callback used to clear a user's FSM state."""
         self._state_clearer = clearer
 
     async def bootstrap_admins(self) -> None:
+        """Create placeholder records for all configured admin IDs."""
         await self.users.create_admin_placeholders(self.settings.admin_ids, self.clock.now())
 
     async def clear_user_state(self, telegram_user_id: int) -> None:
+        """Clear the user's FSM state, ignoring failures."""
         if self._state_clearer is None:
             return
         try:
@@ -80,6 +85,7 @@ class UserService:
             logger.warning("Не удалось очистить FSM-состояние пользователя %s", telegram_user_id, exc_info=True)
 
     async def ensure_user(self, profile: TelegramUserProfile) -> User:
+        """Create or update the user record from a Telegram profile and return it."""
         existing = await self.users.get_by_id(profile.telegram_user_id)
         if profile.telegram_user_id in self.settings.admin_ids:
             role = UserRole.SUPERADMIN
@@ -94,24 +100,28 @@ class UserService:
         return user
 
     async def get_user(self, telegram_user_id: int) -> User:
+        """Return the user by Telegram ID or raise NotFound."""
         user = await self.users.get_by_id(telegram_user_id)
         if user is None:
             raise NotFound("Пользователь не найден")
         return user
 
     async def require_superadmin(self, actor_user_id: int) -> User:
+        """Return the actor only if they are a superadmin, else raise AccessDenied."""
         user = await self.get_user(actor_user_id)
         if user.role != UserRole.SUPERADMIN:
             raise AccessDenied("Недостаточно прав")
         return user
 
     async def require_moderator_or_admin(self, actor_user_id: int) -> User:
+        """Return the actor only if they are a moderator or superadmin."""
         user = await self.get_user(actor_user_id)
         if user.role in {UserRole.SUPERADMIN, UserRole.MODERATOR}:
             return user
         raise AccessDenied("Недостаточно прав")
 
     async def require_approved_or_admin(self, actor_user_id: int) -> User:
+        """Return the actor only if they are approved, a moderator, or a superadmin."""
         user = await self.get_user(actor_user_id)
         if user.role in {UserRole.SUPERADMIN, UserRole.MODERATOR}:
             return user
@@ -122,10 +132,12 @@ class UserService:
         return user
 
     async def can_manage_owner(self, actor_user_id: int, owner_user_id: int) -> bool:
+        """Return whether the actor may manage resources owned by the given user."""
         user = await self.get_user(actor_user_id)
         return user.role == UserRole.SUPERADMIN or actor_user_id == owner_user_id
 
     async def set_role(self, actor_user_id: int, target_user_id: int, role: UserRole) -> None:
+        """Change a target user's role, enforcing superadmin protections."""
         await self.require_superadmin(actor_user_id)
         if target_user_id in self.settings.admin_ids and role != UserRole.SUPERADMIN:
             raise InvalidOperation("Нельзя изменить роль superadmin из ADMIN_IDS")
@@ -153,6 +165,7 @@ class UserService:
         *,
         requested_at: str,
     ) -> tuple[User, bool, bool]:
+        """Approve a user's access request and return the user with status flags."""
         await self.require_moderator_or_admin(actor_user_id)
         current = await self.get_user(target_user_id)
         if target_user_id in self.settings.admin_ids or current.role == UserRole.SUPERADMIN:
@@ -169,6 +182,7 @@ class UserService:
         return await self.get_user(target_user_id), True, repeat_after_block
 
     async def reject_access_request_user(self, actor_user_id: int, target_user_id: int) -> tuple[User | None, bool]:
+        """Reject a user's pending access request."""
         await self.require_moderator_or_admin(actor_user_id)
         user = await self.users.get_by_id(target_user_id)
         if user is None:
@@ -185,6 +199,7 @@ class UserService:
         target_user_id: int,
         revoke_active_keys: bool = True,
     ) -> BlockUserResult:
+        """Block a user and optionally revoke their active keys and proxy accesses."""
         actor = await self.require_moderator_or_admin(actor_user_id)
         async with self.user_locks.lock(target_user_id):
             if target_user_id in self.settings.admin_ids:
@@ -325,6 +340,7 @@ class UserService:
                 return
 
     async def unblock_user(self, actor_user_id: int, target_user_id: int) -> User:
+        """Unblock a user by restoring their approved role."""
         await self.require_moderator_or_admin(actor_user_id)
         if target_user_id in self.settings.admin_ids:
             raise InvalidOperation("Нельзя изменить роль superadmin из ADMIN_IDS")
@@ -344,6 +360,7 @@ class UserService:
         return await self.get_user(target_user_id)
 
     async def inspect_unblock_risk(self, actor_user_id: int, target_user_id: int) -> UnblockUserWarning:
+        """Assess whether unblocking a user may leave residual access and return a warning."""
         await self.require_moderator_or_admin(actor_user_id)
         if target_user_id in self.settings.admin_ids:
             raise InvalidOperation("Нельзя изменить роль superadmin из ADMIN_IDS")
@@ -389,14 +406,17 @@ class UserService:
         )
 
     async def count_users(self, actor_user_id: int) -> int:
+        """Return the total number of registered users."""
         await self.require_moderator_or_admin(actor_user_id)
         return await self.users.count_users()
 
     async def list_users(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[User]:
+        """Return a paginated list of users."""
         await self.require_moderator_or_admin(actor_user_id)
         return await self.users.list_users(limit=limit, offset=offset)
 
     async def count_keys_for_users(self, actor_user_id: int, user_ids: list[int]) -> dict[int, int]:
+        """Return the key count per user for the given user IDs."""
         await self.require_moderator_or_admin(actor_user_id)
         if self._vpn_keys is None:
             return {}

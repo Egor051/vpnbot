@@ -26,6 +26,7 @@ class AuditLogRepository:
         details: dict[str, Any] | None,
         now: str,
     ) -> None:
+        """Insert an audit log entry, truncating oversized details to a placeholder."""
         details_json = json.dumps(details or {}, ensure_ascii=False, separators=(",", ":"))
         if len(details_json.encode()) > _DETAILS_JSON_MAX_BYTES:
             details_json = json.dumps({"truncated": True}, ensure_ascii=False)
@@ -46,11 +47,13 @@ class AuditLogRepository:
         await self.db.commit()
 
     async def count_all(self) -> int:
+        """Return the total number of audit log entries."""
         cursor = await self.db.conn.execute("SELECT COUNT(*) AS cnt FROM audit_log")
         row = await cursor.fetchone()
         return int(row["cnt"]) if row is not None else 0
 
     async def list_recent(self, limit: int = 20, offset: int = 0) -> list[dict[str, object]]:
+        """Return a paginated list of recent audit log entries, newest first."""
         cursor = await self.db.conn.execute(
             """
             SELECT id, actor_user_id, action, entity_type, entity_id, details_json, created_at
@@ -82,6 +85,7 @@ class AuditLogRepository:
         actions: set[str] | None = None,
         limit: int = 10,
     ) -> list[dict[str, object]]:
+        """Return recent audit log entries for a specific entity, optionally filtered by action."""
         safe_limit = max(1, min(limit, 50))
         params: list[object] = [entity_type.value, str(entity_id)]
         action_sql = ""
@@ -117,6 +121,7 @@ class AuditLogRepository:
         ]
 
     async def prune_older_than(self, cutoff: str) -> int:
+        """Delete audit log entries older than the cutoff and return the number removed."""
         # SQLite datetime() returns NULL for ISO-8601 strings with the '+00:00'
         # timezone offset (e.g. '2024-01-01T12:00:00+00:00'), so the WHERE
         # clause would always be false and no rows would ever be deleted.

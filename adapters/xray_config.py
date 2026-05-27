@@ -93,6 +93,7 @@ class XrayConfigAdapter:
         flow: str,
         manage_short_id: bool,
     ) -> XrayClientApplyResult:
+        """Add a VLESS/REALITY client to the inbound and apply the config."""
         lock_dir = self.helper_staging_dir if self._using_helper() else None
         async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
             if not self._using_helper():
@@ -139,6 +140,7 @@ class XrayConfigAdapter:
         short_id: str | None,
         remove_short_id: bool,
     ) -> None:
+        """Remove a client from the inbound and apply the config."""
         lock_dir = self.helper_staging_dir if self._using_helper() else None
         async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
             if not self._using_helper():
@@ -183,6 +185,7 @@ class XrayConfigAdapter:
                 self._cleanup_temp(temp_path)
 
     async def ensure_short_id(self, short_id: str) -> bool:
+        """Add the short id to the inbound if missing and apply the config."""
         if not short_id:
             return False
         lock_dir = self.helper_staging_dir if self._using_helper() else None
@@ -208,17 +211,20 @@ class XrayConfigAdapter:
                 self._cleanup_temp(temp_path)
 
     def find_client(self, *, uuid_value: str | None = None, email_label: str | None = None) -> dict[str, Any] | None:
+        """Find a client in the inbound matching the given UUID or email."""
         config = self._read_config(self.config_path)
         inbound = self._target_inbound(config)
         found = self._find_client_in_list(self._clients(inbound), uuid_value=uuid_value, email_label=email_label)
         return dict(found) if found is not None else None
 
     def list_clients(self) -> list[dict[str, Any]]:
+        """Return all clients configured on the target inbound."""
         config = self._read_config(self.config_path)
         inbound = self._target_inbound(config)
         return [dict(client) for client in self._clients(inbound) if isinstance(client, dict)]
 
     def list_short_ids(self) -> set[str]:
+        """Return the set of REALITY short ids configured on the inbound."""
         config = self._read_config(self.config_path)
         inbound = self._target_inbound(config)
         short_ids = self._reality_settings(inbound).get("shortIds")

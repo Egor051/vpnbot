@@ -78,6 +78,7 @@ class AwgService:
         self._lock = asyncio.Lock()
 
     async def create_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
+        """Create a new AWG key for the owner."""
         return await self.create_awg_key(actor_user_id, owner, note)
 
     async def create_awg_key(
@@ -89,6 +90,7 @@ class AwgService:
         allow_pending_owner: bool = False,
         mtu: int | None = None,
     ) -> VpnKeyCreateResult:
+        """Provision a new AWG peer and persist its key, returning the client config."""
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         self.settings.validate_awg_ready()
         self._ensure_ipv4_network()
@@ -185,9 +187,11 @@ class AwgService:
                 return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key, viewer_user_id=actor_user_id))
 
     async def revoke_key(self, actor_user_id: int, key_id: int) -> VpnKey:
+        """Revoke an AWG key by id."""
         return await self.revoke_awg_key(actor_user_id, key_id)
 
     async def revoke_awg_key(self, actor_user_id: int, key_id: int) -> VpnKey:
+        """Remove the AWG peer and mark the key revoked."""
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         async with self._lock:
             key = await self._get_awg_key_for_manage(actor_user_id, key_id)
@@ -250,9 +254,11 @@ class AwgService:
             return await self._get_key(key_id)
 
     async def delete_key(self, actor_user_id: int, key_id: int) -> None:
+        """Delete an AWG key by id."""
         await self.delete_awg_key(actor_user_id, key_id)
 
     async def delete_awg_key(self, actor_user_id: int, key_id: int) -> None:
+        """Remove the AWG peer and hard-delete the key with its stats."""
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         async with self._lock:
             key = await self._get_awg_key_for_manage(actor_user_id, key_id)
@@ -281,6 +287,7 @@ class AwgService:
             )
 
     async def startup_reconcile(self) -> dict[str, int]:
+        """Reconcile pending and drifted AWG keys against the server on startup."""
         summary = {"checked": 0, "recovered": 0, "failed": 0}
         async with self._lock:
             last_id = 0
@@ -312,9 +319,11 @@ class AwgService:
         return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
+        """Return the formatted AWG config for the key."""
         return await self.get_awg_client_config(actor_user_id, key_id)
 
     async def get_awg_client_config(self, actor_user_id: int, key_id: int) -> str:
+        """Return the formatted AWG client config for an active key."""
         async with self._lock:  # Prevents returning config for a key being concurrently deleted
             key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
             if key.status != VpnKeyStatus.ACTIVE:
@@ -330,6 +339,7 @@ class AwgService:
             return self._format_config(key, viewer_user_id=actor_user_id)
 
     async def get_awg_client_config_plain(self, actor_user_id: int, key_id: int, audit: bool = True) -> str:
+        """Return the raw AWG client config text for an active key."""
         async with self._lock:  # Prevents returning config for a key being concurrently deleted
             key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
             if key.status != VpnKeyStatus.ACTIVE:
@@ -346,6 +356,7 @@ class AwgService:
             return self._client_config(key)
 
     async def get_awg_client_config_for_owner(self, owner_user_id: int, key_id: int) -> str:
+        """Return the raw AWG client config text for a key owned by the requester."""
         async with self._lock:  # Prevents returning config for a key being concurrently deleted
             key = await self._get_key(key_id)
             if key.key_type != VpnKeyType.AWG:
@@ -358,6 +369,7 @@ class AwgService:
             return self._client_config(key)
 
     async def get_awg_formatted_config_for_owner(self, owner_user_id: int, key_id: int) -> str:
+        """Return the formatted AWG config for a key owned by the requester."""
         async with self._lock:  # Prevents returning config for a key being concurrently deleted
             key = await self._get_key(key_id)
             if key.key_type != VpnKeyType.AWG:
@@ -376,6 +388,7 @@ class AwgService:
         limit: int = 20,
         offset: int = 0,
     ) -> list[VpnKey]:
+        """Return a paginated list of a user's AWG keys."""
         return await self.list_user_awg_keys(actor_user_id, owner_user_id, limit=limit, offset=offset)
 
     async def list_user_awg_keys(
@@ -385,6 +398,7 @@ class AwgService:
         limit: int = 20,
         offset: int = 0,
     ) -> list[VpnKey]:
+        """Return a paginated list of AWG keys for a user, enforcing ownership rules."""
         actor = await self.users.require_approved_or_admin(actor_user_id)
         target = owner_user_id or actor_user_id
         if actor.role != UserRole.SUPERADMIN and target != actor_user_id:
@@ -392,6 +406,7 @@ class AwgService:
         return await self.vpn_keys.list_by_owner_and_type(target, VpnKeyType.AWG, limit=limit, offset=offset)
 
     async def update_awg_note(self, actor_user_id: int, key_id: int, note: str | None) -> VpnKey:
+        """Update the note on an AWG key owned by the requester."""
         async with self._lock:  # Prevents note update racing with concurrent key deletion
             key = await self._get_awg_key_for_manage(actor_user_id, key_id, allow_read=True)
             if key.owner_user_id != actor_user_id:
@@ -408,6 +423,7 @@ class AwgService:
             return await self._get_key(key_id)
 
     async def reconcile_key_status(self, actor_user_id: int, key_id: int) -> VpnKey:
+        """Reconcile a single AWG key's status against the server peer state."""
         await self.users.require_superadmin(actor_user_id)
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         key = await self._get_key(key_id)

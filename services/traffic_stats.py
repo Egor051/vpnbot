@@ -36,6 +36,7 @@ class TrafficStatsService:
         self._refresh_lock = asyncio.Lock()
 
     async def refresh_for_actor(self, actor_user_id: int, key_id: int) -> KeyTrafficStatsView:
+        """Refresh and return traffic stats for a single key the actor may view."""
         actor = await self.users.require_approved_or_admin(actor_user_id)
         key = await self.vpn_keys.get_by_id(key_id)
         if key is None or key.status == VpnKeyStatus.DELETED:
@@ -48,15 +49,18 @@ class TrafficStatsService:
         return views[0]
 
     async def count_for_superadmin(self, actor_user_id: int) -> int:
+        """Return the number of keys that support traffic stats; requires superadmin."""
         await self.users.require_superadmin(actor_user_id)
         return await self.vpn_keys.count_traffic_supported()
 
     async def list_for_superadmin(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[KeyTrafficStatsView]:
+        """Return a paginated, refreshed list of traffic stats for all keys; requires superadmin."""
         await self.users.require_superadmin(actor_user_id)
         keys = await self.vpn_keys.list_traffic_supported(limit=limit, offset=offset)
         return await self.refresh_views(keys)
 
     async def refresh_views(self, keys: list[VpnKey]) -> list[KeyTrafficStatsView]:
+        """Sample backend counters for the given keys and return updated stats views."""
         owner_ids: set[int] = set()
         key_ids: list[int] = []
         for key in keys:
@@ -94,6 +98,7 @@ class TrafficStatsService:
         return views
 
     async def refresh_all_awg(self) -> None:
+        """Refresh traffic stats for all AWG keys whose peer may still exist."""
         # Include all statuses where the peer may still exist in the AWG runtime.
         statuses = {
             VpnKeyStatus.ACTIVE,
@@ -116,6 +121,7 @@ class TrafficStatsService:
             after_id = batch[-1].id
 
     async def cached_for_keys(self, keys: list[VpnKey]) -> dict[int, TrafficStats]:
+        """Return cached traffic stats for the given keys without refreshing."""
         return await self.stats.list_by_key_ids([key.id for key in keys])
 
     async def _load_awg_transfers(self, keys: list[VpnKey]) -> tuple[dict[str, tuple[int, int]], str | None]:

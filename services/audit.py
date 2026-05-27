@@ -92,6 +92,7 @@ class AuditService:
             )
 
     async def count_all(self, actor_user_id: int) -> int:
+        """Return the total number of audit records; requires superadmin."""
         if self.users is None:
             raise RuntimeError("AuditService.count_all requires a UserRepository; pass users= to AuditService()")
         user = await self.users.get_by_id(actor_user_id)
@@ -116,6 +117,7 @@ class AuditService:
         actions: set[str] | None = None,
         limit: int = 10,
     ) -> list[dict[str, object]]:
+        """Return recent audit log entries for a specific entity, optionally filtered by action."""
         return await self.audit_logs.list_recent_for_entity(
             entity_type=entity_type,
             entity_id=entity_id,

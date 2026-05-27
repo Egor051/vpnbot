@@ -17,6 +17,7 @@ router = Router()
 
 @router.callback_query(lambda callback: callback.data == "cancel")
 async def cancel_callback(callback: CallbackQuery, state: FSMContext, services: Services | None = None) -> None:
+    """Cancel the current FSM flow and return the user to the relevant screen."""
     if not await ensure_private_callback(callback):
         return
     data = await state.get_data()
@@ -53,6 +54,7 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext, services: 
 
 @router.callback_query()
 async def unknown_callback(callback: CallbackQuery) -> None:
+    """Reject any unrecognized callback as stale."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback, t("action_stale"), show_alert=True)

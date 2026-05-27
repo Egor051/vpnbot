@@ -68,6 +68,7 @@ class VpnKeyRepository:
         client_ip: str | None = None,
         expires_at: str | None = None,
     ) -> VpnKey:
+        """Insert a new VPN key in pending-apply status and return it."""
         cursor = await self.db.conn.execute(
             """
             INSERT INTO vpn_keys (
@@ -120,6 +121,7 @@ class VpnKeyRepository:
         client_ip: str | None = None,
         expires_at: str | None = None,
     ) -> VpnKey:
+        """Create a new VPN key and return it."""
         return await self.create_pending(
             owner_user_id=owner_user_id,
             username=username,
@@ -147,9 +149,11 @@ class VpnKeyRepository:
         return _row_to_vpn_key(row)
 
     async def get_key_by_id(self, key_id: int) -> VpnKey | None:
+        """Return a VPN key by primary key, or None if not found."""
         return await self.get_by_id(key_id)
 
     async def list_by_owner(self, owner_user_id: int, limit: int = 20, offset: int = 0) -> list[VpnKey]:
+        """Return a paginated list of an owner's non-deleted VPN keys, newest first."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM vpn_keys
@@ -163,6 +167,7 @@ class VpnKeyRepository:
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
     async def count_traffic_supported(self) -> int:
+        """Return the number of non-deleted keys whose type supports traffic stats."""
         cursor = await self.db.conn.execute(
             "SELECT COUNT(*) AS cnt FROM vpn_keys WHERE key_type IN (?, ?) AND status != ?",
             (VpnKeyType.XRAY.value, VpnKeyType.AWG.value, VpnKeyStatus.DELETED.value),
@@ -171,6 +176,7 @@ class VpnKeyRepository:
         return int(row["cnt"]) if row is not None else 0
 
     async def list_traffic_supported(self, limit: int = 20, offset: int = 0) -> list[VpnKey]:
+        """Return a paginated list of non-deleted keys whose type supports traffic stats."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM vpn_keys
@@ -184,6 +190,7 @@ class VpnKeyRepository:
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
     async def count_by_owner(self, owner_user_id: int) -> int:
+        """Return the number of non-deleted VPN keys owned by a user."""
         cursor = await self.db.conn.execute(
             """
             SELECT COUNT(*) AS cnt
@@ -196,6 +203,7 @@ class VpnKeyRepository:
         return int(row["cnt"]) if row is not None else 0
 
     async def count_by_owner_and_type(self, owner_user_id: int, key_type: VpnKeyType) -> int:
+        """Return the number of non-deleted keys owned by a user of the given type."""
         cursor = await self.db.conn.execute(
             """
             SELECT COUNT(*) AS cnt
@@ -208,6 +216,7 @@ class VpnKeyRepository:
         return int(row["cnt"]) if row is not None else 0
 
     async def count_by_owners(self, owner_user_ids: list[int]) -> dict[int, int]:
+        """Return non-deleted key counts per owner for the given user ids."""
         if not owner_user_ids:
             return {}
         placeholders = ",".join("?" for _ in owner_user_ids)
@@ -224,6 +233,7 @@ class VpnKeyRepository:
         return {int(row["owner_user_id"]): int(row["cnt"]) for row in rows}
 
     async def count_by_owner_statuses(self, owner_user_id: int, statuses: set[VpnKeyStatus]) -> int:
+        """Return the number of an owner's keys having any of the given statuses."""
         if not statuses:
             return 0
         placeholders = ",".join("?" for _ in statuses)
@@ -239,6 +249,7 @@ class VpnKeyRepository:
         return int(row["cnt"]) if row is not None else 0
 
     async def list_recent_by_owner(self, owner_user_id: int, limit: int = 10) -> list[VpnKey]:
+        """Return an owner's most recent non-deleted VPN keys."""
         return await self.list_by_owner(owner_user_id, limit=limit, offset=0)
 
     async def list_keys_by_owner_and_type(
@@ -248,6 +259,7 @@ class VpnKeyRepository:
         limit: int = 20,
         offset: int = 0,
     ) -> list[VpnKey]:
+        """Return a paginated list of an owner's non-deleted keys of the given type."""
         return await self.list_by_owner_and_type(owner_user_id, key_type, limit=limit, offset=offset)
 
     async def list_by_owner_and_type(
@@ -257,6 +269,7 @@ class VpnKeyRepository:
         limit: int = 20,
         offset: int = 0,
     ) -> list[VpnKey]:
+        """Return a paginated list of an owner's non-deleted keys of the given type, newest first."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM vpn_keys
@@ -276,6 +289,7 @@ class VpnKeyRepository:
         limit: int = 100,
         offset: int = 0,
     ) -> list[VpnKey]:
+        """Return a paginated list of an owner's keys filtered by the given statuses, oldest first."""
         if not statuses:
             return []
         placeholders = ",".join("?" for _ in statuses)
@@ -297,6 +311,7 @@ class VpnKeyRepository:
         limit: int = 500,
         offset: int = 0,
     ) -> list[VpnKey]:
+        """Return a paginated list of keys filtered by the given statuses, oldest updated first."""
         if not statuses:
             return []
         placeholders = ",".join("?" for _ in statuses)
@@ -320,6 +335,7 @@ class VpnKeyRepository:
         offset: int = 0,
         after_id: int | None = None,
     ) -> list[VpnKey]:
+        """Return keys of a type with the given statuses, optionally keyset-paginated by id."""
         if not statuses:
             return []
         placeholders = ",".join("?" for _ in statuses)
@@ -349,6 +365,7 @@ class VpnKeyRepository:
         payload: dict[str, Any] | None = None,
         public_payload: dict[str, Any] | None = None,
     ) -> None:
+        """Transition a pending or apply-failed VPN key to active, updating payloads."""
         async with self.db.transaction():
             current = await self.get_by_id(key_id)
             if current is None:
@@ -387,6 +404,7 @@ class VpnKeyRepository:
         *,
         allowed_from_statuses: tuple[VpnKeyStatus, ...] | None = None,
     ) -> None:
+        """Set a VPN key's status, raising if it is not in an allowed source status."""
         if allowed_from_statuses:
             placeholders = ",".join("?" for _ in allowed_from_statuses)
             cursor = await self.db.conn.execute(
@@ -406,9 +424,11 @@ class VpnKeyRepository:
             await self.db.commit()
 
     async def update_key_status(self, key_id: int, status: VpnKeyStatus, now: str) -> None:
+        """Update a VPN key's status unconditionally."""
         await self.set_status(key_id, status, now)
 
     async def mark_revoked(self, key_id: int, actor_user_id: int, now: str) -> None:
+        """Mark a VPN key as revoked, raising if already revoked or deleted."""
         cursor = await self.db.conn.execute(
             """
             UPDATE vpn_keys
@@ -424,6 +444,7 @@ class VpnKeyRepository:
             raise InvalidTransition(f"VPN key {key_id} is already revoked or deleted")
 
     async def mark_deleted(self, key_id: int, actor_user_id: int, now: str) -> None:
+        """Mark a VPN key as deleted, raising if already deleted."""
         cursor = await self.db.conn.execute(
             """
             UPDATE vpn_keys
@@ -437,9 +458,11 @@ class VpnKeyRepository:
             raise InvalidTransition(f"VPN key {key_id} is already deleted")
 
     async def soft_delete_key(self, key_id: int, actor_user_id: int, now: str) -> None:
+        """Soft-delete a VPN key by marking it deleted."""
         await self.mark_deleted(key_id, actor_user_id, now)
 
     async def hard_delete_with_stats(self, key_id: int) -> None:
+        """Permanently delete a VPN key along with its traffic stats."""
         async with self.db.transaction():
             await self.db.conn.execute(
                 "DELETE FROM vpn_key_traffic_stats WHERE key_id = ?",
@@ -451,6 +474,7 @@ class VpnKeyRepository:
             )
 
     async def update_note(self, key_id: int, note: str | None, now: str) -> None:
+        """Update the note text for a VPN key."""
         await self.db.conn.execute(
             "UPDATE vpn_keys SET note = ?, updated_at = ? WHERE id = ?",
             (note, now, key_id),
@@ -458,6 +482,7 @@ class VpnKeyRepository:
         await self.db.commit()
 
     async def get_occupied_awg_ips(self) -> set[str]:
+        """Return the set of client IPs reserved by non-terminal AWG keys."""
         reserved_statuses = (
             VpnKeyStatus.PENDING_APPLY,
             VpnKeyStatus.ACTIVE,
@@ -478,6 +503,7 @@ class VpnKeyRepository:
         return {str(row["client_ip"]) for row in rows}
 
     async def find_active_awg_ips(self) -> set[str]:
+        """Return the set of client IPs reserved by non-terminal AWG keys."""
         return await self.get_occupied_awg_ips()
 
     async def find_by_uuid(self, uuid_value: str) -> VpnKey | None:
@@ -553,6 +579,7 @@ class VpnKeyRepository:
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
     async def mark_expiry_notified(self, key_id: int, threshold_days: int) -> None:
+        """Record that a key's expiry was notified at the given threshold in days."""
         async with self.db.transaction():
             row = await self.db.conn.execute_fetchone(
                 "SELECT expiry_notified_days FROM vpn_keys WHERE id = ?", (key_id,)
@@ -567,6 +594,7 @@ class VpnKeyRepository:
             )
 
     async def list_expired_active(self, now: str, limit: int = 100) -> list[VpnKey]:
+        """Return active keys whose expiry time has passed, earliest expiring first."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM vpn_keys
@@ -580,6 +608,7 @@ class VpnKeyRepository:
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
     async def list_active_trial_by_owner(self, owner_user_id: int) -> list[VpnKey]:
+        """Return an owner's active keys that came from approved trial requests, newest first."""
         cursor = await self.db.conn.execute(
             """
             SELECT vk.* FROM vpn_keys vk
@@ -593,6 +622,7 @@ class VpnKeyRepository:
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
     async def count_active_managed_short_id(self, short_id: str, exclude_key_id: int | None = None) -> int:
+        """Return the count of non-terminal XRAY keys using the given managed short id."""
         statuses = (
             VpnKeyStatus.ACTIVE,
             VpnKeyStatus.PENDING_APPLY,

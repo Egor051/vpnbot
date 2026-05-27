@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 @router.message(CommandStart())
 async def start_command(message: Message, services: Services, bot: Bot, rate_limiter: RateLimiter | None = None) -> None:
+    """Handle the /start command and register or greet the user."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message):

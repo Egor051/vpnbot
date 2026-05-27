@@ -28,6 +28,7 @@ class TrialKeyRequestRepository:
         self.db = db
 
     async def create(self, *, telegram_user_id: int, key_type: VpnKeyType, requested_at: str) -> TrialKeyRequest:
+        """Insert a new pending trial key request and return it."""
         # idx_trial_requests_one_pending (WHERE status='pending') is a DB-level
         # guard: a second INSERT while a pending row already exists raises
         # IntegrityError instead of silently creating a duplicate pending request.
@@ -46,6 +47,7 @@ class TrialKeyRequestRepository:
         return req
 
     async def get_by_id(self, request_id: int) -> TrialKeyRequest | None:
+        """Return a trial key request by primary key, or None if not found."""
         cursor = await self.db.conn.execute(
             "SELECT * FROM trial_key_requests WHERE id = ?",
             (request_id,),
@@ -54,6 +56,7 @@ class TrialKeyRequestRepository:
         return _row_to_request(row)
 
     async def count_pending(self) -> int:
+        """Return the number of pending trial key requests."""
         cursor = await self.db.conn.execute(
             "SELECT COUNT(*) AS cnt FROM trial_key_requests WHERE status = 'pending'"
         )
@@ -61,6 +64,7 @@ class TrialKeyRequestRepository:
         return int(row["cnt"]) if row is not None else 0
 
     async def list_pending(self, limit: int = 20, offset: int = 0) -> list[TrialKeyRequest]:
+        """Return a paginated list of pending trial key requests, oldest first."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM trial_key_requests
@@ -74,6 +78,7 @@ class TrialKeyRequestRepository:
         return [r for row in rows if (r := _row_to_request(row)) is not None]
 
     async def count_used_since_reset(self, telegram_user_id: int, reset_at: str | None) -> int:
+        """Return the number of non-rejected trial requests a user made since the reset time."""
         threshold = reset_at or "1970-01-01T00:00:00"
         cursor = await self.db.conn.execute(
             """
@@ -86,6 +91,7 @@ class TrialKeyRequestRepository:
         return int(row["cnt"]) if row is not None else 0
 
     async def approve(self, *, request_id: int, key_id: int, decided_by: int, decided_at: str) -> None:
+        """Approve a pending trial request, linking the issued key, or raise on conflict."""
         cursor = await self.db.conn.execute(
             """
             UPDATE trial_key_requests
@@ -101,6 +107,7 @@ class TrialKeyRequestRepository:
             )
 
     async def reject(self, *, request_id: int, decided_by: int, decided_at: str) -> None:
+        """Reject a pending trial request, or raise on conflict."""
         cursor = await self.db.conn.execute(
             """
             UPDATE trial_key_requests

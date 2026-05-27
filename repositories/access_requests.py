@@ -29,6 +29,7 @@ class AccessRequestRepository:
         self.db = db
 
     async def create(self, telegram_user_id: int, username: str | None, now: str) -> AccessRequest:
+        """Insert a new pending access request and return it."""
         cursor = await self.db.conn.execute(
             """
             INSERT INTO access_requests (telegram_user_id, username, status, requested_at)
@@ -44,6 +45,7 @@ class AccessRequestRepository:
         return request
 
     async def create_pending_idempotent(self, telegram_user_id: int, username: str | None, now: str) -> tuple[AccessRequest, bool]:
+        """Create a pending request, or return the existing one; the bool flags whether it was newly created."""
         try:
             return await self.create(telegram_user_id, username, now), True
         except sqlite3.IntegrityError as exc:
@@ -65,6 +67,7 @@ class AccessRequestRepository:
         return _row_to_access_request(row)
 
     async def get_pending_for_user(self, telegram_user_id: int) -> AccessRequest | None:
+        """Return the latest pending access request for a user, or None."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM access_requests
@@ -78,6 +81,7 @@ class AccessRequestRepository:
         return _row_to_access_request(row)
 
     async def get_latest_for_user(self, telegram_user_id: int) -> AccessRequest | None:
+        """Return the most recent access request for a user, or None."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM access_requests
@@ -98,6 +102,7 @@ class AccessRequestRepository:
         now: str,
         decision_note: str | None = None,
     ) -> bool:
+        """Update a request's status only if still pending; return whether it changed."""
         cursor = await self.db.conn.execute(
             """
             UPDATE access_requests
@@ -117,6 +122,7 @@ class AccessRequestRepository:
         return cursor.rowcount == 1
 
     async def count_by_status(self, status: AccessRequestStatus) -> int:
+        """Return the number of access requests with the given status."""
         cursor = await self.db.conn.execute(
             "SELECT COUNT(*) AS cnt FROM access_requests WHERE status = ?",
             (status.value,),
@@ -125,6 +131,7 @@ class AccessRequestRepository:
         return int(row["cnt"]) if row is not None else 0
 
     async def list_by_status(self, status: AccessRequestStatus, limit: int = 20, offset: int = 0) -> list[AccessRequest]:
+        """Return a paginated list of access requests with the given status, oldest first."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM access_requests

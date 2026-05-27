@@ -25,6 +25,7 @@ _proxy_confirm_locks = UserLockManager()
 
 @router.message(F.text == t("btn_proxy"))
 async def show_proxy_message(message: Message, services: Services) -> None:
+    """Show the proxy menu in response to the proxy button."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -38,6 +39,7 @@ async def show_proxy_message(message: Message, services: Services) -> None:
 
 @router.callback_query(F.data.in_({"proxy:show", "proxy:menu"}))
 async def show_proxy(callback: CallbackQuery, services: Services) -> None:
+    """Show the proxy menu via callback."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -52,6 +54,7 @@ async def show_proxy(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data.in_({"proxy:get:socks5", "proxy:get:mtproto"}))
 async def proxy_get_prompt(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Prompt the user to confirm requesting a SOCKS5 or MTProto proxy."""
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -89,6 +92,7 @@ async def proxy_get_prompt(callback: CallbackQuery, state: FSMContext, services:
 
 @router.callback_query(F.data == "proxy:stats")
 async def proxy_stats(callback: CallbackQuery, services: Services) -> None:
+    """Show the user's proxy usage statistics."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -107,6 +111,7 @@ async def proxy_stats(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data.regexp(r"^proxy:confirm:(socks5|mtproto):[-_A-Za-z0-9]+$"))
 async def proxy_confirm(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Issue the requested proxy access after confirmation."""
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -152,6 +157,7 @@ async def proxy_confirm(callback: CallbackQuery, state: FSMContext, services: Se
 
 @router.callback_query(F.data == "proxy:cancel")
 async def proxy_cancel(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Cancel the proxy request flow and return to the proxy menu."""
     if not await ensure_private_callback(callback):
         return
     await state.clear()
@@ -167,6 +173,7 @@ async def proxy_cancel(callback: CallbackQuery, state: FSMContext, services: Ser
 
 @router.callback_query(F.data == "proxy:back")
 async def proxy_back(callback: CallbackQuery, services: Services) -> None:
+    """Return from the proxy menu to the main menu."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)

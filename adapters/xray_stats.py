@@ -16,6 +16,7 @@ class XrayStatsAdapter:
         self.stats_server = stats_server.strip()
 
     async def query_all(self) -> dict[str, int]:
+        """Query the Xray stats API and return all counters as a name-to-value map."""
         if not self.stats_server:
             raise XrayStatsUnavailable("XRAY_STATS_SERVER не задан, Xray stats API не настроен")
         result = await self.shell.run(
@@ -29,6 +30,7 @@ class XrayStatsAdapter:
 
     @staticmethod
     def parse_statsquery_output(text: str) -> dict[str, int]:
+        """Parse xray statsquery JSON output into a name-to-value counter map."""
         if not text.strip():
             return {}
         try:
