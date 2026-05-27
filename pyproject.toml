@@ -1,6 +1,6 @@
 [project]
 name = "vpnbot"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 version = "1.0.0"
 
 [tool.pytest.ini_options]
