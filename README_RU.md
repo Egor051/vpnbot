@@ -22,7 +22,7 @@ Telegram-бот для управления доступом к self-hosted VPN 
 
 ## Stack
 
-- Python 3.12+
+- Python 3.12 (3.12.x)
 - aiogram 3
 - SQLite via aiosqlite
 - python-dotenv

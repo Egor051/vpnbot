@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.12 (3.12.x)
 - Linux (Ubuntu recommended; privileged deploy flows require Linux system tools)
 - git
 
@@ -110,7 +110,7 @@ python -m pip_audit -r requirements.txt -r constraints.txt --no-deps
 
 ## Code Standards
 
-- Target Python 3.12+; use modern type-hint syntax (`X | Y`, `list[X]`, etc.).
+- Target Python 3.12 (3.12.x); use modern type-hint syntax (`X | Y`, `list[X]`, etc.).
 - All public functions in the source packages require type annotations.
 - Use `async def` for I/O-bound operations.
 - Use per-user async locks (`services/user_locks.py`) when mutating user-owned state.
