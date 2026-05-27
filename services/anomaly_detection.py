@@ -72,6 +72,7 @@ class AnomalyDetectionService:
         self._last_alerted: dict[int, float] = {}
 
     async def check_all(self) -> None:
+        """Sample all backends for connection IPs and fire alerts when thresholds are exceeded."""
         now = time_module.time()
         await self._sample_awg_endpoints(now)
         await self._sample_xray_log(now)
@@ -298,6 +299,7 @@ class AnomalyDetectionService:
 
 
 async def anomaly_detection_loop(service: AnomalyDetectionService, interval: int) -> None:
+    """Run the anomaly detection check repeatedly at the given interval."""
     while True:
         try:
             await service.check_all()

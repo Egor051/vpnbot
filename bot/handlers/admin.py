@@ -72,6 +72,7 @@ ADMIN_PROXY_USER_LIMIT = 10
 
 @router.message(Command("admin"))
 async def admin_command(message: Message, services: Services) -> None:
+    """Handle the /admin command by opening the admin panel."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -85,6 +86,7 @@ async def admin_command(message: Message, services: Services) -> None:
 
 @router.message(F.text == t("btn_admin_panel"))
 async def admin_menu_message(message: Message, services: Services) -> None:
+    """Open the admin panel in response to the admin panel button."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -98,6 +100,7 @@ async def admin_menu_message(message: Message, services: Services) -> None:
 
 @router.callback_query(F.data == "admin:panel")
 async def admin_panel(callback: CallbackQuery, services: Services) -> None:
+    """Show the admin panel via callback."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -112,6 +115,7 @@ async def admin_panel(callback: CallbackQuery, services: Services) -> None:
 
 @router.message(Command("moderator"))
 async def moderator_command(message: Message, services: Services) -> None:
+    """Handle the /moderator command by opening the moderator panel."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -125,6 +129,7 @@ async def moderator_command(message: Message, services: Services) -> None:
 
 @router.message(F.text == t("moderator_panel_title"))
 async def moderator_menu_message(message: Message, services: Services) -> None:
+    """Open the moderator panel in response to the moderator panel button."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -138,6 +143,7 @@ async def moderator_menu_message(message: Message, services: Services) -> None:
 
 @router.callback_query(F.data == "admin:moderator_panel")
 async def moderator_panel_callback(callback: CallbackQuery, services: Services) -> None:
+    """Show the moderator panel via callback."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -152,6 +158,7 @@ async def moderator_panel_callback(callback: CallbackQuery, services: Services) 
 
 @router.callback_query(F.data == "admin:announce")
 async def admin_announcement_start(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Start the announcement flow by prompting for a message."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -173,6 +180,7 @@ async def admin_announcement_start(callback: CallbackQuery, state: FSMContext, s
 
 @router.message(AdminAnnouncementStates.waiting_message)
 async def admin_announcement_message(message: Message, state: FSMContext, services: Services) -> None:
+    """Store the announcement message and show the send confirmation."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -199,6 +207,7 @@ async def admin_announcement_send(
     bot: Bot,
     rate_limiter: RateLimiter | None = None,
 ) -> None:
+    """Send the confirmed announcement to all recipients."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None:
@@ -236,6 +245,7 @@ async def admin_announcement_send(
 
 @router.callback_query(AdminAnnouncementStates.confirming, F.data == "admin:announce:schedule")
 async def admin_announcement_schedule_request(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Prompt the admin to enter a time to schedule the announcement."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None:
@@ -255,6 +265,7 @@ async def admin_announcement_schedule_request(callback: CallbackQuery, state: FS
 
 @router.message(AdminAnnouncementStates.waiting_schedule_time)
 async def admin_announcement_schedule_time(message: Message, state: FSMContext, services: Services) -> None:
+    """Schedule the announcement for the entered time."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -293,6 +304,7 @@ async def admin_announcement_schedule_time(message: Message, state: FSMContext, 
 
 @router.callback_query(AdminAnnouncementStates.confirming, F.data == "admin:announce:cancel")
 async def admin_announcement_cancel(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Cancel the announcement flow and return to the admin panel."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await state.clear()
@@ -308,6 +320,7 @@ async def admin_announcement_cancel(callback: CallbackQuery, state: FSMContext, 
 
 @router.callback_query(F.data == "admin:announce_batches")
 async def admin_announcement_batches(callback: CallbackQuery, services: Services) -> None:
+    """Show the list of incomplete announcement batches."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("announce_update_list"))
@@ -322,6 +335,7 @@ async def admin_announcement_batches(callback: CallbackQuery, services: Services
 
 @router.callback_query(F.data.regexp(r"^admin:announce:(resume|retry|cancelbatch):\d+$"))
 async def admin_announcement_batch_action(callback: CallbackQuery, services: Services, bot: Bot, rate_limiter: RateLimiter | None = None) -> None:
+    """Resume, retry, or cancel the selected announcement batch."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -361,6 +375,7 @@ async def admin_announcement_batch_action(callback: CallbackQuery, services: Ser
 
 @router.callback_query(F.data.regexp(r"^admin:reqs(?::\d+)?$"))
 async def admin_requests(callback: CallbackQuery, services: Services) -> None:
+    """Show a page of pending access requests."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -388,6 +403,7 @@ async def admin_requests(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data.startswith("admin:req:"))
 async def admin_request_detail(callback: CallbackQuery, services: Services) -> None:
+    """Show the detail view for a single access request."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -407,6 +423,7 @@ async def admin_request_detail(callback: CallbackQuery, services: Services) -> N
 
 @router.callback_query(F.data.regexp(r"^admin:approve:\d+$"))
 async def admin_approve(callback: CallbackQuery, services: Services, bot: Bot) -> None:
+    """Prompt to confirm approving the selected access request."""
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -430,6 +447,7 @@ async def admin_approve(callback: CallbackQuery, services: Services, bot: Bot) -
 
 @router.callback_query(F.data.regexp(r"^admin:reject:\d+$"))
 async def admin_reject(callback: CallbackQuery, services: Services, bot: Bot) -> None:
+    """Prompt to confirm rejecting the selected access request."""
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -453,6 +471,7 @@ async def admin_reject(callback: CallbackQuery, services: Services, bot: Bot) ->
 
 @router.callback_query(F.data.regexp(r"^admin:(approve|reject):confirm:\d+$"))
 async def admin_access_decision_confirm(callback: CallbackQuery, services: Services, bot: Bot) -> None:
+    """Apply the confirmed approve or reject decision and notify the user."""
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -484,6 +503,7 @@ async def admin_access_decision_confirm(callback: CallbackQuery, services: Servi
 
 @router.callback_query(F.data.regexp(r"^admin:users(?::\d+)?$"))
 async def admin_users(callback: CallbackQuery, services: Services) -> None:
+    """Show a page of registered users."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -511,6 +531,7 @@ async def admin_users(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data.startswith("admin:user:"))
 async def admin_user_detail(callback: CallbackQuery, services: Services) -> None:
+    """Show the detail card for a single user with their keys."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -540,6 +561,7 @@ async def admin_user_detail(callback: CallbackQuery, services: Services) -> None
 
 @router.callback_query(F.data.startswith("admin:userapprove:"))
 async def admin_user_approve(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
+    """Promote the selected user to approved status."""
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -560,6 +582,7 @@ async def admin_user_approve(callback: CallbackQuery, services: Services, rate_l
 
 @router.callback_query(F.data.startswith("admin:setmoderator:"))
 async def admin_set_moderator(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
+    """Toggle the moderator role for the selected user."""
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -587,6 +610,7 @@ async def admin_set_moderator(callback: CallbackQuery, services: Services, rate_
 
 @router.callback_query(F.data.regexp(r"^admin:block:\d+$"))
 async def admin_block_user(callback: CallbackQuery, services: Services) -> None:
+    """Prompt to confirm blocking the selected user."""
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -614,6 +638,7 @@ async def admin_block_user(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data.regexp(r"^admin:block:confirm:\d+$"))
 async def admin_block_user_confirm(callback: CallbackQuery, services: Services, bot: Bot, rate_limiter: RateLimiter | None = None) -> None:
+    """Block the user, revoke their active keys, and notify them."""
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -664,6 +689,7 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Services, 
 
 @router.callback_query(F.data.regexp(r"^admin:unblock:\d+$"))
 async def admin_unblock_user(callback: CallbackQuery, services: Services) -> None:
+    """Prompt to confirm unblocking the selected user."""
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -693,6 +719,7 @@ async def admin_unblock_user(callback: CallbackQuery, services: Services) -> Non
 
 @router.callback_query(F.data.regexp(r"^admin:unblock:confirm:\d+$"))
 async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
+    """Unblock the selected user."""
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -726,6 +753,7 @@ async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services
 
 @router.callback_query(F.data.regexp(r"^admin:ukeys:\d+:\d+$"))
 async def admin_user_keys(callback: CallbackQuery, services: Services) -> None:
+    """Show a page of a user's keys."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -760,6 +788,7 @@ async def admin_user_keys(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data.regexp(r"^admin:audit(?::\d+)?$"))
 async def admin_audit(callback: CallbackQuery, services: Services) -> None:
+    """Show a page of the audit log."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -793,6 +822,7 @@ async def admin_audit(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data.regexp(r"^admin:stats(?::\d+)?$"))
 async def admin_stats(callback: CallbackQuery, services: Services) -> None:
+    """Show a page of traffic statistics across all keys."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("updating_stats"))
@@ -825,6 +855,7 @@ async def admin_stats(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data == "admin:proxy")
 async def admin_proxy_status(callback: CallbackQuery, services: Services) -> None:
+    """Show the proxy service status and lifecycle stats."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("updating_proxy_status"))
@@ -854,6 +885,7 @@ async def admin_proxy_status(callback: CallbackQuery, services: Services) -> Non
 
 @router.callback_query(F.data == "admin:diagnostics")
 async def admin_backend_diagnostics(callback: CallbackQuery, services: Services) -> None:
+    """Run and show backend system diagnostics."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("updating_diagnostics"))
@@ -888,6 +920,7 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Services)
 
 @router.callback_query(F.data == "admin:proxy_stats")
 async def admin_proxy_stats(callback: CallbackQuery, services: Services) -> None:
+    """Show detailed proxy usage statistics."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("updating_proxy_stats"))
@@ -920,6 +953,7 @@ async def admin_proxy_stats(callback: CallbackQuery, services: Services) -> None
 
 @router.callback_query(F.data == "admin:issue")
 async def admin_issue_choose_user(callback: CallbackQuery, services: Services) -> None:
+    """Show the user list for choosing whom to issue a key to."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -942,6 +976,7 @@ async def admin_issue_choose_user(callback: CallbackQuery, services: Services) -
 
 @router.callback_query(F.data.regexp(r"^admin:issuepage:\d+$"))
 async def admin_issue_choose_user_page(callback: CallbackQuery, services: Services) -> None:
+    """Show a page of the user list for key issuance."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -969,6 +1004,7 @@ async def admin_issue_choose_user_page(callback: CallbackQuery, services: Servic
 
 @router.callback_query(F.data.regexp(r"^admin:issue:\d+$"))
 async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Start key issuance for the chosen user by prompting for key type."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -991,6 +1027,7 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
 
 @router.callback_query(AdminCreateKeyStates.choosing_type, F.data.regexp(r"^admin:ctype:(xray|awg):\d+$"))
 async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Record the chosen key type and prompt for a note."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -1024,6 +1061,7 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
 
 @router.message(AdminCreateKeyStates.waiting_note)
 async def admin_issue_note(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
+    """Store the note and advance to MTU or expiry selection."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -1050,6 +1088,7 @@ async def admin_issue_note(message: Message, state: FSMContext, services: Servic
 
 @router.callback_query(AdminCreateKeyStates.waiting_mtu, F.data.regexp(r"^mtu:\d+$"))
 async def admin_issue_mtu(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Store the chosen MTU value and advance to expiry selection."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -1075,6 +1114,7 @@ async def admin_issue_mtu(callback: CallbackQuery, state: FSMContext, services: 
 
 @router.callback_query(AdminCreateKeyStates.waiting_mtu, F.data == "mtu:custom")
 async def admin_issue_mtu_custom_request(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt the admin to enter a custom MTU value."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.message is None:
@@ -1087,6 +1127,7 @@ async def admin_issue_mtu_custom_request(callback: CallbackQuery, state: FSMCont
 
 @router.message(AdminCreateKeyStates.waiting_mtu_custom)
 async def admin_issue_mtu_custom(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
+    """Validate the custom MTU input and advance to expiry selection."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -1112,6 +1153,7 @@ async def admin_issue_mtu_custom(message: Message, state: FSMContext, services: 
 
 @router.callback_query(AdminCreateKeyStates.waiting_expiry, F.data.regexp(r"^expiry:(permanent|\d+)$"))
 async def admin_issue_expiry(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Store the chosen expiry and show the key creation confirmation."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -1148,6 +1190,7 @@ async def admin_issue_expiry(callback: CallbackQuery, state: FSMContext, service
 
 @router.callback_query(AdminCreateKeyStates.waiting_expiry, F.data == "expiry:custom")
 async def admin_issue_expiry_custom(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt the admin to enter a custom number of expiry days."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.message is None:
@@ -1163,6 +1206,7 @@ async def admin_issue_expiry_custom(callback: CallbackQuery, state: FSMContext) 
 
 @router.message(AdminCreateKeyStates.waiting_custom_days)
 async def admin_issue_custom_days(message: Message, state: FSMContext, services: Services) -> None:
+    """Validate the custom expiry days input and show the confirmation."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -1199,6 +1243,7 @@ async def admin_issue_custom_days(message: Message, state: FSMContext, services:
 
 @router.callback_query(AdminCreateKeyStates.confirming, F.data == "admin:cconfirm")
 async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, services: Services, rate_limiter: RateLimiter, bot: Bot) -> None:
+    """Create the key for the chosen user and deliver its configuration."""
     if callback.from_user is None or callback.message is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -1274,6 +1319,7 @@ async def _deliver_key_to_pending_user(bot: Bot, result: Any, user_id: int, plai
 
 @router.callback_query(F.data.regexp(r"^admin:trial(?::\d+)?$"))
 async def admin_trial_list(callback: CallbackQuery, services: Services) -> None:
+    """Show the paginated list of pending trial access requests."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -1325,6 +1371,7 @@ async def admin_trial_list(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data.regexp(r"^admin:trial:approve:\d+$"))
 async def admin_trial_approve(callback: CallbackQuery, services: Services) -> None:
+    """Approve the selected pending trial access request."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -1345,6 +1392,7 @@ async def admin_trial_approve(callback: CallbackQuery, services: Services) -> No
 
 @router.callback_query(F.data.regexp(r"^admin:trial:reject:\d+$"))
 async def admin_trial_reject(callback: CallbackQuery, services: Services) -> None:
+    """Reject the selected pending trial access request."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -1365,6 +1413,7 @@ async def admin_trial_reject(callback: CallbackQuery, services: Services) -> Non
 
 @router.callback_query(F.data.regexp(r"^admin:trial:reset:\d+$"))
 async def admin_trial_reset(callback: CallbackQuery, services: Services) -> None:
+    """Reset a user's trial quota and refresh their user card."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -1386,6 +1435,7 @@ async def admin_trial_reset(callback: CallbackQuery, services: Services) -> None
 
 @router.callback_query(F.data.regexp(r"^admin:unote:\d+$"))
 async def admin_edit_user_note(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Prompt the admin to enter a new note for the selected user."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -1409,6 +1459,7 @@ async def admin_edit_user_note(callback: CallbackQuery, state: FSMContext, servi
 
 @router.message(AdminEditUserNoteStates.waiting_note)
 async def admin_edit_user_note_input(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
+    """Save the admin-entered note and re-render the user card."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -1440,6 +1491,7 @@ async def admin_edit_user_note_input(message: Message, state: FSMContext, servic
 
 @router.callback_query(F.data == "admin:backup")
 async def admin_backup_now(callback: CallbackQuery, services: Services, bot: Bot) -> None:
+    """Trigger an on-demand offsite backup and send it to admins."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None:

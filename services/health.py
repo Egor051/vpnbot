@@ -35,12 +35,14 @@ class HealthCheckResult:
 
 
 def aggregate_status(statuses: list[HealthStatus]) -> HealthStatus:
+    """Return the most severe status from the given list."""
     if not statuses:
         return "ok"
     return max(statuses, key=lambda s: _STATUS_RANK[s])
 
 
 def build_result(checks: list[HealthCheckItem]) -> HealthCheckResult:
+    """Combine individual health checks into an overall timestamped result."""
     overall = aggregate_status([c.status for c in checks])
     return HealthCheckResult(
         overall=overall,
@@ -50,6 +52,7 @@ def build_result(checks: list[HealthCheckItem]) -> HealthCheckResult:
 
 
 def check_bot_non_root() -> HealthCheckItem:
+    """Check that the bot process is not running as root."""
     if os.name != "posix":
         return HealthCheckItem(
             name="bot_runtime",
@@ -74,6 +77,7 @@ def check_bot_non_root() -> HealthCheckItem:
 
 
 def check_helper_mode(enabled: bool) -> HealthCheckItem:
+    """Report whether privilege helper mode is enabled."""
     if enabled:
         return HealthCheckItem(
             name="helper_mode",
@@ -90,6 +94,7 @@ def check_helper_mode(enabled: bool) -> HealthCheckItem:
 
 
 def check_backends(statuses: tuple[BackendHealthStatus, ...]) -> list[HealthCheckItem]:
+    """Convert backend health statuses into health check items."""
     items: list[HealthCheckItem] = []
     for s in statuses:
         if s.degraded:
@@ -115,6 +120,7 @@ def check_backends(statuses: tuple[BackendHealthStatus, ...]) -> list[HealthChec
 
 
 async def check_sqlite_quick(db: Any) -> HealthCheckItem:
+    """Run SQLite PRAGMA quick_check and report the result."""
     try:
         cursor = await db.conn.execute("PRAGMA quick_check")
         row = await cursor.fetchone()
@@ -143,6 +149,7 @@ async def check_sqlite_quick(db: Any) -> HealthCheckItem:
 
 
 async def check_service_active(service_name: str) -> HealthCheckItem:
+    """Check whether a systemd service is currently active."""
     if os.name != "posix":
         return HealthCheckItem(
             name=f"service_{service_name}",

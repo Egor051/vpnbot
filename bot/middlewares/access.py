@@ -36,6 +36,7 @@ class BlockedUserMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        """Block updates from blocked users before reaching the handler."""
         tg_user = data.get("event_from_user")
         if tg_user is None:
             return await handler(event, data)

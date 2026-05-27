@@ -18,6 +18,7 @@ class VpnKeyQueryService:
         limit: int = 20,
         offset: int = 0,
     ) -> list[VpnKey]:
+        """Return the VPN keys an actor is allowed to view for a given owner."""
         actor = await self.users.require_approved_or_admin(actor_user_id)
         target = owner_user_id or actor_user_id
         if actor.role != UserRole.SUPERADMIN and target != actor_user_id:
@@ -25,6 +26,7 @@ class VpnKeyQueryService:
         return await self.vpn_keys.list_by_owner(target, limit=limit, offset=offset)
 
     async def count_for_actor(self, actor_user_id: int, owner_user_id: int | None = None) -> int:
+        """Return the number of VPN keys an actor may view for a given owner."""
         actor = await self.users.require_approved_or_admin(actor_user_id)
         target = owner_user_id or actor_user_id
         if actor.role != UserRole.SUPERADMIN and target != actor_user_id:
@@ -32,9 +34,11 @@ class VpnKeyQueryService:
         return await self.vpn_keys.count_by_owner(target)
 
     async def list_active_trial_by_owner(self, owner_user_id: int) -> list[VpnKey]:
+        """Return the owner's active trial VPN keys."""
         return await self.vpn_keys.list_active_trial_by_owner(owner_user_id)
 
     async def get_for_actor(self, actor_user_id: int, key_id: int) -> VpnKey:
+        """Return a single VPN key if the actor is allowed to view it."""
         key = await self.vpn_keys.get_by_id(key_id)
         if key is None or key.status == VpnKeyStatus.DELETED:
             raise NotFound("Ключ не найден")

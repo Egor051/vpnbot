@@ -11,19 +11,24 @@ _LABEL_UNDERSCORE_RUN_RE = re.compile(r"_+")
 
 class IdGenerator:
     def uuid4(self) -> str:
+        """Generate a random UUID4 string."""
         return str(uuid.uuid4())
 
     def xray_short_id(self) -> str:
+        """Generate a random Xray REALITY short id."""
         return secrets.token_hex(8)
 
     def key_label(self, telegram_user_id: int, username: str | None = None) -> str:
+        """Generate a unique key label derived from the user id or username."""
         base = self._label_base(telegram_user_id, username)
         return f"{base}_{secrets.token_hex(3)}"
 
     def email_label(self, telegram_user_id: int, username: str | None = None) -> str:
+        """Generate a unique email label derived from the user id or username."""
         return self.key_label(telegram_user_id, username)
 
     def generated_key_name(self, prefix: str) -> str:
+        """Generate a key name from the prefix plus a random suffix."""
         return f"{prefix}_{''.join(secrets.choice(KEY_NAME_ALPHABET) for _ in range(5))}"
 
     def _label_base(self, telegram_user_id: int, username: str | None) -> str:

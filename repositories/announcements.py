@@ -82,6 +82,7 @@ class AnnouncementRepository:
         now: str,
         scheduled_at: str | None = None,
     ) -> AnnouncementBatch:
+        """Create an announcement batch with per-recipient delivery rows and return it."""
         status = "scheduled" if scheduled_at is not None else "pending"
         async with self.db.transaction():
             cursor = await self.db.conn.execute(
@@ -112,10 +113,12 @@ class AnnouncementRepository:
         return batch
 
     async def get_batch(self, announcement_id: int) -> AnnouncementBatch | None:
+        """Return an announcement batch by id, or None if not found."""
         cursor = await self.db.conn.execute("SELECT * FROM announcement_batches WHERE id = ?", (announcement_id,))
         return _row_to_batch(await cursor.fetchone())
 
     async def list_incomplete_batches(self, *, limit: int = 10) -> list[AnnouncementBatch]:
+        """Return batches that are not yet completed, most recently updated first."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM announcement_batches
@@ -130,6 +133,7 @@ class AnnouncementRepository:
         return [batch for row in rows if (batch := _row_to_batch(row)) is not None]
 
     async def list_due_scheduled_batches(self, now: str, *, limit: int = 10) -> list[AnnouncementBatch]:
+        """Return scheduled batches whose scheduled time is now due, earliest first."""
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM announcement_batches
@@ -151,6 +155,7 @@ class AnnouncementRepository:
         after_user_id: int = 0,
         retry_failed: bool = False,
     ) -> list[AnnouncementDelivery]:
+        """Return pending (and optionally failed) deliveries for a batch, keyset-paginated by user id."""
         statuses = ("pending", "failed") if retry_failed else ("pending",)
         placeholders = ",".join("?" for _ in statuses)
         cursor = await self.db.conn.execute(
@@ -168,6 +173,7 @@ class AnnouncementRepository:
         return [delivery for row in rows if (delivery := _row_to_delivery(row)) is not None]
 
     async def set_batch_status(self, announcement_id: int, status: str, now: str, *, completed: bool = False) -> None:
+        """Update a batch's status, optionally marking it completed, unless already cancelled."""
         await self.db.conn.execute(
             """
             UPDATE announcement_batches
@@ -179,6 +185,7 @@ class AnnouncementRepository:
         await self.db.commit()
 
     async def mark_cancelled(self, announcement_id: int, now: str) -> None:
+        """Mark an announcement batch as cancelled."""
         await self.db.conn.execute(
             """
             UPDATE announcement_batches
@@ -190,6 +197,7 @@ class AnnouncementRepository:
         await self.db.commit()
 
     async def mark_delivery(self, announcement_id: int, user_id: int, status: str, now: str, error_text: str | None = None) -> None:
+        """Update a single delivery's status, raising InvalidTransition if it was not pending/failed."""
         cursor = await self.db.conn.execute(
             """
             UPDATE announcement_deliveries
@@ -203,6 +211,7 @@ class AnnouncementRepository:
             raise InvalidTransition(f"Announcement delivery {announcement_id}/{user_id} is not in pending/failed state")
 
     async def refresh_batch_counts(self, announcement_id: int, now: str) -> None:
+        """Recompute a batch's success, failed, and skipped counts from its deliveries."""
         await self.db.conn.execute(
             """
             UPDATE announcement_batches
@@ -228,6 +237,7 @@ class AnnouncementRepository:
     async def delivery_user_ids_grouped(
         self, announcement_id: int
     ) -> dict[str, tuple[int, ...]]:
+        """Return delivery user ids for a batch grouped by delivery status."""
         cursor = await self.db.conn.execute(
             """
             SELECT user_id, status FROM announcement_deliveries

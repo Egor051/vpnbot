@@ -71,6 +71,7 @@ class XrayService:
         self._lock = asyncio.Lock()
 
     async def create_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
+        """Create a new Xray key for the owner."""
         return await self.create_xray_key(actor_user_id, owner, note)
 
     async def create_xray_key(
@@ -81,6 +82,7 @@ class XrayService:
         expires_at: str | None = None,
         allow_pending_owner: bool = False,
     ) -> VpnKeyCreateResult:
+        """Provision a new Xray client, persist the key, and return its config."""
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         self.settings.validate_xray_ready()
         clean_note = normalize_note(note)
@@ -171,9 +173,11 @@ class XrayService:
                 return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key, viewer_user_id=actor_user_id))
 
     async def revoke_key(self, actor_user_id: int, key_id: int) -> VpnKey:
+        """Revoke an Xray key."""
         return await self.revoke_xray_key(actor_user_id, key_id)
 
     async def revoke_xray_key(self, actor_user_id: int, key_id: int) -> VpnKey:
+        """Revoke an Xray key and remove its client from the running config."""
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         async with self._lock:
             key = await self._get_xray_key_for_manage(actor_user_id, key_id)
@@ -236,9 +240,11 @@ class XrayService:
             return await self._get_key(key_id)
 
     async def delete_key(self, actor_user_id: int, key_id: int) -> None:
+        """Delete an Xray key."""
         await self.delete_xray_key(actor_user_id, key_id)
 
     async def delete_xray_key(self, actor_user_id: int, key_id: int) -> None:
+        """Remove the Xray client and hard-delete the key record."""
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         async with self._lock:
             key = await self._get_xray_key_for_manage(actor_user_id, key_id)
@@ -267,6 +273,7 @@ class XrayService:
             )
 
     async def startup_reconcile(self) -> dict[str, int]:
+        """Reconcile pending/failed Xray keys against the live config on startup."""
         summary = {"checked": 0, "recovered": 0, "failed": 0}
         async with self._lock:
             last_id = 0
@@ -298,9 +305,11 @@ class XrayService:
         return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
+        """Return the connection config text for an Xray key."""
         return await self.get_xray_key_config(actor_user_id, key_id)
 
     async def get_xray_key_config(self, actor_user_id: int, key_id: int) -> str:
+        """Return the connection config for an active Xray key the actor manages."""
         async with self._lock:  # Prevents returning config for a key being concurrently deleted
             key = await self._get_xray_key_for_manage(actor_user_id, key_id, allow_read=True)
             if key.status != VpnKeyStatus.ACTIVE:
@@ -315,6 +324,7 @@ class XrayService:
             return self._format_config(key, viewer_user_id=actor_user_id)
 
     async def get_xray_key_config_for_owner(self, owner_user_id: int, key_id: int) -> str:
+        """Return the connection config for an active Xray key owned by the user."""
         async with self._lock:  # Prevents returning config for a key being concurrently deleted
             key = await self._get_key(key_id)
             if key.key_type != VpnKeyType.XRAY:
@@ -332,6 +342,7 @@ class XrayService:
         limit: int = 20,
         offset: int = 0,
     ) -> list[VpnKey]:
+        """Return the Xray keys an actor may view for a given owner."""
         return await self.list_user_xray_keys(actor_user_id, owner_user_id, limit=limit, offset=offset)
 
     async def list_user_xray_keys(
@@ -341,6 +352,7 @@ class XrayService:
         limit: int = 20,
         offset: int = 0,
     ) -> list[VpnKey]:
+        """Return the Xray keys an actor is allowed to view for a given owner."""
         actor = await self.users.require_approved_or_admin(actor_user_id)
         target = owner_user_id or actor_user_id
         if actor.role != UserRole.SUPERADMIN and target != actor_user_id:
@@ -348,6 +360,7 @@ class XrayService:
         return await self.vpn_keys.list_by_owner_and_type(target, VpnKeyType.XRAY, limit=limit, offset=offset)
 
     async def update_xray_note(self, actor_user_id: int, key_id: int, note: str | None) -> VpnKey:
+        """Update the note on an Xray key owned by the actor."""
         async with self._lock:  # Prevents note update racing with concurrent key deletion
             key = await self._get_xray_key_for_manage(actor_user_id, key_id, allow_read=True)
             if key.owner_user_id != actor_user_id:
@@ -364,6 +377,7 @@ class XrayService:
             return await self._get_key(key_id)
 
     async def reconcile_key_status(self, actor_user_id: int, key_id: int) -> VpnKey:
+        """Reconcile a single Xray key's status against the live config."""
         await self.users.require_superadmin(actor_user_id)
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         key = await self._get_key(key_id)

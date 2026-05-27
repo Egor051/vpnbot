@@ -8,6 +8,7 @@ from repositories.vpn_keys import VpnKeyRepository
 
 class AwgPeerIpSource(Protocol):
     def list_peer_allowed_ips(self) -> set[str]:
+        """Return the set of AllowedIPs across all configured peers."""
         ...
 
 
@@ -35,6 +36,7 @@ class IpAllocator:
 
     # NOT THREAD-SAFE: caller must hold awg service lock
     async def next_free_ip(self) -> str:
+        """Allocate and return the next free IP address in the AWG pool."""
         occupied = {ipaddress.ip_address(value) for value in await self.vpn_keys.get_occupied_awg_ips()}
         occupied_networks: list[ipaddress.IPv4Network] = []
         if self.awg_config is not None:
@@ -66,6 +68,7 @@ class IpAllocator:
 
 
 def self_check_ip_allocator_sources() -> bool:
+    """Self-test that the peer IP source protocol returns the expected set."""
     class Source:
         def list_peer_allowed_ips(self) -> set[str]:
             return {"10.0.0.2", "10.0.0.3"}

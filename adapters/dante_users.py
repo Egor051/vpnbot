@@ -26,6 +26,7 @@ class DanteUserAdapter:
         self.helper_path = helper_path or Path("/usr/local/sbin/vpnbot-socks5-user")
 
     async def exists(self, login: str) -> bool:
+        """Return whether the managed SOCKS5 Linux user exists."""
         self._ensure_managed_login(login)
         if self.helper_runner is not None:
             result = await self.helper_runner.run(self.helper_path, ["exists", login], timeout=10)
@@ -42,6 +43,7 @@ class DanteUserAdapter:
         raise DanteUserError(f"Не удалось проверить SOCKS5 Linux user: rc={result.returncode}")
 
     async def create_user(self, login: str, password: str) -> None:
+        """Create a managed SOCKS5 Linux user and set its password."""
         self._ensure_managed_login(login)
         if await self.exists(login):
             raise DanteUserError("SOCKS5 Linux user уже существует")
@@ -79,6 +81,7 @@ class DanteUserAdapter:
             raise DanteUserError(f"Не удалось установить пароль SOCKS5 Linux user: rc={password_set.returncode}")
 
     async def lock_user(self, login: str) -> None:
+        """Lock the password of the managed SOCKS5 Linux user."""
         self._ensure_managed_login(login)
         if not await self.exists(login):
             raise DanteUserNotFoundError("SOCKS5 Linux user не найден")
@@ -92,6 +95,7 @@ class DanteUserAdapter:
             raise DanteUserError(f"Не удалось заблокировать SOCKS5 Linux user: rc={result.returncode}")
 
     async def delete_user(self, login: str) -> None:
+        """Delete the managed SOCKS5 Linux user if it exists."""
         self._ensure_managed_login(login)
         if not await self.exists(login):
             return

@@ -104,12 +104,14 @@ class AwgConfigAdapter:
         self.helper_staging_dir = helper_staging_dir or Path("/run/vpn-bot/awg")
 
     async def generate_private_key(self) -> str:
+        """Generate a new AWG/WG private key."""
         result = await self._run_awg_or_wg(["genkey"], timeout=10)
         if not result.ok or not result.stdout:
             raise AwgApplyError("Не удалось сгенерировать AWG private key")
         return result.stdout.splitlines()[0].strip()
 
     async def generate_public_key(self, private_key: str) -> str:
+        """Derive the public key for the given private key."""
         result = await self._run_awg_or_wg(
             ["pubkey"],
             input_text=private_key + "\n",
@@ -121,12 +123,14 @@ class AwgConfigAdapter:
         return result.stdout.splitlines()[0].strip()
 
     async def generate_preshared_key(self) -> str:
+        """Generate a new AWG/WG preshared key."""
         result = await self._run_awg_or_wg(["genpsk"], timeout=10)
         if not result.ok or not result.stdout:
             raise AwgApplyError("Не удалось сгенерировать AWG preshared key")
         return result.stdout.splitlines()[0].strip()
 
     def read_server_config(self) -> AwgServerConfig:
+        """Read and return the server interface configuration from the config file."""
         text = self._read_text()
         sections = self._parse_sections(text)
         interface = next((section for section in sections if section.name == "Interface"), None)
@@ -156,6 +160,7 @@ class AwgConfigAdapter:
         client_ip: str,
         label: str | None = None,
     ) -> None:
+        """Add a peer to the config and runtime, rolling back on failure."""
         if self._using_helper():
             await self._add_peer_via_helper(
                 key_id=key_id,
@@ -215,6 +220,7 @@ class AwgConfigAdapter:
                 self._raise_with_rollback_summary("AWG peer add failed", exc, rollback_errors)
 
     async def remove_peer(self, *, key_id: int, public_key: str | None) -> None:
+        """Remove a peer from the config and runtime, rolling back on failure."""
         if self._using_helper():
             await self._remove_peer_via_helper(key_id=key_id, public_key=public_key)
             return
@@ -322,17 +328,21 @@ class AwgConfigAdapter:
             cleanup_staging_path(candidate_path)
 
     def client_interface_options(self) -> dict[str, str]:
+        """Return client-facing interface options from the config, or empty if missing."""
         if not self.config_path.exists():
             return {}
         return self.read_server_config().interface_options
 
     def find_peer(self, *, public_key: str | None = None, client_ip: str | None = None) -> dict[str, str] | None:
+        """Find a config peer matching the given public key or client IP."""
         return self._find_peer(self._parse_sections(self._read_text()), public_key=public_key, client_ip=client_ip)
 
     def list_config_peers(self) -> list[dict[str, str]]:
+        """Return all peer blocks defined in the config file."""
         return self._parse_peer_blocks(self._read_text())
 
     def list_peer_allowed_ips(self) -> set[str]:
+        """Return the set of AllowedIPs across all peers in the config."""
         ips: set[str] = set()
         for section in self._parse_sections(self._read_text()):
             if section.name != "Peer":
@@ -346,6 +356,7 @@ class AwgConfigAdapter:
         return ips
 
     def find_managed_peer_public_key(self, key_id: int) -> str | None:
+        """Return the public key of the managed peer block for the given key id."""
         block = self._managed_block_lines(self._read_text(), key_id)
         if not block:
             return None
@@ -359,6 +370,7 @@ class AwgConfigAdapter:
         return None
 
     async def ensure_interface_active(self) -> None:
+        """Verify the AWG interface is available and active."""
         if self._using_helper():
             result = await self._run_helper(["status"], timeout=20)
             if not result.ok:
@@ -369,6 +381,7 @@ class AwgConfigAdapter:
             raise AwgApplyError(f"AWG interface {self.interface} недоступен или не активен")
 
     async def verify_runtime_peer(self, public_key: str) -> bool:
+        """Return whether the peer with the given public key is present in runtime."""
         if self._using_helper():
             result = await self._run_helper(["show-peers"], timeout=20, max_output_chars=MACHINE_OUTPUT_LIMIT)
             if not result.ok:
@@ -380,6 +393,7 @@ class AwgConfigAdapter:
         return any(line.strip() == f"peer: {public_key}" for line in result.stdout.splitlines())
 
     async def list_runtime_peers(self) -> list[dict[str, str]]:
+        """Return all peers currently active in the AWG runtime."""
         if self._using_helper():
             result = await self._run_helper(["show-peers"], timeout=20, max_output_chars=MACHINE_OUTPUT_LIMIT)
             if not result.ok:
@@ -391,6 +405,7 @@ class AwgConfigAdapter:
         return self._parse_runtime_peers(result.stdout)
 
     async def sync_runtime_from_config(self) -> None:
+        """Synchronize the AWG runtime to match the on-disk config."""
         if self._using_helper():
             lock_dir = self.helper_staging_dir
             async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
@@ -402,6 +417,7 @@ class AwgConfigAdapter:
             await self._sync_runtime_from_config(self.config_path)
 
     async def remove_runtime_peer(self, public_key: str) -> None:
+        """Remove the peer with the given public key from the AWG runtime."""
         if self._using_helper():
             lock_dir = self.helper_staging_dir
             async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
@@ -417,6 +433,7 @@ class AwgConfigAdapter:
                 raise AwgApplyError("AWG peer удалён командой, но всё ещё найден в runtime")
 
     async def list_transfer(self) -> dict[str, tuple[int, int]]:
+        """Return per-peer received and sent byte counts from the AWG runtime."""
         if self._using_helper():
             result = await self._run_helper(["show-transfer"], timeout=20, max_output_chars=MACHINE_OUTPUT_LIMIT)
             if not result.ok:
@@ -441,6 +458,7 @@ class AwgConfigAdapter:
 
     @staticmethod
     def parse_transfer_output(text: str, *, source: str = "awg") -> dict[str, tuple[int, int]]:
+        """Parse awg/wg transfer output into a mapping of public key to byte counts."""
         transfers: dict[str, tuple[int, int]] = {}
         for raw_line in text.splitlines():
             line = raw_line.strip()
@@ -928,6 +946,7 @@ class AwgConfigAdapter:
 
 
 def self_check_allowed_ips_parser() -> bool:
+    """Self-test that the section parser extracts AllowedIPs correctly."""
     text = """
 [Interface]
 PrivateKey = server

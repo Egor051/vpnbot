@@ -61,6 +61,7 @@ class Socks5Service:
         self._lock = asyncio.Lock()
 
     async def issue_socks5_proxy(self, actor_user_id: int, profile: TelegramUserProfile) -> ProxyAccess:
+        """Issue or return a SOCKS5 proxy access, provisioning the backend user."""
         self._ensure_enabled()
         self.backend_health.require_mutation_allowed(ProxyAccessType.SOCKS5)
         async with self.user_locks.lock(profile.telegram_user_id):
@@ -130,6 +131,7 @@ class Socks5Service:
                 return await self._get_access(access.id)
 
     async def get_socks5_proxy_config(self, actor_user_id: int) -> ProxyAccess:
+        """Return the user's active SOCKS5 proxy access."""
         await self.users.require_approved_or_admin(actor_user_id)
         access = await self._active_access(actor_user_id)
         if access is None:
@@ -138,10 +140,12 @@ class Socks5Service:
         return await self._get_access(access.id)
 
     async def list_user_proxy_accesses(self, actor_user_id: int) -> list[ProxyAccess]:
+        """Return all proxy accesses owned by the requesting user."""
         await self.users.require_approved_or_admin(actor_user_id)
         return await self.accesses.list_by_owner(actor_user_id)
 
     async def revoke_socks5_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
+        """Revoke a SOCKS5 proxy access by locking its backend user."""
         await self.users.require_superadmin(actor_user_id)
         access = await self._get_access(access_id)
         if access.access_type != ProxyAccessType.SOCKS5:
@@ -181,6 +185,7 @@ class Socks5Service:
             return await self._get_access(access.id)
 
     async def delete_socks5_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
+        """Delete a SOCKS5 proxy access and remove its backend user."""
         await self.users.require_superadmin(actor_user_id)
         access = await self._get_access(access_id)
         if access.access_type != ProxyAccessType.SOCKS5:

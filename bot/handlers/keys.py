@@ -46,6 +46,7 @@ KEYS_PAGE_SIZE = 5
 
 @router.callback_query(F.data.regexp(r"^keys:list(?::\d+)?$"))
 async def list_keys(callback: CallbackQuery, services: Services) -> None:
+    """Show the current user's key list page via callback."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -71,6 +72,7 @@ async def list_keys(callback: CallbackQuery, services: Services) -> None:
 
 @router.message(F.text == t("btn_my_keys"))
 async def list_keys_message(message: Message, services: Services) -> None:
+    """Show the current user's key list in response to the my-keys button."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -92,6 +94,7 @@ async def list_keys_message(message: Message, services: Services) -> None:
 
 @router.callback_query(F.data == "keys:create")
 async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
+    """Show the key type selection menu for creating a key."""
     if not await ensure_private_callback(callback):
         return
     try:
@@ -112,6 +115,7 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
 
 @router.message(F.text == t("btn_create_key"))
 async def create_key_menu_message(message: Message, services: Services) -> None:
+    """Show the key type selection menu in response to the create-key button."""
     if not await ensure_private_message(message):
         return
     if message.from_user is None:
@@ -125,6 +129,7 @@ async def create_key_menu_message(message: Message, services: Services) -> None:
 
 @router.callback_query(F.data.in_({"keys:create:xray", "keys:create:awg"}))
 async def create_key_choose(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Record the chosen key type and prompt for a note."""
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -146,6 +151,7 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext, services
 
 @router.message(CreateKeyStates.waiting_note)
 async def create_key_note(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
+    """Store the entered note and advance to MTU or expiry selection."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -172,6 +178,7 @@ async def create_key_note(message: Message, state: FSMContext, services: Service
 
 @router.callback_query(CreateKeyStates.waiting_mtu, F.data.regexp(r"^mtu:\d+$"))
 async def create_key_mtu(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Store the chosen MTU value and advance to expiry selection."""
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -197,6 +204,7 @@ async def create_key_mtu(callback: CallbackQuery, state: FSMContext, services: S
 
 @router.callback_query(CreateKeyStates.waiting_mtu, F.data == "mtu:custom")
 async def create_key_mtu_custom_request(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt the user to enter a custom MTU value."""
     if not await ensure_private_callback(callback):
         return
     if callback.message is None:
@@ -209,6 +217,7 @@ async def create_key_mtu_custom_request(callback: CallbackQuery, state: FSMConte
 
 @router.message(CreateKeyStates.waiting_mtu_custom)
 async def create_key_mtu_custom(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
+    """Validate the custom MTU input and advance to expiry selection."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -233,6 +242,7 @@ async def create_key_mtu_custom(message: Message, state: FSMContext, services: S
 
 @router.callback_query(CreateKeyStates.waiting_expiry, F.data.regexp(r"^expiry:(permanent|\d+)$"))
 async def create_key_expiry(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Store the chosen expiry and show the key creation confirmation."""
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -268,6 +278,7 @@ async def create_key_expiry(callback: CallbackQuery, state: FSMContext, services
 
 @router.callback_query(CreateKeyStates.waiting_expiry, F.data == "expiry:custom")
 async def create_key_expiry_custom(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt the user to enter a custom number of expiry days."""
     if not await ensure_private_callback(callback):
         return
     if callback.message is None:
@@ -283,6 +294,7 @@ async def create_key_expiry_custom(callback: CallbackQuery, state: FSMContext) -
 
 @router.message(CreateKeyStates.waiting_custom_days)
 async def create_key_custom_days(message: Message, state: FSMContext, services: Services) -> None:
+    """Validate the custom expiry days input and show the confirmation."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -318,6 +330,7 @@ async def create_key_custom_days(message: Message, state: FSMContext, services: 
 
 @router.callback_query(CreateKeyStates.confirming, F.data == "create:confirm")
 async def create_key_confirm(callback: CallbackQuery, state: FSMContext, services: Services, rate_limiter: RateLimiter) -> None:
+    """Create the VPN key and send its configuration to the user."""
     if callback.from_user is None or callback.message is None:
         return
     if not await ensure_private_callback(callback):
@@ -356,6 +369,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
 
 @router.callback_query(F.data.startswith("key:open:"))
 async def open_key(callback: CallbackQuery, services: Services) -> None:
+    """Show the detail view for the selected key."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -379,6 +393,7 @@ async def open_key(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data.startswith("key:show:"))
 async def show_key_config(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
+    """Show the connection configuration for the selected key."""
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -415,6 +430,7 @@ async def show_key_config(callback: CallbackQuery, services: Services, rate_limi
 
 @router.callback_query(F.data.startswith("key:stats:"))
 async def show_key_stats(callback: CallbackQuery, services: Services) -> None:
+    """Refresh and show traffic statistics for the selected key."""
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -450,6 +466,7 @@ async def show_key_stats(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data.startswith("key:revoke:"))
 async def revoke_key_prompt(callback: CallbackQuery, services: Services) -> None:
+    """Prompt the user to confirm revoking the selected key."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -472,6 +489,7 @@ async def revoke_key_prompt(callback: CallbackQuery, services: Services) -> None
 
 @router.callback_query(F.data.startswith("key:delete:"))
 async def delete_key_prompt(callback: CallbackQuery, services: Services) -> None:
+    """Prompt the user to confirm deleting the selected key."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -494,6 +512,7 @@ async def delete_key_prompt(callback: CallbackQuery, services: Services) -> None
 
 @router.callback_query(F.data.startswith("confirm:"))
 async def confirm_key_action(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
+    """Execute the confirmed revoke or delete action on a key."""
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     if not await ensure_private_callback(callback):
@@ -558,6 +577,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
 
 @router.callback_query(F.data.startswith("key:note:"))
 async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Prompt the user to enter a new note for the selected key."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -582,6 +602,7 @@ async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services:
 
 @router.message(EditNoteStates.waiting_note)
 async def edit_note_waiting(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
+    """Store the new note input and show the note change confirmation."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -605,6 +626,7 @@ async def edit_note_waiting(message: Message, state: FSMContext, services: Servi
 
 @router.callback_query(EditNoteStates.confirming, F.data == "note:confirm")
 async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Save the updated note for the key and return to its detail view."""
     if callback.from_user is None or callback.message is None:
         return
     if not await ensure_private_callback(callback):
@@ -628,6 +650,7 @@ async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services
 
 @router.callback_query(F.data == "trial:request")
 async def trial_request_start(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Start the trial request flow by prompting for a protocol."""
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None:
@@ -650,6 +673,7 @@ async def trial_request_start(callback: CallbackQuery, state: FSMContext, servic
 
 @router.callback_query(TrialRequestStates.choosing_protocol, F.data.regexp(r"^trial:proto:(xray|awg)$"))
 async def trial_request_proto(callback: CallbackQuery, state: FSMContext, services: Services, bot: Bot, rate_limiter: RateLimiter) -> None:
+    """Submit the trial request for the chosen protocol and notify admins."""
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -690,6 +714,7 @@ async def trial_request_proto(callback: CallbackQuery, state: FSMContext, servic
 
 @router.callback_query(F.data.regexp(r"^trial:show:\d+$"))
 async def trial_key_show(callback: CallbackQuery, services: Services) -> None:
+    """Show the configuration for the user's trial key."""
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -783,6 +808,7 @@ async def load_keys_page(
     page: int,
     page_size: int,
 ) -> tuple[Any, int, int, bool]:
+    """Load a clamped page of keys and return them with pagination metadata."""
     total_count = await services.vpn_keys.count_for_actor(actor_user_id, owner_user_id=owner_user_id)
     total_pages = max(1, (total_count + page_size - 1) // page_size)
     current_page = min(max(page, 0), total_pages - 1)

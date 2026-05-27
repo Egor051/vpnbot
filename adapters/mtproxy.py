@@ -98,10 +98,12 @@ class MtProxyAdapter:
         self._listen_port_re = re.compile(rf":{re.escape(str(port))}(?:\s|$)")
 
     def read_current_managed_secrets(self) -> list[MtProxyManagedSecret]:
+        """Return the user secrets currently stored in the managed document."""
         document = self._read_store_document()
         return self._document_user_secrets(document)
 
     def read_runtime_managed_secrets(self) -> list[MtProxyManagedSecret]:
+        """Return the secrets currently active in the mtproxy runtime."""
         document = self._read_store_document()
         items = document.get("runtime_secrets")
         if not isinstance(items, list):
@@ -127,6 +129,7 @@ class MtProxyAdapter:
         return self._normalize_secrets(secrets)
 
     def write_managed_secrets_atomically(self, secrets: list[MtProxyManagedSecret]) -> None:
+        """Atomically write the given managed secrets to the store document."""
         current = self._read_store_document()
         document = self._store_document(secrets, current)
         self._atomic_write_text(self.managed_secrets_path, self._json_dump(document), mode=0o600)
@@ -157,6 +160,7 @@ class MtProxyAdapter:
         return MtProxyApplyResult(changed=True, generation=generation)
 
     def ensure_managed_runtime_ready(self) -> bool:
+        """Verify the managed runtime files exist and have correct permissions."""
         missing = [str(path) for path in self._managed_files() if not path.exists()]
         if missing:
             raise MtProxyApplyError(_MANAGED_RUNTIME_NOT_INITIALIZED)
@@ -165,6 +169,7 @@ class MtProxyAdapter:
         return self.ensure_managed_permissions()
 
     def ensure_managed_permissions(self) -> bool:
+        """Enforce private permissions on managed files and dirs, returning whether anything changed."""
         changed = False
         changed = self._chmod_dir(self.managed_secrets_path.parent) or changed
         changed = self._chmod_dir(self.backup_root) or changed
@@ -180,6 +185,7 @@ class MtProxyAdapter:
         return changed
 
     def backup_managed_files(self) -> str:
+        """Back up the managed files into a new backup directory and return its id."""
         backup_id = f"{int(time.time())}-{time.time_ns()}-{secrets_module.token_hex(4)}"
         backup_dir = self._backup_dir(backup_id)
         backup_dir.mkdir(parents=True, exist_ok=False)
@@ -202,6 +208,7 @@ class MtProxyAdapter:
         return backup_id
 
     def restore_backup(self, backup_id: str) -> None:
+        """Restore the managed files from the backup with the given id."""
         backup_dir = self._backup_dir(backup_id)
         manifest_path = backup_dir / "manifest.json"
         try:
@@ -223,6 +230,7 @@ class MtProxyAdapter:
             self._chmod_file(target, executable=os.access(backup_path, os.X_OK))
 
     async def apply_managed_secrets(self, secrets: list[MtProxyManagedSecret]) -> MtProxyApplyResult:
+        """Apply the desired secrets to the runtime, restarting and rolling back on failure."""
         self.ensure_managed_runtime_ready()
         desired = self._normalize_secrets(secrets)
         current_document = self._read_store_document()
@@ -273,13 +281,16 @@ class MtProxyAdapter:
             raise MtProxyApplyError(message) from exc
 
     async def restart_mtproxy(self) -> ShellResult:
+        """Restart the mtproxy systemd service."""
         return await self.systemctl.restart(self.service_name)
 
     async def check_mtproxy_active(self) -> bool:
+        """Return whether the mtproxy systemd service is active."""
         result = await self.systemctl.is_active(self.service_name)
         return result.ok and result.stdout.strip() == "active"
 
     async def check_mtproxy_listening(self) -> bool:
+        """Poll until the mtproxy port is listening or the apply timeout elapses."""
         deadline = time.monotonic() + self.apply_timeout_seconds
         while True:
             if await self._check_mtproxy_listening_once():
@@ -310,6 +321,7 @@ class MtProxyAdapter:
         return active_without_process_info and await self.check_mtproxy_active()
 
     async def runtime_status(self) -> MtProxyRuntimeStatus:
+        """Return the current mtproxy systemd and port-listening status."""
         if self._using_helper():
             result = await self._run_helper(["status"], timeout=self.apply_timeout_seconds)
             if not result.ok:

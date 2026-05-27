@@ -12,6 +12,7 @@ class UserLockManager:
 
     @asynccontextmanager
     async def lock(self, user_id: int) -> AsyncIterator[None]:
+        """Acquire a per-user lock, serialising concurrent operations for that user."""
         async with self._guard:
             lock = self._locks.get(user_id)
             if lock is None:

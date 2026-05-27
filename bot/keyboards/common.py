@@ -23,6 +23,7 @@ FAQ_PER_PAGE = 5
 
 
 def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Build the main menu inline keyboard, optionally with the admin panel entry."""
     rows = [
         [InlineKeyboardButton(text=t("btn_my_keys"), callback_data="keys:list")],
         [InlineKeyboardButton(text=t("btn_create_key"), callback_data="keys:create")],
@@ -35,6 +36,7 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
 
 
 def main_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
+    """Build the main menu reply keyboard, optionally with the admin panel button."""
     rows = [
         [KeyboardButton(text=t("btn_my_keys")), KeyboardButton(text=t("btn_create_key"))],
         [KeyboardButton(text=t("btn_proxy")), KeyboardButton(text=t("btn_help"))],
@@ -45,12 +47,14 @@ def main_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
 
 
 def back_to_menu() -> InlineKeyboardMarkup:
+    """Build a keyboard with a single back-to-menu button."""
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data="menu:main")]]
     )
 
 
 def faq_keyboard(page: int = 1) -> InlineKeyboardMarkup:
+    """Build the paginated FAQ topics inline keyboard."""
     total = (len(FAQ_TOPICS) + FAQ_PER_PAGE - 1) // FAQ_PER_PAGE
     page = max(1, min(page, total))
     start = (page - 1) * FAQ_PER_PAGE
@@ -73,6 +77,7 @@ def faq_keyboard(page: int = 1) -> InlineKeyboardMarkup:
 
 
 def faq_answer_keyboard(page: int = 1) -> InlineKeyboardMarkup:
+    """Build the keyboard shown beneath an FAQ answer."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_back_to_faq"), callback_data=f"faq_page:{page}")],
@@ -82,12 +87,14 @@ def faq_answer_keyboard(page: int = 1) -> InlineKeyboardMarkup:
 
 
 def cancel_keyboard() -> InlineKeyboardMarkup:
+    """Build a keyboard with a single cancel button."""
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")]]
     )
 
 
 def confirm_cancel_keyboard(confirm_data: str, cancel_data: str = "cancel") -> InlineKeyboardMarkup:
+    """Build a confirm/cancel keyboard with the given callback data."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_confirm"), callback_data=confirm_data)],
@@ -102,6 +109,7 @@ def pagination_keyboard(
     next_data: str | None,
     back_data: str,
 ) -> InlineKeyboardMarkup:
+    """Build a generic prev/next pagination keyboard with a back button."""
     rows: list[list[InlineKeyboardButton]] = []
     nav: list[InlineKeyboardButton] = []
     if prev_data:

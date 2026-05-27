@@ -74,6 +74,7 @@ def _mkdir_private(path: Path) -> None:
 
 
 def write_private_staging_file(staging_dir: Path, *, prefix: str, suffix: str, content: str) -> Path:
+    """Write content to a new private (0600) staging file and return its path."""
     if os.name == "posix":
         _mkdir_private(staging_dir)
     else:
@@ -96,6 +97,7 @@ def write_private_staging_file(staging_dir: Path, *, prefix: str, suffix: str, c
 
 
 def create_private_staging_dir(staging_root: Path, *, prefix: str) -> Path:
+    """Create and return a new private (0700) staging directory under the root."""
     if os.name == "posix":
         _mkdir_private(staging_root)
     else:
@@ -108,6 +110,7 @@ def create_private_staging_dir(staging_root: Path, *, prefix: str) -> Path:
 
 
 def cleanup_staging_path(path: Path | None) -> None:
+    """Remove the given staging file or directory, ignoring missing paths."""
     if path is None:
         return
     if path.is_dir():

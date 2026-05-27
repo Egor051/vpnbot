@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def profile_from_tg(user: TgUser) -> TelegramUserProfile:
+    """Build a TelegramUserProfile from an aiogram user object."""
     return TelegramUserProfile(
         telegram_user_id=user.id,
         username=user.username,
@@ -31,6 +32,7 @@ def profile_from_tg(user: TgUser) -> TelegramUserProfile:
 
 
 async def is_admin(services: Services, user_id: int) -> bool:
+    """Return whether the given user is a superadmin."""
     try:
         user = await services.users.get_user(user_id)
     except NotFound:
@@ -62,12 +64,14 @@ _SAFE_EXCEPTIONS = (
 
 
 def service_error_text(exc: Exception) -> str:
+    """Return a user-safe message for the exception, hiding internal errors."""
     if isinstance(exc, _SAFE_EXCEPTIONS):
         return str(exc)
     return t("internal_error")
 
 
 async def answer_callback_error(callback: CallbackQuery, exc: Exception) -> None:
+    """Show an error alert for a failed callback, logging unexpected errors."""
     if is_stale_callback_query_error(exc):
         logger.debug("Ignoring stale callback query error while handling callback: %s", exc)
         return
@@ -77,6 +81,7 @@ async def answer_callback_error(callback: CallbackQuery, exc: Exception) -> None
 
 
 async def answer_message_error(message: Message, exc: Exception) -> None:
+    """Reply with an error message for a failed message handler, logging unexpected errors."""
     if not isinstance(exc, _SAFE_EXCEPTIONS):
         logger.exception("Unhandled message error")
     await message.answer(service_error_text(exc), reply_markup=back_to_menu())
@@ -89,6 +94,7 @@ def _faq_page_title(page: int) -> str:
 
 @router.message(Command("help"))
 async def help_command(message: Message, services: Services) -> None:
+    """Handle the /help command by showing the FAQ list."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -98,6 +104,7 @@ async def help_command(message: Message, services: Services) -> None:
 
 @router.message(Command("faq"))
 async def faq_command(message: Message, services: Services) -> None:
+    """Handle the /faq command by showing the FAQ list."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -107,6 +114,7 @@ async def faq_command(message: Message, services: Services) -> None:
 
 @router.callback_query(F.data == "help")
 async def help_callback(callback: CallbackQuery, services: Services) -> None:
+    """Show the FAQ list in response to the help button."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -116,11 +124,13 @@ async def help_callback(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data == "noop")
 async def noop_callback(callback: CallbackQuery) -> None:
+    """Acknowledge a no-op callback without changing anything."""
     await safe_callback_answer(callback)
 
 
 @router.callback_query(F.data.startswith("faq_page:"))
 async def faq_page_callback(callback: CallbackQuery) -> None:
+    """Show the requested page of the FAQ list."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -137,6 +147,7 @@ async def faq_page_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("faq:"))
 async def faq_answer_callback(callback: CallbackQuery) -> None:
+    """Show the answer for the selected FAQ topic."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -155,6 +166,7 @@ async def faq_answer_callback(callback: CallbackQuery) -> None:
 
 @router.message(F.text == t("btn_help"))
 async def help_menu_message(message: Message, services: Services) -> None:
+    """Show the FAQ list in response to the help menu button."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -164,6 +176,7 @@ async def help_menu_message(message: Message, services: Services) -> None:
 
 @router.message(Command("menu"))
 async def menu_command(message: Message, services: Services) -> None:
+    """Handle the /menu command by showing the main menu."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message):
@@ -180,6 +193,7 @@ async def menu_command(message: Message, services: Services) -> None:
 
 @router.callback_query(F.data == "menu:main")
 async def menu_callback(callback: CallbackQuery, services: Services) -> None:
+    """Show the main menu in response to the menu button."""
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -198,6 +212,7 @@ async def menu_callback(callback: CallbackQuery, services: Services) -> None:
 
 @router.message(Command("cancel"))
 async def cancel_command(message: Message, state: FSMContext) -> None:
+    """Handle the /cancel command by clearing the current FSM state."""
     if not await ensure_private_message(message):
         return
     await state.clear()

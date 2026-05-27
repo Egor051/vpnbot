@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 async def scheduled_announcements_loop(service: AnnouncementService, bot: Bot, interval: int) -> None:
+    """Send due scheduled announcements repeatedly at the given interval."""
     while True:
         try:
             results = await service.check_and_send_due(bot)

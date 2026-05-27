@@ -27,6 +27,7 @@ class TrafficStatsRepository:
         self.db = db
 
     async def get_by_key_id(self, key_id: int) -> TrafficStats | None:
+        """Return traffic stats for a VPN key, or None if not recorded."""
         cursor = await self.db.conn.execute(
             "SELECT * FROM vpn_key_traffic_stats WHERE key_id = ?",
             (key_id,),
@@ -35,6 +36,7 @@ class TrafficStatsRepository:
         return _row_to_traffic_stats(row)
 
     async def list_by_key_ids(self, key_ids: list[int]) -> dict[int, TrafficStats]:
+        """Return traffic stats for the given key ids keyed by key id."""
         if not key_ids:
             return {}
         placeholders = ",".join("?" for _ in key_ids)
@@ -61,6 +63,7 @@ class TrafficStatsRepository:
         now: str,
         source: str,
     ) -> TrafficStats:
+        """Upsert successful traffic stats for a key and return the stored stats."""
         downloaded = max(downloaded_bytes, 0)
         uploaded = max(uploaded_bytes, 0)
         raw_down = max(raw_downloaded_bytes, 0) if raw_downloaded_bytes is not None else None
@@ -109,6 +112,7 @@ class TrafficStatsRepository:
         now: str,
         source: str,
     ) -> TrafficStats:
+        """Upsert a key's traffic stats as unavailable with the given reason and return them."""
         await self.db.conn.execute(
             """
             INSERT INTO vpn_key_traffic_stats (

@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def normalize_note(note: str | None) -> str | None:
+    """Trim and validate a note, returning None for empty values."""
     if note is None:
         return None
     value = note.strip()
@@ -44,6 +45,7 @@ class NotesService:
         self.audit = audit
 
     async def update_key_note(self, actor_user_id: int, key_id: int, note: str | None) -> None:
+        """Update the note on a VPN key owned by the requester."""
         key = await self.vpn_keys.get_by_id(key_id)
         if key is None:
             raise NotFound("Ключ не найден")
@@ -61,6 +63,7 @@ class NotesService:
         )
 
     async def update_user_note(self, actor_user_id: int, target_user_id: int, note: str | None) -> None:
+        """Update the admin note on a user; requires superadmin."""
         await self.users.require_superadmin(actor_user_id)
         user = await self.users_repo.get_by_id(target_user_id)
         if user is None:
@@ -76,6 +79,7 @@ class NotesService:
         )
 
     async def update_proxy_note(self, actor_user_id: int, proxy_id: int, note: str | None) -> None:
+        """Update the note on a proxy entry; requires superadmin."""
         await self.users.require_superadmin(actor_user_id)
         proxy = await self.proxies.get_by_id(proxy_id)
         if proxy is None:

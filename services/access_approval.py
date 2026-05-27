@@ -24,6 +24,7 @@ class AccessApprovalService:
         self.audit = audit
 
     async def create_or_get_request(self, profile: TelegramUserProfile) -> AccessRequestResult:
+        """Create a pending access request for the user or return an existing one."""
         async with self.requests.db.transaction():
             user = await self.users.ensure_user(profile)
             blocked = is_blocked_user(user)
@@ -56,6 +57,7 @@ class AccessApprovalService:
             return AccessRequestResult(user=user, request=request, created=created)
 
     async def approve(self, actor_user_id: int, request_id: int) -> tuple[AccessRequest, bool]:
+        """Approve a pending access request and grant the user approved access."""
         await self.users.require_moderator_or_admin(actor_user_id)
         async with self.requests.db.transaction():
             request = await self.requests.get_by_id(request_id)
@@ -90,6 +92,7 @@ class AccessApprovalService:
             return refreshed, changed
 
     async def reject(self, actor_user_id: int, request_id: int) -> tuple[AccessRequest, bool]:
+        """Reject a pending access request and update the user accordingly."""
         await self.users.require_moderator_or_admin(actor_user_id)
         async with self.requests.db.transaction():
             request = await self.requests.get_by_id(request_id)
@@ -116,14 +119,17 @@ class AccessApprovalService:
             return refreshed, changed
 
     async def count_pending(self, actor_user_id: int) -> int:
+        """Return the number of pending access requests."""
         await self.users.require_moderator_or_admin(actor_user_id)
         return await self.requests.count_by_status(AccessRequestStatus.PENDING)
 
     async def list_pending(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[AccessRequest]:
+        """Return a paginated list of pending access requests."""
         await self.users.require_moderator_or_admin(actor_user_id)
         return await self.requests.list_by_status(AccessRequestStatus.PENDING, limit=limit, offset=offset)
 
     async def get_request(self, actor_user_id: int, request_id: int) -> AccessRequest:
+        """Return a single access request by id."""
         await self.users.require_moderator_or_admin(actor_user_id)
         request = await self.requests.get_by_id(request_id)
         if request is None:
@@ -131,6 +137,7 @@ class AccessApprovalService:
         return request
 
     async def check_access(self, actor_user_id: int) -> UserRole:
+        """Return the user's role, raising if the user is blocked."""
         user = await self.users.get_user(actor_user_id)
         if is_blocked_user(user):
             raise InvalidOperation("Пользователь заблокирован")
