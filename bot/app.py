@@ -261,6 +261,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     )
 
     offsite_backup_service = OffsiteBackupService(
+        db=db,
         db_path=settings.db_path,
         encryption_key=settings.offsite_backup_encryption_key,
         clock=clock,
