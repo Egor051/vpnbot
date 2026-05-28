@@ -428,6 +428,18 @@ class Database:
             (str(version),),
         )
 
+    async def get_meta(self, key: str) -> str | None:
+        cursor = await self.conn.execute("SELECT value FROM schema_meta WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        return str(row["value"]) if row is not None else None
+
+    async def set_meta(self, key: str, value: str) -> None:
+        await self.conn.execute(
+            "INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await self.conn.commit()
+
     async def _collapse_duplicate_pending_access_requests(self, now: str) -> None:
         await self.conn.execute(
             """

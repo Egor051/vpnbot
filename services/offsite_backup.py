@@ -2,12 +2,14 @@
 import asyncio
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from aiogram import Bot
 from aiogram.types import BufferedInputFile
 
 from adapters.clock import ClockProvider
+from db.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +31,22 @@ class OffsiteBackupService:
     # window during which a compromised key can be used to decrypt old data.
     BACKUP_MAX_AGE_DAYS = 30
 
-    def __init__(self, *, db_path: Path, encryption_key: str, clock: ClockProvider) -> None:
+    _META_KEY = "last_offsite_backup"
+
+    def __init__(self, *, db: Database, db_path: Path, encryption_key: str, clock: ClockProvider) -> None:
         self.db_path = db_path
         self.clock = clock
         self._encryption_key = encryption_key
+        self._db = db
+
+    async def get_last_backup_time(self) -> datetime | None:
+        value = await self._db.get_meta(self._META_KEY)
+        if value is None:
+            return None
+        return datetime.fromisoformat(value)
+
+    async def record_backup_sent(self) -> None:
+        await self._db.set_meta(self._META_KEY, datetime.now(timezone.utc).replace(microsecond=0).isoformat())
 
     @property
     def enabled(self) -> bool:
@@ -137,7 +151,21 @@ async def offsite_backup_loop(
     await asyncio.sleep(60)
     while True:
         try:
+            last_sent = await service.get_last_backup_time()
+        except Exception:
+            logger.warning("Offsite backup: не удалось прочитать метку времени, считаем как первый запуск", exc_info=True)
+            last_sent = None
+        if last_sent is not None:
+            elapsed = (datetime.now(timezone.utc) - last_sent).total_seconds()
+            remaining = interval - elapsed
+            if remaining > 0:
+                logger.info("Offsite backup: следующий через %.0f с (последний %.0f с назад)", remaining, elapsed)
+                await asyncio.sleep(remaining)
+
+        try:
             result = await service.send_to_admins(bot, admin_ids)
+            if result["success"] > 0:
+                await service.record_backup_sent()
             logger.info(
                 "Offsite backup sent: success=%d failed=%d total=%d",
                 result["success"],
