@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.2] — 2026-05-28
+
+### Fixed
+
+- **AWG key detail** — removed IP and public key fields from the AmneziaWG key detail card; MTU is now displayed instead. Config hint after showing an AWG config updated from «AmneziaWG» to «AmneziaVPN» in both locales. (#106)
+- **Offsite backup timer** — weekly backup timer no longer resets after a bot reboot. The last-backup timestamp is now persisted in `schema_meta`; on startup the loop sleeps only for the remaining interval, or sends immediately if 7+ days have elapsed. (#112)
+
+### Changed
+
+- **Prompt message cleanup** — the inline-keyboard prompt message shown when the bot awaits a text reply (note or custom MTU) is now deleted before the next message is sent, reducing chat clutter. Covers all key-creation and note-editing flows for both users and admins. (#107)
+- **Python version declaration** — declared Python support narrowed to `>=3.12,<3.13` in `pyproject.toml` and updated in `README.md`, `README_RU.md`, `CONTRIBUTING.md` to reflect that only Python 3.12.x is tested and verified. (#111)
+- **Docstrings** — added concise one-line docstrings to all public methods and functions across `services/`, `adapters/`, `repositories/`, `bot/handlers/`, `bot/keyboards/`, and `bot/middlewares/`. (#110)
+
 ## [1.0.1] — 2026-05-25
 
 ### Fixed
@@ -98,5 +111,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Managed MTProto secrets and env files are `root:root 0600`; backup directories are `root:root 0700`.
 - `XRAY_APPLY_MODE=api` + `PRIVILEGE_HELPERS_ENABLED=true` combination rejected at startup.
 
+[1.0.2]: https://github.com/Egor051/vpnbot/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Egor051/vpnbot/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Egor051/vpnbot/releases/tag/v1.0.0
