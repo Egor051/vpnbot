@@ -150,7 +150,11 @@ async def offsite_backup_loop(
     # Short startup delay so the bot finishes initialising before the first backup.
     await asyncio.sleep(60)
     while True:
-        last_sent = await service.get_last_backup_time()
+        try:
+            last_sent = await service.get_last_backup_time()
+        except Exception:
+            logger.warning("Offsite backup: не удалось прочитать метку времени, считаем как первый запуск", exc_info=True)
+            last_sent = None
         if last_sent is not None:
             elapsed = (datetime.now(timezone.utc) - last_sent).total_seconds()
             remaining = interval - elapsed
@@ -160,7 +164,8 @@ async def offsite_backup_loop(
 
         try:
             result = await service.send_to_admins(bot, admin_ids)
-            await service.record_backup_sent()
+            if result["success"] > 0:
+                await service.record_backup_sent()
             logger.info(
                 "Offsite backup sent: success=%d failed=%d total=%d",
                 result["success"],
