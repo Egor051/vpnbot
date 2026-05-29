@@ -48,7 +48,7 @@ from bot.keyboards.admin import (
 )
 from bot.handlers.keys import load_keys_page
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
-from bot.keyboards.keys import expiry_choice_keyboard, key_actions_keyboard, keys_list_keyboard, mtu_choice_keyboard
+from bot.keyboards.keys import VALID_FINGERPRINTS, expiry_choice_keyboard, fp_choice_keyboard, key_actions_keyboard, keys_list_keyboard, mtu_choice_keyboard
 from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text
 from bot.pagination import MAX_PAGE, page_offset, split_page
 from bot.private_chat import ensure_private_callback, ensure_private_message
@@ -1078,12 +1078,40 @@ async def admin_issue_note(message: Message, state: FSMContext, services: Servic
         if key_type == VpnKeyType.AWG.value:
             await state.set_state(AdminCreateKeyStates.waiting_mtu)
             await message.answer(t("mtu_prompt"), reply_markup=mtu_choice_keyboard())
+        elif key_type == VpnKeyType.XRAY.value:
+            await state.set_state(AdminCreateKeyStates.waiting_fp)
+            await message.answer(t("fp_prompt"), reply_markup=fp_choice_keyboard())
         else:
             await state.set_state(AdminCreateKeyStates.waiting_expiry)
             await message.answer(t("expiry_prompt"), reply_markup=expiry_choice_keyboard())
     except Exception as exc:
         await state.clear()
         await answer_message_error(message, exc)
+
+
+@router.callback_query(AdminCreateKeyStates.waiting_fp, F.data.regexp(r"^fp:[\w]+$"))
+async def admin_issue_fp(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Store the chosen fingerprint and advance to expiry selection."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        fp = callback.data.split(":", 1)[1]
+        if fp not in VALID_FINGERPRINTS:
+            await safe_callback_answer(callback, t("fp_invalid"), show_alert=True)
+            return
+        await state.update_data(fingerprint=fp)
+        await state.set_state(AdminCreateKeyStates.waiting_expiry)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("expiry_prompt"),
+            reply_markup=expiry_choice_keyboard(is_admin=True),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
 
 
 @router.callback_query(AdminCreateKeyStates.waiting_mtu, F.data.regexp(r"^mtu:\d+$"))
@@ -1177,11 +1205,12 @@ async def admin_issue_expiry(callback: CallbackQuery, state: FSMContext, service
         key_type = str(data["key_type"])
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
+        fingerprint = data.get("fingerprint")
         await state.set_state(AdminCreateKeyStates.confirming)
         await safe_callback_answer(callback)
         await safe_edit_message_text(
             callback.message,
-            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu),
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint),
             reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
         )
     except Exception as exc:
@@ -1231,9 +1260,10 @@ async def admin_issue_custom_days(message: Message, state: FSMContext, services:
         key_type = str(data["key_type"])
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
+        fingerprint = data.get("fingerprint")
         await state.set_state(AdminCreateKeyStates.confirming)
         await message.answer(
-            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu),
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint),
             reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
         )
     except Exception as exc:
@@ -1255,6 +1285,7 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
         note = data.get("note")
         expires_at: str | None = data.get("expires_at")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
+        fingerprint: str | None = data.get("fingerprint")
         owner_is_pending = bool(data.get("owner_is_pending", False))
         owner = await services.users.get_user(owner_user_id)
         await require_superadmin(services, callback.from_user.id)
@@ -1267,6 +1298,7 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
                 callback.from_user.id, profile, note,
                 expires_at=expires_at,
                 allow_pending_owner=owner_is_pending,
+                fingerprint=fingerprint,
             )
         elif key_type == VpnKeyType.AWG.value:
             result = await services.awg.create_awg_key(

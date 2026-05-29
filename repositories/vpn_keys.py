@@ -481,6 +481,20 @@ class VpnKeyRepository:
         )
         await self.db.commit()
 
+    async def update_payload(
+        self,
+        key_id: int,
+        payload: dict[str, Any],
+        public_payload: dict[str, Any],
+        now: str,
+    ) -> None:
+        """Update payload_json and public_payload_json for a key."""
+        await self.db.conn.execute(
+            "UPDATE vpn_keys SET payload_json = ?, public_payload_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(payload, ensure_ascii=False), json.dumps(public_payload, ensure_ascii=False), now, key_id),
+        )
+        await self.db.commit()
+
     async def get_occupied_awg_ips(self) -> set[str]:
         """Return the set of client IPs reserved by non-terminal AWG keys."""
         reserved_statuses = (
