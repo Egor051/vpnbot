@@ -893,7 +893,7 @@ class XrayService:
         uuid_value = str(key.payload.get("uuid") or key.uuid or "")
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "")
         email_label = str(key.payload.get("email_label") or key.email_label or "")
-        fingerprint = key.payload.get("fingerprint") or None
+        fingerprint = str(key.payload.get("fingerprint")) if key.payload.get("fingerprint") else None
         link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint)
         visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
         note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
