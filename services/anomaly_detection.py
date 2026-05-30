@@ -7,6 +7,7 @@ import time as time_module
 from pathlib import Path
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from adapters.awg_config import AwgConfigAdapter
 from models.dto import VpnKey
@@ -249,9 +250,12 @@ class AnomalyDetectionService:
             lines.append(f"⚠️ Авто-отзыв не удался: {revoke_error[:120]}")
         text = "\n".join(lines)
 
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="✅ Я прочитал", callback_data="admin:anomaly:dismiss")]]
+        )
         for admin_id in self._admin_ids:
             try:
-                await self.bot.send_message(admin_id, text)
+                await self.bot.send_message(admin_id, text, reply_markup=keyboard)
             except Exception:
                 logger.warning("Failed to send anomaly alert to admin %d", admin_id, exc_info=True)
 

@@ -224,6 +224,15 @@ def trial_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def anomaly_dismiss_keyboard() -> InlineKeyboardMarkup:
+    """Build the dismiss keyboard for anomaly alert messages."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Я прочитал", callback_data="admin:anomaly:dismiss")]
+        ]
+    )
+
+
 def admin_issue_users_keyboard(users: list[User], page: int = 0, has_next: bool = False, total_pages: int = 1) -> InlineKeyboardMarkup:
     """Build the paginated keyboard for selecting a user to issue a key to."""
     rows: list[list[InlineKeyboardButton]] = []

@@ -5,9 +5,10 @@ from dataclasses import replace
 from typing import Any
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InaccessibleMessage, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.container import Services
 from bot.formatters import (
@@ -96,6 +97,16 @@ async def admin_menu_message(message: Message, services: Services) -> None:
         await message.answer(t("admin_panel_title"), reply_markup=admin_panel_keyboard())
     except Exception as exc:
         await answer_message_error(message, exc)
+
+
+@router.callback_query(F.data == "admin:anomaly:dismiss")
+async def anomaly_alert_dismiss(callback: CallbackQuery) -> None:
+    """Delete the anomaly alert message for the admin who clicked the button."""
+    await safe_callback_answer(callback)
+    if callback.message is None or isinstance(callback.message, InaccessibleMessage):
+        return
+    with suppress(TelegramBadRequest):
+        await callback.message.delete()
 
 
 @router.callback_query(F.data == "admin:panel")
