@@ -313,6 +313,9 @@ class Settings:
             "ios",
             "android",
             "edge",
+            "360",
+            "qq",
+            "random",
             "randomized",
             "randomizedalpn",
             "randomizednoalpn",
@@ -414,7 +417,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_fingerprint=_choice(
             "XRAY_FINGERPRINT",
             "chrome",
-            {"chrome", "firefox", "safari", "ios", "android", "edge", "randomized", "randomizedalpn", "randomizednoalpn"},
+            {"chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized", "randomizedalpn", "randomizednoalpn"},
         ),
         xray_network_type=_choice("XRAY_NETWORK_TYPE", "tcp", {"tcp", "raw"}),
         xray_short_id=xray_short_id,

@@ -4,6 +4,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 class CreateKeyStates(StatesGroup):
     waiting_note = State()
+    waiting_fp = State()
     waiting_mtu = State()
     waiting_mtu_custom = State()
     waiting_expiry = State()
@@ -16,6 +17,10 @@ class EditNoteStates(StatesGroup):
     confirming = State()
 
 
+class EditFpStates(StatesGroup):
+    waiting_fp = State()
+
+
 class ProxyStates(StatesGroup):
     confirming = State()
 
@@ -23,6 +28,7 @@ class ProxyStates(StatesGroup):
 class AdminCreateKeyStates(StatesGroup):
     choosing_type = State()
     waiting_note = State()
+    waiting_fp = State()
     waiting_mtu = State()
     waiting_mtu_custom = State()
     waiting_expiry = State()

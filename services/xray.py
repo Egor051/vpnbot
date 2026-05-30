@@ -81,6 +81,7 @@ class XrayService:
         note: str | None,
         expires_at: str | None = None,
         allow_pending_owner: bool = False,
+        fingerprint: str | None = None,
     ) -> VpnKeyCreateResult:
         """Provision a new Xray client, persist the key, and return its config."""
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
@@ -94,13 +95,14 @@ class XrayService:
                 uuid_value, email_label = await self._unique_identity(owner.telegram_user_id, owner.username)
                 short_id_managed = self.settings.xray_manage_short_ids
                 short_id = self.ids.xray_short_id() if short_id_managed else self.settings.xray_short_id
-                link = self._build_vless_link(uuid_value, short_id, email_label)
+                link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint)
                 payload = {
                     "uuid": uuid_value,
                     "email_label": email_label,
                     "short_id": short_id,
                     "short_id_managed": short_id_managed,
                     "flow": self.settings.xray_flow,
+                    "fingerprint": fingerprint,
                 }
                 public_payload = {
                     "email_label": email_label,
@@ -334,6 +336,30 @@ class XrayService:
             if key.status != VpnKeyStatus.ACTIVE:
                 raise InvalidOperation("Конфигурация доступна только для активного ключа")
             return self._format_config(key, viewer_user_id=owner_user_id)
+
+    async def change_fingerprint(self, actor_user_id: int, key_id: int, fingerprint: str) -> VpnKey:
+        """Update the per-key fingerprint and rebuild the stored VLESS link."""
+        from bot.keyboards.keys import VALID_FINGERPRINTS
+        if fingerprint not in VALID_FINGERPRINTS:
+            raise InvalidOperation("Неподдерживаемый fingerprint")
+        key = await self._get_xray_key_for_manage(actor_user_id, key_id)
+        if key.status != VpnKeyStatus.ACTIVE:
+            raise InvalidOperation("Fingerprint можно изменить только у активного ключа")
+        new_payload = {**key.payload, "fingerprint": fingerprint}
+        uuid_value = str(new_payload.get("uuid") or key.uuid or "")
+        short_id = str(new_payload.get("short_id") or key.public_payload.get("short_id") or "")
+        email_label = str(new_payload.get("email_label") or key.email_label or "")
+        link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint)
+        new_public_payload = {**key.public_payload, "link": link}
+        await self.vpn_keys.update_payload(key_id, new_payload, new_public_payload, self.clock.now())
+        await self._write_audit_best_effort(
+            actor_user_id=actor_user_id,
+            action="xray_fingerprint_changed",
+            entity_type=AuditEntityType.VPN_KEY,
+            entity_id=key_id,
+            details={"fingerprint": fingerprint},
+        )
+        return await self._get_key(key_id)
 
     async def list_user_keys(
         self,
@@ -832,14 +858,14 @@ class XrayService:
                 return uuid_value, email_label
         raise InvalidOperation("Не удалось сгенерировать уникальные Xray-идентификаторы")
 
-    def _build_vless_link(self, uuid_value: str, short_id: str, email_label: str) -> str:
+    def _build_vless_link(self, uuid_value: str, short_id: str, email_label: str, fingerprint: str | None = None) -> str:
         host = self._format_host(self.settings.xray_public_host)
         params = {
             "type": self.settings.xray_network_type,
             "security": "reality",
             "encryption": "none",
             "pbk": self.settings.xray_reality_public_key,
-            "fp": self.settings.xray_fingerprint,
+            "fp": fingerprint or self.settings.xray_fingerprint,
             "sni": self.settings.xray_sni,
             "sid": short_id,
         }
@@ -867,7 +893,8 @@ class XrayService:
         uuid_value = str(key.payload.get("uuid") or key.uuid or "")
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "")
         email_label = str(key.payload.get("email_label") or key.email_label or "")
-        link = self._build_vless_link(uuid_value, short_id, email_label)
+        fingerprint = str(key.payload.get("fingerprint")) if key.payload.get("fingerprint") else None
+        link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint)
         visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
         note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
         label = f"\nМетка: {h(email_label)}" if email_label else ""

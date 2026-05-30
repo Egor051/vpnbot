@@ -6,6 +6,11 @@ from i18n import t
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 
+VALID_FINGERPRINTS = [
+    "firefox", "chrome", "safari", "ios", "android", "edge",
+    "360", "qq", "random", "randomized",
+]
+
 
 def create_key_keyboard() -> InlineKeyboardMarkup:
     """Build the key type selection keyboard for creating a new key."""
@@ -77,6 +82,8 @@ def key_actions_keyboard(key: VpnKey, owner_user_id: int | None = None, page: in
         rows.append([InlineKeyboardButton(text=t("btn_show_config"), callback_data=f"key:show:{key.id}")])
         revoke_data = f"key:revoke:{key.id}" if owner_user_id is None else f"key:revoke:{key.id}:{owner_user_id}:{page}"
         rows.append([InlineKeyboardButton(text=t("btn_revoke"), callback_data=revoke_data)])
+        if key.key_type == VpnKeyType.XRAY and owner_user_id is None:
+            rows.append([InlineKeyboardButton(text=t("btn_change_fp"), callback_data=f"key:fp:{key.id}")])
     rows.append([InlineKeyboardButton(text=t("btn_stats"), callback_data=f"key:stats:{key.id}")])
     if key.status != VpnKeyStatus.DELETED:
         if owner_user_id is None:
@@ -99,6 +106,25 @@ def confirm_keyboard(action: str, key_id: int, owner_user_id: int | None = None,
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_confirm"), callback_data=confirm_data)],
             [InlineKeyboardButton(text=t("btn_cancel"), callback_data=cancel_data)],
+        ]
+    )
+
+
+def fp_choice_keyboard() -> InlineKeyboardMarkup:
+    """Build the fingerprint selection keyboard for Xray key creation."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_fp_firefox"),    callback_data="fp:firefox")],
+            [InlineKeyboardButton(text="Chrome",               callback_data="fp:chrome")],
+            [InlineKeyboardButton(text="Safari",               callback_data="fp:safari")],
+            [InlineKeyboardButton(text="iOS",                  callback_data="fp:ios")],
+            [InlineKeyboardButton(text="Android",              callback_data="fp:android")],
+            [InlineKeyboardButton(text="Edge",                 callback_data="fp:edge")],
+            [InlineKeyboardButton(text="360",                  callback_data="fp:360")],
+            [InlineKeyboardButton(text="QQ",                   callback_data="fp:qq")],
+            [InlineKeyboardButton(text=t("btn_fp_random"),     callback_data="fp:random")],
+            [InlineKeyboardButton(text=t("btn_fp_randomized"), callback_data="fp:randomized")],
+            [InlineKeyboardButton(text=t("btn_cancel"),        callback_data="cancel")],
         ]
     )
 

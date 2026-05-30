@@ -18,14 +18,16 @@ from bot.formatters import (
     xray_config_text,
 )
 from bot.container import Services
-from bot.fsm.states import CreateKeyStates, EditNoteStates, TrialRequestStates
+from bot.fsm.states import CreateKeyStates, EditFpStates, EditNoteStates, TrialRequestStates
 from bot.handlers.common import InvalidCallbackData, answer_callback_error, answer_message_error, parse_int_callback, profile_from_tg
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import (
+    VALID_FINGERPRINTS,
     after_key_deleted_keyboard,
     confirm_keyboard,
     create_key_keyboard,
     expiry_choice_keyboard,
+    fp_choice_keyboard,
     key_actions_keyboard,
     keys_list_keyboard,
     mtu_choice_keyboard,
@@ -169,11 +171,39 @@ async def create_key_note(message: Message, state: FSMContext, services: Service
         if key_type == VpnKeyType.AWG.value:
             await state.set_state(CreateKeyStates.waiting_mtu)
             await message.answer(t("mtu_prompt"), reply_markup=mtu_choice_keyboard())
+        elif key_type == VpnKeyType.XRAY.value:
+            await state.set_state(CreateKeyStates.waiting_fp)
+            await message.answer(t("fp_prompt"), reply_markup=fp_choice_keyboard())
         else:
             await state.set_state(CreateKeyStates.waiting_expiry)
             await message.answer(t("expiry_prompt"), reply_markup=expiry_choice_keyboard())
     except Exception as exc:
         await answer_message_error(message, exc)
+
+
+@router.callback_query(CreateKeyStates.waiting_fp, F.data.regexp(r"^fp:[\w]+$"))
+async def create_key_fp(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Store the chosen fingerprint and advance to expiry selection."""
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        fp = callback.data.split(":", 1)[1]
+        if fp not in VALID_FINGERPRINTS:
+            await safe_callback_answer(callback, t("fp_invalid"), show_alert=True)
+            return
+        await state.update_data(fingerprint=fp)
+        await state.set_state(CreateKeyStates.waiting_expiry)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("expiry_prompt"),
+            reply_markup=expiry_choice_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
 
 
 @router.callback_query(CreateKeyStates.waiting_mtu, F.data.regexp(r"^mtu:\d+$"))
@@ -266,10 +296,11 @@ async def create_key_expiry(callback: CallbackQuery, state: FSMContext, services
         key_type = str(data.get("key_type") or "")
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
+        fingerprint = data.get("fingerprint")
         from bot.keyboards.common import confirm_cancel_keyboard
         await safe_edit_message_text(
             callback.message,
-            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu),
+            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -318,9 +349,10 @@ async def create_key_custom_days(message: Message, state: FSMContext, services: 
         key_type = str(data.get("key_type") or "")
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
+        fingerprint = data.get("fingerprint")
         from bot.keyboards.common import confirm_cancel_keyboard
         await message.answer(
-            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu),
+            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -340,6 +372,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
     note = data.get("note")
     expires_at: str | None = data.get("expires_at")
     mtu = int(data["mtu"]) if data.get("mtu") is not None else None
+    fingerprint: str | None = data.get("fingerprint")
     try:
         await _ensure_can_enter_create(callback.from_user.id, services)
         profile = profile_from_tg(callback.from_user)
@@ -347,7 +380,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         await state.clear()
         await safe_callback_answer(callback, t("creating_key"))
         if key_type == VpnKeyType.XRAY.value:
-            result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at)
+            result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at, fingerprint=fingerprint)
         elif key_type == VpnKeyType.AWG.value:
             result = await services.awg.create_awg_key(callback.from_user.id, profile, note, expires_at=expires_at, mtu=mtu)
         else:
@@ -642,6 +675,55 @@ async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services
         await safe_edit_message_text(
             callback.message,
             t("note_updated"),
+            reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^key:fp:\d+$"))
+async def edit_fp_prompt(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Show the fingerprint selection keyboard for changing an existing Xray key's fingerprint."""
+    if not await ensure_private_callback(callback):
+        return
+    await safe_callback_answer(callback)
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        key_id = parse_int_callback(callback.data.rsplit(":", 1)[-1])
+        if key_id is None:
+            await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
+            return
+        await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
+        await state.set_state(EditFpStates.waiting_fp)
+        await state.update_data(key_id=key_id)
+        await safe_edit_message_text(
+            callback.message,
+            t("fp_change_prompt"),
+            reply_markup=fp_choice_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(EditFpStates.waiting_fp, F.data.regexp(r"^fp:[\w]+$"))
+async def edit_fp_select(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Apply the selected fingerprint to the existing Xray key."""
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    fp = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    await state.clear()
+    try:
+        key_id = int(data["key_id"])
+        await safe_callback_answer(callback, t("saving"))
+        await services.xray.change_fingerprint(callback.from_user.id, key_id, fp)
+        key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
+        await safe_edit_message_text(
+            callback.message,
+            key_detail_text(key, viewer_user_id=callback.from_user.id),
             reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
         )
     except Exception as exc:

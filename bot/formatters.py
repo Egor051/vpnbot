@@ -146,6 +146,9 @@ def key_detail_text(key: VpnKey, *, viewer_user_id: int) -> str:
         if mtu is not None:
             lines.append(f"MTU: {h(str(int(str(mtu))))}")
     else:
+        fp = key.payload.get("fingerprint")
+        if fp:
+            lines.append(f"Fingerprint: {h(str(fp))}")
         if key.client_ip:
             lines.append(f"{t('field_ip')}: {code(key.client_ip)}")
         if key.public_key:
@@ -236,6 +239,7 @@ def create_confirm_text(
     owner: User | None = None,
     expires_at: str | None = None,
     mtu: int | None = None,
+    fingerprint: str | None = None,
 ) -> str:
     lines = [
         t("create_confirm_title"),
@@ -245,6 +249,8 @@ def create_confirm_text(
     ]
     if mtu is not None:
         lines.append(f"MTU: {h(str(mtu))}")
+    if fingerprint is not None:
+        lines.append(f"Fingerprint: {h(fingerprint)}")
     if owner is not None:
         lines.append(f"{t('field_owner')}: {format_user_display(owner.telegram_user_id, owner.username)}")
     return "\n".join(lines)
