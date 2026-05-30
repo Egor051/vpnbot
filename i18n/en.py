@@ -201,7 +201,7 @@ STRINGS: dict[str, str] = {
         "<b>AWG:</b> if the connection is unstable or won't connect, try lowering the MTU to 1280 "
         "(use the «Change MTU» button in the key settings).\n\n"
         "<b>Xray:</b> if the connection won't establish, try changing the fingerprint "
-        "(use the «Change Fingerprint» button in the key settings). Good starting options: Firefox or Chrome.\n\n"
+        "(use the «Change Fingerprint» button in the key settings). Good starting options: Firefox or Randomized.\n\n"
         "If the problem persists, contact support."
     ),
     "faq_key_statuses": (
@@ -234,8 +234,9 @@ STRINGS: dict[str, str] = {
         "A fingerprint is an imitation of the TLS stack of a popular browser or device. "
         "Xray pretends to be a regular browser so its traffic looks like ordinary HTTPS. "
         "This makes it harder to detect and block VPN traffic.\n\n"
-        "<b>Firefox</b> and <b>Chrome</b> — a good choice for most cases.\n"
-        "<b>Safari / iOS / Android / Edge / 360 / QQ</b> — alternatives if the main ones are blocked.\n"
+        "<b>Firefox</b> and <b>Randomized</b> — a good choice for most cases. "
+        "Note: Randomized is less stable than real fingerprints.\n"
+        "<b>Chrome / Safari / iOS / Android / Edge / 360 / QQ</b> — alternatives if Firefox doesn't work.\n"
         "<b>Random</b> — a random fingerprint from the list is picked each time.\n"
         "<b>Randomized</b> — a random fingerprint with randomized TLS parameters; maximally obfuscates the pattern.\n\n"
         "The fingerprint applies only to Xray keys and has no effect on AWG."
@@ -477,7 +478,7 @@ STRINGS: dict[str, str] = {
     "btn_mtu_recommended": "1280 (recommended)",
     "btn_enter_manually": "Enter manually",
     "btn_fp_firefox": "Firefox (recommended)",
-    "btn_fp_random": "Random — random from list",
+    "btn_fp_random": "Random — random from list (not recommended)",
     "btn_fp_randomized": "Randomized — fully randomized params",
     "btn_change_fp": "Change Fingerprint",
     "btn_open_key": "Open key",
