@@ -9,6 +9,7 @@ from pathlib import Path
 from aiogram import Bot
 
 from adapters.awg_config import AwgConfigAdapter
+from bot.keyboards.admin import anomaly_dismiss_keyboard
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 from repositories.vpn_keys import VpnKeyRepository
@@ -249,9 +250,10 @@ class AnomalyDetectionService:
             lines.append(f"⚠️ Авто-отзыв не удался: {revoke_error[:120]}")
         text = "\n".join(lines)
 
+        keyboard = anomaly_dismiss_keyboard()
         for admin_id in self._admin_ids:
             try:
-                await self.bot.send_message(admin_id, text)
+                await self.bot.send_message(admin_id, text, reply_markup=keyboard)
             except Exception:
                 logger.warning("Failed to send anomaly alert to admin %d", admin_id, exc_info=True)
 
