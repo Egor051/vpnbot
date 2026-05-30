@@ -248,7 +248,10 @@ def test_alert_fires_when_threshold_exceeded():
 
     asyncio.run(svc._check_thresholds(now))
 
-    svc.bot.send_message.assert_called_once_with(999, svc.bot.send_message.call_args[0][1])
+    svc.bot.send_message.assert_called_once()
+    call_args, call_kwargs = svc.bot.send_message.call_args
+    assert call_args[0] == 999
+    assert call_kwargs.get("reply_markup") is not None
 
 
 def test_alert_respects_cooldown():

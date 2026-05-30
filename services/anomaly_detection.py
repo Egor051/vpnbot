@@ -7,9 +7,9 @@ import time as time_module
 from pathlib import Path
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from adapters.awg_config import AwgConfigAdapter
-from bot.keyboards.admin import anomaly_dismiss_keyboard
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 from repositories.vpn_keys import VpnKeyRepository
@@ -250,7 +250,9 @@ class AnomalyDetectionService:
             lines.append(f"⚠️ Авто-отзыв не удался: {revoke_error[:120]}")
         text = "\n".join(lines)
 
-        keyboard = anomaly_dismiss_keyboard()
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="✅ Я прочитал", callback_data="admin:anomaly:dismiss")]]
+        )
         for admin_id in self._admin_ids:
             try:
                 await self.bot.send_message(admin_id, text, reply_markup=keyboard)
