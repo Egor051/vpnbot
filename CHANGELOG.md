@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.0] — 2026-05-30
+
+### Added
+
+- **Xray TLS fingerprint selection** — a new step in the Xray key creation flow lets users (and admins) choose a TLS fingerprint right after the note prompt; the selected value is embedded in the VLESS link (`fp=`) and stored in the key payload. Ten fingerprints are supported: `firefox` (default), `chrome`, `safari`, `ios`, `android`, `edge`, `360`, `qq`, `random`, `randomized`. Legacy keys without a stored fingerprint transparently fall back to the global `XRAY_FINGERPRINT` env variable. (#115)
+- **Per-key fingerprint editing** — the key detail card for active Xray keys now includes a «Изменить Fingerprint» button that opens an inline keyboard to change the fingerprint; the VLESS link is regenerated and the detail card updated immediately. (#115)
+- **Anomaly alert dismiss button** — anomaly alert messages now include an inline «✅ Я прочитал» button; clicking it silently deletes the alert only from that admin's chat, leaving other admins' copies intact. (#116)
+
 ## [1.0.2] — 2026-05-28
 
 ### Fixed
@@ -111,6 +119,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Managed MTProto secrets and env files are `root:root 0600`; backup directories are `root:root 0700`.
 - `XRAY_APPLY_MODE=api` + `PRIVILEGE_HELPERS_ENABLED=true` combination rejected at startup.
 
+[1.1.0]: https://github.com/Egor051/vpnbot/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/Egor051/vpnbot/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Egor051/vpnbot/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Egor051/vpnbot/releases/tag/v1.0.0
