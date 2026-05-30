@@ -338,7 +338,7 @@ class XrayService:
             return self._format_config(key, viewer_user_id=owner_user_id)
 
     async def change_fingerprint(self, actor_user_id: int, key_id: int, fingerprint: str) -> VpnKey:
-        """Update the per-key TLS fingerprint and rebuild the stored VLESS link."""
+        """Update the per-key fingerprint and rebuild the stored VLESS link."""
         from bot.keyboards.keys import VALID_FINGERPRINTS
         if fingerprint not in VALID_FINGERPRINTS:
             raise InvalidOperation("Неподдерживаемый fingerprint")

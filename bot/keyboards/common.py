@@ -12,6 +12,7 @@ FAQ_TOPICS: list[tuple[str, str]] = [
     ("device",         "btn_faq_device"),
     ("stats",          "btn_faq_stats"),
     ("choice",         "btn_faq_choice"),
+    ("fingerprint",    "btn_faq_fingerprint"),
     ("mtu",            "btn_faq_mtu"),
     ("note_why",       "btn_faq_note_why"),
     ("proxy",          "btn_faq_proxy"),

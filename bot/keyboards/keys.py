@@ -111,7 +111,7 @@ def confirm_keyboard(action: str, key_id: int, owner_user_id: int | None = None,
 
 
 def fp_choice_keyboard() -> InlineKeyboardMarkup:
-    """Build the TLS fingerprint selection keyboard for Xray key creation."""
+    """Build the fingerprint selection keyboard for Xray key creation."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_fp_firefox"),    callback_data="fp:firefox")],

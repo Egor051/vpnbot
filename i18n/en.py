@@ -197,8 +197,12 @@ STRINGS: dict[str, str] = {
     "faq_trouble": (
         "Check your internet, the imported profile, the access expiry date, and whether the same key "
         "is being used on another device. Also try toggling the VPN app off and on. If that doesn't help, "
-        "try enabling and disabling airplane mode or restarting the device. If the problem persists, "
-        "contact support."
+        "try enabling and disabling airplane mode or restarting the device.\n\n"
+        "<b>AWG:</b> if the connection is unstable or won't connect, try lowering the MTU to 1280 "
+        "(use the «Change MTU» button in the key settings).\n\n"
+        "<b>Xray:</b> if the connection won't establish, try changing the fingerprint "
+        "(use the «Change Fingerprint» button in the key settings). Good starting options: Firefox or Chrome.\n\n"
+        "If the problem persists, contact support."
     ),
     "faq_key_statuses": (
         "<b>Active</b> — the key is working.\n"
@@ -226,6 +230,16 @@ STRINGS: dict[str, str] = {
         "You'll see incoming and outgoing traffic volumes. Data is updated automatically."
     ),
     "faq_choice": "If you're not sure what to choose, start with XRay.",
+    "faq_fingerprint": (
+        "A fingerprint is an imitation of the TLS stack of a popular browser or device. "
+        "Xray pretends to be a regular browser so its traffic looks like ordinary HTTPS. "
+        "This makes it harder to detect and block VPN traffic.\n\n"
+        "<b>Firefox</b> and <b>Chrome</b> — a good choice for most cases.\n"
+        "<b>Safari / iOS / Android / Edge / 360 / QQ</b> — alternatives if the main ones are blocked.\n"
+        "<b>Random</b> — a random fingerprint from the list is picked each time.\n"
+        "<b>Randomized</b> — a random fingerprint with randomized TLS parameters; maximally obfuscates the pattern.\n\n"
+        "The fingerprint applies only to Xray keys and has no effect on AWG."
+    ),
     "faq_mtu": (
         "MTU is the maximum network packet size. It applies only to AWG keys.\n\n"
         "The recommended value of 1280 works in most cases. "
@@ -306,8 +320,8 @@ STRINGS: dict[str, str] = {
     "mtu_prompt": "Choose MTU for the key:",
     "mtu_custom_prompt": "Enter MTU (1 to 1500):",
     "mtu_enter_integer": "Enter an integer between 1 and 1500:",
-    "fp_prompt": "Choose TLS fingerprint for the key:",
-    "fp_change_prompt": "Select new TLS fingerprint:",
+    "fp_prompt": "Choose fingerprint for the key:",
+    "fp_change_prompt": "Select new fingerprint:",
     "fp_invalid": "Unsupported fingerprint value",
     "fp_updated": "Fingerprint updated.",
     "expiry_invalid": "Invalid period: 1–{max} days",
@@ -412,6 +426,7 @@ STRINGS: dict[str, str] = {
     "btn_faq_device": "1 key = 1 device?",
     "btn_faq_stats": "How to check traffic stats?",
     "btn_faq_choice": "What to choose: AWG or Xray?",
+    "btn_faq_fingerprint": "What is a fingerprint?",
     "btn_faq_mtu": "What is MTU?",
     "btn_faq_note_why": "Why add a note to a key?",
     "btn_faq_proxy": "What is a proxy?",
