@@ -1,0 +1,32 @@
+#!/bin/bash
+# vpnbot-warp-routes — add/remove the WARP routes read from routes.list.
+# Default routes (0.0.0.0/0, ::/0) are always skipped to prevent host
+# isolation. No other CIDRs are hardcoded; the DNS resolver is never touched.
+set -euo pipefail
+ROUTES_LIST="/etc/amnezia/tg-warp-routes.list"
+ACTION="${1:-}"; IFACE="${2:-tg-warp}"
+
+[[ -f "$ROUTES_LIST" ]] || { echo "Routes list not found: $ROUTES_LIST" >&2; exit 1; }
+
+case "$ACTION" in
+    add)
+        while IFS= read -r net; do
+            [[ -z "$net" || "$net" == \#* ]] && continue
+            # Skip default routes — they must be managed explicitly, not via AllowedIPs.
+            if [[ "$net" == "0.0.0.0/0" || "$net" == "::/0" ]]; then
+                echo "WARNING: skipping default route $net (use explicit routing table instead)" >&2
+                continue
+            fi
+            ip route replace "$net" dev "$IFACE" metric 10 2>/dev/null || true
+        done < "$ROUTES_LIST" ;;
+    del)
+        while IFS= read -r net; do
+            [[ -z "$net" || "$net" == \#* ]] && continue
+            if [[ "$net" == "0.0.0.0/0" || "$net" == "::/0" ]]; then
+                continue
+            fi
+            ip route del "$net" dev "$IFACE" 2>/dev/null || true
+        done < "$ROUTES_LIST" ;;
+    *)
+        echo "Usage: $0 {add|del} <iface>" >&2; exit 1 ;;
+esac
