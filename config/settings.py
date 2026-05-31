@@ -271,6 +271,13 @@ class Settings:
     xray_helper_staging_dir: Path = Path("/run/vpn-bot/xray")
     awg_helper_staging_dir: Path = Path("/run/vpn-bot/awg")
     mtproto_helper_staging_dir: Path = Path("/run/vpn-bot/mtproxy")
+    warp_config_path: Path = Path("/etc/amnezia/tg-warp.conf")
+    warp_interface: str = "tg-warp"
+    warp_install_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-install")
+    warp_iface_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-iface")
+    warp_routes_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-routes")
+    warp_status_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-status")
+    warp_helper_staging_dir: Path = Path("/run/vpn-bot/warp")
     health_port: int | None = None
     health_host: str = "127.0.0.1"
     key_expiry_check_interval: int = 1800
@@ -507,5 +514,12 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_helper_staging_dir=Path(_optional("XRAY_HELPER_STAGING_DIR", str(helper_staging_root / "xray"))),
         awg_helper_staging_dir=Path(_optional("AWG_HELPER_STAGING_DIR", str(helper_staging_root / "awg"))),
         mtproto_helper_staging_dir=Path(_optional("MTPROTO_HELPER_STAGING_DIR", str(helper_staging_root / "mtproxy"))),
+        warp_config_path=Path(_optional("WARP_CONFIG_PATH", "/etc/amnezia/tg-warp.conf")),
+        warp_interface=_optional("WARP_INTERFACE", "tg-warp"),
+        warp_install_helper_path=Path(_optional("WARP_INSTALL_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-install")),
+        warp_iface_helper_path=Path(_optional("WARP_IFACE_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-iface")),
+        warp_routes_helper_path=Path(_optional("WARP_ROUTES_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-routes")),
+        warp_status_helper_path=Path(_optional("WARP_STATUS_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-status")),
+        warp_helper_staging_dir=Path(_optional("WARP_HELPER_STAGING_DIR", str(helper_staging_root / "warp"))),
         bot_language=_choice("BOT_LANGUAGE", "ru", {"ru", "en"}),
     )

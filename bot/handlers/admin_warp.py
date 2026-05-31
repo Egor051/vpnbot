@@ -33,7 +33,7 @@ _SEP = "────────────────────────
 _MAX_CONFIG_BYTES = 64 * 1024
 
 
-# ── text builders ────────────────────────────────────────────────
+# ── text builders ──────────────────────────────────────────────────────────
 
 
 def _format_ago(last_handshake: int) -> str:
@@ -107,7 +107,7 @@ async def _render_main(callback: CallbackQuery, services: Services) -> None:
     )
 
 
-# ── navigation ─────────────────────────────────────────────────────
+# ── navigation ─────────────────────────────────────────────────────────────
 
 
 @router.callback_query(F.data == "admin:warp")
@@ -146,7 +146,7 @@ async def warp_settings(callback: CallbackQuery, services: Services) -> None:
         await answer_callback_error(callback, exc)
 
 
-# ── enable / disable / restart ───────────────────────────────────────────────
+# ── enable / disable / restart ─────────────────────────────────────────────
 
 
 @router.callback_query(F.data == "admin:warp:enable")
@@ -208,7 +208,7 @@ async def warp_restart(callback: CallbackQuery, services: Services, rate_limiter
         await answer_callback_error(callback, exc)
 
 
-# ── config upload ──────────────────────────────────────────────────────
+# ── config upload ──────────────────────────────────────────────────────────
 
 
 @router.callback_query(F.data == "admin:warp:upload")
@@ -279,7 +279,7 @@ async def warp_upload_receive(message: Message, state: FSMContext, services: Ser
         await answer_message_error(message, exc)
 
 
-# ── delete config ──────────────────────────────────────────────────────
+# ── delete config ──────────────────────────────────────────────────────────
 
 
 @router.callback_query(F.data == "admin:warp:delete")

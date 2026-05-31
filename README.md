@@ -11,6 +11,7 @@ This project is designed for a single-server deployment without Docker, Redis, P
 - Xray VLESS Reality key creation, config delivery, revocation, deletion, and startup reconciliation.
 - AmneziaWG key creation, client config delivery, revocation, deletion, IP allocation, and startup reconciliation.
 - Separate one-page Telegram section "Прокси" for SOCKS5/Dante auto-issue and Telegram MTProto Proxy links.
+- Optional WARP Telegram routing module: server-side AmneziaWG (`tg-warp`) tunnel with automatic health-based fallback. Disabled by default; see [WARP Telegram Routing](#warp-telegram-routing).
 - MTProto supports `static` compatibility mode and `managed` mode with per-user secrets, safe apply, and rollback.
 - Optional legacy proxy entry table seeded from `DEFAULT_PROXY_*` remains internal/compatibility storage; the user-facing proxy UX uses `proxy_accesses`.
 - Ownership checks so users can view their own configs/stats; destructive VPN and proxy lifecycle actions are admin-only.
@@ -47,6 +48,8 @@ bot/                       # Telegram handlers, keyboards, FSM, formatting
 services/                  # Business workflows and permissions
 repositories/              # SQLite access layer
 adapters/                  # Xray, AWG, systemctl, backups, shell adapters
+warp/                      # WARP Telegram routing module (tunnel, routes, health monitor)
+scripts/                   # vpnbot-warp-* sudo helpers
 config/settings.py         # Environment parsing and validation
 tests/                     # Regression and hardening tests
 ```
@@ -355,7 +358,7 @@ Notes:
 - `MTPROTO_SECRET`, SOCKS5 passwords, and real production endpoints with credentials must never be committed. `.env.example` intentionally keeps proxy secrets empty.
 - `DEFAULT_PROXY_*` is legacy compatibility storage and does not drive the new user-facing proxy access flow.
 - **Root deployment with api mode** (current `deploy/vpn-bot.service` default): `User=root`, `PRIVILEGE_HELPERS_ENABLED=false`, `XRAY_APPLY_MODE=api`. The bot writes Xray config and applies changes directly via the Xray gRPC API; no sudo helpers are needed. See [Xray API Mode](#xray-api-mode).
-- **Alternative non-root deployment with privilege helpers**: Run the bot as `vpn-bot:vpn-bot` with `PRIVILEGE_HELPERS_ENABLED=true`. Root-only backend changes go through fixed sudo helpers documented in `deploy/helpers/README.md`. Use `XRAY_APPLY_MODE=restart` or `reload` in this model; api mode is not honoured when helpers are enabled.
+- **Alternative non-root deployment with privilege helpers**: Run the bot as `vpn-bot:vpn-bot` with `PRIVILEGE_HELPERS_ENABLED=true`. Root-only backend changes go through fixed sudo helpers documented in `deploy/helpers/README.md`. Use `XRAY_APPLY_MODE=restart` or `reload` in this model; api mode is not honoured by the helper.
 - Keep project code, deploy files, `.env`, and `.venv` not writable by the service account. In root mode all paths are accessible; in non-root mode only `/opt/vpn-service/data`, `/opt/vpn-service/logs` if file logs are enabled, and `/run/vpn-bot` should be writable by `vpn-bot`.
 
 ## Xray API Mode
@@ -548,6 +551,81 @@ Manual rollback for managed MTProto:
 5. Check `sudo systemctl status mtproxy --no-pager` and `sudo ss -tlnp | grep 8443`.
 
 Proxy statistics are lifecycle/accounting stats from SQLite: issued, active, revoked/deactivated, timestamps, status, reason, and error. The bot does not invent per-user traffic for Dante or MTProxy. Without Dante per-login accounting or a safe aggregate MTProxy stats endpoint, traffic is shown as unavailable.
+
+## WARP Telegram Routing
+
+Optional server-side module that routes selected traffic through an AmneziaWG
+(`tg-warp`) tunnel and automatically falls back to the direct path when the
+tunnel is unreachable. It is **disabled by default** and does nothing until a
+superadmin uploads a config and enables it from the admin panel (📡 WARP-туннель).
+
+How it works:
+
+1. `awg-quick up` brings the `tg-warp` interface up from `/etc/amnezia/tg-warp.conf`.
+2. System `ip route` entries are added for the CIDRs in the config via `tg-warp`.
+3. An asyncio background task pings the tunnel every 10 s. After **2** consecutive
+   failures the routes are removed (traffic → direct); after **3** consecutive
+   successes they are restored.
+4. Disabling the module removes the routes and brings the interface down.
+
+The bot runs unprivileged: every root action goes through the `vpnbot-warp-*`
+sudo helpers. The server DNS resolver is never touched. Default routes
+(`0.0.0.0/0`, `::/0`) in `AllowedIPs` are silently skipped by the routes helper
+to prevent accidental host isolation — the helper logs a warning when it skips
+them. If you need full-tunnel routing, configure a separate routing table and
+policy rules outside the bot instead of relying on `AllowedIPs`.
+
+### Config format
+
+Upload an **AmneziaWG** client config (not plain WireGuard) as a `.conf`
+document. It must contain `[Interface]`/`[Peer]`, `PrivateKey`/`PublicKey`/
+`Endpoint`, the AmneziaWG obfuscation fields (`Jc`, `S1`, `S2`, …) and a
+non-empty `AllowedIPs`. **You decide which traffic flows through the tunnel via
+`AllowedIPs`** — Telegram MTProto only, or also its dependencies (Google FCM for
+push, CDNs for media, etc.). `AllowedIPs` is never modified: the install helper
+extracts it verbatim into `/etc/amnezia/tg-warp-routes.list` (one CIDR per line)
+and the routes helper reads it from there.
+
+> **Warning:** `0.0.0.0/0` and `::/0` in `AllowedIPs` are automatically skipped
+> by the routes helper (a warning is printed to stderr). This protects the host
+> from losing connectivity due to an accidental default-route override. If you
+> need full-tunnel routing, manage a separate routing table and `ip rule` policy
+> outside the bot.
+
+On install the helper strips any `DNS = …` line and adds `Table = off` to
+`[Interface]` and `PersistentKeepalive = 25` to `[Peer]` if missing.
+
+### Installation
+
+`awg-quick`/`awg` (AmneziaWG userspace tools) must be installed at
+`/usr/bin/awg-quick` / `/usr/bin/awg`. Install the helpers and grant sudo
+(see `deploy/helpers/README.md` and `deploy/sudoers.d/vpnbot.example`):
+
+```bash
+install -o root -g root -m 0755 scripts/vpnbot-warp-install /usr/local/sbin/vpnbot-warp-install
+install -o root -g root -m 0755 scripts/vpnbot-warp-iface   /usr/local/sbin/vpnbot-warp-iface
+install -o root -g root -m 0755 scripts/vpnbot-warp-routes  /usr/local/sbin/vpnbot-warp-routes
+install -o root -g root -m 0755 scripts/vpnbot-warp-status  /usr/local/sbin/vpnbot-warp-status
+install -o root -g root -m 0440 deploy/sudoers.d/vpnbot.example /etc/sudoers.d/vpnbot
+visudo -cf /etc/sudoers.d/vpnbot
+```
+
+If `awg-quick` is missing, the module refuses to start and shows a clear error in
+the admin panel.
+
+### WARP environment variables
+
+These default to the provided sudoers template paths. Changing `WARP_CONFIG_PATH` or `WARP_INTERFACE` requires matching updates to `/etc/sudoers.d/vpnbot` and the `vpnbot-warp-*` helper scripts; mismatches cause silent sudo failures. Change only if you know what you are doing.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `WARP_CONFIG_PATH` | `/etc/amnezia/tg-warp.conf` | Installed tunnel config path |
+| `WARP_INTERFACE` | `tg-warp` | AmneziaWG interface name |
+| `WARP_INSTALL_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-install` | Config install helper |
+| `WARP_IFACE_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-iface` | Interface up/down helper |
+| `WARP_ROUTES_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-routes` | Route add/del helper |
+| `WARP_STATUS_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-status` | `awg show` helper |
+| `WARP_HELPER_STAGING_DIR` | `/run/vpn-bot/warp` | Private dir for staged uploads |
 
 ## Deployment Overview
 

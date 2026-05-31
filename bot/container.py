@@ -20,6 +20,7 @@ from services.trial_access import TrialAccessService
 from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
 from services.xray import XrayService
+from warp.manager import WarpManager
 
 
 @dataclass(slots=True)
@@ -43,3 +44,4 @@ class Services:
     trial_access: TrialAccessService
     offsite_backup: OffsiteBackupService
     anomaly_detection: AnomalyDetectionService
+    warp: WarpManager

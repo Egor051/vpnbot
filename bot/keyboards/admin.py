@@ -50,6 +50,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t("btn_users"), callback_data="admin:users")],
             [InlineKeyboardButton(text=t("btn_key_stats"), callback_data="admin:stats")],
             [InlineKeyboardButton(text=t("btn_proxy_status"), callback_data="admin:proxy")],
+            [InlineKeyboardButton(text=t("btn_warp"), callback_data="admin:warp")],
             [InlineKeyboardButton(text=t("btn_backend_diagnostics"), callback_data="admin:diagnostics")],
             [InlineKeyboardButton(text=t("btn_proxy_stats"), callback_data="admin:proxy_stats")],
             [InlineKeyboardButton(text=t("btn_action_logs"), callback_data="admin:audit")],

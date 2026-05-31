@@ -67,7 +67,7 @@ class WarpManager:
         self._monitor: WarpHealthMonitor | None = None
         self._last_error: str | None = None
 
-    # ── read-only accessors ─────────────────────────────────────────────
+    # ── read-only accessors ────────────────────────────────────────────────
 
     @property
     def last_error(self) -> str | None:
@@ -84,7 +84,7 @@ class WarpManager:
         """Clear stale runtime columns on bot startup."""
         await self._repo.reset_runtime()
 
-    # ── lifecycle ──────────────────────────────────────────────────────
+    # ── lifecycle ──────────────────────────────────────────────────────────
 
     async def start(self) -> None:
         async with self._lock:
@@ -110,7 +110,7 @@ class WarpManager:
             await self._stop_locked()
             await self._start_locked()
 
-    # ── config management ────────────────────────────────────────────
+    # ── config management ──────────────────────────────────────────────────
 
     async def install_config(self, config_text: str) -> int:
         """Install a validated config via the sudo helper; return the route count.
@@ -159,7 +159,7 @@ class WarpManager:
             self._last_error = None
             logger.info("WARP config removed from disk and DB; module disabled")
 
-    # ── internals (lock held) ────────────────────────────────────────────
+    # ── internals (lock held) ──────────────────────────────────────────────
 
     async def _start_locked(self) -> None:
         if self._running:
