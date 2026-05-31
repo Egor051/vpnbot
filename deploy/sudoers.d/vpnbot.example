@@ -50,7 +50,8 @@ Cmnd_Alias VPNBOT_MTPROTO = \
 # the bot's private staging dir; iface/routes/status are pinned to the fixed
 # tg-warp interface and /etc/amnezia/tg-warp.conf config.
 Cmnd_Alias VPNBOT_WARP = \
-    /usr/local/sbin/vpnbot-warp-install /run/vpn-bot/warp/*, \
+    /usr/local/sbin/vpnbot-warp-install install /run/vpn-bot/warp/*, \
+    /usr/local/sbin/vpnbot-warp-install remove, \
     /usr/local/sbin/vpnbot-warp-iface up /etc/amnezia/tg-warp.conf, \
     /usr/local/sbin/vpnbot-warp-iface down /etc/amnezia/tg-warp.conf, \
     /usr/local/sbin/vpnbot-warp-routes add tg-warp, \

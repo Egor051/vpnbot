@@ -1,42 +1,58 @@
 #!/bin/bash
-# vpnbot-warp-install — install a staged AmneziaWG config for the WARP module.
+# vpnbot-warp-install — install or remove the WARP AmneziaWG config.
 #
-# The bot stages the uploaded config under its private helper staging dir and
-# calls this helper via sudo. The helper validates the AmneziaWG format,
-# strips/normalises the config, writes the canonical config and the routes.list
-# (one CIDR per line, extracted from AllowedIPs — never modified).
+# Usage:
+#   vpnbot-warp-install install <staged_config>
+#   vpnbot-warp-install remove
+#
+# install: validates the AmneziaWG format, strips/normalises the config, writes
+# the canonical config and the routes.list (one CIDR per line, extracted from
+# AllowedIPs — never modified).
+# remove: deletes the config and routes.list files from disk.
 set -euo pipefail
 
-SOURCE="${1:-}"
+ACTION="${1:-}"
+SOURCE="${2:-}"
 DEST="/etc/amnezia/tg-warp.conf"
 ROUTES_LIST="/etc/amnezia/tg-warp-routes.list"
 
-[[ -f "$SOURCE" ]] || { echo "Source file not found: $SOURCE" >&2; exit 1; }
+case "${ACTION}" in
+  install)
+    [[ -f "$SOURCE" ]] || { echo "Source file not found: $SOURCE" >&2; exit 1; }
 
-# Validate that SOURCE is within the allowed staging directory
-ALLOWED_DIR="/run/vpn-bot/warp"
-realpath_source=$(realpath "$SOURCE")
-[[ "$realpath_source" == "$ALLOWED_DIR/"* ]] || {
-    echo "Source path outside allowed dir: $SOURCE" >&2; exit 1
-}
+    # Validate that SOURCE is within the allowed staging directory
+    ALLOWED_DIR="/run/vpn-bot/warp"
+    realpath_source=$(realpath "$SOURCE")
+    [[  "$realpath_source" == "$ALLOWED_DIR/"* ]] || {
+        echo "Source path outside allowed dir: $SOURCE" >&2; exit 1
+    }
 
-# Validation: AmneziaWG format
-grep -qE "^[[:space:]]*\[Interface\]"       "$SOURCE" || { echo "Missing [Interface] section" >&2; exit 1; }
-grep -qE "^[[:space:]]*\[Peer\]"            "$SOURCE" || { echo "Missing [Peer] section" >&2; exit 1; }
-grep -qE "^[[:space:]]*Jc[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing Jc)" >&2; exit 1; }
-grep -qE "^[[:space:]]*S1[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing S1)" >&2; exit 1; }
-grep -qE "^[[:space:]]*S2[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing S2)" >&2; exit 1; }
-grep -qE "^[[:space:]]*AllowedIPs[[:space:]]*=" "$SOURCE" || { echo "Missing AllowedIPs" >&2; exit 1; }
+    # Validation: AmneziaWG format
+    grep -qE "^[[:space:]]*\\[Interface\\]"       "$SOURCE" || { echo "Missing [Interface] section" >&2; exit 1; }
+    grep -qE "^[[:space:]]*\\[Peer\\]"            "$SOURCE" || { echo "Missing [Peer] section" >&2; exit 1; }
+    grep -qE "^[[:space:]]*Jc[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing Jc)" >&2; exit 1; }
+    grep -qE "^[[:space:]]*S1[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing S1)" >&2; exit 1; }
+    grep -qE "^[[:space:]]*S2[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing S2)" >&2; exit 1; }
+    grep -qE "^[[:space:]]*AllowedIPs[[:space:]]*=" "$SOURCE" || { echo "Missing AllowedIPs" >&2; exit 1; }
 
-mkdir -p /etc/amnezia
+    mkdir -p /etc/amnezia
 
-# Preprocess and write routes.list via Python
-SOURCE="$SOURCE" DEST="$DEST" ROUTES_LIST="$ROUTES_LIST" python3 - <<'PYEOF'
+    # Create temp files with restrictive permissions before any sensitive data is written.
+    # This prevents a window where the PrivateKey is world-readable under a typical root umask.
+    DEST_TMP="${DEST}.tmp.$$"
+    ROUTES_TMP="${ROUTES_LIST}.tmp.$$"
+    cleanup() { rm -f "$DEST_TMP" "$ROUTES_TMP"; }
+    trap cleanup EXIT
+    install -m 600 /dev/null "$DEST_TMP"
+    install -m 600 /dev/null "$ROUTES_TMP"
+
+    # Preprocess and write routes.list via Python
+    SOURCE="$SOURCE" DEST_TMP="$DEST_TMP" ROUTES_TMP="$ROUTES_TMP" python3 - <<'PYEOF'
 import os, re, sys
 
 src = os.environ["SOURCE"]
-dest = os.environ["DEST"]
-routes_list = os.environ["ROUTES_LIST"]
+dest = os.environ["DEST_TMP"]
+routes_list = os.environ["ROUTES_TMP"]
 
 content = open(src).read()
 
@@ -59,7 +75,7 @@ if not re.search(r'^PersistentKeepalive\s*=', content, re.MULTILINE):
         content
     )
 
-# Write the processed config
+# Write the processed config to the temp file (already mode 600)
 with open(dest, 'w') as f:
     f.write(content)
 
@@ -76,4 +92,17 @@ with open(routes_list, 'w') as f:
 print(f"Installed: {len(routes)} routes")
 PYEOF
 
-chmod 600 "$DEST"
+    # Atomically move temp files into final locations; disarm cleanup trap
+    mv "$DEST_TMP" "$DEST"
+    mv "$ROUTES_TMP" "$ROUTES_LIST"
+    trap - EXIT
+    ;;
+  remove)
+    rm -f "$DEST" "$ROUTES_LIST"
+    echo "WARP config removed"
+    ;;
+  *)
+    echo "Usage: $0 {install <staged_config>|remove}" >&2
+    exit 1
+    ;;
+esac

@@ -239,6 +239,7 @@ class Database:
         if version < 20:
             await self._migrate_v20()
             await self._set_schema_version(20)
+            version = 20
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 

@@ -144,10 +144,20 @@ class WarpManager:
         """Stop the module, disable it and forget the installed config."""
         async with self._lock:
             await self._stop_locked()
+            result = await self._runner.run(self._install_helper, ["remove"])
+            if not result.ok:
+                msg = _helper_error_message(result, "Не удалось удалить файлы конфига WARP")
+                self._last_error = msg
+                logger.warning(
+                    "WARP config file removal failed rc=%s: %s",
+                    result.returncode,
+                    result.stderr,
+                )
+                raise WarpError(msg)
             await self._repo.set_enabled(False)
             await self._repo.clear_config()
             self._last_error = None
-            logger.info("WARP config removed; module disabled")
+            logger.info("WARP config removed from disk and DB; module disabled")
 
     # ── internals (lock held) ──────────────────────────────────────────────
 
@@ -234,7 +244,7 @@ class WarpManager:
             content=config_text,
         )
         try:
-            result = await self._runner.run(self._install_helper, [str(staging_file)])
+            result = await self._runner.run(self._install_helper, ["install", str(staging_file)])
         finally:
             cleanup_staging_path(staging_file)
         if not result.ok:

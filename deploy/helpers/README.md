@@ -97,13 +97,16 @@ install -o root -g root -m 0755 scripts/vpnbot-warp-status  /usr/local/sbin/vpnb
 
 Interfaces:
 
-- `vpnbot-warp-install <staged_config>` — validates the AmneziaWG format
+- `vpnbot-warp-install install <staged_config>` — validates the AmneziaWG format
   (`[Interface]`/`[Peer]`, `Jc`/`S1`/`S2`, non-empty `AllowedIPs`), strips `DNS`,
   adds `Table = off` and `PersistentKeepalive = 25`, writes
   `/etc/amnezia/tg-warp.conf` (mode `0600`) and
   `/etc/amnezia/tg-warp-routes.list` (one CIDR per line from `AllowedIPs`, which
   is never modified). The bot stages the upload under
   `/run/vpn-bot/warp/warp-upload-*.conf`.
+- `vpnbot-warp-install remove` — deletes `/etc/amnezia/tg-warp.conf` and
+  `/etc/amnezia/tg-warp-routes.list` from disk. Called by `delete_config` to
+  ensure the PrivateKey does not persist after config removal.
 - `vpnbot-warp-iface {up|down} /etc/amnezia/tg-warp.conf` — runs
   `awg-quick up|down` (AmneziaWG, **not** `wg-quick`).
 - `vpnbot-warp-routes {add|del} tg-warp` — adds/removes `ip route` entries read
