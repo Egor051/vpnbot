@@ -465,6 +465,7 @@ STRINGS: dict[str, str] = {
     "btn_block_confirm": "Confirm block",
     "btn_unblock_confirm": "Confirm unblock",
     "btn_refresh": "Refresh",
+    "btn_anomaly_dismiss": "✅ I've read it",
     # ── keyboard buttons (keys) ───────────────────────────────────────────────
     "btn_back": "Back",
     "btn_config": "Config",
@@ -493,4 +494,59 @@ STRINGS: dict[str, str] = {
     "btn_get_mtproto": "Get MTProto",
     "btn_go_back": "Back",
     "btn_back_to_proxy": "Back to Proxy",
+    # ── WARP routing module ───────────────────────────────────────────────────
+    "btn_warp": "📡 WARP tunnel",
+    "btn_warp_upload": "📤 Upload config",
+    "btn_warp_replace": "📤 Replace config",
+    "btn_warp_delete": "🗑 Delete config",
+    "btn_warp_enable": "🟢 Enable",
+    "btn_warp_disable": "🔴 Disable",
+    "btn_warp_restart": "🔄 Restart",
+    "btn_warp_settings": "⚙️ Settings",
+    "warp_title": "📡 <b>WARP Telegram Routing</b>",
+    "warp_settings_title": "⚙️ <b>WARP Settings</b>",
+    "warp_status_disabled": "Status: 🔴 Disabled",
+    "warp_intro": (
+        "Routes traffic through an AmneziaWG tunnel.\n"
+        "On connection loss it automatically\n"
+        "falls back to the direct path."
+    ),
+    "warp_no_config_hint": "Upload a config to enable the module.",
+    "warp_label_module": "Module:",
+    "warp_label_tunnel": "Tunnel:",
+    "warp_label_routes": "Routes:",
+    "warp_label_handshake": "Handshake:",
+    "warp_label_fails": "Consecutive failures:",
+    "warp_module_on": "✅ Enabled",
+    "warp_module_off": "🔴 Disabled",
+    "warp_tunnel_up": "🟢 Up",
+    "warp_tunnel_down": "🔴 Unreachable",
+    "warp_routes_active": "✅ Active ({count} CIDR)",
+    "warp_routes_fallback": "⚠️ Fallback (traffic → direct)",
+    "warp_routes_inactive": "⏸ Inactive",
+    "warp_handshake_never": "no data",
+    "warp_ago_seconds": "{n} sec ago",
+    "warp_ago_minutes": "{n} min ago",
+    "warp_ago_hours": "{n} h ago",
+    "warp_ago_days": "{n} d ago",
+    "warp_settings_config": "Config:",
+    "warp_settings_iface": "Interface:",
+    "warp_settings_routes": "Routes:",
+    "warp_upload_prompt": (
+        "Send the AmneziaWG configuration file (<code>.conf</code>) as a document.\n\n"
+        "It must contain the AmneziaWG fields (Jc, S1, S2) and a non-empty AllowedIPs. "
+        "You decide which traffic goes through the tunnel via your AllowedIPs."
+    ),
+    "warp_upload_not_document": "Please send the <code>.conf</code> file as a document.",
+    "warp_upload_too_large": "The configuration file is too large.",
+    "warp_upload_read_failed": "Could not read the file. Please try again.",
+    "warp_config_invalid": "❌ Config rejected: {error}",
+    "warp_config_installed": "✅ Config installed, routes: {count}",
+    "warp_delete_confirm": "Delete the WARP config and disable the module?",
+    "warp_deleted": "🗑 Config deleted, module disabled.",
+    "warp_enabled_ok": "✅ WARP module enabled.",
+    "warp_disabled_ok": "🔴 WARP module disabled.",
+    "warp_restarted_ok": "🔄 WARP module restarted.",
+    "warp_last_error": "⚠️ {error}",
+    "warp_processing": "Working…",
 }

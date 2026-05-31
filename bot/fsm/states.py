@@ -49,3 +49,7 @@ class AdminAnnouncementStates(StatesGroup):
 class TrialRequestStates(StatesGroup):
     choosing_protocol = State()
     confirming = State()
+
+
+class WarpConfigStates(StatesGroup):
+    waiting_config = State()

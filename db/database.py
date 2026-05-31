@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 20
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -235,6 +235,11 @@ class Database:
         if version < 19:
             await self._migrate_v19()
             await self._set_schema_version(19)
+            version = 19
+        if version < 20:
+            await self._migrate_v20()
+            await self._set_schema_version(20)
+            version = 20
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -782,6 +787,29 @@ class Database:
               )
             """
         )
+
+    async def _migrate_v20(self) -> None:
+        # WARP Telegram routing module settings (single-row table, id = 1).
+        # Disabled by default; runtime columns are reset on every bot restart.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warp_settings (
+              id              INTEGER PRIMARY KEY DEFAULT 1,
+              enabled         INTEGER NOT NULL DEFAULT 0,
+              config_path     TEXT    NOT NULL DEFAULT '/etc/amnezia/tg-warp.conf',
+              interface_name  TEXT    NOT NULL DEFAULT 'tg-warp',
+              routes_count    INTEGER NOT NULL DEFAULT 0,
+              tunnel_up       INTEGER NOT NULL DEFAULT 0,
+              routes_active   INTEGER NOT NULL DEFAULT 0,
+              fail_streak     INTEGER NOT NULL DEFAULT 0,
+              success_streak  INTEGER NOT NULL DEFAULT 0,
+              last_handshake  INTEGER NOT NULL DEFAULT 0,
+              last_check_ts   INTEGER NOT NULL DEFAULT 0,
+              updated_at      INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        await self.conn.execute("INSERT OR IGNORE INTO warp_settings (id) VALUES (1)")
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(

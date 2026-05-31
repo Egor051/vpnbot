@@ -21,7 +21,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, callbacks, common, keys, proxy, start
+from bot.handlers import admin, admin_warp, callbacks, common, keys, proxy, start
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.rate_limit import RateLimiter
 from config.settings import Settings
@@ -54,6 +54,7 @@ from services.user_locks import UserLockManager
 from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
 from services.xray import XrayService
+from warp.manager import WarpManager
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +284,8 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
 
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
 
+    warp_manager = WarpManager(db=db, settings=settings, shell=shell)
+
     services = Services(
         settings=settings,
         db=db,
@@ -303,6 +306,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         trial_access=trial_access_service,
         offsite_backup=offsite_backup_service,
         anomaly_detection=anomaly_detection_service,
+        warp=warp_manager,
     )
 
     await _startup_reconcile_keys(services)
@@ -335,6 +339,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     dp.include_router(start.router)
     dp.include_router(common.router)
     dp.include_router(admin.router)
+    dp.include_router(admin_warp.router)
     dp.include_router(keys.router)
     dp.include_router(proxy.router)
     dp.include_router(callbacks.router)

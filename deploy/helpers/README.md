@@ -79,6 +79,66 @@ MTProxy:
 
 The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpnbot/managed-secrets.json` and `/etc/mtproxy/vpnbot/mtproxy.env` atomically as `root:root` mode `0600`, restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure.
 
+## WARP Telegram Routing helpers
+
+The WARP module ships four additional sudo helpers (in `scripts/`, installed to
+`/usr/local/sbin`). Unlike the backend helpers above, the WARP helpers are
+**always** invoked via `sudo` regardless of `PRIVILEGE_HELPERS_ENABLED` (the
+module manages a dedicated `tg-warp` AmneziaWG interface and its routes; the bot
+itself stays unprivileged). The module is disabled by default and does nothing
+until an admin uploads a config and enables it.
+
+```bash
+install -o root -g root -m 0755 scripts/vpnbot-warp-install /usr/local/sbin/vpnbot-warp-install
+install -o root -g root -m 0755 scripts/vpnbot-warp-iface   /usr/local/sbin/vpnbot-warp-iface
+install -o root -g root -m 0755 scripts/vpnbot-warp-routes  /usr/local/sbin/vpnbot-warp-routes
+install -o root -g root -m 0755 scripts/vpnbot-warp-status  /usr/local/sbin/vpnbot-warp-status
+```
+
+Interfaces:
+
+- `vpnbot-warp-install install <staged_config>` — validates the AmneziaWG format
+  (`[Interface]`/`[Peer]`, `Jc`/`S1`/`S2`, non-empty `AllowedIPs`), strips `DNS`,
+  adds `Table = off` and `PersistentKeepalive = 25`, writes
+  `/etc/amnezia/tg-warp.conf` (mode `0600`) and
+  `/etc/amnezia/tg-warp-routes.list` (one CIDR per line from `AllowedIPs`, which
+  is never modified). The bot stages the upload under
+  `/run/vpn-bot/warp/warp-upload-*.conf`.
+- `vpnbot-warp-install remove` — deletes `/etc/amnezia/tg-warp.conf` and
+  `/etc/amnezia/tg-warp-routes.list` from disk. Called by `delete_config` to
+  ensure the PrivateKey does not persist after config removal.
+- `vpnbot-warp-iface {up|down} /etc/amnezia/tg-warp.conf` — runs
+  `awg-quick up|down` (AmneziaWG, **not** `wg-quick`).
+- `vpnbot-warp-routes {add|del} tg-warp` — adds/removes `ip route` entries read
+  from `tg-warp-routes.list`. Skips `0.0.0.0/0` and `::/0` to protect the default
+  route; never touches the DNS resolver.
+- `vpnbot-warp-status tg-warp` — runs `awg show tg-warp`.
+
+`awg-quick`/`awg` (AmneziaWG userspace tools) must be installed at
+`/usr/bin/awg-quick` and `/usr/bin/awg`; the module blocks startup with a clear
+admin-panel error when the binary is missing.
+
+### Prerequisites
+
+Before enabling the WARP module, verify that the `ping` binary has the
+`cap_net_raw` file capability (required by `ping -I <iface>`):
+
+```bash
+getcap $(which ping)
+# Expected output contains: cap_net_raw=ep
+# e.g. /usr/bin/ping cap_net_raw=ep
+```
+
+If the capability is missing, the health monitor's probes will silently fail on
+startup and the routes will be pulled down immediately. To add the capability:
+
+```bash
+sudo setcap cap_net_raw+ep $(which ping)
+```
+
+On most modern distros `ping` ships with this capability set. If yours does not,
+add the `setcap` call to your server provisioning script.
+
 ## Rollout Checks
 
 1. Install helpers and `/etc/sudoers.d/vpnbot` with the ownership and modes above.

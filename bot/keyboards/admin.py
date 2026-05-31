@@ -50,6 +50,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t("btn_users"), callback_data="admin:users")],
             [InlineKeyboardButton(text=t("btn_key_stats"), callback_data="admin:stats")],
             [InlineKeyboardButton(text=t("btn_proxy_status"), callback_data="admin:proxy")],
+            [InlineKeyboardButton(text=t("btn_warp"), callback_data="admin:warp")],
             [InlineKeyboardButton(text=t("btn_backend_diagnostics"), callback_data="admin:diagnostics")],
             [InlineKeyboardButton(text=t("btn_proxy_stats"), callback_data="admin:proxy_stats")],
             [InlineKeyboardButton(text=t("btn_action_logs"), callback_data="admin:audit")],
@@ -220,15 +221,6 @@ def trial_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=t("btn_approve"), callback_data=f"admin:trial:approve:{request_id}"),
                 InlineKeyboardButton(text=t("btn_reject"), callback_data=f"admin:trial:reject:{request_id}"),
             ]
-        ]
-    )
-
-
-def anomaly_dismiss_keyboard() -> InlineKeyboardMarkup:
-    """Build the dismiss keyboard for anomaly alert messages."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Я прочитал", callback_data="admin:anomaly:dismiss")]
         ]
     )
 

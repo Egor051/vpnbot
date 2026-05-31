@@ -1,0 +1,3 @@
+#!/bin/bash
+# vpnbot-warp-status — show the WARP interface status (awg show).
+exec /usr/bin/awg show "${1:-tg-warp}"

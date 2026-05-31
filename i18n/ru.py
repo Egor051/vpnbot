@@ -466,6 +466,7 @@ STRINGS: dict[str, str] = {
     "btn_block_confirm": "Подтвердить блокировку",
     "btn_unblock_confirm": "Подтвердить разблокировку",
     "btn_refresh": "Обновить",
+    "btn_anomaly_dismiss": "✅ Я прочитал",
     # ── keyboard buttons (keys) ───────────────────────────────────────────────
     "btn_back": "Назад",
     "btn_config": "Конфиг",
@@ -494,4 +495,59 @@ STRINGS: dict[str, str] = {
     "btn_get_mtproto": "Получить MTProto",
     "btn_go_back": "Вернуться",
     "btn_back_to_proxy": "Вернуться в Прокси",
+    # ── WARP routing module ───────────────────────────────────────────────────
+    "btn_warp": "📡 WARP-туннель",
+    "btn_warp_upload": "📤 Загрузить конфиг",
+    "btn_warp_replace": "📤 Заменить конфиг",
+    "btn_warp_delete": "🗑 Удалить конфиг",
+    "btn_warp_enable": "🟢 Включить",
+    "btn_warp_disable": "🔴 Выключить",
+    "btn_warp_restart": "🔄 Перезапустить",
+    "btn_warp_settings": "⚙️ Настройки",
+    "warp_title": "📡 <b>WARP Telegram Routing</b>",
+    "warp_settings_title": "⚙️ <b>Настройки WARP</b>",
+    "warp_status_disabled": "Статус: 🔴 Выключен",
+    "warp_intro": (
+        "Направляет трафик через AmneziaWG туннель.\n"
+        "При обрыве соединения автоматически\n"
+        "переключается на прямой выход."
+    ),
+    "warp_no_config_hint": "Загрузите конфиг, чтобы включить модуль.",
+    "warp_label_module": "Модуль:",
+    "warp_label_tunnel": "Туннель:",
+    "warp_label_routes": "Маршруты:",
+    "warp_label_handshake": "Handshake:",
+    "warp_label_fails": "Провалов подряд:",
+    "warp_module_on": "✅ Включён",
+    "warp_module_off": "🔴 Выключен",
+    "warp_tunnel_up": "🟢 Активен",
+    "warp_tunnel_down": "🔴 Недоступен",
+    "warp_routes_active": "✅ Активны ({count} CIDR)",
+    "warp_routes_fallback": "⚠️ Fallback (трафик → прямо)",
+    "warp_routes_inactive": "⏸ Неактивны",
+    "warp_handshake_never": "нет данных",
+    "warp_ago_seconds": "{n} сек назад",
+    "warp_ago_minutes": "{n} мин назад",
+    "warp_ago_hours": "{n} ч назад",
+    "warp_ago_days": "{n} дн назад",
+    "warp_settings_config": "Конфиг:",
+    "warp_settings_iface": "Интерфейс:",
+    "warp_settings_routes": "Маршрутов:",
+    "warp_upload_prompt": (
+        "Отправьте файл конфигурации AmneziaWG (<code>.conf</code>) как документ.\n\n"
+        "Конфиг должен содержать поля AmneziaWG (Jc, S1, S2) и непустой AllowedIPs. "
+        "Какой трафик пойдёт через туннель — определяете вы своим AllowedIPs."
+    ),
+    "warp_upload_not_document": "Пожалуйста, отправьте <code>.conf</code> файл как документ.",
+    "warp_upload_too_large": "Файл слишком большой для конфигурации.",
+    "warp_upload_read_failed": "Не удалось прочитать файл. Попробуйте ещё раз.",
+    "warp_config_invalid": "❌ Конфиг отклонён: {error}",
+    "warp_config_installed": "✅ Конфиг загружен, маршрутов: {count}",
+    "warp_delete_confirm": "Удалить конфиг WARP и выключить модуль?",
+    "warp_deleted": "🗑 Конфиг удалён, модуль выключен.",
+    "warp_enabled_ok": "✅ Модуль WARP включён.",
+    "warp_disabled_ok": "🔴 Модуль WARP выключен.",
+    "warp_restarted_ok": "🔄 Модуль WARP перезапущен.",
+    "warp_last_error": "⚠️ {error}",
+    "warp_processing": "Выполняется…",
 }
