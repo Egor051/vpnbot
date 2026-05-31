@@ -84,7 +84,20 @@ def test_routes_helper_masquerade_rules() -> None:
     assert re.search(r'iptables -t nat -A POSTROUTING -o "\$IFACE" -j MASQUERADE', text) is not None
     # del: MASQUERADE rule is removed after routes are deleted
     assert re.search(r'iptables -t nat -D POSTROUTING -o "\$IFACE" -j MASQUERADE', text) is not None
-    # iptables calls come AFTER the route loops, not before
+    # add: both FORWARD rules are installed
+    assert re.search(r'iptables -I FORWARD -i awg0 -o "\$IFACE" -j ACCEPT', text) is not None
+    assert re.search(
+        r'iptables -I FORWARD -i "\$IFACE" -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT',
+        text,
+    ) is not None
+    # del: both FORWARD rules are removed
+    assert re.search(r'iptables -D FORWARD -i awg0 -o "\$IFACE" -j ACCEPT', text) is not None
+    assert re.search(
+        r'iptables -D FORWARD -i "\$IFACE" -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT',
+        text,
+    ) is not None
+    # order in add section: ip route → MASQUERADE → FORWARD
     first_done = text.index('done < "$ROUTES_LIST"')
-    first_iptables = text.index("iptables -t nat")
-    assert first_iptables > first_done
+    first_masquerade = text.index("iptables -t nat")
+    first_forward = text.index("iptables -C FORWARD")
+    assert first_done < first_masquerade < first_forward
