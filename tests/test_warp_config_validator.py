@@ -114,3 +114,12 @@ def test_missing_allowed_ips_line_rejected() -> None:
     )
     with pytest.raises(WarpConfigError, match="AllowedIPs"):
         validate_amnezia_config(config)
+
+
+def test_invalid_cidr_rejected() -> None:
+    config = VALID_AMNEZIA.replace(
+        "AllowedIPs = 149.154.160.0/20, 91.108.4.0/22, 8.8.8.8/32",
+        "AllowedIPs = 10.0.0.0/8, not-a-cidr, also-bad",
+    )
+    with pytest.raises(WarpConfigError, match="некорректные CIDR"):
+        validate_amnezia_config(config)

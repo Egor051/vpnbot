@@ -233,7 +233,7 @@ async def warp_upload_start(callback: CallbackQuery, state: FSMContext, services
 
 
 @router.message(WarpConfigStates.waiting_config)
-async def warp_upload_receive(message: Message, state: FSMContext, services: Services, bot: Bot) -> None:
+async def warp_upload_receive(message: Message, state: FSMContext, services: Services, bot: Bot, rate_limiter: RateLimiter | None = None) -> None:
     """Validate and install an uploaded AmneziaWG config."""
     if message.from_user is None:
         return
@@ -241,6 +241,8 @@ async def warp_upload_receive(message: Message, state: FSMContext, services: Ser
         return
     try:
         await require_superadmin(services, message.from_user.id)
+        if rate_limiter is not None:
+            rate_limiter.check(message.from_user.id, "warp_upload", 30)
         document = message.document
         if document is None:
             await message.answer(t("warp_upload_not_document"), reply_markup=warp_upload_keyboard())
