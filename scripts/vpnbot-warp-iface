@@ -1,0 +1,14 @@
+#!/bin/bash
+# vpnbot-warp-iface — bring the WARP AmneziaWG interface up or down.
+set -euo pipefail
+ACTION="${1:-}"; CONFIG="${2:-}"
+case "$ACTION" in
+    up)
+        [[ -f "$CONFIG" ]] || { echo "Config not found: $CONFIG" >&2; exit 1; }
+        exec /usr/bin/awg-quick up "$CONFIG" ;;
+    down)
+        [[ -f "$CONFIG" ]] || { echo "Config not found: $CONFIG" >&2; exit 1; }
+        exec /usr/bin/awg-quick down "$CONFIG" ;;
+    *)
+        echo "Usage: $0 {up|down} <config_path>" >&2; exit 1 ;;
+esac

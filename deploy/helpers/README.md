@@ -79,6 +79,41 @@ MTProxy:
 
 The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpnbot/managed-secrets.json` and `/etc/mtproxy/vpnbot/mtproxy.env` atomically as `root:root` mode `0600`, restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure.
 
+## WARP Telegram Routing helpers
+
+The WARP module ships four additional sudo helpers (in `scripts/`, installed to
+`/usr/local/sbin`). Unlike the backend helpers above, the WARP helpers are
+**always** invoked via `sudo` regardless of `PRIVILEGE_HELPERS_ENABLED` (the
+module manages a dedicated `tg-warp` AmneziaWG interface and its routes; the bot
+itself stays unprivileged). The module is disabled by default and does nothing
+until an admin uploads a config and enables it.
+
+```bash
+install -o root -g root -m 0755 scripts/vpnbot-warp-install /usr/local/sbin/vpnbot-warp-install
+install -o root -g root -m 0755 scripts/vpnbot-warp-iface   /usr/local/sbin/vpnbot-warp-iface
+install -o root -g root -m 0755 scripts/vpnbot-warp-routes  /usr/local/sbin/vpnbot-warp-routes
+install -o root -g root -m 0755 scripts/vpnbot-warp-status  /usr/local/sbin/vpnbot-warp-status
+```
+
+Interfaces:
+
+- `vpnbot-warp-install <staged_config>` — validates the AmneziaWG format
+  (`[Interface]`/`[Peer]`, `Jc`/`S1`/`S2`, non-empty `AllowedIPs`), strips `DNS`,
+  adds `Table = off` and `PersistentKeepalive = 25`, writes
+  `/etc/amnezia/tg-warp.conf` (mode `0600`) and
+  `/etc/amnezia/tg-warp-routes.list` (one CIDR per line from `AllowedIPs`, which
+  is never modified). The bot stages the upload under
+  `/run/vpn-bot/warp/warp-upload-*.conf`.
+- `vpnbot-warp-iface {up|down} /etc/amnezia/tg-warp.conf` — runs
+  `awg-quick up|down` (AmneziaWG, **not** `wg-quick`).
+- `vpnbot-warp-routes {add|del} tg-warp` — adds/removes `ip route` entries read
+  from `tg-warp-routes.list`. Never touches the default route or DNS resolver.
+- `vpnbot-warp-status tg-warp` — runs `awg show tg-warp`.
+
+`awg-quick`/`awg` (AmneziaWG userspace tools) must be installed at
+`/usr/bin/awg-quick` and `/usr/bin/awg`; the module blocks startup with a clear
+admin-panel error when the binary is missing.
+
 ## Rollout Checks
 
 1. Install helpers and `/etc/sudoers.d/vpnbot` with the ownership and modes above.

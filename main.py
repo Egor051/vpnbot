@@ -83,6 +83,13 @@ async def main() -> None:
                 site = web.TCPSite(runner, settings.health_host, settings.health_port)
                 await site.start()
                 logger.info("Health check endpoint started on port %d", settings.health_port)
+            await services.warp.reset_runtime_state()
+            if await services.warp.is_enabled():
+                try:
+                    await services.warp.start()
+                    logger.info("WARP routing module autostarted")
+                except Exception:
+                    logger.warning("WARP routing module autostart failed; continuing", exc_info=True)
             await bot.delete_webhook(drop_pending_updates=settings.bot_drop_pending_updates)
             logger.info("VPN bot started")
             await dp.start_polling(bot)
@@ -105,6 +112,10 @@ async def main() -> None:
             if scheduled_announcements_task is not None:
                 scheduled_announcements_task.cancel()
                 await asyncio.gather(scheduled_announcements_task, return_exceptions=True)
+            try:
+                await services.warp.stop()
+            except Exception:
+                logger.warning("WARP routing module shutdown failed", exc_info=True)
             if runner is not None:
                 await runner.cleanup()
             await db.close()

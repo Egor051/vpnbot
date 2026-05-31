@@ -1,0 +1,68 @@
+#!/bin/bash
+# vpnbot-warp-install — install a staged AmneziaWG config for the WARP module.
+#
+# The bot stages the uploaded config under its private helper staging dir and
+# calls this helper via sudo. The helper validates the AmneziaWG format,
+# strips/normalises the config, writes the canonical config and the routes.list
+# (one CIDR per line, extracted from AllowedIPs — never modified).
+set -euo pipefail
+
+SOURCE="${1:-}"
+DEST="/etc/amnezia/tg-warp.conf"
+ROUTES_LIST="/etc/amnezia/tg-warp-routes.list"
+
+[[ -f "$SOURCE" ]] || { echo "Source file not found: $SOURCE" >&2; exit 1; }
+
+# Validation: AmneziaWG format
+grep -q "^\[Interface\]" "$SOURCE" || { echo "Missing [Interface] section" >&2; exit 1; }
+grep -q "^\[Peer\]"      "$SOURCE" || { echo "Missing [Peer] section" >&2; exit 1; }
+grep -qE "^Jc\s*="       "$SOURCE" || { echo "Not AmneziaWG format (missing Jc)" >&2; exit 1; }
+grep -qE "^S1\s*="       "$SOURCE" || { echo "Not AmneziaWG format (missing S1)" >&2; exit 1; }
+grep -qE "^S2\s*="       "$SOURCE" || { echo "Not AmneziaWG format (missing S2)" >&2; exit 1; }
+grep -qE "^AllowedIPs\s*=" "$SOURCE" || { echo "Missing AllowedIPs" >&2; exit 1; }
+
+mkdir -p /etc/amnezia
+
+# Preprocess and write routes.list via Python
+python3 << PYEOF
+import re, sys
+
+content = open("$SOURCE").read()
+
+# Drop DNS (do not touch the server resolver)
+content = re.sub(r'^DNS\s*=.*\n?', '', content, flags=re.MULTILINE)
+
+# Add "Table = off" to [Interface] if absent (routes are managed manually via ip route)
+if not re.search(r'^Table\s*=', content, re.MULTILINE):
+    content = re.sub(
+        r'(\[Interface\])',
+        r'\1\nTable = off',
+        content
+    )
+
+# Add PersistentKeepalive to [Peer] if absent
+if not re.search(r'^PersistentKeepalive\s*=', content, re.MULTILINE):
+    content = re.sub(
+        r'(\[Peer\])',
+        r'\1\nPersistentKeepalive = 25',
+        content
+    )
+
+# Write the processed config
+with open("$DEST", 'w') as f:
+    f.write(content)
+
+# Extract AllowedIPs and write routes.list (AllowedIPs itself is not modified)
+match = re.search(r'^AllowedIPs\s*=\s*(.+)$', content, re.MULTILINE)
+if not match:
+    print("AllowedIPs not found after processing", file=sys.stderr)
+    sys.exit(1)
+
+routes = [ip.strip() for ip in match.group(1).split(',') if ip.strip()]
+with open("$ROUTES_LIST", 'w') as f:
+    f.write('\n'.join(routes) + '\n')
+
+print(f"Installed: {len(routes)} routes")
+PYEOF
+
+chmod 600 "$DEST"

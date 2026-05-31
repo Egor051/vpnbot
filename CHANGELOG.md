@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **WARP Telegram routing module** — optional server-side AmneziaWG (`tg-warp`) tunnel that routes the traffic defined by the uploaded config's `AllowedIPs` and automatically falls back to the direct path on tunnel loss. Disabled by default; managed from a new admin-panel tab (📡 WARP-туннель) with config upload, enable/disable/restart, settings and delete. An asyncio health monitor pings the tunnel every 10 s, removing routes after 2 consecutive failures and restoring them after 3 consecutive successes. The bot stays unprivileged: all root actions go through new `vpnbot-warp-install` / `-iface` / `-routes` / `-status` sudo helpers. `AllowedIPs` is never modified; the server DNS resolver and default route are never touched. Adds the `warp_settings` table (schema version 20), the `warp/` package, `bot/handlers/admin_warp.py`, `bot/keyboards/warp_keyboard.py` and `scripts/vpnbot-warp-*`.
+
 ## [1.1.0] — 2026-05-30
 
 ### Added

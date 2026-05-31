@@ -1,0 +1,23 @@
+#!/bin/bash
+# vpnbot-warp-routes — add/remove the WARP routes read from routes.list.
+# Never touches the default route or the DNS resolver. No CIDRs are hardcoded.
+set -euo pipefail
+ROUTES_LIST="/etc/amnezia/tg-warp-routes.list"
+ACTION="${1:-}"; IFACE="${2:-tg-warp}"
+
+[[ -f "$ROUTES_LIST" ]] || { echo "Routes list not found: $ROUTES_LIST" >&2; exit 1; }
+
+case "$ACTION" in
+    add)
+        while IFS= read -r net; do
+            [[ -z "$net" || "$net" == \#* ]] && continue
+            ip route replace "$net" dev "$IFACE" metric 10 2>/dev/null || true
+        done < "$ROUTES_LIST" ;;
+    del)
+        while IFS= read -r net; do
+            [[ -z "$net" || "$net" == \#* ]] && continue
+            ip route del "$net" dev "$IFACE" 2>/dev/null || true
+        done < "$ROUTES_LIST" ;;
+    *)
+        echo "Usage: $0 {add|del} <iface>" >&2; exit 1 ;;
+esac
