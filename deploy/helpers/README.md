@@ -110,12 +110,34 @@ Interfaces:
 - `vpnbot-warp-iface {up|down} /etc/amnezia/tg-warp.conf` — runs
   `awg-quick up|down` (AmneziaWG, **not** `wg-quick`).
 - `vpnbot-warp-routes {add|del} tg-warp` — adds/removes `ip route` entries read
-  from `tg-warp-routes.list`. Never touches the default route or DNS resolver.
+  from `tg-warp-routes.list`. Skips `0.0.0.0/0` and `::/0` to protect the default
+  route; never touches the DNS resolver.
 - `vpnbot-warp-status tg-warp` — runs `awg show tg-warp`.
 
 `awg-quick`/`awg` (AmneziaWG userspace tools) must be installed at
 `/usr/bin/awg-quick` and `/usr/bin/awg`; the module blocks startup with a clear
 admin-panel error when the binary is missing.
+
+### Prerequisites
+
+Before enabling the WARP module, verify that the `ping` binary has the
+`cap_net_raw` file capability (required by `ping -I <iface>`):
+
+```bash
+getcap $(which ping)
+# Expected output contains: cap_net_raw=ep
+# e.g. /usr/bin/ping cap_net_raw=ep
+```
+
+If the capability is missing, the health monitor's probes will silently fail on
+startup and the routes will be pulled down immediately. To add the capability:
+
+```bash
+sudo setcap cap_net_raw+ep $(which ping)
+```
+
+On most modern distros `ping` ships with this capability set. If yours does not,
+add the `setcap` call to your server provisioning script.
 
 ## Rollout Checks
 

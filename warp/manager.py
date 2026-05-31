@@ -192,6 +192,15 @@ class WarpManager:
 
         self._last_error = None
         self._running = True
+
+        probe_ok = await self._ping()
+        if not probe_ok:
+            logger.warning(
+                "WARP: first tunnel probe failed immediately after up. "
+                "Check that 'ping' binary has cap_net_raw+ep "
+                "(run: getcap $(which ping)). Health monitor will continue trying."
+            )
+
         handshake = await self._safe_handshake()
         await self._repo.update_runtime(
             tunnel_up=True,

@@ -569,7 +569,11 @@ How it works:
 4. Disabling the module removes the routes and brings the interface down.
 
 The bot runs unprivileged: every root action goes through the `vpnbot-warp-*`
-sudo helpers. The server DNS resolver and the default route are never touched.
+sudo helpers. The server DNS resolver is never touched. Default routes
+(`0.0.0.0/0`, `::/0`) in `AllowedIPs` are silently skipped by the routes helper
+to prevent accidental host isolation — the helper logs a warning when it skips
+them. If you need full-tunnel routing, configure a separate routing table and
+policy rules outside the bot instead of relying on `AllowedIPs`.
 
 ### Config format
 
@@ -581,6 +585,12 @@ non-empty `AllowedIPs`. **You decide which traffic flows through the tunnel via
 push, CDNs for media, etc.). `AllowedIPs` is never modified: the install helper
 extracts it verbatim into `/etc/amnezia/tg-warp-routes.list` (one CIDR per line)
 and the routes helper reads it from there.
+
+> **Warning:** `0.0.0.0/0` and `::/0` in `AllowedIPs` are automatically skipped
+> by the routes helper (a warning is printed to stderr). This protects the host
+> from losing connectivity due to an accidental default-route override. If you
+> need full-tunnel routing, manage a separate routing table and `ip rule` policy
+> outside the bot.
 
 On install the helper strips any `DNS = …` line and adds `Table = off` to
 `[Interface]` and `PersistentKeepalive = 25` to `[Peer]` if missing.

@@ -251,6 +251,9 @@ async def warp_upload_receive(message: Message, state: FSMContext, services: Ser
         try:
             buffer = BytesIO()
             await bot.download(document, destination=buffer)
+            if len(buffer.getvalue()) > _MAX_CONFIG_BYTES:
+                await message.answer(t("warp_upload_too_large"), reply_markup=warp_upload_keyboard())
+                return
             config_text = buffer.getvalue().decode("utf-8")
         except (UnicodeDecodeError, ValueError):
             await message.answer(t("warp_upload_read_failed"), reply_markup=warp_upload_keyboard())
