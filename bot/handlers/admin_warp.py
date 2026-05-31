@@ -241,15 +241,16 @@ async def warp_upload_receive(message: Message, state: FSMContext, services: Ser
         return
     try:
         await require_superadmin(services, message.from_user.id)
-        if message.document is None:
+        document = message.document
+        if document is None:
             await message.answer(t("warp_upload_not_document"), reply_markup=warp_upload_keyboard())
             return
-        if (message.document.file_size or 0) > _MAX_CONFIG_BYTES:
+        if (document.file_size or 0) > _MAX_CONFIG_BYTES:
             await message.answer(t("warp_upload_too_large"), reply_markup=warp_upload_keyboard())
             return
         try:
             buffer = BytesIO()
-            await bot.download(message.document, destination=buffer)
+            await bot.download(document, destination=buffer)
             config_text = buffer.getvalue().decode("utf-8")
         except (UnicodeDecodeError, ValueError):
             await message.answer(t("warp_upload_read_failed"), reply_markup=warp_upload_keyboard())
