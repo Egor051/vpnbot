@@ -18,7 +18,10 @@ case "$ACTION" in
                 continue
             fi
             ip route replace "$net" dev "$IFACE" metric 10 2>/dev/null || true
-        done < "$ROUTES_LIST" ;;
+        done < "$ROUTES_LIST"
+        # MASQUERADE: трафик из awg0/других интерфейсов меняет source на IP tg-warp
+        iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null \
+            || iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE ;;
     del)
         while IFS= read -r net; do
             [[ -z "$net" || "$net" == \#* ]] && continue
@@ -26,7 +29,8 @@ case "$ACTION" in
                 continue
             fi
             ip route del "$net" dev "$IFACE" 2>/dev/null || true
-        done < "$ROUTES_LIST" ;;
+        done < "$ROUTES_LIST"
+        iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true ;;
     *)
         echo "Usage: $0 {add|del} <iface>" >&2; exit 1 ;;
 esac

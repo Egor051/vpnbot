@@ -76,3 +76,15 @@ def test_no_helper_uses_shell_injection_patterns() -> None:
 def test_install_helper_validates_source_path() -> None:
     text = (SCRIPTS / "vpnbot-warp-install").read_text(encoding="utf-8")
     assert "ALLOWED_DIR" in text or "realpath" in text
+
+
+def test_routes_helper_masquerade_rules() -> None:
+    text = (SCRIPTS / "vpnbot-warp-routes").read_text(encoding="utf-8")
+    # add: MASQUERADE rule is installed after routes are added
+    assert re.search(r'iptables -t nat -A POSTROUTING -o "\$IFACE" -j MASQUERADE', text) is not None
+    # del: MASQUERADE rule is removed after routes are deleted
+    assert re.search(r'iptables -t nat -D POSTROUTING -o "\$IFACE" -j MASQUERADE', text) is not None
+    # iptables calls come AFTER the route loops, not before
+    first_done = text.index('done < "$ROUTES_LIST"')
+    first_iptables = text.index("iptables -t nat")
+    assert first_iptables > first_done
