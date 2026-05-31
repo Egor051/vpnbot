@@ -10,6 +10,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from adapters.awg_config import AwgConfigAdapter
+from i18n import t
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 from repositories.vpn_keys import VpnKeyRepository
@@ -251,7 +252,7 @@ class AnomalyDetectionService:
         text = "\n".join(lines)
 
         keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="✅ Я прочитал", callback_data="admin:anomaly:dismiss")]]
+            inline_keyboard=[[InlineKeyboardButton(text=t("btn_anomaly_dismiss"), callback_data="admin:anomaly:dismiss")]]
         )
         for admin_id in self._admin_ids:
             try:

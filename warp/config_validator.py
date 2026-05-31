@@ -8,6 +8,7 @@ the user decides which traffic flows through the tunnel.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass
 
@@ -86,5 +87,16 @@ def validate_amnezia_config(text: str) -> WarpConfig:
     allowed_ips = extract_allowed_ips(text)
     if not allowed_ips:
         raise WarpConfigError("В конфиге отсутствует непустой AllowedIPs")
+
+    invalid = []
+    for token in allowed_ips:
+        try:
+            ipaddress.ip_network(token, strict=False)
+        except ValueError:
+            invalid.append(token)
+    if invalid:
+        raise WarpConfigError(
+            f"AllowedIPs содержит некорректные CIDR: {', '.join(invalid)}"
+        )
 
     return WarpConfig(allowed_ips=allowed_ips)

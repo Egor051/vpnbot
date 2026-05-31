@@ -465,6 +465,7 @@ STRINGS: dict[str, str] = {
     "btn_block_confirm": "Confirm block",
     "btn_unblock_confirm": "Confirm unblock",
     "btn_refresh": "Refresh",
+    "btn_anomaly_dismiss": "✅ I've read it",
     # ── keyboard buttons (keys) ───────────────────────────────────────────────
     "btn_back": "Back",
     "btn_config": "Config",
