@@ -358,7 +358,7 @@ Notes:
 - `MTPROTO_SECRET`, SOCKS5 passwords, and real production endpoints with credentials must never be committed. `.env.example` intentionally keeps proxy secrets empty.
 - `DEFAULT_PROXY_*` is legacy compatibility storage and does not drive the new user-facing proxy access flow.
 - **Root deployment with api mode** (current `deploy/vpn-bot.service` default): `User=root`, `PRIVILEGE_HELPERS_ENABLED=false`, `XRAY_APPLY_MODE=api`. The bot writes Xray config and applies changes directly via the Xray gRPC API; no sudo helpers are needed. See [Xray API Mode](#xray-api-mode).
-- **Alternative non-root deployment with privilege helpers**: Run the bot as `vpn-bot:vpn-bot` with `PRIVILEGE_HELPERS_ENABLED=true`. Root-only backend changes go through fixed sudo helpers documented in `deploy/helpers/README.md`. Use `XRAY_APPLY_MODE=restart` or `reload` in this model; api mode is not honoured when helpers are enabled.
+- **Alternative non-root deployment with privilege helpers**: Run the bot as `vpn-bot:vpn-bot` with `PRIVILEGE_HELPERS_ENABLED=true`. Root-only backend changes go through fixed sudo helpers documented in `deploy/helpers/README.md`. Use `XRAY_APPLY_MODE=restart` or `reload` in this model; api mode is not honoured by the helper.
 - Keep project code, deploy files, `.env`, and `.venv` not writable by the service account. In root mode all paths are accessible; in non-root mode only `/opt/vpn-service/data`, `/opt/vpn-service/logs` if file logs are enabled, and `/run/vpn-bot` should be writable by `vpn-bot`.
 
 ## Xray API Mode
@@ -605,7 +605,7 @@ the admin panel.
 
 ### WARP environment variables
 
-These default to the sudoers template paths and rarely need changing:
+These default to the provided sudoers template paths. Changing `WARP_CONFIG_PATH` or `WARP_INTERFACE` requires matching updates to `/etc/sudoers.d/vpnbot` and the `vpnbot-warp-*` helper scripts; mismatches cause silent sudo failures. Change only if you know what you are doing.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
