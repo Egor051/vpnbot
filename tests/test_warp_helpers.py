@@ -63,3 +63,13 @@ def test_no_helper_uses_shell_injection_patterns() -> None:
     for name in WARP_HELPERS:
         text = (SCRIPTS / name).read_text(encoding="utf-8")
         assert "eval " not in text
+
+    # The install helper must use a quoted here-doc delimiter so the shell does
+    # not interpolate $SOURCE/$DEST/$ROUTES_LIST into the Python source code.
+    install_text = (SCRIPTS / "vpnbot-warp-install").read_text(encoding="utf-8")
+    assert "<<'PYEOF'" in install_text or "<< 'PYEOF'" in install_text
+
+
+def test_install_helper_validates_source_path() -> None:
+    text = (SCRIPTS / "vpnbot-warp-install").read_text(encoding="utf-8")
+    assert "ALLOWED_DIR" in text or "realpath" in text

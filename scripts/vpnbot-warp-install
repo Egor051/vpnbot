@@ -13,21 +13,32 @@ ROUTES_LIST="/etc/amnezia/tg-warp-routes.list"
 
 [[ -f "$SOURCE" ]] || { echo "Source file not found: $SOURCE" >&2; exit 1; }
 
+# Validate that SOURCE is within the allowed staging directory
+ALLOWED_DIR="/run/vpn-bot/warp"
+realpath_source=$(realpath "$SOURCE")
+[[ "$realpath_source" == "$ALLOWED_DIR/"* ]] || {
+    echo "Source path outside allowed dir: $SOURCE" >&2; exit 1
+}
+
 # Validation: AmneziaWG format
-grep -q "^\[Interface\]" "$SOURCE" || { echo "Missing [Interface] section" >&2; exit 1; }
-grep -q "^\[Peer\]"      "$SOURCE" || { echo "Missing [Peer] section" >&2; exit 1; }
-grep -qE "^Jc\s*="       "$SOURCE" || { echo "Not AmneziaWG format (missing Jc)" >&2; exit 1; }
-grep -qE "^S1\s*="       "$SOURCE" || { echo "Not AmneziaWG format (missing S1)" >&2; exit 1; }
-grep -qE "^S2\s*="       "$SOURCE" || { echo "Not AmneziaWG format (missing S2)" >&2; exit 1; }
-grep -qE "^AllowedIPs\s*=" "$SOURCE" || { echo "Missing AllowedIPs" >&2; exit 1; }
+grep -qE "^[[:space:]]*\[Interface\]"       "$SOURCE" || { echo "Missing [Interface] section" >&2; exit 1; }
+grep -qE "^[[:space:]]*\[Peer\]"            "$SOURCE" || { echo "Missing [Peer] section" >&2; exit 1; }
+grep -qE "^[[:space:]]*Jc[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing Jc)" >&2; exit 1; }
+grep -qE "^[[:space:]]*S1[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing S1)" >&2; exit 1; }
+grep -qE "^[[:space:]]*S2[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing S2)" >&2; exit 1; }
+grep -qE "^[[:space:]]*AllowedIPs[[:space:]]*=" "$SOURCE" || { echo "Missing AllowedIPs" >&2; exit 1; }
 
 mkdir -p /etc/amnezia
 
 # Preprocess and write routes.list via Python
-python3 << PYEOF
-import re, sys
+SOURCE="$SOURCE" DEST="$DEST" ROUTES_LIST="$ROUTES_LIST" python3 - <<'PYEOF'
+import os, re, sys
 
-content = open("$SOURCE").read()
+src = os.environ["SOURCE"]
+dest = os.environ["DEST"]
+routes_list = os.environ["ROUTES_LIST"]
+
+content = open(src).read()
 
 # Drop DNS (do not touch the server resolver)
 content = re.sub(r'^DNS\s*=.*\n?', '', content, flags=re.MULTILINE)
@@ -49,7 +60,7 @@ if not re.search(r'^PersistentKeepalive\s*=', content, re.MULTILINE):
     )
 
 # Write the processed config
-with open("$DEST", 'w') as f:
+with open(dest, 'w') as f:
     f.write(content)
 
 # Extract AllowedIPs and write routes.list (AllowedIPs itself is not modified)
@@ -59,7 +70,7 @@ if not match:
     sys.exit(1)
 
 routes = [ip.strip() for ip in match.group(1).split(',') if ip.strip()]
-with open("$ROUTES_LIST", 'w') as f:
+with open(routes_list, 'w') as f:
     f.write('\n'.join(routes) + '\n')
 
 print(f"Installed: {len(routes)} routes")
