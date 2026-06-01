@@ -339,6 +339,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     key_expiry_service.bot = bot
     trial_access_service.bot = bot
     anomaly_detection_service.bot = bot
+    warp_manager.bot = bot
     # FSM state is in-memory only — bot restart clears in-progress wizards.
     # TTLMemoryStorage expires sessions idle for >30 min via the fsm_cleanup_loop
     # background task started in main.py.
