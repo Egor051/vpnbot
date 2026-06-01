@@ -67,7 +67,7 @@ def check_bot_non_root(*, xray_api_mode: bool = False) -> HealthCheckItem:
                 name="bot_runtime",
                 status="warning",
                 severity="warning",
-                message="Bot running as root — OK for XRAY_APPLY_MODE=api, use vpn-bot user in production",
+                message="Bot running as root — expected for XRAY_APPLY_MODE=api",
             )
         return HealthCheckItem(
             name="bot_runtime",
@@ -83,7 +83,7 @@ def check_bot_non_root(*, xray_api_mode: bool = False) -> HealthCheckItem:
     )
 
 
-def check_helper_mode(enabled: bool) -> HealthCheckItem:
+def check_helper_mode(enabled: bool, *, xray_api_mode: bool = False) -> HealthCheckItem:
     """Report whether privilege helper mode is enabled."""
     if enabled:
         return HealthCheckItem(
@@ -92,11 +92,18 @@ def check_helper_mode(enabled: bool) -> HealthCheckItem:
             severity="info",
             message="PRIVILEGE_HELPERS_ENABLED=true",
         )
+    if xray_api_mode:
+        return HealthCheckItem(
+            name="helper_mode",
+            status="warning",
+            severity="warning",
+            message="PRIVILEGE_HELPERS_ENABLED=false — OK for XRAY_APPLY_MODE=api",
+        )
     return HealthCheckItem(
         name="helper_mode",
         status="warning",
         severity="warning",
-        message="PRIVILEGE_HELPERS_ENABLED=false — OK for Xray API and normal operation",
+        message="PRIVILEGE_HELPERS_ENABLED=false — apply operations will fail without sudo helpers",
     )
 
 
@@ -214,7 +221,7 @@ async def run_bot_health(
     """Run all on-demand bot health checks. Read-only. Never modifies config or restarts services."""
     checks: list[HealthCheckItem] = []
     checks.append(check_bot_non_root(xray_api_mode=xray_api_mode))
-    checks.append(check_helper_mode(privilege_helpers_enabled))
+    checks.append(check_helper_mode(privilege_helpers_enabled, xray_api_mode=xray_api_mode))
     checks.extend(check_backends(backend_health.snapshot()))
     skipped = getattr(backend_health, "skipped_revocation_count", 0)
     if skipped:

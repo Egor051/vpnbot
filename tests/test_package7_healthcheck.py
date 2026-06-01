@@ -215,10 +215,18 @@ def test_check_helper_mode_enabled() -> None:
     assert item.status == "ok"
 
 
-def test_check_helper_mode_disabled() -> None:
-    """Helper mode disabled → warning status."""
+def test_check_helper_mode_disabled_non_api() -> None:
+    """Helper mode disabled outside API mode → warning about broken apply operations."""
     item = check_helper_mode(False)
     assert item.status == "warning"
+    assert "apply operations" in item.message
+
+
+def test_check_helper_mode_disabled_xray_api_mode() -> None:
+    """Helper mode disabled with xray_api_mode=True → warning that it is OK for API mode."""
+    item = check_helper_mode(False, xray_api_mode=True)
+    assert item.status == "warning"
+    assert "api" in item.message.lower()
 
 
 # ---------------------------------------------------------------------------
