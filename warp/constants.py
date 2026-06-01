@@ -5,9 +5,8 @@ the config path and the interface name are configurable and therefore belong to
 ``config.settings`` / the ``warp_settings`` table, not this file.
 """
 
-# Telegram MTProto IP used as the tunnel liveness probe target. Such configs
-# always route this address, so it is a reliable ping target for the tunnel.
-PING_TARGET = "149.154.167.50"
+# Cloudflare anycast — стабильно отвечает на ICMP, присутствует в типовых WARP AllowedIPs.
+PING_TARGET = "162.159.140.245"
 
 # Interface created by awg-quick for the WARP tunnel.
 PING_INTERFACE = "tg-warp"
