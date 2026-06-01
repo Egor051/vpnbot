@@ -29,6 +29,13 @@ from models.enums import ProxyAccessStatus, ProxyAccessType
 from services.errors import AccessDenied
 
 
+def _modules_enabled() -> SimpleNamespace:
+    """Mock modules service where all protocols are enabled."""
+    async def _is_enabled(name: str) -> bool:
+        return True
+    return SimpleNamespace(is_enabled=_is_enabled)
+
+
 def _access(access_type: ProxyAccessType, payload: dict[str, object] | None = None) -> ProxyAccess:
     return ProxyAccess(
         id=1 if access_type == ProxyAccessType.SOCKS5 else 2,
@@ -507,6 +514,7 @@ def test_proxy_confirm_issues_socks5_and_edits_same_message(monkeypatch) -> None
             socks5=socks5,
             mtproto=SimpleNamespace(),
             settings=SimpleNamespace(socks5_enabled=True, mtproto_enabled=True),
+            modules=_modules_enabled(),
         )
         state = _State({"proxy_type": "socks5", "nonce": "abc"})
         callback = _Callback("proxy:confirm:socks5:abc")
@@ -568,7 +576,11 @@ def test_proxy_confirm_stale_without_existing_access_returns_to_proxy(monkeypatc
     async def run() -> None:
         state = _State({"proxy_type": "socks5", "nonce": "fresh"})
         callback = _Callback("proxy:confirm:socks5:old")
-        services = SimpleNamespace(proxy=Proxy(), settings=SimpleNamespace(socks5_enabled=True, mtproto_enabled=True))
+        services = SimpleNamespace(
+            proxy=Proxy(),
+            settings=SimpleNamespace(socks5_enabled=True, mtproto_enabled=True),
+            modules=_modules_enabled(),
+        )
         await proxy_confirm(callback, state, services)  # type: ignore[arg-type]
 
         assert state.cleared is True
@@ -608,6 +620,7 @@ def test_proxy_confirm_stale_with_existing_access_shows_existing_without_reissue
             socks5=SimpleNamespace(),
             mtproto=mtproto,
             settings=SimpleNamespace(socks5_enabled=True, mtproto_enabled=True),
+            modules=_modules_enabled(),
         )
         await proxy_confirm(callback, state, services)  # type: ignore[arg-type]
 

@@ -24,6 +24,13 @@ from models.enums import AccessRequestStatus, UserRole, VpnKeyStatus, VpnKeyType
 from services.errors import AccessDenied, NotFound
 
 
+def _modules_enabled() -> SimpleNamespace:
+    """Mock modules service where all protocols are enabled."""
+    async def _is_enabled(name: str) -> bool:
+        return True
+    return SimpleNamespace(is_enabled=_is_enabled)
+
+
 class _FakeTrialAccess:
     async def can_request_trial(self, user_id: int) -> bool:
         return False
@@ -620,7 +627,7 @@ def test_pending_user_cannot_open_create_menu(monkeypatch) -> None:
 
     async def run() -> None:
         callback = _Callback("keys:create", user_id=100)
-        await create_key_menu(callback, SimpleNamespace(users=Users()))  # type: ignore[arg-type]
+        await create_key_menu(callback, SimpleNamespace(users=Users(), modules=_modules_enabled()))  # type: ignore[arg-type]
         assert callback.answers == [("Доступ ещё не одобрен. Дождитесь решения администратора.", True)]
 
     asyncio.run(run())
@@ -653,7 +660,7 @@ def test_create_key_menu_ignores_stale_callback_answer(monkeypatch) -> None:
 
     async def run() -> None:
         callback = Callback()
-        await create_key_menu(callback, SimpleNamespace(users=Users()))  # type: ignore[arg-type]
+        await create_key_menu(callback, SimpleNamespace(users=Users(), modules=_modules_enabled()))  # type: ignore[arg-type]
 
         assert callback.answer_calls == 1
         assert len(edits) == 1

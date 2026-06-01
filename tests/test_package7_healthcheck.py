@@ -593,13 +593,18 @@ def test_admin_diagnostics_handler_uses_run_bot_health(monkeypatch: pytest.Monke
     monkeypatch.setattr("bot.handlers.admin.run_bot_health", fake_run_bot_health)
     monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", allow_private)
 
+    async def _no_modules() -> list[object]:
+        return []
+
     async def run() -> None:
         callback = _AdminCallback()
+        modules_mock = SimpleNamespace(get_all=_no_modules)
         services = SimpleNamespace(
             users=_AdminUsers(),
             backend_health=BackendHealth(),
             settings=_make_settings(),
             db=MagicMock(),
+            modules=modules_mock,
         )
         await admin_backend_diagnostics(callback, services)
         assert "backend_health" in called_with
@@ -630,13 +635,18 @@ def test_admin_diagnostics_excludes_disabled_proxy_services(monkeypatch: pytest.
     monkeypatch.setattr("bot.handlers.admin.run_bot_health", fake_run_bot_health)
     monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", allow_private)
 
+    async def _no_modules() -> list[object]:
+        return []
+
     async def run() -> None:
         callback = _AdminCallback()
+        modules_mock = SimpleNamespace(get_all=_no_modules)
         services = SimpleNamespace(
             users=_AdminUsers(),
             backend_health=BackendHealth(),
             settings=_make_settings(socks5_enabled=False, mtproto_enabled=False),
             db=MagicMock(),
+            modules=modules_mock,
         )
         await admin_backend_diagnostics(callback, services)
         assert "danted" not in captured_service_names

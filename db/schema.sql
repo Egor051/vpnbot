@@ -155,6 +155,17 @@ CREATE TABLE IF NOT EXISTS announcement_deliveries (
   PRIMARY KEY (announcement_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS protocol_modules (
+    name        TEXT PRIMARY KEY,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    disabled_at TEXT,
+    disabled_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL
+);
+INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('xray', 1);
+INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('awg', 1);
+INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('socks5', 1);
+INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('mtproto', 1);
+
 CREATE TABLE IF NOT EXISTS warp_settings (
   id              INTEGER PRIMARY KEY DEFAULT 1,
   enabled         INTEGER NOT NULL DEFAULT 0,

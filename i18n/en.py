@@ -442,6 +442,7 @@ STRINGS: dict[str, str] = {
     "btn_users": "Users",
     "btn_key_stats": "Key statistics",
     "btn_proxy_status": "Proxy status",
+    "btn_modules": "⚙️ Protocol modules",
     "btn_backend_diagnostics": "Backend diagnostics",
     "btn_proxy_stats": "Proxy statistics",
     "btn_action_logs": "Action logs",
@@ -494,6 +495,41 @@ STRINGS: dict[str, str] = {
     "btn_get_mtproto": "Get MTProto",
     "btn_go_back": "Back",
     "btn_back_to_proxy": "Back to Proxy",
+    # ── Protocol modules panel ────────────────────────────────────────────────
+    "btn_module_disable": "Disable",
+    "btn_module_enable": "Enable",
+    "btn_module_disable_step1": "Yes, disable →",
+    "btn_module_disable_step2": "⚠️ CONFIRM DELETION",
+    "btn_module_enable_confirm": "Enable protocol",
+    "btn_modules_back": "← Back to modules",
+    "modules_panel_title": (
+        "<b>⚙️ Protocol modules</b>\n\n"
+        "Disabling a protocol <b>permanently deletes</b> all related bot-side data (keys, proxy accesses, database records).\n"
+        "Server-side accounts (AWG/Xray configs, Linux users, MTProto secrets) are NOT removed — clean them up manually.\n"
+        "Once disabled, the protocol is completely hidden; only «Backend diagnostics» will show it was disabled.\n\n"
+        "You can re-enable a protocol at any time."
+    ),
+    "module_disable_confirm1": (
+        "<b>⚠️ Disable protocol {label}</b>\n\n"
+        "This action will:\n"
+        "• permanently hard-delete all keys / proxy accesses for this protocol from the bot database\n"
+        "• remove all buttons and mentions of the protocol\n"
+        "• NOT touch the server side (AWG/Xray configs etc.) — clean those up manually\n\n"
+        "Continue?"
+    ),
+    "module_disable_confirm2": (
+        "<b>🛑 FINAL CONFIRMATION — {label}</b>\n\n"
+        "All data for this protocol will be <b>permanently destroyed</b>.\n"
+        "Click the button below to confirm."
+    ),
+    "module_enable_confirm": (
+        "<b>Enable protocol {label}?</b>\n\n"
+        "The protocol will become available to users again. Old data will not be restored."
+    ),
+    "module_disabling": "Disabling protocol...",
+    "module_enabling": "Enabling protocol...",
+    "module_disabled_ok": "✅ Protocol <b>{label}</b> disabled. Records deleted: {deleted}.",
+    "module_enabled_ok": "✅ Protocol <b>{label}</b> enabled.",
     # ── WARP routing module ───────────────────────────────────────────────────
     "btn_warp": "📡 WARP tunnel",
     "btn_warp_upload": "📤 Upload config",

@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 20
+CURRENT_SCHEMA_VERSION = 21
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -240,6 +240,10 @@ class Database:
             await self._migrate_v20()
             await self._set_schema_version(20)
             version = 20
+        if version < 21:
+            await self._migrate_v21()
+            await self._set_schema_version(21)
+            version = 21
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -810,6 +814,25 @@ class Database:
             """
         )
         await self.conn.execute("INSERT OR IGNORE INTO warp_settings (id) VALUES (1)")
+
+    async def _migrate_v21(self) -> None:
+        # Protocol modules table — tracks which protocols are enabled/disabled.
+        # All four protocols are seeded as enabled.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS protocol_modules (
+              name        TEXT PRIMARY KEY,
+              enabled     INTEGER NOT NULL DEFAULT 1,
+              disabled_at TEXT,
+              disabled_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL
+            )
+            """
+        )
+        for name in ("xray", "awg", "socks5", "mtproto"):
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES (?, 1)",
+                (name,),
+            )
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(
