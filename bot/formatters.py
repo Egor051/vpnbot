@@ -593,10 +593,13 @@ def proxy_admin_combined_text(lifecycle: ProxyLifecycleStats, stats: ProxyAdminS
         f" | active: {h(lifecycle.socks5_active)}"
         f" | revoked: {h(lifecycle.socks5_revoked)}"
     )
-    socks5_failed = sum(
-        v for s, v in stats.type_status_counts.get(ProxyAccessType.SOCKS5, {}).items()
-        if s in {ProxyAccessStatus.APPLY_FAILED, ProxyAccessStatus.REVOKE_FAILED, ProxyAccessStatus.DELETE_FAILED}
-    )
+    pending_statuses = frozenset({ProxyAccessStatus.PENDING_APPLY, ProxyAccessStatus.PENDING_REVOKE, ProxyAccessStatus.PENDING_DELETE})
+    failed_statuses = frozenset({ProxyAccessStatus.APPLY_FAILED, ProxyAccessStatus.REVOKE_FAILED, ProxyAccessStatus.DELETE_FAILED})
+    socks5_counts = stats.type_status_counts.get(ProxyAccessType.SOCKS5, {})
+    socks5_pending = sum(v for s, v in socks5_counts.items() if s in pending_statuses)
+    socks5_failed = sum(v for s, v in socks5_counts.items() if s in failed_statuses)
+    if socks5_pending:
+        lines.append(f"• pending: {h(socks5_pending)}")
     if socks5_failed:
         lines.append(f"• failed: {h(socks5_failed)}")
 
@@ -628,14 +631,13 @@ def proxy_admin_combined_text(lifecycle: ProxyLifecycleStats, stats: ProxyAdminS
         lines.append(f"• {managed_str}")
     if runtime is not None and runtime.mtproto_runtime_secret_count is not None:
         lines.append(f"• runtime secrets: {h(runtime.mtproto_runtime_secret_count)}")
-    mtproto_failed = lifecycle.mtproto_apply_failed + lifecycle.mtproto_revoke_failed
+    mtproto_counts = stats.type_status_counts.get(ProxyAccessType.MTPROTO, {})
+    mtproto_pending = sum(v for s, v in mtproto_counts.items() if s in pending_statuses)
+    mtproto_failed = sum(v for s, v in mtproto_counts.items() if s in failed_statuses)
+    if mtproto_pending:
+        lines.append(f"• pending: {h(mtproto_pending)}")
     if mtproto_failed:
-        parts = []
-        if lifecycle.mtproto_apply_failed:
-            parts.append(f"apply {h(lifecycle.mtproto_apply_failed)}")
-        if lifecycle.mtproto_revoke_failed:
-            parts.append(f"revoke {h(lifecycle.mtproto_revoke_failed)}")
-        lines.append(f"• failed: {', '.join(parts)}")
+        lines.append(f"• failed: {h(mtproto_failed)}")
 
     lines.extend(["", "<b>Пользователи</b>"])
     if stats.last_issued_at:
