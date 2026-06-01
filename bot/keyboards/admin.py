@@ -42,10 +42,21 @@ def moderator_panel_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def dashboard_keyboard() -> InlineKeyboardMarkup:
+    """Build the refresh/back inline keyboard for the admin dashboard."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:dashboard:refresh")],
+            [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")],
+        ]
+    )
+
+
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     """Build the full admin panel inline keyboard."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Дашборд", callback_data="admin:dashboard")],
             [InlineKeyboardButton(text=t("btn_access_requests"), callback_data="admin:reqs")],
             [InlineKeyboardButton(text=t("btn_users"), callback_data="admin:users")],
             [InlineKeyboardButton(text=t("btn_issue_key_to_user"), callback_data="admin:issue")],
