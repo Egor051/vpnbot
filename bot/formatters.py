@@ -1025,6 +1025,7 @@ def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
         suffix = t("audit_access_rejected")
     else:
         suffix = t("audit_action_generic", action=h(action))
+    return f"{time_text} — {actor_text}{suffix}"
 
 
 def dashboard_text(snap: DashboardSnapshot) -> str:
@@ -1135,4 +1136,3 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
         lines.append("  Последние: " + ", ".join(recent_actions))
 
     return "\n".join(lines)
-    return f"{time_text} — {actor_text}{suffix}"
