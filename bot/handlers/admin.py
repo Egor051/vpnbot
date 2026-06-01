@@ -108,6 +108,16 @@ async def anomaly_alert_dismiss(callback: CallbackQuery) -> None:
         await callback.message.delete()
 
 
+@router.callback_query(F.data == "admin:warp:alert:dismiss")
+async def warp_alert_dismiss(callback: CallbackQuery) -> None:
+    """Delete the WARP tunnel alert message for the admin who clicked the button."""
+    await safe_callback_answer(callback)
+    if callback.message is None or isinstance(callback.message, InaccessibleMessage):
+        return
+    with suppress(TelegramBadRequest):
+        await callback.message.delete()
+
+
 @router.callback_query(F.data == "admin:panel")
 async def admin_panel(callback: CallbackQuery, services: Services) -> None:
     """Show the admin panel via callback."""

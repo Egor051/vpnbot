@@ -76,6 +76,8 @@ class WarpHealthMonitor:
         activate_routes: Callable[[], Awaitable[None]],
         deactivate_routes: Callable[[], Awaitable[None]],
         on_update: Callable[[HealthSnapshot], Awaitable[None]],
+        on_tunnel_down: Callable[[], Awaitable[None]] | None = None,
+        on_tunnel_recovered: Callable[[], Awaitable[None]] | None = None,
         interval: int | None = None,
         fail_threshold: int | None = None,
         recover_threshold: int | None = None,
@@ -85,6 +87,8 @@ class WarpHealthMonitor:
         self._activate_routes = activate_routes
         self._deactivate_routes = deactivate_routes
         self._on_update = on_update
+        self._on_tunnel_down = on_tunnel_down
+        self._on_tunnel_recovered = on_tunnel_recovered
         self._interval = self.INTERVAL if interval is None else interval
         self._fail_threshold = self.FAIL_THRESHOLD if fail_threshold is None else fail_threshold
         self._recover_threshold = self.RECOVER_THRESHOLD if recover_threshold is None else recover_threshold
@@ -128,6 +132,9 @@ class WarpHealthMonitor:
                 "WARP tunnel recovered after %d consecutive successes; routes restored",
                 self._success_streak,
             )
+            if self._on_tunnel_recovered is not None:
+                with suppress(Exception):
+                    await self._on_tunnel_recovered()
         else:
             await self._deactivate_routes()
             self._routes_active = False
@@ -136,6 +143,9 @@ class WarpHealthMonitor:
                 "(traffic falls back to the direct path)",
                 self._fail_streak,
             )
+            if self._on_tunnel_down is not None:
+                with suppress(Exception):
+                    await self._on_tunnel_down()
 
     async def run(self) -> None:
         self._running = True

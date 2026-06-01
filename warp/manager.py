@@ -15,6 +15,10 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
+from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from i18n import t
 from adapters.privileged_helpers import (
     PrivilegedHelperRunner,
     cleanup_staging_path,
@@ -67,6 +71,7 @@ class WarpManager:
         self._running = False
         self._monitor: WarpHealthMonitor | None = None
         self._last_error: str | None = None
+        self.bot: Bot | None = None
 
     # ── read-only accessors ────────────────────────────────────────────────
 
@@ -216,6 +221,8 @@ class WarpManager:
             activate_routes=self._activate_routes,
             deactivate_routes=self._deactivate_routes,
             on_update=self._on_health_update,
+            on_tunnel_down=self._notify_tunnel_down,
+            on_tunnel_recovered=self._notify_tunnel_recovered,
             initial_routes_active=routes_active,
         )
         self._monitor.start()
@@ -287,6 +294,38 @@ class WarpManager:
             last_handshake=handshake,
             last_check_ts=int(time.time()),
         )
+
+    async def _notify_tunnel_down(self) -> None:
+        if self.bot is None:
+            return
+        text = (
+            "🔴 <b>WARP-туннель недоступен</b>\n"
+            "Маршруты сняты — трафик идёт напрямую."
+        )
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text=t("btn_warp_alert_dismiss"), callback_data="admin:warp:alert:dismiss")]]
+        )
+        for admin_id in self._settings.admin_ids:
+            try:
+                await self.bot.send_message(admin_id, text, reply_markup=keyboard)
+            except Exception:
+                logger.warning("Failed to send WARP down alert to admin %d", admin_id, exc_info=True)
+
+    async def _notify_tunnel_recovered(self) -> None:
+        if self.bot is None:
+            return
+        text = (
+            "🟢 <b>WARP-туннель восстановлен</b>\n"
+            "Маршруты восстановлены."
+        )
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text=t("btn_warp_alert_dismiss"), callback_data="admin:warp:alert:dismiss")]]
+        )
+        for admin_id in self._settings.admin_ids:
+            try:
+                await self.bot.send_message(admin_id, text, reply_markup=keyboard)
+            except Exception:
+                logger.warning("Failed to send WARP recovered alert to admin %d", admin_id, exc_info=True)
 
     async def _safe_handshake(self) -> int:
         try:
