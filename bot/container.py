@@ -8,6 +8,7 @@ from services.announcements import AnnouncementService
 from services.audit import AuditService
 from services.awg import AwgService
 from services.backend_health import BackendHealth
+from services.dashboard import DashboardService
 from services.key_expiry import KeyExpiryService
 from services.mtproto import MtProtoService
 from services.notes import NotesService
@@ -47,3 +48,4 @@ class Services:
     anomaly_detection: AnomalyDetectionService
     warp: WarpManager
     modules: ProtocolModulesService
+    dashboard: DashboardService

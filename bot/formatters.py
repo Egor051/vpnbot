@@ -23,6 +23,7 @@ from repositories.protocol_modules import PROTOCOL_DISPLAY, ProtocolModule
 from models.enums import ProxyAccessStatus, ProxyAccessType, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.announcements import AnnouncementBatch
 from services.backend_health import BackendHealthStatus
+from services.dashboard import DashboardSnapshot
 from services.health import HealthCheckResult
 from utils.formatting import (
     code,
@@ -1025,3 +1026,113 @@ def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
     else:
         suffix = t("audit_action_generic", action=h(action))
     return f"{time_text} — {actor_text}{suffix}"
+
+
+def dashboard_text(snap: DashboardSnapshot) -> str:
+    lines: list[str] = [f"<b>📊 Дашборд</b>  <i>обновлено {h(snap.refreshed_at)}</i>", ""]
+
+    # Users
+    approved = snap.users_by_role.get("APPROVED_USER", 0)
+    pending = snap.users_by_role.get("PENDING_USER", 0)
+    blocked = snap.users_by_role.get("BLOCKED_USER", 0)
+    moderators = snap.users_by_role.get("MODERATOR", 0)
+    superadmins = snap.users_by_role.get("SUPERADMIN", 0)
+    total_users = sum(snap.users_by_role.values())
+    lines += [
+        "<b>👥 Пользователи</b>",
+        f"  Всего: <b>{h(total_users)}</b>  (одобрено: {h(approved)} | ожидают: {h(pending)} | заблок.: {h(blocked)})",
+    ]
+    if moderators or superadmins:
+        lines.append(f"  Модераторов: {h(moderators)} | Админов: {h(superadmins)}")
+    lines.append(f"  Новых за 7д: {h(snap.new_users_7d)} | за 30д: {h(snap.new_users_30d)}")
+    lines.append(f"  С активными ключами: {h(snap.users_with_active_keys)}")
+    attention_parts = []
+    if snap.pending_access_requests:
+        attention_parts.append(f"⏳ Заявок: {snap.pending_access_requests}")
+    if snap.pending_trial_requests:
+        attention_parts.append(f"⏳ Пробных: {snap.pending_trial_requests}")
+    if attention_parts:
+        lines.append("  " + " | ".join(attention_parts))
+    lines.append("")
+
+    # Keys
+    k = snap.keys
+    lines += [
+        "<b>🔑 VPN-ключи</b>",
+        f"  Активных: <b>{h(k.active)}</b>  (Xray: {h(k.xray_active)} | AWG: {h(k.awg_active)})  · всего: {h(k.total)}",
+        f"  Истекают 7д: {h(k.expiring_7d)} | 30д: {h(k.expiring_30d)}",
+        f"  Зависших: {'⚠️ ' + str(k.stuck) if k.stuck else '0'} | Ср. на пользователя: {h(f'{k.avg_per_user:.1f}')}",
+        "",
+    ]
+
+    # Traffic
+    t_ = snap.traffic
+    top_parts = []
+    for entry in snap.top_users:
+        name = f"@{entry.username}" if entry.username else f"id{entry.user_id}"
+        top_parts.append(f"{h(name)} {h(format_bytes(entry.total_bytes))}")
+    lines += [
+        "<b>📊 Трафик</b>",
+        f"  Итого: <b>{h(format_bytes(t_.total_bytes))}</b>  (Xray: {h(format_bytes(t_.xray_bytes))} | AWG: {h(format_bytes(t_.awg_bytes))})",
+        f"  Среднее на ключ: {h(format_bytes(t_.avg_per_key_bytes))}",
+    ]
+    if top_parts:
+        lines.append("  Топ-5: " + " | ".join(top_parts))
+    lines.append("")
+
+    # Proxy
+    stuck_proxy_str = f"  ⚠️ Зависших: {snap.stuck_proxies}" if snap.stuck_proxies else ""
+    lines += [
+        "<b>🌐 Прокси</b>",
+        f"  SOCKS5: {h(snap.active_socks5)} | MTProto: {h(snap.active_mtproto)}",
+    ]
+    if stuck_proxy_str:
+        lines.append(stuck_proxy_str)
+    lines.append("")
+
+    # System
+    health_parts = []
+    for s in snap.backend_health:
+        icon = "✅" if not s.degraded else "⚠️"
+        health_parts.append(f"{icon} {h(s.label)}")
+    w = snap.warp
+    warp_str = "вкл" if w.enabled else "выкл"
+    if w.enabled:
+        warp_str += f" · тоннель: {'↑' if w.tunnel_up else '↓'}"
+        if w.fail_streak:
+            warp_str += f" · ошибок: {w.fail_streak}"
+    lines += [
+        "<b>⚙️ Система</b>",
+        "  " + " | ".join(health_parts),
+        f"  WARP: {h(warp_str)} | БД: {h(format_bytes(snap.db_size_bytes))}",
+    ]
+    if snap.last_backup_at is not None:
+        from datetime import timezone as _tz
+        now_dt = datetime.now(_tz.utc)
+        delta = now_dt - snap.last_backup_at.replace(tzinfo=_tz.utc) if snap.last_backup_at.tzinfo is None else now_dt - snap.last_backup_at
+        hours = int(delta.total_seconds() // 3600)
+        if hours < 1:
+            backup_age = f"{int(delta.total_seconds() // 60)} мин назад"
+        elif hours < 24:
+            backup_age = f"{hours} ч назад"
+        else:
+            backup_age = f"{hours // 24} д назад"
+        lines.append(f"  Последний бэкап: {h(backup_age)}")
+    else:
+        lines.append("  Последний бэкап: нет данных")
+    lines.append("")
+
+    # Activity
+    recent_actions = []
+    for audit_entry in snap.recent_audit_entries[:3]:
+        action = str(audit_entry.get("action") or "")
+        recent_actions.append(h(action))
+    lines += [
+        "<b>📋 Активность</b>",
+        f"  Аудит 24ч: {h(snap.audit_count_24h)} | 7д: {h(snap.audit_count_7d)}",
+        f"  Объявлений за 30д: {h(snap.announcements_30d)}",
+    ]
+    if recent_actions:
+        lines.append("  Последние: " + ", ".join(recent_actions))
+
+    return "\n".join(lines)
