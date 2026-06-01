@@ -17,8 +17,7 @@ from bot.formatters import (
     access_requests_page_text,
     announcement_batches_text,
     admin_stats_page_text,
-    admin_proxy_stats_text,
-    proxy_admin_status_text,
+    proxy_admin_combined_text,
     audit_page_text,
     block_user_confirm_text,
     create_confirm_text,
@@ -865,8 +864,8 @@ async def admin_stats(callback: CallbackQuery, services: Services) -> None:
 
 
 @router.callback_query(F.data == "admin:proxy")
-async def admin_proxy_status(callback: CallbackQuery, services: Services) -> None:
-    """Show the proxy service status and lifecycle stats."""
+async def admin_proxy_combined(callback: CallbackQuery, services: Services) -> None:
+    """Show combined proxy status and statistics."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("updating_proxy_status"))
@@ -874,20 +873,24 @@ async def admin_proxy_status(callback: CallbackQuery, services: Services) -> Non
         return
     try:
         await require_superadmin(services, callback.from_user.id)
-        stats = await services.proxy.lifecycle_stats(callback.from_user.id)
-        status = services.proxy.service_status()
-        runtime_reader = getattr(getattr(services, "mtproto", None), "runtime_status", None)
-        if runtime_reader is not None:
-            runtime = await runtime_reader()
-            if runtime is not None:
-                status = replace(
-                    status,
-                    mtproto_systemd_active=runtime.systemd_active,
-                    mtproto_port_listening=runtime.port_listening,
-                )
+        lifecycle = await services.proxy.lifecycle_stats(callback.from_user.id)
+        runtime = services.proxy.runtime_stats()
+        runtime_status = await services.mtproto.runtime_status()
+        if runtime_status is not None:
+            runtime = replace(
+                runtime,
+                mtproto_systemd_active=runtime_status.systemd_active,
+                mtproto_port_listening=runtime_status.port_listening,
+            )
+        runtime = replace(runtime, mtproto_runtime_secret_count=await services.mtproto.runtime_secret_count())
+        admin_stats = await services.proxy.get_admin_proxy_stats(
+            callback.from_user.id,
+            user_limit=ADMIN_PROXY_USER_LIMIT,
+            runtime=runtime,
+        )
         await safe_edit_message_text(
             callback.message,
-            proxy_admin_status_text(status, stats),
+            proxy_admin_combined_text(lifecycle, admin_stats),
             reply_markup=_simple_nav([], "admin:panel"),
         )
     except Exception as exc:
@@ -923,39 +926,6 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Services)
         await safe_edit_message_text(
             callback.message,
             system_diagnostics_text(result),
-            reply_markup=_simple_nav([], "admin:panel"),
-        )
-    except Exception as exc:
-        await answer_callback_error(callback, exc)
-
-
-@router.callback_query(F.data == "admin:proxy_stats")
-async def admin_proxy_stats(callback: CallbackQuery, services: Services) -> None:
-    """Show detailed proxy usage statistics."""
-    if not await ensure_private_callback(callback, t("admin_private_only_text")):
-        return
-    await safe_callback_answer(callback, t("updating_proxy_stats"))
-    if callback.from_user is None or callback.message is None:
-        return
-    try:
-        await require_superadmin(services, callback.from_user.id)
-        runtime = services.proxy.runtime_stats()
-        runtime_status = await services.mtproto.runtime_status()
-        if runtime_status is not None:
-            runtime = replace(
-                runtime,
-                mtproto_systemd_active=runtime_status.systemd_active,
-                mtproto_port_listening=runtime_status.port_listening,
-            )
-        runtime = replace(runtime, mtproto_runtime_secret_count=await services.mtproto.runtime_secret_count())
-        stats = await services.proxy.get_admin_proxy_stats(
-            callback.from_user.id,
-            user_limit=ADMIN_PROXY_USER_LIMIT,
-            runtime=runtime,
-        )
-        await safe_edit_message_text(
-            callback.message,
-            admin_proxy_stats_text(stats),
             reply_markup=_simple_nav([], "admin:panel"),
         )
     except Exception as exc:

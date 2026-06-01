@@ -572,6 +572,102 @@ def _status_display_order() -> tuple[ProxyAccessStatus, ...]:
     )
 
 
+def proxy_admin_combined_text(lifecycle: ProxyLifecycleStats, stats: ProxyAdminStats) -> str:
+    lines = ["<b>Прокси — статус и статистика</b>"]
+    runtime = stats.runtime
+
+    lines.extend(["", "<b>SOCKS5 / Dante</b>"])
+    if runtime is not None:
+        lines.append(f"• enabled: {h(_yes_no(runtime.socks5_enabled))}")
+        if runtime.socks5_enabled:
+            lines.append(
+                f"• host: {code(runtime.socks5_host or t('not_set'))}"
+                f" | port: {code(runtime.socks5_port if runtime.socks5_port is not None else t('not_set'))}"
+            )
+            lines.append(
+                f"• service: {h(_runtime_value(runtime.socks5_systemd_active))}"
+                f" | listening: {h(_runtime_value(runtime.socks5_port_listening))}"
+            )
+    lines.append(
+        f"• issued: {h(lifecycle.socks5_issued)}"
+        f" | active: {h(lifecycle.socks5_active)}"
+        f" | revoked: {h(lifecycle.socks5_revoked)}"
+    )
+    pending_statuses = frozenset({ProxyAccessStatus.PENDING_APPLY, ProxyAccessStatus.PENDING_REVOKE, ProxyAccessStatus.PENDING_DELETE})
+    failed_statuses = frozenset({ProxyAccessStatus.APPLY_FAILED, ProxyAccessStatus.REVOKE_FAILED, ProxyAccessStatus.DELETE_FAILED})
+    socks5_counts = stats.type_status_counts.get(ProxyAccessType.SOCKS5, {})
+    socks5_pending = sum(v for s, v in socks5_counts.items() if s in pending_statuses)
+    socks5_failed = sum(v for s, v in socks5_counts.items() if s in failed_statuses)
+    socks5_deleted = socks5_counts.get(ProxyAccessStatus.DELETED, 0)
+    if socks5_pending:
+        lines.append(f"• pending: {h(socks5_pending)}")
+    if socks5_deleted:
+        lines.append(f"• deleted: {h(socks5_deleted)}")
+    if socks5_failed:
+        lines.append(f"• failed: {h(socks5_failed)}")
+
+    lines.extend(["", "<b>MTProto</b>"])
+    if runtime is not None:
+        lines.append(f"• enabled: {h(_yes_no(runtime.mtproto_enabled))}")
+        if runtime.mtproto_enabled:
+            lines.append(f"• mode: {h(runtime.mtproto_mode)}")
+            lines.append(
+                f"• host: {code(runtime.mtproto_host or t('not_set'))}"
+                f" | port: {code(runtime.mtproto_port if runtime.mtproto_port is not None else t('not_set'))}"
+            )
+            lines.append(
+                f"• service: {h(_runtime_value(runtime.mtproto_systemd_active))}"
+                f" | listening: {h(_runtime_value(runtime.mtproto_port_listening))}"
+            )
+    lines.append(
+        f"• issued: {h(lifecycle.mtproto_issued)}"
+        f" | active: {h(lifecycle.mtproto_active)}"
+        f" | deactivated: {h(lifecycle.mtproto_deactivated)}"
+    )
+    if lifecycle.mtproto_managed_issued:
+        managed_str = (
+            f"managed: {h(lifecycle.mtproto_managed_issued)} issued,"
+            f" {h(lifecycle.mtproto_managed_active)} active"
+        )
+        if lifecycle.mtproto_managed_revoked:
+            managed_str += f", {h(lifecycle.mtproto_managed_revoked)} revoked"
+        lines.append(f"• {managed_str}")
+    if lifecycle.mtproto_legacy_static:
+        lines.append(f"• legacy/static records: {h(lifecycle.mtproto_legacy_static)}")
+    if runtime is not None and runtime.mtproto_runtime_secret_count is not None:
+        lines.append(f"• runtime secrets: {h(runtime.mtproto_runtime_secret_count)}")
+    mtproto_counts = stats.type_status_counts.get(ProxyAccessType.MTPROTO, {})
+    mtproto_pending = sum(v for s, v in mtproto_counts.items() if s in pending_statuses)
+    mtproto_failed = sum(v for s, v in mtproto_counts.items() if s in failed_statuses)
+    mtproto_deleted = mtproto_counts.get(ProxyAccessStatus.DELETED, 0)
+    if mtproto_pending:
+        lines.append(f"• pending: {h(mtproto_pending)}")
+    if mtproto_deleted:
+        lines.append(f"• deleted: {h(mtproto_deleted)}")
+    if mtproto_failed:
+        lines.append(f"• failed: {h(mtproto_failed)}")
+
+    lines.extend(["", "<b>Пользователи</b>"])
+    if stats.last_issued_at:
+        lines.append(f"• last issued: {h(_format_proxy_datetime(stats.last_issued_at))}")
+    if not stats.users:
+        lines.append(t("proxy_stats_no_users"))
+    for row in stats.users:
+        username = format_user_display(row.telegram_user_id, row.username)
+        active = ", ".join(
+            f"{_proxy_type_title(ref.access_type)} #{ref.id}"
+            for ref in row.active_accesses
+        ) or t("none")
+        lines.append(f"👤 {code(row.telegram_user_id)} {username}")
+        lines.append(f"  active: {h(active)}")
+        if row.failed_count:
+            lines.append(f"  failed: {h(row.failed_count)}")
+    if stats.hidden_users > 0:
+        lines.append(t("proxy_stats_hidden_users", n=stats.hidden_users))
+    lines.extend(["", t("proxy_stats_traffic_note")])
+    return "\n".join(lines)
+
+
 def proxy_admin_status_text(status: ProxyServiceStatus, stats: ProxyLifecycleStats) -> str:
     socks5_port = status.socks5_port if status.socks5_port is not None else t("not_set")
     mtproto_active = "unknown" if status.mtproto_systemd_active is None else ("yes" if status.mtproto_systemd_active else "no")

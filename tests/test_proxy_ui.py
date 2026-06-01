@@ -3,15 +3,14 @@ import asyncio
 from types import SimpleNamespace
 
 from bot.formatters import (
-    admin_proxy_stats_text,
     mtproto_proxy_text,
     proxy_access_text,
-    proxy_admin_status_text,
+    proxy_admin_combined_text,
     proxy_section_separator,
     socks5_proxy_text,
     user_proxy_stats_text,
 )
-from bot.handlers.admin import admin_proxy_stats
+from bot.handlers.admin import admin_proxy_combined
 from bot.handlers.proxy import proxy_confirm, proxy_stats
 from bot.keyboards.admin import admin_panel_keyboard
 from bot.keyboards.proxy import proxy_menu_keyboard
@@ -160,10 +159,11 @@ def test_proxy_keyboard_hides_disabled_or_already_issued_types() -> None:
     assert buttons == [("Вернуться", "proxy:back")]
 
 
-def test_admin_keyboard_has_proxy_stats_button() -> None:
+def test_admin_keyboard_has_single_proxy_button() -> None:
     buttons = _buttons(admin_panel_keyboard())
 
-    assert ("Статистика прокси", "admin:proxy_stats") in buttons
+    assert ("Прокси: статус и статистика", "admin:proxy") in buttons
+    assert all(cb != "admin:proxy_stats" for _, cb in buttons)
 
 
 
@@ -225,20 +225,8 @@ def test_proxy_access_text_uses_central_separator_for_two_blocks() -> None:
     assert proxy_section_separator() in text
 
 
-def test_proxy_admin_status_does_not_show_secrets_and_marks_traffic_unavailable() -> None:
-    text = proxy_admin_status_text(
-        ProxyServiceStatus(
-            socks5_enabled=True,
-            socks5_host="150.251.152.243",
-            socks5_port=31337,
-            socks5_public_name="SOCKS5 Proxy",
-            socks5_service_name="danted",
-            mtproto_enabled=True,
-            mtproto_host="150.251.152.243",
-            mtproto_port=8443,
-            mtproto_public_name="Telegram MTProto Proxy",
-            mtproto_stats_url_configured=True,
-        ),
+def test_proxy_admin_combined_shows_status_stats_and_traffic_note() -> None:
+    text = proxy_admin_combined_text(
         ProxyLifecycleStats(
             socks5_issued=2,
             socks5_active=1,
@@ -247,11 +235,39 @@ def test_proxy_admin_status_does_not_show_secrets_and_marks_traffic_unavailable(
             mtproto_active=1,
             mtproto_deactivated=1,
         ),
+        ProxyAdminStats(
+            total_accesses=4,
+            active_total=2,
+            active_socks5=1,
+            active_mtproto=1,
+            apply_failed=0,
+            revoked=1,
+            deleted=0,
+            pending=0,
+            users_with_active_proxies=1,
+            last_issued_at=None,
+            last_failed_at=None,
+            type_status_counts={},
+            mtproto_mode_counts={},
+            users=(),
+            total_users=0,
+            runtime=ProxyRuntimeStats(
+                socks5_enabled=True,
+                socks5_host="150.251.152.243",
+                socks5_port=31337,
+                mtproto_enabled=True,
+                mtproto_host="150.251.152.243",
+                mtproto_port=8443,
+            ),
+        ),
     )
 
-    assert "secret" in text.lower()
+    assert "SOCKS5" in text
+    assert "MTProto" in text
+    assert "issued: 2" in text
+    assert "active: 1" in text
     assert "0123456789abcdef" not in text
-    assert "статистика трафика недоступна" in text
+    assert "traffic" in text.lower()
 
 
 def test_user_proxy_stats_empty_message() -> None:
@@ -383,8 +399,18 @@ def test_user_proxy_stats_does_not_show_old_apply_failed_when_no_recent_slot() -
     assert "#6" in text
 
 
-def test_admin_proxy_stats_contains_aggregates_users_and_no_raw_credentials() -> None:
-    text = admin_proxy_stats_text(
+def test_proxy_admin_combined_shows_users_and_no_raw_credentials() -> None:
+    text = proxy_admin_combined_text(
+        ProxyLifecycleStats(
+            socks5_issued=2,
+            socks5_active=1,
+            socks5_revoked=0,
+            mtproto_issued=2,
+            mtproto_active=1,
+            mtproto_deactivated=0,
+            mtproto_apply_failed=0,
+            mtproto_revoke_failed=0,
+        ),
         ProxyAdminStats(
             total_accesses=4,
             active_total=2,
@@ -435,18 +461,14 @@ def test_admin_proxy_stats_contains_aggregates_users_and_no_raw_credentials() ->
                 mtproto_port_listening=True,
                 mtproto_runtime_secret_count=1,
             ),
-        )
+        ),
     )
 
-    assert "total proxy accesses: 4" in text
-    assert "active SOCKS5: 1" in text
-    assert "active MTProto: 1" in text
-    assert "failed total: 1" in text
-    assert "users with active proxies: 1" in text
     assert "1278023784" in text
     assert "@username" in text
     assert "SOCKS5 #10" in text
     assert "MTProto #11" in text
+    assert "failed: 1" in text
     assert "secret-password" not in text
     assert "0123456789abcdef0123456789abcdef" not in text
     assert "t.me/proxy" not in text
@@ -518,7 +540,7 @@ def test_proxy_stats_callback_shows_current_user_stats(monkeypatch) -> None:
     asyncio.run(run())
 
 
-def test_admin_proxy_stats_denies_non_admin(monkeypatch) -> None:
+def test_admin_proxy_combined_denies_non_admin(monkeypatch) -> None:
     monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", _allow_private)
 
     class Users:
@@ -526,9 +548,9 @@ def test_admin_proxy_stats_denies_non_admin(monkeypatch) -> None:
             raise AccessDenied("Нет доступа")
 
     async def run() -> None:
-        callback = _Callback("admin:proxy_stats")
+        callback = _Callback("admin:proxy")
         services = SimpleNamespace(users=Users())
-        await admin_proxy_stats(callback, services)  # type: ignore[arg-type]
+        await admin_proxy_combined(callback, services)  # type: ignore[arg-type]
 
         assert callback.answers[-1] == ("Нет доступа", True)
         assert callback.message.edits == []
