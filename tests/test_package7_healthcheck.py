@@ -73,6 +73,7 @@ def _make_settings(**overrides: object) -> SimpleNamespace:
     defaults: dict[str, object] = dict(
         awg_interface="awg0",
         xray_service_name="xray",
+        xray_apply_mode="restart",
         socks5_enabled=True,
         socks5_service_name="danted",
         mtproto_enabled=True,
@@ -184,13 +185,33 @@ def test_check_bot_non_root_when_not_root(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_check_bot_non_root_when_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    """UID 0 (root) produces a critical failed health item."""
+    """UID 0 (root) without Xray API mode produces a critical failed item."""
     if os.name != "posix":
         pytest.skip("POSIX only")
     monkeypatch.setattr(os, "getuid", lambda: 0)
     item = check_bot_non_root()
     assert item.status == "failed"
     assert item.severity == "critical"
+
+
+def test_check_bot_non_root_when_root_xray_api_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UID 0 (root) with xray_api_mode=True produces a warning, not a failure."""
+    if os.name != "posix":
+        pytest.skip("POSIX only")
+    monkeypatch.setattr(os, "getuid", lambda: 0)
+    item = check_bot_non_root(xray_api_mode=True)
+    assert item.status == "warning"
+    assert item.severity == "warning"
+
+
+def test_check_bot_non_root_non_root_xray_api_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-root uid with xray_api_mode=True produces degraded — API mode requires root."""
+    if os.name != "posix":
+        pytest.skip("POSIX only")
+    monkeypatch.setattr(os, "getuid", lambda: 1001)
+    item = check_bot_non_root(xray_api_mode=True)
+    assert item.status == "degraded"
+    assert "1001" in item.message
 
 
 # ---------------------------------------------------------------------------
@@ -204,10 +225,18 @@ def test_check_helper_mode_enabled() -> None:
     assert item.status == "ok"
 
 
-def test_check_helper_mode_disabled() -> None:
-    """Helper mode disabled → warning status."""
+def test_check_helper_mode_disabled_non_api() -> None:
+    """Helper mode disabled outside API mode → warning about broken apply operations."""
     item = check_helper_mode(False)
     assert item.status == "warning"
+    assert "apply operations" in item.message
+
+
+def test_check_helper_mode_disabled_xray_api_mode() -> None:
+    """Helper mode disabled with xray_api_mode=True → warning that it is OK for API mode."""
+    item = check_helper_mode(False, xray_api_mode=True)
+    assert item.status == "warning"
+    assert "api" in item.message.lower()
 
 
 # ---------------------------------------------------------------------------

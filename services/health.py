@@ -51,7 +51,7 @@ def build_result(checks: list[HealthCheckItem]) -> HealthCheckResult:
     )
 
 
-def check_bot_non_root() -> HealthCheckItem:
+def check_bot_non_root(*, xray_api_mode: bool = False) -> HealthCheckItem:
     """Check that the bot process is not running as root."""
     if os.name != "posix":
         return HealthCheckItem(
@@ -62,11 +62,25 @@ def check_bot_non_root() -> HealthCheckItem:
         )
     uid = os.getuid()
     if uid == 0:
+        if xray_api_mode:
+            return HealthCheckItem(
+                name="bot_runtime",
+                status="warning",
+                severity="warning",
+                message="Bot running as root — expected for XRAY_APPLY_MODE=api",
+            )
         return HealthCheckItem(
             name="bot_runtime",
             status="failed",
             severity="critical",
             message="Bot running as root — must run as vpn-bot in production",
+        )
+    if xray_api_mode:
+        return HealthCheckItem(
+            name="bot_runtime",
+            status="degraded",
+            severity="warning",
+            message=f"XRAY_APPLY_MODE=api requires root but running as uid={uid} — Xray apply operations will fail",
         )
     return HealthCheckItem(
         name="bot_runtime",
@@ -76,7 +90,7 @@ def check_bot_non_root() -> HealthCheckItem:
     )
 
 
-def check_helper_mode(enabled: bool) -> HealthCheckItem:
+def check_helper_mode(enabled: bool, *, xray_api_mode: bool = False) -> HealthCheckItem:
     """Report whether privilege helper mode is enabled."""
     if enabled:
         return HealthCheckItem(
@@ -85,11 +99,18 @@ def check_helper_mode(enabled: bool) -> HealthCheckItem:
             severity="info",
             message="PRIVILEGE_HELPERS_ENABLED=true",
         )
+    if xray_api_mode:
+        return HealthCheckItem(
+            name="helper_mode",
+            status="warning",
+            severity="warning",
+            message="PRIVILEGE_HELPERS_ENABLED=false — OK for XRAY_APPLY_MODE=api",
+        )
     return HealthCheckItem(
         name="helper_mode",
         status="warning",
         severity="warning",
-        message="PRIVILEGE_HELPERS_ENABLED=false — OK for dev, not for production",
+        message="PRIVILEGE_HELPERS_ENABLED=false — apply operations will fail without sudo helpers",
     )
 
 
@@ -201,12 +222,13 @@ async def run_bot_health(
     backend_health: BackendHealth,
     db: Any,
     privilege_helpers_enabled: bool,
+    xray_api_mode: bool = False,
     service_names: list[str],
 ) -> HealthCheckResult:
     """Run all on-demand bot health checks. Read-only. Never modifies config or restarts services."""
     checks: list[HealthCheckItem] = []
-    checks.append(check_bot_non_root())
-    checks.append(check_helper_mode(privilege_helpers_enabled))
+    checks.append(check_bot_non_root(xray_api_mode=xray_api_mode))
+    checks.append(check_helper_mode(privilege_helpers_enabled, xray_api_mode=xray_api_mode))
     checks.extend(check_backends(backend_health.snapshot()))
     skipped = getattr(backend_health, "skipped_revocation_count", 0)
     if skipped:
