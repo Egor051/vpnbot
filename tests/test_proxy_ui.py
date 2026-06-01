@@ -169,7 +169,7 @@ def test_proxy_keyboard_hides_disabled_or_already_issued_types() -> None:
 def test_admin_keyboard_has_single_proxy_button() -> None:
     buttons = _buttons(admin_panel_keyboard())
 
-    assert ("Прокси: статус и статистика", "admin:proxy") in buttons
+    assert ("🌐 Прокси: статус и статистика", "admin:proxy") in buttons
     assert all(cb != "admin:proxy_stats" for _, cb in buttons)
 
 
