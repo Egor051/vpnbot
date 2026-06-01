@@ -67,12 +67,14 @@ async def proxy_get_prompt(callback: CallbackQuery, state: FSMContext, services:
             text, markup = await _proxy_menu_view(services, callback.from_user.id, accesses=accesses)
             await safe_edit_message_text(callback.message, text, reply_markup=markup)
             return
-        if access_type == ProxyAccessType.SOCKS5.value and not services.settings.socks5_enabled:
+        socks5_on = services.settings.socks5_enabled and await services.modules.is_enabled("socks5")
+        mtproto_on = services.settings.mtproto_enabled and await services.modules.is_enabled("mtproto")
+        if access_type == ProxyAccessType.SOCKS5.value and not socks5_on:
             text, markup = await _proxy_menu_view(services, callback.from_user.id, accesses=accesses)
             await safe_callback_answer(callback, t("socks5_unavailable"), show_alert=True)
             await safe_edit_message_text(callback.message, text, reply_markup=markup)
             return
-        if access_type == ProxyAccessType.MTPROTO.value and not services.settings.mtproto_enabled:
+        if access_type == ProxyAccessType.MTPROTO.value and not mtproto_on:
             text, markup = await _proxy_menu_view(services, callback.from_user.id, accesses=accesses)
             await safe_callback_answer(callback, t("mtproto_unavailable"), show_alert=True)
             await safe_edit_message_text(callback.message, text, reply_markup=markup)
@@ -193,7 +195,9 @@ async def proxy_back(callback: CallbackQuery, services: Services) -> None:
 async def _proxy_menu_view(services: Services, user_id: int, accesses: list[Any] | None = None) -> tuple[str, Any]:
     if accesses is None:
         accesses = await services.proxy.list_user_accesses(user_id)
-    if not accesses and not services.settings.socks5_enabled and not services.settings.mtproto_enabled:
+    socks5_on = services.settings.socks5_enabled and await services.modules.is_enabled("socks5")
+    mtproto_on = services.settings.mtproto_enabled and await services.modules.is_enabled("mtproto")
+    if not accesses and not socks5_on and not mtproto_on:
         text = t("proxy_unavailable")
     elif not accesses:
         text = t("proxy_no_accesses")
@@ -201,8 +205,8 @@ async def _proxy_menu_view(services: Services, user_id: int, accesses: list[Any]
         text = proxy_access_text(accesses)
     return text, proxy_menu_keyboard(
         accesses,
-        socks5_enabled=services.settings.socks5_enabled,
-        mtproto_enabled=services.settings.mtproto_enabled,
+        socks5_enabled=socks5_on,
+        mtproto_enabled=mtproto_on,
     )
 
 

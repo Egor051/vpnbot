@@ -19,6 +19,7 @@ from models.dto import (
     User,
     VpnKey,
 )
+from repositories.protocol_modules import PROTOCOL_DISPLAY, ProtocolModule
 from models.enums import ProxyAccessStatus, ProxyAccessType, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.announcements import AnnouncementBatch
 from services.backend_health import BackendHealthStatus
@@ -759,7 +760,11 @@ _STATUS_ICONS: dict[str, str] = {
 }
 
 
-def system_diagnostics_text(result: HealthCheckResult) -> str:
+def system_diagnostics_text(
+    result: HealthCheckResult,
+    *,
+    disabled_modules: list[ProtocolModule] | None = None,
+) -> str:
     overall = result.overall.upper()
     ts = result.timestamp[:19].replace("T", " ") + " UTC"
     lines = [
@@ -772,6 +777,13 @@ def system_diagnostics_text(result: HealthCheckResult) -> str:
         lines.append(f"{icon} {h(item.message)}")
         if item.details:
             lines.append(f"  └ {h(item.details)}")
+    if disabled_modules:
+        lines.append("")
+        lines.append("<b>Отключённые модули:</b>")
+        for m in disabled_modules:
+            label = PROTOCOL_DISPLAY.get(m.name, m.name)
+            ts_part = f" (отключён {m.disabled_at[:10]})" if m.disabled_at else ""
+            lines.append(f"✗ {h(label)}: DISABLED{h(ts_part)}")
     return "\n".join(lines)
 
 

@@ -923,9 +923,10 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Services)
             privilege_helpers_enabled=settings.privilege_helpers_enabled,
             service_names=service_names,
         )
+        disabled_modules = [m for m in await services.modules.get_all() if not m.enabled]
         await safe_edit_message_text(
             callback.message,
-            system_diagnostics_text(result),
+            system_diagnostics_text(result, disabled_modules=disabled_modules),
             reply_markup=_simple_nav([], "admin:panel"),
         )
     except Exception as exc:
@@ -1001,7 +1002,13 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
         await state.set_state(AdminCreateKeyStates.choosing_type)
         await state.update_data(owner_user_id=user.telegram_user_id, owner_is_pending=owner_is_pending, cancel_target="admin:panel")
         text = f"{user_card_text(user)}\n\n{t('one_key_one_device')}\n\n{t('choose_key_type')}"
-        await safe_edit_message_text(callback.message, text, reply_markup=admin_key_type_keyboard(user.telegram_user_id))
+        xray_on = await services.modules.is_enabled("xray")
+        awg_on = await services.modules.is_enabled("awg")
+        await safe_edit_message_text(
+            callback.message,
+            text,
+            reply_markup=admin_key_type_keyboard(user.telegram_user_id, xray_enabled=xray_on, awg_enabled=awg_on),
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

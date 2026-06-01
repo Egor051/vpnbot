@@ -108,10 +108,12 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
         await answer_callback_error(callback, exc)
         return
     if callback.message:
+        xray_on = await services.modules.is_enabled("xray")
+        awg_on = await services.modules.is_enabled("awg")
         await safe_edit_message_text(
             callback.message,
             f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
-            reply_markup=create_key_keyboard(),
+            reply_markup=create_key_keyboard(xray_enabled=xray_on, awg_enabled=awg_on),
         )
 
 
@@ -124,7 +126,12 @@ async def create_key_menu_message(message: Message, services: Services) -> None:
         return
     try:
         await _ensure_can_enter_create(message.from_user.id, services)
-        await message.answer(f"{t('one_key_one_device')}\n\n{t('choose_key_type')}", reply_markup=create_key_keyboard())
+        xray_on = await services.modules.is_enabled("xray")
+        awg_on = await services.modules.is_enabled("awg")
+        await message.answer(
+            f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
+            reply_markup=create_key_keyboard(xray_enabled=xray_on, awg_enabled=awg_on),
+        )
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -744,10 +751,12 @@ async def trial_request_start(callback: CallbackQuery, state: FSMContext, servic
             return
         await safe_callback_answer(callback)
         await state.set_state(TrialRequestStates.choosing_protocol)
+        xray_on = await services.modules.is_enabled("xray")
+        awg_on = await services.modules.is_enabled("awg")
         await safe_edit_message_text(
             callback.message,
             t("trial_choose_protocol"),
-            reply_markup=trial_protocol_keyboard(),
+            reply_markup=trial_protocol_keyboard(xray_enabled=xray_on, awg_enabled=awg_on),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)

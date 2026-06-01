@@ -13,6 +13,7 @@ from services.mtproto import MtProtoService
 from services.notes import NotesService
 from services.anomaly_detection import AnomalyDetectionService
 from services.offsite_backup import OffsiteBackupService
+from services.protocol_modules import ProtocolModulesService
 from services.proxy import ProxyService
 from services.socks5 import Socks5Service
 from services.traffic_stats import TrafficStatsService
@@ -45,3 +46,4 @@ class Services:
     offsite_backup: OffsiteBackupService
     anomaly_detection: AnomalyDetectionService
     warp: WarpManager
+    modules: ProtocolModulesService

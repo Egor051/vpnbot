@@ -21,7 +21,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_warp, callbacks, common, keys, proxy, start
+from bot.handlers import admin, admin_modules, admin_warp, callbacks, common, keys, proxy, start
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.rate_limit import RateLimiter
 from config.settings import Settings
@@ -30,6 +30,7 @@ from models.enums import AuditEntityType, ProxyAccessType, VpnKeyType
 from repositories.access_requests import AccessRequestRepository
 from repositories.announcements import AnnouncementRepository
 from repositories.audit_log import AuditLogRepository
+from repositories.protocol_modules import ProtocolModulesRepository
 from repositories.proxy_entries import ProxyRepository
 from repositories.proxy_accesses import ProxyAccessRepository
 from repositories.traffic_stats import TrafficStatsRepository
@@ -45,6 +46,7 @@ from services.backend_health import BackendHealth
 from services.key_expiry import KeyExpiryService
 from services.offsite_backup import OffsiteBackupService
 from services.notes import NotesService
+from services.protocol_modules import ProtocolModulesService
 from services.proxy import ProxyService
 from services.socks5 import Socks5Service
 from services.mtproto import MtProtoService
@@ -91,6 +93,9 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     audit_repo = AuditLogRepository(db)
     traffic_stats_repo = TrafficStatsRepository(db)
     trial_requests_repo = TrialKeyRequestRepository(db)
+
+    protocol_modules_repo = ProtocolModulesRepository(db)
+    protocol_modules_service = ProtocolModulesService(protocol_modules_repo, db)
 
     audit_service = AuditService(audit_repo, clock, users_repo)
     user_service = UserService(users=users_repo, settings=settings, clock=clock, audit=audit_service, user_locks=user_locks)
@@ -307,6 +312,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         offsite_backup=offsite_backup_service,
         anomaly_detection=anomaly_detection_service,
         warp=warp_manager,
+        modules=protocol_modules_service,
     )
 
     await _startup_reconcile_keys(services)
@@ -340,6 +346,7 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
     dp.include_router(common.router)
     dp.include_router(admin.router)
     dp.include_router(admin_warp.router)
+    dp.include_router(admin_modules.router)
     dp.include_router(keys.router)
     dp.include_router(proxy.router)
     dp.include_router(callbacks.router)

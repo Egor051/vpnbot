@@ -12,15 +12,15 @@ VALID_FINGERPRINTS = [
 ]
 
 
-def create_key_keyboard() -> InlineKeyboardMarkup:
+def create_key_keyboard(*, xray_enabled: bool = True, awg_enabled: bool = True) -> InlineKeyboardMarkup:
     """Build the key type selection keyboard for creating a new key."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data="keys:create:xray")],
-            [InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="keys:create:awg")],
-            [InlineKeyboardButton(text=t("btn_back"), callback_data="keys:list")],
-        ]
-    )
+    rows: list[list[InlineKeyboardButton]] = []
+    if xray_enabled:
+        rows.append([InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data="keys:create:xray")])
+    if awg_enabled:
+        rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="keys:create:awg")])
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="keys:list")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def keys_list_keyboard(
@@ -183,15 +183,15 @@ def request_trial_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def trial_protocol_keyboard() -> InlineKeyboardMarkup:
+def trial_protocol_keyboard(*, xray_enabled: bool = True, awg_enabled: bool = True) -> InlineKeyboardMarkup:
     """Build the protocol selection keyboard for a trial key."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data="trial:proto:xray")],
-            [InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="trial:proto:awg")],
-            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
-        ]
-    )
+    rows: list[list[InlineKeyboardButton]] = []
+    if xray_enabled:
+        rows.append([InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data="trial:proto:xray")])
+    if awg_enabled:
+        rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="trial:proto:awg")])
+    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def after_key_deleted_keyboard() -> InlineKeyboardMarkup:

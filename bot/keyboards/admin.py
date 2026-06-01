@@ -50,6 +50,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t("btn_users"), callback_data="admin:users")],
             [InlineKeyboardButton(text=t("btn_key_stats"), callback_data="admin:stats")],
             [InlineKeyboardButton(text=t("btn_proxy_status"), callback_data="admin:proxy")],
+            [InlineKeyboardButton(text=t("btn_modules"), callback_data="admin:modules")],
             [InlineKeyboardButton(text=t("btn_warp"), callback_data="admin:warp")],
             [InlineKeyboardButton(text=t("btn_backend_diagnostics"), callback_data="admin:diagnostics")],
             [InlineKeyboardButton(text=t("btn_action_logs"), callback_data="admin:audit")],
@@ -201,15 +202,20 @@ def unblock_user_confirm_keyboard(user: User) -> InlineKeyboardMarkup:
     )
 
 
-def admin_key_type_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def admin_key_type_keyboard(
+    user_id: int,
+    *,
+    xray_enabled: bool = True,
+    awg_enabled: bool = True,
+) -> InlineKeyboardMarkup:
     """Build the key type selection keyboard for issuing a key to a user."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data=f"admin:ctype:xray:{user_id}")],
-            [InlineKeyboardButton(text="AmneziaWG 2.0", callback_data=f"admin:ctype:awg:{user_id}")],
-            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
-        ]
-    )
+    rows: list[list[InlineKeyboardButton]] = []
+    if xray_enabled:
+        rows.append([InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data=f"admin:ctype:xray:{user_id}")])
+    if awg_enabled:
+        rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data=f"admin:ctype:awg:{user_id}")])
+    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def trial_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
