@@ -93,7 +93,7 @@ def key_display_label(key: VpnKey, viewer_user_id: int | None = None) -> str:
 
 def main_menu_text(user: TgUser) -> str:
     name = format_greeting_name(user.id, user.first_name, user.username)
-    return t("main_menu_text", name=name, warning=t("server_restart_warning"))
+    return t("main_menu_text", name=name, rules=t("usage_rules"), warning=t("server_restart_warning"))
 
 
 def key_list_card(key: VpnKey, *, viewer_user_id: int) -> str:
