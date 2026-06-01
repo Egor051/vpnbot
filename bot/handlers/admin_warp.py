@@ -1,6 +1,7 @@
 
 import logging
 import time
+from contextlib import suppress
 from io import BytesIO
 
 from aiogram import Bot, F, Router
@@ -222,7 +223,7 @@ async def warp_upload_start(callback: CallbackQuery, state: FSMContext, services
     try:
         await require_superadmin(services, callback.from_user.id)
         await state.set_state(WarpConfigStates.waiting_config)
-        await state.update_data(cancel_target="admin:warp")
+        await state.update_data(cancel_target="admin:warp", upload_prompt_msg_id=callback.message.message_id)
         await safe_edit_message_text(
             callback.message,
             t("warp_upload_prompt"),
@@ -268,8 +269,13 @@ async def warp_upload_receive(message: Message, state: FSMContext, services: Ser
                 reply_markup=warp_upload_keyboard(),
             )
             return
+        data = await state.get_data()
+        upload_prompt_msg_id = data.get("upload_prompt_msg_id")
         count = await services.warp.install_config(config_text)
         await state.clear()
+        if upload_prompt_msg_id:
+            with suppress(Exception):
+                await bot.delete_message(chat_id=message.chat.id, message_id=upload_prompt_msg_id)
         new_state = await services.warp.get_state()
         await message.answer(
             f"{t('warp_config_installed', count=count)}\n\n"
