@@ -932,7 +932,6 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Services)
         await answer_callback_error(callback, exc)
 
 
-
 @router.callback_query(F.data == "admin:issue")
 async def admin_issue_choose_user(callback: CallbackQuery, services: Services) -> None:
     """Show the user list for choosing whom to issue a key to."""
