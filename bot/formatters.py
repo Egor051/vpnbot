@@ -598,8 +598,11 @@ def proxy_admin_combined_text(lifecycle: ProxyLifecycleStats, stats: ProxyAdminS
     socks5_counts = stats.type_status_counts.get(ProxyAccessType.SOCKS5, {})
     socks5_pending = sum(v for s, v in socks5_counts.items() if s in pending_statuses)
     socks5_failed = sum(v for s, v in socks5_counts.items() if s in failed_statuses)
+    socks5_deleted = socks5_counts.get(ProxyAccessStatus.DELETED, 0)
     if socks5_pending:
         lines.append(f"• pending: {h(socks5_pending)}")
+    if socks5_deleted:
+        lines.append(f"• deleted: {h(socks5_deleted)}")
     if socks5_failed:
         lines.append(f"• failed: {h(socks5_failed)}")
 
@@ -629,13 +632,18 @@ def proxy_admin_combined_text(lifecycle: ProxyLifecycleStats, stats: ProxyAdminS
         if lifecycle.mtproto_managed_revoked:
             managed_str += f", {h(lifecycle.mtproto_managed_revoked)} revoked"
         lines.append(f"• {managed_str}")
+    if lifecycle.mtproto_legacy_static:
+        lines.append(f"• legacy/static records: {h(lifecycle.mtproto_legacy_static)}")
     if runtime is not None and runtime.mtproto_runtime_secret_count is not None:
         lines.append(f"• runtime secrets: {h(runtime.mtproto_runtime_secret_count)}")
     mtproto_counts = stats.type_status_counts.get(ProxyAccessType.MTPROTO, {})
     mtproto_pending = sum(v for s, v in mtproto_counts.items() if s in pending_statuses)
     mtproto_failed = sum(v for s, v in mtproto_counts.items() if s in failed_statuses)
+    mtproto_deleted = mtproto_counts.get(ProxyAccessStatus.DELETED, 0)
     if mtproto_pending:
         lines.append(f"• pending: {h(mtproto_pending)}")
+    if mtproto_deleted:
+        lines.append(f"• deleted: {h(mtproto_deleted)}")
     if mtproto_failed:
         lines.append(f"• failed: {h(mtproto_failed)}")
 
