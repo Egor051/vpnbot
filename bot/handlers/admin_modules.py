@@ -11,7 +11,6 @@ from bot.keyboards.admin_modules import (
     module_disable_confirm1_keyboard,
     module_disable_confirm2_keyboard,
     module_enable_confirm_keyboard,
-    modules_back_keyboard,
     modules_panel_keyboard,
 )
 from bot.messages import safe_callback_answer, safe_edit_message_text
