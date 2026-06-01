@@ -6,9 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-06-01
+
 ### Added
 
-- **WARP Telegram routing module** — optional server-side AmneziaWG (`tg-warp`) tunnel that routes the traffic defined by the uploaded config's `AllowedIPs` and automatically falls back to the direct path on tunnel loss. Disabled by default; managed from a new admin-panel tab (📡 WARP-туннель) with config upload, enable/disable/restart, settings and delete. An asyncio health monitor pings the tunnel every 10 s, removing routes after 2 consecutive failures and restoring them after 3 consecutive successes. The bot stays unprivileged: all root actions go through new `vpnbot-warp-install` / `-iface` / `-routes` / `-status` sudo helpers. `AllowedIPs` is never modified; the server DNS resolver and default route are never touched. Adds the `warp_settings` table (schema version 20), the `warp/` package, `bot/handlers/admin_warp.py`, `bot/keyboards/warp_keyboard.py` and `scripts/vpnbot-warp-*`.
+- **WARP Telegram routing module** — optional server-side AmneziaWG (`tg-warp`) tunnel that routes traffic defined by the uploaded config's `AllowedIPs` through a dedicated tunnel interface, with automatic health-based fallback to the direct path on tunnel loss. Disabled by default; managed from a new admin panel tab (📡 WARP-туннель) with config upload, enable/disable/restart, settings and delete. An asyncio health monitor pings the tunnel every 10 s, removing routes after 2 consecutive failures and restoring them after 3 consecutive successes. The bot stays unprivileged: all root actions go through new `vpnbot-warp-install` / `-iface` / `-routes` / `-status` sudo helpers. `AllowedIPs` is never modified; the server DNS resolver and default route are never touched. Adds the `warp_settings` table (schema version 20), the `warp/` package, `bot/handlers/admin_warp.py`, `bot/keyboards/warp_keyboard.py` and `scripts/vpnbot-warp-*`. (#118)
+- **Protocol modules management** — new «⚙️ Модули протоколов» tab in the admin panel lets superadmins enable or disable any protocol (Xray, AWG, SOCKS5, MTProto) independently. Disabling a protocol requires two-step confirmation and hard-deletes all related keys and proxy entries from the database; the bot UI hides all buttons and menus for the disabled protocol. Re-enabling restores access in one click (historical data is not recovered). Server-side configs and Linux accounts are unaffected. Adds the `protocol_modules` table (schema version 21). (#125)
+- **Usage rules on main menu** — the main menu screen now displays a usage rules block warning users that MAX messenger and torrent traffic through VPN are strictly prohibited. (#128)
+
+### Changed
+
+- **Admin panel proxy tab unified** — «Статус прокси» and «Статистика прокси» tabs merged into a single «🌐 Прокси: статус и статистика» tab. The new combined view shows service configuration, lifecycle counters, and the per-user table in one message; zero-value fields are hidden to reduce noise. (#124)
+- **Admin panel button order and emojis** — admin panel buttons are now sorted from most to least frequently used and all labels carry emojis (📋 Заявки, 👥 Пользователи, 🔑 Выдать ключ, 🧪 Пробные доступы, 📊 Статистика ключей, 🌐 Прокси, 📢 Объявление, 📡 WARP-туннель, ⚙️ Модули протоколов, 🔍 Диагностика, 📜 Логи, 🔄 Восстановление, 💾 Бэкап). (#126)
+- **WARP ping target configurable** — `PING_TARGET` default switched from `149.154.167.50` to `162.159.140.245` (Cloudflare anycast, reliably responds to ICMP and present in typical WARP `AllowedIPs`). Deployments with Telegram-only `AllowedIPs` can override via the new `WARP_PING_TARGET` env variable to prevent false health-monitor failures. (#130)
+- **Health diagnostics severity** — running as root and `PRIVILEGE_HELPERS_ENABLED=false` are now reported as `warning` (⚠) instead of `failed` (✗); the overall backend diagnostics status no longer shows FAILED in these configurations. (#129)
+
+### Fixed
+
+- **WARP config delete removes files from disk** — `delete_config` now calls the new `vpnbot-warp-install remove` sub-command to delete `/etc/amnezia/tg-warp.conf` and `/etc/amnezia/tg-warp-routes.list`, preventing the PrivateKey from persisting after config deletion. A helper failure is propagated as `WarpError` so the database is kept intact if the removal fails. (#119)
+- **WARP config install uses secure temp files** — `vpnbot-warp-install` now creates mode-600 temp files with `install -m 600 /dev/null` before writing any content, then atomically `mv`s them into place, eliminating the window where an intermediate file containing the PrivateKey could be world-readable. (#119)
+- **WARP DB migration version counter** — `_apply_migrations` was missing the `version = 20` assignment after `_set_schema_version(20)`, breaking the consistent pattern used by every other migration block. (#119)
+- **WARP routes skip default routes** — `vpnbot-warp-routes` now skips `0.0.0.0/0` and `::/0` entries from `AllowedIPs` with a warning to stderr, preventing accidental capture of the default route and host isolation. The `del` branch mirrors this symmetrically. (#120)
+- **WARP cap_net_raw probe on startup** — `WarpManager._start_locked` now runs one test ping immediately after the interface comes up and logs a `WARNING` pointing the operator to `getcap $(which ping)` if it fails, before the health monitor starts its loop. (#120)
+- **WARP upload size validated after download** — `warp_upload_receive` now checks `len(buffer.getvalue())` after `bot.download()` completes to enforce the 64 KB limit on actual downloaded bytes rather than relying solely on the client-reported `file_size`. (#120)
+- **WARP CIDR validation** — `validate_amnezia_config` now validates each `AllowedIPs` token via `ipaddress.ip_network(strict=False)` and raises `WarpConfigError` for invalid CIDRs, preventing bogus route-count inflation. (#121)
+- **WARP upload rate-limit** — `warp_upload_receive` now enforces the same per-user rate-limit as other WARP admin actions (30 s cooldown). (#121)
+- **AWG client traffic NATted through tg-warp** — `vpnbot-warp-routes` now adds an `iptables -t nat POSTROUTING MASQUERADE` rule for traffic leaving via `tg-warp`, so AWG clients (source `10.0.0.x`) reach the WARP endpoint correctly. The rule is idempotent (`-C` check before `-A`) and removed symmetrically in the `del` branch. (#122)
+- **FORWARD rules for awg0↔tg-warp** — `vpnbot-warp-routes` now manages two iptables `FORWARD` rules: allow `awg0→tg-warp` and allow `tg-warp→awg0 RELATED,ESTABLISHED`, ensuring bidirectional packet forwarding for VPN clients routed through the WARP tunnel. (#123)
+- **WARP upload prompt deleted on success** — the upload prompt message is now saved to FSM state and deleted after a config is successfully installed, consistent with the behaviour in other bot input flows. Validation errors leave the prompt intact so the user can retry. (#127)
+- **Anomaly dismiss i18n** — hardcoded `«✅ Я прочитал»` string in `services/anomaly_detection.py` replaced with the new `btn_anomaly_dismiss` i18n key (ru + en); dead `anomaly_dismiss_keyboard()` helper removed from `bot/keyboards/admin.py`. (#121)
+
+### Security
+
+- **WARP PrivateKey protection** — config install now writes exclusively through mode-600 temp files and config delete propagates helper errors rather than silently clearing the database, preventing PrivateKey material from being exposed in world-readable intermediate files or from persisting on disk after deletion. (#119)
 
 ## [1.1.0] — 2026-05-30
 
@@ -125,6 +155,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Managed MTProto secrets and env files are `root:root 0600`; backup directories are `root:root 0700`.
 - `XRAY_APPLY_MODE=api` + `PRIVILEGE_HELPERS_ENABLED=true` combination rejected at startup.
 
+[1.2.0]: https://github.com/Egor051/vpnbot/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Egor051/vpnbot/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/Egor051/vpnbot/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Egor051/vpnbot/compare/v1.0.0...v1.0.1
