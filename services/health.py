@@ -75,6 +75,13 @@ def check_bot_non_root(*, xray_api_mode: bool = False) -> HealthCheckItem:
             severity="critical",
             message="Bot running as root — must run as vpn-bot in production",
         )
+    if xray_api_mode:
+        return HealthCheckItem(
+            name="bot_runtime",
+            status="degraded",
+            severity="warning",
+            message=f"XRAY_APPLY_MODE=api requires root but running as uid={uid} — Xray apply operations will fail",
+        )
     return HealthCheckItem(
         name="bot_runtime",
         status="ok",

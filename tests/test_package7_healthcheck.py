@@ -204,6 +204,16 @@ def test_check_bot_non_root_when_root_xray_api_mode(monkeypatch: pytest.MonkeyPa
     assert item.severity == "warning"
 
 
+def test_check_bot_non_root_non_root_xray_api_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-root uid with xray_api_mode=True produces degraded — API mode requires root."""
+    if os.name != "posix":
+        pytest.skip("POSIX only")
+    monkeypatch.setattr(os, "getuid", lambda: 1001)
+    item = check_bot_non_root(xray_api_mode=True)
+    assert item.status == "degraded"
+    assert "1001" in item.message
+
+
 # ---------------------------------------------------------------------------
 # 4. check_helper_mode
 # ---------------------------------------------------------------------------
