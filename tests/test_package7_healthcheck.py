@@ -73,6 +73,7 @@ def _make_settings(**overrides: object) -> SimpleNamespace:
     defaults: dict[str, object] = dict(
         awg_interface="awg0",
         xray_service_name="xray",
+        xray_apply_mode="restart",
         socks5_enabled=True,
         socks5_service_name="danted",
         mtproto_enabled=True,
