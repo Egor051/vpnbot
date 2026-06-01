@@ -273,6 +273,7 @@ class Settings:
     mtproto_helper_staging_dir: Path = Path("/run/vpn-bot/mtproxy")
     warp_config_path: Path = Path("/etc/amnezia/tg-warp.conf")
     warp_interface: str = "tg-warp"
+    warp_ping_target: str = "162.159.140.245"
     warp_install_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-install")
     warp_iface_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-iface")
     warp_routes_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-routes")
@@ -516,6 +517,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         mtproto_helper_staging_dir=Path(_optional("MTPROTO_HELPER_STAGING_DIR", str(helper_staging_root / "mtproxy"))),
         warp_config_path=Path(_optional("WARP_CONFIG_PATH", "/etc/amnezia/tg-warp.conf")),
         warp_interface=_optional("WARP_INTERFACE", "tg-warp"),
+        warp_ping_target=_optional("WARP_PING_TARGET", "162.159.140.245"),
         warp_install_helper_path=Path(_optional("WARP_INSTALL_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-install")),
         warp_iface_helper_path=Path(_optional("WARP_IFACE_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-iface")),
         warp_routes_helper_path=Path(_optional("WARP_ROUTES_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-routes")),

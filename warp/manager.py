@@ -26,7 +26,7 @@ from db.database import Database
 from models.dto import ShellResult
 from repositories.warp_settings import WarpSettingsRepository
 from services.errors import ServiceError
-from warp.constants import PING_TARGET, ROUTES_LIST
+from warp.constants import ROUTES_LIST
 from warp.health import HealthSnapshot, WarpHealthMonitor, ping_interface
 from warp.interface import WarpInterface
 from warp.routes import WarpRoutes
@@ -48,6 +48,7 @@ class WarpManager:
         self._runner = PrivilegedHelperRunner(shell=shell, use_sudo=True)
         self._config_path = settings.warp_config_path
         self._interface_name = settings.warp_interface
+        self._ping_target = settings.warp_ping_target
         self._install_helper = settings.warp_install_helper_path
         self._staging_dir = settings.warp_helper_staging_dir
         self._interface = WarpInterface(
@@ -264,7 +265,7 @@ class WarpManager:
         return _count_routes(result.stdout)
 
     async def _ping(self) -> bool:
-        return await ping_interface(PING_TARGET, self._interface_name)
+        return await ping_interface(self._ping_target, self._interface_name)
 
     async def _activate_routes(self) -> None:
         result = await self._routes.add()
