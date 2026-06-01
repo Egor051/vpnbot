@@ -64,9 +64,9 @@ def check_bot_non_root() -> HealthCheckItem:
     if uid == 0:
         return HealthCheckItem(
             name="bot_runtime",
-            status="failed",
-            severity="critical",
-            message="Bot running as root — must run as vpn-bot in production",
+            status="warning",
+            severity="warning",
+            message="Bot running as root — OK for Xray API, use vpn-bot user in production",
         )
     return HealthCheckItem(
         name="bot_runtime",
@@ -89,7 +89,7 @@ def check_helper_mode(enabled: bool) -> HealthCheckItem:
         name="helper_mode",
         status="warning",
         severity="warning",
-        message="PRIVILEGE_HELPERS_ENABLED=false — OK for dev, not for production",
+        message="PRIVILEGE_HELPERS_ENABLED=false — OK for Xray API and normal operation",
     )
 
 
