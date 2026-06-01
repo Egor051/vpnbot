@@ -921,6 +921,7 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Services)
             backend_health=services.backend_health,
             db=services.db,
             privilege_helpers_enabled=settings.privilege_helpers_enabled,
+            xray_api_mode=settings.xray_apply_mode == "api",
             service_names=service_names,
         )
         disabled_modules = [m for m in await services.modules.get_all() if not m.enabled]

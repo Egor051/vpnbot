@@ -51,7 +51,7 @@ def build_result(checks: list[HealthCheckItem]) -> HealthCheckResult:
     )
 
 
-def check_bot_non_root() -> HealthCheckItem:
+def check_bot_non_root(*, xray_api_mode: bool = False) -> HealthCheckItem:
     """Check that the bot process is not running as root."""
     if os.name != "posix":
         return HealthCheckItem(
@@ -62,11 +62,18 @@ def check_bot_non_root() -> HealthCheckItem:
         )
     uid = os.getuid()
     if uid == 0:
+        if xray_api_mode:
+            return HealthCheckItem(
+                name="bot_runtime",
+                status="warning",
+                severity="warning",
+                message="Bot running as root — OK for XRAY_APPLY_MODE=api, use vpn-bot user in production",
+            )
         return HealthCheckItem(
             name="bot_runtime",
-            status="warning",
-            severity="warning",
-            message="Bot running as root — OK for Xray API, use vpn-bot user in production",
+            status="failed",
+            severity="critical",
+            message="Bot running as root — must run as vpn-bot in production",
         )
     return HealthCheckItem(
         name="bot_runtime",
@@ -201,11 +208,12 @@ async def run_bot_health(
     backend_health: BackendHealth,
     db: Any,
     privilege_helpers_enabled: bool,
+    xray_api_mode: bool = False,
     service_names: list[str],
 ) -> HealthCheckResult:
     """Run all on-demand bot health checks. Read-only. Never modifies config or restarts services."""
     checks: list[HealthCheckItem] = []
-    checks.append(check_bot_non_root())
+    checks.append(check_bot_non_root(xray_api_mode=xray_api_mode))
     checks.append(check_helper_mode(privilege_helpers_enabled))
     checks.extend(check_backends(backend_health.snapshot()))
     skipped = getattr(backend_health, "skipped_revocation_count", 0)

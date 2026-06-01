@@ -184,11 +184,21 @@ def test_check_bot_non_root_when_not_root(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_check_bot_non_root_when_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    """UID 0 (root) produces a warning health item (OK for Xray API)."""
+    """UID 0 (root) without Xray API mode produces a critical failed item."""
     if os.name != "posix":
         pytest.skip("POSIX only")
     monkeypatch.setattr(os, "getuid", lambda: 0)
     item = check_bot_non_root()
+    assert item.status == "failed"
+    assert item.severity == "critical"
+
+
+def test_check_bot_non_root_when_root_xray_api_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UID 0 (root) with xray_api_mode=True produces a warning, not a failure."""
+    if os.name != "posix":
+        pytest.skip("POSIX only")
+    monkeypatch.setattr(os, "getuid", lambda: 0)
+    item = check_bot_non_root(xray_api_mode=True)
     assert item.status == "warning"
     assert item.severity == "warning"
 
