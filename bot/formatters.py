@@ -1124,8 +1124,8 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
 
     # Activity
     recent_actions = []
-    for entry in snap.recent_audit_entries[:3]:
-        action = str(entry.get("action") or "")
+    for audit_entry in snap.recent_audit_entries[:3]:
+        action = str(audit_entry.get("action") or "")
         recent_actions.append(h(action))
     lines += [
         "<b>📋 Активность</b>",

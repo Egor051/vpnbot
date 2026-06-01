@@ -75,7 +75,7 @@ class DashboardRepository:
                             AND expires_at > ? AND expires_at <= ?   THEN 1 ELSE 0 END) AS expiring_7d,
               SUM(CASE WHEN status = 'active' AND expires_at IS NOT NULL
                             AND expires_at > ? AND expires_at <= ?   THEN 1 ELSE 0 END) AS expiring_30d,
-              SUM(CASE WHEN status IN ('pending_apply','apply_failed','pending_revoke')
+              SUM(CASE WHEN status IN ('pending_apply','apply_failed','pending_revoke','pending_delete','delete_failed','failed')
                        THEN 1 ELSE 0 END) AS stuck
             FROM vpn_keys
             WHERE status != 'deleted'
