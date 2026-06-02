@@ -472,6 +472,7 @@ STRINGS: dict[str, str] = {
     "btn_unblock_confirm": "Подтвердить разблокировку",
     "btn_refresh": "Обновить",
     "btn_anomaly_dismiss": "✅ Я прочитал",
+    "btn_warp_alert_dismiss": "✅ Понял",
     # ── keyboard buttons (keys) ───────────────────────────────────────────────
     "btn_back": "Назад",
     "btn_config": "Конфиг",

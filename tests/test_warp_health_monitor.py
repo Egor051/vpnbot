@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from warp.health import HealthSnapshot, WarpHealthMonitor
+from warp.manager import WarpManager
 
 
 class _Recorder:
@@ -13,6 +15,8 @@ class _Recorder:
         self._results: Iterator[bool] = iter(ping_results)
         self.activations = 0
         self.deactivations = 0
+        self.tunnel_down_calls = 0
+        self.tunnel_recovered_calls = 0
         self.snapshots: list[HealthSnapshot] = []
 
     async def ping(self) -> bool:
@@ -27,13 +31,26 @@ class _Recorder:
     async def on_update(self, snapshot: HealthSnapshot) -> None:
         self.snapshots.append(snapshot)
 
+    async def on_tunnel_down(self) -> None:
+        self.tunnel_down_calls += 1
 
-def _monitor(rec: _Recorder, *, initial_routes_active: bool = True) -> WarpHealthMonitor:
+    async def on_tunnel_recovered(self) -> None:
+        self.tunnel_recovered_calls += 1
+
+
+def _monitor(
+    rec: _Recorder,
+    *,
+    initial_routes_active: bool = True,
+    with_notify_callbacks: bool = False,
+) -> WarpHealthMonitor:
     return WarpHealthMonitor(
         ping=rec.ping,
         activate_routes=rec.activate,
         deactivate_routes=rec.deactivate,
         on_update=rec.on_update,
+        on_tunnel_down=rec.on_tunnel_down if with_notify_callbacks else None,
+        on_tunnel_recovered=rec.on_tunnel_recovered if with_notify_callbacks else None,
         fail_threshold=2,
         recover_threshold=3,
         initial_routes_active=initial_routes_active,
@@ -119,3 +136,144 @@ def test_class_thresholds_match_spec() -> None:
     assert WarpHealthMonitor.INTERVAL == 10
     assert WarpHealthMonitor.FAIL_THRESHOLD == 2
     assert WarpHealthMonitor.RECOVER_THRESHOLD == 3
+
+
+# ── on_tunnel_down / on_tunnel_recovered callbacks ────────────────────────────
+
+async def test_on_tunnel_down_called_when_threshold_crossed() -> None:
+    rec = _Recorder([False, False, False])
+    monitor = _monitor(rec, with_notify_callbacks=True)
+
+    await monitor.check_once()
+    assert rec.tunnel_down_calls == 0
+
+    await monitor.check_once()
+    assert rec.tunnel_down_calls == 1
+
+    # Third failure: routes already removed, callback not called again.
+    await monitor.check_once()
+    assert rec.tunnel_down_calls == 1
+
+
+async def test_on_tunnel_recovered_called_when_threshold_crossed() -> None:
+    rec = _Recorder([True, True, True, True])
+    monitor = _monitor(rec, initial_routes_active=False, with_notify_callbacks=True)
+
+    await monitor.check_once()
+    assert rec.tunnel_recovered_calls == 0
+    await monitor.check_once()
+    assert rec.tunnel_recovered_calls == 0
+
+    await monitor.check_once()
+    assert rec.tunnel_recovered_calls == 1
+
+    # Fourth success: routes already active, callback not called again.
+    await monitor.check_once()
+    assert rec.tunnel_recovered_calls == 1
+
+
+async def test_on_tunnel_down_exception_is_suppressed() -> None:
+    async def boom() -> None:
+        raise RuntimeError("notify failed")
+
+    rec = _Recorder([False, False])
+    monitor = WarpHealthMonitor(
+        ping=rec.ping,
+        activate_routes=rec.activate,
+        deactivate_routes=rec.deactivate,
+        on_update=rec.on_update,
+        on_tunnel_down=boom,
+        fail_threshold=2,
+        recover_threshold=3,
+    )
+    # Should not raise even though on_tunnel_down raises.
+    await monitor.check_once()
+    await monitor.check_once()
+    assert rec.deactivations == 1
+
+
+async def test_on_tunnel_recovered_exception_is_suppressed() -> None:
+    async def boom() -> None:
+        raise RuntimeError("notify failed")
+
+    rec = _Recorder([True, True, True])
+    monitor = WarpHealthMonitor(
+        ping=rec.ping,
+        activate_routes=rec.activate,
+        deactivate_routes=rec.deactivate,
+        on_update=rec.on_update,
+        on_tunnel_recovered=boom,
+        fail_threshold=2,
+        recover_threshold=3,
+        initial_routes_active=False,
+    )
+    for _ in range(3):
+        await monitor.check_once()
+    assert rec.activations == 1
+
+
+async def test_no_callbacks_when_none() -> None:
+    # Passing None callbacks must not raise.
+    rec = _Recorder([False, False, True, True, True])
+    monitor = _monitor(rec, initial_routes_active=True, with_notify_callbacks=False)
+    for _ in range(5):
+        await monitor.check_once()
+    assert rec.deactivations == 1 and rec.activations == 1
+
+
+# ── WarpManager notification methods ─────────────────────────────────────────
+
+def _make_manager(admin_ids: frozenset[int] = frozenset([111, 222])) -> WarpManager:
+    """Construct a WarpManager bypassing __init__, injecting only what the notify methods need."""
+    manager = object.__new__(WarpManager)
+    settings = MagicMock()
+    settings.admin_ids = admin_ids
+    manager._settings = settings
+    manager.bot = None
+    return manager
+
+
+async def test_notify_tunnel_down_sends_to_all_admins() -> None:
+    manager = _make_manager(frozenset([111, 222]))
+    manager.bot = AsyncMock()
+
+    await manager._notify_tunnel_down()
+
+    assert manager.bot.send_message.call_count == 2
+    call_ids = {c.args[0] for c in manager.bot.send_message.call_args_list}
+    assert call_ids == {111, 222}
+
+
+async def test_notify_tunnel_recovered_sends_to_all_admins() -> None:
+    manager = _make_manager(frozenset([333]))
+    manager.bot = AsyncMock()
+
+    await manager._notify_tunnel_recovered()
+
+    manager.bot.send_message.assert_awaited_once()
+    assert manager.bot.send_message.call_args.args[0] == 333
+
+
+async def test_notify_skipped_when_bot_is_none() -> None:
+    manager = _make_manager()
+    manager.bot = None
+    # Must not raise.
+    await manager._notify_tunnel_down()
+    await manager._notify_tunnel_recovered()
+
+
+async def test_notify_tunnel_down_tolerates_send_error() -> None:
+    manager = _make_manager(frozenset([1, 2]))
+    manager.bot = AsyncMock()
+    manager.bot.send_message.side_effect = Exception("telegram error")
+
+    # Should not raise even if send fails.
+    await manager._notify_tunnel_down()
+
+
+async def test_notify_tunnel_recovered_tolerates_send_error() -> None:
+    manager = _make_manager(frozenset([1]))
+    manager.bot = AsyncMock()
+    manager.bot.send_message.side_effect = Exception("telegram error")
+
+    await manager._notify_tunnel_recovered()
