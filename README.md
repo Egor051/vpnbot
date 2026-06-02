@@ -217,7 +217,7 @@ All variables parsed by `config/settings.py`. Variables marked **Required** must
 |---|---|---|---|---|
 | `XRAY_CONFIG_PATH` | No | `/usr/local/etc/xray/config.json` | Path to the Xray config file. | `/usr/local/etc/xray/config.json` |
 | `XRAY_SERVICE_NAME` | No | `xray` | systemd service name for Xray. | `xray` |
-| `XRAY_APPLY_MODE` | No | `restart` | How to apply Xray config changes: `restart`, `reload`, or `api`. `api` requires root and is incompatible with helpers. | `api` |
+| `XRAY_APPLY_MODE` | No | `api` | How to apply Xray config changes: `restart`, `reload`, or `api`. Default `api` (root deployment, no connection drops). `api` requires root and is incompatible with helpers; use `restart`/`reload` with the non-root privilege-helper model. | `api` |
 | `XRAY_INBOUND_TAG` | No* | _(first inbound)_ | Tag of the VLESS inbound in `config.json`. Required for `api` mode. | `vless-in` |
 | `XRAY_PUBLIC_HOST` | No* | — | Public hostname/IP clients use to connect. Required to issue keys. | `vpn.example.com` |
 | `XRAY_PUBLIC_PORT` | No | `443` | Public TCP port for VLESS connections. | `443` |
@@ -338,7 +338,10 @@ Notes:
 
 - If `XRAY_INBOUND_TAG` is empty, the adapter uses the first inbound with `settings.clients`.
 - If `XRAY_MANAGE_SHORT_IDS=false`, `XRAY_SHORT_ID` must be set.
-- `XRAY_APPLY_MODE=restart` is the default apply mode; use `reload` only when your Xray unit reliably applies reload.
+- `XRAY_APPLY_MODE=api` is the default apply mode (root deployment; adds/removes keys without restarting Xray, so no connections drop). Use `restart`/`reload` only in the non-root privilege-helper model — the helper ignores `api`/`reload` and always restarts Xray.
+
+> 📌 **Production note — switch the mode manually for serious deployments:**
+> The default `XRAY_APPLY_MODE=api` runs the bot **as root** (`PRIVILEGE_HELPERS_ENABLED=false`) for zero-downtime key changes. This is convenient but keeps the bot privileged. For a hardened/serious production deployment, **manually switch** to the non-root privilege-helper model: set `PRIVILEGE_HELPERS_ENABLED=true`, `XRAY_APPLY_MODE=restart` (or `reload`), run as `User=vpn-bot`, and install the sudo helpers. See [Privilege Helpers](#privilege-helpers-non-root-deployment).
 
 > ⚠️ **IMPORTANT — XRAY_APPLY_MODE=api and root deployment:**
 > - `XRAY_APPLY_MODE=api` is the **only** mode that adds/removes Xray keys without restarting the Xray service. Without it, every key creation or deletion causes a full Xray restart, which drops all active connections.

@@ -15,6 +15,12 @@ class SingleInstanceLock:
         self._file: TextIO | None = None
 
     def __enter__(self) -> Self:
+        if os.name != "posix":
+            # Fail before touching the filesystem so we don't leave an orphan
+            # lock file on platforms where flock() is unavailable.
+            raise SingleInstanceError(
+                "Single-instance lock поддерживается только на Linux/POSIX через fcntl.flock"
+            )
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         file = self.lock_path.open("a+", encoding="utf-8")
         try:

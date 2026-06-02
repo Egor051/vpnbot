@@ -205,7 +205,10 @@ BOT_LANGUAGE=ru
 
 - Если `XRAY_INBOUND_TAG` пустой, адаптер использует первый inbound с `settings.clients`.
 - Если `XRAY_MANAGE_SHORT_IDS=false`, необходимо указать `XRAY_SHORT_ID`.
-- `XRAY_APPLY_MODE=restart` — режим apply по умолчанию; `reload` используйте только если ваш Xray unit надёжно обрабатывает reload.
+- `XRAY_APPLY_MODE=api` — режим apply по умолчанию (развёртывание под root; добавляет/удаляет ключи без перезапуска Xray, поэтому соединения не обрываются). `restart`/`reload` используйте только в non-root режиме с privilege helpers — helper игнорирует `api`/`reload` и всегда перезапускает Xray.
+
+> 📌 **Примечание для production — переключайте режим вручную для серьёзных развёртываний:**
+> Дефолтный `XRAY_APPLY_MODE=api` запускает бота **под root** (`PRIVILEGE_HELPERS_ENABLED=false`) ради применения ключей без обрыва соединений. Это удобно, но бот остаётся привилегированным. Для серьёзного production-развёртывания **вручную переключитесь** на non-root модель с privilege helpers: задайте `PRIVILEGE_HELPERS_ENABLED=true`, `XRAY_APPLY_MODE=restart` (или `reload`), запускайте под `User=vpn-bot` и установите sudo-helpers. См. раздел «Обзор развёртывания».
 
 > ⚠️ **ВАЖНО — XRAY_APPLY_MODE=api и развёртывание под root:**
 > - `XRAY_APPLY_MODE=api` — **единственный** режим, позволяющий добавлять/удалять ключи Xray без перезапуска сервиса. Без него каждое создание или удаление ключа вызывает полный перезапуск Xray, обрывая все активные подключения.

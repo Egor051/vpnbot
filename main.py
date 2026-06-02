@@ -28,12 +28,12 @@ async def main() -> None:
     with SingleInstanceLock(settings.bot_lock_path):
         bot, dp, db, backend_health, services = await create_app(settings)
         runner: web.AppRunner | None = None
-        awg_stats_task: asyncio.Task | None = None
-        expiry_task: asyncio.Task | None = None
-        backup_task: asyncio.Task | None = None
-        anomaly_task: asyncio.Task | None = None
-        scheduled_announcements_task: asyncio.Task | None = None
-        fsm_cleanup_task: asyncio.Task | None = None
+        awg_stats_task: asyncio.Task[None] | None = None
+        expiry_task: asyncio.Task[None] | None = None
+        backup_task: asyncio.Task[None] | None = None
+        anomaly_task: asyncio.Task[None] | None = None
+        scheduled_announcements_task: asyncio.Task[None] | None = None
+        fsm_cleanup_task: asyncio.Task[None] | None = None
         try:
             if isinstance(dp.storage, TTLMemoryStorage):
                 fsm_cleanup_task = asyncio.create_task(
@@ -117,9 +117,18 @@ async def main() -> None:
             except Exception:
                 logger.warning("WARP routing module shutdown failed", exc_info=True)
             if runner is not None:
-                await runner.cleanup()
-            await db.close()
-            await bot.session.close()
+                try:
+                    await runner.cleanup()
+                except Exception:
+                    logger.warning("Health check endpoint shutdown failed", exc_info=True)
+            try:
+                await db.close()
+            except Exception:
+                logger.warning("Database close failed", exc_info=True)
+            try:
+                await bot.session.close()
+            except Exception:
+                logger.warning("Bot session close failed", exc_info=True)
 
 
 if __name__ == "__main__":
