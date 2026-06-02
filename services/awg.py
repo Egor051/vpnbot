@@ -225,8 +225,20 @@ class AwgService:
             )
             return await self._get_key(key_id)
 
-    async def revoke_awg_key_system(self, key_id: int) -> VpnKey:
-        """Revoke triggered by expiry job — bypasses actor role check."""
+    async def revoke_awg_key_system(
+        self,
+        key_id: int,
+        *,
+        actor_user_id: int | None = None,
+        action: str = "awg_key_expired",
+    ) -> VpnKey:
+        """Revoke without an interactive role check — for trusted callers.
+
+        Used by the expiry job, anomaly auto-revoke and the block-user flow, all
+        of which authorise the operation themselves. When *actor_user_id* is given
+        it is recorded as the revoker and used for audit attribution; otherwise
+        the key's creator is recorded (system-initiated expiry).
+        """
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         async with self._lock:
             key = await self._get_key(key_id)
@@ -243,10 +255,11 @@ class AwgService:
             except Exception:
                 await self.vpn_keys.set_status(key_id, previous_status, self.clock.now())
                 raise
-            await self.vpn_keys.mark_revoked(key_id, key.created_by, self.clock.now())
+            revoked_by = actor_user_id if actor_user_id is not None else key.created_by
+            await self.vpn_keys.mark_revoked(key_id, revoked_by, self.clock.now())
             await self._write_audit_best_effort(
-                actor_user_id=None,
-                action="awg_key_expired",
+                actor_user_id=actor_user_id,
+                action=action,
                 entity_type=AuditEntityType.VPN_KEY,
                 entity_id=key_id,
                 details={"owner_user_id": key.owner_user_id, "expires_at": key.expires_at, "client_ip": key.client_ip},
@@ -426,23 +439,25 @@ class AwgService:
         """Reconcile a single AWG key's status against the server peer state."""
         await self.users.require_superadmin(actor_user_id)
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
-        key = await self._get_key(key_id)
-        if key.key_type != VpnKeyType.AWG:
-            raise InvalidOperation("Это не AWG-ключ")
-        public_key = self._stored_awg_public_key(key)
-        peer = self.adapter.find_peer(public_key=public_key, client_ip=None) if public_key else None
-        if peer is not None and key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
-            await self.vpn_keys.mark_active(key.id, self.clock.now())
-        elif peer is None and key.status == VpnKeyStatus.PENDING_APPLY:
-            await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
-        await self.audit.write(
-            actor_user_id=actor_user_id,
-            action="awg_key_reconciled",
-            entity_type=AuditEntityType.VPN_KEY,
-            entity_id=key_id,
-            details={"peer_present": peer is not None, "client_ip": key.client_ip},
-        )
-        return await self._get_key(key_id)
+        # Serialise against concurrent create/revoke/delete for this backend.
+        async with self._lock:
+            key = await self._get_key(key_id)
+            if key.key_type != VpnKeyType.AWG:
+                raise InvalidOperation("Это не AWG-ключ")
+            public_key = self._stored_awg_public_key(key)
+            peer = self.adapter.find_peer(public_key=public_key, client_ip=None) if public_key else None
+            if peer is not None and key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
+                await self.vpn_keys.mark_active(key.id, self.clock.now())
+            elif peer is None and key.status == VpnKeyStatus.PENDING_APPLY:
+                await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+            await self.audit.write(
+                actor_user_id=actor_user_id,
+                action="awg_key_reconciled",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={"peer_present": peer is not None, "client_ip": key.client_ip},
+            )
+            return await self._get_key(key_id)
 
     async def _ensure_can_create(
         self, actor_user_id: int, owner_user_id: int, *, allow_pending_owner: bool = False

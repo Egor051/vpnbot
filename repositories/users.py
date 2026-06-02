@@ -169,6 +169,19 @@ class UserRepository:
         rows = await cursor.fetchall()
         return [user for row in rows if (user := _row_to_user(row)) is not None]
 
+    async def is_announcement_recipient(self, telegram_user_id: int) -> bool:
+        """Return whether the user is currently eligible to receive announcements."""
+        cursor = await self.db.conn.execute(
+            f"""
+            SELECT 1 FROM users
+            WHERE telegram_user_id = ?
+              AND blocked_at IS NULL
+              AND role IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
+            """,
+            (telegram_user_id, *_ANNOUNCEMENT_ROLE_SQL_VALUES),
+        )
+        return await cursor.fetchone() is not None
+
     async def update_note(self, telegram_user_id: int, note: str | None, now: str) -> None:
         """Update a user's note, raising NotFound if the user is absent."""
         cursor = await self.db.conn.execute(

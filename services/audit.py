@@ -111,13 +111,35 @@ class AuditService:
 
     async def recent_for_entity(
         self,
+        actor_user_id: int,
         *,
         entity_type: AuditEntityType,
         entity_id: str | int,
         actions: set[str] | None = None,
         limit: int = 10,
     ) -> list[dict[str, object]]:
-        """Return recent audit log entries for a specific entity, optionally filtered by action."""
+        """Return recent audit log entries for a specific entity; requires superadmin."""
+        if self.users is None:
+            raise RuntimeError("AuditService.recent_for_entity requires a UserRepository; pass users= to AuditService()")
+        user = await self.users.get_by_id(actor_user_id)
+        if user is None or user.role != UserRole.SUPERADMIN:
+            raise AccessDenied("Недостаточно прав")
+        return await self.recent_for_entity_internal(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            actions=actions,
+            limit=limit,
+        )
+
+    async def recent_for_entity_internal(
+        self,
+        *,
+        entity_type: AuditEntityType,
+        entity_id: str | int,
+        actions: set[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, object]]:
+        """Trusted server-side reader (no actor check). For internal service use only."""
         return await self.audit_logs.list_recent_for_entity(
             entity_type=entity_type,
             entity_id=entity_id,

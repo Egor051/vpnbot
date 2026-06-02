@@ -1,12 +1,14 @@
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 
 from aiogram import Bot
 
 from adapters.clock import ClockProvider
+from models.access import is_blocked_user
 from models.dto import TelegramUserProfile, TrialKeyRequest, VpnKeyCreateResult
-from models.enums import AuditEntityType, VpnKeyType
+from models.enums import AuditEntityType, UserRole, VpnKeyType
 from repositories.trial_requests import TrialKeyRequestRepository
 from repositories.users import UserRepository
 from services.audit import AuditService
@@ -41,6 +43,15 @@ class TrialAccessService:
         self.audit = audit
         self.clock = clock
         self.bot = bot
+        # Serialises approve/reject of trial requests so that two concurrent
+        # admin decisions on the same request cannot both provision a key.
+        self._decision_lock = asyncio.Lock()
+
+    async def _require_superadmin(self, actor_user_id: int) -> None:
+        """Service-level RBAC: only a superadmin may decide trial requests."""
+        actor = await self.users_repo.get_by_id(actor_user_id)
+        if actor is None or actor.role != UserRole.SUPERADMIN:
+            raise AccessDenied("Недостаточно прав")
 
     async def can_request_trial(self, telegram_user_id: int) -> bool:
         """Return whether the user still has an unused trial quota."""
@@ -52,6 +63,13 @@ class TrialAccessService:
         self, telegram_user_id: int, key_type: VpnKeyType
     ) -> TrialKeyRequest:
         """Create a pending trial key request after verifying the user's quota."""
+        # Defense-in-depth: a blocked user must not be able to create requests
+        # even if a handler forgets to gate the call.
+        requester = await self.users_repo.get_by_id(telegram_user_id)
+        if requester is None:
+            raise NotFound("Пользователь не найден")
+        if is_blocked_user(requester):
+            raise AccessDenied("Доступ заблокирован")
         # BEGIN IMMEDIATE serialises the quota check (SELECT) and the INSERT so
         # that two concurrent double-taps cannot both pass can_request_trial and
         # then both succeed at create.  The idx_trial_requests_one_pending
@@ -97,41 +115,48 @@ class TrialAccessService:
         request_id: int,
     ) -> VpnKeyCreateResult:
         """Approve a trial request, provision the key, and deliver it to the user."""
-        req = await self.get_request(request_id)
-        if req.status != "pending":
-            raise AccessDenied("Заявка уже обработана")
-        owner = await self.users_repo.get_by_id(req.telegram_user_id)
-        if owner is None:
-            raise NotFound("Пользователь-владелец не найден")
-        now = self.clock.now()
-        expires_at = _trial_expires_at(now)
-        profile = TelegramUserProfile(
-            telegram_user_id=owner.telegram_user_id,
-            username=owner.username,
-            first_name=owner.first_name,
-        )
-        if req.key_type == VpnKeyType.XRAY:
-            result: VpnKeyCreateResult = await self.xray.create_xray_key(  # type: ignore[attr-defined]
-                actor_user_id,
-                profile,
-                None,
-                expires_at=expires_at,
-                allow_pending_owner=True,
+        await self._require_superadmin(actor_user_id)
+        # The decision lock + a fresh status re-check inside it guarantee the key
+        # is provisioned exactly once even if two admins (or a double-tap) approve
+        # the same pending request concurrently. Without it, both would create a
+        # key before the DB-level `approve()` guard rejected the loser, leaving an
+        # orphaned extra key live on the backend.
+        async with self._decision_lock:
+            req = await self.get_request(request_id)
+            if req.status != "pending":
+                raise AccessDenied("Заявка уже обработана")
+            owner = await self.users_repo.get_by_id(req.telegram_user_id)
+            if owner is None:
+                raise NotFound("Пользователь-владелец не найден")
+            now = self.clock.now()
+            expires_at = _trial_expires_at(now)
+            profile = TelegramUserProfile(
+                telegram_user_id=owner.telegram_user_id,
+                username=owner.username,
+                first_name=owner.first_name,
             )
-        else:
-            result = await self.awg.create_awg_key(  # type: ignore[attr-defined]
-                actor_user_id,
-                profile,
-                None,
-                expires_at=expires_at,
-                allow_pending_owner=True,
+            if req.key_type == VpnKeyType.XRAY:
+                result: VpnKeyCreateResult = await self.xray.create_xray_key(  # type: ignore[attr-defined]
+                    actor_user_id,
+                    profile,
+                    None,
+                    expires_at=expires_at,
+                    allow_pending_owner=True,
+                )
+            else:
+                result = await self.awg.create_awg_key(  # type: ignore[attr-defined]
+                    actor_user_id,
+                    profile,
+                    None,
+                    expires_at=expires_at,
+                    allow_pending_owner=True,
+                )
+            await self.trial_requests.approve(
+                request_id=request_id,
+                key_id=result.key.id,
+                decided_by=actor_user_id,
+                decided_at=now,
             )
-        await self.trial_requests.approve(
-            request_id=request_id,
-            key_id=result.key.id,
-            decided_by=actor_user_id,
-            decided_at=now,
-        )
         await self.audit.write(
             actor_user_id=actor_user_id,
             action="trial_key_approved",
@@ -149,15 +174,19 @@ class TrialAccessService:
 
     async def reject_trial_request(self, actor_user_id: int, request_id: int) -> None:
         """Reject a pending trial request and notify the requester."""
-        req = await self.get_request(request_id)
-        if req.status != "pending":
-            raise AccessDenied("Заявка уже обработана")
-        now = self.clock.now()
-        await self.trial_requests.reject(
-            request_id=request_id,
-            decided_by=actor_user_id,
-            decided_at=now,
-        )
+        await self._require_superadmin(actor_user_id)
+        # Same lock as approve: prevents reject from racing a concurrent approve
+        # of the same request (which could otherwise orphan a provisioned key).
+        async with self._decision_lock:
+            req = await self.get_request(request_id)
+            if req.status != "pending":
+                raise AccessDenied("Заявка уже обработана")
+            now = self.clock.now()
+            await self.trial_requests.reject(
+                request_id=request_id,
+                decided_by=actor_user_id,
+                decided_at=now,
+            )
         await self.audit.write(
             actor_user_id=actor_user_id,
             action="trial_key_rejected",
@@ -169,6 +198,7 @@ class TrialAccessService:
 
     async def admin_reset_trial_quota(self, actor_user_id: int, target_user_id: int) -> None:
         """Reset a user's trial quota so they can request another trial."""
+        await self._require_superadmin(actor_user_id)
         now = self.clock.now()
         await self.users_repo.reset_trial_quota(target_user_id, now)
         await self.audit.write(

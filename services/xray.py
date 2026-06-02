@@ -213,8 +213,20 @@ class XrayService:
             )
             return await self._get_key(key_id)
 
-    async def revoke_xray_key_system(self, key_id: int) -> VpnKey:
-        """Revoke triggered by expiry job — bypasses actor role check."""
+    async def revoke_xray_key_system(
+        self,
+        key_id: int,
+        *,
+        actor_user_id: int | None = None,
+        action: str = "xray_key_expired",
+    ) -> VpnKey:
+        """Revoke without an interactive role check — for trusted callers.
+
+        Used by the expiry job, anomaly auto-revoke and the block-user flow, all
+        of which authorise the operation themselves. When *actor_user_id* is given
+        it is recorded as the revoker and used for audit attribution; otherwise
+        the key's creator is recorded (system-initiated expiry).
+        """
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         async with self._lock:
             key = await self._get_key(key_id)
@@ -231,10 +243,11 @@ class XrayService:
             except Exception:
                 await self.vpn_keys.set_status(key_id, previous_status, self.clock.now())
                 raise
-            await self.vpn_keys.mark_revoked(key_id, key.created_by, self.clock.now())
+            revoked_by = actor_user_id if actor_user_id is not None else key.created_by
+            await self.vpn_keys.mark_revoked(key_id, revoked_by, self.clock.now())
             await self._write_audit_best_effort(
-                actor_user_id=None,
-                action="xray_key_expired",
+                actor_user_id=actor_user_id,
+                action=action,
                 entity_type=AuditEntityType.VPN_KEY,
                 entity_id=key_id,
                 details={"owner_user_id": key.owner_user_id, "expires_at": key.expires_at},
@@ -342,24 +355,27 @@ class XrayService:
         from bot.keyboards.keys import VALID_FINGERPRINTS
         if fingerprint not in VALID_FINGERPRINTS:
             raise InvalidOperation("Неподдерживаемый fingerprint")
-        key = await self._get_xray_key_for_manage(actor_user_id, key_id)
-        if key.status != VpnKeyStatus.ACTIVE:
-            raise InvalidOperation("Fingerprint можно изменить только у активного ключа")
-        new_payload = {**key.payload, "fingerprint": fingerprint}
-        uuid_value = str(new_payload.get("uuid") or key.uuid or "")
-        short_id = str(new_payload.get("short_id") or key.public_payload.get("short_id") or "")
-        email_label = str(new_payload.get("email_label") or key.email_label or "")
-        link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint)
-        new_public_payload = {**key.public_payload, "link": link}
-        await self.vpn_keys.update_payload(key_id, new_payload, new_public_payload, self.clock.now())
-        await self._write_audit_best_effort(
-            actor_user_id=actor_user_id,
-            action="xray_fingerprint_changed",
-            entity_type=AuditEntityType.VPN_KEY,
-            entity_id=key_id,
-            details={"fingerprint": fingerprint},
-        )
-        return await self._get_key(key_id)
+        # Serialise against concurrent revoke/delete so the status check and the
+        # payload write cannot straddle a state change for the same key.
+        async with self._lock:
+            key = await self._get_xray_key_for_manage(actor_user_id, key_id)
+            if key.status != VpnKeyStatus.ACTIVE:
+                raise InvalidOperation("Fingerprint можно изменить только у активного ключа")
+            new_payload = {**key.payload, "fingerprint": fingerprint}
+            uuid_value = str(new_payload.get("uuid") or key.uuid or "")
+            short_id = str(new_payload.get("short_id") or key.public_payload.get("short_id") or "")
+            email_label = str(new_payload.get("email_label") or key.email_label or "")
+            link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint)
+            new_public_payload = {**key.public_payload, "link": link}
+            await self.vpn_keys.update_payload(key_id, new_payload, new_public_payload, self.clock.now())
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="xray_fingerprint_changed",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={"fingerprint": fingerprint},
+            )
+            return await self._get_key(key_id)
 
     async def list_user_keys(
         self,
@@ -406,22 +422,24 @@ class XrayService:
         """Reconcile a single Xray key's status against the live config."""
         await self.users.require_superadmin(actor_user_id)
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
-        key = await self._get_key(key_id)
-        if key.key_type != VpnKeyType.XRAY:
-            raise InvalidOperation("Это не Xray-ключ")
-        client = self.adapter.find_client(uuid_value=key.uuid, email_label=key.email_label)
-        if client is not None and key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
-            await self.vpn_keys.mark_active(key.id, self.clock.now())
-        elif client is None and key.status == VpnKeyStatus.PENDING_APPLY:
-            await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
-        await self.audit.write(
-            actor_user_id=actor_user_id,
-            action="xray_key_reconciled",
-            entity_type=AuditEntityType.VPN_KEY,
-            entity_id=key_id,
-            details={"client_present": client is not None},
-        )
-        return await self._get_key(key_id)
+        # Serialise against concurrent create/revoke/delete for this backend.
+        async with self._lock:
+            key = await self._get_key(key_id)
+            if key.key_type != VpnKeyType.XRAY:
+                raise InvalidOperation("Это не Xray-ключ")
+            client = self.adapter.find_client(uuid_value=key.uuid, email_label=key.email_label)
+            if client is not None and key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
+                await self.vpn_keys.mark_active(key.id, self.clock.now())
+            elif client is None and key.status == VpnKeyStatus.PENDING_APPLY:
+                await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+            await self.audit.write(
+                actor_user_id=actor_user_id,
+                action="xray_key_reconciled",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={"client_present": client is not None},
+            )
+            return await self._get_key(key_id)
 
     async def _ensure_can_create(
         self, actor_user_id: int, owner_user_id: int, *, allow_pending_owner: bool = False

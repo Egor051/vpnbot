@@ -129,12 +129,10 @@ def test_notify_expiring_keys_deduplicates_on_second_run(tmp_path: Path) -> None
     asyncio.run(run())
 
 
-def test_notify_expiring_keys_each_threshold_notified_independently(tmp_path: Path) -> None:
+def test_notify_expiring_keys_one_accurate_reminder_per_run(tmp_path: Path) -> None:
     async def run() -> None:
         db, repo = await _setup_db(tmp_path)
         try:
-            # Expires in 2 days — within both 3-day and 1-day thresholds? No, 1-day needs <= 1 day
-            # Put it at 0.5 days: 2026-01-10T12:00:00 (now is 2026-01-10T00:00:00)
             await _make_active_key(repo, "2026-01-11T00:00:00+00:00")  # 1 day away
 
             bot = MagicMock()
@@ -143,9 +141,19 @@ def test_notify_expiring_keys_each_threshold_notified_independently(tmp_path: Pa
 
             count = await service.notify_expiring_keys()
 
-            # Key is within both 3-day and 1-day windows → 2 notifications
-            assert count == 2
-            assert bot.send_message.await_count == 2
+            # A key 1 day from expiry must get exactly ONE reminder this run, and
+            # the text must state the real remaining time (1 day), not a higher
+            # threshold like "3 days".
+            assert count == 1
+            assert bot.send_message.await_count == 1
+            message = bot.send_message.await_args[0][1]
+            assert "1 день" in message
+            assert "3 дня" not in message and "3 дней" not in message
+
+            # Both thresholds are recorded as handled, so a second run is silent.
+            second = await service.notify_expiring_keys()
+            assert second == 0
+            assert bot.send_message.await_count == 1
         finally:
             await db.close()
 

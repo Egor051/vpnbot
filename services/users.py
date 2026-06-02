@@ -1,7 +1,7 @@
 
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 
 from adapters.clock import ClockProvider
 from config.settings import Settings
@@ -139,15 +139,21 @@ class UserService:
     async def set_role(self, actor_user_id: int, target_user_id: int, role: UserRole) -> None:
         """Change a target user's role, enforcing superadmin protections."""
         await self.require_superadmin(actor_user_id)
+        if role == UserRole.BLOCKED_USER:
+            # Blocking must go through block_user() so that the user's keys and
+            # proxy accesses are revoked on the backend. set_role() only flips
+            # the DB role and would otherwise leave live access dangling.
+            raise InvalidOperation("Для блокировки используйте block_user, чтобы отозвать доступ")
         if target_user_id in self.settings.admin_ids and role != UserRole.SUPERADMIN:
             raise InvalidOperation("Нельзя изменить роль superadmin из ADMIN_IDS")
         current = await self.get_user(target_user_id)
         if current.role == UserRole.SUPERADMIN and role != UserRole.SUPERADMIN:
             raise InvalidOperation("Нельзя изменить роль superadmin")
-        blocked_at = self.clock.now() if role == UserRole.BLOCKED_USER else None
+        # role is never BLOCKED_USER here (guarded above), so the role change
+        # always clears any prior block.
         action = "user_unblocked" if role == UserRole.APPROVED_USER and is_blocked_user(current) else "user_role_changed"
         async with self.users.db.transaction():
-            await self.users.set_role(target_user_id, role, self.clock.now(), blocked_at=blocked_at)
+            await self.users.set_role(target_user_id, role, self.clock.now(), blocked_at=None)
             await self.audit.write(
                 actor_user_id=actor_user_id,
                 action=action,
@@ -155,7 +161,7 @@ class UserService:
                 entity_id=target_user_id,
                 details={"role": role.value},
             )
-        if role in {UserRole.BLOCKED_USER, UserRole.APPROVED_USER, UserRole.PENDING_USER}:
+        if role in {UserRole.APPROVED_USER, UserRole.PENDING_USER}:
             await self.clear_user_state(target_user_id)
 
     async def approve_access_request_user(
@@ -277,27 +283,37 @@ class UserService:
             VpnKeyStatus.PENDING_DELETE,
             VpnKeyStatus.DELETE_FAILED,
         }
-        processed_success_ids: set[int] = set()
+        succeeded_ids: set[int] = set()
+        failed_ids: set[int] = set()
         while True:
             keys = await self._vpn_keys.list_by_owner_statuses(target_user_id, statuses, limit=500)
             if not keys:
                 return
-            for key in keys:
-                if key.id in processed_success_ids:
-                    errors.append(KeyOperationError(key.id, key.key_type, "Ключ застрял в активном статусе после отзыва (stuck in re-list)"))
-                    continue
+            # Attempt every key that has not yet been tried this run. A single
+            # backend failure must NOT abort revocation of the remaining keys —
+            # otherwise a user stays blocked at the bot level with live VPN keys.
+            pending = [key for key in keys if key.id not in succeeded_ids and key.id not in failed_ids]
+            if not pending:
+                # Remaining keys were all attempted but still surface in the
+                # active-status list. Report keys we revoked yet remain active as
+                # stuck; failed keys were already reported once.
+                for key in keys:
+                    if key.id in succeeded_ids:
+                        errors.append(KeyOperationError(key.id, key.key_type, "Ключ застрял в активном статусе после отзыва (stuck in re-list)"))
+                return
+            for key in pending:
                 revoker = self._key_revokers.get(key.key_type)
                 if revoker is None:
+                    failed_ids.add(key.id)
                     errors.append(KeyOperationError(key.id, key.key_type, "Нет сервиса для отзыва ключа"))
                     continue
                 try:
                     await revoker(actor_user_id, key.id)
                     revoked_key_ids.append(key.id)
-                    processed_success_ids.add(key.id)
+                    succeeded_ids.add(key.id)
                 except Exception as exc:
+                    failed_ids.add(key.id)
                     errors.append(KeyOperationError(key.id, key.key_type, str(exc)))
-            if errors:
-                return
 
     async def _revoke_all_proxy_accesses(
         self,
@@ -317,27 +333,31 @@ class UserService:
             ProxyAccessStatus.PENDING_DELETE,
             ProxyAccessStatus.DELETE_FAILED,
         }
-        processed_success_ids: set[int] = set()
+        succeeded_ids: set[int] = set()
+        failed_ids: set[int] = set()
         while True:
             accesses = await self._proxy_accesses.list_by_owner_statuses(target_user_id, statuses, limit=500)
             if not accesses:
                 return
-            for access in accesses:
-                if access.id in processed_success_ids:
-                    errors.append(KeyOperationError(access.id, access.access_type, "Прокси-доступ застрял в активном статусе после отзыва (stuck in re-list)"))
-                    continue
+            pending = [access for access in accesses if access.id not in succeeded_ids and access.id not in failed_ids]
+            if not pending:
+                for access in accesses:
+                    if access.id in succeeded_ids:
+                        errors.append(KeyOperationError(access.id, access.access_type, "Прокси-доступ застрял в активном статусе после отзыва (stuck in re-list)"))
+                return
+            for access in pending:
                 revoker = self._proxy_revokers.get(access.access_type)
                 if revoker is None:
+                    failed_ids.add(access.id)
                     errors.append(KeyOperationError(access.id, access.access_type, "Нет сервиса для отзыва прокси-доступа"))
                     continue
                 try:
                     await revoker(actor_user_id, access.id, "hard_block")
                     revoked_proxy_ids.append(access.id)
-                    processed_success_ids.add(access.id)
+                    succeeded_ids.add(access.id)
                 except Exception as exc:
+                    failed_ids.add(access.id)
                     errors.append(KeyOperationError(access.id, access.access_type, str(exc)))
-            if errors:
-                return
 
     async def unblock_user(self, actor_user_id: int, target_user_id: int) -> User:
         """Unblock a user by restoring their approved role."""
@@ -423,7 +443,9 @@ class UserService:
         return await self._vpn_keys.count_by_owners(user_ids)
 
     async def _last_block_revoke_error(self, target_user_id: int) -> tuple[int, str | None]:
-        reader = getattr(self.audit, "recent_for_entity", None)
+        # Use the unchecked internal reader: this is a trusted server-side lookup
+        # (no interactive actor), distinct from the access-gated public method.
+        reader = getattr(self.audit, "recent_for_entity_internal", None)
         if reader is None:
             return 0, None
         items = await reader(
@@ -456,6 +478,12 @@ class UserService:
             requested = datetime.fromisoformat(requested_at)
         except ValueError:
             return False
+        # Normalise to aware UTC so a naive/aware mismatch (e.g. legacy data)
+        # cannot raise TypeError when the two datetimes are compared.
+        if blocked.tzinfo is None:
+            blocked = blocked.replace(tzinfo=timezone.utc)
+        if requested.tzinfo is None:
+            requested = requested.replace(tzinfo=timezone.utc)
         return requested > blocked
 
     async def _write_audit_best_effort(

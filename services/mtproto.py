@@ -88,8 +88,19 @@ class MtProtoService:
         return self._with_current_payload(await self._get_access(access.id))
 
     async def revoke_mtproto_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
-        """Revoke an MTProto proxy access, removing its managed secret when applicable."""
+        """Revoke an MTProto proxy access, removing its managed secret when applicable; requires superadmin."""
         await self.users.require_superadmin(actor_user_id)
+        return await self._revoke_mtproto_proxy(actor_user_id, access_id, reason)
+
+    async def revoke_mtproto_proxy_system(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
+        """Revoke without a role check — for trusted callers (e.g. block_user).
+
+        The caller is responsible for authorising the operation. *actor_user_id*
+        is recorded as the revoker for audit/attribution purposes.
+        """
+        return await self._revoke_mtproto_proxy(actor_user_id, access_id, reason)
+
+    async def _revoke_mtproto_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
         access = await self._get_access(access_id)
         if access.access_type != ProxyAccessType.MTPROTO:
             raise InvalidOperation("Это не MTProto-доступ")
