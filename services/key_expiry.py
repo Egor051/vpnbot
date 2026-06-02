@@ -77,14 +77,26 @@ class KeyExpiryService:
             return 0
         now = self.clock.now()
         count = 0
-        for days in self.notify_days:
+        notified_this_run: set[int] = set()
+        # Ascending so a key gets a single reminder at the *smallest* threshold it
+        # currently crosses, and the message states its real remaining time — never
+        # a contradictory "expires in 7 days" for a key that actually expires
+        # tomorrow, and never two reminders for the same key in one run.
+        for days in sorted(self.notify_days):
             deadline = _add_days(now, days)
             keys = await self.vpn_keys.list_not_notified_expiring(now, deadline, days)
             for key in keys:
+                if key.id in notified_this_run:
+                    # Already reminded at a smaller threshold this run; record this
+                    # larger threshold as handled so it never re-fires later.
+                    await self.vpn_keys.mark_expiry_notified(key.id, days)
+                    continue
+                remaining = self._remaining_days(now, key.expires_at)
                 try:
-                    await self._notify_owner_expiring_soon(key, days)
+                    await self._notify_owner_expiring_soon(key, remaining)
                     # mark_expiry_notified is called only if send succeeded
                     await self.vpn_keys.mark_expiry_notified(key.id, days)
+                    notified_this_run.add(key.id)
                     count += 1
                 except Exception:
                     logger.warning(
@@ -95,6 +107,22 @@ class KeyExpiryService:
                         exc_info=True,
                     )
         return count
+
+    @staticmethod
+    def _remaining_days(now: str, expires_at: str | None) -> int:
+        """Return the whole number of days left until expiry (>= 1)."""
+        if not expires_at:
+            return 1
+        try:
+            now_dt = datetime.fromisoformat(now)
+            exp_dt = datetime.fromisoformat(expires_at)
+        except ValueError:
+            return 1
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+        return max(1, round((exp_dt - now_dt).total_seconds() / 86400))
 
     async def _notify_owner_expiring_soon(self, key: VpnKey, days: int) -> None:
         if self.bot is None:

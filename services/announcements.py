@@ -280,6 +280,13 @@ class AnnouncementService:
                         logger.warning("Skipping announcement recipient with non-private chat id=%s", delivery.user_id)
                         await self.announcements.mark_delivery(batch.id, delivery.user_id, "skipped", now, "non-private chat id")
                         continue
+                    # Recipients are snapshotted when the batch is created; for
+                    # scheduled/resumed batches a user may have been blocked or
+                    # demoted in the meantime, so re-check eligibility at send time.
+                    if not await self.users_repo.is_announcement_recipient(delivery.user_id):
+                        logger.info("Skipping announcement recipient no longer eligible id=%s", delivery.user_id)
+                        await self.announcements.mark_delivery(batch.id, delivery.user_id, "skipped", now, "recipient no longer eligible")
+                        continue
                     sent, error = await self._copy_message(bot, delivery.user_id, batch.from_chat_id, batch.message_id)
                     if sent:
                         await self.announcements.mark_delivery(batch.id, delivery.user_id, "sent", now)

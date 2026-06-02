@@ -210,11 +210,19 @@ async def _build_app(
         user_locks=user_locks,
         backend_health=backend_health,
     )
+    # block_user is reachable by moderators, who are neither superadmin nor the
+    # key owner. Wire the *system* revokers (authorisation is already done by
+    # block_user) so a moderator-initiated block actually revokes backend access
+    # instead of failing with AccessDenied and leaving keys live.
     user_service.attach_key_management(
         vpn_keys_repo,
         {
-            VpnKeyType.XRAY: xray_service.revoke_xray_key,
-            VpnKeyType.AWG: awg_service.revoke_awg_key,
+            VpnKeyType.XRAY: lambda actor, key_id: xray_service.revoke_xray_key_system(
+                key_id, actor_user_id=actor, action="xray_key_revoked"
+            ),
+            VpnKeyType.AWG: lambda actor, key_id: awg_service.revoke_awg_key_system(
+                key_id, actor_user_id=actor, action="awg_key_revoked"
+            ),
         },
     )
     proxy_service = ProxyService(accesses=proxy_accesses_repo, users=user_service, settings=settings)
@@ -241,8 +249,24 @@ async def _build_app(
     user_service.attach_proxy_access_management(
         proxy_accesses_repo,
         {
-            ProxyAccessType.SOCKS5: socks5_service.revoke_socks5_proxy,
-            ProxyAccessType.MTPROTO: mtproto_service.revoke_mtproto_proxy,
+            ProxyAccessType.SOCKS5: socks5_service.revoke_socks5_proxy_system,
+            ProxyAccessType.MTPROTO: mtproto_service.revoke_mtproto_proxy_system,
+        },
+    )
+    # Disabling a protocol must revoke each key/access on the backend before the
+    # DB row is removed — otherwise live access is orphaned with no DB trace.
+    protocol_modules_service.attach_purge_handlers(
+        users=user_service,
+        audit=audit_service,
+        vpn_keys=vpn_keys_repo,
+        proxy_accesses=proxy_accesses_repo,
+        key_purgers={
+            VpnKeyType.XRAY: xray_service.delete_xray_key,
+            VpnKeyType.AWG: awg_service.delete_awg_key,
+        },
+        proxy_purgers={
+            ProxyAccessType.SOCKS5: socks5_service.delete_socks5_proxy,
+            ProxyAccessType.MTPROTO: mtproto_service.delete_mtproto_proxy,
         },
     )
     notes_service = NotesService(

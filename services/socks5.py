@@ -145,8 +145,19 @@ class Socks5Service:
         return await self.accesses.list_by_owner(actor_user_id)
 
     async def revoke_socks5_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
-        """Revoke a SOCKS5 proxy access by locking its backend user."""
+        """Revoke a SOCKS5 proxy access by locking its backend user; requires superadmin."""
         await self.users.require_superadmin(actor_user_id)
+        return await self._revoke_socks5_proxy(actor_user_id, access_id, reason)
+
+    async def revoke_socks5_proxy_system(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
+        """Revoke without a role check — for trusted callers (e.g. block_user).
+
+        The caller is responsible for authorising the operation. *actor_user_id*
+        is recorded as the revoker for audit/attribution purposes.
+        """
+        return await self._revoke_socks5_proxy(actor_user_id, access_id, reason)
+
+    async def _revoke_socks5_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
         access = await self._get_access(access_id)
         if access.access_type != ProxyAccessType.SOCKS5:
             raise InvalidOperation("Это не SOCKS5-доступ")

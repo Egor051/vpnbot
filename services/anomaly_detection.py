@@ -66,6 +66,17 @@ class AnomalyDetectionService:
         # When > 0, threshold is checked against this shorter window instead of the full window.
         # Prevents false positives from mobile users whose IPs rotate over time.
         self._concurrent_window_seconds = concurrent_window_seconds
+        # Destructive auto-revoke is only safe when there is a *concurrency*
+        # signal: over the full (default 1h) window a single roaming/mobile user
+        # legitimately accumulates many IPs and would be wrongly revoked. Require
+        # a concurrent window before auto-revoking; otherwise only alert.
+        self._auto_revoke_effective = auto_revoke and concurrent_window_seconds > 0
+        if auto_revoke and not self._auto_revoke_effective:
+            logger.warning(
+                "Anomaly auto-revoke is enabled but ANOMALY_CONCURRENT_WINDOW_SECONDS is not set; "
+                "auto-revoke is disabled (alert-only) to avoid revoking legitimate roaming users. "
+                "Set a concurrent window to enable auto-revoke."
+            )
         self.bot = bot
         self._backend_health = backend_health
         # {key_id: deque of (wall_clock_float, source_ip)}
@@ -196,7 +207,7 @@ class AnomalyDetectionService:
         )
         auto_revoked = False
         revoke_error: str | None = None
-        if self._auto_revoke:
+        if self._auto_revoke_effective:
             try:
                 await self._revoke_key(key)
                 auto_revoked = True

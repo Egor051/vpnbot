@@ -87,7 +87,7 @@ class OffsiteBackupService:
         fernet = Fernet(self._encryption_key.encode())
         try:
             token_ts = fernet.extract_timestamp(encrypted_data)
-        except (InvalidToken, Exception) as exc:
+        except Exception as exc:  # InvalidToken and any malformed-token error
             raise RuntimeError(f"Не удалось прочитать метку времени из бэкапа: {exc}") from exc
 
         age_seconds = time.time() - token_ts
