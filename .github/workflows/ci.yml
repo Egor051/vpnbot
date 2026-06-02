@@ -77,7 +77,7 @@ jobs:
         run: python -m compileall .
 
       - name: Type check with mypy (strict)
-        run: python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/
+        run: python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ main.py init_db.py
 
       - name: Run tests with coverage
         run: python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=60

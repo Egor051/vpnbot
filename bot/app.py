@@ -1,6 +1,7 @@
 
 import asyncio
 import logging
+from contextlib import suppress
 from typing import Any
 
 from aiogram import Bot, Dispatcher
@@ -75,6 +76,20 @@ async def _awg_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> 
 async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, BackendHealth, Services]:
     db = Database(settings.db_path, synchronous=settings.sqlite_synchronous)
     await db.connect()
+    try:
+        return await _build_app(settings, db)
+    except BaseException:
+        # create_app is not atomic: if startup fails after connect() (bootstrap,
+        # admin seeding, reconciliation, …) close the DB so the aiosqlite
+        # connection/background thread is not leaked when startup aborts.
+        with suppress(Exception):
+            await db.close()
+        raise
+
+
+async def _build_app(
+    settings: Settings, db: Database
+) -> tuple[Bot, Dispatcher, Database, BackendHealth, Services]:
     await db.bootstrap()
 
     clock = ClockProvider()
@@ -407,10 +422,10 @@ async def _startup_reconcile_keys(services: Services) -> None:
         socks5_summary,
     )
     any_checked = (
-        xray_summary["checked"]
-        or awg_summary["checked"]
-        or mtproto_summary["checked"]
-        or socks5_summary["checked"]
+        xray_summary.get("checked", 0)
+        or awg_summary.get("checked", 0)
+        or mtproto_summary.get("checked", 0)
+        or socks5_summary.get("checked", 0)
     )
     if any_checked:
         try:

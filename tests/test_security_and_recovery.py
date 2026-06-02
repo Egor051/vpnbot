@@ -114,11 +114,128 @@ def test_settings_drop_pending_updates_defaults_false_and_can_be_enabled(
 
     settings = load_settings()
     assert settings.bot_drop_pending_updates is False
-    assert settings.xray_apply_mode == "restart"
+    assert settings.xray_apply_mode == "api"
 
     monkeypatch.setenv("BOT_DROP_PENDING_UPDATES", "true")
 
     assert load_settings().bot_drop_pending_updates is True
+
+
+def test_settings_repr_does_not_leak_bot_token_or_proxy_password(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "123456789:super-secret-bot-token-value")
+    monkeypatch.setenv("ADMIN_IDS", "1")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
+    monkeypatch.setenv("DEFAULT_PROXY_PASSWORD", "proxy-password-secret-value")
+
+    rendered = repr(load_settings())
+
+    assert "super-secret-bot-token-value" not in rendered
+    assert "proxy-password-secret-value" not in rendered
+
+
+def test_create_app_closes_db_when_startup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import bot.app as app_module
+
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("ADMIN_IDS", "1")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
+    settings = load_settings()
+
+    closed: list[bool] = []
+    real_close = Database.close
+
+    async def tracking_close(self: Database) -> None:
+        closed.append(True)
+        await real_close(self)
+
+    async def boom(_settings: object, _db: object) -> None:
+        raise RuntimeError("startup failed")
+
+    monkeypatch.setattr(Database, "close", tracking_close)
+    monkeypatch.setattr(app_module, "_build_app", boom)
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        asyncio.run(app_module.create_app(settings))
+
+    # create_app must release the DB connection it opened before the failure.
+    assert closed == [True]
+
+
+def test_validate_awg_ready_requires_server_public_key_and_port() -> None:
+    base = _settings()
+    base.validate_awg_ready()  # baseline is complete
+
+    with pytest.raises(SettingsError, match="AWG_SERVER_PUBLIC_KEY"):
+        replace(base, awg_server_public_key="").validate_awg_ready()
+
+    with pytest.raises(SettingsError, match="AWG_ENDPOINT_PORT"):
+        replace(base, awg_endpoint_port=0).validate_awg_ready()
+
+
+def test_settings_reject_non_positive_admin_ids(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("ADMIN_IDS", "-5")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
+
+    with pytest.raises(SettingsError, match="ADMIN_IDS"):
+        load_settings()
+
+
+def test_settings_reject_control_chars_in_network_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("ADMIN_IDS", "1")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
+    monkeypatch.setenv("XRAY_PUBLIC_HOST", "vpn.example.com\nInjected: line")
+
+    with pytest.raises(SettingsError, match="XRAY_PUBLIC_HOST"):
+        load_settings()
+
+
+def test_settings_blank_health_host_falls_back_to_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("ADMIN_IDS", "1")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
+    monkeypatch.setenv("HEALTH_HOST", "")
+
+    assert load_settings().health_host == "127.0.0.1"
+
+
+def test_settings_reject_malformed_fernet_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("ADMIN_IDS", "1")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
+    # Right length and charset, but does not decode to a 32-byte Fernet key.
+    monkeypatch.setenv("OFFSITE_BACKUP_ENCRYPTION_KEY", "A" * 44)
+
+    with pytest.raises(SettingsError, match="OFFSITE_BACKUP_ENCRYPTION_KEY"):
+        load_settings()
+
+
+def test_settings_accept_valid_fernet_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import base64
+    import os as _os
+
+    # A Fernet key is 32 random bytes encoded as URL-safe base64 (44 chars).
+    valid_key = base64.urlsafe_b64encode(_os.urandom(32)).decode()
+
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("ADMIN_IDS", "1")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
+    monkeypatch.setenv("OFFSITE_BACKUP_ENCRYPTION_KEY", valid_key)
+
+    assert load_settings().offsite_backup_encryption_key == valid_key
 
 
 def test_settings_reject_invalid_xray_apply_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

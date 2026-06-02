@@ -1,4 +1,6 @@
 
+import base64
+import binascii
 import os
 import ipaddress
 import re
@@ -20,6 +22,10 @@ def _required(name: str) -> str:
 
 
 def _optional(name: str, default: str = "") -> str:
+    # NOTE: an explicitly empty value (``VAR=``) intentionally yields "" rather
+    # than *default* — several call sites rely on that to fail closed (e.g. the
+    # managed MTProto paths reject a blanked value via _non_empty()). Values that
+    # must keep a safe fallback when blanked apply ``or default`` at the call site.
     return os.getenv(name, default).strip()
 
 
@@ -81,6 +87,17 @@ def _non_empty(name: str, value: str) -> str:
     return value
 
 
+def _no_control_chars(name: str, value: str) -> str:
+    """Reject control characters in values that flow into generated configs/links.
+
+    A newline injected into e.g. XRAY_SNI or AWG_ENDPOINT_HOST could break the
+    Xray config.json / WireGuard config or the generated client URI.
+    """
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        raise SettingsError(f"{name} содержит недопустимые управляющие символы")
+    return value
+
+
 _SOCKS5_FORBIDDEN_PREFIXES = frozenset({"", "root", "admin", "user", "test", "ubuntu", "www", "daemon"})
 
 
@@ -120,13 +137,20 @@ def _fernet_key(name: str) -> str:
     value = _optional(name)
     if not value:
         return ""
-    import re
-    if len(value) != 44 or not re.fullmatch(r"[A-Za-z0-9_\-=]+", value):
-        raise SettingsError(
-            f"{name} должен быть корректным Fernet-ключом "
-            "(44-символьный URL-safe base64, сгенерируйте командой: "
-            'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")'
-        )
+    error = SettingsError(
+        f"{name} должен быть корректным Fernet-ключом "
+        "(44-символьный URL-safe base64, сгенерируйте командой: "
+        'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")'
+    )
+    if len(value) != 44 or re.fullmatch(r"[A-Za-z0-9_\-=]+", value) is None:
+        raise error
+    # A real Fernet key is 32 raw bytes encoded as URL-safe base64; verify the
+    # bytes decode and have the right length instead of trusting the charset only.
+    try:
+        if len(base64.urlsafe_b64decode(value)) != 32:
+            raise error
+    except (ValueError, binascii.Error) as exc:
+        raise error from exc
     return value
 
 
@@ -137,9 +161,12 @@ def _admin_ids(raw: str) -> frozenset[int]:
         if not item:
             continue
         try:
-            values.add(int(item))
+            parsed = int(item)
         except ValueError as exc:
             raise SettingsError("ADMIN_IDS должен быть списком Telegram ID через запятую") from exc
+        if parsed <= 0:
+            raise SettingsError("ADMIN_IDS: все Telegram ID должны быть положительными числами")
+        values.add(parsed)
     if not values:
         raise SettingsError("ADMIN_IDS не должен быть пустым")
     return frozenset(values)
@@ -182,7 +209,7 @@ def _ipv4_address_in_network(name: str, value: str, network_value: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    bot_token: str
+    bot_token: str = field(repr=False)
     admin_ids: frozenset[int]
 
     db_path: Path
@@ -223,7 +250,7 @@ class Settings:
     default_proxy_host: str
     default_proxy_port: int | None
     default_proxy_login: str
-    default_proxy_password: str
+    default_proxy_password: str = field(repr=False)
     default_proxy_note: str
     audit_retention_days: int
     config_backup_keep_last: int
@@ -337,11 +364,14 @@ class Settings:
             name
             for name, value in {
                 "AWG_ENDPOINT_HOST": self.awg_endpoint_host,
+                "AWG_SERVER_PUBLIC_KEY": self.awg_server_public_key,
             }.items()
             if not value
         ]
         if missing:
             raise SettingsError("Для создания AWG-ключа не заданы: " + ", ".join(missing))
+        if not 1 <= self.awg_endpoint_port <= 65535:
+            raise SettingsError("Для создания AWG-ключа AWG_ENDPOINT_PORT должен быть в диапазоне 1–65535")
 
 
 def load_settings(env_path: str | Path | None = None) -> Settings:
@@ -407,21 +437,23 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         db_path=Path(_optional("DB_PATH", "/opt/vpn-service/data/vpn.db")),
         sqlite_synchronous=_choice("SQLITE_SYNCHRONOUS", "FULL", {"full", "normal", "extra"}).upper(),
         log_dir=Path(_optional("LOG_DIR", "/opt/vpn-service/logs")),
-        bot_lock_path=Path(_optional("BOT_LOCK_PATH", "/run/vpn-bot.lock")),
+        bot_lock_path=Path(_optional("BOT_LOCK_PATH", "/run/vpn-bot/vpn-bot.lock")),
         bot_drop_pending_updates=_bool("BOT_DROP_PENDING_UPDATES", False),
         xray_config_path=Path(_optional("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")),
         xray_service_name=_optional("XRAY_SERVICE_NAME", "xray"),
-        xray_apply_mode=_choice("XRAY_APPLY_MODE", "restart", {"reload", "restart", "api"}),
+        xray_apply_mode=_choice("XRAY_APPLY_MODE", "api", {"reload", "restart", "api"}),
         xray_inbound_tag=_optional("XRAY_INBOUND_TAG"),
-        xray_public_host=_optional("XRAY_PUBLIC_HOST") or _optional("XRAY_SERVER_ADDRESS"),
+        xray_public_host=_no_control_chars(
+            "XRAY_PUBLIC_HOST", _optional("XRAY_PUBLIC_HOST") or _optional("XRAY_SERVER_ADDRESS")
+        ),
         xray_public_port=(
             _int_range("XRAY_PUBLIC_PORT" if _optional("XRAY_PUBLIC_PORT") else "XRAY_SERVER_PORT", 443, 1, 65535)
             if xray_port
             else 443
         ),
         xray_reality_public_key=_optional("XRAY_REALITY_PUBLIC_KEY") or _optional("XRAY_PUBLIC_KEY"),
-        xray_sni=_optional("XRAY_SNI") or _optional("XRAY_SERVER_NAME"),
-        xray_flow=_optional("XRAY_FLOW", "xtls-rprx-vision"),
+        xray_sni=_no_control_chars("XRAY_SNI", _optional("XRAY_SNI") or _optional("XRAY_SERVER_NAME")),
+        xray_flow=_no_control_chars("XRAY_FLOW", _optional("XRAY_FLOW", "xtls-rprx-vision")),
         xray_fingerprint=_choice(
             "XRAY_FINGERPRINT",
             "chrome",
@@ -436,12 +468,12 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         awg_interface=_optional("AWG_INTERFACE", "awg0"),
         awg_network=awg_network,
         awg_server_address=awg_server_address,
-        awg_endpoint_host=_optional("AWG_ENDPOINT_HOST"),
+        awg_endpoint_host=_no_control_chars("AWG_ENDPOINT_HOST", _optional("AWG_ENDPOINT_HOST")),
         awg_endpoint_port=_int_range("AWG_ENDPOINT_PORT", 0, 0, 65535),
         awg_server_public_key=_optional("AWG_SERVER_PUBLIC_KEY"),
-        awg_client_dns=awg_dns,
+        awg_client_dns=_no_control_chars("AWG_DNS", awg_dns),
         awg_mtu=_optional_int_range("AWG_MTU", 576, 1500),
-        awg_allowed_ips=_optional("AWG_ALLOWED_IPS", "0.0.0.0/0, ::/0"),
+        awg_allowed_ips=_no_control_chars("AWG_ALLOWED_IPS", _optional("AWG_ALLOWED_IPS", "0.0.0.0/0, ::/0")),
         awg_persistent_keepalive=_int_range("AWG_PERSISTENT_KEEPALIVE", 25, 0, 86400),
         awg_use_preshared_key=_bool("AWG_USE_PRESHARED_KEY", True),
         awg_stats_interval=_int_range("AWG_STATS_INTERVAL", 60, 0, 3600),
@@ -454,7 +486,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         audit_retention_days=_int_range("AUDIT_RETENTION_DAYS", 180, 0, 3650),
         config_backup_keep_last=_int_range("CONFIG_BACKUP_KEEP_LAST", 20, 1, 500),
         socks5_enabled=socks5_enabled,
-        socks5_host=socks5_host,
+        socks5_host=_no_control_chars("SOCKS5_HOST", socks5_host),
         socks5_port=socks5_port,
         socks5_login_prefix=socks5_login_prefix,
         socks5_system_user_shell=_optional("SOCKS5_SYSTEM_USER_SHELL", "/usr/sbin/nologin"),
@@ -463,7 +495,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         socks5_note=_optional("SOCKS5_NOTE", "SOCKS5 Dante proxy on VDS"),
         mtproto_enabled=mtproto_enabled,
         mtproto_mode=mtproto_mode,
-        mtproto_host=mtproto_host,
+        mtproto_host=_no_control_chars("MTPROTO_HOST", mtproto_host),
         mtproto_port=_int_range("MTPROTO_PORT", 8443, 1, 65535),
         mtproto_secret=mtproto_secret,
         mtproto_public_name=_optional("MTPROTO_PUBLIC_NAME", "Telegram MTProto Proxy"),
@@ -493,7 +525,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         mtproto_rollback_on_apply_failure=_bool("MTPROTO_ROLLBACK_ON_APPLY_FAILURE", True),
         mtproto_keep_last_backups=_int_range("MTPROTO_KEEP_LAST_BACKUPS", 10, 0, 1000),
         health_port=_optional_int_range("HEALTH_PORT", 1, 65535),
-        health_host=_optional("HEALTH_HOST", "127.0.0.1"),
+        health_host=_optional("HEALTH_HOST", "127.0.0.1") or "127.0.0.1",
         key_expiry_check_interval=_int_range("KEY_EXPIRY_CHECK_INTERVAL", 1800, 0, 86400),
         key_expiry_notify_days=_int_list_positive("KEY_EXPIRY_NOTIFY_DAYS", ()),
         key_max_trial_days=_int_range("KEY_MAX_TRIAL_DAYS", 365, 1, 3650),

@@ -45,3 +45,15 @@ def test_single_instance_lock_released_after_context(tmp_path: Path) -> None:
 
 def test_single_instance_error_is_runtime_error() -> None:
     assert issubclass(SingleInstanceError, RuntimeError)
+
+
+def test_single_instance_non_posix_raises_without_creating_lock_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os, "name", "nt")
+    lock_path = tmp_path / "test.lock"
+    with pytest.raises(SingleInstanceError):
+        with SingleInstanceLock(lock_path):
+            pass  # pragma: no cover
+    assert not lock_path.exists()

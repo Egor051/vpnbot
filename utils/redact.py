@@ -35,3 +35,12 @@ def redact(value: str, limit: int = 180) -> str:
 def redact_value(value: str) -> str:
     """Redact secret-like patterns without truncation, for individual field values."""
     return _apply_patterns(value.replace("\r", " ").replace("\n", " ").strip())
+
+
+def redact_text(text: str) -> str:
+    """Redact secret-like patterns while preserving newlines.
+
+    Used by the logging formatter so secrets are masked without collapsing
+    multi-line records (e.g. tracebacks) onto a single line.
+    """
+    return _apply_patterns(text)

@@ -77,6 +77,7 @@ def test_xray_invalid_network_type_rejected(monkeypatch: pytest.MonkeyPatch, tmp
 
 def test_xray_invalid_public_key_rejected_when_ready(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("XRAY_APPLY_MODE", "reload")
     monkeypatch.setenv("XRAY_PUBLIC_HOST", "vpn.example.com")
     monkeypatch.setenv("XRAY_REALITY_PUBLIC_KEY", "bad key!")
     monkeypatch.setenv("XRAY_SNI", "example.com")
@@ -89,6 +90,7 @@ def test_xray_invalid_public_key_rejected_when_ready(monkeypatch: pytest.MonkeyP
 
 def test_xray_current_valid_values_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("XRAY_APPLY_MODE", "reload")
     monkeypatch.setenv("XRAY_PUBLIC_HOST", "vpn.example.com")
     monkeypatch.setenv("XRAY_REALITY_PUBLIC_KEY", "abc_DEF-123")
     monkeypatch.setenv("XRAY_SNI", "example.com")
@@ -163,6 +165,38 @@ def test_sqlite_and_log_files_are_private_on_posix(tmp_path: Path) -> None:
     setup_logging(tmp_path / "logs")
     try:
         assert stat.S_IMODE((tmp_path / "logs" / "bot.log").stat().st_mode) == 0o600
+    finally:
+        logging.getLogger().handlers.clear()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX modes are Linux-only")
+def test_rotated_log_files_stay_private_on_rollover(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    setup_logging(log_dir)
+    try:
+        handler = next(
+            h for h in logging.getLogger().handlers if hasattr(h, "doRollover")
+        )
+        handler.doRollover()  # type: ignore[attr-defined]
+        logging.getLogger().info("after rollover")
+        for path in log_dir.glob("bot.log*"):
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
+    finally:
+        logging.getLogger().handlers.clear()
+
+
+def test_logging_formatter_redacts_secret_tokens(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    setup_logging(log_dir)
+    try:
+        logging.getLogger("test.redact").warning(
+            "bot_token=123456789:AAFakeFakeFakeFakeFakeFakeFakeFakeFak leaked"
+        )
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        contents = (log_dir / "bot.log").read_text(encoding="utf-8")
+        assert "AAFakeFakeFakeFakeFakeFakeFakeFakeFak" not in contents
+        assert "***" in contents
     finally:
         logging.getLogger().handlers.clear()
 
