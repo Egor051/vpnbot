@@ -37,8 +37,10 @@ from aiogram.types import BufferedInputFile
 from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text
 from bot.pagination import MAX_PAGE, page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
+from bot.middlewares.access import BLOCKED_CALLBACK_TEXT
 from bot.rate_limit import RateLimiter
 from i18n import t
+from models.access import is_blocked_user
 from models.enums import AuditEntityType, VpnKeyType
 from services.errors import AccessDenied, NotFound
 
@@ -418,12 +420,15 @@ async def open_key(callback: CallbackQuery, services: Services) -> None:
     try:
         key_id, owner_context, page_context = _parse_key_context(callback.data, "key:open")
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
+        owner_context = owner_context or _admin_owner_context(key, callback.from_user.id)
+        if owner_context is not None and owner_context != key.owner_user_id:
+            raise AccessDenied(t("invalid_callback_btn"))
         await safe_edit_message_text(
             callback.message,
             key_detail_text(key, viewer_user_id=callback.from_user.id),
             reply_markup=key_actions_keyboard(
                 key,
-                owner_user_id=owner_context or _admin_owner_context(key, callback.from_user.id),
+                owner_user_id=owner_context,
                 page=page_context,
             ),
         )
@@ -469,7 +474,7 @@ async def show_key_config(callback: CallbackQuery, services: Services, rate_limi
 
 
 @router.callback_query(F.data.startswith("key:stats:"))
-async def show_key_stats(callback: CallbackQuery, services: Services) -> None:
+async def show_key_stats(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
     """Refresh and show traffic statistics for the selected key."""
     if not await ensure_private_callback(callback):
         return
@@ -480,6 +485,7 @@ async def show_key_stats(callback: CallbackQuery, services: Services) -> None:
         if key_id is None:
             await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
             return
+        rate_limiter.check(callback.from_user.id, "key_stats", 5)
         await safe_callback_answer(callback, t("updating_stats"))
         view = await services.traffic_stats.refresh_for_actor(callback.from_user.id, key_id)
         owner = view.owner
@@ -745,6 +751,10 @@ async def trial_request_start(callback: CallbackQuery, state: FSMContext, servic
     if callback.from_user is None or callback.message is None:
         return
     try:
+        user = await services.users.get_user(callback.from_user.id)
+        if is_blocked_user(user):
+            await safe_callback_answer(callback, BLOCKED_CALLBACK_TEXT, show_alert=True)
+            return
         can = await services.trial_access.can_request_trial(callback.from_user.id)
         if not can:
             await safe_callback_answer(callback, t("trial_already_used"), show_alert=True)
@@ -770,6 +780,11 @@ async def trial_request_proto(callback: CallbackQuery, state: FSMContext, servic
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
+        user = await services.users.get_user(callback.from_user.id)
+        if is_blocked_user(user):
+            await state.clear()
+            await safe_callback_answer(callback, BLOCKED_CALLBACK_TEXT, show_alert=True)
+            return
         rate_limiter.check(callback.from_user.id, "trial_request", 300)
         proto = callback.data.rsplit(":", 1)[-1]
         key_type = VpnKeyType(proto)

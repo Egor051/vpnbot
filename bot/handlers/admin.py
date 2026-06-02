@@ -59,6 +59,7 @@ from models.access import is_blocked_user
 from models.enums import AccessRequestStatus, UserRole, VpnKeyType
 from services.errors import AccessDenied
 from services.user_locks import UserLockManager
+from utils.formatting import h
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -450,6 +451,8 @@ async def admin_approve(callback: CallbackQuery, services: Services, bot: Bot) -
         return
     await safe_callback_answer(callback)
     try:
+        # Authorization is enforced by services.access.get_request() below
+        # (require_moderator_or_admin) — see access_approval.py.
         request_id = int(callback.data.rsplit(":", 1)[-1])
         request = await services.access.get_request(callback.from_user.id, request_id)
         if callback.message:
@@ -474,6 +477,7 @@ async def admin_reject(callback: CallbackQuery, services: Services, bot: Bot) ->
         return
     await safe_callback_answer(callback)
     try:
+        # Authorization is enforced by services.access.get_request() below.
         request_id = int(callback.data.rsplit(":", 1)[-1])
         request = await services.access.get_request(callback.from_user.id, request_id)
         if callback.message:
@@ -498,6 +502,8 @@ async def admin_access_decision_confirm(callback: CallbackQuery, services: Servi
         return
     await safe_callback_answer(callback, t("processing"))
     try:
+        # Authorization is enforced by services.access.get_request()/approve()/
+        # reject() below (all call require_moderator_or_admin).
         _admin, action, _confirm, raw_request_id = callback.data.split(":", 3)
         request_id = int(raw_request_id)
         current = await services.access.get_request(callback.from_user.id, request_id)
@@ -531,6 +537,7 @@ async def admin_users(callback: CallbackQuery, services: Services) -> None:
         return
     page = _page_from_callback(callback.data)
     try:
+        # Authorization enforced by services.users.count_users()/list_users().
         total = await services.users.count_users(callback.from_user.id)
         total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
         items = await services.users.list_users(
@@ -588,14 +595,18 @@ async def admin_user_approve(callback: CallbackQuery, services: Services, rate_l
         return
     await safe_callback_answer(callback, t("processing"))
     try:
+        actor = await require_superadmin(services, callback.from_user.id)
         if rate_limiter is not None:
             rate_limiter.check(callback.from_user.id, "admin_user_approve", 5)
-        user_id = int(callback.data.rsplit(":", 1)[-1])
+        user_id = parse_int_callback(callback.data.rsplit(":", 1)[-1])
+        if user_id is None:
+            await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
+            return
         await services.users.set_role(callback.from_user.id, user_id, UserRole.APPROVED_USER)
         if callback.message:
             user = await services.users.get_user(user_id)
             has_used_trial = not await services.trial_access.can_request_trial(user_id)
-            await safe_edit_message_text(callback.message, t("user_approved_msg"), reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial))
+            await safe_edit_message_text(callback.message, t("user_approved_msg"), reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -609,9 +620,13 @@ async def admin_set_moderator(callback: CallbackQuery, services: Services, rate_
         return
     await safe_callback_answer(callback, t("processing"))
     try:
+        actor = await require_superadmin(services, callback.from_user.id)
         if rate_limiter is not None:
             rate_limiter.check(callback.from_user.id, "admin_set_moderator", 10)
-        user_id = int(callback.data.rsplit(":", 1)[-1])
+        user_id = parse_int_callback(callback.data.rsplit(":", 1)[-1])
+        if user_id is None:
+            await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
+            return
         target = await services.users.get_user(user_id)
         if target.role == UserRole.MODERATOR:
             new_role = UserRole.APPROVED_USER
@@ -623,7 +638,7 @@ async def admin_set_moderator(callback: CallbackQuery, services: Services, rate_
         if callback.message:
             user = await services.users.get_user(user_id)
             has_used_trial = not await services.trial_access.can_request_trial(user_id)
-            await safe_edit_message_text(callback.message, result_text, reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial))
+            await safe_edit_message_text(callback.message, result_text, reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -780,6 +795,8 @@ async def admin_user_keys(callback: CallbackQuery, services: Services) -> None:
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
+        # Authorization enforced by load_keys_page -> count_for_actor/list_for_actor
+        # (superadmin required to view another user's keys).
         _, _, raw_user_id, raw_page = callback.data.split(":", 3)
         user_id = int(raw_user_id)
         page = max(int(raw_page), 0)
@@ -816,6 +833,7 @@ async def admin_audit(callback: CallbackQuery, services: Services) -> None:
         return
     page = _page_from_callback(callback.data)
     try:
+        # Authorization enforced by services.audit.count_all()/recent() (superadmin).
         total = await services.audit.count_all(callback.from_user.id)
         total_pages = max(1, (total + AUDIT_PAGE_SIZE - 1) // AUDIT_PAGE_SIZE)
         items = await services.audit.recent(actor_user_id=callback.from_user.id, limit=AUDIT_PAGE_SIZE + 1, offset=page_offset(page, AUDIT_PAGE_SIZE))
@@ -1450,7 +1468,7 @@ async def admin_trial_reset(callback: CallbackQuery, services: Services) -> None
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        await require_superadmin(services, callback.from_user.id)
+        actor = await require_superadmin(services, callback.from_user.id)
         user_id = int(callback.data.rsplit(":", 1)[-1])
         await safe_callback_answer(callback, t("trial_quota_resetting"))
         await services.trial_access.admin_reset_trial_quota(callback.from_user.id, user_id)
@@ -1458,7 +1476,7 @@ async def admin_trial_reset(callback: CallbackQuery, services: Services) -> None
         await safe_edit_message_text(
             callback.message,
             t("trial_quota_reset"),
-            reply_markup=user_actions_keyboard(user, has_used_trial=False),
+            reply_markup=user_actions_keyboard(user, has_used_trial=False, actor_role=actor.role),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1478,7 +1496,7 @@ async def admin_edit_user_note(callback: CallbackQuery, state: FSMContext, servi
         user = await services.users.get_user(user_id)
         await state.set_state(AdminEditUserNoteStates.waiting_note)
         await state.update_data(target_user_id=user_id, note_prompt_msg_id=callback.message.message_id)
-        current = t("admin_unote_current", note=user.note) if user.note else ""
+        current = t("admin_unote_current", note=h(user.note)) if user.note else ""
         await safe_edit_message_text(
             callback.message,
             t("admin_unote_prompt", user_id=user_id, current=current),
@@ -1496,7 +1514,7 @@ async def admin_edit_user_note_input(message: Message, state: FSMContext, servic
     if not await ensure_private_message(message, t("admin_private_only_text")):
         return
     try:
-        await require_superadmin(services, message.from_user.id)
+        actor = await require_superadmin(services, message.from_user.id)
         data = await state.get_data()
         user_id = int(data["target_user_id"])
         note_prompt_msg_id = data.get("note_prompt_msg_id")
@@ -1511,7 +1529,7 @@ async def admin_edit_user_note_input(message: Message, state: FSMContext, servic
         has_used_trial = not await services.trial_access.can_request_trial(user_id)
         await message.answer(
             user_card_text(user, keys, stats_by_key_id, viewer_user_id=message.from_user.id),
-            reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial),
+            reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role),
         )
     except ValueError as exc:
         await answer_message_error(message, exc)

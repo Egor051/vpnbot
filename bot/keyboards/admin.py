@@ -165,9 +165,15 @@ def user_actions_keyboard(
     user: User,
     *,
     has_used_trial: bool = False,
-    actor_role: UserRole = UserRole.SUPERADMIN,
+    actor_role: UserRole = UserRole.MODERATOR,
 ) -> InlineKeyboardMarkup:
-    """Build the user management actions keyboard scoped to the actor's role."""
+    """Build the user management actions keyboard scoped to the actor's role.
+
+    The ``actor_role`` default is intentionally the least-privileged role that
+    still has a user card (MODERATOR): if a caller forgets to pass the real
+    actor role, the keyboard fails closed and hides superadmin-only actions
+    instead of exposing them.
+    """
     rows: list[list[InlineKeyboardButton]] = []
     blocked = is_blocked_user(user)
     is_moderator_actor = actor_role == UserRole.MODERATOR

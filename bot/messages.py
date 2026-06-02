@@ -120,6 +120,7 @@ def cap_telegram_html(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
     last_gt = snippet.rfind(">")
     if last_lt > last_gt:
         snippet = snippet[:last_lt].rstrip()
+    snippet = _trim_partial_entity(snippet)
     closing = _closing_tags(snippet)
     if len(snippet) + len(closing) + len(suffix) > limit:
         snippet = snippet[: max(limit - len(closing) - len(suffix), 0)].rstrip()
@@ -127,13 +128,31 @@ def cap_telegram_html(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
         last_gt = snippet.rfind(">")
         if last_lt > last_gt:
             snippet = snippet[:last_lt].rstrip()
+        snippet = _trim_partial_entity(snippet)
         closing = _closing_tags(snippet)
     return snippet + closing + suffix
 
 
+def _trim_partial_entity(text: str) -> str:
+    """Drop a trailing HTML entity that was cut in half (e.g. ``&amp;`` -> ``&am``).
+
+    Only a short dangling ``&...`` with no terminating ``;`` is removed, so a
+    bare ampersand earlier in the text is left untouched.
+    """
+    amp = text.rfind("&")
+    if amp == -1 or ";" in text[amp:]:
+        return text
+    if len(text) - amp <= 10:  # max length of a real entity (&#x1F600; etc.)
+        return text[:amp].rstrip()
+    return text
+
+
 def _closing_tags(text: str) -> str:
+    # Telegram-supported simple tags emitted by the formatters. ``<a>`` is
+    # intentionally omitted: it carries attributes (``<a href=...>``) so it
+    # cannot match this pattern, and no formatter currently emits links.
     stack: list[str] = []
-    for match in re.finditer(r"</?(b|code|pre)>", text):
+    for match in re.finditer(r"</?(b|i|u|s|code|pre|blockquote)>", text):
         tag = match.group(1)
         if match.group(0).startswith("</"):
             if tag in stack:
