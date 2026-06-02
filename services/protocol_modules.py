@@ -117,7 +117,8 @@ class ProtocolModulesService:
             raise InvalidOperation(
                 "Очистка протокола не подключена: невозможно безопасно отозвать доступ на бэкенде."
             )
-        statuses = set(VpnKeyStatus) - {VpnKeyStatus.DELETED}
+        statuses: set[VpnKeyStatus] = set(VpnKeyStatus)
+        statuses.discard(VpnKeyStatus.DELETED)
         # Collect ids up-front so deletions don't disturb keyset pagination.
         ids: list[int] = []
         after_id = 0
@@ -149,7 +150,8 @@ class ProtocolModulesService:
             raise InvalidOperation(
                 "Очистка протокола не подключена: невозможно безопасно отозвать доступ на бэкенде."
             )
-        statuses = set(ProxyAccessStatus) - {ProxyAccessStatus.DELETED}
+        statuses: set[ProxyAccessStatus] = set(ProxyAccessStatus)
+        statuses.discard(ProxyAccessStatus.DELETED)
         ids: list[int] = []
         after_id = 0
         while True:
