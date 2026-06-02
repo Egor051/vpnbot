@@ -32,14 +32,23 @@ class TTLMemoryStorage(MemoryStorage):
 
     async def expire_stale(self) -> int:
         now = time.monotonic()
-        expired = [k for k, ts in list(self._touched.items()) if now - ts > self._ttl]
-        for key in expired:
+        candidates = [k for k, ts in list(self._touched.items()) if now - ts > self._ttl]
+        expired = 0
+        for key in candidates:
+            # Re-validate each key right before wiping it: a concurrent
+            # set_state/set_data may have refreshed it after the snapshot was
+            # taken (user resumed a wizard at the TTL boundary). Skip those so
+            # we never clear a freshly-touched session.
+            ts = self._touched.get(key)
+            if ts is None or time.monotonic() - ts <= self._ttl:
+                continue
             await super().set_state(key, state=None)
             await super().set_data(key, data={})
             self._touched.pop(key, None)
+            expired += 1
         if expired:
-            logger.info("FSM TTL cleanup: expired %d stale sessions", len(expired))
-        return len(expired)
+            logger.info("FSM TTL cleanup: expired %d stale sessions", expired)
+        return expired
 
 
 async def fsm_cleanup_loop(storage: TTLMemoryStorage, interval_seconds: int = 3600) -> None:

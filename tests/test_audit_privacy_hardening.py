@@ -214,13 +214,27 @@ def test_user_actions_keyboard_hides_issue_key_for_pending_and_blocked_users() -
     superadmin = User(1, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
 
     def callbacks(user: User) -> set[str | None]:
-        return {button.callback_data for row in user_actions_keyboard(user).inline_keyboard for button in row}
+        return {
+            button.callback_data
+            for row in user_actions_keyboard(user, actor_role=UserRole.SUPERADMIN).inline_keyboard
+            for button in row
+        }
 
     # Admins can now issue keys to PENDING users (trial/early access)
     assert f"admin:issue:{pending.telegram_user_id}" in callbacks(pending)
     assert f"admin:issue:{blocked.telegram_user_id}" not in callbacks(blocked)
     assert f"admin:issue:{approved.telegram_user_id}" in callbacks(approved)
     assert f"admin:issue:{superadmin.telegram_user_id}" in callbacks(superadmin)
+
+    # Fail-closed default: when the actor role is omitted the keyboard must
+    # hide superadmin-only actions instead of exposing them.
+    default_callbacks = {
+        button.callback_data
+        for row in user_actions_keyboard(approved).inline_keyboard
+        for button in row
+    }
+    assert f"admin:issue:{approved.telegram_user_id}" not in default_callbacks
+    assert f"admin:setmoderator:{approved.telegram_user_id}" not in default_callbacks
 
 
 def test_confirm_cancel_keeps_admin_owner_and_page_context() -> None:

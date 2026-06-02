@@ -43,7 +43,6 @@ async def start_command(message: Message, services: Services, bot: Bot, rate_lim
                 await _notify_admins(services, bot, result.request.id, profile.telegram_user_id, profile.username)
             else:
                 await message.answer(t("blocked_request_pending"))
-            await _send_trial_offer(message, services, profile.telegram_user_id)
             return
         if result.user.role in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
             await message.answer(
