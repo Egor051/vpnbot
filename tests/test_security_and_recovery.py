@@ -367,7 +367,9 @@ AllowedIPs = 10.0.0.2/32
 def test_awg_candidate_validation_fails_when_quick_tools_are_missing(tmp_path: Path) -> None:
     class Shell:
         async def run(self, args: list[str], **kwargs: object) -> object:
-            return type("Result", (), {"returncode": 127, "ok": False, "stdout": "", "stderr": "not found"})()
+            # Mirror ShellRunner's FileNotFoundError sentinel (rc 127 + "command not found"),
+            # which is how a genuinely missing awg-quick/wg-quick binary surfaces.
+            return type("Result", (), {"returncode": 127, "ok": False, "stdout": "", "stderr": "command not found"})()
 
     config_path = tmp_path / "awg.conf"
     config_path.write_text("[Interface]\nPrivateKey = server\n", encoding="utf-8")

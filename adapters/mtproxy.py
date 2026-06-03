@@ -533,7 +533,8 @@ class MtProxyAdapter:
             shutil.rmtree(path, ignore_errors=True)
 
     def _atomic_write_text(self, target: Path, content: str, *, mode: int) -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        # _chmod_dir creates any missing ancestors at 0700 (not just the leaf), avoiding a
+        # window where an intermediate dir is left world-traversable under the umask.
         self._chmod_dir(target.parent)
         tmp_path = target.with_name(f".{target.name}.{time.time_ns()}.{secrets_module.token_hex(4)}.tmp")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -562,18 +563,34 @@ class MtProxyAdapter:
         except OSError:
             return False
 
+    def _mkdir_private_p(self, path: Path) -> bool:
+        """Create path and any missing ancestors at 0700; return whether anything was created."""
+        to_create: list[Path] = []
+        p = path
+        while not p.exists():
+            to_create.append(p)
+            p = p.parent
+        for d in reversed(to_create):
+            d.mkdir(mode=0o700, exist_ok=True)
+            if os.name == "posix":
+                d.chmod(0o700)
+        return bool(to_create)
+
     def _chmod_dir(self, path: Path) -> bool:
+        try:
+            changed = self._mkdir_private_p(path)
+        except OSError:
+            return False
         if os.name != "posix":
             return False
         try:
-            path.mkdir(parents=True, exist_ok=True)
             current = path.stat().st_mode & 0o777
-            if current == 0o700:
-                return False
-            path.chmod(0o700)
-            return True
+            if current != 0o700:
+                path.chmod(0o700)
+                changed = True
         except OSError:
             return False
+        return changed
 
     def _ensure_wrapper_ready(self) -> None:
         if self.managed_wrapper_path is None:

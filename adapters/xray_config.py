@@ -20,7 +20,7 @@ from adapters.errors import (
 from adapters.file_lock import ConfigFileLock
 from adapters.file_ops import async_copy_stat, async_fsync_parent
 from adapters.privileged_helpers import PrivilegedHelperRunner, cleanup_staging_path, write_private_staging_file
-from adapters.shell_runner import ShellRunner
+from adapters.shell_runner import TIMEOUT_RETURNCODE, ShellRunner
 from adapters.systemctl import SystemCtlAdapter
 
 
@@ -94,6 +94,11 @@ class XrayConfigAdapter:
         manage_short_id: bool,
     ) -> XrayClientApplyResult:
         """Add a VLESS/REALITY client to the inbound and apply the config."""
+        # Defence-in-depth: email_label is server-generated, but enforce the safe charset
+        # at the adapter boundary so a malformed/crafted label can never reach the config
+        # (and never a CLI flag position). Leading '-' is rejected to prevent flag injection.
+        if not email_label or _EMAIL_SAFE_RE.match(email_label) is None:
+            raise XrayConfigError("Xray email_label содержит недопустимые символы")
         lock_dir = self.helper_staging_dir if self._using_helper() else None
         async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
             if not self._using_helper():
@@ -425,6 +430,11 @@ class XrayConfigAdapter:
         )
         if result.ok:
             return
+        if result.returncode == TIMEOUT_RETURNCODE:
+            # The helper runs privileged via sudo; on our timeout it may still be applying
+            # (the unprivileged bot cannot kill the root child). Retrying could run two
+            # concurrent applies against the same config/runtime, so fail instead.
+            raise XrayApplyError("Xray helper apply timed out; not retrying to avoid concurrent apply")
         logger.warning("Xray helper apply failed on attempt 1: rc=%s; retrying in 2s", result.returncode)
         await asyncio.sleep(2)
         await self._assert_config_unchanged(snapshot)
@@ -549,9 +559,26 @@ class XrayConfigAdapter:
 
         tmp_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-                json.dump(inbound_payload, f, ensure_ascii=False)
-                tmp_path = Path(f.name)
+            # Write next to the (private) config rather than /tmp: the payload carries the
+            # server REALITY privateKey and all client UUIDs. umask(0o177) guarantees the
+            # file is 0600 from creation (no copy-then-chmod world-readable window).
+            content = json.dumps(inbound_payload, ensure_ascii=False)
+            old_umask = os.umask(0o177)
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    dir=self.config_path.parent,
+                    prefix=f".{self.config_path.name}.inbound.",
+                    suffix=".json",
+                    delete=False,
+                ) as f:
+                    f.write(content)
+                    f.flush()
+                    os.fsync(f.fileno())
+                    tmp_path = Path(f.name)
+            finally:
+                os.umask(old_umask)
 
             rmi_result = await self.shell.run(
                 ["xray", "api", "rmi", f"--server={self.stats_server}", self.inbound_tag],

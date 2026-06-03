@@ -45,6 +45,7 @@ class DanteUserAdapter:
     async def create_user(self, login: str, password: str) -> None:
         """Create a managed SOCKS5 Linux user and set its password."""
         self._ensure_managed_login(login)
+        self._ensure_safe_password(password)
         if await self.exists(login):
             raise DanteUserError("SOCKS5 Linux user уже существует")
         if self.helper_runner is not None:
@@ -113,3 +114,12 @@ class DanteUserAdapter:
             raise DanteUserError("SOCKS5 Linux user не принадлежит bot-managed prefix")
         if _LOGIN_RE.fullmatch(login) is None:
             raise DanteUserError("Некорректный SOCKS5 Linux login")
+
+    def _ensure_safe_password(self, password: str) -> None:
+        # chpasswd consumes "login:password" lines; a newline/CR/NUL/colon would inject an
+        # extra record (e.g. set root's password) on the direct path. The privileged helper
+        # enforces this too, but the adapter must not depend on caller discipline.
+        if not password:
+            raise DanteUserError("SOCKS5 password пустой")
+        if any(ch in password for ch in ("\n", "\r", "\x00", ":")):
+            raise DanteUserError("SOCKS5 password содержит недопустимые символы")
