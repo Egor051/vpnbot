@@ -13,7 +13,11 @@ from adapters.backup import BackupAdapter
 from adapters.errors import AwgApplyError, AwgConfigError, AwgPeerAlreadyExistsError
 from adapters.file_lock import ConfigFileLock
 from adapters.privileged_helpers import PrivilegedHelperRunner, cleanup_staging_path, write_private_staging_file
-from adapters.shell_runner import ShellRunner
+from adapters.shell_runner import (
+    COMMAND_NOT_FOUND_RETURNCODE,
+    COMMAND_NOT_FOUND_STDERR,
+    ShellRunner,
+)
 from models.dto import ShellResult
 
 logger = logging.getLogger(__name__)
@@ -535,12 +539,19 @@ class AwgConfigAdapter:
             if tmp_path is not None:
                 tmp_path.unlink(missing_ok=True)
 
+    @staticmethod
+    def _is_command_missing(result: ShellResult) -> bool:
+        # Distinguish "binary not installed" (ShellRunner's FileNotFoundError sentinel)
+        # from a genuine rc=127 exit of an existing binary, so the awg->wg fallback only
+        # triggers when awg/awg-quick is actually absent.
+        return result.returncode == COMMAND_NOT_FOUND_RETURNCODE and result.stderr == COMMAND_NOT_FOUND_STDERR
+
     async def _quick_strip(self, path: Path) -> ShellResult:
         result = await self.shell.run(["awg-quick", "strip", str(path)], timeout=10)
-        if result.returncode != 127:
+        if not self._is_command_missing(result):
             return result
         result = await self.shell.run(["wg-quick", "strip", str(path)], timeout=10)
-        if result.returncode == 127:
+        if self._is_command_missing(result):
             raise AwgConfigError("Не найден awg-quick или wg-quick для проверки AWG config")
         return result
 
@@ -751,6 +762,14 @@ class AwgConfigAdapter:
                 return True
         return False
 
+    def _validate_label(self, label: str) -> None:
+        # label is written into a single-line config comment marker
+        # ("# vpn-bot peer start key_id=N owner=M label=<label>"). Any whitespace/newline
+        # or control char could inject extra config lines (e.g. a rogue [Peer] with
+        # AllowedIPs = 0.0.0.0/0) or break marker round-trip parsing.
+        if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in label):
+            raise AwgConfigError("AWG peer label содержит недопустимые символы")
+
     def _peer_block(
         self,
         key_id: int,
@@ -760,6 +779,8 @@ class AwgConfigAdapter:
         client_ip: str,
         label: str | None = None,
     ) -> str:
+        if label:
+            self._validate_label(label)
         label_part = f" label={label}" if label else ""
         lines = [
             f"# vpn-bot peer start key_id={key_id} owner={owner_user_id}{label_part}",
@@ -907,7 +928,7 @@ class AwgConfigAdapter:
         sensitive_values: list[str] | None = None,
     ) -> ShellResult:
         result = await self.shell.run(["awg", *args], input_text=input_text, timeout=timeout, sensitive_values=sensitive_values or [])
-        if result.returncode != 127:
+        if not self._is_command_missing(result):
             return result
         return await self.shell.run(["wg", *args], input_text=input_text, timeout=timeout, sensitive_values=sensitive_values or [])
 

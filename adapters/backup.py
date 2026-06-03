@@ -26,8 +26,7 @@ class BackupAdapter:
                 break
         else:
             raise AdapterError(f"Не удалось создать уникальное имя backup для {target}")
-        shutil.copy2(target, backup_path)
-        self._chmod_private_file(backup_path)
+        self._copy_private(target, backup_path)
         if self.keep_last:
             self.cleanup_old_backups(target.parent, pattern=f"{target.name}.*.bak", keep_last=self.keep_last)
         return backup_path
@@ -39,14 +38,11 @@ class BackupAdapter:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = target.with_name(f".{target.name}.restore.{time.time_ns()}.{secrets.token_urlsafe(16)}")
         try:
-            shutil.copy2(backup_path, tmp_path)
+            self._copy_private(backup_path, tmp_path)
             if mode_from is not None and mode_from.exists():
                 copy_stat(mode_from, tmp_path)
             else:
                 self._chmod_private_file(tmp_path)
-            with tmp_path.open("rb+") as file:
-                file.flush()
-                os.fsync(file.fileno())
             os.replace(tmp_path, target)
             fsync_parent(target)
         finally:
@@ -58,10 +54,7 @@ class BackupAdapter:
         tmp_path = target.with_name(f".{target.name}.{time.time_ns()}.{secrets.token_urlsafe(16)}.tmp")
         data = content.encode("utf-8")
         try:
-            with tmp_path.open("wb") as file:
-                file.write(data)
-                file.flush()
-                os.fsync(file.fileno())
+            self._write_private(tmp_path, data)
             if mode_from and mode_from.exists():
                 copy_stat(mode_from, tmp_path)
             else:
@@ -83,6 +76,36 @@ class BackupAdapter:
             path.unlink(missing_ok=True)
             removed += 1
         return removed
+
+    def _copy_private(self, source: Path, dest: Path) -> None:
+        """Copy source into a freshly created, fsync'd, private (0600) destination.
+
+        The destination is created with O_CREAT|O_EXCL and mode 0600 so a secret-bearing
+        config (e.g. AWG [Interface] PrivateKey) is never momentarily group/world-readable
+        between creation and chmod.
+        """
+        if os.name == "posix":
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as out, source.open("rb") as src:
+                shutil.copyfileobj(src, out)
+                out.flush()
+                os.fsync(out.fileno())
+        else:
+            shutil.copyfile(source, dest)
+
+    def _write_private(self, dest: Path, data: bytes) -> None:
+        """Write bytes to a freshly created, fsync'd, private (0600) destination."""
+        if os.name == "posix":
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as file:
+                file.write(data)
+                file.flush()
+                os.fsync(file.fileno())
+        else:
+            with dest.open("wb") as file:
+                file.write(data)
+                file.flush()
+                os.fsync(file.fileno())
 
     def _chmod_private_file(self, path: Path) -> None:
         if os.name != "posix":

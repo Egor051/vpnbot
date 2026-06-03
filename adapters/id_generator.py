@@ -21,7 +21,7 @@ class IdGenerator:
     def key_label(self, telegram_user_id: int, username: str | None = None) -> str:
         """Generate a unique key label derived from the user id or username."""
         base = self._label_base(telegram_user_id, username)
-        return f"{base}_{secrets.token_hex(3)}"
+        return f"{base}_{secrets.token_hex(4)}"
 
     def email_label(self, telegram_user_id: int, username: str | None = None) -> str:
         """Generate a unique email label derived from the user id or username."""

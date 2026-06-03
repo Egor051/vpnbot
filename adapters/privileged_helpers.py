@@ -45,9 +45,18 @@ class PrivilegedHelperRunner:
         timeout: float = 60.0,
         max_output_chars: int = 2048,
     ) -> ShellResult:
-        """Run the helper at helper_path with optional sudo; raises PrivilegedHelperError on bad path."""
+        """Run the helper at helper_path with optional sudo; raises PrivilegedHelperError on bad path.
+
+        The real security boundary is the sudoers exact-path allowlist; these checks are
+        defence-in-depth so a buggy caller cannot smuggle a relative path or ``..`` segment
+        into a sudo invocation.
+        """
         if not helper_path.is_absolute():
             raise PrivilegedHelperError("Privileged helper path must be absolute")
+        if ".." in helper_path.parts:
+            raise PrivilegedHelperError("Privileged helper path must not contain '..'")
+        if helper_path.is_symlink():
+            raise PrivilegedHelperError("Privileged helper path must not be a symlink")
         command = [str(helper_path), *args]
         if self.use_sudo:
             command = ["sudo", "-n", *command]
@@ -61,7 +70,13 @@ class PrivilegedHelperRunner:
 
 
 def _mkdir_private(path: Path) -> None:
-    """Create path and all missing ancestors, chmoding each to 0700 immediately."""
+    """Create path and all missing ancestors, chmoding each to 0700 immediately.
+
+    Also re-asserts 0700 on the leaf when it already exists, so a pre-created staging
+    directory with lax permissions is tightened instead of being trusted as-is.
+    """
+    if path.is_symlink():
+        raise PrivilegedHelperError(f"Staging path must not be a symlink: {path}")
     to_create: list[Path] = []
     p = path
     while not p.exists():
@@ -71,6 +86,9 @@ def _mkdir_private(path: Path) -> None:
         d.mkdir(mode=0o700, exist_ok=True)
         if os.name == "posix":
             os.chmod(d, 0o700)
+    if os.name == "posix" and not to_create:
+        # Leaf already existed: enforce private permissions rather than trust them.
+        os.chmod(path, 0o700)
 
 
 def write_private_staging_file(staging_dir: Path, *, prefix: str, suffix: str, content: str) -> Path:
@@ -112,6 +130,11 @@ def create_private_staging_dir(staging_root: Path, *, prefix: str) -> Path:
 def cleanup_staging_path(path: Path | None) -> None:
     """Remove the given staging file or directory, ignoring missing paths."""
     if path is None:
+        return
+    # Check symlink first: is_dir() follows links, so a symlinked staging path must be
+    # unlinked (never rmtree'd through, which would also fail and leak the target).
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
         return
     if path.is_dir():
         shutil.rmtree(path, ignore_errors=True)

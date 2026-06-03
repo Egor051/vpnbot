@@ -37,7 +37,16 @@ class IpAllocator:
     # NOT THREAD-SAFE: caller must hold awg service lock
     async def next_free_ip(self) -> str:
         """Allocate and return the next free IP address in the AWG pool."""
-        occupied = {ipaddress.ip_address(value) for value in await self.vpn_keys.get_occupied_awg_ips()}
+        occupied: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+        for value in await self.vpn_keys.get_occupied_awg_ips():
+            # Tolerate values stored either bare ("10.0.0.5") or with a prefix ("10.0.0.5/32").
+            text = str(value).split("/", 1)[0].strip()
+            if not text:
+                continue
+            try:
+                occupied.add(ipaddress.ip_address(text))
+            except ValueError as exc:
+                raise AwgIpAllocationError(f"Занятый AWG IP некорректен: {value!r}") from exc
         occupied_networks: list[ipaddress.IPv4Network] = []
         if self.awg_config is not None:
             try:

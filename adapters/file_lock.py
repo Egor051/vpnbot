@@ -86,9 +86,9 @@ class ConfigFileLock:
             deadline = time.monotonic() + self.timeout
             while True:
                 try:
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    )
+                    # LOCK_NB makes flock non-blocking, so it is safe to call directly on the
+                    # event loop without an executor (avoids the deprecated get_event_loop()).
+                    fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError as exc:
                     remaining = deadline - time.monotonic()
