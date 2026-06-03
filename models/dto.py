@@ -1,7 +1,21 @@
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 from models.enums import AccessRequestStatus, ProxyAccessStatus, ProxyAccessType, ProxyStatus, UserRole, VpnKeyStatus, VpnKeyType
+
+
+def _redacted_repr(obj: object, redacted: frozenset[str]) -> str:
+    """Build a dataclass-style repr with the named fields masked.
+
+    Defence-in-depth so secret-bearing fields (e.g. AWG private_key/preshared_key
+    inside ``payload``, or a proxy ``password``) can never leak through logs,
+    tracebacks, or f-strings that interpolate the whole DTO.
+    """
+    parts = [
+        f"{f.name}=" + ("'<redacted>'" if f.name in redacted else repr(getattr(obj, f.name)))
+        for f in fields(obj)  # type: ignore[arg-type]
+    ]
+    return f"{type(obj).__name__}({', '.join(parts)})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +78,10 @@ class VpnKey:
     revoked_by: int | None
     deleted_by: int | None
     expires_at: str | None = None
+
+    def __repr__(self) -> str:
+        # payload carries AWG private_key/preshared_key — never expose it in repr.
+        return _redacted_repr(self, frozenset({"payload"}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +161,10 @@ class ProxyEntry:
     created_at: str
     updated_at: str
 
+    def __repr__(self) -> str:
+        # password is the upstream proxy credential — never expose it in repr.
+        return _redacted_repr(self, frozenset({"password"}))
+
 
 @dataclass(frozen=True, slots=True)
 class ProxyAccess:
@@ -167,6 +189,10 @@ class ProxyAccess:
     apply_generation: int = 0
     activated_at: str | None = None
     last_apply_at: str | None = None
+
+    def __repr__(self) -> str:
+        # payload may carry proxy secrets/credentials — never expose it in repr.
+        return _redacted_repr(self, frozenset({"payload"}))
 
 
 @dataclass(frozen=True, slots=True)

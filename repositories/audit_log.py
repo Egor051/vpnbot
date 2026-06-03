@@ -121,13 +121,15 @@ class AuditLogRepository:
         ]
 
     async def prune_older_than(self, cutoff: str) -> int:
-        """Delete audit log entries older than the cutoff and return the number removed."""
-        # SQLite datetime() returns NULL for ISO-8601 strings with the '+00:00'
-        # timezone offset (e.g. '2024-01-01T12:00:00+00:00'), so the WHERE
-        # clause would always be false and no rows would ever be deleted.
-        # Strip the offset before comparing so both sides are plain UTC strings.
+        """Delete audit log entries older than the cutoff and return the number removed.
+
+        created_at and the cutoff are both UTC ISO-8601 strings with a '+00:00'
+        offset (adapters/clock.py / services/audit.py), so a direct lexicographic
+        comparison is correct and uses idx_audit_log_created_at. A REPLACE() on
+        the column would force a full table scan.
+        """
         cursor = await self.db.conn.execute(
-            "DELETE FROM audit_log WHERE REPLACE(created_at, '+00:00', '') < REPLACE(?, '+00:00', '')",
+            "DELETE FROM audit_log WHERE created_at < ?",
             (cutoff,),
         )
         await self.db.commit()

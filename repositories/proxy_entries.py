@@ -4,6 +4,7 @@ from aiosqlite import Row
 from db.database import Database
 from models.dto import ProxyEntry
 from models.enums import ProxyStatus
+from repositories._helpers import _clamp_limit, _clamp_offset
 
 
 def _row_to_proxy(row: Row | None) -> ProxyEntry | None:
@@ -43,7 +44,7 @@ class ProxyRepository:
             ORDER BY id ASC
             LIMIT ? OFFSET ?
             """,
-            (ProxyStatus.ACTIVE.value, limit, offset),
+            (ProxyStatus.ACTIVE.value, _clamp_limit(limit), _clamp_offset(offset)),
         )
         rows = await cursor.fetchall()
         return [entry for row in rows if (entry := _row_to_proxy(row)) is not None]

@@ -96,11 +96,16 @@ class DashboardService:
         now_dt = datetime.now(timezone.utc)
         now_str = self._clock.now()
 
-        cutoff_7d_past = (now_dt - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
-        cutoff_30d_past = (now_dt - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
-        cutoff_24h_past = (now_dt - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S")
-        cutoff_7d_future = (now_dt + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
-        cutoff_30d_future = (now_dt + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
+        # Cutoffs MUST use the same UTC ISO-8601 format (with the '+00:00' offset,
+        # no microseconds) as the timestamps stored in the DB (see adapters/clock.py).
+        # A bare "%Y-%m-%dT%H:%M:%S" string has no offset and sorts BEFORE an
+        # equivalent stored value, skewing every range comparison below
+        # (keys_summary expiry buckets, new-user / audit / announcement counts).
+        cutoff_7d_past = (now_dt - timedelta(days=7)).replace(microsecond=0).isoformat()
+        cutoff_30d_past = (now_dt - timedelta(days=30)).replace(microsecond=0).isoformat()
+        cutoff_24h_past = (now_dt - timedelta(hours=24)).replace(microsecond=0).isoformat()
+        cutoff_7d_future = (now_dt + timedelta(days=7)).replace(microsecond=0).isoformat()
+        cutoff_30d_future = (now_dt + timedelta(days=30)).replace(microsecond=0).isoformat()
 
         # Split into groups of ≤6 so mypy can infer exact tuple types from gather overloads.
         (

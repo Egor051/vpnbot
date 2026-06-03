@@ -98,6 +98,12 @@ class AnnouncementRepository:
             assert cursor.lastrowid is not None
             batch_id = int(cursor.lastrowid)
             if recipient_ids:
+                # recipient_ids come from the announcement-recipient query and
+                # reference existing users; users are never hard-deleted (only
+                # blocked), so the user_id FK cannot dangle here. Note OR IGNORE
+                # suppresses only the PK/unique conflict on (announcement_id,
+                # user_id) — SQLite does NOT apply it to FK violations, so a
+                # genuinely missing user would abort the batch transaction.
                 await self.db.conn.executemany(
                     """
                     INSERT OR IGNORE INTO announcement_deliveries (

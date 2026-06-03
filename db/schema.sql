@@ -1,5 +1,11 @@
--- auto-generated from migrations, do not edit manually
--- reflects schema after all migrations up to CURRENT_SCHEMA_VERSION
+-- Baseline schema + post-migration snapshot, hand-maintained.
+--
+-- This file serves two roles: (1) it is the version-1 BASELINE executed by
+-- Database.bootstrap() on a fresh DB (the programmatic migrations in
+-- db/database.py are NOT self-sufficient — they assume these baseline tables
+-- exist); and (2) it must stay in sync with the state produced by all
+-- migrations up to CURRENT_SCHEMA_VERSION. Keep every object below consistent
+-- with db/database.py; tests/test_schema_drift.py enforces this parity.
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -25,6 +31,8 @@ CREATE TABLE IF NOT EXISTS access_requests (
   username TEXT,
   status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
   requested_at TEXT NOT NULL,
+  -- decided_by intentionally has NO FK (legacy actor ids may predate the users
+  -- table); orphans are validated at bootstrap by _validate_reference_integrity.
   decided_by INTEGER,
   decided_at TEXT,
   decision_note TEXT
@@ -49,6 +57,12 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   expires_at TEXT DEFAULT NULL,
   expiry_notified_days TEXT DEFAULT NULL,
   deleted_at TEXT,
+  -- created_by/revoked_by/deleted_by intentionally have NO foreign key (unlike
+  -- proxy_accesses): users are NEVER hard-deleted (only blocked via role), so
+  -- these actor references cannot dangle in practice. owner_user_id keeps its
+  -- ON DELETE CASCADE. If a hard-delete path for users is ever added, these
+  -- columns must be handled (otherwise _validate_reference_integrity fails at
+  -- the next bootstrap on created_by, which is validated as non-nullable).
   created_by INTEGER NOT NULL,
   revoked_by INTEGER,
   deleted_by INTEGER
@@ -203,8 +217,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_accesses_one_live_per_user_type
 ON proxy_accesses(owner_user_id, access_type)
 WHERE status IN ('pending_apply','active','pending_revoke');
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);
 CREATE INDEX IF NOT EXISTS idx_trial_requests_user ON trial_key_requests(telegram_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_announcement_batches_status ON announcement_batches(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_announcement_batches_scheduled ON announcement_batches(scheduled_at) WHERE status = 'scheduled' AND scheduled_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_announcement_deliveries_status ON announcement_deliveries(announcement_id, status, user_id);
+
+-- Intentionally NOT created here (created by migrations instead). bootstrap()
+-- runs THIS file BEFORE the migrations, so an index that depends on data
+-- cleanup or on a column added by a later migration cannot live in the
+-- baseline — creating it on a dirty/old legacy DB would raise before the
+-- relevant migration runs:
+--   idx_access_requests_one_pending   (UNIQUE, migration v4 — after duplicate-pending collapse)
+--   idx_vpn_keys_client_ip_reserved   (UNIQUE, migrations v5/v6 — after AWG client_ip repair)
+--   idx_trial_requests_one_pending    (UNIQUE, migration v18 — after duplicate-pending collapse)
+--   idx_vpn_keys_expires_at           (migration v13 — depends on the expires_at column it adds)
+-- tests/test_schema_drift.py asserts this exact set is the ONLY difference
+-- between schema.sql and a fully migrated database.

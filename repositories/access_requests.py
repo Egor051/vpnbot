@@ -6,7 +6,7 @@ from aiosqlite import Row
 from db.database import Database
 from models.dto import AccessRequest
 from models.enums import AccessRequestStatus
-from repositories._helpers import _clamp_limit, _clamp_offset
+from repositories._helpers import _clamp_limit, _clamp_offset, enum_value
 
 
 def _row_to_access_request(row: Row | None) -> AccessRequest | None:
@@ -16,7 +16,7 @@ def _row_to_access_request(row: Row | None) -> AccessRequest | None:
         id=int(row["id"]),
         telegram_user_id=int(row["telegram_user_id"]),
         username=row["username"],
-        status=AccessRequestStatus(row["status"]),
+        status=enum_value(AccessRequestStatus, row["status"], "access_requests.status"),
         requested_at=row["requested_at"],
         decided_by=row["decided_by"],
         decided_at=row["decided_at"],

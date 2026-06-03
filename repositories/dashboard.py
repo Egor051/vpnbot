@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from db.database import Database
+from repositories._helpers import _clamp_limit
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +145,7 @@ class DashboardRepository:
             """
             SELECT
               k.owner_user_id,
-              COALESCE(u.username, k.username) AS username,
+              COALESCE(u.username, MAX(k.username)) AS username,
               SUM(t.downloaded_bytes + t.uploaded_bytes) AS total_bytes
             FROM vpn_key_traffic_stats t
             JOIN vpn_keys k ON k.id = t.key_id
@@ -153,7 +154,7 @@ class DashboardRepository:
             ORDER BY total_bytes DESC
             LIMIT ?
             """,
-            (limit,),
+            (_clamp_limit(limit),),
         )
         rows = await cursor.fetchall()
         return [
@@ -166,12 +167,15 @@ class DashboardRepository:
         ]
 
     async def count_audit_since(self, cutoff: str) -> int:
-        """Return audit log entry count since cutoff timestamp."""
+        """Return audit log entry count since cutoff timestamp.
+
+        created_at and the cutoff are both produced as UTC ISO-8601 strings with
+        a '+00:00' offset (see adapters/clock.py and services/dashboard.py), so a
+        plain lexicographic comparison is correct and lets idx_audit_log_created_at
+        be used (a REPLACE() on the column would force a full scan).
+        """
         cursor = await self.db.conn.execute(
-            """
-            SELECT COUNT(*) AS cnt FROM audit_log
-            WHERE REPLACE(created_at, '+00:00', '') >= REPLACE(?, '+00:00', '')
-            """,
+            "SELECT COUNT(*) AS cnt FROM audit_log WHERE created_at >= ?",
             (cutoff,),
         )
         row = await cursor.fetchone()
