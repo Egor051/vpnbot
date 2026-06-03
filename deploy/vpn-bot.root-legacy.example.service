@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/vpn-service
 EnvironmentFile=/opt/vpn-service/.env
-Environment=BOT_LOCK_PATH=/run/vpn-bot.lock
+Environment=BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock
 ExecStart=/opt/vpn-service/.venv/bin/python /opt/vpn-service/main.py
 Restart=on-failure
 RestartSec=5
@@ -18,6 +18,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
+RuntimeDirectory=vpn-bot
+RuntimeDirectoryMode=0700
 ReadWritePaths=/opt/vpn-service /run /usr/local/etc/xray /etc/amnezia/amneziawg /etc/mtproxy/vpnbot /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/.pwd.lock
 
 [Install]

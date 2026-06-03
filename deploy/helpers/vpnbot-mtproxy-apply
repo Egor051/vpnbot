@@ -65,6 +65,10 @@ def validate_candidate_dir(raw_path: str) -> Path:
         resolved = candidate.resolve(strict=True)
     except FileNotFoundError as exc:
         raise HelperError("candidate path does not exist", EXIT_VALIDATION) from exc
+    # The staging root must be a real directory, not a bot-planted symlink that
+    # would otherwise let resolve() retarget the allowed prefix to an arbitrary tree.
+    if STAGING_ROOT.is_symlink():
+        raise HelperError("staging root must not be a symlink", EXIT_VALIDATION)
     root = STAGING_ROOT.resolve(strict=False)
     if not _is_relative_to(resolved, root):
         raise HelperError("candidate path outside staging root", EXIT_VALIDATION)
@@ -150,6 +154,10 @@ def parse_env(path: Path) -> dict[str, str]:
         # Security: allowlist binary path to prevent arbitrary execv RCE
         if key == "MTPROTO_BINARY_PATH" and value not in ALLOWED_BINARY_PATHS:
             raise HelperError("MTPROTO_BINARY_PATH is not in the allowlist", EXIT_VALIDATION)
+        # Security: every path-valued key must be an absolute path so a tampered
+        # env file cannot point the runtime at a relative/attacker-resolved file.
+        if key.endswith("_PATH") and not value.startswith("/"):
+            raise HelperError("MTProxy env path value must be absolute", EXIT_VALIDATION)
         values[key] = value
     return values
 

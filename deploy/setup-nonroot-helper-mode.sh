@@ -53,6 +53,7 @@ install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 /run/vpn-bot
 install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 /run/vpn-bot/xray
 install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 /run/vpn-bot/awg
 install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 /run/vpn-bot/mtproxy
+install -d -o "${BOT_USER}" -g "${BOT_GROUP}" -m 0700 /run/vpn-bot/warp
 
 if [[ -f "${ENV_FILE}" ]]; then
   chown root:"${BOT_GROUP}" "${ENV_FILE}"

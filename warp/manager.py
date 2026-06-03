@@ -30,7 +30,7 @@ from db.database import Database
 from models.dto import ShellResult
 from repositories.warp_settings import WarpSettingsRepository
 from services.errors import ServiceError
-from warp.constants import ROUTES_LIST
+from warp.constants import HANDSHAKE_FRESH_SECONDS, ROUTES_LIST
 from warp.health import HealthSnapshot, WarpHealthMonitor, ping_interface
 from warp.interface import WarpInterface
 from warp.routes import WarpRoutes
@@ -232,6 +232,8 @@ class WarpManager:
         )
 
     async def _stop_locked(self) -> None:
+        # Stop (cancel + await) the monitor before tearing down routes/interface so
+        # its out-of-lock activate/deactivate_routes calls cannot race this teardown.
         if self._monitor is not None:
             await self._monitor.stop()
             self._monitor = None
@@ -272,7 +274,13 @@ class WarpManager:
         return _count_routes(result.stdout)
 
     async def _ping(self) -> bool:
-        return await ping_interface(self._ping_target, self._interface_name)
+        if await ping_interface(self._ping_target, self._interface_name):
+            return True
+        # Fallback: the fixed ICMP target may sit outside the user's AllowedIPs or
+        # filter ICMP. A recent WireGuard handshake still proves the tunnel is alive,
+        # so honour it instead of stranding the routes in fallback on a false "down".
+        handshake = await self._safe_handshake()
+        return handshake > 0 and (int(time.time()) - handshake) <= HANDSHAKE_FRESH_SECONDS
 
     async def _activate_routes(self) -> None:
         result = await self._routes.add()

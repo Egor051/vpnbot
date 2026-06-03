@@ -47,6 +47,10 @@ def validate_candidate_path(raw_path: str) -> Path:
         resolved = candidate.resolve(strict=True)
     except FileNotFoundError as exc:
         raise HelperError("candidate path does not exist", EXIT_VALIDATION) from exc
+    # The staging root must be a real directory, not a bot-planted symlink that
+    # would otherwise let resolve() retarget the allowed prefix to an arbitrary tree.
+    if STAGING_ROOT.is_symlink():
+        raise HelperError("staging root must not be a symlink", EXIT_VALIDATION)
     root = STAGING_ROOT.resolve(strict=False)
     if not _is_relative_to(resolved, root):
         raise HelperError("candidate path outside staging root", EXIT_VALIDATION)

@@ -19,21 +19,35 @@ ROUTES_LIST="/etc/amnezia/tg-warp-routes.list"
 case "${ACTION}" in
   install)
     [[ -f "$SOURCE" ]] || { echo "Source file not found: $SOURCE" >&2; exit 1; }
+    # Reject symlinks outright (parity with the Python helpers). The bot owns the
+    # staging dir, so a symlinked source must never be followed into a root read.
+    [[ -L "$SOURCE" ]] && { echo "Source must not be a symlink: $SOURCE" >&2; exit 1; }
 
-    # Validate that SOURCE is within the allowed staging directory
+    # Validate that SOURCE resolves within the allowed staging directory. The
+    # comparison uses the literal staging prefix (not a resolved one), so swapping
+    # the staging dir itself for a symlink is also rejected.
     ALLOWED_DIR="/run/vpn-bot/warp"
     realpath_source=$(realpath "$SOURCE")
     [[  "$realpath_source" == "$ALLOWED_DIR/"* ]] || {
         echo "Source path outside allowed dir: $SOURCE" >&2; exit 1
     }
+    # From here on operate on the resolved path only.
+    SRC="$realpath_source"
 
     # Validation: AmneziaWG format
-    grep -qE "^[[:space:]]*\\[Interface\\]"       "$SOURCE" || { echo "Missing [Interface] section" >&2; exit 1; }
-    grep -qE "^[[:space:]]*\\[Peer\\]"            "$SOURCE" || { echo "Missing [Peer] section" >&2; exit 1; }
-    grep -qE "^[[:space:]]*Jc[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing Jc)" >&2; exit 1; }
-    grep -qE "^[[:space:]]*S1[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing S1)" >&2; exit 1; }
-    grep -qE "^[[:space:]]*S2[[:space:]]*="     "$SOURCE" || { echo "Not AmneziaWG format (missing S2)" >&2; exit 1; }
-    grep -qE "^[[:space:]]*AllowedIPs[[:space:]]*=" "$SOURCE" || { echo "Missing AllowedIPs" >&2; exit 1; }
+    grep -qE "^[[:space:]]*\\[Interface\\]"       "$SRC" || { echo "Missing [Interface] section" >&2; exit 1; }
+    grep -qE "^[[:space:]]*\\[Peer\\]"            "$SRC" || { echo "Missing [Peer] section" >&2; exit 1; }
+    grep -qE "^[[:space:]]*Jc[[:space:]]*="     "$SRC" || { echo "Not AmneziaWG format (missing Jc)" >&2; exit 1; }
+    grep -qE "^[[:space:]]*S1[[:space:]]*="     "$SRC" || { echo "Not AmneziaWG format (missing S1)" >&2; exit 1; }
+    grep -qE "^[[:space:]]*S2[[:space:]]*="     "$SRC" || { echo "Not AmneziaWG format (missing S2)" >&2; exit 1; }
+    grep -qE "^[[:space:]]*AllowedIPs[[:space:]]*=" "$SRC" || { echo "Missing AllowedIPs" >&2; exit 1; }
+
+    # Security: reject script-execution hooks. awg-quick/wg-quick run PreUp/PostUp/
+    # PreDown/PostDown as root when the interface is brought up or down — a config
+    # must never be allowed to smuggle commands across the privilege boundary.
+    if grep -qiE "^[[:space:]]*(Pre|Post)(Up|Down)[[:space:]]*=" "$SRC"; then
+        echo "Config must not contain PreUp/PostUp/PreDown/PostDown directives" >&2; exit 1
+    fi
 
     mkdir -p /etc/amnezia
 
@@ -47,14 +61,18 @@ case "${ACTION}" in
     install -m 600 /dev/null "$ROUTES_TMP"
 
     # Preprocess and write routes.list via Python
-    SOURCE="$SOURCE" DEST_TMP="$DEST_TMP" ROUTES_TMP="$ROUTES_TMP" python3 - <<'PYEOF'
-import os, re, sys
+    SOURCE="$SRC" DEST_TMP="$DEST_TMP" ROUTES_TMP="$ROUTES_TMP" python3 - <<'PYEOF'
+import ipaddress, os, re, sys
 
 src = os.environ["SOURCE"]
 dest = os.environ["DEST_TMP"]
 routes_list = os.environ["ROUTES_TMP"]
 
-content = open(src).read()
+# O_NOFOLLOW guards against a TOCTOU swap of the validated source to a symlink
+# between the shell-side realpath check and this read.
+fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+with os.fdopen(fd, "r", encoding="utf-8") as f:
+    content = f.read()
 
 # Drop DNS (do not touch the server resolver)
 content = re.sub(r'^DNS\s*=.*\n?', '', content, flags=re.MULTILINE)
@@ -86,15 +104,27 @@ if not match:
     sys.exit(1)
 
 routes = [ip.strip() for ip in match.group(1).split(',') if ip.strip()]
+
+# Validate every token as a real CIDR here, at the root boundary, instead of
+# trusting the bot-side validator. This rejects "default" and any malformed entry
+# before it can reach routes.list and be fed to "ip route".
+for token in routes:
+    try:
+        ipaddress.ip_network(token, strict=False)
+    except ValueError:
+        print(f"Invalid CIDR in AllowedIPs: {token}", file=sys.stderr)
+        sys.exit(1)
+
 with open(routes_list, 'w') as f:
     f.write('\n'.join(routes) + '\n')
 
 print(f"Installed: {len(routes)} routes")
 PYEOF
 
-    # Atomically move temp files into final locations; disarm cleanup trap
-    mv "$DEST_TMP" "$DEST"
+    # Move routes.list into place first so that, if interrupted between the two
+    # renames, "config present" always implies "routes present". Then disarm trap.
     mv "$ROUTES_TMP" "$ROUTES_LIST"
+    mv "$DEST_TMP" "$DEST"
     trap - EXIT
     ;;
   remove)

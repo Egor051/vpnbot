@@ -60,7 +60,7 @@ Xray:
 - `vpnbot-xray-apply validate <candidate_config_path>`
 - `vpnbot-xray-apply status`
 
-Candidates must live under `/run/vpn-bot/xray`. The helper validates JSON, runs `/usr/local/bin/xray run -test -config <candidate>`, installs `/usr/local/etc/xray/config.json` atomically with mode `0600` for `nobody:nogroup`, restarts fixed service `xray`, verifies active state, and restores the previous config on failure.
+Candidates must live under `/run/vpn-bot/xray`. The helper validates JSON, runs `/usr/local/bin/xray run -test -config <candidate>`, installs `/usr/local/etc/xray/config.json` atomically as `nobody:vpn-bot` mode `0640` (world-unreadable; group-readable for non-root reads), restarts fixed service `xray`, verifies active state, and restores the previous config on failure.
 
 AWG:
 
@@ -70,14 +70,14 @@ AWG:
 - `vpnbot-awg-apply show-peers`
 - `vpnbot-awg-apply show-transfer`
 
-Candidates must live under `/run/vpn-bot/awg`. The helper validates with `awg-quick strip` or `wg-quick strip`, installs `/etc/amnezia/amneziawg/awg0.conf` atomically as `root:root` mode `0600`, applies runtime with fixed-interface `syncconf` for `awg0`, checks `awg-quick@awg0`, and restores the previous config on failure.
+Candidates must live under `/run/vpn-bot/awg`. The helper validates with `awg-quick strip` or `wg-quick strip`, installs `/etc/amnezia/amneziawg/awg0.conf` atomically as `root:vpn-bot` mode `0640` (world-unreadable; group-readable for non-root reads — note this exposes the server WireGuard PrivateKey to the `vpn-bot` group, an accepted trade-off), applies runtime with fixed-interface `syncconf` for `awg0`, checks `awg-quick@awg0`, and restores the previous config on failure.
 
 MTProxy:
 
 - `vpnbot-mtproxy-apply apply <candidate_dir>`
 - `vpnbot-mtproxy-apply status`
 
-The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpnbot/managed-secrets.json` and `/etc/mtproxy/vpnbot/mtproxy.env` atomically as `root:root` mode `0600`, restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure.
+The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpnbot/managed-secrets.json` and `/etc/mtproxy/vpnbot/mtproxy.env` atomically as `root:vpn-bot` mode `0640` in a `0750` `root:vpn-bot` directory (world-unreadable; group-readable for non-root reads), restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure.
 
 ## WARP Telegram Routing helpers
 
@@ -98,11 +98,13 @@ install -o root -g root -m 0755 scripts/vpnbot-warp-status  /usr/local/sbin/vpnb
 Interfaces:
 
 - `vpnbot-warp-install install <staged_config>` — validates the AmneziaWG format
-  (`[Interface]`/`[Peer]`, `Jc`/`S1`/`S2`, non-empty `AllowedIPs`), strips `DNS`,
-  adds `Table = off` and `PersistentKeepalive = 25`, writes
-  `/etc/amnezia/tg-warp.conf` (mode `0600`) and
-  `/etc/amnezia/tg-warp-routes.list` (one CIDR per line from `AllowedIPs`, which
-  is never modified). The bot stages the upload under
+  (`[Interface]`/`[Peer]`, `Jc`/`S1`/`S2`, non-empty `AllowedIPs`), **rejects**
+  `PreUp`/`PostUp`/`PreDown`/`PostDown` hooks (awg-quick would run them as root),
+  validates every `AllowedIPs` token as a real CIDR, strips `DNS`, adds
+  `Table = off` and `PersistentKeepalive = 25`, writes `/etc/amnezia/tg-warp.conf`
+  (mode `0600`) and `/etc/amnezia/tg-warp-routes.list` (one CIDR per line from
+  `AllowedIPs`, which is never modified). The source must be a non-symlink file
+  inside the staging dir; the bot stages the upload under
   `/run/vpn-bot/warp/warp-upload-*.conf`.
 - `vpnbot-warp-install remove` — deletes `/etc/amnezia/tg-warp.conf` and
   `/etc/amnezia/tg-warp-routes.list` from disk. Called by `delete_config` to
@@ -110,8 +112,10 @@ Interfaces:
 - `vpnbot-warp-iface {up|down} /etc/amnezia/tg-warp.conf` — runs
   `awg-quick up|down` (AmneziaWG, **not** `wg-quick`).
 - `vpnbot-warp-routes {add|del} tg-warp` — adds/removes `ip route` entries read
-  from `tg-warp-routes.list`. Skips `0.0.0.0/0` and `::/0` to protect the default
-  route; never touches the DNS resolver.
+  from `tg-warp-routes.list`. Skips any default-equivalent route (`default`, or a
+  prefix length of 0 or 1, which also blocks the two-halves split-default trick) to
+  protect the host's egress; never touches the DNS resolver. `del` tears down its
+  iptables rules even when the routes list is already gone.
 - `vpnbot-warp-status tg-warp` — runs `awg show tg-warp`.
 
 `awg-quick`/`awg` (AmneziaWG userspace tools) must be installed at

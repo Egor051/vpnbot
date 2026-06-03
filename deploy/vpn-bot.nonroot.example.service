@@ -26,6 +26,18 @@ UMask=0077
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
+# Additional sandboxing that does not interfere with the sudo helper transition.
+# SystemCallFilter, RestrictAddressFamilies, ProtectKernelModules, RestrictSUIDSGID
+# and RestrictNamespaces are intentionally omitted: they propagate to the root sudo
+# helpers and would break awg-quick's modprobe, iptables' netlink, setuid via sudo,
+# and the socks5 helper's "nsenter --mount".
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+LockPersonality=true
 RuntimeDirectory=vpn-bot
 RuntimeDirectoryMode=0700
 ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot
