@@ -1,10 +1,13 @@
 # Package 5 Privilege Separation Plan
 
-Status: Package 5D completed and promoted to production. The live production model is a non-root `vpn-bot.service` running as `User=vpn-bot` and `Group=vpn-bot`, with privileged backend mutation isolated behind fixed sudo helper entrypoints.
+Status: The privilege-separation helper architecture (Package 5D) is implemented and shipped. Two deployment modes are supported:
 
-## Live Production Model
+- **root+api mode (shipped default).** `deploy/vpn-bot.service` runs as `User=root` with `ProtectSystem=false`; backend changes go through the Xray API and direct service control, and `PRIVILEGE_HELPERS_ENABLED` defaults to `false`. The sudo helpers are not used in this mode.
+- **non-root helper mode (hardened opt-in).** The bot runs as `User=vpn-bot`/`Group=vpn-bot` from `deploy/vpn-bot.nonroot.example.service`, and every privileged backend mutation is isolated behind fixed sudo helper entrypoints. This is the model the rest of this document and `deploy/check-nonroot-helper-mode.py` describe and validate.
 
-- `deploy/vpn-bot.service` is the production non-root unit, not a placeholder.
+## Non-root Helper Mode
+
+- Install `deploy/vpn-bot.nonroot.example.service` as the active unit. The shipped `deploy/vpn-bot.service` runs root+api and is intentionally **not** non-root; it would not pass the non-root preflight.
 - `PRIVILEGE_HELPERS_ENABLED=true`.
 - `BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock`.
 - systemd creates `/run/vpn-bot` with `RuntimeDirectory=vpn-bot` and `RuntimeDirectoryMode=0700`.
@@ -49,7 +52,7 @@ The security boundary is therefore:
 
 | Component | Production behavior | Root-only boundary | Telegram-facing bot direct access |
 | --- | --- | --- | --- |
-| vpn-bot systemd runtime | Runs as `vpn-bot:vpn-bot` from `deploy/vpn-bot.service`; `ProtectSystem=strict`; `ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot`. | Unit install, code install, `.env`, and service management remain operator/root work. | No root runtime. |
+| vpn-bot systemd runtime | In non-root helper mode runs as `vpn-bot:vpn-bot` from `deploy/vpn-bot.nonroot.example.service`; `ProtectSystem=strict`; `ReadWritePaths=/opt/vpn-service/data /opt/vpn-service/logs /run/vpn-bot`. | Unit install, code install, `.env`, and service management remain operator/root work. | No root runtime. |
 | SQLite data directory | `DB_PATH` defaults to `/opt/vpn-service/data/vpn.db`; DB/WAL/SHM files are bot runtime state. | No sudoers needed. | Yes, direct read/write to SQLite is expected. |
 | `.env` handling | systemd reads `EnvironmentFile=/opt/vpn-service/.env`; file must not be writable by `vpn-bot`. | Root/operator owns production secrets and restart-time config. | Environment is inherited; no direct write. |
 | Logs and lock paths | `LOG_DIR=/opt/vpn-service/logs`; `BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock`; `RuntimeDirectory=vpn-bot`. | No sudoers needed. | Yes, direct write to narrow runtime paths. |
@@ -103,7 +106,7 @@ Required properties:
 - Accepts candidates only from `/run/vpn-bot/awg`.
 - Validates with `awg-quick strip` or the configured compatible tool.
 - Atomically installs `/etc/amnezia/amneziawg/awg0.conf`.
-- Preserves private key permissions as `root:root` mode `0600`.
+- Installs as `root:vpn-bot` mode `0640` (world-unreadable; group-readable so the bot can read status). Note: this makes the server WireGuard `PrivateKey` readable by the `vpn-bot` group — an accepted trade-off for non-root status reads; keep the bot process and group membership tightly scoped.
 - Applies runtime with fixed-interface `syncconf` for `awg0`, consistent with the existing adapter design that avoids a full tunnel restart.
 - Verifies `awg-quick@awg0` is active.
 - Provides sanitized read-only status/peer/transfer output for the fixed interface.
@@ -115,7 +118,7 @@ Path: `/usr/local/sbin/vpnbot-mtproxy-apply`.
 Required properties:
 
 - Accepts candidates only from `/run/vpn-bot/mtproxy`.
-- Installs managed secret and env files atomically with mode `0600`.
+- Installs managed secret and env files atomically as `root:vpn-bot` mode `0640` in a `0750` `root:vpn-bot` directory (world-unreadable; group-readable for non-root reads).
 - Restarts `mtproxy` using a fixed service name.
 - Verifies service active state and listening port.
 - Never prints raw MTProto secrets or generated links.
@@ -132,10 +135,10 @@ Wildcard arguments in sudoers are acceptable only because they are attached to f
 Package 5D closes the earlier Package 5B/5C rollout plan:
 
 1. Helpers are implemented and installed as fixed root-owned entrypoints.
-2. `deploy/vpn-bot.service` is the production non-root unit.
-3. `deploy/vpn-bot.nonroot.example.service` is retained only as a compatibility reference for old rollout notes and must stay aligned with production behavior.
-4. Helper mode is production-on with `PRIVILEGE_HELPERS_ENABLED=true`.
-5. `deploy/check-nonroot-helper-mode.py` is the mandatory preflight and postflight host check.
+2. `deploy/vpn-bot.service` is the shipped root+api unit; `deploy/vpn-bot.nonroot.example.service` is the non-root helper-mode unit to install when opting into that model.
+3. `deploy/vpn-bot.root-legacy.example.service` is retained only as an emergency root/direct fallback.
+4. Helper mode is opt-in via `PRIVILEGE_HELPERS_ENABLED=true` (default `false`).
+5. `deploy/check-nonroot-helper-mode.py` is the mandatory preflight and postflight host check for the non-root helper mode.
 
 ## Emergency Rollback Notes
 

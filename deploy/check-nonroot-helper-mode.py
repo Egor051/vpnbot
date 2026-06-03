@@ -16,6 +16,13 @@ HELPERS = (
     Path("/usr/local/sbin/vpnbot-awg-apply"),
     Path("/usr/local/sbin/vpnbot-mtproxy-apply"),
 )
+# Optional WARP routing helpers (only used when the WARP module is enabled).
+WARP_HELPERS = (
+    Path("/usr/local/sbin/vpnbot-warp-install"),
+    Path("/usr/local/sbin/vpnbot-warp-iface"),
+    Path("/usr/local/sbin/vpnbot-warp-routes"),
+    Path("/usr/local/sbin/vpnbot-warp-status"),
+)
 FORBIDDEN_WRITE_PATHS = (
     "/etc/passwd",
     "/etc/shadow",
@@ -31,6 +38,20 @@ def _read(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
         raise CheckError(f"{path}: cannot read: {exc}") from exc
+
+
+def _active_text(text: str) -> str:
+    """Return only non-blank, non-comment lines.
+
+    Substring checks must not match a directive that is merely mentioned in a
+    comment (e.g. a helper path documented in the sudoers header, or a sample
+    ``User=root`` line), which would otherwise yield a false OK/FAIL.
+    """
+    return "\n".join(
+        line
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith(("#", ";"))
+    )
 
 
 class CheckError(Exception):
@@ -105,7 +126,11 @@ def _resolve_unit_path(raw_path: str | None, repo_root: Path) -> Path:
     installed = Path("/etc/systemd/system/vpn-bot.service")
     if installed.exists():
         return installed
-    return repo_root / "deploy" / "vpn-bot.service"
+    # This tool validates the NON-ROOT helper-mode deployment. The shipped
+    # deploy/vpn-bot.service runs in root+api mode and intentionally would not pass
+    # these checks, so fall back to the non-root reference unit when no installed
+    # unit is present (e.g. running from a repo checkout).
+    return repo_root / "deploy" / "vpn-bot.nonroot.example.service"
 
 
 def check_unit(path: Path, reporter: Reporter) -> None:
@@ -114,6 +139,10 @@ def check_unit(path: Path, reporter: Reporter) -> None:
     except CheckError as exc:
         reporter.fail(str(exc))
         return
+
+    # Ignore comments so a directive mentioned only in a comment never satisfies a
+    # required check nor trips a forbidden one.
+    active = _active_text(text)
 
     required = (
         "User=vpn-bot",
@@ -124,14 +153,14 @@ def check_unit(path: Path, reporter: Reporter) -> None:
         "ProtectSystem=strict",
     )
     for item in required:
-        if item in text:
+        if item in active:
             reporter.ok(f"{path}: contains {item}")
         else:
             reporter.fail(f"{path}: missing {item}")
 
     forbidden = ("User=root", "Group=root", "NoNewPrivileges=true", "future example")
     for item in forbidden:
-        if item in text:
+        if item in active:
             reporter.fail(f"{path}: contains forbidden {item}")
         else:
             reporter.ok(f"{path}: does not contain {item}")
@@ -153,17 +182,27 @@ def check_sudoers(path: Path, reporter: Reporter) -> None:
         reporter.fail(str(exc))
         return
 
+    # Ignore comments so the helper paths documented in the sudoers header cannot
+    # satisfy the grant checks — only real Cmnd_Alias/grant lines count.
+    active = _active_text(text)
+
     forbidden = ("NOPASSWD: ALL", "ALL=(ALL) ALL", "ALL=(ALL:ALL) ALL")
     for item in forbidden:
-        if item in text:
+        if item in active:
             reporter.fail(f"{path}: contains forbidden {item}")
         else:
             reporter.ok(f"{path}: does not contain {item}")
     for helper in HELPERS:
-        if str(helper) in text:
+        if str(helper) in active:
             reporter.ok(f"{path}: grants {helper}")
         else:
             reporter.fail(f"{path}: missing {helper}")
+    # WARP helpers are optional (only when the WARP module is enabled); a partial
+    # set is suspicious, so warn rather than fail when some-but-not-all are present.
+    warp_present = [h for h in WARP_HELPERS if str(h) in active]
+    if warp_present and len(warp_present) != len(WARP_HELPERS):
+        missing = [str(h) for h in WARP_HELPERS if str(h) not in active]
+        reporter.warn(f"{path}: partial WARP helper grants; missing {', '.join(missing)}")
 
     if os.name == "posix" and path.exists():
         st = path.stat()

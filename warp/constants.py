@@ -19,3 +19,8 @@ ROUTES_LIST = "/etc/amnezia/tg-warp-routes.list"
 CHECK_INTERVAL = 10     # seconds between tunnel liveness probes
 FAIL_THRESHOLD = 2      # consecutive failures before routes are removed (fallback)
 RECOVER_THRESHOLD = 3   # consecutive successes before routes are restored
+
+# A WireGuard handshake newer than this is treated as tunnel liveness when the
+# fixed ICMP probe target is unreachable (e.g. it is not inside the user's
+# AllowedIPs or it filters ICMP), preventing a permanent false "tunnel down".
+HANDSHAKE_FRESH_SECONDS = 180

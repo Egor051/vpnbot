@@ -10,15 +10,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_helper(name: str) -> object:
+    import importlib.machinery
     import importlib.util
     import sys
 
+    # SourceFileLoader (not spec_from_file_location) so extension-less helper
+    # scripts under deploy/helpers/ load correctly.
     path = ROOT / "deploy" / "helpers" / name
-    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), path)
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    spec.loader.exec_module(module)
     return module
 
 

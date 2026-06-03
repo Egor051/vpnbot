@@ -13,6 +13,23 @@ _ALLOWED_BINARY_PATHS: frozenset[str] = frozenset({
     "/usr/local/bin/mtproto-proxy",
 })
 
+# Security: only honour these keys from the env file (mirrors the apply helper's
+# allowlist) so an unexpected key in a tampered file is ignored, not acted upon.
+_ALLOWED_ENV_KEYS: frozenset[str] = frozenset({
+    "MTPROTO_BINARY_PATH",
+    "MTPROTO_RUN_USER",
+    "MTPROTO_RUN_GROUP",
+    "MTPROTO_PROXY_SECRET_PATH",
+    "MTPROTO_PROXY_MULTI_CONF_PATH",
+    "MTPROTO_MANAGED_SECRETS_PATH",
+    "MTPROTO_PORT",
+    "MTPROTO_INTERNAL_STATS_PORT",
+    "MTPROTO_WORKERS",
+})
+
+# Numeric fields validated before they reach the proxy argv.
+_PORT_KEYS = ("MTPROTO_PORT", "MTPROTO_INTERNAL_STATS_PORT")
+
 
 def read_env(path: str) -> dict[str, str]:
     result: dict[str, str] = {}
@@ -22,8 +39,18 @@ def read_env(path: str) -> dict[str, str]:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
+            if key not in _ALLOWED_ENV_KEYS:
+                continue
             result[key] = value
     return result
+
+
+def _require_port(env: dict[str, str], key: str) -> str:
+    raw = env[key]
+    if not raw.isdigit() or not (1 <= int(raw) <= 65535):
+        print(f"error: {key} is not a valid port: {raw!r}", file=sys.stderr)
+        raise SystemExit(1)
+    return raw
 
 
 def main() -> None:
@@ -32,6 +59,12 @@ def main() -> None:
     # Security: validate binary path against allowlist before execv
     if binary_path not in _ALLOWED_BINARY_PATHS:
         print(f"error: MTPROTO_BINARY_PATH not in allowlist: {binary_path!r}", file=sys.stderr)
+        raise SystemExit(1)
+    # Validate numeric fields and workers before building argv.
+    for port_key in _PORT_KEYS:
+        _require_port(env, port_key)
+    if not env["MTPROTO_WORKERS"].isdigit():
+        print(f"error: MTPROTO_WORKERS is not numeric: {env['MTPROTO_WORKERS']!r}", file=sys.stderr)
         raise SystemExit(1)
     with open(env["MTPROTO_MANAGED_SECRETS_PATH"], "r", encoding="utf-8") as file:
         document = json.load(file)

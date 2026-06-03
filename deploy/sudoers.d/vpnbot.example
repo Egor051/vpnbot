@@ -18,6 +18,14 @@
 # are the security boundary and must validate all actions, paths, prefixes, and
 # staged file contents strictly. This file grants no raw account-management,
 # service-manager, file-copy, Xray, AWG, WG, or MTProxy binaries.
+#
+# NOTE on sudo glob semantics: in command ARGUMENTS a trailing "*" is matched
+# against the whole concatenated argument string, so it also matches "/", spaces
+# and additional argv elements. A pattern like ".../xray/*" therefore does NOT by
+# itself forbid "..", traversal, or extra arguments — every helper independently
+# re-validates its argv (argparse rejects extra/unknown args), resolves and
+# confines staged paths to its fixed staging root, and rejects symlinks. The
+# remove/up/down/add/del/status verbs use no wildcard and are fully pinned.
 
 Defaults:vpn-bot env_reset
 Defaults:vpn-bot secure_path="/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"

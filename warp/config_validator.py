@@ -84,6 +84,15 @@ def validate_amnezia_config(text: str) -> WarpConfig:
             "Загрузите конфиг в расширенном формате AmneziaWG."
         )
 
+    # Reject script-execution hooks: awg-quick/wg-quick run PreUp/PostUp/PreDown/
+    # PostDown as root when the interface is brought up or down, so a config that
+    # carries them would smuggle arbitrary commands across the privilege boundary.
+    if re.search(r"^[ \t]*(?:Pre|Post)(?:Up|Down)[ \t]*=", text, re.MULTILINE | re.IGNORECASE):
+        raise WarpConfigError(
+            "Конфиг не должен содержать директивы PreUp/PostUp/PreDown/PostDown "
+            "(они выполняются как root при поднятии интерфейса)."
+        )
+
     allowed_ips = extract_allowed_ips(text)
     if not allowed_ips:
         raise WarpConfigError("В конфиге отсутствует непустой AllowedIPs")

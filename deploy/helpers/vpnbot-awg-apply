@@ -46,6 +46,10 @@ def validate_candidate_path(raw_path: str) -> Path:
         resolved = candidate.resolve(strict=True)
     except FileNotFoundError as exc:
         raise HelperError("candidate path does not exist", EXIT_VALIDATION) from exc
+    # The staging root must be a real directory, not a bot-planted symlink that
+    # would otherwise let resolve() retarget the allowed prefix to an arbitrary tree.
+    if STAGING_ROOT.is_symlink():
+        raise HelperError("staging root must not be a symlink", EXIT_VALIDATION)
     root = STAGING_ROOT.resolve(strict=False)
     if not _is_relative_to(resolved, root):
         raise HelperError("candidate path outside staging root", EXIT_VALIDATION)
@@ -69,7 +73,15 @@ def run_awg_or_wg(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def quick_strip(path: Path) -> str:
-    named = path.parent / "awg0.conf"
+    # Stage the strip input in the root-owned canonical config directory (created
+    # 0700, root-only), never in the bot-writable staging dir, and create it with
+    # O_CREAT|O_EXCL|O_NOFOLLOW. Writing a fixed-name file into the bot-writable
+    # staging dir would let a pre-planted symlink redirect this root-owned write to
+    # an arbitrary path (arbitrary-write escalation). A unique name in the canonical
+    # dir also guarantees we never alias the canonical config itself (which would
+    # self-truncate it on rollback).
+    _prepare_target_dir()
+    strip_input = CANONICAL_CONFIG.with_name(f".{CANONICAL_CONFIG.name}.{time.time_ns()}.strip")
     # O_NOFOLLOW prevents TOCTOU: if path was swapped to a symlink, open raises OSError
     try:
         raw_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -77,13 +89,15 @@ def quick_strip(path: Path) -> str:
         raise HelperError(f"cannot open candidate: {exc}", EXIT_VALIDATION) from exc
     try:
         with os.fdopen(raw_fd, "rb") as src:
-            with named.open("wb") as dst:
+            fd = os.open(strip_input, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, PRIVATE_TEMP_MODE)
+            with os.fdopen(fd, "wb") as dst:
                 shutil.copyfileobj(src, dst)
-        result = run_command(["awg-quick", "strip", str(named)])
+        _set_private_root(strip_input)
+        result = run_command(["awg-quick", "strip", str(strip_input)])
         if result.returncode == 127:
-            result = run_command(["wg-quick", "strip", str(named)])
+            result = run_command(["wg-quick", "strip", str(strip_input)])
     finally:
-        named.unlink(missing_ok=True)
+        strip_input.unlink(missing_ok=True)
     if result.returncode != 0:
         raise HelperError("AWG config validation failed")
     return result.stdout
