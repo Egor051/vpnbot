@@ -64,6 +64,12 @@ class Database:
         created = not self.path.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._chmod_private_dir(self.path.parent)
+        if created:
+            # Create the database file with private permissions BEFORE aiosqlite
+            # opens it, so there is no window where the freshly created DB is
+            # world-readable. The -wal/-shm files SQLite creates later are still
+            # covered by the 0700 parent directory set above.
+            self._precreate_private_file(self.path)
         self._conn = await aiosqlite.connect(self.path)
         self._conn.row_factory = aiosqlite.Row
         await self._raw_conn().execute("PRAGMA foreign_keys = ON")
@@ -76,6 +82,15 @@ class Database:
 
     async def close(self) -> None:
         if self._conn is not None:
+            # Truncate the WAL on a clean shutdown so it does not grow unbounded
+            # across long-running deployments. Best-effort: a checkpoint can fail
+            # if a transaction is still open at close time (e.g. tests that never
+            # commit) — that is benign, so it is logged at debug and must not
+            # prevent the connection from closing.
+            try:
+                await self._raw_conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                logger.debug("wal_checkpoint при закрытии SQLite пропущен", exc_info=True)
             await self._raw_conn().close()
             self._conn = None
 
@@ -661,13 +676,19 @@ class Database:
         # 2. copy data;
         # 3. drop the old table (FK OFF to avoid cascade complications);
         # 4. rename _new → original (no sibling FK references _new, so nothing to rewrite).
-        # Commit any pending writes so PRAGMA foreign_keys = OFF takes effect
-        # (SQLite silently ignores the pragma inside an open transaction).
+        #
+        # All statements run on the RAW connection (mirroring _migrate_v17): the
+        # pragma toggles only take effect outside an open transaction, so we
+        # commit() first, then run the rebuild on a single raw transaction, and
+        # re-enable FK in `finally` AFTER the raw.commit() closes that
+        # transaction — otherwise PRAGMA foreign_keys = ON would be silently
+        # ignored and FK enforcement would stay OFF.
         await self.commit()
-        await self._raw_conn().execute("PRAGMA foreign_keys = OFF")
+        raw = self._raw_conn()
+        await raw.execute("PRAGMA foreign_keys = OFF")
         try:
-            await self.conn.execute("DROP INDEX IF EXISTS idx_announcement_batches_status")
-            await self.conn.execute(
+            await raw.execute("DROP INDEX IF EXISTS idx_announcement_batches_status")
+            await raw.execute(
                 """
                 CREATE TABLE announcement_batches_new (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -686,7 +707,7 @@ class Database:
                 )
                 """
             )
-            await self.conn.execute(
+            await raw.execute(
                 """
                 INSERT INTO announcement_batches_new (
                   id, actor_user_id, from_chat_id, message_id, status,
@@ -699,19 +720,25 @@ class Database:
                 FROM announcement_batches
                 """
             )
-            await self.conn.execute("DROP TABLE announcement_batches")
-            await self.conn.execute("ALTER TABLE announcement_batches_new RENAME TO announcement_batches")
-            await self.conn.execute(
+            await raw.execute("DROP TABLE announcement_batches")
+            await raw.execute("ALTER TABLE announcement_batches_new RENAME TO announcement_batches")
+            await raw.execute(
                 "CREATE INDEX IF NOT EXISTS idx_announcement_batches_status "
                 "ON announcement_batches(status, updated_at)"
             )
-            await self.conn.execute(
+            await raw.execute(
                 "CREATE INDEX IF NOT EXISTS idx_announcement_batches_scheduled "
                 "ON announcement_batches(scheduled_at) "
                 "WHERE status = 'scheduled' AND scheduled_at IS NOT NULL"
             )
+            await raw.commit()
+        except Exception:
+            await raw.rollback()
+            raise
         finally:
-            await self._raw_conn().execute("PRAGMA foreign_keys = ON")
+            # Re-enable FK after committing so the pragma actually takes effect
+            # (SQLite ignores it inside a transaction).
+            await raw.execute("PRAGMA foreign_keys = ON")
 
     async def _migrate_v17(self) -> None:
         # Commit any writes buffered by previous migrations so that
@@ -738,7 +765,21 @@ class Database:
                 )
                 """
             )
-            await raw.execute("INSERT INTO users_new SELECT * FROM users")
+            # Explicit column list (not SELECT *) so a future divergence in
+            # column order between schema.sql and this rebuild cannot silently
+            # misalign data.
+            await raw.execute(
+                """
+                INSERT INTO users_new (
+                  telegram_user_id, username, first_name, role,
+                  created_at, updated_at, blocked_at, trial_quota_reset_at, note
+                )
+                SELECT
+                  telegram_user_id, username, first_name, role,
+                  created_at, updated_at, blocked_at, trial_quota_reset_at, note
+                FROM users
+                """
+            )
             await raw.execute("DROP TABLE users")
             await raw.execute("ALTER TABLE users_new RENAME TO users")
             await raw.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
@@ -885,6 +926,11 @@ class Database:
             )
 
     async def commit(self) -> None:
+        # A commit()/rollback() issued by a task that owns neither an explicit
+        # transaction nor the implicit-write slot is an intentional safe no-op
+        # (it waits for any in-flight transaction to finish, then commits the
+        # autocommit-empty connection). This lets repository helpers call
+        # commit() unconditionally without corrupting another task's transaction.
         current_task = asyncio.current_task()
         if self._transaction_owner is current_task and self._transaction_depth > 0:
             return
@@ -914,6 +960,14 @@ class Database:
 
     @asynccontextmanager
     async def transaction(self, immediate: bool = True) -> AsyncIterator[aiosqlite.Connection]:
+        # Nested transactions are intentionally FLATTENED (join semantics), NOT
+        # implemented with SAVEPOINTs: a nested `transaction()` in the same task
+        # joins the outer transaction, and only the outermost commits/rolls back.
+        # This makes repository writes (whose internal `commit()` is a no-op while
+        # an explicit transaction is open) composable into one atomic unit — see
+        # test_approve_rolls_back_request_if_role_update_fails. A consequence is
+        # that an exception caught *inside* an inner block is NOT independently
+        # rolled back; callers needing partial rollback must use explicit SAVEPOINTs.
         current_task = asyncio.current_task()
         if current_task is None:
             raise RuntimeError("Database transaction requires an asyncio task")
@@ -966,6 +1020,14 @@ class Database:
         is_write = _is_write_statement(sql) if write is None else write
         if self._transaction_owner is current_task:
             return False
+        # Intentional, covered by test_connection_proxy_select_during_active_transaction_does_not_wait:
+        # a task that INHERITED the active-transaction ContextVar (i.e. an asyncio
+        # child task spawned within the owner's `async with transaction()` scope)
+        # is treated as part of that transaction. Its reads proceed immediately
+        # (read-your-writes) instead of waiting on the lock — this also prevents a
+        # parent→child read deadlock when the owner awaits such a child before
+        # committing. Independent reader tasks (which did NOT inherit the context)
+        # fall through to the lock wait below, so they never see uncommitted data.
         if _ACTIVE_TRANSACTION_DB.get() is self and not is_write:
             return False
         if self._implicit_write_owner is current_task:
@@ -1010,6 +1072,15 @@ class Database:
             path.chmod(0o700)
         except OSError:
             logger.warning("Не удалось выставить права 700 на директорию %s", path, exc_info=True)
+
+    def _precreate_private_file(self, path: Path) -> None:
+        if os.name != "posix":
+            return
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except OSError:
+            logger.warning("Не удалось предсоздать файл SQLite с правами 600 %s", path, exc_info=True)
 
     def _chmod_private_file(self, path: Path) -> None:
         if os.name != "posix":

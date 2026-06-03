@@ -1,8 +1,16 @@
 
+import asyncio
+from pathlib import Path
+
 import pytest
 
 from adapters.dante_users import DanteUserAdapter
 from adapters.errors import DanteUserError
+from db.database import Database
+from models.dto import TelegramUserProfile
+from models.enums import AuditEntityType, UserRole
+from repositories.audit_log import AuditLogRepository
+from repositories.users import UserRepository
 from services.notes import normalize_note
 
 
@@ -75,3 +83,75 @@ def test_awg_config_note_clean_note_passes() -> None:
 def test_awg_config_note_none_returns_none() -> None:
     """normalize_note returns None for None input."""
     assert normalize_note(None) is None
+
+
+# ---------------------------------------------------------------------------
+# SQL parameterization — values with SQL metacharacters must be stored
+# verbatim and never interpreted (verifies the S608 suppression in practice).
+# ---------------------------------------------------------------------------
+
+_SQL_INJECTION_PAYLOADS = [
+    "'); DROP TABLE users;--",
+    "' OR '1'='1",
+    'Robert"); DROP TABLE vpn_keys;--',
+    "x'; DELETE FROM users WHERE ''='",
+]
+
+
+@pytest.mark.parametrize("payload", _SQL_INJECTION_PAYLOADS)
+def test_user_note_sql_injection_is_stored_verbatim(tmp_path: Path, payload: str) -> None:
+    """A note containing SQL metacharacters is stored as data, not executed."""
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users = UserRepository(db)
+            await users.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.PENDING_USER, "now")
+            await users.update_note(100, payload, "now")
+
+            # The users table still exists and the value round-trips verbatim.
+            stored = await users.get_by_id(100)
+            assert stored is not None
+            assert stored.note == payload
+            count = await users.count_users()
+            assert count == 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("payload", _SQL_INJECTION_PAYLOADS)
+def test_audit_entity_id_filter_sql_injection_is_inert(tmp_path: Path, payload: str) -> None:
+    """A crafted entity_id / action filter is parameterized, not interpreted."""
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            audit = AuditLogRepository(db)
+            await audit.create(
+                actor_user_id=None,
+                action=payload,
+                entity_type=AuditEntityType.SYSTEM,
+                entity_id=payload,
+                details={"note": payload},
+                now="2026-01-01T00:00:00+00:00",
+            )
+            # Dynamic action IN-list + entity_id filter must match the literal row,
+            # not trigger injection, and the audit_log table must survive.
+            rows = await audit.list_recent_for_entity(
+                entity_type=AuditEntityType.SYSTEM,
+                entity_id=payload,
+                actions={payload, "' OR 1=1 --"},
+            )
+            assert len(rows) == 1
+            assert rows[0]["entity_id"] == payload
+            assert await audit.count_all() == 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())

@@ -785,8 +785,8 @@ class ProxyAccessRepository:
                 ProxyAccessStatus.APPLY_FAILED.value,
                 ProxyAccessStatus.REVOKE_FAILED.value,
                 ProxyAccessStatus.DELETE_FAILED.value,
-                limit,
-                offset,
+                _clamp_limit(limit),
+                _clamp_offset(offset),
             ),
         )
         rows = await cursor.fetchall()

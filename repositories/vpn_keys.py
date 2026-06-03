@@ -311,7 +311,13 @@ class VpnKeyRepository:
         limit: int = 500,
         offset: int = 0,
     ) -> list[VpnKey]:
-        """Return a paginated list of keys filtered by the given statuses, oldest updated first."""
+        """Return a paginated list of keys filtered by the given statuses, oldest updated first.
+
+        NOTE: LIMIT/OFFSET paginated and capped at 500 — NOT suitable for a full
+        sweep of every matching key. Callers that must process all rows should
+        use the keyset-paginated list_by_type_statuses(after_id=...) loop instead
+        (every production scan already does).
+        """
         if not statuses:
             return []
         placeholders = ",".join("?" for _ in statuses)
@@ -462,7 +468,12 @@ class VpnKeyRepository:
         await self.mark_deleted(key_id, actor_user_id, now)
 
     async def hard_delete_with_stats(self, key_id: int) -> None:
-        """Permanently delete a VPN key along with its traffic stats."""
+        """Permanently delete a VPN key along with its traffic stats.
+
+        The explicit traffic-stats delete is intentional belt-and-suspenders:
+        vpn_key_traffic_stats has ON DELETE CASCADE, but deleting it explicitly
+        keeps the cleanup correct even if foreign-key enforcement is ever off.
+        """
         async with self.db.transaction():
             await self.db.conn.execute(
                 "DELETE FROM vpn_key_traffic_stats WHERE key_id = ?",
