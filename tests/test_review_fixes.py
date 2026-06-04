@@ -363,7 +363,7 @@ async def test_disable_protocol_revokes_backend_before_delete(tmp_path: Path) ->
         async def xray_purger(actor_id: int, key_id: int):
             # Mirrors delete_xray_key: backend revoke happens here, then hard delete.
             purged.append(key_id)
-            await keys_repo.hard_delete_with_stats(key_id)
+            await keys_repo.hard_delete_with_stats(key_id, "now")
 
         svc = ProtocolModulesService(ProtocolModulesRepository(db), db)
 

@@ -278,7 +278,7 @@ class XrayService:
                     details={"previous_status": previous_status.value, "error": str(exc)},
                 )
                 raise
-            await self.vpn_keys.hard_delete_with_stats(key_id)
+            await self.vpn_keys.hard_delete_with_stats(key_id, self.clock.now())
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action="xray_key_hard_deleted",
@@ -813,7 +813,7 @@ class XrayService:
             except Exception:
                 await self.vpn_keys.set_status(key.id, VpnKeyStatus.DELETE_FAILED, self.clock.now())
                 raise
-            await self.vpn_keys.hard_delete_with_stats(key.id)
+            await self.vpn_keys.hard_delete_with_stats(key.id, self.clock.now())
             await self._write_audit_best_effort(
                 actor_user_id=None,
                 action="xray_startup_delete_completed",
