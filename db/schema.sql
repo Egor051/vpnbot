@@ -229,6 +229,8 @@ WHERE status IN ('pending_apply','active','pending_revoke');
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);
+CREATE INDEX IF NOT EXISTS idx_deleted_key_traffic_archive_type ON deleted_key_traffic_archive(key_type, downloaded_bytes, uploaded_bytes);
+CREATE INDEX IF NOT EXISTS idx_deleted_key_traffic_archive_owner ON deleted_key_traffic_archive(owner_user_id, downloaded_bytes, uploaded_bytes);
 CREATE INDEX IF NOT EXISTS idx_trial_requests_user ON trial_key_requests(telegram_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_announcement_batches_status ON announcement_batches(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_announcement_batches_scheduled ON announcement_batches(scheduled_at) WHERE status = 'scheduled' AND scheduled_at IS NOT NULL;
