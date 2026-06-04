@@ -110,7 +110,7 @@ def key_list_card(key: VpnKey, *, viewer_user_id: int) -> str:
         parts.append(f"{t('field_expires')}: {h(format_expiry_date(key.expires_at))}")
     if not note or label != note:
         parts.append(f"{t('field_note')}: {h(short_note(note))}")
-    if key.client_ip:
+    if key.client_ip and key.key_type != VpnKeyType.AWG:
         parts.append(f"{t('field_ip')}: {code(key.client_ip)}")
     return "\n".join(parts)
 
