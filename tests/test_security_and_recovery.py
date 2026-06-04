@@ -483,7 +483,7 @@ def test_awg_delete_failed_retry_removes_access_before_deleted() -> None:
         async def set_status(self, key_id: int, status: VpnKeyStatus, now: str) -> None:
             self.key = self._replace(status=status)
 
-        async def hard_delete_with_stats(self, key_id: int) -> None:
+        async def hard_delete_with_stats(self, key_id: int, now: str) -> None:
             self.key = None
 
         def _replace(self, **changes: object) -> VpnKey:

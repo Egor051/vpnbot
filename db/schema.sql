@@ -143,6 +143,16 @@ CREATE TABLE IF NOT EXISTS vpn_key_traffic_stats (
   FOREIGN KEY(key_id) REFERENCES vpn_keys(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS deleted_key_traffic_archive (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key_id INTEGER NOT NULL,
+  owner_user_id INTEGER NOT NULL,
+  key_type TEXT NOT NULL,
+  downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+  uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+  deleted_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS announcement_batches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   actor_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE RESTRICT,

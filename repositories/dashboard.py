@@ -115,12 +115,16 @@ class DashboardRepository:
         """Return aggregate traffic bytes grouped by VPN key protocol."""
         cursor = await self.db.conn.execute(
             """
-            SELECT
-              k.key_type,
-              SUM(t.downloaded_bytes + t.uploaded_bytes) AS total_bytes
-            FROM vpn_key_traffic_stats t
-            JOIN vpn_keys k ON k.id = t.key_id
-            GROUP BY k.key_type
+            SELECT key_type, SUM(total_bytes) AS total_bytes
+            FROM (
+                SELECT k.key_type, (t.downloaded_bytes + t.uploaded_bytes) AS total_bytes
+                FROM vpn_key_traffic_stats t
+                JOIN vpn_keys k ON k.id = t.key_id
+                UNION ALL
+                SELECT key_type, (downloaded_bytes + uploaded_bytes) AS total_bytes
+                FROM deleted_key_traffic_archive
+            )
+            GROUP BY key_type
             """
         )
         rows = await cursor.fetchall()
@@ -143,14 +147,22 @@ class DashboardRepository:
         """Return top N users sorted by total traffic bytes descending."""
         cursor = await self.db.conn.execute(
             """
-            SELECT
-              k.owner_user_id,
-              COALESCE(u.username, MAX(k.username)) AS username,
-              SUM(t.downloaded_bytes + t.uploaded_bytes) AS total_bytes
-            FROM vpn_key_traffic_stats t
-            JOIN vpn_keys k ON k.id = t.key_id
-            LEFT JOIN users u ON u.telegram_user_id = k.owner_user_id
-            GROUP BY k.owner_user_id
+            SELECT owner_user_id, username, SUM(total_bytes) AS total_bytes
+            FROM (
+                SELECT k.owner_user_id,
+                       COALESCE(u.username, k.username) AS username,
+                       (t.downloaded_bytes + t.uploaded_bytes) AS total_bytes
+                FROM vpn_key_traffic_stats t
+                JOIN vpn_keys k ON k.id = t.key_id
+                LEFT JOIN users u ON u.telegram_user_id = k.owner_user_id
+                UNION ALL
+                SELECT a.owner_user_id,
+                       COALESCE(u.username, CAST(a.owner_user_id AS TEXT)) AS username,
+                       (a.downloaded_bytes + a.uploaded_bytes) AS total_bytes
+                FROM deleted_key_traffic_archive a
+                LEFT JOIN users u ON u.telegram_user_id = a.owner_user_id
+            )
+            GROUP BY owner_user_id
             ORDER BY total_bytes DESC
             LIMIT ?
             """,

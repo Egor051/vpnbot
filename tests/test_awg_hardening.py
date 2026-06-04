@@ -191,7 +191,7 @@ def test_missing_public_key_is_recovered_from_managed_block_and_removed(tmp_path
             assert self.key is not None
             self.key = replace(self.key, status=status)
 
-        async def hard_delete_with_stats(self, key_id: int) -> None:
+        async def hard_delete_with_stats(self, key_id: int, now: str) -> None:
             self.hard_deleted = True
             self.key = None
 
@@ -233,7 +233,7 @@ def test_missing_public_key_without_managed_block_fails_safe(tmp_path: Path) -> 
             assert self.key is not None
             self.key = replace(self.key, status=status)
 
-        async def hard_delete_with_stats(self, key_id: int) -> None:
+        async def hard_delete_with_stats(self, key_id: int, now: str) -> None:
             self.hard_deleted = True
 
     class Adapter:

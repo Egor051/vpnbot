@@ -467,14 +467,28 @@ class VpnKeyRepository:
         """Soft-delete a VPN key by marking it deleted."""
         await self.mark_deleted(key_id, actor_user_id, now)
 
-    async def hard_delete_with_stats(self, key_id: int) -> None:
+    async def hard_delete_with_stats(self, key_id: int, now: str) -> None:
         """Permanently delete a VPN key along with its traffic stats.
 
+        Traffic bytes are archived to deleted_key_traffic_archive before removal
+        so dashboard totals continue to include traffic from deleted keys.
         The explicit traffic-stats delete is intentional belt-and-suspenders:
         vpn_key_traffic_stats has ON DELETE CASCADE, but deleting it explicitly
         keeps the cleanup correct even if foreign-key enforcement is ever off.
         """
         async with self.db.transaction():
+            await self.db.conn.execute(
+                """
+                INSERT INTO deleted_key_traffic_archive
+                    (key_id, owner_user_id, key_type, downloaded_bytes, uploaded_bytes, deleted_at)
+                SELECT t.key_id, k.owner_user_id, k.key_type,
+                       t.downloaded_bytes, t.uploaded_bytes, ?
+                FROM vpn_key_traffic_stats t
+                JOIN vpn_keys k ON k.id = t.key_id
+                WHERE t.key_id = ?
+                """,
+                (now, key_id),
+            )
             await self.db.conn.execute(
                 "DELETE FROM vpn_key_traffic_stats WHERE key_id = ?",
                 (key_id,),

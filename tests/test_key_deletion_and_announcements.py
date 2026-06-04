@@ -113,7 +113,7 @@ class MemoryKeyRepo:
         if self.key is not None:
             self.key = replace(self.key, status=VpnKeyStatus.REVOKED, revoked_at=now, revoked_by=actor_user_id)
 
-    async def hard_delete_with_stats(self, key_id: int) -> None:
+    async def hard_delete_with_stats(self, key_id: int, now: str) -> None:
         self.hard_deleted = True
         self.key = None
 
@@ -304,12 +304,22 @@ def test_hard_delete_with_stats_removes_key_and_stats(tmp_path: Path) -> None:
             )
             await db.commit()
 
-            await repo.hard_delete_with_stats(key.id)
+            await repo.hard_delete_with_stats(key.id, "2024-01-01T00:00:00")
 
             assert await repo.get_by_id(key.id) is None
             cursor = await db.conn.execute("SELECT COUNT(*) AS cnt FROM vpn_key_traffic_stats WHERE key_id = ?", (key.id,))
             row = await cursor.fetchone()
             assert row["cnt"] == 0
+
+            # Traffic bytes must be preserved in the archive
+            cursor = await db.conn.execute(
+                "SELECT downloaded_bytes, uploaded_bytes FROM deleted_key_traffic_archive WHERE key_id = ?",
+                (key.id,),
+            )
+            archive_row = await cursor.fetchone()
+            assert archive_row is not None
+            assert archive_row["downloaded_bytes"] == 123
+            assert archive_row["uploaded_bytes"] == 45
         finally:
             await db.close()
 
@@ -575,7 +585,7 @@ def test_successful_hard_delete_frees_awg_ip_for_reuse(tmp_path: Path) -> None:
 
             assert "10.0.0.2" in await repo.get_occupied_awg_ips()
 
-            await repo.hard_delete_with_stats(key.id)
+            await repo.hard_delete_with_stats(key.id, "2024-01-01T00:00:00")
 
             assert await repo.get_by_id(key.id) is None
             cursor = await db.conn.execute("SELECT COUNT(*) AS cnt FROM vpn_key_traffic_stats WHERE key_id = ?", (key.id,))
