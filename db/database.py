@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 21
+CURRENT_SCHEMA_VERSION = 22
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -259,6 +259,10 @@ class Database:
             await self._migrate_v21()
             await self._set_schema_version(21)
             version = 21
+        if version < 22:
+            await self._migrate_v22()
+            await self._set_schema_version(22)
+            version = 22
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -874,6 +878,34 @@ class Database:
                 "INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES (?, 1)",
                 (name,),
             )
+
+    async def _migrate_v22(self) -> None:
+        # Archive of traffic bytes for hard-deleted VPN keys, so dashboard
+        # lifetime totals keep counting traffic from keys that no longer exist.
+        # The covering indexes let the dashboard aggregations run as index-only
+        # scans. The table is also declared in schema.sql (re-ensured on every
+        # bootstrap); this migration backfills the object on legacy databases.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deleted_key_traffic_archive (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              key_id INTEGER NOT NULL,
+              owner_user_id INTEGER NOT NULL,
+              key_type TEXT NOT NULL,
+              downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+              uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+              deleted_at TEXT NOT NULL
+            )
+            """
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_deleted_key_traffic_archive_type "
+            "ON deleted_key_traffic_archive(key_type, downloaded_bytes, uploaded_bytes)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_deleted_key_traffic_archive_owner "
+            "ON deleted_key_traffic_archive(owner_user_id, downloaded_bytes, uploaded_bytes)"
+        )
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(

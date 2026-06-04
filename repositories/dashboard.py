@@ -112,30 +112,35 @@ class DashboardRepository:
         )
 
     async def traffic_totals(self) -> TrafficTotals:
-        """Return aggregate traffic bytes grouped by VPN key protocol."""
-        cursor = await self.db.conn.execute(
+        """Return aggregate traffic bytes grouped by VPN key protocol.
+
+        Both the per-protocol totals and the per-key average are computed over
+        the SAME dataset — live traffic stats UNION the deleted-key archive — so
+        ``avg_per_key_bytes`` stays consistent with ``total_bytes`` (i.e.
+        avg * key_count == total) instead of drifting because deleted keys count
+        toward the total but not the average.
+        """
+        row = await self.db.conn.execute_fetchone(
             """
-            SELECT key_type, SUM(total_bytes) AS total_bytes
+            SELECT
+              COALESCE(SUM(CASE WHEN key_type = 'xray' THEN total_bytes END), 0) AS xray_bytes,
+              COALESCE(SUM(CASE WHEN key_type = 'awg' THEN total_bytes END), 0) AS awg_bytes,
+              AVG(total_bytes) AS avg_bytes
             FROM (
-                SELECT k.key_type, (t.downloaded_bytes + t.uploaded_bytes) AS total_bytes
+                SELECT k.key_type AS key_type,
+                       (t.downloaded_bytes + t.uploaded_bytes) AS total_bytes
                 FROM vpn_key_traffic_stats t
                 JOIN vpn_keys k ON k.id = t.key_id
                 UNION ALL
-                SELECT key_type, (downloaded_bytes + uploaded_bytes) AS total_bytes
+                SELECT key_type,
+                       (downloaded_bytes + uploaded_bytes) AS total_bytes
                 FROM deleted_key_traffic_archive
             )
-            GROUP BY key_type
             """
         )
-        rows = await cursor.fetchall()
-        by_type: dict[str, int] = {str(row["key_type"]): int(row["total_bytes"] or 0) for row in rows}
-        xray_bytes = by_type.get("xray", 0)
-        awg_bytes = by_type.get("awg", 0)
-
-        avg_row = await self.db.conn.execute_fetchone(
-            "SELECT AVG(downloaded_bytes + uploaded_bytes) AS avg FROM vpn_key_traffic_stats"
-        )
-        avg = int(avg_row["avg"]) if avg_row and avg_row["avg"] is not None else 0
+        xray_bytes = int(row["xray_bytes"] or 0) if row else 0
+        awg_bytes = int(row["awg_bytes"] or 0) if row else 0
+        avg = int(row["avg_bytes"]) if row and row["avg_bytes"] is not None else 0
         return TrafficTotals(
             total_bytes=xray_bytes + awg_bytes,
             xray_bytes=xray_bytes,
@@ -147,9 +152,9 @@ class DashboardRepository:
         """Return top N users sorted by total traffic bytes descending."""
         cursor = await self.db.conn.execute(
             """
-            SELECT owner_user_id, username, SUM(total_bytes) AS total_bytes
+            SELECT owner_user_id, MAX(username) AS username, SUM(total_bytes) AS total_bytes
             FROM (
-                SELECT k.owner_user_id,
+                SELECT k.owner_user_id AS owner_user_id,
                        COALESCE(u.username, k.username) AS username,
                        (t.downloaded_bytes + t.uploaded_bytes) AS total_bytes
                 FROM vpn_key_traffic_stats t
