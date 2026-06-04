@@ -4,10 +4,55 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [1.3.0] — 2026-06-04
+
+### Added
+
+- **Live admin dashboard** — new «📊 Дашборд» button in the admin panel opens a
+  single auto-refreshable message with six stat blocks: 👥 Users (role breakdown,
+  new in 7/30 d, active keys, pending requests), 🔑 VPN keys (active Xray/AWG,
+  expiring in 7/30 d, stale, average per user), 📊 Traffic (totals Xray/AWG,
+  per-key average, Top-5 users), 🌐 Proxy (active SOCKS5/MTProto, stale), ⚙️
+  System (backend status, WARP, DB size, last backup time), 📋 Activity (audit
+  24 h/7 d, announcements in 30 d, last 3 actions). All 17 data sources are
+  queried in parallel via `asyncio.gather`. Adds `repositories/dashboard.py`,
+  `services/dashboard.py`, and `bot/handlers/admin_dashboard.py`. (#132)
+- **WARP tunnel Telegram alerts** — `WarpHealthMonitor` now fires optional
+  `on_tunnel_down` / `on_tunnel_recovered` callbacks on every route-state
+  transition; `WarpManager` wires them to send a dismissible inline alert to all
+  admins (🔴 tunnel down / 🟢 recovered). The alert message is deleted when the
+  admin taps «✅ Понял». (#134)
+
+### Changed
+
+- **Usage rules formatting** — removed the blank line between the «ПРАВИЛА
+  ПОЛЬЗОВАНИЯ:» header and the first prohibition icon, making the block more
+  compact. (#133)
+- **Dashboard layout** — Top-5 traffic users and recent audit actions are now
+  displayed in a column (one entry per line) instead of a pipe-separated single
+  line. (#148)
+- **Server restart notice** — schedule wording updated from «по чётным числам» to
+  «по числам, кратным пяти», and the expected downtime from «несколько минут» to
+  «несколько десятков секунд». (#149)
 
 ### Fixed
 
+- **AWG keys hide IP on listing page** — `key_list_card` no longer shows the
+  assigned IP for AmneziaWG keys (IP is meaningful in the config file, not as a
+  display label); Xray keys are unaffected. (#145)
+- **Deleted-key traffic preserved in dashboard totals** — `hard_delete_with_stats`
+  previously removed both the key row and its `vpn_key_traffic_stats` entry,
+  silently dropping lifetime bytes from the dashboard. A new
+  `deleted_key_traffic_archive` table (schema version 22) captures the byte counts
+  at deletion time within the same transaction; `traffic_totals()` and
+  `top_users_by_traffic()` `UNION ALL` the archive so lifetime traffic is always
+  reflected. (#146)
+- **Deleted-key traffic archive consistency** — follow-up to #146: migration v22
+  is now properly wired into the versioned ladder (`_migrate_v22`,
+  `CURRENT_SCHEMA_VERSION = 22`); dashboard `avg_per_key_bytes` is now computed
+  over the same live-plus-archive dataset as `total_bytes` so `avg × keys = total`;
+  `top_users_by_traffic` username is deterministic (`MAX(username)`); covering
+  indexes added on the archive table for index-only aggregation scans. (#147)
 - **Dependency audit set realigned with the installed set** — `constraints.txt`
   (scanned by `pip-audit`) had drifted from `constraints-hashed.txt` (installed
   with `--require-hashes`): five transitive pins disagreed (`aiohappyeyeballs`,
@@ -15,36 +60,119 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   entirely. `constraints.txt` is now generated as the un-hashed mirror of
   `constraints-hashed.txt` via `scripts/sync-constraints.py` (wired into
   `make update-hashes`), so the audited and installed sets can no longer diverge.
+  (#141)
 - **i18n key parity** — removed the orphan `btn_proxy_stats` key that existed only
   in the English catalogue, restoring ru/en parity; `i18n.t()` now falls back to
   the base (ru) string before the raw identifier when a key is missing in the
   active locale. Added `tests/test_i18n_parity.py` (key/placeholder/HTML parity)
   and `tests/test_env_settings_drift.py` (settings ↔ .env.example/README drift).
+  (#141)
 - **Documentation drift** — documented the WARP Telegram routing module and
   `WARP_PING_TARGET` in `README_RU.md` (previously English-only) and in
   `.env.example`; fixed the `BOT_LOCK_PATH` default and the `XRAY_FINGERPRINT`
   value list in `README.md`; refreshed the database-table list in both READMEs;
   surfaced previously undocumented tunables (`ANOMALY_*`, `KEY_EXPIRY_*`,
   `BOT_LANGUAGE`, staging dirs, …) in `.env.example`; aligned `CONTRIBUTING.md`
-  with the actual CI gates.
+  with the actual CI gates. (#141)
 
 ### Security
 
+- **WARP root-RCE via config hooks closed** — `awg-quick` executes
+  `PreUp/PostUp/PreDown/PostDown` as root; both the bot-side
+  `warp/config_validator.py` and the `vpnbot-warp-install` root boundary now
+  reject any of these directives (case-insensitive). (#140)
+- **AWG arbitrary root file-write and rollback corruption fixed** — `vpnbot-awg-apply`
+  wrote the stripped config into the bot-writable staging directory via a plain
+  `open("wb")`, allowing a symlink to redirect the write to any root-owned path;
+  rollback aliased the canonical config, causing self-truncation. The helper now
+  stages the strip-input in the root-owned canonical directory with
+  `O_CREAT|O_EXCL|O_NOFOLLOW`. (#140)
+- **Default-route guard extended** — `vpnbot-warp-routes` now skips any
+  default-equivalent route (`default`, prefix length 0 or 1, including the
+  two-`/1` split-default trick); `vpnbot-warp-install` validates every
+  `AllowedIPs` token as a real CIDR at the root boundary. (#140)
+- **Privileged-process zombie on timeout prevented** — `shell_runner.py` now
+  launches subprocesses in a new session and sends `SIGKILL` to the entire process
+  group on timeout, ensuring grandchild processes (e.g. `awg`) are also reaped;
+  `xray_config._apply_helper` no longer retries on timeout to avoid a concurrent
+  double-apply race. (#139)
+- **Adapter injection vectors closed** — AWG config `label` field rejects
+  whitespace/control characters; `dante_users` validates the password for `\n`,
+  `\r`, `\x00`, and `:` at the adapter boundary (not only in the helper); the
+  `email_label` field in `xray_config.add_client` is validated against
+  `_EMAIL_SAFE_RE`. (#139)
+- **Secrets no longer leak through ShellResult or logs** — `ShellResult.stderr` is
+  now stored redacted; redaction happens before truncation so secrets cannot appear
+  in the tail of a long error output. REALITY inbound API config (containing the
+  private key) is written with `umask 0600` + `fsync` instead of to `/tmp`. (#139)
+- **Staging symlink attacks prevented** — `privileged_helpers.py` enforces 0700 on
+  an already-existing staging directory, forbids symlink staging roots, correctly
+  removes symlinks on cleanup, and rejects `..` and symlinks in the helper path;
+  `vpnbot-warp-install` rejects a symlinked source file and operates on `realpath`.
+  (#139, #140)
+- **Moderator-initiated block now revokes all backend access** — `block_user` was
+  reachable by moderators but the wired revokers required superadmin, leaving every
+  VPN key and proxy access active on the backend after a moderator block. The block
+  flow now uses system revokers (`revoke_*_system`) with correct audit attribution.
+  (#137)
+- **`disable_protocol` no longer orphans live backend access** — it previously
+  hard-deleted database rows without revoking the corresponding Xray client / AWG
+  peer / Dante user / MTProto secret. It now revokes each key/access through the
+  full delete pipeline, enforces superadmin, writes an audit record, and refuses to
+  run if purge handlers are not wired. (#137)
+- **Concurrent trial approval no longer double-issues keys** — `approve_trial_request`
+  provisioned the key before atomically claiming the request, allowing two
+  concurrent approvals to each create a key. A decision lock and fresh status
+  re-check now guarantee exactly one provisioning. (#137)
+- **Trial flow rejects blocked users** — `create_trial_request` and the trial
+  request handlers now reject blocked users; `/start` no longer offers the trial
+  button to blocked users. (#136, #137)
+- **IDOR in key detail view fixed** — `open_key` now cross-checks the `owner` from
+  callback data against the key's real owner, matching the behaviour of `revoke`
+  and `delete`. (#136)
+- **HTML truncation and escaping fixes** — `cap_telegram_html` now closes
+  `i`/`u`/`s`/`blockquote` tags (not just `b`/`code`/`pre`) on truncation and
+  drops a trailing half-cut HTML entity; the user note in the admin «edit note»
+  prompt is now HTML-escaped (every other note render already escaped it). (#136)
+- **`RateLimiter` eviction bypass fixed** — throttled entries are now kept
+  most-recently-used so they cannot be evicted (which would reset the cooldown)
+  under high churn. (#136)
+- **Secrets excluded from `repr()` and tracebacks** — `Settings.bot_token` and
+  `Settings.default_proxy_password` are marked `repr=False`; `VpnKey`, `ProxyAccess`,
+  and `ProxyEntry` DTOs have redacting `__repr__` so `payload`/`password` fields
+  do not appear in logs or tracebacks. (#135, #138)
+- **Central log redaction** — a redaction formatter is applied to every log handler
+  so secrets are masked in every record even if the call site omits `redact()`;
+  log files remain `0600` after rotation via a secure `RotatingFileHandler`. (#135)
+- **Config validation hardened** — control characters are now banned in network
+  values (host/SNI/DNS/AllowedIPs/flow) to prevent injection into configs and
+  links; Fernet key is validated to decode to exactly 32 bytes; non-positive
+  `ADMIN_IDS` are rejected; empty `HEALTH_HOST` defaults to `127.0.0.1` instead of
+  binding all interfaces. (#135)
+- **DB file created mode 0600** — the database file is created with `0600`
+  permissions before `aiosqlite` opens it, closing the world-readable window; WAL
+  checkpoint (`TRUNCATE`) added to `close()` to limit WAL growth; FK enforcement
+  after migration v16 fixed (raw connection + `commit()` before `finally`). (#138)
+- **Dashboard timestamp timezone consistency** — dashboard cutoffs now use the same
+  `+00:00` format as stored values, eliminating boundary skew in
+  `keys_summary`/`count_new_users_since`/`count_announcements_since`; the audit
+  prune and `count_audit_since` queries now use `idx_audit_log_created_at` again
+  (the `REPLACE()` that prevented index use was removed). (#138)
 - **CI action pinning** — `actions/checkout` and `actions/setup-python` are now
   pinned by commit SHA (with version comments) instead of mutable tags; `push`
-  CI is scoped to `main`.
+  CI is scoped to `main`. (#141)
 - **Lint suppressions scoped** — the project-wide `S608` (SQL injection) and
   `S603`/`S607`/`S404` (subprocess) ruff ignores are now scoped to the
   directories that legitimately need them (`db/`, `repositories/`, `deploy/`,
   `tests/`), so the rest of the tree is guarded against new violations. Added
   `*-wal`/`*-shm`/`*-journal` ignores and a vulnerability-response timeframe to
-  `SECURITY.md`.
+  `SECURITY.md`. (#141)
 - **aiohttp advisories triaged (VEX)** — `pip-audit` now runs via `make audit`
   with a documented `--ignore-vuln` list for `CVE-2026-34993` and
   `CVE-2026-47265`. Both are fixed only in aiohttp 3.14.0, which the tree cannot
   adopt while `aiogram` (≤3.28.2) caps `aiohttp<3.14`, and neither applies to the
   bot's client-only, trusted-host usage. To be revisited when `aiogram` raises the
-  cap.
+  cap. (#141)
 
 ## [1.2.0] — 2026-06-01
 
@@ -195,6 +323,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Managed MTProto secrets and env files are `root:root 0600`; backup directories are `root:root 0700`.
 - `XRAY_APPLY_MODE=api` + `PRIVILEGE_HELPERS_ENABLED=true` combination rejected at startup.
 
+[1.3.0]: https://github.com/Egor051/vpnbot/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/Egor051/vpnbot/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Egor051/vpnbot/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/Egor051/vpnbot/compare/v1.0.1...v1.0.2
