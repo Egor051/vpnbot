@@ -1077,7 +1077,9 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
         f"  Среднее на ключ: {h(format_bytes(t_.avg_per_key_bytes))}",
     ]
     if top_parts:
-        lines.append("  Топ-5: " + " | ".join(top_parts))
+        lines.append("  Топ-5:")
+        for part in top_parts:
+            lines.append(f"    {part}")
     lines.append("")
 
     # Proxy
@@ -1133,6 +1135,8 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
         f"  Объявлений за 30д: {h(snap.announcements_30d)}",
     ]
     if recent_actions:
-        lines.append("  Последние: " + ", ".join(recent_actions))
+        lines.append("  Последние:")
+        for action in recent_actions:
+            lines.append(f"    {action}")
 
     return "\n".join(lines)
