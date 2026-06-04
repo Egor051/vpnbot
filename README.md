@@ -184,7 +184,7 @@ All variables parsed by `config/settings.py`. Variables marked **Required** must
 | `DB_PATH` | No | `/opt/vpn-service/data/vpn.db` | Path to the SQLite database file. | `/opt/vpn-service/data/vpn.db` |
 | `SQLITE_SYNCHRONOUS` | No | `FULL` | SQLite synchronous mode: `FULL`, `NORMAL`, or `EXTRA`. `FULL` is safest. | `FULL` |
 | `LOG_DIR` | No | `/opt/vpn-service/logs` | Directory for rotating log files. | `/opt/vpn-service/logs` |
-| `BOT_LOCK_PATH` | No | `/run/vpn-bot.lock` | Path to the single-instance PID lock file. | `/run/vpn-bot/vpn-bot.lock` |
+| `BOT_LOCK_PATH` | No | `/run/vpn-bot/vpn-bot.lock` | Path to the single-instance PID lock file. | `/run/vpn-bot/vpn-bot.lock` |
 | `BOT_DROP_PENDING_UPDATES` | No | `false` | Drop queued Telegram updates on startup. Useful after downtime. | `false` |
 | `BOT_LANGUAGE` | No | `ru` | Bot UI language. Supported: `ru`, `en`. | `ru` |
 | `AUDIT_RETENTION_DAYS` | No | `180` | Days to retain audit log entries (0 = forever, max 3650). | `180` |
@@ -224,7 +224,7 @@ All variables parsed by `config/settings.py`. Variables marked **Required** must
 | `XRAY_REALITY_PUBLIC_KEY` | No* | — | Xray Reality public key (base64url). Required to issue keys. | `ABC123...` |
 | `XRAY_SNI` | No* | — | SNI (Server Name Indication) for Reality. Required to issue keys. | `www.microsoft.com` |
 | `XRAY_FLOW` | No | `xtls-rprx-vision` | VLESS flow control. | `xtls-rprx-vision` |
-| `XRAY_FINGERPRINT` | No | `chrome` | TLS fingerprint. One of: `chrome`, `firefox`, `safari`, `ios`, `android`, `edge`, `randomized`, `randomizedalpn`, `randomizednoalpn`. | `chrome` |
+| `XRAY_FINGERPRINT` | No | `chrome` | Global fallback TLS fingerprint (the key-creation flow lets the user pick per key). One of: `chrome`, `firefox`, `safari`, `ios`, `android`, `edge`, `360`, `qq`, `random`, `randomized`, `randomizedalpn`, `randomizednoalpn`. | `chrome` |
 | `XRAY_NETWORK_TYPE` | No | `tcp` | Network type: `tcp` or `raw`. | `tcp` |
 | `XRAY_SHORT_ID` | No* | — | Hex short ID (≤16 chars). Required if `XRAY_MANAGE_SHORT_IDS=false`. | `abcd1234` |
 | `XRAY_MANAGE_SHORT_IDS` | No | `false` | Let the bot manage short IDs automatically. | `false` |
@@ -629,6 +629,7 @@ These default to the provided sudoers template paths. Changing `WARP_CONFIG_PATH
 | `WARP_ROUTES_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-routes` | Route add/del helper |
 | `WARP_STATUS_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-status` | `awg show` helper |
 | `WARP_HELPER_STAGING_DIR` | `/run/vpn-bot/warp` | Private dir for staged uploads |
+| `WARP_PING_TARGET` | `162.159.140.245` | ICMP target the health monitor pings to decide tunnel up/down. Default is a Cloudflare anycast address present in typical WARP `AllowedIPs`. Override if your `AllowedIPs` is Telegram-only, otherwise the monitor reports false failures. |
 
 ## Deployment Overview
 
@@ -715,31 +716,50 @@ python -m pip install -r requirements-dev.txt
 Run the same core gates used by CI:
 
 ```bash
-python -m pip_audit -r requirements.txt -r constraints.txt
+make audit   # python -m pip_audit -r requirements.txt -r constraints.txt (+ documented --ignore-vuln list)
 python -m ruff check .
 python -m compileall .
-python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/
+python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ main.py init_db.py
 python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=60
 ```
 
+> The audit ignores two aiohttp advisories (`CVE-2026-34993`, `CVE-2026-47265`)
+> that are fixed only in aiohttp 3.14.0 — which the tree cannot adopt while
+> `aiogram` caps `aiohttp<3.14` — and that do not apply to this bot's
+> client-only, trusted-host usage. The justification lives in the `Makefile`
+> (`PIP_AUDIT_IGNORES`); revisit it when `aiogram` raises the cap.
+
 ### Updating dependencies
 
-After changing `requirements.txt` or `requirements-dev.txt`, regenerate the hashed constraints files and commit them:
+After changing `requirements.txt` or `requirements-dev.txt`, regenerate the constraints files and commit them:
 
 ```bash
-make update-hashes
-git add constraints-hashed.txt constraints-dev-hashed.txt
-git commit -m "chore: update hashed constraints"
+make update-hashes   # run under Python 3.12 (the only supported runtime)
+git add constraints.txt constraints-hashed.txt constraints-dev-hashed.txt
+git commit -m "chore: update pinned constraints"
 ```
 
-CI installs packages with `--require-hashes` and will fail if the committed hashes do not match what PyPI serves, protecting against supply-chain tampering.
+`make update-hashes` runs `pip-compile --generate-hashes` for both hashed files
+and then `sync-constraints` to rewrite `constraints.txt` as the un-hashed mirror
+of `constraints-hashed.txt`. Always run it under **Python 3.12** so the resolved
+set matches the runtime; running it under another interpreter can pin a different
+transitive set.
+
+Why three files:
+
+- `constraints-hashed.txt` / `constraints-dev-hashed.txt` — what CI installs with
+  `--require-hashes`; fail the build if the committed hashes do not match what
+  PyPI serves, protecting against supply-chain tampering.
+- `constraints.txt` — the un-hashed mirror `pip-audit` scans. It is generated
+  from `constraints-hashed.txt` (never hand-edited) so the audited set can never
+  drift from the installed set.
 
 ## CI Checks
 
 GitHub Actions runs the local gates without production secrets or live services:
 
-- `dependency-audit`: `python -m pip_audit -r requirements.txt -r constraints.txt` — blocks the `tests` job if vulnerabilities are found.
-- `tests` (needs `dependency-audit`): Python 3.12 — install runtime/dev dependencies, `ruff check .` (style + security + bugbear rules), `compileall`, `mypy --strict`, and `pytest ≥60% coverage`.
+- `dependency-audit`: `make audit` (`pip_audit` over `requirements.txt` + `constraints.txt`, minus the documented `--ignore-vuln` list) — blocks the `tests` job if vulnerabilities are found.
+- `tests` (needs `dependency-audit`): Python 3.12 — install runtime/dev dependencies with `--require-hashes`, `ruff check .` (style + security + bugbear rules), `compileall`, `mypy --strict`, and `pytest ≥60% coverage`. Third-party actions are pinned by commit SHA.
 
 ## Maintenance
 
@@ -1116,15 +1136,22 @@ SQLite is used as the local storage backend. By default the database path is:
 
 `init_db.py` opens the database and applies schema bootstrap/migrations. The bot also bootstraps the database during app creation.
 
-Current schema tables include:
+Current schema tables:
 
 - `users`
 - `access_requests`
 - `vpn_keys`
+- `trial_key_requests`
 - `proxy_entries`
 - `proxy_accesses`
 - `audit_log`
 - `vpn_key_traffic_stats`
+- `announcement_batches`
+- `announcement_deliveries`
+- `protocol_modules`
+- `warp_settings`
+
+(`schema_meta` tracks the applied schema version internally.)
 
 ## Project Status
 
@@ -1133,3 +1160,6 @@ Early self-hosted project. It is usable as a focused VPN management bot, but pro
 ## License
 
 MIT License. See [LICENSE](LICENSE).
+
+Third-party runtime dependencies retain their own licenses (all permissive —
+MIT / Apache-2.0 / BSD / MPL-2.0 — and compatible with MIT distribution).

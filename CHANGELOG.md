@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dependency audit set realigned with the installed set** — `constraints.txt`
+  (scanned by `pip-audit`) had drifted from `constraints-hashed.txt` (installed
+  with `--require-hashes`): five transitive pins disagreed (`aiohappyeyeballs`,
+  `certifi`, `idna`, `propcache`, `yarl`) and `cffi`/`pycparser` were missing
+  entirely. `constraints.txt` is now generated as the un-hashed mirror of
+  `constraints-hashed.txt` via `scripts/sync-constraints.py` (wired into
+  `make update-hashes`), so the audited and installed sets can no longer diverge.
+- **i18n key parity** — removed the orphan `btn_proxy_stats` key that existed only
+  in the English catalogue, restoring ru/en parity; `i18n.t()` now falls back to
+  the base (ru) string before the raw identifier when a key is missing in the
+  active locale. Added `tests/test_i18n_parity.py` (key/placeholder/HTML parity)
+  and `tests/test_env_settings_drift.py` (settings ↔ .env.example/README drift).
+- **Documentation drift** — documented the WARP Telegram routing module and
+  `WARP_PING_TARGET` in `README_RU.md` (previously English-only) and in
+  `.env.example`; fixed the `BOT_LOCK_PATH` default and the `XRAY_FINGERPRINT`
+  value list in `README.md`; refreshed the database-table list in both READMEs;
+  surfaced previously undocumented tunables (`ANOMALY_*`, `KEY_EXPIRY_*`,
+  `BOT_LANGUAGE`, staging dirs, …) in `.env.example`; aligned `CONTRIBUTING.md`
+  with the actual CI gates.
+
+### Security
+
+- **CI action pinning** — `actions/checkout` and `actions/setup-python` are now
+  pinned by commit SHA (with version comments) instead of mutable tags; `push`
+  CI is scoped to `main`.
+- **Lint suppressions scoped** — the project-wide `S608` (SQL injection) and
+  `S603`/`S607`/`S404` (subprocess) ruff ignores are now scoped to the
+  directories that legitimately need them (`db/`, `repositories/`, `deploy/`,
+  `tests/`), so the rest of the tree is guarded against new violations. Added
+  `*-wal`/`*-shm`/`*-journal` ignores and a vulnerability-response timeframe to
+  `SECURITY.md`.
+- **aiohttp advisories triaged (VEX)** — `pip-audit` now runs via `make audit`
+  with a documented `--ignore-vuln` list for `CVE-2026-34993` and
+  `CVE-2026-47265`. Both are fixed only in aiohttp 3.14.0, which the tree cannot
+  adopt while `aiogram` (≤3.28.2) caps `aiohttp<3.14`, and neither applies to the
+  bot's client-only, trusted-host usage. To be revisited when `aiogram` raises the
+  cap.
+
 ## [1.2.0] — 2026-06-01
 
 ### Added

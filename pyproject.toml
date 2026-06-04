@@ -43,12 +43,19 @@ ignore = [
     "RUF001", # ambiguous unicode character — project intentionally uses Cyrillic strings
     "RUF029", # async without await — framework handlers must be async even without internal awaits
     "RUF067", # __init__ module logic — i18n design intentional
-    "S101",   # assert used in tests
-    "S404",   # subprocess import — required by deploy scripts and test helpers
-    "S603",   # subprocess without shell=True — controlled internal tooling
-    "S607",   # partial executable path — controlled internal paths
-    "S608",   # SQL injection — all f-string SQL uses internal column/table constants, never user input
+    "S101",   # assert used in tests and internal invariants
 ]
 
+# The subprocess (S404/S603/S607) and SQL (S608) suppressions below are scoped to
+# the directories that legitimately need them, so the rules still guard the rest of
+# the tree (bot/, services/, config/, etc.) against new violations.
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S105", "S106", "S108", "F401", "B009", "B010", "RUF043", "RUF015", "RUF100", "E303", "E306"]
+# f-string SQL in the data-access layer uses only internal column/table constants,
+# never user input. Parameterised values always go through placeholders.
+"db/*" = ["S608"]
+"repositories/*" = ["S608"]
+# The non-root deploy preflight shells out to controlled, fixed system tools.
+"deploy/*" = ["S404", "S603", "S607"]
+# Tests: hardcoded test secrets/paths, subprocess import for helper tests, and
+# pytest-style idioms are expected here.
+"tests/*" = ["S105", "S106", "S108", "S404", "F401", "B009", "B010", "RUF043", "RUF015", "RUF100", "E303", "E306"]

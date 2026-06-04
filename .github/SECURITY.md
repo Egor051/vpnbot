@@ -34,6 +34,14 @@ Use responsible disclosure:
 
 If no private channel is available, open a minimal public issue asking for a private security contact. Do not include exploit details, secrets, logs, or real configs in that issue.
 
+### Response expectations
+
+This is a small self-hosted project maintained on a best-effort basis. Expect an
+initial acknowledgment within **7 days** and a triage/status update within
+**30 days**. Issues that expose secrets, allow access-control bypass, or leak
+database contents are prioritized over other reports. Please allow time for a fix
+before any public disclosure.
+
 ## Scope
 
 Security-sensitive areas include:
