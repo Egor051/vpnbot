@@ -12,6 +12,7 @@ Telegram-бот для управления доступом к self-hosted VPN 
 - Создание ключей AmneziaWG, доставка конфигурации клиента, отзыв, удаление, выделение IP и сверка при запуске.
 - Отдельный раздел «Прокси» в Telegram для автоматической выдачи SOCKS5/Dante и ссылок Telegram MTProto Proxy.
 - MTProto поддерживает режим совместимости `static` и режим `managed` с персональными секретами для каждого пользователя, safe apply и rollback.
+- Опциональный модуль WARP-маршрутизации Telegram: серверный AmneziaWG-туннель (`tg-warp`) с автоматическим health-based fallback. Выключен по умолчанию; см. [WARP-маршрутизация Telegram](#warp-маршрутизация-telegram).
 - Опциональная таблица legacy-записей прокси, заполняемая из `DEFAULT_PROXY_*`, используется только как внутреннее хранилище для совместимости; пользовательский интерфейс прокси работает через `proxy_accesses`.
 - Проверки владельца: пользователи могут просматривать собственные конфигурации и статистику; деструктивные операции с VPN и прокси доступны только администраторам.
 - Audit log с рекурсивной маскировкой чувствительных значений.
@@ -47,6 +48,8 @@ bot/                       # Telegram handlers, keyboards, FSM, форматир
 services/                  # Бизнес-логика и управление правами доступа
 repositories/              # Слой доступа к SQLite
 adapters/                  # Адаптеры для Xray, AWG, systemctl, backup, shell
+warp/                      # Модуль WARP-маршрутизации Telegram (туннель, маршруты, health-монитор)
+scripts/                   # sudo-хелперы vpnbot-warp-*
 config/settings.py         # Разбор переменных окружения и валидация
 tests/                     # Регрессионные тесты и hardening-тесты
 ```
@@ -174,9 +177,9 @@ BOT_LANGUAGE=ru
 
 > ⚠️ **Security-sensitive переменные** помечены 🔒. Никогда не коммитьте их; храните на сервере в `.env` (режим `0600`, только root).
 
-Полная таблица переменных — в [английском README](README.md#complete-environment-variable-reference).
-
-Переменные, не указанные в `.env.example` выше:
+Полная таблица переменных — в [английском README](README.md#complete-environment-variable-reference);
+все переменные также представлены в `.env.example`. Краткая справка по
+дополнительным (тонким) настройкам:
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
@@ -423,6 +426,84 @@ MTProto managed mode:
 
 Статистика прокси — это lifecycle/accounting-статистика из SQLite: выдано, активно, отозвано/деактивировано, временные метки, статус, причина, ошибка. Бот не придумывает per-user трафик для Dante или MTProxy. Без per-login accounting в Dante или надёжного агрегированного stats endpoint для MTProxy трафик отображается как недоступный.
 
+## WARP-маршрутизация Telegram
+
+Опциональный серверный модуль, который направляет выбранный трафик через
+AmneziaWG-туннель (`tg-warp`) и автоматически переключается на прямой выход, когда
+туннель недоступен. **Выключен по умолчанию** и ничего не делает, пока superadmin
+не загрузит конфиг и не включит модуль из админ-панели (📡 WARP-туннель).
+
+Как это работает:
+
+1. `awg-quick up` поднимает интерфейс `tg-warp` из `/etc/amnezia/tg-warp.conf`.
+2. Через `tg-warp` добавляются системные маршруты `ip route` для CIDR из конфига.
+3. Фоновая asyncio-задача пингует туннель каждые 10 с. После **2** провалов подряд
+   маршруты снимаются (трафик → напрямую); после **3** успехов подряд —
+   восстанавливаются.
+4. Выключение модуля снимает маршруты и опускает интерфейс.
+
+Бот работает непривилегированно: каждое root-действие проходит через sudo-хелперы
+`vpnbot-warp-*`. Системный DNS-резолвер не трогается. Маршруты по умолчанию
+(`0.0.0.0/0`, `::/0`) в `AllowedIPs` молча пропускаются routes-хелпером, чтобы не
+изолировать хост случайно — при пропуске хелпер пишет предупреждение. Если нужен
+full-tunnel, настройте отдельную таблицу маршрутизации и policy-правила вне бота,
+а не через `AllowedIPs`.
+
+### Формат конфига
+
+Загрузите клиентский конфиг **AmneziaWG** (не обычный WireGuard) как документ
+`.conf`. Он должен содержать `[Interface]`/`[Peer]`, `PrivateKey`/`PublicKey`/
+`Endpoint`, поля обфускации AmneziaWG (`Jc`, `S1`, `S2`, …) и непустой
+`AllowedIPs`. **Какой трафик идёт через туннель — определяете вы через
+`AllowedIPs`**: только Telegram MTProto или ещё и его зависимости (Google FCM для
+push, CDN для медиа и т.д.). `AllowedIPs` никогда не изменяется: install-хелпер
+дословно извлекает его в `/etc/amnezia/tg-warp-routes.list` (один CIDR на строку),
+а routes-хелпер читает оттуда.
+
+> **Предупреждение:** `0.0.0.0/0` и `::/0` в `AllowedIPs` автоматически
+> пропускаются routes-хелпером (предупреждение печатается в stderr). Это защищает
+> хост от потери связности из-за случайного переопределения маршрута по умолчанию.
+> Для full-tunnel ведите отдельную таблицу маршрутизации и `ip rule` вне бота.
+
+При установке хелпер удаляет любую строку `DNS = …` и добавляет `Table = off` в
+`[Interface]` и `PersistentKeepalive = 25` в `[Peer]`, если их нет.
+
+### Установка
+
+`awg-quick`/`awg` (userspace-инструменты AmneziaWG) должны быть установлены в
+`/usr/bin/awg-quick` / `/usr/bin/awg`. Установите хелперы и выдайте sudo
+(см. `deploy/helpers/README.md` и `deploy/sudoers.d/vpnbot.example`):
+
+```bash
+install -o root -g root -m 0755 scripts/vpnbot-warp-install /usr/local/sbin/vpnbot-warp-install
+install -o root -g root -m 0755 scripts/vpnbot-warp-iface   /usr/local/sbin/vpnbot-warp-iface
+install -o root -g root -m 0755 scripts/vpnbot-warp-routes  /usr/local/sbin/vpnbot-warp-routes
+install -o root -g root -m 0755 scripts/vpnbot-warp-status  /usr/local/sbin/vpnbot-warp-status
+install -o root -g root -m 0440 deploy/sudoers.d/vpnbot.example /etc/sudoers.d/vpnbot
+visudo -cf /etc/sudoers.d/vpnbot
+```
+
+Если `awg-quick` отсутствует, модуль отказывается стартовать и показывает понятную
+ошибку в админ-панели.
+
+### Переменные окружения WARP
+
+По умолчанию совпадают с путями из шаблона sudoers. Смена `WARP_CONFIG_PATH` или
+`WARP_INTERFACE` требует согласованного обновления `/etc/sudoers.d/vpnbot` и
+скриптов `vpnbot-warp-*`; рассогласование вызывает молчаливые сбои sudo. Меняйте,
+только если понимаете, что делаете.
+
+| Переменная | По умолчанию | Назначение |
+| --- | --- | --- |
+| `WARP_CONFIG_PATH` | `/etc/amnezia/tg-warp.conf` | Путь установленного конфига туннеля |
+| `WARP_INTERFACE` | `tg-warp` | Имя интерфейса AmneziaWG |
+| `WARP_INSTALL_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-install` | Хелпер установки конфига |
+| `WARP_IFACE_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-iface` | Хелпер up/down интерфейса |
+| `WARP_ROUTES_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-routes` | Хелпер add/del маршрутов |
+| `WARP_STATUS_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-status` | Хелпер `awg show` |
+| `WARP_HELPER_STAGING_DIR` | `/run/vpn-bot/warp` | Приватный каталог для staged-загрузок |
+| `WARP_PING_TARGET` | `162.159.140.245` | ICMP-цель, которую health-монитор пингует для определения up/down туннеля. По умолчанию — Cloudflare anycast, присутствующий в типичных `AllowedIPs` WARP. Переопределите, если ваш `AllowedIPs` только для Telegram, иначе монитор будет давать ложные провалы. |
+
 ## Обзор развёртывания
 
 > ⚠️ **ВАЖНО — `deploy/vpn-bot.service` является авторитетным источником:**
@@ -508,19 +589,51 @@ python -m pip install -r requirements-dev.txt
 Запустите те же проверки, что использует CI:
 
 ```bash
-python -m pip_audit -r requirements.txt -r constraints.txt
+make audit   # python -m pip_audit -r requirements.txt -r constraints.txt (+ документированный список --ignore-vuln)
 python -m ruff check .
 python -m compileall .
-python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/
+python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ main.py init_db.py
 python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=60
 ```
+
+> Аудит игнорирует два advisory aiohttp (`CVE-2026-34993`, `CVE-2026-47265`),
+> исправленные только в aiohttp 3.14.0 — который дерево не может принять, пока
+> `aiogram` держит `aiohttp<3.14` — и которые не применимы к использованию бота
+> (aiohttp только как клиент к доверённому хосту Telegram). Обоснование — в
+> `Makefile` (`PIP_AUDIT_IGNORES`); пересмотрите, когда `aiogram` поднимет
+> ограничение.
+
+### Обновление зависимостей
+
+После изменения `requirements.txt` или `requirements-dev.txt` пересоберите файлы
+constraints и закоммитьте их:
+
+```bash
+make update-hashes   # запускать под Python 3.12 (единственный поддерживаемый runtime)
+git add constraints.txt constraints-hashed.txt constraints-dev-hashed.txt
+git commit -m "chore: update pinned constraints"
+```
+
+`make update-hashes` запускает `pip-compile --generate-hashes` для обоих
+hashed-файлов, затем `sync-constraints`, который переписывает `constraints.txt`
+как зеркало без хешей из `constraints-hashed.txt`. Всегда запускайте под
+**Python 3.12**, чтобы разрешённый набор совпадал с runtime.
+
+Зачем три файла:
+
+- `constraints-hashed.txt` / `constraints-dev-hashed.txt` — то, что CI ставит с
+  `--require-hashes`; сборка падает, если закоммиченные хеши не совпадают с тем,
+  что отдаёт PyPI (защита от supply-chain-подмены).
+- `constraints.txt` — зеркало без хешей, которое сканирует `pip-audit`.
+  Генерируется из `constraints-hashed.txt` (вручную не редактируется), поэтому
+  аудируемый набор не может разойтись с устанавливаемым.
 
 ## CI
 
 GitHub Actions запускает локальные проверки без production-секретов и живых сервисов:
 
-- `dependency-audit`: `python -m pip_audit -r requirements.txt -r constraints.txt` — блокирует job `tests` при обнаружении уязвимостей.
-- `tests` (needs `dependency-audit`): Python 3.12 — установка зависимостей, `ruff check .` (стиль, безопасность, bugbear), `compileall`, `mypy --strict`, `pytest ≥60% coverage`.
+- `dependency-audit`: `make audit` (`pip_audit` по `requirements.txt` + `constraints.txt` за вычетом документированного списка `--ignore-vuln`) — блокирует job `tests` при обнаружении уязвимостей.
+- `tests` (needs `dependency-audit`): Python 3.12 — установка зависимостей с `--require-hashes`, `ruff check .` (стиль, безопасность, bugbear), `compileall`, `mypy --strict`, `pytest ≥60% coverage`. Сторонние actions запиннены по commit-SHA.
 
 ## Обслуживание
 
@@ -901,10 +1014,17 @@ SQLite используется как локальный backend хранили
 - `users`
 - `access_requests`
 - `vpn_keys`
+- `trial_key_requests`
 - `proxy_entries`
 - `proxy_accesses`
 - `audit_log`
 - `vpn_key_traffic_stats`
+- `announcement_batches`
+- `announcement_deliveries`
+- `protocol_modules`
+- `warp_settings`
+
+(`schema_meta` внутренне отслеживает применённую версию схемы.)
 
 ## Статус проекта
 

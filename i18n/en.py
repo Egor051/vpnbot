@@ -61,7 +61,7 @@ STRINGS: dict[str, str] = {
     "field_deleted": "Deleted",
     # ── main menu ─────────────────────────────────────────────────────────────
     "usage_rules": (
-        "USAGE RULES:\n\n"
+        "USAGE RULES:\n"
         "🚫🚫🚫 STRICTLY PROHIBITED: downloading or using the MAX messenger on the same device where VPN is used\n"
         "🚫🚫🚫 STRICTLY PROHIBITED: downloading torrent content through VPN"
     ),
@@ -449,7 +449,6 @@ STRINGS: dict[str, str] = {
     "btn_proxy_status": "🌐 Proxy status",
     "btn_modules": "⚙️ Protocol modules",
     "btn_backend_diagnostics": "🔍 Backend diagnostics",
-    "btn_proxy_stats": "🌐 Proxy statistics",
     "btn_action_logs": "📜 Action logs",
     "btn_issue_key_to_user": "🔑 Issue key to user",
     "btn_trial_accesses": "🧪 Trial accesses",

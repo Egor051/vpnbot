@@ -1,6 +1,7 @@
 
 import asyncio
 import json
+import re
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -307,18 +308,32 @@ def test_readme_uses_env_example_as_canonical_source() -> None:
     assert "Never expose the Xray stats API to the internet" in readme
 
 
+def _pins(text: str) -> dict[str, str]:
+    return dict(re.findall(r"^([A-Za-z0-9._-]+)==([^\s\\]+)", text, re.M))
+
+
 def test_constraints_file_pins_runtime_dependency_tree() -> None:
     constraints = Path("constraints.txt").read_text(encoding="utf-8")
 
+    # Direct runtime deps (pinned in requirements.txt) must be present and exact.
     for package in (
         "aiogram==3.27.0",
         "aiohttp==3.13.5",
         "aiosqlite==0.22.1",
+        "cryptography==46.0.7",
         "python-dotenv==1.2.2",
-        "pydantic-core==2.41.5",
-        "yarl==1.23.0",
     ):
         assert package in constraints
+
+
+def test_constraints_txt_is_unhashed_mirror_of_hashed() -> None:
+    # constraints.txt (scanned by pip-audit) is generated from constraints-hashed.txt
+    # (installed with --require-hashes) by scripts/sync-constraints.py. The two pin
+    # sets must match exactly, otherwise the audited set drifts from the installed
+    # set. Regenerate with `make sync-constraints` / `make update-hashes`.
+    constraints = _pins(Path("constraints.txt").read_text(encoding="utf-8"))
+    hashed = _pins(Path("constraints-hashed.txt").read_text(encoding="utf-8"))
+    assert constraints == hashed
 
 
 def test_audit_sanitizer_masks_nested_secrets() -> None:

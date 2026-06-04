@@ -238,6 +238,14 @@ ENV/
 *.db
 *.sqlite
 *.sqlite3
+# SQLite runs in WAL mode (db/database.py), which creates -wal/-shm/-journal
+# sidecar files next to the DB; ignore them too.
+*-wal
+*-shm
+*-journal
+*.db-wal
+*.db-shm
+*.db-journal
 data/
 !data/.gitkeep
 data/*.db

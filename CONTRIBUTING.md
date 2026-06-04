@@ -38,16 +38,18 @@ bot will call config adapters directly without going through sudo helpers.
 
 All gates below match what CI runs. Pass them locally before pushing.
 
-### Minimal lint (CI gate)
+### Lint (CI gate)
 
-```bash
-python -m ruff check . --select=E9,F63,F7,F82
-```
-
-### Full lint
+CI runs the full ruff check (style, security, and bugbear rules):
 
 ```bash
 python -m ruff check .
+```
+
+For a fast pre-commit subset of the most critical rules:
+
+```bash
+python -m ruff check . --select=E9,F63,F7,F82
 ```
 
 ### Format
@@ -65,20 +67,25 @@ python -m compileall .
 
 ### Type checking
 
+CI runs strict mypy over the source packages plus the entry points:
+
 ```bash
-python -m mypy bot/ services/ adapters/ config/ models/ utils/ repositories/
+python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ main.py init_db.py
 ```
 
 All modules under those packages require full type annotations
-(`disallow_untyped_defs = true` in `pyproject.toml`).
+(`strict = true` in `pyproject.toml`).
 
 ### Dependency audit
 
 ```bash
-python -m pip_audit -r requirements.txt -r constraints.txt --no-deps
+make audit
 ```
 
-Run this before adding or upgrading a dependency.
+This runs `pip_audit` over `requirements.txt` + `constraints.txt` with the
+documented `--ignore-vuln` list (see `PIP_AUDIT_IGNORES` in the `Makefile`).
+Run it before adding or upgrading a dependency. If you add a `--ignore-vuln`
+entry, document why and link the upstream tracking issue.
 
 ## Running Tests
 
@@ -101,12 +108,14 @@ feature area, e.g. `test_<area>.py`.
 ## All Local Gates at Once
 
 ```bash
-python -m ruff check . --select=E9,F63,F7,F82
+python -m ruff check .
 python -m compileall .
-python -m mypy bot/ services/ adapters/ config/ models/ utils/ repositories/
+python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ main.py init_db.py
 python -m pytest --cov=. --cov-fail-under=60
-python -m pip_audit -r requirements.txt -r constraints.txt --no-deps
+make audit
 ```
+
+(`make check` runs the ruff/compile/mypy/pytest/audit gates in one shot.)
 
 ## Code Standards
 
@@ -193,8 +202,10 @@ When adding features, observe these requirements:
   pattern in `adapters/xray_config.py` and `adapters/awg_config.py`.
 - **New environment variables**: Add to `.env.example` (empty value) and
   `config/settings.py`. Document the valid range and security impact.
-- **New dependencies**: Pin versions in `constraints.txt` and run `pip_audit`
-  before committing.
+- **New dependencies**: Add the pin to `requirements.txt` (or
+  `requirements-dev.txt`), run `make update-hashes` (under Python 3.12) to
+  regenerate the constraints files, and run `pip_audit` before committing. Never
+  hand-edit `constraints.txt` — it is generated from `constraints-hashed.txt`.
 
 ## Pull Request Process
 
