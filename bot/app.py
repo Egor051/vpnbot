@@ -24,6 +24,7 @@ from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
 from bot.handlers import admin, admin_dashboard, admin_modules, admin_warp, callbacks, common, keys, proxy, start
 from bot.middlewares.access import BlockedUserMiddleware
+from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
 from bot.rate_limit import RateLimiter
 from config.settings import Settings
 from db.database import Database
@@ -399,6 +400,10 @@ async def _build_app(
         dp.my_chat_member,
     ):
         observer.outer_middleware(blocked_middleware)
+
+    # Runs after the blocked-user gate so the cleanup only fires for callbacks
+    # that are actually about to be handled.
+    dp.callback_query.outer_middleware(ConfigDocumentCleanupMiddleware())
 
     dp.include_router(start.router)
     dp.include_router(common.router)
