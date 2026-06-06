@@ -367,6 +367,7 @@ STRINGS: dict[str, str] = {
         "the key record and its statistics will be removed from the bot. This action cannot be undone."
     ),
     "executing": "Executing...",
+    "config_already_sent": "The configuration file has already been sent.",
     "key_revoked": "Key revoked.",
     "key_deleted": "Key permanently deleted.",
     "key_deleted_with_list": "Key permanently deleted.\n\n{list}",

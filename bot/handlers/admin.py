@@ -49,7 +49,7 @@ from bot.keyboards.admin import (
 from bot.handlers.keys import load_keys_page
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import VALID_FINGERPRINTS, expiry_choice_keyboard, fp_choice_keyboard, key_actions_keyboard, keys_list_keyboard, mtu_choice_keyboard
-from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text
+from bot.messages import awg_config_filename, remember_config_document, safe_callback_answer, safe_edit_message_text
 from bot.pagination import MAX_PAGE, page_offset, split_page
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimitExceeded, RateLimiter
@@ -1336,7 +1336,8 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
         if result.key.key_type == VpnKeyType.AWG:
             plain_awg_config = await services.awg.get_awg_client_config_plain(callback.from_user.id, result.key.id, audit=False)
             filename = awg_config_filename(result.key)
-            await callback.message.answer_document(BufferedInputFile(plain_awg_config.encode("utf-8"), filename=filename))
+            sent = await callback.message.answer_document(BufferedInputFile(plain_awg_config.encode("utf-8"), filename=filename))
+            await remember_config_document(state, key_id=result.key.id, message_id=sent.message_id)
         if owner_is_pending:
             await _deliver_key_to_pending_user(bot, result, owner_user_id, plain_awg_config=plain_awg_config)
     except Exception as exc:

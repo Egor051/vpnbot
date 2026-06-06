@@ -34,7 +34,14 @@ from bot.keyboards.keys import (
     trial_protocol_keyboard,
 )
 from aiogram.types import BufferedInputFile
-from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text
+from bot.messages import (
+    awg_config_filename,
+    config_document_present,
+    discard_config_document,
+    remember_config_document,
+    safe_callback_answer,
+    safe_edit_message_text,
+)
 from bot.pagination import MAX_PAGE, page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.middlewares.access import BLOCKED_CALLBACK_TEXT
@@ -404,7 +411,8 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         if result.key.key_type == VpnKeyType.AWG:
             plain = await services.awg.get_awg_client_config_plain(callback.from_user.id, result.key.id, audit=False)
             filename = awg_config_filename(result.key)
-            await callback.message.answer_document(BufferedInputFile(plain.encode("utf-8"), filename=filename))
+            sent = await callback.message.answer_document(BufferedInputFile(plain.encode("utf-8"), filename=filename))
+            await remember_config_document(state, key_id=result.key.id, message_id=sent.message_id)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -437,7 +445,7 @@ async def open_key(callback: CallbackQuery, services: Services) -> None:
 
 
 @router.callback_query(F.data.startswith("key:show:"))
-async def show_key_config(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
+async def show_key_config(callback: CallbackQuery, state: FSMContext, services: Services, rate_limiter: RateLimiter, bot: Bot) -> None:
     """Show the connection configuration for the selected key."""
     if not await ensure_private_callback(callback):
         return
@@ -449,26 +457,27 @@ async def show_key_config(callback: CallbackQuery, services: Services, rate_limi
             await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
             return
         rate_limiter.check(callback.from_user.id, "key_show", 5)
-        await safe_callback_answer(callback)
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
+        keyboard = key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id))
         if key.key_type == VpnKeyType.XRAY:
+            await safe_callback_answer(callback)
             text = xray_config_text(await services.xray.get_xray_key_config(callback.from_user.id, key_id))
-            await safe_edit_message_text(
-                callback.message,
-                text,
-                reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
-            )
-        else:
-            text = awg_config_text(await services.awg.get_awg_client_config(callback.from_user.id, key_id))
-            plain = await services.awg.get_awg_client_config_plain(callback.from_user.id, key_id)
-            await safe_edit_message_text(
-                callback.message,
-                text,
-                reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
-            )
-            await callback.message.answer_document(
-                BufferedInputFile(plain.encode("utf-8"), filename=awg_config_filename(key))
-            )
+            await safe_edit_message_text(callback.message, text, reply_markup=keyboard)
+            return
+        text = awg_config_text(await services.awg.get_awg_client_config(callback.from_user.id, key_id))
+        await safe_edit_message_text(callback.message, text, reply_markup=keyboard)
+        # The config file is still on screen — don't send a duplicate.
+        if await config_document_present(state, key_id):
+            await safe_callback_answer(callback, t("config_already_sent"))
+            return
+        # A leftover file for a different key may linger; drop it before sending.
+        await discard_config_document(state, bot, callback.message.chat.id)
+        plain = await services.awg.get_awg_client_config_plain(callback.from_user.id, key_id)
+        await safe_callback_answer(callback)
+        sent = await callback.message.answer_document(
+            BufferedInputFile(plain.encode("utf-8"), filename=awg_config_filename(key))
+        )
+        await remember_config_document(state, key_id=key_id, message_id=sent.message_id)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

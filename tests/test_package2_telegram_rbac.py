@@ -589,8 +589,10 @@ def test_old_key_config_callback_after_revoke_is_safely_rejected(monkeypatch: py
         callback = _Callback("key:show:10")
         await show_key_config(
             callback,
+            _State(),
             SimpleNamespace(vpn_keys=VpnKeys(), xray=Xray(), awg=SimpleNamespace()),
             _RateLimiter(),
+            None,
         )  # type: ignore[arg-type]
         assert callback.answers == [
             ("", None),

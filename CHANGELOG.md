@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **AWG config file lifecycle** — the «Показать конфиг» button no longer sends a
+  duplicate `.conf` file when one is already on screen for that key (it shows a
+  «Файл конфигурации уже отправлен.» toast instead), and tapping any other button
+  on the key card now removes the previously sent config-file message. A new
+  `ConfigDocumentCleanupMiddleware` performs the cleanup for every callback except
+  «show config», and the just-sent file is tracked in FSM state by the create,
+  admin-issue, and show-config flows.
+
 ## [1.3.0] — 2026-06-04
 
 ### Added

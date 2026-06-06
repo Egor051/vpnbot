@@ -1,8 +1,11 @@
 
 import logging
 import re
+from contextlib import suppress
 
+from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from models.dto import VpnKey
@@ -15,6 +18,34 @@ TELEGRAM_TEXT_LIMIT = 4096
 AWG_CONFIG_FILENAME = "awg.conf"
 _AWG_GENERATED_NAME_RE = re.compile(r"^awg_[A-Za-z0-9]{5}$")
 _TRUNCATED_SUFFIX = "\n...обрезано"
+
+# FSM data keys used to track the config file most recently delivered to the
+# user. The message id lets us delete that file when the user taps another
+# button, and the key id lets the "show config" button avoid sending it twice.
+_CONFIG_DOC_MSG_KEY = "config_doc_msg_id"
+_CONFIG_DOC_KEY_KEY = "config_doc_key_id"
+
+
+async def remember_config_document(state: FSMContext, *, key_id: int, message_id: int) -> None:
+    """Record the just-sent config file so it can be reused/cleaned up later."""
+    await state.update_data({_CONFIG_DOC_MSG_KEY: message_id, _CONFIG_DOC_KEY_KEY: key_id})
+
+
+async def config_document_present(state: FSMContext, key_id: int) -> bool:
+    """Return whether a config file for ``key_id`` is currently on screen."""
+    data = await state.get_data()
+    return data.get(_CONFIG_DOC_KEY_KEY) == key_id and data.get(_CONFIG_DOC_MSG_KEY) is not None
+
+
+async def discard_config_document(state: FSMContext, bot: Bot, chat_id: int) -> None:
+    """Delete the tracked config file (if any) and forget it."""
+    data = await state.get_data()
+    msg_id = data.get(_CONFIG_DOC_MSG_KEY)
+    if msg_id is None:
+        return
+    with suppress(Exception):
+        await bot.delete_message(chat_id=chat_id, message_id=int(msg_id))
+    await state.update_data({_CONFIG_DOC_MSG_KEY: None, _CONFIG_DOC_KEY_KEY: None})
 
 
 async def safe_edit_message_text(
