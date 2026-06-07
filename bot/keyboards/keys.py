@@ -1,7 +1,7 @@
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from bot.formatters import status_text
+from bot.formatters import key_type_label, status_text
 from i18n import t
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
@@ -13,13 +13,24 @@ VALID_FINGERPRINTS = [
 
 
 def create_key_keyboard(*, xray_enabled: bool = True, awg_enabled: bool = True) -> InlineKeyboardMarkup:
-    """Build the key type selection keyboard for creating a new key."""
+    """Build the protocol selection keyboard for creating a new key (step 1)."""
     rows: list[list[InlineKeyboardButton]] = []
     if xray_enabled:
-        rows.append([InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data="keys:create:xray")])
+        rows.append([InlineKeyboardButton(text="VLESS", callback_data="keys:proto:vless")])
     if awg_enabled:
         rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="keys:create:awg")])
     rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="keys:list")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def vless_transport_keyboard(*, xhttp_enabled: bool = False) -> InlineKeyboardMarkup:
+    """Build the VLESS transport selection keyboard (step 2, VLESS only)."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="VLESS (TCP)", callback_data="keys:create:xray")],
+    ]
+    if xhttp_enabled:
+        rows.append([InlineKeyboardButton(text="VLESS (HTTP)", callback_data="keys:create:xhttp")])
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="keys:create")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -34,7 +45,7 @@ def keys_list_keyboard(
     """Build the paginated keyboard listing keys with per-key actions."""
     rows: list[list[InlineKeyboardButton]] = []
     for key in keys:
-        prefix = "Xray" if key.key_type == VpnKeyType.XRAY else "AWG"
+        prefix = key_type_label(key)
         open_data = f"key:open:{key.id}"
         if owner_user_id is not None:
             open_data = f"key:open:{key.id}:{owner_user_id}:{page}"

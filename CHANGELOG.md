@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Second VLESS transport — VLESS (HTTP) over XHTTP+REALITY** — key creation now
+  has two steps: choose protocol (`AmneziaWG 2.0` / `VLESS`), then for VLESS choose
+  transport (`VLESS (TCP)` / `VLESS (HTTP)`). `VLESS (TCP)` keys live only in the
+  existing `vless-in` inbound (raw/TCP, `flow=xtls-rprx-vision`, port 443);
+  `VLESS (HTTP)` keys live only in a separate `vless-xhttp-reality` inbound (XHTTP,
+  no flow, port 8443). Each key belongs to exactly one inbound; deletion and link
+  regeneration are routed by the key's saved transport. The XHTTP client link uses
+  `type=xhttp` with the same REALITY `pbk`/`sni`/`sid` and never carries `flow`.
+  Existing keys are labelled `VLESS (TCP)` and keep working unchanged. Gated behind
+  `XRAY_XHTTP_ENABLED` (default off) — when disabled the bot behaves exactly as
+  before. Adds settings `XRAY_XHTTP_ENABLED`, `XRAY_XHTTP_INBOUND_TAG`,
+  `XRAY_XHTTP_PORT`, `XRAY_XHTTP_PATH`, `XRAY_XHTTP_MODE`, a `transport` column on
+  `vpn_keys` (migration v23, backfilled to `tcp`), and a second `XrayConfigAdapter`
+  bound to the XHTTP inbound tag. Server-side inbound seeding is documented in
+  `docs/xray-xhttp-inbound.md`.
+
 ### Changed
 
 - **AWG config file lifecycle** — the «Показать конфиг» button no longer sends a

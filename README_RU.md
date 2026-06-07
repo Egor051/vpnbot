@@ -199,6 +199,11 @@ BOT_LANGUAGE=ru
 | `ANOMALY_AUTO_REVOKE` | `false` | Автоматически отзывать помеченные ключи без подтверждения администратора. |
 | `ANOMALY_COOLDOWN_SECONDS` | `7200` | Cooldown перед повторным флагом того же ключа (сек). |
 | `ANOMALY_CONCURRENT_WINDOW_SECONDS` | `600` | Окно для обнаружения одновременных соединений (сек). |
+| `XRAY_XHTTP_ENABLED` | `false` | Включить второй VLESS-транспорт (XHTTP+REALITY) как отдельный inbound. При включении создание ключа предлагает выбор VLESS (TCP) / VLESS (HTTP). |
+| `XRAY_XHTTP_INBOUND_TAG` | `vless-xhttp-reality` | Тег XHTTP-inbound в `config.json` (должен отличаться от `XRAY_INBOUND_TAG`). Обязателен при `XRAY_XHTTP_ENABLED=true`. |
+| `XRAY_XHTTP_PORT` | `8443` | Публичный порт XHTTP-inbound; используется только для построения ссылок VLESS (HTTP). |
+| `XRAY_XHTTP_PATH` | `/v1/messages/stream` | Путь XHTTP для ссылок VLESS (HTTP); должен совпадать с `xhttpSettings.path` inbound. |
+| `XRAY_XHTTP_MODE` | `packet-up` | Режим XHTTP для ссылок VLESS (HTTP): `auto`, `packet-up`, `stream-up`, `stream-one`. |
 | `XRAY_ACCESS_LOG_PATH` | _(пусто)_ | Путь к access-логу Xray для обнаружения аномалий. |
 | `XRAY_HELPER_STAGING_DIR` | `$HELPER_STAGING_ROOT/xray` | Staging-каталог для файлов Xray-хелпера. |
 | `AWG_HELPER_STAGING_DIR` | `$HELPER_STAGING_ROOT/awg` | Staging-каталог для файлов AWG-хелпера. |

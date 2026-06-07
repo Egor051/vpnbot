@@ -141,6 +141,28 @@ async def _build_app(
         helper_path=settings.xray_apply_helper_path,
         helper_staging_dir=settings.xray_helper_staging_dir,
     )
+    # Second VLESS transport (XHTTP+REALITY) inbound. Shares the same config.json,
+    # service, apply_mode and stats_server; only the inbound_tag differs. Built only
+    # when enabled so the feature is fully inert otherwise. Both adapters serialise
+    # on the same ConfigFileLock (keyed by config_path).
+    xray_xhttp_adapter = (
+        XrayConfigAdapter(
+            config_path=settings.xray_config_path,
+            service_name=settings.xray_service_name,
+            apply_mode=settings.xray_apply_mode,
+            inbound_tag=settings.xray_xhttp_inbound_tag,
+            allow_restart_on_rollback=settings.xray_allow_restart_on_rollback,
+            backup=backup,
+            systemctl=systemctl,
+            shell=shell,
+            stats_server=settings.xray_stats_server,
+            helper_runner=helper_runner,
+            helper_path=settings.xray_apply_helper_path,
+            helper_staging_dir=settings.xray_helper_staging_dir,
+        )
+        if settings.xray_xhttp_enabled
+        else None
+    )
     xray_stats_adapter = XrayStatsAdapter(shell=shell, stats_server=settings.xray_stats_server)
     awg_adapter = AwgConfigAdapter(
         config_path=settings.awg_config_path,
@@ -198,6 +220,7 @@ async def _build_app(
         audit=audit_service,
         user_locks=user_locks,
         backend_health=backend_health,
+        xhttp_adapter=xray_xhttp_adapter,
     )
     awg_service = AwgService(
         vpn_keys=vpn_keys_repo,

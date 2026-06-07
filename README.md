@@ -230,6 +230,11 @@ All variables parsed by `config/settings.py`. Variables marked **Required** must
 | `XRAY_MANAGE_SHORT_IDS` | No | `false` | Let the bot manage short IDs automatically. | `false` |
 | `XRAY_ALLOW_RESTART_ON_ROLLBACK` | No | `false` | Allow service restart during config rollback. | `false` |
 | `XRAY_STATS_SERVER` | No* | — | Address of the Xray gRPC stats/API server. Required for `api` mode. | `127.0.0.1:10085` |
+| `XRAY_XHTTP_ENABLED` | No | `false` | Enable a second VLESS transport (XHTTP+REALITY) as a separate inbound. When on, key creation offers VLESS (TCP) / VLESS (HTTP). | `false` |
+| `XRAY_XHTTP_INBOUND_TAG` | No* | `vless-xhttp-reality` | Tag of the XHTTP inbound in `config.json` (must differ from `XRAY_INBOUND_TAG`). Required when `XRAY_XHTTP_ENABLED=true`. | `vless-xhttp-reality` |
+| `XRAY_XHTTP_PORT` | No | `8443` | Public port of the XHTTP inbound; used only to build VLESS (HTTP) links. | `8443` |
+| `XRAY_XHTTP_PATH` | No | `/v1/messages/stream` | XHTTP path used in VLESS (HTTP) links; must match the inbound's `xhttpSettings.path`. | `/v1/messages/stream` |
+| `XRAY_XHTTP_MODE` | No | `packet-up` | XHTTP mode used in VLESS (HTTP) links: `auto`, `packet-up`, `stream-up`, `stream-one`. | `packet-up` |
 | `XRAY_ACCESS_LOG_PATH` | No | _(empty)_ | Path to the Xray access log for anomaly detection. Leave empty to disable. | `/var/log/xray/access.log` |
 
 _Legacy aliases accepted: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SERVER_PORT` (= `XRAY_PUBLIC_PORT`), `XRAY_PUBLIC_KEY` (= `XRAY_REALITY_PUBLIC_KEY`), `XRAY_SERVER_NAME` (= `XRAY_SNI`)._

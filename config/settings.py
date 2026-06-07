@@ -321,6 +321,15 @@ class Settings:
     anomaly_concurrent_window_seconds: int = 600
     xray_access_log_path: str = ""
     bot_language: str = "ru"
+    # Second VLESS transport (XHTTP+REALITY) as a separate inbound. Inert while
+    # disabled: when xray_xhttp_enabled is False the bot behaves exactly as before
+    # and never touches the vless-xhttp-reality inbound. Defaulted so existing
+    # Settings(...) call sites keep working unchanged.
+    xray_xhttp_enabled: bool = False
+    xray_xhttp_inbound_tag: str = "vless-xhttp-reality"
+    xray_xhttp_port: int = 8443
+    xray_xhttp_path: str = "/v1/messages/stream"
+    xray_xhttp_mode: str = "packet-up"
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -328,6 +337,13 @@ class Settings:
                 raise SettingsError("XRAY_APPLY_MODE=api требует XRAY_INBOUND_TAG")
             if not self.xray_stats_server:
                 raise SettingsError("XRAY_APPLY_MODE=api требует XRAY_STATS_SERVER")
+        if self.xray_xhttp_enabled:
+            if not self.xray_xhttp_inbound_tag:
+                raise SettingsError("XRAY_XHTTP_ENABLED=true требует XRAY_XHTTP_INBOUND_TAG")
+            if self.xray_xhttp_inbound_tag == self.xray_inbound_tag:
+                raise SettingsError("XRAY_XHTTP_INBOUND_TAG не должен совпадать с XRAY_INBOUND_TAG")
+            if not self.xray_xhttp_path.startswith("/"):
+                raise SettingsError("XRAY_XHTTP_PATH должен начинаться с '/'")
         required = {
             "XRAY_PUBLIC_HOST/XRAY_SERVER_ADDRESS": self.xray_public_host,
             "XRAY_REALITY_PUBLIC_KEY/XRAY_PUBLIC_KEY": self.xray_reality_public_key,
@@ -431,6 +447,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         _optional("AWG_SERVER_ADDRESS", "10.0.0.1"),
         awg_network,
     )
+    if _bool("XRAY_XHTTP_ENABLED", False) and not _optional("XRAY_XHTTP_INBOUND_TAG", "vless-xhttp-reality"):
+        raise SettingsError("XRAY_XHTTP_ENABLED=true требует непустой XRAY_XHTTP_INBOUND_TAG")
     return Settings(
         bot_token=_required("BOT_TOKEN"),
         admin_ids=_admin_ids(_required("ADMIN_IDS")),
@@ -464,6 +482,15 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_manage_short_ids=xray_manage_short_ids,
         xray_allow_restart_on_rollback=_bool("XRAY_ALLOW_RESTART_ON_ROLLBACK", False),
         xray_stats_server=_optional("XRAY_STATS_SERVER"),
+        xray_xhttp_enabled=_bool("XRAY_XHTTP_ENABLED", False),
+        xray_xhttp_inbound_tag=_optional("XRAY_XHTTP_INBOUND_TAG", "vless-xhttp-reality"),
+        xray_xhttp_port=_int_range("XRAY_XHTTP_PORT", 8443, 1, 65535),
+        xray_xhttp_path=_no_control_chars("XRAY_XHTTP_PATH", _optional("XRAY_XHTTP_PATH", "/v1/messages/stream")),
+        xray_xhttp_mode=_choice(
+            "XRAY_XHTTP_MODE",
+            "packet-up",
+            {"auto", "packet-up", "stream-up", "stream-one"},
+        ),
         awg_config_path=Path(_optional("AWG_CONFIG_PATH", "/etc/amnezia/amneziawg/awg0.conf")),
         awg_interface=_optional("AWG_INTERFACE", "awg0"),
         awg_network=awg_network,
