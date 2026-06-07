@@ -14,10 +14,10 @@ import aiosqlite
 import pytest
 
 from adapters.clock import ClockProvider
-from bot.formatters import key_type_label
+from bot.formatters import create_confirm_text, create_type_label, key_type_label
 from bot.keyboards.admin import admin_key_type_keyboard, admin_vless_transport_keyboard
 from bot.keyboards.keys import create_key_keyboard, vless_transport_keyboard
-from config.settings import Settings
+from config.settings import Settings, SettingsError
 from db.database import Database
 from models.dto import TelegramUserProfile, User, VpnKey
 from models.enums import UserRole, VpnKeyStatus, VpnKeyType
@@ -108,27 +108,44 @@ class _Ids:
 
 
 class _RecordingAdapter:
-    """Records add/remove client calls and pretends the inbound is empty."""
+    """A stateful stand-in for one inbound: records calls and tracks clients."""
 
     def __init__(self) -> None:
         self.add_calls: list[dict[str, object]] = []
         self.remove_calls: list[dict[str, object]] = []
+        self.clients: list[dict[str, str]] = []
+        self.short_ids: set[str] = set()
 
     async def add_client(self, **kwargs: object) -> object:
         self.add_calls.append(dict(kwargs))
+        self.clients.append({"id": str(kwargs["uuid_value"]), "email": str(kwargs["email_label"])})
+        if kwargs.get("manage_short_id") and kwargs.get("short_id"):
+            self.short_ids.add(str(kwargs["short_id"]))
         return SimpleNamespace(short_id_inserted=False)
 
     async def remove_client(self, **kwargs: object) -> None:
         self.remove_calls.append(dict(kwargs))
+        uuid_value = kwargs.get("uuid_value")
+        email_label = kwargs.get("email_label")
+        self.clients = [
+            c
+            for c in self.clients
+            if not ((uuid_value and c["id"] == uuid_value) or (email_label and c["email"] == email_label))
+        ]
 
-    def find_client(self, **kwargs: object) -> None:
+    def find_client(self, *, uuid_value: str | None = None, email_label: str | None = None) -> dict[str, str] | None:
+        for c in self.clients:
+            if uuid_value and c["id"] == uuid_value:
+                return dict(c)
+            if email_label and c["email"] == email_label:
+                return dict(c)
         return None
 
-    def list_clients(self) -> list[dict[str, object]]:
-        return []
+    def list_clients(self) -> list[dict[str, str]]:
+        return [dict(c) for c in self.clients]
 
     def list_short_ids(self) -> set[str]:
-        return set()
+        return set(self.short_ids)
 
 
 async def _make_service(
@@ -247,6 +264,53 @@ def test_delete_routes_removal_by_saved_transport(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_startup_reconcile_restores_missing_key_into_its_own_inbound(tmp_path: Path) -> None:
+    async def run() -> None:
+        service, _repo, tcp, http, db = await _make_service(tmp_path)
+        try:
+            await service.create_xray_key(100, TelegramUserProfile(100, "user", "User"), None, transport="http")
+            await service.create_xray_key(100, TelegramUserProfile(100, "user", "User"), None, transport="tcp")
+            # The http client drifts out of the http inbound only.
+            http.clients.clear()
+            tcp.add_calls.clear()
+            http.add_calls.clear()
+
+            summary = await service.startup_reconcile()
+
+            # Restored into the http inbound (no flow), never the tcp inbound.
+            assert len(http.add_calls) == 1
+            assert http.add_calls[0]["flow"] == ""
+            assert tcp.add_calls == []  # tcp client still present -> not re-added
+            assert summary["recovered"] >= 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_startup_reconcile_removes_revoked_client_from_its_own_inbound(tmp_path: Path) -> None:
+    async def run() -> None:
+        service, repo, tcp, http, db = await _make_service(tmp_path)
+        try:
+            http_key = await service.create_xray_key(
+                100, TelegramUserProfile(100, "user", "User"), None, transport="http"
+            )
+            # Key revoked in the DB but its client is still live in the http inbound.
+            await repo.set_status(http_key.key.id, VpnKeyStatus.REVOKED, "now")
+            tcp.remove_calls.clear()
+            http.remove_calls.clear()
+
+            await service.startup_reconcile()
+
+            assert len(http.remove_calls) == 1
+            assert tcp.remove_calls == []
+            assert http.clients == []
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_build_vless_link_tcp_is_unchanged(tmp_path: Path) -> None:
     async def run() -> None:
         service, _repo, _tcp, _http, db = await _make_service(tmp_path)
@@ -289,6 +353,53 @@ def test_build_vless_link_http_uses_xhttp_no_flow(tmp_path: Path) -> None:
             await db.close()
 
     asyncio.run(run())
+
+
+def test_get_config_and_change_fingerprint_for_http_key(tmp_path: Path) -> None:
+    async def run() -> None:
+        service, _repo, _tcp, _http, db = await _make_service(tmp_path)
+        try:
+            created = await service.create_xray_key(
+                100, TelegramUserProfile(100, "user", "User"), None, transport="http"
+            )
+            text = await service.get_xray_key_config(100, created.key.id)
+            assert "type=xhttp" in text
+            assert "flow=" not in text
+
+            updated = await service.change_fingerprint(100, created.key.id, "firefox")
+            link = str(updated.public_payload["link"])
+            assert "type=xhttp" in link
+            assert "fp=firefox" in link
+            assert "flow=" not in link
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_create_confirm_text_renders_transport_label() -> None:
+    assert create_type_label(VpnKeyType.XRAY.value, "tcp") == "VLESS (TCP)"
+    assert create_type_label(VpnKeyType.XRAY.value, "http") == "VLESS (HTTP)"
+    assert create_type_label(VpnKeyType.AWG.value) == "AmneziaWG"
+    assert "VLESS (HTTP)" in create_confirm_text(VpnKeyType.XRAY.value, None, transport="http")
+    assert "VLESS (TCP)" in create_confirm_text(VpnKeyType.XRAY.value, None, transport="tcp")
+
+
+def test_settings_validation_guards_xhttp_misconfig(tmp_path: Path) -> None:
+    # Valid config passes.
+    _settings(tmp_path, xhttp_enabled=True).validate_xray_ready()
+
+    from dataclasses import replace
+
+    base = _settings(tmp_path, xhttp_enabled=True)
+    # XHTTP tag must differ from the TCP inbound tag.
+    with pytest.raises(SettingsError):
+        replace(base, xray_xhttp_inbound_tag="vless-in").validate_xray_ready()
+    # XHTTP path must be absolute.
+    with pytest.raises(SettingsError):
+        replace(base, xray_xhttp_path="v1/messages").validate_xray_ready()
+    # Disabled -> no XHTTP constraints apply.
+    replace(base, xray_xhttp_enabled=False, xray_xhttp_inbound_tag="").validate_xray_ready()
 
 
 def test_key_type_label_by_protocol_and_transport() -> None:
