@@ -58,10 +58,19 @@ class XrayService:
         audit: AuditService,
         user_locks: UserLockManager | None = None,
         backend_health: BackendHealth | None = None,
+        xhttp_adapter: XrayConfigAdapter | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
         self.users = users
+        # `adapter` is the primary VLESS (TCP) inbound (vless-in). The optional
+        # xhttp_adapter targets the separate VLESS (HTTP) inbound. Both wrap the
+        # same config.json and share one ConfigFileLock (keyed by config_path), so
+        # they mutate only their own inbound by tag and reload only their own tag.
         self.adapter = adapter
+        self.xhttp_adapter = xhttp_adapter
+        self._adapters: dict[str, XrayConfigAdapter] = {"tcp": adapter}
+        if xhttp_adapter is not None:
+            self._adapters["http"] = xhttp_adapter
         self.settings = settings
         self.clock = clock
         self.ids = ids
@@ -69,6 +78,32 @@ class XrayService:
         self.user_locks: UserLockManager = user_locks if user_locks is not None else getattr(users, "user_locks", UserLockManager())
         self.backend_health = backend_health or BackendHealth()
         self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _normalize_transport(value: object) -> str:
+        """Map any stored/requested transport to the canonical 'tcp' or 'http'."""
+        return "http" if str(value or "").strip().lower() == "http" else "tcp"
+
+    def _key_transport(self, key: VpnKey) -> str:
+        """Resolve a key's transport from the DB column, falling back to payload."""
+        return self._normalize_transport(getattr(key, "transport", None) or key.payload.get("transport"))
+
+    def _flow_for_transport(self, transport: str) -> str:
+        """XHTTP clients must never carry a flow; TCP keeps xtls-rprx-vision."""
+        return "" if self._normalize_transport(transport) == "http" else self.settings.xray_flow
+
+    def _adapter_optional(self, transport: str) -> XrayConfigAdapter | None:
+        return self._adapters.get(self._normalize_transport(transport))
+
+    def _adapter_for(self, transport: str) -> XrayConfigAdapter:
+        """Return the adapter for *transport* or raise a clear, user-facing error."""
+        adapter = self._adapter_optional(transport)
+        if adapter is None:
+            raise InvalidOperation("Транспорт VLESS (HTTP) недоступен: XHTTP-inbound не настроен")
+        return adapter
+
+    def _iter_adapters(self) -> list[tuple[str, XrayConfigAdapter]]:
+        return list(self._adapters.items())
 
     async def create_key(self, actor_user_id: int, owner: TelegramUserProfile, note: str | None) -> VpnKeyCreateResult:
         """Create a new Xray key for the owner."""
@@ -82,10 +117,16 @@ class XrayService:
         expires_at: str | None = None,
         allow_pending_owner: bool = False,
         fingerprint: str | None = None,
+        transport: str = "tcp",
     ) -> VpnKeyCreateResult:
         """Provision a new Xray client, persist the key, and return its config."""
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         self.settings.validate_xray_ready()
+        transport = self._normalize_transport(transport)
+        # Fail early with a clear message if VLESS (HTTP) was requested but the
+        # XHTTP inbound is disabled/unavailable — no DB row, no partial apply.
+        adapter = self._adapter_for(transport)
+        flow = self._flow_for_transport(transport)
         clean_note = normalize_note(note)
 
         async with self.user_locks.lock(owner.telegram_user_id):
@@ -95,14 +136,15 @@ class XrayService:
                 uuid_value, email_label = await self._unique_identity(owner.telegram_user_id, owner.username)
                 short_id_managed = self.settings.xray_manage_short_ids
                 short_id = self.ids.xray_short_id() if short_id_managed else self.settings.xray_short_id
-                link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint)
+                link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint, transport=transport)
                 payload = {
                     "uuid": uuid_value,
                     "email_label": email_label,
                     "short_id": short_id,
                     "short_id_managed": short_id_managed,
-                    "flow": self.settings.xray_flow,
+                    "flow": flow,
                     "fingerprint": fingerprint,
+                    "transport": transport,
                 }
                 public_payload = {
                     "email_label": email_label,
@@ -122,15 +164,16 @@ class XrayService:
                     uuid=uuid_value,
                     email_label=email_label,
                     expires_at=expires_at,
+                    transport=transport,
                 )
                 xray_apply_result = None
                 try:
                     await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
-                    xray_apply_result = await self.adapter.add_client(
+                    xray_apply_result = await adapter.add_client(
                         uuid_value=uuid_value,
                         email_label=email_label,
                         short_id=short_id,
-                        flow=self.settings.xray_flow,
+                        flow=flow,
                         manage_short_id=short_id_managed,
                     )
                 except Exception as exc:
@@ -157,6 +200,7 @@ class XrayService:
                         short_id_managed=short_id_managed,
                         short_id_inserted=self._short_id_inserted_from_apply_result(xray_apply_result),
                         original_error=exc,
+                        transport=transport,
                     )
                     raise
                 await self._write_audit_best_effort(
@@ -365,7 +409,9 @@ class XrayService:
             uuid_value = str(new_payload.get("uuid") or key.uuid or "")
             short_id = str(new_payload.get("short_id") or key.public_payload.get("short_id") or "")
             email_label = str(new_payload.get("email_label") or key.email_label or "")
-            link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint)
+            link = self._build_vless_link(
+                uuid_value, short_id, email_label, fingerprint=fingerprint, transport=self._key_transport(key)
+            )
             new_public_payload = {**key.public_payload, "link": link}
             await self.vpn_keys.update_payload(key_id, new_payload, new_public_payload, self.clock.now())
             await self._write_audit_best_effort(
@@ -427,7 +473,7 @@ class XrayService:
             key = await self._get_key(key_id)
             if key.key_type != VpnKeyType.XRAY:
                 raise InvalidOperation("Это не Xray-ключ")
-            client = self.adapter.find_client(uuid_value=key.uuid, email_label=key.email_label)
+            client = self._adapter_for(self._key_transport(key)).find_client(uuid_value=key.uuid, email_label=key.email_label)
             if client is not None and key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
                 await self.vpn_keys.mark_active(key.id, self.clock.now())
             elif client is None and key.status == VpnKeyStatus.PENDING_APPLY:
@@ -482,7 +528,7 @@ class XrayService:
         return in_use == 0
 
     async def _remove_xray_access(self, key: VpnKey) -> None:
-        await self.adapter.remove_client(
+        await self._adapter_for(self._key_transport(key)).remove_client(
             uuid_value=key.uuid,
             email_label=key.email_label,
             short_id=str(key.payload.get("short_id") or ""),
@@ -501,6 +547,7 @@ class XrayService:
         short_id_managed: bool,
         short_id_inserted: bool,
         original_error: Exception,
+        transport: str = "tcp",
     ) -> None:
         logger.critical(
             "Xray client applied, but DB mark_active failed for key_id=%s; attempting compensation",
@@ -508,7 +555,7 @@ class XrayService:
             exc_info=True,
         )
         try:
-            await self.adapter.remove_client(
+            await self._adapter_for(transport).remove_client(
                 uuid_value=uuid_value,
                 email_label=email_label,
                 short_id=short_id,
@@ -562,13 +609,16 @@ class XrayService:
             summary["checked"] = len(active_keys)
             summary["recovered"] += await self._remove_non_live_xray_clients(all_keys)
 
-            clients = self.adapter.list_clients()
-            summary["checked"] += len(clients)
-            orphan_result = await self._remove_or_degrade_xray_orphans(clients, active_keys)
-            summary["recovered"] += orphan_result["recovered"]
-            summary["failed"] += orphan_result["failed"]
-            if orphan_result["failed"]:
-                return summary
+            # Scan each managed inbound independently: an orphan in vless-in must be
+            # removed from vless-in, and one in vless-xhttp-reality from that inbound.
+            for _transport, adapter in self._iter_adapters():
+                clients = adapter.list_clients()
+                summary["checked"] += len(clients)
+                orphan_result = await self._remove_or_degrade_xray_orphans(clients, active_keys, adapter)
+                summary["recovered"] += orphan_result["recovered"]
+                summary["failed"] += orphan_result["failed"]
+                if orphan_result["failed"]:
+                    return summary
 
             summary["recovered"] += await self._restore_missing_active_xray_clients(active_keys)
         except Exception as exc:
@@ -604,13 +654,32 @@ class XrayService:
 
     async def _restore_missing_active_xray_clients(self, active_keys: list[VpnKey]) -> int:
         recovered = 0
-        short_ids_reader = getattr(self.adapter, "list_short_ids", None)
-        short_ids = short_ids_reader() if short_ids_reader is not None else set()
+        short_ids_by_transport: dict[str, set[str]] = {}
+
+        def _short_ids(transport: str, adapter: XrayConfigAdapter) -> set[str]:
+            reader = getattr(adapter, "list_short_ids", None)
+            if reader is None:
+                return set()
+            value: set[str] = reader()
+            short_ids_by_transport[transport] = value
+            return value
+
         for key in active_keys:
-            uuid_value, email_label, short_id, flow, short_id_managed = self._xray_restore_values(key)
-            client = self.adapter.find_client(uuid_value=uuid_value, email_label=email_label)
+            uuid_value, email_label, short_id, flow, short_id_managed, transport = self._xray_restore_values(key)
+            adapter = self._adapter_optional(transport)
+            if adapter is None:
+                logger.warning(
+                    "Xray startup restore skipped for key_id=%s: transport %s adapter unavailable",
+                    key.id,
+                    transport,
+                )
+                continue
+            short_ids = short_ids_by_transport.get(transport)
+            if short_ids is None:
+                short_ids = _short_ids(transport, adapter)
+            client = adapter.find_client(uuid_value=uuid_value, email_label=email_label)
             if client is None:
-                await self.adapter.add_client(
+                await adapter.add_client(
                     uuid_value=uuid_value,
                     email_label=email_label,
                     short_id=short_id,
@@ -625,15 +694,14 @@ class XrayService:
                     entity_id=key.id,
                     details={"client_present": False, "short_id_managed": short_id_managed},
                 )
-                if short_ids_reader is not None:
-                    short_ids = short_ids_reader()
+                _short_ids(transport, adapter)
                 continue
 
             if short_id_managed and short_id and short_id not in short_ids:
-                ensured = await self.adapter.ensure_short_id(short_id)
+                ensured = await adapter.ensure_short_id(short_id)
                 if ensured:
                     recovered += 1
-                    short_ids = short_ids_reader() if short_ids_reader is not None else short_ids
+                    _short_ids(transport, adapter)
                     await self._write_audit_best_effort(
                         actor_user_id=None,
                         action="xray_startup_short_id_restored",
@@ -648,7 +716,10 @@ class XrayService:
         for key in keys:
             if key.status == VpnKeyStatus.ACTIVE:
                 continue
-            client = self.adapter.find_client(uuid_value=key.uuid, email_label=key.email_label)
+            adapter = self._adapter_optional(self._key_transport(key))
+            if adapter is None:
+                continue
+            client = adapter.find_client(uuid_value=key.uuid, email_label=key.email_label)
             if client is None:
                 continue
             await self._remove_xray_access(key)
@@ -666,6 +737,7 @@ class XrayService:
         self,
         clients: list[dict[str, object]],
         active_keys: list[VpnKey],
+        adapter: XrayConfigAdapter,
     ) -> dict[str, int]:
         recovered = 0
         active_identities = self._xray_active_identities(active_keys)
@@ -679,6 +751,8 @@ class XrayService:
             if historical is not None:
                 if historical.status == VpnKeyStatus.ACTIVE:
                     continue
+                # Routes by the historical key's saved transport (one key = one
+                # inbound), preserving managed short-id removal semantics.
                 await self._remove_xray_access(historical)
                 recovered += 1
                 await self._write_audit_best_effort(
@@ -691,7 +765,7 @@ class XrayService:
                 continue
 
             if XRAY_MANAGED_LABEL_RE.fullmatch(email_label):
-                await self.adapter.remove_client(
+                await adapter.remove_client(
                     uuid_value=uuid_value or None,
                     email_label=email_label or None,
                     short_id=None,
@@ -718,19 +792,21 @@ class XrayService:
             return {"recovered": recovered, "failed": 1}
         return {"recovered": recovered, "failed": 0}
 
-    def _xray_restore_values(self, key: VpnKey) -> tuple[str, str, str, str, bool]:
+    def _xray_restore_values(self, key: VpnKey) -> tuple[str, str, str, str, bool, str]:
         uuid_value = str(key.payload.get("uuid") or key.uuid or "").strip()
         email_label = str(key.payload.get("email_label") or key.email_label or "").strip()
         short_id_managed = key.payload.get("short_id_managed") is True
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "").strip()
         if not short_id and not short_id_managed:
             short_id = self.settings.xray_short_id
-        flow = str(key.payload.get("flow") or self.settings.xray_flow or "")
+        transport = self._key_transport(key)
+        # XHTTP clients never carry a flow; TCP keeps the configured flow.
+        flow = "" if transport == "http" else str(key.payload.get("flow") or self.settings.xray_flow or "")
         if not uuid_value or not email_label:
             raise InvalidOperation("Xray active key cannot be restored: missing UUID or email label in DB")
         if not short_id:
             raise InvalidOperation("Xray active key cannot be restored: missing short_id in DB/settings")
-        return uuid_value, email_label, short_id, flow, short_id_managed
+        return uuid_value, email_label, short_id, flow, short_id_managed, transport
 
     def _xray_active_identities(self, active_keys: list[VpnKey]) -> tuple[set[str], set[str]]:
         uuids = {str(key.payload.get("uuid") or key.uuid or "").strip() for key in active_keys}
@@ -771,8 +847,17 @@ class XrayService:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
     async def _startup_reconcile_key(self, key: VpnKey) -> bool:
+        transport = self._key_transport(key)
+        adapter = self._adapter_optional(transport)
+        if adapter is None:
+            logger.warning(
+                "Xray startup reconcile skipped for key_id=%s: transport %s adapter unavailable",
+                key.id,
+                transport,
+            )
+            return False
         if key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
-            client = self.adapter.find_client(uuid_value=key.uuid, email_label=key.email_label)
+            client = adapter.find_client(uuid_value=key.uuid, email_label=key.email_label)
             if client is None:
                 if key.status == VpnKeyStatus.PENDING_APPLY:
                     await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
@@ -876,8 +961,33 @@ class XrayService:
                 return uuid_value, email_label
         raise InvalidOperation("Не удалось сгенерировать уникальные Xray-идентификаторы")
 
-    def _build_vless_link(self, uuid_value: str, short_id: str, email_label: str, fingerprint: str | None = None) -> str:
+    def _build_vless_link(
+        self,
+        uuid_value: str,
+        short_id: str,
+        email_label: str,
+        fingerprint: str | None = None,
+        transport: str = "tcp",
+    ) -> str:
         host = self._format_host(self.settings.xray_public_host)
+        fragment = quote(email_label or "xray")
+        if self._normalize_transport(transport) == "http":
+            # VLESS (HTTP): REALITY over XHTTP on the vless-xhttp-reality inbound.
+            # No flow (XHTTP clients must never carry one). Server-side `extra`
+            # tuning is intentionally NOT placed in the link.
+            params = {
+                "type": "xhttp",
+                "security": "reality",
+                "encryption": "none",
+                "pbk": self.settings.xray_reality_public_key,
+                "fp": fingerprint or self.settings.xray_fingerprint,
+                "sni": self.settings.xray_sni,
+                "sid": short_id,
+                "path": self.settings.xray_xhttp_path,
+                "mode": self.settings.xray_xhttp_mode,
+            }
+            query = urlencode(params)
+            return f"vless://{uuid_value}@{host}:{self.settings.xray_xhttp_port}?{query}#{fragment}"
         params = {
             "type": self.settings.xray_network_type,
             "security": "reality",
@@ -890,8 +1000,6 @@ class XrayService:
         if self.settings.xray_flow:
             params["flow"] = self.settings.xray_flow
         query = urlencode(params)
-        fragment_label = email_label or "xray"
-        fragment = quote(fragment_label)
         return f"vless://{uuid_value}@{host}:{self.settings.xray_public_port}?{query}#{fragment}"
 
     def _format_host(self, host: str) -> str:
@@ -912,7 +1020,9 @@ class XrayService:
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "")
         email_label = str(key.payload.get("email_label") or key.email_label or "")
         fingerprint = str(key.payload.get("fingerprint")) if key.payload.get("fingerprint") else None
-        link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint)
+        link = self._build_vless_link(
+            uuid_value, short_id, email_label, fingerprint=fingerprint, transport=self._key_transport(key)
+        )
         visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
         note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
         label = f"\nМетка: {h(email_label)}" if email_label else ""

@@ -69,9 +69,20 @@ def status_text(status: VpnKeyStatus) -> str:
     }.get(status, status.value)
 
 
+def key_type_label(key: VpnKey) -> str:
+    """Human label for a key by protocol + transport.
+
+    "VLESS (TCP)" / "VLESS (HTTP)" for Xray keys, "AmneziaWG" for AWG keys.
+    Legacy Xray keys (no/unknown transport) read as "VLESS (TCP)".
+    """
+    if key.key_type == VpnKeyType.AWG:
+        return "AmneziaWG"
+    transport = str(getattr(key, "transport", "tcp") or "tcp").lower()
+    return "VLESS (HTTP)" if transport == "http" else "VLESS (TCP)"
+
+
 def key_title(key: VpnKey) -> str:
-    prefix = "Xray" if key.key_type == VpnKeyType.XRAY else "AWG"
-    return f"{prefix} #{key.id}"
+    return f"{key_type_label(key)} #{key.id}"
 
 
 def key_note_for_viewer(key: VpnKey, viewer_user_id: int) -> str | None:
@@ -123,9 +134,9 @@ def keys_page_text(keys: list[VpnKey], page: int, *, viewer_user_id: int, owner_
     awg = [key for key in keys if key.key_type == VpnKeyType.AWG]
     sections = [t("keys_page_title", title=title, page=page + 1), t("one_key_one_device")]
     if xray:
-        sections.append("<b>Xray</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in xray))
+        sections.append("<b>VLESS</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in xray))
     if awg:
-        sections.append("<b>AWG</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in awg))
+        sections.append("<b>AmneziaWG</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in awg))
     return "\n\n".join(sections)
 
 
@@ -235,6 +246,15 @@ def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer
     return "\n".join(lines)
 
 
+def create_type_label(key_type: str, transport: str | None = None) -> str:
+    """Human label for a key type + transport used on the creation confirm screen."""
+    if key_type == VpnKeyType.AWG.value:
+        return "AmneziaWG"
+    if key_type == VpnKeyType.XRAY.value:
+        return "VLESS (HTTP)" if str(transport or "tcp").lower() == "http" else "VLESS (TCP)"
+    return key_type.upper()
+
+
 def create_confirm_text(
     key_type: str,
     note: str | None,
@@ -242,10 +262,11 @@ def create_confirm_text(
     expires_at: str | None = None,
     mtu: int | None = None,
     fingerprint: str | None = None,
+    transport: str | None = None,
 ) -> str:
     lines = [
         t("create_confirm_title"),
-        f"{t('field_type')}: {h(key_type.upper())}",
+        f"{t('field_type')}: {h(create_type_label(key_type, transport))}",
         f"{t('field_note')}: {h(note or t('none'))}",
         f"{t('field_expires_at')}: {h(format_expiry_date(expires_at))}",
     ]

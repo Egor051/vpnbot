@@ -225,13 +225,24 @@ def admin_key_type_keyboard(
     xray_enabled: bool = True,
     awg_enabled: bool = True,
 ) -> InlineKeyboardMarkup:
-    """Build the key type selection keyboard for issuing a key to a user."""
+    """Build the protocol selection keyboard for issuing a key to a user (step 1)."""
     rows: list[list[InlineKeyboardButton]] = []
     if xray_enabled:
-        rows.append([InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data=f"admin:ctype:xray:{user_id}")])
+        rows.append([InlineKeyboardButton(text="VLESS", callback_data=f"admin:proto:vless:{user_id}")])
     if awg_enabled:
         rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data=f"admin:ctype:awg:{user_id}")])
     rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_vless_transport_keyboard(user_id: int, *, xhttp_enabled: bool = False) -> InlineKeyboardMarkup:
+    """Build the VLESS transport selection keyboard for issuing a key (step 2)."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="VLESS (TCP)", callback_data=f"admin:ctype:xray:{user_id}")],
+    ]
+    if xhttp_enabled:
+        rows.append([InlineKeyboardButton(text="VLESS (HTTP)", callback_data=f"admin:ctype:xhttp:{user_id}")])
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data=f"admin:issue:{user_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

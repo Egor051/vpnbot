@@ -78,6 +78,9 @@ class VpnKey:
     revoked_by: int | None
     deleted_by: int | None
     expires_at: str | None = None
+    # VLESS transport selector: "tcp" (vless-in, flow=xtls-rprx-vision) or "http"
+    # (vless-xhttp-reality, no flow). Always "tcp" for AWG keys and legacy rows.
+    transport: str = "tcp"
 
     def __repr__(self) -> str:
         # payload carries AWG private_key/preshared_key — never expose it in repr.

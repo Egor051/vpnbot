@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 22
+CURRENT_SCHEMA_VERSION = 23
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -263,6 +263,10 @@ class Database:
             await self._migrate_v22()
             await self._set_schema_version(22)
             version = 22
+        if version < 23:
+            await self._migrate_v23()
+            await self._set_schema_version(23)
+            version = 23
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -555,6 +559,7 @@ class Database:
                 "key_type",
                 ("xray", "awg"),
             ),
+            ("vpn_keys", "transport", ("tcp", "http")),
             (
                 "vpn_keys",
                 "status",
@@ -906,6 +911,18 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_deleted_key_traffic_archive_owner "
             "ON deleted_key_traffic_archive(owner_user_id, downloaded_bytes, uploaded_bytes)"
         )
+
+    async def _migrate_v23(self) -> None:
+        # VLESS transport selector on vpn_keys: 'tcp' (vless-in, flow=xtls-rprx-vision)
+        # or 'http' (vless-xhttp-reality, no flow). Adding the column with a NOT NULL
+        # DEFAULT 'tcp' backfills every existing row to 'tcp' (all pre-XHTTP keys are
+        # TCP), which is exactly the desired migration. Guarded by a column check so
+        # the migration is idempotent. Also declared in schema.sql for fresh DBs.
+        vpn_cols = await self._table_columns("vpn_keys")
+        if "transport" not in vpn_cols:
+            await self.conn.execute(
+                "ALTER TABLE vpn_keys ADD COLUMN transport TEXT NOT NULL DEFAULT 'tcp'"
+            )
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(

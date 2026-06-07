@@ -32,6 +32,7 @@ from bot.keyboards.keys import (
     keys_list_keyboard,
     mtu_choice_keyboard,
     trial_protocol_keyboard,
+    vless_transport_keyboard,
 )
 from aiogram.types import BufferedInputFile
 from bot.messages import (
@@ -145,19 +146,54 @@ async def create_key_menu_message(message: Message, services: Services) -> None:
         await answer_message_error(message, exc)
 
 
-@router.callback_query(F.data.in_({"keys:create:xray", "keys:create:awg"}))
+@router.callback_query(F.data == "keys:proto:vless")
+async def create_key_proto_vless(callback: CallbackQuery, services: Services) -> None:
+    """Show the VLESS transport selection (step 2) for the chosen VLESS protocol."""
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("choose_vless_transport"),
+            reply_markup=vless_transport_keyboard(xhttp_enabled=services.settings.xray_xhttp_enabled),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+# Maps the protocol/transport callback to (key_type, transport).
+_CREATE_CHOICE: dict[str, tuple[str, str]] = {
+    "keys:create:awg": (VpnKeyType.AWG.value, "tcp"),
+    "keys:create:xray": (VpnKeyType.XRAY.value, "tcp"),
+    "keys:create:xhttp": (VpnKeyType.XRAY.value, "http"),
+}
+
+
+@router.callback_query(F.data.in_(set(_CREATE_CHOICE)))
 async def create_key_choose(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """Record the chosen key type and prompt for a note."""
+    """Record the chosen key type/transport and prompt for a note."""
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
         await _ensure_can_enter_create(callback.from_user.id, services)
+        key_type, transport = _CREATE_CHOICE[callback.data]
+        if transport == "http" and not services.settings.xray_xhttp_enabled:
+            await safe_callback_answer(callback, t("vless_http_unavailable"), show_alert=True)
+            return
         await safe_callback_answer(callback)
-        key_type = callback.data.rsplit(":", 1)[-1]
         await state.set_state(CreateKeyStates.waiting_note)
-        await state.update_data(key_type=key_type, cancel_target="keys:create", note_prompt_msg_id=callback.message.message_id)
+        await state.update_data(
+            key_type=key_type,
+            transport=transport,
+            cancel_target="keys:create",
+            note_prompt_msg_id=callback.message.message_id,
+        )
         await safe_edit_message_text(
             callback.message,
             f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
@@ -310,13 +346,14 @@ async def create_key_expiry(callback: CallbackQuery, state: FSMContext, services
         await safe_callback_answer(callback)
         data = await state.get_data()
         key_type = str(data.get("key_type") or "")
+        transport = str(data.get("transport") or "tcp")
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         fingerprint = data.get("fingerprint")
         from bot.keyboards.common import confirm_cancel_keyboard
         await safe_edit_message_text(
             callback.message,
-            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint),
+            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -363,12 +400,13 @@ async def create_key_custom_days(message: Message, state: FSMContext, services: 
         await state.set_state(CreateKeyStates.confirming)
         data = await state.get_data()
         key_type = str(data.get("key_type") or "")
+        transport = str(data.get("transport") or "tcp")
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         fingerprint = data.get("fingerprint")
         from bot.keyboards.common import confirm_cancel_keyboard
         await message.answer(
-            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint),
+            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -385,6 +423,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         return
     data = await state.get_data()
     key_type = str(data.get("key_type") or "")
+    transport = str(data.get("transport") or "tcp")
     note = data.get("note")
     expires_at: str | None = data.get("expires_at")
     mtu = int(data["mtu"]) if data.get("mtu") is not None else None
@@ -396,7 +435,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         await state.clear()
         await safe_callback_answer(callback, t("creating_key"))
         if key_type == VpnKeyType.XRAY.value:
-            result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at, fingerprint=fingerprint)
+            result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at, fingerprint=fingerprint, transport=transport)
         elif key_type == VpnKeyType.AWG.value:
             result = await services.awg.create_awg_key(callback.from_user.id, profile, note, expires_at=expires_at, mtu=mtu)
         else:

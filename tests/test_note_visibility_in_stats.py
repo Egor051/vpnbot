@@ -88,9 +88,9 @@ def test_superadmin_does_not_see_foreign_note_in_key_list_or_details() -> None:
 def test_key_display_label_does_not_use_foreign_note_as_fallback() -> None:
     key = _key(note="fallback note", email_label=None, public_key=None)
 
-    assert key_display_label(key, viewer_user_id=1) == "AWG #10"
+    assert key_display_label(key, viewer_user_id=1) == "AmneziaWG #10"
     assert key_display_label(key, viewer_user_id=100) == "fallback note"
-    assert key_display_label(key) == "AWG #10"
+    assert key_display_label(key) == "AmneziaWG #10"
 
 
 def test_note_used_as_fallback_label_is_not_duplicated_in_key_list_or_details() -> None:
@@ -113,7 +113,7 @@ def test_admin_user_card_hides_foreign_note_fallback_label() -> None:
     )
 
     assert "foreign note" not in text
-    assert "<code>AWG #10</code>" in text
+    assert "<code>AmneziaWG #10</code>" in text
 
 
 def test_owner_sees_own_key_note_in_stats() -> None:
@@ -127,7 +127,7 @@ def test_foreign_viewer_does_not_see_note_or_note_fallback_label_in_stats() -> N
     text = traffic_stats_text(_view(_key()), viewer_user_id=1)
 
     assert "owner private note" not in text
-    assert "<code>AWG #10</code>" in text
+    assert "<code>AmneziaWG #10</code>" in text
 
 
 def test_owner_note_used_as_fallback_label_is_not_duplicated_in_stats() -> None:

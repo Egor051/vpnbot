@@ -44,6 +44,7 @@ def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
         created_by=int(row["created_by"]),
         revoked_by=row["revoked_by"],
         deleted_by=row["deleted_by"],
+        transport=str(row["transport"]) if "transport" in keys and row["transport"] else "tcp",
     )
 
 
@@ -67,6 +68,7 @@ class VpnKeyRepository:
         public_key: str | None = None,
         client_ip: str | None = None,
         expires_at: str | None = None,
+        transport: str = "tcp",
     ) -> VpnKey:
         """Insert a new VPN key in pending-apply status and return it."""
         cursor = await self.db.conn.execute(
@@ -75,9 +77,9 @@ class VpnKeyRepository:
               owner_user_id, username, key_type, status, note,
               uuid, email_label, public_key, client_ip,
               payload_json, public_payload_json,
-              created_at, updated_at, created_by, expires_at
+              created_at, updated_at, created_by, expires_at, transport
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 owner_user_id,
@@ -95,6 +97,7 @@ class VpnKeyRepository:
                 now,
                 created_by,
                 expires_at,
+                transport,
             ),
         )
         await self.db.commit()
@@ -120,6 +123,7 @@ class VpnKeyRepository:
         public_key: str | None = None,
         client_ip: str | None = None,
         expires_at: str | None = None,
+        transport: str = "tcp",
     ) -> VpnKey:
         """Create a new VPN key and return it."""
         return await self.create_pending(
@@ -136,6 +140,7 @@ class VpnKeyRepository:
             public_key=public_key,
             client_ip=client_ip,
             expires_at=expires_at,
+            transport=transport,
         )
 
     async def get_by_id(self, key_id: int) -> VpnKey | None:

@@ -35,6 +35,7 @@ from bot.handlers.common import answer_callback_error, answer_message_error, par
 from bot.keyboards.admin import (
     admin_issue_users_keyboard,
     admin_key_type_keyboard,
+    admin_vless_transport_keyboard,
     admin_panel_keyboard,
     moderator_panel_keyboard,
     announcement_batches_keyboard,
@@ -1042,16 +1043,52 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(AdminCreateKeyStates.choosing_type, F.data.regexp(r"^admin:ctype:(xray|awg):\d+$"))
-async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """Record the chosen key type and prompt for a note."""
+@router.callback_query(AdminCreateKeyStates.choosing_type, F.data.regexp(r"^admin:proto:vless:\d+$"))
+async def admin_issue_proto_vless(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Show the VLESS transport selection (step 2) for the chosen user."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
         await require_superadmin(services, callback.from_user.id)
-        _, _, key_type, raw_user_id = callback.data.split(":", 3)
+        owner_user_id = int(callback.data.rsplit(":", 1)[-1])
+        data = await state.get_data()
+        expected_owner_id = data.get("owner_user_id")
+        if expected_owner_id is None or int(expected_owner_id) != owner_user_id:
+            await state.clear()
+            await safe_callback_answer(callback, t("action_stale"), show_alert=True)
+            await safe_edit_message_text(callback.message, t("action_stale_msg"), reply_markup=admin_panel_keyboard())
+            return
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("choose_vless_transport"),
+            reply_markup=admin_vless_transport_keyboard(owner_user_id, xhttp_enabled=services.settings.xray_xhttp_enabled),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+# Maps the admin protocol/transport callback verb to (key_type, transport).
+_ADMIN_CTYPE_CHOICE: dict[str, tuple[str, str]] = {
+    "awg": (VpnKeyType.AWG.value, "tcp"),
+    "xray": (VpnKeyType.XRAY.value, "tcp"),
+    "xhttp": (VpnKeyType.XRAY.value, "http"),
+}
+
+
+@router.callback_query(AdminCreateKeyStates.choosing_type, F.data.regexp(r"^admin:ctype:(xray|awg|xhttp):\d+$"))
+async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Record the chosen key type/transport and prompt for a note."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        _, _, verb, raw_user_id = callback.data.split(":", 3)
+        key_type, transport = _ADMIN_CTYPE_CHOICE[verb]
         owner_user_id = int(raw_user_id)
         data = await state.get_data()
         expected_owner_id = data.get("owner_user_id")
@@ -1064,9 +1101,17 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
                 reply_markup=admin_panel_keyboard(),
             )
             return
+        if transport == "http" and not services.settings.xray_xhttp_enabled:
+            await safe_callback_answer(callback, t("vless_http_unavailable"), show_alert=True)
+            return
         await safe_callback_answer(callback)
         await state.set_state(AdminCreateKeyStates.waiting_note)
-        await state.update_data(owner_user_id=owner_user_id, key_type=key_type, note_prompt_msg_id=callback.message.message_id)
+        await state.update_data(
+            owner_user_id=owner_user_id,
+            key_type=key_type,
+            transport=transport,
+            note_prompt_msg_id=callback.message.message_id,
+        )
         await safe_edit_message_text(
             callback.message,
             f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
@@ -1220,6 +1265,7 @@ async def admin_issue_expiry(callback: CallbackQuery, state: FSMContext, service
         owner_user_id = int(data["owner_user_id"])
         owner = await services.users.get_user(owner_user_id)
         key_type = str(data["key_type"])
+        transport = str(data.get("transport") or "tcp")
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         fingerprint = data.get("fingerprint")
@@ -1227,7 +1273,7 @@ async def admin_issue_expiry(callback: CallbackQuery, state: FSMContext, service
         await safe_callback_answer(callback)
         await safe_edit_message_text(
             callback.message,
-            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint),
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport),
             reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
         )
     except Exception as exc:
@@ -1275,12 +1321,13 @@ async def admin_issue_custom_days(message: Message, state: FSMContext, services:
         owner_user_id = int(data["owner_user_id"])
         owner = await services.users.get_user(owner_user_id)
         key_type = str(data["key_type"])
+        transport = str(data.get("transport") or "tcp")
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         fingerprint = data.get("fingerprint")
         await state.set_state(AdminCreateKeyStates.confirming)
         await message.answer(
-            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint),
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport),
             reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
         )
     except Exception as exc:
@@ -1299,6 +1346,7 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
     try:
         owner_user_id = int(data["owner_user_id"])
         key_type = str(data["key_type"])
+        transport = str(data.get("transport") or "tcp")
         note = data.get("note")
         expires_at: str | None = data.get("expires_at")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
@@ -1316,6 +1364,7 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
                 expires_at=expires_at,
                 allow_pending_owner=owner_is_pending,
                 fingerprint=fingerprint,
+                transport=transport,
             )
         elif key_type == VpnKeyType.AWG.value:
             result = await services.awg.create_awg_key(

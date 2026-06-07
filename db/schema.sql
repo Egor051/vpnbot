@@ -56,6 +56,9 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   revoked_at TEXT,
   expires_at TEXT DEFAULT NULL,
   expiry_notified_days TEXT DEFAULT NULL,
+  -- VLESS transport: 'tcp' (vless-in) or 'http' (vless-xhttp-reality). Always
+  -- 'tcp' for AWG keys and pre-XHTTP legacy rows. Mirrors _migrate_v23.
+  transport TEXT NOT NULL DEFAULT 'tcp',
   deleted_at TEXT,
   -- created_by/revoked_by/deleted_by intentionally have NO foreign key (unlike
   -- proxy_accesses): users are NEVER hard-deleted (only blocked via role), so
