@@ -1,4 +1,4 @@
--- Migration 020: WARP Telegram routing module settings.
+-- Migration 020: WARP outbound-IP masking module settings.
 --
 -- This project applies migrations programmatically from db/database.py
 -- (schema_version bumped to 20, see Database._migrate_v20). This file documents
@@ -12,8 +12,8 @@
 CREATE TABLE IF NOT EXISTS warp_settings (
     id              INTEGER PRIMARY KEY DEFAULT 1,
     enabled         INTEGER NOT NULL DEFAULT 0,
-    config_path     TEXT    NOT NULL DEFAULT '/etc/amnezia/tg-warp.conf',
-    interface_name  TEXT    NOT NULL DEFAULT 'tg-warp',
+    config_path     TEXT    NOT NULL DEFAULT '/etc/amnezia/out-warp.conf',
+    interface_name  TEXT    NOT NULL DEFAULT 'out-warp',
     routes_count    INTEGER NOT NULL DEFAULT 0,   -- number of CIDRs from the config
     -- runtime state (reset on bot restart)
     tunnel_up       INTEGER NOT NULL DEFAULT 0,

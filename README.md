@@ -11,7 +11,7 @@ This project is designed for a single-server deployment without Docker, Redis, P
 - Xray VLESS Reality key creation, config delivery, revocation, deletion, and startup reconciliation.
 - AmneziaWG key creation, client config delivery, revocation, deletion, IP allocation, and startup reconciliation.
 - Separate one-page Telegram section "Прокси" for SOCKS5/Dante auto-issue and Telegram MTProto Proxy links.
-- Optional WARP Telegram routing module: server-side AmneziaWG (`tg-warp`) tunnel with automatic health-based fallback. Disabled by default; see [WARP Telegram Routing](#warp-telegram-routing).
+- Optional WARP outbound-IP masking module: server-side AmneziaWG (`out-warp`) tunnel that hides the server's outbound IP for selected "spy" apps, with automatic health-based fallback. Disabled by default; see [WARP Outbound IP Masking](#warp-outbound-ip-masking).
 - MTProto supports `static` compatibility mode and `managed` mode with per-user secrets, safe apply, and rollback.
 - Optional legacy proxy entry table seeded from `DEFAULT_PROXY_*` remains internal/compatibility storage; the user-facing proxy UX uses `proxy_accesses`.
 - Ownership checks so users can view their own configs/stats; destructive VPN and proxy lifecycle actions are admin-only.
@@ -48,7 +48,7 @@ bot/                       # Telegram handlers, keyboards, FSM, formatting
 services/                  # Business workflows and permissions
 repositories/              # SQLite access layer
 adapters/                  # Xray, AWG, systemctl, backups, shell adapters
-warp/                      # WARP Telegram routing module (tunnel, routes, health monitor)
+warp/                      # WARP outbound-IP masking module (tunnel, routes, health monitor)
 scripts/                   # vpnbot-warp-* sudo helpers
 config/settings.py         # Environment parsing and validation
 tests/                     # Regression and hardening tests
@@ -560,17 +560,20 @@ Manual rollback for managed MTProto:
 
 Proxy statistics are lifecycle/accounting stats from SQLite: issued, active, revoked/deactivated, timestamps, status, reason, and error. The bot does not invent per-user traffic for Dante or MTProxy. Without Dante per-login accounting or a safe aggregate MTProxy stats endpoint, traffic is shown as unavailable.
 
-## WARP Telegram Routing
+## WARP Outbound IP Masking
 
-Optional server-side module that routes selected traffic through an AmneziaWG
-(`tg-warp`) tunnel and automatically falls back to the direct path when the
-tunnel is unreachable. It is **disabled by default** and does nothing until a
-superadmin uploads a config and enables it from the admin panel (📡 WARP-туннель).
+Optional server-side module that masks the server's outbound IP for selected
+applications (e.g. data-harvesting "spy" apps): it routes their traffic through
+an AmneziaWG (`out-warp`) tunnel so their connections leave from the tunnel
+endpoint instead of the real server IP, and automatically falls back to the
+direct path when the tunnel is unreachable. It is **disabled by default** and
+does nothing until a superadmin uploads a config and enables it from the admin
+panel (📡 WARP tunnel).
 
 How it works:
 
-1. `awg-quick up` brings the `tg-warp` interface up from `/etc/amnezia/tg-warp.conf`.
-2. System `ip route` entries are added for the CIDRs in the config via `tg-warp`.
+1. `awg-quick up` brings the `out-warp` interface up from `/etc/amnezia/out-warp.conf`.
+2. System `ip route` entries are added for the CIDRs in the config via `out-warp`.
 3. An asyncio background task pings the tunnel every 10 s. After **2** consecutive
    failures the routes are removed (traffic → direct); after **3** consecutive
    successes they are restored.
@@ -588,11 +591,12 @@ policy rules outside the bot instead of relying on `AllowedIPs`.
 Upload an **AmneziaWG** client config (not plain WireGuard) as a `.conf`
 document. It must contain `[Interface]`/`[Peer]`, `PrivateKey`/`PublicKey`/
 `Endpoint`, the AmneziaWG obfuscation fields (`Jc`, `S1`, `S2`, …) and a
-non-empty `AllowedIPs`. **You decide which traffic flows through the tunnel via
-`AllowedIPs`** — Telegram MTProto only, or also its dependencies (Google FCM for
-push, CDNs for media, etc.). `AllowedIPs` is never modified: the install helper
-extracts it verbatim into `/etc/amnezia/tg-warp-routes.list` (one CIDR per line)
-and the routes helper reads it from there.
+non-empty `AllowedIPs`. **You decide whose outbound IP is masked via
+`AllowedIPs`** — list the address ranges of the "spy" apps whose traffic should
+leave from the tunnel endpoint instead of the real server IP. `AllowedIPs` is
+never modified: the install helper extracts it verbatim into
+`/etc/amnezia/out-warp-routes.list` (one CIDR per line) and the routes helper
+reads it from there.
 
 > **Warning:** `0.0.0.0/0` and `::/0` in `AllowedIPs` are automatically skipped
 > by the routes helper (a warning is printed to stderr). This protects the host
@@ -627,14 +631,14 @@ These default to the provided sudoers template paths. Changing `WARP_CONFIG_PATH
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `WARP_CONFIG_PATH` | `/etc/amnezia/tg-warp.conf` | Installed tunnel config path |
-| `WARP_INTERFACE` | `tg-warp` | AmneziaWG interface name |
+| `WARP_CONFIG_PATH` | `/etc/amnezia/out-warp.conf` | Installed tunnel config path |
+| `WARP_INTERFACE` | `out-warp` | AmneziaWG interface name |
 | `WARP_INSTALL_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-install` | Config install helper |
 | `WARP_IFACE_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-iface` | Interface up/down helper |
 | `WARP_ROUTES_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-routes` | Route add/del helper |
 | `WARP_STATUS_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-status` | `awg show` helper |
 | `WARP_HELPER_STAGING_DIR` | `/run/vpn-bot/warp` | Private dir for staged uploads |
-| `WARP_PING_TARGET` | `162.159.140.245` | ICMP target the health monitor pings to decide tunnel up/down. Default is a Cloudflare anycast address present in typical WARP `AllowedIPs`. Override if your `AllowedIPs` is Telegram-only, otherwise the monitor reports false failures. |
+| `WARP_PING_TARGET` | `162.159.140.245` | ICMP target the health monitor pings to decide tunnel up/down. Default is a Cloudflare anycast address present in typical WARP `AllowedIPs`. Override if your `AllowedIPs` does not cover this address, otherwise the monitor reports false failures. |
 
 ## Deployment Overview
 

@@ -1,4 +1,4 @@
-"""Control of the ``tg-warp`` AmneziaWG interface through sudo helpers.
+"""Control of the ``out-warp`` AmneziaWG interface through sudo helpers.
 
 The bot never runs ``awg-quick``/``awg`` directly; it invokes fixed sudo helper
 scripts. This wrapper only assembles the helper calls and parses the ``awg show``

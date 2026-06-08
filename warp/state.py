@@ -15,8 +15,8 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class WarpState:
     enabled: bool = False
-    config_path: str = "/etc/amnezia/tg-warp.conf"
-    interface_name: str = "tg-warp"
+    config_path: str = "/etc/amnezia/out-warp.conf"
+    interface_name: str = "out-warp"
     routes_count: int = 0
     # runtime state (reset on bot restart)
     tunnel_up: bool = False

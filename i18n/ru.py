@@ -549,13 +549,13 @@ STRINGS: dict[str, str] = {
     "btn_warp_disable": "🔴 Выключить",
     "btn_warp_restart": "🔄 Перезапустить",
     "btn_warp_settings": "⚙️ Настройки",
-    "warp_title": "📡 <b>WARP Telegram Routing</b>",
+    "warp_title": "📡 <b>Сокрытие outbound IP</b>",
     "warp_settings_title": "⚙️ <b>Настройки WARP</b>",
     "warp_status_disabled": "Статус: 🔴 Выключен",
     "warp_intro": (
-        "Направляет трафик через AmneziaWG туннель.\n"
-        "При обрыве соединения автоматически\n"
-        "переключается на прямой выход."
+        "Скрывает исходящий IP сервера для приложений-шпионов:\n"
+        "направляет их трафик через AmneziaWG-туннель.\n"
+        "При обрыве автоматически переключается на прямой выход."
     ),
     "warp_no_config_hint": "Загрузите конфиг, чтобы включить модуль.",
     "warp_label_module": "Модуль:",
@@ -581,7 +581,7 @@ STRINGS: dict[str, str] = {
     "warp_upload_prompt": (
         "Отправьте файл конфигурации AmneziaWG (<code>.conf</code>) как документ.\n\n"
         "Конфиг должен содержать поля AmneziaWG (Jc, S1, S2) и непустой AllowedIPs. "
-        "Какой трафик пойдёт через туннель — определяете вы своим AllowedIPs."
+        "Чей исходящий IP скрывать (адреса приложений-шпионов) — определяете вы своим AllowedIPs."
     ),
     "warp_upload_not_document": "Пожалуйста, отправьте <code>.conf</code> файл как документ.",
     "warp_upload_too_large": "Файл слишком большой для конфигурации.",

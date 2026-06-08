@@ -13,8 +13,8 @@ set -euo pipefail
 
 ACTION="${1:-}"
 SOURCE="${2:-}"
-DEST="/etc/amnezia/tg-warp.conf"
-ROUTES_LIST="/etc/amnezia/tg-warp-routes.list"
+DEST="/etc/amnezia/out-warp.conf"
+ROUTES_LIST="/etc/amnezia/out-warp-routes.list"
 
 case "${ACTION}" in
   install)

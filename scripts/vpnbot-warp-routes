@@ -3,8 +3,8 @@
 # Default-equivalent routes are always skipped to prevent host isolation. No other
 # CIDRs are hardcoded; the DNS resolver is never touched.
 set -euo pipefail
-ROUTES_LIST="/etc/amnezia/tg-warp-routes.list"
-ACTION="${1:-}"; IFACE="${2:-tg-warp}"
+ROUTES_LIST="/etc/amnezia/out-warp-routes.list"
+ACTION="${1:-}"; IFACE="${2:-out-warp}"
 
 # A route is "default-equivalent" when it has no prefix ("default") or a prefix
 # length of 0 or 1. That covers the IPv4/IPv6 default routes and the "two halves"
@@ -44,7 +44,7 @@ case "$ACTION" in
     add)
         [[ -f "$ROUTES_LIST" ]] || { echo "Routes list not found: $ROUTES_LIST" >&2; exit 1; }
         apply_routes
-        # MASQUERADE: трафик из awg0/других интерфейсов меняет source на IP tg-warp
+        # MASQUERADE: трафик из awg0/других интерфейсов меняет source на IP out-warp
         iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null \
             || iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
         iptables -C FORWARD -i awg0 -o "$IFACE" -j ACCEPT 2>/dev/null \

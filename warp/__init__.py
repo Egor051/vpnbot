@@ -1,4 +1,9 @@
-"""Server-side WARP (AmneziaWG) routing module for Telegram traffic.
+"""Server-side WARP (AmneziaWG) module for masking the server's outbound IP.
+
+It routes the traffic of selected applications (e.g. data-harvesting "spy" apps)
+through an AmneziaWG tunnel so their outbound connections leave from the tunnel
+endpoint instead of the real server IP. Which traffic is masked is decided purely
+by the uploaded config's ``AllowedIPs``.
 
 The module is disabled by default. Until an administrator uploads a config and
 explicitly enables it from the admin panel, nothing is brought up and no routes

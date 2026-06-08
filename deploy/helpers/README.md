@@ -79,14 +79,15 @@ MTProxy:
 
 The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpnbot/managed-secrets.json` and `/etc/mtproxy/vpnbot/mtproxy.env` atomically as `root:vpn-bot` mode `0640` in a `0750` `root:vpn-bot` directory (world-unreadable; group-readable for non-root reads), restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure.
 
-## WARP Telegram Routing helpers
+## WARP outbound-IP masking helpers
 
 The WARP module ships four additional sudo helpers (in `scripts/`, installed to
 `/usr/local/sbin`). Unlike the backend helpers above, the WARP helpers are
 **always** invoked via `sudo` regardless of `PRIVILEGE_HELPERS_ENABLED` (the
-module manages a dedicated `tg-warp` AmneziaWG interface and its routes; the bot
-itself stays unprivileged). The module is disabled by default and does nothing
-until an admin uploads a config and enables it.
+module manages a dedicated `out-warp` AmneziaWG interface and its routes so that
+selected apps' traffic leaves from the tunnel endpoint, masking the server's
+outbound IP; the bot itself stays unprivileged). The module is disabled by
+default and does nothing until an admin uploads a config and enables it.
 
 ```bash
 install -o root -g root -m 0755 scripts/vpnbot-warp-install /usr/local/sbin/vpnbot-warp-install
@@ -101,22 +102,22 @@ Interfaces:
   (`[Interface]`/`[Peer]`, `Jc`/`S1`/`S2`, non-empty `AllowedIPs`), **rejects**
   `PreUp`/`PostUp`/`PreDown`/`PostDown` hooks (awg-quick would run them as root),
   validates every `AllowedIPs` token as a real CIDR, strips `DNS`, adds
-  `Table = off` and `PersistentKeepalive = 25`, writes `/etc/amnezia/tg-warp.conf`
-  (mode `0600`) and `/etc/amnezia/tg-warp-routes.list` (one CIDR per line from
+  `Table = off` and `PersistentKeepalive = 25`, writes `/etc/amnezia/out-warp.conf`
+  (mode `0600`) and `/etc/amnezia/out-warp-routes.list` (one CIDR per line from
   `AllowedIPs`, which is never modified). The source must be a non-symlink file
   inside the staging dir; the bot stages the upload under
   `/run/vpn-bot/warp/warp-upload-*.conf`.
-- `vpnbot-warp-install remove` — deletes `/etc/amnezia/tg-warp.conf` and
-  `/etc/amnezia/tg-warp-routes.list` from disk. Called by `delete_config` to
+- `vpnbot-warp-install remove` — deletes `/etc/amnezia/out-warp.conf` and
+  `/etc/amnezia/out-warp-routes.list` from disk. Called by `delete_config` to
   ensure the PrivateKey does not persist after config removal.
-- `vpnbot-warp-iface {up|down} /etc/amnezia/tg-warp.conf` — runs
+- `vpnbot-warp-iface {up|down} /etc/amnezia/out-warp.conf` — runs
   `awg-quick up|down` (AmneziaWG, **not** `wg-quick`).
-- `vpnbot-warp-routes {add|del} tg-warp` — adds/removes `ip route` entries read
-  from `tg-warp-routes.list`. Skips any default-equivalent route (`default`, or a
+- `vpnbot-warp-routes {add|del} out-warp` — adds/removes `ip route` entries read
+  from `out-warp-routes.list`. Skips any default-equivalent route (`default`, or a
   prefix length of 0 or 1, which also blocks the two-halves split-default trick) to
   protect the host's egress; never touches the DNS resolver. `del` tears down its
   iptables rules even when the routes list is already gone.
-- `vpnbot-warp-status tg-warp` — runs `awg show tg-warp`.
+- `vpnbot-warp-status out-warp` — runs `awg show out-warp`.
 
 `awg-quick`/`awg` (AmneziaWG userspace tools) must be installed at
 `/usr/bin/awg-quick` and `/usr/bin/awg`; the module blocks startup with a clear

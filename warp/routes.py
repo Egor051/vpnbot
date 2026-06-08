@@ -1,7 +1,7 @@
 """Management of the system ``ip route`` entries for the WARP tunnel.
 
 The CIDRs themselves are never hardcoded here: the routes helper reads them from
-``/etc/amnezia/tg-warp-routes.list`` (written by the install helper from the
+``/etc/amnezia/out-warp-routes.list`` (written by the install helper from the
 user's ``AllowedIPs``). This wrapper only triggers the add/del helper actions and
 never touches the default route or the DNS resolver.
 """
