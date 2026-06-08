@@ -660,7 +660,12 @@ def test_create_key_menu_ignores_stale_callback_answer(monkeypatch) -> None:
 
     async def run() -> None:
         callback = Callback()
-        await create_key_menu(callback, SimpleNamespace(users=Users(), modules=_modules_enabled()))  # type: ignore[arg-type]
+        services = SimpleNamespace(
+            users=Users(),
+            modules=_modules_enabled(),
+            settings=SimpleNamespace(xray_xhttp_enabled=False),
+        )
+        await create_key_menu(callback, services)  # type: ignore[arg-type]
 
         assert callback.answer_calls == 1
         assert len(edits) == 1

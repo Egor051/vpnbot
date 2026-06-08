@@ -1037,7 +1037,12 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
         await safe_edit_message_text(
             callback.message,
             text,
-            reply_markup=admin_key_type_keyboard(user.telegram_user_id, xray_enabled=xray_on, awg_enabled=awg_on),
+            reply_markup=admin_key_type_keyboard(
+                user.telegram_user_id,
+                xray_enabled=xray_on,
+                awg_enabled=awg_on,
+                xhttp_enabled=services.settings.xray_xhttp_enabled,
+            ),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)

@@ -33,6 +33,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `ConfigDocumentCleanupMiddleware` performs the cleanup for every callback except
   «show config», and the just-sent file is tracked in FSM state by the create,
   admin-issue, and show-config flows.
+- **VLESS (HTTP) management decoupled from the feature flag** — managing an
+  already-issued `VLESS (HTTP)` key (revoke / delete / reconcile) no longer depends
+  on `XRAY_XHTTP_ENABLED`. The second `XrayConfigAdapter` is now built from the
+  actual presence of the XHTTP inbound in `config.json`, so turning the flag back
+  off can never strand live http keys as unrevocable. `XRAY_XHTTP_ENABLED` now
+  gates only the issuance of *new* http keys (the UI button + a create guard), and
+  with XHTTP disabled the VLESS button goes straight to TCP key creation instead of
+  a single-option transport step. With the flag off and no XHTTP inbound the bot
+  behaves exactly as before.
+- **Unified VLESS key label** — the config header and stored `display_name` now read
+  `VLESS (TCP)` / `VLESS (HTTP)` (matching the key list) instead of `Xray`.
+
+### Fixed
+
+- `XRAY_XHTTP_INBOUND_TAG` colliding with `XRAY_INBOUND_TAG` (or left empty) while
+  `XRAY_XHTTP_ENABLED=true` is now rejected at startup in `load_settings` instead of
+  lazily on the first key issuance. A startup diagnostic also logs loudly when
+  `VLESS (HTTP)` keys exist in the DB but their XHTTP inbound is absent, so the
+  operator knows they are unmanageable until the inbound is restored.
 
 ## [1.3.0] — 2026-06-04
 

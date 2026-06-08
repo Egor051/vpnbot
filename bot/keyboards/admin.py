@@ -224,11 +224,18 @@ def admin_key_type_keyboard(
     *,
     xray_enabled: bool = True,
     awg_enabled: bool = True,
+    xhttp_enabled: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Build the protocol selection keyboard for issuing a key to a user (step 1)."""
+    """Build the protocol selection keyboard for issuing a key to a user (step 1).
+
+    With XHTTP disabled the VLESS button goes straight to TCP key creation,
+    skipping the redundant single-option transport step; the transport step is
+    offered only when XHTTP is enabled.
+    """
     rows: list[list[InlineKeyboardButton]] = []
     if xray_enabled:
-        rows.append([InlineKeyboardButton(text="VLESS", callback_data=f"admin:proto:vless:{user_id}")])
+        vless_data = f"admin:proto:vless:{user_id}" if xhttp_enabled else f"admin:ctype:xray:{user_id}"
+        rows.append([InlineKeyboardButton(text="VLESS", callback_data=vless_data)])
     if awg_enabled:
         rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data=f"admin:ctype:awg:{user_id}")])
     rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
