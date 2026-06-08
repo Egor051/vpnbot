@@ -42,7 +42,7 @@ def test_uses_awg_quick_not_wg_quick() -> None:
 
 def test_routes_helper_reads_list_and_has_no_hardcoded_cidrs() -> None:
     text = (SCRIPTS / "vpnbot-warp-routes").read_text(encoding="utf-8")
-    assert "tg-warp-routes.list" in text
+    assert "out-warp-routes.list" in text
     # The only permitted hardcoded CIDRs are the default-route guards (0.0.0.0/0
     # and ::/0) that protect the host from accidental isolation. No other literal
     # CIDRs may be baked in — all routing decisions must come from routes.list.
@@ -59,7 +59,7 @@ def test_install_helper_preprocessing_rules() -> None:
     assert "DNS" in text
     assert "Table = off" in text
     assert "PersistentKeepalive = 25" in text
-    assert "tg-warp-routes.list" in text
+    assert "out-warp-routes.list" in text
 
 
 def test_no_helper_uses_shell_injection_patterns() -> None:

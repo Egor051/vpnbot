@@ -26,6 +26,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **WARP module repositioned as outbound-IP masking (was "Telegram routing")** —
+  the optional WARP module is now presented as a way to hide the server's outbound
+  IP for selected "spy" applications (chosen via the config's `AllowedIPs`), not as
+  a Telegram-only feature. All Telegram wording was removed from the module's UI
+  (panel title `📡 Сокрытие outbound IP` / `📡 Outbound IP masking`, intro and
+  upload prompt), docstrings, READMEs, `.env.example`, sudoers/helper docs. The
+  interface and file paths were renamed `tg-warp` → `out-warp`
+  (`/etc/amnezia/out-warp.conf`, `/etc/amnezia/out-warp-routes.list`), updating the
+  helper scripts, the `VPNBOT_WARP` sudoers alias, the `warp_settings` defaults
+  (schema/migration v20 docs), and the `WARP_CONFIG_PATH`/`WARP_INTERFACE` defaults.
+  **Breaking for existing deployments that adopt the new names:** reinstall the
+  `vpnbot-warp-*` helpers, update `/etc/sudoers.d/vpnbot` to the new `out-warp`
+  entries, and re-upload the WARP config. Deployments that keep their current
+  sudoers and stored `interface_name`/`config_path` (still `tg-warp`) continue to
+  work unchanged.
 - **AWG config file lifecycle** — the «Показать конфиг» button no longer sends a
   duplicate `.conf` file when one is already on screen for that key (it shows a
   «Файл конфигурации уже отправлен.» toast instead), and tapping any other button

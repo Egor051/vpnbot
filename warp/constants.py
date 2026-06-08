@@ -9,11 +9,11 @@ the config path and the interface name are configurable and therefore belong to
 PING_TARGET = "162.159.140.245"
 
 # Interface created by awg-quick for the WARP tunnel.
-PING_INTERFACE = "tg-warp"
+PING_INTERFACE = "out-warp"
 
 # File the install helper writes (one CIDR per line, extracted from AllowedIPs)
 # and the routes helper reads. Never hardcode the CIDRs themselves.
-ROUTES_LIST = "/etc/amnezia/tg-warp-routes.list"
+ROUTES_LIST = "/etc/amnezia/out-warp-routes.list"
 
 # Health monitor thresholds.
 CHECK_INTERVAL = 10     # seconds between tunnel liveness probes

@@ -547,13 +547,13 @@ STRINGS: dict[str, str] = {
     "btn_warp_disable": "🔴 Disable",
     "btn_warp_restart": "🔄 Restart",
     "btn_warp_settings": "⚙️ Settings",
-    "warp_title": "📡 <b>WARP Telegram Routing</b>",
+    "warp_title": "📡 <b>Outbound IP masking</b>",
     "warp_settings_title": "⚙️ <b>WARP Settings</b>",
     "warp_status_disabled": "Status: 🔴 Disabled",
     "warp_intro": (
-        "Routes traffic through an AmneziaWG tunnel.\n"
-        "On connection loss it automatically\n"
-        "falls back to the direct path."
+        "Hides the server's outbound IP for spy apps:\n"
+        "routes their traffic through an AmneziaWG tunnel.\n"
+        "On connection loss it falls back to the direct path."
     ),
     "warp_no_config_hint": "Upload a config to enable the module.",
     "warp_label_module": "Module:",
@@ -579,7 +579,7 @@ STRINGS: dict[str, str] = {
     "warp_upload_prompt": (
         "Send the AmneziaWG configuration file (<code>.conf</code>) as a document.\n\n"
         "It must contain the AmneziaWG fields (Jc, S1, S2) and a non-empty AllowedIPs. "
-        "You decide which traffic goes through the tunnel via your AllowedIPs."
+        "Whose outbound IP to mask (the spy apps' addresses) is decided by your AllowedIPs."
     ),
     "warp_upload_not_document": "Please send the <code>.conf</code> file as a document.",
     "warp_upload_too_large": "The configuration file is too large.",

@@ -196,8 +196,8 @@ INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('mtproto', 1);
 CREATE TABLE IF NOT EXISTS warp_settings (
   id              INTEGER PRIMARY KEY DEFAULT 1,
   enabled         INTEGER NOT NULL DEFAULT 0,
-  config_path     TEXT    NOT NULL DEFAULT '/etc/amnezia/tg-warp.conf',
-  interface_name  TEXT    NOT NULL DEFAULT 'tg-warp',
+  config_path     TEXT    NOT NULL DEFAULT '/etc/amnezia/out-warp.conf',
+  interface_name  TEXT    NOT NULL DEFAULT 'out-warp',
   routes_count    INTEGER NOT NULL DEFAULT 0,
   tunnel_up       INTEGER NOT NULL DEFAULT 0,
   routes_active   INTEGER NOT NULL DEFAULT 0,

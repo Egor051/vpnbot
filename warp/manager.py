@@ -187,7 +187,7 @@ class WarpManager:
             await self._interface.down()
         up = await self._interface.up()
         if not up.ok:
-            self._last_error = _helper_error_message(up, "Не удалось поднять интерфейс tg-warp")
+            self._last_error = _helper_error_message(up, "Не удалось поднять интерфейс out-warp")
             logger.warning("WARP interface up failed rc=%s: %s", up.returncode, up.stderr)
             raise WarpError(self._last_error)
 

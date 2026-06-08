@@ -54,16 +54,16 @@ Cmnd_Alias VPNBOT_MTPROTO = \
     /usr/local/sbin/vpnbot-mtproxy-apply apply /run/vpn-bot/mtproxy/*, \
     /usr/local/sbin/vpnbot-mtproxy-apply status
 
-# WARP Telegram routing module. The install helper consumes a staged config from
-# the bot's private staging dir; iface/routes/status are pinned to the fixed
-# tg-warp interface and /etc/amnezia/tg-warp.conf config.
+# WARP outbound-IP masking module. The install helper consumes a staged config
+# from the bot's private staging dir; iface/routes/status are pinned to the fixed
+# out-warp interface and /etc/amnezia/out-warp.conf config.
 Cmnd_Alias VPNBOT_WARP = \
     /usr/local/sbin/vpnbot-warp-install install /run/vpn-bot/warp/*, \
     /usr/local/sbin/vpnbot-warp-install remove, \
-    /usr/local/sbin/vpnbot-warp-iface up /etc/amnezia/tg-warp.conf, \
-    /usr/local/sbin/vpnbot-warp-iface down /etc/amnezia/tg-warp.conf, \
-    /usr/local/sbin/vpnbot-warp-routes add tg-warp, \
-    /usr/local/sbin/vpnbot-warp-routes del tg-warp, \
-    /usr/local/sbin/vpnbot-warp-status tg-warp
+    /usr/local/sbin/vpnbot-warp-iface up /etc/amnezia/out-warp.conf, \
+    /usr/local/sbin/vpnbot-warp-iface down /etc/amnezia/out-warp.conf, \
+    /usr/local/sbin/vpnbot-warp-routes add out-warp, \
+    /usr/local/sbin/vpnbot-warp-routes del out-warp, \
+    /usr/local/sbin/vpnbot-warp-status out-warp
 
 vpn-bot ALL=(root) NOPASSWD: VPNBOT_SOCKS5, VPNBOT_XRAY, VPNBOT_AWG, VPNBOT_MTPROTO, VPNBOT_WARP
