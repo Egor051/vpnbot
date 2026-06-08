@@ -123,8 +123,15 @@ class XrayService:
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         self.settings.validate_xray_ready()
         transport = self._normalize_transport(transport)
-        # Fail early with a clear message if VLESS (HTTP) was requested but the
-        # XHTTP inbound is disabled/unavailable — no DB row, no partial apply.
+        # Gate the issuance of NEW http keys on the feature flag, before any DB
+        # write or partial apply. Management of already-issued http keys
+        # (revoke/delete/reconcile) is intentionally NOT gated by the flag — it
+        # depends only on the inbound's adapter being present (see app.py).
+        if transport == "http" and not self.settings.xray_xhttp_enabled:
+            raise InvalidOperation("VLESS (HTTP) сейчас отключён")
+        # Fail closed with a clear message if VLESS (HTTP) was requested but the
+        # XHTTP inbound is not configured — no DB row, no partial apply. Create
+        # stays strict.
         adapter = self._adapter_for(transport)
         flow = self._flow_for_transport(transport)
         clean_note = normalize_note(note)
@@ -473,7 +480,11 @@ class XrayService:
             key = await self._get_key(key_id)
             if key.key_type != VpnKeyType.XRAY:
                 raise InvalidOperation("Это не Xray-ключ")
-            client = self._adapter_for(self._key_transport(key)).find_client(uuid_value=key.uuid, email_label=key.email_label)
+            # Tolerant of a missing adapter (optional XHTTP inbound not configured):
+            # treat an absent inbound as "client not found" instead of raising, so a
+            # manual reconcile never hard-fails on a transport whose inbound is gone.
+            adapter = self._adapter_optional(self._key_transport(key))
+            client = adapter.find_client(uuid_value=key.uuid, email_label=key.email_label) if adapter is not None else None
             if client is not None and key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
                 await self.vpn_keys.mark_active(key.id, self.clock.now())
             elif client is None and key.status == VpnKeyStatus.PENDING_APPLY:
@@ -528,7 +539,14 @@ class XrayService:
         return in_use == 0
 
     async def _remove_xray_access(self, key: VpnKey) -> None:
-        await self._adapter_for(self._key_transport(key)).remove_client(
+        adapter = self._adapter_optional(self._key_transport(key))
+        if adapter is None:
+            # The key's transport has no managed inbound (e.g. the optional XHTTP
+            # inbound was removed from config.json): there is no live client to
+            # remove, so removal is a no-op and revoke/delete can still clear the
+            # DB row. Never block revocation on a missing optional inbound.
+            return
+        await adapter.remove_client(
             uuid_value=key.uuid,
             email_label=key.email_label,
             short_id=str(key.payload.get("short_id") or ""),
@@ -554,13 +572,20 @@ class XrayService:
             key_id,
             exc_info=True,
         )
+        adapter = self._adapter_optional(transport)
         try:
-            await self._adapter_for(transport).remove_client(
-                uuid_value=uuid_value,
-                email_label=email_label,
-                short_id=short_id,
-                remove_short_id=short_id_managed and short_id_inserted,
-            )
+            # The adapter is resolved optionally so compensation never hard-fails
+            # with a fail-closed "inbound not configured" error. In practice the
+            # adapter is always present here (create obtained it before add_client
+            # succeeded); a None adapter means its inbound vanished, leaving
+            # nothing to compensate, so we fall through to mark the key apply_failed.
+            if adapter is not None:
+                await adapter.remove_client(
+                    uuid_value=uuid_value,
+                    email_label=email_label,
+                    short_id=short_id,
+                    remove_short_id=short_id_managed and short_id_inserted,
+                )
         except Exception as compensation_error:
             self.backend_health.mark_degraded(VpnKeyType.XRAY, "post-apply mark_active failed and compensation failed")
             logger.critical(

@@ -6,6 +6,7 @@ VLESS link builder for both transports, the transport DB migration (default
 """
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -262,6 +263,175 @@ def test_delete_routes_removal_by_saved_transport(tmp_path: Path) -> None:
             await db.close()
 
     asyncio.run(run())
+
+
+def _service_with(
+    repo: VpnKeyRepository,
+    tcp: _RecordingAdapter,
+    http: _RecordingAdapter | None,
+    settings: Settings,
+) -> XrayService:
+    """Build an XrayService over existing repo/adapters with explicit settings.
+
+    Mirrors app.py wiring the XHTTP adapter from the *inbound's* presence rather
+    than the feature flag, so a test can pair an adapter with the flag off.
+    """
+    return XrayService(
+        vpn_keys=repo,
+        users=_Users(),  # type: ignore[arg-type]
+        adapter=tcp,  # type: ignore[arg-type]
+        settings=settings,
+        clock=ClockProvider(),
+        ids=_Ids(),  # type: ignore[arg-type]
+        audit=_Audit(),  # type: ignore[arg-type]
+        user_locks=UserLockManager(),
+        backend_health=BackendHealth(),
+        xhttp_adapter=http,  # type: ignore[arg-type]
+    )
+
+
+async def _insert_active_http_key(repo: VpnKeyRepository) -> VpnKey:
+    """Insert an ACTIVE http key directly, as if issued while the inbound existed."""
+    key = await repo.create_pending(
+        owner_user_id=100,
+        username="user",
+        key_type=VpnKeyType.XRAY,
+        note=None,
+        payload={"transport": "http", "uuid": "u-http", "email_label": "xray_AHTTP", "short_id": "abcd"},
+        public_payload={"short_id": "abcd"},
+        created_by=100,
+        now="now",
+        uuid="u-http",
+        email_label="xray_AHTTP",
+        transport="http",
+    )
+    await repo.mark_active(key.id, "now")
+    reloaded = await repo.get_by_id(key.id)
+    assert reloaded is not None
+    return reloaded
+
+
+def test_existing_http_key_revocable_when_flag_disabled_but_inbound_present(tmp_path: Path) -> None:
+    """The flag gates only NEW http keys; an issued http key stays revocable while its inbound is present."""
+
+    async def run() -> None:
+        service, repo, tcp, http, db = await _make_service(tmp_path, xhttp_enabled=True)
+        try:
+            created = await service.create_xray_key(
+                100, TelegramUserProfile(100, "user", "User"), None, transport="http"
+            )
+            http.remove_calls.clear()
+            # Simulate a restart with XRAY_XHTTP_ENABLED=false while the XHTTP
+            # inbound (hence its adapter) is still present in config.json.
+            disabled = _service_with(repo, tcp, http, _settings(tmp_path, xhttp_enabled=False))
+            # Issuing a NEW http key is refused...
+            with pytest.raises(InvalidOperation):
+                await disabled.create_xray_key(
+                    100, TelegramUserProfile(100, "user", "User"), None, transport="http"
+                )
+            # ...but the already-issued http key is still revoked on its own inbound.
+            updated = await disabled.revoke_xray_key(100, created.key.id)
+            assert updated.status == VpnKeyStatus.REVOKED
+            assert len(http.remove_calls) == 1
+            assert tcp.remove_calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_existing_http_key_revocable_when_inbound_absent(tmp_path: Path) -> None:
+    """With no XHTTP adapter (inbound gone), removal is a no-op but the DB row is still cleared."""
+
+    async def run() -> None:
+        # xhttp_enabled=False -> _make_service wires xhttp_adapter=None, modelling
+        # a restart where the XHTTP inbound was removed from config.json entirely.
+        service, repo, tcp, _http, db = await _make_service(tmp_path, xhttp_enabled=False)
+        try:
+            key = await _insert_active_http_key(repo)
+            updated = await service.revoke_xray_key(100, key.id)
+            assert updated.status == VpnKeyStatus.REVOKED
+            # Never touched the unrelated tcp inbound while compensating for the missing one.
+            assert tcp.remove_calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_existing_http_key_deletable_when_inbound_absent(tmp_path: Path) -> None:
+    """Delete of an http key still hard-deletes the DB row when its inbound/adapter is gone."""
+
+    async def run() -> None:
+        service, repo, tcp, _http, db = await _make_service(tmp_path, xhttp_enabled=False)
+        try:
+            key = await _insert_active_http_key(repo)
+            await service.delete_xray_key(100, key.id)
+            assert await repo.get_by_id(key.id) is None
+            assert tcp.remove_calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_reconcile_http_key_tolerant_when_inbound_absent(tmp_path: Path) -> None:
+    """A manual single-key reconcile never hard-fails when the http inbound/adapter is missing."""
+
+    async def run() -> None:
+        class _SuperUsers(_Users):
+            async def require_superadmin(self, actor_user_id: int) -> User:
+                return User(actor_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
+
+        service, repo, _tcp, _http, db = await _make_service(tmp_path, xhttp_enabled=False)
+        service.users = _SuperUsers()  # type: ignore[assignment]
+        try:
+            key = await _insert_active_http_key(repo)
+            # Active key + absent adapter -> treated as client-not-found, no raise,
+            # no status change (only ACTIVE), reconcile returns the key.
+            result = await service.reconcile_key_status(1, key.id)
+            assert result.status == VpnKeyStatus.ACTIVE
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_vless_reality_inbound_present_detection(tmp_path: Path) -> None:
+    from adapters.xray_config import vless_reality_inbound_present
+
+    config_path = tmp_path / "xray.json"
+    tag = "vless-xhttp-reality"
+
+    # Missing file -> absent, never raises.
+    assert vless_reality_inbound_present(config_path, tag) is False
+
+    # The tagged VLESS/REALITY inbound present -> detected (independently of any flag).
+    config_path.write_text(
+        json.dumps(
+            {
+                "inbounds": [
+                    {"tag": "vless-in", "protocol": "vless", "streamSettings": {"security": "reality"}, "settings": {"clients": []}},
+                    {"tag": tag, "protocol": "vless", "streamSettings": {"security": "reality"}, "settings": {"clients": []}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert vless_reality_inbound_present(config_path, tag) is True
+
+    # Broken JSON -> absent, swallowed.
+    config_path.write_text("{not json", encoding="utf-8")
+    assert vless_reality_inbound_present(config_path, tag) is False
+
+    # Tag present but not a VLESS/REALITY inbound -> absent.
+    config_path.write_text(
+        json.dumps({"inbounds": [{"tag": tag, "protocol": "trojan"}]}), encoding="utf-8"
+    )
+    assert vless_reality_inbound_present(config_path, tag) is False
+
+    # Empty tag -> never matches.
+    assert vless_reality_inbound_present(config_path, "") is False
 
 
 def test_startup_reconcile_restores_missing_key_into_its_own_inbound(tmp_path: Path) -> None:

@@ -19,7 +19,7 @@ from adapters.mtproxy import MtProxyAdapter
 from adapters.privileged_helpers import PrivilegedHelperRunner
 from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
-from adapters.xray_config import XrayConfigAdapter
+from adapters.xray_config import XrayConfigAdapter, vless_reality_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
 from bot.handlers import admin, admin_dashboard, admin_modules, admin_warp, callbacks, common, keys, proxy, start
@@ -142,9 +142,15 @@ async def _build_app(
         helper_staging_dir=settings.xray_helper_staging_dir,
     )
     # Second VLESS transport (XHTTP+REALITY) inbound. Shares the same config.json,
-    # service, apply_mode and stats_server; only the inbound_tag differs. Built only
-    # when enabled so the feature is fully inert otherwise. Both adapters serialise
-    # on the same ConfigFileLock (keyed by config_path).
+    # service, apply_mode and stats_server; only the inbound_tag differs. Both
+    # adapters serialise on the same ConfigFileLock (keyed by config_path).
+    #
+    # The adapter is built from the *actual* presence of the XHTTP inbound in
+    # config.json — NOT from XRAY_XHTTP_ENABLED. This keeps already-issued VLESS
+    # (HTTP) keys revocable/deletable/reconcilable even after the flag is turned
+    # back off (the flag gates only the issuance of NEW http keys: UI buttons +
+    # create). When the inbound is absent (or the config is unreadable) the
+    # adapter is None and the feature stays fully inert, identical to before.
     xray_xhttp_adapter = (
         XrayConfigAdapter(
             config_path=settings.xray_config_path,
@@ -160,7 +166,7 @@ async def _build_app(
             helper_path=settings.xray_apply_helper_path,
             helper_staging_dir=settings.xray_helper_staging_dir,
         )
-        if settings.xray_xhttp_enabled
+        if vless_reality_inbound_present(settings.xray_config_path, settings.xray_xhttp_inbound_tag)
         else None
     )
     xray_stats_adapter = XrayStatsAdapter(shell=shell, stats_server=settings.xray_stats_server)

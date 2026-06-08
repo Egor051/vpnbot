@@ -36,6 +36,38 @@ class XrayClientApplyResult:
     short_id_inserted: bool = False
 
 
+def vless_reality_inbound_present(config_path: Path, inbound_tag: str) -> bool:
+    """Return True if *config_path* has a VLESS/REALITY inbound tagged *inbound_tag*.
+
+    Read once at startup to decide whether to build the optional second (XHTTP)
+    adapter from what is *actually* in config.json — independently of any feature
+    flag — so already-issued keys on that inbound stay manageable. Any error
+    (missing file, broken JSON, unexpected shape) is treated as "absent" so a
+    misconfiguration never aborts startup. Mirrors ``_is_vless_reality``.
+    """
+    if not inbound_tag:
+        return False
+    try:
+        data = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    inbounds = data.get("inbounds")
+    if not isinstance(inbounds, list):
+        return False
+    for inbound in inbounds:
+        if isinstance(inbound, dict) and inbound.get("tag") == inbound_tag:
+            stream = inbound.get("streamSettings")
+            return (
+                inbound.get("protocol") == "vless"
+                and isinstance(stream, dict)
+                and stream.get("security") == "reality"
+                and isinstance(inbound.get("settings"), dict)
+            )
+    return False
+
+
 class XrayConfigAdapter:
     def __init__(
         self,
