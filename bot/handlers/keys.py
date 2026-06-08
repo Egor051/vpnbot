@@ -123,7 +123,9 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
         await safe_edit_message_text(
             callback.message,
             f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
-            reply_markup=create_key_keyboard(xray_enabled=xray_on, awg_enabled=awg_on),
+            reply_markup=create_key_keyboard(
+                xray_enabled=xray_on, awg_enabled=awg_on, xhttp_enabled=services.settings.xray_xhttp_enabled
+            ),
         )
 
 
@@ -140,7 +142,9 @@ async def create_key_menu_message(message: Message, services: Services) -> None:
         awg_on = await services.modules.is_enabled("awg")
         await message.answer(
             f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
-            reply_markup=create_key_keyboard(xray_enabled=xray_on, awg_enabled=awg_on),
+            reply_markup=create_key_keyboard(
+                xray_enabled=xray_on, awg_enabled=awg_on, xhttp_enabled=services.settings.xray_xhttp_enabled
+            ),
         )
     except Exception as exc:
         await answer_message_error(message, exc)

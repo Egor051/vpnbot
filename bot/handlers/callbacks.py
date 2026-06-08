@@ -29,10 +29,11 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext, services: 
     if cancel_target == "admin:panel":
         await safe_edit_message_text(callback.message, t("admin_panel_title"), reply_markup=admin_panel_keyboard())
     elif cancel_target == "keys:create":
+        xhttp_on = bool(services and services.settings.xray_xhttp_enabled)
         await safe_edit_message_text(
             callback.message,
             f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
-            reply_markup=create_key_keyboard(),
+            reply_markup=create_key_keyboard(xhttp_enabled=xhttp_on),
         )
     elif cancel_target and cancel_target.startswith("key:open:"):
         try:

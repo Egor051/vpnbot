@@ -447,8 +447,17 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         _optional("AWG_SERVER_ADDRESS", "10.0.0.1"),
         awg_network,
     )
-    if _bool("XRAY_XHTTP_ENABLED", False) and not _optional("XRAY_XHTTP_INBOUND_TAG", "vless-xhttp-reality"):
-        raise SettingsError("XRAY_XHTTP_ENABLED=true требует непустой XRAY_XHTTP_INBOUND_TAG")
+    xray_xhttp_enabled = _bool("XRAY_XHTTP_ENABLED", False)
+    xray_inbound_tag = _optional("XRAY_INBOUND_TAG")
+    xray_xhttp_inbound_tag = _optional("XRAY_XHTTP_INBOUND_TAG", "vless-xhttp-reality")
+    if xray_xhttp_enabled:
+        # Catch XHTTP misconfig at startup rather than lazily on the first key
+        # issuance (validate_xray_ready). A blank tag, or one colliding with the
+        # primary inbound, would otherwise route both transports into one inbound.
+        if not xray_xhttp_inbound_tag:
+            raise SettingsError("XRAY_XHTTP_ENABLED=true требует непустой XRAY_XHTTP_INBOUND_TAG")
+        if xray_xhttp_inbound_tag == xray_inbound_tag:
+            raise SettingsError("XRAY_XHTTP_INBOUND_TAG не должен совпадать с XRAY_INBOUND_TAG")
     return Settings(
         bot_token=_required("BOT_TOKEN"),
         admin_ids=_admin_ids(_required("ADMIN_IDS")),
@@ -460,7 +469,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_config_path=Path(_optional("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")),
         xray_service_name=_optional("XRAY_SERVICE_NAME", "xray"),
         xray_apply_mode=_choice("XRAY_APPLY_MODE", "api", {"reload", "restart", "api"}),
-        xray_inbound_tag=_optional("XRAY_INBOUND_TAG"),
+        xray_inbound_tag=xray_inbound_tag,
         xray_public_host=_no_control_chars(
             "XRAY_PUBLIC_HOST", _optional("XRAY_PUBLIC_HOST") or _optional("XRAY_SERVER_ADDRESS")
         ),
@@ -482,8 +491,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_manage_short_ids=xray_manage_short_ids,
         xray_allow_restart_on_rollback=_bool("XRAY_ALLOW_RESTART_ON_ROLLBACK", False),
         xray_stats_server=_optional("XRAY_STATS_SERVER"),
-        xray_xhttp_enabled=_bool("XRAY_XHTTP_ENABLED", False),
-        xray_xhttp_inbound_tag=_optional("XRAY_XHTTP_INBOUND_TAG", "vless-xhttp-reality"),
+        xray_xhttp_enabled=xray_xhttp_enabled,
+        xray_xhttp_inbound_tag=xray_xhttp_inbound_tag,
         xray_xhttp_port=_int_range("XRAY_XHTTP_PORT", 8443, 1, 65535),
         xray_xhttp_path=_no_control_chars("XRAY_XHTTP_PATH", _optional("XRAY_XHTTP_PATH", "/v1/messages/stream")),
         xray_xhttp_mode=_choice(

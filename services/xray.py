@@ -8,7 +8,7 @@ from urllib.parse import quote, urlencode
 from adapters.clock import ClockProvider
 from adapters.id_generator import IdGenerator
 from adapters.xray_config import XrayConfigAdapter
-from bot.formatters import key_note_for_viewer, status_text
+from bot.formatters import create_type_label, key_note_for_viewer, key_type_label, status_text
 from config.settings import Settings
 from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
@@ -156,7 +156,7 @@ class XrayService:
                 public_payload = {
                     "email_label": email_label,
                     "short_id": short_id,
-                    "display_name": f"Xray #{email_label}",
+                    "display_name": f"{create_type_label(VpnKeyType.XRAY.value, transport)} #{email_label}",
                     "link": link,
                 }
                 key = await self.vpn_keys.create_pending(
@@ -368,6 +368,9 @@ class XrayService:
                 drift_summary = await self._startup_reconcile_drift()
                 for drift_key, drift_val in drift_summary.items():
                     summary[drift_key] += drift_val
+        # Read-only diagnostic, run after reconcile so it observes the settled
+        # state (and never the lock).
+        await self._warn_if_unmanaged_http_keys()
         return summary
 
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
@@ -483,7 +486,14 @@ class XrayService:
             # Tolerant of a missing adapter (optional XHTTP inbound not configured):
             # treat an absent inbound as "client not found" instead of raising, so a
             # manual reconcile never hard-fails on a transport whose inbound is gone.
-            adapter = self._adapter_optional(self._key_transport(key))
+            transport = self._key_transport(key)
+            adapter = self._adapter_optional(transport)
+            if adapter is None:
+                logger.warning(
+                    "Xray reconcile skipped server-side for key_id=%s: transport %s inbound not configured",
+                    key.id,
+                    transport,
+                )
             client = adapter.find_client(uuid_value=key.uuid, email_label=key.email_label) if adapter is not None else None
             if client is not None and key.status in {VpnKeyStatus.PENDING_APPLY, VpnKeyStatus.APPLY_FAILED}:
                 await self.vpn_keys.mark_active(key.id, self.clock.now())
@@ -539,12 +549,19 @@ class XrayService:
         return in_use == 0
 
     async def _remove_xray_access(self, key: VpnKey) -> None:
-        adapter = self._adapter_optional(self._key_transport(key))
+        transport = self._key_transport(key)
+        adapter = self._adapter_optional(transport)
         if adapter is None:
             # The key's transport has no managed inbound (e.g. the optional XHTTP
             # inbound was removed from config.json): there is no live client to
             # remove, so removal is a no-op and revoke/delete can still clear the
             # DB row. Never block revocation on a missing optional inbound.
+            logger.warning(
+                "Xray client removal skipped for key_id=%s: transport %s inbound not configured; "
+                "completing the operation on the DB side only",
+                key.id,
+                transport,
+            )
             return
         await adapter.remove_client(
             uuid_value=key.uuid,
@@ -573,6 +590,12 @@ class XrayService:
             exc_info=True,
         )
         adapter = self._adapter_optional(transport)
+        if adapter is None:
+            logger.warning(
+                "Xray create compensation skipped server-side for key_id=%s: transport %s inbound not configured",
+                key_id,
+                transport,
+            )
         try:
             # The adapter is resolved optionally so compensation never hard-fails
             # with a fail-closed "inbound not configured" error. In practice the
@@ -676,6 +699,41 @@ class XrayService:
             keys.extend(batch)
             last_id = batch[-1].id
         return keys
+
+    async def _warn_if_unmanaged_http_keys(self) -> None:
+        """Flag at startup any VLESS (HTTP) keys the bot can no longer manage.
+
+        If http keys exist in the DB while the XHTTP inbound (and thus its
+        adapter) is absent, the bot cannot revoke/delete them server-side. Log
+        loudly so the operator restores the inbound; never abort startup. With no
+        such keys this is a silent no-op, preserving pre-feature behaviour.
+        """
+        if self._adapter_optional("http") is not None:
+            return
+        unmanaged = 0
+        last_id = 0
+        while True:
+            batch = await self.vpn_keys.list_by_type_statuses(
+                VpnKeyType.XRAY,
+                XRAY_ACCESS_MAY_EXIST_STATUSES,
+                limit=500,
+                after_id=last_id,
+            )
+            if not batch:
+                break
+            unmanaged += sum(1 for key in batch if self._key_transport(key) == "http")
+            new_last = batch[-1].id
+            if new_last <= last_id:  # repo not advancing on after_id -> stop, never spin
+                break
+            last_id = new_last
+        if unmanaged:
+            logger.critical(
+                "%d VLESS (HTTP) key(s) exist in the DB but the XHTTP inbound (tag=%r) is not "
+                "configured; the bot cannot manage them server-side (revoke/delete) until the "
+                "inbound is restored in config.json",
+                unmanaged,
+                self.settings.xray_xhttp_inbound_tag,
+            )
 
     async def _restore_missing_active_xray_clients(self, active_keys: list[VpnKey]) -> int:
         recovered = 0
@@ -1052,7 +1110,7 @@ class XrayService:
         note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
         label = f"\nМетка: {h(email_label)}" if email_label else ""
         return (
-            f"<b>Xray-ключ #{key.id}</b>\n"
+            f"<b>{key_type_label(key)} #{key.id}</b>\n"
             f"Статус: {status_text(key.status)}{label}{note}\n\n"
             f"{code(link)}"
         )
