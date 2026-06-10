@@ -134,8 +134,8 @@ def test_routes_helper_source_rule_for_awg_clients() -> None:
 def test_routes_helper_fwmark_rule() -> None:
     """Marked packets (mark 200) are selected into table 200."""
     text = _routes_text()
-    assert re.search(r"ip rule add fwmark 200 lookup 200 priority 101", text) is not None
-    assert re.search(r"ip rule del fwmark 200 lookup 200 priority 101", text) is not None
+    assert "ip rule add fwmark 200 lookup 200 priority 101" in text
+    assert "ip rule del fwmark 200 lookup 200 priority 101" in text
 
 
 def test_routes_helper_dante_mark() -> None:
