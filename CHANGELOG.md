@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **WARP egress now covers every VPN client, not just split-tunnel CIDRs** — the
+  `vpnbot-warp-routes` helper was rewritten from destination-only `ip route`
+  entries to policy routing that diverts all VPN-client traffic through the
+  `out-warp` tunnel: a dedicated routing table (`200`) with a default route via
+  `out-warp`, a source rule for the AmneziaWG client subnet (`10.0.0.0/24`) and an
+  `fwmark 200` rule, `mangle OUTPUT` marks tagging the local proxy daemons' egress
+  by owning UID (Dante as `nobody`, MTProto and Xray by their resolved systemd
+  `User=`), an anti-loop host route pinning the WARP endpoint to the real `eth0`
+  gateway, and `MASQUERADE`/`FORWARD` rules on `out-warp`. The host's own default
+  route is never touched (SSH and the bot keep egressing directly). UID-based
+  marking makes proxy routing independent of the bot's per-module enable toggle.
+  Root-owned proxies fall back to a `from <out-warp IP>` source rule (Xray
+  `sendThrough`) since they cannot be marked by UID without capturing the host's
+  own egress. Adds `deploy/warp-routes.service` (oneshot, applied at boot before
+  `vpn-bot.service`) for persistence; every add step is idempotent and `del` is
+  safe on a clean system.
 - **Second VLESS transport — VLESS (HTTP) over XHTTP+REALITY** — key creation now
   has two steps: choose protocol (`AmneziaWG 2.0` / `VLESS`), then for VLESS choose
   transport (`VLESS (TCP)` / `VLESS (HTTP)`). `VLESS (TCP)` keys live only in the

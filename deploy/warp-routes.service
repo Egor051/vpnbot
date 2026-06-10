@@ -1,0 +1,28 @@
+# WARP policy-routing rules — applied at boot and torn down on stop.
+#
+# Installs the source/fwmark policy rules, the table-200 default route via the
+# WARP interface, the per-daemon mangle marks and the MASQUERADE/FORWARD rules
+# that divert every VPN client's egress through the out-warp tunnel. The helper
+# is idempotent on add and safe on del, so this unit can be (re)started freely.
+#
+# The helper runs directly as root here (no sudo); the bot also invokes the same
+# add/del verbs through its pinned sudoers entry for the health-monitor fallback.
+#
+# Install:
+#   install -o root -g root -m 0644 deploy/warp-routes.service /etc/systemd/system/warp-routes.service
+#   systemctl daemon-reload
+#   systemctl enable warp-routes.service
+[Unit]
+Description=WARP policy routing rules
+After=network-online.target
+Wants=network-online.target
+Before=vpn-bot.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vpnbot-warp-routes add out-warp
+ExecStop=/usr/local/sbin/vpnbot-warp-routes del out-warp
+
+[Install]
+WantedBy=multi-user.target

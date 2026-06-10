@@ -1,6 +1,6 @@
 [Unit]
 Description=VPN Telegram Bot
-After=network-online.target
+After=network-online.target warp-routes.service
 Wants=network-online.target
 
 [Service]

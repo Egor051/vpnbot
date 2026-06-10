@@ -7,7 +7,7 @@
 
 [Unit]
 Description=VPN Telegram Bot (non-root helper-mode reference)
-After=network-online.target
+After=network-online.target warp-routes.service
 Wants=network-online.target
 
 [Service]
