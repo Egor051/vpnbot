@@ -19,7 +19,7 @@ from adapters.mtproxy import MtProxyAdapter
 from adapters.privileged_helpers import PrivilegedHelperRunner
 from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
-from adapters.xray_config import XrayConfigAdapter, vless_reality_inbound_present
+from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
 from bot.handlers import admin, admin_dashboard, admin_modules, admin_warp, callbacks, common, keys, proxy, start
@@ -151,6 +151,11 @@ async def _build_app(
     # back off (the flag gates only the issuance of NEW http keys: UI buttons +
     # create). When the inbound is absent (or the config is unreadable) the
     # adapter is None and the feature stays fully inert, identical to before.
+    #
+    # In the fallback topology the XHTTP inbound is the dest of vless-in's REALITY
+    # fallback and carries `security: none` itself, so it is detected by VLESS
+    # presence (not REALITY) and the adapter runs with require_reality=False: it
+    # mutates only that inbound's settings.clients[] and never its (absent) REALITY.
     xray_xhttp_adapter = (
         XrayConfigAdapter(
             config_path=settings.xray_config_path,
@@ -165,8 +170,9 @@ async def _build_app(
             helper_runner=helper_runner,
             helper_path=settings.xray_apply_helper_path,
             helper_staging_dir=settings.xray_helper_staging_dir,
+            require_reality=False,
         )
-        if vless_reality_inbound_present(settings.xray_config_path, settings.xray_xhttp_inbound_tag)
+        if vless_inbound_present(settings.xray_config_path, settings.xray_xhttp_inbound_tag)
         else None
     )
     xray_stats_adapter = XrayStatsAdapter(shell=shell, stats_server=settings.xray_stats_server)

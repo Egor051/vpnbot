@@ -77,7 +77,7 @@ def _settings(tmp_path: Path, *, xhttp_enabled: bool = True) -> Settings:
         xray_xhttp_inbound_tag="vless-xhttp-reality",
         xray_xhttp_port=8443,
         xray_xhttp_path="/v1/messages/stream",
-        xray_xhttp_mode="packet-up",
+        xray_xhttp_mode="stream-one",
     )
 
 
@@ -594,22 +594,30 @@ def test_build_vless_link_tcp_is_unchanged(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_build_vless_link_http_uses_xhttp_no_flow(tmp_path: Path) -> None:
+def test_build_vless_link_http_is_hybrid_reality_over_xhttp(tmp_path: Path) -> None:
+    """The http link reuses vless-in's REALITY on :443, differing only in transport."""
+
     async def run() -> None:
         service, _repo, _tcp, _http, db = await _make_service(tmp_path)
         try:
             link = service._build_vless_link("uuid-1", "abcd", "xray_A0001", transport="http")
             parts = urlsplit(link)
-            assert parts.port == 8443
+            # Rides vless-in's public :443 (NOT 8001/8443).
+            assert parts.port == 443
             params = parse_qs(parts.query)
             assert params["type"] == ["xhttp"]
             assert params["security"] == ["reality"]
             assert params["encryption"] == ["none"]
+            assert params["mode"] == ["stream-one"]
             assert params["path"] == ["/v1/messages/stream"]
-            assert params["mode"] == ["packet-up"]
+            # REALITY part matches the TCP link: pbk/sni/sid/fp from vless-in/settings.
+            assert params["pbk"] == ["public"]
+            assert params["sni"] == ["example.com"]
             assert params["sid"] == ["abcd"]
-            # No flow for XHTTP, and server-side `extra` tuning is not in the link.
+            assert params["fp"] == ["chrome"]
+            # No flow for XHTTP (xtls-rprx-vision is TCP/Vision-only); no server `extra` tuning.
             assert "flow" not in params
+            assert "xtls-rprx-vision" not in link
             assert "xPaddingBytes" not in parts.query
             assert "scMaxEachPostBytes" not in parts.query
         finally:

@@ -36,14 +36,15 @@ class XrayClientApplyResult:
     short_id_inserted: bool = False
 
 
-def vless_reality_inbound_present(config_path: Path, inbound_tag: str) -> bool:
-    """Return True if *config_path* has a VLESS/REALITY inbound tagged *inbound_tag*.
+def _vless_inbound_present(config_path: Path, inbound_tag: str, *, require_reality: bool) -> bool:
+    """Return True if *config_path* has a VLESS inbound tagged *inbound_tag*.
 
     Read once at startup to decide whether to build the optional second (XHTTP)
     adapter from what is *actually* in config.json — independently of any feature
     flag — so already-issued keys on that inbound stay manageable. Any error
     (missing file, broken JSON, unexpected shape) is treated as "absent" so a
-    misconfiguration never aborts startup. Mirrors ``_is_vless_reality``.
+    misconfiguration never aborts startup. Mirrors ``_is_vless_reality`` /
+    ``_is_vless`` depending on *require_reality*.
     """
     if not inbound_tag:
         return False
@@ -58,14 +59,29 @@ def vless_reality_inbound_present(config_path: Path, inbound_tag: str) -> bool:
         return False
     for inbound in inbounds:
         if isinstance(inbound, dict) and inbound.get("tag") == inbound_tag:
+            if not isinstance(inbound.get("settings"), dict) or inbound.get("protocol") != "vless":
+                return False
+            if not require_reality:
+                return True
             stream = inbound.get("streamSettings")
-            return (
-                inbound.get("protocol") == "vless"
-                and isinstance(stream, dict)
-                and stream.get("security") == "reality"
-                and isinstance(inbound.get("settings"), dict)
-            )
+            return isinstance(stream, dict) and stream.get("security") == "reality"
     return False
+
+
+def vless_reality_inbound_present(config_path: Path, inbound_tag: str) -> bool:
+    """Return True if *config_path* has a VLESS/REALITY inbound tagged *inbound_tag*."""
+    return _vless_inbound_present(config_path, inbound_tag, require_reality=True)
+
+
+def vless_inbound_present(config_path: Path, inbound_tag: str) -> bool:
+    """Return True if *config_path* has a VLESS inbound tagged *inbound_tag*, REALITY or not.
+
+    Used to build the XHTTP adapter from the inbound's *presence* rather than its
+    security: in the fallback topology the XHTTP inbound (``vless-xhttp-reality``)
+    is the dest of vless-in's REALITY fallback and itself carries ``security:
+    none`` — it holds only ``settings.clients`` for routing, no REALITY.
+    """
+    return _vless_inbound_present(config_path, inbound_tag, require_reality=False)
 
 
 class XrayConfigAdapter:
@@ -84,6 +100,7 @@ class XrayConfigAdapter:
         helper_runner: PrivilegedHelperRunner | None = None,
         helper_path: Path | None = None,
         helper_staging_dir: Path | None = None,
+        require_reality: bool = True,
     ) -> None:
         if config_path.is_symlink():
             raise XrayConfigError("Xray config path не должен быть symlink. Укажите реальный путь к config.json.")
@@ -105,6 +122,10 @@ class XrayConfigAdapter:
                 )
         self.apply_mode = apply_mode
         self.inbound_tag = inbound_tag
+        # When False the target inbound is a plain VLESS inbound without REALITY
+        # (the XHTTP fallback dest): accept it by tag and never touch REALITY-only
+        # state (shortIds), which does not exist there.
+        self.require_reality = require_reality
         self.allow_restart_on_rollback = allow_restart_on_rollback
         self.backup = backup
         self.systemctl = systemctl
@@ -223,7 +244,8 @@ class XrayConfigAdapter:
 
     async def ensure_short_id(self, short_id: str) -> bool:
         """Add the short id to the inbound if missing and apply the config."""
-        if not short_id:
+        if not short_id or not self.require_reality:
+            # No REALITY shortIds to manage on the XHTTP fallback dest.
             return False
         lock_dir = self.helper_staging_dir if self._using_helper() else None
         async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
@@ -262,6 +284,9 @@ class XrayConfigAdapter:
 
     def list_short_ids(self) -> set[str]:
         """Return the set of REALITY short ids configured on the inbound."""
+        if not self.require_reality:
+            # The XHTTP fallback dest carries no REALITY/shortIds of its own.
+            return set()
         config = self._read_config(self.config_path)
         inbound = self._target_inbound(config)
         short_ids = self._reality_settings(inbound).get("shortIds")
@@ -318,9 +343,10 @@ class XrayConfigAdapter:
         if self.inbound_tag:
             for inbound in inbounds:
                 if isinstance(inbound, dict) and inbound.get("tag") == self.inbound_tag:
-                    if not self._is_vless_reality(inbound):
+                    if not self._is_target_inbound(inbound):
+                        kind = "VLESS/REALITY" if self.require_reality else "VLESS"
                         raise XrayInboundNotFoundError(
-                            f"Xray inbound tag={self.inbound_tag!r} найден, но это не VLESS/REALITY inbound"
+                            f"Xray inbound tag={self.inbound_tag!r} найден, но это не {kind} inbound"
                         )
                     return inbound
             raise XrayInboundNotFoundError(f"Xray inbound tag={self.inbound_tag!r} не найден")
@@ -335,13 +361,18 @@ class XrayConfigAdapter:
             )
         raise XrayInboundNotFoundError("Не найден Xray inbound protocol=vless и security=reality")
 
+    def _is_target_inbound(self, inbound: dict[str, Any]) -> bool:
+        return self._is_vless_reality(inbound) if self.require_reality else self._is_vless(inbound)
+
+    def _is_vless(self, inbound: dict[str, Any]) -> bool:
+        return inbound.get("protocol") == "vless" and isinstance(inbound.get("settings"), dict)
+
     def _is_vless_reality(self, inbound: dict[str, Any]) -> bool:
         stream = inbound.get("streamSettings")
         return (
-            inbound.get("protocol") == "vless"
+            self._is_vless(inbound)
             and isinstance(stream, dict)
             and stream.get("security") == "reality"
-            and isinstance(inbound.get("settings"), dict)
         )
 
     def _clients(self, inbound: dict[str, Any]) -> list[Any]:

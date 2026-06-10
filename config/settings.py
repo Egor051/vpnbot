@@ -327,9 +327,12 @@ class Settings:
     # Settings(...) call sites keep working unchanged.
     xray_xhttp_enabled: bool = False
     xray_xhttp_inbound_tag: str = "vless-xhttp-reality"
+    # xray_xhttp_port is retained for back-compat but no longer used to build VLESS
+    # (HTTP) links: in the fallback topology http rides vless-in's public :443
+    # (xray_public_port), and the XHTTP inbound listens only on loopback.
     xray_xhttp_port: int = 8443
     xray_xhttp_path: str = "/v1/messages/stream"
-    xray_xhttp_mode: str = "packet-up"
+    xray_xhttp_mode: str = "stream-one"
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -497,7 +500,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_xhttp_path=_no_control_chars("XRAY_XHTTP_PATH", _optional("XRAY_XHTTP_PATH", "/v1/messages/stream")),
         xray_xhttp_mode=_choice(
             "XRAY_XHTTP_MODE",
-            "packet-up",
+            "stream-one",
             {"auto", "packet-up", "stream-up", "stream-one"},
         ),
         awg_config_path=Path(_optional("AWG_CONFIG_PATH", "/etc/amnezia/amneziawg/awg0.conf")),
