@@ -332,6 +332,12 @@ class Settings:
     # (xray_public_port), and the XHTTP inbound listens only on loopback.
     xray_xhttp_port: int = 8443
     xray_xhttp_path: str = "/v1/messages/stream"
+    # Client-side XHTTP mode written into VLESS (HTTP) links. Default stream-one: a single
+    # full-duplex HTTP/2 session, the cleanest fit for direct REALITY and confirmed working
+    # through the catch-all fallback. packet-up is a switchable option for request
+    # throttling on long sessions or CDN passthrough (xmux rotates connections there);
+    # stream-up (two-request) is only for environments without single-request full-duplex
+    # and is not needed on direct REALITY.
     xray_xhttp_mode: str = "stream-one"
 
     def validate_xray_ready(self) -> None:

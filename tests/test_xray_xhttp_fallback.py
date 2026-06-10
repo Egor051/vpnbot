@@ -63,7 +63,11 @@ def _write_server_config(path: Path) -> None:
                         "protocol": "vless",
                         "settings": {
                             "clients": [],
-                            "fallbacks": [{"path": XHTTP_PATH, "dest": 8001, "xver": 0}],
+                            # DEFAULT catch-all fallback (no "path"): a path-based VLESS
+                            # fallback does not match h2 XHTTP, so the working topology
+                            # routes all fall-through REALITY traffic to the loopback
+                            # XHTTP dest and validates the path on that inbound.
+                            "fallbacks": [{"dest": 8001, "xver": 0}],
                         },
                         "streamSettings": {
                             "security": "reality",
