@@ -1,15 +1,66 @@
 #!/bin/bash
-# vpnbot-warp-routes — add/remove the WARP routes read from routes.list.
-# Default-equivalent routes are always skipped to prevent host isolation. No other
-# CIDRs are hardcoded; the DNS resolver is never touched.
+# vpnbot-warp-routes — policy-route every VPN-client egress through the WARP tunnel.
+#
+# Usage: vpnbot-warp-routes <add|del> <iface>
+#
+# Diverts the traffic of every VPN client — the AmneziaWG client subnet plus the
+# local proxy daemons (Dante SOCKS5, MTProto, Xray) — out through the WARP
+# AmneziaWG interface instead of eth0, while the host's own egress (SSH, the bot,
+# package updates) stays on the direct path. This is done with a dedicated
+# routing table (200) selected by policy rules: a source rule for the AWG client
+# subnet and an fwmark rule for packets the mangle table marks by owning UID.
+#
+# The host's own default route is never touched, so the box can never isolate
+# itself even if the WARP tunnel is down. Every "add" step checks before it acts
+# (idempotent) and every "del" step is safe on a clean system.
+#
+# Constants 200 (table) and mark 200 are fixed identifiers for this module, on a
+# par with the default-route guards below; they are intentionally not configurable.
 set -euo pipefail
+
 ROUTES_LIST="/etc/amnezia/out-warp-routes.list"
 ACTION="${1:-}"; IFACE="${2:-out-warp}"
 
+# AmneziaWG client subnet. This is a SOURCE selector (which clients' traffic to
+# capture), not a routing destination — destinations are handled by the table-200
+# default route. It is the only literal CIDR baked in; all destination CIDRs come
+# from routes.list, never from this script.
+AWG_CLIENTS_SUBNET="10.0.0.0/24"
+
+# Dante SOCKS5 always runs as this dedicated unprivileged account.
+DANTE_USER="nobody"
+
+# systemd units of the local proxy daemons whose egress must also leave via WARP.
+# Their run-user is resolved at apply time so we can mark by owning UID — the only
+# marking that reliably tags a proxy→upstream connection (its source port is the
+# upstream socket's ephemeral port, never the proxy's listen port). Marking by UID
+# is also independent of the bot's module toggle: the OS account owns the traffic
+# regardless of whether the protocol is "enabled" in the bot database.
+XRAY_SERVICE="xray"
+MTPROTO_SERVICE="mtproxy"
+
+# Run-user of a systemd unit. Prints the configured User=, or "" when the unit
+# runs as root (User= unset). Resolving via systemd does not require the service
+# to be currently running, so the rule is installed even if it starts later.
+service_user() {
+    local svc="$1" user
+    user="$(systemctl show "$svc" --property=User --value 2>/dev/null || true)"
+    [[ "$user" == "root" ]] && user=""
+    printf '%s' "$user"
+}
+
+# IPv4 address bound to the WARP interface. Used as the source selector for a
+# root-owned proxy that binds its egress to the WARP IP (Xray "sendThrough"),
+# since such a proxy cannot be tagged by owning UID without also capturing the
+# host's own root traffic.
+warp_iface_ip() {
+    ip -4 -o addr show dev "$IFACE" 2>/dev/null | awk 'NR==1{print $4}' | cut -d/ -f1
+}
+
 # A route is "default-equivalent" when it has no prefix ("default") or a prefix
-# length of 0 or 1. That covers the IPv4/IPv6 default routes and the "two halves"
-# split-default trick (a pair of /1 routes that together cover every address).
-# These are always skipped so the tunnel can never capture the host's whole egress.
+# length of 0 or 1 (the IPv4/IPv6 defaults and the /1+/1 split-default trick).
+# These are skipped in the main table — the table-200 default handles "everything
+# through WARP" without ever capturing the host's whole egress.
 is_default_route() {
     local net="$1" plen
     [[ "$net" == "default" ]] && return 0
@@ -19,19 +70,23 @@ is_default_route() {
     (( plen <= 1 ))
 }
 
-apply_routes() {
+# Optional split-tunnel destinations from routes.list are added to the MAIN table.
+# Default-equivalent entries are skipped (covered by table 200 instead).
+apply_routes_list() {
+    [[ -f "$ROUTES_LIST" ]] || return 0
     local net
     while IFS= read -r net; do
         [[ -z "$net" || "$net" == \#* ]] && continue
         if is_default_route "$net"; then
-            echo "WARNING: skipping default-equivalent route $net (use an explicit routing table instead)" >&2
+            echo "WARNING: skipping default-equivalent route $net (handled by table 200)" >&2
             continue
         fi
         ip route replace "$net" dev "$IFACE" metric 10 2>/dev/null || true
     done < "$ROUTES_LIST"
 }
 
-remove_routes() {
+remove_routes_list() {
+    [[ -f "$ROUTES_LIST" ]] || return 0
     local net
     while IFS= read -r net; do
         [[ -z "$net" || "$net" == \#* ]] && continue
@@ -42,22 +97,114 @@ remove_routes() {
 
 case "$ACTION" in
     add)
-        [[ -f "$ROUTES_LIST" ]] || { echo "Routes list not found: $ROUTES_LIST" >&2; exit 1; }
-        apply_routes
-        # MASQUERADE: трафик из awg0/других интерфейсов меняет source на IP out-warp
+        [[ -n "$IFACE" ]] || { echo "Interface required" >&2; exit 1; }
+
+        # 1. Direct-path gateway (for the anti-loop route).
+        MAIN_GW="$(ip route show default dev eth0 | awk 'NR==1{print $3}')"
+        # 2. Encrypted WARP endpoint — must never be routed back into the tunnel.
+        WARP_ENDPOINT="$(awg show "$IFACE" 2>/dev/null | awk '/endpoint/{print $2; exit}' | cut -d: -f1)"
+
+        # 3. Anti-loop: pin the WARP endpoint to the real gateway on eth0 so the
+        #    tunnel's own packets keep flowing while everything else uses table 200.
+        if [[ -n "$WARP_ENDPOINT" && -n "$MAIN_GW" ]]; then
+            ip route show | grep -q "$WARP_ENDPOINT" \
+                || ip route replace "$WARP_ENDPOINT/32" via "$MAIN_GW" dev eth0
+        fi
+
+        # Optional split-tunnel destinations from routes.list (default-equiv skipped).
+        apply_routes_list
+
+        # 4. WARP routing table: everything selected into table 200 leaves via WARP.
+        ip route show table 200 | grep -q "^default" \
+            || ip route replace default dev "$IFACE" table 200
+
+        # 5. AWG clients (source-based) → table 200.
+        ip rule show | grep -q "from $AWG_CLIENTS_SUBNET lookup 200" \
+            || ip rule add from "$AWG_CLIENTS_SUBNET" lookup 200 priority 100
+
+        # 6. fwmark 200 (set by the mangle rules below) → table 200. (0xc8 == 200)
+        ip rule show | grep -q "fwmark 0xc8" \
+            || ip rule add fwmark 200 lookup 200 priority 101
+
+        # 7. Dante SOCKS5 (runs as nobody) → mark 200.
+        iptables -t mangle -C OUTPUT -m owner --uid-owner "$DANTE_USER" -j MARK --set-mark 200 2>/dev/null \
+            || iptables -t mangle -A OUTPUT -m owner --uid-owner "$DANTE_USER" -j MARK --set-mark 200
+
+        # 8. MTProto → mark 200 by owning UID when it runs as a dedicated user.
+        #    This tags proxy→Telegram connections regardless of the bot's module
+        #    toggle. If it runs as root we cannot mark by UID without capturing the
+        #    host's egress, so its egress must be bound to the WARP IP instead.
+        MTPROTO_USER="$(service_user "$MTPROTO_SERVICE")"
+        if [[ -n "$MTPROTO_USER" ]]; then
+            iptables -t mangle -C OUTPUT -m owner --uid-owner "$MTPROTO_USER" -j MARK --set-mark 200 2>/dev/null \
+                || iptables -t mangle -A OUTPUT -m owner --uid-owner "$MTPROTO_USER" -j MARK --set-mark 200
+        else
+            echo "WARNING: $MTPROTO_SERVICE runs as root; run it as a dedicated user so its egress can be marked for WARP" >&2
+        fi
+
+        # 9. Xray → mark 200 by owning UID (non-root), or a WARP-IP source rule
+        #    when it runs as root and binds its freedom outbound via sendThrough.
+        XRAY_USER="$(service_user "$XRAY_SERVICE")"
+        if [[ -n "$XRAY_USER" ]]; then
+            iptables -t mangle -C OUTPUT -m owner --uid-owner "$XRAY_USER" -j MARK --set-mark 200 2>/dev/null \
+                || iptables -t mangle -A OUTPUT -m owner --uid-owner "$XRAY_USER" -j MARK --set-mark 200
+        else
+            WARP_IP="$(warp_iface_ip)"
+            if [[ -n "$WARP_IP" ]]; then
+                ip rule show | grep -q "from $WARP_IP lookup 200" \
+                    || ip rule add from "$WARP_IP" lookup 200 priority 102
+            fi
+        fi
+
+        # 10. NAT: rewrite the source to the WARP interface address on the way out.
         iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null \
             || iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
-        iptables -C FORWARD -i awg0 -o "$IFACE" -j ACCEPT 2>/dev/null \
-            || iptables -I FORWARD -i awg0 -o "$IFACE" -j ACCEPT
-        iptables -C FORWARD -i "$IFACE" -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
-            || iptables -I FORWARD -i "$IFACE" -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT ;;
+
+        # 11. Permit forwarding to and from the WARP interface.
+        iptables -t filter -C FORWARD -o "$IFACE" -j ACCEPT 2>/dev/null \
+            || iptables -t filter -A FORWARD -o "$IFACE" -j ACCEPT
+        iptables -t filter -C FORWARD -i "$IFACE" -j ACCEPT 2>/dev/null \
+            || iptables -t filter -A FORWARD -i "$IFACE" -j ACCEPT
+        ;;
     del)
-        # Tolerate a missing routes.list: the iptables teardown below must still run
-        # so the NAT/FORWARD rules are never left dangling (idempotent teardown).
-        [[ -f "$ROUTES_LIST" ]] && remove_routes
+        # Reverse order (11 → 1); every step is safe when the rule is absent.
+
+        # 11. FORWARD.
+        iptables -t filter -D FORWARD -i "$IFACE" -j ACCEPT 2>/dev/null || true
+        iptables -t filter -D FORWARD -o "$IFACE" -j ACCEPT 2>/dev/null || true
+
+        # 10. NAT.
         iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
-        iptables -D FORWARD -i awg0 -o "$IFACE" -j ACCEPT 2>/dev/null || true
-        iptables -D FORWARD -i "$IFACE" -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true ;;
+
+        # 9. Xray.
+        XRAY_USER="$(service_user "$XRAY_SERVICE")"
+        [[ -n "$XRAY_USER" ]] && iptables -t mangle -D OUTPUT -m owner --uid-owner "$XRAY_USER" -j MARK --set-mark 200 2>/dev/null || true
+        WARP_IP="$(warp_iface_ip)"
+        [[ -n "$WARP_IP" ]] && ip rule del from "$WARP_IP" lookup 200 priority 102 2>/dev/null || true
+
+        # 8. MTProto.
+        MTPROTO_USER="$(service_user "$MTPROTO_SERVICE")"
+        [[ -n "$MTPROTO_USER" ]] && iptables -t mangle -D OUTPUT -m owner --uid-owner "$MTPROTO_USER" -j MARK --set-mark 200 2>/dev/null || true
+
+        # 7. Dante.
+        iptables -t mangle -D OUTPUT -m owner --uid-owner "$DANTE_USER" -j MARK --set-mark 200 2>/dev/null || true
+
+        # 6. fwmark rule.
+        ip rule del fwmark 200 lookup 200 priority 101 2>/dev/null || true
+
+        # 5. AWG source rule.
+        ip rule del from "$AWG_CLIENTS_SUBNET" lookup 200 priority 100 2>/dev/null || true
+
+        # 4. WARP table default route.
+        ip route del default dev "$IFACE" table 200 2>/dev/null || true
+
+        # Split-tunnel destinations from routes.list.
+        remove_routes_list
+
+        # 3. Anti-loop route.
+        WARP_ENDPOINT="$(awg show "$IFACE" 2>/dev/null | awk '/endpoint/{print $2; exit}' | cut -d: -f1)"
+        [[ -n "$WARP_ENDPOINT" ]] && ip route del "$WARP_ENDPOINT/32" 2>/dev/null || true
+        ;;
     *)
         echo "Usage: $0 {add|del} <iface>" >&2; exit 1 ;;
 esac

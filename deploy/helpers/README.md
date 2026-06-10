@@ -96,6 +96,15 @@ install -o root -g root -m 0755 scripts/vpnbot-warp-routes  /usr/local/sbin/vpnb
 install -o root -g root -m 0755 scripts/vpnbot-warp-status  /usr/local/sbin/vpnbot-warp-status
 ```
 
+To apply the policy routing automatically at boot (before `vpn-bot.service`),
+install and enable the oneshot unit:
+
+```bash
+install -o root -g root -m 0644 deploy/warp-routes.service /etc/systemd/system/warp-routes.service
+systemctl daemon-reload
+systemctl enable warp-routes.service
+```
+
 Interfaces:
 
 - `vpnbot-warp-install install <staged_config>` — validates the AmneziaWG format
@@ -112,11 +121,24 @@ Interfaces:
   ensure the PrivateKey does not persist after config removal.
 - `vpnbot-warp-iface {up|down} /etc/amnezia/out-warp.conf` — runs
   `awg-quick up|down` (AmneziaWG, **not** `wg-quick`).
-- `vpnbot-warp-routes {add|del} out-warp` — adds/removes `ip route` entries read
-  from `out-warp-routes.list`. Skips any default-equivalent route (`default`, or a
-  prefix length of 0 or 1, which also blocks the two-halves split-default trick) to
-  protect the host's egress; never touches the DNS resolver. `del` tears down its
-  iptables rules even when the routes list is already gone.
+- `vpnbot-warp-routes {add|del} out-warp` — installs the policy routing that
+  diverts **every VPN client's egress** through the tunnel: a dedicated routing
+  table (`200`) whose default route leaves via `out-warp`, a source rule for the
+  AmneziaWG client subnet (`10.0.0.0/24`) and an `fwmark 200` rule, plus
+  `mangle OUTPUT` marks that tag the local proxy daemons' egress by owning UID
+  (Dante as `nobody`; MTProto and Xray by their resolved systemd `User=`), an
+  anti-loop host route pinning the WARP endpoint to the real `eth0` gateway, and
+  `MASQUERADE`/`FORWARD` rules on `out-warp`. The host's own default route is
+  never touched (SSH and the bot keep egressing directly), and any non-default
+  CIDRs in `out-warp-routes.list` are still added to the main table for
+  split-tunnel use. Marking by UID means MTProto/Dante/Xray routing is
+  independent of the bot's per-module enable toggle. When a proxy runs as **root**
+  (no dedicated `User=`), it cannot be marked by UID without capturing the host's
+  own egress: Xray then relies on a `from <out-warp IP> lookup 200` source rule
+  (its freedom outbound must set `sendThrough` to the WARP interface IP), while
+  MTProto must be run as a dedicated user. Every add step checks before it acts
+  (idempotent) and `del` tears down its rules safely even on a clean system or
+  when the routes list is already gone.
 - `vpnbot-warp-status out-warp` — runs `awg show out-warp`.
 
 `awg-quick`/`awg` (AmneziaWG userspace tools) must be installed at
