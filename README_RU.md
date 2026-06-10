@@ -199,15 +199,23 @@ BOT_LANGUAGE=ru
 | `ANOMALY_AUTO_REVOKE` | `false` | Автоматически отзывать помеченные ключи без подтверждения администратора. |
 | `ANOMALY_COOLDOWN_SECONDS` | `7200` | Cooldown перед повторным флагом того же ключа (сек). |
 | `ANOMALY_CONCURRENT_WINDOW_SECONDS` | `600` | Окно для обнаружения одновременных соединений (сек). |
-| `XRAY_XHTTP_ENABLED` | `false` | Включить второй VLESS-транспорт (XHTTP+REALITY) как отдельный inbound. При включении создание ключа предлагает выбор VLESS (TCP) / VLESS (HTTP). |
-| `XRAY_XHTTP_INBOUND_TAG` | `vless-xhttp-reality` | Тег XHTTP-inbound в `config.json` (должен отличаться от `XRAY_INBOUND_TAG`). Обязателен при `XRAY_XHTTP_ENABLED=true`. |
-| `XRAY_XHTTP_PORT` | `8443` | Публичный порт XHTTP-inbound; используется только для построения ссылок VLESS (HTTP). |
-| `XRAY_XHTTP_PATH` | `/v1/messages/stream` | Путь XHTTP для ссылок VLESS (HTTP); должен совпадать с `xhttpSettings.path` inbound. |
-| `XRAY_XHTTP_MODE` | `packet-up` | Режим XHTTP для ссылок VLESS (HTTP): `auto`, `packet-up`, `stream-up`, `stream-one`. |
+| `XRAY_XHTTP_ENABLED` | `false` | Включить второй VLESS-транспорт (XHTTP) через REALITY catch-all fallback `vless-in` на loopback-inbound. При включении создание ключа предлагает выбор VLESS (TCP) / VLESS (HTTP). |
+| `XRAY_XHTTP_INBOUND_TAG` | `vless-xhttp-reality` | Тег loopback XHTTP-inbound (fallback-dest) в `config.json` (должен отличаться от `XRAY_INBOUND_TAG`). Обязателен при `XRAY_XHTTP_ENABLED=true`. |
+| `XRAY_XHTTP_PORT` | `8443` | Оставлен для обратной совместимости; **не** используется при построении ссылок VLESS (HTTP). Ссылка идёт через публичный порт `vless-in` (`XRAY_PUBLIC_PORT`); XHTTP-inbound слушает loopback как fallback-dest REALITY. |
+| `XRAY_XHTTP_PATH` | `/v1/messages/stream` | Путь XHTTP для ссылок VLESS (HTTP); должен совпадать с `xhttpSettings.path` inbound (валидируется на inbound, не в fallback). |
+| `XRAY_XHTTP_MODE` | `stream-one` | Клиентский режим XHTTP в ссылках VLESS (HTTP): `auto`, `packet-up`, `stream-up`, `stream-one`. По умолчанию `stream-one` (одна full-duplex h2-сессия, чище всего для direct REALITY); `packet-up` — переключаемая опция для троттлинга на длинных сессиях или прохода через CDN. |
 | `XRAY_ACCESS_LOG_PATH` | _(пусто)_ | Путь к access-логу Xray для обнаружения аномалий. |
 | `XRAY_HELPER_STAGING_DIR` | `$HELPER_STAGING_ROOT/xray` | Staging-каталог для файлов Xray-хелпера. |
 | `AWG_HELPER_STAGING_DIR` | `$HELPER_STAGING_ROOT/awg` | Staging-каталог для файлов AWG-хелпера. |
 | `MTPROTO_HELPER_STAGING_DIR` | `$HELPER_STAGING_ROOT/mtproxy` | Staging-каталог для файлов MTProto-хелпера. |
+
+> **XHTTP fallback topology.** У VLESS (HTTP) нет собственного публичного порта:
+> `vless-in` (`:443`) терминирует REALITY и через **дефолтный catch-all** `fallback`
+> (`{ "dest": 8001, "xver": 0 }`, без `path`) форвардит на loopback XHTTP-inbound
+> (`security: none`); путь валидируется на этом inbound. Path-based fallback **не** матчит
+> HTTP/2 XHTTP — h2 `:path` лежит в HPACK, а не в request-line — поэтому catch-all
+> обязателен. Топология заводится один раз вручную; см.
+> [`docs/xray-xhttp-inbound.md`](docs/xray-xhttp-inbound.md).
 
 Примечания:
 
