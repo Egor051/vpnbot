@@ -26,6 +26,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **VLESS (HTTP) now rides vless-in's REALITY via an XHTTP fallback dest** — the
+  XHTTP transport was retopologised on the server: `vless-in` (:443) terminates
+  REALITY/TLS and forwards by path to an internal `vless-xhttp-reality` inbound,
+  which is the fallback dest and now carries `security: none` (no REALITY of its
+  own, only the http `clients[]`). The http-key code is realigned to that layout:
+  the VLESS (HTTP) link is a hybrid of the TCP link — same `pbk`/`sni`/`sid`/`fp`
+  and the same public `:443` (`XRAY_PUBLIC_PORT`), differing only in `type=xhttp` /
+  `path` / `mode=stream-one` and never carrying `flow`. The XHTTP `XrayConfigAdapter`
+  is now built from VLESS *presence* (not REALITY) and runs with `require_reality=
+  False`: it provisions/revokes UUIDs only in `vless-xhttp-reality`'s `clients[]`
+  (never `vless-in`) and never manages REALITY shortIds there. `XRAY_XHTTP_PORT` is
+  retained for back-compat but no longer used to build links; `XRAY_XHTTP_MODE`
+  default is now `stream-one`. TCP and AWG key issuance/revocation are unchanged.
 - **WARP module repositioned as outbound-IP masking (was "Telegram routing")** —
   the optional WARP module is now presented as a way to hide the server's outbound
   IP for selected "spy" applications (chosen via the config's `AllowedIPs`), not as

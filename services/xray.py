@@ -141,7 +141,11 @@ class XrayService:
             async with self._lock:
                 await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
                 uuid_value, email_label = await self._unique_identity(owner.telegram_user_id, owner.username)
-                short_id_managed = self.settings.xray_manage_short_ids
+                # http keys ride vless-in's REALITY via the XHTTP fallback dest,
+                # which has no realitySettings of its own: never manage shortIds on
+                # it. The link's sid is vless-in's configured shortId (the same one
+                # the TCP link uses), read from settings.
+                short_id_managed = self.settings.xray_manage_short_ids and transport != "http"
                 short_id = self.ids.xray_short_id() if short_id_managed else self.settings.xray_short_id
                 link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint, transport=transport)
                 payload = {
@@ -1055,9 +1059,14 @@ class XrayService:
         host = self._format_host(self.settings.xray_public_host)
         fragment = quote(email_label or "xray")
         if self._normalize_transport(transport) == "http":
-            # VLESS (HTTP): REALITY over XHTTP on the vless-xhttp-reality inbound.
-            # No flow (XHTTP clients must never carry one). Server-side `extra`
-            # tuning is intentionally NOT placed in the link.
+            # VLESS (HTTP) is a *hybrid* of the TCP link: it shares vless-in's
+            # REALITY (pbk/sni/sid/fp) and rides the same public :443, differing
+            # only in transport. In the fallback topology vless-in (:443) accepts
+            # REALITY/TLS and forwards by path to the internal vless-xhttp-reality
+            # inbound, which carries no REALITY of its own — so every REALITY
+            # parameter comes from vless-in / settings, never from that inbound.
+            # No flow (XHTTP clients must never carry xtls-rprx-vision); server-side
+            # `extra` tuning is intentionally NOT placed in the link.
             params = {
                 "type": "xhttp",
                 "security": "reality",
@@ -1070,7 +1079,7 @@ class XrayService:
                 "mode": self.settings.xray_xhttp_mode,
             }
             query = urlencode(params)
-            return f"vless://{uuid_value}@{host}:{self.settings.xray_xhttp_port}?{query}#{fragment}"
+            return f"vless://{uuid_value}@{host}:{self.settings.xray_public_port}?{query}#{fragment}"
         params = {
             "type": self.settings.xray_network_type,
             "security": "reality",
