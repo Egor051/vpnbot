@@ -1,10 +1,18 @@
 """Asyncio background health monitor for the WARP tunnel.
 
 Every ``INTERVAL`` seconds the monitor pings the tunnel target through the WARP
-interface. After ``FAIL_THRESHOLD`` consecutive failures it pulls the routes
-(traffic falls back to the direct path); after ``RECOVER_THRESHOLD`` consecutive
-successes it restores them. The route-flip logic is self-contained and free of
-I/O details so it can be unit-tested with injected callables.
+interface and tracks a tunnel-health latch: after ``FAIL_THRESHOLD`` consecutive
+failures the tunnel is declared *down*, after ``RECOVER_THRESHOLD`` consecutive
+successes it is declared *back up*. Each latch crossing fires the corresponding
+notification callback exactly once (anti-spam: only on an actual state change).
+
+In **observer mode** (the default for production) that is *all* the monitor does:
+the ``out-warp`` interface and its policy routes are owned by systemd
+(``awg-quick@out-warp`` + ``warp-routes.service``), so the route callbacks are
+never invoked. In the legacy non-observer mode the same latch crossings also flip
+the routes (the monitor pulls them on *down* and restores them on *up*). The
+logic is self-contained and free of I/O details so it can be unit-tested with
+injected callables.
 """
 
 from __future__ import annotations
@@ -82,6 +90,7 @@ class WarpHealthMonitor:
         fail_threshold: int | None = None,
         recover_threshold: int | None = None,
         initial_routes_active: bool = True,
+        observer_mode: bool = False,
     ) -> None:
         self._ping = ping
         self._activate_routes = activate_routes
@@ -92,8 +101,14 @@ class WarpHealthMonitor:
         self._interval = self.INTERVAL if interval is None else interval
         self._fail_threshold = self.FAIL_THRESHOLD if fail_threshold is None else fail_threshold
         self._recover_threshold = self.RECOVER_THRESHOLD if recover_threshold is None else recover_threshold
+        self._observer_mode = observer_mode
         self._fail_streak = 0
         self._success_streak = 0
+        # ``_healthy`` is the tunnel-up latch that drives notifications (and, in the
+        # legacy mode, the route flips). ``_routes_active`` is the value reported in
+        # snapshots: in observer mode the routes are owned by systemd and stay up, so
+        # it never changes; in legacy mode it tracks the latch.
+        self._healthy = initial_routes_active
         self._routes_active = initial_routes_active
         self._running = False
         self._task: asyncio.Task[None] | None = None
@@ -103,18 +118,18 @@ class WarpHealthMonitor:
         return self._routes_active
 
     async def check_once(self) -> HealthSnapshot:
-        """Run one probe, flip routes if a threshold is crossed, persist the result."""
+        """Run one probe; on a latch crossing notify (and, if not observer, flip routes)."""
         ok = await self._ping()
         if ok:
             self._success_streak += 1
             self._fail_streak = 0
-            if not self._routes_active and self._success_streak >= self._recover_threshold:
-                await self._deactivate_or_activate(activate=True)
+            if not self._healthy and self._success_streak >= self._recover_threshold:
+                await self._mark_recovered()
         else:
             self._fail_streak += 1
             self._success_streak = 0
-            if self._routes_active and self._fail_streak >= self._fail_threshold:
-                await self._deactivate_or_activate(activate=False)
+            if self._healthy and self._fail_streak >= self._fail_threshold:
+                await self._mark_down()
         snapshot = HealthSnapshot(
             tunnel_up=ok,
             routes_active=self._routes_active,
@@ -124,28 +139,35 @@ class WarpHealthMonitor:
         await self._on_update(snapshot)
         return snapshot
 
-    async def _deactivate_or_activate(self, *, activate: bool) -> None:
-        if activate:
+    async def _mark_recovered(self) -> None:
+        self._healthy = True
+        if not self._observer_mode:
             await self._activate_routes()
             self._routes_active = True
-            logger.info(
-                "WARP tunnel recovered after %d consecutive successes; routes restored",
-                self._success_streak,
-            )
-            if self._on_tunnel_recovered is not None:
-                with suppress(Exception):
-                    await self._on_tunnel_recovered()
-        else:
+        logger.info(
+            "WARP tunnel recovered after %d consecutive successes%s",
+            self._success_streak,
+            "" if self._observer_mode else "; routes restored",
+        )
+        if self._on_tunnel_recovered is not None:
+            with suppress(Exception):
+                await self._on_tunnel_recovered()
+
+    async def _mark_down(self) -> None:
+        self._healthy = False
+        if not self._observer_mode:
             await self._deactivate_routes()
             self._routes_active = False
-            logger.warning(
-                "WARP tunnel unreachable after %d consecutive failures; routes removed "
-                "(traffic falls back to the direct path)",
-                self._fail_streak,
-            )
-            if self._on_tunnel_down is not None:
-                with suppress(Exception):
-                    await self._on_tunnel_down()
+        logger.warning(
+            "WARP tunnel unreachable after %d consecutive failures%s",
+            self._fail_streak,
+            ""
+            if self._observer_mode
+            else "; routes removed (traffic falls back to the direct path)",
+        )
+        if self._on_tunnel_down is not None:
+            with suppress(Exception):
+                await self._on_tunnel_down()
 
     async def run(self) -> None:
         self._running = True

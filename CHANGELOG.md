@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **WARP interface and routes now have a single owner (systemd); the bot's health
+  monitor became a pure observer** — previously both `warp-routes.service` (at boot)
+  and the bot's `WarpHealthMonitor` managed the same `ip rule`/`ip route` entries, so
+  a flaky ICMP probe in the monitor would tear down routes the service had installed,
+  producing a recovered → add → fail → del → down flap every ~30–60 s and spamming
+  admins. A new **observer mode** (`WARP_MONITOR_OBSERVER_MODE`, default `true`) makes
+  the monitor only probe the tunnel, persist state and notify admins on a real
+  up→down/down→up change — it never runs `awg-quick`, `ip route` or `ip rule`.
+  Enabling/disabling the WARP toggle now starts/stops only the observer monitor, so
+  toggling it off no longer drops the tunnel or wipes the routes. The interface is
+  brought up by `awg-quick@out-warp.service`; `warp-routes.service` is now bound to it
+  (`Requires=`/`After=`/`PartOf=awg-quick@out-warp.service`) so routes are applied only
+  after the interface is up and re-applied on restart. The fail threshold is now
+  configurable and raised to `4` (`WARP_MONITOR_FAIL_THRESHOLD`, plus
+  `WARP_MONITOR_SUCCESS_THRESHOLD`, default `3`) so a single dropped probe can't raise
+  a false alarm. Set `WARP_MONITOR_OBSERVER_MODE=false` to restore the legacy
+  bot-managed behaviour.
+
 ### Added
 
 - **WARP egress now covers every VPN client, not just split-tunnel CIDRs** — the

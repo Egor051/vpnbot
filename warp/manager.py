@@ -67,6 +67,9 @@ class WarpManager:
             routes_helper=settings.warp_routes_helper_path,
             interface_name=self._interface_name,
         )
+        self._observer_mode = settings.warp_monitor_observer_mode
+        self._fail_threshold = settings.warp_monitor_fail_threshold
+        self._recover_threshold = settings.warp_monitor_success_threshold
         self._lock = asyncio.Lock()
         self._running = False
         self._monitor: WarpHealthMonitor | None = None
@@ -182,6 +185,10 @@ class WarpManager:
             self._last_error = "Конфиг WARP не загружен."
             raise WarpError(self._last_error)
 
+        if self._observer_mode:
+            await self._start_observer_locked()
+            return
+
         # Clean up any stale interface left by a previous run before bringing it up.
         with suppress(Exception):
             await self._interface.down()
@@ -223,6 +230,8 @@ class WarpManager:
             on_update=self._on_health_update,
             on_tunnel_down=self._notify_tunnel_down,
             on_tunnel_recovered=self._notify_tunnel_recovered,
+            fail_threshold=self._fail_threshold,
+            recover_threshold=self._recover_threshold,
             initial_routes_active=routes_active,
         )
         self._monitor.start()
@@ -231,13 +240,69 @@ class WarpManager:
             "active" if routes_active else "inactive (fallback)",
         )
 
+    async def _start_observer_locked(self) -> None:
+        """Start the monitor as a pure observer.
+
+        The ``out-warp`` interface and its routes are owned by systemd
+        (``awg-quick@out-warp`` + ``warp-routes.service``); the bot never brings the
+        interface up or touches the routes. We only confirm the interface is up and
+        launch the monitor with no-op route callbacks so a flaky probe can no longer
+        tear down system-owned routing.
+        """
+        status = await self._interface.status()
+        iface_up = status.ok
+        if not iface_up:
+            logger.warning(
+                "WARP observer: interface %s does not appear to be up (awg show rc=%s). "
+                "It is managed by systemd — run: systemctl enable --now awg-quick@out-warp",
+                self._interface_name,
+                status.returncode,
+            )
+        handshake = await self._safe_handshake()
+        self._last_error = None
+        self._running = True
+        await self._repo.update_runtime(
+            tunnel_up=iface_up,
+            routes_active=True,  # owned by warp-routes.service; not the bot's to track
+            fail_streak=0,
+            success_streak=0,
+            last_handshake=handshake,
+            last_check_ts=int(time.time()),
+        )
+        self._monitor = WarpHealthMonitor(
+            ping=self._ping,
+            activate_routes=_noop_route,
+            deactivate_routes=_noop_route,
+            on_update=self._on_health_update,
+            on_tunnel_down=self._notify_tunnel_down,
+            on_tunnel_recovered=self._notify_tunnel_recovered,
+            fail_threshold=self._fail_threshold,
+            recover_threshold=self._recover_threshold,
+            initial_routes_active=True,
+            observer_mode=True,
+        )
+        self._monitor.start()
+        logger.info(
+            "WARP module started in observer mode: interface and routes owned by systemd, "
+            "monitor watching only (interface %s)",
+            "up" if iface_up else "DOWN",
+        )
+
     async def _stop_locked(self) -> None:
         # Stop (cancel + await) the monitor before tearing down routes/interface so
         # its out-of-lock activate/deactivate_routes calls cannot race this teardown.
         if self._monitor is not None:
             await self._monitor.stop()
             self._monitor = None
-        if self._running:
+        if self._observer_mode:
+            # The interface and routes are owned by systemd — leave them untouched so
+            # toggling the bot's monitor off never strands the tunnel or wipes the
+            # policy rules (the exact failure that prompted observer mode).
+            if self._running:
+                logger.info(
+                    "WARP observer stopped: interface and routes left in place (owned by systemd)"
+                )
+        elif self._running:
             removed = await self._routes.remove()
             if not removed.ok:
                 logger.warning("WARP routes remove failed rc=%s: %s", removed.returncode, removed.stderr)
@@ -306,10 +371,21 @@ class WarpManager:
     async def _notify_tunnel_down(self) -> None:
         if self.bot is None:
             return
-        text = (
-            "🔴 <b>WARP-туннель недоступен</b>\n"
-            "Маршруты сняты — трафик идёт напрямую."
-        )
+        if self._observer_mode:
+            # Observer mode no longer manages routes, so don't promise anything about
+            # them — just report the tunnel state. Routes stay in place (systemd owns
+            # them); if the tunnel is truly down, traffic falls back via those rules.
+            text = (
+                "🔴 <b>WARP-туннель недоступен</b>\n"
+                "Монитор не получает ответа от туннеля. Маршрутами управляет systemd "
+                "(<code>warp-routes.service</code>) — проверьте "
+                "<code>awg-quick@out-warp</code>."
+            )
+        else:
+            text = (
+                "🔴 <b>WARP-туннель недоступен</b>\n"
+                "Маршруты сняты — трафик идёт напрямую."
+            )
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text=t("btn_warp_alert_dismiss"), callback_data="admin:warp:alert:dismiss")]]
         )
@@ -322,10 +398,16 @@ class WarpManager:
     async def _notify_tunnel_recovered(self) -> None:
         if self.bot is None:
             return
-        text = (
-            "🟢 <b>WARP-туннель восстановлен</b>\n"
-            "Маршруты восстановлены."
-        )
+        if self._observer_mode:
+            text = (
+                "🟢 <b>WARP-туннель восстановлен</b>\n"
+                "Связь с туннелем снова в норме."
+            )
+        else:
+            text = (
+                "🟢 <b>WARP-туннель восстановлен</b>\n"
+                "Маршруты восстановлены."
+            )
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text=t("btn_warp_alert_dismiss"), callback_data="admin:warp:alert:dismiss")]]
         )
@@ -341,6 +423,11 @@ class WarpManager:
         except Exception:
             logger.debug("WARP handshake read failed", exc_info=True)
             return 0
+
+
+async def _noop_route() -> None:
+    """Route callback used in observer mode: systemd owns the routes, so do nothing."""
+    return None
 
 
 def _count_routes(stdout: str) -> int:

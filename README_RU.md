@@ -519,6 +519,24 @@ visudo -cf /etc/sudoers.d/vpnbot
 | `WARP_STATUS_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-status` | Хелпер `awg show` |
 | `WARP_HELPER_STAGING_DIR` | `/run/vpn-bot/warp` | Приватный каталог для staged-загрузок |
 | `WARP_PING_TARGET` | `162.159.140.245` | ICMP-цель, которую health-монитор пингует для определения up/down туннеля. По умолчанию — Cloudflare anycast, присутствующий в типичных `AllowedIPs` WARP. Переопределите, если ваш `AllowedIPs` не покрывает этот адрес, иначе монитор будет давать ложные провалы. |
+| `WARP_MONITOR_OBSERVER_MODE` | `true` | Когда `true` (по умолчанию), health-монитор бота только **наблюдает** за туннелем (пробы, состояние в БД, уведомления админам) и никогда не трогает интерфейс и маршруты — ими владеет systemd (`awg-quick@out-warp` + `warp-routes.service`). Установите `false` только чтобы вернуть устаревшую модель, где бот сам поднимает/опускает интерфейс и добавляет/снимает маршруты. |
+| `WARP_MONITOR_FAIL_THRESHOLD` | `4` | Сколько подряд неудачных проб нужно, прежде чем монитор объявит туннель упавшим и уведомит админов. Держится выше 1, чтобы одна потерянная ICMP-проба не вызывала ложную тревогу. |
+| `WARP_MONITOR_SUCCESS_THRESHOLD` | `3` | Сколько подряд успешных проб нужно, прежде чем монитор объявит туннель восстановленным. |
+
+#### Владение интерфейсом и маршрутами (observer mode)
+
+В режиме observer (по умолчанию) у интерфейса `out-warp` и его policy-маршрутов один владелец — **systemd**. Интерфейс поднимает `awg-quick@out-warp.service`, а policy-правила, default-маршрут в таблице 200 и метки по демонам ставит `warp-routes.service`; health-монитор бота — чистый наблюдатель: он сообщает о состоянии туннеля, но никогда не запускает `awg-quick`, `ip route` или `ip rule`. Это убирает флаппинг, возникавший, когда `warp-routes.service` (на загрузке) и монитор бота боролись за одни и те же записи `ip rule`/`ip route`. Тумблер WARP в админ-панели теперь запускает/останавливает **только** наблюдающий монитор — его выключение больше не роняет туннель и не стирает маршруты.
+
+Разверните оба юнита (сначала интерфейс, затем маршруты поверх него):
+
+```bash
+# awg-quick резолвит имя "out-warp" в /etc/amnezia/amneziawg/out-warp.conf, а install-хелпер
+# пишет канонический конфиг в /etc/amnezia/out-warp.conf — направьте имя на него симлинком:
+mkdir -p /etc/amnezia/amneziawg
+ln -sf /etc/amnezia/out-warp.conf /etc/amnezia/amneziawg/out-warp.conf
+systemctl enable --now awg-quick@out-warp
+systemctl enable --now warp-routes.service
+```
 
 ## Обзор развёртывания
 
