@@ -599,21 +599,25 @@ policy rules outside the bot instead of relying on `AllowedIPs`.
 Upload an **AmneziaWG** client config (not plain WireGuard) as a `.conf`
 document. It must contain `[Interface]`/`[Peer]`, `PrivateKey`/`PublicKey`/
 `Endpoint`, the AmneziaWG obfuscation fields (`Jc`, `S1`, `S2`, …) and a
-non-empty `AllowedIPs`. **You decide whose outbound IP is masked via
-`AllowedIPs`** — list the address ranges of the "spy" apps whose traffic should
-leave from the tunnel endpoint instead of the real server IP. `AllowedIPs` is
-never modified: the install helper extracts it verbatim into
-`/etc/amnezia/out-warp-routes.list` (one CIDR per line) and the routes helper
-reads it from there.
+non-empty `AllowedIPs`. The module diverts **every AmneziaWG client**
+(`10.0.0.0/24`) out through the tunnel so the clients' outbound IP is the WARP
+endpoint instead of the real server IP, while the host itself (SSH, the bot,
+updates) always stays on the direct path. Use a full-tunnel `AllowedIPs =
+0.0.0.0/0, ::/0` so `Table = auto` builds the tunnel's default route. `AllowedIPs`
+is never modified: the install helper extracts it verbatim into
+`/etc/amnezia/out-warp-routes.list` (one CIDR per line, kept for the admin-panel
+route count).
 
-> **Warning:** `0.0.0.0/0` and `::/0` in `AllowedIPs` are automatically skipped
-> by the routes helper (a warning is printed to stderr). This protects the host
-> from losing connectivity due to an accidental default-route override. If you
-> need full-tunnel routing, manage a separate routing table and `ip rule` policy
-> outside the bot.
+> **Note:** the host is protected by design — `vpnbot-warp-routes` strips the
+> awg-quick host-bypass immediately after the interface comes up and installs a
+> single narrow `from 10.0.0.0/24` policy rule, so a full-tunnel `AllowedIPs`
+> never pulls the host (or your SSH session) into the tunnel. The helper
+> self-checks this and rolls back to direct client egress if it ever fails.
 
-On install the helper strips any `DNS = …` line and adds `Table = off` to
-`[Interface]` and `PersistentKeepalive = 25` to `[Peer]` if missing.
+On install the helper strips any `DNS = …` line, forces `Table = auto` on
+`[Interface]` (mandatory — it sets the WG-socket fwmark and the dynamic routing
+table; the old `Table = off` caused a routing loop) and adds
+`PersistentKeepalive = 25` to `[Peer]` if missing.
 
 ### Installation
 

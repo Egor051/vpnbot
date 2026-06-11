@@ -1,209 +1,245 @@
 #!/bin/bash
-# vpnbot-warp-routes — policy-route every VPN-client egress through the WARP tunnel.
+# vpnbot-warp-routes — divert the VPN-client subnet out through the Cloudflare
+# WARP AmneziaWG tunnel (out-warp) while the host itself stays on the direct path.
 #
 # Usage: vpnbot-warp-routes <add|del> <iface>
 #
-# Diverts the traffic of every VPN client — the AmneziaWG client subnet plus the
-# local proxy daemons (Dante SOCKS5, MTProto, Xray) — out through the WARP
-# AmneziaWG interface instead of eth0, while the host's own egress (SSH, the bot,
-# package updates) stays on the direct path. This is done with a dedicated
-# routing table (200) selected by policy rules: a source rule for the AWG client
-# subnet and an fwmark rule for packets the mangle table marks by owning UID.
+# This is the production-proven recipe. The tunnel itself is brought up by
+# awg-quick@out-warp with `Table = auto` in /etc/amnezia/out-warp.conf, which:
+#   * sets an fwmark on the WireGuard socket so the tunnel's own encrypted
+#     packets are never routed back into the tunnel (loop protection), and
+#   * creates a dedicated routing table (the first free number it finds, equal
+#     to the fwmark) whose default route is `dev out-warp`, plus the
+#     host-bypass rules `not fwmark <T> table <T>` and
+#     `table main suppress_prefixlength 0` that would otherwise send the WHOLE
+#     host — including this SSH session — into the tunnel.
 #
-# The host's own default route is never touched, so the box can never isolate
-# itself even if the WARP tunnel is down. Every "add" step checks before it acts
-# (idempotent) and every "del" step is safe on a clean system.
+# `add` therefore (steps mirror the prod recipe):
+#   1. reads the DYNAMIC table number T from `awg show <iface> fwmark`
+#      (never hardcoded — awg-quick picks the first free one);
+#   2. removes the host-bypass rules immediately so the host (SSH, the bot, apt)
+#      keeps egressing directly — this is the critical safety step;
+#   3. installs ONE narrow rule `from 10.0.0.0/24 lookup T` so only the AWG
+#      client subnet uses the tunnel table;
+#   4. pins the WARP endpoint to the real WAN gateway in BOTH the main and the
+#      tunnel table (anti-loop; endpoint read at runtime, never hardcoded);
+#   5. swaps the NAT — drops any direct `MASQUERADE -s 10.0.0.0/24 -o <wan>` and
+#      adds `MASQUERADE -o out-warp`;
+#   6. inserts the FORWARD accepts ABOVE UFW (`-I FORWARD 1`, both directions),
+#      since UFW's FORWARD policy is DROP;
+#   7. sets rp_filter=2 (loose) on all/out-warp/awg0 for the asymmetric path.
+# Finally it self-checks (host egress NOT in the tunnel + client subnet routed
+# via out-warp) and rolls back to direct client egress if the check fails.
 #
-# Constants 200 (table) and mark 200 are fixed identifiers for this module, on a
-# par with the default-route guards below; they are intentionally not configurable.
+# `del` reverses everything and restores the direct WAN MASQUERADE for the
+# client subnet; it is safe to run on a clean system. It never restores the
+# host-bypass — the host must always stay on the direct path. Neither the table
+# number nor the WARP endpoint is hardcoded; both are read at runtime.
 set -euo pipefail
 
-ROUTES_LIST="/etc/amnezia/out-warp-routes.list"
 ACTION="${1:-}"; IFACE="${2:-out-warp}"
 
-# AmneziaWG client subnet. This is a SOURCE selector (which clients' traffic to
-# capture), not a routing destination — destinations are handled by the table-200
-# default route. It is the only literal CIDR baked in; all destination CIDRs come
-# from routes.list, never from this script.
-AWG_CLIENTS_SUBNET="10.0.0.0/24"
+# AmneziaWG client-facing interface and its subnet. The subnet is a SOURCE
+# selector (which clients to divert), not a routing destination, and is the only
+# literal CIDR baked in. Priority 1000 sits above the kernel's main-table rule so
+# client packets reach the tunnel table, but it is a single narrow selector — the
+# host's own (unmarked) traffic never matches it.
+CLIENT_IFACE="awg0"
+CLIENT_SUBNET="10.0.0.0/24"
+CLIENT_RULE_PRIO=1000
 
-# Dante SOCKS5 always runs as this dedicated unprivileged account.
-DANTE_USER="nobody"
+# ── runtime discovery (nothing below is hardcoded) ────────────────────────────
 
-# systemd units of the local proxy daemons whose egress must also leave via WARP.
-# Their run-user is resolved at apply time so we can mark by owning UID — the only
-# marking that reliably tags a proxy→upstream connection (its source port is the
-# upstream socket's ephemeral port, never the proxy's listen port). Marking by UID
-# is also independent of the bot's module toggle: the OS account owns the traffic
-# regardless of whether the protocol is "enabled" in the bot database.
-XRAY_SERVICE="xray"
-MTPROTO_SERVICE="mtproxy"
-
-# Run-user of a systemd unit. Prints the configured User=, or "" when the unit
-# runs as root (User= unset). Resolving via systemd does not require the service
-# to be currently running, so the rule is installed even if it starts later.
-service_user() {
-    local svc="$1" user
-    user="$(systemctl show "$svc" --property=User --value 2>/dev/null || true)"
-    [[ "$user" == "root" ]] && user=""
-    printf '%s' "$user"
+# Dynamic routing-table number == the fwmark awg-quick set for Table=auto.
+# `awg show <iface> fwmark` prints it in hex (e.g. 0xca6c) or "off". Empty when
+# the interface is down or the config has no default-route AllowedIPs.
+warp_table() {
+    local fw
+    fw="$(awg show "$IFACE" fwmark 2>/dev/null || true)"
+    [[ "$fw" =~ ^0x[0-9a-fA-F]+$ ]] && echo "$((fw))"
 }
 
-# IPv4 address bound to the WARP interface. Used as the source selector for a
-# root-owned proxy that binds its egress to the WARP IP (Xray "sendThrough"),
-# since such a proxy cannot be tagged by owning UID without also capturing the
-# host's own root traffic.
-warp_iface_ip() {
-    ip -4 -o addr show dev "$IFACE" 2>/dev/null | awk 'NR==1{print $4}' | cut -d/ -f1
+# WARP endpoint IPv4 (the encrypted tunnel's far side). Read from awg show so it
+# is never baked in; this is what the anti-loop /32 route pins to the WAN.
+warp_endpoint() {
+    awg show "$IFACE" endpoints 2>/dev/null \
+        | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1
 }
 
-# A route is "default-equivalent" when it has no prefix ("default") or a prefix
-# length of 0 or 1 (the IPv4/IPv6 defaults and the /1+/1 split-default trick).
-# These are skipped in the main table — the table-200 default handles "everything
-# through WARP" without ever capturing the host's whole egress.
-is_default_route() {
-    local net="$1" plen
-    [[ "$net" == "default" ]] && return 0
-    [[ "$net" != */* ]] && return 1
-    plen="${net##*/}"
-    [[ "$plen" =~ ^[0-9]+$ ]] || return 1
-    (( plen <= 1 ))
+# Device of the main-table IPv4 default route (the real WAN uplink, e.g. eth0).
+wan_dev() {
+    ip -4 route show default 2>/dev/null \
+        | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
 }
 
-# Optional split-tunnel destinations from routes.list are added to the MAIN table.
-# Default-equivalent entries are skipped (covered by table 200 instead).
-apply_routes_list() {
-    [[ -f "$ROUTES_LIST" ]] || return 0
-    local net
-    while IFS= read -r net; do
-        [[ -z "$net" || "$net" == \#* ]] && continue
-        if is_default_route "$net"; then
-            echo "WARNING: skipping default-equivalent route $net (handled by table 200)" >&2
-            continue
+# Gateway of the main-table IPv4 default route (empty for a point-to-point WAN).
+wan_gw() {
+    ip -4 route show default 2>/dev/null \
+        | awk '/^default/{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}'
+}
+
+# ── building blocks (idempotent) ──────────────────────────────────────────────
+
+# Remove the awg-quick Table=auto host-bypass so the host stays on the direct
+# path. `not fwmark T table T` captures every unmarked host packet and
+# `table main suppress_prefixlength 0` overrides the host's own default route;
+# together they tunnel the whole box. We strip both for v4 and v6.
+strip_host_bypass() {
+    local t="$1" fam
+    for fam in -4 -6; do
+        while ip "$fam" rule show 2>/dev/null | grep -q "lookup $t"; do
+            ip "$fam" rule del not fwmark "$t" table "$t" 2>/dev/null || break
+        done
+        while ip "$fam" rule show 2>/dev/null | grep -q "lookup main suppress_prefixlength 0"; do
+            ip "$fam" rule del table main suppress_prefixlength 0 2>/dev/null || break
+        done
+    done
+}
+
+# Restore the direct WAN MASQUERADE for the client subnet (used by del/rollback
+# so clients still reach the internet once the tunnel path is gone).
+restore_direct_masquerade() {
+    local dev; dev="$(wan_dev)"
+    [[ -n "$dev" ]] || return 0
+    iptables -t nat -C POSTROUTING -s "$CLIENT_SUBNET" -o "$dev" -j MASQUERADE 2>/dev/null \
+        || iptables -t nat -A POSTROUTING -s "$CLIENT_SUBNET" -o "$dev" -j MASQUERADE
+}
+
+# Tear down everything `add` installs and return clients to direct egress. Safe
+# to call on a clean system; never touches the host-bypass (host stays direct).
+teardown_client_routing() {
+    local t ep dev
+    t="$(warp_table || true)"
+    ep="$(warp_endpoint || true)"
+    dev="$(wan_dev)"
+
+    # 6. FORWARD accepts (removed first, reverse order).
+    iptables -D FORWARD -i "$IFACE" -o "$CLIENT_IFACE" -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -i "$CLIENT_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
+
+    # 5. NAT: drop the out-warp MASQUERADE, restore the direct one for clients.
+    iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
+    restore_direct_masquerade
+
+    # 3. Narrow client rule (table-independent: match the selector + priority).
+    while ip -4 rule show 2>/dev/null | grep -q "from $CLIENT_SUBNET lookup"; do
+        ip -4 rule del from "$CLIENT_SUBNET" priority "$CLIENT_RULE_PRIO" 2>/dev/null || break
+    done
+
+    # 4. Anti-loop endpoint pin (main + tunnel table).
+    if [[ -n "$ep" ]]; then
+        ip route del "$ep/32" 2>/dev/null || true
+        [[ -n "$t" ]] && ip route del "$ep/32" table "$t" 2>/dev/null || true
+    fi
+}
+
+# Self-check: the host must NOT be inside the tunnel and the client subnet MUST
+# route via out-warp. Returns non-zero on any failure.
+self_check() {
+    local t="$1" rc=0 out trace
+
+    # Host egress must stay on the direct path (SSH safety). If the host-bypass
+    # were still present, a locally-originated unmarked packet would resolve to
+    # out-warp.
+    if ip route get 1.1.1.1 2>/dev/null | grep -q "dev $IFACE"; then
+        echo "self-check FAILED: host egress is inside the WARP tunnel" >&2
+        rc=1
+    fi
+
+    # Client subnet must resolve through the tunnel. Prefer a forwarding-style
+    # lookup; fall back to verifying the rule + tunnel-table default when the
+    # client interface is not up yet.
+    out="$(ip route get 1.1.1.1 from 10.0.0.4 iif "$CLIENT_IFACE" 2>/dev/null || true)"
+    if [[ -n "$out" ]]; then
+        printf '%s' "$out" | grep -q "dev $IFACE" \
+            || { echo "self-check FAILED: client 10.0.0.4 is not routed via $IFACE" >&2; rc=1; }
+    elif ! { ip -4 rule show 2>/dev/null | grep -q "from $CLIENT_SUBNET lookup $t" \
+             && ip -4 route show table "$t" 2>/dev/null | grep -q "dev $IFACE"; }; then
+        echo "self-check FAILED: client 10.0.0.4 is not routed via $IFACE" >&2
+        rc=1
+    fi
+
+    # Best-effort: the host's own curl must report warp=off (it must NOT egress
+    # through the tunnel). Skipped when curl or the network is unavailable.
+    if command -v curl >/dev/null 2>&1; then
+        trace="$(curl -s --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+        if printf '%s\n' "$trace" | grep -qE '^warp=(on|plus)'; then
+            echo "self-check FAILED: host curl reports warp on (host egress is tunneled)" >&2
+            rc=1
         fi
-        ip route replace "$net" dev "$IFACE" metric 10 2>/dev/null || true
-    done < "$ROUTES_LIST"
-}
-
-remove_routes_list() {
-    [[ -f "$ROUTES_LIST" ]] || return 0
-    local net
-    while IFS= read -r net; do
-        [[ -z "$net" || "$net" == \#* ]] && continue
-        is_default_route "$net" && continue
-        ip route del "$net" dev "$IFACE" 2>/dev/null || true
-    done < "$ROUTES_LIST"
+    fi
+    return "$rc"
 }
 
 case "$ACTION" in
     add)
         [[ -n "$IFACE" ]] || { echo "Interface required" >&2; exit 1; }
 
-        # 1. Direct-path gateway (for the anti-loop route).
-        MAIN_GW="$(ip route show default dev eth0 | awk 'NR==1{print $3}')"
-        # 2. Encrypted WARP endpoint — must never be routed back into the tunnel.
-        WARP_ENDPOINT="$(awg show "$IFACE" 2>/dev/null | awk '/endpoint/{print $2; exit}' | cut -d: -f1)"
-
-        # 3. Anti-loop: pin the WARP endpoint to the real gateway on eth0 so the
-        #    tunnel's own packets keep flowing while everything else uses table 200.
-        if [[ -n "$WARP_ENDPOINT" && -n "$MAIN_GW" ]]; then
-            ip route show | grep -q "$WARP_ENDPOINT" \
-                || ip route replace "$WARP_ENDPOINT/32" via "$MAIN_GW" dev eth0
+        # 1. Dynamic tunnel table from the fwmark awg-quick set for Table=auto.
+        TABLE="$(warp_table || true)"
+        if [[ -z "$TABLE" ]]; then
+            echo "ERROR: $IFACE has no auto routing table (awg show $IFACE fwmark = off)." >&2
+            echo "       The config must set 'Table = auto' with a default-route" >&2
+            echo "       AllowedIPs (0.0.0.0/0), and the interface must be up." >&2
+            exit 1
         fi
 
-        # Optional split-tunnel destinations from routes.list (default-equiv skipped).
-        apply_routes_list
+        # 2. CRITICAL: strip the host-bypass first so the host never stays in the
+        #    tunnel (a dropped SSH session here would mean a reboot).
+        strip_host_bypass "$TABLE"
 
-        # 4. WARP routing table: everything selected into table 200 leaves via WARP.
-        ip route show table 200 | grep -q "^default" \
-            || ip route replace default dev "$IFACE" table 200
+        # 3. Narrow client rule: only 10.0.0.0/24 uses the tunnel table.
+        ip -4 rule show | grep -q "from $CLIENT_SUBNET lookup $TABLE" \
+            || ip -4 rule add from "$CLIENT_SUBNET" lookup "$TABLE" priority "$CLIENT_RULE_PRIO"
 
-        # 5. AWG clients (source-based) → table 200.
-        ip rule show | grep -q "from $AWG_CLIENTS_SUBNET lookup 200" \
-            || ip rule add from "$AWG_CLIENTS_SUBNET" lookup 200 priority 100
-
-        # 6. fwmark 200 (set by the mangle rules below) → table 200. (0xc8 == 200)
-        ip rule show | grep -q "fwmark 0xc8" \
-            || ip rule add fwmark 200 lookup 200 priority 101
-
-        # 7. Dante SOCKS5 (runs as nobody) → mark 200.
-        iptables -t mangle -C OUTPUT -m owner --uid-owner "$DANTE_USER" -j MARK --set-mark 200 2>/dev/null \
-            || iptables -t mangle -A OUTPUT -m owner --uid-owner "$DANTE_USER" -j MARK --set-mark 200
-
-        # 8. MTProto → mark 200 by owning UID when it runs as a dedicated user.
-        #    This tags proxy→Telegram connections regardless of the bot's module
-        #    toggle. If it runs as root we cannot mark by UID without capturing the
-        #    host's egress, so its egress must be bound to the WARP IP instead.
-        MTPROTO_USER="$(service_user "$MTPROTO_SERVICE")"
-        if [[ -n "$MTPROTO_USER" ]]; then
-            iptables -t mangle -C OUTPUT -m owner --uid-owner "$MTPROTO_USER" -j MARK --set-mark 200 2>/dev/null \
-                || iptables -t mangle -A OUTPUT -m owner --uid-owner "$MTPROTO_USER" -j MARK --set-mark 200
-        else
-            echo "WARNING: $MTPROTO_SERVICE runs as root; run it as a dedicated user so its egress can be marked for WARP" >&2
-        fi
-
-        # 9. Xray → mark 200 by owning UID (non-root), or a WARP-IP source rule
-        #    when it runs as root and binds its freedom outbound via sendThrough.
-        XRAY_USER="$(service_user "$XRAY_SERVICE")"
-        if [[ -n "$XRAY_USER" ]]; then
-            iptables -t mangle -C OUTPUT -m owner --uid-owner "$XRAY_USER" -j MARK --set-mark 200 2>/dev/null \
-                || iptables -t mangle -A OUTPUT -m owner --uid-owner "$XRAY_USER" -j MARK --set-mark 200
-        else
-            WARP_IP="$(warp_iface_ip)"
-            if [[ -n "$WARP_IP" ]]; then
-                ip rule show | grep -q "from $WARP_IP lookup 200" \
-                    || ip rule add from "$WARP_IP" lookup 200 priority 102
+        # 4. Anti-loop: pin the WARP endpoint to the real WAN gateway in BOTH the
+        #    main table and the tunnel table so neither the host's WG socket nor a
+        #    client destined for the endpoint IP is routed back into the tunnel.
+        WAN_DEV="$(wan_dev)"; WAN_GW="$(wan_gw)"
+        WARP_ENDPOINT="$(warp_endpoint || true)"
+        if [[ -n "$WARP_ENDPOINT" && -n "$WAN_DEV" ]]; then
+            if [[ -n "$WAN_GW" ]]; then
+                ip route replace "$WARP_ENDPOINT/32" via "$WAN_GW" dev "$WAN_DEV"
+                ip route replace "$WARP_ENDPOINT/32" via "$WAN_GW" dev "$WAN_DEV" table "$TABLE"
+            else
+                ip route replace "$WARP_ENDPOINT/32" dev "$WAN_DEV"
+                ip route replace "$WARP_ENDPOINT/32" dev "$WAN_DEV" table "$TABLE"
             fi
+        else
+            echo "WARNING: could not resolve WARP endpoint or WAN device; skipping anti-loop pin" >&2
         fi
 
-        # 10. NAT: rewrite the source to the WARP interface address on the way out.
+        # 5. NAT: drop any direct client MASQUERADE on the WAN device, then add
+        #    the MASQUERADE on the tunnel so client egress shows the WARP IP.
+        if [[ -n "$WAN_DEV" ]]; then
+            while iptables -t nat -C POSTROUTING -s "$CLIENT_SUBNET" -o "$WAN_DEV" -j MASQUERADE 2>/dev/null; do
+                iptables -t nat -D POSTROUTING -s "$CLIENT_SUBNET" -o "$WAN_DEV" -j MASQUERADE
+            done
+        fi
         iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null \
             || iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
 
-        # 11. Permit forwarding to and from the WARP interface.
-        iptables -t filter -C FORWARD -o "$IFACE" -j ACCEPT 2>/dev/null \
-            || iptables -t filter -A FORWARD -o "$IFACE" -j ACCEPT
-        iptables -t filter -C FORWARD -i "$IFACE" -j ACCEPT 2>/dev/null \
-            || iptables -t filter -A FORWARD -i "$IFACE" -j ACCEPT
+        # 6. FORWARD above UFW (UFW's FORWARD policy is DROP). Insert at the top.
+        iptables -C FORWARD -i "$CLIENT_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null \
+            || iptables -I FORWARD 1 -i "$CLIENT_IFACE" -o "$IFACE" -j ACCEPT
+        iptables -C FORWARD -i "$IFACE" -o "$CLIENT_IFACE" -j ACCEPT 2>/dev/null \
+            || iptables -I FORWARD 1 -i "$IFACE" -o "$CLIENT_IFACE" -j ACCEPT
+
+        # 7. Loose reverse-path filtering for the asymmetric tunnel path.
+        for rp in all "$IFACE" "$CLIENT_IFACE"; do
+            sysctl -w "net.ipv4.conf.$rp.rp_filter=2" >/dev/null 2>&1 || true
+        done
+
+        # 8. Verify, and roll back to direct client egress on any failure.
+        if ! self_check "$TABLE"; then
+            echo "ERROR: self-check failed — rolling back to direct client egress" >&2
+            teardown_client_routing
+            strip_host_bypass "$TABLE"
+            exit 1
+        fi
         ;;
     del)
-        # Reverse order (11 → 1); every step is safe when the rule is absent.
-
-        # 11. FORWARD.
-        iptables -t filter -D FORWARD -i "$IFACE" -j ACCEPT 2>/dev/null || true
-        iptables -t filter -D FORWARD -o "$IFACE" -j ACCEPT 2>/dev/null || true
-
-        # 10. NAT.
-        iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
-
-        # 9. Xray.
-        XRAY_USER="$(service_user "$XRAY_SERVICE")"
-        [[ -n "$XRAY_USER" ]] && iptables -t mangle -D OUTPUT -m owner --uid-owner "$XRAY_USER" -j MARK --set-mark 200 2>/dev/null || true
-        WARP_IP="$(warp_iface_ip)"
-        [[ -n "$WARP_IP" ]] && ip rule del from "$WARP_IP" lookup 200 priority 102 2>/dev/null || true
-
-        # 8. MTProto.
-        MTPROTO_USER="$(service_user "$MTPROTO_SERVICE")"
-        [[ -n "$MTPROTO_USER" ]] && iptables -t mangle -D OUTPUT -m owner --uid-owner "$MTPROTO_USER" -j MARK --set-mark 200 2>/dev/null || true
-
-        # 7. Dante.
-        iptables -t mangle -D OUTPUT -m owner --uid-owner "$DANTE_USER" -j MARK --set-mark 200 2>/dev/null || true
-
-        # 6. fwmark rule.
-        ip rule del fwmark 200 lookup 200 priority 101 2>/dev/null || true
-
-        # 5. AWG source rule.
-        ip rule del from "$AWG_CLIENTS_SUBNET" lookup 200 priority 100 2>/dev/null || true
-
-        # 4. WARP table default route.
-        ip route del default dev "$IFACE" table 200 2>/dev/null || true
-
-        # Split-tunnel destinations from routes.list.
-        remove_routes_list
-
-        # 3. Anti-loop route.
-        WARP_ENDPOINT="$(awg show "$IFACE" 2>/dev/null | awk '/endpoint/{print $2; exit}' | cut -d: -f1)"
-        [[ -n "$WARP_ENDPOINT" ]] && ip route del "$WARP_ENDPOINT/32" 2>/dev/null || true
+        teardown_client_routing
         ;;
     *)
         echo "Usage: $0 {add|del} <iface>" >&2; exit 1 ;;
