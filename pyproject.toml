@@ -56,6 +56,6 @@ ignore = [
 "repositories/*" = ["S608"]
 # The non-root deploy preflight shells out to controlled, fixed system tools.
 "deploy/*" = ["S404", "S603", "S607"]
-# Tests: hardcoded test secrets/paths, subprocess import for helper tests, and
-# pytest-style idioms are expected here.
-"tests/*" = ["S105", "S106", "S108", "S404", "F401", "B009", "B010", "RUF043", "RUF015", "RUF100", "E303", "E306"]
+# Tests: hardcoded test secrets/paths, subprocess for helper tests (running the
+# WARP routes helper against mocked ip/awg/iptables), and pytest-style idioms.
+"tests/*" = ["S105", "S106", "S108", "S404", "S603", "S607", "F401", "B009", "B010", "RUF043", "RUF015", "RUF100", "E303", "E306"]

@@ -28,22 +28,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **WARP egress now covers every VPN client, not just split-tunnel CIDRs** — the
-  `vpnbot-warp-routes` helper was rewritten from destination-only `ip route`
-  entries to policy routing that diverts all VPN-client traffic through the
-  `out-warp` tunnel: a dedicated routing table (`200`) with a default route via
-  `out-warp`, a source rule for the AmneziaWG client subnet (`10.0.0.0/24`) and an
-  `fwmark 200` rule, `mangle OUTPUT` marks tagging the local proxy daemons' egress
-  by owning UID (Dante as `nobody`, MTProto and Xray by their resolved systemd
-  `User=`), an anti-loop host route pinning the WARP endpoint to the real `eth0`
-  gateway, and `MASQUERADE`/`FORWARD` rules on `out-warp`. The host's own default
-  route is never touched (SSH and the bot keep egressing directly). UID-based
-  marking makes proxy routing independent of the bot's per-module enable toggle.
-  Root-owned proxies fall back to a `from <out-warp IP>` source rule (Xray
-  `sendThrough`) since they cannot be marked by UID without capturing the host's
-  own egress. Adds `deploy/warp-routes.service` (oneshot, applied at boot before
-  `vpn-bot.service`) for persistence; every add step is idempotent and `del` is
-  safe on a clean system.
+- **WARP egress now diverts the AmneziaWG client subnet through the tunnel via
+  the production-proven `Table = auto` recipe** — `vpnbot-warp-routes` was
+  rewritten to match the manually-debugged working scheme and replace the previous
+  table-`200` policy-routing implementation, which created a routing loop (the
+  server hung). The tunnel is now brought up by `awg-quick@out-warp` with
+  `Table = auto` (the install helper forces it; the old `Table = off` is what broke
+  routing), which sets an fwmark on the WG socket and creates a **dynamic** routing
+  table (read at runtime from `awg show out-warp fwmark`, never hardcoded). `add`
+  then: strips the awg-quick host-bypass immediately so the host (SSH, the bot,
+  apt) never enters the tunnel; installs a single narrow `from 10.0.0.0/24 lookup
+  <T>` rule (priority 1000); pins the WARP endpoint (read at runtime) to the real
+  WAN gateway in both the main and the tunnel table (anti-loop); swaps the NAT to
+  `MASQUERADE -o out-warp` (dropping any direct client masquerade); inserts the
+  `FORWARD` accepts above UFW; and sets `rp_filter=2`. It finishes with a
+  self-check (host egress NOT tunneled + client routed via `out-warp`) and rolls
+  back to direct client egress on failure. `del` reverses everything, restores the
+  direct WAN masquerade for the client subnet and is safe on a clean system; it
+  never restores the host-bypass. The install helper also symlinks
+  `/etc/amnezia/amneziawg/out-warp.conf` so `awg-quick@out-warp` resolves the
+  config by name, and `deploy/setup-nonroot-helper-mode.sh` now installs the four
+  WARP helpers (previously omitted, so a `git reset` deploy left a stale
+  `/usr/local/sbin/vpnbot-warp-routes`). `deploy/warp-routes.service` (oneshot,
+  bound to `awg-quick@out-warp`, ordered after `awg-quick@awg0`) applies it at
+  boot. Every add step is idempotent. Forwarding Dante/Xray/MTProto through WARP is
+  intentionally out of scope here — only AmneziaWG clients are diverted.
 - **Second VLESS transport — VLESS (HTTP) over XHTTP+REALITY** — key creation now
   has two steps: choose protocol (`AmneziaWG 2.0` / `VLESS`), then for VLESS choose
   transport (`VLESS (TCP)` / `VLESS (HTTP)`). `VLESS (TCP)` keys live only in the

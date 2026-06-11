@@ -15,6 +15,7 @@ XRAY_CONFIG_PATH="${XRAY_CONFIG_PATH:-/usr/local/etc/xray/config.json}"
 AWG_CONFIG_PATH="${AWG_CONFIG_PATH:-/etc/amnezia/amneziawg/awg0.conf}"
 MTPROTO_MANAGED_DIR="${MTPROTO_MANAGED_DIR:-/etc/mtproxy/vpnbot}"
 HELPER_SOURCE_DIR="${HELPER_SOURCE_DIR:-deploy/helpers}"
+WARP_HELPER_SOURCE_DIR="${WARP_HELPER_SOURCE_DIR:-scripts}"
 SUDOERS_SOURCE="${SUDOERS_SOURCE:-deploy/sudoers.d/vpnbot.example}"
 SUDOERS_TARGET="${SUDOERS_TARGET:-/etc/sudoers.d/vpnbot}"
 
@@ -64,6 +65,15 @@ install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-socks5-user" /usr/l
 install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-xray-apply" /usr/local/sbin/vpnbot-xray-apply
 install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-awg-apply" /usr/local/sbin/vpnbot-awg-apply
 install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-mtproxy-apply" /usr/local/sbin/vpnbot-mtproxy-apply
+
+# WARP outbound-IP masking helpers live in scripts/ (not deploy/helpers/). They
+# must be (re)installed here too, otherwise a `git reset` deploy leaves the stale
+# /usr/local/sbin copy in place — which is exactly what shipped the broken routing
+# helper before. Keep them byte-for-byte in sync with the checkout on every run.
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-install" /usr/local/sbin/vpnbot-warp-install
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-iface" /usr/local/sbin/vpnbot-warp-iface
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-routes" /usr/local/sbin/vpnbot-warp-routes
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-status" /usr/local/sbin/vpnbot-warp-status
 
 if [[ -f "${XRAY_CONFIG_PATH}" ]]; then
   chown nobody:"${BOT_GROUP}" "${XRAY_CONFIG_PATH}"

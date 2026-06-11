@@ -77,11 +77,23 @@ with os.fdopen(fd, "r", encoding="utf-8") as f:
 # Drop DNS (do not touch the server resolver)
 content = re.sub(r'^DNS\s*=.*\n?', '', content, flags=re.MULTILINE)
 
-# Add "Table = off" to [Interface] if absent (routes are managed manually via ip route)
-if not re.search(r'^Table\s*=', content, re.MULTILINE):
+# Force "Table = auto" in [Interface]. Table=auto makes awg-quick put an fwmark on
+# the WireGuard socket (loop protection) and create a dedicated routing table with
+# a default route via the tunnel; vpnbot-warp-routes then strips the host-bypass
+# and diverts only the client subnet. Any stale value is rewritten — a disabled
+# table is what broke the previous routing-loop implementation.
+if re.search(r'^[ \t]*Table\s*=', content, re.MULTILINE):
+    content = re.sub(
+        r'^[ \t]*Table\s*=.*$',
+        'Table = auto',
+        content,
+        count=1,
+        flags=re.MULTILINE,
+    )
+else:
     content = re.sub(
         r'(\[Interface\])',
-        r'\1\nTable = off',
+        r'\1\nTable = auto',
         content
     )
 
@@ -126,9 +138,16 @@ PYEOF
     mv "$ROUTES_TMP" "$ROUTES_LIST"
     mv "$DEST_TMP" "$DEST"
     trap - EXIT
+
+    # awg-quick@out-warp resolves the config by interface name from
+    # /etc/amnezia/amneziawg/out-warp.conf. Point that name at the canonical
+    # config so there is a single source of truth (and the bot's pinned sudoers
+    # paths stay valid). The symlink is mandatory for the systemd-owned interface.
+    mkdir -p /etc/amnezia/amneziawg
+    ln -sfn "$DEST" /etc/amnezia/amneziawg/out-warp.conf
     ;;
   remove)
-    rm -f "$DEST" "$ROUTES_LIST"
+    rm -f "$DEST" "$ROUTES_LIST" /etc/amnezia/amneziawg/out-warp.conf
     echo "WARP config removed"
     ;;
   *)

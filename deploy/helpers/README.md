@@ -96,6 +96,13 @@ install -o root -g root -m 0755 scripts/vpnbot-warp-routes  /usr/local/sbin/vpnb
 install -o root -g root -m 0755 scripts/vpnbot-warp-status  /usr/local/sbin/vpnbot-warp-status
 ```
 
+`deploy/setup-nonroot-helper-mode.sh` now installs (and refreshes) these four
+WARP helpers as well, so a standard non-root deploy keeps `/usr/local/sbin` in
+sync with the checkout. Previously they were not part of any deploy step, so a
+`git reset` left the stale `/usr/local/sbin/vpnbot-warp-routes` in place — which
+is how the broken routing helper kept running after the source was fixed. Re-run
+that script (or the `install` commands above) after pulling new helper versions.
+
 ### Ownership model: systemd owns the interface and routes; the bot only observes
 
 The `out-warp` interface and its policy routes have **one** owner: **systemd**.
@@ -145,35 +152,46 @@ Interfaces:
 - `vpnbot-warp-install install <staged_config>` — validates the AmneziaWG format
   (`[Interface]`/`[Peer]`, `Jc`/`S1`/`S2`, non-empty `AllowedIPs`), **rejects**
   `PreUp`/`PostUp`/`PreDown`/`PostDown` hooks (awg-quick would run them as root),
-  validates every `AllowedIPs` token as a real CIDR, strips `DNS`, adds
-  `Table = off` and `PersistentKeepalive = 25`, writes `/etc/amnezia/out-warp.conf`
-  (mode `0600`) and `/etc/amnezia/out-warp-routes.list` (one CIDR per line from
-  `AllowedIPs`, which is never modified). The source must be a non-symlink file
-  inside the staging dir; the bot stages the upload under
-  `/run/vpn-bot/warp/warp-upload-*.conf`.
-- `vpnbot-warp-install remove` — deletes `/etc/amnezia/out-warp.conf` and
-  `/etc/amnezia/out-warp-routes.list` from disk. Called by `delete_config` to
-  ensure the PrivateKey does not persist after config removal.
+  validates every `AllowedIPs` token as a real CIDR, strips `DNS`, forces
+  `Table = auto` and adds `PersistentKeepalive = 25`, writes
+  `/etc/amnezia/out-warp.conf` (mode `0600`) and `/etc/amnezia/out-warp-routes.list`
+  (one CIDR per line from `AllowedIPs`, which is never modified — kept for the
+  admin-panel route count), and points `/etc/amnezia/amneziawg/out-warp.conf` at
+  the canonical config via a symlink so `awg-quick@out-warp` resolves it by name.
+  `Table = auto` is mandatory: it makes awg-quick set an fwmark on the WG socket
+  (loop protection) and create the dynamic routing table the routes helper diverts
+  the client subnet into; the previous `Table = off` is what caused the routing
+  loop. The source must be a non-symlink file inside the staging dir; the bot
+  stages the upload under `/run/vpn-bot/warp/warp-upload-*.conf`.
+- `vpnbot-warp-install remove` — deletes `/etc/amnezia/out-warp.conf`,
+  `/etc/amnezia/out-warp-routes.list` and the
+  `/etc/amnezia/amneziawg/out-warp.conf` symlink from disk. Called by
+  `delete_config` to ensure the PrivateKey does not persist after config removal.
 - `vpnbot-warp-iface {up|down} /etc/amnezia/out-warp.conf` — runs
   `awg-quick up|down` (AmneziaWG, **not** `wg-quick`).
-- `vpnbot-warp-routes {add|del} out-warp` — installs the policy routing that
-  diverts **every VPN client's egress** through the tunnel: a dedicated routing
-  table (`200`) whose default route leaves via `out-warp`, a source rule for the
-  AmneziaWG client subnet (`10.0.0.0/24`) and an `fwmark 200` rule, plus
-  `mangle OUTPUT` marks that tag the local proxy daemons' egress by owning UID
-  (Dante as `nobody`; MTProto and Xray by their resolved systemd `User=`), an
-  anti-loop host route pinning the WARP endpoint to the real `eth0` gateway, and
-  `MASQUERADE`/`FORWARD` rules on `out-warp`. The host's own default route is
-  never touched (SSH and the bot keep egressing directly), and any non-default
-  CIDRs in `out-warp-routes.list` are still added to the main table for
-  split-tunnel use. Marking by UID means MTProto/Dante/Xray routing is
-  independent of the bot's per-module enable toggle. When a proxy runs as **root**
-  (no dedicated `User=`), it cannot be marked by UID without capturing the host's
-  own egress: Xray then relies on a `from <out-warp IP> lookup 200` source rule
-  (its freedom outbound must set `sendThrough` to the WARP interface IP), while
-  MTProto must be run as a dedicated user. Every add step checks before it acts
-  (idempotent) and `del` tears down its rules safely even on a clean system or
-  when the routes list is already gone.
+- `vpnbot-warp-routes {add|del} out-warp` — installs the production-proven policy
+  routing that diverts the **AmneziaWG client subnet** (`10.0.0.0/24`) through the
+  tunnel while the host itself stays on the direct path. The tunnel is brought up
+  by `awg-quick@out-warp` with `Table = auto`, which creates a **dynamic** routing
+  table (the first free number from 51820 up, equal to the WG-socket fwmark) with
+  a default route via `out-warp`, plus the host-bypass rules
+  `not fwmark <T> table <T>` and `table main suppress_prefixlength 0` that would
+  otherwise tunnel the whole box. `add` therefore: (1) reads the table number from
+  `awg show out-warp fwmark` (never hardcoded); (2) **strips the host-bypass
+  immediately** so SSH/the bot keep egressing directly — the critical safety step;
+  (3) installs a single narrow rule `from 10.0.0.0/24 lookup <T>` (priority 1000);
+  (4) pins the WARP endpoint (read from `awg show`) to the real WAN gateway in
+  **both** the main and the tunnel table (anti-loop); (5) swaps the NAT — drops any
+  direct `MASQUERADE -s 10.0.0.0/24 -o <wan>` and adds `MASQUERADE -o out-warp`;
+  (6) inserts the `FORWARD` accepts **above UFW** (`-I FORWARD 1`, `awg0`↔`out-warp`,
+  since UFW's FORWARD policy is DROP); (7) sets `rp_filter=2`. It then self-checks
+  (host egress NOT in the tunnel + client subnet routed via `out-warp`) and rolls
+  back to direct client egress on failure. Every add step is idempotent. `del`
+  reverses everything, restores the direct WAN `MASQUERADE` for the client subnet
+  and is safe on a clean system; it never restores the host-bypass (the host must
+  always stay direct). The table number and endpoint are always resolved at
+  runtime. Forwarding **Dante/Xray/MTProto** through WARP is out of scope here —
+  this helper diverts AmneziaWG clients only.
 - `vpnbot-warp-status out-warp` — runs `awg show out-warp`.
 
 `awg-quick`/`awg` (AmneziaWG userspace tools) must be installed at
