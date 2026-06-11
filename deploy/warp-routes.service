@@ -5,17 +5,23 @@
 # that divert every VPN client's egress through the out-warp tunnel. The helper
 # is idempotent on add and safe on del, so this unit can be (re)started freely.
 #
-# The helper runs directly as root here (no sudo); the bot also invokes the same
-# add/del verbs through its pinned sudoers entry for the health-monitor fallback.
+# The helper runs directly as root here (no sudo). systemd owns both the interface
+# (awg-quick@out-warp) and these routes; the bot's health monitor is a pure observer
+# and never adds/removes them. Binding to awg-quick@out-warp guarantees the routes
+# are installed only after the interface is up and are re-applied whenever it
+# restarts (PartOf), so the two owners can never drift apart.
 #
-# Install:
+# Install (interface first, then the routes that ride on it):
 #   install -o root -g root -m 0644 deploy/warp-routes.service /etc/systemd/system/warp-routes.service
 #   systemctl daemon-reload
-#   systemctl enable warp-routes.service
+#   systemctl enable --now awg-quick@out-warp
+#   systemctl enable --now warp-routes.service
 [Unit]
 Description=WARP policy routing rules
-After=network-online.target
+After=network-online.target awg-quick@out-warp.service
 Wants=network-online.target
+Requires=awg-quick@out-warp.service
+PartOf=awg-quick@out-warp.service
 Before=vpn-bot.service
 
 [Service]

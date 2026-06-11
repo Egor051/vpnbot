@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from models.dto import ShellResult
 from warp.health import HealthSnapshot, WarpHealthMonitor
-from warp.manager import WarpManager
+from warp.manager import WarpManager, _noop_route
+from warp.state import WarpState
 
 
 class _Recorder:
@@ -43,6 +45,7 @@ def _monitor(
     *,
     initial_routes_active: bool = True,
     with_notify_callbacks: bool = False,
+    observer_mode: bool = False,
 ) -> WarpHealthMonitor:
     return WarpHealthMonitor(
         ping=rec.ping,
@@ -54,6 +57,7 @@ def _monitor(
         fail_threshold=2,
         recover_threshold=3,
         initial_routes_active=initial_routes_active,
+        observer_mode=observer_mode,
     )
 
 
@@ -134,7 +138,8 @@ async def test_snapshot_reports_tunnel_state() -> None:
 
 def test_class_thresholds_match_spec() -> None:
     assert WarpHealthMonitor.INTERVAL == 10
-    assert WarpHealthMonitor.FAIL_THRESHOLD == 2
+    # The fail threshold is intentionally > 1 so a single dropped probe never flaps.
+    assert WarpHealthMonitor.FAIL_THRESHOLD == 4
     assert WarpHealthMonitor.RECOVER_THRESHOLD == 3
 
 
@@ -221,14 +226,80 @@ async def test_no_callbacks_when_none() -> None:
     assert rec.deactivations == 1 and rec.activations == 1
 
 
+# ── observer mode: never touch routes, only observe + notify ──────────────────
+
+async def test_observer_mode_down_notifies_without_route_calls() -> None:
+    rec = _Recorder([False, False, False])
+    monitor = _monitor(rec, observer_mode=True, with_notify_callbacks=True)
+
+    await monitor.check_once()
+    assert rec.tunnel_down_calls == 0
+
+    # Threshold crossed: notify, but routes are NEVER touched (systemd owns them).
+    await monitor.check_once()
+    assert rec.tunnel_down_calls == 1
+    assert rec.deactivations == 0 and rec.activations == 0
+    # routes_active stays True throughout — the bot does not manage it in observer mode.
+    assert monitor.routes_active is True
+    assert all(s.routes_active is True for s in rec.snapshots)
+
+
+async def test_observer_mode_recovery_notifies_without_route_calls() -> None:
+    rec = _Recorder([False, False, True, True, True])
+    monitor = _monitor(rec, observer_mode=True, with_notify_callbacks=True)
+    for _ in range(5):
+        await monitor.check_once()
+
+    # 2 fails -> down notify, 3 successes -> recovered notify; no route calls at all.
+    assert rec.tunnel_down_calls == 1
+    assert rec.tunnel_recovered_calls == 1
+    assert rec.deactivations == 0 and rec.activations == 0
+    assert monitor.routes_active is True
+
+
+async def test_observer_mode_notifies_only_on_state_change() -> None:
+    # Four straight failures must produce exactly one "down" notification (anti-spam).
+    rec = _Recorder([False, False, False, False])
+    monitor = _monitor(rec, observer_mode=True, with_notify_callbacks=True)
+    for _ in range(4):
+        await monitor.check_once()
+    assert rec.tunnel_down_calls == 1
+    assert rec.deactivations == 0
+
+
+async def test_fail_threshold_is_honoured_from_constructor() -> None:
+    # With a higher threshold a single (or few) dropped probes do not trip a "down".
+    rec = _Recorder([False, False, False, False])
+    monitor = WarpHealthMonitor(
+        ping=rec.ping,
+        activate_routes=rec.activate,
+        deactivate_routes=rec.deactivate,
+        on_update=rec.on_update,
+        on_tunnel_down=rec.on_tunnel_down,
+        fail_threshold=4,
+        recover_threshold=3,
+        observer_mode=True,
+    )
+    for _ in range(3):
+        await monitor.check_once()
+    assert rec.tunnel_down_calls == 0  # 3 < 4
+    await monitor.check_once()
+    assert rec.tunnel_down_calls == 1  # 4 == threshold
+
+
 # ── WarpManager notification methods ─────────────────────────────────────────
 
-def _make_manager(admin_ids: frozenset[int] = frozenset([111, 222])) -> WarpManager:
+def _make_manager(
+    admin_ids: frozenset[int] = frozenset([111, 222]),
+    *,
+    observer_mode: bool = True,
+) -> WarpManager:
     """Construct a WarpManager bypassing __init__, injecting only what the notify methods need."""
     manager = object.__new__(WarpManager)
     settings = MagicMock()
     settings.admin_ids = admin_ids
     manager._settings = settings
+    manager._observer_mode = observer_mode
     manager.bot = None
     return manager
 
@@ -277,3 +348,119 @@ async def test_notify_tunnel_recovered_tolerates_send_error() -> None:
     manager.bot.send_message.side_effect = Exception("telegram error")
 
     await manager._notify_tunnel_recovered()
+
+
+async def test_observer_down_notification_makes_no_route_promise() -> None:
+    manager = _make_manager(frozenset([1]), observer_mode=True)
+    manager.bot = AsyncMock()
+    await manager._notify_tunnel_down()
+    text = manager.bot.send_message.call_args.args[1]
+    assert "Маршруты сняты" not in text
+    assert "warp-routes.service" in text
+
+
+async def test_legacy_down_notification_keeps_route_wording() -> None:
+    manager = _make_manager(frozenset([1]), observer_mode=False)
+    manager.bot = AsyncMock()
+    await manager._notify_tunnel_down()
+    text = manager.bot.send_message.call_args.args[1]
+    assert "Маршруты сняты" in text
+
+
+# ── WarpManager start/stop ownership (observer vs legacy) ─────────────────────
+
+def _ok() -> ShellResult:
+    return ShellResult(args=(), returncode=0, stdout="", stderr="")
+
+
+def _lifecycle_manager(*, observer_mode: bool) -> WarpManager:
+    """Build a WarpManager bypassing __init__ with mocked interface/routes/repo."""
+    manager = object.__new__(WarpManager)
+    manager._settings = MagicMock(admin_ids=frozenset())
+    manager._observer_mode = observer_mode
+    manager._fail_threshold = 4
+    manager._recover_threshold = 3
+    manager._running = False
+    manager._monitor = None
+    manager._last_error = None
+    manager.bot = None
+    manager._interface_name = "out-warp"
+    manager._interface = AsyncMock()
+    manager._interface.up.return_value = _ok()
+    manager._interface.down.return_value = _ok()
+    manager._interface.status.return_value = _ok()
+    manager._routes = AsyncMock()
+    manager._routes.add.return_value = _ok()
+    manager._routes.remove.return_value = _ok()
+    manager._repo = AsyncMock()
+    manager._repo.get.return_value = WarpState(routes_count=1)
+    manager._ping = AsyncMock(return_value=True)
+    manager._safe_handshake = AsyncMock(return_value=123)
+    return manager
+
+
+async def test_observer_start_does_not_touch_interface_or_routes(monkeypatch) -> None:
+    monkeypatch.setattr("warp.manager.WarpInterface.awg_quick_available", lambda: True)
+    fake_monitor_cls = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr("warp.manager.WarpHealthMonitor", fake_monitor_cls)
+
+    manager = _lifecycle_manager(observer_mode=True)
+    await manager._start_locked()
+
+    manager._interface.up.assert_not_called()
+    manager._interface.down.assert_not_called()
+    manager._routes.add.assert_not_called()
+    manager._routes.remove.assert_not_called()
+    assert manager._running is True
+    # Monitor wired as an observer with no-op route callbacks and the configured threshold.
+    kwargs = fake_monitor_cls.call_args.kwargs
+    assert kwargs["observer_mode"] is True
+    assert kwargs["activate_routes"] is _noop_route
+    assert kwargs["deactivate_routes"] is _noop_route
+    assert kwargs["fail_threshold"] == 4
+    assert kwargs["recover_threshold"] == 3
+
+
+async def test_legacy_start_brings_up_interface_and_routes(monkeypatch) -> None:
+    monkeypatch.setattr("warp.manager.WarpInterface.awg_quick_available", lambda: True)
+    fake_monitor_cls = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr("warp.manager.WarpHealthMonitor", fake_monitor_cls)
+
+    manager = _lifecycle_manager(observer_mode=False)
+    await manager._start_locked()
+
+    manager._interface.up.assert_awaited()
+    manager._routes.add.assert_awaited()
+    assert manager._running is True
+    # Legacy monitor keeps the real route callbacks (no observer flag forced on).
+    kwargs = fake_monitor_cls.call_args.kwargs
+    assert kwargs.get("observer_mode", False) is False
+    # Legacy keeps the real (non no-op) route callbacks.
+    assert kwargs["activate_routes"] is not _noop_route
+    assert kwargs["activate_routes"] == manager._activate_routes
+
+
+async def test_observer_stop_leaves_routes_and_interface_in_place() -> None:
+    manager = _lifecycle_manager(observer_mode=True)
+    manager._running = True
+    manager._monitor = AsyncMock()
+
+    await manager._stop_locked()
+
+    manager._routes.remove.assert_not_called()
+    manager._interface.down.assert_not_called()
+    manager._repo.update_runtime.assert_awaited()  # runtime view still reset
+    assert manager._running is False
+    assert manager._monitor is None
+
+
+async def test_legacy_stop_removes_routes_and_brings_interface_down() -> None:
+    manager = _lifecycle_manager(observer_mode=False)
+    manager._running = True
+    manager._monitor = AsyncMock()
+
+    await manager._stop_locked()
+
+    manager._routes.remove.assert_awaited()
+    manager._interface.down.assert_awaited()
+    assert manager._running is False

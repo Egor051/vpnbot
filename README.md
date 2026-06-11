@@ -647,6 +647,24 @@ These default to the provided sudoers template paths. Changing `WARP_CONFIG_PATH
 | `WARP_STATUS_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-status` | `awg show` helper |
 | `WARP_HELPER_STAGING_DIR` | `/run/vpn-bot/warp` | Private dir for staged uploads |
 | `WARP_PING_TARGET` | `162.159.140.245` | ICMP target the health monitor pings to decide tunnel up/down. Default is a Cloudflare anycast address present in typical WARP `AllowedIPs`. Override if your `AllowedIPs` does not cover this address, otherwise the monitor reports false failures. |
+| `WARP_MONITOR_OBSERVER_MODE` | `true` | When true (default) the bot's health monitor only **observes** the tunnel (probes, DB state, admin notifications) and never touches the interface or routes — those are owned by systemd (`awg-quick@out-warp` + `warp-routes.service`). Set to `false` only to restore the legacy model where the bot itself brings the interface up/down and adds/removes the routes. |
+| `WARP_MONITOR_FAIL_THRESHOLD` | `4` | Consecutive failed probes before the monitor declares the tunnel down and notifies admins. Kept above 1 so a single dropped ICMP probe never raises a false alarm. |
+| `WARP_MONITOR_SUCCESS_THRESHOLD` | `3` | Consecutive successful probes before the monitor declares the tunnel recovered. |
+
+#### Interface/route ownership (observer mode)
+
+In the default observer mode there is a single owner for the `out-warp` interface and its policy routes: **systemd**. The interface is brought up by `awg-quick@out-warp.service` and the policy rules/routes by `warp-routes.service`; the bot's health monitor is a pure observer that reports tunnel state but never runs `awg-quick`, `ip route`, or `ip rule`. This removes the flapping that occurred when both the boot-time `warp-routes.service` and the bot fought over the same `ip rule`/`ip route` entries. Enabling/disabling the WARP toggle in the admin panel now starts/stops **only** the observer monitor — it no longer drops the tunnel or wipes the routes.
+
+Deploy both units (interface first, then the routes that ride on it):
+
+```bash
+# awg-quick resolves "out-warp" to /etc/amnezia/amneziawg/out-warp.conf; the install
+# helper writes /etc/amnezia/out-warp.conf, so point the awg-quick name at it once:
+mkdir -p /etc/amnezia/amneziawg
+ln -sf /etc/amnezia/out-warp.conf /etc/amnezia/amneziawg/out-warp.conf
+systemctl enable --now awg-quick@out-warp
+systemctl enable --now warp-routes.service
+```
 
 ## Deployment Overview
 

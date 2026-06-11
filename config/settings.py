@@ -306,6 +306,17 @@ class Settings:
     warp_routes_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-routes")
     warp_status_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-status")
     warp_helper_staging_dir: Path = Path("/run/vpn-bot/warp")
+    # Observer mode (default): the bot's health monitor only watches the tunnel
+    # (probes, DB state, admin notifications) and NEVER touches the interface or
+    # routes — those are owned by systemd (``awg-quick@out-warp`` +
+    # ``warp-routes.service``). Set to False only to restore the legacy model where
+    # the bot itself brings the interface up/down and adds/removes the routes.
+    warp_monitor_observer_mode: bool = True
+    # Consecutive failed/successful probes before the monitor declares the tunnel
+    # down / back up. The fail threshold is > 1 so a single dropped probe never
+    # raises a false alarm.
+    warp_monitor_fail_threshold: int = 4
+    warp_monitor_success_threshold: int = 3
     health_port: int | None = None
     health_host: str = "127.0.0.1"
     key_expiry_check_interval: int = 1800
@@ -600,5 +611,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         warp_routes_helper_path=Path(_optional("WARP_ROUTES_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-routes")),
         warp_status_helper_path=Path(_optional("WARP_STATUS_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-status")),
         warp_helper_staging_dir=Path(_optional("WARP_HELPER_STAGING_DIR", str(helper_staging_root / "warp"))),
+        warp_monitor_observer_mode=_bool("WARP_MONITOR_OBSERVER_MODE", True),
+        warp_monitor_fail_threshold=_int_range("WARP_MONITOR_FAIL_THRESHOLD", 4, 1, 1000),
+        warp_monitor_success_threshold=_int_range("WARP_MONITOR_SUCCESS_THRESHOLD", 3, 1, 1000),
         bot_language=_choice("BOT_LANGUAGE", "ru", {"ru", "en"}),
     )

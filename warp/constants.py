@@ -15,10 +15,13 @@ PING_INTERFACE = "out-warp"
 # and the routes helper reads. Never hardcode the CIDRs themselves.
 ROUTES_LIST = "/etc/amnezia/out-warp-routes.list"
 
-# Health monitor thresholds.
+# Health monitor thresholds. These are the built-in defaults; production reads the
+# effective values from ``config.settings`` (``WARP_MONITOR_FAIL_THRESHOLD`` /
+# ``WARP_MONITOR_SUCCESS_THRESHOLD``). The fail threshold is intentionally > 1 so a
+# single dropped ICMP probe never trips a false "tunnel down".
 CHECK_INTERVAL = 10     # seconds between tunnel liveness probes
-FAIL_THRESHOLD = 2      # consecutive failures before routes are removed (fallback)
-RECOVER_THRESHOLD = 3   # consecutive successes before routes are restored
+FAIL_THRESHOLD = 4      # consecutive failures before the tunnel is declared down
+RECOVER_THRESHOLD = 3   # consecutive successes before the tunnel is declared back up
 
 # A WireGuard handshake newer than this is treated as tunnel liveness when the
 # fixed ICMP probe target is unreachable (e.g. it is not inside the user's

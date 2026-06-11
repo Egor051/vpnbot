@@ -96,14 +96,49 @@ install -o root -g root -m 0755 scripts/vpnbot-warp-routes  /usr/local/sbin/vpnb
 install -o root -g root -m 0755 scripts/vpnbot-warp-status  /usr/local/sbin/vpnbot-warp-status
 ```
 
-To apply the policy routing automatically at boot (before `vpn-bot.service`),
-install and enable the oneshot unit:
+### Ownership model: systemd owns the interface and routes; the bot only observes
+
+The `out-warp` interface and its policy routes have **one** owner: **systemd**.
+The interface is brought up by the stock `awg-quick@out-warp.service`; the policy
+rules, table-200 default route and per-daemon marks by `warp-routes.service`. The
+bot's WARP health monitor runs in **observer mode** (the default,
+`WARP_MONITOR_OBSERVER_MODE=true`): it pings the tunnel, records state in the DB
+and notifies admins, but it **never** runs `awg-quick`, `ip route` or `ip rule`.
+
+This is deliberate. Previously both `warp-routes.service` (at boot) and the bot's
+monitor managed the same `ip rule`/`ip route` entries; a flaky probe in the bot
+would tear down routes that the service had installed, producing a
+recovered → add → fail → del → down flap every ~30–60 s. With a single owner the
+flapping is gone, and the WARP toggle in the admin panel now starts/stops **only**
+the observer monitor — toggling it off no longer drops the tunnel or wipes the
+routes.
+
+`awg-quick up out-warp` resolves the interface name to
+`/etc/amnezia/amneziawg/out-warp.conf`, whereas the install helper writes the
+canonical config to `/etc/amnezia/out-warp.conf`. Do **not** duplicate the file —
+point the name awg-quick expects at the canonical one with a symlink, so there is
+still a single source of truth (and the bot's pinned sudoers paths stay valid):
 
 ```bash
 install -o root -g root -m 0644 deploy/warp-routes.service /etc/systemd/system/warp-routes.service
 systemctl daemon-reload
-systemctl enable warp-routes.service
+
+# 1. Let awg-quick@out-warp find the installed config by interface name.
+mkdir -p /etc/amnezia/amneziawg
+ln -sf /etc/amnezia/out-warp.conf /etc/amnezia/amneziawg/out-warp.conf
+
+# 2. Bring the interface up via systemd (NOT the bot).
+systemctl enable --now awg-quick@out-warp
+
+# 3. Install the policy routing. warp-routes.service is bound to the interface unit
+#    (Requires=/After=/PartOf=awg-quick@out-warp.service) so routes land only after
+#    the interface is up and are re-applied whenever it restarts.
+systemctl enable --now warp-routes.service
 ```
+
+To restore the legacy model where the bot manages the interface and routes itself
+(not recommended — it reintroduces the two-owner flapping), set
+`WARP_MONITOR_OBSERVER_MODE=false` and leave the systemd units disabled.
 
 Interfaces:
 
