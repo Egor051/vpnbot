@@ -654,6 +654,7 @@ These default to the provided sudoers template paths. Changing `WARP_CONFIG_PATH
 | `WARP_MONITOR_OBSERVER_MODE` | `true` | When true (default) the bot's health monitor only **observes** the tunnel (probes, DB state, admin notifications) and never touches the interface or routes — those are owned by systemd (`awg-quick@out-warp` + `warp-routes.service`). Set to `false` only to restore the legacy model where the bot itself brings the interface up/down and adds/removes the routes. |
 | `WARP_MONITOR_FAIL_THRESHOLD` | `4` | Consecutive failed probes before the monitor declares the tunnel down and notifies admins. Kept above 1 so a single dropped ICMP probe never raises a false alarm. |
 | `WARP_MONITOR_SUCCESS_THRESHOLD` | `3` | Consecutive successful probes before the monitor declares the tunnel recovered. |
+| `WARP_PROXY_EGRESS` | `false` | Route LOCAL proxy egress (Dante/Xray/MTProto) through the WARP tunnel too. When `true` the Xray config writer binds the freedom outbound's egress source to the tunnel IP (`sendThrough` = the config's `[Interface] Address`) so its traffic is diverted into the tunnel by `vpnbot-warp-routes`. Off by default; flip on only as part of the manual [WARP proxy egress](#warp-proxy-egress-masking-the-proxies-outbound-ip) activation runbook. |
 
 #### Interface/route ownership (observer mode)
 
@@ -669,6 +670,67 @@ ln -sf /etc/amnezia/out-warp.conf /etc/amnezia/amneziawg/out-warp.conf
 systemctl enable --now awg-quick@out-warp
 systemctl enable --now warp-routes.service
 ```
+
+### WARP proxy egress (masking the proxies' outbound IP)
+
+By default WARP diverts only the AmneziaWG **client** subnet (`10.0.0.0/24`). The
+local egress proxies — Dante SOCKS5, Xray VLESS, MTProto — keep leaving from the
+host's real IP. Enabling **proxy egress** routes those proxies through the tunnel
+too, so their outbound IP is masked just like the clients'.
+
+A local proxy cannot be matched by source subnet: its packets carry the host's real
+IP, and `MASQUERADE -o out-warp` does **not** rewrite locally-generated,
+fwmark-rerouted packets (they would enter the tunnel with the host IP and WARP would
+drop them). The fix makes the inner source equal to the tunnel IP
+(`[Interface] Address`, e.g. `172.16.0.2`) two ways:
+
+- **Source-bind daemons** (Dante, Xray) bind their egress source to the tunnel IP;
+  `vpnbot-warp-routes` then adds a single `ip rule from <tunnel-ip> lookup <T>` and
+  needs **no** NAT (the source is already correct):
+  - **Xray** — bot-managed. `config.json` is rewritten by the bot, so a hand-added
+    field is lost; instead set `WARP_PROXY_EGRESS=true` and the config writer emits
+    `"sendThrough": "<tunnel-ip>"` on the **freedom outbound** on every write (only
+    the outbound is touched — the hybrid REALITY/XHTTP inbounds are untouched).
+  - **Dante** — *not* bot-managed (a prerequisite). Edit `/etc/danted.conf` and set
+    `external: 172.16.0.2` (the tunnel IP) in place of the WAN device, then install
+    the ordering drop-in `deploy/danted-warp.conf` so it starts after the tunnel is
+    up.
+- **MTProto / mtg** cannot source-bind. `vpnbot-warp-routes` cgroup-marks its unit's
+  egress (`fwmark 0x2`) and adds an **explicit SNAT** to the tunnel IP, inserted
+  *above* the broad `out-warp` MASQUERADE. Because the `-m cgroup --path` match needs
+  the daemon's cgroup to exist, the unit drop-in `deploy/mtproxy-warp.conf` re-asserts
+  it from a privileged `ExecStartPost` once mtg is running.
+
+The tunnel IP is never hardcoded — both `vpnbot-warp-routes` and the Xray writer read
+it from the config's `[Interface] Address`. The `add`/`del` recipe is idempotent and
+safe when a proxy daemon is absent.
+
+> ⚠️ **Activation is a manual, host-routing change** — a mistake that drops SSH means
+> a reboot. Flip from the legacy hand-rolled `warp-clients.service` to the bot/systemd
+> schema deliberately, off-hours, with console access:
+>
+> 1. Back up the working setup (`.WORKING` snapshot).
+> 2. `deploy/setup-nonroot-helper-mode.sh` — refresh the helpers in `/usr/local/sbin`.
+> 3. Re-install the tunnel config so `[Interface]` carries `Table = auto`
+>    (`vpnbot-warp-install`).
+> 4. Set the proxy source-binds: `external: 172.16.0.2` in `danted.conf`;
+>    `WARP_PROXY_EGRESS=true` in `.env` (Xray `sendThrough` is then emitted by the bot).
+> 5. Install the ordering drop-ins:
+>    ```bash
+>    install -m 700 -d /etc/systemd/system/danted.service.d
+>    install -m 644 deploy/danted-warp.conf  /etc/systemd/system/danted.service.d/vpnbot-warp.conf
+>    install -m 700 -d /etc/systemd/system/mtproxy.service.d   # only if MTProto is enabled
+>    install -m 644 deploy/mtproxy-warp.conf /etc/systemd/system/mtproxy.service.d/vpnbot-warp.conf
+>    systemctl daemon-reload
+>    ```
+> 6. `systemctl disable --now warp-clients.service` (the legacy schema), then
+>    `systemctl enable --now awg-quick@out-warp warp-routes.service`.
+> 7. **Reboot** (do not live-restart — the host-routing flip can drop the SSH window),
+>    then verify: the host reports `warp=off` and SSH is alive, while
+>    AWG / Dante / Xray (and MTProto if enabled) report `warp=on`
+>    (`curl -s https://www.cloudflare.com/cdn-cgi/trace`).
+> 8. **Rollback:** re-enable `warp-clients.service`, restore the `.WORKING` snapshot
+>    and reboot.
 
 ## Deployment Overview
 

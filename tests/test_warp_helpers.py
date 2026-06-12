@@ -223,6 +223,85 @@ def test_routes_add_is_idempotent() -> None:
     assert "iptables -C FORWARD" in add_section
 
 
+# ── routes helper: local-proxy egress through the tunnel ──────────────────────
+
+
+def test_routes_tunnel_ip_read_from_interface_address() -> None:
+    """The tunnel IP is read from the config's [Interface] Address, never hardcoded."""
+    text = _routes_text()
+    # Parsed from the config file (default /etc/amnezia/out-warp.conf, overridable).
+    assert 'WARP_CONFIG="${WARP_CONFIG:-/etc/amnezia/out-warp.conf}"' in text
+    assert "Address" in text and "tunnel_ip()" in text
+    # No literal tunnel IP/CIDR is baked in (the bare-IP regex used to validate the
+    # parsed value carries no /mask, so it is not a hardcoded CIDR).
+    stripped = text.replace(CLIENT_SUBNET, "").replace("0.0.0.0/0", "").replace("::/0", "")
+    assert re.search(r"\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}", stripped) is None
+
+
+def test_routes_add_source_bind_proxy_rule() -> None:
+    """A single `from <tunnel-ip>` rule diverts the source-bind proxies (no NAT)."""
+    text = _routes_text()
+    assert 'ip -4 rule add from "$tip" lookup "$t" priority "$PROXY_RULE_PRIO"' in text
+    assert "PROXY_RULE_PRIO=999" in text
+    # Guarded for idempotency.
+    assert 'ip -4 rule show | grep -q "from $tip lookup $t"' in text
+
+
+def test_routes_add_mtproto_fwmark_cgroup_mark_and_snat() -> None:
+    """MTProto: fwmark rule + cgroup-mark + explicit SNAT to the tunnel IP."""
+    text = _routes_text()
+    assert "MTPROTO_MARK=\"0x2\"" in text
+    assert "MTPROTO_RULE_PRIO=998" in text
+    # a. marked packets use the tunnel table.
+    assert 'ip -4 rule add fwmark "$MTPROTO_MARK" lookup "$t" priority "$MTPROTO_RULE_PRIO"' in text
+    # b. cgroup-mark the daemon's own packets by its unit cgroup path.
+    assert 'iptables -t mangle -A OUTPUT -m cgroup --path "$cgpath" -j MARK --set-mark "$MTPROTO_MARK"' in text
+    assert 'cgpath="system.slice/${unit}.service"' in text
+    # c. explicit SNAT to the tunnel IP.
+    assert '-m mark --mark "$MTPROTO_MARK" -j SNAT --to-source "$tip"' in text
+
+
+def test_routes_mtproto_snat_inserted_above_masquerade() -> None:
+    """The SNAT is INSERTED at position 1 (above the appended broad masquerade)."""
+    text = _routes_text()
+    assert 'iptables -t nat -I POSTROUTING 1 -o "$IFACE" -m mark --mark "$MTPROTO_MARK" -j SNAT --to-source "$tip"' in text
+    # The broad out-warp masquerade is APPENDED, so a position-1 insert sits above it.
+    assert 'iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE' in text
+
+
+def test_routes_mtproto_only_when_unit_exists() -> None:
+    """The MTProto step is gated on the unit existing and is safe when it is absent."""
+    text = _routes_text()
+    assert "mtproxy_unit_exists" in text
+    assert 'systemctl cat -- "${1}.service"' in text
+    # The unit name is resolved (default mtproxy), never a hardcoded cgroup literal.
+    assert 'u="${MTPROXY_UNIT-mtproxy}"' in text
+    # cgroup-mark add is non-fatal so a not-yet-running daemon never breaks the host.
+    assert "could not cgroup-mark" in text
+
+
+def test_routes_proxy_subactions_exist() -> None:
+    """proxy-add/proxy-del apply only the proxy egress (no host/client routing)."""
+    text = _routes_text()
+    assert "proxy-add)" in text
+    assert "proxy-del)" in text
+    assert "{add|del|proxy-add|proxy-del}" in text
+    # proxy-add must not strip the host-bypass or run the destructive self-check.
+    proxy_add = text[text.index("proxy-add)") : text.index("proxy-del)")]
+    assert "strip_host_bypass" not in proxy_add
+    assert "self_check" not in proxy_add
+    assert "apply_proxy_routing" in proxy_add
+
+
+def test_routes_add_applies_proxy_routing_before_self_check() -> None:
+    """add diverts proxy egress, then self-checks the host is still direct."""
+    text = _routes_text()
+    add_section = text[text.index("    add)") : text.index("    del)")]
+    i_proxy = add_section.index('apply_proxy_routing "$TABLE"')
+    i_check = add_section.index("self_check")
+    assert i_proxy < i_check
+
+
 # ── routes helper: del is the reverse and is safe ─────────────────────────────
 
 
@@ -290,8 +369,12 @@ _MOCK_IP = textwrap.dedent(
               grep -v "suppress_prefixlength 0" "$IP_RULES" > "$tmp" 2>/dev/null || true
             elif [[ "$spec" == *"not fwmark"* ]]; then
               grep -vE "not.*fwmark" "$IP_RULES" > "$tmp" 2>/dev/null || true
-            elif [[ "$spec" == *"from 10.0.0.0/24"* ]]; then
-              grep -v "from 10.0.0.0/24" "$IP_RULES" > "$tmp" 2>/dev/null || true
+            elif [[ "$spec" == *"fwmark"* ]]; then
+              m="$(awk '{for(i=1;i<=NF;i++) if($i=="fwmark") print $(i+1)}' <<<"$spec")"
+              grep -v "fwmark $m" "$IP_RULES" > "$tmp" 2>/dev/null || true
+            elif [[ "$spec" == *"from "* ]]; then
+              s="$(awk '{for(i=1;i<=NF;i++) if($i=="from") print $(i+1)}' <<<"$spec")"
+              grep -v "from $s" "$IP_RULES" > "$tmp" 2>/dev/null || true
             else
               cp "$IP_RULES" "$tmp" 2>/dev/null || true
             fi
@@ -355,6 +438,20 @@ _MOCK_CURL = textwrap.dedent(
     """
 ).lstrip()
 
+# `systemctl cat <unit>` decides whether the MTProto egress step runs. The mock
+# reports the unit present only when MOCK_MTPROXY_PRESENT=1 (absent by default), so
+# the proxy step is exercised on demand and stays a safe no-op otherwise.
+_MOCK_SYSTEMCTL = textwrap.dedent(
+    r"""
+    #!/bin/bash
+    printf 'systemctl %s\n' "$*" >> "$CMD_LOG"
+    if [[ "${1:-}" == "cat" ]]; then
+      [[ "${MOCK_MTPROXY_PRESENT:-0}" == "1" ]] && exit 0 || exit 1
+    fi
+    exit 0
+    """
+).lstrip()
+
 # Fresh post-`awg-quick up` state: the Table=auto host-bypass rules are present.
 _INITIAL_RULES = textwrap.dedent(
     """\
@@ -384,11 +481,29 @@ def _make_bin(tmp_path: Path) -> Path:
         ("iptables", _MOCK_IPTABLES),
         ("sysctl", _MOCK_SYSCTL),
         ("curl", _MOCK_CURL),
+        ("systemctl", _MOCK_SYSTEMCTL),
     ):
         p = bindir / name
         p.write_text(body, encoding="utf-8")
         p.chmod(0o755)
     return bindir
+
+
+# A WARP config whose [Interface] Address is the tunnel IP the proxy egress is
+# sourced from. The helper reads it at runtime — never hardcoded.
+_WARP_CONFIG = textwrap.dedent(
+    """\
+    [Interface]
+    PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+    Address = 172.16.0.2/32
+    Table = auto
+
+    [Peer]
+    PublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=
+    Endpoint = 162.159.195.1:2408
+    AllowedIPs = 0.0.0.0/0
+    """
+)
 
 
 def _run_routes(
@@ -398,11 +513,19 @@ def _run_routes(
     initial_rules: str = "",
     fwmark: str = "0xca6c",
     endpoint: str = "162.159.195.1",
+    warp_config: str | None = None,
+    mtproxy_present: bool = False,
 ) -> tuple[int, str, str]:
     bindir = _make_bin(tmp_path)
     cmd_log = tmp_path / "cmd.log"
     ip_rules = tmp_path / "rules"
     ip_rules.write_text(initial_rules, encoding="utf-8")
+    # WARP_CONFIG always points inside tmp_path; the file exists only when a fixture
+    # is supplied, so by default tunnel_ip resolves empty and the proxy step is a
+    # no-op (matching a host that has not enabled proxy egress).
+    warp_config_path = tmp_path / "out-warp.conf"
+    if warp_config is not None:
+        warp_config_path.write_text(warp_config, encoding="utf-8")
     env = {
         **os.environ,
         "PATH": f"{bindir}:{os.environ['PATH']}",
@@ -410,6 +533,8 @@ def _run_routes(
         "IP_RULES": str(ip_rules),
         "MOCK_FWMARK": fwmark,
         "MOCK_ENDPOINT": endpoint,
+        "WARP_CONFIG": str(warp_config_path),
+        "MOCK_MTPROXY_PRESENT": "1" if mtproxy_present else "0",
     }
     proc = subprocess.run(
         ["bash", str(SCRIPTS / "vpnbot-warp-routes"), action, "out-warp"],
@@ -496,3 +621,271 @@ def test_functional_add_aborts_when_no_auto_table(tmp_path: Path) -> None:
     rc, _, stderr = _run_routes(tmp_path, "add", initial_rules="", fwmark="off")
     assert rc != 0
     assert "Table = auto" in stderr or "no auto routing table" in stderr
+
+
+# ── routes helper: del reverses the proxy egress ──────────────────────────────
+
+
+def test_routes_del_reverses_proxy_routing() -> None:
+    """teardown removes the proxy egress (it calls remove_proxy_routing)."""
+    text = _routes_text()
+    teardown = text[text.index("teardown_client_routing() {") : text.index("# Self-check")]
+    assert 'remove_proxy_routing "$t"' in teardown
+    # remove_proxy_routing tears down SNAT, cgroup-mark and both policy rules, safely.
+    remove = text[text.index("remove_proxy_routing() {") :]
+    remove = remove[: remove.index("\n}\n")]
+    assert '-m mark --mark "$MTPROTO_MARK" -j SNAT --to-source "$tip"' in remove
+    assert 'iptables -t mangle -D OUTPUT -m cgroup --path "$cgpath"' in remove
+    assert 'ip -4 rule del fwmark "$MTPROTO_MARK"' in remove
+    assert 'ip -4 rule del from "$tip"' in remove
+    # Every deletion swallows "rule not present" so del is safe on a clean system.
+    for line in remove.splitlines():
+        s = line.strip()
+        if s.startswith("iptables") and "-D" in s:
+            assert "2>/dev/null" in s and "true" in s
+
+
+# ── functional: proxy egress against mocked ip/awg/iptables/systemctl ──────────
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_functional_add_applies_proxy_routing(tmp_path: Path) -> None:
+    """With a tunnel IP + an mtproxy unit, add installs the full proxy egress recipe."""
+    rc, log, stderr = _run_routes(
+        tmp_path, "add", initial_rules=_INITIAL_RULES, warp_config=_WARP_CONFIG, mtproxy_present=True
+    )
+    assert rc == 0, stderr
+    # Source-bind proxies: one rule, src == tunnel IP, no NAT, prio above the client rule.
+    assert "ip -4 rule add from 172.16.0.2 lookup 51820 priority 999" in log
+    # MTProto: fwmark rule + cgroup-mark + explicit SNAT to the tunnel IP.
+    assert "ip -4 rule add fwmark 0x2 lookup 51820 priority 998" in log
+    assert (
+        "iptables -t mangle -A OUTPUT -m cgroup --path system.slice/mtproxy.service "
+        "-j MARK --set-mark 0x2" in log
+    )
+    # SNAT INSERTED at position 1 (above the appended broad masquerade).
+    assert (
+        "iptables -t nat -I POSTROUTING 1 -o out-warp -m mark --mark 0x2 "
+        "-j SNAT --to-source 172.16.0.2" in log
+    )
+    assert "iptables -t nat -A POSTROUTING -o out-warp -j MASQUERADE" in log
+    # The host stays direct (self-check passed → rc 0, no rollback).
+    assert "rolling back" not in stderr
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_functional_add_proxy_egress_safe_without_mtproxy(tmp_path: Path) -> None:
+    """No mtproxy unit → only the source-bind rule is added; MTProto step is skipped."""
+    rc, log, stderr = _run_routes(
+        tmp_path, "add", initial_rules=_INITIAL_RULES, warp_config=_WARP_CONFIG, mtproxy_present=False
+    )
+    assert rc == 0, stderr
+    # Source-bind proxies (Dante/Xray) still work...
+    assert "ip -4 rule add from 172.16.0.2 lookup 51820 priority 999" in log
+    # ...but no MTProto cgroup-mark / fwmark rule / SNAT is installed.
+    assert "fwmark 0x2" not in log
+    assert "cgroup" not in log
+    assert "SNAT" not in log
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_functional_add_proxy_routing_is_idempotent(tmp_path: Path) -> None:
+    """Re-running add over already-applied proxy state adds no duplicate ip rules."""
+    rc1, _, err1 = _run_routes(
+        tmp_path, "add", initial_rules=_INITIAL_RULES, warp_config=_WARP_CONFIG, mtproxy_present=True
+    )
+    assert rc1 == 0, err1
+    rules_after = (tmp_path / "rules").read_text(encoding="utf-8")
+    assert rules_after.count("from 172.16.0.2 lookup 51820") == 1
+    assert rules_after.count("fwmark 0x2 lookup 51820") == 1
+
+    bindir = tmp_path / "bin"
+    proc = subprocess.run(
+        ["bash", str(SCRIPTS / "vpnbot-warp-routes"), "add", "out-warp"],
+        env={
+            **os.environ,
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "CMD_LOG": str(tmp_path / "cmd2.log"),
+            "IP_RULES": str(tmp_path / "rules"),
+            "MOCK_FWMARK": "0xca6c",
+            "MOCK_ENDPOINT": "162.159.195.1",
+            "WARP_CONFIG": str(tmp_path / "out-warp.conf"),
+            "MOCK_MTPROXY_PRESENT": "1",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    rules_after2 = (tmp_path / "rules").read_text(encoding="utf-8")
+    assert rules_after2.count("from 172.16.0.2 lookup 51820") == 1
+    assert rules_after2.count("fwmark 0x2 lookup 51820") == 1
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_functional_proxy_del_reverses_and_is_safe(tmp_path: Path) -> None:
+    """proxy-del (and del) remove every proxy rule; safe on a clean system."""
+    applied = (
+        _APPLIED_RULES
+        + "RULE -4 from 172.16.0.2 lookup 51820 priority 999\n"
+        + "RULE -4 fwmark 0x2 lookup 51820 priority 998\n"
+    )
+    work = tmp_path / "applied"
+    work.mkdir()
+    rc, log, err = _run_routes(
+        work, "proxy-del", initial_rules=applied, warp_config=_WARP_CONFIG, mtproxy_present=True
+    )
+    assert rc == 0, err
+    assert (
+        "iptables -t nat -D POSTROUTING -o out-warp -m mark --mark 0x2 "
+        "-j SNAT --to-source 172.16.0.2" in log
+    )
+    assert (
+        "iptables -t mangle -D OUTPUT -m cgroup --path system.slice/mtproxy.service "
+        "-j MARK --set-mark 0x2" in log
+    )
+    assert "ip -4 rule del fwmark 0x2 priority 998" in log
+    assert "ip -4 rule del from 172.16.0.2 priority 999" in log
+    rules_after = (work / "rules").read_text(encoding="utf-8")
+    assert "from 172.16.0.2" not in rules_after
+    assert "fwmark 0x2" not in rules_after
+
+    # proxy-del on a clean system (no config, no rules) is a safe no-op.
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    rc2, _, err2 = _run_routes(clean, "proxy-del", initial_rules="", fwmark="off", endpoint="")
+    assert rc2 == 0, err2
+
+
+# ── Xray config generator: sendThrough emitted only when WARP egress is on ─────
+
+
+def _freedom_config() -> dict:
+    """A hybrid-build config: REALITY vless-in + freedom/blackhole outbounds."""
+    return {
+        "inbounds": [
+            {
+                "tag": "vless-in",
+                "protocol": "vless",
+                "settings": {"clients": []},
+                "streamSettings": {"security": "reality", "realitySettings": {"shortIds": []}},
+            }
+        ],
+        "outbounds": [
+            {"protocol": "freedom", "tag": "direct"},
+            {"protocol": "blackhole", "tag": "block"},
+        ],
+    }
+
+
+def test_xray_send_through_emitted_when_warp_on() -> None:
+    from adapters.xray_config import apply_warp_send_through
+
+    config = _freedom_config()
+    assert apply_warp_send_through(config, "172.16.0.2") is True
+    freedom = config["outbounds"][0]
+    assert freedom["sendThrough"] == "172.16.0.2"
+    # Idempotent: a second pass with the same IP changes nothing.
+    assert apply_warp_send_through(config, "172.16.0.2") is False
+
+
+def test_xray_send_through_absent_when_warp_off() -> None:
+    from adapters.xray_config import apply_warp_send_through
+
+    config = _freedom_config()
+    # Off / non-WARP deploy: nothing is added.
+    assert apply_warp_send_through(config, None) is False
+    assert "sendThrough" not in config["outbounds"][0]
+    # And a previously-set value is stripped when WARP is turned off.
+    config["outbounds"][0]["sendThrough"] = "172.16.0.2"
+    assert apply_warp_send_through(config, None) is True
+    assert "sendThrough" not in config["outbounds"][0]
+
+
+def test_xray_send_through_only_touches_freedom_outbound() -> None:
+    from adapters.xray_config import apply_warp_send_through
+
+    config = _freedom_config()
+    apply_warp_send_through(config, "172.16.0.2")
+    # The blackhole outbound and the (REALITY) inbound are never touched.
+    assert "sendThrough" not in config["outbounds"][1]
+    assert "sendThrough" not in config["inbounds"][0]
+    assert "sendThrough" not in config["inbounds"][0]["streamSettings"]
+    # No outbounds key at all → safe no-op.
+    assert apply_warp_send_through({"inbounds": []}, "172.16.0.2") is False
+
+
+def test_read_tunnel_address_from_interface_address(tmp_path: Path) -> None:
+    from warp.proxy_egress import make_send_through_provider, read_tunnel_address
+
+    conf = tmp_path / "out-warp.conf"
+    conf.write_text(_WARP_CONFIG, encoding="utf-8")
+    assert read_tunnel_address(conf) == "172.16.0.2"
+    # Missing file / IPv6-only address → None (no egress source to bind).
+    assert read_tunnel_address(tmp_path / "nope.conf") is None
+    (tmp_path / "v6.conf").write_text("[Interface]\nAddress = fd00::2/128\n", encoding="utf-8")
+    assert read_tunnel_address(tmp_path / "v6.conf") is None
+
+    # The provider gates on the enabled flag and reads the tunnel IP live.
+    assert make_send_through_provider(enabled=True, config_path=conf)() == "172.16.0.2"
+    assert make_send_through_provider(enabled=False, config_path=conf)() is None
+
+
+async def test_xray_adapter_writes_send_through_only_when_provider_set(tmp_path: Path) -> None:
+    """End-to-end: a config write emits sendThrough when WARP egress is enabled."""
+    import json
+
+    from adapters.backup import BackupAdapter
+    from adapters.clock import ClockProvider
+    from adapters.xray_config import XrayConfigAdapter
+    from models.dto import ShellResult
+
+    class _Systemctl:
+        async def xray_test_config(self, path: Path) -> ShellResult:
+            json.loads(path.read_text(encoding="utf-8"))
+            return ShellResult(("xray", "-test"), 0, "", "")
+
+        async def reload(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "reload", service_name), 0, "", "")
+
+        async def is_active(self, service_name: str) -> ShellResult:
+            return ShellResult(("systemctl", "is-active", service_name), 0, "active", "")
+
+    def _adapter(send_through):
+        return XrayConfigAdapter(
+            config_path=config_path,
+            service_name="xray",
+            apply_mode="reload",
+            inbound_tag="vless-in",
+            allow_restart_on_rollback=False,
+            backup=BackupAdapter(ClockProvider(), keep_last=0),
+            systemctl=_Systemctl(),  # type: ignore[arg-type]
+            warp_send_through=send_through,
+        )
+
+    config_path = tmp_path / "config.json"
+
+    # WARP on: the freedom outbound is bound to the tunnel IP after a client write.
+    config_path.write_text(json.dumps(_freedom_config()), encoding="utf-8")
+    await _adapter(lambda: "172.16.0.2").add_client(
+        uuid_value="11111111-1111-1111-1111-111111111111",
+        email_label="user1",
+        short_id="",
+        flow="",
+        manage_short_id=False,
+    )
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["outbounds"][0]["sendThrough"] == "172.16.0.2"
+    assert "sendThrough" not in written["outbounds"][1]
+
+    # WARP off (no provider): the freedom outbound is left clean.
+    config_path.write_text(json.dumps(_freedom_config()), encoding="utf-8")
+    await _adapter(None).add_client(
+        uuid_value="22222222-2222-2222-2222-222222222222",
+        email_label="user2",
+        short_id="",
+        flow="",
+        manage_short_id=False,
+    )
+    written_off = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "sendThrough" not in written_off["outbounds"][0]

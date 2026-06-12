@@ -9,6 +9,15 @@
 # MASQUERADE and the FORWARD accepts above UFW. The helper is idempotent on add
 # and safe on del, so this unit can be (re)started freely.
 #
+# It also diverts LOCAL proxy egress (Dante/Xray/MTProto) into the tunnel: a
+# `from <tunnel-ip>` rule for the source-bind daemons (Dante `external`, Xray
+# `sendThrough`) and a cgroup-mark + SNAT for MTProto. The MTProto step is applied
+# only when its unit exists; because the cgroup match needs the daemon running, the
+# mtproxy drop-in (deploy/mtproxy-warp.conf) re-asserts it from a privileged
+# ExecStartPost once mtproxy is up. MTPROXY_UNIT below names that unit (override it
+# when MTPROTO_SERVICE_NAME differs from the default "mtproxy"); WARP_CONFIG is the
+# config whose [Interface] Address is read as the tunnel IP.
+#
 # The helper runs directly as root here (no sudo). systemd owns both the
 # interface (awg-quick@out-warp) and these routes; the bot's health monitor is a
 # pure observer and never adds/removes them. Binding to awg-quick@out-warp
@@ -34,6 +43,8 @@ Before=vpn-bot.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+Environment=MTPROXY_UNIT=mtproxy
+Environment=WARP_CONFIG=/etc/amnezia/out-warp.conf
 ExecStart=/usr/local/sbin/vpnbot-warp-routes add out-warp
 ExecStop=/usr/local/sbin/vpnbot-warp-routes del out-warp
 
