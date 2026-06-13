@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **WARP proxy egress: the local proxies (Dante/Xray/MTProto) can now egress
+  through the tunnel too, masking their outbound IP like the AWG clients'** — a
+  local proxy cannot be matched by source subnet (its packets carry the host's real
+  IP, and `MASQUERADE -o out-warp` does not rewrite locally-generated,
+  fwmark-rerouted packets), so the inner source is made equal to the tunnel IP
+  (read from the config's `[Interface] Address`, never hardcoded) two ways:
+  - **Source-bind daemons** (Dante `external`, Xray `sendThrough`) already egress
+    with `src == tunnel-ip`; `vpnbot-warp-routes` adds a single
+    `ip rule from <tunnel-ip> lookup <T>` (priority `999`) and needs **no** NAT.
+  - **MTProto/mtg** cannot source-bind, so it is cgroup-marked (`fwmark 0x2`,
+    priority `998`) and given an **explicit SNAT** to the tunnel IP, inserted
+    *above* the broad `out-warp` MASQUERADE. The step runs only when the mtproxy
+    unit exists and is idempotent/safe when it is absent; the cgroup-match (which
+    needs the running cgroup) is re-asserted from the unit drop-in
+    `deploy/mtproxy-warp.conf` via a privileged `ExecStartPost` once mtg is up.
+  Xray's `config.json` is rewritten by the bot, so the freedom outbound's
+  `"sendThrough": "<tunnel-ip>"` is re-emitted on **every** config write (gated by
+  the new `WARP_PROXY_EGRESS` flag; only the outbound is touched, so the hybrid
+  REALITY/XHTTP inbounds are unaffected, and non-WARP deploys are unchanged). Dante's
+  `external:` is a manual `danted.conf` prerequisite (it is not bot-managed);
+  `deploy/danted-warp.conf` and `deploy/mtproxy-warp.conf` order the daemons after
+  the tunnel is up. `vpnbot-warp-routes` gains idempotent `proxy-add`/`proxy-del`
+  sub-actions. Activation is a deliberate, reboot-guarded manual runbook (see
+  README "WARP proxy egress"); the host is never placed in the tunnel.
+
 ### Changed
 
 - **WARP interface and routes now have a single owner (systemd); the bot's health

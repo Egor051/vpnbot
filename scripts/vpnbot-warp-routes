@@ -27,14 +27,19 @@
 #      adds `MASQUERADE -o out-warp`;
 #   6. inserts the FORWARD accepts ABOVE UFW (`-I FORWARD 1`, both directions),
 #      since UFW's FORWARD policy is DROP;
-#   7. sets rp_filter=2 (loose) on all/out-warp/awg0 for the asymmetric path.
+#   7. sets rp_filter=2 (loose) on all/out-warp/awg0 for the asymmetric path;
+#   8. diverts LOCAL proxy egress (Dante/Xray/MTProto) through the tunnel too —
+#      `from <tunnel-ip>` for the source-bind daemons and a cgroup-mark + explicit
+#      SNAT for MTProto (which cannot source-bind). The tunnel IP is read from the
+#      config's [Interface] Address; the MTProto step runs only when its unit exists.
 # Finally it self-checks (host egress NOT in the tunnel + client subnet routed
 # via out-warp) and rolls back to direct client egress if the check fails.
 #
-# `del` reverses everything and restores the direct WAN MASQUERADE for the
-# client subnet; it is safe to run on a clean system. It never restores the
-# host-bypass — the host must always stay on the direct path. Neither the table
-# number nor the WARP endpoint is hardcoded; both are read at runtime.
+# `del` reverses everything (proxy egress first, then the client path) and restores
+# the direct WAN MASQUERADE for the client subnet; it is safe to run on a clean
+# system and when no proxy daemon is installed. It never restores the host-bypass —
+# the host must always stay on the direct path. Neither the table number, the WARP
+# endpoint nor the tunnel IP is hardcoded; all are read at runtime.
 set -euo pipefail
 
 ACTION="${1:-}"; IFACE="${2:-out-warp}"
@@ -47,6 +52,28 @@ ACTION="${1:-}"; IFACE="${2:-out-warp}"
 CLIENT_IFACE="awg0"
 CLIENT_SUBNET="10.0.0.0/24"
 CLIENT_RULE_PRIO=1000
+
+# ── local-proxy egress through WARP ───────────────────────────────────────────
+# Local egress proxies (Dante SOCKS5, Xray VLESS, MTProto) must ALSO leave through
+# the tunnel, but they cannot be matched by source SUBNET: a locally-generated
+# packet carries the host's real WAN IP, and `MASQUERADE -o out-warp` does NOT
+# rewrite it (verified: masquerade rewrites FORWARDED client traffic but not
+# locally-generated, fwmark-rerouted packets — they entered the tunnel with the
+# host IP and WARP dropped them). The fix makes the inner src equal to the tunnel
+# IP two ways:
+#   * Source-bind daemons (Dante `external`, Xray `sendThrough`) already egress
+#     with src == tunnel IP, so ONE rule diverts them and NO NAT is needed.
+#   * MTProto/mtg cannot source-bind, so it is cgroup-marked and EXPLICITLY SNATed
+#     to the tunnel IP, with the SNAT inserted ABOVE the broad out-warp MASQUERADE.
+# Both priorities sit above the client rule (lower number = higher priority). The
+# tunnel IP is read from the config's [Interface] Address — never hardcoded.
+PROXY_RULE_PRIO=999
+MTPROTO_RULE_PRIO=998
+MTPROTO_MARK="0x2"
+
+# WARP config the install helper writes; its [Interface] Address is the tunnel IP.
+# Overridable so the helper can be exercised against a fixture.
+WARP_CONFIG="${WARP_CONFIG:-/etc/amnezia/out-warp.conf}"
 
 # ── runtime discovery (nothing below is hardcoded) ────────────────────────────
 
@@ -76,6 +103,37 @@ wan_dev() {
 wan_gw() {
     ip -4 route show default 2>/dev/null \
         | awk '/^default/{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}'
+}
+
+# Tunnel IPv4 — the inner WARP address that proxy egress must be sourced from. Read
+# from the config's [Interface] Address (first comma token, mask stripped); never
+# hardcoded. Empty when the config is unreadable or carries no IPv4 Address.
+tunnel_ip() {
+    local line addr
+    [[ -r "$WARP_CONFIG" ]] || return 0
+    line="$(grep -iE '^[[:space:]]*Address[[:space:]]*=' "$WARP_CONFIG" 2>/dev/null | head -n1)"
+    [[ -n "$line" ]] || return 0
+    addr="${line#*=}"          # value after '='
+    addr="${addr%%,*}"         # first comma-separated token (drop any IPv6)
+    addr="${addr//[[:space:]]/}"  # trim whitespace
+    addr="${addr%%/*}"         # strip the CIDR mask
+    [[ "$addr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && printf '%s\n' "$addr"
+}
+
+# systemd unit name of the MTProto proxy (mtg). Defaults to "mtproxy"; override via
+# the MTPROXY_UNIT env when MTPROTO_SERVICE_NAME differs. An empty value disables
+# the MTProto egress step entirely. A trailing ".service" is normalised away.
+mtproxy_unit() {
+    local u="${MTPROXY_UNIT-mtproxy}"
+    printf '%s\n' "${u%.service}"
+}
+
+# True only when the resolved MTProto unit actually exists on this host, so the
+# cgroup-mark recipe is applied solely where mtg is installed (safe otherwise).
+mtproxy_unit_exists() {
+    [[ -n "${1:-}" ]] || return 1
+    command -v systemctl >/dev/null 2>&1 || return 1
+    systemctl cat -- "${1}.service" >/dev/null 2>&1
 }
 
 # ── building blocks (idempotent) ──────────────────────────────────────────────
@@ -113,6 +171,9 @@ teardown_client_routing() {
     ep="$(warp_endpoint || true)"
     dev="$(wan_dev)"
 
+    # 7. Proxy egress (reverse of add: removed before the client routing it rides on).
+    remove_proxy_routing "$t"
+
     # 6. FORWARD accepts (removed first, reverse order).
     iptables -D FORWARD -i "$IFACE" -o "$CLIENT_IFACE" -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -i "$CLIENT_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
@@ -130,6 +191,72 @@ teardown_client_routing() {
     if [[ -n "$ep" ]]; then
         ip route del "$ep/32" 2>/dev/null || true
         [[ -n "$t" ]] && ip route del "$ep/32" table "$t" 2>/dev/null || true
+    fi
+}
+
+# Divert local proxy egress (Dante/Xray/MTProto) through the tunnel. Idempotent and
+# safe when no proxy daemon is installed. Source-bind daemons need only the
+# `from <tunnel-ip>` rule; MTProto additionally needs the cgroup-mark + SNAT.
+apply_proxy_routing() {
+    local t="$1" tip unit cgpath
+    tip="$(tunnel_ip || true)"
+    if [[ -z "$tip" ]]; then
+        echo "WARNING: no tunnel IP in $WARP_CONFIG [Interface] Address; skipping proxy egress" >&2
+        return 0
+    fi
+
+    # Source-bind proxies: src is already the tunnel IP → one rule into table T.
+    # No NAT (the source is correct). Priority sits above the client subnet rule.
+    ip -4 rule show | grep -q "from $tip lookup $t" \
+        || ip -4 rule add from "$tip" lookup "$t" priority "$PROXY_RULE_PRIO"
+
+    # MTProto (mtg) cannot source-bind: cgroup-mark its egress and SNAT to the tunnel
+    # IP. Applied ONLY when the unit exists; a no-op (and safe) otherwise.
+    unit="$(mtproxy_unit)"
+    mtproxy_unit_exists "$unit" || return 0
+    cgpath="system.slice/${unit}.service"
+
+    # a. Marked packets use the tunnel table (priority above the source-bind rule).
+    ip -4 rule show | grep -q "fwmark $MTPROTO_MARK lookup $t" \
+        || ip -4 rule add fwmark "$MTPROTO_MARK" lookup "$t" priority "$MTPROTO_RULE_PRIO"
+
+    # b. Mark the daemon's locally-generated packets by its cgroup. Non-fatal: the
+    #    cgroup only materialises once mtg is running, so a boot-time apply that runs
+    #    before it starts just warns (the unit's drop-in re-applies on start).
+    iptables -t mangle -C OUTPUT -m cgroup --path "$cgpath" -j MARK --set-mark "$MTPROTO_MARK" 2>/dev/null \
+        || iptables -t mangle -A OUTPUT -m cgroup --path "$cgpath" -j MARK --set-mark "$MTPROTO_MARK" 2>/dev/null \
+        || echo "WARNING: could not cgroup-mark $cgpath (is $unit running?); MTProto masking applies once it starts" >&2
+
+    # c. Explicit SNAT to the tunnel IP, INSERTED (-I 1) ABOVE the broad out-warp
+    #    MASQUERADE so the marked packets get the tunnel source before masquerade.
+    iptables -t nat -C POSTROUTING -o "$IFACE" -m mark --mark "$MTPROTO_MARK" -j SNAT --to-source "$tip" 2>/dev/null \
+        || iptables -t nat -I POSTROUTING 1 -o "$IFACE" -m mark --mark "$MTPROTO_MARK" -j SNAT --to-source "$tip"
+}
+
+# Reverse of apply_proxy_routing. Safe on a clean system and when no proxy daemon is
+# present; every deletion swallows "rule not present".
+remove_proxy_routing() {
+    local t="$1" tip unit cgpath
+    tip="$(tunnel_ip || true)"
+    unit="$(mtproxy_unit)"
+    cgpath="system.slice/${unit}.service"
+
+    # MTProto teardown (reverse: SNAT → cgroup-mark → fwmark rule).
+    if [[ -n "$tip" ]]; then
+        iptables -t nat -D POSTROUTING -o "$IFACE" -m mark --mark "$MTPROTO_MARK" -j SNAT --to-source "$tip" 2>/dev/null || true
+    fi
+    if [[ -n "$unit" ]]; then
+        iptables -t mangle -D OUTPUT -m cgroup --path "$cgpath" -j MARK --set-mark "$MTPROTO_MARK" 2>/dev/null || true
+    fi
+    while ip -4 rule show 2>/dev/null | grep -q "fwmark $MTPROTO_MARK lookup"; do
+        ip -4 rule del fwmark "$MTPROTO_MARK" priority "$MTPROTO_RULE_PRIO" 2>/dev/null || break
+    done
+
+    # Source-bind proxy rule.
+    if [[ -n "$tip" ]]; then
+        while ip -4 rule show 2>/dev/null | grep -q "from $tip lookup"; do
+            ip -4 rule del from "$tip" priority "$PROXY_RULE_PRIO" 2>/dev/null || break
+        done
     fi
 }
 
@@ -230,7 +357,10 @@ case "$ACTION" in
             sysctl -w "net.ipv4.conf.$rp.rp_filter=2" >/dev/null 2>&1 || true
         done
 
-        # 8. Verify, and roll back to direct client egress on any failure.
+        # 8. Divert local proxy egress (Dante/Xray/MTProto) through the tunnel too.
+        apply_proxy_routing "$TABLE"
+
+        # 9. Verify, and roll back to direct client egress on any failure.
         if ! self_check "$TABLE"; then
             echo "ERROR: self-check failed — rolling back to direct client egress" >&2
             teardown_client_routing
@@ -241,6 +371,23 @@ case "$ACTION" in
     del)
         teardown_client_routing
         ;;
+    proxy-add)
+        # Apply ONLY the local-proxy egress rules (no host/client routing, no
+        # destructive self-check). Used by the MTProto unit's privileged
+        # ExecStartPost to (re)assert the cgroup-mark once its cgroup exists — the
+        # `-m cgroup --path` match can only be added while the daemon is running.
+        # Idempotent and safe to call repeatedly.
+        TABLE="$(warp_table || true)"
+        if [[ -z "$TABLE" ]]; then
+            echo "ERROR: $IFACE has no auto routing table; cannot apply proxy egress" >&2
+            exit 1
+        fi
+        apply_proxy_routing "$TABLE"
+        ;;
+    proxy-del)
+        # Remove ONLY the local-proxy egress rules; leaves host/client routing intact.
+        remove_proxy_routing "$(warp_table || true)"
+        ;;
     *)
-        echo "Usage: $0 {add|del} <iface>" >&2; exit 1 ;;
+        echo "Usage: $0 {add|del|proxy-add|proxy-del} <iface>" >&2; exit 1 ;;
 esac

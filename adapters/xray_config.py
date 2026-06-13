@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,42 @@ def vless_inbound_present(config_path: Path, inbound_tag: str) -> bool:
     return _vless_inbound_present(config_path, inbound_tag, require_reality=False)
 
 
+# Protocol of the direct-egress outbound that WARP binds to the tunnel IP.
+FREEDOM_OUTBOUND_PROTOCOL = "freedom"
+
+
+def apply_warp_send_through(config: dict[str, Any], tunnel_ip: str | None) -> bool:
+    """Bind every ``freedom`` outbound's egress source to the WARP tunnel IP.
+
+    config.json is rewritten by the bot on every client change, so a hand-added
+    ``sendThrough`` would be lost; the writer re-asserts it here instead. When
+    *tunnel_ip* is a non-empty string, each outbound with ``protocol == "freedom"``
+    gets ``"sendThrough": tunnel_ip`` so Xray sources its direct egress from the
+    tunnel address (which ``vpnbot-warp-routes`` diverts into the tunnel). When
+    *tunnel_ip* is falsy the field is removed again, leaving a disabled/non-WARP
+    deploy clean.
+
+    Only OUTBOUNDS are touched — never inbounds — so the hybrid build (REALITY from
+    ``vless-in``, transport from the XHTTP inbound) is unaffected. Returns whether
+    the config changed.
+    """
+    outbounds = config.get("outbounds")
+    if not isinstance(outbounds, list):
+        return False
+    changed = False
+    for outbound in outbounds:
+        if not isinstance(outbound, dict) or outbound.get("protocol") != FREEDOM_OUTBOUND_PROTOCOL:
+            continue
+        if tunnel_ip:
+            if outbound.get("sendThrough") != tunnel_ip:
+                outbound["sendThrough"] = tunnel_ip
+                changed = True
+        elif "sendThrough" in outbound:
+            del outbound["sendThrough"]
+            changed = True
+    return changed
+
+
 class XrayConfigAdapter:
     def __init__(
         self,
@@ -101,6 +138,7 @@ class XrayConfigAdapter:
         helper_path: Path | None = None,
         helper_staging_dir: Path | None = None,
         require_reality: bool = True,
+        warp_send_through: Callable[[], str | None] | None = None,
     ) -> None:
         if config_path.is_symlink():
             raise XrayConfigError("Xray config path не должен быть symlink. Укажите реальный путь к config.json.")
@@ -134,6 +172,11 @@ class XrayConfigAdapter:
         self.helper_runner = helper_runner
         self.helper_path = helper_path or Path("/usr/local/sbin/vpnbot-xray-apply")
         self.helper_staging_dir = helper_staging_dir or Path("/run/vpn-bot/xray")
+        # Optional provider of the WARP tunnel IP. When set, every config write binds
+        # the freedom outbound's egress source to it (sendThrough); when it yields
+        # None the field is stripped. Left None on non-WARP deploys (outbounds are
+        # then never touched). See ``apply_warp_send_through``.
+        self._warp_send_through = warp_send_through
         if self.apply_mode == "restart":
             logger.warning("XRAY_APPLY_MODE=restart: Xray config changes will restart service %s", self.service_name)
 
@@ -435,6 +478,10 @@ class XrayConfigAdapter:
         return reality
 
     async def _write_temp_config(self, config: dict[str, Any], mode_from: Path) -> Path:
+        # Re-assert (or strip) the WARP egress source-bind on the freedom outbound so
+        # it survives the bot's config rewrites. No-op on non-WARP deploys.
+        if self._warp_send_through is not None:
+            apply_warp_send_through(config, self._warp_send_through())
         content = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
         json.loads(content)
         if self._using_helper():

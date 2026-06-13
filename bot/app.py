@@ -61,6 +61,7 @@ from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
 from services.xray import XrayService
 from warp.manager import WarpManager
+from warp.proxy_egress import make_send_through_provider
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,14 @@ async def _build_app(
         audit=audit_service,
     )
 
+    # When WARP proxy egress is enabled, every Xray config write binds the freedom
+    # outbound's egress source to the tunnel IP (sendThrough) so its traffic is
+    # diverted into the tunnel by vpnbot-warp-routes. Both adapters share it because
+    # they write the same config.json (and therefore the same outbounds).
+    warp_send_through = make_send_through_provider(
+        enabled=settings.warp_proxy_egress_enabled,
+        config_path=settings.warp_config_path,
+    )
     xray_adapter = XrayConfigAdapter(
         config_path=settings.xray_config_path,
         service_name=settings.xray_service_name,
@@ -140,6 +149,7 @@ async def _build_app(
         helper_runner=helper_runner,
         helper_path=settings.xray_apply_helper_path,
         helper_staging_dir=settings.xray_helper_staging_dir,
+        warp_send_through=warp_send_through,
     )
     # Second VLESS transport (XHTTP+REALITY) inbound. Shares the same config.json,
     # service, apply_mode and stats_server; only the inbound_tag differs. Both
@@ -171,6 +181,7 @@ async def _build_app(
             helper_path=settings.xray_apply_helper_path,
             helper_staging_dir=settings.xray_helper_staging_dir,
             require_reality=False,
+            warp_send_through=warp_send_through,
         )
         if vless_inbound_present(settings.xray_config_path, settings.xray_xhttp_inbound_tag)
         else None

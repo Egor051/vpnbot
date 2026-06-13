@@ -526,6 +526,7 @@ visudo -cf /etc/sudoers.d/vpnbot
 | `WARP_MONITOR_OBSERVER_MODE` | `true` | Когда `true` (по умолчанию), health-монитор бота только **наблюдает** за туннелем (пробы, состояние в БД, уведомления админам) и никогда не трогает интерфейс и маршруты — ими владеет systemd (`awg-quick@out-warp` + `warp-routes.service`). Установите `false` только чтобы вернуть устаревшую модель, где бот сам поднимает/опускает интерфейс и добавляет/снимает маршруты. |
 | `WARP_MONITOR_FAIL_THRESHOLD` | `4` | Сколько подряд неудачных проб нужно, прежде чем монитор объявит туннель упавшим и уведомит админов. Держится выше 1, чтобы одна потерянная ICMP-проба не вызывала ложную тревогу. |
 | `WARP_MONITOR_SUCCESS_THRESHOLD` | `3` | Сколько подряд успешных проб нужно, прежде чем монитор объявит туннель восстановленным. |
+| `WARP_PROXY_EGRESS` | `false` | Заворачивать в WARP-туннель и ЛОКАЛЬНЫЙ egress прокси (Dante/Xray/MTProto), а не только клиентов AWG. Когда `true`, генератор конфига Xray привязывает source egress у freedom-outbound к IP туннеля (`sendThrough` = `[Interface] Address` из конфига), и его трафик заворачивается в туннель через `vpnbot-warp-routes`. По умолчанию выключено; включать только в рамках ручного runbook'а [WARP proxy egress](#warp-proxy-egress-маскировка-исходящего-ip-прокси). |
 
 #### Владение интерфейсом и маршрутами (observer mode)
 
@@ -541,6 +542,66 @@ ln -sf /etc/amnezia/out-warp.conf /etc/amnezia/amneziawg/out-warp.conf
 systemctl enable --now awg-quick@out-warp
 systemctl enable --now warp-routes.service
 ```
+
+### WARP proxy egress (маскировка исходящего IP прокси)
+
+По умолчанию WARP заворачивает только **клиентскую** подсеть AmneziaWG
+(`10.0.0.0/24`). Локальные egress-прокси — Dante SOCKS5, Xray VLESS, MTProto —
+продолжают выходить с реального IP хоста. Включение **proxy egress** заворачивает в
+туннель и их, маскируя исходящий IP так же, как у клиентов.
+
+Локальный прокси нельзя матчить по source-подсети: его пакеты несут реальный IP
+хоста, а `MASQUERADE -o out-warp` **не** переписывает locally-generated пакеты после
+fwmark-reroute (они уходили бы в туннель с IP хоста, и WARP их дропал бы). Решение —
+сделать inner-src равным IP туннеля (`[Interface] Address`, напр. `172.16.0.2`) двумя
+способами:
+
+- **Source-bind демоны** (Dante, Xray) биндят source egress на IP туннеля;
+  `vpnbot-warp-routes` добавляет одно правило `ip rule from <tunnel-ip> lookup <T>` и
+  **NAT не нужен** (src уже корректный):
+  - **Xray** — управляется ботом. `config.json` перезаписывается ботом, поэтому ручная
+    правка слетает; вместо неё ставьте `WARP_PROXY_EGRESS=true`, и генератор конфига
+    эмитит `"sendThrough": "<tunnel-ip>"` на **freedom outbound** при каждой записи
+    (трогается только outbound — гибридные REALITY/XHTTP inbound не задеты).
+  - **Dante** — *не* управляется ботом (prerequisite). В `/etc/danted.conf` поставьте
+    `external: 172.16.0.2` (IP туннеля) вместо WAN-устройства и установите drop-in
+    `deploy/danted-warp.conf`, чтобы демон стартовал после подъёма туннеля.
+- **MTProto / mtg** не умеет source-bind. `vpnbot-warp-routes` помечает egress его
+  юнита по cgroup (`fwmark 0x2`) и добавляет **явный SNAT** на IP туннеля, вставкой
+  *перед* широким `out-warp` MASQUERADE. Так как матч `-m cgroup --path` требует
+  существующего cgroup демона, drop-in `deploy/mtproxy-warp.conf` переприменяет
+  правило из привилегированного `ExecStartPost` после старта mtg.
+
+IP туннеля нигде не хардкодится — и `vpnbot-warp-routes`, и генератор Xray читают его
+из `[Interface] Address`. Рецепт `add`/`del` идемпотентен и безопасен при отсутствии
+демона.
+
+> ⚠️ **Активация — это правка host-routing**: ошибка с разрывом SSH = reboot.
+> Переключайтесь с ручной схемы `warp-clients.service` на схему бот/systemd осознанно,
+> в нерабочее время и с доступом к консоли:
+>
+> 1. Сделайте бэкап рабочей конфигурации (снимок `.WORKING`).
+> 2. `deploy/setup-nonroot-helper-mode.sh` — обновите хелперы в `/usr/local/sbin`.
+> 3. Переустановите конфиг туннеля, чтобы в `[Interface]` был `Table = auto`
+>    (`vpnbot-warp-install`).
+> 4. Настройте source-bind прокси: `external: 172.16.0.2` в `danted.conf`;
+>    `WARP_PROXY_EGRESS=true` в `.env` (Xray `sendThrough` тогда эмитит бот).
+> 5. Установите ordering drop-in'ы:
+>    ```bash
+>    install -m 700 -d /etc/systemd/system/danted.service.d
+>    install -m 644 deploy/danted-warp.conf  /etc/systemd/system/danted.service.d/vpnbot-warp.conf
+>    install -m 700 -d /etc/systemd/system/mtproxy.service.d   # только если MTProto включён
+>    install -m 644 deploy/mtproxy-warp.conf /etc/systemd/system/mtproxy.service.d/vpnbot-warp.conf
+>    systemctl daemon-reload
+>    ```
+> 6. `systemctl disable --now warp-clients.service` (старая схема), затем
+>    `systemctl enable --now awg-quick@out-warp warp-routes.service`.
+> 7. **Reboot** (не live-restart — флип host-routing может разорвать SSH-окно), затем
+>    проверьте: хост сообщает `warp=off` и SSH жив, а
+>    AWG / Dante / Xray (и MTProto, если включён) сообщают `warp=on`
+>    (`curl -s https://www.cloudflare.com/cdn-cgi/trace`).
+> 8. **Откат:** заново включите `warp-clients.service`, восстановите снимок `.WORKING`
+>    и перезагрузитесь.
 
 ## Обзор развёртывания
 
