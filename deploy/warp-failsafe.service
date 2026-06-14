@@ -1,0 +1,14 @@
+[Unit]
+Description=WARP boot failsafe — restore direct host egress if the flip broke SSH
+After=warp-routes.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=WARP_IFACE=out-warp
+Environment=WAN_DEV=eth0
+Environment=WARP_FAILSAFE_DELAY=75
+ExecStart=/usr/local/sbin/warp-failsafe
+
+[Install]
+WantedBy=multi-user.target

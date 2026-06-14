@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# vpnbot-warp-split — selective WARP: listed prefixes via out-warp, rest direct via eth0.
+# Runs AFTER vpnbot-warp-routes (full-tunnel setup). Host stays direct — never touches main/SSH.
+set -euo pipefail
+
+IFACE="${WARP_IFACE:-out-warp}"
+WAN_DEV="${WAN_DEV:-eth0}"
+PROXY_SRC="${WARP_PROXY_SRC:-172.16.0.2}"
+CLIENT_NET="${WARP_CLIENT_NET:-10.0.0.0/24}"
+ENDPOINT_IP="${WARP_ENDPOINT_IP:-162.159.195.1}"
+LIST="${WARP_SPLIT_LIST:-/etc/vpnbot/warp-split.list}"
+log(){ echo "[warp-split] $*"; }
+
+fwmark="$(awg show "$IFACE" fwmark 2>/dev/null || true)"
+[ -n "$fwmark" ] && [ "$fwmark" != off ] || { log "no fwmark for $IFACE (tunnel down?) — abort, routing left as-is"; exit 0; }
+T=$(( fwmark ))
+GW="$(ip route show default dev "$WAN_DEV" | awk '/default/{print $3; exit}')"
+[ -n "$GW" ] || { log "no default gw on $WAN_DEV — abort"; exit 0; }
+log "table T=$T iface=$IFACE wan=$WAN_DEV gw=$GW"
+
+case "${1:-apply}" in
+apply)
+  [ -s "$LIST" ] || { log "empty/missing $LIST — abort (refuse to blackhole)"; exit 0; }
+  ip route del default dev "$IFACE" table "$T" 2>/dev/null || true
+  ip route replace "$ENDPOINT_IP/32" via "$GW" dev "$WAN_DEV" table "$T"
+  while read -r pfx; do
+    pfx="${pfx%%#*}"; pfx="${pfx//[[:space:]]/}"
+    [ -n "$pfx" ] || continue
+    case "$pfx" in 0.0.0.0/0|::/0) continue;; esac
+    ip route replace "$pfx" dev "$IFACE" table "$T"
+  done < "$LIST"
+  log "table T is now selective ($(grep -cvE '^\s*(#|$)' "$LIST") prefixes)"
+  for SRC in "$CLIENT_NET" "$PROXY_SRC"; do
+    iptables -t nat -C POSTROUTING -s "$SRC" -o "$WAN_DEV" -j MASQUERADE 2>/dev/null \
+      || iptables -t nat -A POSTROUTING -s "$SRC" -o "$WAN_DEV" -j MASQUERADE
+  done
+  iptables -C FORWARD -i awg0 -o "$WAN_DEV" -j ACCEPT 2>/dev/null \
+    || iptables -I FORWARD 1 -i awg0 -o "$WAN_DEV" -j ACCEPT
+  iptables -C FORWARD -i "$WAN_DEV" -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+    || iptables -I FORWARD 1 -i "$WAN_DEV" -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+  log "selective WARP applied"
+  ;;
+revert)
+  ip route replace default dev "$IFACE" table "$T"
+  iptables -t nat -D POSTROUTING -s "$CLIENT_NET" -o "$WAN_DEV" -j MASQUERADE 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -s "$PROXY_SRC"  -o "$WAN_DEV" -j MASQUERADE 2>/dev/null || true
+  log "reverted to full-tunnel (default dev $IFACE restored in table $T)"
+  ;;
+*) echo "usage: $0 {apply|revert}" >&2; exit 2;;
+esac

@@ -603,6 +603,87 @@ IP туннеля нигде не хардкодится — и `vpnbot-warp-rou
 > 8. **Откат:** заново включите `warp-clients.service`, восстановите снимок `.WORKING`
 >    и перезагрузитесь.
 
+### Активация WARP selective-split и boot-failsafe
+
+Selective-split направляет через WARP только префиксы из `/etc/vpnbot/warp-split.list`;
+остальной трафик выходит напрямую через `eth0`. Boot-failsafe предотвращает блокировку
+SSH после перезагрузки при неправильно настроенном туннеле.
+
+Оба компонента — **аддитивный слой** поверх full-tunnel базы (`warp-routes.service`).
+`AllowedIPs = 0.0.0.0/0` остаётся в `out-warp.conf` — split-маршрутизация работает
+полностью через routing table, а не через WireGuard.
+
+**Предусловие:** `awg-quick@out-warp` и `warp-routes.service` уже включены и
+протестированы (full-tunnel работает).
+
+#### Runbook активации
+
+1. **Базовый full-tunnel** — включите туннель, если ещё не запущен:
+
+   ```bash
+   sudo systemctl enable --now awg-quick@out-warp warp-routes.service
+   ```
+
+2. **Установка нового слоя** (запускать из корня репозитория от root):
+
+   ```bash
+   sudo bash deploy/setup-nonroot-helper-mode.sh
+   ```
+
+   Скрипт устанавливает `vpnbot-warp-split`, `warp-failsafe`, их unit-файлы,
+   перезагружает systemd и обновляет danted drop-in (удаляет устаревший
+   `10-after-warp.conf`). Unit'ы **не** включаются автоматически.
+
+3. *(Опционально)* **Включение selective-split:**
+
+   ```bash
+   sudo cp deploy/warp-split.list.example /etc/vpnbot/warp-split.list
+   # Отредактируйте список — добавьте/уберите CIDR. Широкие диапазоны
+   # предпочтительнее /32 (round-robin CDN не ловится /32).
+   sudo systemctl enable --now vpnbot-warp-split
+   ```
+
+4. **Включение boot-failsafe** (рекомендуется всегда):
+
+   ```bash
+   sudo systemctl enable warp-failsafe
+   ```
+
+5. **Reboot** и проверка:
+
+   ```bash
+   # Исходящий egress хоста должен быть прямым (eth0), не через туннель
+   ip route get 1.1.1.1          # → dev eth0
+
+   # Таблица selective routing (T = decimal от `awg show out-warp fwmark`):
+   T=$(printf '%d\n' "$(awg show out-warp fwmark)")
+   ip route show table "$T"      # нет 'default dev out-warp'; видны префиксы
+
+   # Клиентский трафик: listed-префикс → out-warp, не-listed → eth0
+   ip route get 91.108.4.1  iif awg0   # → dev out-warp
+   ip route get 8.8.8.8     iif awg0   # → dev eth0 (если 8.8.8.0/24 не в списке)
+
+   # Прокси-сервисы работают
+   sudo systemctl is-active danted
+   ```
+
+6. **Убедитесь в росте WARP transfer** на Telegram-фетче:
+
+   ```bash
+   awg show out-warp transfer
+   # выполните любой запрос через Telegram; перепроверьте — счётчики rx/tx должны вырасти
+   ```
+
+   > **Примечание:** `AllowedIPs` в `out-warp.conf` остаётся `0.0.0.0/0` — split
+   > реализован полностью через таблицу маршрутизации.
+
+#### Откат
+
+- **Только selective-split:** `sudo systemctl disable --now vpnbot-warp-split` +
+  reboot → возврат к full-tunnel (весь клиентский трафик идёт через WARP).
+- **Полный откат WARP:** `sudo systemctl disable --now warp-routes awg-quick@out-warp`
+  + reboot.
+
 ## Обзор развёртывания
 
 > ⚠️ **ВАЖНО — `deploy/vpn-bot.service` является авторитетным источником:**

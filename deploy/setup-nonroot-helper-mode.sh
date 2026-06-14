@@ -75,6 +75,30 @@ install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-iface" /u
 install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-routes" /usr/local/sbin/vpnbot-warp-routes
 install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-status" /usr/local/sbin/vpnbot-warp-status
 
+# WARP post-activation layer: selective-split and boot-failsafe.
+# These are additive on top of the full-tunnel base (warp-routes). They are
+# installed unconditionally so a git-reset deploy keeps /usr/local/sbin in sync,
+# but NOT auto-enabled — the operator enables them via the runbook.
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-split" /usr/local/sbin/vpnbot-warp-split
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/warp-failsafe" /usr/local/sbin/warp-failsafe
+install -o root -g root -m 0644 deploy/vpnbot-warp-split.service /etc/systemd/system/vpnbot-warp-split.service
+install -o root -g root -m 0644 deploy/warp-failsafe.service /etc/systemd/system/warp-failsafe.service
+systemctl daemon-reload
+
+# Danted WARP drop-in: install the current version and remove the legacy
+# 10-after-warp.conf (After=warp-clients.service, now disabled).
+install -d -o root -g root -m 0755 /etc/systemd/system/danted.service.d
+install -o root -g root -m 0644 deploy/danted-warp.conf \
+  /etc/systemd/system/danted.service.d/vpnbot-warp.conf
+if [[ -f /etc/systemd/system/danted.service.d/10-after-warp.conf ]]; then
+  rm -f /etc/systemd/system/danted.service.d/10-after-warp.conf
+  echo "Removed stale danted drop-in 10-after-warp.conf."
+fi
+
+# /etc/vpnbot/warp-split.list is deployment-specific — the operator creates it
+# from deploy/warp-split.list.example (see runbook). Never overwrite the live file.
+install -d -o root -g root -m 0755 /etc/vpnbot
+
 if [[ -f "${XRAY_CONFIG_PATH}" ]]; then
   chown nobody:"${BOT_GROUP}" "${XRAY_CONFIG_PATH}"
   chmod 0640 "${XRAY_CONFIG_PATH}"
