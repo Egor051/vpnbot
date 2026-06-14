@@ -95,6 +95,21 @@ if [[ -f /etc/systemd/system/danted.service.d/10-after-warp.conf ]]; then
   echo "Removed stale danted drop-in 10-after-warp.conf."
 fi
 
+# Legacy WARP artifacts: the interface and its files were renamed tg-warp →
+# out-warp. The pre-rename installer left /etc/amnezia/tg-warp.conf (carrying a
+# PrivateKey) and tg-warp-routes.list orphaned on servers upgraded across the
+# rename. Remove them so the stale key does not linger. The active out-warp.conf
+# (+ its amneziawg/out-warp.conf symlink and .WORKING backup) and out-warp-routes.list
+# are never touched.
+if [[ -f /etc/amnezia/tg-warp.conf ]]; then
+  rm -f /etc/amnezia/tg-warp.conf
+  echo "Removed stale legacy WARP config tg-warp.conf."
+fi
+if [[ -f /etc/amnezia/tg-warp-routes.list ]]; then
+  rm -f /etc/amnezia/tg-warp-routes.list
+  echo "Removed stale legacy WARP routes list tg-warp-routes.list."
+fi
+
 # /etc/vpnbot/warp-split.list is deployment-specific — the operator creates it
 # from deploy/warp-split.list.example (see runbook). Never overwrite the live file.
 install -d -o root -g root -m 0755 /etc/vpnbot

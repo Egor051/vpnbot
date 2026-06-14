@@ -108,6 +108,30 @@ def test_sudoers_example_grants_only_fixed_helpers() -> None:
     assert re.search(r"vpn-bot\s+ALL=\(root\)\s+NOPASSWD:", text)
 
 
+def test_setup_removes_stale_legacy_tg_warp_files() -> None:
+    """The WARP interface/files were renamed tg-warp → out-warp; servers upgraded
+    across the rename keep orphaned tg-warp.conf (with a stale key) and
+    tg-warp-routes.list. The setup script removes both idempotently and must never
+    touch the active out-warp files."""
+    text = _read("deploy/setup-nonroot-helper-mode.sh")
+
+    # Both legacy files are removed, each guarded by an -f existence check so the
+    # cleanup is idempotent (no error when the file is already gone).
+    assert "if [[ -f /etc/amnezia/tg-warp.conf ]]; then" in text
+    assert "rm -f /etc/amnezia/tg-warp.conf" in text
+    assert "if [[ -f /etc/amnezia/tg-warp-routes.list ]]; then" in text
+    assert "rm -f /etc/amnezia/tg-warp-routes.list" in text
+
+    # Invariant: no rm command may target the active out-warp path. Scan only the
+    # executable lines — comments legitimately mention out-warp.conf for context.
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if stripped.startswith("rm "):
+            assert "out-warp" not in stripped, f"setup must not rm active out-warp file: {line!r}"
+
+
 def test_create_user_script_is_non_destructive_scaffold() -> None:
     text = _read("deploy/create-vpn-bot-user.sh")
 
