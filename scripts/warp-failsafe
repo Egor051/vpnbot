@@ -1,0 +1,28 @@
+#!/bin/bash
+# Boot watchdog: если flip оставил собственный egress хоста в туннеле (единственный
+# способ убить SSH), рушим туннель-роутинг → хост падает обратно на eth0 → SSH
+# возвращается. No-op, когда хост здоров (egress через eth0).
+set +e
+WARP_IFACE="${WARP_IFACE:-out-warp}"
+WAN_DEV="${WAN_DEV:-eth0}"
+WARP_FAILSAFE_DELAY="${WARP_FAILSAFE_DELAY:-75}"
+
+sleep "$WARP_FAILSAFE_DELAY"   # дать awg-quick@out-warp + warp-routes устаканиться
+route="$(ip route get 1.1.1.1 2>/dev/null)"
+if echo "$route" | grep -qw "dev $WAN_DEV"; then
+    logger -t warp-failsafe "host egress via $WAN_DEV — healthy, no action"
+    exit 0
+fi
+logger -t warp-failsafe "host egress NOT via $WAN_DEV ($route) — reverting to restore SSH"
+systemctl stop warp-routes.service 2>/dev/null
+systemctl stop "awg-quick@${WARP_IFACE}.service" 2>/dev/null
+awg-quick down "$WARP_IFACE" 2>/dev/null
+ip link del "$WARP_IFACE" 2>/dev/null
+for t in $(ip -4 rule show 2>/dev/null | grep -oE 'lookup [0-9]+' | awk '{print $2}' | sort -u); do
+    ip -4 rule del not fwmark "$t" table "$t" 2>/dev/null
+    ip -6 rule del not fwmark "$t" table "$t" 2>/dev/null
+done
+ip -4 rule del table main suppress_prefixlength 0 2>/dev/null
+ip -6 rule del table main suppress_prefixlength 0 2>/dev/null
+logger -t warp-failsafe "revert complete — host should be reachable on $WAN_DEV"
+exit 0

@@ -732,6 +732,83 @@ safe when a proxy daemon is absent.
 > 8. **Rollback:** re-enable `warp-clients.service`, restore the `.WORKING` snapshot
 >    and reboot.
 
+### WARP selective-split and boot-failsafe activation
+
+The selective-split layer routes only the prefixes in `/etc/vpnbot/warp-split.list`
+through WARP; everything else exits directly via `eth0`. The boot-failsafe watchdog
+prevents a misconfigured tunnel from locking out SSH after a reboot.
+
+Both features are **additive** on top of the full-tunnel base (`warp-routes.service`).
+`AllowedIPs = 0.0.0.0/0` stays in `out-warp.conf` — split routing is handled entirely
+in the routing table, not in WireGuard.
+
+**Prerequisites:** `awg-quick@out-warp` and `warp-routes.service` already enabled and
+tested (full-tunnel working).
+
+#### Activation runbook
+
+1. **Base full-tunnel** — enable and start the tunnel if not already running:
+
+   ```bash
+   sudo systemctl enable --now awg-quick@out-warp warp-routes.service
+   ```
+
+2. **Install the new layer** (run from the repo root as root):
+
+   ```bash
+   sudo bash deploy/setup-nonroot-helper-mode.sh
+   ```
+
+   This installs `vpnbot-warp-split`, `warp-failsafe`, their unit files, reloads
+   systemd, and updates the danted drop-in (removing the stale `10-after-warp.conf`).
+   It does NOT auto-enable either unit.
+
+3. *(Optional)* **Enable selective-split:**
+
+   ```bash
+   sudo cp deploy/warp-split.list.example /etc/vpnbot/warp-split.list
+   # Edit the list — add/remove CIDRs to taste. Broad ranges preferred over /32s.
+   sudo systemctl enable --now vpnbot-warp-split
+   ```
+
+4. **Enable the boot-failsafe** (always recommended):
+
+   ```bash
+   sudo systemctl enable warp-failsafe
+   ```
+
+5. **Reboot** and verify:
+
+   ```bash
+   # Host egress must be direct (eth0), not through the tunnel
+   ip route get 1.1.1.1          # → dev eth0
+
+   # Selective routing table (T = decimal of `awg show out-warp fwmark`):
+   T=$(printf '%d\n' "$(awg show out-warp fwmark)")
+   ip route show table "$T"      # no 'default dev out-warp'; prefixes visible
+
+   # Client traffic: listed prefix → out-warp, non-listed → eth0
+   ip route get 91.108.4.1  iif awg0   # → dev out-warp
+   ip route get 8.8.8.8     iif awg0   # → dev eth0 (if 8.8.8.0/24 not listed)
+
+   # Proxy services running
+   sudo systemctl is-active danted
+   ```
+
+6. **Confirm WARP transfer increases** on a Telegram fetch:
+
+   ```bash
+   awg show out-warp transfer
+   # fetch any Telegram content; re-check — rx/tx counters must grow
+   ```
+
+#### Rollback
+
+- **Selective-split only:** `sudo systemctl disable --now vpnbot-warp-split` then
+  reboot → returns to full-tunnel (every client prefix exits via WARP again).
+- **Full WARP rollback:** `sudo systemctl disable --now warp-routes awg-quick@out-warp`
+  then reboot.
+
 ## Deployment Overview
 
 > ⚠️ **IMPORTANT — `deploy/vpn-bot.service` is the authoritative source:**

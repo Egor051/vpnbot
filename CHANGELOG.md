@@ -8,6 +8,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **WARP post-activation layer: selective-split and boot-failsafe** — two additive
+  scripts and systemd units on top of the full-tunnel base from #160, codified from
+  the server-tested configuration:
+  - `scripts/vpnbot-warp-split` / `deploy/vpnbot-warp-split.service` — selective
+    routing: instead of a single `default dev out-warp` in the tunnel table, the
+    script removes that default and adds one `ip route replace <prefix> dev out-warp
+    table T` per line in `/etc/vpnbot/warp-split.list`; unlisted traffic egresses
+    directly via `eth0`. An explicit `/32` anti-loop pin for the WARP endpoint is
+    always installed in table T. Direct-path NAT (`MASQUERADE -s <client_net|proxy>
+    -o eth0`) and the awg0↔eth0 FORWARD rules are added on apply and removed on
+    revert. The script is safe-by-default: it aborts without touching any routes when
+    the list is empty/missing or the fwmark is off (`tunnel down?`). `ip rule` entries
+    remain owned by `warp-routes` — this script never touches them. The unit is
+    `Type=oneshot RemainAfterExit PartOf=warp-routes.service` and requires the list
+    file to exist (`ConditionPathExists`). Rollback to full-tunnel: `systemctl disable
+    --now vpnbot-warp-split` + reboot.
+  - `scripts/warp-failsafe` / `deploy/warp-failsafe.service` — boot watchdog: waits
+    `WARP_FAILSAFE_DELAY` seconds (default 75) for the tunnel to settle, then checks
+    whether host egress is on `eth0`; if not (the flip broke SSH), it stops
+    `warp-routes.service` + `awg-quick@out-warp.service`, brings the interface down,
+    and strips the host-bypass rules so the host falls back to the direct path and SSH
+    returns. No-op when healthy (logs "healthy, no action"). `Type=oneshot
+    After=warp-routes.service`.
+  - `deploy/warp-split.list.example` — representative list with Telegram, Google,
+    GitHub, and Cloudflare broad ranges; comments explain why narrow `/32` picks miss
+    round-robin CDNs and why the WARP endpoint must not be listed.
+  - `deploy/setup-nonroot-helper-mode.sh` updated: installs both scripts to
+    `/usr/local/sbin`, both unit files to `/etc/systemd/system`, reloads daemon,
+    manages the danted drop-in (`vpnbot-warp.conf`), removes the stale
+    `10-after-warp.conf`, and creates `/etc/vpnbot/` — but does NOT auto-enable
+    either unit (operator enables via the WARP activation runbook in README).
+  All env-knobs (`WARP_IFACE`, `WAN_DEV`, `WARP_PROXY_SRC`, `WARP_CLIENT_NET`,
+  `WARP_ENDPOINT_IP`, `WARP_SPLIT_LIST`, `WARP_FAILSAFE_DELAY`) are the only
+  points of configuration. Code from #160 is untouched.
+
 - **WARP proxy egress: the local proxies (Dante/Xray/MTProto) can now egress
   through the tunnel too, masking their outbound IP like the AWG clients'** — a
   local proxy cannot be matched by source subnet (its packets carry the host's real

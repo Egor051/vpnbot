@@ -1,0 +1,57 @@
+# warp-split.list — prefixes to route via WARP (listed = out-warp, unlisted = eth0).
+#
+# FORMAT
+#   One IPv4 CIDR per line. Blank lines and # comments are ignored.
+#   Use broad provider ranges, NOT individual /32s: Telegram, Google, and similar
+#   CDNs round-robin across thousands of IPs; a hand-picked /32 will miss most of
+#   them. A /32 for a stable single-IP endpoint is fine.
+#
+# ENDPOINT EXCLUSION
+#   Do NOT add 162.159.195.1/32 (the WARP endpoint itself) — vpnbot-warp-split
+#   always installs an explicit /32 route for the endpoint via eth0 in the routing
+#   table, regardless of what is listed here. Adding it here would be a no-op.
+#
+# APPLYING CHANGES
+#   After editing the live list restart the service to re-apply:
+#     systemctl restart vpnbot-warp-split
+#   Verify: ip route show table <T>   (T = fwmark from `awg show out-warp fwmark`)
+
+# ── Telegram ─────────────────────────────────────────────────────────────────
+# Core DC address ranges (authoritative allocation, stable)
+91.108.4.0/22
+91.108.8.0/22
+91.108.12.0/22
+91.108.16.0/22
+91.108.20.0/22
+91.108.56.0/22
+149.154.160.0/20
+# CDN and media delivery (Cloudflare-hosted Telegram assets)
+91.105.192.0/23
+95.161.64.0/20
+
+# ── Google ────────────────────────────────────────────────────────────────────
+# Broad Google/GCP announced ranges — cover Search, YouTube, Drive, Meet, etc.
+# Narrow /32 picks will miss round-robin; prefer /16 or wider.
+142.250.0.0/15
+172.217.0.0/16
+216.58.192.0/19
+35.190.0.0/15
+34.64.0.0/10
+8.8.8.0/24
+8.8.4.0/24
+
+# ── GitHub ────────────────────────────────────────────────────────────────────
+185.199.108.0/22
+140.82.112.0/20
+192.30.252.0/22
+
+# ── Cloudflare ────────────────────────────────────────────────────────────────
+# Cloudflare CDN (1.1.1.1 DNS, Workers, Pages, broad CDN traffic).
+# Note: the WARP endpoint 162.159.195.1 lives inside 162.159.192.0/22 —
+# vpnbot-warp-split pins it to eth0 via an anti-loop /32, so including the
+# broader block here is safe and routes the rest via WARP.
+104.16.0.0/12
+162.158.0.0/15
+162.159.0.0/16
+172.64.0.0/13
+198.41.128.0/17
