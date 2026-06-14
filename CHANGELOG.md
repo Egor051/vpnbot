@@ -188,6 +188,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `VLESS (HTTP)` keys exist in the DB but their XHTTP inbound is absent, so the
   operator knows they are unmanageable until the inbound is restored.
 
+### Removed
+
+- **Legacy `tg-warp` cleanup** — the WARP interface and its on-disk files were
+  renamed `tg-warp` → `out-warp` (the active path is `awg-quick@out-warp` + the
+  `vpnbot-warp-routes`/`-split`/`warp-failsafe` layer from #160/#161, and every
+  repo helper already targets `out-warp`). Servers upgraded across that rename
+  still carried orphaned `/etc/amnezia/tg-warp.conf` (with a stale `PrivateKey`)
+  and `tg-warp-routes.list`. `deploy/setup-nonroot-helper-mode.sh` now removes
+  both with an idempotent `rm -if-exists` (modelled on the existing danted
+  `10-after-warp.conf` cleanup). The active `out-warp.conf` (+ its
+  `amneziawg/out-warp.conf` symlink and `.WORKING` backup) and `out-warp-routes.list`
+  are never touched. The remaining `tg-warp` mentions in this changelog are
+  historical and intentionally kept.
+
 ## [1.3.0] — 2026-06-04
 
 ### Added
