@@ -66,4 +66,11 @@ Cmnd_Alias VPNBOT_WARP = \
     /usr/local/sbin/vpnbot-warp-routes del out-warp, \
     /usr/local/sbin/vpnbot-warp-status out-warp
 
-vpn-bot ALL=(root) NOPASSWD: VPNBOT_SOCKS5, VPNBOT_XRAY, VPNBOT_AWG, VPNBOT_MTPROTO, VPNBOT_WARP
+# WARP selective-split list management. The helper reads the new list from stdin,
+# validates every CIDR (python3 ipaddress), writes /etc/vpnbot/warp-split.list
+# atomically, and restarts vpnbot-warp-split. No arguments beyond the binary
+# itself — the list is piped via stdin, so no path wildcards are needed here.
+Cmnd_Alias VPNBOT_WARP_SPLIT = \
+    /usr/local/sbin/vpnbot-warp-split-apply
+
+vpn-bot ALL=(root) NOPASSWD: VPNBOT_SOCKS5, VPNBOT_XRAY, VPNBOT_AWG, VPNBOT_MTPROTO, VPNBOT_WARP, VPNBOT_WARP_SPLIT

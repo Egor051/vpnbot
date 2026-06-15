@@ -22,6 +22,9 @@ WARP_HELPERS = (
     Path("/usr/local/sbin/vpnbot-warp-iface"),
     Path("/usr/local/sbin/vpnbot-warp-routes"),
     Path("/usr/local/sbin/vpnbot-warp-status"),
+    # Split-list management helper (reads new list from stdin, writes atomically,
+    # restarts vpnbot-warp-split). Required when bot-controlled split is in use.
+    Path("/usr/local/sbin/vpnbot-warp-split-apply"),
 )
 FORBIDDEN_WRITE_PATHS = (
     "/etc/passwd",

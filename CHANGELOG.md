@@ -8,6 +8,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **WARP split-list bot control** — admins can now manage the selective-split
+  prefix list (`/etc/vpnbot/warp-split.list`) directly from Telegram without
+  touching the server. Four new commands (superadmin-only):
+
+  - `/warp_split_add <cidr…>` — add one or more IPv4 CIDRs; tokens may be
+    separated by spaces, commas or newlines. Mask is mandatory (bare IPs are
+    rejected with a `/32` hint). Host bits are silently corrected and the
+    normalisation is reported (`1.2.3.4/24 → 1.2.3.0/24`). Guard-list rejects:
+    `0.0.0.0/0` (suggests full-tunnel toggle), AWG client subnet (from
+    `AWG_NETWORK`), WARP tunnel range `172.16.0.0/12`, loopback, link-local,
+    multicast, server's own `eth0` subnet (runtime-detected). Duplicates are
+    skipped. The entire batch is applied in one helper call (one service restart).
+
+  - `/warp_split_del <cidr…>` — remove one or more CIDRs. Refuses if removal
+    would empty the list (suggests using the WARP toggle or a sentinel prefix).
+
+  - `/warp_split_list` — show current list sorted by network address + count.
+
+  - `/warp_split_reload` — re-apply the current file without changing it
+    (recovery after manual edits or after a service restart failure).
+
+  **Architecture:** the bot is a thin controller — it reads the list file
+  directly (0644) and writes exclusively via the new privileged helper
+  `vpnbot-warp-split-apply` (root:root 0755, sudoers grant scoped to that
+  binary only). The bot never calls `ip`/`iptables`/`awg-quick`.
+
+  New components:
+  - `scripts/vpnbot-warp-split-apply` — privileged helper: reads CIDR list
+    from stdin, validates every non-comment line with `python3 ipaddress`
+    (IPv4-only, mask required, strict CIDR), writes `/etc/vpnbot/warp-split.list`
+    atomically (temp + `mv` rename, same fs), restarts `vpnbot-warp-split`.
+    Empty stdin or any invalid line → `exit 1`, nothing written.
+  - `warp/split_manager.py` — `WarpSplitManager` class: reads list, validates
+    tokens (normalisation + guards), computes add/del diffs, calls the helper
+    via `PrivilegedHelperRunner` (always sudo).
+  - `bot/handlers/admin_warp_split.py` — four command handlers.
+  - `deploy/sudoers.d/vpnbot.example` updated: new `VPNBOT_WARP_SPLIT` alias
+    scoped to `/usr/local/sbin/vpnbot-warp-split-apply` (no wildcards needed —
+    list goes over stdin).
+  - `deploy/setup-nonroot-helper-mode.sh` updated: installs the new helper to
+    `/usr/local/sbin/`.
+  - `deploy/check-nonroot-helper-mode.py` updated: `vpnbot-warp-split-apply`
+    added to `WARP_HELPERS` so the preflight checker flags a missing install.
+  - Two new settings: `WARP_SPLIT_LIST_PATH` (default
+    `/etc/vpnbot/warp-split.list`) and `WARP_SPLIT_APPLY_HELPER_PATH` (default
+    `/usr/local/sbin/vpnbot-warp-split-apply`).
+  - `pyproject.toml`: `pythonpath = ["."]` added to `[tool.pytest.ini_options]`
+    so project-module imports work when running `pytest` directly (not only via
+    `python -m pytest`).
+
+  **Tests** (`tests/test_warp_split_bot_control.py`, 52 cases):
+  - CIDR parsing/normalisation/guard/dedup matrix
+  - Helper: valid list, empty stdin abort, garbage-line abort, IPv6 abort, bare-IP
+    abort, comments/blanks pass-through, atomicity (no temp file leaked), overwrite
+  - Sudoers: grant present, NOPASSWD set, no wildcards on the helper
+  - check-nonroot expects the helper
+  - Invariant: no `subprocess.run(["ip"…])` in `bot/` or `warp/` code
+
 - **WARP post-activation layer: selective-split and boot-failsafe** — two additive
   scripts and systemd units on top of the full-tunnel base from #160, codified from
   the server-tested configuration:

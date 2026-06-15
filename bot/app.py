@@ -22,7 +22,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_dashboard, admin_modules, admin_warp, callbacks, common, keys, proxy, start
+from bot.handlers import admin, admin_dashboard, admin_modules, admin_warp, admin_warp_split, callbacks, common, keys, proxy, start
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
 from bot.rate_limit import RateLimiter
@@ -62,6 +62,7 @@ from services.vpn_keys import VpnKeyQueryService
 from services.xray import XrayService
 from warp.manager import WarpManager
 from warp.proxy_egress import make_send_through_provider
+from warp.split_manager import WarpSplitManager
 
 logger = logging.getLogger(__name__)
 
@@ -379,6 +380,12 @@ async def _build_app(
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
 
     warp_manager = WarpManager(db=db, settings=settings, shell=shell)
+    warp_split_manager = WarpSplitManager(
+        list_path=settings.warp_split_list_path,
+        apply_helper_path=settings.warp_split_apply_helper_path,
+        awg_network=settings.awg_network,
+        shell=shell,
+    )
 
     dashboard_service = DashboardService(
         repo=dashboard_repo,
@@ -415,6 +422,7 @@ async def _build_app(
         offsite_backup=offsite_backup_service,
         anomaly_detection=anomaly_detection_service,
         warp=warp_manager,
+        warp_split=warp_split_manager,
         modules=protocol_modules_service,
         dashboard=dashboard_service,
     )
@@ -456,6 +464,7 @@ async def _build_app(
     dp.include_router(admin.router)
     dp.include_router(admin_dashboard.router)
     dp.include_router(admin_warp.router)
+    dp.include_router(admin_warp_split.router)
     dp.include_router(admin_modules.router)
     dp.include_router(keys.router)
     dp.include_router(proxy.router)
