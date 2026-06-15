@@ -317,6 +317,11 @@ class Settings:
     # raises a false alarm.
     warp_monitor_fail_threshold: int = 4
     warp_monitor_success_threshold: int = 3
+    # Selective-split list and its privileged apply helper.
+    # The bot reads the list file directly (0644); writes go exclusively through
+    # the helper which validates, writes atomically, and restarts the service.
+    warp_split_list_path: Path = Path("/etc/vpnbot/warp-split.list")
+    warp_split_apply_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-split-apply")
     # Route LOCAL proxy egress (Dante/Xray/MTProto) through the WARP tunnel too.
     # When true the Xray config writer binds the freedom outbound's egress source to
     # the tunnel IP (``sendThrough``) so its traffic is diverted into the tunnel by
@@ -620,6 +625,12 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         warp_monitor_observer_mode=_bool("WARP_MONITOR_OBSERVER_MODE", True),
         warp_monitor_fail_threshold=_int_range("WARP_MONITOR_FAIL_THRESHOLD", 4, 1, 1000),
         warp_monitor_success_threshold=_int_range("WARP_MONITOR_SUCCESS_THRESHOLD", 3, 1, 1000),
+        warp_split_list_path=Path(
+            _optional("WARP_SPLIT_LIST_PATH", "/etc/vpnbot/warp-split.list")
+        ),
+        warp_split_apply_helper_path=Path(
+            _optional("WARP_SPLIT_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-split-apply")
+        ),
         warp_proxy_egress_enabled=_bool("WARP_PROXY_EGRESS", False),
         bot_language=_choice("BOT_LANGUAGE", "ru", {"ru", "en"}),
     )

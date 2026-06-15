@@ -23,6 +23,7 @@ from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
 from services.xray import XrayService
 from warp.manager import WarpManager
+from warp.split_manager import WarpSplitManager
 
 
 @dataclass(slots=True)
@@ -47,5 +48,6 @@ class Services:
     offsite_backup: OffsiteBackupService
     anomaly_detection: AnomalyDetectionService
     warp: WarpManager
+    warp_split: WarpSplitManager
     modules: ProtocolModulesService
     dashboard: DashboardService
