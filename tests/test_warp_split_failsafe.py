@@ -73,6 +73,13 @@ if [ "$1" = "route" ] && [ "$2" = "show" ] && [ "$3" = "default" ]; then
     echo "default via {WAN_GW} dev {WAN_DEV}"
     exit 0
 fi
+# route show table <T> → echo the seeded tunnel-table contents (reconcile probe)
+if [ "$1" = "route" ] && [ "$2" = "show" ] && [ "$3" = "table" ]; then
+    if [ -n "${{WARP_TABLE_SEED:-}}" ] && [ -f "${{WARP_TABLE_SEED}}" ]; then
+        cat "${{WARP_TABLE_SEED}}"
+    fi
+    exit 0
+fi
 # route get 1.1.1.1 → egress device for failsafe check
 if [ "$1" = "route" ] && [ "$2" = "get" ]; then
     echo "1.1.1.1 via {WAN_GW} dev {egress_dev} src 1.2.3.4"
@@ -359,6 +366,125 @@ class TestWarpSplitApply:
 
 
 # ---------------------------------------------------------------------------
+# vpnbot-warp-split apply — reconcile (table T == list after restart/apply)
+# ---------------------------------------------------------------------------
+
+class TestWarpSplitReconcile:
+    """apply must bring per-prefix `dev out-warp` routes in table T into exact
+    agreement with the list: prefixes removed from the list are deleted from the
+    table (root cause of the #161 symptom), wanted ones are kept/refreshed, and the
+    anti-loop endpoint route is never touched."""
+
+    def _seed_env(self, tmp_path: Path, base_env: dict[str, str], seed_lines: list[str]) -> dict[str, str]:
+        seed = tmp_path / "table_t_seed"
+        seed.write_text("\n".join(seed_lines) + "\n", encoding="utf-8")
+        return {**base_env, "WARP_TABLE_SEED": str(seed)}
+
+    def test_apply_removes_prefix_no_longer_in_list(self, env_dir, tmp_path):
+        _, log_file, split_list, base_env = env_dir
+        # List wants only 10.10.0.0/16; 198.51.100.0/24 was removed.
+        split_list.write_text("10.10.0.0/16\n", encoding="utf-8")
+        # Seed table T: a stale managed prefix (not in list), a still-wanted managed
+        # prefix (in list), and the anti-loop endpoint route (dev eth0, not managed).
+        env = self._seed_env(
+            tmp_path,
+            base_env,
+            [
+                f"198.51.100.0/24 dev {WARP_IFACE}",
+                f"10.10.0.0/16 dev {WARP_IFACE}",
+                f"{ENDPOINT_IP} via {WAN_GW} dev {WAN_DEV}",
+            ],
+        )
+
+        result = _run_script(SPLIT_SCRIPT, ["apply"], env)
+        assert result.returncode == 0, result.stderr
+
+        lines = _log_lines(log_file)
+        # The de-listed prefix is deleted from table T.
+        assert any(
+            f"ip route del 198.51.100.0/24 dev {WARP_IFACE} table {FWMARK_DEC}" in ln
+            for ln in lines
+        ), "stale prefix 198.51.100.0/24 must be deleted from table T; got:\n" + "\n".join(lines)
+
+    def test_apply_does_not_delete_anti_loop_endpoint(self, env_dir, tmp_path):
+        _, log_file, split_list, base_env = env_dir
+        split_list.write_text("10.10.0.0/16\n", encoding="utf-8")
+        env = self._seed_env(
+            tmp_path,
+            base_env,
+            [
+                f"198.51.100.0/24 dev {WARP_IFACE}",
+                f"{ENDPOINT_IP} via {WAN_GW} dev {WAN_DEV}",
+            ],
+        )
+
+        result = _run_script(SPLIT_SCRIPT, ["apply"], env)
+        assert result.returncode == 0, result.stderr
+
+        lines = _log_lines(log_file)
+        # The anti-loop endpoint route (via eth0, not `dev out-warp`) is preserved.
+        assert not any(
+            f"route del {ENDPOINT_IP}" in ln for ln in lines
+        ), "anti-loop endpoint route must NOT be deleted; got:\n" + "\n".join(lines)
+
+    def test_apply_keeps_listed_prefix(self, env_dir, tmp_path):
+        _, log_file, split_list, base_env = env_dir
+        split_list.write_text("10.10.0.0/16\n", encoding="utf-8")
+        env = self._seed_env(
+            tmp_path,
+            base_env,
+            [
+                f"198.51.100.0/24 dev {WARP_IFACE}",
+                f"10.10.0.0/16 dev {WARP_IFACE}",
+            ],
+        )
+
+        result = _run_script(SPLIT_SCRIPT, ["apply"], env)
+        assert result.returncode == 0, result.stderr
+
+        lines = _log_lines(log_file)
+        # A still-listed prefix is never deleted, only (re)added via replace.
+        assert not any("route del 10.10.0.0/16" in ln for ln in lines), \
+            "wanted prefix must NOT be deleted; got:\n" + "\n".join(lines)
+        assert any(
+            f"ip route replace 10.10.0.0/16 dev {WARP_IFACE} table {FWMARK_DEC}" in ln
+            for ln in lines
+        ), "wanted prefix must be (re)added; got:\n" + "\n".join(lines)
+
+    def test_apply_is_idempotent_no_dup_or_error(self, env_dir, tmp_path):
+        _, log_file, split_list, base_env = env_dir
+        split_list.write_text("10.10.0.0/16\n192.168.5.0/24\n", encoding="utf-8")
+        # Seed table T already reflecting the list (post-apply steady state).
+        env = self._seed_env(
+            tmp_path,
+            base_env,
+            [
+                f"10.10.0.0/16 dev {WARP_IFACE}",
+                f"192.168.5.0/24 dev {WARP_IFACE}",
+                f"{ENDPOINT_IP} via {WAN_GW} dev {WAN_DEV}",
+            ],
+        )
+
+        first = _run_script(SPLIT_SCRIPT, ["apply"], env)
+        assert first.returncode == 0, first.stderr
+        second = _run_script(SPLIT_SCRIPT, ["apply"], env)
+        assert second.returncode == 0, second.stderr
+
+        lines = _log_lines(log_file)
+        # Steady state == list: no listed prefix is ever deleted.
+        assert not any("route del 10.10.0.0/16" in ln for ln in lines)
+        assert not any("route del 192.168.5.0/24" in ln for ln in lines)
+        # `replace` runs once per apply (twice total) — idempotent, no duplicates.
+        for pfx in ("10.10.0.0/16", "192.168.5.0/24"):
+            n = sum(
+                1
+                for ln in lines
+                if f"ip route replace {pfx} dev {WARP_IFACE} table {FWMARK_DEC}" in ln
+            )
+            assert n == 2, f"{pfx} should be replaced once per apply (2 total), got {n}"
+
+
+# ---------------------------------------------------------------------------
 # vpnbot-warp-split revert
 # ---------------------------------------------------------------------------
 
@@ -505,6 +631,17 @@ class TestScriptMetadata:
         assert FAILSAFE_SCRIPT.exists(), f"{FAILSAFE_SCRIPT} not found"
         text = FAILSAFE_SCRIPT.read_text(encoding="utf-8")
         assert text.startswith("#!/bin/bash")
+
+    def test_warp_split_apply_reconciles_table_against_list(self):
+        """apply enumerates managed per-prefix routes in table T and deletes the
+        de-listed ones — the table is reconciled to the list, not merely added to."""
+        text = SPLIT_SCRIPT.read_text(encoding="utf-8")
+        # Enumerate the current contents of the dynamic tunnel table.
+        assert 'ip route show table "$T"' in text
+        # Select only script-managed per-prefix routes (`<prefix> dev $IFACE`).
+        assert "$3==dev" in text
+        # Delete the unwanted ones from table T (reconcile).
+        assert 'ip route del "$old" dev "$IFACE" table "$T"' in text
 
     def test_warp_split_uses_env_vars_not_hardcoded_defaults(self):
         text = SPLIT_SCRIPT.read_text(encoding="utf-8")

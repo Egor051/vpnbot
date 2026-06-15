@@ -240,6 +240,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **WARP selective-split: removed prefixes kept routing through WARP until reboot**
+  — `vpnbot-warp-split apply` was additive: it added a `<prefix> dev out-warp` route
+  in the dynamic tunnel table for every listed prefix but never removed the ones
+  that had been deleted from `/etc/vpnbot/warp-split.list`. So `/warp_split_del`
+  dropped the prefix from the file and restarted the service, yet the stale route
+  lingered (`restart` = `revert` + `apply`, and neither flushed it). `apply` now
+  reconciles the table against the list: it enumerates the script-managed per-prefix
+  routes (`<prefix> dev out-warp`) in the tunnel table and `ip route del`s the ones
+  no longer listed, then `ip route replace`s the wanted ones (idempotent, no flap on
+  still-listed prefixes). Only `dev out-warp` per-prefix routes are touched — the
+  anti-loop endpoint pin (`162.159.195.1/32 via <gw> dev eth0`), `ip rule`s, NAT and
+  FORWARD rules from the full-tunnel layer are left untouched, and the dynamic table
+  number is still read from `awg show out-warp fwmark`. An empty/missing list still
+  aborts safely (refuses to blackhole).
+
 - `XRAY_XHTTP_INBOUND_TAG` colliding with `XRAY_INBOUND_TAG` (or left empty) while
   `XRAY_XHTTP_ENABLED=true` is now rejected at startup in `load_settings` instead of
   lazily on the first key issuance. A startup diagnostic also logs loudly when
