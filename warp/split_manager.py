@@ -22,10 +22,10 @@ logger = logging.getLogger(__name__)
 
 # Static guard networks that must never appear in the split list.
 # Entries are (network, reason) pairs used to generate user-facing messages.
-_LOOPBACK: Final = ipaddress.ip_network("127.0.0.0/8")
-_LINK_LOCAL: Final = ipaddress.ip_network("169.254.0.0/16")
-_MULTICAST: Final = ipaddress.ip_network("224.0.0.0/4")
-_WARP_TUNNEL: Final = ipaddress.ip_network("172.16.0.0/12")
+_LOOPBACK: Final = ipaddress.IPv4Network("127.0.0.0/8")
+_LINK_LOCAL: Final = ipaddress.IPv4Network("169.254.0.0/16")
+_MULTICAST: Final = ipaddress.IPv4Network("224.0.0.0/4")
+_WARP_TUNNEL: Final = ipaddress.IPv4Network("172.16.0.0/12")
 
 _STATIC_GUARDS: Final[list[tuple[ipaddress.IPv4Network, str]]] = [
     (_LOOPBACK, "loopback (127.0.0.0/8)"),
@@ -67,10 +67,7 @@ class WarpSplitManager:
     ) -> None:
         self._list_path = list_path
         self._apply_helper_path = apply_helper_path
-        try:
-            self._awg_network = ipaddress.ip_network(awg_network, strict=False)
-        except ValueError:
-            self._awg_network = ipaddress.ip_network("10.0.0.0/24")
+        self._awg_network = _parse_ipv4_network(awg_network, default="10.0.0.0/24")
         # Always use sudo — the helper needs root to write /etc/vpnbot/ and
         # restart systemd, regardless of whether the bot itself runs as root.
         self._runner = PrivilegedHelperRunner(shell=shell, use_sudo=True)
@@ -191,6 +188,21 @@ class WarpSplitManager:
 
 
 # ── module-level helpers ───────────────────────────────────────────────────────
+
+
+def _parse_ipv4_network(value: str, *, default: str) -> ipaddress.IPv4Network:
+    """Parse *value* as an IPv4 network, falling back to *default* on error.
+
+    The split list is IPv4-only, so an IPv6 or unparseable value is rejected and
+    replaced with the safe default.
+    """
+    try:
+        net = ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return ipaddress.IPv4Network(default)
+    if isinstance(net, ipaddress.IPv4Network):
+        return net
+    return ipaddress.IPv4Network(default)
 
 
 def _validate_add(
