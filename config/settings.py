@@ -322,6 +322,13 @@ class Settings:
     # the helper which validates, writes atomically, and restarts the service.
     warp_split_list_path: Path = Path("/etc/vpnbot/warp-split.list")
     warp_split_apply_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-split-apply")
+    # Privileged on/off/restart/status helper for split ROUTING (table T) plus the
+    # root-owned intent marker it manages. Toggling these buttons operates on the
+    # selective-split routes only — never the awg-quick@out-warp interface/process.
+    # The bot reads the marker directly (root:root 0644) but mutates routing solely
+    # through this helper.
+    warp_split_state_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-split-state")
+    warp_split_disabled_marker_path: Path = Path("/etc/vpnbot/warp-split.disabled")
     # Route LOCAL proxy egress (Dante/Xray/MTProto) through the WARP tunnel too.
     # When true the Xray config writer binds the freedom outbound's egress source to
     # the tunnel IP (``sendThrough``) so its traffic is diverted into the tunnel by
@@ -630,6 +637,12 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         ),
         warp_split_apply_helper_path=Path(
             _optional("WARP_SPLIT_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-split-apply")
+        ),
+        warp_split_state_helper_path=Path(
+            _optional("WARP_SPLIT_STATE_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-split-state")
+        ),
+        warp_split_disabled_marker_path=Path(
+            _optional("WARP_SPLIT_DISABLED_MARKER_PATH", "/etc/vpnbot/warp-split.disabled")
         ),
         warp_proxy_egress_enabled=_bool("WARP_PROXY_EGRESS", False),
         bot_language=_choice("BOT_LANGUAGE", "ru", {"ru", "en"}),

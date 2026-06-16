@@ -1,6 +1,5 @@
 
 import logging
-import time
 from contextlib import suppress
 from io import BytesIO
 
@@ -24,7 +23,7 @@ from bot.rate_limit import RateLimitExceeded, RateLimiter
 from i18n import t
 from utils.formatting import code, h
 from warp.config_validator import WarpConfigError, validate_amnezia_config
-from warp.health import WarpHealthMonitor
+from warp.split_manager import SplitStatus
 from warp.state import WarpState
 
 router = Router()
@@ -37,30 +36,29 @@ _MAX_CONFIG_BYTES = 64 * 1024
 # ── text builders ──────────────────────────────────────────────────────────
 
 
-def _format_ago(last_handshake: int) -> str:
-    if last_handshake <= 0:
-        return t("warp_handshake_never")
-    seconds = int(time.time()) - last_handshake
-    if seconds < 0:
-        seconds = 0
-    if seconds < 60:
-        return t("warp_ago_seconds", n=seconds)
-    if seconds < 3600:
-        return t("warp_ago_minutes", n=seconds // 60)
-    if seconds < 86400:
-        return t("warp_ago_hours", n=seconds // 3600)
-    return t("warp_ago_days", n=seconds // 86400)
+def _split_routes_value(split_status: SplitStatus) -> str:
+    """Render the «Маршруты» line from the split-routing status.
+
+    marker=on  & table==list → «✅ Активны (N CIDR)»
+    marker=off & table empty → «⚪ Выключены (все direct)»
+    drift (table ≠ intent)   → «⚠️ Рассинхрон …» shown as-is, never an error
+    """
+    if not split_status.in_sync:
+        table = "?" if split_status.n_table is None else str(split_status.n_table)
+        return t(
+            "warp_routes_drift",
+            marker=split_status.intended_state,
+            table=table,
+            count=split_status.n_list,
+        )
+    if split_status.intended_state == "on":
+        return t("warp_routes_active", count=split_status.n_list)
+    return t("warp_routes_off")
 
 
-def _routes_value(state: WarpState) -> str:
-    if state.routes_active:
-        return t("warp_routes_active", count=state.routes_count)
-    if not state.tunnel_up:
-        return t("warp_routes_fallback")
-    return t("warp_routes_inactive")
-
-
-def warp_main_text(state: WarpState, *, last_error: str | None = None) -> str:
+def warp_main_text(
+    state: WarpState, split_status: SplitStatus, *, last_error: str | None = None
+) -> str:
     lines = [t("warp_title"), _SEP]
     if not state.config_present:
         lines.append(t("warp_status_disabled"))
@@ -68,19 +66,15 @@ def warp_main_text(state: WarpState, *, last_error: str | None = None) -> str:
         lines.append(t("warp_intro"))
         lines.append("")
         lines.append(t("warp_no_config_hint"))
-    elif not state.enabled:
-        lines.append(f"{t('warp_label_module')} {t('warp_module_off')}")
-        lines.append(f"{t('warp_settings_routes')} {state.routes_count}")
-        lines.append("")
-        lines.append(t("warp_intro"))
     else:
-        lines.append(f"{t('warp_label_module')} {t('warp_module_on')}")
+        # Tunnel is an observer-only signal (systemd owns the interface) and is
+        # independent of the split on/off state.
         lines.append(
-            f"{t('warp_label_tunnel')} {t('warp_tunnel_up') if state.tunnel_up else t('warp_tunnel_down')}"
+            f"{t('warp_label_tunnel')} {t('warp_tunnel_up') if split_status.tunnel_up else t('warp_tunnel_down')}"
         )
-        lines.append(f"{t('warp_label_routes')} {_routes_value(state)}")
-        lines.append(f"{t('warp_label_handshake')} {_format_ago(state.last_handshake)}")
-        lines.append(f"{t('warp_label_fails')} {state.fail_streak} / {WarpHealthMonitor.FAIL_THRESHOLD}")
+        lines.append(f"{t('warp_label_routes')} {_split_routes_value(split_status)}")
+        lines.append("")
+        lines.append(t("warp_routes_hint"))
     if last_error:
         lines.append("")
         lines.append(t("warp_last_error", error=h(last_error)))
@@ -101,10 +95,11 @@ def warp_settings_text(state: WarpState) -> str:
 
 async def _render_main(callback: CallbackQuery, services: Services) -> None:
     state = await services.warp.get_state()
+    split_status = await services.warp_split.status()
     await safe_edit_message_text(
         callback.message,
-        warp_main_text(state, last_error=services.warp.last_error),
-        reply_markup=warp_main_keyboard(state),
+        warp_main_text(state, split_status, last_error=services.warp.last_error),
+        reply_markup=warp_main_keyboard(state, split_status),
     )
 
 
@@ -152,7 +147,7 @@ async def warp_settings(callback: CallbackQuery, services: Services) -> None:
 
 @router.callback_query(F.data == "admin:warp:enable")
 async def warp_enable(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
-    """Enable the WARP module (bring up the tunnel and add routes)."""
+    """Turn split ROUTING on: reconcile table T → saved list (never touches the tunnel)."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None:
@@ -162,7 +157,7 @@ async def warp_enable(callback: CallbackQuery, services: Services, rate_limiter:
         if rate_limiter is not None:
             rate_limiter.check(callback.from_user.id, "warp_toggle", 10)
         await safe_callback_answer(callback, t("warp_processing"))
-        await services.warp.enable()
+        await services.warp_split.enable()
         await _render_main(callback, services)
     except RateLimitExceeded as exc:
         await answer_callback_error(callback, exc)
@@ -174,7 +169,7 @@ async def warp_enable(callback: CallbackQuery, services: Services, rate_limiter:
 
 @router.callback_query(F.data == "admin:warp:disable")
 async def warp_disable(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
-    """Disable the WARP module (remove routes and bring the tunnel down)."""
+    """Turn split ROUTING off: reconcile table T → empty (all direct); list preserved."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None:
@@ -184,15 +179,16 @@ async def warp_disable(callback: CallbackQuery, services: Services, rate_limiter
         if rate_limiter is not None:
             rate_limiter.check(callback.from_user.id, "warp_toggle", 10)
         await safe_callback_answer(callback, t("warp_processing"))
-        await services.warp.disable()
+        await services.warp_split.disable()
         await _render_main(callback, services)
     except Exception as exc:
+        await _safe_render_after_error(callback, services)
         await answer_callback_error(callback, exc)
 
 
 @router.callback_query(F.data == "admin:warp:restart")
 async def warp_restart(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
-    """Restart the WARP module."""
+    """Restart split ROUTING: off-reconcile then on-reconcile (final state: on)."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None:
@@ -202,7 +198,7 @@ async def warp_restart(callback: CallbackQuery, services: Services, rate_limiter
         if rate_limiter is not None:
             rate_limiter.check(callback.from_user.id, "warp_toggle", 10)
         await safe_callback_answer(callback, t("warp_processing"))
-        await services.warp.restart()
+        await services.warp_split.restart_routes()
         await _render_main(callback, services)
     except Exception as exc:
         await _safe_render_after_error(callback, services)
@@ -277,10 +273,11 @@ async def warp_upload_receive(message: Message, state: FSMContext, services: Ser
             with suppress(Exception):
                 await bot.delete_message(chat_id=message.chat.id, message_id=upload_prompt_msg_id)
         new_state = await services.warp.get_state()
+        split_status = await services.warp_split.status()
         await message.answer(
             f"{t('warp_config_installed', count=count)}\n\n"
-            f"{warp_main_text(new_state, last_error=services.warp.last_error)}",
-            reply_markup=warp_main_keyboard(new_state),
+            f"{warp_main_text(new_state, split_status, last_error=services.warp.last_error)}",
+            reply_markup=warp_main_keyboard(new_state, split_status),
         )
     except Exception as exc:
         await state.clear()
@@ -323,10 +320,11 @@ async def warp_delete(callback: CallbackQuery, services: Services, rate_limiter:
         await safe_callback_answer(callback, t("warp_processing"))
         await services.warp.delete_config()
         state = await services.warp.get_state()
+        split_status = await services.warp_split.status()
         await safe_edit_message_text(
             callback.message,
-            f"{t('warp_deleted')}\n\n{warp_main_text(state, last_error=services.warp.last_error)}",
-            reply_markup=warp_main_keyboard(state),
+            f"{t('warp_deleted')}\n\n{warp_main_text(state, split_status, last_error=services.warp.last_error)}",
+            reply_markup=warp_main_keyboard(state, split_status),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# vpnbot-warp-split-state — privileged on/off/restart/status for WARP split ROUTING.
+#
+# This helper manages ONLY the selective-split routing in the dynamic tunnel
+# table T (the per-prefix `<prefix> dev out-warp` routes) plus a root-owned intent
+# marker. It NEVER touches awg-quick@out-warp, the out-warp interface/process, the
+# anti-loop endpoint route, the ip rules, or the NAT/FORWARD chains — those stay
+# exactly as the observer model and #160/#161 left them. All table-T mutation is
+# delegated to `vpnbot-warp-split` (apply), which honours the marker.
+#
+# Verbs:
+#   on       remove the marker, then reconcile table T → saved list (selective).
+#   off      write the marker (root:root 0644), then reconcile table T → EMPTY
+#            (all-direct). The saved list file is NOT modified.
+#   restart  off-reconcile (flush) then on-reconcile (re-apply list); apply runs
+#            after each step; the final state is "on".
+#   status   print observer facts as key=value lines (tunnel_up, n_table, marker).
+#
+# The on/off state is persistent: vpnbot-warp-split honours the marker on every
+# boot-apply, so "off" survives a reboot until the operator turns it back on.
+#
+# Usage (bot calls via sudo -n):
+#   sudo -n vpnbot-warp-split-state {on|off|restart|status}
+set -euo pipefail
+
+MARKER="${WARP_SPLIT_DISABLED_MARKER:-/etc/vpnbot/warp-split.disabled}"
+SPLIT_HELPER="${WARP_SPLIT_HELPER:-/usr/local/sbin/vpnbot-warp-split}"
+IFACE="${WARP_IFACE:-out-warp}"
+ME="vpnbot-warp-split-state"
+
+write_marker() {
+    local mdir tmp
+    mdir="$(dirname "$MARKER")"
+    tmp="$(mktemp "${mdir}/.warp-split-state.XXXXXX")"
+    trap 'rm -f "$tmp"' EXIT
+    printf 'disabled\n' > "$tmp"
+    chown root:root "$tmp"
+    chmod 0644 "$tmp"
+    # Atomic replace so a concurrent reader never sees a half-written marker.
+    mv "$tmp" "$MARKER"
+    trap - EXIT
+}
+
+remove_marker() {
+    rm -f "$MARKER"
+}
+
+case "${1:-}" in
+on)
+    remove_marker
+    "$SPLIT_HELPER" apply
+    echo "${ME}: split ENABLED — marker cleared, table T reconciled to list"
+    ;;
+off)
+    write_marker
+    # apply now sees the marker and reconciles table T to EMPTY (all-direct).
+    "$SPLIT_HELPER" apply
+    echo "${ME}: split DISABLED — marker written, table T flushed (all direct)"
+    ;;
+restart)
+    # off-reconcile (flush) then on-reconcile (re-apply list); apply after each.
+    write_marker
+    "$SPLIT_HELPER" apply
+    remove_marker
+    "$SPLIT_HELPER" apply
+    echo "${ME}: split RESTARTED — flushed then re-applied list (final state: on)"
+    ;;
+status)
+    # Observer only: a present fwmark means the out-warp interface is up. Count the
+    # script-managed per-prefix `dev $IFACE` routes currently in table T.
+    fwmark="$(awg show "$IFACE" fwmark 2>/dev/null || true)"
+    if [ -n "$fwmark" ] && [ "$fwmark" != off ]; then
+        echo "tunnel_up=1"
+        T=$(( fwmark ))
+        n="$(ip route show table "$T" 2>/dev/null \
+            | awk -v dev="$IFACE" '$1!="default" && $2=="dev" && $3==dev' \
+            | wc -l | tr -d ' ')"
+        echo "n_table=${n:-0}"
+    else
+        echo "tunnel_up=0"
+        echo "n_table=0"
+    fi
+    if [ -e "$MARKER" ]; then
+        echo "marker=off"
+    else
+        echo "marker=on"
+    fi
+    ;;
+*)
+    echo "usage: $0 {on|off|restart|status}" >&2
+    exit 2
+    ;;
+esac

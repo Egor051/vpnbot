@@ -153,7 +153,8 @@ def test_panel_renders_entries_from_manager(monkeypatch) -> None:
     assert ("1.0.0.0/24", "noop") in btns
     assert ("🗑", "wsplit:del:1.0.0.0/24") in btns
     assert any(data == "wsplit:add" for _, data in btns)
-    assert ("⬅ Назад в WARP", "admin:warp") in btns
+    # Split GUI is now entered from «Настройки WARP», so Back returns there.
+    assert ("⬅ Назад в настройки", "admin:warp:settings") in btns
 
 
 def test_empty_panel_has_no_apply_button(monkeypatch) -> None:

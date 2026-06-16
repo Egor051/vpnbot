@@ -9,6 +9,10 @@ PROXY_SRC="${WARP_PROXY_SRC:-172.16.0.2}"
 CLIENT_NET="${WARP_CLIENT_NET:-10.0.0.0/24}"
 ENDPOINT_IP="${WARP_ENDPOINT_IP:-162.159.195.1}"
 LIST="${WARP_SPLIT_LIST:-/etc/vpnbot/warp-split.list}"
+# Root-owned intent marker: when present the split routing is "off" — table T is
+# reconciled to EMPTY (all-direct) instead of to the list. Written/removed by the
+# vpnbot-warp-split-state helper; honoured here so an "off" state survives reboot.
+MARKER="${WARP_SPLIT_DISABLED_MARKER:-/etc/vpnbot/warp-split.disabled}"
 log(){ echo "[warp-split] $*"; }
 
 fwmark="$(awg show "$IFACE" fwmark 2>/dev/null || true)"
@@ -20,6 +24,20 @@ log "table T=$T iface=$IFACE wan=$WAN_DEV gw=$GW"
 
 case "${1:-apply}" in
 apply)
+  # Boot/state honour: if the disabled marker is present, reconcile table T to
+  # EMPTY (all-direct) instead of to the list. Only script-managed per-prefix
+  # `<prefix> dev $IFACE` routes are retracted (the #164 reconcile loop with an
+  # empty want-set). The anti-loop endpoint route, ip rules and NAT/FORWARD are
+  # left untouched, and the saved list file is NOT modified — re-applied on "on".
+  if [ -e "$MARKER" ]; then
+    ip route show table "$T" 2>/dev/null \
+      | awk -v dev="$IFACE" '$1!="default" && $2=="dev" && $3==dev {print $1}' \
+      | while read -r old; do
+          ip route del "$old" dev "$IFACE" table "$T" 2>/dev/null || true
+        done || true
+    log "split DISABLED by marker $MARKER — per-prefix WARP routes flushed from table $T (all direct)"
+    exit 0
+  fi
   [ -s "$LIST" ] || { log "empty/missing $LIST — abort (refuse to blackhole)"; exit 0; }
   ip route del default dev "$IFACE" table "$T" 2>/dev/null || true
   ip route replace "$ENDPOINT_IP/32" via "$GW" dev "$WAN_DEV" table "$T"

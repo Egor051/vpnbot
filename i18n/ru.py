@@ -571,6 +571,12 @@ STRINGS: dict[str, str] = {
     "warp_routes_active": "✅ Активны ({count} CIDR)",
     "warp_routes_fallback": "⚠️ Fallback (трафик → прямо)",
     "warp_routes_inactive": "⏸ Неактивны",
+    "warp_routes_off": "⚪ Выключены (весь трафик direct)",
+    "warp_routes_drift": "⚠️ Рассинхрон (маркер: {marker}, в таблице: {table}, в списке: {count})",
+    "warp_routes_hint": (
+        "ℹ️ Кнопки Вкл/Выкл/Перезапустить управляют split-<b>маршрутами</b> (table T), "
+        "а не туннелем: интерфейс <code>out-warp</code> ведёт systemd."
+    ),
     "warp_handshake_never": "нет данных",
     "warp_ago_seconds": "{n} сек назад",
     "warp_ago_minutes": "{n} мин назад",

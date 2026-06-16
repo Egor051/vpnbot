@@ -21,6 +21,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **WARP split-routing on/off/restart toggle** — the **Enable / Disable /
+  Restart** buttons in the «Outbound IP masking» panel now control the selective
+  split **routes** in the dynamic tunnel table `T`, not the tunnel process or
+  interface (which stay owned by systemd — the observer model is intact, so the
+  previously no-op buttons gain real meaning). **Disable** reconciles table `T`
+  to empty (retracts only the `<prefix> dev out-warp` routes → all traffic
+  direct) and writes a root-owned marker; the saved list, the anti-loop endpoint
+  route, `ip rules` and NAT/FORWARD are left untouched. **Enable** clears the
+  marker and reconciles table `T` back to the saved list; **Restart** flushes
+  then re-applies (final state: enabled). The state is persistent — a new
+  `scripts/vpnbot-warp-split` boot-honour reconciles table `T` to empty whenever
+  the marker is present, so an "off" state survives a reboot. All table-`T`
+  mutation goes through a new privileged helper `scripts/vpnbot-warp-split-state`
+  (`on|off|restart|status`, sudoers-pinned per verb, no wildcard); the bot never
+  calls `ip`/`awg`/`iptables`. The panel's Tunnel (observer) and Routes (marker
+  intent + actual table `T`) lines come from `WarpSplitManager.status()`, which
+  never raises and surfaces an intent/reality drift as a warning. New settings
+  `WARP_SPLIT_STATE_HELPER_PATH` / `WARP_SPLIT_DISABLED_MARKER_PATH`,
+  `WarpSplitManager.enable()/disable()/restart_routes()/status()`, plus
+  `tests/test_warp_split_state.py` and `tests/test_warp_panel_ui.py`.
+- **WARP Split-routes entry moved into «WARP Settings»** — the **🌐 Split routes**
+  button now lives in the ⚙️ Settings sub-panel (next to Replace/Delete config),
+  not on the main WARP panel; the Split panel's Back button returns to Settings.
+  The Split panel itself, its `/warp_split_*` commands and config-management
+  buttons are unchanged.
 - **WARP split-list GUI** — the selective-split prefix list can now be managed
   with inline buttons inside the existing **WARP tunnel** admin section, in
   addition to the `/warp_split_*` commands (which keep working unchanged). A new
