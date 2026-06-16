@@ -22,7 +22,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_dashboard, admin_modules, admin_warp, admin_warp_split, callbacks, common, keys, proxy, start
+from bot.handlers import admin, admin_dashboard, admin_modules, admin_warp, admin_warp_split, admin_warp_split_ui, callbacks, common, keys, proxy, start
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
 from bot.rate_limit import RateLimiter
@@ -465,6 +465,7 @@ async def _build_app(
     dp.include_router(admin_dashboard.router)
     dp.include_router(admin_warp.router)
     dp.include_router(admin_warp_split.router)
+    dp.include_router(admin_warp_split_ui.router)
     dp.include_router(admin_modules.router)
     dp.include_router(keys.router)
     dp.include_router(proxy.router)

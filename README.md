@@ -811,6 +811,25 @@ tested (full-tunnel working).
 - **Full WARP rollback:** `sudo systemctl disable --now warp-routes awg-quick@out-warp`
   then reboot.
 
+#### Managing the split list from the bot (superadmin)
+
+Once `vpnbot-warp-split` is active, the prefix list can be managed from Telegram —
+no SSH required:
+
+- **GUI:** the **WARP tunnel** admin section has a **🌐 Split routes** button that
+  opens a paginated panel (≈8 prefixes per page, each with a 🗑 button), plus
+  **➕ Add** (send one or more IPv4 CIDRs separated by spaces/commas/newlines),
+  **🔄 Apply** (re-apply the current list), and a Yes/No confirmation before each
+  delete.
+- **Commands:** `/warp_split_list`, `/warp_split_add <cidr…>`,
+  `/warp_split_del <cidr…>`, `/warp_split_reload`.
+
+Both paths are pure presentation over `WarpSplitManager`: input is IPv4-only with a
+mandatory mask, host bits are normalised, guard ranges (`0.0.0.0/0`, the AWG client
+subnet, `172.16.0.0/12`, loopback/link-local/multicast, the server's own `eth0`
+subnet) are rejected, duplicates are skipped, and emptying the list is refused. The
+bot never calls `ip`/`iptables` — writes go only through the privileged helper.
+
 ## Deployment Overview
 
 > ⚠️ **IMPORTANT — `deploy/vpn-bot.service` is the authoritative source:**

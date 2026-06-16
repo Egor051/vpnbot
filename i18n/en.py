@@ -547,6 +547,7 @@ STRINGS: dict[str, str] = {
     "btn_warp_disable": "🔴 Disable",
     "btn_warp_restart": "🔄 Restart",
     "btn_warp_settings": "⚙️ Settings",
+    "btn_warp_split": "🌐 Split routes",
     "warp_title": "📡 <b>Outbound IP masking</b>",
     "warp_settings_title": "⚙️ <b>WARP Settings</b>",
     "warp_status_disabled": "Status: 🔴 Disabled",
