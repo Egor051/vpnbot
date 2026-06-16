@@ -317,10 +317,10 @@ def test_constraints_file_pins_runtime_dependency_tree() -> None:
 
     # Direct runtime deps (pinned in requirements.txt) must be present and exact.
     for package in (
-        "aiogram==3.27.0",
-        "aiohttp==3.13.5",
+        "aiogram==3.29.0",
+        "aiohttp==3.14.1",
         "aiosqlite==0.22.1",
-        "cryptography==46.0.7",
+        "cryptography==48.0.1",
         "python-dotenv==1.2.2",
     ):
         assert package in constraints

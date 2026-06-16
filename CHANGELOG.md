@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **Upgraded `aiohttp` 3.13.5 → 3.14.1, `aiogram` 3.27.0 → 3.29.0, and
+  `cryptography` 46.0.7 → 48.0.1 to clear all outstanding `pip-audit` advisories.**
+  `aiohttp` 3.14.1 fixes nine CVEs (CVE-2026-50269, -54273, -54276, -54277,
+  -54278, -54279, -54280, plus the two previously VEX-deferred CVE-2026-34993 /
+  CVE-2026-47265); adopting it required raising the `aiogram` cap, which 3.29.0
+  does (`aiohttp<3.15`). `cryptography` 48.0.1 fixes GHSA-537c-gmf6-5ccf (High —
+  OpenSSL out-of-bounds read bundled in the wheels). The `PIP_AUDIT_IGNORES` VEX
+  list in the `Makefile` is now removed — `make audit` runs with no exceptions and
+  reports no known vulnerabilities. Hashed constraint sets were regenerated and the
+  un-hashed mirror re-synced.
+
 ### Added
 
 - **WARP split-list bot control** — admins can now manage the selective-split
@@ -239,6 +252,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `VLESS (TCP)` / `VLESS (HTTP)` (matching the key list) instead of `Xray`.
 
 ### Fixed
+
+- **WARP selective-split: removed prefixes kept routing through WARP until reboot**
+  — `vpnbot-warp-split apply` was additive: it added a `<prefix> dev out-warp` route
+  in the dynamic tunnel table for every listed prefix but never removed the ones
+  that had been deleted from `/etc/vpnbot/warp-split.list`. So `/warp_split_del`
+  dropped the prefix from the file and restarted the service, yet the stale route
+  lingered (`restart` = `revert` + `apply`, and neither flushed it). `apply` now
+  reconciles the table against the list: it enumerates the script-managed per-prefix
+  routes (`<prefix> dev out-warp`) in the tunnel table and `ip route del`s the ones
+  no longer listed, then `ip route replace`s the wanted ones (idempotent, no flap on
+  still-listed prefixes). Only `dev out-warp` per-prefix routes are touched — the
+  anti-loop endpoint pin (`162.159.195.1/32 via <gw> dev eth0`), `ip rule`s, NAT and
+  FORWARD rules from the full-tunnel layer are left untouched, and the dynamic table
+  number is still read from `awg show out-warp fwmark`. An empty/missing list still
+  aborts safely (refuses to blackhole).
 
 - `XRAY_XHTTP_INBOUND_TAG` colliding with `XRAY_INBOUND_TAG` (or left empty) while
   `XRAY_XHTTP_ENABLED=true` is now rejected at startup in `load_settings` instead of

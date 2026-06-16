@@ -896,18 +896,16 @@ python -m pip install -r requirements-dev.txt
 Run the same core gates used by CI:
 
 ```bash
-make audit   # python -m pip_audit -r requirements.txt -r constraints.txt (+ documented --ignore-vuln list)
+make audit   # python -m pip_audit -r requirements.txt -r constraints.txt
 python -m ruff check .
 python -m compileall .
 python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ main.py init_db.py
 python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=60
 ```
 
-> The audit ignores two aiohttp advisories (`CVE-2026-34993`, `CVE-2026-47265`)
-> that are fixed only in aiohttp 3.14.0 — which the tree cannot adopt while
-> `aiogram` caps `aiohttp<3.14` — and that do not apply to this bot's
-> client-only, trusted-host usage. The justification lives in the `Makefile`
-> (`PIP_AUDIT_IGNORES`); revisit it when `aiogram` raises the cap.
+> The audit runs with no `--ignore-vuln` exceptions: `aiogram==3.29.0` raised its
+> cap to `aiohttp<3.15`, so `aiohttp==3.14.1` (which fixes the previously-deferred
+> advisories) is now adopted and the dependency set audits clean.
 
 ### Updating dependencies
 

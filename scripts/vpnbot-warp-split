@@ -23,12 +23,31 @@ apply)
   [ -s "$LIST" ] || { log "empty/missing $LIST — abort (refuse to blackhole)"; exit 0; }
   ip route del default dev "$IFACE" table "$T" 2>/dev/null || true
   ip route replace "$ENDPOINT_IP/32" via "$GW" dev "$WAN_DEV" table "$T"
+  # Build the wanted prefix set from the list (comments/blanks/default-routes dropped).
+  WANT=" "
   while read -r pfx; do
     pfx="${pfx%%#*}"; pfx="${pfx//[[:space:]]/}"
     [ -n "$pfx" ] || continue
     case "$pfx" in 0.0.0.0/0|::/0) continue;; esac
-    ip route replace "$pfx" dev "$IFACE" table "$T"
+    case "$WANT" in *" $pfx "*) ;; *) WANT="$WANT$pfx ";; esac
   done < "$LIST"
+  # Reconcile: drop script-managed per-prefix routes (`<prefix> dev $IFACE`) in
+  # table T that are no longer listed, so a removed prefix stops using WARP after
+  # restart instead of lingering until reboot. Only `dev $IFACE` routes are touched
+  # — the anti-loop (`$ENDPOINT_IP/32 via $GW dev $WAN_DEV`) is `dev $WAN_DEV`, never
+  # matched; the table default was already removed above.
+  ip route show table "$T" 2>/dev/null \
+    | awk -v dev="$IFACE" '$1!="default" && $2=="dev" && $3==dev {print $1}' \
+    | while read -r old; do
+        case "$WANT" in
+          *" $old "*) : ;;                                       # still wanted — keep
+          *) ip route del "$old" dev "$IFACE" table "$T" 2>/dev/null || true ;;
+        esac
+      done || true
+  # Add/refresh the wanted prefixes (`replace` is idempotent — no dups on re-apply).
+  for pfx in $WANT; do
+    ip route replace "$pfx" dev "$IFACE" table "$T"
+  done
   log "table T is now selective ($(grep -cvE '^\s*(#|$)' "$LIST") prefixes)"
   for SRC in "$CLIENT_NET" "$PROXY_SRC"; do
     iptables -t nat -C POSTROUTING -s "$SRC" -o "$WAN_DEV" -j MASQUERADE 2>/dev/null \
