@@ -29,7 +29,7 @@ multidict==6.7.1
 propcache==0.5.2
 pycparser==3.0
 pydantic==2.12.5
-pydantic-core==2.41.5
+pydantic-core==2.47.0
 python-dotenv==1.2.2
 typing-extensions==4.15.0
 typing-inspection==0.4.2
