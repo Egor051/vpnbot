@@ -4,15 +4,6 @@
 # matches what the pipeline enforces.
 MYPY_PATHS = bot/ services/ adapters/ config/ models/ utils/ repositories/ main.py init_db.py
 
-# Advisories deliberately not failing the audit (VEX). Both are fixed only in
-# aiohttp 3.14.0, which the dependency tree cannot adopt yet: aiogram (<=3.28.2)
-# caps aiohttp <3.14. Neither applies to this bot's usage — aiohttp is only a
-# client to the trusted Telegram API host; we never call CookieJar.load() on
-# untrusted input (CVE-2026-34993) nor use the per-request cookies= parameter
-# across attacker-controlled redirects (CVE-2026-47265). Re-audit and remove these
-# the moment aiogram raises its aiohttp cap.
-PIP_AUDIT_IGNORES = --ignore-vuln CVE-2026-34993 --ignore-vuln CVE-2026-47265
-
 lint:
 	python -m ruff check .
 
@@ -26,7 +17,7 @@ test:
 	python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=60
 
 audit:
-	python -m pip_audit -r requirements.txt -r constraints.txt $(PIP_AUDIT_IGNORES)
+	python -m pip_audit -r requirements.txt -r constraints.txt
 
 check: lint compile typecheck test audit
 

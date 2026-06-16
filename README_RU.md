@@ -816,19 +816,16 @@ python -m pip install -r requirements-dev.txt
 Запустите те же проверки, что использует CI:
 
 ```bash
-make audit   # python -m pip_audit -r requirements.txt -r constraints.txt (+ документированный список --ignore-vuln)
+make audit   # python -m pip_audit -r requirements.txt -r constraints.txt
 python -m ruff check .
 python -m compileall .
 python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ main.py init_db.py
 python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=60
 ```
 
-> Аудит игнорирует два advisory aiohttp (`CVE-2026-34993`, `CVE-2026-47265`),
-> исправленные только в aiohttp 3.14.0 — который дерево не может принять, пока
-> `aiogram` держит `aiohttp<3.14` — и которые не применимы к использованию бота
-> (aiohttp только как клиент к доверённому хосту Telegram). Обоснование — в
-> `Makefile` (`PIP_AUDIT_IGNORES`); пересмотрите, когда `aiogram` поднимет
-> ограничение.
+> Аудит выполняется без исключений `--ignore-vuln`: `aiogram==3.29.0` поднял
+> ограничение до `aiohttp<3.15`, поэтому принят `aiohttp==3.14.1` (он исправляет
+> ранее отложенные advisory), и набор зависимостей проходит аудит чисто.
 
 ### Обновление зависимостей
 

@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **Upgraded `aiohttp` 3.13.5 → 3.14.1, `aiogram` 3.27.0 → 3.29.0, and
+  `cryptography` 46.0.7 → 48.0.1 to clear all outstanding `pip-audit` advisories.**
+  `aiohttp` 3.14.1 fixes nine CVEs (CVE-2026-50269, -54273, -54276, -54277,
+  -54278, -54279, -54280, plus the two previously VEX-deferred CVE-2026-34993 /
+  CVE-2026-47265); adopting it required raising the `aiogram` cap, which 3.29.0
+  does (`aiohttp<3.15`). `cryptography` 48.0.1 fixes GHSA-537c-gmf6-5ccf (High —
+  OpenSSL out-of-bounds read bundled in the wheels). The `PIP_AUDIT_IGNORES` VEX
+  list in the `Makefile` is now removed — `make audit` runs with no exceptions and
+  reports no known vulnerabilities. Hashed constraint sets were regenerated and the
+  un-hashed mirror re-synced.
+
 ### Added
 
 - **WARP split-list bot control** — admins can now manage the selective-split
