@@ -549,6 +549,7 @@ STRINGS: dict[str, str] = {
     "btn_warp_disable": "🔴 Выключить",
     "btn_warp_restart": "🔄 Перезапустить",
     "btn_warp_settings": "⚙️ Настройки",
+    "btn_warp_split": "🌐 Split-маршруты",
     "warp_title": "📡 <b>Сокрытие outbound IP</b>",
     "warp_settings_title": "⚙️ <b>Настройки WARP</b>",
     "warp_status_disabled": "Статус: 🔴 Выключен",

@@ -21,6 +21,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **WARP split-list GUI** — the selective-split prefix list can now be managed
+  with inline buttons inside the existing **WARP tunnel** admin section, in
+  addition to the `/warp_split_*` commands (which keep working unchanged). A new
+  **🌐 Split routes** button opens a paginated panel (≈8 prefixes per page, each
+  with a 🗑 button), plus **➕ Add** (FSM: send one or more IPv4 CIDRs by
+  space/comma/newline, parsed per-line into added / dup / rejected reports),
+  **🔄 Apply** (re-applies the current list), and per-prefix delete with a
+  Yes/No confirmation step. Pure presentation: every mutation goes through
+  `WarpSplitManager` (`process_*_tokens` + `apply_list`) exactly as the commands
+  do — the UI adds no `ip`/`iptables`/file-write/helper logic. Every callback and
+  the FSM input handler is superadmin-gated server-side (never relies on a hidden
+  button), manager refusals (guard-reject, del-to-empty, helper failure) are
+  shown in the panel without crashing, and the FSM state is always cleared after
+  add/cancel. New components: `bot/handlers/admin_warp_split_ui.py`,
+  `bot/keyboards/warp_split_keyboard.py`, the `WarpSplitStates` FSM group, the
+  `btn_warp_split` i18n key (ru/en), and `tests/test_warp_split_ui.py`.
+
 - **WARP split-list bot control** — admins can now manage the selective-split
   prefix list (`/etc/vpnbot/warp-split.list`) directly from Telegram without
   touching the server. Four new commands (superadmin-only):

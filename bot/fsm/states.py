@@ -53,3 +53,7 @@ class TrialRequestStates(StatesGroup):
 
 class WarpConfigStates(StatesGroup):
     waiting_config = State()
+
+
+class WarpSplitStates(StatesGroup):
+    waiting_cidrs = State()

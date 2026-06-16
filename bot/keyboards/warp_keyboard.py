@@ -21,6 +21,9 @@ def warp_main_keyboard(state: WarpState) -> InlineKeyboardMarkup:
     else:
         rows.append([InlineKeyboardButton(text=t("btn_warp_enable"), callback_data="admin:warp:enable")])
         rows.append([InlineKeyboardButton(text=t("btn_warp_settings"), callback_data="admin:warp:settings")])
+    # Selective-split list GUI (separate vpnbot-warp-split service): always
+    # reachable from the WARP section regardless of tunnel-module state.
+    rows.append([InlineKeyboardButton(text=t("btn_warp_split"), callback_data="wsplit:p:0")])
     rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
