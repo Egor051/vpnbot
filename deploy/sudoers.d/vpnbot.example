@@ -70,7 +70,15 @@ Cmnd_Alias VPNBOT_WARP = \
 # validates every CIDR (python3 ipaddress), writes /etc/vpnbot/warp-split.list
 # atomically, and restarts vpnbot-warp-split. No arguments beyond the binary
 # itself — the list is piped via stdin, so no path wildcards are needed here.
+#
+# The split-state helper toggles the split ROUTING (table T) on/off/restart and
+# reports observer status. Each verb is pinned exactly (no wildcard); it only
+# manages the per-prefix routes + the root-owned marker, never the tunnel.
 Cmnd_Alias VPNBOT_WARP_SPLIT = \
-    /usr/local/sbin/vpnbot-warp-split-apply
+    /usr/local/sbin/vpnbot-warp-split-apply, \
+    /usr/local/sbin/vpnbot-warp-split-state on, \
+    /usr/local/sbin/vpnbot-warp-split-state off, \
+    /usr/local/sbin/vpnbot-warp-split-state restart, \
+    /usr/local/sbin/vpnbot-warp-split-state status
 
 vpn-bot ALL=(root) NOPASSWD: VPNBOT_SOCKS5, VPNBOT_XRAY, VPNBOT_AWG, VPNBOT_MTPROTO, VPNBOT_WARP, VPNBOT_WARP_SPLIT

@@ -30,11 +30,15 @@ CHECK_SCRIPT = ROOT / "deploy" / "check-nonroot-helper-mode.py"
 from warp.split_manager import (
     WarpSplitManager,
     CidrResult,
+    WarpSplitError,
     _validate_add,
     _validate_del,
     parse_cidr_tokens,
 )
+import asyncio
 import ipaddress
+
+from models.dto import ShellResult
 
 
 AWG_NETWORK = "10.0.0.0/24"
@@ -209,6 +213,132 @@ class TestCidrValidationDel:
         from warp.split_manager import WarpSplitError
         with pytest.raises(WarpSplitError):
             mgr.process_del_tokens(["1.2.3.0/24"], ["1.2.3.0/24"])
+
+
+class _FakeShell:
+    """Async shell stub recording commands and returning canned ShellResults."""
+
+    def __init__(self, results: dict[str, ShellResult] | None = None) -> None:
+        self.calls: list[list[str]] = []
+        self._results = results or {}
+        self._default = ShellResult(args=(), returncode=0, stdout="", stderr="")
+
+    async def run(
+        self,
+        command: list[str],
+        *,
+        input_text: str | None = None,
+        sensitive_values: tuple[str, ...] = (),
+        timeout: float = 60.0,
+        max_output_chars: int = 2048,
+    ) -> ShellResult:
+        self.calls.append(list(command))
+        verb = command[-1]
+        return self._results.get(verb, self._default)
+
+    def verbs(self) -> list[str]:
+        return [c[-1] for c in self.calls]
+
+
+def _state_manager(tmp_path: Path, shell: _FakeShell, *, marker_present: bool = False) -> WarpSplitManager:
+    marker = tmp_path / "warp-split.disabled"
+    if marker_present:
+        marker.write_text("disabled\n", encoding="utf-8")
+    return WarpSplitManager(
+        list_path=tmp_path / "warp-split.list",
+        apply_helper_path=Path("/usr/local/sbin/vpnbot-warp-split-apply"),
+        awg_network=AWG_NETWORK,
+        shell=shell,  # type: ignore[arg-type]
+        state_helper_path=Path("/usr/local/sbin/vpnbot-warp-split-state"),
+        marker_path=marker,
+        interface_name="out-warp-nonexistent-xyz",  # _iface_up fallback → False
+    )
+
+
+def _status_result(stdout: str, rc: int = 0) -> ShellResult:
+    return ShellResult(args=(), returncode=rc, stdout=stdout, stderr="")
+
+
+class TestSplitStateManager:
+    """enable/disable/restart_routes call the right verb; status() never raises."""
+
+    def test_enable_calls_on_verb(self, tmp_path: Path) -> None:
+        shell = _FakeShell()
+        mgr = _state_manager(tmp_path, shell)
+        asyncio.run(mgr.enable())
+        assert shell.verbs() == ["on"]
+
+    def test_disable_calls_off_verb(self, tmp_path: Path) -> None:
+        shell = _FakeShell()
+        mgr = _state_manager(tmp_path, shell)
+        asyncio.run(mgr.disable())
+        assert shell.verbs() == ["off"]
+
+    def test_restart_calls_restart_verb(self, tmp_path: Path) -> None:
+        shell = _FakeShell()
+        mgr = _state_manager(tmp_path, shell)
+        asyncio.run(mgr.restart_routes())
+        assert shell.verbs() == ["restart"]
+
+    def test_state_uses_state_helper_path(self, tmp_path: Path) -> None:
+        shell = _FakeShell()
+        mgr = _state_manager(tmp_path, shell)
+        asyncio.run(mgr.enable())
+        # command = ["sudo", "-n", <state-helper>, "on"]
+        assert shell.calls[-1][-2] == "/usr/local/sbin/vpnbot-warp-split-state"
+
+    def test_state_helper_failure_raises(self, tmp_path: Path) -> None:
+        shell = _FakeShell({"off": _status_result("boom", rc=1)})
+        mgr = _state_manager(tmp_path, shell)
+        with pytest.raises(WarpSplitError):
+            asyncio.run(mgr.disable())
+
+    def test_status_on_in_sync(self, tmp_path: Path) -> None:
+        (tmp_path / "warp-split.list").write_text("10.10.0.0/16\n192.168.5.0/24\n", encoding="utf-8")
+        shell = _FakeShell({"status": _status_result("tunnel_up=1\nn_table=2\nmarker=on\n")})
+        mgr = _state_manager(tmp_path, shell, marker_present=False)
+        s = asyncio.run(mgr.status())
+        assert s.intended_state == "on"
+        assert s.n_list == 2
+        assert s.n_table == 2
+        assert s.in_sync is True
+        assert s.tunnel_up is True
+
+    def test_status_off_in_sync(self, tmp_path: Path) -> None:
+        (tmp_path / "warp-split.list").write_text("10.10.0.0/16\n", encoding="utf-8")
+        shell = _FakeShell({"status": _status_result("tunnel_up=1\nn_table=0\nmarker=off\n")})
+        mgr = _state_manager(tmp_path, shell, marker_present=True)
+        s = asyncio.run(mgr.status())
+        assert s.intended_state == "off"
+        assert s.n_table == 0
+        assert s.in_sync is True
+
+    def test_status_detects_drift(self, tmp_path: Path) -> None:
+        # marker says ON, list has 2, but table only has 1 → drift.
+        (tmp_path / "warp-split.list").write_text("10.10.0.0/16\n192.168.5.0/24\n", encoding="utf-8")
+        shell = _FakeShell({"status": _status_result("tunnel_up=1\nn_table=1\nmarker=on\n")})
+        mgr = _state_manager(tmp_path, shell, marker_present=False)
+        s = asyncio.run(mgr.status())
+        assert s.intended_state == "on"
+        assert s.in_sync is False
+
+    def test_status_helper_failure_does_not_raise(self, tmp_path: Path) -> None:
+        (tmp_path / "warp-split.list").write_text("10.10.0.0/16\n", encoding="utf-8")
+        shell = _FakeShell({"status": _status_result("", rc=1)})
+        mgr = _state_manager(tmp_path, shell, marker_present=False)
+        s = asyncio.run(mgr.status())
+        # Reality unknown → n_table None, no drift claimed, tunnel_up from sysfs (False).
+        assert s.n_table is None
+        assert s.in_sync is True
+        assert s.tunnel_up is False
+        assert s.intended_state == "on"
+
+    def test_status_intended_from_marker_file(self, tmp_path: Path) -> None:
+        shell = _FakeShell({"status": _status_result("tunnel_up=0\nn_table=0\nmarker=on\n")})
+        # marker file present overrides whatever the helper prints for intent.
+        mgr = _state_manager(tmp_path, shell, marker_present=True)
+        s = asyncio.run(mgr.status())
+        assert s.intended_state == "off"
 
 
 class TestReadList:

@@ -385,6 +385,9 @@ async def _build_app(
         apply_helper_path=settings.warp_split_apply_helper_path,
         awg_network=settings.awg_network,
         shell=shell,
+        state_helper_path=settings.warp_split_state_helper_path,
+        marker_path=settings.warp_split_disabled_marker_path,
+        interface_name=settings.warp_interface,
     )
 
     dashboard_service = DashboardService(

@@ -39,6 +39,25 @@ class WarpSplitError(InvalidOperation):
     """User-facing failure from the split-list helper."""
 
 
+@dataclass(frozen=True, slots=True)
+class SplitStatus:
+    """Snapshot of the split-routing state for the admin panel.
+
+    ``intended_state`` is the operator intent read from the root-owned marker
+    (``"on"`` / ``"off"``); ``n_list`` is the saved prefix count; ``n_table`` is the
+    number of script-managed ``dev <iface>`` routes actually present in table T
+    (``None`` when it could not be read). ``in_sync`` is True when reality matches
+    intent (or when reality is unknown — we never claim drift we cannot prove).
+    ``tunnel_up`` is an observer signal only; it never depends on on/off.
+    """
+
+    tunnel_up: bool
+    intended_state: str  # "on" | "off"
+    n_list: int
+    n_table: int | None
+    in_sync: bool
+
+
 @dataclass(slots=True)
 class CidrResult:
     """Outcome of processing one CIDR token from user input."""
@@ -64,9 +83,15 @@ class WarpSplitManager:
         apply_helper_path: Path,
         awg_network: str,
         shell: ShellRunner,
+        state_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-split-state"),
+        marker_path: Path = Path("/etc/vpnbot/warp-split.disabled"),
+        interface_name: str = "out-warp",
     ) -> None:
         self._list_path = list_path
         self._apply_helper_path = apply_helper_path
+        self._state_helper_path = state_helper_path
+        self._marker_path = marker_path
+        self._interface_name = interface_name
         self._awg_network = _parse_ipv4_network(awg_network, default="10.0.0.0/24")
         # Always use sudo — the helper needs root to write /etc/vpnbot/ and
         # restart systemd, regardless of whether the bot itself runs as root.
@@ -115,6 +140,93 @@ class WarpSplitManager:
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "no output").strip()[:256]
             raise WarpSplitError(f"apply helper failed (rc={result.returncode}): {detail}")
+
+    # ── on / off / restart (split ROUTING, not the tunnel) ──────────────────────
+
+    async def enable(self) -> None:
+        """Turn split routing ON: clear the marker, reconcile table T → saved list.
+
+        Operates on the routes only — the awg-quick@out-warp interface/process is
+        never touched (observer model intact). Raises WarpSplitError on failure.
+        """
+        await self._run_state("on")
+
+    async def disable(self) -> None:
+        """Turn split routing OFF: write the marker, reconcile table T → EMPTY.
+
+        Every ``<prefix> dev <iface>`` route is retracted so all client/proxy
+        traffic egresses direct; the saved list file is preserved (re-applied on
+        ``enable``) and the anti-loop/NAT/FORWARD rules are left untouched.
+        """
+        await self._run_state("off")
+
+    async def restart_routes(self) -> None:
+        """Restart split routing: off-reconcile (flush) then on-reconcile (re-apply).
+
+        The final state is ON. Only table T is affected — never the tunnel.
+        """
+        await self._run_state("restart")
+
+    async def _run_state(self, verb: str) -> None:
+        result = await self._runner.run(self._state_helper_path, [verb], timeout=60.0)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "no output").strip()[:256]
+            raise WarpSplitError(f"state helper '{verb}' failed (rc={result.returncode}): {detail}")
+
+    # ── status (always works — both on and off, never raises) ───────────────────
+
+    async def status(self) -> SplitStatus:
+        """Return the split-routing status for the admin panel.
+
+        Combines the operator intent (marker file, read directly — always works)
+        with the saved list count and the actual table-T contents (read via the
+        privileged status verb, best-effort). Never raises: any failure degrades to
+        a safe, drift-free snapshot so the panel renders in every state.
+        """
+        intended_state = "off" if self._marker_exists() else "on"
+        n_list = len(self.read_list())
+
+        tunnel_up = False
+        n_table: int | None = None
+        try:
+            result = await self._runner.run(
+                self._state_helper_path, ["status"], timeout=15.0
+            )
+            if result.returncode == 0:
+                facts = _parse_state_status(result.stdout)
+                tunnel_up = facts.get("tunnel_up") == "1"
+                raw_table = facts.get("n_table")
+                if raw_table is not None:
+                    try:
+                        n_table = int(raw_table)
+                    except ValueError:
+                        n_table = None
+            else:
+                tunnel_up = _iface_up(self._interface_name)
+        except Exception:
+            logger.debug("warp-split status helper unavailable", exc_info=True)
+            tunnel_up = _iface_up(self._interface_name)
+
+        if n_table is None:
+            in_sync = True  # reality unknown — do not claim a drift we can't prove
+        elif intended_state == "on":
+            in_sync = n_table == n_list
+        else:
+            in_sync = n_table == 0
+
+        return SplitStatus(
+            tunnel_up=tunnel_up,
+            intended_state=intended_state,
+            n_list=n_list,
+            n_table=n_table,
+            in_sync=in_sync,
+        )
+
+    def _marker_exists(self) -> bool:
+        try:
+            return self._marker_path.exists()
+        except OSError:
+            return False
 
     # ── validation ────────────────────────────────────────────────────────────
 
@@ -285,6 +397,35 @@ def _validate_del(token: str, result: CidrResult, current: set[str]) -> None:
         return
 
     result.status = "removed"
+
+
+def _parse_state_status(stdout: str) -> dict[str, str]:
+    """Parse ``key=value`` lines emitted by ``vpnbot-warp-split-state status``."""
+    facts: dict[str, str] = {}
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        facts[key.strip()] = value.strip()
+    return facts
+
+
+def _iface_up(iface: str) -> bool:
+    """Best-effort observer check: is *iface* up? Reads sysfs, never raises.
+
+    Used only as a fallback when the privileged status verb is unavailable (e.g.
+    on a dev box). Reads ``/sys/class/net/<iface>/flags`` and tests IFF_UP (0x1).
+    Returns False on any error rather than guessing the tunnel is up.
+    """
+    try:
+        flags_text = Path(f"/sys/class/net/{iface}/flags").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        return bool(int(flags_text.strip(), 16) & 0x1)
+    except ValueError:
+        return False
 
 
 def _eth0_network() -> ipaddress.IPv4Network | None:

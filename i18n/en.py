@@ -569,6 +569,12 @@ STRINGS: dict[str, str] = {
     "warp_routes_active": "✅ Active ({count} CIDR)",
     "warp_routes_fallback": "⚠️ Fallback (traffic → direct)",
     "warp_routes_inactive": "⏸ Inactive",
+    "warp_routes_off": "⚪ Disabled (all traffic direct)",
+    "warp_routes_drift": "⚠️ Out of sync (marker: {marker}, in table: {table}, in list: {count})",
+    "warp_routes_hint": (
+        "ℹ️ The On/Off/Restart buttons control the split <b>routes</b> (table T), "
+        "not the tunnel: the <code>out-warp</code> interface is owned by systemd."
+    ),
     "warp_handshake_never": "no data",
     "warp_ago_seconds": "{n} sec ago",
     "warp_ago_minutes": "{n} min ago",

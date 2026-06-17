@@ -72,7 +72,8 @@ def warp_split_panel_keyboard(entries: list[str], page: int) -> InlineKeyboardMa
             ]
         )
 
-    rows.append([InlineKeyboardButton(text="⬅ Назад в WARP", callback_data="admin:warp")])
+    # The Split GUI is entered from «Настройки WARP», so Back returns there.
+    rows.append([InlineKeyboardButton(text="⬅ Назад в настройки", callback_data="admin:warp:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

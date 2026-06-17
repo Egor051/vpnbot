@@ -656,6 +656,8 @@ These default to the provided sudoers template paths. Changing `WARP_CONFIG_PATH
 | `WARP_MONITOR_SUCCESS_THRESHOLD` | `3` | Consecutive successful probes before the monitor declares the tunnel recovered. |
 | `WARP_SPLIT_LIST_PATH` | `/etc/vpnbot/warp-split.list` | Path to the selective-split prefix list. The bot reads this file directly (0644); writes go exclusively via `WARP_SPLIT_APPLY_HELPER_PATH`. Change only if you relocate the file — update the sudoers grant to match. |
 | `WARP_SPLIT_APPLY_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-split-apply` | Privileged helper that validates, atomically writes the split list, and restarts `vpnbot-warp-split`. Must be root:root 0755 with a `NOPASSWD` sudoers grant. |
+| `WARP_SPLIT_STATE_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-split-state` | Privileged on/off/restart/status helper for the split **routing** (table T). The On/Off/Restart buttons call it to retract/re-apply the per-prefix `dev out-warp` routes and write the disabled marker — it never touches `awg-quick@out-warp`. Must be root:root 0755 with pinned-verb `NOPASSWD` grants. |
+| `WARP_SPLIT_DISABLED_MARKER_PATH` | `/etc/vpnbot/warp-split.disabled` | Root-owned (0644) marker recording the "off" intent. When present, `vpnbot-warp-split` reconciles table T to empty on every boot-apply, so an "off" state survives reboot. The bot reads it directly; only the state helper writes it. |
 | `WARP_PROXY_EGRESS` | `false` | Route LOCAL proxy egress (Dante/Xray/MTProto) through the WARP tunnel too. When `true` the Xray config writer binds the freedom outbound's egress source to the tunnel IP (`sendThrough` = the config's `[Interface] Address`) so its traffic is diverted into the tunnel by `vpnbot-warp-routes`. Off by default; flip on only as part of the manual [WARP proxy egress](#warp-proxy-egress-masking-the-proxies-outbound-ip) activation runbook. |
 
 #### Interface/route ownership (observer mode)
@@ -811,16 +813,40 @@ tested (full-tunnel working).
 - **Full WARP rollback:** `sudo systemctl disable --now warp-routes awg-quick@out-warp`
   then reboot.
 
+#### On/Off/Restart buttons (split ROUTING control)
+
+The **Enable / Disable / Restart** buttons in the «Outbound IP masking» panel act
+on the split **routes** in the dynamic table `T`, NOT on the tunnel: the `out-warp`
+interface and the `awg-quick@out-warp` process stay owned by systemd (observer
+model) and the bot never touches them.
+
+- **Disable** — reconcile table `T` to empty: every per-prefix `<prefix> dev
+  out-warp` route is retracted and all client/proxy traffic egresses direct. The
+  saved list (`/etc/vpnbot/warp-split.list`) is **not erased**, and the anti-loop
+  `162.159.195.1/32 via eth0-gw`, the `ip rules` and the NAT/FORWARD chains are
+  left untouched.
+- **Enable** — reconcile table `T` back to the saved list (selective).
+- **Restart** — flush then re-apply the list (final state: enabled).
+
+The on/off state is **persistent**: "disable" writes a root-owned marker
+(`/etc/vpnbot/warp-split.disabled`) that `vpnbot-warp-split` honours on every
+boot-apply, so an "off" state survives a reboot. All table-`T` mutation goes through
+`vpnbot-warp-split-state` (sudoers grants the exact `on|off|restart|status` verbs,
+no wildcard). The panel's Tunnel (observer) and Routes (marker intent + actual table
+`T`) lines come from `status()`; a drift between intent and reality is shown as a
+warning and the status never fails in any state.
+
 #### Managing the split list from the bot (superadmin)
 
 Once `vpnbot-warp-split` is active, the prefix list can be managed from Telegram —
 no SSH required:
 
-- **GUI:** the **WARP tunnel** admin section has a **🌐 Split routes** button that
-  opens a paginated panel (≈8 prefixes per page, each with a 🗑 button), plus
-  **➕ Add** (send one or more IPv4 CIDRs separated by spaces/commas/newlines),
+- **GUI:** the **WARP settings** sub-panel (⚙️ Settings) has a **🌐 Split routes**
+  button that opens a paginated panel (≈8 prefixes per page, each with a 🗑 button),
+  plus **➕ Add** (send one or more IPv4 CIDRs separated by spaces/commas/newlines),
   **🔄 Apply** (re-apply the current list), and a Yes/No confirmation before each
-  delete.
+  delete. (The entry point moved here from the main WARP panel; Back returns to
+  Settings.)
 - **Commands:** `/warp_split_list`, `/warp_split_add <cidr…>`,
   `/warp_split_del <cidr…>`, `/warp_split_reload`.
 

@@ -86,6 +86,10 @@ install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/warp-failsafe" /usr/l
 # /etc/vpnbot/warp-split.list and restarts vpnbot-warp-split. Grants are in
 # the sudoers file below; the helper is root:root 0755 like all other helpers.
 install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-split-apply" /usr/local/sbin/vpnbot-warp-split-apply
+# WARP split-routing on/off/restart/status helper: manages the per-prefix routes
+# in table T + the root-owned disabled marker (honoured by vpnbot-warp-split on
+# every boot-apply). Never touches the awg-quick@out-warp interface/process.
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-split-state" /usr/local/sbin/vpnbot-warp-split-state
 install -o root -g root -m 0644 deploy/vpnbot-warp-split.service /etc/systemd/system/vpnbot-warp-split.service
 install -o root -g root -m 0644 deploy/warp-failsafe.service /etc/systemd/system/warp-failsafe.service
 systemctl daemon-reload
