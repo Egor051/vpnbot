@@ -480,7 +480,7 @@ STRINGS: dict[str, str] = {
     # ── server status panel ───────────────────────────────────────────────────
     "server_status_title": "REAL-TIME SERVER STATUS",
     "server_status_disk_label": "Disk",
-    "server_status_disk_value": "{free} GB free of {total} GB",
+    "server_status_disk_value": "{used} GB used of {total} GB",
     "server_status_network_label": "Network activity",
     "server_status_net_in": "Inbound",
     "server_status_net_out": "Outbound",

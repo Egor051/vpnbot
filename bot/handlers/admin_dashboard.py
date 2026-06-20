@@ -2,14 +2,19 @@
 import logging
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InaccessibleMessage, Message
 
 from bot.container import Services
 from bot.formatters import dashboard_text, server_status_text
 from bot.guards import require_superadmin
 from bot.handlers.common import answer_callback_error
-from bot.keyboards.admin import dashboard_keyboard, server_status_keyboard
-from bot.messages import safe_callback_answer, safe_edit_message_text
+from bot.keyboards.admin import admin_panel_keyboard, dashboard_keyboard, server_status_keyboard
+from bot.messages import (
+    edit_message_for_refresh,
+    message_target_key,
+    safe_callback_answer,
+    safe_edit_message_text,
+)
 from bot.private_chat import ensure_private_callback
 from i18n import t
 
@@ -65,6 +70,50 @@ async def _render_server_status(callback: CallbackQuery, services: Services) -> 
         await answer_callback_error(callback, exc)
 
 
+def _start_server_status_auto_refresh(callback: CallbackQuery, services: Services) -> None:
+    """Keep the server-status card live: re-render it every few seconds for up to
+    an hour, then fall back to the admin panel so an abandoned card stops
+    sampling the host. Re-opening the panel restarts the timer; navigating away
+    cancels it (see the ``admin:panel`` handler)."""
+    message = callback.message
+    user = callback.from_user
+    if user is None or message is None or isinstance(message, InaccessibleMessage):
+        return
+    key = message_target_key(message)
+    if key is None:
+        return
+    user_id = user.id
+
+    async def refresh() -> bool:
+        try:
+            await require_superadmin(services, user_id)
+            status = await services.server_status.snapshot()
+        except Exception:
+            logger.debug("server status auto-refresh snapshot failed", exc_info=True)
+            return False
+        return await edit_message_for_refresh(
+            message,
+            server_status_text(status),
+            reply_markup=server_status_keyboard(),
+        )
+
+    async def on_expire() -> None:
+        await edit_message_for_refresh(
+            message,
+            t("admin_panel_title"),
+            reply_markup=admin_panel_keyboard(),
+        )
+
+    services.auto_refresh.start(key, refresh=refresh, on_expire=on_expire)
+
+
+def stop_server_status_auto_refresh(message: Message | InaccessibleMessage | None, services: Services) -> None:
+    """Cancel the auto-refresh loop bound to ``message`` (used when navigating away)."""
+    key = message_target_key(message)
+    if key is not None:
+        services.auto_refresh.cancel(key)
+
+
 @router.callback_query(F.data == "admin:server_status")
 async def admin_server_status(callback: CallbackQuery, services: Services) -> None:
     """Open the real-time server status panel."""
@@ -72,6 +121,7 @@ async def admin_server_status(callback: CallbackQuery, services: Services) -> No
         return
     await safe_callback_answer(callback, t("updating_server_status"))
     await _render_server_status(callback, services)
+    _start_server_status_auto_refresh(callback, services)
 
 
 @router.callback_query(F.data == "admin:server_status:refresh")

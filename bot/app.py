@@ -42,6 +42,7 @@ from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.access_approval import AccessApprovalService
 from services.anomaly_detection import AnomalyDetectionService
+from services.auto_refresh import LiveRefreshManager
 from services.announcements import AnnouncementService
 from services.audit import AuditService
 from services.awg import AwgService
@@ -404,6 +405,7 @@ async def _build_app(
     )
 
     server_status_service = ServerStatusService()
+    auto_refresh_manager = LiveRefreshManager()
 
     dashboard_service = DashboardService(
         repo=dashboard_repo,
@@ -444,6 +446,7 @@ async def _build_app(
         modules=protocol_modules_service,
         dashboard=dashboard_service,
         server_status=server_status_service,
+        auto_refresh=auto_refresh_manager,
     )
 
     await _startup_reconcile_keys(services)

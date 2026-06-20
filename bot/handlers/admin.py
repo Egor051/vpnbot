@@ -31,6 +31,7 @@ from bot.formatters import (
 from services.health import run_bot_health
 from bot.fsm.states import AdminCreateKeyStates, AdminAnnouncementStates, AdminEditUserNoteStates
 from bot.guards import require_superadmin, require_moderator_or_admin
+from bot.handlers.admin_dashboard import stop_server_status_auto_refresh
 from bot.handlers.common import answer_callback_error, answer_message_error, parse_int_callback
 from bot.keyboards.admin import (
     admin_issue_users_keyboard,
@@ -128,6 +129,10 @@ async def admin_panel(callback: CallbackQuery, services: Services) -> None:
     await safe_callback_answer(callback)
     if callback.from_user is None or callback.message is None:
         return
+    # Leaving the server-status card (its "Back" button lands here) ends the live
+    # auto-refresh loop before we overwrite the card, so it cannot fight us for
+    # the message.
+    stop_server_status_auto_refresh(callback.message, services)
     try:
         await require_superadmin(services, callback.from_user.id)
         await safe_edit_message_text(callback.message, t("admin_panel_title"), reply_markup=admin_panel_keyboard())
