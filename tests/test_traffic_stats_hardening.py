@@ -1,5 +1,6 @@
 
 import asyncio
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -389,5 +390,182 @@ def test_awg_stats_internal_error_is_not_returned_as_public_reason() -> None:
         assert reason is not None
         assert "awg0.conf" not in reason
         assert "/etc" not in reason
+
+    asyncio.run(run())
+
+
+def _xray_key_n(key_id: int) -> VpnKey:
+    return VpnKey(
+        id=key_id,
+        owner_user_id=100,
+        username="user",
+        key_type=VpnKeyType.XRAY,
+        status=VpnKeyStatus.ACTIVE,
+        note=None,
+        uuid=f"uuid-{key_id}",
+        email_label=f"xray_{key_id:05d}",
+        public_key=None,
+        client_ip=None,
+        payload={},
+        public_payload={},
+        created_at="now",
+        updated_at="now",
+        revoked_at=None,
+        deleted_at=None,
+        created_by=100,
+        revoked_by=None,
+        deleted_by=None,
+    )
+
+
+class _FakeDB:
+    @contextlib.asynccontextmanager
+    async def transaction(self):  # type: ignore[no-untyped-def]
+        yield
+
+
+class _MultiStatsRepo:
+    """Stats repo fake that stores rows in-memory keyed by key_id."""
+
+    def __init__(self, initial: dict[int, TrafficStats] | None = None) -> None:
+        self.rows: dict[int, TrafficStats] = dict(initial or {})
+        self.db = _FakeDB()
+
+    async def list_by_key_ids(self, key_ids: list[int]) -> dict[int, TrafficStats]:
+        return {kid: self.rows[kid] for kid in key_ids if kid in self.rows}
+
+    async def upsert_success(
+        self,
+        *,
+        key_id: int,
+        downloaded_bytes: int,
+        uploaded_bytes: int,
+        raw_downloaded_bytes: int | None,
+        raw_uploaded_bytes: int | None,
+        now: str,
+        source: str,
+    ) -> TrafficStats:
+        row = TrafficStats(
+            key_id=key_id,
+            downloaded_bytes=downloaded_bytes,
+            uploaded_bytes=uploaded_bytes,
+            last_raw_downloaded_bytes=raw_downloaded_bytes,
+            last_raw_uploaded_bytes=raw_uploaded_bytes,
+            last_success_at=now,
+            last_attempt_at=now,
+            available=True,
+            unavailable_reason=None,
+            source=source,
+        )
+        self.rows[key_id] = row
+        return row
+
+    async def upsert_unavailable(
+        self, *, key_id: int, reason: str, now: str, source: str
+    ) -> TrafficStats:
+        prev = self.rows.get(key_id)
+        row = TrafficStats(
+            key_id=key_id,
+            downloaded_bytes=0 if prev is None else prev.downloaded_bytes,
+            uploaded_bytes=0 if prev is None else prev.uploaded_bytes,
+            last_raw_downloaded_bytes=None if prev is None else prev.last_raw_downloaded_bytes,
+            last_raw_uploaded_bytes=None if prev is None else prev.last_raw_uploaded_bytes,
+            last_success_at=None if prev is None else prev.last_success_at,
+            last_attempt_at=now,
+            available=False,
+            unavailable_reason=reason,
+            source=source,
+        )
+        self.rows[key_id] = row
+        return row
+
+
+class _PagedKeysRepo:
+    def __init__(self, keys: list[VpnKey]) -> None:
+        self.keys = keys
+
+    async def list_by_type_statuses(
+        self,
+        *,
+        key_type: VpnKeyType,
+        statuses: set[VpnKeyStatus],
+        limit: int = 500,
+        after_id: int | None = None,
+    ) -> list[VpnKey]:
+        page = [
+            key
+            for key in self.keys
+            if key.key_type == key_type and (after_id is None or key.id > after_id)
+        ]
+        return page[:limit]
+
+
+class _CountingXray:
+    def __init__(self, counters: dict[str, int]) -> None:
+        self.counters = counters
+        self.calls = 0
+
+    async def query_all(self) -> dict[str, int]:
+        self.calls += 1
+        return dict(self.counters)
+
+
+class _EmptyUsersRepo:
+    async def list_by_ids(self, ids: list[int]) -> dict[int, object]:
+        return {}
+
+
+def test_refresh_all_xray_polls_statsquery_once_for_the_whole_fleet() -> None:
+    # statsquery resets the counters it returns, so the background refresh must
+    # capture every Xray key in a single poll even when the DB read paginates.
+    async def run() -> None:
+        keys = [_xray_key_n(i) for i in range(1, 251)]  # 250 keys -> two DB pages of 200
+        counters: dict[str, int] = {}
+        for key in keys:
+            counters[f"user>>>{key.email_label}>>>traffic>>>downlink"] = key.id * 10
+            counters[f"user>>>{key.email_label}>>>traffic>>>uplink"] = key.id
+        xray = _CountingXray(counters)
+        repo = _MultiStatsRepo()
+        service = TrafficStatsService(
+            stats=repo,  # type: ignore[arg-type]
+            vpn_keys=_PagedKeysRepo(keys),  # type: ignore[arg-type]
+            users_repo=_EmptyUsersRepo(),
+            users=SimpleNamespace(clock=SimpleNamespace(now=lambda: "now")),
+            awg=SimpleNamespace(),
+            xray=xray,  # type: ignore[arg-type]
+        )
+
+        await service.refresh_all_xray()
+
+        assert xray.calls == 1  # one statsquery for all 250 keys, not one per page
+        assert len(repo.rows) == 250
+        assert all(row.available for row in repo.rows.values())
+        assert repo.rows[250].downloaded_bytes == 2500
+        assert repo.rows[250].uploaded_bytes == 250
+
+    asyncio.run(run())
+
+
+def test_manual_refresh_views_serves_cached_xray_without_polling() -> None:
+    # Manual stat views must not touch the resetting statsquery; they surface the
+    # cached row the background loop last committed.
+    async def run() -> None:
+        cached = _stats(downloaded=4242, uploaded=2121, raw_downloaded=4242, raw_uploaded=2121)
+        repo = _MultiStatsRepo({10: cached})
+        xray = _CountingXray({"user>>>xray_A7kQz>>>traffic>>>downlink": 999999})
+        service = TrafficStatsService(
+            stats=repo,  # type: ignore[arg-type]
+            vpn_keys=SimpleNamespace(),
+            users_repo=_EmptyUsersRepo(),
+            users=SimpleNamespace(clock=SimpleNamespace(now=lambda: "now")),
+            awg=SimpleNamespace(),
+            xray=xray,  # type: ignore[arg-type]
+        )
+
+        views = await service.refresh_views([_xray_key()])
+
+        assert xray.calls == 0  # no statsquery from the manual path
+        assert views[0].stats is cached
+        assert repo.rows[10] is cached  # cached row left untouched
 
     asyncio.run(run())

@@ -76,6 +76,18 @@ async def _awg_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> 
         await asyncio.sleep(interval)
 
 
+async def _xray_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> None:
+    # Xray's statsquery resets the counters it returns, so this loop is the single
+    # place that polls the Xray stats API; manual stat views read the cached values
+    # it commits (see TrafficStatsService.refresh_all_xray).
+    while True:
+        try:
+            await traffic_stats.refresh_all_xray()
+        except Exception:
+            logger.warning("Xray background stats collection failed", exc_info=True)
+        await asyncio.sleep(interval)
+
+
 async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, BackendHealth, Services]:
     db = Database(settings.db_path, synchronous=settings.sqlite_synchronous)
     await db.connect()

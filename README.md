@@ -107,6 +107,7 @@ XRAY_SHORT_ID=<xray_short_id>
 XRAY_MANAGE_SHORT_IDS=false
 XRAY_ALLOW_RESTART_ON_ROLLBACK=false
 XRAY_STATS_SERVER=127.0.0.1:10085
+XRAY_STATS_INTERVAL=60
 
 AWG_CONFIG_PATH=/etc/amnezia/amneziawg/awg0.conf
 AWG_INTERFACE=awg0
@@ -230,6 +231,7 @@ All variables parsed by `config/settings.py`. Variables marked **Required** must
 | `XRAY_MANAGE_SHORT_IDS` | No | `false` | Let the bot manage short IDs automatically. | `false` |
 | `XRAY_ALLOW_RESTART_ON_ROLLBACK` | No | `false` | Allow service restart during config rollback. | `false` |
 | `XRAY_STATS_SERVER` | No* | — | Address of the Xray gRPC stats/API server. Required for `api` mode. | `127.0.0.1:10085` |
+| `XRAY_STATS_INTERVAL` | No | `60` | Background Xray traffic stats sampling interval in seconds (0–3600; 0 disables). This loop is the only poller of the Xray stats API — `statsquery` resets the counters it returns, so manual stat views read the values it caches. | `60` |
 | `XRAY_XHTTP_ENABLED` | No | `false` | Enable a second VLESS transport (XHTTP) reached via `vless-in`'s REALITY catch-all fallback to a loopback inbound. When on, key creation offers VLESS (TCP) / VLESS (HTTP). | `false` |
 | `XRAY_XHTTP_INBOUND_TAG` | No* | `vless-xhttp-reality` | Tag of the loopback XHTTP fallback-dest inbound in `config.json` (must differ from `XRAY_INBOUND_TAG`). Required when `XRAY_XHTTP_ENABLED=true`. | `vless-xhttp-reality` |
 | `XRAY_XHTTP_PORT` | No | `8443` | Retained for back-compat; **not** used to build VLESS (HTTP) links. The link rides `vless-in`'s public port (`XRAY_PUBLIC_PORT`); the XHTTP inbound listens on loopback as the REALITY fallback dest. | `8001` |

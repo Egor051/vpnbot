@@ -21,6 +21,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Background Xray traffic-stats collector** — a new `refresh_all_xray` loop
+  keeps the dashboard's Xray traffic fresh, mirroring the existing AWG collector
+  (`XRAY_STATS_INTERVAL`, default `60s`, `0` disables). It accounts for an Xray
+  quirk: `xray api statsquery` resets the counters it returns, so the loop is the
+  **single** poller of the Xray stats API — it captures the whole fleet in one
+  `statsquery` per cycle (paginating the DB read into one `refresh_views(...,
+  poll_xray=True)` call) so a later page can't lose bytes a previous page's poll
+  zeroed. Manual stat views (`refresh_for_actor`, `list_for_superadmin`) no longer
+  poll Xray; they surface the values the loop last cached, serialised against the
+  loop on the same `_refresh_lock` so a view never straddles an in-flight reset.
+  AWG counters are idempotent to read and keep being sampled live on demand.
+
 - **WARP split-routing on/off/restart toggle** — the **Enable / Disable /
   Restart** buttons in the «Outbound IP masking» panel now control the selective
   split **routes** in the dynamic tunnel table `T`, not the tunnel process or

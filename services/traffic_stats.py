@@ -59,8 +59,18 @@ class TrafficStatsService:
         keys = await self.vpn_keys.list_traffic_supported(limit=limit, offset=offset)
         return await self.refresh_views(keys)
 
-    async def refresh_views(self, keys: list[VpnKey]) -> list[KeyTrafficStatsView]:
-        """Sample backend counters for the given keys and return updated stats views."""
+    async def refresh_views(self, keys: list[VpnKey], *, poll_xray: bool = False) -> list[KeyTrafficStatsView]:
+        """Sample backend counters for the given keys and return updated stats views.
+
+        Xray's stats API (``xray api statsquery``) resets the counters it returns,
+        so a single-key or single-page manual refresh would zero the counters for
+        every *other* Xray key and silently drop their accumulated bytes. To keep
+        the accounting correct the Xray API is polled from exactly one place —
+        ``refresh_all_xray`` — which passes ``poll_xray=True`` and always processes
+        every Xray key at once. Manual callers leave ``poll_xray`` False and surface
+        the cached Xray stats the background loop last committed; AWG counters are
+        idempotent to read and are always sampled live.
+        """
         owner_ids: set[int] = set()
         key_ids: list[int] = []
         for key in keys:
@@ -72,14 +82,20 @@ class TrafficStatsService:
         # Both AWG and Xray counters are sampled inside the lock so that a stale
         # snapshot from a concurrent refresh can never be committed after a fresher
         # one: doing so would see stored_raw > stale_raw and falsely trigger
-        # reset-detection in _next_total, inflating the cumulative total.
-        # AWG and Xray queries run in parallel to keep the lock time bounded by
-        # max(awg_latency, xray_latency) rather than their sum.
+        # reset-detection in _next_total, inflating the cumulative total. The same
+        # lock also serialises the background Xray poll against manual cache reads,
+        # so a manual view never straddles an in-flight (counter-resetting) statsquery.
         async with self._refresh_lock:
-            (awg_transfers, awg_error), (xray_stats, xray_error) = await asyncio.gather(
-                self._load_awg_transfers(keys),
-                self._load_xray_stats(keys),
-            )
+            if poll_xray:
+                # AWG and Xray queries run in parallel to keep the lock time bounded
+                # by max(awg_latency, xray_latency) rather than their sum.
+                (awg_transfers, awg_error), (xray_stats, xray_error) = await asyncio.gather(
+                    self._load_awg_transfers(keys),
+                    self._load_xray_stats(keys),
+                )
+            else:
+                awg_transfers, awg_error = await self._load_awg_transfers(keys)
+                xray_stats, xray_error = {}, None
             current_stats = await self.stats.list_by_key_ids(key_ids)
             views: list[KeyTrafficStatsView] = []
             # Coalesce the per-key upserts into a single commit. Each upsert's own
@@ -91,7 +107,13 @@ class TrafficStatsService:
                     if key.key_type == VpnKeyType.AWG:
                         stats = await self._refresh_awg_key(key, current_stats.get(key.id), awg_transfers, awg_error)
                     elif key.key_type == VpnKeyType.XRAY:
-                        stats = await self._refresh_xray_key(key, current_stats.get(key.id), xray_stats, xray_error)
+                        # Only the background poll writes Xray stats; manual callers
+                        # surface the cached row without touching the live counters.
+                        stats = (
+                            await self._refresh_xray_key(key, current_stats.get(key.id), xray_stats, xray_error)
+                            if poll_xray
+                            else current_stats.get(key.id)
+                        )
                     else:
                         stats = None
                     views.append(KeyTrafficStatsView(key=key, owner=owners.get(key.owner_user_id), stats=stats))
@@ -119,6 +141,41 @@ class TrafficStatsService:
                 break
             await self.refresh_views(batch)
             after_id = batch[-1].id
+
+    async def refresh_all_xray(self) -> None:
+        """Refresh traffic stats for all Xray keys whose client may still exist.
+
+        This is the only place that polls the Xray stats API. ``statsquery`` resets
+        the counters it returns, so each cycle must capture every Xray key in a
+        single poll: the keys are paginated out of the DB into one list and handed
+        to a single ``refresh_views(..., poll_xray=True)`` call (one statsquery for
+        the whole fleet). Batching into several ``refresh_views`` calls — as
+        ``refresh_all_awg`` safely does for its idempotent counters — would let the
+        first batch's poll zero the counters and drop every later batch's bytes.
+        """
+        # Include all statuses where the client may still exist in the Xray runtime.
+        statuses = {
+            VpnKeyStatus.ACTIVE,
+            VpnKeyStatus.PENDING_REVOKE,
+            VpnKeyStatus.APPLY_FAILED,
+            VpnKeyStatus.PENDING_DELETE,
+            VpnKeyStatus.DELETE_FAILED,
+        }
+        keys: list[VpnKey] = []
+        after_id: int | None = None
+        while True:
+            batch = await self.vpn_keys.list_by_type_statuses(
+                key_type=VpnKeyType.XRAY,
+                statuses=statuses,
+                limit=200,
+                after_id=after_id,
+            )
+            if not batch:
+                break
+            keys.extend(batch)
+            after_id = batch[-1].id
+        if keys:
+            await self.refresh_views(keys, poll_xray=True)
 
     async def cached_for_keys(self, keys: list[VpnKey]) -> dict[int, TrafficStats]:
         """Return cached traffic stats for the given keys without refreshing."""
