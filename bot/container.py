@@ -13,6 +13,7 @@ from services.key_expiry import KeyExpiryService
 from services.mtproto import MtProtoService
 from services.notes import NotesService
 from services.anomaly_detection import AnomalyDetectionService
+from services.auto_refresh import LiveRefreshManager
 from services.offsite_backup import OffsiteBackupService
 from services.protocol_modules import ProtocolModulesService
 from services.proxy import ProxyService
@@ -53,3 +54,4 @@ class Services:
     modules: ProtocolModulesService
     dashboard: DashboardService
     server_status: ServerStatusService
+    auto_refresh: LiveRefreshManager

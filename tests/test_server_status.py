@@ -50,9 +50,28 @@ def test_server_status_text_matches_layout() -> None:
     text = server_status_text(status)
     assert "CPU: 8.3%" in text
     assert "RAM: 0.54 GB / 0.93 GB" in text
-    assert "6.43 GB" in text and "9.71 GB" in text
+    # Disk shows used space (total - free = 9.71 - 6.43 = 3.28), not free space.
+    assert "3.28 GB" in text and "9.71 GB" in text
+    assert "занято" in text and "6.43 GB" not in text
     assert "📥" in text and "0.42 Mbps" in text
     assert "📤" in text and "0.02 Mbps" in text
+
+
+def test_disk_used_gb_is_total_minus_free() -> None:
+    status = ServerStatus(
+        cpu_percent=0.0,
+        cpu_available=False,
+        ram_used_gb=0.0,
+        ram_total_gb=0.0,
+        disk_free_gb=6.43,
+        disk_total_gb=9.71,
+        net_in_mbps=0.0,
+        net_out_mbps=0.0,
+        net_available=False,
+    )
+    assert status.disk_used_gb == approx(3.28)
+    # Never negative even if free somehow exceeds total (clock skew, races).
+    assert ServerStatus(0, False, 0, 0, 100.0, 10.0, 0, 0, False).disk_used_gb == approx(0.0)
 
 
 def test_server_status_text_reports_no_data_when_unavailable() -> None:

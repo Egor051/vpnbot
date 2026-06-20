@@ -21,6 +21,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Live-updating "Server status" panel** — the admin **📊 Статус сервера** card
+  now refreshes itself in place every ~3 seconds (`LiveRefreshManager`) so CPU,
+  RAM, disk and network read in real time without tapping **Refresh**. Each open
+  card is capped at one hour of auto-refresh; when the cap elapses the card falls
+  back to the admin panel so an abandoned panel stops sampling `/proc` and editing
+  the message. Navigating away (the card's **Back** button → `admin:panel`)
+  cancels the loop immediately, and re-opening the panel restarts the timer. A new
+  `edit_message_for_refresh` helper edits the card in place without ever
+  re-posting a fresh message, so a deleted card simply ends its loop.
+
 - **Background Xray traffic-stats collector** — a new `refresh_all_xray` loop
   keeps the dashboard's Xray traffic fresh, mirroring the existing AWG collector
   (`XRAY_STATS_INTERVAL`, default `60s`, `0` disables). `xray api statsquery` is
@@ -195,6 +205,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   README "WARP proxy egress"); the host is never placed in the tunnel.
 
 ### Changed
+
+- **Server-status disk metric now reports used space instead of free** — the
+  **💾 Диск** line reads `{used} GB занято из {total} GB` (`{used} GB used of
+  {total} GB` in English), derived from a new `ServerStatus.disk_used_gb`
+  (`total − free`, clamped at zero), matching how operators expect disk usage to
+  be shown.
 
 - **WARP interface and routes now have a single owner (systemd); the bot's health
   monitor became a pure observer** — previously both `warp-routes.service` (at boot)

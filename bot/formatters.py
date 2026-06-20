@@ -1174,7 +1174,7 @@ def server_status_text(status: ServerStatus) -> str:
     else:
         ram = no_data
     if status.disk_total_gb > 0:
-        disk = t("server_status_disk_value", free=f"{status.disk_free_gb:.2f}", total=f"{status.disk_total_gb:.2f}")
+        disk = t("server_status_disk_value", used=f"{status.disk_used_gb:.2f}", total=f"{status.disk_total_gb:.2f}")
     else:
         disk = no_data
     net_in = f"{status.net_in_mbps:.2f} Mbps" if status.net_available else no_data

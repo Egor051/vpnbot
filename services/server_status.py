@@ -28,6 +28,11 @@ class ServerStatus:
     net_out_mbps: float
     net_available: bool
 
+    @property
+    def disk_used_gb(self) -> float:
+        """Occupied disk space, derived from total minus free."""
+        return max(self.disk_total_gb - self.disk_free_gb, 0.0)
+
 
 def _read_cpu_times() -> tuple[int, int] | None:
     """Return (total_jiffies, idle_jiffies) from the aggregate line of /proc/stat."""

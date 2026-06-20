@@ -69,6 +69,47 @@ async def safe_edit_message_text(
     return True
 
 
+def message_target_key(message: Message | InaccessibleMessage | None) -> tuple[int, int] | None:
+    """Return a stable ``(chat_id, message_id)`` key for a message, or ``None``.
+
+    Used to track per-message background work (e.g. the server-status auto-refresh
+    loop) so it can be started and cancelled from different handlers.
+    """
+    if message is None:
+        return None
+    return (message.chat.id, message.message_id)
+
+
+async def edit_message_for_refresh(
+    message: Message | InaccessibleMessage | None,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    """Edit a message in place for an auto-refresh loop.
+
+    Returns ``True`` while the card is still present — including when the new
+    content is byte-for-byte identical to the old (Telegram rejects that, but for
+    a periodic refresh it just means "nothing changed, keep going"). Returns
+    ``False`` once the message can no longer be edited (deleted or otherwise
+    inaccessible) so the caller can stop the loop. Unlike
+    :func:`safe_edit_message_text` it never re-posts a fresh message, so an
+    abandoned card is not resurrected on every tick.
+    """
+    if message is None or isinstance(message, InaccessibleMessage):
+        return False
+    text = cap_telegram_html(text)
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if _is_message_not_modified(exc):
+            return True
+        if _is_edit_unavailable(exc):
+            return False
+        raise
+    return True
+
+
 async def safe_callback_answer(
     callback: CallbackQuery,
     text: str | None = None,
