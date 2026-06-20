@@ -18,7 +18,7 @@ async def main() -> None:
     setup_logging(settings.log_dir)
 
     from adapters.health_server import create_health_app
-    from bot.app import _awg_stats_loop, create_app
+    from bot.app import _awg_stats_loop, _xray_stats_loop, create_app
     from bot.fsm.ttl_storage import TTLMemoryStorage, fsm_cleanup_loop
     from services.anomaly_detection import anomaly_detection_loop
     from services.key_expiry import key_expiry_loop
@@ -29,6 +29,7 @@ async def main() -> None:
         bot, dp, db, backend_health, services = await create_app(settings)
         runner: web.AppRunner | None = None
         awg_stats_task: asyncio.Task[None] | None = None
+        xray_stats_task: asyncio.Task[None] | None = None
         expiry_task: asyncio.Task[None] | None = None
         backup_task: asyncio.Task[None] | None = None
         anomaly_task: asyncio.Task[None] | None = None
@@ -47,6 +48,12 @@ async def main() -> None:
                     name="awg-stats-collector",
                 )
                 logger.info("AWG stats collector started (interval=%ds)", settings.awg_stats_interval)
+            if settings.xray_stats_interval > 0:
+                xray_stats_task = asyncio.create_task(
+                    _xray_stats_loop(services.traffic_stats, settings.xray_stats_interval),
+                    name="xray-stats-collector",
+                )
+                logger.info("Xray stats collector started (interval=%ds)", settings.xray_stats_interval)
             if settings.key_expiry_check_interval > 0:
                 expiry_task = asyncio.create_task(
                     key_expiry_loop(services.key_expiry, settings.key_expiry_check_interval),
@@ -100,6 +107,9 @@ async def main() -> None:
             if awg_stats_task is not None:
                 awg_stats_task.cancel()
                 await asyncio.gather(awg_stats_task, return_exceptions=True)
+            if xray_stats_task is not None:
+                xray_stats_task.cancel()
+                await asyncio.gather(xray_stats_task, return_exceptions=True)
             if expiry_task is not None:
                 expiry_task.cancel()
                 await asyncio.gather(expiry_task, return_exceptions=True)

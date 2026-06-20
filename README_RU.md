@@ -107,6 +107,7 @@ XRAY_SHORT_ID=<xray_short_id>
 XRAY_MANAGE_SHORT_IDS=false
 XRAY_ALLOW_RESTART_ON_ROLLBACK=false
 XRAY_STATS_SERVER=127.0.0.1:10085
+XRAY_STATS_INTERVAL=60
 
 AWG_CONFIG_PATH=/etc/amnezia/amneziawg/awg0.conf
 AWG_INTERFACE=awg0
@@ -188,6 +189,7 @@ BOT_LANGUAGE=ru
 | `HEALTH_HOST` | `127.0.0.1` | Хост HTTP-эндпоинта проверки работоспособности (опционально). |
 | `HEALTH_PORT` | _(отключён)_ | Порт HTTP-эндпоинта. Не указывать для отключения. |
 | `AWG_STATS_INTERVAL` | `60` | Интервал (сек) сбора статистики трафика AWG (0–3600). |
+| `XRAY_STATS_INTERVAL` | `60` | Интервал (сек) фонового сбора статистики трафика Xray (0–3600; 0 отключает). Этот цикл — единственное место, опрашивающее Xray stats API: `statsquery` сбрасывает счётчики, поэтому ручные просмотры статистики читают закэшированные им значения. |
 | `KEY_EXPIRY_CHECK_INTERVAL` | `1800` | Как часто (сек) проверять истечение ключей (0–86400). |
 | `KEY_EXPIRY_NOTIFY_DAYS` | _(пусто)_ | Дни до истечения для уведомления пользователя, через запятую. Например: `7,3,1`. |
 | `KEY_MAX_TRIAL_DAYS` | `365` | Максимальная длительность (дней) пробных VPN-ключей (1–3650). |
