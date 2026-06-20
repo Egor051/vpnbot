@@ -25,6 +25,7 @@ from repositories.announcements import AnnouncementBatch
 from services.backend_health import BackendHealthStatus
 from services.dashboard import DashboardSnapshot
 from services.health import HealthCheckResult
+from services.server_status import ServerStatus
 from utils.formatting import (
     code,
     format_bytes,
@@ -1161,3 +1162,34 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
             lines.append(f"    {action}")
 
     return "\n".join(lines)
+
+
+def server_status_text(status: ServerStatus) -> str:
+    """Render the real-time server status panel (CPU, RAM, disk, network)."""
+    no_data = t("no_data")
+
+    cpu = f"{status.cpu_percent:.1f}%" if status.cpu_available else no_data
+    if status.ram_total_gb > 0:
+        ram = f"{status.ram_used_gb:.2f} GB / {status.ram_total_gb:.2f} GB"
+    else:
+        ram = no_data
+    if status.disk_total_gb > 0:
+        disk = t("server_status_disk_value", free=f"{status.disk_free_gb:.2f}", total=f"{status.disk_total_gb:.2f}")
+    else:
+        disk = no_data
+    net_in = f"{status.net_in_mbps:.2f} Mbps" if status.net_available else no_data
+    net_out = f"{status.net_out_mbps:.2f} Mbps" if status.net_available else no_data
+
+    return "\n".join(
+        [
+            f"<b>📊 {t('server_status_title')}</b>",
+            "",
+            f"⚙️ CPU: {h(cpu)}",
+            f"🧠 RAM: {h(ram)}",
+            f"💾 {t('server_status_disk_label')}: {h(disk)}",
+            "",
+            f"🌐 {t('server_status_network_label')}:",
+            f"📥 {t('server_status_net_in')}: {h(net_in)}",
+            f"📤 {t('server_status_net_out')}: {h(net_out)}",
+        ]
+    )
