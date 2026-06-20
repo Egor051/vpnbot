@@ -23,15 +23,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Background Xray traffic-stats collector** — a new `refresh_all_xray` loop
   keeps the dashboard's Xray traffic fresh, mirroring the existing AWG collector
-  (`XRAY_STATS_INTERVAL`, default `60s`, `0` disables). It accounts for an Xray
-  quirk: `xray api statsquery` resets the counters it returns, so the loop is the
-  **single** poller of the Xray stats API — it captures the whole fleet in one
-  `statsquery` per cycle (paginating the DB read into one `refresh_views(...,
-  poll_xray=True)` call) so a later page can't lose bytes a previous page's poll
-  zeroed. Manual stat views (`refresh_for_actor`, `list_for_superadmin`) no longer
-  poll Xray; they surface the values the loop last cached, serialised against the
-  loop on the same `_refresh_lock` so a view never straddles an in-flight reset.
-  AWG counters are idempotent to read and keep being sampled live on demand.
+  (`XRAY_STATS_INTERVAL`, default `60s`, `0` disables). `xray api statsquery` is
+  read without `-reset` (whose Xray default is `false`), so the query is
+  non-destructive: reading one key's counters never zeroes another's. Manual stat
+  views (`refresh_for_actor`, `list_for_superadmin`) therefore poll Xray live, just
+  like AWG, and stay fresh even when `XRAY_STATS_INTERVAL=0`; the loop only keeps
+  the cache warm between manual views. Because `statsquery` returns the whole
+  fleet's counters in one call, the loop still captures every key in a single
+  `statsquery` per cycle (paginating the DB read into one `refresh_views` call).
+  Concurrent refreshes are serialised on `_refresh_lock` so a stale snapshot can
+  never overwrite a fresher one.
 
 - **WARP split-routing on/off/restart toggle** — the **Enable / Disable /
   Restart** buttons in the «Outbound IP masking» panel now control the selective

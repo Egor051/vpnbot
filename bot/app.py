@@ -77,9 +77,9 @@ async def _awg_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> 
 
 
 async def _xray_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> None:
-    # Xray's statsquery resets the counters it returns, so this loop is the single
-    # place that polls the Xray stats API; manual stat views read the cached values
-    # it commits (see TrafficStatsService.refresh_all_xray).
+    # statsquery is read without -reset (non-destructive), so manual stat views poll
+    # it live; this loop only keeps the cache warm between them so the dashboard
+    # stays fresh without user interaction (see TrafficStatsService.refresh_all_xray).
     while True:
         try:
             await traffic_stats.refresh_all_xray()

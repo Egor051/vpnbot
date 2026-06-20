@@ -516,8 +516,9 @@ class _EmptyUsersRepo:
 
 
 def test_refresh_all_xray_polls_statsquery_once_for_the_whole_fleet() -> None:
-    # statsquery resets the counters it returns, so the background refresh must
-    # capture every Xray key in a single poll even when the DB read paginates.
+    # statsquery returns the whole fleet's counters in one call, so the background
+    # refresh captures every Xray key in a single poll even when the DB read
+    # paginates -- one subprocess spawn instead of one per page.
     async def run() -> None:
         keys = [_xray_key_n(i) for i in range(1, 251)]  # 250 keys -> two DB pages of 200
         counters: dict[str, int] = {}
@@ -546,13 +547,19 @@ def test_refresh_all_xray_polls_statsquery_once_for_the_whole_fleet() -> None:
     asyncio.run(run())
 
 
-def test_manual_refresh_views_serves_cached_xray_without_polling() -> None:
-    # Manual stat views must not touch the resetting statsquery; they surface the
-    # cached row the background loop last committed.
+def test_manual_refresh_views_polls_xray_live() -> None:
+    # statsquery is read without -reset (non-destructive), so a manual view polls it
+    # live and updates the cached row rather than serving a stale cache -- this keeps
+    # stats fresh even when the background loop is disabled (XRAY_STATS_INTERVAL=0).
     async def run() -> None:
         cached = _stats(downloaded=4242, uploaded=2121, raw_downloaded=4242, raw_uploaded=2121)
         repo = _MultiStatsRepo({10: cached})
-        xray = _CountingXray({"user>>>xray_A7kQz>>>traffic>>>downlink": 999999})
+        xray = _CountingXray(
+            {
+                "user>>>xray_A7kQz>>>traffic>>>downlink": 5000,
+                "user>>>xray_A7kQz>>>traffic>>>uplink": 2500,
+            }
+        )
         service = TrafficStatsService(
             stats=repo,  # type: ignore[arg-type]
             vpn_keys=SimpleNamespace(),
@@ -564,8 +571,12 @@ def test_manual_refresh_views_serves_cached_xray_without_polling() -> None:
 
         views = await service.refresh_views([_xray_key()])
 
-        assert xray.calls == 0  # no statsquery from the manual path
-        assert views[0].stats is cached
-        assert repo.rows[10] is cached  # cached row left untouched
+        assert xray.calls == 1  # the manual path polls statsquery live
+        # raw climbed 4242 -> 5000 (+758) and 2121 -> 2500 (+379); totals follow.
+        assert views[0].stats is not None
+        assert views[0].stats.downloaded_bytes == 5000
+        assert views[0].stats.uploaded_bytes == 2500
+        assert repo.rows[10].downloaded_bytes == 5000
+        assert repo.rows[10].uploaded_bytes == 2500
 
     asyncio.run(run())
