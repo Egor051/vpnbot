@@ -122,12 +122,3 @@ async def admin_server_status(callback: CallbackQuery, services: Services) -> No
     await safe_callback_answer(callback, t("updating_server_status"))
     await _render_server_status(callback, services)
     _start_server_status_auto_refresh(callback, services)
-
-
-@router.callback_query(F.data == "admin:server_status:refresh")
-async def admin_server_status_refresh(callback: CallbackQuery, services: Services) -> None:
-    """Refresh the server status panel in place."""
-    if not await ensure_private_callback(callback, t("admin_private_only_text")):
-        return
-    await safe_callback_answer(callback, t("updating_server_status"))
-    await _render_server_status(callback, services)

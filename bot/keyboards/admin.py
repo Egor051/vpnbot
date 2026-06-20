@@ -53,10 +53,12 @@ def dashboard_keyboard() -> InlineKeyboardMarkup:
 
 
 def server_status_keyboard() -> InlineKeyboardMarkup:
-    """Build the refresh/back inline keyboard for the server status panel."""
+    """Build the back inline keyboard for the server status panel.
+
+    No manual refresh button is needed because the panel auto-refreshes.
+    """
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t("btn_refresh"), callback_data="admin:server_status:refresh")],
             [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")],
         ]
     )
