@@ -52,10 +52,21 @@ def dashboard_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def server_status_keyboard() -> InlineKeyboardMarkup:
+    """Build the refresh/back inline keyboard for the server status panel."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_refresh"), callback_data="admin:server_status:refresh")],
+            [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")],
+        ]
+    )
+
+
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     """Build the full admin panel inline keyboard."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_server_status"), callback_data="admin:server_status")],
             [InlineKeyboardButton(text="📊 Дашборд", callback_data="admin:dashboard")],
             [InlineKeyboardButton(text=t("btn_access_requests"), callback_data="admin:reqs")],
             [InlineKeyboardButton(text=t("btn_users"), callback_data="admin:users")],

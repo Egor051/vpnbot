@@ -352,6 +352,7 @@ STRINGS: dict[str, str] = {
     "trial_quota_reset": "Квота пробных доступов сброшена.",
     "updating_stats": "Обновляю статистику...",
     "updating_proxy_status": "Обновляю статус...",
+    "updating_server_status": "Обновляю статус сервера...",
     "updating_diagnostics": "Обновляю диагностику...",
     "updating_proxy_stats": "Обновляю статистику прокси...",
     "backup_disabled": "OFFSITE_BACKUP_ENCRYPTION_KEY не настроен — бэкап отключён.",
@@ -447,6 +448,7 @@ STRINGS: dict[str, str] = {
     # ── keyboard buttons (admin) ──────────────────────────────────────────────
     "btn_approve": "Одобрить",
     "btn_reject": "Отклонить",
+    "btn_server_status": "📊 Статус сервера",
     "btn_access_requests": "📋 Заявки на доступ",
     "btn_users": "👥 Пользователи",
     "btn_key_stats": "📊 Статистика ключей",
@@ -476,6 +478,13 @@ STRINGS: dict[str, str] = {
     "btn_refresh": "Обновить",
     "btn_anomaly_dismiss": "✅ Я прочитал",
     "btn_warp_alert_dismiss": "✅ Понял",
+    # ── server status panel ───────────────────────────────────────────────────
+    "server_status_title": "СТАТУС СЕРВЕРА В РЕАЛЬНОМ ВРЕМЕНИ",
+    "server_status_disk_label": "Диск",
+    "server_status_disk_value": "{free} GB свободно из {total} GB",
+    "server_status_network_label": "Сетевая активность",
+    "server_status_net_in": "Входящая",
+    "server_status_net_out": "Исходящая",
     # ── keyboard buttons (keys) ───────────────────────────────────────────────
     "btn_back": "Назад",
     "btn_config": "Конфиг",

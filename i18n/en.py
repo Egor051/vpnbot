@@ -351,6 +351,7 @@ STRINGS: dict[str, str] = {
     "trial_quota_reset": "Trial access quota reset.",
     "updating_stats": "Updating statistics...",
     "updating_proxy_status": "Updating status...",
+    "updating_server_status": "Updating server status...",
     "updating_diagnostics": "Updating diagnostics...",
     "updating_proxy_stats": "Updating proxy statistics...",
     "backup_disabled": "OFFSITE_BACKUP_ENCRYPTION_KEY is not configured — backup disabled.",
@@ -446,6 +447,7 @@ STRINGS: dict[str, str] = {
     # ── keyboard buttons (admin) ──────────────────────────────────────────────
     "btn_approve": "Approve",
     "btn_reject": "Reject",
+    "btn_server_status": "📊 Server status",
     "btn_access_requests": "📋 Access requests",
     "btn_users": "👥 Users",
     "btn_key_stats": "📊 Key statistics",
@@ -475,6 +477,13 @@ STRINGS: dict[str, str] = {
     "btn_refresh": "Refresh",
     "btn_anomaly_dismiss": "✅ I've read it",
     "btn_warp_alert_dismiss": "✅ Got it",
+    # ── server status panel ───────────────────────────────────────────────────
+    "server_status_title": "REAL-TIME SERVER STATUS",
+    "server_status_disk_label": "Disk",
+    "server_status_disk_value": "{free} GB free of {total} GB",
+    "server_status_network_label": "Network activity",
+    "server_status_net_in": "Inbound",
+    "server_status_net_out": "Outbound",
     # ── keyboard buttons (keys) ───────────────────────────────────────────────
     "btn_back": "Back",
     "btn_config": "Config",

@@ -52,6 +52,7 @@ from services.offsite_backup import OffsiteBackupService
 from services.notes import NotesService
 from services.protocol_modules import ProtocolModulesService
 from services.proxy import ProxyService
+from services.server_status import ServerStatusService
 from services.socks5 import Socks5Service
 from services.mtproto import MtProtoService
 from services.traffic_stats import TrafficStatsService
@@ -402,6 +403,8 @@ async def _build_app(
         interface_name=settings.warp_interface,
     )
 
+    server_status_service = ServerStatusService()
+
     dashboard_service = DashboardService(
         repo=dashboard_repo,
         access_requests=access_repo,
@@ -440,6 +443,7 @@ async def _build_app(
         warp_split=warp_split_manager,
         modules=protocol_modules_service,
         dashboard=dashboard_service,
+        server_status=server_status_service,
     )
 
     await _startup_reconcile_keys(services)
