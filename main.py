@@ -35,6 +35,7 @@ async def main() -> None:
         anomaly_task: asyncio.Task[None] | None = None
         scheduled_announcements_task: asyncio.Task[None] | None = None
         fsm_cleanup_task: asyncio.Task[None] | None = None
+        server_status_task: asyncio.Task[None] | None = None
         try:
             if isinstance(dp.storage, TTLMemoryStorage):
                 fsm_cleanup_task = asyncio.create_task(
@@ -83,6 +84,11 @@ async def main() -> None:
                     name="scheduled-announcements",
                 )
                 logger.info("Scheduled announcements checker started (interval=60s)")
+            server_status_task = asyncio.create_task(
+                services.server_status.run(),
+                name="server-status-sampler",
+            )
+            logger.info("Server status sampler started (continuous /proc sampling)")
             if settings.health_port is not None:
                 health_app = create_health_app(backend_health)
                 runner = web.AppRunner(health_app)
@@ -122,6 +128,9 @@ async def main() -> None:
             if scheduled_announcements_task is not None:
                 scheduled_announcements_task.cancel()
                 await asyncio.gather(scheduled_announcements_task, return_exceptions=True)
+            if server_status_task is not None:
+                server_status_task.cancel()
+                await asyncio.gather(server_status_task, return_exceptions=True)
             try:
                 await services.warp.stop()
             except Exception:
