@@ -3,7 +3,7 @@ import asyncio
 from types import SimpleNamespace
 
 from aiogram.enums import ChatType
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 from bot.fsm.states import AdminCreateKeyStates
 from bot.handlers.admin import (
@@ -19,6 +19,7 @@ from bot.handlers.keys import confirm_key_action, create_key_choose, create_key_
 from bot.handlers.start import start_command
 from bot.keyboards.common import main_menu
 from bot.keyboards.keys import keys_list_keyboard
+from bot.messages import _MAX_REFRESH_RETRY_AFTER, edit_message_for_refresh
 from models.dto import AccessRequest, UnblockUserWarning, User, VpnKey
 from models.enums import AccessRequestStatus, UserRole, VpnKeyStatus, VpnKeyType
 from services.errors import AccessDenied, NotFound
@@ -901,3 +902,150 @@ def test_admin_delete_last_key_returns_previous_valid_page(monkeypatch) -> None:
         assert "страница 2" in edits[-1]
 
     asyncio.run(run())
+
+
+# --- edit_message_for_refresh: 429 / TelegramRetryAfter back-off -------------
+
+
+def _retry_after(seconds: int) -> TelegramRetryAfter:
+    return TelegramRetryAfter(
+        method=SimpleNamespace(),
+        message=f"Too Many Requests: retry after {seconds}",
+        retry_after=seconds,
+    )
+
+
+class _RefreshMessage:
+    """Fake aiogram message whose ``edit_text`` replays scripted outcomes.
+
+    Each entry in ``outcomes`` is either ``None`` (the edit succeeds) or an
+    exception instance to raise for that call.
+    """
+
+    def __init__(self, outcomes: list[BaseException | None]) -> None:
+        self._outcomes = list(outcomes)
+        self.edit_calls = 0
+
+    async def edit_text(self, text: str, reply_markup: object = None) -> None:
+        self.edit_calls += 1
+        outcome = self._outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+
+
+def test_refresh_honours_retry_after_then_succeeds() -> None:
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+
+    message = _RefreshMessage([_retry_after(2), None])
+
+    async def run() -> bool:
+        return await edit_message_for_refresh(message, "text", sleep=sleep)  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is True
+    assert slept == [2.0]  # waited exactly retry_after, once
+    assert message.edit_calls == 2  # initial attempt + one retry
+
+
+def test_refresh_caps_retry_after_at_ceiling() -> None:
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+
+    # retry_after far above the ceiling: we wait only the cap, then retry once.
+    message = _RefreshMessage([_retry_after(3600), None])
+
+    async def run() -> bool:
+        return await edit_message_for_refresh(message, "text", sleep=sleep)  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is True
+    assert slept == [_MAX_REFRESH_RETRY_AFTER]
+    assert message.edit_calls == 2
+
+
+def test_refresh_persistent_flood_keeps_card_alive_without_looping() -> None:
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+
+    # Both the initial edit and the single retry hit 429.
+    message = _RefreshMessage([_retry_after(2), _retry_after(2)])
+
+    async def run() -> bool:
+        return await edit_message_for_refresh(message, "text", sleep=sleep)  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is True  # card stays alive; next tick will try again
+    assert len(slept) == 1  # slept once, did not spin on retries
+    assert message.edit_calls == 2  # exactly one retry, no infinite loop
+
+
+def test_refresh_message_not_modified_returns_true_without_sleeping() -> None:
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+
+    not_modified = TelegramBadRequest(
+        method=SimpleNamespace(),
+        message="Bad Request: message is not modified",
+    )
+    message = _RefreshMessage([not_modified])
+
+    async def run() -> bool:
+        return await edit_message_for_refresh(message, "text", sleep=sleep)  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is True
+    assert slept == []
+    assert message.edit_calls == 1
+
+
+def test_refresh_edit_unavailable_returns_false_without_sleeping() -> None:
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+
+    gone = TelegramBadRequest(
+        method=SimpleNamespace(),
+        message="Bad Request: message to edit not found",
+    )
+    message = _RefreshMessage([gone])
+
+    async def run() -> bool:
+        return await edit_message_for_refresh(message, "text", sleep=sleep)  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is False
+    assert slept == []
+    assert message.edit_calls == 1
+
+
+def test_refresh_success_returns_true_without_sleeping() -> None:
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+
+    message = _RefreshMessage([None])
+
+    async def run() -> bool:
+        return await edit_message_for_refresh(message, "text", sleep=sleep)  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is True
+    assert slept == []
+    assert message.edit_calls == 1

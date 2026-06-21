@@ -9,9 +9,12 @@ from collections.abc import Awaitable, Callable, Hashable
 
 logger = logging.getLogger(__name__)
 
-# Defaults for the server-status panel: re-render every few seconds, but cap the
+# Defaults for the server-status panel: re-render once a second, but cap the
 # total lifetime so an abandoned panel stops hammering Telegram and ``/proc``.
-DEFAULT_INTERVAL_SECONDS = 2.0
+# A 1s cadence is safe because the snapshot is served from a background sampler's
+# cache, so the render never blocks, and the Telegram edit path honours 429
+# ``retry_after`` back-off (see ``bot.messages.edit_message_for_refresh``).
+DEFAULT_INTERVAL_SECONDS = 1.0
 DEFAULT_DURATION_SECONDS = 3600.0  # one hour
 
 
