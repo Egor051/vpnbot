@@ -7,11 +7,16 @@ import shutil
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _GB = 1024**3
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +37,7 @@ class ServerStatus:
     net_in_mbps: float
     net_out_mbps: float
     net_available: bool
+    sampled_at: datetime | None = None
 
     @property
     def disk_used_gb(self) -> float:
@@ -150,11 +156,13 @@ class ServerStatusService:
         interval: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        wall_clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._disk_path = str(disk_path)
         self._interval = interval
         self._clock = clock
         self._sleep = sleep
+        self._wall_clock = wall_clock
         self._prev_cpu: tuple[int, int] | None = None
         self._prev_net: tuple[int, int] | None = None
         self._prev_time: float | None = None
@@ -237,6 +245,7 @@ class ServerStatusService:
             net_in_mbps=net_in,
             net_out_mbps=net_out,
             net_available=net_available,
+            sampled_at=self._wall_clock(),
         )
 
     def _cold_status(self) -> ServerStatus:
@@ -253,6 +262,7 @@ class ServerStatusService:
             net_in_mbps=0.0,
             net_out_mbps=0.0,
             net_available=False,
+            sampled_at=self._wall_clock(),
         )
 
     @staticmethod

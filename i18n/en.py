@@ -479,6 +479,7 @@ STRINGS: dict[str, str] = {
     "btn_warp_alert_dismiss": "✅ Got it",
     # ── server status panel ───────────────────────────────────────────────────
     "server_status_title": "REAL-TIME SERVER STATUS",
+    "server_status_updated_at": "updated {time}",
     "server_status_disk_label": "Disk",
     "server_status_disk_value": "{used} GB used of {total} GB",
     "server_status_network_label": "Network activity",
