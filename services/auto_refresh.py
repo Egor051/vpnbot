@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Defaults for the server-status panel: re-render every few seconds, but cap the
 # total lifetime so an abandoned panel stops hammering Telegram and ``/proc``.
-DEFAULT_INTERVAL_SECONDS = 3.0
+DEFAULT_INTERVAL_SECONDS = 2.0
 DEFAULT_DURATION_SECONDS = 3600.0  # one hour
 
 
