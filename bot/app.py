@@ -39,6 +39,7 @@ from repositories.proxy_accesses import ProxyAccessRepository
 from repositories.traffic_stats import TrafficStatsRepository
 from repositories.trial_requests import TrialKeyRequestRepository
 from repositories.users import UserRepository
+from repositories.server_status_settings import ServerStatusSettingsRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.access_approval import AccessApprovalService
 from services.anomaly_detection import AnomalyDetectionService
@@ -51,6 +52,7 @@ from services.dashboard import DashboardService
 from services.key_expiry import KeyExpiryService
 from services.offsite_backup import OffsiteBackupService
 from services.notes import NotesService
+from services.online_clients import OnlineClientsService
 from services.protocol_modules import ProtocolModulesService
 from services.proxy import ProxyService
 from services.server_status import ServerStatusService
@@ -405,6 +407,14 @@ async def _build_app(
     )
 
     server_status_service = ServerStatusService()
+    server_status_settings_repo = ServerStatusSettingsRepository(db)
+    # Restore the persisted detailed-metrics toggle so the sampler resumes
+    # (or stays out of) background history collection across restarts.
+    server_status_service.set_detailed(await server_status_settings_repo.get())
+    online_clients_service = OnlineClientsService(
+        awg_adapter=awg_service.adapter,
+        xray_stats=xray_stats_adapter,
+    )
     auto_refresh_manager = LiveRefreshManager()
 
     dashboard_service = DashboardService(
@@ -446,6 +456,8 @@ async def _build_app(
         modules=protocol_modules_service,
         dashboard=dashboard_service,
         server_status=server_status_service,
+        server_status_settings=server_status_settings_repo,
+        online_clients=online_clients_service,
         auto_refresh=auto_refresh_manager,
     )
 

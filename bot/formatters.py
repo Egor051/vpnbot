@@ -25,6 +25,7 @@ from repositories.announcements import AnnouncementBatch
 from services.backend_health import BackendHealthStatus
 from services.dashboard import DashboardSnapshot
 from services.health import HealthCheckResult
+from services.online_clients import OnlineClients
 from services.server_status import ServerStatus
 from utils.formatting import (
     code,
@@ -1164,19 +1165,111 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
     return "\n".join(lines)
 
 
-def server_status_text(status: ServerStatus) -> str:
+_BAR_WIDTH = 10
+_SPARKLINE_CHARS = "▁▂▃▄▅▆▇█"
+
+
+def _usage_bar(percent: float, width: int = _BAR_WIDTH) -> str:
+    """Render a 10-cell usage bar: white squares filled, red at ≥90 %, black empty."""
+    percent = max(0.0, min(100.0, percent))
+    filled = round(percent / 100 * width)
+    glyph = "🟥" if percent >= 90 else "⬜"
+    return glyph * filled + "⬛" * (width - filled)
+
+
+def _sparkline(values: tuple[float, ...]) -> str:
+    """Render a series as Unicode block glyphs scaled to the window's own peak."""
+    if not values:
+        return ""
+    peak = max(values)
+    if peak <= 0:
+        return _SPARKLINE_CHARS[0] * len(values)
+    last = len(_SPARKLINE_CHARS) - 1
+    return "".join(_SPARKLINE_CHARS[min(last, int(value / peak * last))] for value in values)
+
+
+def _format_uptime(seconds: float) -> str:
+    """Render an uptime duration as ``Xд Yч Zм`` (omitting zero leading units)."""
+    total = int(seconds)
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}д")
+    if hours or days:
+        parts.append(f"{hours}ч")
+    parts.append(f"{minutes}м")
+    return " ".join(parts)
+
+
+_TREND_ARROW = {"up": "↑", "down": "↓", "flat": "→"}
+
+
+def _online_clients_line(online: OnlineClients) -> str:
+    no_data = t("no_data")
+    if not online.available:
+        return f"🔗 {t('server_status_online_label')}: {h(t('server_status_online_collecting'))}"
+    total = no_data if online.total is None else str(online.total)
+    wg = no_data if online.wg is None else str(online.wg)
+    xray = no_data if online.xray is None else str(online.xray)
+    return (
+        f"🔗 {t('server_status_online_label')}: <b>{h(total)}</b>"
+        f"  (WG: {h(wg)} · Xray: {h(xray)})"
+    )
+
+
+def _detailed_lines(status: ServerStatus) -> list[str]:
+    """Build the extra detailed-metrics block (load average, uptime, net trends)."""
+    lines: list[str] = [""]
+    if status.load1 is not None and status.load5 is not None and status.load15 is not None:
+        load = f"{status.load1:.2f} / {status.load5:.2f} / {status.load15:.2f}"
+        if status.cpu_count and status.cpu_count > 0:
+            pct = status.load5 / status.cpu_count * 100
+            load = f"{load}  ({pct:.0f}% / {status.cpu_count} CPU)"
+        lines.append(f"📈 {t('server_status_loadavg_label')}: {h(load)}")
+    if status.uptime_seconds is not None:
+        lines.append(f"⏱ {t('server_status_uptime_label')}: {h(_format_uptime(status.uptime_seconds))}")
+    if status.net_in_avg is not None and status.net_out_avg is not None:
+        in_arrow = _TREND_ARROW.get(status.net_in_trend or "flat", "→")
+        out_arrow = _TREND_ARROW.get(status.net_out_trend or "flat", "→")
+        avg_label = t("server_status_net_avg")
+        peak_label = t("server_status_net_peak")
+        lines.append(
+            f"📥 {avg_label} {status.net_in_avg:.2f} {in_arrow}"
+            f"  {peak_label} {status.net_in_peak or 0.0:.2f} Mbps"
+        )
+        lines.append(
+            f"📤 {avg_label} {status.net_out_avg:.2f} {out_arrow}"
+            f"  {peak_label} {status.net_out_peak or 0.0:.2f} Mbps"
+        )
+    if status.net_sparkline:
+        lines.append(_sparkline(status.net_sparkline))
+    return lines
+
+
+def server_status_text(status: ServerStatus, online: OnlineClients) -> str:
     """Render the real-time server status panel (CPU, RAM, disk, network)."""
     no_data = t("no_data")
 
     cpu = f"{status.cpu_percent:.1f}%" if status.cpu_available else no_data
+    cpu_bar = _usage_bar(status.cpu_percent) if status.cpu_available else ""
     if status.ram_total_gb > 0:
         ram = f"{status.ram_used_gb:.2f} GB / {status.ram_total_gb:.2f} GB"
+        ram_bar = _usage_bar(status.ram_used_gb / status.ram_total_gb * 100)
     else:
         ram = no_data
+        ram_bar = ""
     if status.disk_total_gb > 0:
         disk = t("server_status_disk_value", used=f"{status.disk_used_gb:.2f}", total=f"{status.disk_total_gb:.2f}")
+        disk_bar = _usage_bar(status.disk_used_gb / status.disk_total_gb * 100)
     else:
         disk = no_data
+        disk_bar = ""
+    if status.swap_total_gb > 0:
+        swap = f"{status.swap_used_gb:.2f} GB / {status.swap_total_gb:.2f} GB"
+    else:
+        swap = t("server_status_swap_off")
     net_in = f"{status.net_in_mbps:.2f} Mbps" if status.net_available else no_data
     net_out = f"{status.net_out_mbps:.2f} Mbps" if status.net_available else no_data
 
@@ -1188,16 +1281,26 @@ def server_status_text(status: ServerStatus) -> str:
         updated = t("server_status_updated_at", time=h(status.sampled_at.strftime("%H:%M:%S")))
         title = f"{title}  <i>{updated}</i>"
 
-    return "\n".join(
-        [
-            title,
-            "",
-            f"⚙️ CPU: {h(cpu)}",
-            f"🧠 RAM: {h(ram)}",
-            f"💾 {t('server_status_disk_label')}: {h(disk)}",
-            "",
-            f"🌐 {t('server_status_network_label')}:",
-            f"📥 {t('server_status_net_in')}: {h(net_in)}",
-            f"📤 {t('server_status_net_out')}: {h(net_out)}",
-        ]
-    )
+    lines = [
+        title,
+        "",
+        f"⚙️ CPU: {h(cpu)}",
+    ]
+    if cpu_bar:
+        lines.append(cpu_bar)
+    lines.append(f"🧠 RAM: {h(ram)}")
+    if ram_bar:
+        lines.append(ram_bar)
+    lines.append(f"💾 {t('server_status_disk_label')}: {h(disk)}")
+    if disk_bar:
+        lines.append(disk_bar)
+    lines.append(f"🔁 {t('server_status_swap_label')}: {h(swap)}")
+    lines.append("")
+    lines.append(_online_clients_line(online))
+    lines.append("")
+    lines.append(f"🌐 {t('server_status_network_label')}:")
+    lines.append(f"📥 {t('server_status_net_in')}: {h(net_in)}")
+    lines.append(f"📤 {t('server_status_net_out')}: {h(net_out)}")
+    if status.detailed_enabled:
+        lines.extend(_detailed_lines(status))
+    return "\n".join(lines)

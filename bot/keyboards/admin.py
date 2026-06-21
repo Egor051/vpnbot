@@ -52,13 +52,17 @@ def dashboard_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def server_status_keyboard() -> InlineKeyboardMarkup:
-    """Build the back inline keyboard for the server status panel.
+def server_status_keyboard(detailed_enabled: bool = False) -> InlineKeyboardMarkup:
+    """Build the inline keyboard for the server status panel.
 
-    No manual refresh button is needed because the panel auto-refreshes.
+    A toggle row controls the detailed-metrics mode (load average, uptime,
+    network smoothing); its label reflects the current state. No manual refresh
+    button is needed because the panel auto-refreshes.
     """
+    toggle_text = t("btn_server_status_detailed_on" if detailed_enabled else "btn_server_status_detailed_off")
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text=toggle_text, callback_data="admin:server_status:toggle_detailed")],
             [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")],
         ]
     )
