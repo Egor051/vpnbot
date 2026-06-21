@@ -15,6 +15,7 @@ from services.notes import NotesService
 from services.anomaly_detection import AnomalyDetectionService
 from services.auto_refresh import LiveRefreshManager
 from services.offsite_backup import OffsiteBackupService
+from services.online_clients import OnlineClientsService
 from services.protocol_modules import ProtocolModulesService
 from services.proxy import ProxyService
 from services.server_status import ServerStatusService
@@ -24,6 +25,7 @@ from services.trial_access import TrialAccessService
 from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
 from services.xray import XrayService
+from repositories.server_status_settings import ServerStatusSettingsRepository
 from warp.manager import WarpManager
 from warp.split_manager import WarpSplitManager
 
@@ -54,4 +56,6 @@ class Services:
     modules: ProtocolModulesService
     dashboard: DashboardService
     server_status: ServerStatusService
+    server_status_settings: ServerStatusSettingsRepository
+    online_clients: OnlineClientsService
     auto_refresh: LiveRefreshManager

@@ -61,10 +61,11 @@ async def _render_server_status(callback: CallbackQuery, services: Services) -> 
     try:
         await require_superadmin(services, callback.from_user.id)
         status = await services.server_status.snapshot()
+        online = await services.online_clients.get()
         await safe_edit_message_text(
             callback.message,
-            server_status_text(status),
-            reply_markup=server_status_keyboard(),
+            server_status_text(status, online),
+            reply_markup=server_status_keyboard(services.server_status.detailed),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -88,13 +89,14 @@ def _start_server_status_auto_refresh(callback: CallbackQuery, services: Service
         try:
             await require_superadmin(services, user_id)
             status = await services.server_status.snapshot()
+            online = await services.online_clients.get()
         except Exception:
             logger.debug("server status auto-refresh snapshot failed", exc_info=True)
             return False
         return await edit_message_for_refresh(
             message,
-            server_status_text(status),
-            reply_markup=server_status_keyboard(),
+            server_status_text(status, online),
+            reply_markup=server_status_keyboard(services.server_status.detailed),
         )
 
     async def on_expire() -> None:
@@ -120,5 +122,29 @@ async def admin_server_status(callback: CallbackQuery, services: Services) -> No
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback, t("updating_server_status"))
+    await _render_server_status(callback, services)
+    _start_server_status_auto_refresh(callback, services)
+
+
+@router.callback_query(F.data == "admin:server_status:toggle_detailed")
+async def admin_server_status_toggle_detailed(callback: CallbackQuery, services: Services) -> None:
+    """Toggle detailed-metrics collection (load average, uptime, network history).
+
+    Persists the new state to the DB and flips the sampler's in-memory flag so
+    background collection starts/stops immediately, then re-renders the panel.
+    """
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        new_state = not services.server_status.detailed
+        await services.server_status_settings.set_detailed(new_state)
+        services.server_status.set_detailed(new_state)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+        return
+    await safe_callback_answer(callback)
     await _render_server_status(callback, services)
     _start_server_status_auto_refresh(callback, services)

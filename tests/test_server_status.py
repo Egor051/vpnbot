@@ -7,7 +7,12 @@ from pytest import approx
 
 from bot.formatters import server_status_text
 from services import server_status as ss
+from services.online_clients import OnlineClients
 from services.server_status import ServerStatus, ServerStatusService
+
+# Online counts are rendered separately; most formatter tests don't exercise them,
+# so they pass a "no baseline yet" value that renders as "collecting".
+_ONLINE_COLLECTING = OnlineClients(wg=None, xray=None, total=None, available=False)
 
 
 def test_cpu_percent_computes_busy_fraction() -> None:
@@ -228,7 +233,7 @@ def test_server_status_text_shows_updated_at() -> None:
         net_available=True,
         sampled_at=datetime(2026, 6, 21, 12, 34, 56, tzinfo=timezone.utc),
     )
-    text = server_status_text(status)
+    text = server_status_text(status, _ONLINE_COLLECTING)
     assert "12:34:56" in text
     assert "обновлено" in text
 
@@ -246,7 +251,7 @@ def test_server_status_text_omits_updated_at_without_timestamp() -> None:
         net_available=True,
         sampled_at=None,
     )
-    text = server_status_text(status)
+    text = server_status_text(status, _ONLINE_COLLECTING)
     assert "обновлено" not in text
 
 
@@ -262,7 +267,7 @@ def test_server_status_text_matches_layout() -> None:
         net_out_mbps=0.02,
         net_available=True,
     )
-    text = server_status_text(status)
+    text = server_status_text(status, _ONLINE_COLLECTING)
     assert "CPU: 8.3%" in text
     assert "RAM: 0.54 GB / 0.93 GB" in text
     # Disk shows used space (total - free = 9.71 - 6.43 = 3.28), not free space.
@@ -301,7 +306,143 @@ def test_server_status_text_reports_no_data_when_unavailable() -> None:
         net_out_mbps=0.0,
         net_available=False,
     )
-    text = server_status_text(status)
+    text = server_status_text(status, _ONLINE_COLLECTING)
     # CPU/RAM/disk/network all degrade gracefully rather than showing zeros.
     assert "8.3%" not in text
     assert text.count("нет данных") == 5
+
+
+def _base_status(**overrides: object) -> ServerStatus:
+    defaults: dict[str, object] = dict(
+        cpu_percent=8.3,
+        cpu_available=True,
+        ram_used_gb=0.54,
+        ram_total_gb=0.93,
+        disk_free_gb=6.43,
+        disk_total_gb=9.71,
+        net_in_mbps=0.42,
+        net_out_mbps=0.02,
+        net_available=True,
+    )
+    defaults.update(overrides)
+    return ServerStatus(**defaults)  # type: ignore[arg-type]
+
+
+def test_usage_bar_empty_full_and_red() -> None:
+    from bot.formatters import _usage_bar
+
+    assert _usage_bar(0.0) == "⬛" * 10
+    assert _usage_bar(47.0) == "⬜" * 5 + "⬛" * 5  # round(4.7) = 5
+    # At/above 90% the filled glyph turns red.
+    assert _usage_bar(90.0) == "🟥" * 9 + "⬛"
+    assert _usage_bar(100.0) == "🟥" * 10
+
+
+def test_server_status_text_base_view_shows_swap_and_online() -> None:
+    status = _base_status(swap_used_gb=0.25, swap_total_gb=2.0)
+    online = OnlineClients(wg=28, xray=9, total=37, available=True)
+    text = server_status_text(status, online)
+    assert "Подкачка" in text and "0.25 GB / 2.00 GB" in text
+    assert "Онлайн-клиентов" in text and "37" in text
+    assert "WG: 28" in text and "Xray: 9" in text
+    # Detailed-only blocks stay hidden in the base view.
+    assert "Средняя нагрузка" not in text
+    assert "Аптайм" not in text
+
+
+def test_server_status_text_swap_off_when_no_swap() -> None:
+    text = server_status_text(_base_status(swap_total_gb=0.0), _ONLINE_COLLECTING)
+    assert "выкл" in text
+
+
+def test_server_status_text_detailed_view_shows_loadavg_and_uptime() -> None:
+    status = _base_status(
+        detailed_enabled=True,
+        load1=0.5,
+        load5=1.0,
+        load15=1.5,
+        cpu_count=4,
+        uptime_seconds=90061.0,  # 1d 1h 1m
+        net_in_avg=0.30,
+        net_out_avg=0.10,
+        net_in_peak=0.90,
+        net_out_peak=0.40,
+        net_in_trend="up",
+        net_out_trend="flat",
+        net_sparkline=(0.1, 0.5, 0.9),
+    )
+    text = server_status_text(status, _ONLINE_COLLECTING)
+    assert "Средняя нагрузка" in text and "0.50 / 1.00 / 1.50" in text
+    assert "Аптайм" in text and "1д 1ч 1м" in text
+    assert "↑" in text and "→" in text  # trend arrows
+
+
+def test_detailed_mode_collects_history_loadavg_and_uptime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500))
+    monkeypatch.setattr(ss, "_read_net_bytes", lambda: (0, 0))
+    monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
+    monkeypatch.setattr(ss, "_read_swap_gb", lambda: (0.5, 4.0))
+    monkeypatch.setattr(ss, "_read_loadavg", lambda: (0.1, 0.2, 0.3))
+    monkeypatch.setattr(ss, "_read_uptime", lambda: 12345.0)
+    monkeypatch.setattr(ServerStatusService, "_read_disk", lambda self: (5.0, 10.0))
+
+    service = ServerStatusService()
+    service.set_detailed(True)
+    # Prime, then take several samples so the history window fills.
+    for _ in range(8):
+        status = service._sample_once()
+
+    assert status.detailed_enabled is True
+    assert status.swap_total_gb == approx(4.0)  # swap is always read
+    assert status.load1 == approx(0.1) and status.load15 == approx(0.3)
+    assert status.uptime_seconds == approx(12345.0)
+    assert status.cpu_count is not None
+    assert status.net_in_avg is not None and status.net_in_peak is not None
+    assert status.net_sparkline is not None
+    assert len(service._history) > 0
+
+
+def test_detailed_disabled_skips_history_and_loadavg(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Tripwires: if the sampler reads these while detailed is off, the test fails.
+    def _boom_loadavg() -> tuple[float, float, float]:
+        raise AssertionError("loadavg must not be read in base mode")
+
+    def _boom_uptime() -> float:
+        raise AssertionError("uptime must not be read in base mode")
+
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500))
+    monkeypatch.setattr(ss, "_read_net_bytes", lambda: (0, 0))
+    monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
+    monkeypatch.setattr(ss, "_read_swap_gb", lambda: (0.5, 4.0))
+    monkeypatch.setattr(ss, "_read_loadavg", _boom_loadavg)
+    monkeypatch.setattr(ss, "_read_uptime", _boom_uptime)
+    monkeypatch.setattr(ServerStatusService, "_read_disk", lambda self: (5.0, 10.0))
+
+    service = ServerStatusService()  # detailed defaults off
+    for _ in range(3):
+        status = service._sample_once()
+
+    assert status.detailed_enabled is False
+    assert status.load1 is None and status.uptime_seconds is None
+    assert status.net_sparkline is None
+    assert len(service._history) == 0
+    # Swap is part of the base view and must still be present.
+    assert status.swap_total_gb == approx(4.0)
+
+
+def test_set_detailed_off_clears_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500))
+    monkeypatch.setattr(ss, "_read_net_bytes", lambda: (0, 0))
+    monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
+    monkeypatch.setattr(ss, "_read_swap_gb", lambda: (0.0, 0.0))
+    monkeypatch.setattr(ss, "_read_loadavg", lambda: (0.1, 0.2, 0.3))
+    monkeypatch.setattr(ss, "_read_uptime", lambda: 1.0)
+    monkeypatch.setattr(ServerStatusService, "_read_disk", lambda self: (5.0, 10.0))
+
+    service = ServerStatusService()
+    service.set_detailed(True)
+    for _ in range(4):
+        service._sample_once()
+    assert len(service._history) > 0
+    service.set_detailed(False)
+    assert len(service._history) == 0

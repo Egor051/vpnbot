@@ -209,6 +209,13 @@ CREATE TABLE IF NOT EXISTS warp_settings (
 );
 INSERT OR IGNORE INTO warp_settings (id) VALUES (1);
 
+CREATE TABLE IF NOT EXISTS server_status_settings (
+  id               INTEGER PRIMARY KEY DEFAULT 1,
+  detailed_enabled INTEGER NOT NULL DEFAULT 0,
+  updated_at       INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO server_status_settings (id) VALUES (1);
+
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_active_role ON users(role) WHERE blocked_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_access_requests_user_status ON access_requests(telegram_user_id, status);
