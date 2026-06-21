@@ -21,6 +21,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **"Server status" panel refreshes once a second and honours Telegram 429
+  back-off** — the auto-refresh cadence (`LiveRefreshManager` default interval)
+  drops from 2s to **1s**. The render no longer blocks (the snapshot is served
+  from the background sampler's cache), so the only remaining limit is Telegram's
+  edit rate. To make a 1s cadence safe, `edit_message_for_refresh` now catches
+  `TelegramRetryAfter` (HTTP 429): it waits the server-provided `retry_after`
+  (clamped to a 5s ceiling so a pathological value cannot park the loop), retries
+  the edit exactly once, and — if the flood persists — keeps the card alive and
+  lets the next tick try again instead of spinning on retries. Previously
+  `TelegramRetryAfter` (a sibling of `TelegramBadRequest`, not a subclass) slipped
+  past the helper into the loop's generic handler, so the back-off was ignored and
+  the bot kept hammering the rate limit. The back-off stays local to the
+  Telegram-specific helper; `LiveRefreshManager` remains generic. The panel
+  lifetime cap (one hour) and the sampler interval (1s) are unchanged.
+
 - **Continuous background sampling for the "Server status" panel** — host
   metrics are now collected by a single always-on sampler (`ServerStatusService.run`,
   started in `main.py`) instead of each render taking its own blocking two-reading
@@ -37,7 +52,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **Live-updating "Server status" panel** — the admin **📊 Статус сервера** card
-  now refreshes itself in place every ~3 seconds (`LiveRefreshManager`) so CPU,
+  now refreshes itself in place about once a second (`LiveRefreshManager`) so CPU,
   RAM, disk and network read in real time without tapping **Refresh**. Each open
   card is capped at one hour of auto-refresh; when the cap elapses the card falls
   back to the admin panel so an abandoned panel stops sampling `/proc` and editing

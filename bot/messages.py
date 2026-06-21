@@ -1,10 +1,12 @@
 
+import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
@@ -18,6 +20,14 @@ TELEGRAM_TEXT_LIMIT = 4096
 AWG_CONFIG_FILENAME = "awg.conf"
 _AWG_GENERATED_NAME_RE = re.compile(r"^awg_[A-Za-z0-9]{5}$")
 _TRUNCATED_SUFFIX = "\n...обрезано"
+
+# Upper bound on how long the auto-refresh path will wait on a Telegram 429
+# (``TelegramRetryAfter.retry_after``) before retrying the edit. Telegram can
+# return a pathologically large ``retry_after`` under sustained flooding; the cap
+# keeps the per-tick stall short so the refresh loop never parks for long. A
+# larger ``retry_after`` is clamped to this value, the edit is retried once, and
+# the tick returns "alive" regardless of the outcome.
+_MAX_REFRESH_RETRY_AFTER = 5.0
 
 # FSM data keys used to track the config file most recently delivered to the
 # user. The message id lets us delete that file when the user taps another
@@ -85,6 +95,7 @@ async def edit_message_for_refresh(
     text: str,
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> bool:
     """Edit a message in place for an auto-refresh loop.
 
@@ -95,19 +106,47 @@ async def edit_message_for_refresh(
     inaccessible) so the caller can stop the loop. Unlike
     :func:`safe_edit_message_text` it never re-posts a fresh message, so an
     abandoned card is not resurrected on every tick.
+
+    Telegram rate-limits frequent edits of one message with HTTP 429
+    (:class:`~aiogram.exceptions.TelegramRetryAfter`). That back-off is honoured
+    here, local to this Telegram-specific helper: on a 429 we wait the
+    server-provided ``retry_after`` (clamped to :data:`_MAX_REFRESH_RETRY_AFTER`
+    so a huge value cannot park the loop) and retry the edit exactly once. If the
+    flood persists we keep the card alive and let the next tick try again rather
+    than spinning on retries. ``sleep`` is injectable so tests can drive the
+    back-off without real delays.
     """
     if message is None or isinstance(message, InaccessibleMessage):
         return False
     text = cap_telegram_html(text)
     try:
         await message.edit_text(text, reply_markup=reply_markup)
-    except TelegramBadRequest as exc:
-        if _is_message_not_modified(exc):
+    except TelegramRetryAfter as exc:
+        await sleep(min(exc.retry_after, _MAX_REFRESH_RETRY_AFTER))
+        try:
+            await message.edit_text(text, reply_markup=reply_markup)
+        except TelegramRetryAfter:
+            logger.debug("live refresh still rate-limited after retry; skipping tick")
             return True
-        if _is_edit_unavailable(exc):
-            return False
-        raise
+        except TelegramBadRequest as retry_exc:
+            return _refresh_edit_outcome(retry_exc)
+    except TelegramBadRequest as exc:
+        return _refresh_edit_outcome(exc)
     return True
+
+
+def _refresh_edit_outcome(exc: TelegramBadRequest) -> bool:
+    """Map a failed refresh edit to "card alive" (``True``) / "gone" (``False``).
+
+    ``message is not modified`` means the card is still there with identical
+    content, so the loop keeps going. An edit-unavailable error means the card is
+    gone and the loop should stop. Anything else is unexpected and re-raised.
+    """
+    if _is_message_not_modified(exc):
+        return True
+    if _is_edit_unavailable(exc):
+        return False
+    raise exc
 
 
 async def safe_callback_answer(
