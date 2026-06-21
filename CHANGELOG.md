@@ -19,6 +19,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reports no known vulnerabilities. Hashed constraint sets were regenerated and the
   un-hashed mirror re-synced.
 
+### Added
+
+- **"Server status" panel shows the snapshot time as a freshness indicator** —
+  the title line now carries an italic "обновлено HH:MM:SS" ("updated HH:MM:SS")
+  mark (UTC, matching the dashboard). The timestamp is stamped on the
+  `ServerStatus` snapshot at *sampling* time by the background sampler (new
+  injectable `wall_clock`), not computed at render time, so if the sampler stalls
+  or Telegram stops delivering edits the mark freezes alongside the data instead
+  of ticking on stale numbers. A new `server_status_updated_at` i18n key was added
+  to both locales; a cold cache (no timestamp yet) renders no mark.
+
 ### Changed
 
 - **First render of the "Server status" panel also honours Telegram 429

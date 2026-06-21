@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from itertools import pairwise
 
 import pytest
@@ -195,6 +196,58 @@ def test_run_starts_task_and_cancels_cleanly() -> None:
     assert running is True
     assert primed is True
     assert cancelled is True
+
+
+def test_sampler_stamps_sampled_at_from_wall_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both the warm and cold sampling paths stamp the injected wall clock."""
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500))
+    monkeypatch.setattr(ss, "_read_net_bytes", lambda: (10, 20))
+    monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
+    monkeypatch.setattr(ServerStatusService, "_read_disk", lambda self: (5.0, 10.0))
+
+    fixed = datetime(2026, 6, 21, 12, 34, 56, tzinfo=timezone.utc)
+    service = ServerStatusService(wall_clock=lambda: fixed)
+
+    service._sample_once()  # prime so the next reading is a warm status
+    warm = service._sample_once()
+    assert warm.sampled_at == fixed
+
+    assert service._cold_status().sampled_at == fixed
+
+
+def test_server_status_text_shows_updated_at() -> None:
+    status = ServerStatus(
+        cpu_percent=8.3,
+        cpu_available=True,
+        ram_used_gb=0.54,
+        ram_total_gb=0.93,
+        disk_free_gb=6.43,
+        disk_total_gb=9.71,
+        net_in_mbps=0.42,
+        net_out_mbps=0.02,
+        net_available=True,
+        sampled_at=datetime(2026, 6, 21, 12, 34, 56, tzinfo=timezone.utc),
+    )
+    text = server_status_text(status)
+    assert "12:34:56" in text
+    assert "обновлено" in text
+
+
+def test_server_status_text_omits_updated_at_without_timestamp() -> None:
+    status = ServerStatus(
+        cpu_percent=8.3,
+        cpu_available=True,
+        ram_used_gb=0.54,
+        ram_total_gb=0.93,
+        disk_free_gb=6.43,
+        disk_total_gb=9.71,
+        net_in_mbps=0.42,
+        net_out_mbps=0.02,
+        net_available=True,
+        sampled_at=None,
+    )
+    text = server_status_text(status)
+    assert "обновлено" not in text
 
 
 def test_server_status_text_matches_layout() -> None:

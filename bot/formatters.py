@@ -1180,9 +1180,17 @@ def server_status_text(status: ServerStatus) -> str:
     net_in = f"{status.net_in_mbps:.2f} Mbps" if status.net_available else no_data
     net_out = f"{status.net_out_mbps:.2f} Mbps" if status.net_available else no_data
 
+    # Timestamp of the snapshot itself (set by the background sampler), so the
+    # mark freezes when the sampler stalls instead of tracking render time. A
+    # cold cache or a status built without a time renders no mark at all.
+    title = f"<b>📊 {t('server_status_title')}</b>"
+    if status.sampled_at is not None:
+        updated = t("server_status_updated_at", time=h(status.sampled_at.strftime("%H:%M:%S")))
+        title = f"{title}  <i>{updated}</i>"
+
     return "\n".join(
         [
-            f"<b>📊 {t('server_status_title')}</b>",
+            title,
             "",
             f"⚙️ CPU: {h(cpu)}",
             f"🧠 RAM: {h(ram)}",
