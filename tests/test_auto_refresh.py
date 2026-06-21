@@ -1,8 +1,9 @@
 import asyncio
+from itertools import pairwise
 
 import pytest
 
-from services.auto_refresh import LiveRefreshManager
+from services.auto_refresh import DEFAULT_INTERVAL_SECONDS, LiveRefreshManager
 
 
 class FakeClock:
@@ -179,3 +180,58 @@ def test_start_replaces_previous_loop_for_same_key() -> None:
 def test_active_false_for_unknown_key(missing: None) -> None:
     mgr = LiveRefreshManager()
     assert mgr.active("never-started") is False
+
+
+def test_default_interval_is_five_seconds() -> None:
+    # A 1s cadence trips Telegram's per-message edit flood control; the panel is
+    # served from a cached snapshot, so a slower 5s edit cadence stays "live" for
+    # a human while staying well clear of the flood zone.
+    assert DEFAULT_INTERVAL_SECONDS == pytest.approx(5.0)
+    assert LiveRefreshManager()._interval == pytest.approx(5.0)
+
+
+def test_run_no_catch_up_burst_after_long_refresh() -> None:
+    """A tick whose ``refresh()`` stalls past the interval must not be followed
+    by a burst of immediate catch-up refreshes.
+
+    The schedule is recomputed relative to "now" after each refresh, so even a
+    long 429 back-off absorbed inside a single tick cannot leave the loop firing
+    several edits back-to-back the moment it recovers (which would re-trip the
+    very flood control it just waited out).
+    """
+    clock = FakeClock()
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+        clock.advance(delay)
+
+    refresh_times: list[float] = []
+    tick = 0
+
+    async def refresh() -> bool:
+        nonlocal tick
+        refresh_times.append(clock.now)
+        tick += 1
+        if tick == 1:
+            # Simulate a long back-off absorbed inside one tick (e.g. Telegram
+            # asked us to wait out a flood penalty): the clock jumps far past
+            # several scheduled ticks while this single refresh is in flight.
+            clock.advance(30.0)
+        return True
+
+    async def on_expire() -> None:
+        pass
+
+    interval = 5.0
+    mgr = LiveRefreshManager(interval=interval, duration=60.0, clock=clock, sleep=sleep)
+    asyncio.run(mgr._run("k", refresh, on_expire))
+
+    # Every consecutive pair of refreshes is at least one interval apart: the
+    # loop always slept a full interval before the next edit, so there is no
+    # zero-gap catch-up burst after the stalled tick.
+    deltas = [later - earlier for earlier, later in pairwise(refresh_times)]
+    assert deltas, "expected several refreshes"
+    assert all(delta >= interval for delta in deltas), deltas
+    # And every tick was actually preceded by a real (positive) sleep.
+    assert all(s > 0 for s in sleeps), sleeps

@@ -9,12 +9,16 @@ from collections.abc import Awaitable, Callable, Hashable
 
 logger = logging.getLogger(__name__)
 
-# Defaults for the server-status panel: re-render once a second, but cap the
+# Defaults for the server-status panel: re-render every few seconds, but cap the
 # total lifetime so an abandoned panel stops hammering Telegram and ``/proc``.
-# A 1s cadence is safe because the snapshot is served from a background sampler's
-# cache, so the render never blocks, and the Telegram edit path honours 429
-# ``retry_after`` back-off (see ``bot.messages.edit_message_for_refresh``).
-DEFAULT_INTERVAL_SECONDS = 1.0
+# A 5s cadence keeps the panel visibly "live" for a human while staying clear of
+# Telegram's per-message edit flood control (one ``editMessageText`` of the same
+# message_id every second reliably trips HTTP 429). It is safe because the
+# snapshot is served from a background sampler's cache (which keeps sampling once
+# a second regardless of this interval), so the render never blocks, and the
+# Telegram edit path also honours 429 ``retry_after`` back-off (see
+# ``bot.messages.edit_message_for_refresh``).
+DEFAULT_INTERVAL_SECONDS = 5.0
 DEFAULT_DURATION_SECONDS = 3600.0  # one hour
 
 
@@ -93,18 +97,23 @@ class LiveRefreshManager:
                     await self._sleep(delay)
                 if self._clock() >= deadline:
                     break
-                # Advance the schedule by a fixed step so a slow refresh (the
-                # snapshot itself samples for ~1s) does not let drift accumulate.
-                next_tick += self._interval
                 try:
                     alive = await refresh()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     logger.debug("live refresh tick failed for %r", key, exc_info=True)
-                    continue
+                    alive = True  # transient render error: keep the loop going
                 if not alive:
                     return
+                # Schedule the next tick relative to *now*, after refresh() (and
+                # any 429 back-off it absorbed) has fully returned. Using a fixed
+                # additive step instead would let next_tick fall far behind the
+                # clock during a long back-off and then fire a burst of catch-up
+                # edits the moment it recovers — re-tripping the flood control we
+                # just waited out. A little schedule drift is fine for a status
+                # panel; burst-safety is not negotiable.
+                next_tick = self._clock() + self._interval
             try:
                 await on_expire()
             except asyncio.CancelledError:
