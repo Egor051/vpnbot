@@ -63,20 +63,56 @@ async def safe_edit_message_text(
     text: str,
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> bool:
     if message is None or isinstance(message, InaccessibleMessage):
         return False
     text = cap_telegram_html(text)
     try:
         await message.edit_text(text, reply_markup=reply_markup)
-    except TelegramBadRequest as exc:
-        if _is_message_not_modified(exc):
+    except TelegramRetryAfter as exc:
+        # Telegram 429: wait the server-provided back-off (clamped to
+        # ``_MAX_REFRESH_RETRY_AFTER`` so a pathological value cannot stall the
+        # caller) and retry the edit exactly once. If the flood persists we leave
+        # the message untouched and report "not applied" rather than re-posting a
+        # fresh message — a transient flood must not orphan a duplicate card. For
+        # the panel's first render the auto-refresh loop (which also honours 429)
+        # will fill the original message in within ~1s.
+        await sleep(min(exc.retry_after, _MAX_REFRESH_RETRY_AFTER))
+        try:
+            await message.edit_text(text, reply_markup=reply_markup)
+        except TelegramRetryAfter:
+            logger.debug("edit still rate-limited after retry; leaving message unchanged")
             return False
-        if _is_edit_unavailable(exc):
-            await message.answer(text, reply_markup=reply_markup)
-            return True
-        raise
+        except TelegramBadRequest as retry_exc:
+            return await _safe_edit_outcome(retry_exc, message, text, reply_markup)
+    except TelegramBadRequest as exc:
+        return await _safe_edit_outcome(exc, message, text, reply_markup)
     return True
+
+
+async def _safe_edit_outcome(
+    exc: TelegramBadRequest,
+    message: Message,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None,
+) -> bool:
+    """Map a failed :func:`safe_edit_message_text` edit to its boolean result.
+
+    ``message is not modified`` means the content is already on screen, so the
+    edit is a no-op (``False``). An edit-unavailable error means the message can
+    no longer be edited, so the content is re-posted as a fresh message
+    (``True``). Anything else is unexpected and re-raised. This mirrors the
+    inline branches the function used to carry; it is *not*
+    :func:`_refresh_edit_outcome`, which has the opposite semantics (not-modified
+    keeps the card alive, unavailable stops the loop without re-posting).
+    """
+    if _is_message_not_modified(exc):
+        return False
+    if _is_edit_unavailable(exc):
+        await message.answer(text, reply_markup=reply_markup)
+        return True
+    raise exc
 
 
 def message_target_key(message: Message | InaccessibleMessage | None) -> tuple[int, int] | None:

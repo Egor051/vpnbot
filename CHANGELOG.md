@@ -21,6 +21,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **First render of the "Server status" panel also honours Telegram 429
+  back-off** — the panel's initial open goes through `safe_edit_message_text`
+  (not the auto-refresh path), which previously caught only `TelegramBadRequest`
+  and let `TelegramRetryAfter` (HTTP 429) escape to the callback error handler.
+  It now waits the server-provided `retry_after` (clamped to the same 5s ceiling)
+  and retries the edit once; if the flood persists it leaves the message
+  unchanged and returns "not applied" rather than re-posting a duplicate card —
+  the auto-refresh loop, which also honours 429, fills the original message in
+  within ~1s. The existing `safe_edit_message_text` branches (not-modified,
+  edit-unavailable re-post, raise) are unchanged.
+
 - **"Server status" panel refreshes once a second and honours Telegram 429
   back-off** — the auto-refresh cadence (`LiveRefreshManager` default interval)
   drops from 2s to **1s**. The render no longer blocks (the snapshot is served
