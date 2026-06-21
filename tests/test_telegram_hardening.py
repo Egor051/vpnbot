@@ -19,7 +19,12 @@ from bot.handlers.keys import confirm_key_action, create_key_choose, create_key_
 from bot.handlers.start import start_command
 from bot.keyboards.common import main_menu
 from bot.keyboards.keys import keys_list_keyboard
-from bot.messages import _MAX_REFRESH_RETRY_AFTER, edit_message_for_refresh, safe_edit_message_text
+from bot.messages import (
+    _MAX_LIVE_REFRESH_RETRY_AFTER,
+    _MAX_REFRESH_RETRY_AFTER,
+    edit_message_for_refresh,
+    safe_edit_message_text,
+)
 from models.dto import AccessRequest, UnblockUserWarning, User, VpnKey
 from models.enums import AccessRequestStatus, UserRole, VpnKeyStatus, VpnKeyType
 from services.errors import AccessDenied, NotFound
@@ -951,13 +956,15 @@ def test_refresh_honours_retry_after_then_succeeds() -> None:
     assert message.edit_calls == 2  # initial attempt + one retry
 
 
-def test_refresh_caps_retry_after_at_ceiling() -> None:
+def test_refresh_caps_retry_after_at_loop_ceiling() -> None:
     slept: list[float] = []
 
     async def sleep(delay: float) -> None:
         slept.append(delay)
 
-    # retry_after far above the ceiling: we wait only the cap, then retry once.
+    # retry_after far above the ceiling: the loop path waits out the *loop*
+    # ceiling (a realistic penalty window), not the short user-facing clamp, so
+    # a single tick honours the back-off instead of re-poking mid-cooldown.
     message = _RefreshMessage([_retry_after(3600), None])
 
     async def run() -> bool:
@@ -966,7 +973,31 @@ def test_refresh_caps_retry_after_at_ceiling() -> None:
     result = asyncio.run(run())
 
     assert result is True
-    assert slept == [_MAX_REFRESH_RETRY_AFTER]
+    assert slept == [_MAX_LIVE_REFRESH_RETRY_AFTER]
+    # The loop path must wait longer than the user-facing one-shot clamp.
+    assert _MAX_LIVE_REFRESH_RETRY_AFTER > _MAX_REFRESH_RETRY_AFTER
+    assert message.edit_calls == 2
+
+
+def test_refresh_retry_after_between_ceilings_is_not_clamped_to_user_cap() -> None:
+    # A retry_after between the user clamp (5s) and the loop ceiling (30s) must
+    # be honoured in full by the loop path — proving the loop no longer reuses
+    # the short user-facing clamp.
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+
+    retry_after = int(_MAX_REFRESH_RETRY_AFTER) + 10  # 15s: above user clamp, below loop cap
+    message = _RefreshMessage([_retry_after(retry_after), None])
+
+    async def run() -> bool:
+        return await edit_message_for_refresh(message, "text", sleep=sleep)  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is True
+    assert slept == [float(retry_after)]  # waited the full retry_after, not the 5s user clamp
     assert message.edit_calls == 2
 
 
@@ -1114,7 +1145,10 @@ def test_safe_edit_caps_retry_after_at_ceiling() -> None:
     result = asyncio.run(run())
 
     assert result is True
+    # Regression guard: the user-facing one-shot edit keeps its short clamp and
+    # must NOT inherit the longer live-refresh-loop ceiling — a human is waiting.
     assert slept == [_MAX_REFRESH_RETRY_AFTER]
+    assert slept != [_MAX_LIVE_REFRESH_RETRY_AFTER]
     assert message.edit_calls == 2
     assert message.answer_calls == 0
 

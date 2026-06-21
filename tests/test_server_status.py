@@ -446,3 +446,201 @@ def test_set_detailed_off_clears_history(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(service._history) > 0
     service.set_detailed(False)
     assert len(service._history) == 0
+
+
+# --- snapshot_averaged: smoothed head-line rate metrics ----------------------
+
+
+def test_averaging_and_interval_constants() -> None:
+    """The averaging window is 3 samples and the panel re-renders every 3s."""
+    from services.auto_refresh import DEFAULT_INTERVAL_SECONDS
+
+    assert ss._AVERAGING_SAMPLES == 3
+    assert DEFAULT_INTERVAL_SECONDS == approx(3.0)
+
+
+def test_snapshot_averaged_means_cpu_and_net_over_last_three() -> None:
+    """CPU% and net in/out are the mean of the last exactly-3 samples."""
+    service = ServerStatusService()
+    # Feed five samples; the bounded window must keep only the last three, so
+    # the first two values (10/20 cpu, 1-4 net) do not contribute to the mean.
+    service._recent.append(_base_status(cpu_percent=10.0, net_in_mbps=1.0, net_out_mbps=2.0))
+    service._recent.append(_base_status(cpu_percent=20.0, net_in_mbps=3.0, net_out_mbps=4.0))
+    service._recent.append(_base_status(cpu_percent=30.0, net_in_mbps=5.0, net_out_mbps=6.0))
+    service._recent.append(_base_status(cpu_percent=40.0, net_in_mbps=7.0, net_out_mbps=8.0))
+    service._recent.append(_base_status(cpu_percent=60.0, net_in_mbps=9.0, net_out_mbps=12.0))
+
+    avg = asyncio.run(service.snapshot_averaged())
+
+    assert avg.cpu_percent == approx((30.0 + 40.0 + 60.0) / 3)
+    assert avg.net_in_mbps == approx((5.0 + 7.0 + 9.0) / 3)
+    assert avg.net_out_mbps == approx((6.0 + 8.0 + 12.0) / 3)
+    assert avg.cpu_available is True
+    assert avg.net_available is True
+
+
+def test_snapshot_averaged_takes_point_in_time_fields_from_latest() -> None:
+    """RAM/disk/swap, loadavg, uptime and sampled_at come from the latest sample."""
+    service = ServerStatusService()
+    t_old = datetime(2026, 6, 21, 12, 0, 0, tzinfo=timezone.utc)
+    t_new = datetime(2026, 6, 21, 12, 0, 2, tzinfo=timezone.utc)
+    service._recent.append(
+        _base_status(
+            cpu_percent=10.0,
+            ram_used_gb=1.0,
+            disk_free_gb=8.0,
+            swap_used_gb=0.1,
+            load1=0.5,
+            load5=0.6,
+            load15=0.7,
+            uptime_seconds=100.0,
+            sampled_at=t_old,
+            detailed_enabled=True,
+        )
+    )
+    service._recent.append(
+        _base_status(
+            cpu_percent=20.0,
+            ram_used_gb=2.0,
+            disk_free_gb=4.0,
+            swap_used_gb=0.9,
+            load1=5.0,
+            load5=6.0,
+            load15=7.0,
+            uptime_seconds=300.0,
+            sampled_at=t_new,
+            detailed_enabled=True,
+        )
+    )
+
+    avg = asyncio.run(service.snapshot_averaged())
+
+    # Rate metric is averaged...
+    assert avg.cpu_percent == approx(15.0)
+    # ...but every point-in-time field is taken verbatim from the latest sample,
+    # never averaged (loadavg in particular is already a kernel-side average).
+    assert avg.ram_used_gb == approx(2.0)
+    assert avg.disk_free_gb == approx(4.0)
+    assert avg.swap_used_gb == approx(0.9)
+    assert avg.load1 == approx(5.0)
+    assert avg.load5 == approx(6.0)
+    assert avg.load15 == approx(7.0)
+    assert avg.uptime_seconds == approx(300.0)
+    assert avg.sampled_at == t_new
+
+
+def test_snapshot_averaged_partial_window_averages_what_is_present() -> None:
+    """With 1 then 2 samples, the mean is taken over only those samples."""
+    service = ServerStatusService()
+    service._recent.append(_base_status(cpu_percent=12.0, net_in_mbps=3.0, net_out_mbps=1.0))
+    one = asyncio.run(service.snapshot_averaged())
+    assert one.cpu_percent == approx(12.0)
+    assert one.net_in_mbps == approx(3.0)
+    assert one.net_out_mbps == approx(1.0)
+
+    service._recent.append(_base_status(cpu_percent=18.0, net_in_mbps=5.0, net_out_mbps=3.0))
+    two = asyncio.run(service.snapshot_averaged())
+    assert two.cpu_percent == approx(15.0)
+    assert two.net_in_mbps == approx(4.0)
+    assert two.net_out_mbps == approx(2.0)
+
+
+def test_snapshot_averaged_empty_buffer_returns_cold_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty window mirrors snapshot(): a cold status with RAM/disk only."""
+    monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
+    monkeypatch.setattr(ServerStatusService, "_read_disk", lambda self: (5.0, 10.0))
+
+    service = ServerStatusService()
+    cold = asyncio.run(service.snapshot_averaged())
+
+    assert cold.cpu_available is False
+    assert cold.net_available is False
+    assert cold.ram_total_gb == approx(2.0)
+    assert cold.disk_total_gb == approx(10.0)
+
+
+def test_snapshot_averaged_cpu_mean_over_available_samples_only() -> None:
+    """CPU is averaged over only the samples where it was available; flag set."""
+    service = ServerStatusService()
+    service._recent.append(_base_status(cpu_percent=0.0, cpu_available=False))
+    service._recent.append(_base_status(cpu_percent=20.0, cpu_available=True))
+    service._recent.append(_base_status(cpu_percent=40.0, cpu_available=True))
+
+    avg = asyncio.run(service.snapshot_averaged())
+
+    # Only the two available readings (20, 40) count -> 30, not (0+20+40)/3.
+    assert avg.cpu_percent == approx(30.0)
+    assert avg.cpu_available is True
+
+
+def test_snapshot_averaged_net_mean_over_available_samples_only() -> None:
+    """Network is averaged over only the available samples; the rest are skipped."""
+    service = ServerStatusService()
+    service._recent.append(_base_status(net_available=False, net_in_mbps=0.0, net_out_mbps=0.0))
+    service._recent.append(_base_status(net_available=True, net_in_mbps=8.0, net_out_mbps=4.0))
+    service._recent.append(_base_status(net_available=True, net_in_mbps=12.0, net_out_mbps=6.0))
+
+    avg = asyncio.run(service.snapshot_averaged())
+
+    assert avg.net_in_mbps == approx(10.0)  # (8 + 12) / 2; the unavailable sample excluded
+    assert avg.net_out_mbps == approx(5.0)
+    assert avg.net_available is True
+
+
+def test_snapshot_averaged_all_unavailable_falls_back_to_zero() -> None:
+    """When no sample in the window has a metric, it reads 0.0 with flag cleared."""
+    service = ServerStatusService()
+    for _ in range(3):
+        service._recent.append(
+            _base_status(
+                cpu_percent=0.0,
+                cpu_available=False,
+                net_available=False,
+                net_in_mbps=0.0,
+                net_out_mbps=0.0,
+            )
+        )
+
+    avg = asyncio.run(service.snapshot_averaged())
+
+    assert avg.cpu_available is False
+    assert avg.cpu_percent == approx(0.0)
+    assert avg.net_available is False
+    assert avg.net_in_mbps == approx(0.0)
+    assert avg.net_out_mbps == approx(0.0)
+
+
+def test_sample_once_fills_recent_buffer_in_base_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The averaging window is filled every tick even with detailed mode off,
+    and is bounded to exactly the averaging length."""
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500))
+    monkeypatch.setattr(ss, "_read_net_bytes", lambda: (0, 0))
+    monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
+    monkeypatch.setattr(ServerStatusService, "_read_disk", lambda self: (5.0, 10.0))
+
+    service = ServerStatusService()  # detailed defaults off
+    for _ in range(5):
+        service._sample_once()
+
+    assert service.detailed is False
+    assert len(service._recent) == ss._AVERAGING_SAMPLES
+    # The 60s detailed history stays empty in base mode (unchanged behaviour).
+    assert len(service._history) == 0
+
+
+def test_snapshot_returns_latest_not_averaged() -> None:
+    """Regression: snapshot() still returns the most recent sample verbatim,
+    while snapshot_averaged() smooths across the window."""
+    service = ServerStatusService()
+    s1 = _base_status(cpu_percent=10.0, net_in_mbps=2.0)
+    s2 = _base_status(cpu_percent=50.0, net_in_mbps=10.0)
+    service._recent.append(s1)
+    service._recent.append(s2)
+    service._latest = s2
+
+    latest = asyncio.run(service.snapshot())
+    assert latest is s2
+    assert latest.cpu_percent == approx(50.0)
+
+    avg = asyncio.run(service.snapshot_averaged())
+    assert avg.cpu_percent == approx(30.0)  # (10 + 50) / 2

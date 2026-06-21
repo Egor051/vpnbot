@@ -21,13 +21,22 @@ AWG_CONFIG_FILENAME = "awg.conf"
 _AWG_GENERATED_NAME_RE = re.compile(r"^awg_[A-Za-z0-9]{5}$")
 _TRUNCATED_SUFFIX = "\n...обрезано"
 
-# Upper bound on how long the auto-refresh path will wait on a Telegram 429
-# (``TelegramRetryAfter.retry_after``) before retrying the edit. Telegram can
-# return a pathologically large ``retry_after`` under sustained flooding; the cap
-# keeps the per-tick stall short so the refresh loop never parks for long. A
-# larger ``retry_after`` is clamped to this value, the edit is retried once, and
-# the tick returns "alive" regardless of the outcome.
+# Upper bound on how long a one-shot, user-facing edit (``safe_edit_message_text``)
+# will wait on a Telegram 429 (``TelegramRetryAfter.retry_after``) before retrying.
+# This path runs inline with a human waiting on a button tap, so the clamp is
+# deliberately short: a pathologically large ``retry_after`` must not make the
+# user stare at a frozen UI. A larger value is clamped to this and the edit is
+# retried once.
 _MAX_REFRESH_RETRY_AFTER = 5.0
+
+# Upper bound for the *live auto-refresh loop* path (``edit_message_for_refresh``),
+# which edits a single ``message_id`` on a fixed cadence for up to an hour. Unlike
+# the user-facing edit above, there is no human blocked on this tick, so it must
+# honour a realistic penalty window: clamping to a few seconds and then re-poking
+# the same message mid-cooldown only prolongs Telegram's flood ban (each early
+# edit resets/extends it). A larger ceiling lets one tick actually wait the flood
+# out; the loop's own cadence (``DEFAULT_INTERVAL_SECONDS``) keeps the panel alive.
+_MAX_LIVE_REFRESH_RETRY_AFTER = 30.0
 
 # FSM data keys used to track the config file most recently delivered to the
 # user. The message id lets us delete that file when the user taps another
@@ -146,11 +155,13 @@ async def edit_message_for_refresh(
     Telegram rate-limits frequent edits of one message with HTTP 429
     (:class:`~aiogram.exceptions.TelegramRetryAfter`). That back-off is honoured
     here, local to this Telegram-specific helper: on a 429 we wait the
-    server-provided ``retry_after`` (clamped to :data:`_MAX_REFRESH_RETRY_AFTER`
-    so a huge value cannot park the loop) and retry the edit exactly once. If the
-    flood persists we keep the card alive and let the next tick try again rather
-    than spinning on retries. ``sleep`` is injectable so tests can drive the
-    back-off without real delays.
+    server-provided ``retry_after`` (clamped to
+    :data:`_MAX_LIVE_REFRESH_RETRY_AFTER` so a pathological value cannot park the
+    loop indefinitely, but generously enough that one tick actually waits out a
+    realistic penalty window instead of re-poking the message mid-cooldown) and
+    retry the edit exactly once. If the flood persists we keep the card alive and
+    let the next tick try again rather than spinning on retries. ``sleep`` is
+    injectable so tests can drive the back-off without real delays.
     """
     if message is None or isinstance(message, InaccessibleMessage):
         return False
@@ -158,7 +169,7 @@ async def edit_message_for_refresh(
     try:
         await message.edit_text(text, reply_markup=reply_markup)
     except TelegramRetryAfter as exc:
-        await sleep(min(exc.retry_after, _MAX_REFRESH_RETRY_AFTER))
+        await sleep(min(exc.retry_after, _MAX_LIVE_REFRESH_RETRY_AFTER))
         try:
             await message.edit_text(text, reply_markup=reply_markup)
         except TelegramRetryAfter:

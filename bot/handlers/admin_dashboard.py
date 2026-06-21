@@ -60,7 +60,7 @@ async def _render_server_status(callback: CallbackQuery, services: Services) -> 
         return
     try:
         await require_superadmin(services, callback.from_user.id)
-        status = await services.server_status.snapshot()
+        status = await services.server_status.snapshot_averaged()
         online = await services.online_clients.get()
         await safe_edit_message_text(
             callback.message,
@@ -88,7 +88,7 @@ def _start_server_status_auto_refresh(callback: CallbackQuery, services: Service
     async def refresh() -> bool:
         try:
             await require_superadmin(services, user_id)
-            status = await services.server_status.snapshot()
+            status = await services.server_status.snapshot_averaged()
             online = await services.online_clients.get()
         except Exception:
             logger.debug("server status auto-refresh snapshot failed", exc_info=True)
