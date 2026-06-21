@@ -19,6 +19,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reports no known vulnerabilities. Hashed constraint sets were regenerated and the
   un-hashed mirror re-synced.
 
+### Changed
+
+- **Continuous background sampling for the "Server status" panel** — host
+  metrics are now collected by a single always-on sampler (`ServerStatusService.run`,
+  started in `main.py`) instead of each render taking its own blocking two-reading
+  sample. The previous design slept ~1s inside every `snapshot()` and measured only
+  the `[t, t+1]` window per 2s refresh tick, so every other second of CPU/network
+  activity went unobserved (a "blind second"). The sampler now reuses each reading
+  as the next window's baseline, so measurement windows abut edge-to-edge with no
+  gap, network speed is divided by the actually-elapsed Δt, and `snapshot()` returns
+  the latest cached reading instantly (no blocking sleep on the render path). RAM and
+  disk are read live each tick; before the first rate is available CPU/network render
+  as "no data" while RAM/disk show immediately. Graceful degradation on unreadable
+  `/proc` is unchanged, and no new dependencies were added (stdlib + `/proc` only).
+
 ### Added
 
 - **Live-updating "Server status" panel** — the admin **📊 Статус сервера** card

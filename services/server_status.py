@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _GB = 1024**3
 
@@ -125,46 +130,102 @@ def _net_mbps(before: int, after: int, interval: float) -> float:
 
 
 class ServerStatusService:
-    """Collects real-time host metrics (CPU, RAM, disk, network) from /proc."""
+    """Collects real-time host metrics (CPU, RAM, disk, network) from /proc.
 
-    def __init__(self, *, disk_path: Path | str = "/", sample_interval: float = 1.0) -> None:
+    A background sampler (:meth:`run`) takes one reading per ``interval`` and
+    derives CPU/network rates against the *previous* reading. Because each
+    reading is reused as the "before" of the next window, consecutive
+    measurement windows abut edge-to-edge — there is never an unobserved
+    second. :meth:`snapshot` returns the most recently computed status
+    instantly, with no blocking sample on the render path.
+
+    All timing goes through an injectable monotonic ``clock`` and ``sleep`` so
+    tests can drive the loop deterministically without real sleeps.
+    """
+
+    def __init__(
+        self,
+        *,
+        disk_path: Path | str = "/",
+        interval: float = 1.0,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self._disk_path = str(disk_path)
-        self._sample_interval = sample_interval
+        self._interval = interval
+        self._clock = clock
+        self._sleep = sleep
+        self._prev_cpu: tuple[int, int] | None = None
+        self._prev_net: tuple[int, int] | None = None
+        self._prev_time: float | None = None
+        self._latest: ServerStatus | None = None
+
+    async def run(self) -> None:
+        """Continuously sample host metrics until cancelled.
+
+        Each iteration reads fresh counters and derives CPU/network rates from
+        the previous iteration's reading over the actually-elapsed Δt, so the
+        windows tile time end-to-end with no blind gap. The result is cached in
+        ``self._latest`` for :meth:`snapshot` to return instantly. A failed read
+        is logged and skipped; the loop keeps running.
+        """
+        while True:
+            try:
+                self._latest = self._sample_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("server status sampler tick failed", exc_info=True)
+            await self._sleep(self._interval)
 
     async def snapshot(self) -> ServerStatus:
-        """Sample host metrics, taking two readings to derive CPU and network rates."""
-        cpu_before = _read_cpu_times()
-        net_before = _read_net_bytes()
-        await asyncio.sleep(self._sample_interval)
-        cpu_after = _read_cpu_times()
-        net_after = _read_net_bytes()
+        """Return the most recently sampled status without blocking.
 
-        if cpu_before is not None and cpu_after is not None:
-            cpu_percent = _cpu_percent(cpu_before, cpu_after)
+        Before the sampler has produced its first reading the cache is empty; we
+        then return a cold status (CPU/network reported as unavailable) while
+        still reading RAM and disk, which are point-in-time and need no prior
+        sample.
+        """
+        latest = self._latest
+        if latest is not None:
+            return latest
+        return self._cold_status()
+
+    def _sample_once(self) -> ServerStatus:
+        """Take one reading and derive rates against the previous reading."""
+        now = self._clock()
+        cpu_now = _read_cpu_times()
+        net_now = _read_net_bytes()
+
+        if self._prev_cpu is not None and cpu_now is not None:
+            cpu_percent = _cpu_percent(self._prev_cpu, cpu_now)
             cpu_available = True
         else:
             cpu_percent = 0.0
             cpu_available = False
 
-        if net_before is not None and net_after is not None:
-            net_in = _net_mbps(net_before[0], net_after[0], self._sample_interval)
-            net_out = _net_mbps(net_before[1], net_after[1], self._sample_interval)
+        if self._prev_net is not None and self._prev_time is not None and net_now is not None:
+            # Divide by the measured Δt, not the configured interval, so a long
+            # or short tick still reports the true rate.
+            interval = now - self._prev_time
+            net_in = _net_mbps(self._prev_net[0], net_now[0], interval)
+            net_out = _net_mbps(self._prev_net[1], net_now[1], interval)
             net_available = True
         else:
             net_in = 0.0
             net_out = 0.0
             net_available = False
 
-        mem = _read_mem_gb()
-        ram_used_gb, ram_total_gb = mem if mem is not None else (0.0, 0.0)
+        ram_used_gb, ram_total_gb = self._read_ram()
+        disk_free_gb, disk_total_gb = self._read_disk()
 
-        try:
-            usage = shutil.disk_usage(self._disk_path)
-            disk_free_gb = usage.free / _GB
-            disk_total_gb = usage.total / _GB
-        except OSError:
-            disk_free_gb = 0.0
-            disk_total_gb = 0.0
+        # This reading becomes the "before" of the next window, so consecutive
+        # windows share an edge and no interval goes unmeasured.
+        if cpu_now is not None:
+            self._prev_cpu = cpu_now
+        if net_now is not None:
+            self._prev_net = net_now
+            self._prev_time = now
 
         return ServerStatus(
             cpu_percent=cpu_percent,
@@ -177,3 +238,31 @@ class ServerStatusService:
             net_out_mbps=net_out,
             net_available=net_available,
         )
+
+    def _cold_status(self) -> ServerStatus:
+        """Status for a cold cache: RAM/disk read live, CPU/network unavailable."""
+        ram_used_gb, ram_total_gb = self._read_ram()
+        disk_free_gb, disk_total_gb = self._read_disk()
+        return ServerStatus(
+            cpu_percent=0.0,
+            cpu_available=False,
+            ram_used_gb=ram_used_gb,
+            ram_total_gb=ram_total_gb,
+            disk_free_gb=disk_free_gb,
+            disk_total_gb=disk_total_gb,
+            net_in_mbps=0.0,
+            net_out_mbps=0.0,
+            net_available=False,
+        )
+
+    @staticmethod
+    def _read_ram() -> tuple[float, float]:
+        mem = _read_mem_gb()
+        return mem if mem is not None else (0.0, 0.0)
+
+    def _read_disk(self) -> tuple[float, float]:
+        try:
+            usage = shutil.disk_usage(self._disk_path)
+        except OSError:
+            return 0.0, 0.0
+        return usage.free / _GB, usage.total / _GB
