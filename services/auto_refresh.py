@@ -11,14 +11,14 @@ logger = logging.getLogger(__name__)
 
 # Defaults for the server-status panel: re-render every few seconds, but cap the
 # total lifetime so an abandoned panel stops hammering Telegram and ``/proc``.
-# A 5s cadence keeps the panel visibly "live" for a human while staying clear of
+# A 3s cadence keeps the panel visibly "live" for a human while staying clear of
 # Telegram's per-message edit flood control (one ``editMessageText`` of the same
 # message_id every second reliably trips HTTP 429). It is safe because the
 # snapshot is served from a background sampler's cache (which keeps sampling once
 # a second regardless of this interval), so the render never blocks, and the
 # Telegram edit path also honours 429 ``retry_after`` back-off (see
 # ``bot.messages.edit_message_for_refresh``).
-DEFAULT_INTERVAL_SECONDS = 5.0
+DEFAULT_INTERVAL_SECONDS = 3.0
 DEFAULT_DURATION_SECONDS = 3600.0  # one hour
 
 

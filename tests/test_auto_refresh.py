@@ -182,12 +182,12 @@ def test_active_false_for_unknown_key(missing: None) -> None:
     assert mgr.active("never-started") is False
 
 
-def test_default_interval_is_five_seconds() -> None:
+def test_default_interval_is_three_seconds() -> None:
     # A 1s cadence trips Telegram's per-message edit flood control; the panel is
-    # served from a cached snapshot, so a slower 5s edit cadence stays "live" for
+    # served from a cached snapshot, so a slower 3s edit cadence stays "live" for
     # a human while staying well clear of the flood zone.
-    assert DEFAULT_INTERVAL_SECONDS == pytest.approx(5.0)
-    assert LiveRefreshManager()._interval == pytest.approx(5.0)
+    assert DEFAULT_INTERVAL_SECONDS == pytest.approx(3.0)
+    assert LiveRefreshManager()._interval == pytest.approx(3.0)
 
 
 def test_run_no_catch_up_burst_after_long_refresh() -> None:

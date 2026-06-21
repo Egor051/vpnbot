@@ -8,7 +8,7 @@ import shutil
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,11 @@ _GB = 1024**3
 _HISTORY_LEN = 60
 # Points in the downsampled sparkline handed to the formatter.
 _SPARKLINE_POINTS = 12
+# Number of most-recent samples averaged for the panel's head-line rate metrics
+# (CPU%, network in/out). At the sampler's 1s cadence this smooths roughly the
+# last 3 seconds — matching the panel's render interval — so the figures stop
+# jittering on a single-second slice. Independent of the 60s detailed history.
+_AVERAGING_SAMPLES = 3
 
 
 def _utc_now() -> datetime:
@@ -300,6 +305,11 @@ class ServerStatusService:
         # default so the sampler does no extra work until an admin enables it.
         self._detailed = False
         self._history: deque[tuple[float, float]] = deque(maxlen=_HISTORY_LEN)
+        # Short rolling window of the most recent full samples, used by
+        # :meth:`snapshot_averaged` to smooth the head-line rate metrics. Filled
+        # in every :meth:`_sample_once` regardless of detailed mode; distinct
+        # from ``_history`` (which is detailed-only and tracks network for 60s).
+        self._recent: deque[ServerStatus] = deque(maxlen=_AVERAGING_SAMPLES)
 
     @property
     def detailed(self) -> bool:
@@ -349,6 +359,58 @@ class ServerStatusService:
             return latest
         return self._cold_status()
 
+    async def snapshot_averaged(self) -> ServerStatus:
+        """Return a status whose head-line rate metrics are smoothed over the
+        last :data:`_AVERAGING_SAMPLES` samples (≈3s), without blocking.
+
+        Only the noisy rate metrics — ``cpu_percent``, ``net_in_mbps`` and
+        ``net_out_mbps`` — are averaged, and only over the samples in the window
+        where that metric was actually available. Every other field is taken
+        verbatim from the most recent sample: RAM/disk/swap, load average,
+        uptime, CPU count, ``sampled_at``, the detailed-mode flag and the 60s
+        detailed network stats (avg/peak/trend/sparkline) are all point-in-time
+        or already aggregated, so re-averaging them here would be wrong.
+
+        Availability mirrors :meth:`_sample_once`: a metric is reported available
+        (with the window mean) when at least one sample in the window had it, and
+        otherwise falls back to ``0.0`` with the flag cleared. An empty buffer
+        means the sampler has not run yet, so we return a cold status exactly as
+        :meth:`snapshot` does; with fewer than ``_AVERAGING_SAMPLES`` samples we
+        simply average over whatever is present.
+        """
+        recent = list(self._recent)
+        if not recent:
+            return self._cold_status()
+        latest = recent[-1]
+
+        cpu_values = [s.cpu_percent for s in recent if s.cpu_available]
+        if cpu_values:
+            cpu_percent = _mean(cpu_values)
+            cpu_available = True
+        else:
+            cpu_percent = 0.0
+            cpu_available = False
+
+        net_in_values = [s.net_in_mbps for s in recent if s.net_available]
+        net_out_values = [s.net_out_mbps for s in recent if s.net_available]
+        if net_in_values:
+            net_in = _mean(net_in_values)
+            net_out = _mean(net_out_values)
+            net_available = True
+        else:
+            net_in = 0.0
+            net_out = 0.0
+            net_available = False
+
+        return replace(
+            latest,
+            cpu_percent=cpu_percent,
+            cpu_available=cpu_available,
+            net_in_mbps=net_in,
+            net_out_mbps=net_out,
+            net_available=net_available,
+        )
+
     def _sample_once(self) -> ServerStatus:
         """Take one reading and derive rates against the previous reading."""
         now = self._clock()
@@ -388,7 +450,7 @@ class ServerStatusService:
 
         detailed = self._detailed_fields(net_in, net_out, net_available)
 
-        return ServerStatus(
+        status = ServerStatus(
             cpu_percent=cpu_percent,
             cpu_available=cpu_available,
             ram_used_gb=ram_used_gb,
@@ -404,6 +466,10 @@ class ServerStatusService:
             detailed_enabled=self._detailed,
             **detailed,
         )
+        # Feed the averaging window every tick, in both base and detailed modes,
+        # so the panel's smoothed head-line metrics are always available.
+        self._recent.append(status)
+        return status
 
     def _detailed_fields(self, net_in: float, net_out: float, net_available: bool) -> dict[str, Any]:
         """Read load/uptime and update the network history, returning the derived
