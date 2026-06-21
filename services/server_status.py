@@ -18,10 +18,15 @@ logger = logging.getLogger(__name__)
 _GB = 1024**3
 
 # Number of one-second samples kept for the detailed network history (≈ last
-# minute). Only populated while the detailed-metrics toggle is on.
+# minute). Only populated while the detailed-metrics toggle is on. Feeds the
+# avg/peak/trend figures.
 _HISTORY_LEN = 60
-# Points in the downsampled sparkline handed to the formatter.
-_SPARKLINE_POINTS = 12
+# Number of columns (buckets) in the network sparkline. One bucket is emitted per
+# Telegram render (see :meth:`ServerStatusService.snapshot_averaged`), each
+# averaging the ~render-interval worth of one-second samples gathered since the
+# previous render. At the panel's 3s cadence 20 columns span ≈ the last minute,
+# matching the detailed history window above.
+_SPARKLINE_POINTS = 20
 # Number of most-recent samples averaged for the panel's head-line rate metrics
 # (CPU%, network in/out). At the sampler's 1s cadence this smooths roughly the
 # last 3 seconds — matching the panel's render interval — so the figures stop
@@ -237,22 +242,6 @@ def _trend(values: list[float]) -> str:
     return "flat"
 
 
-def _downsample(values: list[float], points: int) -> tuple[float, ...]:
-    """Reduce a series to at most ``points`` representative values (bucket means)."""
-    n = len(values)
-    if n == 0:
-        return ()
-    if n <= points:
-        return tuple(values)
-    bucket = n / points
-    out: list[float] = []
-    for i in range(points):
-        start = int(i * bucket)
-        end = int((i + 1) * bucket) if i < points - 1 else n
-        out.append(_mean(values[start:end]))
-    return tuple(out)
-
-
 def _cpu_percent(before: tuple[int, int], after: tuple[int, int]) -> float:
     total_delta = after[0] - before[0]
     idle_delta = after[1] - before[1]
@@ -310,6 +299,15 @@ class ServerStatusService:
         # in every :meth:`_sample_once` regardless of detailed mode; distinct
         # from ``_history`` (which is detailed-only and tracks network for 60s).
         self._recent: deque[ServerStatus] = deque(maxlen=_AVERAGING_SAMPLES)
+        # Finished sparkline columns: one per Telegram render, flushed by
+        # :meth:`snapshot_averaged`. Bounded to the sparkline width so it holds
+        # exactly the visible window.
+        self._sparkline_buckets: deque[float] = deque(maxlen=_SPARKLINE_POINTS)
+        # Per-second total throughput (in+out) accumulated since the previous
+        # render. The next render averages these into a single bucket and clears
+        # the list, so every sampled second feeds exactly one column — it can
+        # never bleed across columns the way a sliding-window downsample did.
+        self._bucket_samples: list[float] = []
 
     @property
     def detailed(self) -> bool:
@@ -327,6 +325,8 @@ class ServerStatusService:
         self._detailed = enabled
         if not enabled:
             self._history.clear()
+            self._sparkline_buckets.clear()
+            self._bucket_samples.clear()
 
     async def run(self) -> None:
         """Continuously sample host metrics until cancelled.
@@ -365,11 +365,20 @@ class ServerStatusService:
 
         Only the noisy rate metrics — ``cpu_percent``, ``net_in_mbps`` and
         ``net_out_mbps`` — are averaged, and only over the samples in the window
-        where that metric was actually available. Every other field is taken
+        where that metric was actually available. Most other fields are taken
         verbatim from the most recent sample: RAM/disk/swap, load average,
         uptime, CPU count, ``sampled_at``, the detailed-mode flag and the 60s
-        detailed network stats (avg/peak/trend/sparkline) are all point-in-time
-        or already aggregated, so re-averaging them here would be wrong.
+        detailed avg/peak/trend stats are all point-in-time or already
+        aggregated, so re-averaging them here would be wrong.
+
+        The network ``net_sparkline`` is the exception: this method is the render
+        path (one call per Telegram update), so it doubles as the sparkline's
+        clock. On each call, in detailed mode, the per-second samples gathered
+        since the previous render are averaged into one column, appended to the
+        rolling bucket window and the accumulator reset. Driving the buckets off
+        the render — rather than re-downsampling a sliding history every tick —
+        means a sampled second lands in exactly one column and never shifts
+        between columns over time.
 
         Availability mirrors :meth:`_sample_once`: a metric is reported available
         (with the window mean) when at least one sample in the window had it, and
@@ -402,6 +411,20 @@ class ServerStatusService:
             net_out = 0.0
             net_available = False
 
+        # Flush the in-progress sparkline bucket in lock-step with this render:
+        # average the samples gathered since the previous render into one column,
+        # freeze it into the rolling window and reset the accumulator. Skip an
+        # empty accumulator so back-to-back renders don't emit a spurious zero
+        # column. In base mode there are no buckets — keep whatever the latest
+        # sample carried (``None``).
+        if latest.detailed_enabled:
+            if self._bucket_samples:
+                self._sparkline_buckets.append(_mean(self._bucket_samples))
+                self._bucket_samples.clear()
+            sparkline: tuple[float, ...] | None = tuple(self._sparkline_buckets) or None
+        else:
+            sparkline = latest.net_sparkline
+
         return replace(
             latest,
             cpu_percent=cpu_percent,
@@ -409,6 +432,7 @@ class ServerStatusService:
             net_in_mbps=net_in,
             net_out_mbps=net_out,
             net_available=net_available,
+            net_sparkline=sparkline,
         )
 
     def _sample_once(self) -> ServerStatus:
@@ -480,6 +504,10 @@ class ServerStatusService:
             return {}
         if net_available:
             self._history.append((net_in, net_out))
+            # Feed this second's total throughput into the in-progress sparkline
+            # bucket; the next render (snapshot_averaged) averages and freezes it
+            # into one column. The sparkline itself is built there, not here.
+            self._bucket_samples.append(net_in + net_out)
         loadavg = _read_loadavg()
         ins = [sample[0] for sample in self._history]
         outs = [sample[1] for sample in self._history]
@@ -491,7 +519,6 @@ class ServerStatusService:
             "uptime_seconds": _read_uptime(),
         }
         if ins:
-            totals = [i + o for i, o in zip(ins, outs, strict=True)]
             fields.update(
                 net_in_avg=_mean(ins),
                 net_out_avg=_mean(outs),
@@ -499,7 +526,6 @@ class ServerStatusService:
                 net_out_peak=max(outs),
                 net_in_trend=_trend(ins),
                 net_out_trend=_trend(outs),
-                net_sparkline=_downsample(totals, _SPARKLINE_POINTS),
             )
         return fields
 

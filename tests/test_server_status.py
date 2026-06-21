@@ -361,7 +361,7 @@ def test_server_status_text_detailed_view_shows_loadavg_and_uptime() -> None:
         load1=0.5,
         load5=1.0,
         load15=1.5,
-        cpu_count=4,
+        cpu_count=2,
         uptime_seconds=90061.0,  # 1d 1h 1m
         net_in_avg=0.30,
         net_out_avg=0.10,
@@ -372,9 +372,27 @@ def test_server_status_text_detailed_view_shows_loadavg_and_uptime() -> None:
         net_sparkline=(0.1, 0.5, 0.9),
     )
     text = server_status_text(status, _ONLINE_COLLECTING)
-    assert "Средняя нагрузка" in text and "0.50 / 1.00 / 1.50" in text
+    # Each load average is shown as a % of total CPU capacity (load / cpu_count):
+    # 0.5/2, 1.0/2, 1.5/2 -> 25% / 50% / 75%. No raw figures, no "(.. / N CPU)".
+    assert "Средняя нагрузка" in text and "25% / 50% / 75%" in text
+    assert "CPU)" not in text
     assert "Аптайм" in text and "1д 1ч 1м" in text
     assert "↑" in text and "→" in text  # trend arrows
+
+
+def test_loadavg_falls_back_to_raw_figures_without_cpu_count() -> None:
+    """Without a CPU count to normalise against, the load line keeps raw figures."""
+    status = _base_status(
+        detailed_enabled=True,
+        load1=0.5,
+        load5=1.0,
+        load15=1.5,
+        cpu_count=None,
+    )
+    text = server_status_text(status, _ONLINE_COLLECTING)
+    load_line = next(line for line in text.splitlines() if "Средняя нагрузка" in line)
+    assert "0.50 / 1.00 / 1.50" in load_line
+    assert "%" not in load_line
 
 
 def test_detailed_mode_collects_history_loadavg_and_uptime(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -398,8 +416,14 @@ def test_detailed_mode_collects_history_loadavg_and_uptime(monkeypatch: pytest.M
     assert status.uptime_seconds == approx(12345.0)
     assert status.cpu_count is not None
     assert status.net_in_avg is not None and status.net_in_peak is not None
-    assert status.net_sparkline is not None
     assert len(service._history) > 0
+    # The sparkline is no longer attached by _sample_once; it is built per render
+    # by snapshot_averaged, which flushes the accumulated bucket samples.
+    assert status.net_sparkline is None
+    assert len(service._bucket_samples) > 0
+    avg = asyncio.run(service.snapshot_averaged())
+    assert avg.net_sparkline is not None
+    assert service._bucket_samples == []  # flushed into a column
 
 
 def test_detailed_disabled_skips_history_and_loadavg(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -444,8 +468,13 @@ def test_set_detailed_off_clears_history(monkeypatch: pytest.MonkeyPatch) -> Non
     for _ in range(4):
         service._sample_once()
     assert len(service._history) > 0
+    assert len(service._bucket_samples) > 0
     service.set_detailed(False)
     assert len(service._history) == 0
+    # Sparkline buckets and the in-progress accumulator reset too, so a later
+    # re-enable starts from a clean window.
+    assert len(service._bucket_samples) == 0
+    assert len(service._sparkline_buckets) == 0
 
 
 # --- snapshot_averaged: smoothed head-line rate metrics ----------------------
@@ -456,6 +485,7 @@ def test_averaging_and_interval_constants() -> None:
     from services.auto_refresh import DEFAULT_INTERVAL_SECONDS
 
     assert ss._AVERAGING_SAMPLES == 3
+    assert ss._SPARKLINE_POINTS == 20
     assert DEFAULT_INTERVAL_SECONDS == approx(3.0)
 
 
@@ -644,3 +674,47 @@ def test_snapshot_returns_latest_not_averaged() -> None:
 
     avg = asyncio.run(service.snapshot_averaged())
     assert avg.cpu_percent == approx(30.0)  # (10 + 50) / 2
+
+
+# --- sparkline buckets: one column per render -------------------------------
+
+
+def test_snapshot_averaged_flushes_one_sparkline_bucket_per_render() -> None:
+    """In detailed mode each render averages the samples gathered since the
+    previous render into a single sparkline column, then resets the accumulator —
+    so a sampled second feeds exactly one column and never re-buckets."""
+    service = ServerStatusService()
+    service.set_detailed(True)
+    service._recent.append(_base_status(detailed_enabled=True))
+
+    # Three ticks accumulate before the first render.
+    service._bucket_samples.extend([1.0, 2.0, 3.0])
+    first = asyncio.run(service.snapshot_averaged())
+    assert first.net_sparkline is not None and len(first.net_sparkline) == 1
+    assert first.net_sparkline[0] == approx(2.0)  # mean(1, 2, 3)
+    assert service._bucket_samples == []  # accumulator reset by the flush
+
+    # A second render with a fresh batch appends a second column; the first
+    # column is untouched (already-consumed seconds are never re-bucketed).
+    service._bucket_samples.extend([4.0, 8.0])
+    second = asyncio.run(service.snapshot_averaged())
+    assert second.net_sparkline is not None and len(second.net_sparkline) == 2
+    assert second.net_sparkline[0] == approx(2.0)
+    assert second.net_sparkline[1] == approx(6.0)  # mean(4, 8)
+
+    # An empty accumulator (no tick since the last render) emits no new column.
+    third = asyncio.run(service.snapshot_averaged())
+    assert third.net_sparkline is not None and len(third.net_sparkline) == 2
+
+
+def test_sparkline_buckets_cap_at_sparkline_width() -> None:
+    """The bucket window holds at most _SPARKLINE_POINTS columns (oldest drop)."""
+    service = ServerStatusService()
+    service.set_detailed(True)
+    service._recent.append(_base_status(detailed_enabled=True))
+    avg = None
+    for i in range(ss._SPARKLINE_POINTS + 5):
+        service._bucket_samples.append(float(i))
+        avg = asyncio.run(service.snapshot_averaged())
+    assert avg is not None and avg.net_sparkline is not None
+    assert len(avg.net_sparkline) == ss._SPARKLINE_POINTS

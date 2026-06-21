@@ -1223,10 +1223,16 @@ def _detailed_lines(status: ServerStatus) -> list[str]:
     """Build the extra detailed-metrics block (load average, uptime, net trends)."""
     lines: list[str] = [""]
     if status.load1 is not None and status.load5 is not None and status.load15 is not None:
-        load = f"{status.load1:.2f} / {status.load5:.2f} / {status.load15:.2f}"
         if status.cpu_count and status.cpu_count > 0:
-            pct = status.load5 / status.cpu_count * 100
-            load = f"{load}  ({pct:.0f}% / {status.cpu_count} CPU)"
+            # Normalise each load average by the CPU count so all three read as a
+            # percentage of total CPU capacity (100% == every core fully busy).
+            load = " / ".join(
+                f"{val / status.cpu_count * 100:.0f}%"
+                for val in (status.load1, status.load5, status.load15)
+            )
+        else:
+            # No CPU count to normalise against — fall back to the raw figures.
+            load = f"{status.load1:.2f} / {status.load5:.2f} / {status.load15:.2f}"
         lines.append(f"📈 {t('server_status_loadavg_label')}: {h(load)}")
     if status.uptime_seconds is not None:
         lines.append(f"⏱ {t('server_status_uptime_label')}: {h(_format_uptime(status.uptime_seconds))}")
@@ -1262,10 +1268,8 @@ def server_status_text(status: ServerStatus, online: OnlineClients) -> str:
         ram_bar = ""
     if status.disk_total_gb > 0:
         disk = t("server_status_disk_value", used=f"{status.disk_used_gb:.2f}", total=f"{status.disk_total_gb:.2f}")
-        disk_bar = _usage_bar(status.disk_used_gb / status.disk_total_gb * 100)
     else:
         disk = no_data
-        disk_bar = ""
     if status.swap_total_gb > 0:
         swap = f"{status.swap_used_gb:.2f} GB / {status.swap_total_gb:.2f} GB"
     else:
@@ -1292,8 +1296,6 @@ def server_status_text(status: ServerStatus, online: OnlineClients) -> str:
     if ram_bar:
         lines.append(ram_bar)
     lines.append(f"💾 {t('server_status_disk_label')}: {h(disk)}")
-    if disk_bar:
-        lines.append(disk_bar)
     lines.append(f"🔁 {t('server_status_swap_label')}: {h(swap)}")
     lines.append("")
     lines.append(_online_clients_line(online))

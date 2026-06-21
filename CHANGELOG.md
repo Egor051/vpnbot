@@ -32,6 +32,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **"Server status" detailed view reworks the load-average line, the disk row
+  and the network sparkline.** Three independent tweaks to the panel:
+  - *Load average shown as percentages.* The `📈 Средняя нагрузка (1/5/15м)` line
+    now renders all three figures as a percentage of total CPU capacity
+    (`load ÷ cpu_count × 100`, so 100% == every core fully busy) instead of the
+    raw kernel run-queue numbers, and the trailing `(N% / M CPU)` parenthetical is
+    dropped — each window already carries its own percentage. When the CPU count
+    is unknown it falls back to the raw figures.
+  - *Disk progress bar removed.* The `💾 Диск` row keeps its "used / total" text
+    but no longer draws the 10-cell usage bar (CPU and RAM bars are unchanged).
+  - *Sparkline widened to 20 columns and re-bucketed per render.* The network
+    sparkline is no longer a sliding-window downsample recomputed every sampler
+    tick (which let one sampled second drift across several columns over time).
+    Instead each Telegram render flushes one column: the per-second samples
+    gathered since the previous render are averaged into a single bucket, frozen
+    into a 20-wide rolling window, and the accumulator reset — so every sampled
+    second feeds exactly one column. At the panel's 3s render cadence the 20
+    columns span ≈ the last minute, matching the avg/peak/trend history window.
+    The unused `_downsample` helper was removed.
+
 - **First render of the "Server status" panel also honours Telegram 429
   back-off** — the panel's initial open goes through `safe_edit_message_text`
   (not the auto-refresh path), which previously caught only `TelegramBadRequest`
