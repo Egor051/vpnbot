@@ -19,7 +19,7 @@ from bot.handlers.keys import confirm_key_action, create_key_choose, create_key_
 from bot.handlers.start import start_command
 from bot.keyboards.common import main_menu
 from bot.keyboards.keys import keys_list_keyboard
-from bot.messages import _MAX_REFRESH_RETRY_AFTER, edit_message_for_refresh
+from bot.messages import _MAX_REFRESH_RETRY_AFTER, edit_message_for_refresh, safe_edit_message_text
 from models.dto import AccessRequest, UnblockUserWarning, User, VpnKey
 from models.enums import AccessRequestStatus, UserRole, VpnKeyStatus, VpnKeyType
 from services.errors import AccessDenied, NotFound
@@ -1049,3 +1049,130 @@ def test_refresh_success_returns_true_without_sleeping() -> None:
     assert result is True
     assert slept == []
     assert message.edit_calls == 1
+
+
+# --- safe_edit_message_text: 429 / TelegramRetryAfter back-off ---------------
+
+
+def _bad_request(message: str) -> TelegramBadRequest:
+    return TelegramBadRequest(method=SimpleNamespace(), message=message)
+
+
+class _SafeEditMessage:
+    """Fake aiogram message with both ``edit_text`` and ``answer``.
+
+    ``edit_text`` replays scripted outcomes (``None`` = success, an exception
+    instance = raised). ``answer`` records re-post attempts so tests can assert
+    whether the helper fell back to posting a fresh message.
+    """
+
+    def __init__(self, outcomes: list[BaseException | None]) -> None:
+        self._outcomes = list(outcomes)
+        self.edit_calls = 0
+        self.answer_calls = 0
+
+    async def edit_text(self, text: str, reply_markup: object = None) -> None:
+        self.edit_calls += 1
+        outcome = self._outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    async def answer(self, text: str, reply_markup: object = None) -> None:
+        self.answer_calls += 1
+
+
+def test_safe_edit_honours_retry_after_then_succeeds() -> None:
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+
+    message = _SafeEditMessage([_retry_after(2), None])
+
+    async def run() -> bool:
+        return await safe_edit_message_text(message, "text", sleep=sleep)  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is True
+    assert slept == [2.0]  # waited exactly retry_after, once
+    assert message.edit_calls == 2  # initial attempt + one retry
+    assert message.answer_calls == 0  # no re-post
+
+
+def test_safe_edit_caps_retry_after_at_ceiling() -> None:
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+
+    message = _SafeEditMessage([_retry_after(3600), None])
+
+    async def run() -> bool:
+        return await safe_edit_message_text(message, "text", sleep=sleep)  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is True
+    assert slept == [_MAX_REFRESH_RETRY_AFTER]
+    assert message.edit_calls == 2
+    assert message.answer_calls == 0
+
+
+def test_safe_edit_persistent_flood_returns_false_without_reposting() -> None:
+    slept: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+
+    # Both the initial edit and the single retry hit 429.
+    message = _SafeEditMessage([_retry_after(2), _retry_after(2)])
+
+    async def run() -> bool:
+        return await safe_edit_message_text(message, "text", sleep=sleep)  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is False  # edit not applied
+    assert len(slept) == 1  # slept once, did not spin on retries
+    assert message.edit_calls == 2  # exactly one retry, no infinite loop
+    assert message.answer_calls == 0  # no re-post, no orphaned message
+
+
+def test_safe_edit_message_not_modified_returns_false() -> None:
+    message = _SafeEditMessage([_bad_request("Bad Request: message is not modified")])
+
+    async def run() -> bool:
+        return await safe_edit_message_text(message, "text")  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is False
+    assert message.edit_calls == 1
+    assert message.answer_calls == 0
+
+
+def test_safe_edit_unavailable_reposts_and_returns_true() -> None:
+    message = _SafeEditMessage([_bad_request("Bad Request: message to edit not found")])
+
+    async def run() -> bool:
+        return await safe_edit_message_text(message, "text")  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is True
+    assert message.edit_calls == 1
+    assert message.answer_calls == 1  # re-posted as a fresh message
+
+
+def test_safe_edit_success_returns_true() -> None:
+    message = _SafeEditMessage([None])
+
+    async def run() -> bool:
+        return await safe_edit_message_text(message, "text")  # type: ignore[arg-type]
+
+    result = asyncio.run(run())
+
+    assert result is True
+    assert message.edit_calls == 1
+    assert message.answer_calls == 0
