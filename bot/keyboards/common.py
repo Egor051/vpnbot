@@ -16,8 +16,9 @@ FAQ_TOPICS: list[tuple[str, str]] = [
     ("mtu",            "btn_faq_mtu"),
     ("note_why",       "btn_faq_note_why"),
     ("proxy",          "btn_faq_proxy"),
+    ("settings",       "btn_faq_settings"),
     ("server_restart", "btn_faq_server_restart"),
-    ("notes",          "btn_faq_notes"),
+    ("security",       "btn_faq_security"),
     ("support",        "btn_faq_support"),
 ]
 FAQ_PER_PAGE = 5
