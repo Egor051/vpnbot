@@ -1881,7 +1881,17 @@ async def admin_backup_now(callback: CallbackQuery, services: Services, bot: Bot
             return
         await safe_callback_answer(callback, t("backup_creating"))
         result = await services.offsite_backup.send_to_admins(bot, services.settings.admin_ids)
-        text = t("backup_sent", success=result["success"], failed=result["failed"])
+        recovery = await services.offsite_backup.send_recovery_to_admins(bot, services.settings.admin_ids)
+        if recovery is None:
+            text = t("backup_sent", success=result["success"], failed=result["failed"])
+        else:
+            text = t(
+                "backup_sent_with_recovery",
+                success=result["success"],
+                failed=result["failed"],
+                recovery_success=recovery["success"],
+                recovery_failed=recovery["failed"],
+            )
         await safe_edit_message_text(callback.message, text, reply_markup=admin_panel_keyboard())
     except Exception as exc:
         await answer_callback_error(callback, exc)

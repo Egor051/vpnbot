@@ -372,6 +372,10 @@ STRINGS: dict[str, str] = {
     "backup_disabled": "OFFSITE_BACKUP_ENCRYPTION_KEY is not configured — backup disabled.",
     "backup_creating": "Creating backup...",
     "backup_sent": "Backup sent.\nSuccessful: {success}\nFailed: {failed}",
+    "backup_sent_with_recovery": (
+        "Backup sent.\nSuccessful: {success}\nFailed: {failed}\n"
+        "Recovery bundle: {recovery_success} sent, {recovery_failed} failed"
+    ),
     "moderator_role_removed": "Moderator role removed. User is now a regular approved user.",
     "moderator_role_assigned": "User set as moderator.",
     "admin_unote_current": " Current: <code>{note}</code>",

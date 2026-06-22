@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Off-site recovery bundle for full disaster recovery** — the scheduled off-site
+  backup now sends a second encrypted document alongside the DB snapshot: a
+  `vpnbot_recovery_*.tar.gz.enc` bundle containing `.env` plus the irreplaceable
+  server-side secrets that are **not** in the database (Xray `config.json` with the
+  REALITY private key + shortIds, the AWG `.conf` interface private key, managed
+  MTProto secrets, and the WARP config). Without these a rebuilt server issues new
+  keypairs and breaks every already-issued client. The bundle is assembled entirely
+  in memory (no plaintext on disk), encrypted with the same `OFFSITE_BACKUP_ENCRYPTION_KEY`
+  (so the existing 30-day TTL applies), and includes a `MANIFEST.json` recording each
+  file's original absolute path, size, and sha256. Reads are best-effort: missing or
+  unreadable sources are skipped and flagged in the manifest, so a partial bundle stays
+  useful. Controlled by `OFFSITE_BACKUP_INCLUDE_CONFIGS` (default `true`) with an optional
+  `OFFSITE_BACKUP_ENV_PATH` override; the existing `*.db.enc` backup format is unchanged.
+  Both the scheduler and the admin **💾 Бэкап БД** button now deliver both artifacts.
+
 - **Maintenance mode + banner for users during works** — a superadmin can put the
   bot into maintenance from the admin panel (**🛠 Режим обслуживания**). While it
   is on, every non-superadmin update is short-circuited by a new outer
