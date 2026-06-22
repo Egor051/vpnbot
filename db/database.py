@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 24
+CURRENT_SCHEMA_VERSION = 25
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -270,6 +270,9 @@ class Database:
         if version < 24:
             await self._migrate_v24()
             await self._set_schema_version(24)
+        if version < 25:
+            await self._migrate_v25()
+            await self._set_schema_version(25)
             version = 24
         await self._validate_reference_integrity()
         await self._validate_enum_values()
@@ -942,6 +945,25 @@ class Database:
             """
         )
         await self.conn.execute("INSERT OR IGNORE INTO server_status_settings (id) VALUES (1)")
+
+    async def _migrate_v25(self) -> None:
+        # Maintenance-mode settings (single-row table, id = 1). Holds the global
+        # maintenance toggle, an optional custom banner message, and who/when it
+        # was turned on. Disabled by default. Also declared in schema.sql for
+        # fresh DBs.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS maintenance_settings (
+              id         INTEGER PRIMARY KEY DEFAULT 1,
+              enabled    INTEGER NOT NULL DEFAULT 0,
+              message    TEXT,
+              started_at INTEGER NOT NULL DEFAULT 0,
+              started_by INTEGER,
+              updated_at INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        await self.conn.execute("INSERT OR IGNORE INTO maintenance_settings (id) VALUES (1)")
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(

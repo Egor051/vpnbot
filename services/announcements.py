@@ -95,6 +95,80 @@ class AnnouncementService:
         )
         return await self.resume_batch(actor_user_id=actor_user_id, bot=bot, announcement_id=batch.id, retry_failed=False)
 
+    async def send_text_to_all(
+        self,
+        *,
+        actor_user_id: int,
+        bot: Bot,
+        text: str,
+    ) -> AnnouncementResult:
+        """Broadcast a generated text message to all eligible recipients.
+
+        Unlike :meth:`send_to_all` (which copies an existing message) this sends a
+        freshly generated ``text`` — used for system notifications such as the
+        maintenance-mode on/off banners. It reuses the same keyset pagination,
+        rate-limiting and ``TelegramRetryAfter`` handling, but is best-effort
+        (no announcement ledger / resume support).
+        """
+        await self.users.require_superadmin(actor_user_id)
+        total = 0
+        success = 0
+        failed = 0
+        last_seen_id: int | None = None
+        delivered_user_ids: list[int] = []
+        failed_user_ids: list[int] = []
+        skipped_user_ids: list[int] = []
+        while True:
+            recipients = await self.users_repo.list_announcement_recipients_after(last_seen_id=last_seen_id, limit=self.batch_size)
+            if not recipients:
+                break
+            for recipient in recipients:
+                last_seen_id = recipient.telegram_user_id
+                total += 1
+                target_id = recipient.telegram_user_id
+                if target_id <= 0:
+                    failed += 1
+                    skipped_user_ids.append(target_id)
+                    logger.warning("Skipping broadcast recipient with non-private chat id=%s", target_id)
+                    continue
+                sent, _error = await self._send_text(bot, target_id, text)
+                if sent:
+                    success += 1
+                    delivered_user_ids.append(target_id)
+                else:
+                    failed += 1
+                    failed_user_ids.append(target_id)
+                if self.delay_seconds > 0:
+                    await asyncio.sleep(self.delay_seconds)
+
+        result = AnnouncementResult(
+            announcement_id=None,
+            total=total,
+            success=success,
+            failed=failed,
+            last_seen_id=last_seen_id,
+            delivered_user_ids=tuple(delivered_user_ids),
+            failed_user_ids=tuple(failed_user_ids),
+            skipped_user_ids=tuple(skipped_user_ids),
+        )
+        logger.info(
+            "Text broadcast completed: total=%s success=%s failed=%s",
+            result.total,
+            result.success,
+            result.failed,
+        )
+        try:
+            await self.audit.write(
+                actor_user_id=actor_user_id,
+                action="text_broadcast_sent",
+                entity_type=AuditEntityType.SYSTEM,
+                entity_id=None,
+                details={"total": result.total, "success": result.success, "failed": result.failed},
+            )
+        except Exception:
+            logger.warning("Text broadcast was sent, but audit write failed", exc_info=True)
+        return result
+
     async def resume_batch(
         self,
         *,
@@ -408,6 +482,22 @@ class AnnouncementService:
                 return False, _public_error_text(retry_error)
         except Exception as error:
             logger.warning("Announcement copy failed for user_id=%s", target_id, exc_info=True)
+            return False, _public_error_text(error)
+
+    async def _send_text(self, bot: Bot, target_id: int, text: str) -> tuple[bool, str | None]:
+        try:
+            await bot.send_message(chat_id=target_id, text=text)
+            return True, None
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(max(exc.retry_after, 0))
+            try:
+                await bot.send_message(chat_id=target_id, text=text)
+                return True, None
+            except Exception as retry_error:
+                logger.warning("Text broadcast retry failed for user_id=%s", target_id, exc_info=True)
+                return False, _public_error_text(retry_error)
+        except Exception as error:
+            logger.warning("Text broadcast failed for user_id=%s", target_id, exc_info=True)
             return False, _public_error_text(error)
 
     def _now(self) -> str:

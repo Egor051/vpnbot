@@ -68,6 +68,30 @@ def server_status_keyboard(detailed_enabled: bool = False) -> InlineKeyboardMark
     )
 
 
+def maintenance_panel_keyboard(enabled: bool) -> InlineKeyboardMarkup:
+    """Build the maintenance panel: an enable/disable toggle plus a back button."""
+    if enabled:
+        toggle = InlineKeyboardButton(text=t("btn_maintenance_disable"), callback_data="admin:maintenance:disable")
+    else:
+        toggle = InlineKeyboardButton(text=t("btn_maintenance_enable"), callback_data="admin:maintenance:enable")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [toggle],
+            [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")],
+        ]
+    )
+
+
+def maintenance_enable_skip_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard shown while asking for the banner text: skip (use default) or cancel."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_maintenance_skip_text"), callback_data="admin:maintenance:enable:default")],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="admin:maintenance")],
+        ]
+    )
+
+
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     """Build the full admin panel inline keyboard."""
     return InlineKeyboardMarkup(
@@ -83,6 +107,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t("btn_announcement"), callback_data="admin:announce")],
             [InlineKeyboardButton(text=t("btn_warp"), callback_data="admin:warp")],
             [InlineKeyboardButton(text=t("btn_modules"), callback_data="admin:modules")],
+            [InlineKeyboardButton(text=t("btn_maintenance"), callback_data="admin:maintenance")],
             [InlineKeyboardButton(text=t("btn_backend_diagnostics"), callback_data="admin:diagnostics")],
             [InlineKeyboardButton(text=t("btn_action_logs"), callback_data="admin:audit")],
             [InlineKeyboardButton(text=t("btn_announcement_recovery"), callback_data="admin:announce_batches")],

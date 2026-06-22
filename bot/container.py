@@ -10,6 +10,7 @@ from services.awg import AwgService
 from services.backend_health import BackendHealth
 from services.dashboard import DashboardService
 from services.key_expiry import KeyExpiryService
+from services.maintenance import MaintenanceService
 from services.mtproto import MtProtoService
 from services.notes import NotesService
 from services.anomaly_detection import AnomalyDetectionService
@@ -59,3 +60,4 @@ class Services:
     server_status_settings: ServerStatusSettingsRepository
     online_clients: OnlineClientsService
     auto_refresh: LiveRefreshManager
+    maintenance: MaintenanceService

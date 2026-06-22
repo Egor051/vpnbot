@@ -453,6 +453,7 @@ STRINGS: dict[str, str] = {
     "btn_key_stats": "📊 Key statistics",
     "btn_proxy_status": "🌐 Proxy status",
     "btn_modules": "⚙️ Protocol modules",
+    "btn_maintenance": "🛠 Maintenance mode",
     "btn_backend_diagnostics": "🔍 Backend diagnostics",
     "btn_action_logs": "📜 Action logs",
     "btn_issue_key_to_user": "🔑 Issue key to user",
@@ -496,6 +497,29 @@ STRINGS: dict[str, str] = {
     "server_status_net_peak": "peak",
     "btn_server_status_detailed_on": "🔬 Detailed metrics: ON",
     "btn_server_status_detailed_off": "🔬 Detailed metrics: OFF",
+    # ── maintenance mode ──────────────────────────────────────────────────────
+    "btn_maintenance_enable": "🛠 Enable maintenance mode",
+    "btn_maintenance_disable": "✅ Finish works",
+    "btn_maintenance_skip_text": "No text (default)",
+    "maintenance_panel_title": "<b>🛠 Maintenance mode</b>",
+    "maintenance_status_on": "Status: 🔴 ON",
+    "maintenance_status_off": "Status: 🟢 off",
+    "maintenance_started_at": "Enabled: {time}",
+    "maintenance_current_banner": "Banner shown to users:\n{banner}",
+    "maintenance_enable_prompt": (
+        "Send the banner text users will see during the works, "
+        "or tap \"No text\" to show the default message."
+    ),
+    "maintenance_default_banner": (
+        "🛠 Maintenance is in progress. The bot is temporarily unavailable. "
+        "Please try again later."
+    ),
+    "maintenance_enabling": "Enabling maintenance mode…",
+    "maintenance_disabling": "Finishing works…",
+    "maintenance_broadcast_on": "🛠 Dear users!\n\n{banner}",
+    "maintenance_broadcast_off": "✅ Maintenance is finished. The bot is available again. Thanks for waiting!",
+    "maintenance_enabled_ok": "Maintenance mode enabled. {count} users notified.",
+    "maintenance_disabled_ok": "Maintenance mode disabled. {count} users notified.",
     # ── keyboard buttons (keys) ───────────────────────────────────────────────
     "btn_back": "Back",
     "btn_config": "Config",
