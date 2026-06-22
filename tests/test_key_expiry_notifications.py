@@ -49,6 +49,7 @@ def _make_service(repo: VpnKeyRepository, bot: object, notify_days: tuple[int, .
     clock.now.return_value = "2026-01-10T00:00:00+00:00"
     return KeyExpiryService(
         vpn_keys=repo,
+        users=UserRepository(repo.db),
         xray=MagicMock(),
         awg=MagicMock(),
         audit=MagicMock(),
@@ -170,6 +171,7 @@ def test_notify_expiring_keys_no_bot_does_nothing(tmp_path: Path) -> None:
             clock.now.return_value = "2026-01-10T00:00:00+00:00"
             service = KeyExpiryService(
                 vpn_keys=repo,
+                users=UserRepository(repo.db),
                 xray=MagicMock(),
                 awg=MagicMock(),
                 audit=MagicMock(),
@@ -266,6 +268,7 @@ def test_notify_expired_key_calls_bot_send_message(tmp_path: Path) -> None:
             clock.now.return_value = "2026-01-10T00:00:00+00:00"
             service = KeyExpiryService(
                 vpn_keys=repo,
+                users=UserRepository(repo.db),
                 xray=xray_mock,
                 awg=MagicMock(),
                 audit=MagicMock(),

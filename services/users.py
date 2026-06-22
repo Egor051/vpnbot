@@ -106,6 +106,20 @@ class UserService:
             raise NotFound("Пользователь не найден")
         return user
 
+    async def set_language(self, actor_user_id: int, language: str | None) -> User:
+        """Set the actor's own language override (None follows the global default)."""
+        await self.require_approved_or_admin(actor_user_id)
+        if language is not None and language not in {"ru", "en"}:
+            raise InvalidOperation("Неподдерживаемый язык")
+        await self.users.set_language(actor_user_id, language, self.clock.now())
+        return await self.get_user(actor_user_id)
+
+    async def set_expiry_notifications(self, actor_user_id: int, enabled: bool) -> User:
+        """Toggle the actor's own expiry-reminder opt-out."""
+        await self.require_approved_or_admin(actor_user_id)
+        await self.users.set_expiry_notifications_enabled(actor_user_id, enabled, self.clock.now())
+        return await self.get_user(actor_user_id)
+
     async def require_superadmin(self, actor_user_id: int) -> User:
         """Return the actor only if they are a superadmin, else raise AccessDenied."""
         user = await self.get_user(actor_user_id)

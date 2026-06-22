@@ -29,6 +29,7 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=t("btn_my_keys"), callback_data="keys:list")],
         [InlineKeyboardButton(text=t("btn_create_key"), callback_data="keys:create")],
         [InlineKeyboardButton(text=t("btn_proxy"), callback_data="proxy:show")],
+        [InlineKeyboardButton(text=t("btn_settings"), callback_data="settings:open")],
         [InlineKeyboardButton(text=t("btn_help"), callback_data="help")],
     ]
     if is_admin:

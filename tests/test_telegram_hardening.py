@@ -116,6 +116,7 @@ def test_main_menu_regular_user_uses_inline_buttons() -> None:
         ("Мои ключи", "keys:list"),
         ("Создать ключ", "keys:create"),
         ("Прокси", "proxy:show"),
+        ("⚙️ Настройки", "settings:open"),
         ("Помощь", "help"),
     ]
 
@@ -123,9 +124,10 @@ def test_main_menu_regular_user_uses_inline_buttons() -> None:
 def test_main_menu_admin_has_admin_button_and_complete_create_key_text() -> None:
     buttons = _main_menu_buttons(is_admin=True)
 
-    assert len(buttons) == 5
+    assert len(buttons) == 6
     assert ("Создать ключ", "keys:create") in buttons
     assert ("Создать клю", "keys:create") not in buttons
+    assert ("⚙️ Настройки", "settings:open") in buttons
     assert buttons[-1] == ("Админ-панель", "admin:panel")
 
 
@@ -163,6 +165,7 @@ def test_start_command_sends_inline_main_menu_for_approved_users() -> None:
             ("Мои ключи", "keys:list"),
             ("Создать ключ", "keys:create"),
             ("Прокси", "proxy:show"),
+            ("⚙️ Настройки", "settings:open"),
             ("Помощь", "help"),
         ]
 

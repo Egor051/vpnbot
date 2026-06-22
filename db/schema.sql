@@ -22,7 +22,13 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TEXT NOT NULL,
   blocked_at TEXT,
   trial_quota_reset_at TEXT DEFAULT NULL,
-  note TEXT DEFAULT NULL
+  note TEXT DEFAULT NULL,
+  -- Per-user language override: NULL follows the global BOT_LANGUAGE default,
+  -- otherwise 'ru'/'en'. Mirrors _migrate_v26.
+  language TEXT DEFAULT NULL,
+  -- Opt-out toggle for "key expires in N days" reminders (1 = receive).
+  -- Mirrors _migrate_v26.
+  expiry_notifications_enabled INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS access_requests (

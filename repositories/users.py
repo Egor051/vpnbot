@@ -37,6 +37,12 @@ def _row_to_user(row: Row | None) -> User | None:
         updated_at=row["updated_at"],
         blocked_at=row["blocked_at"],
         note=row["note"] if "note" in keys else None,
+        language=row["language"] if "language" in keys else None,
+        expiry_notifications_enabled=(
+            bool(row["expiry_notifications_enabled"])
+            if "expiry_notifications_enabled" in keys and row["expiry_notifications_enabled"] is not None
+            else True
+        ),
     )
 
 
@@ -187,6 +193,26 @@ class UserRepository:
         cursor = await self.db.conn.execute(
             "UPDATE users SET note = ?, updated_at = ? WHERE telegram_user_id = ?",
             (note, now, telegram_user_id),
+        )
+        await self.db.commit()
+        if cursor.rowcount != 1:
+            raise NotFound("Пользователь не найден")
+
+    async def set_language(self, telegram_user_id: int, language: str | None, now: str) -> None:
+        """Set a user's language override, raising NotFound if the user is absent."""
+        cursor = await self.db.conn.execute(
+            "UPDATE users SET language = ?, updated_at = ? WHERE telegram_user_id = ?",
+            (language, now, telegram_user_id),
+        )
+        await self.db.commit()
+        if cursor.rowcount != 1:
+            raise NotFound("Пользователь не найден")
+
+    async def set_expiry_notifications_enabled(self, telegram_user_id: int, enabled: bool, now: str) -> None:
+        """Toggle a user's expiry-reminder opt-out, raising NotFound if absent."""
+        cursor = await self.db.conn.execute(
+            "UPDATE users SET expiry_notifications_enabled = ?, updated_at = ? WHERE telegram_user_id = ?",
+            (1 if enabled else 0, now, telegram_user_id),
         )
         await self.db.commit()
         if cursor.rowcount != 1:

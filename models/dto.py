@@ -35,6 +35,10 @@ class User:
     updated_at: str
     blocked_at: str | None
     note: str | None = None
+    # Per-user language override; None follows the global BOT_LANGUAGE default.
+    language: str | None = None
+    # Opt-out toggle for "key expires in N days" reminders.
+    expiry_notifications_enabled: bool = True
 
 
 @dataclass(frozen=True, slots=True)
