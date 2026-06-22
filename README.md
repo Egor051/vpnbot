@@ -326,6 +326,8 @@ _Legacy alias: `AWG_CLIENT_DNS` (= `AWG_DNS`)._
 |---|---|---|---|---|
 | `OFFSITE_BACKUP_ENCRYPTION_KEY` | No | _(disabled)_ | 🔒 Fernet key for encrypting off-site DB backups. Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Leave empty to disable off-site backups. | _(44-char base64url)_ |
 | `OFFSITE_BACKUP_INTERVAL` | No | `604800` | Interval (seconds) between off-site backup uploads (0 = disabled). Default is 7 days. | `604800` |
+| `OFFSITE_BACKUP_INCLUDE_CONFIGS` | No | `true` | Also send a second encrypted **recovery bundle** (`.env` + Xray/AWG/MTProto/WARP configs) alongside the DB backup so the service can be rebuilt on a clean server. Encrypted with the same key; delivered as `vpnbot_recovery_*.tar.gz.enc`. | `true` |
+| `OFFSITE_BACKUP_ENV_PATH` | No | _(auto)_ | 🔒 Path to the `.env` placed in the recovery bundle. Empty = auto-detect the `.env` loaded at startup. | `/opt/vpn-service/.env` |
 
 #### Anomaly Detection
 
@@ -1185,6 +1187,25 @@ sudo journalctl -u vpn-bot -n 100 --no-pager
 ```
 
 If `awg-quick` is unavailable but `wg-quick` is the intended tool on the server, run the equivalent `wg-quick strip` check. Do not run `awg set`, `wg set`, `systemctl restart xray`, or runtime-changing commands during restore validation until the config files have passed read-only checks.
+
+### Off-site backup coverage and recovery bundle
+
+The scheduled off-site backup (`OFFSITE_BACKUP_ENCRYPTION_KEY`) delivers two encrypted documents to admins via Telegram:
+
+- `vpnbot_backup_*.db.enc` — full SQLite snapshot (users, keys, proxy accesses, traffic stats, settings). Per-client data is re-applied into the live configs on startup.
+- `vpnbot_recovery_*.tar.gz.enc` — the **recovery bundle** (when `OFFSITE_BACKUP_INCLUDE_CONFIGS=true`): `.env`, Xray `config.json` (REALITY private key + shortIds), AWG `.conf` (interface private key), managed MTProto secrets, and the WARP config. These are the irreplaceable server-side secrets that are **not** in the DB — without them a rebuilt server issues new keypairs and breaks every already-issued client. Unreadable/missing files are skipped and recorded in the bundle's `MANIFEST.json`.
+
+To restore from the bundle on a clean server:
+
+```bash
+# Decrypt (KEY = OFFSITE_BACKUP_ENCRYPTION_KEY, stored OUTSIDE the bundle):
+python -c "from cryptography.fernet import Fernet; open('recovery.tar.gz','wb').write(Fernet(b'KEY').decrypt(open('vpnbot_recovery_*.tar.gz.enc','rb').read()))"
+tar xzf recovery.tar.gz            # MANIFEST.json lists each file's original absolute path
+# Place each file back at its MANIFEST path, restore the .db.enc snapshot, validate
+# configs (see Restore above), then start vpn-bot so startup reconciliation runs.
+```
+
+Because the bundle contains `.env` (which itself holds `OFFSITE_BACKUP_ENCRYPTION_KEY`), keep the key in a separate secret store — otherwise the bundle cannot be decrypted.
 
 ### Firewall and exposed ports
 

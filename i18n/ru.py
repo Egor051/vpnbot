@@ -373,6 +373,10 @@ STRINGS: dict[str, str] = {
     "backup_disabled": "OFFSITE_BACKUP_ENCRYPTION_KEY не настроен — бэкап отключён.",
     "backup_creating": "Создаю бэкап...",
     "backup_sent": "Бэкап отправлен.\nУспешно: {success}\nОшибок: {failed}",
+    "backup_sent_with_recovery": (
+        "Бэкап отправлен.\nУспешно: {success}\nОшибок: {failed}\n"
+        "Бандл восстановления: успешно {recovery_success}, ошибок {recovery_failed}"
+    ),
     "moderator_role_removed": "Роль модератора снята. Пользователь стал обычным одобренным пользователем.",
     "moderator_role_assigned": "Пользователь назначен модератором.",
     "admin_unote_current": " Текущая: <code>{note}</code>",

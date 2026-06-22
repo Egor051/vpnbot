@@ -195,6 +195,8 @@ BOT_LANGUAGE=ru
 | `KEY_MAX_TRIAL_DAYS` | `365` | Максимальная длительность (дней) пробных VPN-ключей (1–3650). |
 | `OFFSITE_BACKUP_ENCRYPTION_KEY` | _(отключён)_ | 🔒 Fernet-ключ для шифрования резервных копий DB. Оставьте пустым для отключения. |
 | `OFFSITE_BACKUP_INTERVAL` | `604800` | Интервал (сек) между загрузками резервных копий. По умолчанию — 7 дней. |
+| `OFFSITE_BACKUP_INCLUDE_CONFIGS` | `true` | Дополнительно отправлять зашифрованный **бандл восстановления** (`.env` + конфиги Xray/AWG/MTProto/WARP) рядом с бэкапом БД, чтобы поднять сервис на чистом сервере. Шифруется тем же ключом; файл `vpnbot_recovery_*.tar.gz.enc`. |
+| `OFFSITE_BACKUP_ENV_PATH` | _(авто)_ | 🔒 Путь к `.env`, попадающему в бандл восстановления. Пусто — автоопределение `.env`, загруженного при старте. |
 | `ANOMALY_CHECK_INTERVAL` | `300` | Как часто (сек) запускать анализ аномалий (0–86400). |
 | `ANOMALY_WINDOW_SECONDS` | `3600` | Окно наблюдения за трафиком (сек). |
 | `ANOMALY_MIN_UNIQUE_IPS` | `3` | Мин. уникальных source IP в окне для флага. |
@@ -1105,6 +1107,25 @@ sudo journalctl -u vpn-bot -n 100 --no-pager
 ```
 
 Если `awg-quick` недоступен, но на сервере используется `wg-quick`, запустите эквивалентную проверку `wg-quick strip`. Не запускайте `awg set`, `wg set`, `systemctl restart xray` и другие команды, изменяющие runtime-состояние, пока конфигурационные файлы не прошли read-only проверки.
+
+### Офсайтовый бэкап: что покрывает и бандл восстановления
+
+Плановый офсайтовый бэкап (`OFFSITE_BACKUP_ENCRYPTION_KEY`) отправляет админам в Telegram два зашифрованных документа:
+
+- `vpnbot_backup_*.db.enc` — полный снимок SQLite (пользователи, ключи, proxy-доступы, статистика, настройки). Per-client данные бот пере-применяет в конфиги при старте.
+- `vpnbot_recovery_*.tar.gz.enc` — **бандл восстановления** (при `OFFSITE_BACKUP_INCLUDE_CONFIGS=true`): `.env`, Xray `config.json` (REALITY private key + shortIds), AWG `.conf` (interface private key), managed-секреты MTProto и конфиг WARP. Это незаменимые серверные секреты, которых **нет** в БД — без них пересозданный сервер выдаст новые пары ключей и сломает все ранее выданные клиентские конфиги. Недоступные/отсутствующие файлы пропускаются и фиксируются в `MANIFEST.json` внутри бандла.
+
+Восстановление из бандла на чистом сервере:
+
+```bash
+# Расшифровка (KEY = OFFSITE_BACKUP_ENCRYPTION_KEY, хранится ОТДЕЛЬНО от бандла):
+python -c "from cryptography.fernet import Fernet; open('recovery.tar.gz','wb').write(Fernet(b'KEY').decrypt(open('vpnbot_recovery_*.tar.gz.enc','rb').read()))"
+tar xzf recovery.tar.gz            # MANIFEST.json содержит исходный абсолютный путь каждого файла
+# Разложите файлы по путям из MANIFEST, восстановите снимок .db.enc, проверьте
+# конфиги (см. «Восстановление» выше) и запустите vpn-bot — отработает реконсиляция.
+```
+
+Так как бандл содержит `.env` (а в нём — сам `OFFSITE_BACKUP_ENCRYPTION_KEY`), храните ключ в отдельном секрет-хранилище, иначе бандл нечем будет расшифровать.
 
 ### Firewall и открытые порты
 

@@ -2,6 +2,7 @@
 import asyncio
 import logging
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from aiogram import Bot, Dispatcher
@@ -377,11 +378,28 @@ async def _build_app(
         clock=clock,
     )
 
+    # Files bundled into the recovery archive alongside the DB backup so the
+    # service can be rebuilt on a clean server: .env (secrets + AWG/MTProto keys),
+    # the Xray config (REALITY private key + shortIds), the AWG config (interface
+    # private key), and — when present — the managed MTProto secrets and WARP
+    # config. Missing/unreadable entries are skipped best-effort at backup time.
+    recovery_sources: list[Path] = []
+    if settings.offsite_backup_env_path is not None:
+        recovery_sources.append(settings.offsite_backup_env_path)
+    recovery_sources.append(settings.xray_config_path)
+    recovery_sources.append(settings.awg_config_path)
+    if settings.mtproto_enabled and settings.mtproto_mode == "managed":
+        recovery_sources.append(settings.mtproto_managed_secrets_path)
+        recovery_sources.append(settings.mtproto_managed_env_path)
+    recovery_sources.append(settings.warp_config_path)
+
     offsite_backup_service = OffsiteBackupService(
         db=db,
         db_path=settings.db_path,
         encryption_key=settings.offsite_backup_encryption_key,
         clock=clock,
+        recovery_sources=recovery_sources,
+        include_recovery=settings.offsite_backup_include_configs,
     )
 
     anomaly_detection_service = AnomalyDetectionService(

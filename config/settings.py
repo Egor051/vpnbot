@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 
 class SettingsError(RuntimeError):
@@ -343,6 +343,13 @@ class Settings:
     key_max_trial_days: int = 365
     offsite_backup_encryption_key: str = field(default="", repr=False)
     offsite_backup_interval: int = 604800
+    # When enabled, each offsite backup run also sends a second encrypted archive
+    # (the "recovery bundle") with .env + service configs needed to rebuild the
+    # service on a clean server. The DB backup itself is unchanged.
+    offsite_backup_include_configs: bool = True
+    # Path to the .env file included in the recovery bundle. None disables only the
+    # .env entry (configs are still bundled). Resolved at load time.
+    offsite_backup_env_path: Path | None = None
     anomaly_check_interval: int = 300
     anomaly_window_seconds: int = 3600
     anomaly_min_unique_ips: int = 3
@@ -427,6 +434,22 @@ class Settings:
             raise SettingsError("Для создания AWG-ключа не заданы: " + ", ".join(missing))
         if not 1 <= self.awg_endpoint_port <= 65535:
             raise SettingsError("Для создания AWG-ключа AWG_ENDPOINT_PORT должен быть в диапазоне 1–65535")
+
+
+def _offsite_env_path(env_path: str | Path | None) -> Path | None:
+    """Resolve which .env file to bundle into the offsite recovery archive.
+
+    Precedence: explicit OFFSITE_BACKUP_ENV_PATH, then the path passed to
+    load_settings(), then dotenv's own discovery (find_dotenv, same search
+    load_dotenv(None) uses). Returns None when no .env can be located.
+    """
+    explicit = _optional("OFFSITE_BACKUP_ENV_PATH")
+    if explicit:
+        return Path(explicit)
+    if env_path:
+        return Path(env_path)
+    found = find_dotenv(usecwd=True)
+    return Path(found) if found else None
 
 
 def load_settings(env_path: str | Path | None = None) -> Settings:
@@ -609,6 +632,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         helper_staging_root=helper_staging_root,
         offsite_backup_encryption_key=_fernet_key("OFFSITE_BACKUP_ENCRYPTION_KEY"),
         offsite_backup_interval=_int_range("OFFSITE_BACKUP_INTERVAL", 604800, 0, 365 * 24 * 3600),
+        offsite_backup_include_configs=_bool("OFFSITE_BACKUP_INCLUDE_CONFIGS", True),
+        offsite_backup_env_path=_offsite_env_path(env_path),
         anomaly_check_interval=_int_range("ANOMALY_CHECK_INTERVAL", 300, 0, 86400),
         anomaly_window_seconds=_int_range("ANOMALY_WINDOW_SECONDS", 3600, 60, 86400),
         anomaly_min_unique_ips=_int_range("ANOMALY_MIN_UNIQUE_IPS", 3, 1, 1000),

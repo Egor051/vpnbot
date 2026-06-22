@@ -1,7 +1,12 @@
 
 import asyncio
+import hashlib
+import io
+import json
 import logging
 import sqlite3
+import tarfile
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,11 +38,30 @@ class OffsiteBackupService:
 
     _META_KEY = "last_offsite_backup"
 
-    def __init__(self, *, db: Database, db_path: Path, encryption_key: str, clock: ClockProvider) -> None:
+    def __init__(
+        self,
+        *,
+        db: Database,
+        db_path: Path,
+        encryption_key: str,
+        clock: ClockProvider,
+        recovery_sources: Sequence[Path] = (),
+        include_recovery: bool = False,
+    ) -> None:
         self.db_path = db_path
         self.clock = clock
         self._encryption_key = encryption_key
         self._db = db
+        # De-duplicated, order-preserving list of files bundled into the recovery
+        # archive (.env + service configs). Read best-effort at backup time.
+        seen: set[Path] = set()
+        sources: list[Path] = []
+        for source in recovery_sources:
+            if source not in seen:
+                seen.add(source)
+                sources.append(source)
+        self._recovery_sources = tuple(sources)
+        self._include_recovery = include_recovery
 
     async def get_last_backup_time(self) -> datetime | None:
         value = await self._db.get_meta(self._META_KEY)
@@ -51,6 +75,11 @@ class OffsiteBackupService:
     @property
     def enabled(self) -> bool:
         return bool(self._encryption_key)
+
+    @property
+    def recovery_enabled(self) -> bool:
+        """Whether a recovery bundle (.env + configs) can be produced and sent."""
+        return self.enabled and self._include_recovery and bool(self._recovery_sources)
 
     async def create_encrypted_backup(self) -> tuple[bytes, str]:
         """Create an encrypted snapshot of the database and return it with a filename."""
@@ -104,6 +133,96 @@ class OffsiteBackupService:
         except InvalidToken as exc:
             raise RuntimeError("Не удалось расшифровать бэкап: неверный ключ или повреждённые данные") from exc
 
+    async def create_recovery_bundle(self) -> tuple[bytes, str] | None:
+        """Create an encrypted tar.gz of .env + service configs and a filename.
+
+        Returns None when nothing could be read (e.g. all sources missing or
+        unreadable), so the caller can skip sending an empty bundle. Raises
+        RuntimeError when the encryption key is not configured — callers gate on
+        :attr:`recovery_enabled` before invoking this. The same Fernet key (and
+        therefore the same TTL enforced by :meth:`decrypt_backup`) protects both
+        the DB backup and this bundle.
+        """
+        if not self._encryption_key:
+            raise RuntimeError("OFFSITE_BACKUP_ENCRYPTION_KEY не настроен")
+
+        tar_bytes = await asyncio.to_thread(self._build_recovery_tar)
+        if tar_bytes is None:
+            return None
+
+        from cryptography.fernet import Fernet
+        fernet = Fernet(self._encryption_key.encode())
+        encrypted = fernet.encrypt(tar_bytes)
+
+        stamp = self.clock.now().replace(":", "").replace("+", "_").replace(".", "")[:15]
+        filename = f"vpnbot_recovery_{stamp}.tar.gz.enc"
+        return encrypted, filename
+
+    def _build_recovery_tar(self) -> bytes | None:
+        """Build an in-memory tar.gz of the recovery sources plus MANIFEST.json.
+
+        Best-effort: a missing/unreadable source is skipped (recorded in the
+        manifest with a reason) so a partial bundle stays useful and its gaps are
+        visible. Returns None if no source file could be read at all. No plaintext
+        is ever written to disk — the archive is assembled entirely in memory,
+        mirroring :meth:`_snapshot_db`.
+        """
+        created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        manifest_files: list[dict[str, object]] = []
+        blobs: list[tuple[str, bytes]] = []
+        for source in self._recovery_sources:
+            entry: dict[str, object] = {"path": str(source)}
+            try:
+                data = source.read_bytes()
+            except OSError as exc:
+                entry["included"] = False
+                entry["reason"] = exc.__class__.__name__
+                manifest_files.append(entry)
+                logger.warning("Recovery bundle: пропускаю недоступный файл %s: %s", source, exc)
+                continue
+            member = "files/" + self._safe_arcname(source)
+            entry["included"] = True
+            entry["member"] = member
+            entry["size"] = len(data)
+            entry["sha256"] = hashlib.sha256(data).hexdigest()
+            manifest_files.append(entry)
+            blobs.append((member, data))
+
+        if not blobs:
+            return None
+
+        manifest = {"created_at": created_at, "files": manifest_files}
+        manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+
+        buffer = io.BytesIO()
+        # mtime=0 (no embedded gzip timestamp) keeps the archive reproducible for
+        # a given input set, which makes the round-trip tests deterministic.
+        with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+            self._add_tar_bytes(tar, "MANIFEST.json", manifest_bytes)
+            for member, data in blobs:
+                self._add_tar_bytes(tar, member, data)
+        return buffer.getvalue()
+
+    @staticmethod
+    def _safe_arcname(source: Path) -> str:
+        """Map an absolute source path to a safe, relative tar member name.
+
+        Leading slashes and any ``..``/``.`` components are stripped so extraction
+        can never escape the destination directory. The remaining path preserves
+        the file's origin (e.g. ``home/user/vpnbot/.env``), and the original
+        absolute path is also recorded in MANIFEST.json.
+        """
+        parts = [part for part in source.as_posix().split("/") if part not in ("", ".", "..")]
+        return "/".join(parts) or source.name
+
+    @staticmethod
+    def _add_tar_bytes(tar: tarfile.TarFile, name: str, data: bytes) -> None:
+        info = tarfile.TarInfo(name=name)
+        info.size = len(data)
+        info.mtime = 0
+        info.mode = 0o600
+        tar.addfile(info, io.BytesIO(data))
+
     def _snapshot_db(self) -> bytes:
         # Backup into an in-memory database so no plaintext ever touches disk.
         # serialize() is available since Python 3.12 (required by this project).
@@ -136,6 +255,37 @@ class OffsiteBackupService:
                 success += 1
             except Exception:
                 logger.warning("Не удалось отправить бэкап администратору %s", admin_id, exc_info=True)
+                failed += 1
+        return {"success": success, "failed": failed, "total": len(admin_ids)}
+
+    async def send_recovery_to_admins(self, bot: Bot, admin_ids: frozenset[int]) -> dict[str, int] | None:
+        """Send the encrypted recovery bundle to all admins and return delivery counts.
+
+        Returns None when the bundle is disabled or no source file could be read,
+        so callers can distinguish "not sent" from a zero-success delivery.
+        """
+        if not self.recovery_enabled:
+            return None
+        built = await self.create_recovery_bundle()
+        if built is None:
+            return None
+        encrypted, filename = built
+        success = 0
+        failed = 0
+        for admin_id in admin_ids:
+            try:
+                await bot.send_document(
+                    admin_id,
+                    document=BufferedInputFile(encrypted, filename=filename),
+                    caption=(
+                        f"Зашифрованный бандл восстановления (.env + конфиги): <code>{filename}</code>\n"
+                        "Расшифруйте тем же ключом <code>OFFSITE_BACKUP_ENCRYPTION_KEY</code>, "
+                        "затем распакуйте: <code>tar xzf</code>. Хранить ключ нужно отдельно от бандла."
+                    ),
+                )
+                success += 1
+            except Exception:
+                logger.warning("Не удалось отправить бандл восстановления администратору %s", admin_id, exc_info=True)
                 failed += 1
         return {"success": success, "failed": failed, "total": len(admin_ids)}
 
@@ -174,4 +324,22 @@ async def offsite_backup_loop(
             )
         except Exception:
             logger.warning("Offsite backup job упал с ошибкой", exc_info=True)
+
+        # The recovery bundle is sent independently so a DB-backup failure never
+        # suppresses it (and vice versa). It does not update last_offsite_backup —
+        # the DB backup remains the scheduling anchor.
+        if service.recovery_enabled:
+            try:
+                recovery = await service.send_recovery_to_admins(bot, admin_ids)
+                if recovery is None:
+                    logger.info("Offsite recovery bundle: нет доступных файлов, пропуск")
+                else:
+                    logger.info(
+                        "Offsite recovery bundle sent: success=%d failed=%d total=%d",
+                        recovery["success"],
+                        recovery["failed"],
+                        recovery["total"],
+                    )
+            except Exception:
+                logger.warning("Offsite recovery bundle job упал с ошибкой", exc_info=True)
         await asyncio.sleep(interval)
