@@ -41,6 +41,9 @@ class AdminEditUserNoteStates(StatesGroup):
 
 
 class AdminAnnouncementStates(StatesGroup):
+    choosing_roles = State()
+    choosing_protocols = State()
+    choosing_transports = State()
     waiting_message = State()
     confirming = State()
     waiting_schedule_time = State()

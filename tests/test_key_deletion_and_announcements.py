@@ -830,6 +830,9 @@ def test_announcement_waits_for_confirmation_before_sending() -> None:
             self.data: dict[str, object] = {}
             self.state: object = None
 
+        async def get_data(self) -> dict[str, object]:
+            return dict(self.data)
+
         async def update_data(self, **kwargs: object) -> None:
             self.data.update(kwargs)
 
@@ -844,7 +847,7 @@ def test_announcement_waits_for_confirmation_before_sending() -> None:
         def __init__(self) -> None:
             self.send_called = False
 
-        async def count_recipients(self, actor_user_id: int) -> int:
+        async def count_recipients(self, actor_user_id: int, *, recipient_filter: object = None) -> int:
             return 2
 
         async def send_to_all(self, **kwargs: object) -> None:
@@ -871,7 +874,7 @@ def test_announcement_waits_for_confirmation_before_sending() -> None:
         assert announcements.send_called is False
         assert state.data == {"from_chat_id": 1, "message_id": 55}
         assert message.answers
-        assert "Получателей среди одобренных пользователей: 2" in message.answers[0][0]
+        assert "Получателей: 2" in message.answers[0][0]
 
     asyncio.run(run())
 
