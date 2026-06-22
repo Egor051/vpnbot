@@ -1285,10 +1285,15 @@ def server_status_text(status: ServerStatus, online: OnlineClients) -> str:
         updated = t("server_status_updated_at", time=h(status.sampled_at.strftime("%H:%M:%S")))
         title = f"{title}  <i>{updated}</i>"
 
+    cpu_line = f"⚙️ CPU: {h(cpu)}"
+    if status.cpu_available:
+        # After the plain CPU%, show in parentheses the share consumed by the
+        # hypervisor (the /proc/stat "steal" counter). Shown only here.
+        cpu_line += f" ({t('server_status_cpu_hypervisor')}: {status.cpu_steal_percent:.1f}%)"
     lines = [
         title,
         "",
-        f"⚙️ CPU: {h(cpu)}",
+        cpu_line,
     ]
     if cpu_bar:
         lines.append(cpu_bar)

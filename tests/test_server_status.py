@@ -26,6 +26,25 @@ def test_cpu_percent_clamps_and_handles_no_delta() -> None:
     assert ss._cpu_percent((0, 0), (100, -50)) == approx(100.0)
 
 
+def test_cpu_steal_percent_computes_hypervisor_share() -> None:
+    # total grows by 1000, steal grows by 150 -> 15% stolen by the hypervisor.
+    assert ss._cpu_steal_percent((1000, 500, 0), (2000, 1250, 150)) == approx(15.0)
+
+
+def test_cpu_steal_percent_clamps_and_handles_no_delta() -> None:
+    assert ss._cpu_steal_percent((1000, 500, 100), (1000, 500, 100)) == approx(0.0)
+    # A shrinking steal counter (counter reset) never goes negative.
+    assert ss._cpu_steal_percent((0, 0, 100), (1000, 500, 0)) == approx(0.0)
+
+
+def test_read_cpu_times_returns_total_idle_steal() -> None:
+    # On the Linux CI host /proc/stat is present and the aggregate line carries
+    # the steal field, so a three-tuple comes back.
+    result = ss._read_cpu_times()
+    assert result is not None
+    assert len(result) == 3
+
+
 def test_net_mbps_converts_bytes_to_megabits() -> None:
     # 1_000_000 bytes over 1s = 8 Mbps
     assert ss._net_mbps(0, 1_000_000, 1.0) == approx(8.0)
@@ -49,7 +68,7 @@ def test_snapshot_returns_live_metrics() -> None:
 
 def test_measurement_windows_are_contiguous(monkeypatch: pytest.MonkeyPatch) -> None:
     """The "before" of window N+1 equals the "after" of window N — no blind gap."""
-    cpu_seq = iter([(0, 0), (1000, 750), (2000, 1500), (3000, 2250)])
+    cpu_seq = iter([(0, 0, 0), (1000, 750, 10), (2000, 1500, 20), (3000, 2250, 30)])
     net_seq = iter([(0, 0), (1_000, 2_000), (3_000, 5_000), (6_000, 9_000)])
     clock_seq = iter([0.0, 1.0, 2.0, 3.0])
     monkeypatch.setattr(ss, "_read_cpu_times", lambda: next(cpu_seq))
@@ -90,7 +109,7 @@ def test_measurement_windows_are_contiguous(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_net_rate_uses_measured_delta(monkeypatch: pytest.MonkeyPatch) -> None:
     """Network speed divides by the real Δt, not the configured interval."""
-    cpu_seq = iter([(0, 0), (1000, 750), (2000, 1500)])
+    cpu_seq = iter([(0, 0, 0), (1000, 750, 0), (2000, 1500, 0)])
     # rx grows by 1e6 over the first window, 2e6 over the second.
     net_seq = iter([(0, 0), (1_000_000, 0), (3_000_000, 0)])
     clock_seq = iter([0.0, 1.0, 5.0])  # Δt = 1s then 4s
@@ -109,7 +128,7 @@ def test_net_rate_uses_measured_delta(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_cold_start_marks_cpu_and_net_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Until a second reading lands, CPU/network are unavailable; RAM/disk are not."""
-    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500))
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500, 0))
     monkeypatch.setattr(ss, "_read_net_bytes", lambda: (10, 20))
     monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
     monkeypatch.setattr(ServerStatusService, "_read_disk", lambda self: (5.0, 10.0))
@@ -144,11 +163,11 @@ def test_sampler_survives_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """An exception in one tick is logged and skipped; the loop keeps sampling."""
     calls = {"cpu": 0}
 
-    def fake_cpu() -> tuple[int, int]:
+    def fake_cpu() -> tuple[int, int, int]:
         calls["cpu"] += 1
         if calls["cpu"] == 2:
             raise RuntimeError("transient /proc read failure")
-        return calls["cpu"] * 1000, calls["cpu"] * 500
+        return calls["cpu"] * 1000, calls["cpu"] * 500, 0
 
     monkeypatch.setattr(ss, "_read_cpu_times", fake_cpu)
     monkeypatch.setattr(ss, "_read_net_bytes", lambda: (0, 0))
@@ -205,7 +224,7 @@ def test_run_starts_task_and_cancels_cleanly() -> None:
 
 def test_sampler_stamps_sampled_at_from_wall_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     """Both the warm and cold sampling paths stamp the injected wall clock."""
-    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500))
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500, 0))
     monkeypatch.setattr(ss, "_read_net_bytes", lambda: (10, 20))
     monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
     monkeypatch.setattr(ServerStatusService, "_read_disk", lambda self: (5.0, 10.0))
@@ -275,6 +294,42 @@ def test_server_status_text_matches_layout() -> None:
     assert "занято" in text and "6.43 GB" not in text
     assert "📥" in text and "0.42 Mbps" in text
     assert "📤" in text and "0.02 Mbps" in text
+
+
+def test_server_status_text_shows_hypervisor_steal() -> None:
+    status = ServerStatus(
+        cpu_percent=8.3,
+        cpu_available=True,
+        cpu_steal_percent=2.4,
+        ram_used_gb=0.54,
+        ram_total_gb=0.93,
+        disk_free_gb=6.43,
+        disk_total_gb=9.71,
+        net_in_mbps=0.42,
+        net_out_mbps=0.02,
+        net_available=True,
+    )
+    text = server_status_text(status, _ONLINE_COLLECTING)
+    # The hypervisor share is shown in parentheses right after the plain CPU%.
+    cpu_line = next(line for line in text.splitlines() if "CPU:" in line)
+    assert cpu_line == "⚙️ CPU: 8.3% (гипервизор: 2.4%)"
+
+
+def test_server_status_text_hides_hypervisor_when_cpu_unavailable() -> None:
+    status = ServerStatus(
+        cpu_percent=0.0,
+        cpu_available=False,
+        cpu_steal_percent=0.0,
+        ram_used_gb=0.54,
+        ram_total_gb=0.93,
+        disk_free_gb=6.43,
+        disk_total_gb=9.71,
+        net_in_mbps=0.42,
+        net_out_mbps=0.02,
+        net_available=True,
+    )
+    text = server_status_text(status, _ONLINE_COLLECTING)
+    assert "гипервизор" not in text
 
 
 def test_disk_used_gb_is_total_minus_free() -> None:
@@ -396,7 +451,7 @@ def test_loadavg_falls_back_to_raw_figures_without_cpu_count() -> None:
 
 
 def test_detailed_mode_collects_history_loadavg_and_uptime(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500))
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500, 0))
     monkeypatch.setattr(ss, "_read_net_bytes", lambda: (0, 0))
     monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
     monkeypatch.setattr(ss, "_read_swap_gb", lambda: (0.5, 4.0))
@@ -434,7 +489,7 @@ def test_detailed_disabled_skips_history_and_loadavg(monkeypatch: pytest.MonkeyP
     def _boom_uptime() -> float:
         raise AssertionError("uptime must not be read in base mode")
 
-    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500))
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500, 0))
     monkeypatch.setattr(ss, "_read_net_bytes", lambda: (0, 0))
     monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
     monkeypatch.setattr(ss, "_read_swap_gb", lambda: (0.5, 4.0))
@@ -455,7 +510,7 @@ def test_detailed_disabled_skips_history_and_loadavg(monkeypatch: pytest.MonkeyP
 
 
 def test_set_detailed_off_clears_history(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500))
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500, 0))
     monkeypatch.setattr(ss, "_read_net_bytes", lambda: (0, 0))
     monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
     monkeypatch.setattr(ss, "_read_swap_gb", lambda: (0.0, 0.0))
@@ -507,6 +562,21 @@ def test_snapshot_averaged_means_cpu_and_net_over_last_three() -> None:
     assert avg.net_out_mbps == approx((6.0 + 8.0 + 12.0) / 3)
     assert avg.cpu_available is True
     assert avg.net_available is True
+
+
+def test_snapshot_averaged_means_hypervisor_steal_over_available_samples() -> None:
+    """The hypervisor steal% is smoothed like cpu%, over the same available window."""
+    service = ServerStatusService()
+    service._recent.append(_base_status(cpu_percent=0.0, cpu_available=False, cpu_steal_percent=99.0))
+    service._recent.append(_base_status(cpu_percent=20.0, cpu_available=True, cpu_steal_percent=2.0))
+    service._recent.append(_base_status(cpu_percent=40.0, cpu_available=True, cpu_steal_percent=4.0))
+
+    avg = asyncio.run(service.snapshot_averaged())
+
+    # Only the two available readings (2, 4) count -> 3.0; the unavailable one
+    # (with its bogus 99) is excluded just as it is for cpu%.
+    assert avg.cpu_steal_percent == approx(3.0)
+    assert avg.cpu_available is True
 
 
 def test_snapshot_averaged_takes_point_in_time_fields_from_latest() -> None:
@@ -643,7 +713,7 @@ def test_snapshot_averaged_all_unavailable_falls_back_to_zero() -> None:
 def test_sample_once_fills_recent_buffer_in_base_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """The averaging window is filled every tick even with detailed mode off,
     and is bounded to exactly the averaging length."""
-    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500))
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500, 0))
     monkeypatch.setattr(ss, "_read_net_bytes", lambda: (0, 0))
     monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
     monkeypatch.setattr(ServerStatusService, "_read_disk", lambda self: (5.0, 10.0))

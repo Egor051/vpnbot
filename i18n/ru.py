@@ -481,6 +481,7 @@ STRINGS: dict[str, str] = {
     # ── server status panel ───────────────────────────────────────────────────
     "server_status_title": "СТАТУС СЕРВЕРА В РЕАЛЬНОМ ВРЕМЕНИ",
     "server_status_updated_at": "обновлено {time}",
+    "server_status_cpu_hypervisor": "гипервизор",
     "server_status_disk_label": "Диск",
     "server_status_disk_value": "{used} GB занято из {total} GB",
     "server_status_network_label": "Сетевая активность",
