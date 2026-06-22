@@ -175,7 +175,10 @@ CREATE TABLE IF NOT EXISTS announcement_batches (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   completed_at TEXT,
-  scheduled_at TEXT
+  scheduled_at TEXT,
+  -- Segmentation filter (roles/protocols/transports as JSON) for targeted
+  -- broadcasts; NULL means an unsegmented "send to all" batch. Mirrors _migrate_v27.
+  recipient_filter_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS announcement_deliveries (

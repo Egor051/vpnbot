@@ -34,6 +34,9 @@ from bot.guards import require_superadmin, require_moderator_or_admin
 from bot.handlers.admin_dashboard import stop_server_status_auto_refresh
 from bot.handlers.common import answer_callback_error, answer_message_error, parse_int_callback
 from bot.keyboards.admin import (
+    ANNOUNCEMENT_PROTOCOL_OPTIONS,
+    ANNOUNCEMENT_ROLE_OPTIONS,
+    ANNOUNCEMENT_TRANSPORT_OPTIONS,
     admin_issue_users_keyboard,
     admin_key_type_keyboard,
     admin_vless_transport_keyboard,
@@ -41,6 +44,9 @@ from bot.keyboards.admin import (
     moderator_panel_keyboard,
     announcement_batches_keyboard,
     announcement_confirm_keyboard,
+    announcement_protocols_keyboard,
+    announcement_roles_keyboard,
+    announcement_transports_keyboard,
     access_request_decision_confirm_keyboard,
     block_user_confirm_keyboard,
     pending_requests_keyboard,
@@ -56,7 +62,7 @@ from bot.pagination import MAX_PAGE, page_offset, split_page
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimitExceeded, RateLimiter
 from i18n import t
-from models.dto import TelegramUserProfile
+from models.dto import RecipientFilter, TelegramUserProfile
 from models.access import is_blocked_user
 from models.enums import AccessRequestStatus, UserRole, VpnKeyType
 from services.errors import AccessDenied
@@ -183,9 +189,50 @@ async def moderator_panel_callback(callback: CallbackQuery, services: Services) 
         await answer_callback_error(callback, exc)
 
 
+_ANNOUNCEMENT_ROLE_VALUES = frozenset(value for value, _ in ANNOUNCEMENT_ROLE_OPTIONS)
+_ANNOUNCEMENT_PROTOCOL_VALUES = frozenset(value for value, _ in ANNOUNCEMENT_PROTOCOL_OPTIONS)
+_ANNOUNCEMENT_TRANSPORT_VALUES = frozenset(value for value, _ in ANNOUNCEMENT_TRANSPORT_OPTIONS)
+
+
+def _announcement_filter_from_data(data: dict[str, Any]) -> RecipientFilter:
+    """Rebuild the audience filter from the stage selections stored in FSM data."""
+    return RecipientFilter.create(
+        roles=tuple(data.get("sel_roles") or ()),
+        protocols=tuple(data.get("sel_protocols") or ()),
+        transports=tuple(data.get("sel_transports") or ()),
+    )
+
+
+def _format_segment(recipient_filter: RecipientFilter) -> str:
+    """Build a human-readable summary of the chosen audience segment."""
+    role_label_keys = dict(ANNOUNCEMENT_ROLE_OPTIONS)
+    protocol_labels = dict(ANNOUNCEMENT_PROTOCOL_OPTIONS)
+    transport_labels = dict(ANNOUNCEMENT_TRANSPORT_OPTIONS)
+    if recipient_filter.roles:
+        roles_text = ", ".join(t(role_label_keys[value]) for value in recipient_filter.roles if value in role_label_keys)
+    else:
+        roles_text = t("seg_all")
+    if recipient_filter.protocols:
+        protocols_text = ", ".join(protocol_labels.get(value, value) for value in recipient_filter.protocols)
+    else:
+        protocols_text = t("seg_all")
+    lines = [t("seg_summary_roles", value=roles_text), t("seg_summary_protocols", value=protocols_text)]
+    if recipient_filter.transports:
+        transports_text = ", ".join(transport_labels.get(value, value) for value in recipient_filter.transports)
+        lines.append(t("seg_summary_transports", value=transports_text))
+    return "\n".join(lines)
+
+
+async def _show_announcement_message_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    """Advance to the message-entry stage once the audience segment is chosen."""
+    await state.set_state(AdminAnnouncementStates.waiting_message)
+    if callback.message is not None:
+        await safe_edit_message_text(callback.message, t("announce_prompt"), reply_markup=cancel_keyboard())
+
+
 @router.callback_query(F.data == "admin:announce")
 async def admin_announcement_start(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """Start the announcement flow by prompting for a message."""
+    """Start the announcement flow with the audience role-selection stage."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -194,31 +241,245 @@ async def admin_announcement_start(callback: CallbackQuery, state: FSMContext, s
     try:
         await require_superadmin(services, callback.from_user.id)
         await state.clear()
-        await state.set_state(AdminAnnouncementStates.waiting_message)
-        await state.update_data(cancel_target="admin:panel")
+        await state.set_state(AdminAnnouncementStates.choosing_roles)
+        await state.update_data(cancel_target="admin:panel", sel_roles=[], sel_protocols=[], sel_transports=[])
         await safe_edit_message_text(
             callback.message,
-            t("announce_prompt"),
-            reply_markup=cancel_keyboard(),
+            t("announce_choose_roles"),
+            reply_markup=announcement_roles_keyboard(set()),
         )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminAnnouncementStates.choosing_roles, F.data.startswith("admin:announce:role:"))
+async def admin_announcement_toggle_role(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Toggle a role, or select all roles and advance to the protocol stage."""
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        value = callback.data.rsplit(":", 1)[1]
+        if value == "all":
+            await state.update_data(sel_roles=[])
+            await state.set_state(AdminAnnouncementStates.choosing_protocols)
+            await safe_callback_answer(callback)
+            data = await state.get_data()
+            await safe_edit_message_text(
+                callback.message,
+                t("announce_choose_protocols"),
+                reply_markup=announcement_protocols_keyboard(set(data.get("sel_protocols") or [])),
+            )
+            return
+        if value not in _ANNOUNCEMENT_ROLE_VALUES:
+            await safe_callback_answer(callback)
+            return
+        data = await state.get_data()
+        selected = list(data.get("sel_roles") or [])
+        if value in selected:
+            selected.remove(value)
+        else:
+            selected.append(value)
+        await state.update_data(sel_roles=selected)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("announce_choose_roles"),
+            reply_markup=announcement_roles_keyboard(set(selected)),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminAnnouncementStates.choosing_roles, F.data == "admin:announce:roles:done")
+async def admin_announcement_roles_done(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Confirm the selected roles and advance to the protocol stage."""
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        data = await state.get_data()
+        if not (data.get("sel_roles") or []):
+            await safe_callback_answer(callback, t("seg_select_one"), show_alert=True)
+            return
+        await state.set_state(AdminAnnouncementStates.choosing_protocols)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("announce_choose_protocols"),
+            reply_markup=announcement_protocols_keyboard(set(data.get("sel_protocols") or [])),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminAnnouncementStates.choosing_protocols, F.data == "admin:announce:back:roles")
+async def admin_announcement_back_to_roles(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Return from the protocol stage to the role stage, keeping selections."""
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await state.set_state(AdminAnnouncementStates.choosing_roles)
+        await safe_callback_answer(callback)
+        data = await state.get_data()
+        await safe_edit_message_text(
+            callback.message,
+            t("announce_choose_roles"),
+            reply_markup=announcement_roles_keyboard(set(data.get("sel_roles") or [])),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminAnnouncementStates.choosing_protocols, F.data.startswith("admin:announce:proto:"))
+async def admin_announcement_toggle_protocol(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Toggle a protocol, or select all protocols and move past the protocol stage."""
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        value = callback.data.rsplit(":", 1)[1]
+        if value == "all":
+            await state.update_data(sel_protocols=[], sel_transports=[])
+            await safe_callback_answer(callback)
+            await _show_announcement_message_prompt(callback, state)
+            return
+        if value not in _ANNOUNCEMENT_PROTOCOL_VALUES:
+            await safe_callback_answer(callback)
+            return
+        data = await state.get_data()
+        selected = list(data.get("sel_protocols") or [])
+        if value in selected:
+            selected.remove(value)
+        else:
+            selected.append(value)
+        await state.update_data(sel_protocols=selected)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("announce_choose_protocols"),
+            reply_markup=announcement_protocols_keyboard(set(selected)),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminAnnouncementStates.choosing_protocols, F.data == "admin:announce:protos:done")
+async def admin_announcement_protocols_done(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Confirm the protocols; ask for transport only when VLESS is selected."""
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        data = await state.get_data()
+        selected = list(data.get("sel_protocols") or [])
+        if not selected:
+            await safe_callback_answer(callback, t("seg_select_one"), show_alert=True)
+            return
+        if VpnKeyType.XRAY.value in selected:
+            await state.set_state(AdminAnnouncementStates.choosing_transports)
+            await safe_callback_answer(callback)
+            await safe_edit_message_text(
+                callback.message,
+                t("announce_choose_transports"),
+                reply_markup=announcement_transports_keyboard(set(data.get("sel_transports") or [])),
+            )
+            return
+        await state.update_data(sel_transports=[])
+        await safe_callback_answer(callback)
+        await _show_announcement_message_prompt(callback, state)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminAnnouncementStates.choosing_transports, F.data == "admin:announce:back:protos")
+async def admin_announcement_back_to_protocols(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Return from the transport stage to the protocol stage, keeping selections."""
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await state.set_state(AdminAnnouncementStates.choosing_protocols)
+        await safe_callback_answer(callback)
+        data = await state.get_data()
+        await safe_edit_message_text(
+            callback.message,
+            t("announce_choose_protocols"),
+            reply_markup=announcement_protocols_keyboard(set(data.get("sel_protocols") or [])),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminAnnouncementStates.choosing_transports, F.data.startswith("admin:announce:tr:"))
+async def admin_announcement_toggle_transport(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Toggle a transport, or select all transports and finish the segment stage."""
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        value = callback.data.rsplit(":", 1)[1]
+        if value == "all":
+            await state.update_data(sel_transports=[])
+            await safe_callback_answer(callback)
+            await _show_announcement_message_prompt(callback, state)
+            return
+        if value not in _ANNOUNCEMENT_TRANSPORT_VALUES:
+            await safe_callback_answer(callback)
+            return
+        data = await state.get_data()
+        selected = list(data.get("sel_transports") or [])
+        if value in selected:
+            selected.remove(value)
+        else:
+            selected.append(value)
+        await state.update_data(sel_transports=selected)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("announce_choose_transports"),
+            reply_markup=announcement_transports_keyboard(set(selected)),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminAnnouncementStates.choosing_transports, F.data == "admin:announce:trs:done")
+async def admin_announcement_transports_done(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Confirm the selected transports and advance to the message-entry stage."""
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        data = await state.get_data()
+        if not (data.get("sel_transports") or []):
+            await safe_callback_answer(callback, t("seg_select_one"), show_alert=True)
+            return
+        await safe_callback_answer(callback)
+        await _show_announcement_message_prompt(callback, state)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
 @router.message(AdminAnnouncementStates.waiting_message)
 async def admin_announcement_message(message: Message, state: FSMContext, services: Services) -> None:
-    """Store the announcement message and show the send confirmation."""
+    """Store the announcement message and show the send confirmation for the segment."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
         return
     try:
         await require_superadmin(services, message.from_user.id)
-        recipient_count = await services.announcements.count_recipients(message.from_user.id)
+        data = await state.get_data()
+        recipient_filter = _announcement_filter_from_data(data)
+        recipient_count = await services.announcements.count_recipients(
+            message.from_user.id, recipient_filter=recipient_filter
+        )
         await state.update_data(from_chat_id=message.chat.id, message_id=message.message_id)
         await state.set_state(AdminAnnouncementStates.confirming)
         await message.answer(
-            t("announce_confirm_prompt", count=recipient_count),
+            t("announce_confirm_prompt_segmented", segment=_format_segment(recipient_filter), count=recipient_count),
             reply_markup=announcement_confirm_keyboard(),
         )
     except Exception as exc:
@@ -248,6 +509,7 @@ async def admin_announcement_send(
                 return
             from_chat_id = int(data["from_chat_id"])
             message_id = int(data["message_id"])
+            recipient_filter = _announcement_filter_from_data(data)
             if rate_limiter is not None:
                 rate_limiter.check(callback.from_user.id, "announcement_send", 20)
             await state.clear()
@@ -257,6 +519,7 @@ async def admin_announcement_send(
                 bot=bot,
                 from_chat_id=from_chat_id,
                 message_id=message_id,
+                recipient_filter=recipient_filter,
             )
         await safe_edit_message_text(
             callback.message,
@@ -310,12 +573,14 @@ async def admin_announcement_schedule_time(message: Message, state: FSMContext, 
             return
         from_chat_id = int(data["from_chat_id"])
         message_id = int(data["message_id"])
+        recipient_filter = _announcement_filter_from_data(data)
         await state.clear()
         batch = await services.announcements.schedule_to_all(
             actor_user_id=message.from_user.id,
             from_chat_id=from_chat_id,
             message_id=message_id,
             scheduled_at=scheduled_at,
+            recipient_filter=recipient_filter,
         )
         from datetime import datetime, timezone, timedelta
         dt = datetime.fromisoformat(scheduled_at).replace(tzinfo=timezone.utc)

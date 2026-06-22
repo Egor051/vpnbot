@@ -4,8 +4,8 @@ from collections.abc import Iterable
 from aiosqlite import Row
 
 from db.database import Database
-from models.dto import TelegramUserProfile, User
-from models.enums import UserRole, parse_user_role
+from models.dto import TARGETABLE_ROLES, RecipientFilter, TelegramUserProfile, User
+from models.enums import ProxyAccessType, UserRole, VpnKeyType, parse_user_role
 from repositories._helpers import _clamp_limit, _clamp_offset
 from services.errors import NotFound
 
@@ -44,6 +44,53 @@ def _row_to_user(row: Row | None) -> User | None:
             else True
         ),
     )
+
+
+def _build_segment_where(recipient_filter: RecipientFilter) -> tuple[str, list[object]]:
+    """Build the parameterized WHERE body for a segmented recipient query.
+
+    Only whitelisted enum values reach the SQL: roles/transports flow through
+    placeholders, and protocol branches are selected by exact-match comparison
+    against the closed protocol set, so no caller-supplied string is interpolated.
+    """
+    clauses = ["u.blocked_at IS NULL"]
+    params: list[object] = []
+    roles = recipient_filter.roles or TARGETABLE_ROLES
+    role_placeholders = ", ".join("?" for _ in roles)
+    clauses.append(f"u.role IN ({role_placeholders})")
+    params.extend(roles)
+    if recipient_filter.protocols:
+        protocol_clauses: list[str] = []
+        for protocol in recipient_filter.protocols:
+            if protocol == VpnKeyType.XRAY.value:
+                sub = (
+                    "EXISTS (SELECT 1 FROM vpn_keys k WHERE k.owner_user_id = u.telegram_user_id "
+                    "AND k.key_type = 'xray' AND k.status = 'active'"
+                )
+                if recipient_filter.transports:
+                    transport_placeholders = ", ".join("?" for _ in recipient_filter.transports)
+                    sub += f" AND k.transport IN ({transport_placeholders})"
+                    params.extend(recipient_filter.transports)
+                sub += ")"
+                protocol_clauses.append(sub)
+            elif protocol == VpnKeyType.AWG.value:
+                protocol_clauses.append(
+                    "EXISTS (SELECT 1 FROM vpn_keys k WHERE k.owner_user_id = u.telegram_user_id "
+                    "AND k.key_type = 'awg' AND k.status = 'active')"
+                )
+            elif protocol == ProxyAccessType.SOCKS5.value:
+                protocol_clauses.append(
+                    "EXISTS (SELECT 1 FROM proxy_accesses p WHERE p.owner_user_id = u.telegram_user_id "
+                    "AND p.access_type = 'socks5' AND p.status = 'active')"
+                )
+            elif protocol == ProxyAccessType.MTPROTO.value:
+                protocol_clauses.append(
+                    "EXISTS (SELECT 1 FROM proxy_accesses p WHERE p.owner_user_id = u.telegram_user_id "
+                    "AND p.access_type = 'mtproto' AND p.status = 'active')"
+                )
+        if protocol_clauses:
+            clauses.append("(" + " OR ".join(protocol_clauses) + ")")
+    return " AND ".join(clauses), params
 
 
 class UserRepository:
@@ -185,6 +232,44 @@ class UserRepository:
               AND role IN ({_ANNOUNCEMENT_ROLE_SQL_PLACEHOLDERS})
             """,
             (telegram_user_id, *_ANNOUNCEMENT_ROLE_SQL_VALUES),
+        )
+        return await cursor.fetchone() is not None
+
+    async def count_segment_recipients(self, recipient_filter: RecipientFilter) -> int:
+        """Return the number of non-blocked users matching the segmentation filter."""
+        where, params = _build_segment_where(recipient_filter)
+        cursor = await self.db.conn.execute(
+            f"SELECT COUNT(*) AS cnt FROM users u WHERE {where}",
+            tuple(params),
+        )
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row is not None else 0
+
+    async def list_segment_recipients_after(
+        self, recipient_filter: RecipientFilter, last_seen_id: int | None, limit: int = 100
+    ) -> list[User]:
+        """Return segment-matching users keyset-paginated by user id after last_seen_id."""
+        safe_limit = _clamp_limit(limit)
+        where, params = _build_segment_where(recipient_filter)
+        if last_seen_id is None:
+            sql = f"SELECT u.* FROM users u WHERE {where} ORDER BY u.telegram_user_id ASC LIMIT ?"
+            query_params = [*params, safe_limit]
+        else:
+            sql = (
+                f"SELECT u.* FROM users u WHERE {where} AND u.telegram_user_id > ? "
+                "ORDER BY u.telegram_user_id ASC LIMIT ?"
+            )
+            query_params = [*params, last_seen_id, safe_limit]
+        cursor = await self.db.conn.execute(sql, tuple(query_params))
+        rows = await cursor.fetchall()
+        return [user for row in rows if (user := _row_to_user(row)) is not None]
+
+    async def is_segment_recipient(self, telegram_user_id: int, recipient_filter: RecipientFilter) -> bool:
+        """Return whether the user currently matches the segmentation filter."""
+        where, params = _build_segment_where(recipient_filter)
+        cursor = await self.db.conn.execute(
+            f"SELECT 1 FROM users u WHERE {where} AND u.telegram_user_id = ? LIMIT 1",
+            (*params, telegram_user_id),
         )
         return await cursor.fetchone() is not None
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from aiosqlite import Row
 
 from db.database import Database
+from models.dto import RecipientFilter
 from repositories._helpers import _clamp_limit
 from services.errors import InvalidTransition
 
@@ -23,6 +24,8 @@ class AnnouncementBatch:
     updated_at: str
     completed_at: str | None
     scheduled_at: str | None = None
+    # Segmentation filter for targeted broadcasts; None for an unsegmented batch.
+    recipient_filter: RecipientFilter | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +55,11 @@ def _row_to_batch(row: Row | None) -> AnnouncementBatch | None:
         updated_at=str(row["updated_at"]),
         completed_at=row["completed_at"],
         scheduled_at=row["scheduled_at"] if "scheduled_at" in row.keys() else None,
+        recipient_filter=(
+            RecipientFilter.from_json(row["recipient_filter_json"])
+            if "recipient_filter_json" in row.keys()
+            else None
+        ),
     )
 
 
@@ -81,19 +89,31 @@ class AnnouncementRepository:
         recipient_ids: list[int],
         now: str,
         scheduled_at: str | None = None,
+        recipient_filter: RecipientFilter | None = None,
     ) -> AnnouncementBatch:
         """Create an announcement batch with per-recipient delivery rows and return it."""
         status = "scheduled" if scheduled_at is not None else "pending"
+        recipient_filter_json = recipient_filter.to_json() if recipient_filter is not None else None
         async with self.db.transaction():
             cursor = await self.db.conn.execute(
                 """
                 INSERT INTO announcement_batches (
                   actor_user_id, from_chat_id, message_id, status, total_count,
-                  created_at, updated_at, scheduled_at
+                  created_at, updated_at, scheduled_at, recipient_filter_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (actor_user_id, from_chat_id, message_id, status, len(recipient_ids), now, now, scheduled_at),
+                (
+                    actor_user_id,
+                    from_chat_id,
+                    message_id,
+                    status,
+                    len(recipient_ids),
+                    now,
+                    now,
+                    scheduled_at,
+                    recipient_filter_json,
+                ),
             )
             assert cursor.lastrowid is not None
             batch_id = int(cursor.lastrowid)

@@ -128,6 +128,73 @@ def announcement_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+# Segmentation options for targeted announcements. Roles carry an i18n label key
+# (translated at render time); protocols/transports use universal literal labels.
+ANNOUNCEMENT_ROLE_OPTIONS: tuple[tuple[str, str], ...] = (
+    (UserRole.APPROVED_USER.value, "seg_role_approved"),
+    (UserRole.MODERATOR.value, "seg_role_moderator"),
+    (UserRole.PENDING_USER.value, "seg_role_pending"),
+    (UserRole.SUPERADMIN.value, "seg_role_superadmin"),
+)
+ANNOUNCEMENT_PROTOCOL_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("xray", "VLESS"),
+    ("awg", "AmneziaWG"),
+    ("socks5", "SOCKS5"),
+    ("mtproto", "MTProto"),
+)
+ANNOUNCEMENT_TRANSPORT_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("tcp", "TCP"),
+    ("http", "HTTP"),
+)
+
+
+def _segment_option_button(label: str, selected: bool, callback_data: str) -> InlineKeyboardButton:
+    """Build a toggle button prefixed with a checkbox reflecting its selected state."""
+    mark = "✅" if selected else "▫️"
+    return InlineKeyboardButton(text=f"{mark} {label}", callback_data=callback_data)
+
+
+def announcement_roles_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
+    """Build the role-selection (stage 1) keyboard for a segmented announcement."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [_segment_option_button(t(label_key), value in selected, f"admin:announce:role:{value}")]
+        for value, label_key in ANNOUNCEMENT_ROLE_OPTIONS
+    ]
+    rows.append([InlineKeyboardButton(text=t("btn_seg_all"), callback_data="admin:announce:role:all")])
+    if selected:
+        rows.append([InlineKeyboardButton(text=t("btn_seg_next"), callback_data="admin:announce:roles:done")])
+    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def announcement_protocols_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
+    """Build the protocol-selection (stage 2) keyboard for a segmented announcement."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [_segment_option_button(label, value in selected, f"admin:announce:proto:{value}")]
+        for value, label in ANNOUNCEMENT_PROTOCOL_OPTIONS
+    ]
+    rows.append([InlineKeyboardButton(text=t("btn_seg_all"), callback_data="admin:announce:proto:all")])
+    if selected:
+        rows.append([InlineKeyboardButton(text=t("btn_seg_next"), callback_data="admin:announce:protos:done")])
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:announce:back:roles")])
+    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def announcement_transports_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
+    """Build the VLESS transport-selection (stage 3) keyboard for a segmented announcement."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [_segment_option_button(label, value in selected, f"admin:announce:tr:{value}")]
+        for value, label in ANNOUNCEMENT_TRANSPORT_OPTIONS
+    ]
+    rows.append([InlineKeyboardButton(text=t("btn_seg_all"), callback_data="admin:announce:tr:all")])
+    if selected:
+        rows.append([InlineKeyboardButton(text=t("btn_seg_next"), callback_data="admin:announce:trs:done")])
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:announce:back:protos")])
+    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def announcement_batches_keyboard(batches: list[AnnouncementBatch]) -> InlineKeyboardMarkup:
     """Build the keyboard listing announcement batches with status-based actions."""
     rows: list[list[InlineKeyboardButton]] = []

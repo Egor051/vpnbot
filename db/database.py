@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 26
+CURRENT_SCHEMA_VERSION = 27
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -278,6 +278,10 @@ class Database:
             await self._migrate_v26()
             await self._set_schema_version(26)
             version = 26
+        if version < 27:
+            await self._migrate_v27()
+            await self._set_schema_version(27)
+            version = 27
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -982,6 +986,19 @@ class Database:
         if "expiry_notifications_enabled" not in user_cols:
             await self.conn.execute(
                 "ALTER TABLE users ADD COLUMN expiry_notifications_enabled INTEGER NOT NULL DEFAULT 1"
+            )
+
+    async def _migrate_v27(self) -> None:
+        # Segmented announcements: persist the audience filter (roles/protocols/
+        # transports as JSON) on each batch so scheduled/resumed sends re-validate
+        # against the chosen segment instead of the default approved-users audience.
+        # NULL means an unsegmented (legacy "send to all") batch. Guarded by a
+        # column check so the migration is idempotent. Also declared in schema.sql
+        # for fresh DBs.
+        batch_cols = await self._table_columns("announcement_batches")
+        if "recipient_filter_json" not in batch_cols:
+            await self.conn.execute(
+                "ALTER TABLE announcement_batches ADD COLUMN recipient_filter_json TEXT"
             )
 
     async def _create_performance_indexes(self) -> None:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from aiogram import Bot
 from aiogram.exceptions import TelegramRetryAfter
 
+from models.dto import RecipientFilter, User
 from models.enums import AuditEntityType
 from repositories.announcements import AnnouncementBatch, AnnouncementRepository
 from repositories.users import UserRepository
@@ -53,9 +54,16 @@ class AnnouncementService:
         self.delay_seconds = delay_seconds
         self.batch_size = max(batch_size, 1)
 
-    async def count_recipients(self, actor_user_id: int) -> int:
-        """Return the number of users eligible to receive an announcement."""
+    async def count_recipients(self, actor_user_id: int, *, recipient_filter: RecipientFilter | None = None) -> int:
+        """Return the number of users eligible to receive an announcement.
+
+        When ``recipient_filter`` is given the count reflects the segmented
+        audience (which may span roles beyond the default approved-users set);
+        otherwise it counts the legacy approved-users + superadmins audience.
+        """
         await self.users.require_superadmin(actor_user_id)
+        if recipient_filter is not None:
+            return await self.users_repo.count_segment_recipients(recipient_filter)
         return await self.users_repo.count_announcement_recipients()
 
     async def list_incomplete_batches(self, actor_user_id: int, *, limit: int = 10) -> list[AnnouncementBatch]:
@@ -75,8 +83,9 @@ class AnnouncementService:
         bot: Bot,
         from_chat_id: int,
         message_id: int,
+        recipient_filter: RecipientFilter | None = None,
     ) -> AnnouncementResult:
-        """Broadcast a message to all eligible recipients and return the delivery result."""
+        """Broadcast a message to the (optionally segmented) recipients and return the result."""
         await self.users.require_superadmin(actor_user_id)
         if self.announcements is None:
             return await self._send_without_ledger(
@@ -84,14 +93,16 @@ class AnnouncementService:
                 bot=bot,
                 from_chat_id=from_chat_id,
                 message_id=message_id,
+                recipient_filter=recipient_filter,
             )
-        recipients = await self._load_recipient_ids()
+        recipients = await self._load_recipient_ids(recipient_filter)
         batch = await self.announcements.create_batch(
             actor_user_id=actor_user_id,
             from_chat_id=from_chat_id,
             message_id=message_id,
             recipient_ids=recipients,
             now=self._now(),
+            recipient_filter=recipient_filter,
         )
         return await self.resume_batch(actor_user_id=actor_user_id, bot=bot, announcement_id=batch.id, retry_failed=False)
 
@@ -199,12 +210,13 @@ class AnnouncementService:
         from_chat_id: int,
         message_id: int,
         scheduled_at: str,
+        recipient_filter: RecipientFilter | None = None,
     ) -> AnnouncementBatch:
-        """Create an announcement batch scheduled for later delivery to all recipients."""
+        """Create an announcement batch scheduled for later delivery to the recipients."""
         await self.users.require_superadmin(actor_user_id)
         if self.announcements is None:
             raise RuntimeError("Announcement ledger is not configured")
-        recipients = await self._load_recipient_ids()
+        recipients = await self._load_recipient_ids(recipient_filter)
         return await self.announcements.create_batch(
             actor_user_id=actor_user_id,
             from_chat_id=from_chat_id,
@@ -212,6 +224,7 @@ class AnnouncementService:
             recipient_ids=recipients,
             now=self._now(),
             scheduled_at=scheduled_at,
+            recipient_filter=recipient_filter,
         )
 
     async def check_and_send_due(self, bot: Bot) -> list[AnnouncementResult]:
@@ -255,6 +268,7 @@ class AnnouncementService:
         bot: Bot,
         from_chat_id: int,
         message_id: int,
+        recipient_filter: RecipientFilter | None = None,
     ) -> AnnouncementResult:
         total = 0
         success = 0
@@ -264,7 +278,7 @@ class AnnouncementService:
         failed_user_ids: list[int] = []
         skipped_user_ids: list[int] = []
         while True:
-            recipients = await self.users_repo.list_announcement_recipients_after(last_seen_id=last_seen_id, limit=self.batch_size)
+            recipients = await self._fetch_recipient_page(recipient_filter, last_seen_id)
             if not recipients:
                 break
             for recipient in recipients:
@@ -357,7 +371,14 @@ class AnnouncementService:
                     # Recipients are snapshotted when the batch is created; for
                     # scheduled/resumed batches a user may have been blocked or
                     # demoted in the meantime, so re-check eligibility at send time.
-                    if not await self.users_repo.is_announcement_recipient(delivery.user_id):
+                    # Segmented batches re-validate against their stored filter so
+                    # the targeted roles/protocols (which can fall outside the
+                    # default approved-users audience) are honoured.
+                    if batch.recipient_filter is not None:
+                        still_eligible = await self.users_repo.is_segment_recipient(delivery.user_id, batch.recipient_filter)
+                    else:
+                        still_eligible = await self.users_repo.is_announcement_recipient(delivery.user_id)
+                    if not still_eligible:
                         logger.info("Skipping announcement recipient no longer eligible id=%s", delivery.user_id)
                         await self.announcements.mark_delivery(batch.id, delivery.user_id, "skipped", now, "recipient no longer eligible")
                         continue
@@ -457,11 +478,19 @@ class AnnouncementService:
             skipped_user_ids=skipped,
         )
 
-    async def _load_recipient_ids(self) -> list[int]:
+    async def _fetch_recipient_page(self, recipient_filter: RecipientFilter | None, last_seen_id: int | None) -> list[User]:
+        """Fetch one keyset page of recipients, segmented when a filter is given."""
+        if recipient_filter is not None:
+            return await self.users_repo.list_segment_recipients_after(
+                recipient_filter, last_seen_id=last_seen_id, limit=self.batch_size
+            )
+        return await self.users_repo.list_announcement_recipients_after(last_seen_id=last_seen_id, limit=self.batch_size)
+
+    async def _load_recipient_ids(self, recipient_filter: RecipientFilter | None = None) -> list[int]:
         recipients: list[int] = []
         last_seen_id: int | None = None
         while True:
-            batch = await self.users_repo.list_announcement_recipients_after(last_seen_id=last_seen_id, limit=self.batch_size)
+            batch = await self._fetch_recipient_page(recipient_filter, last_seen_id)
             if not batch:
                 break
             recipients.extend(user.telegram_user_id for user in batch)

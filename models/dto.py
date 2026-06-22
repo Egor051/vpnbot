@@ -1,4 +1,6 @@
 
+import json
+from collections.abc import Iterable
 from dataclasses import dataclass, fields
 
 from models.enums import AccessRequestStatus, ProxyAccessStatus, ProxyAccessType, ProxyStatus, UserRole, VpnKeyStatus, VpnKeyType
@@ -39,6 +41,91 @@ class User:
     language: str | None = None
     # Opt-out toggle for "key expires in N days" reminders.
     expiry_notifications_enabled: bool = True
+
+
+# Roles that may be targeted by a segmented announcement. BLOCKED_USER is always
+# excluded (blocked users never receive announcements); an empty role filter means
+# "every role in this tuple".
+TARGETABLE_ROLES: tuple[str, ...] = (
+    UserRole.SUPERADMIN.value,
+    UserRole.MODERATOR.value,
+    UserRole.APPROVED_USER.value,
+    UserRole.PENDING_USER.value,
+)
+# Protocols available for segmentation: VPN key types plus proxy access types.
+SEGMENT_PROTOCOLS: tuple[str, ...] = (
+    VpnKeyType.XRAY.value,
+    VpnKeyType.AWG.value,
+    ProxyAccessType.SOCKS5.value,
+    ProxyAccessType.MTPROTO.value,
+)
+# VLESS (xray) transports; only meaningful when xray is among the chosen protocols.
+SEGMENT_TRANSPORTS: tuple[str, ...] = ("tcp", "http")
+
+
+@dataclass(frozen=True, slots=True)
+class RecipientFilter:
+    """Audience selector for a segmented announcement.
+
+    An empty tuple in any dimension means "no constraint on this dimension":
+    empty ``roles`` targets every role in :data:`TARGETABLE_ROLES`, empty
+    ``protocols`` places no protocol requirement, and empty ``transports`` places
+    no transport requirement. ``transports`` only narrows the xray subset and is
+    forced empty when xray is not among ``protocols``.
+    """
+
+    roles: tuple[str, ...] = ()
+    protocols: tuple[str, ...] = ()
+    transports: tuple[str, ...] = ()
+
+    @staticmethod
+    def _clean(values: Iterable[str], allowed: tuple[str, ...]) -> tuple[str, ...]:
+        chosen = {value for value in values if value in allowed}
+        return tuple(value for value in allowed if value in chosen)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        roles: Iterable[str] = (),
+        protocols: Iterable[str] = (),
+        transports: Iterable[str] = (),
+    ) -> "RecipientFilter":
+        """Build a normalized filter, dropping unknown values and ordering canonically."""
+        roles_t = cls._clean(roles, TARGETABLE_ROLES)
+        protocols_t = cls._clean(protocols, SEGMENT_PROTOCOLS)
+        transports_t = cls._clean(transports, SEGMENT_TRANSPORTS)
+        if VpnKeyType.XRAY.value not in protocols_t:
+            transports_t = ()
+        return cls(roles=roles_t, protocols=protocols_t, transports=transports_t)
+
+    def is_unfiltered(self) -> bool:
+        """Return whether the filter constrains nothing (all targetable roles)."""
+        return not self.roles and not self.protocols and not self.transports
+
+    def to_json(self) -> str:
+        """Serialize the filter to a compact JSON string for storage."""
+        return json.dumps(
+            {"roles": list(self.roles), "protocols": list(self.protocols), "transports": list(self.transports)},
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def from_json(cls, raw: str | None) -> "RecipientFilter | None":
+        """Parse a stored filter, returning None for empty/invalid input."""
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        return cls.create(
+            roles=tuple(data.get("roles") or ()),
+            protocols=tuple(data.get("protocols") or ()),
+            transports=tuple(data.get("transports") or ()),
+        )
 
 
 @dataclass(frozen=True, slots=True)
