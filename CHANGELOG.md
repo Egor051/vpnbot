@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [2.1.0] — 2026-06-22
 
 ### Added
 
@@ -787,7 +787,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Managed MTProto secrets and env files are `root:root 0600`; backup directories are `root:root 0700`.
 - `XRAY_APPLY_MODE=api` + `PRIVILEGE_HELPERS_ENABLED=true` combination rejected at startup.
 
-[Unreleased]: https://github.com/Egor051/vpnbot/compare/v2.0.0...HEAD
+[2.1.0]: https://github.com/Egor051/vpnbot/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/Egor051/vpnbot/compare/v1.3.0...v2.0.0
 [1.3.0]: https://github.com/Egor051/vpnbot/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/Egor051/vpnbot/compare/v1.1.0...v1.2.0
