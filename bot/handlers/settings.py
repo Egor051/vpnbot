@@ -3,7 +3,7 @@ import logging
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 import i18n
 from bot.container import Services
@@ -20,7 +20,7 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
-def _settings_keyboard(user: User):
+def _settings_keyboard(user: User) -> InlineKeyboardMarkup:
     return settings_menu_keyboard(expiry_notifications_enabled=user.expiry_notifications_enabled)
 
 
