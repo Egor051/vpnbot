@@ -6,19 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Security
-
-- **Upgraded `aiohttp` 3.13.5 → 3.14.1, `aiogram` 3.27.0 → 3.29.0, and
-  `cryptography` 46.0.7 → 48.0.1 to clear all outstanding `pip-audit` advisories.**
-  `aiohttp` 3.14.1 fixes nine CVEs (CVE-2026-50269, -54273, -54276, -54277,
-  -54278, -54279, -54280, plus the two previously VEX-deferred CVE-2026-34993 /
-  CVE-2026-47265); adopting it required raising the `aiogram` cap, which 3.29.0
-  does (`aiohttp<3.15`). `cryptography` 48.0.1 fixes GHSA-537c-gmf6-5ccf (High —
-  OpenSSL out-of-bounds read bundled in the wheels). The `PIP_AUDIT_IGNORES` VEX
-  list in the `Makefile` is now removed — `make audit` runs with no exceptions and
-  reports no known vulnerabilities. Hashed constraint sets were regenerated and the
-  un-hashed mirror re-synced.
-
 ### Added
 
 - **"Server status" panel shows the snapshot time as a freshness indicator** —
@@ -29,6 +16,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   or Telegram stops delivering edits the mark freezes alongside the data instead
   of ticking on stale numbers. A new `server_status_updated_at` i18n key was added
   to both locales; a cold cache (no timestamp yet) renders no mark.
+
+- **Live-updating "Server status" panel** — the admin **📊 Статус сервера** card
+  now refreshes itself in place about once a second (`LiveRefreshManager`) so CPU,
+  RAM, disk and network read in real time without tapping **Refresh**. Each open
+  card is capped at one hour of auto-refresh; when the cap elapses the card falls
+  back to the admin panel so an abandoned panel stops sampling `/proc` and editing
+  the message. Navigating away (the card's **Back** button → `admin:panel`)
+  cancels the loop immediately, and re-opening the panel restarts the timer. A new
+  `edit_message_for_refresh` helper edits the card in place without ever
+  re-posting a fresh message, so a deleted card simply ends its loop.
 
 ### Changed
 
@@ -91,17 +88,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   as "no data" while RAM/disk show immediately. Graceful degradation on unreadable
   `/proc` is unchanged, and no new dependencies were added (stdlib + `/proc` only).
 
-### Added
+- **Server-status disk metric now reports used space instead of free** — the
+  **💾 Диск** line reads `{used} GB занято из {total} GB` (`{used} GB used of
+  {total} GB` in English), derived from a new `ServerStatus.disk_used_gb`
+  (`total − free`, clamped at zero), matching how operators expect disk usage to
+  be shown.
 
-- **Live-updating "Server status" panel** — the admin **📊 Статус сервера** card
-  now refreshes itself in place about once a second (`LiveRefreshManager`) so CPU,
-  RAM, disk and network read in real time without tapping **Refresh**. Each open
-  card is capped at one hour of auto-refresh; when the cap elapses the card falls
-  back to the admin panel so an abandoned panel stops sampling `/proc` and editing
-  the message. Navigating away (the card's **Back** button → `admin:panel`)
-  cancels the loop immediately, and re-opening the panel restarts the timer. A new
-  `edit_message_for_refresh` helper edits the card in place without ever
-  re-posting a fresh message, so a deleted card simply ends its loop.
+## [2.0.0] — 2026-06-20
+
+### Added
 
 - **Background Xray traffic-stats collector** — a new `refresh_all_xray` loop
   keeps the dashboard's Xray traffic fresh, mirroring the existing AWG collector
@@ -276,34 +271,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sub-actions. Activation is a deliberate, reboot-guarded manual runbook (see
   README "WARP proxy egress"); the host is never placed in the tunnel.
 
-### Changed
-
-- **Server-status disk metric now reports used space instead of free** — the
-  **💾 Диск** line reads `{used} GB занято из {total} GB` (`{used} GB used of
-  {total} GB` in English), derived from a new `ServerStatus.disk_used_gb`
-  (`total − free`, clamped at zero), matching how operators expect disk usage to
-  be shown.
-
-- **WARP interface and routes now have a single owner (systemd); the bot's health
-  monitor became a pure observer** — previously both `warp-routes.service` (at boot)
-  and the bot's `WarpHealthMonitor` managed the same `ip rule`/`ip route` entries, so
-  a flaky ICMP probe in the monitor would tear down routes the service had installed,
-  producing a recovered → add → fail → del → down flap every ~30–60 s and spamming
-  admins. A new **observer mode** (`WARP_MONITOR_OBSERVER_MODE`, default `true`) makes
-  the monitor only probe the tunnel, persist state and notify admins on a real
-  up→down/down→up change — it never runs `awg-quick`, `ip route` or `ip rule`.
-  Enabling/disabling the WARP toggle now starts/stops only the observer monitor, so
-  toggling it off no longer drops the tunnel or wipes the routes. The interface is
-  brought up by `awg-quick@out-warp.service`; `warp-routes.service` is now bound to it
-  (`Requires=`/`After=`/`PartOf=awg-quick@out-warp.service`) so routes are applied only
-  after the interface is up and re-applied on restart. The fail threshold is now
-  configurable and raised to `4` (`WARP_MONITOR_FAIL_THRESHOLD`, plus
-  `WARP_MONITOR_SUCCESS_THRESHOLD`, default `3`) so a single dropped probe can't raise
-  a false alarm. Set `WARP_MONITOR_OBSERVER_MODE=false` to restore the legacy
-  bot-managed behaviour.
-
-### Added
-
 - **WARP egress now diverts the AmneziaWG client subnet through the tunnel via
   the production-proven `Table = auto` recipe** — `vpnbot-warp-routes` was
   rewritten to match the manually-debugged working scheme and replace the previous
@@ -346,6 +313,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `docs/xray-xhttp-inbound.md`.
 
 ### Changed
+
+- **WARP interface and routes now have a single owner (systemd); the bot's health
+  monitor became a pure observer** — previously both `warp-routes.service` (at boot)
+  and the bot's `WarpHealthMonitor` managed the same `ip rule`/`ip route` entries, so
+  a flaky ICMP probe in the monitor would tear down routes the service had installed,
+  producing a recovered → add → fail → del → down flap every ~30–60 s and spamming
+  admins. A new **observer mode** (`WARP_MONITOR_OBSERVER_MODE`, default `true`) makes
+  the monitor only probe the tunnel, persist state and notify admins on a real
+  up→down/down→up change — it never runs `awg-quick`, `ip route` or `ip rule`.
+  Enabling/disabling the WARP toggle now starts/stops only the observer monitor, so
+  toggling it off no longer drops the tunnel or wipes the routes. The interface is
+  brought up by `awg-quick@out-warp.service`; `warp-routes.service` is now bound to it
+  (`Requires=`/`After=`/`PartOf=awg-quick@out-warp.service`) so routes are applied only
+  after the interface is up and re-applied on restart. The fail threshold is now
+  configurable and raised to `4` (`WARP_MONITOR_FAIL_THRESHOLD`, plus
+  `WARP_MONITOR_SUCCESS_THRESHOLD`, default `3`) so a single dropped probe can't raise
+  a false alarm. Set `WARP_MONITOR_OBSERVER_MODE=false` to restore the legacy
+  bot-managed behaviour.
 
 - **VLESS (HTTP) now rides vless-in's REALITY via an XHTTP fallback dest** — the
   XHTTP transport was retopologised on the server: `vless-in` (:443) terminates
@@ -394,6 +379,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Unified VLESS key label** — the config header and stored `display_name` now read
   `VLESS (TCP)` / `VLESS (HTTP)` (matching the key list) instead of `Xray`.
 
+### Removed
+
+- **Legacy `tg-warp` cleanup** — the WARP interface and its on-disk files were
+  renamed `tg-warp` → `out-warp` (the active path is `awg-quick@out-warp` + the
+  `vpnbot-warp-routes`/`-split`/`warp-failsafe` layer from #160/#161, and every
+  repo helper already targets `out-warp`). Servers upgraded across that rename
+  still carried orphaned `/etc/amnezia/tg-warp.conf` (with a stale `PrivateKey`)
+  and `tg-warp-routes.list`. `deploy/setup-nonroot-helper-mode.sh` now removes
+  both with an idempotent `rm -if-exists` (modelled on the existing danted
+  `10-after-warp.conf` cleanup). The active `out-warp.conf` (+ its
+  `amneziawg/out-warp.conf` symlink and `.WORKING` backup) and `out-warp-routes.list`
+  are never touched. The remaining `tg-warp` mentions in this changelog are
+  historical and intentionally kept.
+
 ### Fixed
 
 - **WARP selective-split: removed prefixes kept routing through WARP until reboot**
@@ -417,19 +416,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `VLESS (HTTP)` keys exist in the DB but their XHTTP inbound is absent, so the
   operator knows they are unmanageable until the inbound is restored.
 
-### Removed
+### Security
 
-- **Legacy `tg-warp` cleanup** — the WARP interface and its on-disk files were
-  renamed `tg-warp` → `out-warp` (the active path is `awg-quick@out-warp` + the
-  `vpnbot-warp-routes`/`-split`/`warp-failsafe` layer from #160/#161, and every
-  repo helper already targets `out-warp`). Servers upgraded across that rename
-  still carried orphaned `/etc/amnezia/tg-warp.conf` (with a stale `PrivateKey`)
-  and `tg-warp-routes.list`. `deploy/setup-nonroot-helper-mode.sh` now removes
-  both with an idempotent `rm -if-exists` (modelled on the existing danted
-  `10-after-warp.conf` cleanup). The active `out-warp.conf` (+ its
-  `amneziawg/out-warp.conf` symlink and `.WORKING` backup) and `out-warp-routes.list`
-  are never touched. The remaining `tg-warp` mentions in this changelog are
-  historical and intentionally kept.
+- **Upgraded `aiohttp` 3.13.5 → 3.14.1, `aiogram` 3.27.0 → 3.29.0, and
+  `cryptography` 46.0.7 → 48.0.1 to clear all outstanding `pip-audit` advisories.**
+  `aiohttp` 3.14.1 fixes nine CVEs (CVE-2026-50269, -54273, -54276, -54277,
+  -54278, -54279, -54280, plus the two previously VEX-deferred CVE-2026-34993 /
+  CVE-2026-47265); adopting it required raising the `aiogram` cap, which 3.29.0
+  does (`aiohttp<3.15`). `cryptography` 48.0.1 fixes GHSA-537c-gmf6-5ccf (High —
+  OpenSSL out-of-bounds read bundled in the wheels). The `PIP_AUDIT_IGNORES` VEX
+  list in the `Makefile` is now removed — `make audit` runs with no exceptions and
+  reports no known vulnerabilities. Hashed constraint sets were regenerated and the
+  un-hashed mirror re-synced.
 
 ## [1.3.0] — 2026-06-04
 
@@ -750,6 +748,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Managed MTProto secrets and env files are `root:root 0600`; backup directories are `root:root 0700`.
 - `XRAY_APPLY_MODE=api` + `PRIVILEGE_HELPERS_ENABLED=true` combination rejected at startup.
 
+[Unreleased]: https://github.com/Egor051/vpnbot/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/Egor051/vpnbot/compare/v1.3.0...v2.0.0
 [1.3.0]: https://github.com/Egor051/vpnbot/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/Egor051/vpnbot/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Egor051/vpnbot/compare/v1.0.2...v1.1.0
