@@ -17,15 +17,12 @@ logger = logging.getLogger(__name__)
 
 _GB = 1024**3
 
-# Number of one-second samples kept for the detailed network history (≈ last
-# minute). Only populated while the detailed-metrics toggle is on. Feeds the
-# avg/peak/trend figures.
-_HISTORY_LEN = 60
-# Number of columns (buckets) in the network sparkline. One bucket is emitted per
+# Number of columns (buckets) in the network history. One bucket is emitted per
 # Telegram render (see :meth:`ServerStatusService.snapshot_averaged`), each
 # averaging the ~render-interval worth of one-second samples gathered since the
-# previous render. At the panel's 3s cadence 20 columns span ≈ the last minute,
-# matching the detailed history window above.
+# previous render. At the panel's 3s cadence 20 columns span ≈ the last minute.
+# This single window feeds the sparkline *and* the avg/peak/trend figures, so all
+# four always describe the identical render-synchronized minute.
 _SPARKLINE_POINTS = 20
 # Number of most-recent samples averaged for the panel's head-line rate metrics
 # (CPU%, network in/out). At the sampler's 1s cadence this smooths roughly the
@@ -310,21 +307,23 @@ class ServerStatusService:
         # Detailed-metrics mode (load average, uptime, network history). Off by
         # default so the sampler does no extra work until an admin enables it.
         self._detailed = False
-        self._history: deque[tuple[float, float]] = deque(maxlen=_HISTORY_LEN)
         # Short rolling window of the most recent full samples, used by
         # :meth:`snapshot_averaged` to smooth the head-line rate metrics. Filled
-        # in every :meth:`_sample_once` regardless of detailed mode; distinct
-        # from ``_history`` (which is detailed-only and tracks network for 60s).
+        # in every :meth:`_sample_once` regardless of detailed mode.
         self._recent: deque[ServerStatus] = deque(maxlen=_AVERAGING_SAMPLES)
-        # Finished sparkline columns: one per Telegram render, flushed by
-        # :meth:`snapshot_averaged`. Bounded to the sparkline width so it holds
-        # exactly the visible window.
-        self._sparkline_buckets: deque[float] = deque(maxlen=_SPARKLINE_POINTS)
-        # Per-second total throughput (in+out) accumulated since the previous
-        # render. The next render averages these into a single bucket and clears
-        # the list, so every sampled second feeds exactly one column — it can
+        # Finished network columns, one per Telegram render, flushed by
+        # :meth:`snapshot_averaged` and kept split by direction. This single
+        # window backs both the sparkline (the per-column in+out total) and the
+        # avg/peak/trend figures (per direction), so the two never drift apart.
+        # Bounded to the sparkline width so it holds exactly the visible window.
+        self._net_in_buckets: deque[float] = deque(maxlen=_SPARKLINE_POINTS)
+        self._net_out_buckets: deque[float] = deque(maxlen=_SPARKLINE_POINTS)
+        # Per-second throughput accumulated since the previous render, split by
+        # direction. The next render averages each into a single bucket and clears
+        # the lists, so every sampled second feeds exactly one column — it can
         # never bleed across columns the way a sliding-window downsample did.
-        self._bucket_samples: list[float] = []
+        self._bucket_in_samples: list[float] = []
+        self._bucket_out_samples: list[float] = []
 
     @property
     def detailed(self) -> bool:
@@ -341,9 +340,10 @@ class ServerStatusService:
             return
         self._detailed = enabled
         if not enabled:
-            self._history.clear()
-            self._sparkline_buckets.clear()
-            self._bucket_samples.clear()
+            self._net_in_buckets.clear()
+            self._net_out_buckets.clear()
+            self._bucket_in_samples.clear()
+            self._bucket_out_samples.clear()
 
     async def run(self) -> None:
         """Continuously sample host metrics until cancelled.
@@ -388,14 +388,17 @@ class ServerStatusService:
         detailed avg/peak/trend stats are all point-in-time or already
         aggregated, so re-averaging them here would be wrong.
 
-        The network ``net_sparkline`` is the exception: this method is the render
-        path (one call per Telegram update), so it doubles as the sparkline's
-        clock. On each call, in detailed mode, the per-second samples gathered
-        since the previous render are averaged into one column, appended to the
-        rolling bucket window and the accumulator reset. Driving the buckets off
-        the render — rather than re-downsampling a sliding history every tick —
-        means a sampled second lands in exactly one column and never shifts
-        between columns over time.
+        The detailed network figures are the exception: this method is the render
+        path (one call per Telegram update), so it doubles as the network
+        history's clock. On each call, in detailed mode, the per-second samples
+        gathered since the previous render are averaged into one column (per
+        direction), appended to the rolling bucket window and the accumulators
+        reset. Driving the buckets off the render — rather than re-downsampling a
+        sliding history every tick — means a sampled second lands in exactly one
+        column and never shifts between columns over time. The ``net_sparkline``,
+        the avg/peak figures and the up/down trends are then all derived from that
+        same window, so they stay in lock-step with one another and with the
+        render that produced them.
 
         Availability mirrors :meth:`_sample_once`: a metric is reported available
         (with the window mean) when at least one sample in the window had it, and
@@ -430,19 +433,29 @@ class ServerStatusService:
             net_out = 0.0
             net_available = False
 
-        # Flush the in-progress sparkline bucket in lock-step with this render:
-        # average the samples gathered since the previous render into one column,
-        # freeze it into the rolling window and reset the accumulator. Skip an
+        # Flush the in-progress bucket in lock-step with this render: average the
+        # samples gathered since the previous render into one column per direction,
+        # freeze them into the rolling window and reset the accumulators. Skip an
         # empty accumulator so back-to-back renders don't emit a spurious zero
         # column. In base mode there are no buckets — keep whatever the latest
-        # sample carried (``None``).
+        # sample carried (all ``None``).
         if latest.detailed_enabled:
-            if self._bucket_samples:
-                self._sparkline_buckets.append(_mean(self._bucket_samples))
-                self._bucket_samples.clear()
-            sparkline: tuple[float, ...] | None = tuple(self._sparkline_buckets) or None
+            if self._bucket_in_samples:
+                self._net_in_buckets.append(_mean(self._bucket_in_samples))
+                self._net_out_buckets.append(_mean(self._bucket_out_samples))
+                self._bucket_in_samples.clear()
+                self._bucket_out_samples.clear()
+            net_detail = self._net_bucket_stats()
         else:
-            sparkline = latest.net_sparkline
+            net_detail = {
+                "net_sparkline": latest.net_sparkline,
+                "net_in_avg": latest.net_in_avg,
+                "net_out_avg": latest.net_out_avg,
+                "net_in_peak": latest.net_in_peak,
+                "net_out_peak": latest.net_out_peak,
+                "net_in_trend": latest.net_in_trend,
+                "net_out_trend": latest.net_out_trend,
+            }
 
         return replace(
             latest,
@@ -452,8 +465,40 @@ class ServerStatusService:
             net_in_mbps=net_in,
             net_out_mbps=net_out,
             net_available=net_available,
-            net_sparkline=sparkline,
+            **net_detail,
         )
+
+    def _net_bucket_stats(self) -> dict[str, Any]:
+        """Derive the detailed network figures from the render-driven buckets.
+
+        The sparkline (per-column in+out total), the avg/peak and the up/down
+        trends are all read off the same per-direction bucket window, so they
+        describe an identical ≈minute and stay in lock-step with each other and
+        with the render that froze the latest column. An empty window (no
+        net-available sample gathered yet) reports everything as "no data"
+        (``None``), which the formatter renders by hiding the avg/peak block.
+        """
+        ins = list(self._net_in_buckets)
+        outs = list(self._net_out_buckets)
+        if not ins:
+            return {
+                "net_sparkline": None,
+                "net_in_avg": None,
+                "net_out_avg": None,
+                "net_in_peak": None,
+                "net_out_peak": None,
+                "net_in_trend": None,
+                "net_out_trend": None,
+            }
+        return {
+            "net_sparkline": tuple(i + o for i, o in zip(ins, outs, strict=True)),
+            "net_in_avg": _mean(ins),
+            "net_out_avg": _mean(outs),
+            "net_in_peak": max(ins),
+            "net_out_peak": max(outs),
+            "net_in_trend": _trend(ins),
+            "net_out_trend": _trend(outs),
+        }
 
     def _sample_once(self) -> ServerStatus:
         """Take one reading and derive rates against the previous reading."""
@@ -519,38 +564,31 @@ class ServerStatusService:
         return status
 
     def _detailed_fields(self, net_in: float, net_out: float, net_available: bool) -> dict[str, Any]:
-        """Read load/uptime and update the network history, returning the derived
-        detailed fields. Returns empty (all-default) when detailed mode is off so
-        the sampler does no extra ``/proc`` reads or history work in the base view.
+        """Read load/uptime and feed the in-progress network bucket, returning the
+        derived detailed fields. Returns empty (all-default) when detailed mode is
+        off so the sampler does no extra ``/proc`` reads in the base view.
+
+        The network avg/peak/trend are deliberately *not* computed here: they are
+        derived per render by :meth:`snapshot_averaged` from the same buckets that
+        build the sparkline, so all four describe one identical window. This method
+        only accumulates each second's throughput into the in-progress bucket.
         """
         if not self._detailed:
             return {}
         if net_available:
-            self._history.append((net_in, net_out))
-            # Feed this second's total throughput into the in-progress sparkline
-            # bucket; the next render (snapshot_averaged) averages and freezes it
-            # into one column. The sparkline itself is built there, not here.
-            self._bucket_samples.append(net_in + net_out)
+            # Feed this second's throughput into the in-progress bucket (per
+            # direction); the next render (snapshot_averaged) averages and freezes
+            # it into one column. The sparkline and avg/peak are built there.
+            self._bucket_in_samples.append(net_in)
+            self._bucket_out_samples.append(net_out)
         loadavg = _read_loadavg()
-        ins = [sample[0] for sample in self._history]
-        outs = [sample[1] for sample in self._history]
-        fields: dict[str, Any] = {
+        return {
             "load1": loadavg[0] if loadavg else None,
             "load5": loadavg[1] if loadavg else None,
             "load15": loadavg[2] if loadavg else None,
             "cpu_count": os.cpu_count(),
             "uptime_seconds": _read_uptime(),
         }
-        if ins:
-            fields.update(
-                net_in_avg=_mean(ins),
-                net_out_avg=_mean(outs),
-                net_in_peak=max(ins),
-                net_out_peak=max(outs),
-                net_in_trend=_trend(ins),
-                net_out_trend=_trend(outs),
-            )
-        return fields
 
     def _cold_status(self) -> ServerStatus:
         """Status for a cold cache: RAM/disk read live, CPU/network unavailable."""

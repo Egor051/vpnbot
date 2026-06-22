@@ -59,6 +59,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     columns span ≈ the last minute, matching the avg/peak/trend history window.
     The unused `_downsample` helper was removed.
 
+- **"Server status" network avg/peak/trend now share the sparkline's window.**
+  The detailed `📥/📤 сред … макс …` figures (and their `↑/↓/→` trend arrows) were
+  computed from a separate per-second 60-sample history (`_history`) updated on
+  every sampler tick, while the sparkline was rebuilt per Telegram render — so the
+  two could describe slightly different minutes and update on different clocks.
+  The avg/peak/trend are now derived per render from the **same** per-direction
+  render buckets that build the sparkline (`net_in_avg`/`net_out_avg` as the bucket
+  means, `…_peak` as the bucket maxima, trends over the bucket series), so all four
+  read off one identical, render-synchronized ≈minute and move together on each
+  refresh. The peak therefore matches the tallest sparkline column rather than a
+  single un-bucketed second. The now-redundant `_history` deque and `_HISTORY_LEN`
+  constant were removed; with no net-available column yet the block reads "no data".
+
 - **First render of the "Server status" panel also honours Telegram 429
   back-off** — the panel's initial open goes through `safe_edit_message_text`
   (not the auto-refresh path), which previously caught only `TelegramBadRequest`

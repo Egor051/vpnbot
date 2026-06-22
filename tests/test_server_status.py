@@ -470,15 +470,18 @@ def test_detailed_mode_collects_history_loadavg_and_uptime(monkeypatch: pytest.M
     assert status.load1 == approx(0.1) and status.load15 == approx(0.3)
     assert status.uptime_seconds == approx(12345.0)
     assert status.cpu_count is not None
-    assert status.net_in_avg is not None and status.net_in_peak is not None
-    assert len(service._history) > 0
-    # The sparkline is no longer attached by _sample_once; it is built per render
-    # by snapshot_averaged, which flushes the accumulated bucket samples.
+    # _sample_once no longer derives the net avg/peak/sparkline — those are built
+    # per render by snapshot_averaged from the accumulated bucket samples, so the
+    # raw sample carries them as "no data" while the accumulator fills.
+    assert status.net_in_avg is None and status.net_in_peak is None
     assert status.net_sparkline is None
-    assert len(service._bucket_samples) > 0
+    assert len(service._bucket_in_samples) > 0 and len(service._bucket_out_samples) > 0
     avg = asyncio.run(service.snapshot_averaged())
+    # The render flushes the accumulator into one column and derives every net
+    # figure from that same window, so avg/peak/sparkline appear together.
     assert avg.net_sparkline is not None
-    assert service._bucket_samples == []  # flushed into a column
+    assert avg.net_in_avg is not None and avg.net_in_peak is not None
+    assert service._bucket_in_samples == [] and service._bucket_out_samples == []
 
 
 def test_detailed_disabled_skips_history_and_loadavg(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -504,7 +507,9 @@ def test_detailed_disabled_skips_history_and_loadavg(monkeypatch: pytest.MonkeyP
     assert status.detailed_enabled is False
     assert status.load1 is None and status.uptime_seconds is None
     assert status.net_sparkline is None
-    assert len(service._history) == 0
+    # No network buckets accumulate while detailed mode is off.
+    assert len(service._bucket_in_samples) == 0
+    assert len(service._net_in_buckets) == 0
     # Swap is part of the base view and must still be present.
     assert status.swap_total_gb == approx(4.0)
 
@@ -522,14 +527,15 @@ def test_set_detailed_off_clears_history(monkeypatch: pytest.MonkeyPatch) -> Non
     service.set_detailed(True)
     for _ in range(4):
         service._sample_once()
-    assert len(service._history) > 0
-    assert len(service._bucket_samples) > 0
+    asyncio.run(service.snapshot_averaged())  # freeze a column into the window
+    assert len(service._bucket_in_samples) > 0 or len(service._net_in_buckets) > 0
     service.set_detailed(False)
-    assert len(service._history) == 0
-    # Sparkline buckets and the in-progress accumulator reset too, so a later
+    # The frozen columns and the in-progress accumulators all reset, so a later
     # re-enable starts from a clean window.
-    assert len(service._bucket_samples) == 0
-    assert len(service._sparkline_buckets) == 0
+    assert len(service._bucket_in_samples) == 0
+    assert len(service._bucket_out_samples) == 0
+    assert len(service._net_in_buckets) == 0
+    assert len(service._net_out_buckets) == 0
 
 
 # --- snapshot_averaged: smoothed head-line rate metrics ----------------------
@@ -724,8 +730,9 @@ def test_sample_once_fills_recent_buffer_in_base_mode(monkeypatch: pytest.Monkey
 
     assert service.detailed is False
     assert len(service._recent) == ss._AVERAGING_SAMPLES
-    # The 60s detailed history stays empty in base mode (unchanged behaviour).
-    assert len(service._history) == 0
+    # The detailed network buckets stay empty in base mode (unchanged behaviour).
+    assert len(service._bucket_in_samples) == 0
+    assert len(service._net_in_buckets) == 0
 
 
 def test_snapshot_returns_latest_not_averaged() -> None:
@@ -751,26 +758,34 @@ def test_snapshot_returns_latest_not_averaged() -> None:
 
 def test_snapshot_averaged_flushes_one_sparkline_bucket_per_render() -> None:
     """In detailed mode each render averages the samples gathered since the
-    previous render into a single sparkline column, then resets the accumulator —
-    so a sampled second feeds exactly one column and never re-buckets."""
+    previous render into a single column (per direction), then resets the
+    accumulator — so a sampled second feeds exactly one column and never
+    re-buckets. The sparkline column is the per-column in+out total."""
     service = ServerStatusService()
     service.set_detailed(True)
     service._recent.append(_base_status(detailed_enabled=True))
 
-    # Three ticks accumulate before the first render.
-    service._bucket_samples.extend([1.0, 2.0, 3.0])
+    # Three ticks accumulate before the first render (out stays 0 here, so the
+    # sparkline column equals the in-direction mean).
+    service._bucket_in_samples.extend([1.0, 2.0, 3.0])
+    service._bucket_out_samples.extend([0.0, 0.0, 0.0])
     first = asyncio.run(service.snapshot_averaged())
     assert first.net_sparkline is not None and len(first.net_sparkline) == 1
-    assert first.net_sparkline[0] == approx(2.0)  # mean(1, 2, 3)
-    assert service._bucket_samples == []  # accumulator reset by the flush
+    assert first.net_sparkline[0] == approx(2.0)  # mean(1, 2, 3) + mean(0, 0, 0)
+    assert first.net_in_avg == approx(2.0) and first.net_in_peak == approx(2.0)
+    assert service._bucket_in_samples == []  # accumulator reset by the flush
+    assert service._bucket_out_samples == []
 
     # A second render with a fresh batch appends a second column; the first
     # column is untouched (already-consumed seconds are never re-bucketed).
-    service._bucket_samples.extend([4.0, 8.0])
+    service._bucket_in_samples.extend([4.0, 8.0])
+    service._bucket_out_samples.extend([1.0, 1.0])
     second = asyncio.run(service.snapshot_averaged())
     assert second.net_sparkline is not None and len(second.net_sparkline) == 2
     assert second.net_sparkline[0] == approx(2.0)
-    assert second.net_sparkline[1] == approx(6.0)  # mean(4, 8)
+    assert second.net_sparkline[1] == approx(7.0)  # mean(4, 8) + mean(1, 1)
+    # Avg/peak track the same two columns: in-avg = mean(2, 6), in-peak = 6.
+    assert second.net_in_avg == approx(4.0) and second.net_in_peak == approx(6.0)
 
     # An empty accumulator (no tick since the last render) emits no new column.
     third = asyncio.run(service.snapshot_averaged())
@@ -784,7 +799,41 @@ def test_sparkline_buckets_cap_at_sparkline_width() -> None:
     service._recent.append(_base_status(detailed_enabled=True))
     avg = None
     for i in range(ss._SPARKLINE_POINTS + 5):
-        service._bucket_samples.append(float(i))
+        service._bucket_in_samples.append(float(i))
+        service._bucket_out_samples.append(0.0)
         avg = asyncio.run(service.snapshot_averaged())
     assert avg is not None and avg.net_sparkline is not None
     assert len(avg.net_sparkline) == ss._SPARKLINE_POINTS
+    # The avg/peak windows are capped to the very same columns as the sparkline.
+    assert len(service._net_in_buckets) == ss._SPARKLINE_POINTS
+    assert len(service._net_out_buckets) == ss._SPARKLINE_POINTS
+
+
+def test_snapshot_averaged_net_avg_peak_trend_track_sparkline_window() -> None:
+    """avg/peak/trend are derived from the same render buckets as the sparkline,
+    split per direction — so they describe the identical window and move with it
+    on every render, rather than from a separate per-second history."""
+    service = ServerStatusService()
+    service.set_detailed(True)
+    service._recent.append(_base_status(detailed_enabled=True))
+
+    # Freeze six columns, one per render, with rising in-throughput and flat out.
+    in_cols = [1.0, 2.0, 3.0, 4.0, 5.0, 9.0]
+    avg = None
+    for value in in_cols:
+        service._bucket_in_samples.append(value)
+        service._bucket_out_samples.append(2.0)
+        avg = asyncio.run(service.snapshot_averaged())
+
+    assert avg is not None and avg.net_sparkline is not None
+    # Each sparkline column is the per-column in+out total.
+    assert avg.net_sparkline == approx(tuple(v + 2.0 for v in in_cols))
+    # Avg/peak read off those very columns, per direction — in lock-step with the
+    # sparkline window above.
+    assert avg.net_in_avg == approx(sum(in_cols) / len(in_cols))
+    assert avg.net_in_peak == approx(9.0)
+    assert avg.net_out_avg == approx(2.0)
+    assert avg.net_out_peak == approx(2.0)
+    # Rising in-direction reads as an upward trend; flat out reads as flat.
+    assert avg.net_in_trend == "up"
+    assert avg.net_out_trend == "flat"
