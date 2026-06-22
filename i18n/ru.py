@@ -418,11 +418,11 @@ STRINGS: dict[str, str] = {
         "При общем secret индивидуальный серверный revoke для MTProto невозможен."
     ),
     # ── keyboard buttons (common) ─────────────────────────────────────────────
-    "btn_my_keys": "Мои ключи",
-    "btn_create_key": "Создать ключ",
-    "btn_proxy": "Прокси",
-    "btn_help": "Помощь",
-    "btn_admin_panel": "Админ-панель",
+    "btn_my_keys": "🔑 Мои ключи",
+    "btn_create_key": "➕ Создать ключ",
+    "btn_proxy": "🌐 Прокси",
+    "btn_help": "❓ Помощь",
+    "btn_admin_panel": "🛡 Админ-панель",
     "btn_back_to_menu": "В меню",
     "btn_back_to_faq": "К вопросам",
     "btn_cancel": "Отмена",

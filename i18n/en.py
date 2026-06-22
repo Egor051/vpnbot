@@ -417,11 +417,11 @@ STRINGS: dict[str, str] = {
         "With a shared secret, individual server-side revoke for MTProto is not possible."
     ),
     # ── keyboard buttons (common) ─────────────────────────────────────────────
-    "btn_my_keys": "My keys",
-    "btn_create_key": "Create key",
-    "btn_proxy": "Proxy",
-    "btn_help": "Help",
-    "btn_admin_panel": "Admin panel",
+    "btn_my_keys": "🔑 My keys",
+    "btn_create_key": "➕ Create key",
+    "btn_proxy": "🌐 Proxy",
+    "btn_help": "❓ Help",
+    "btn_admin_panel": "🛡 Admin panel",
     "btn_back_to_menu": "Main menu",
     "btn_back_to_faq": "Back to FAQ",
     "btn_cancel": "Cancel",
