@@ -205,7 +205,9 @@ STRINGS: dict[str, str] = {
         "<b>AWG:</b> if the connection is unstable or won't connect, try lowering the MTU to 1280 "
         "(use the «Change MTU» button in the key settings).\n\n"
         "<b>Xray:</b> if the connection won't establish, try changing the fingerprint "
-        "(use the «Change Fingerprint» button in the key settings). Good starting options: Firefox or Randomized.\n\n"
+        "(use the «Change Fingerprint» button in the key settings). Good starting options: Firefox or Edge. "
+        "If that doesn't help, try creating a new Xray key with a different transport (TCP / XHTTP) — "
+        "the transport choice is offered during key creation.\n\n"
         "If the problem persists, contact support."
     ),
     "faq_key_statuses": (
