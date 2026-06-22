@@ -253,6 +253,24 @@ class VpnKeyRepository:
         row = await cursor.fetchone()
         return int(row["cnt"]) if row is not None else 0
 
+    async def sum_traffic_for_owner(self, owner_user_id: int) -> tuple[int, int]:
+        """Return total (downloaded, uploaded) bytes across an owner's non-deleted keys."""
+        cursor = await self.db.conn.execute(
+            """
+            SELECT
+              COALESCE(SUM(s.downloaded_bytes), 0) AS down,
+              COALESCE(SUM(s.uploaded_bytes), 0) AS up
+            FROM vpn_keys k
+            JOIN vpn_key_traffic_stats s ON s.key_id = k.id
+            WHERE k.owner_user_id = ? AND k.status != ?
+            """,
+            (owner_user_id, VpnKeyStatus.DELETED.value),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return 0, 0
+        return int(row["down"]), int(row["up"])
+
     async def list_recent_by_owner(self, owner_user_id: int, limit: int = 10) -> list[VpnKey]:
         """Return an owner's most recent non-deleted VPN keys."""
         return await self.list_by_owner(owner_user_id, limit=limit, offset=0)

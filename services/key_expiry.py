@@ -5,9 +5,11 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 
+import i18n
 from adapters.clock import ClockProvider
-from models.dto import VpnKey
+from models.dto import User, VpnKey
 from models.enums import VpnKeyType
+from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.audit import AuditService
 
@@ -26,6 +28,7 @@ class KeyExpiryService:
         self,
         *,
         vpn_keys: VpnKeyRepository,
+        users: UserRepository,
         xray: object,
         awg: object,
         audit: AuditService,
@@ -35,6 +38,7 @@ class KeyExpiryService:
         backend_health: object | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
+        self.users = users
         self.xray = xray
         self.awg = awg
         self.audit = audit
@@ -78,6 +82,7 @@ class KeyExpiryService:
         now = self.clock.now()
         count = 0
         notified_this_run: set[int] = set()
+        owners: dict[int, User | None] = {}
         # Ascending so a key gets a single reminder at the *smallest* threshold it
         # currently crosses, and the message states its real remaining time — never
         # a contradictory "expires in 7 days" for a key that actually expires
@@ -91,9 +96,14 @@ class KeyExpiryService:
                     # larger threshold as handled so it never re-fires later.
                     await self.vpn_keys.mark_expiry_notified(key.id, days)
                     continue
+                owner = await self._owner(owners, key.owner_user_id)
+                if owner is not None and not owner.expiry_notifications_enabled:
+                    # Opted out of expiry reminders. Skip WITHOUT marking notified so
+                    # the reminder can still fire if they re-enable before expiry.
+                    continue
                 remaining = self._remaining_days(now, key.expires_at)
                 try:
-                    await self._notify_owner_expiring_soon(key, remaining)
+                    await self._notify_owner_expiring_soon(key, remaining, owner)
                     # mark_expiry_notified is called only if send succeeded
                     await self.vpn_keys.mark_expiry_notified(key.id, days)
                     notified_this_run.add(key.id)
@@ -124,28 +134,42 @@ class KeyExpiryService:
             exp_dt = exp_dt.replace(tzinfo=timezone.utc)
         return max(1, round((exp_dt - now_dt).total_seconds() / 86400))
 
-    async def _notify_owner_expiring_soon(self, key: VpnKey, days: int) -> None:
+    async def _owner(self, cache: dict[int, User | None], owner_user_id: int) -> User | None:
+        """Return the key owner, caching lookups within a single run."""
+        if owner_user_id not in cache:
+            cache[owner_user_id] = await self.users.get_by_id(owner_user_id)
+        return cache[owner_user_id]
+
+    async def _notify_owner_expiring_soon(self, key: VpnKey, days: int, owner: User | None) -> None:
         if self.bot is None:
             return
         type_label = key.key_type.value.upper()
-        noun = _days_noun(days)
+        locale = owner.language if owner is not None else None
+        with i18n.use_locale(locale):
+            noun = _days_noun_for(i18n.resolve_locale(), days)
+            message = i18n.t("key_expiry_reminder", type=type_label, id=key.id, days=days, noun=noun)
         # Let send errors propagate so mark_expiry_notified is not called on failure.
-        await self.bot.send_message(
-            key.owner_user_id,
-            f"Срок действия {type_label}-ключа #{key.id} истекает через {days} {noun}.",
-        )
+        await self.bot.send_message(key.owner_user_id, message)
 
     async def _notify_owner_expired(self, key: VpnKey) -> None:
         if self.bot is None:
             return
         type_label = key.key_type.value.upper()
         try:
-            await self.bot.send_message(
-                key.owner_user_id,
-                f"Срок действия {type_label}-ключа #{key.id} истёк — доступ автоматически отозван.",
-            )
+            owner = await self.users.get_by_id(key.owner_user_id)
+            locale = owner.language if owner is not None else None
+            with i18n.use_locale(locale):
+                message = i18n.t("key_expired_revoked", type=type_label, id=key.id)
+            await self.bot.send_message(key.owner_user_id, message)
         except Exception:  # noqa: S110
             pass
+
+
+def _days_noun_for(locale: str, days: int) -> str:
+    """Return the day-noun matching the given locale and count."""
+    if locale == "en":
+        return "day" if days == 1 else "days"
+    return _days_noun(days)
 
 
 def _days_noun(days: int) -> str:

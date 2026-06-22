@@ -110,6 +110,37 @@ def main_menu_text(user: TgUser) -> str:
     return t("main_menu_text", name=name, rules=t("usage_rules"), warning=t("server_restart_warning"))
 
 
+def settings_intro_text() -> str:
+    """Build the settings panel text: explanations of each button shown above them."""
+    return f"{t('settings_title')}\n\n{t('settings_intro')}"
+
+
+def personal_cabinet_text(
+    user: User,
+    *,
+    active_xray: int,
+    active_awg: int,
+    downloaded_bytes: int,
+    uploaded_bytes: int,
+    proxy_count: int,
+) -> str:
+    """Build the personal cabinet card: profile fields plus a personal summary."""
+    username = f"@{user.username}" if user.username else t("not_specified")
+    lines = [
+        t("cabinet_title"),
+        f"{t('field_tg_id')}: {code(user.telegram_user_id)}",
+        f"{t('field_name')}: {h(user.first_name or t('not_specified'))}",
+        f"{t('field_username')}: {h(username)}",
+        f"{t('field_role')}: {h(role_text(user.role))}",
+        f"{t('field_registered')}: {h(format_msk_datetime(user.created_at))}",
+        "",
+        t("cabinet_active_keys", total=active_xray + active_awg, xray=active_xray, awg=active_awg),
+        t("cabinet_traffic", down=format_bytes(downloaded_bytes), up=format_bytes(uploaded_bytes)),
+        t("cabinet_proxy_count", count=proxy_count),
+    ]
+    return "\n".join(lines)
+
+
 def key_list_card(key: VpnKey, *, viewer_user_id: int) -> str:
     note = key_note_for_viewer(key, viewer_user_id)
     label = key_display_label(key, viewer_user_id=viewer_user_id)

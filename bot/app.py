@@ -22,9 +22,10 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_dashboard, admin_maintenance, admin_modules, admin_warp, admin_warp_split, admin_warp_split_ui, callbacks, common, keys, proxy, start
+from bot.handlers import admin, admin_dashboard, admin_maintenance, admin_modules, admin_warp, admin_warp_split, admin_warp_split_ui, callbacks, common, keys, proxy, settings as settings_handler, start
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
+from bot.middlewares.locale import LocaleMiddleware
 from bot.middlewares.maintenance import MaintenanceModeMiddleware
 from bot.rate_limit import RateLimiter
 from config.settings import Settings
@@ -360,6 +361,7 @@ async def _build_app(
     )
     key_expiry_service = KeyExpiryService(
         vpn_keys=vpn_keys_repo,
+        users=users_repo,
         xray=xray_service,
         awg=awg_service,
         audit=audit_service,
@@ -492,6 +494,7 @@ async def _build_app(
     # the blocked-user gate or any handler sees it. When off it is a zero-DB no-op.
     maintenance_middleware = MaintenanceModeMiddleware(maintenance_service, settings)
     blocked_middleware = BlockedUserMiddleware(user_service)
+    locale_middleware = LocaleMiddleware(user_service)
     for observer in (
         dp.message,
         dp.callback_query,
@@ -502,6 +505,9 @@ async def _build_app(
     ):
         observer.outer_middleware(maintenance_middleware)
         observer.outer_middleware(blocked_middleware)
+        # Activate the user's stored language after the access gates so handlers
+        # and keyboard builders render in their preferred locale.
+        observer.outer_middleware(locale_middleware)
 
     # Runs after the blocked-user gate so the cleanup only fires for callbacks
     # that are actually about to be handled.
@@ -509,6 +515,7 @@ async def _build_app(
 
     dp.include_router(start.router)
     dp.include_router(common.router)
+    dp.include_router(settings_handler.router)
     dp.include_router(admin.router)
     dp.include_router(admin_dashboard.router)
     dp.include_router(admin_warp.router)

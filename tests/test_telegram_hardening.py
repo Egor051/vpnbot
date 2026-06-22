@@ -113,20 +113,22 @@ def _main_menu_buttons(is_admin: bool = False) -> list[tuple[str, str | None]]:
 
 def test_main_menu_regular_user_uses_inline_buttons() -> None:
     assert _main_menu_buttons() == [
-        ("Мои ключи", "keys:list"),
-        ("Создать ключ", "keys:create"),
-        ("Прокси", "proxy:show"),
-        ("Помощь", "help"),
+        ("🔑 Мои ключи", "keys:list"),
+        ("➕ Создать ключ", "keys:create"),
+        ("🌐 Прокси", "proxy:show"),
+        ("⚙️ Настройки", "settings:open"),
+        ("❓ Помощь", "help"),
     ]
 
 
 def test_main_menu_admin_has_admin_button_and_complete_create_key_text() -> None:
     buttons = _main_menu_buttons(is_admin=True)
 
-    assert len(buttons) == 5
-    assert ("Создать ключ", "keys:create") in buttons
+    assert len(buttons) == 6
+    assert ("➕ Создать ключ", "keys:create") in buttons
     assert ("Создать клю", "keys:create") not in buttons
-    assert buttons[-1] == ("Админ-панель", "admin:panel")
+    assert ("⚙️ Настройки", "settings:open") in buttons
+    assert buttons[-1] == ("🛡 Админ-панель", "admin:panel")
 
 
 def test_start_command_sends_inline_main_menu_for_approved_users() -> None:
@@ -160,10 +162,11 @@ def test_start_command_sends_inline_main_menu_for_approved_users() -> None:
         assert hasattr(markup, "inline_keyboard")
         assert not hasattr(markup, "keyboard")
         assert [(button.text, button.callback_data) for row in markup.inline_keyboard for button in row] == [
-            ("Мои ключи", "keys:list"),
-            ("Создать ключ", "keys:create"),
-            ("Прокси", "proxy:show"),
-            ("Помощь", "help"),
+            ("🔑 Мои ключи", "keys:list"),
+            ("➕ Создать ключ", "keys:create"),
+            ("🌐 Прокси", "proxy:show"),
+            ("⚙️ Настройки", "settings:open"),
+            ("❓ Помощь", "help"),
         ]
 
     asyncio.run(run())

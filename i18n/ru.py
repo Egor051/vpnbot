@@ -418,11 +418,11 @@ STRINGS: dict[str, str] = {
         "При общем secret индивидуальный серверный revoke для MTProto невозможен."
     ),
     # ── keyboard buttons (common) ─────────────────────────────────────────────
-    "btn_my_keys": "Мои ключи",
-    "btn_create_key": "Создать ключ",
-    "btn_proxy": "Прокси",
-    "btn_help": "Помощь",
-    "btn_admin_panel": "Админ-панель",
+    "btn_my_keys": "🔑 Мои ключи",
+    "btn_create_key": "➕ Создать ключ",
+    "btn_proxy": "🌐 Прокси",
+    "btn_help": "❓ Помощь",
+    "btn_admin_panel": "🛡 Админ-панель",
     "btn_back_to_menu": "В меню",
     "btn_back_to_faq": "К вопросам",
     "btn_cancel": "Отмена",
@@ -445,6 +445,35 @@ STRINGS: dict[str, str] = {
     "btn_faq_notes": "Видит ли кто-нибудь мои заметки?",
     "btn_faq_support": "Техподдержка",
     "btn_keyboard_placeholder": "Выберите действие",
+    # ── settings & personal cabinet ───────────────────────────────────────────
+    "btn_settings": "⚙️ Настройки",
+    "btn_settings_cabinet": "👤 Личный кабинет",
+    "btn_settings_language": "🌐 Язык: {lang}",
+    "btn_settings_notifications": "Уведомления об истечении",
+    "btn_back_to_settings": "‹ К настройкам",
+    "lang_name_ru": "Русский",
+    "lang_name_en": "English",
+    "settings_title": "<b>⚙️ Настройки</b>",
+    "settings_intro": (
+        "Здесь собраны ваши персональные настройки. Ниже — что делает каждая кнопка:\n\n"
+        "👤 <b>Личный кабинет</b> — ваш профиль и персональная статистика: роль, дата "
+        "регистрации, число активных ключей и прокси-доступов, суммарный трафик.\n\n"
+        "🌐 <b>Язык</b> — язык интерфейса бота. Переключает все сообщения и кнопки между "
+        "русским и английским только для вас.\n\n"
+        "🔔 <b>Уведомления об истечении</b> — напоминания о том, что срок действия ключа "
+        "скоро закончится. Их можно отключить, если они не нужны. Сообщение об "
+        "автоматическом отзыве уже истёкшего ключа приходит в любом случае."
+    ),
+    "cabinet_title": "<b>👤 Личный кабинет</b>",
+    "field_registered": "Дата регистрации",
+    "cabinet_active_keys": "Активные ключи: {total} (Xray: {xray}, AWG: {awg})",
+    "cabinet_traffic": "Трафик: ↓ {down} · ↑ {up}",
+    "cabinet_proxy_count": "Прокси-доступы: {count}",
+    "settings_language_changed": "Язык изменён",
+    "settings_notifications_on": "Уведомления об истечении включены",
+    "settings_notifications_off": "Уведомления об истечении выключены",
+    "key_expiry_reminder": "Срок действия {type}-ключа #{id} истекает через {days} {noun}.",
+    "key_expired_revoked": "Срок действия {type}-ключа #{id} истёк — доступ автоматически отозван.",
     # ── keyboard buttons (admin) ──────────────────────────────────────────────
     "btn_approve": "Одобрить",
     "btn_reject": "Отклонить",

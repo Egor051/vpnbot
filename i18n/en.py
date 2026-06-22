@@ -417,11 +417,11 @@ STRINGS: dict[str, str] = {
         "With a shared secret, individual server-side revoke for MTProto is not possible."
     ),
     # ── keyboard buttons (common) ─────────────────────────────────────────────
-    "btn_my_keys": "My keys",
-    "btn_create_key": "Create key",
-    "btn_proxy": "Proxy",
-    "btn_help": "Help",
-    "btn_admin_panel": "Admin panel",
+    "btn_my_keys": "🔑 My keys",
+    "btn_create_key": "➕ Create key",
+    "btn_proxy": "🌐 Proxy",
+    "btn_help": "❓ Help",
+    "btn_admin_panel": "🛡 Admin panel",
     "btn_back_to_menu": "Main menu",
     "btn_back_to_faq": "Back to FAQ",
     "btn_cancel": "Cancel",
@@ -444,6 +444,35 @@ STRINGS: dict[str, str] = {
     "btn_faq_notes": "Can anyone see my notes?",
     "btn_faq_support": "Support",
     "btn_keyboard_placeholder": "Choose an action",
+    # ── settings & personal cabinet ───────────────────────────────────────────
+    "btn_settings": "⚙️ Settings",
+    "btn_settings_cabinet": "👤 Personal cabinet",
+    "btn_settings_language": "🌐 Language: {lang}",
+    "btn_settings_notifications": "Expiry notifications",
+    "btn_back_to_settings": "‹ Back to settings",
+    "lang_name_ru": "Русский",
+    "lang_name_en": "English",
+    "settings_title": "<b>⚙️ Settings</b>",
+    "settings_intro": (
+        "Your personal settings live here. Below is what each button does:\n\n"
+        "👤 <b>Personal cabinet</b> — your profile and personal statistics: role, "
+        "registration date, number of active keys and proxy accesses, total traffic.\n\n"
+        "🌐 <b>Language</b> — the bot's interface language. Switches all messages and "
+        "buttons between Russian and English for you only.\n\n"
+        "🔔 <b>Expiry notifications</b> — reminders that a key is about to expire. You can "
+        "turn them off if you don't need them. The notice about an already-expired key being "
+        "automatically revoked is always delivered."
+    ),
+    "cabinet_title": "<b>👤 Personal cabinet</b>",
+    "field_registered": "Registered",
+    "cabinet_active_keys": "Active keys: {total} (Xray: {xray}, AWG: {awg})",
+    "cabinet_traffic": "Traffic: ↓ {down} · ↑ {up}",
+    "cabinet_proxy_count": "Proxy accesses: {count}",
+    "settings_language_changed": "Language changed",
+    "settings_notifications_on": "Expiry notifications enabled",
+    "settings_notifications_off": "Expiry notifications disabled",
+    "key_expiry_reminder": "Your {type} key #{id} expires in {days} {noun}.",
+    "key_expired_revoked": "Your {type} key #{id} has expired — access was automatically revoked.",
     # ── keyboard buttons (admin) ──────────────────────────────────────────────
     "btn_approve": "Approve",
     "btn_reject": "Reject",

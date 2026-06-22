@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 25
+CURRENT_SCHEMA_VERSION = 26
 logger = logging.getLogger(__name__)
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
@@ -273,7 +273,11 @@ class Database:
         if version < 25:
             await self._migrate_v25()
             await self._set_schema_version(25)
-            version = 24
+            version = 25
+        if version < 26:
+            await self._migrate_v26()
+            await self._set_schema_version(26)
+            version = 26
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -964,6 +968,21 @@ class Database:
             """
         )
         await self.conn.execute("INSERT OR IGNORE INTO maintenance_settings (id) VALUES (1)")
+
+    async def _migrate_v26(self) -> None:
+        # Per-user settings on the users table:
+        #  - language: NULL means "follow the global BOT_LANGUAGE default"; values
+        #    'ru'/'en' override it for that user.
+        #  - expiry_notifications_enabled: opt-out toggle for the "key expires in N
+        #    days" reminders (1 = receive, default). Guarded by column checks so the
+        #    migration is idempotent. Also declared in schema.sql for fresh DBs.
+        user_cols = await self._table_columns("users")
+        if "language" not in user_cols:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN language TEXT DEFAULT NULL")
+        if "expiry_notifications_enabled" not in user_cols:
+            await self.conn.execute(
+                "ALTER TABLE users ADD COLUMN expiry_notifications_enabled INTEGER NOT NULL DEFAULT 1"
+            )
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(
