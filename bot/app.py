@@ -22,9 +22,10 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_dashboard, admin_modules, admin_warp, admin_warp_split, admin_warp_split_ui, callbacks, common, keys, proxy, start
+from bot.handlers import admin, admin_dashboard, admin_maintenance, admin_modules, admin_warp, admin_warp_split, admin_warp_split_ui, callbacks, common, keys, proxy, start
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
+from bot.middlewares.maintenance import MaintenanceModeMiddleware
 from bot.rate_limit import RateLimiter
 from config.settings import Settings
 from db.database import Database
@@ -39,6 +40,7 @@ from repositories.proxy_accesses import ProxyAccessRepository
 from repositories.traffic_stats import TrafficStatsRepository
 from repositories.trial_requests import TrialKeyRequestRepository
 from repositories.users import UserRepository
+from repositories.maintenance_settings import MaintenanceSettingsRepository
 from repositories.server_status_settings import ServerStatusSettingsRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.access_approval import AccessApprovalService
@@ -50,6 +52,7 @@ from services.awg import AwgService
 from services.backend_health import BackendHealth
 from services.dashboard import DashboardService
 from services.key_expiry import KeyExpiryService
+from services.maintenance import MaintenanceService
 from services.offsite_backup import OffsiteBackupService
 from services.notes import NotesService
 from services.online_clients import OnlineClientsService
@@ -411,6 +414,11 @@ async def _build_app(
     # Restore the persisted detailed-metrics toggle so the sampler resumes
     # (or stays out of) background history collection across restarts.
     server_status_service.set_detailed(await server_status_settings_repo.get())
+    maintenance_settings_repo = MaintenanceSettingsRepository(db)
+    maintenance_service = MaintenanceService(maintenance_settings_repo, user_service, audit_service)
+    # Restore the persisted maintenance flag so the request gate resumes the same
+    # state across restarts (e.g. a crash mid-maintenance must not silently reopen).
+    await maintenance_service.load()
     online_clients_service = OnlineClientsService(
         awg_adapter=awg_service.adapter,
         xray_stats=xray_stats_adapter,
@@ -459,6 +467,7 @@ async def _build_app(
         server_status_settings=server_status_settings_repo,
         online_clients=online_clients_service,
         auto_refresh=auto_refresh_manager,
+        maintenance=maintenance_service,
     )
 
     await _startup_reconcile_keys(services)
@@ -478,6 +487,10 @@ async def _build_app(
         lambda user_id: dp.fsm.get_context(bot=bot, chat_id=user_id, user_id=user_id).clear()
     )
 
+    # Maintenance gate runs as the outermost outer-middleware: while maintenance
+    # is on, every non-superadmin update is short-circuited with the banner before
+    # the blocked-user gate or any handler sees it. When off it is a zero-DB no-op.
+    maintenance_middleware = MaintenanceModeMiddleware(maintenance_service, settings)
     blocked_middleware = BlockedUserMiddleware(user_service)
     for observer in (
         dp.message,
@@ -487,6 +500,7 @@ async def _build_app(
         dp.channel_post,
         dp.my_chat_member,
     ):
+        observer.outer_middleware(maintenance_middleware)
         observer.outer_middleware(blocked_middleware)
 
     # Runs after the blocked-user gate so the cleanup only fires for callbacks
@@ -501,6 +515,7 @@ async def _build_app(
     dp.include_router(admin_warp_split.router)
     dp.include_router(admin_warp_split_ui.router)
     dp.include_router(admin_modules.router)
+    dp.include_router(admin_maintenance.router)
     dp.include_router(keys.router)
     dp.include_router(proxy.router)
     dp.include_router(callbacks.router)

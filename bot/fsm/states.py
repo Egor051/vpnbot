@@ -46,6 +46,10 @@ class AdminAnnouncementStates(StatesGroup):
     waiting_schedule_time = State()
 
 
+class MaintenanceStates(StatesGroup):
+    waiting_message = State()
+
+
 class TrialRequestStates(StatesGroup):
     choosing_protocol = State()
     confirming = State()

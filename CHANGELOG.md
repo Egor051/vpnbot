@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Maintenance mode + banner for users during works** — a superadmin can put the
+  bot into maintenance from the admin panel (**🛠 Режим обслуживания**). While it
+  is on, every non-superadmin update is short-circuited by a new outer
+  `MaintenanceModeMiddleware` (registered ahead of the blocked-user gate) that
+  replies with a banner instead of handling the request; superadmins (identified
+  by `ADMIN_IDS`) keep full access so they can carry out the works. Enabling
+  prompts for an optional custom banner (FSM step; "No text" uses an i18n default),
+  and both enabling and disabling push a one-off broadcast to all eligible users
+  via the new best-effort `AnnouncementService.send_text_to_all` (same recipient
+  pagination / rate-limiting as announcements). The flag is persisted in a new
+  single-row `maintenance_settings` table (schema v25, mirrors
+  `server_status_settings`) and restored into an in-memory snapshot at startup, so
+  the gate survives restarts and costs zero DB reads while maintenance is off. The
+  custom banner is HTML-escaped at a single choke point (`MaintenanceService.banner_text`)
+  before it reaches any HTML-rendered surface. New i18n keys were added to both locales.
+
 - **"Server status" panel shows the hypervisor's CPU share next to CPU usage** —
   the `⚙️ CPU` line now appends, in parentheses after the ordinary CPU%, the
   percentage of CPU time stolen by the hypervisor (the `/proc/stat` "steal"

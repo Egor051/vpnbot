@@ -454,6 +454,7 @@ STRINGS: dict[str, str] = {
     "btn_key_stats": "📊 Статистика ключей",
     "btn_proxy_status": "🌐 Прокси: статус и статистика",
     "btn_modules": "⚙️ Модули протоколов",
+    "btn_maintenance": "🛠 Режим обслуживания",
     "btn_backend_diagnostics": "🔍 Диагностика backend",
     "btn_action_logs": "📜 Логи действий",
     "btn_issue_key_to_user": "🔑 Выдать ключ пользователю",
@@ -497,6 +498,29 @@ STRINGS: dict[str, str] = {
     "server_status_net_peak": "пик",
     "btn_server_status_detailed_on": "🔬 Подробные метрики: ВКЛ",
     "btn_server_status_detailed_off": "🔬 Подробные метрики: ВЫКЛ",
+    # ── maintenance mode ──────────────────────────────────────────────────────
+    "btn_maintenance_enable": "🛠 Включить режим обслуживания",
+    "btn_maintenance_disable": "✅ Завершить работы",
+    "btn_maintenance_skip_text": "Без текста (по умолчанию)",
+    "maintenance_panel_title": "<b>🛠 Режим обслуживания</b>",
+    "maintenance_status_on": "Статус: 🔴 ВКЛЮЧЁН",
+    "maintenance_status_off": "Статус: 🟢 выключен",
+    "maintenance_started_at": "Включён: {time}",
+    "maintenance_current_banner": "Текст баннера для пользователей:\n{banner}",
+    "maintenance_enable_prompt": (
+        "Отправьте текст баннера, который увидят пользователи во время работ, "
+        "или нажмите «Без текста», чтобы показать стандартное сообщение."
+    ),
+    "maintenance_default_banner": (
+        "🛠 Идут технические работы. Бот временно недоступен. "
+        "Пожалуйста, попробуйте позже."
+    ),
+    "maintenance_enabling": "Включаю режим обслуживания…",
+    "maintenance_disabling": "Завершаю работы…",
+    "maintenance_broadcast_on": "🛠 Уважаемые пользователи!\n\n{banner}",
+    "maintenance_broadcast_off": "✅ Технические работы завершены. Бот снова доступен. Спасибо за ожидание!",
+    "maintenance_enabled_ok": "Режим обслуживания включён. Уведомление получили {count} польз.",
+    "maintenance_disabled_ok": "Режим обслуживания выключен. Уведомление получили {count} польз.",
     # ── keyboard buttons (keys) ───────────────────────────────────────────────
     "btn_back": "Назад",
     "btn_config": "Конфиг",
