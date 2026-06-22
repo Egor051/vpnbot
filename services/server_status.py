@@ -57,6 +57,10 @@ class ServerStatus:
     net_out_mbps: float
     net_available: bool
     sampled_at: datetime | None = None
+    # Share of CPU time stolen by the hypervisor (the "steal" counter from
+    # /proc/stat). Tracks the same availability as ``cpu_percent`` — it is only
+    # meaningful when ``cpu_available`` is set. Defaults to 0.0 (e.g. bare metal).
+    cpu_steal_percent: float = 0.0
     # Swap usage is always read (cheap, point-in-time from /proc/meminfo). A host
     # with no swap configured reports total 0.0, rendered as "off" by the formatter.
     swap_used_gb: float = 0.0
@@ -84,8 +88,8 @@ class ServerStatus:
         return max(self.disk_total_gb - self.disk_free_gb, 0.0)
 
 
-def _read_cpu_times() -> tuple[int, int] | None:
-    """Return (total_jiffies, idle_jiffies) from the aggregate line of /proc/stat."""
+def _read_cpu_times() -> tuple[int, int, int] | None:
+    """Return (total_jiffies, idle_jiffies, steal_jiffies) from /proc/stat's aggregate line."""
     try:
         with open("/proc/stat", encoding="ascii") as fh:
             line = fh.readline()
@@ -103,7 +107,11 @@ def _read_cpu_times() -> tuple[int, int] | None:
     # "Busy" idle is idle + iowait; everything counts toward the total.
     idle = values[3] + values[4]
     total = sum(values)
-    return total, idle
+    # "steal" is the time the hypervisor ran other guests instead of this VM —
+    # i.e. CPU consumed by the hypervisor. Absent on bare metal and on kernels
+    # older than 2.6.11, so default to 0 when the field is missing.
+    steal = values[7] if len(values) > 7 else 0
+    return total, idle, steal
 
 
 def _read_net_bytes() -> tuple[int, int] | None:
@@ -242,13 +250,22 @@ def _trend(values: list[float]) -> str:
     return "flat"
 
 
-def _cpu_percent(before: tuple[int, int], after: tuple[int, int]) -> float:
+def _cpu_percent(before: tuple[int, int, int], after: tuple[int, int, int]) -> float:
     total_delta = after[0] - before[0]
     idle_delta = after[1] - before[1]
     if total_delta <= 0:
         return 0.0
     busy = total_delta - idle_delta
     return max(0.0, min(100.0, busy / total_delta * 100.0))
+
+
+def _cpu_steal_percent(before: tuple[int, int, int], after: tuple[int, int, int]) -> float:
+    """Share of the measurement window the hypervisor stole from this VM."""
+    total_delta = after[0] - before[0]
+    if total_delta <= 0:
+        return 0.0
+    steal_delta = max(after[2] - before[2], 0)
+    return max(0.0, min(100.0, steal_delta / total_delta * 100.0))
 
 
 def _net_mbps(before: int, after: int, interval: float) -> float:
@@ -286,7 +303,7 @@ class ServerStatusService:
         self._clock = clock
         self._sleep = sleep
         self._wall_clock = wall_clock
-        self._prev_cpu: tuple[int, int] | None = None
+        self._prev_cpu: tuple[int, int, int] | None = None
         self._prev_net: tuple[int, int] | None = None
         self._prev_time: float | None = None
         self._latest: ServerStatus | None = None
@@ -395,9 +412,11 @@ class ServerStatusService:
         cpu_values = [s.cpu_percent for s in recent if s.cpu_available]
         if cpu_values:
             cpu_percent = _mean(cpu_values)
+            cpu_steal_percent = _mean([s.cpu_steal_percent for s in recent if s.cpu_available])
             cpu_available = True
         else:
             cpu_percent = 0.0
+            cpu_steal_percent = 0.0
             cpu_available = False
 
         net_in_values = [s.net_in_mbps for s in recent if s.net_available]
@@ -428,6 +447,7 @@ class ServerStatusService:
         return replace(
             latest,
             cpu_percent=cpu_percent,
+            cpu_steal_percent=cpu_steal_percent,
             cpu_available=cpu_available,
             net_in_mbps=net_in,
             net_out_mbps=net_out,
@@ -443,9 +463,11 @@ class ServerStatusService:
 
         if self._prev_cpu is not None and cpu_now is not None:
             cpu_percent = _cpu_percent(self._prev_cpu, cpu_now)
+            cpu_steal_percent = _cpu_steal_percent(self._prev_cpu, cpu_now)
             cpu_available = True
         else:
             cpu_percent = 0.0
+            cpu_steal_percent = 0.0
             cpu_available = False
 
         if self._prev_net is not None and self._prev_time is not None and net_now is not None:
@@ -477,6 +499,7 @@ class ServerStatusService:
         status = ServerStatus(
             cpu_percent=cpu_percent,
             cpu_available=cpu_available,
+            cpu_steal_percent=cpu_steal_percent,
             ram_used_gb=ram_used_gb,
             ram_total_gb=ram_total_gb,
             disk_free_gb=disk_free_gb,

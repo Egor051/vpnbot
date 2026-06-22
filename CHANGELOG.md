@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **"Server status" panel shows the hypervisor's CPU share next to CPU usage** —
+  the `⚙️ CPU` line now appends, in parentheses after the ordinary CPU%, the
+  percentage of CPU time stolen by the hypervisor (the `/proc/stat` "steal"
+  counter), e.g. `⚙️ CPU: 8.3% (гипервизор: 2.4%)`. The figure is sampled and
+  smoothed alongside the regular CPU% (same averaging window and availability),
+  defaults to 0.0% on bare metal / kernels without a steal field, and is hidden
+  entirely when CPU is unavailable. It is shown only here — no other panel
+  surfaces it. A new `server_status_cpu_hypervisor` i18n key was added to both
+  locales.
+
 - **"Server status" panel shows the snapshot time as a freshness indicator** —
   the title line now carries an italic "обновлено HH:MM:SS" ("updated HH:MM:SS")
   mark (UTC, matching the dashboard). The timestamp is stamped on the
