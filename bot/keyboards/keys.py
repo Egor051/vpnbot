@@ -13,13 +13,20 @@ VALID_FINGERPRINTS = [
 
 
 def create_key_keyboard(
-    *, xray_enabled: bool = True, awg_enabled: bool = True, xhttp_enabled: bool = False
+    *,
+    xray_enabled: bool = True,
+    awg_enabled: bool = True,
+    xhttp_enabled: bool = False,
+    back_data: str = "keys:list",
 ) -> InlineKeyboardMarkup:
     """Build the protocol selection keyboard for creating a new key (step 1).
 
     With XHTTP disabled there is only one VLESS transport, so the VLESS button
     goes straight to TCP key creation (no redundant single-option transport
     step). The transport step is offered only when XHTTP is enabled.
+
+    ``back_data`` controls where the «back» button returns to so the flow can
+    honour its entry point (the main menu vs. the «My keys» list).
     """
     rows: list[list[InlineKeyboardButton]] = []
     if xray_enabled:
@@ -27,7 +34,7 @@ def create_key_keyboard(
         rows.append([InlineKeyboardButton(text="VLESS", callback_data=vless_data)])
     if awg_enabled:
         rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="keys:create:awg")])
-    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="keys:list")])
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data=back_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

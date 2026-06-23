@@ -282,14 +282,26 @@ def test_pagination_splits_into_pages(monkeypatch) -> None:
     btns0 = _buttons(cb0.message.edits[-1][1])
     del_btns = [data for _, data in btns0 if data and data.startswith("wsplit:del:")]
     assert len(del_btns) == 8  # one 🗑 per prefix on the page
-    assert any(data == "wsplit:p:1" for _, data in btns0)  # next exists
+    assert (t("btn_next"), "wsplit:p:1") in btns0  # next exists
     assert all(data != "wsplit:p:-1" for _, data in btns0)  # no prev on first page
+    # First page omits the prev control entirely — no placeholder "·" dot, matching
+    # the main-menu FAQ pagination style.
+    assert all(text != "·" for text, _ in btns0)
+    assert all(text != t("btn_prev") for text, _ in btns0)
 
     cb1 = _Callback("wsplit:p:1")
     asyncio.run(warp_split_panel(cb1, _State(), _services(split)))  # type: ignore[arg-type]
     btns1 = _buttons(cb1.message.edits[-1][1])
-    assert any(data == "wsplit:p:0" for _, data in btns1)  # prev
-    assert any(data == "wsplit:p:2" for _, data in btns1)  # next
+    assert (t("btn_prev"), "wsplit:p:0") in btns1  # prev
+    assert (t("btn_next"), "wsplit:p:2") in btns1  # next
+
+    cb2 = _Callback("wsplit:p:2")
+    asyncio.run(warp_split_panel(cb2, _State(), _services(split)))  # type: ignore[arg-type]
+    btns2 = _buttons(cb2.message.edits[-1][1])
+    # Last page omits the next control entirely — again, no placeholder dot.
+    assert all(text != "·" for text, _ in btns2)
+    assert all(text != t("btn_next") for text, _ in btns2)
+    assert (t("btn_prev"), "wsplit:p:1") in btns2
 
 
 # ── apply ────────────────────────────────────────────────────────────────────

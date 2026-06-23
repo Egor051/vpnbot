@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **«Создать ключ» → «Назад» from the main menu now returns to the main menu.**
+  The create-key screen's back button was hard-wired to «Мои ключи», so entering
+  it from the main-menu **➕ Создать ключ** button and pressing back dropped the
+  user into the key list instead of back where they came from. The main-menu entry
+  now carries a `keys:create:menu` marker and the screen routes its back button to
+  the correct origin (main menu vs. the «My keys» list); the reply-keyboard entry
+  likewise returns to the main menu.
+- **Clearer "1 key = 1 device" FAQ wording.** The `faq_device` answer said sharing
+  one key across devices *may* cause problems; in practice it always does (devices
+  keep dropping each other's connection). Both locales now state the problem is
+  guaranteed and advise creating a separate key per device.
+- **Standardised WARP split-routes pagination.** In the admin WARP tunnel
+  → settings → split-routes panel, the prev/next controls were replaced by a «·»
+  placeholder dot on the first/last page, breaking the look of every other paginated
+  list. The pager now mirrors the main-menu FAQ pagination: the prev/next button is
+  simply omitted at the edges (no dot) and the page counter stays centred.
+
 ## [2.1.0] — 2026-06-22
 
 ### Added

@@ -28,7 +28,7 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     """Build the main menu inline keyboard, optionally with the admin panel entry."""
     rows = [
         [InlineKeyboardButton(text=t("btn_my_keys"), callback_data="keys:list")],
-        [InlineKeyboardButton(text=t("btn_create_key"), callback_data="keys:create")],
+        [InlineKeyboardButton(text=t("btn_create_key"), callback_data="keys:create:menu")],
         [InlineKeyboardButton(text=t("btn_proxy"), callback_data="proxy:show")],
         [InlineKeyboardButton(text=t("btn_settings"), callback_data="settings:open")],
         [InlineKeyboardButton(text=t("btn_help"), callback_data="help")],
