@@ -192,7 +192,6 @@ STRINGS: dict[str, str] = {
     "private_only_text": "This operation is available in private chat with the bot only.",
     "admin_private_only_text": "Admin panel is available in private chat with the bot only.",
     # ── FAQ ───────────────────────────────────────────────────────────────────
-    "faq_title": "<b>Frequently Asked Questions</b>",
     "faq_page_title": "<b>Frequently Asked Questions</b> · page {page} of {total}",
     "faq_connect": (
         "After creating a key, the bot will provide the configuration. Copy it into a suitable VPN app "
@@ -206,7 +205,9 @@ STRINGS: dict[str, str] = {
         "<b>AWG:</b> if the connection is unstable or won't connect, try lowering the MTU to 1280 "
         "(use the «Change MTU» button in the key settings).\n\n"
         "<b>Xray:</b> if the connection won't establish, try changing the fingerprint "
-        "(use the «Change Fingerprint» button in the key settings). Good starting options: Firefox or Randomized.\n\n"
+        "(use the «Change Fingerprint» button in the key settings). Good starting options: Firefox or Edge. "
+        "If that doesn't help, try creating a new Xray key with a different transport (TCP / XHTTP) — "
+        "the transport choice is offered during key creation.\n\n"
         "If the problem persists, contact support."
     ),
     "faq_key_statuses": (
@@ -234,7 +235,14 @@ STRINGS: dict[str, str] = {
         "Open «My keys», select the key, and tap «Statistics». "
         "You'll see incoming and outgoing traffic volumes. Data is updated automatically."
     ),
-    "faq_choice": "If you're not sure what to choose, start with XRay.",
+    "faq_choice": (
+        "<b>AWG (AmneziaWG)</b> — based on WireGuard: simpler and faster, with lower latency. "
+        "A good pick when VPNs aren't blocked.\n\n"
+        "<b>Xray (VLESS + REALITY)</b> — disguises traffic as ordinary HTTPS, better at bypassing "
+        "blocks and DPI, but a bit more complex and sometimes slightly slower.\n\n"
+        "If you're not sure what to choose, start with Xray — it's more reliable under blocking. "
+        "If top speed matters and there's no blocking, go with AWG."
+    ),
     "faq_fingerprint": (
         "A fingerprint is an imitation of the TLS stack of a popular browser or device. "
         "Xray pretends to be a regular browser so its traffic looks like ordinary HTTPS. "
@@ -261,12 +269,35 @@ STRINGS: dict[str, str] = {
         "<b>MTProto</b> — a proxy specifically for Telegram when it's blocked without VPN.\n\n"
         "Proxies work independently from VPN keys."
     ),
+    "faq_settings": (
+        "The Settings section holds your personal preferences:\n\n"
+        "👤 <b>Personal cabinet</b> — your profile and stats: role, registration date, number of "
+        "active keys and proxy accesses, total traffic.\n\n"
+        "🌐 <b>Language</b> — the bot interface language (Russian or English), for you only.\n\n"
+        "🔔 <b>Expiry notifications</b> — reminders that a key is about to expire; you can turn them "
+        "off. The message about an already-expired key being auto-revoked is sent regardless."
+    ),
     "faq_server_restart": (
         "Yes, this is expected. The server restarts on even-numbered dates at 04:00 MSK. "
         "The restart takes a few minutes — the connection briefly drops and reconnects automatically."
     ),
-    "faq_notes": "No. Your notes are not visible to anyone.",
-    "faq_support": "Support: @ktotakmoje",
+    "faq_security": (
+        "<b>We don't log your activity.</b> We don't record which sites you open, and we don't "
+        "store the contents of your traffic — the tunnel is opaque to us.\n\n"
+        "<b>Encryption.</b> The connection is protected by modern protocols (AmneziaWG / "
+        "VLESS+REALITY), and the traffic can't be read from the outside.\n\n"
+        "<b>Only you can see your key notes</b> — they just help you tell devices apart and are "
+        "not shown to anyone.\n\n"
+        "Still have privacy questions? Contact support."
+    ),
+    "faq_support": (
+        "Support: @ktotakmoje\n\n"
+        "To help you faster, please include up front:\n"
+        "• the key type (AWG or Xray) and its number;\n"
+        "• your device and app;\n"
+        "• what you've already tried (see «Why doesn't it work?»).\n\n"
+        "We usually reply within a day."
+    ),
     "faq_not_found": "Answer not found.",
     # ── errors ────────────────────────────────────────────────────────────────
     "internal_error": "An internal error occurred. Please try again later.",
@@ -459,8 +490,9 @@ STRINGS: dict[str, str] = {
     "btn_faq_mtu": "What is MTU?",
     "btn_faq_note_why": "Why add a note to a key?",
     "btn_faq_proxy": "What is a proxy?",
+    "btn_faq_settings": "What's in Settings?",
     "btn_faq_server_restart": "Server restarting — is that normal?",
-    "btn_faq_notes": "Can anyone see my notes?",
+    "btn_faq_security": "Security & privacy",
     "btn_faq_support": "Support",
     "btn_keyboard_placeholder": "Choose an action",
     # ── settings & personal cabinet ───────────────────────────────────────────
