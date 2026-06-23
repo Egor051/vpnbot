@@ -19,6 +19,7 @@ async def main() -> None:
 
     from adapters.health_server import create_health_app
     from bot.app import _awg_stats_loop, _xray_stats_loop, create_app
+    from bot.commands import setup_bot_commands
     from bot.fsm.ttl_storage import TTLMemoryStorage, fsm_cleanup_loop
     from services.anomaly_detection import anomaly_detection_loop
     from services.key_expiry import key_expiry_loop
@@ -104,6 +105,7 @@ async def main() -> None:
                 except Exception:
                     logger.warning("WARP routing module autostart failed; continuing", exc_info=True)
             await bot.delete_webhook(drop_pending_updates=settings.bot_drop_pending_updates)
+            await setup_bot_commands(bot, settings)
             logger.info("VPN bot started")
             await dp.start_polling(bot)
         finally:
