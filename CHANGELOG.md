@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Slash-command menu in Telegram (`set_my_commands`).** On startup the bot now
+  publishes its commands so they appear in Telegram's command menu (the «/» button)
+  with localized descriptions. Regular users see the public commands (`/start`,
+  `/menu`, `/settings`, `/help`, `/faq`, `/cancel`); superadmins additionally see
+  the privileged ones (`/admin`, `/moderator`, `/warp_split_*`) scoped to their own
+  chat (`BotCommandScopeChat`) so they never leak into the public menu. Descriptions
+  are served in ru/en plus the configured `BOT_LANGUAGE` fallback. A failed sync is
+  logged and never blocks startup — commands still work by typing them.
+
 ### Fixed
 
 - **«Создать ключ» → «Назад» from the main menu now returns to the main menu.**
