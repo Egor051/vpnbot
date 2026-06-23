@@ -538,6 +538,35 @@ def test_set_detailed_off_clears_history(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(service._net_out_buckets) == 0
 
 
+def test_reset_network_history_clears_window_without_disabling_detailed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-opening the status panel starts the sparkline from an empty window
+    while detailed mode stays on, so stale columns can't carry over."""
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500, 0))
+    monkeypatch.setattr(ss, "_read_net_bytes", lambda: (0, 0))
+    monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
+    monkeypatch.setattr(ss, "_read_swap_gb", lambda: (0.0, 0.0))
+    monkeypatch.setattr(ss, "_read_loadavg", lambda: (0.1, 0.2, 0.3))
+    monkeypatch.setattr(ss, "_read_uptime", lambda: 1.0)
+    monkeypatch.setattr(ServerStatusService, "_read_disk", lambda self: (5.0, 10.0))
+
+    service = ServerStatusService()
+    service.set_detailed(True)
+    for _ in range(4):
+        service._sample_once()
+    asyncio.run(service.snapshot_averaged())  # freeze a column into the window
+    assert len(service._net_in_buckets) > 0 or len(service._bucket_in_samples) > 0
+
+    service.reset_network_history()
+
+    assert service.detailed is True  # detailed mode is untouched
+    assert len(service._bucket_in_samples) == 0
+    assert len(service._bucket_out_samples) == 0
+    assert len(service._net_in_buckets) == 0
+    assert len(service._net_out_buckets) == 0
+
+
 # --- snapshot_averaged: smoothed head-line rate metrics ----------------------
 
 

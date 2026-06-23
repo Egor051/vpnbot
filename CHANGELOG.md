@@ -24,6 +24,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   placeholder dot on the first/last page, breaking the look of every other paginated
   list. The pager now mirrors the main-menu FAQ pagination: the prev/next button is
   simply omitted at the edges (no dot) and the page counter stays centred.
+- **Server-status sparkline starts fresh on every open.** The detailed network
+  history (the sparkline plus the avg/peak/trend derived from the same window) was
+  retained between viewings, so re-opening the **Статус сервера** panel showed stale
+  columns from a previous session. Opening the panel now resets the network-history
+  window (`ServerStatusService.reset_network_history`) before the first render;
+  detailed mode and the live auto-refresh tick are untouched.
+- **Corrected & expanded the "How to connect" FAQ.** It claimed AWG "typically uses
+  a `.conf` file", which is inaccurate — depending on the client, both AWG and Xray
+  keys can be added by link/profile *or* by config file. The answer now says so,
+  recommends concrete apps (AmneziaVPN for AWG, v2RayTun / Hiddify / NekoBox for
+  Xray), and adds a paragraph advising users to keep several keys across different
+  protocols/transports so a single one degrading under blocking doesn't cut them off.
+- **"All systems operational" reassurance on the main menu.** Between the server-restart
+  warning and the "Choose an action" line, the main menu now shows a ✅ "Все системы
+  работают в штатном режиме" / "All systems operational" status line, so a healthy bot
+  visibly says so instead of only ever surfacing warnings.
 
 ## [2.1.0] — 2026-06-22
 
