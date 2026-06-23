@@ -740,6 +740,29 @@ def test_vless_transport_keyboard_hides_http_when_disabled() -> None:
     assert "keys:create:xhttp" not in _button_callbacks(disabled)
 
 
+def test_create_key_keyboard_back_button_follows_entry_point() -> None:
+    # Entered from the key list -> "back" returns to the key list.
+    from_list = create_key_keyboard(xray_enabled=True, awg_enabled=True, xhttp_enabled=True)
+    assert "keys:list" in _button_callbacks(from_list)
+    assert "keys:proto:vless" in _button_callbacks(from_list)
+
+    # Entered from the main menu -> "back" returns to the main menu, and the
+    # transport step inherits the menu origin.
+    from_menu = create_key_keyboard(xray_enabled=True, awg_enabled=True, xhttp_enabled=True, from_menu=True)
+    assert "menu:main" in _button_callbacks(from_menu)
+    assert "keys:list" not in _button_callbacks(from_menu)
+    assert "keys:proto:vless:menu" in _button_callbacks(from_menu)
+
+
+def test_vless_transport_keyboard_back_button_follows_entry_point() -> None:
+    from_list = vless_transport_keyboard(xhttp_enabled=True)
+    assert "keys:create" in _button_callbacks(from_list)
+    assert "keys:create:menu" not in _button_callbacks(from_list)
+
+    from_menu = vless_transport_keyboard(xhttp_enabled=True, from_menu=True)
+    assert "keys:create:menu" in _button_callbacks(from_menu)
+
+
 def test_admin_transport_keyboard_routes_by_user() -> None:
     # XHTTP enabled -> VLESS leads to the transport selection step.
     proto = admin_key_type_keyboard(555, xray_enabled=True, awg_enabled=True, xhttp_enabled=True)

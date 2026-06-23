@@ -104,9 +104,13 @@ async def list_keys_message(message: Message, services: Services) -> None:
         await answer_message_error(message, exc)
 
 
-@router.callback_query(F.data == "keys:create")
+@router.callback_query(F.data.in_({"keys:create", "keys:create:menu"}))
 async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
-    """Show the key type selection menu for creating a key."""
+    """Show the key type selection menu for creating a key.
+
+    ``keys:create:menu`` is sent from the main menu and ``keys:create`` from the
+    key list, so the "back" button can return the user to the right screen.
+    """
     if not await ensure_private_callback(callback):
         return
     try:
@@ -118,13 +122,14 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
         await answer_callback_error(callback, exc)
         return
     if callback.message:
+        from_menu = callback.data == "keys:create:menu"
         xray_on = await services.modules.is_enabled("xray")
         awg_on = await services.modules.is_enabled("awg")
         await safe_edit_message_text(
             callback.message,
             f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
             reply_markup=create_key_keyboard(
-                xray_enabled=xray_on, awg_enabled=awg_on, xhttp_enabled=services.settings.xray_xhttp_enabled
+                xray_enabled=xray_on, awg_enabled=awg_on, xhttp_enabled=services.settings.xray_xhttp_enabled, from_menu=from_menu
             ),
         )
 
@@ -143,14 +148,14 @@ async def create_key_menu_message(message: Message, services: Services) -> None:
         await message.answer(
             f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
             reply_markup=create_key_keyboard(
-                xray_enabled=xray_on, awg_enabled=awg_on, xhttp_enabled=services.settings.xray_xhttp_enabled
+                xray_enabled=xray_on, awg_enabled=awg_on, xhttp_enabled=services.settings.xray_xhttp_enabled, from_menu=True
             ),
         )
     except Exception as exc:
         await answer_message_error(message, exc)
 
 
-@router.callback_query(F.data == "keys:proto:vless")
+@router.callback_query(F.data.in_({"keys:proto:vless", "keys:proto:vless:menu"}))
 async def create_key_proto_vless(callback: CallbackQuery, services: Services) -> None:
     """Show the VLESS transport selection (step 2) for the chosen VLESS protocol."""
     if not await ensure_private_callback(callback):
@@ -158,12 +163,13 @@ async def create_key_proto_vless(callback: CallbackQuery, services: Services) ->
     if callback.from_user is None or callback.message is None:
         return
     try:
+        from_menu = callback.data == "keys:proto:vless:menu"
         await _ensure_can_enter_create(callback.from_user.id, services)
         await safe_callback_answer(callback)
         await safe_edit_message_text(
             callback.message,
             t("choose_vless_transport"),
-            reply_markup=vless_transport_keyboard(xhttp_enabled=services.settings.xray_xhttp_enabled),
+            reply_markup=vless_transport_keyboard(xhttp_enabled=services.settings.xray_xhttp_enabled, from_menu=from_menu),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)

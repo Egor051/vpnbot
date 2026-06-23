@@ -13,32 +13,45 @@ VALID_FINGERPRINTS = [
 
 
 def create_key_keyboard(
-    *, xray_enabled: bool = True, awg_enabled: bool = True, xhttp_enabled: bool = False
+    *, xray_enabled: bool = True, awg_enabled: bool = True, xhttp_enabled: bool = False, from_menu: bool = False
 ) -> InlineKeyboardMarkup:
     """Build the protocol selection keyboard for creating a new key (step 1).
 
     With XHTTP disabled there is only one VLESS transport, so the VLESS button
     goes straight to TCP key creation (no redundant single-option transport
     step). The transport step is offered only when XHTTP is enabled.
+
+    ``from_menu`` records that the flow was entered from the main menu (rather
+    than the key list) so the "back" button returns there instead of to the
+    key list.
     """
     rows: list[list[InlineKeyboardButton]] = []
     if xray_enabled:
-        vless_data = "keys:proto:vless" if xhttp_enabled else "keys:create:xray"
+        if xhttp_enabled:
+            vless_data = "keys:proto:vless:menu" if from_menu else "keys:proto:vless"
+        else:
+            vless_data = "keys:create:xray"
         rows.append([InlineKeyboardButton(text="VLESS", callback_data=vless_data)])
     if awg_enabled:
         rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="keys:create:awg")])
-    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="keys:list")])
+    back_data = "menu:main" if from_menu else "keys:list"
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data=back_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def vless_transport_keyboard(*, xhttp_enabled: bool = False) -> InlineKeyboardMarkup:
-    """Build the VLESS transport selection keyboard (step 2, VLESS only)."""
+def vless_transport_keyboard(*, xhttp_enabled: bool = False, from_menu: bool = False) -> InlineKeyboardMarkup:
+    """Build the VLESS transport selection keyboard (step 2, VLESS only).
+
+    ``from_menu`` is threaded back to the protocol step so the "back" button
+    preserves the original entry point (main menu vs. key list).
+    """
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="VLESS (TCP)", callback_data="keys:create:xray")],
     ]
     if xhttp_enabled:
         rows.append([InlineKeyboardButton(text="VLESS (HTTP)", callback_data="keys:create:xhttp")])
-    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="keys:create")])
+    back_data = "keys:create:menu" if from_menu else "keys:create"
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data=back_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

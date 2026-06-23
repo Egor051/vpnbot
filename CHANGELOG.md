@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **"Back" from the create-key menu now respects the entry point** — opening
+  **➕ Создать ключ / Create key** from the main menu and then pressing **« Назад /
+  Back** returned the user to the **🔑 Мои ключи / My keys** list instead of the
+  main menu. The main-menu entry now uses a distinct `keys:create:menu` callback so
+  the protocol-selection screen sends its "back" button to `menu:main`, while the
+  key-list entry (`keys:create`) keeps returning to the list. The origin is threaded
+  through the optional VLESS transport step too, so navigation stays consistent when
+  XHTTP is enabled.
+
+- **Clearer "1 key = 1 device" FAQ wording** — the `faq_device` answer said that
+  using one key on several devices *may* cause an unstable connection; in practice it
+  always does, so both locales now state that the connection will be unstable
+  (devices interfere with each other and keep dropping).
+
 ## [2.1.0] — 2026-06-22
 
 ### Added

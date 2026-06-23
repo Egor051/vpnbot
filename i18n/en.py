@@ -228,8 +228,9 @@ STRINGS: dict[str, str] = {
         "Extending an existing key is not possible."
     ),
     "faq_device": (
-        "Yes. One key is intended for one device. Using the same key on multiple devices "
-        "may cause unstable connections and mixed-up statistics and access management."
+        "Yes. One key is intended strictly for one device. Using the same key on several devices at once "
+        "will inevitably make the connection unstable: the devices interfere with each other and keep "
+        "dropping, while statistics and access management get mixed up."
     ),
     "faq_stats": (
         "Open «My keys», select the key, and tap «Statistics». "
