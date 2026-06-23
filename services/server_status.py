@@ -340,10 +340,20 @@ class ServerStatusService:
             return
         self._detailed = enabled
         if not enabled:
-            self._net_in_buckets.clear()
-            self._net_out_buckets.clear()
-            self._bucket_in_samples.clear()
-            self._bucket_out_samples.clear()
+            self.reset_network_history()
+
+    def reset_network_history(self) -> None:
+        """Drop the accumulated network-history window.
+
+        Called when the status panel is freshly opened so the sparkline — and the
+        avg/peak/trend figures derived from the same window — start empty instead
+        of showing stale columns left over from a previous viewing, which would
+        otherwise misrepresent the current moment.
+        """
+        self._net_in_buckets.clear()
+        self._net_out_buckets.clear()
+        self._bucket_in_samples.clear()
+        self._bucket_out_samples.clear()
 
     async def run(self) -> None:
         """Continuously sample host metrics until cancelled.

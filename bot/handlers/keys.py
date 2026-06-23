@@ -104,9 +104,14 @@ async def list_keys_message(message: Message, services: Services) -> None:
         await answer_message_error(message, exc)
 
 
-@router.callback_query(F.data == "keys:create")
+@router.callback_query(F.data.in_({"keys:create", "keys:create:menu"}))
 async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
-    """Show the key type selection menu for creating a key."""
+    """Show the key type selection menu for creating a key.
+
+    Entered either from the main menu (``keys:create:menu`` → back returns to the
+    main menu) or from the «My keys» list (``keys:create`` → back returns to the
+    list), so the «back» button honours where the user came from.
+    """
     if not await ensure_private_callback(callback):
         return
     try:
@@ -120,11 +125,15 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
     if callback.message:
         xray_on = await services.modules.is_enabled("xray")
         awg_on = await services.modules.is_enabled("awg")
+        back_data = "menu:main" if callback.data == "keys:create:menu" else "keys:list"
         await safe_edit_message_text(
             callback.message,
             f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
             reply_markup=create_key_keyboard(
-                xray_enabled=xray_on, awg_enabled=awg_on, xhttp_enabled=services.settings.xray_xhttp_enabled
+                xray_enabled=xray_on,
+                awg_enabled=awg_on,
+                xhttp_enabled=services.settings.xray_xhttp_enabled,
+                back_data=back_data,
             ),
         )
 
@@ -143,7 +152,10 @@ async def create_key_menu_message(message: Message, services: Services) -> None:
         await message.answer(
             f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
             reply_markup=create_key_keyboard(
-                xray_enabled=xray_on, awg_enabled=awg_on, xhttp_enabled=services.settings.xray_xhttp_enabled
+                xray_enabled=xray_on,
+                awg_enabled=awg_on,
+                xhttp_enabled=services.settings.xray_xhttp_enabled,
+                back_data="menu:main",
             ),
         )
     except Exception as exc:

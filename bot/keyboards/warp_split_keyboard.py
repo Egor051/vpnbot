@@ -60,17 +60,16 @@ def warp_split_panel_keyboard(entries: list[str], page: int) -> InlineKeyboardMa
     rows.append(action_row)
 
     if total_pages > 1:
-        rows.append(
-            [
-                InlineKeyboardButton(text="◀", callback_data=f"wsplit:p:{page - 1}")
-                if page > 0
-                else InlineKeyboardButton(text="·", callback_data="noop"),
-                InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"),
-                InlineKeyboardButton(text="▶", callback_data=f"wsplit:p:{page + 1}")
-                if page < total_pages - 1
-                else InlineKeyboardButton(text="·", callback_data="noop"),
-            ]
-        )
+        # Mirror the main-menu FAQ pagination: omit the prev/next button on the
+        # first/last page instead of substituting a placeholder dot, keeping the
+        # page counter always centred.
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=f"wsplit:p:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1} / {total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"wsplit:p:{page + 1}"))
+        rows.append(nav)
 
     # The Split GUI is entered from «Настройки WARP», so Back returns there.
     rows.append([InlineKeyboardButton(text="⬅ Назад в настройки", callback_data="admin:warp:settings")])

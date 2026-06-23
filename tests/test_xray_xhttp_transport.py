@@ -728,6 +728,18 @@ def test_create_key_keyboard_offers_vless_protocol() -> None:
     assert "keys:proto:vless" not in _button_callbacks(disabled)
 
 
+def test_create_key_keyboard_back_button_honours_entry_point() -> None:
+    # Default (entered from the «My keys» list) -> back returns to the list.
+    from_list = create_key_keyboard(xray_enabled=True, awg_enabled=True)
+    assert "keys:list" in _button_callbacks(from_list)
+    assert "menu:main" not in _button_callbacks(from_list)
+
+    # Entered from the main menu -> back returns to the main menu, not «My keys».
+    from_menu = create_key_keyboard(xray_enabled=True, awg_enabled=True, back_data="menu:main")
+    assert "menu:main" in _button_callbacks(from_menu)
+    assert "keys:list" not in _button_callbacks(from_menu)
+
+
 def test_vless_transport_keyboard_hides_http_when_disabled() -> None:
     enabled = vless_transport_keyboard(xhttp_enabled=True)
     assert "VLESS (TCP)" in _button_texts(enabled)

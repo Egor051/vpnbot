@@ -40,6 +40,7 @@ class _RecordingServerStatus:
     def __init__(self) -> None:
         self.snapshot_calls = 0
         self.snapshot_averaged_calls = 0
+        self.reset_calls = 0
         self.detailed = False
 
     async def snapshot(self) -> ServerStatus:
@@ -49,6 +50,9 @@ class _RecordingServerStatus:
     async def snapshot_averaged(self) -> ServerStatus:
         self.snapshot_averaged_calls += 1
         return _status()
+
+    def reset_network_history(self) -> None:
+        self.reset_calls += 1
 
 
 class _Online:
@@ -139,3 +143,35 @@ def test_auto_refresh_tick_uses_snapshot_averaged(monkeypatch: pytest.MonkeyPatc
     assert alive is True
     assert srv.snapshot_averaged_calls == 1
     assert srv.snapshot_calls == 0
+    # The live tick must not wipe the sparkline window — only a fresh open does.
+    assert srv.reset_calls == 0
+
+
+def test_open_panel_resets_sparkline_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opening the panel clears stale sparkline columns from a previous viewing
+    before the first render, so the window starts empty."""
+    srv = _RecordingServerStatus()
+    services = _services(srv)
+
+    async def fake_private(_callback: object, _text: str) -> bool:
+        return True
+
+    async def fake_super(_services: object, _uid: int) -> None:
+        return None
+
+    async def fake_answer(_callback: object, _text: str = "") -> None:
+        return None
+
+    async def fake_edit(_message: object, _text: str, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(dash, "ensure_private_callback", fake_private)
+    monkeypatch.setattr(dash, "require_superadmin", fake_super)
+    monkeypatch.setattr(dash, "safe_callback_answer", fake_answer)
+    monkeypatch.setattr(dash, "safe_edit_message_text", fake_edit)
+
+    callback = SimpleNamespace(from_user=SimpleNamespace(id=7), message=_Msg())
+    asyncio.run(dash.admin_server_status(callback, services))  # type: ignore[arg-type]
+
+    assert srv.reset_calls == 1
+    assert srv.snapshot_averaged_calls == 1

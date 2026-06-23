@@ -65,7 +65,7 @@ STRINGS: dict[str, str] = {
         "🚫🚫🚫 STRICTLY PROHIBITED: downloading or using the MAX messenger on the same device where VPN is used\n"
         "🚫🚫🚫 STRICTLY PROHIBITED: downloading torrent content through VPN"
     ),
-    "main_menu_text": "Hello, {name}!\n\n{rules}\n\n{warning}\n\nChoose an action.",
+    "main_menu_text": "Hello, {name}!\n\n{rules}\n\n{warning}\n\n✅ All systems operational.\n\nChoose an action.",
     # ── keys page ─────────────────────────────────────────────────────────────
     "keys_user_title": "<b>User's keys</b>",
     "keys_my_title": "<b>My keys</b>",
@@ -195,8 +195,13 @@ STRINGS: dict[str, str] = {
     "faq_page_title": "<b>Frequently Asked Questions</b> · page {page} of {total}",
     "faq_connect": (
         "After creating a key, the bot will provide the configuration. Copy it into a suitable VPN app "
-        "or import the file if available. AWG typically uses a .conf config file; "
-        "Xray uses a link/profile. After importing, enable the connection in your app."
+        "or import the file if available. Depending on the client, both AWG and Xray keys can be added "
+        "either via a link (profile) or via a config file. After importing, enable the connection in your app.\n\n"
+        "<b>Recommended apps:</b> for AWG — the official AmneziaVPN client; "
+        "for Xray — v2RayTun (or alternatives such as Hiddify or NekoBox).\n\n"
+        "<b>Tip:</b> keep several different keys — with different protocols and/or transports "
+        "(e.g. AWG and Xray TCP/XHTTP). If one of them starts to degrade due to blocking, you can "
+        "switch to another and won't be left without a connection."
     ),
     "faq_trouble": (
         "Check your internet, the imported profile, the access expiry date, and whether the same key "
@@ -228,8 +233,9 @@ STRINGS: dict[str, str] = {
         "Extending an existing key is not possible."
     ),
     "faq_device": (
-        "Yes. One key is intended for one device. Using the same key on multiple devices "
-        "may cause unstable connections and mixed-up statistics and access management."
+        "Yes. One key is meant strictly for one device. Using the same key on multiple devices "
+        "will inevitably cause problems: connections become unstable (devices keep dropping each "
+        "other), and statistics and access management get mixed up. Create a separate key for each device."
     ),
     "faq_stats": (
         "Open «My keys», select the key, and tap «Statistics». "

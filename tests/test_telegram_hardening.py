@@ -114,7 +114,7 @@ def _main_menu_buttons(is_admin: bool = False) -> list[tuple[str, str | None]]:
 def test_main_menu_regular_user_uses_inline_buttons() -> None:
     assert _main_menu_buttons() == [
         ("🔑 Мои ключи", "keys:list"),
-        ("➕ Создать ключ", "keys:create"),
+        ("➕ Создать ключ", "keys:create:menu"),
         ("🌐 Прокси", "proxy:show"),
         ("⚙️ Настройки", "settings:open"),
         ("❓ Помощь", "help"),
@@ -125,8 +125,8 @@ def test_main_menu_admin_has_admin_button_and_complete_create_key_text() -> None
     buttons = _main_menu_buttons(is_admin=True)
 
     assert len(buttons) == 6
-    assert ("➕ Создать ключ", "keys:create") in buttons
-    assert ("Создать клю", "keys:create") not in buttons
+    assert ("➕ Создать ключ", "keys:create:menu") in buttons
+    assert ("Создать клю", "keys:create:menu") not in buttons
     assert ("⚙️ Настройки", "settings:open") in buttons
     assert buttons[-1] == ("🛡 Админ-панель", "admin:panel")
 
@@ -163,7 +163,7 @@ def test_start_command_sends_inline_main_menu_for_approved_users() -> None:
         assert not hasattr(markup, "keyboard")
         assert [(button.text, button.callback_data) for row in markup.inline_keyboard for button in row] == [
             ("🔑 Мои ключи", "keys:list"),
-            ("➕ Создать ключ", "keys:create"),
+            ("➕ Создать ключ", "keys:create:menu"),
             ("🌐 Прокси", "proxy:show"),
             ("⚙️ Настройки", "settings:open"),
             ("❓ Помощь", "help"),
@@ -679,6 +679,43 @@ def test_create_key_menu_ignores_stale_callback_answer(monkeypatch) -> None:
         assert callback.answer_calls == 1
         assert len(edits) == 1
         assert "Выберите протокол:" in edits[0]
+
+    asyncio.run(run())
+
+
+def test_create_menu_back_button_returns_to_entry_point(monkeypatch) -> None:
+    """The create-key «back» button honours where the flow was entered from."""
+    markups: list[object] = []
+
+    async def fake_edit(message: object, text: str, reply_markup: object = None, **kwargs: object) -> None:
+        markups.append(reply_markup)
+
+    monkeypatch.setattr("bot.handlers.keys.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.keys.safe_edit_message_text", fake_edit)
+
+    class Users:
+        async def require_approved_or_admin(self, actor_user_id: int) -> User:
+            return User(actor_user_id, "user", "User", UserRole.APPROVED_USER, "now", "now", None)
+
+    def _back_callbacks(markup: object) -> list[str | None]:
+        return [b.callback_data for row in markup.inline_keyboard for b in row]  # type: ignore[attr-defined]
+
+    async def run() -> None:
+        services = SimpleNamespace(
+            users=Users(),
+            modules=_modules_enabled(),
+            settings=SimpleNamespace(xray_xhttp_enabled=False),
+        )
+
+        # Entered from the main menu -> back returns to the main menu.
+        await create_key_menu(_Callback("keys:create:menu", user_id=100), services)  # type: ignore[arg-type]
+        assert "menu:main" in _back_callbacks(markups[-1])
+        assert "keys:list" not in _back_callbacks(markups[-1])
+
+        # Entered from the «My keys» list -> back returns to the list.
+        await create_key_menu(_Callback("keys:create", user_id=100), services)  # type: ignore[arg-type]
+        assert "keys:list" in _back_callbacks(markups[-1])
+        assert "menu:main" not in _back_callbacks(markups[-1])
 
     asyncio.run(run())
 
