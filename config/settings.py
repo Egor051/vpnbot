@@ -313,11 +313,16 @@ class Settings:
     # ``warp-routes.service``). Set to False only to restore the legacy model where
     # the bot itself brings the interface up/down and adds/removes the routes.
     warp_monitor_observer_mode: bool = True
-    # Consecutive failed/successful probes before the monitor declares the tunnel
-    # down / back up. The fail threshold is > 1 so a single dropped probe never
-    # raises a false alarm.
-    warp_monitor_fail_threshold: int = 4
-    warp_monitor_success_threshold: int = 3
+    # Time-based switch windows: the monitor declares the tunnel down only after
+    # ``fail_window`` seconds of continuous no-response, and back up only after
+    # ``recover_window`` seconds of continuous success — so a single dropped (or single
+    # recovered) probe never flaps the routing. The probe cadence is adaptive:
+    # ``interval`` seconds while the last probe answered, dropping to ``fast_interval``
+    # the moment a probe gets no response.
+    warp_monitor_fail_window_seconds: int = 60
+    warp_monitor_recover_window_seconds: int = 60
+    warp_monitor_interval_seconds: int = 10
+    warp_monitor_fast_interval_seconds: int = 3
     # Selective-split list and its privileged apply helper.
     # The bot reads the list file directly (0644); writes go exclusively through
     # the helper which validates, writes atomically, and restarts the service.
@@ -657,8 +662,10 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         warp_status_helper_path=Path(_optional("WARP_STATUS_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-status")),
         warp_helper_staging_dir=Path(_optional("WARP_HELPER_STAGING_DIR", str(helper_staging_root / "warp"))),
         warp_monitor_observer_mode=_bool("WARP_MONITOR_OBSERVER_MODE", True),
-        warp_monitor_fail_threshold=_int_range("WARP_MONITOR_FAIL_THRESHOLD", 4, 1, 1000),
-        warp_monitor_success_threshold=_int_range("WARP_MONITOR_SUCCESS_THRESHOLD", 3, 1, 1000),
+        warp_monitor_fail_window_seconds=_int_range("WARP_MONITOR_FAIL_WINDOW_SECONDS", 60, 1, 3600),
+        warp_monitor_recover_window_seconds=_int_range("WARP_MONITOR_RECOVER_WINDOW_SECONDS", 60, 1, 3600),
+        warp_monitor_interval_seconds=_int_range("WARP_MONITOR_INTERVAL_SECONDS", 10, 1, 3600),
+        warp_monitor_fast_interval_seconds=_int_range("WARP_MONITOR_FAST_INTERVAL_SECONDS", 3, 1, 3600),
         warp_split_list_path=Path(
             _optional("WARP_SPLIT_LIST_PATH", "/etc/vpnbot/warp-split.list")
         ),

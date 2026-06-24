@@ -12,6 +12,19 @@ from warp.manager import WarpManager, _noop_route
 from warp.state import WarpState
 
 
+class _Clock:
+    """Controllable monotonic clock for deterministic time-based latch tests."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, dt: float) -> None:
+        self.now += dt
+
+
 class _Recorder:
     def __init__(self, ping_results: list[bool]) -> None:
         self._results: Iterator[bool] = iter(ping_results)
@@ -46,6 +59,9 @@ def _monitor(
     initial_routes_active: bool = True,
     with_notify_callbacks: bool = False,
     observer_mode: bool = False,
+    fail_window: float = 2,
+    recover_window: float = 3,
+    clock: _Clock | None = None,
 ) -> WarpHealthMonitor:
     return WarpHealthMonitor(
         ping=rec.ping,
@@ -54,72 +70,97 @@ def _monitor(
         on_update=rec.on_update,
         on_tunnel_down=rec.on_tunnel_down if with_notify_callbacks else None,
         on_tunnel_recovered=rec.on_tunnel_recovered if with_notify_callbacks else None,
-        fail_threshold=2,
-        recover_threshold=3,
+        fail_window=fail_window,
+        recover_window=recover_window,
         initial_routes_active=initial_routes_active,
         observer_mode=observer_mode,
+        clock=clock if clock is not None else _Clock(),
     )
 
 
-async def test_two_failures_remove_routes_once() -> None:
+async def _check_at(monitor: WarpHealthMonitor, clk: _Clock, t: float) -> HealthSnapshot:
+    """Run one probe with the clock pinned to ``t``."""
+    clk.now = t
+    return await monitor.check_once()
+
+
+async def test_no_response_for_fail_window_removes_routes_once() -> None:
+    clk = _Clock()
     rec = _Recorder([False, False, False])
-    monitor = _monitor(rec)
+    monitor = _monitor(rec, fail_window=2, clock=clk)
 
-    s1 = await monitor.check_once()
+    s1 = await _check_at(monitor, clk, 0)
     assert s1.fail_streak == 1 and monitor.routes_active is True
-    assert rec.deactivations == 0
+    assert rec.deactivations == 0  # window not elapsed yet
 
-    s2 = await monitor.check_once()
+    s2 = await _check_at(monitor, clk, 2)
     assert s2.fail_streak == 2 and monitor.routes_active is False
-    assert rec.deactivations == 1
+    assert rec.deactivations == 1  # 2s of continuous no response
 
     # A third failure does not remove routes again (already down).
-    s3 = await monitor.check_once()
+    s3 = await _check_at(monitor, clk, 4)
     assert s3.fail_streak == 3 and rec.deactivations == 1
 
 
-async def test_three_successes_restore_routes_once() -> None:
+async def test_continuous_success_for_recover_window_restores_routes_once() -> None:
     # Start with routes already removed (tunnel was down).
-    rec = _Recorder([True, True, True, True])
-    monitor = _monitor(rec, initial_routes_active=False)
+    clk = _Clock()
+    rec = _Recorder([True, True, True])
+    monitor = _monitor(rec, initial_routes_active=False, recover_window=3, clock=clk)
 
-    s1 = await monitor.check_once()
+    s1 = await _check_at(monitor, clk, 0)
     assert s1.success_streak == 1 and monitor.routes_active is False
     assert rec.activations == 0
 
-    s2 = await monitor.check_once()
+    s2 = await _check_at(monitor, clk, 1)
     assert s2.success_streak == 2 and monitor.routes_active is False
 
-    s3 = await monitor.check_once()
+    s3 = await _check_at(monitor, clk, 3)
     assert s3.success_streak == 3 and monitor.routes_active is True
-    assert rec.activations == 1
+    assert rec.activations == 1  # 3s of continuous success
 
-    # A fourth success does not re-add routes.
-    await monitor.check_once()
-    assert rec.activations == 1
+
+async def test_single_success_resets_the_fail_window() -> None:
+    # A lone success in the middle of an outage restarts the no-response window so the
+    # tunnel is never declared down without a *continuous* fail run.
+    clk = _Clock()
+    rec = _Recorder([False, True, False, False])
+    monitor = _monitor(rec, fail_window=2, with_notify_callbacks=True, clock=clk)
+
+    await _check_at(monitor, clk, 0)  # fail, _fail_since=0
+    await _check_at(monitor, clk, 1)  # success resets the window
+    assert rec.tunnel_down_calls == 0
+
+    await _check_at(monitor, clk, 2)  # fail again, _fail_since=2
+    assert rec.tunnel_down_calls == 0  # only 0s into the fresh window
+    await _check_at(monitor, clk, 4)  # 2s of continuous fail -> down
+    assert rec.tunnel_down_calls == 1
 
 
 async def test_failure_resets_success_streak() -> None:
+    clk = _Clock()
     rec = _Recorder([True, True, False, True])
-    monitor = _monitor(rec, initial_routes_active=True)
+    monitor = _monitor(rec, initial_routes_active=True, clock=clk)
 
-    await monitor.check_once()
-    await monitor.check_once()
+    await _check_at(monitor, clk, 0)
+    await _check_at(monitor, clk, 1)
     assert rec.snapshots[-1].success_streak == 2
 
-    snap_fail = await monitor.check_once()
+    snap_fail = await _check_at(monitor, clk, 2)
     assert snap_fail.success_streak == 0 and snap_fail.fail_streak == 1
 
-    snap_ok = await monitor.check_once()
+    snap_ok = await _check_at(monitor, clk, 3)
     assert snap_ok.success_streak == 1 and snap_ok.fail_streak == 0
 
 
 async def test_full_outage_and_recovery_cycle() -> None:
-    # 2 fails -> fallback, then 3 successes -> restored.
+    # No response across the fail window -> fallback, then continuous success across the
+    # recover window -> restored.
+    clk = _Clock()
     rec = _Recorder([False, False, True, True, True])
-    monitor = _monitor(rec, initial_routes_active=True)
-    for _ in range(5):
-        await monitor.check_once()
+    monitor = _monitor(rec, initial_routes_active=True, fail_window=2, recover_window=3, clock=clk)
+    for t in (0, 2, 4, 6, 8):
+        await _check_at(monitor, clk, t)
     assert rec.deactivations == 1
     assert rec.activations == 1
     assert monitor.routes_active is True
@@ -136,44 +177,67 @@ async def test_snapshot_reports_tunnel_state() -> None:
     assert down.tunnel_up is False
 
 
-def test_class_thresholds_match_spec() -> None:
+def test_class_constants_match_spec() -> None:
     assert WarpHealthMonitor.INTERVAL == 10
-    # The fail threshold is intentionally > 1 so a single dropped probe never flaps.
-    assert WarpHealthMonitor.FAIL_THRESHOLD == 4
-    assert WarpHealthMonitor.RECOVER_THRESHOLD == 3
+    assert WarpHealthMonitor.FAST_INTERVAL == 3
+    # Time-based switch windows: 60s of continuous no-response / success to flip.
+    assert WarpHealthMonitor.FAIL_WINDOW == 60
+    assert WarpHealthMonitor.RECOVER_WINDOW == 60
+
+
+# ── adaptive cadence ─────────────────────────────────────────────────────────
+
+
+async def test_next_interval_adapts_to_last_probe() -> None:
+    rec = _Recorder([True, False, True])
+    monitor = _monitor(rec)
+    # Defaults: 10s normal, 3s while failing.
+    assert monitor._interval == 10
+    assert monitor._fast_interval == 3
+    # Before any probe: normal cadence.
+    assert monitor._next_interval() == 10
+
+    await monitor.check_once()  # success
+    assert monitor._next_interval() == 10
+    await monitor.check_once()  # no response -> speed up
+    assert monitor._next_interval() == 3
+    await monitor.check_once()  # response again -> relax
+    assert monitor._next_interval() == 10
 
 
 # ── on_tunnel_down / on_tunnel_recovered callbacks ────────────────────────────
 
-async def test_on_tunnel_down_called_when_threshold_crossed() -> None:
+async def test_on_tunnel_down_called_when_window_crossed() -> None:
+    clk = _Clock()
     rec = _Recorder([False, False, False])
-    monitor = _monitor(rec, with_notify_callbacks=True)
+    monitor = _monitor(rec, fail_window=2, with_notify_callbacks=True, clock=clk)
 
-    await monitor.check_once()
+    await _check_at(monitor, clk, 0)
     assert rec.tunnel_down_calls == 0
 
-    await monitor.check_once()
+    await _check_at(monitor, clk, 2)
     assert rec.tunnel_down_calls == 1
 
     # Third failure: routes already removed, callback not called again.
-    await monitor.check_once()
+    await _check_at(monitor, clk, 4)
     assert rec.tunnel_down_calls == 1
 
 
-async def test_on_tunnel_recovered_called_when_threshold_crossed() -> None:
+async def test_on_tunnel_recovered_called_when_window_crossed() -> None:
+    clk = _Clock()
     rec = _Recorder([True, True, True, True])
-    monitor = _monitor(rec, initial_routes_active=False, with_notify_callbacks=True)
+    monitor = _monitor(rec, initial_routes_active=False, recover_window=3, with_notify_callbacks=True, clock=clk)
 
-    await monitor.check_once()
+    await _check_at(monitor, clk, 0)
     assert rec.tunnel_recovered_calls == 0
-    await monitor.check_once()
+    await _check_at(monitor, clk, 1)
     assert rec.tunnel_recovered_calls == 0
 
-    await monitor.check_once()
+    await _check_at(monitor, clk, 3)
     assert rec.tunnel_recovered_calls == 1
 
     # Fourth success: routes already active, callback not called again.
-    await monitor.check_once()
+    await _check_at(monitor, clk, 4)
     assert rec.tunnel_recovered_calls == 1
 
 
@@ -181,6 +245,7 @@ async def test_on_tunnel_down_exception_is_suppressed() -> None:
     async def boom() -> None:
         raise RuntimeError("notify failed")
 
+    clk = _Clock()
     rec = _Recorder([False, False])
     monitor = WarpHealthMonitor(
         ping=rec.ping,
@@ -188,12 +253,13 @@ async def test_on_tunnel_down_exception_is_suppressed() -> None:
         deactivate_routes=rec.deactivate,
         on_update=rec.on_update,
         on_tunnel_down=boom,
-        fail_threshold=2,
-        recover_threshold=3,
+        fail_window=2,
+        recover_window=3,
+        clock=clk,
     )
     # Should not raise even though on_tunnel_down raises.
-    await monitor.check_once()
-    await monitor.check_once()
+    await _check_at(monitor, clk, 0)
+    await _check_at(monitor, clk, 2)
     assert rec.deactivations == 1
 
 
@@ -201,6 +267,7 @@ async def test_on_tunnel_recovered_exception_is_suppressed() -> None:
     async def boom() -> None:
         raise RuntimeError("notify failed")
 
+    clk = _Clock()
     rec = _Recorder([True, True, True])
     monitor = WarpHealthMonitor(
         ping=rec.ping,
@@ -208,35 +275,38 @@ async def test_on_tunnel_recovered_exception_is_suppressed() -> None:
         deactivate_routes=rec.deactivate,
         on_update=rec.on_update,
         on_tunnel_recovered=boom,
-        fail_threshold=2,
-        recover_threshold=3,
+        fail_window=2,
+        recover_window=3,
         initial_routes_active=False,
+        clock=clk,
     )
-    for _ in range(3):
-        await monitor.check_once()
+    for t in (0, 1, 3):
+        await _check_at(monitor, clk, t)
     assert rec.activations == 1
 
 
 async def test_no_callbacks_when_none() -> None:
     # Passing None callbacks must not raise.
+    clk = _Clock()
     rec = _Recorder([False, False, True, True, True])
-    monitor = _monitor(rec, initial_routes_active=True, with_notify_callbacks=False)
-    for _ in range(5):
-        await monitor.check_once()
+    monitor = _monitor(rec, initial_routes_active=True, fail_window=2, recover_window=3, clock=clk)
+    for t in (0, 2, 4, 6, 8):
+        await _check_at(monitor, clk, t)
     assert rec.deactivations == 1 and rec.activations == 1
 
 
 # ── observer mode: never touch routes, only observe + notify ──────────────────
 
 async def test_observer_mode_down_notifies_without_route_calls() -> None:
+    clk = _Clock()
     rec = _Recorder([False, False, False])
-    monitor = _monitor(rec, observer_mode=True, with_notify_callbacks=True)
+    monitor = _monitor(rec, observer_mode=True, fail_window=2, with_notify_callbacks=True, clock=clk)
 
-    await monitor.check_once()
+    await _check_at(monitor, clk, 0)
     assert rec.tunnel_down_calls == 0
 
-    # Threshold crossed: notify, but routes are NEVER touched (systemd owns them).
-    await monitor.check_once()
+    # Window crossed: notify, but routes are NEVER touched (systemd owns them).
+    await _check_at(monitor, clk, 2)
     assert rec.tunnel_down_calls == 1
     assert rec.deactivations == 0 and rec.activations == 0
     # routes_active stays True throughout — the bot does not manage it in observer mode.
@@ -245,12 +315,14 @@ async def test_observer_mode_down_notifies_without_route_calls() -> None:
 
 
 async def test_observer_mode_recovery_notifies_without_route_calls() -> None:
+    clk = _Clock()
     rec = _Recorder([False, False, True, True, True])
-    monitor = _monitor(rec, observer_mode=True, with_notify_callbacks=True)
-    for _ in range(5):
-        await monitor.check_once()
+    monitor = _monitor(rec, observer_mode=True, fail_window=2, recover_window=3, with_notify_callbacks=True, clock=clk)
+    for t in (0, 2, 4, 6, 8):
+        await _check_at(monitor, clk, t)
 
-    # 2 fails -> down notify, 3 successes -> recovered notify; no route calls at all.
+    # No response across the window -> down notify, continuous success across the window
+    # -> recovered notify; no route calls at all.
     assert rec.tunnel_down_calls == 1
     assert rec.tunnel_recovered_calls == 1
     assert rec.deactivations == 0 and rec.activations == 0
@@ -258,17 +330,19 @@ async def test_observer_mode_recovery_notifies_without_route_calls() -> None:
 
 
 async def test_observer_mode_notifies_only_on_state_change() -> None:
-    # Four straight failures must produce exactly one "down" notification (anti-spam).
+    # A sustained outage must produce exactly one "down" notification (anti-spam).
+    clk = _Clock()
     rec = _Recorder([False, False, False, False])
-    monitor = _monitor(rec, observer_mode=True, with_notify_callbacks=True)
-    for _ in range(4):
-        await monitor.check_once()
+    monitor = _monitor(rec, observer_mode=True, fail_window=2, with_notify_callbacks=True, clock=clk)
+    for t in (0, 2, 4, 6):
+        await _check_at(monitor, clk, t)
     assert rec.tunnel_down_calls == 1
     assert rec.deactivations == 0
 
 
-async def test_fail_threshold_is_honoured_from_constructor() -> None:
-    # With a higher threshold a single (or few) dropped probes do not trip a "down".
+async def test_fail_window_is_honoured_from_constructor() -> None:
+    # With a longer window, a brief outage does not trip a "down".
+    clk = _Clock()
     rec = _Recorder([False, False, False, False])
     monitor = WarpHealthMonitor(
         ping=rec.ping,
@@ -276,15 +350,16 @@ async def test_fail_threshold_is_honoured_from_constructor() -> None:
         deactivate_routes=rec.deactivate,
         on_update=rec.on_update,
         on_tunnel_down=rec.on_tunnel_down,
-        fail_threshold=4,
-        recover_threshold=3,
+        fail_window=4,
+        recover_window=3,
         observer_mode=True,
+        clock=clk,
     )
-    for _ in range(3):
-        await monitor.check_once()
-    assert rec.tunnel_down_calls == 0  # 3 < 4
-    await monitor.check_once()
-    assert rec.tunnel_down_calls == 1  # 4 == threshold
+    for t in (0, 1, 2):
+        await _check_at(monitor, clk, t)
+    assert rec.tunnel_down_calls == 0  # 2s < 4s window
+    await _check_at(monitor, clk, 4)
+    assert rec.tunnel_down_calls == 1  # 4s == window
 
 
 # ── WarpManager notification methods ─────────────────────────────────────────
@@ -378,8 +453,10 @@ def _lifecycle_manager(*, observer_mode: bool) -> WarpManager:
     manager = object.__new__(WarpManager)
     manager._settings = MagicMock(admin_ids=frozenset())
     manager._observer_mode = observer_mode
-    manager._fail_threshold = 4
-    manager._recover_threshold = 3
+    manager._fail_window = 60
+    manager._recover_window = 60
+    manager._interval = 10
+    manager._fast_interval = 3
     manager._running = False
     manager._monitor = None
     manager._last_error = None
@@ -412,13 +489,15 @@ async def test_observer_start_does_not_touch_interface_or_routes(monkeypatch) ->
     manager._routes.add.assert_not_called()
     manager._routes.remove.assert_not_called()
     assert manager._running is True
-    # Monitor wired as an observer with no-op route callbacks and the configured threshold.
+    # Monitor wired as an observer with no-op route callbacks and the configured windows.
     kwargs = fake_monitor_cls.call_args.kwargs
     assert kwargs["observer_mode"] is True
     assert kwargs["activate_routes"] is _noop_route
     assert kwargs["deactivate_routes"] is _noop_route
-    assert kwargs["fail_threshold"] == 4
-    assert kwargs["recover_threshold"] == 3
+    assert kwargs["fail_window"] == 60
+    assert kwargs["recover_window"] == 60
+    assert kwargs["interval"] == 10
+    assert kwargs["fast_interval"] == 3
 
 
 async def test_legacy_start_brings_up_interface_and_routes(monkeypatch) -> None:

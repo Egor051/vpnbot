@@ -586,9 +586,9 @@ How it works:
 
 1. `awg-quick up` brings the `out-warp` interface up from `/etc/amnezia/out-warp.conf`.
 2. System `ip route` entries are added for the CIDRs in the config via `out-warp`.
-3. An asyncio background task pings the tunnel every 10 s. After **2** consecutive
-   failures the routes are removed (traffic → direct); after **3** consecutive
-   successes they are restored.
+3. An asyncio background task pings the tunnel every 10 s, speeding up to every 3 s the
+   moment a probe gets no response. After **60 s** of continuous no-response the routes
+   are removed (traffic → direct); after **60 s** of continuous success they are restored.
 4. Disabling the module removes the routes and brings the interface down.
 
 The bot runs unprivileged: every root action goes through the `vpnbot-warp-*`
@@ -656,8 +656,10 @@ These default to the provided sudoers template paths. Changing `WARP_CONFIG_PATH
 | `WARP_HELPER_STAGING_DIR` | `/run/vpn-bot/warp` | Private dir for staged uploads |
 | `WARP_PING_TARGET` | `162.159.140.245` | ICMP target the health monitor pings to decide tunnel up/down. Default is a Cloudflare anycast address present in typical WARP `AllowedIPs`. Override if your `AllowedIPs` does not cover this address, otherwise the monitor reports false failures. |
 | `WARP_MONITOR_OBSERVER_MODE` | `true` | When true (default) the bot's health monitor only **observes** the tunnel (probes, DB state, admin notifications) and never touches the interface or routes — those are owned by systemd (`awg-quick@out-warp` + `warp-routes.service`). Set to `false` only to restore the legacy model where the bot itself brings the interface up/down and adds/removes the routes. |
-| `WARP_MONITOR_FAIL_THRESHOLD` | `4` | Consecutive failed probes before the monitor declares the tunnel down and notifies admins. Kept above 1 so a single dropped ICMP probe never raises a false alarm. |
-| `WARP_MONITOR_SUCCESS_THRESHOLD` | `3` | Consecutive successful probes before the monitor declares the tunnel recovered. |
+| `WARP_MONITOR_FAIL_WINDOW_SECONDS` | `60` | Seconds of **continuous** no-response before the monitor declares the tunnel down (and notifies admins). A single answered probe resets the window, so one dropped ICMP probe never raises a false alarm. |
+| `WARP_MONITOR_RECOVER_WINDOW_SECONDS` | `60` | Seconds of **continuous** success before the monitor declares the tunnel recovered. A single failed probe resets the window. |
+| `WARP_MONITOR_INTERVAL_SECONDS` | `10` | Probe interval during normal operation. |
+| `WARP_MONITOR_FAST_INTERVAL_SECONDS` | `3` | Faster probe interval used the moment a probe gets no response, so an outage (and the start of recovery) is detected quickly. |
 | `WARP_SPLIT_LIST_PATH` | `/etc/vpnbot/warp-split.list` | Path to the selective-split prefix list. The bot reads this file directly (0644); writes go exclusively via `WARP_SPLIT_APPLY_HELPER_PATH`. Change only if you relocate the file — update the sudoers grant to match. |
 | `WARP_SPLIT_APPLY_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-split-apply` | Privileged helper that validates, atomically writes the split list, and restarts `vpnbot-warp-split`. Must be root:root 0755 with a `NOPASSWD` sudoers grant. |
 | `WARP_SPLIT_STATE_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-split-state` | Privileged on/off/restart/status helper for the split **routing** (table T). The On/Off/Restart buttons call it to retract/re-apply the per-prefix `dev out-warp` routes and write the disabled marker — it never touches `awg-quick@out-warp`. Must be root:root 0755 with pinned-verb `NOPASSWD` grants. |

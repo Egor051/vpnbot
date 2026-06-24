@@ -68,8 +68,10 @@ class WarpManager:
             interface_name=self._interface_name,
         )
         self._observer_mode = settings.warp_monitor_observer_mode
-        self._fail_threshold = settings.warp_monitor_fail_threshold
-        self._recover_threshold = settings.warp_monitor_success_threshold
+        self._fail_window = settings.warp_monitor_fail_window_seconds
+        self._recover_window = settings.warp_monitor_recover_window_seconds
+        self._interval = settings.warp_monitor_interval_seconds
+        self._fast_interval = settings.warp_monitor_fast_interval_seconds
         self._lock = asyncio.Lock()
         self._running = False
         self._monitor: WarpHealthMonitor | None = None
@@ -230,8 +232,10 @@ class WarpManager:
             on_update=self._on_health_update,
             on_tunnel_down=self._notify_tunnel_down,
             on_tunnel_recovered=self._notify_tunnel_recovered,
-            fail_threshold=self._fail_threshold,
-            recover_threshold=self._recover_threshold,
+            interval=self._interval,
+            fast_interval=self._fast_interval,
+            fail_window=self._fail_window,
+            recover_window=self._recover_window,
             initial_routes_active=routes_active,
         )
         self._monitor.start()
@@ -276,8 +280,10 @@ class WarpManager:
             on_update=self._on_health_update,
             on_tunnel_down=self._notify_tunnel_down,
             on_tunnel_recovered=self._notify_tunnel_recovered,
-            fail_threshold=self._fail_threshold,
-            recover_threshold=self._recover_threshold,
+            interval=self._interval,
+            fast_interval=self._fast_interval,
+            fail_window=self._fail_window,
+            recover_window=self._recover_window,
             initial_routes_active=True,
             observer_mode=True,
         )
