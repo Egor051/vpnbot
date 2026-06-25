@@ -17,6 +17,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   are served in ru/en plus the configured `BOT_LANGUAGE` fallback. A failed sync is
   logged and never blocks startup — commands still work by typing them.
 
+### Changed
+
+- **WARP auto-switch is now time-based with an adaptive ping cadence.** The health
+  monitor no longer counts consecutive probes; it switches **warp → direct** only after
+  60 s of *continuous* no-response and **direct → warp** only after 60 s of *continuous*
+  success (a single opposite probe resets the running window). The probe interval is
+  adaptive: 10 s during normal operation, speeding up to 3 s the moment a probe gets no
+  response so an outage — and the start of recovery — is detected quickly. The windows
+  and both intervals are tunable via `WARP_MONITOR_FAIL_WINDOW_SECONDS`,
+  `WARP_MONITOR_RECOVER_WINDOW_SECONDS`, `WARP_MONITOR_INTERVAL_SECONDS` and
+  `WARP_MONITOR_FAST_INTERVAL_SECONDS`. **Breaking:** the old count-based
+  `WARP_MONITOR_FAIL_THRESHOLD` / `WARP_MONITOR_SUCCESS_THRESHOLD` env vars are removed.
+
 ### Fixed
 
 - **«Создать ключ» → «Назад» from the main menu now returns to the main menu.**

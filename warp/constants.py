@@ -15,13 +15,19 @@ PING_INTERFACE = "out-warp"
 # and the routes helper reads. Never hardcode the CIDRs themselves.
 ROUTES_LIST = "/etc/amnezia/out-warp-routes.list"
 
-# Health monitor thresholds. These are the built-in defaults; production reads the
-# effective values from ``config.settings`` (``WARP_MONITOR_FAIL_THRESHOLD`` /
-# ``WARP_MONITOR_SUCCESS_THRESHOLD``). The fail threshold is intentionally > 1 so a
-# single dropped ICMP probe never trips a false "tunnel down".
-CHECK_INTERVAL = 10     # seconds between tunnel liveness probes
-FAIL_THRESHOLD = 4      # consecutive failures before the tunnel is declared down
-RECOVER_THRESHOLD = 3   # consecutive successes before the tunnel is declared back up
+# Health monitor cadence and switch windows. These are the built-in defaults;
+# production reads the effective values from ``config.settings``
+# (``WARP_MONITOR_*`` env vars). The switch decision is time-based: the tunnel is
+# declared down only after ``FAIL_WINDOW_SECONDS`` of *continuous* no-response, and
+# back up only after ``RECOVER_WINDOW_SECONDS`` of *continuous* success — so a single
+# dropped (or single recovered) ICMP probe never flaps the routing. The probe cadence
+# is adaptive: ``CHECK_INTERVAL`` while the last probe answered, dropping to the faster
+# ``FAST_CHECK_INTERVAL`` the moment a probe gets no response so an outage (and the
+# start of recovery) is detected quickly.
+CHECK_INTERVAL = 10        # seconds between probes during normal operation
+FAST_CHECK_INTERVAL = 3    # seconds between probes while the last probe failed
+FAIL_WINDOW_SECONDS = 60   # continuous no-response before the tunnel is declared down
+RECOVER_WINDOW_SECONDS = 60  # continuous success before the tunnel is declared back up
 
 # A WireGuard handshake newer than this is treated as tunnel liveness when the
 # fixed ICMP probe target is unreachable (e.g. it is not inside the user's
