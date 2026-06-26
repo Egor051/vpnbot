@@ -491,7 +491,11 @@ class XrayService:
                 if not mapping:
                     continue
                 try:
-                    summary["renamed"] += await adapter.rename_clients(mapping)
+                    # prefer_restart: this xray unit's `reload` does not rebuild the
+                    # runtime client table, so a renamed email would never reach the
+                    # live inbound; restart it instead (resets per-email stats — an
+                    # accepted trade-off) and verify the runtime via statsquery.
+                    summary["renamed"] += await adapter.rename_clients(mapping, prefer_restart=True)
                 except Exception as exc:
                     summary["failed"] += 1
                     logger.warning(
