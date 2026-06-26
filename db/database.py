@@ -1085,8 +1085,10 @@ class Database:
 
     @staticmethod
     def _v28_load_json(value: object) -> dict[str, Any]:
+        if not isinstance(value, (str, bytes, bytearray)):
+            return {}
         try:
-            data = json.loads(value) if value else {}
+            data = json.loads(value)
         except (TypeError, ValueError):
             return {}
         return data if isinstance(data, dict) else {}

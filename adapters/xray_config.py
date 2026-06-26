@@ -325,9 +325,9 @@ class XrayConfigAdapter:
                     uuid_value = client.get("id")
                     if not isinstance(uuid_value, str):
                         continue
-                    new_email = renames.get(uuid_value)
-                    if new_email and client.get("email") != new_email:
-                        client["email"] = new_email
+                    desired = renames.get(uuid_value)
+                    if desired and client.get("email") != desired:
+                        client["email"] = desired
                         renamed += 1
                 if renamed == 0:
                     return 0
