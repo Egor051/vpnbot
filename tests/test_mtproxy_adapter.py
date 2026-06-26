@@ -190,9 +190,9 @@ def test_mtproxy_systemd_dropin_template_contains_no_raw_secret_surface() -> Non
 
 
 def test_readme_documents_root_wrapper_permissions_model() -> None:
-    text = Path("README.md").read_text(encoding="utf-8")
+    text = Path("docs/proxy.md").read_text(encoding="utf-8")
     assert "systemctl show mtproxy -p User -p Group -p ExecStart" in text
-    assert "wrapper запускается от root" in text
+    assert "the wrapper runs as root" in text
     assert "root:root" in text
     assert "0600" in text and "0700" in text
 

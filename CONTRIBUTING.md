@@ -183,7 +183,7 @@ real VPN backend:
 
 For SOCKS5 or managed MTProto testing, install Dante/MTProxy on the staging server
 and set `PRIVILEGE_HELPERS_ENABLED=true` with the helpers deployed as described in
-`README.md` and `deploy/helpers/README.md`.
+`docs/deployment.md` and `deploy/helpers/README.md`.
 
 ## Security Considerations
 
@@ -201,7 +201,11 @@ When adding features, observe these requirements:
 - **Config atomicity**: Xray and AWG config writes must use the backup/rollback
   pattern in `adapters/xray_config.py` and `adapters/awg_config.py`.
 - **New environment variables**: Add to `.env.example` (empty value) and
-  `config/settings.py`. Document the valid range and security impact.
+  `config/settings.py`, and document the variable (valid range, security impact)
+  in `docs/configuration.md` — the canonical reference the drift-guard test checks.
+- **Documentation**: User-facing docs live in `docs/` as bilingual pairs
+  (`<name>.md` + `<name>.ru.md`). When you change one language, mirror the change in
+  the other; `README.md` and `README_RU.md` stay short and link into `docs/`.
 - **New dependencies**: Add the pin to `requirements.txt` (or
   `requirements-dev.txt`), run `make update-hashes` (under Python 3.12) to
   regenerate the constraints files, and run `pip_audit` before committing. Never

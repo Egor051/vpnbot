@@ -1,10 +1,13 @@
 """Documentation-drift guard for environment variables.
 
 Every environment variable that ``config/settings.py`` actually reads must be
-documented in the canonical reference (README.md) and, unless it is a legacy
-alias, also offered in the .env.example template. This catches the case where a
-new tunable is wired into settings but never surfaced to operators (exactly how
-``WARP_PING_TARGET`` slipped through once).
+documented in the canonical reference (``docs/configuration.md``) and, unless it
+is a legacy alias, also offered in the .env.example template. This catches the
+case where a new tunable is wired into settings but never surfaced to operators
+(exactly how ``WARP_PING_TARGET`` slipped through once).
+
+The doc corpus is the README plus every English doc under ``docs/`` (``.ru.md``
+mirrors are excluded), so a variable documented in any of them counts.
 """
 from __future__ import annotations
 
@@ -15,6 +18,19 @@ ROOT = Path(__file__).resolve().parent.parent
 SETTINGS = ROOT / "config" / "settings.py"
 ENV_EXAMPLE = ROOT / ".env.example"
 README = ROOT / "README.md"
+DOCS = ROOT / "docs"
+
+
+def _docs_corpus() -> str:
+    """README + every English doc (excluding ``*.ru.md`` mirrors)."""
+    parts = [README.read_text()]
+    parts.extend(
+        p.read_text()
+        for p in sorted(DOCS.rglob("*.md"))
+        if not p.name.endswith(".ru.md")
+    )
+    return "\n".join(parts)
+
 
 # Helper calls in settings.py whose first string argument is an env var name.
 _ENV_CALL = re.compile(
@@ -40,9 +56,9 @@ def _settings_env_vars() -> set[str]:
 
 
 def test_every_setting_is_documented_in_readme() -> None:
-    readme = README.read_text()
-    undocumented = sorted(v for v in _settings_env_vars() if v not in readme)
-    assert not undocumented, f"env vars read by settings.py but absent from README.md: {undocumented}"
+    corpus = _docs_corpus()
+    undocumented = sorted(v for v in _settings_env_vars() if v not in corpus)
+    assert not undocumented, f"env vars read by settings.py but absent from README.md/docs: {undocumented}"
 
 
 def test_non_alias_settings_are_in_env_example() -> None:

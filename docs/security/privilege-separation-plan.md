@@ -1,6 +1,6 @@
-# Package 5 Privilege Separation Plan
+# Privilege Separation Architecture
 
-Status: The privilege-separation helper architecture (Package 5D) is implemented and shipped. Two deployment modes are supported:
+Status: The privilege-separation helper architecture is implemented and shipped. Two deployment modes are supported:
 
 - **root+api mode (shipped default).** `deploy/vpn-bot.service` runs as `User=root` with `ProtectSystem=false`; backend changes go through the Xray API and direct service control, and `PRIVILEGE_HELPERS_ENABLED` defaults to `false`. The sudo helpers are not used in this mode.
 - **non-root helper mode (hardened opt-in).** The bot runs as `User=vpn-bot`/`Group=vpn-bot` from `deploy/vpn-bot.nonroot.example.service`, and every privileged backend mutation is isolated behind fixed sudo helper entrypoints. This is the model the rest of this document and `deploy/check-nonroot-helper-mode.py` describe and validate.
@@ -132,7 +132,7 @@ Wildcard arguments in sudoers are acceptable only because they are attached to f
 
 ## Deployment State
 
-Package 5D closes the earlier Package 5B/5C rollout plan:
+The privilege-separation rollout is complete:
 
 1. Helpers are implemented and installed as fixed root-owned entrypoints.
 2. `deploy/vpn-bot.service` is the shipped root+api unit; `deploy/vpn-bot.nonroot.example.service` is the non-root helper-mode unit to install when opting into that model.

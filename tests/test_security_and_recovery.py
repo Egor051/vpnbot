@@ -289,23 +289,35 @@ def test_validate_xray_ready_api_mode_passes_with_required_fields() -> None:
 
 
 def test_readme_uses_env_example_as_canonical_source() -> None:
+    # The README is a short overview; the deep content moved into docs/. Each
+    # assertion is checked against the file that now owns it (drift guard).
     readme = Path("README.md").read_text(encoding="utf-8")
+    configuration = Path("docs/configuration.md").read_text(encoding="utf-8")
+    deployment = Path("docs/deployment.md").read_text(encoding="utf-8")
+    operations = Path("docs/operations.md").read_text(encoding="utf-8")
 
+    # README still points at .env.example as the copy-paste template.
     assert ".env.example" in readme
-    assert "install -o root -g root -m 0600 .env.example .env" in readme
-    assert "AWG_DNS" in readme
-    assert "legacy alias" in readme
-    assert "AWG_CLIENT_DNS=" not in readme
-    assert "XRAY_APPLY_MODE=restart" in readme
-    assert "SQLITE_SYNCHRONOUS=FULL" in readme
     assert "pip install -r requirements.txt -c constraints.txt" in readme
-    assert "Production Operations Runbook" in readme
-    assert "Backup" in readme
-    assert "Restore" in readme
-    assert "Firewall" in readme
-    assert "Read-only health checks" in readme
-    assert "Rollback after a bad deploy" in readme
-    assert "Never expose the Xray stats API to the internet" in readme
+
+    # Configuration reference owns the variable docs and legacy-alias guidance.
+    assert "AWG_DNS" in configuration
+    assert "legacy alias" in configuration
+    assert "AWG_CLIENT_DNS=" not in configuration
+    assert "SQLITE_SYNCHRONOUS=FULL" in configuration
+
+    # Deployment owns the install commands and apply-mode guidance.
+    assert "install -o root -g root -m 0600 .env.example .env" in deployment
+    assert "XRAY_APPLY_MODE=restart" in deployment
+
+    # Operations runbook owns the day-2 sections.
+    assert "Production Operations Runbook" in operations
+    assert "Backup" in operations
+    assert "Restore" in operations
+    assert "Firewall" in operations
+    assert "Read-only health checks" in operations
+    assert "Rollback after a bad deploy" in operations
+    assert "Never expose the Xray stats API to the internet" in operations
 
 
 def _pins(text: str) -> dict[str, str]:
