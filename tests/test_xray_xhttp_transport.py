@@ -679,25 +679,38 @@ def test_build_vless_link_http_profiles_roundtrip(tmp_path: Path) -> None:
             assert base_q["mode"] == ["stream-one"]
             assert "extra" not in base_q
 
-            # antisib: stream-one + xmux.maxConnections == 1.
+            # antisib: stream-one + xmux.maxConnections == 1, cMaxReuseTimes range.
             antisib_q = parse_qs(urlsplit(antisib).query)
             assert antisib_q["mode"] == ["stream-one"]
             assert "extra" in antisib_q
             antisib_extra = json.loads(antisib_q["extra"][0])
             assert antisib_extra["xmux"]["maxConnections"] == 1
+            assert antisib_extra["xmux"]["cMaxReuseTimes"] == "64-128"
 
-            # multi: packet-up + xmux.maxConnections == 2 + sc* tuning present.
+            # multi: packet-up + xmux.maxConnections == 2, hMaxReusableSecs (SECONDS,
+            # NOT the removed cMaxLifetimeMs in ms) + sc* tuning present.
             multi_q = parse_qs(urlsplit(multi).query)
             assert multi_q["mode"] == ["packet-up"]
             assert "extra" in multi_q
             multi_extra = json.loads(multi_q["extra"][0])
             assert multi_extra["xmux"]["maxConnections"] == 2
+            assert multi_extra["xmux"]["hMaxReusableSecs"] == "30-60"
             assert "scMaxEachPostBytes" in multi_extra
             assert "scMinPostsIntervalMs" in multi_extra
 
-            # No profile may carry maxConcurrency (Xray refuses to start otherwise).
-            for link in (base, antisib, multi):
+            # Guard-asserts that must fail loudly on a regression: no profile may
+            # carry maxConcurrency (mutually exclusive with maxConnections — Xray
+            # refuses to start), and the removed cMaxLifetimeMs (renamed to
+            # hMaxReusableSecs in Xray-core v25.3.6) must appear nowhere.
+            for link, q in ((base, base_q), (antisib, antisib_q), (multi, multi_q)):
                 assert "maxConcurrency" not in link
+                assert "cMaxLifetimeMs" not in link
+                extra = q.get("extra")
+                if extra is not None:
+                    parsed = json.loads(extra[0])
+                    assert "maxConcurrency" not in parsed.get("xmux", {})
+                    assert "cMaxLifetimeMs" not in parsed.get("xmux", {})
+                    assert "cMaxLifetimeMs" not in parsed
             # extra= JSON is standard JSON (double quotes), never Python-style.
             assert "'" not in antisib_q["extra"][0]
         finally:

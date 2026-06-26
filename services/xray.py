@@ -57,10 +57,14 @@ XRAY_MANAGED_LABEL_RE = re.compile(
 # (mode + optional ``extra`` tuning) carried in the VLESS (HTTP) link. ``extra``
 # is emitted as a single percent-encoded JSON value (``extra=``), which
 # v2rayN/v2rayNG/Nekobox/Happ decode back into xhttpSettings. Ranges are
-# preferred (anti-cadence); single ints (e.g. cMaxLifetimeMs: 45000,
-# cMaxReuseTimes: 96) are the documented fallback if a client/Xray version
-# rejects a range. No profile may carry ``maxConcurrency`` — it is mutually
-# exclusive with maxConnections and makes Xray refuse to start.
+# preferred (anti-cadence); single ints (e.g. cMaxReuseTimes: 96,
+# hMaxReusableSecs: 45) are the documented fallback if a client/Xray version
+# rejects a range. xmux time-based rotation uses ``hMaxReusableSecs`` (SECONDS);
+# this replaced the removed ``cMaxLifetimeMs`` (MILLISECONDS) in Xray-core
+# v25.3.6 (March 2025), so VLESS (HTTP) clients must be v25.3.6+ — on older or
+# misnamed fields the key would silently drop the rotation tuning. No profile may
+# carry ``maxConcurrency`` — it is mutually exclusive with maxConnections and
+# makes Xray refuse to start.
 XHTTP_PROFILES: tuple[str, ...] = ("base", "antisib", "multi")
 XHTTP_DEFAULT_PROFILE = "base"
 # Per-profile client ``mode``. None => use settings.xray_xhttp_mode, keeping the
@@ -74,12 +78,12 @@ _XHTTP_PROFILE_MODE: dict[str, str | None] = {
 _XHTTP_PROFILE_EXTRA: dict[str, dict[str, object] | None] = {
     "base": None,
     "antisib": {
-        "xmux": {"maxConnections": 1, "cMaxReuseTimes": "64-128", "cMaxLifetimeMs": 0},
+        "xmux": {"maxConnections": 1, "cMaxReuseTimes": "64-128"},
     },
     "multi": {
         "scMaxEachPostBytes": "800000-1200000",
         "scMinPostsIntervalMs": "30-50",
-        "xmux": {"maxConnections": 2, "cMaxReuseTimes": "8-16", "cMaxLifetimeMs": "30000-60000"},
+        "xmux": {"maxConnections": 2, "cMaxReuseTimes": "8-16", "hMaxReusableSecs": "30-60"},
     },
 }
 
