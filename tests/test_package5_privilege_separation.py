@@ -147,6 +147,8 @@ def test_readme_and_security_docs_do_not_recommend_recursive_user_chown() -> Non
     text = (
         _read("README.md")
         + "\n"
+        + _read("docs/deployment.md")
+        + "\n"
         + _read("docs/security/privilege-separation-plan.md")
         + "\n"
         + _read("deploy/helpers/README.md")
@@ -164,6 +166,10 @@ def test_docs_require_nonroot_helper_preflight_postflight() -> None:
 
     text = (
         _read("README.md")
+        + "\n"
+        + _read("docs/deployment.md")
+        + "\n"
+        + _read("docs/operations.md")
         + "\n"
         + _read("docs/security/privilege-separation-plan.md")
         + "\n"

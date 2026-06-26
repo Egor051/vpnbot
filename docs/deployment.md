@@ -1,0 +1,200 @@
+# Deployment
+
+The supplied systemd unit expects the project in `/opt/vpn-service`. If you deploy
+elsewhere, update `deploy/vpn-bot.service` before installing it.
+
+There are two deployment models:
+
+- **Root deployment (current default — `XRAY_APPLY_MODE=api`, `User=root`).** Zero-downtime
+  key changes via the Xray gRPC API; no sudo helpers needed. This is what the shipped
+  `deploy/vpn-bot.service` is configured for.
+- **Non-root deployment (privilege-helper mode, `User=vpn-bot`).** Hardened: every
+  privileged backend change goes through fixed sudo helpers. Opt in by editing the unit
+  and setting `PRIVILEGE_HELPERS_ENABLED=true`.
+
+> ⚠️ **`deploy/vpn-bot.service` is the authoritative source.**
+> Every deploy copies it verbatim to `/etc/systemd/system/vpn-bot.service`. Manual edits to
+> the system service file are overwritten on the next deploy. The current repo file runs the
+> bot as `User=root` with `ProtectSystem=false` for `XRAY_APPLY_MODE=api`. If you switch
+> deployment models, update `deploy/vpn-bot.service` first — do not edit the system file
+> directly.
+
+## Xray API Mode
+
+> ⚠️ **`XRAY_APPLY_MODE=api` requires root and is incompatible with privilege helpers.**
+> This is the **single canonical statement** of the api/root rule; the rest of the docs link
+> here.
+> - `XRAY_APPLY_MODE=api` is the **only** mode that adds/removes Xray keys without restarting
+>   the Xray service. Without it, every key creation or deletion causes a full Xray restart,
+>   which drops all active connections.
+> - `XRAY_APPLY_MODE=api` is **incompatible** with `PRIVILEGE_HELPERS_ENABLED=true` — the bot
+>   refuses to start if both are set simultaneously.
+> - To use api mode, the bot **must run as root** (`User=root` in the service file) with
+>   `PRIVILEGE_HELPERS_ENABLED=false`.
+> - In the non-root privilege-helper model use `XRAY_APPLY_MODE=restart` (or `reload`); the
+>   helper ignores `api`/`reload` and always restarts Xray.
+
+For a hardened production deployment, prefer the non-root privilege-helper model: it keeps
+the bot unprivileged at the cost of a brief Xray restart on each key change.
+
+### Required `.env` variables for api mode
+
+```dotenv
+XRAY_APPLY_MODE=api
+XRAY_INBOUND_TAG=vless-in          # must match the "tag" field on the VLESS inbound in config.json
+XRAY_STATS_SERVER=127.0.0.1:10085  # must match the dokodemo-door api inbound port
+```
+
+Also set `PRIVILEGE_HELPERS_ENABLED=false` (or omit it) when using api mode.
+
+### One-time server preparation
+
+Before starting the bot in api mode, configure the Xray API inbound and tag the VLESS
+inbound in `/usr/local/etc/xray/config.json`:
+
+1. Add `"tag": "vless-in"` to your VLESS inbound object (use whatever tag you set as
+   `XRAY_INBOUND_TAG`):
+
+```json
+{
+  "inbounds": [
+    {
+      "tag": "vless-in",
+      "port": 443,
+      "protocol": "vless",
+      "...": "..."
+    }
+  ]
+}
+```
+
+2. Ensure the Xray API block and a `dokodemo-door` API inbound are present in
+   `config.json`. The port must match `XRAY_STATS_SERVER`:
+
+```json
+{
+  "api": {
+    "tag": "api",
+    "services": ["HandlerService", "StatsService", "LoggerService"]
+  },
+  "inbounds": [
+    {
+      "tag": "api-in",
+      "listen": "127.0.0.1",
+      "port": 10085,
+      "protocol": "dokodemo-door",
+      "settings": { "address": "127.0.0.1" }
+    }
+  ],
+  "routing": {
+    "rules": [
+      { "inboundTag": ["api-in"], "outboundTag": "api", "type": "field" }
+    ]
+  }
+}
+```
+
+3. Restart Xray once so the tag takes effect and verify the config:
+
+```bash
+sudo xray run -test -config /usr/local/etc/xray/config.json
+sudo systemctl restart xray
+sudo systemctl status xray --no-pager
+```
+
+4. Install the service file and start the bot:
+
+```bash
+sudo cp deploy/vpn-bot.service /etc/systemd/system/vpn-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now vpn-bot
+sudo systemctl status vpn-bot
+```
+
+`deploy/vpn-bot.service` already contains `User=root`, `ProtectSystem=false`, and no
+`ReadWritePaths` restrictions — no manual edits to the service file are needed.
+
+## Root deployment model (api mode, `User=root`)
+
+The repo service file is already configured for root+api mode. See [Xray API Mode](#xray-api-mode)
+above for required `.env` variables and one-time Xray config preparation. There is no need to
+create a `vpn-bot` system user or install sudo helpers for this model.
+
+## Non-root deployment model (privilege-helper mode, `User=vpn-bot`)
+
+Update `deploy/vpn-bot.service` to set `User=vpn-bot`, `Group=vpn-bot`,
+`ProtectSystem=strict`, and restore `ReadWritePaths` before deploying. Then follow these
+steps:
+
+1. Keep `/opt/vpn-service`, deploy files, `.env`, and `.venv` owned by root/operator and not writable by `vpn-bot`.
+2. Create the `vpn-bot:vpn-bot` system identity.
+3. Grant `vpn-bot` write access only to runtime state: `/opt/vpn-service/data`, `/opt/vpn-service/logs` if file logs are enabled, and `/run/vpn-bot` created by systemd.
+4. Install fixed helpers under `/usr/local/sbin` and install `/etc/sudoers.d/vpnbot` with only those helper entrypoints.
+5. Enable `PRIVILEGE_HELPERS_ENABLED=true`.
+6. Install `deploy/vpn-bot.service`; it is the non-root unit.
+
+Use `XRAY_APPLY_MODE=restart` (or `reload`) in this model; api mode is not honoured by the
+helper. The full privilege-separation architecture is documented in
+[`security/privilege-separation-plan.md`](security/privilege-separation-plan.md) and the helper
+contracts in [`../deploy/helpers/README.md`](../deploy/helpers/README.md).
+
+Fresh install outline:
+
+```bash
+sudo install -o root -g root -m 0755 -d /opt/vpn-service
+sudo git clone https://github.com/Egor051/vpnbot.git /opt/vpn-service
+cd /opt/vpn-service
+
+sudo python3 -m venv .venv
+sudo /opt/vpn-service/.venv/bin/pip install --upgrade pip
+sudo /opt/vpn-service/.venv/bin/pip install -r requirements.txt -c constraints.txt
+
+sudo deploy/create-vpn-bot-user.sh
+sudo install -o vpn-bot -g vpn-bot -m 0700 -d /opt/vpn-service/data /opt/vpn-service/logs
+sudo install -o root -g root -m 0600 .env.example .env
+sudoedit .env
+```
+
+Helper and sudoers install:
+
+```bash
+sudo install -o root -g root -m 0755 deploy/helpers/vpnbot-socks5-user /usr/local/sbin/vpnbot-socks5-user
+sudo install -o root -g root -m 0755 deploy/helpers/vpnbot-xray-apply /usr/local/sbin/vpnbot-xray-apply
+sudo install -o root -g root -m 0755 deploy/helpers/vpnbot-awg-apply /usr/local/sbin/vpnbot-awg-apply
+sudo install -o root -g root -m 0755 deploy/helpers/vpnbot-mtproxy-apply /usr/local/sbin/vpnbot-mtproxy-apply
+sudo install -o root -g root -m 0440 deploy/sudoers.d/vpnbot.example /etc/sudoers.d/vpnbot
+sudo visudo -cf /etc/sudoers.d/vpnbot
+```
+
+Install and start the systemd service:
+
+```bash
+python deploy/check-nonroot-helper-mode.py
+sudo cp deploy/vpn-bot.service /etc/systemd/system/vpn-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now vpn-bot
+sudo systemctl status vpn-bot
+python deploy/check-nonroot-helper-mode.py
+```
+
+Do not recursively chown the whole application tree to a login user for production. Do not
+make the repository checkout, deploy files, or `.venv` writable by `vpn-bot`; a compromised
+bot process must not be able to rewrite its own code, dependencies, units, or helper source.
+
+If `MTPROTO_MODE=managed` is enabled, keep `/etc/mtproxy/vpnbot` root-owned and
+helper-managed. Do not grant `vpn-bot.service` runtime write access to `/etc/systemd/system`
+or broad write access to `/etc/mtproxy`; install or update the MTProxy drop-in and wrapper
+manually during deploy, then run `systemctl daemon-reload` outside the bot runtime.
+
+## Post-deploy smoke checklist
+
+1. `python deploy/check-nonroot-helper-mode.py` passes.
+2. `systemctl show vpn-bot -p User -p Group -p RuntimeDirectory -p NoNewPrivileges -p ReadWritePaths` shows `vpn-bot`, `vpn-bot`, `vpn-bot`, no enabled `NoNewPrivileges`, and only the expected writable paths.
+3. `sudo -u vpn-bot test ! -w /opt/vpn-service/.venv && sudo -u vpn-bot test ! -w /opt/vpn-service/deploy`.
+4. `sudo visudo -cf /etc/sudoers.d/vpnbot` passes and the file contains no `NOPASSWD: ALL`.
+5. Issue/revoke one staging Xray or AWG key and one enabled proxy backend access, then check `journalctl -u vpn-bot -n 100 --no-pager` for helper errors or secret leakage.
+
+> The `deploy/check-nonroot-helper-mode.py` checker is the **mandatory preflight and
+> postflight** tool for the non-root privilege-helper model. In root+api mode it reports
+> `FAIL: User=root`, which is expected — skip it and use `systemctl status vpn-bot` plus the
+> bot's admin diagnostics instead. See [Operations → Healthcheck tool](operations.md).

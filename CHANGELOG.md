@@ -19,6 +19,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Documentation restructured into a short README plus topical `docs/`.** `README.md`
+  and `README_RU.md` are now concise overviews (~260 lines each, down from ~1400) with a
+  Quick Start, an architecture diagram, a key-variable table, and a documentation index.
+  The deep content moved into bilingual (`*.md` + `*.ru.md`) guides under `docs/`:
+  `configuration.md` (full env-var reference), `deployment.md`, `operations.md`,
+  `proxy.md`, and `warp.md`. The repeated api/root warning is now stated once
+  (`docs/deployment.md`), the env reference is no longer duplicated across README and
+  `.env.example`, internal "Package N" labels were removed from the docs, and the
+  documentation-drift guard tests now check the new canonical doc locations. Add
+  screenshots to `docs/images/` (see that folder's README).
 - **WARP auto-switch is now time-based with an adaptive ping cadence.** The health
   monitor no longer counts consecutive probes; it switches **warp → direct** only after
   60 s of *continuous* no-response and **direct → warp** only after 60 s of *continuous*
