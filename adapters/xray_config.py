@@ -23,6 +23,8 @@ from adapters.file_ops import async_copy_stat, async_fsync_parent
 from adapters.privileged_helpers import PrivilegedHelperRunner, cleanup_staging_path, write_private_staging_file
 from adapters.shell_runner import TIMEOUT_RETURNCODE, ShellRunner
 from adapters.systemctl import SystemCtlAdapter
+from adapters.xray_stats import MACHINE_OUTPUT_LIMIT as STATS_MAX_OUTPUT_CHARS
+from adapters.xray_stats import XrayStatsAdapter
 
 
 logger = logging.getLogger(__name__)
@@ -285,7 +287,7 @@ class XrayConfigAdapter:
             finally:
                 self._cleanup_temp(temp_path)
 
-    async def rename_clients(self, renames: dict[str, str]) -> int:
+    async def rename_clients(self, renames: dict[str, str], *, prefer_restart: bool = False) -> int:
         """Rename clients (matched by UUID) to new email labels and apply once.
 
         *renames* maps client UUID -> desired email label. Only clients present on
@@ -295,6 +297,15 @@ class XrayConfigAdapter:
         or restarting Xray, so this is safe to run on every startup. Applies
         through the standard install path (snapshot + backup + ``xray -test`` +
         helper/reload/restart): the live config is never edited in place.
+
+        When *prefer_restart* is True the direct (non-helper) apply is routed
+        through ``systemctl restart`` instead of ``reload`` — used by the startup
+        reconcile because a plain ``reload`` does not rebuild this unit's runtime
+        client table, so renamed labels would never reach the live inbound. The
+        restart resets Xray's per-email stats (accepted trade-off). After a
+        restart-applied rename the runtime is verified best-effort against
+        ``xray api statsquery`` (logged, never raised). It has no effect when a
+        privileged helper performs the apply.
         """
         if not renames:
             return 0
@@ -319,6 +330,10 @@ class XrayConfigAdapter:
                 inbound = self._target_inbound(config)
                 clients = self._clients(inbound)
                 renamed = 0
+                # Labels of clients that actually exist on this inbound (matched by
+                # UUID) — what the running Xray should expose after the apply. Unknown
+                # UUIDs in *renames* are not collected, so verification stays quiet.
+                present_labels: set[str] = set()
                 for client in clients:
                     if not isinstance(client, dict):
                         continue
@@ -326,14 +341,19 @@ class XrayConfigAdapter:
                     if not isinstance(uuid_value, str):
                         continue
                     desired = renames.get(uuid_value)
-                    if desired and client.get("email") != desired:
+                    if not desired:
+                        continue
+                    present_labels.add(desired)
+                    if client.get("email") != desired:
                         client["email"] = desired
                         renamed += 1
                 if renamed == 0:
                     return 0
 
                 temp_path = await self._write_temp_config(config, self.config_path)
-                await self._install_candidate(temp_path, snapshot, backup_path)
+                await self._install_candidate(temp_path, snapshot, backup_path, prefer_restart=prefer_restart)
+                if prefer_restart:
+                    await self._verify_runtime_labels(present_labels)
                 return renamed
             finally:
                 self._cleanup_temp(temp_path)
@@ -570,8 +590,12 @@ class XrayConfigAdapter:
         temp_path: Path,
         snapshot: tuple[int, int, bytes],
         backup_path: Path | None,
+        *,
+        prefer_restart: bool = False,
     ) -> None:
         if self._using_helper():
+            # The privileged helper owns the apply (and its own reload/restart);
+            # prefer_restart never crosses the privilege boundary.
             await self._assert_config_unchanged(snapshot)
             await self._apply_helper(temp_path, snapshot)
             return
@@ -580,7 +604,7 @@ class XrayConfigAdapter:
         await self._test_config(temp_path)
         await self._assert_config_unchanged(snapshot)
         await self._replace_main_config(temp_path, self.config_path)
-        await self._apply_or_restore(backup_path)
+        await self._apply_or_restore(backup_path, prefer_restart=prefer_restart)
 
     async def _apply_helper(self, candidate_path: Path, snapshot: tuple[int, int, bytes]) -> None:
         if self.helper_runner is None:
@@ -628,8 +652,10 @@ class XrayConfigAdapter:
         await asyncio.to_thread(os.replace, temp_path, self.config_path)
         await async_fsync_parent(self.config_path)
 
-    async def _apply_or_restore(self, backup_path: Path) -> None:
-        if self.apply_mode == "restart":
+    async def _apply_or_restore(self, backup_path: Path, *, prefer_restart: bool = False) -> None:
+        # prefer_restart lets a caller (the startup reconcile) force the restart path
+        # for a unit whose `reload` does not rebuild the runtime client table.
+        if self.apply_mode == "restart" or prefer_restart:
             await self._restart_or_restore(backup_path)
             return
         await self._reload_or_restore(backup_path)
@@ -668,6 +694,54 @@ class XrayConfigAdapter:
             return False
         active = await self.systemctl.is_active(self.service_name)
         return active.ok and active.stdout.strip() == "active"
+
+    async def _verify_runtime_labels(self, email_labels: set[str]) -> None:
+        """Log whether the restarted runtime exposes a traffic stat per renamed label.
+
+        After a restart-applied rename the running Xray should expose a per-user
+        counter (``user>>>{email_label}>>>traffic>>>...``) for every client we
+        renamed. This is a best-effort diagnostic only: a missing counter (e.g. an
+        idle user whose counter Xray has not created yet, or no stats API on this
+        deploy) is logged, never raised, so a stats hiccup can't undo a rename that
+        already applied successfully.
+        """
+        if not email_labels:
+            return
+        if self.shell is None or not self.stats_server:
+            logger.debug("Xray rename applied via restart; stats API not configured, skipping verification")
+            return
+        try:
+            result = await self.shell.run(
+                ["xray", "api", "statsquery", f"--server={self.stats_server}"],
+                timeout=15,
+                max_output_chars=STATS_MAX_OUTPUT_CHARS,
+            )
+            if not result.ok:
+                logger.warning(
+                    "Xray rename applied via restart, but stats verification query failed: %s",
+                    result.stderr or result.stdout,
+                )
+                return
+            counters = XrayStatsAdapter.parse_statsquery_output(result.stdout)
+        except Exception:
+            logger.warning("Xray rename applied via restart, but stats verification raised", exc_info=True)
+            return
+        present = {
+            label
+            for label in email_labels
+            if any(name.startswith(f"user>>>{label}>>>traffic>>>") for name in counters)
+        }
+        missing = sorted(email_labels - present)
+        if missing:
+            logger.warning(
+                "Xray rename verified via statsquery: %d/%d labels present in runtime; missing=%s",
+                len(present), len(email_labels), missing,
+            )
+        else:
+            logger.info(
+                "Xray rename verified via statsquery: all %d labels present in runtime",
+                len(email_labels),
+            )
 
     async def _install_candidate_api(
         self,

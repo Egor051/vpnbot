@@ -233,3 +233,121 @@ def test_rename_clients_renames_by_uuid_and_is_idempotent(tmp_path: Path) -> Non
         assert await http.rename_clients({}) == 0
 
     asyncio.run(run())
+
+
+class _RecordingSystemctl(_XraySystemctl):
+    """Records reload/restart calls (reload can be made to fail) for apply-path tests."""
+
+    def __init__(self, *, reload_ok: bool = True) -> None:
+        self.calls: list[str] = []
+        self.reload_ok = reload_ok
+
+    async def reload(self, service_name: str) -> ShellResult:
+        self.calls.append("reload")
+        return ShellResult(("systemctl", "reload", service_name), 0 if self.reload_ok else 1, "", "")
+
+    async def restart(self, service_name: str) -> ShellResult:
+        self.calls.append("restart")
+        return ShellResult(("systemctl", "restart", service_name), 0, "", "")
+
+
+class _RecordingShell:
+    """Captures shell invocations and replays a fixed statsquery payload."""
+
+    def __init__(self, payload: str = "") -> None:
+        self.payload = payload
+        self.calls: list[tuple[str, ...]] = []
+
+    async def run(self, args: list[str], **kwargs: object) -> ShellResult:
+        self.calls.append(tuple(args))
+        return ShellResult(tuple(args), 0, self.payload, "")
+
+
+def _adapter_with(
+    path: Path,
+    tag: str,
+    *,
+    require_reality: bool,
+    systemctl: object,
+    shell: object | None = None,
+    stats_server: str = "",
+) -> XrayConfigAdapter:
+    return XrayConfigAdapter(
+        config_path=path,
+        service_name="xray",
+        apply_mode="reload",
+        inbound_tag=tag,
+        allow_restart_on_rollback=False,
+        backup=BackupAdapter(ClockProvider(), keep_last=0),
+        systemctl=systemctl,  # type: ignore[arg-type]
+        shell=shell,  # type: ignore[arg-type]
+        stats_server=stats_server,
+        require_reality=require_reality,
+    )
+
+
+def test_rename_clients_prefer_restart_routes_through_restart_not_reload(tmp_path: Path) -> None:
+    """prefer_restart applies the rename via `systemctl restart`, default via `reload`."""
+
+    async def run() -> None:
+        config_path = tmp_path / "config.json"
+        _write_server_config(config_path)
+        sysctl = _RecordingSystemctl()
+        http = _adapter_with(config_path, XHTTP_TAG, require_reality=False, systemctl=sysctl)
+        uuid = "11111111-1111-4111-8111-111111111111"
+        await http.add_client(
+            uuid_value=uuid, email_label="xray_AHTTP",
+            short_id=VLESS_IN_SHORT_ID, flow="", manage_short_id=False,
+        )
+
+        sysctl.calls.clear()  # ignore the provision apply; focus on the rename
+        renamed = await http.rename_clients({uuid: "xray_http_base_Ab3dE"}, prefer_restart=True)
+        assert renamed == 1
+        # The unit's reload does not rebuild clients, so prefer_restart restarts instead.
+        assert sysctl.calls == ["restart"]
+        assert _inbound(config_path, XHTTP_TAG)["settings"]["clients"][0]["email"] == "xray_http_base_Ab3dE"
+
+        # Idempotent no-op: nothing to apply, so neither restart nor reload runs.
+        sysctl.calls.clear()
+        assert await http.rename_clients({uuid: "xray_http_base_Ab3dE"}, prefer_restart=True) == 0
+        assert sysctl.calls == []
+
+        # Default path (no prefer_restart) still applies through reload.
+        sysctl.calls.clear()
+        assert await http.rename_clients({uuid: "xray_AHTTP"}) == 1
+        assert sysctl.calls == ["reload"]
+
+    asyncio.run(run())
+
+
+def test_rename_clients_prefer_restart_verifies_runtime_via_statsquery(tmp_path: Path) -> None:
+    """After the restart rename the runtime is checked against `xray api statsquery`."""
+
+    async def run() -> None:
+        config_path = tmp_path / "config.json"
+        _write_server_config(config_path)
+        uuid = "11111111-1111-4111-8111-111111111111"
+        sysctl = _RecordingSystemctl()
+        provisioner = _adapter_with(config_path, XHTTP_TAG, require_reality=False, systemctl=sysctl)
+        await provisioner.add_client(
+            uuid_value=uuid, email_label="xray_AHTTP",
+            short_id=VLESS_IN_SHORT_ID, flow="", manage_short_id=False,
+        )
+
+        # statsquery reports the renamed label -> verification finds the live counter.
+        payload = json.dumps({
+            "stat": [
+                {"name": "user>>>xray_http_base_Ab3dE>>>traffic>>>downlink", "value": 0},
+                {"name": "user>>>xray_http_base_Ab3dE>>>traffic>>>uplink", "value": 0},
+            ]
+        })
+        shell = _RecordingShell(payload)
+        http = _adapter_with(
+            config_path, XHTTP_TAG, require_reality=False,
+            systemctl=sysctl, shell=shell, stats_server="127.0.0.1:10085",
+        )
+        assert await http.rename_clients({uuid: "xray_http_base_Ab3dE"}, prefer_restart=True) == 1
+        # The restart-applied rename is verified by polling the live stats API.
+        assert any(call[:3] == ("xray", "api", "statsquery") for call in shell.calls)
+
+    asyncio.run(run())
