@@ -21,6 +21,8 @@ from bot.formatters import (
     audit_page_text,
     block_user_confirm_text,
     create_confirm_text,
+    XHTTP_PROFILE_CHOICES,
+    xhttp_profile_prompt,
     keys_page_text,
     system_diagnostics_text,
     unblock_user_confirm_text,
@@ -40,6 +42,7 @@ from bot.keyboards.admin import (
     admin_issue_users_keyboard,
     admin_key_type_keyboard,
     admin_vless_transport_keyboard,
+    admin_xhttp_profile_keyboard,
     admin_panel_keyboard,
     moderator_panel_keyboard,
     announcement_batches_keyboard,
@@ -1380,11 +1383,67 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
             await safe_callback_answer(callback, t("vless_http_unavailable"), show_alert=True)
             return
         await safe_callback_answer(callback)
+        if transport == "http":
+            # VLESS (HTTP) goes through the transport-profile step before the note.
+            await state.set_state(AdminCreateKeyStates.waiting_xhttp_profile)
+            await state.update_data(owner_user_id=owner_user_id)
+            await safe_edit_message_text(
+                callback.message,
+                xhttp_profile_prompt(),
+                reply_markup=admin_xhttp_profile_keyboard(owner_user_id),
+            )
+            return
         await state.set_state(AdminCreateKeyStates.waiting_note)
         await state.update_data(
             owner_user_id=owner_user_id,
             key_type=key_type,
             transport=transport,
+            note_prompt_msg_id=callback.message.message_id,
+        )
+        await safe_edit_message_text(
+            callback.message,
+            f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
+            reply_markup=cancel_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(AdminCreateKeyStates.waiting_xhttp_profile, F.data.regexp(r"^admin:cxprof:(base|antisib|multi):\d+$"))
+async def admin_issue_xhttp_profile(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Record the chosen XHTTP profile for the issued key and prompt for a note."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        _, _, profile, raw_user_id = callback.data.split(":", 3)
+        owner_user_id = int(raw_user_id)
+        data = await state.get_data()
+        expected_owner_id = data.get("owner_user_id")
+        if expected_owner_id is None or int(expected_owner_id) != owner_user_id:
+            await state.clear()
+            await safe_callback_answer(callback, t("action_stale"), show_alert=True)
+            await safe_edit_message_text(
+                callback.message,
+                t("action_stale_msg"),
+                reply_markup=admin_panel_keyboard(),
+            )
+            return
+        if not services.settings.xray_xhttp_enabled:
+            await safe_callback_answer(callback, t("vless_http_unavailable"), show_alert=True)
+            return
+        if profile not in XHTTP_PROFILE_CHOICES:
+            await safe_callback_answer(callback, t("xhttp_profile_invalid"), show_alert=True)
+            return
+        await safe_callback_answer(callback)
+        await state.set_state(AdminCreateKeyStates.waiting_note)
+        await state.update_data(
+            owner_user_id=owner_user_id,
+            key_type=VpnKeyType.XRAY.value,
+            transport="http",
+            xhttp_profile=profile,
             note_prompt_msg_id=callback.message.message_id,
         )
         await safe_edit_message_text(
@@ -1544,11 +1603,12 @@ async def admin_issue_expiry(callback: CallbackQuery, state: FSMContext, service
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         fingerprint = data.get("fingerprint")
+        xhttp_profile = str(data.get("xhttp_profile") or "base")
         await state.set_state(AdminCreateKeyStates.confirming)
         await safe_callback_answer(callback)
         await safe_edit_message_text(
             callback.message,
-            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport),
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport, profile=xhttp_profile),
             reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
         )
     except Exception as exc:
@@ -1600,9 +1660,10 @@ async def admin_issue_custom_days(message: Message, state: FSMContext, services:
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         fingerprint = data.get("fingerprint")
+        xhttp_profile = str(data.get("xhttp_profile") or "base")
         await state.set_state(AdminCreateKeyStates.confirming)
         await message.answer(
-            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport),
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport, profile=xhttp_profile),
             reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
         )
     except Exception as exc:
@@ -1626,6 +1687,7 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
         expires_at: str | None = data.get("expires_at")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         fingerprint: str | None = data.get("fingerprint")
+        xhttp_profile = str(data.get("xhttp_profile") or "base")
         owner_is_pending = bool(data.get("owner_is_pending", False))
         owner = await services.users.get_user(owner_user_id)
         await require_superadmin(services, callback.from_user.id)
@@ -1640,6 +1702,7 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
                 allow_pending_owner=owner_is_pending,
                 fingerprint=fingerprint,
                 transport=transport,
+                xhttp_profile=xhttp_profile,
             )
         elif key_type == VpnKeyType.AWG.value:
             result = await services.awg.create_awg_key(

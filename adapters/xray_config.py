@@ -285,6 +285,59 @@ class XrayConfigAdapter:
             finally:
                 self._cleanup_temp(temp_path)
 
+    async def rename_clients(self, renames: dict[str, str]) -> int:
+        """Rename clients (matched by UUID) to new email labels and apply once.
+
+        *renames* maps client UUID -> desired email label. Only clients present on
+        THIS inbound whose email actually differs are changed; the UUID — the
+        client's identity — is never touched. Returns how many clients were
+        renamed. A no-op (nothing to change) returns 0 without writing the config
+        or restarting Xray, so this is safe to run on every startup. Applies
+        through the standard install path (snapshot + backup + ``xray -test`` +
+        helper/reload/restart): the live config is never edited in place.
+        """
+        if not renames:
+            return 0
+        # Defence-in-depth: every target label is server-generated, but enforce the
+        # safe charset at the adapter boundary so a malformed label can never reach
+        # the config (mirrors add_client). Leading '-' is rejected (flag injection).
+        for new_email in renames.values():
+            if not new_email or _EMAIL_SAFE_RE.match(new_email) is None:
+                raise XrayConfigError("Xray email_label содержит недопустимые символы")
+        lock_dir = self.helper_staging_dir if self._using_helper() else None
+        async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
+            if not self._using_helper():
+                await self._ensure_current_config_valid()
+            snapshot = await self._snapshot_config()
+            backup_path = None if self._using_helper() else await asyncio.to_thread(
+                self.backup.create_backup, self.config_path
+            )
+            temp_path: Path | None = None
+            try:
+                config = await asyncio.to_thread(self._read_config, self.config_path)
+                await self._assert_config_unchanged(snapshot)
+                inbound = self._target_inbound(config)
+                clients = self._clients(inbound)
+                renamed = 0
+                for client in clients:
+                    if not isinstance(client, dict):
+                        continue
+                    uuid_value = client.get("id")
+                    if not isinstance(uuid_value, str):
+                        continue
+                    desired = renames.get(uuid_value)
+                    if desired and client.get("email") != desired:
+                        client["email"] = desired
+                        renamed += 1
+                if renamed == 0:
+                    return 0
+
+                temp_path = await self._write_temp_config(config, self.config_path)
+                await self._install_candidate(temp_path, snapshot, backup_path)
+                return renamed
+            finally:
+                self._cleanup_temp(temp_path)
+
     async def ensure_short_id(self, short_id: str) -> bool:
         """Add the short id to the inbound if missing and apply the config."""
         if not short_id or not self.require_reality:

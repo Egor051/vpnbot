@@ -3,6 +3,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class CreateKeyStates(StatesGroup):
+    waiting_xhttp_profile = State()
     waiting_note = State()
     waiting_fp = State()
     waiting_mtu = State()
@@ -27,6 +28,7 @@ class ProxyStates(StatesGroup):
 
 class AdminCreateKeyStates(StatesGroup):
     choosing_type = State()
+    waiting_xhttp_profile = State()
     waiting_note = State()
     waiting_fp = State()
     waiting_mtu = State()

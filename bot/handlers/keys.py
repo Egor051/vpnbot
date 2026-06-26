@@ -9,12 +9,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.formatters import (
+    XHTTP_PROFILE_CHOICES,
     awg_config_text,
     create_confirm_text,
     key_detail_text,
     keys_page_text,
     note_confirm_text,
     traffic_stats_text,
+    xhttp_profile_prompt,
     xray_config_text,
 )
 from bot.container import Services
@@ -33,6 +35,7 @@ from bot.keyboards.keys import (
     mtu_choice_keyboard,
     trial_protocol_keyboard,
     vless_transport_keyboard,
+    xhttp_profile_keyboard,
 )
 from aiogram.types import BufferedInputFile
 from bot.messages import (
@@ -181,11 +184,11 @@ async def create_key_proto_vless(callback: CallbackQuery, services: Services) ->
         await answer_callback_error(callback, exc)
 
 
-# Maps the protocol/transport callback to (key_type, transport).
+# Maps the protocol/transport callback to (key_type, transport). VLESS (HTTP)
+# is NOT here: it first goes through the XHTTP transport-profile step below.
 _CREATE_CHOICE: dict[str, tuple[str, str]] = {
     "keys:create:awg": (VpnKeyType.AWG.value, "tcp"),
     "keys:create:xray": (VpnKeyType.XRAY.value, "tcp"),
-    "keys:create:xhttp": (VpnKeyType.XRAY.value, "http"),
 }
 
 
@@ -199,14 +202,68 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext, services
     try:
         await _ensure_can_enter_create(callback.from_user.id, services)
         key_type, transport = _CREATE_CHOICE[callback.data]
-        if transport == "http" and not services.settings.xray_xhttp_enabled:
-            await safe_callback_answer(callback, t("vless_http_unavailable"), show_alert=True)
-            return
         await safe_callback_answer(callback)
         await state.set_state(CreateKeyStates.waiting_note)
         await state.update_data(
             key_type=key_type,
             transport=transport,
+            cancel_target="keys:create",
+            note_prompt_msg_id=callback.message.message_id,
+        )
+        await safe_edit_message_text(
+            callback.message,
+            f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
+            reply_markup=cancel_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "keys:create:xhttp")
+async def create_key_choose_xhttp(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Show the XHTTP transport-profile selection (step 3, VLESS HTTP only)."""
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        if not services.settings.xray_xhttp_enabled:
+            await safe_callback_answer(callback, t("vless_http_unavailable"), show_alert=True)
+            return
+        await safe_callback_answer(callback)
+        await state.set_state(CreateKeyStates.waiting_xhttp_profile)
+        await safe_edit_message_text(
+            callback.message,
+            xhttp_profile_prompt(),
+            reply_markup=xhttp_profile_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(CreateKeyStates.waiting_xhttp_profile, F.data.startswith("keys:xhttp:profile:"))
+async def create_key_choose_xhttp_profile(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Record the chosen XHTTP profile and prompt for a note."""
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        if not services.settings.xray_xhttp_enabled:
+            await safe_callback_answer(callback, t("vless_http_unavailable"), show_alert=True)
+            return
+        profile = callback.data.rsplit(":", 1)[-1]
+        if profile not in XHTTP_PROFILE_CHOICES:
+            await safe_callback_answer(callback, t("xhttp_profile_invalid"), show_alert=True)
+            return
+        await safe_callback_answer(callback)
+        await state.set_state(CreateKeyStates.waiting_note)
+        await state.update_data(
+            key_type=VpnKeyType.XRAY.value,
+            transport="http",
+            xhttp_profile=profile,
             cancel_target="keys:create",
             note_prompt_msg_id=callback.message.message_id,
         )
@@ -366,10 +423,11 @@ async def create_key_expiry(callback: CallbackQuery, state: FSMContext, services
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         fingerprint = data.get("fingerprint")
+        xhttp_profile = str(data.get("xhttp_profile") or "base")
         from bot.keyboards.common import confirm_cancel_keyboard
         await safe_edit_message_text(
             callback.message,
-            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport),
+            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport, profile=xhttp_profile),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -420,9 +478,10 @@ async def create_key_custom_days(message: Message, state: FSMContext, services: 
         note = data.get("note")
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         fingerprint = data.get("fingerprint")
+        xhttp_profile = str(data.get("xhttp_profile") or "base")
         from bot.keyboards.common import confirm_cancel_keyboard
         await message.answer(
-            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport),
+            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport, profile=xhttp_profile),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -444,6 +503,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
     expires_at: str | None = data.get("expires_at")
     mtu = int(data["mtu"]) if data.get("mtu") is not None else None
     fingerprint: str | None = data.get("fingerprint")
+    xhttp_profile = str(data.get("xhttp_profile") or "base")
     try:
         await _ensure_can_enter_create(callback.from_user.id, services)
         profile = profile_from_tg(callback.from_user)
@@ -451,7 +511,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         await state.clear()
         await safe_callback_answer(callback, t("creating_key"))
         if key_type == VpnKeyType.XRAY.value:
-            result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at, fingerprint=fingerprint, transport=transport)
+            result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at, fingerprint=fingerprint, transport=transport, xhttp_profile=xhttp_profile)
         elif key_type == VpnKeyType.AWG.value:
             result = await services.awg.create_awg_key(callback.from_user.id, profile, note, expires_at=expires_at, mtu=mtu)
         else:

@@ -200,3 +200,36 @@ def test_tcp_provision_unchanged_on_vless_in(tmp_path: Path) -> None:
         assert _inbound(config_path, XHTTP_TAG)["settings"]["clients"] == []
 
     asyncio.run(run())
+
+
+def test_rename_clients_renames_by_uuid_and_is_idempotent(tmp_path: Path) -> None:
+    """rename_clients changes only emails (by UUID); a matching mapping is a no-op."""
+
+    async def run() -> None:
+        config_path = tmp_path / "config.json"
+        _write_server_config(config_path)
+        http = _adapter(config_path, XHTTP_TAG, require_reality=False)
+        uuid = "11111111-1111-4111-8111-111111111111"
+        await http.add_client(
+            uuid_value=uuid,
+            email_label="xray_AHTTP",
+            short_id=VLESS_IN_SHORT_ID,
+            flow="",
+            manage_short_id=False,
+        )
+
+        # Rename to the new transport/profile scheme: email changes, UUID preserved.
+        renamed = await http.rename_clients({uuid: "xray_http_base_Ab3dE"})
+        assert renamed == 1
+        clients = _inbound(config_path, XHTTP_TAG)["settings"]["clients"]
+        assert clients[0]["id"] == uuid
+        assert clients[0]["email"] == "xray_http_base_Ab3dE"
+
+        # Idempotent no-op once the email already matches (nothing to apply).
+        assert await http.rename_clients({uuid: "xray_http_base_Ab3dE"}) == 0
+        # Unknown UUIDs are ignored.
+        assert await http.rename_clients({"does-not-exist": "xray_http_base_Zzzzz"}) == 0
+        # Empty mapping is a no-op.
+        assert await http.rename_clients({}) == 0
+
+    asyncio.run(run())

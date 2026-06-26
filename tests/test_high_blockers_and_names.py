@@ -209,7 +209,7 @@ def test_generated_names_retry_email_label_collision(tmp_path: Path) -> None:
         audit=_Audit(),  # type: ignore[arg-type]
     )
 
-    uuid_value, label = asyncio.run(service._unique_identity(100, "old_name"))
+    uuid_value, label = asyncio.run(service._unique_identity("xray_tcp"))
 
     assert uuid_value == "00000000-0000-4000-8000-000000000001"
     assert label == "xray_Bbbbb"

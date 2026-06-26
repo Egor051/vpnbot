@@ -279,12 +279,32 @@ def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer
     return "\n".join(lines)
 
 
-def create_type_label(key_type: str, transport: str | None = None) -> str:
-    """Human label for a key type + transport used on the creation confirm screen."""
+# XHTTP transport profiles offered for VLESS (HTTP) keys (callback suffixes).
+XHTTP_PROFILE_CHOICES: tuple[str, ...] = ("base", "antisib", "multi")
+
+
+def xhttp_profile_prompt() -> str:
+    """Header plus each profile's name + description, from single-source i18n keys."""
+    blocks = "\n\n".join(
+        f"{t(f'xhttp_profile_{profile}_name')}\n{t(f'xhttp_profile_{profile}_desc')}"
+        for profile in XHTTP_PROFILE_CHOICES
+    )
+    return f"{t('choose_xhttp_profile')}\n\n{blocks}"
+
+
+def create_type_label(key_type: str, transport: str | None = None, profile: str | None = None) -> str:
+    """Human label for a key type + transport (+ xhttp profile) for the confirm screen."""
     if key_type == VpnKeyType.AWG.value:
         return "AmneziaWG"
     if key_type == VpnKeyType.XRAY.value:
-        return "VLESS (HTTP)" if str(transport or "tcp").lower() == "http" else "VLESS (TCP)"
+        if str(transport or "tcp").lower() != "http":
+            return "VLESS (TCP)"
+        prof = str(profile or "base").lower()
+        # base stays plain "VLESS (HTTP)" (regression-identical); the tuned
+        # profiles append their short name so the user can tell them apart.
+        if prof in ("antisib", "multi"):
+            return f"VLESS (HTTP) · {t(f'xhttp_profile_{prof}_name')}"
+        return "VLESS (HTTP)"
     return key_type.upper()
 
 
@@ -296,10 +316,11 @@ def create_confirm_text(
     mtu: int | None = None,
     fingerprint: str | None = None,
     transport: str | None = None,
+    profile: str | None = None,
 ) -> str:
     lines = [
         t("create_confirm_title"),
-        f"{t('field_type')}: {h(create_type_label(key_type, transport))}",
+        f"{t('field_type')}: {h(create_type_label(key_type, transport, profile))}",
         f"{t('field_note')}: {h(note or t('none'))}",
         f"{t('field_expires_at')}: {h(format_expiry_date(expires_at))}",
     ]

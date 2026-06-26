@@ -8,6 +8,8 @@ VLESS link builder for both transports, the transport DB migration (default
 import asyncio
 import json
 import logging
+import re
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -654,6 +656,212 @@ def test_create_confirm_text_renders_transport_label() -> None:
     assert create_type_label(VpnKeyType.AWG.value) == "AmneziaWG"
     assert "VLESS (HTTP)" in create_confirm_text(VpnKeyType.XRAY.value, None, transport="http")
     assert "VLESS (TCP)" in create_confirm_text(VpnKeyType.XRAY.value, None, transport="tcp")
+
+
+def test_build_vless_link_http_profiles_roundtrip(tmp_path: Path) -> None:
+    """Round-trip guardrail: extra= must survive for antisib/multi and be absent for base.
+
+    This is the test the task calls out as mandatory — it fails loudly if the
+    generator silently drops/empties extra= (which would degrade antisib/multi to
+    base with no import error).
+    """
+
+    async def run() -> None:
+        service, _repo, _tcp, _http, db = await _make_service(tmp_path)
+        try:
+            base = service._build_vless_link("u", "abcd", "xray_http_base_A0001", transport="http", profile="base")
+            antisib = service._build_vless_link("u", "abcd", "xray_http_antisib_A0001", transport="http", profile="antisib")
+            multi = service._build_vless_link("u", "abcd", "xray_http_multi_A0001", transport="http", profile="multi")
+
+            # base: mode stream-one and NO extra= at all (parse_qs drops blank
+            # values too, so an empty extra= would also fail this assertion).
+            base_q = parse_qs(urlsplit(base).query)
+            assert base_q["mode"] == ["stream-one"]
+            assert "extra" not in base_q
+
+            # antisib: stream-one + xmux.maxConnections == 1.
+            antisib_q = parse_qs(urlsplit(antisib).query)
+            assert antisib_q["mode"] == ["stream-one"]
+            assert "extra" in antisib_q
+            antisib_extra = json.loads(antisib_q["extra"][0])
+            assert antisib_extra["xmux"]["maxConnections"] == 1
+
+            # multi: packet-up + xmux.maxConnections == 2 + sc* tuning present.
+            multi_q = parse_qs(urlsplit(multi).query)
+            assert multi_q["mode"] == ["packet-up"]
+            assert "extra" in multi_q
+            multi_extra = json.loads(multi_q["extra"][0])
+            assert multi_extra["xmux"]["maxConnections"] == 2
+            assert "scMaxEachPostBytes" in multi_extra
+            assert "scMinPostsIntervalMs" in multi_extra
+
+            # No profile may carry maxConcurrency (Xray refuses to start otherwise).
+            for link in (base, antisib, multi):
+                assert "maxConcurrency" not in link
+            # extra= JSON is standard JSON (double quotes), never Python-style.
+            assert "'" not in antisib_q["extra"][0]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_build_vless_link_tcp_forces_type_tcp_even_when_raw(tmp_path: Path) -> None:
+    """TCP/Vision links advertise type=tcp for max client compat, even if server is raw."""
+
+    async def run() -> None:
+        service, _repo, _tcp, _http, db = await _make_service(tmp_path)
+        try:
+            service.settings = replace(service.settings, xray_network_type="raw")
+            link = service._build_vless_link("u", "abcd", "xray_tcp_A0001", transport="tcp")
+            params = parse_qs(urlsplit(link).query)
+            assert params["type"] == ["tcp"]
+            assert params["flow"] == ["xtls-rprx-vision"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_email_prefix_encodes_transport_and_profile(tmp_path: Path) -> None:
+    async def run() -> None:
+        service, _repo, _tcp, _http, db = await _make_service(tmp_path)
+        try:
+            assert service._email_prefix("tcp", "base") == "xray_tcp"
+            assert service._email_prefix("http", "base") == "xray_http_base"
+            assert service._email_prefix("http", "antisib") == "xray_http_antisib"
+            assert service._email_prefix("http", "multi") == "xray_http_multi"
+            # tcp ignores the profile; unknown profile falls back to base.
+            assert service._email_prefix("tcp", "multi") == "xray_tcp"
+            assert service._email_prefix("http", "bogus") == "xray_http_base"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_create_http_profiles_persist_profile_and_emit_extra(tmp_path: Path) -> None:
+    async def run() -> None:
+        service, repo, _tcp, _http, db = await _make_service(tmp_path)
+        try:
+            for profile, expected_mc in (("antisib", 1), ("multi", 2)):
+                result = await service.create_xray_key(
+                    100, TelegramUserProfile(100, "user", "User"), None,
+                    transport="http", xhttp_profile=profile,
+                )
+                persisted = await repo.get_by_id(result.key.id)
+                assert persisted is not None
+                assert persisted.transport == "http"
+                assert persisted.xhttp_profile == profile
+                assert persisted.payload.get("xhttp_profile") == profile
+                assert persisted.email_label.startswith(f"xray_http_{profile}_")
+                extra = json.loads(parse_qs(urlsplit(str(persisted.public_payload["link"])).query)["extra"][0])
+                assert extra["xmux"]["maxConnections"] == expected_mc
+
+            # base persists 'base', uses the base prefix and emits no extra=.
+            base = await service.create_xray_key(
+                100, TelegramUserProfile(100, "user", "User"), None,
+                transport="http", xhttp_profile="base",
+            )
+            base_key = await repo.get_by_id(base.key.id)
+            assert base_key is not None
+            assert base_key.xhttp_profile == "base"
+            assert base_key.email_label.startswith("xray_http_base_")
+            assert "extra" not in parse_qs(urlsplit(str(base_key.public_payload["link"])).query)
+
+            # tcp keys get the tcp prefix and profile stays base.
+            tcp_key = await repo.get_by_id(
+                (await service.create_xray_key(
+                    100, TelegramUserProfile(100, "user", "User"), None, transport="tcp",
+                )).key.id
+            )
+            assert tcp_key is not None
+            assert tcp_key.email_label.startswith("xray_tcp_")
+            assert tcp_key.xhttp_profile == "base"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+async def _insert_legacy_xray_key(
+    repo: VpnKeyRepository, *, uuid: str, email_label: str, transport: str
+) -> int:
+    """Insert an xray key with a legacy email label, bypassing the new naming."""
+    link = f"vless://{uuid}@vpn.example.com:443?type=tcp#{email_label}"
+    key = await repo.create_pending(
+        owner_user_id=100,
+        username="user",
+        key_type=VpnKeyType.XRAY,
+        note=None,
+        payload={"uuid": uuid, "email_label": email_label, "transport": transport},
+        public_payload={
+            "email_label": email_label,
+            "display_name": f"VLESS #{email_label}",
+            "link": link,
+        },
+        created_by=100,
+        now="now",
+        uuid=uuid,
+        email_label=email_label,
+        transport=transport,
+    )
+    return key.id
+
+
+def test_migrate_v28_relabels_preserves_uuid_and_is_idempotent(tmp_path: Path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        await db.bootstrap()
+        try:
+            await db.conn.execute(
+                "INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (100, "user", "User", UserRole.APPROVED_USER.value, "now", "now"),
+            )
+            repo = VpnKeyRepository(db)
+            tcp_id = await _insert_legacy_xray_key(repo, uuid="u-tcp", email_label="xray_A0001", transport="tcp")
+            http_id = await _insert_legacy_xray_key(repo, uuid="u-http", email_label="xray_BbCdE", transport="http")
+            fuzzy_id = await _insert_legacy_xray_key(repo, uuid="u-fuzzy", email_label="ktotakmoje_72d446", transport="tcp")
+
+            # Bootstrap already ran v28 (no rows then); run it now over the legacy rows.
+            await db._migrate_v28()
+
+            tcp_key = await repo.get_by_id(tcp_id)
+            http_key = await repo.get_by_id(http_id)
+            fuzzy_key = await repo.get_by_id(fuzzy_id)
+            assert tcp_key is not None and http_key is not None and fuzzy_key is not None
+
+            # Valid 5-char suffix is reused; prefix encodes transport/profile.
+            assert tcp_key.email_label == "xray_tcp_A0001"
+            assert http_key.email_label == "xray_http_base_BbCdE"
+            # Fuzzy legacy name gets a fresh 5-char suffix (NOT the old token).
+            assert re.fullmatch(r"xray_tcp_[A-Za-z0-9]{5}", fuzzy_key.email_label)
+            assert not fuzzy_key.email_label.endswith("72d446")
+
+            # UUIDs are NEVER touched.
+            assert tcp_key.uuid == "u-tcp"
+            assert http_key.uuid == "u-http"
+            assert fuzzy_key.uuid == "u-fuzzy"
+
+            # payload + public_payload (email_label, display_name, link fragment) updated.
+            assert tcp_key.payload["email_label"] == "xray_tcp_A0001"
+            assert tcp_key.public_payload["email_label"] == "xray_tcp_A0001"
+            assert tcp_key.public_payload["display_name"].endswith("#xray_tcp_A0001")
+            assert str(tcp_key.public_payload["link"]).endswith("#xray_tcp_A0001")
+
+            # Idempotent: a second run does not double-prefix or change anything.
+            labels_before = {k.id: k.email_label for k in (tcp_key, http_key, fuzzy_key)}
+            await db._migrate_v28()
+            for key_id, label in labels_before.items():
+                again = await repo.get_by_id(key_id)
+                assert again is not None
+                assert again.email_label == label
+        finally:
+            await db.close()
+
+    asyncio.run(run())
 
 
 def test_settings_validation_guards_xhttp_misconfig(tmp_path: Path) -> None:
