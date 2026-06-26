@@ -1,6 +1,7 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 from urllib.parse import quote, urlencode
@@ -42,7 +43,45 @@ XRAY_STARTUP_RECONCILE_STATUSES = {
 
 XRAY_ACTIVE_STATUSES: set[VpnKeyStatus] = {VpnKeyStatus.ACTIVE}
 XRAY_ALL_STATUSES: set[VpnKeyStatus] = set(VpnKeyStatus)
-XRAY_MANAGED_LABEL_RE = re.compile(r"^xray_[A-Za-z0-9]{5}$")
+# Recognises bot-managed email labels — both the legacy scheme (``xray_<rnd>``)
+# and the transport/profile scheme (``xray_tcp_<rnd>`` /
+# ``xray_http_{base,antisib,multi}_<rnd>``). Used by startup orphan cleanup to
+# tell "a client we issued" from an ambiguous hand-added one, so it must keep
+# matching every scheme the bot has ever written.
+XRAY_MANAGED_LABEL_RE = re.compile(
+    r"^xray_(?:tcp_|http_(?:base|antisib|multi)_)?[A-Za-z0-9]{5}$"
+)
+
+# XHTTP client transport profiles. All three are clients on the SAME server
+# inbound (:8001, mode auto); they differ ONLY in the client-side xhttpSettings
+# (mode + optional ``extra`` tuning) carried in the VLESS (HTTP) link. ``extra``
+# is emitted as a single percent-encoded JSON value (``extra=``), which
+# v2rayN/v2rayNG/Nekobox/Happ decode back into xhttpSettings. Ranges are
+# preferred (anti-cadence); single ints (e.g. cMaxLifetimeMs: 45000,
+# cMaxReuseTimes: 96) are the documented fallback if a client/Xray version
+# rejects a range. No profile may carry ``maxConcurrency`` — it is mutually
+# exclusive with maxConnections and makes Xray refuse to start.
+XHTTP_PROFILES: tuple[str, ...] = ("base", "antisib", "multi")
+XHTTP_DEFAULT_PROFILE = "base"
+# Per-profile client ``mode``. None => use settings.xray_xhttp_mode, keeping the
+# ``base`` link byte-for-byte identical to the pre-profile output.
+_XHTTP_PROFILE_MODE: dict[str, str | None] = {
+    "base": None,
+    "antisib": "stream-one",
+    "multi": "packet-up",
+}
+# Per-profile ``extra`` block. None => no ``extra=`` in the link.
+_XHTTP_PROFILE_EXTRA: dict[str, dict[str, object] | None] = {
+    "base": None,
+    "antisib": {
+        "xmux": {"maxConnections": 1, "cMaxReuseTimes": "64-128", "cMaxLifetimeMs": 0},
+    },
+    "multi": {
+        "scMaxEachPostBytes": "800000-1200000",
+        "scMinPostsIntervalMs": "30-50",
+        "xmux": {"maxConnections": 2, "cMaxReuseTimes": "8-16", "cMaxLifetimeMs": "30000-60000"},
+    },
+}
 
 
 class XrayService:
@@ -88,6 +127,29 @@ class XrayService:
         """Resolve a key's transport from the DB column, falling back to payload."""
         return self._normalize_transport(getattr(key, "transport", None) or key.payload.get("transport"))
 
+    @staticmethod
+    def _normalize_profile(value: object) -> str:
+        """Map any stored/requested XHTTP profile to a known one (default base)."""
+        profile = str(value or "").strip().lower()
+        return profile if profile in XHTTP_PROFILES else XHTTP_DEFAULT_PROFILE
+
+    def _email_prefix(self, transport: str, profile: str) -> str:
+        """Email prefix encoding transport+profile: the naming scheme's source of truth."""
+        if self._normalize_transport(transport) == "http":
+            return f"xray_http_{self._normalize_profile(profile)}"
+        return "xray_tcp"
+
+    def _key_profile(self, key: VpnKey) -> str:
+        """Resolve a key's XHTTP profile from the column, payload, then email prefix."""
+        raw = getattr(key, "xhttp_profile", None) or key.payload.get("xhttp_profile")
+        if raw:
+            return self._normalize_profile(raw)
+        label = str(getattr(key, "email_label", None) or key.payload.get("email_label") or "")
+        for profile in XHTTP_PROFILES:
+            if label.startswith(f"xray_http_{profile}_"):
+                return profile
+        return XHTTP_DEFAULT_PROFILE
+
     def _flow_for_transport(self, transport: str) -> str:
         """XHTTP clients must never carry a flow; TCP keeps xtls-rprx-vision."""
         return "" if self._normalize_transport(transport) == "http" else self.settings.xray_flow
@@ -118,11 +180,16 @@ class XrayService:
         allow_pending_owner: bool = False,
         fingerprint: str | None = None,
         transport: str = "tcp",
+        xhttp_profile: str = XHTTP_DEFAULT_PROFILE,
     ) -> VpnKeyCreateResult:
         """Provision a new Xray client, persist the key, and return its config."""
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         self.settings.validate_xray_ready()
         transport = self._normalize_transport(transport)
+        # Profile is meaningful only for http; tcp keys are always "base". The
+        # profile is immutable for a key (changing it means creating a new key),
+        # and is encoded into both the email label and the xhttp_profile column.
+        profile = self._normalize_profile(xhttp_profile) if transport == "http" else XHTTP_DEFAULT_PROFILE
         # Gate the issuance of NEW http keys on the feature flag, before any DB
         # write or partial apply. Management of already-issued http keys
         # (revoke/delete/reconcile) is intentionally NOT gated by the flag — it
@@ -140,14 +207,16 @@ class XrayService:
             await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
             async with self._lock:
                 await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
-                uuid_value, email_label = await self._unique_identity(owner.telegram_user_id, owner.username)
+                uuid_value, email_label = await self._unique_identity(self._email_prefix(transport, profile))
                 # http keys ride vless-in's REALITY via the XHTTP fallback dest,
                 # which has no realitySettings of its own: never manage shortIds on
                 # it. The link's sid is vless-in's configured shortId (the same one
                 # the TCP link uses), read from settings.
                 short_id_managed = self.settings.xray_manage_short_ids and transport != "http"
                 short_id = self.ids.xray_short_id() if short_id_managed else self.settings.xray_short_id
-                link = self._build_vless_link(uuid_value, short_id, email_label, fingerprint=fingerprint, transport=transport)
+                link = self._build_vless_link(
+                    uuid_value, short_id, email_label, fingerprint=fingerprint, transport=transport, profile=profile
+                )
                 payload = {
                     "uuid": uuid_value,
                     "email_label": email_label,
@@ -156,11 +225,12 @@ class XrayService:
                     "flow": flow,
                     "fingerprint": fingerprint,
                     "transport": transport,
+                    "xhttp_profile": profile,
                 }
                 public_payload = {
                     "email_label": email_label,
                     "short_id": short_id,
-                    "display_name": f"{create_type_label(VpnKeyType.XRAY.value, transport)} #{email_label}",
+                    "display_name": f"{create_type_label(VpnKeyType.XRAY.value, transport, profile)} #{email_label}",
                     "link": link,
                 }
                 key = await self.vpn_keys.create_pending(
@@ -176,6 +246,7 @@ class XrayService:
                     email_label=email_label,
                     expires_at=expires_at,
                     transport=transport,
+                    xhttp_profile=profile,
                 )
                 xray_apply_result = None
                 try:
@@ -377,6 +448,53 @@ class XrayService:
         await self._warn_if_unmanaged_http_keys()
         return summary
 
+    async def reconcile_email_labels(self) -> dict[str, int]:
+        """Sync live Xray client emails to the DB labels (post-v28 rename, by UUID).
+
+        After the v28 relabel the DB carries the new transport/profile email
+        labels, but the running config still holds the old client ``email``
+        values. This renames each live client — matched by its immutable UUID —
+        to the DB's current email_label, one inbound at a time, through the
+        standard apply path (backup + ``xray -test`` + helper/restart). It is
+        idempotent: once every client already matches it writes nothing and
+        restarts nothing, so it is safe to run on every startup. Renaming resets
+        Xray's per-email stats (accepted trade-off).
+        """
+        summary = {"checked": 0, "renamed": 0, "failed": 0}
+        async with self._lock:
+            # uuid -> desired email, partitioned by transport (one key = one inbound).
+            renames: dict[str, dict[str, str]] = {transport: {} for transport, _ in self._iter_adapters()}
+            last_id = 0
+            while True:
+                keys = await self.vpn_keys.list_by_type_statuses(
+                    VpnKeyType.XRAY,
+                    XRAY_ACCESS_MAY_EXIST_STATUSES,
+                    limit=500,
+                    after_id=last_id,
+                )
+                if not keys:
+                    break
+                for key in keys:
+                    last_id = key.id
+                    uuid_value = str(key.uuid or key.payload.get("uuid") or "").strip()
+                    email_label = str(key.email_label or key.payload.get("email_label") or "").strip()
+                    transport = self._key_transport(key)
+                    if uuid_value and email_label and transport in renames:
+                        renames[transport][uuid_value] = email_label
+            for transport, adapter in self._iter_adapters():
+                mapping = renames.get(transport) or {}
+                summary["checked"] += len(mapping)
+                if not mapping:
+                    continue
+                try:
+                    summary["renamed"] += await adapter.rename_clients(mapping)
+                except Exception as exc:
+                    summary["failed"] += 1
+                    logger.warning(
+                        "Не удалось синхронизировать email-лейблы Xray (%s): %s", transport, exc, exc_info=True
+                    )
+        return summary
+
     async def get_config(self, actor_user_id: int, key_id: int) -> str:
         """Return the connection config text for an Xray key."""
         return await self.get_xray_key_config(actor_user_id, key_id)
@@ -424,7 +542,8 @@ class XrayService:
             short_id = str(new_payload.get("short_id") or key.public_payload.get("short_id") or "")
             email_label = str(new_payload.get("email_label") or key.email_label or "")
             link = self._build_vless_link(
-                uuid_value, short_id, email_label, fingerprint=fingerprint, transport=self._key_transport(key)
+                uuid_value, short_id, email_label,
+                fingerprint=fingerprint, transport=self._key_transport(key), profile=self._key_profile(key),
             )
             new_public_payload = {**key.public_payload, "link": link}
             await self.vpn_keys.update_payload(key_id, new_payload, new_public_payload, self.clock.now())
@@ -1036,10 +1155,15 @@ class XrayService:
         except Exception:
             logger.warning("Audit write failed after Xray operation: action=%s entity_id=%s", action, entity_id, exc_info=True)
 
-    async def _unique_identity(self, telegram_user_id: int, username: str | None) -> tuple[str, str]:
+    async def _unique_identity(self, prefix: str) -> tuple[str, str]:
+        """Generate a (uuid, email_label) pair unique across keys, label prefixed.
+
+        *prefix* encodes transport+profile (e.g. ``xray_tcp`` / ``xray_http_multi``)
+        so the email itself carries the key's transport and profile.
+        """
         for _ in range(5):
             uuid_value = self.ids.uuid4()
-            email_label = self.ids.generated_key_name("xray")
+            email_label = self.ids.generated_key_name(prefix)
             by_uuid, by_label = await asyncio.gather(
                 self.vpn_keys.find_by_uuid(uuid_value),
                 self.vpn_keys.find_by_email_label(email_label),
@@ -1055,6 +1179,7 @@ class XrayService:
         email_label: str,
         fingerprint: str | None = None,
         transport: str = "tcp",
+        profile: str = XHTTP_DEFAULT_PROFILE,
     ) -> str:
         host = self._format_host(self.settings.xray_public_host)
         fragment = quote(email_label or "xray")
@@ -1065,8 +1190,16 @@ class XrayService:
             # REALITY/TLS and forwards by path to the internal vless-xhttp-reality
             # inbound, which carries no REALITY of its own — so every REALITY
             # parameter comes from vless-in / settings, never from that inbound.
-            # No flow (XHTTP clients must never carry xtls-rprx-vision); server-side
-            # `extra` tuning is intentionally NOT placed in the link.
+            # No flow (XHTTP clients must never carry xtls-rprx-vision).
+            #
+            # The transport profile (base/antisib/multi) sets the client `mode`
+            # and the optional `extra` block. `extra` is carried as a single
+            # percent-encoded JSON value via `extra=`; urlencode() encodes the
+            # whole JSON string for us, and the compact JSON (no spaces) avoids
+            # any `+`/space ambiguity. base emits no `extra` (regression-identical
+            # to the pre-profile link).
+            norm_profile = self._normalize_profile(profile)
+            mode = _XHTTP_PROFILE_MODE.get(norm_profile) or self.settings.xray_xhttp_mode
             params = {
                 "type": "xhttp",
                 "security": "reality",
@@ -1076,12 +1209,17 @@ class XrayService:
                 "sni": self.settings.xray_sni,
                 "sid": short_id,
                 "path": self.settings.xray_xhttp_path,
-                "mode": self.settings.xray_xhttp_mode,
+                "mode": mode,
             }
+            extra = _XHTTP_PROFILE_EXTRA.get(norm_profile)
+            if extra is not None:
+                params["extra"] = json.dumps(extra, separators=(",", ":"), ensure_ascii=False)
             query = urlencode(params)
             return f"vless://{uuid_value}@{host}:{self.settings.xray_public_port}?{query}#{fragment}"
         params = {
-            "type": self.settings.xray_network_type,
+            # Always advertise type=tcp (not raw) for the widest client
+            # compatibility; the server accepts both (raw is a synonym of tcp).
+            "type": "tcp",
             "security": "reality",
             "encryption": "none",
             "pbk": self.settings.xray_reality_public_key,
@@ -1113,7 +1251,8 @@ class XrayService:
         email_label = str(key.payload.get("email_label") or key.email_label or "")
         fingerprint = str(key.payload.get("fingerprint")) if key.payload.get("fingerprint") else None
         link = self._build_vless_link(
-            uuid_value, short_id, email_label, fingerprint=fingerprint, transport=self._key_transport(key)
+            uuid_value, short_id, email_label,
+            fingerprint=fingerprint, transport=self._key_transport(key), profile=self._key_profile(key),
         )
         visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
         note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""

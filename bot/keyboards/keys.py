@@ -49,6 +49,21 @@ def vless_transport_keyboard(*, xhttp_enabled: bool = False) -> InlineKeyboardMa
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def xhttp_profile_keyboard() -> InlineKeyboardMarkup:
+    """Build the XHTTP transport-profile selection keyboard (step 3, VLESS HTTP).
+
+    Descriptions are shown in the prompt text; each button carries the profile's
+    short name. Back returns to the VLESS transport step.
+    """
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text=t("xhttp_profile_base_name"), callback_data="keys:xhttp:profile:base")],
+        [InlineKeyboardButton(text=t("xhttp_profile_antisib_name"), callback_data="keys:xhttp:profile:antisib")],
+        [InlineKeyboardButton(text=t("xhttp_profile_multi_name"), callback_data="keys:xhttp:profile:multi")],
+        [InlineKeyboardButton(text=t("btn_back"), callback_data="keys:proto:vless")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def keys_list_keyboard(
     keys: list[VpnKey],
     page: int = 0,

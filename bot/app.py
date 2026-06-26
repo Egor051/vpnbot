@@ -550,6 +550,17 @@ async def _build_app(
 
 async def _startup_reconcile_keys(services: Services) -> None:
     xray_summary = await _safe_startup_reconcile("Xray", services.xray.startup_reconcile)
+    # Sync the running config's client emails to the DB labels after the v28
+    # relabel. Idempotent: a no-op (no restart) once they already match; a
+    # failure leaves only label drift (connectivity is unaffected — UUIDs are
+    # stable) so it never degrades the backend. Optional (getattr-guarded) so
+    # lightweight test doubles for the xray service stay valid.
+    xray_label_reconcile = getattr(services.xray, "reconcile_email_labels", None)
+    xray_label_summary = (
+        await _safe_startup_reconcile("Xray labels", xray_label_reconcile)
+        if xray_label_reconcile is not None
+        else {"checked": 0, "renamed": 0, "failed": 0}
+    )
     awg_summary = await _safe_startup_reconcile("AWG", services.awg.startup_reconcile)
     mtproto_reconcile = getattr(getattr(services, "mtproto", None), "reconcile_mtproto_state", None)
     mtproto_summary = (
@@ -574,14 +585,16 @@ async def _startup_reconcile_keys(services: Services) -> None:
         if socks5_summary.get("failed", 0):
             backend_health.mark_degraded(ProxyAccessType.SOCKS5, "startup reconciliation failed")
     logger.info(
-        "Startup access reconciliation: xray=%s awg=%s mtproto=%s socks5=%s",
+        "Startup access reconciliation: xray=%s xray_labels=%s awg=%s mtproto=%s socks5=%s",
         xray_summary,
+        xray_label_summary,
         awg_summary,
         mtproto_summary,
         socks5_summary,
     )
     any_checked = (
         xray_summary.get("checked", 0)
+        or xray_label_summary.get("checked", 0)
         or awg_summary.get("checked", 0)
         or mtproto_summary.get("checked", 0)
         or socks5_summary.get("checked", 0)
@@ -595,6 +608,7 @@ async def _startup_reconcile_keys(services: Services) -> None:
                 entity_id=None,
                 details={
                     "xray": xray_summary,
+                    "xray_labels": xray_label_summary,
                     "awg": awg_summary,
                     "mtproto": mtproto_summary,
                     "socks5": socks5_summary,

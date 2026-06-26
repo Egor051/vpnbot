@@ -1,7 +1,10 @@
 
 import asyncio
+import json
 import logging
 import os
+import re
+import secrets
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -12,8 +15,15 @@ from typing import Any, ClassVar
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 27
+CURRENT_SCHEMA_VERSION = 28
 logger = logging.getLogger(__name__)
+
+# Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
+# one of these prefixes is left untouched, making the relabel idempotent.
+_V28_NEW_PREFIXES = ("xray_tcp_", "xray_http_base_", "xray_http_antisib_", "xray_http_multi_")
+_V28_SUFFIX_RE = re.compile(r"^[A-Za-z0-9]{5}$")
+# Mirrors adapters.id_generator.KEY_NAME_ALPHABET (kept local to avoid a db->adapters import).
+_V28_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 _ACTIVE_TRANSACTION_DB: ContextVar["Database | None"] = ContextVar("active_transaction_db", default=None)
 
 
@@ -282,6 +292,10 @@ class Database:
             await self._migrate_v27()
             await self._set_schema_version(27)
             version = 27
+        if version < 28:
+            await self._migrate_v28()
+            await self._set_schema_version(28)
+            version = 28
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1000,6 +1014,82 @@ class Database:
             await self.conn.execute(
                 "ALTER TABLE announcement_batches ADD COLUMN recipient_filter_json TEXT"
             )
+
+    async def _migrate_v28(self) -> None:
+        # Transport/profile-aware Xray key naming. Two idempotent parts:
+        #  1) Add the xhttp_profile column (NOT NULL DEFAULT 'base') — meaningful
+        #     only for http keys; tcp/AWG/legacy rows stay 'base'. Also declared in
+        #     schema.sql for fresh DBs.
+        #  2) Rewrite Xray email labels into the scheme that encodes transport+
+        #     profile: tcp -> xray_tcp_<rnd>, http -> xray_http_base_<rnd> (every
+        #     pre-profile http key is base). UUIDs are NEVER touched (client
+        #     identity). The live Xray config is reconciled to match on the next
+        #     startup (XrayService.reconcile_email_labels). NOTE: Xray stats are
+        #     keyed by email, so the rename resets accumulated per-label stats — an
+        #     accepted trade-off.
+        vpn_cols = await self._table_columns("vpn_keys")
+        if "xhttp_profile" not in vpn_cols:
+            await self.conn.execute(
+                "ALTER TABLE vpn_keys ADD COLUMN xhttp_profile TEXT NOT NULL DEFAULT 'base'"
+            )
+        await self._relabel_xray_emails_v28()
+
+    async def _relabel_xray_emails_v28(self) -> None:
+        cursor = await self.conn.execute(
+            "SELECT id, email_label, transport, payload_json, public_payload_json "
+            "FROM vpn_keys WHERE key_type = 'xray'"
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            old_email = row["email_label"]
+            # Idempotency: a label already on the new scheme is left as-is so a
+            # re-run never double-prefixes and never regenerates a fresh suffix.
+            if old_email and str(old_email).startswith(_V28_NEW_PREFIXES):
+                continue
+            transport = str(row["transport"] or "tcp").strip().lower()
+            prefix = "xray_http_base" if transport == "http" else "xray_tcp"
+            new_email = f"{prefix}_{self._v28_suffix_for(old_email)}"
+            payload = self._v28_load_json(row["payload_json"])
+            public_payload = self._v28_load_json(row["public_payload_json"])
+            payload["email_label"] = new_email
+            public_payload["email_label"] = new_email
+            if old_email:
+                display_name = public_payload.get("display_name")
+                if isinstance(display_name, str):
+                    public_payload["display_name"] = display_name.replace(f"#{old_email}", f"#{new_email}")
+                link = public_payload.get("link")
+                if isinstance(link, str) and "#" in link:
+                    # The label is ASCII (alnum + '_'), so the link fragment is the
+                    # bare label; rebuild it. The link itself is re-rendered on the
+                    # next config view, this just keeps the stored copy consistent.
+                    public_payload["link"] = f"{link.rsplit('#', 1)[0]}#{new_email}"
+            await self.conn.execute(
+                "UPDATE vpn_keys SET email_label = ?, payload_json = ?, public_payload_json = ? WHERE id = ?",
+                (
+                    new_email,
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(public_payload, ensure_ascii=False, separators=(",", ":")),
+                    int(row["id"]),
+                ),
+            )
+
+    @staticmethod
+    def _v28_suffix_for(email: object) -> str:
+        """Reuse an existing 5-char suffix if it matches the alphabet; else fresh."""
+        if email:
+            text = str(email)
+            candidate = text[5:] if text.startswith("xray_") else text.rsplit("_", 1)[-1]
+            if _V28_SUFFIX_RE.fullmatch(candidate):
+                return candidate
+        return "".join(secrets.choice(_V28_ALPHABET) for _ in range(5))
+
+    @staticmethod
+    def _v28_load_json(value: object) -> dict[str, Any]:
+        try:
+            data = json.loads(value) if value else {}
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     async def _create_performance_indexes(self) -> None:
         await self.conn.execute(

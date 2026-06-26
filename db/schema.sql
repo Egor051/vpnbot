@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   -- VLESS transport: 'tcp' (vless-in) or 'http' (vless-xhttp-reality). Always
   -- 'tcp' for AWG keys and pre-XHTTP legacy rows. Mirrors _migrate_v23.
   transport TEXT NOT NULL DEFAULT 'tcp',
+  -- XHTTP client transport profile: 'base' | 'antisib' | 'multi'. Meaningful only
+  -- for http keys; 'base' for tcp/AWG keys and legacy rows. Mirrors _migrate_v28.
+  xhttp_profile TEXT NOT NULL DEFAULT 'base',
   deleted_at TEXT,
   -- created_by/revoked_by/deleted_by intentionally have NO foreign key (unlike
   -- proxy_accesses): users are NEVER hard-deleted (only blocked via role), so
