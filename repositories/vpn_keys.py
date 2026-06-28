@@ -393,10 +393,11 @@ class VpnKeyRepository:
     async def list_active_hysteria2(self) -> list[VpnKey]:
         """Return all active Hysteria2 keys (label + secret live in payload_json).
 
-        Used by issuance/lifecycle code on the bot side. The hy2_auth endpoint
-        deliberately does NOT go through this repository: it runs in a separate
-        process with a read-only DB connection and its own parameterised SELECT
-        (no bot/aiogram imports).
+        A bot-side query helper (currently used by tests and available to
+        lifecycle/diagnostic code). It is deliberately NOT on the auth hot path:
+        the hy2_auth endpoint runs in a separate process with a read-only DB
+        connection and its own parameterised SELECT, and never imports this
+        repository (no bot/aiogram dependencies).
         """
         cursor = await self.db.conn.execute(
             "SELECT * FROM vpn_keys WHERE key_type = ? AND status = ? ORDER BY id ASC",

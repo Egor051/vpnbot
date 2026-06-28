@@ -548,7 +548,7 @@ STRINGS: dict[str, str] = {
     ),
     "cabinet_title": "<b>👤 Личный кабинет</b>",
     "field_registered": "Дата регистрации",
-    "cabinet_active_keys": "Активные ключи: {total} (Xray: {xray}, AWG: {awg})",
+    "cabinet_active_keys": "Активные ключи: {total} (Xray: {xray}, AWG: {awg}, Hysteria2: {hysteria2})",
     "cabinet_traffic": "Трафик: ↓ {down} · ↑ {up}",
     "cabinet_proxy_count": "Прокси-доступы: {count}",
     "settings_language_changed": "Язык изменён",

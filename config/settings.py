@@ -485,6 +485,19 @@ class Settings:
         if not 1 <= self.hysteria2_port <= 65535:
             raise SettingsError("Для создания Hysteria2-ключа HYSTERIA2_PORT должен быть в диапазоне 1–65535")
 
+    def is_hysteria2_ready(self) -> bool:
+        """Non-raising form of validate_hysteria2_ready() for gating UI affordances.
+
+        Used to hide the Hysteria2 create button when HOST/SNI/OBFS are not yet
+        configured, so the user never sees an option that would fail on issuance.
+        Reuses validate_hysteria2_ready() so the two cannot drift.
+        """
+        try:
+            self.validate_hysteria2_ready()
+        except SettingsError:
+            return False
+        return True
+
     def validate_awg_ready(self) -> None:
         missing = [
             name
