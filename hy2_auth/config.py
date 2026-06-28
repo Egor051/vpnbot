@@ -8,6 +8,13 @@ from dotenv import load_dotenv
 
 # Mirrors config.settings defaults, kept local so this process never imports the
 # bot's settings module (which requires BOT_TOKEN/ADMIN_IDS and pulls in the bot).
+#
+# parse_loopback_listen() below intentionally duplicates the loopback-only check
+# in config.settings (_loopback_host_port). The duplication is by design, not an
+# oversight: hy2_auth is a separate, dependency-light data-plane process that must
+# stay importable without aiogram/the bot package (see the data-plane isolation
+# test), so it cannot share settings.py. Both enforce the same invariant — the
+# auth endpoint must never bind off-loopback — and must be changed together.
 DEFAULT_DB_PATH = "/opt/vpn-service/data/vpn.db"
 DEFAULT_AUTH_LISTEN = "127.0.0.1:8444"
 

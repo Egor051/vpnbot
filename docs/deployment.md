@@ -186,6 +186,74 @@ helper-managed. Do not grant `vpn-bot.service` runtime write access to `/etc/sys
 or broad write access to `/etc/mtproxy`; install or update the MTProxy drop-in and wrapper
 manually during deploy, then run `systemctl daemon-reload` outside the bot runtime.
 
+## Hysteria2 data plane (`hy2_auth` endpoint)
+
+Hysteria2 support is **disabled by default** and runs as a standalone data plane,
+independent of `vpn-bot.service`. The bot only writes key rows to the database;
+the actual handshake authentication is done by a separate process,
+`hy2_auth`, that the `hysteria` server calls over loopback HTTP. Because that
+process reads the **live** database, a revoke or delete takes effect on the very
+next handshake — there is no apply step and no data-plane restart.
+
+You install three things: the `hysteria` server, its HTTP-auth pointing at
+`hy2_auth`, and the `vpnbot-hy2-auth.service` systemd unit.
+
+### 1. Install the `hy2_auth` systemd unit
+
+```bash
+sudo cp deploy/vpnbot-hy2-auth.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vpnbot-hy2-auth
+```
+
+The unit runs `python -m hy2_auth` from the project venv, reads the same
+`/opt/vpn-service/.env`, binds **loopback only** (`HYSTERIA2_AUTH_LISTEN`,
+default `127.0.0.1:8444`), and opens the database **read-only** (`mode=ro`). It
+runs no sudo helpers, so it is fully hardened (`NoNewPrivileges=yes`,
+`ProtectSystem=strict`, a `@system-service` syscall filter, etc.) and must keep
+running even when `vpn-bot.service` is down.
+
+> **WAL / `ReadWritePaths` (required).** The bot keeps `vpn.db` in WAL mode, and a
+> WAL *reader* must be able to write the shared-memory index (`-shm`) and the
+> `-wal` sidecar — even though it only ever reads rows. The unit therefore grants
+> `ReadWritePaths=/opt/vpn-service/data` (not `ReadOnlyPaths`); with a read-only
+> data directory SQLite cannot open those sidecars and fails with
+> `unable to open database file` / `SQLITE_CANTOPEN`, rejecting every handshake.
+> This does **not** loosen the read-only guarantee on the data itself: the
+> application opens the connection with `mode=ro`, so any write to the main DB
+> still raises — the read-write grant only covers the WAL sidecars.
+
+### 2. Point the `hysteria` server at the endpoint
+
+In `/etc/hysteria/config.yaml`, use HTTP auth and the same listen address:
+
+```yaml
+auth:
+  type: http
+  http:
+    url: http://127.0.0.1:8444/auth   # must match HYSTERIA2_AUTH_LISTEN
+```
+
+`HYSTERIA2_OBFS_PASSWORD` in `.env` must equal the salamander obfuscation
+password in this file — a mismatch is a silent client timeout, not an error.
+Start `hysteria-server.service` after `vpnbot-hy2-auth` (the unit declares
+`Before=hysteria-server.service`).
+
+### 3. Fail-closed behaviour and health
+
+- The endpoint **always replies HTTP 200** with `{"ok": <bool>, "id": "<label>"}`
+  so `hysteria` never sees a 5xx. `ok` is `false` for an unknown/revoked token,
+  a malformed body, or a database fault — it always fails **closed**.
+- A wrong token is logged quietly (debug); a database fault (locked, corrupt) is
+  logged at **error** with a failure counter, so a broken data plane is visible
+  in `journalctl -u vpnbot-hy2-auth` instead of hiding behind benign rejections.
+- `GET /healthz` runs a probe read: **200** `{"ok": true}` when the database is
+  readable, **503** `{"ok": false}` when it is not — usable by a watchdog or a
+  manual `curl http://127.0.0.1:8444/healthz`.
+
+See [Configuration → Hysteria2](configuration.md#hysteria2) for the `.env`
+variables, including the `HYSTERIA2_INSECURE=true` MITM tradeoff.
+
 ## Post-deploy smoke checklist
 
 1. `python deploy/check-nonroot-helper-mode.py` passes.
