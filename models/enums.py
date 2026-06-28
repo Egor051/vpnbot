@@ -28,6 +28,7 @@ class AccessRequestStatus(StrEnum):
 class VpnKeyType(StrEnum):
     XRAY = "xray"
     AWG = "awg"
+    HYSTERIA2 = "hysteria2"
 
 
 class VpnKeyStatus(StrEnum):

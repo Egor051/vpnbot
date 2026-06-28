@@ -94,6 +94,7 @@ STRINGS: dict[str, str] = {
     # ── config hints ─────────────────────────────────────────────────────────
     "xray_config_hint": "Add the link to a VLESS/REALITY-compatible client.",
     "awg_config_hint": "Add the link to an AmneziaVPN client or use the configuration file.",
+    "hy2_config_hint": "Add the link to a Hysteria2-capable client (e.g. NekoBox or Hiddify).",
     # ── traffic stats ─────────────────────────────────────────────────────────
     "stats_title": "<b>Stats for {key_title}</b>",
     "stats_unavailable_now": "Stats are currently unavailable. Last successful snapshot:",

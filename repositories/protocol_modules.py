@@ -3,13 +3,14 @@ from dataclasses import dataclass
 
 from db.database import Database
 
-PROTOCOL_NAMES: tuple[str, ...] = ("xray", "awg", "socks5", "mtproto")
+PROTOCOL_NAMES: tuple[str, ...] = ("xray", "awg", "socks5", "mtproto", "hysteria2")
 
 PROTOCOL_DISPLAY: dict[str, str] = {
     "xray": "Xray (VLESS+Reality)",
     "awg": "AmneziaWG 2.0",
     "socks5": "SOCKS5",
     "mtproto": "MTProto",
+    "hysteria2": "Hysteria2",
 }
 
 

@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Hysteria2 (apernet v2) integration with `auth: type: http`.** The bot can now
+  issue, revoke and delete Hysteria2 `vpn_key`s dynamically with **no data-plane
+  restarts**. Authentication is handled by a new standalone process,
+  `python -m hy2_auth`: Hysteria POSTs each handshake to a loopback endpoint that
+  live-reads `vpn.db` read-only and validates the per-key token in constant time
+  (`hmac.compare_digest`), returning `{"ok": …, "id": <label>}` and always HTTP 200.
+  The endpoint is fully decoupled from the bot (it never imports `bot`/`aiogram`,
+  binds loopback only, and keeps working while the bot is down). Per-key secrets
+  (`secrets.token_hex(24)`) live only in `payload_json`; the stats label is
+  `hy2_<hex>`. New settings: `HYSTERIA2_{ENABLED,HOST,PORT,SNI,OBFS_PASSWORD,INSECURE,AUTH_LISTEN}`
+  (`HYSTERIA2_OBFS_PASSWORD` must match the salamander password in
+  `/etc/hysteria/config.yaml`). A new `hysteria2` protocol module gates issuance in
+  the admin panel, and `deploy/vpnbot-hy2-auth.service` is provided for the operator.
+  Includes a table-rebuild migration (schema v29) that widens the `vpn_keys.key_type`
+  CHECK to allow `'hysteria2'` (idempotent; UUIDs of existing keys preserved).
 - **Slash-command menu in Telegram (`set_my_commands`).** On startup the bot now
   publishes its commands so they appear in Telegram's command menu (the «/» button)
   with localized descriptions. Regular users see the public commands (`/start`,

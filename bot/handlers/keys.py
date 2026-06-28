@@ -12,6 +12,7 @@ from bot.formatters import (
     XHTTP_PROFILE_CHOICES,
     awg_config_text,
     create_confirm_text,
+    hysteria2_config_text,
     key_detail_text,
     keys_page_text,
     note_confirm_text,
@@ -128,6 +129,7 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
     if callback.message:
         xray_on = await services.modules.is_enabled("xray")
         awg_on = await services.modules.is_enabled("awg")
+        hy2_on = services.settings.hysteria2_enabled and await services.modules.is_enabled("hysteria2")
         back_data = "menu:main" if callback.data == "keys:create:menu" else "keys:list"
         await safe_edit_message_text(
             callback.message,
@@ -136,6 +138,7 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
                 xray_enabled=xray_on,
                 awg_enabled=awg_on,
                 xhttp_enabled=services.settings.xray_xhttp_enabled,
+                hysteria2_enabled=hy2_on,
                 back_data=back_data,
             ),
         )
@@ -152,12 +155,14 @@ async def create_key_menu_message(message: Message, services: Services) -> None:
         await _ensure_can_enter_create(message.from_user.id, services)
         xray_on = await services.modules.is_enabled("xray")
         awg_on = await services.modules.is_enabled("awg")
+        hy2_on = services.settings.hysteria2_enabled and await services.modules.is_enabled("hysteria2")
         await message.answer(
             f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
             reply_markup=create_key_keyboard(
                 xray_enabled=xray_on,
                 awg_enabled=awg_on,
                 xhttp_enabled=services.settings.xray_xhttp_enabled,
+                hysteria2_enabled=hy2_on,
                 back_data="menu:main",
             ),
         )
@@ -189,6 +194,8 @@ async def create_key_proto_vless(callback: CallbackQuery, services: Services) ->
 _CREATE_CHOICE: dict[str, tuple[str, str]] = {
     "keys:create:awg": (VpnKeyType.AWG.value, "tcp"),
     "keys:create:xray": (VpnKeyType.XRAY.value, "tcp"),
+    # Hysteria2 has no transport variants; the value is unused for hy2 keys.
+    "keys:create:hy2": (VpnKeyType.HYSTERIA2.value, "tcp"),
 }
 
 
@@ -514,6 +521,8 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
             result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at, fingerprint=fingerprint, transport=transport, xhttp_profile=xhttp_profile)
         elif key_type == VpnKeyType.AWG.value:
             result = await services.awg.create_awg_key(callback.from_user.id, profile, note, expires_at=expires_at, mtu=mtu)
+        elif key_type == VpnKeyType.HYSTERIA2.value:
+            result = await services.hysteria.issue(callback.from_user.id, profile, note, expires_at=expires_at)
         else:
             await safe_edit_message_text(callback.message, t("key_unknown_type"))
             return
@@ -577,6 +586,11 @@ async def show_key_config(callback: CallbackQuery, state: FSMContext, services: 
         if key.key_type == VpnKeyType.XRAY:
             await safe_callback_answer(callback)
             text = xray_config_text(await services.xray.get_xray_key_config(callback.from_user.id, key_id))
+            await safe_edit_message_text(callback.message, text, reply_markup=keyboard)
+            return
+        if key.key_type == VpnKeyType.HYSTERIA2:
+            await safe_callback_answer(callback)
+            text = hysteria2_config_text(await services.hysteria.get_config(callback.from_user.id, key_id))
             await safe_edit_message_text(callback.message, text, reply_markup=keyboard)
             return
         text = awg_config_text(await services.awg.get_awg_client_config(callback.from_user.id, key_id))
@@ -693,11 +707,12 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
         if action == "revoke":
             rate_limiter.check(callback.from_user.id, "key_revoke", 10)
             await safe_callback_answer(callback, t("executing"))
-            updated = (
-                await services.xray.revoke_xray_key(callback.from_user.id, key_id)
-                if key.key_type == VpnKeyType.XRAY
-                else await services.awg.revoke_awg_key(callback.from_user.id, key_id)
-            )
+            if key.key_type == VpnKeyType.XRAY:
+                updated = await services.xray.revoke_xray_key(callback.from_user.id, key_id)
+            elif key.key_type == VpnKeyType.HYSTERIA2:
+                updated = await services.hysteria.revoke(callback.from_user.id, key_id)
+            else:
+                updated = await services.awg.revoke_awg_key(callback.from_user.id, key_id)
             await safe_edit_message_text(
                 callback.message,
                 t("key_revoked"),
@@ -711,6 +726,8 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
                 raise AccessDenied(t("delete_context_stale"))
             if key.key_type == VpnKeyType.XRAY:
                 await services.xray.delete_xray_key(callback.from_user.id, key_id)
+            elif key.key_type == VpnKeyType.HYSTERIA2:
+                await services.hysteria.delete_hysteria2_key(callback.from_user.id, key_id)
             else:
                 await services.awg.delete_awg_key(callback.from_user.id, key_id)
             if owner_context is not None:

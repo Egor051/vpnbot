@@ -15,7 +15,7 @@ from typing import Any, ClassVar
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 28
+CURRENT_SCHEMA_VERSION = 29
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -296,6 +296,10 @@ class Database:
             await self._migrate_v28()
             await self._set_schema_version(28)
             version = 28
+        if version < 29:
+            await self._migrate_v29()
+            await self._set_schema_version(29)
+            version = 29
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -586,7 +590,7 @@ class Database:
             (
                 "vpn_keys",
                 "key_type",
-                ("xray", "awg"),
+                ("xray", "awg", "hysteria2"),
             ),
             ("vpn_keys", "transport", ("tcp", "http")),
             (
@@ -1033,6 +1037,140 @@ class Database:
                 "ALTER TABLE vpn_keys ADD COLUMN xhttp_profile TEXT NOT NULL DEFAULT 'base'"
             )
         await self._relabel_xray_emails_v28()
+
+    async def _migrate_v29(self) -> None:
+        # Hysteria2 integration. Two idempotent parts:
+        #  1) Allow 'hysteria2' as a vpn_keys.key_type. SQLite cannot ALTER a CHECK
+        #     constraint, so the table is rebuilt when the legacy CHECK is present.
+        #     Skipped when the CHECK already lists hysteria2 (fresh DBs created from
+        #     schema.sql already include it), so the migration is a no-op there.
+        #  2) Seed the 'hysteria2' protocol module row (mirrors schema.sql).
+        await self._migrate_v29_vpn_keys_key_type_check()
+        await self.conn.execute(
+            "INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('hysteria2', 1)"
+        )
+
+    async def _migrate_v29_vpn_keys_key_type_check(self) -> None:
+        table = await self.conn.execute_fetchone(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vpn_keys'"
+        )
+        if table is None:
+            return
+        if "hysteria2" in str(table["sql"] or ""):
+            # CHECK already lists hysteria2 (fresh DB / re-run) — nothing to rebuild.
+            return
+        # Rebuild vpn_keys to widen the key_type CHECK. UUIDs and every other column
+        # are copied verbatim (client identity is never touched). Same approach as
+        # _migrate_v16/_migrate_v17: run on the RAW connection with FK enforcement
+        # OFF so dropping the old table does not cascade into vpn_key_traffic_stats
+        # / trial_key_requests, then re-enable FK AFTER the commit (SQLite ignores
+        # the pragma inside a transaction).
+        await self.commit()
+        raw = self._raw_conn()
+        await raw.execute("PRAGMA foreign_keys = OFF")
+        try:
+            for index_name in (
+                "idx_vpn_keys_owner",
+                "idx_vpn_keys_type_status",
+                "idx_vpn_keys_status_type",
+                "idx_vpn_keys_owner_type_status",
+                "idx_vpn_keys_uuid",
+                "idx_vpn_keys_email_label",
+                "idx_vpn_keys_public_key",
+                "idx_vpn_keys_short_id",
+                "idx_vpn_keys_client_ip_reserved",
+                "idx_vpn_keys_expires_at",
+            ):
+                await raw.execute(f"DROP INDEX IF EXISTS {index_name}")
+            await raw.execute(
+                """
+                CREATE TABLE vpn_keys_new (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  owner_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+                  username TEXT,
+                  key_type TEXT NOT NULL CHECK(key_type IN ('xray','awg','hysteria2')),
+                  status TEXT NOT NULL CHECK(status IN ('pending_apply','active','apply_failed','pending_revoke','revoked','pending_delete','delete_failed','deleted','failed')),
+                  note TEXT,
+                  uuid TEXT,
+                  email_label TEXT,
+                  public_key TEXT,
+                  client_ip TEXT,
+                  payload_json TEXT NOT NULL,
+                  public_payload_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  revoked_at TEXT,
+                  expires_at TEXT DEFAULT NULL,
+                  expiry_notified_days TEXT DEFAULT NULL,
+                  transport TEXT NOT NULL DEFAULT 'tcp',
+                  xhttp_profile TEXT NOT NULL DEFAULT 'base',
+                  deleted_at TEXT,
+                  created_by INTEGER NOT NULL,
+                  revoked_by INTEGER,
+                  deleted_by INTEGER
+                )
+                """
+            )
+            # Explicit column list (not SELECT *) so a future column-order divergence
+            # between schema.sql and this rebuild cannot silently misalign data.
+            await raw.execute(
+                """
+                INSERT INTO vpn_keys_new (
+                  id, owner_user_id, username, key_type, status, note, uuid, email_label,
+                  public_key, client_ip, payload_json, public_payload_json, created_at,
+                  updated_at, revoked_at, expires_at, expiry_notified_days, transport,
+                  xhttp_profile, deleted_at, created_by, revoked_by, deleted_by
+                )
+                SELECT
+                  id, owner_user_id, username, key_type, status, note, uuid, email_label,
+                  public_key, client_ip, payload_json, public_payload_json, created_at,
+                  updated_at, revoked_at, expires_at, expiry_notified_days, transport,
+                  xhttp_profile, deleted_at, created_by, revoked_by, deleted_by
+                FROM vpn_keys
+                """
+            )
+            await raw.execute("DROP TABLE vpn_keys")
+            await raw.execute("ALTER TABLE vpn_keys_new RENAME TO vpn_keys")
+            # Recreate every vpn_keys index so a single bootstrap ends with the full
+            # set (mirrors schema.sql plus the migration-only partials from v5/v6/v13).
+            await raw.execute("CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner ON vpn_keys(owner_user_id)")
+            await raw.execute("CREATE INDEX IF NOT EXISTS idx_vpn_keys_type_status ON vpn_keys(key_type, status)")
+            await raw.execute("CREATE INDEX IF NOT EXISTS idx_vpn_keys_status_type ON vpn_keys(status, key_type)")
+            await raw.execute(
+                "CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner_type_status ON vpn_keys(owner_user_id, key_type, status)"
+            )
+            await raw.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_uuid ON vpn_keys(uuid) WHERE uuid IS NOT NULL"
+            )
+            await raw.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_email_label ON vpn_keys(email_label) WHERE email_label IS NOT NULL"
+            )
+            await raw.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_public_key ON vpn_keys(public_key) WHERE public_key IS NOT NULL"
+            )
+            await raw.execute(
+                "CREATE INDEX IF NOT EXISTS idx_vpn_keys_short_id "
+                "ON vpn_keys(json_extract(payload_json, '$.short_id')) "
+                "WHERE key_type = 'xray' AND json_valid(payload_json) AND json_extract(payload_json, '$.short_id') IS NOT NULL"
+            )
+            await raw.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_client_ip_reserved "
+                "ON vpn_keys(client_ip) "
+                "WHERE client_ip IS NOT NULL AND key_type = 'awg' "
+                "AND status IN ('pending_apply','active','apply_failed','pending_revoke','pending_delete','delete_failed')"
+            )
+            await raw.execute(
+                "CREATE INDEX IF NOT EXISTS idx_vpn_keys_expires_at "
+                "ON vpn_keys(expires_at) WHERE expires_at IS NOT NULL AND status = 'active'"
+            )
+            await raw.commit()
+        except Exception:
+            await raw.rollback()
+            raise
+        finally:
+            # Re-enable FK after committing so the pragma actually takes effect
+            # (SQLite ignores PRAGMA foreign_keys while a transaction is open).
+            await raw.execute("PRAGMA foreign_keys = ON")
 
     async def _relabel_xray_emails_v28(self) -> None:
         cursor = await self.conn.execute(

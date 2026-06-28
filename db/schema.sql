@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   owner_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
   username TEXT,
-  key_type TEXT NOT NULL CHECK(key_type IN ('xray','awg')),
+  key_type TEXT NOT NULL CHECK(key_type IN ('xray','awg','hysteria2')),
   status TEXT NOT NULL CHECK(status IN ('pending_apply','active','apply_failed','pending_revoke','revoked','pending_delete','delete_failed','deleted','failed')),
   note TEXT,
   uuid TEXT,
@@ -204,6 +204,7 @@ INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('xray', 1);
 INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('awg', 1);
 INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('socks5', 1);
 INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('mtproto', 1);
+INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('hysteria2', 1);
 
 CREATE TABLE IF NOT EXISTS warp_settings (
   id              INTEGER PRIMARY KEY DEFAULT 1,

@@ -1,5 +1,6 @@
 
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from aiogram.types import User as TgUser
 
@@ -79,6 +80,8 @@ def key_type_label(key: VpnKey) -> str:
     """
     if key.key_type == VpnKeyType.AWG:
         return "AmneziaWG"
+    if key.key_type == VpnKeyType.HYSTERIA2:
+        return "Hysteria2"
     transport = str(getattr(key, "transport", "tcp") or "tcp").lower()
     return "VLESS (HTTP)" if transport == "http" else "VLESS (TCP)"
 
@@ -165,11 +168,14 @@ def keys_page_text(keys: list[VpnKey], page: int, *, viewer_user_id: int, owner_
         return f"{title}\n\n{t('one_key_one_device')}\n\n{t('keys_page_empty')}"
     xray = [key for key in keys if key.key_type == VpnKeyType.XRAY]
     awg = [key for key in keys if key.key_type == VpnKeyType.AWG]
+    hysteria2 = [key for key in keys if key.key_type == VpnKeyType.HYSTERIA2]
     sections = [t("keys_page_title", title=title, page=page + 1), t("one_key_one_device")]
     if xray:
         sections.append("<b>VLESS</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in xray))
     if awg:
         sections.append("<b>AmneziaWG</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in awg))
+    if hysteria2:
+        sections.append("<b>Hysteria2</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in hysteria2))
     return "\n\n".join(sections)
 
 
@@ -296,6 +302,8 @@ def create_type_label(key_type: str, transport: str | None = None, profile: str 
     """Human label for a key type + transport (+ xhttp profile) for the confirm screen."""
     if key_type == VpnKeyType.AWG.value:
         return "AmneziaWG"
+    if key_type == VpnKeyType.HYSTERIA2.value:
+        return "Hysteria2"
     if key_type == VpnKeyType.XRAY.value:
         if str(transport or "tcp").lower() != "http":
             return "VLESS (TCP)"
@@ -347,6 +355,40 @@ def xray_config_text(config_text: str) -> str:
 
 def awg_config_text(config_text: str) -> str:
     return f"{config_text}\n\n{t('awg_config_hint')}"
+
+
+def hysteria2_config_text(config_text: str) -> str:
+    return f"{config_text}\n\n{t('hy2_config_hint')}"
+
+
+def format_hysteria2_link(
+    label: str,
+    secret: str,
+    *,
+    host: str,
+    port: int,
+    sni: str,
+    obfs_password: str,
+    insecure: bool = True,
+) -> str:
+    """Build a ``hysteria2://`` client URI for a single issued key.
+
+    The userinfo component is the single auth token (our per-key secret) — NOT a
+    ``user:pass`` pair. Every interpolated value is percent-encoded via
+    ``urllib.parse.quote`` so an obfs password (or label) containing URL
+    metacharacters cannot break the link. ``host``/``port``/``sni``/
+    ``obfs_password`` are the global server settings shared by every key.
+    """
+    user = quote(secret, safe="")
+    sni_q = quote(sni, safe="")
+    obfs_q = quote(obfs_password, safe="")
+    label_q = quote(label, safe="")
+    insecure_flag = 1 if insecure else 0
+    return (
+        f"hysteria2://{user}@{host}:{port}/"
+        f"?sni={sni_q}&obfs=salamander&obfs-password={obfs_q}&insecure={insecure_flag}"
+        f"#{label_q}"
+    )
 
 
 def proxy_section_separator() -> str:

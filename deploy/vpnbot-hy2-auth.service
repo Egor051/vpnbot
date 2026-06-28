@@ -1,0 +1,65 @@
+# Hysteria2 HTTP-auth endpoint (apernet v2 `auth: type: http`).
+#
+# Independent data-plane unit: it authenticates Hysteria handshakes against
+# vpn.db and must keep running even when the bot (vpn-bot.service) is down. It
+# binds loopback only and opens the DB read-only.
+#
+# Operator install (Package PART B):
+#   sudo cp deploy/vpnbot-hy2-auth.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vpnbot-hy2-auth
+# Point Hysteria at it in /etc/hysteria/config.yaml:
+#   auth:
+#     type: http
+#     http:
+#       url: http://127.0.0.1:8444/auth      # must match HYSTERIA2_AUTH_LISTEN
+
+[Unit]
+Description=vpnbot Hysteria2 HTTP-auth endpoint (loopback, read-only DB)
+After=network.target
+# The hysteria server depends on this for auth; start it first when present.
+Before=hysteria-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vpn-service
+EnvironmentFile=/opt/vpn-service/.env
+ExecStart=/opt/vpn-service/.venv/bin/python -m hy2_auth
+Restart=on-failure
+RestartSec=5
+User=vpn-bot
+Group=vpn-bot
+UMask=0077
+
+# Hardening. Unlike vpn-bot.service this unit runs no sudo helpers, so it can lock
+# down fully — including NoNewPrivileges.
+NoNewPrivileges=yes
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# The endpoint never writes the database. The directory is exposed read-only.
+# NOTE: if the bot keeps vpn.db in WAL mode (it does), a read-only SQLite reader
+# still needs to write the `-shm` wal-index. If reads fail with "unable to open
+# database file", replace the ReadOnlyPaths line below with:
+#   ReadWritePaths=/opt/vpn-service/data
+# The application still opens the connection with mode=ro, so the main DB file is
+# never written regardless.
+ReadOnlyPaths=/opt/vpn-service/data
+
+[Install]
+WantedBy=multi-user.target

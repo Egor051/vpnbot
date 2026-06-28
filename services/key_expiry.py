@@ -33,6 +33,7 @@ class KeyExpiryService:
         awg: object,
         audit: AuditService,
         clock: ClockProvider,
+        hysteria: object | None = None,
         bot: Bot | None = None,
         notify_days: tuple[int, ...] = (),
         backend_health: object | None = None,
@@ -41,6 +42,7 @@ class KeyExpiryService:
         self.users = users
         self.xray = xray
         self.awg = awg
+        self.hysteria = hysteria
         self.audit = audit
         self.clock = clock
         self.bot = bot
@@ -56,6 +58,10 @@ class KeyExpiryService:
             try:
                 if key.key_type == VpnKeyType.XRAY:
                     await self.xray.revoke_xray_key_system(key.id)  # type: ignore[attr-defined]
+                elif key.key_type == VpnKeyType.HYSTERIA2:
+                    if self.hysteria is None:
+                        raise RuntimeError("Hysteria2 service not wired for expiry revocation")
+                    await self.hysteria.revoke_hysteria2_key_system(key.id)  # type: ignore[attr-defined]
                 else:
                     await self.awg.revoke_awg_key_system(key.id)  # type: ignore[attr-defined]
                 count += 1

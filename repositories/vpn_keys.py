@@ -390,6 +390,21 @@ class VpnKeyRepository:
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
+    async def list_active_hysteria2(self) -> list[VpnKey]:
+        """Return all active Hysteria2 keys (label + secret live in payload_json).
+
+        Used by issuance/lifecycle code on the bot side. The hy2_auth endpoint
+        deliberately does NOT go through this repository: it runs in a separate
+        process with a read-only DB connection and its own parameterised SELECT
+        (no bot/aiogram imports).
+        """
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM vpn_keys WHERE key_type = ? AND status = ? ORDER BY id ASC",
+            (VpnKeyType.HYSTERIA2.value, VpnKeyStatus.ACTIVE.value),
+        )
+        rows = await cursor.fetchall()
+        return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
+
     async def mark_active(
         self,
         key_id: int,

@@ -672,7 +672,7 @@ def test_create_key_menu_ignores_stale_callback_answer(monkeypatch) -> None:
         services = SimpleNamespace(
             users=Users(),
             modules=_modules_enabled(),
-            settings=SimpleNamespace(xray_xhttp_enabled=False),
+            settings=SimpleNamespace(xray_xhttp_enabled=False, hysteria2_enabled=False),
         )
         await create_key_menu(callback, services)  # type: ignore[arg-type]
 
@@ -704,7 +704,7 @@ def test_create_menu_back_button_returns_to_entry_point(monkeypatch) -> None:
         services = SimpleNamespace(
             users=Users(),
             modules=_modules_enabled(),
-            settings=SimpleNamespace(xray_xhttp_enabled=False),
+            settings=SimpleNamespace(xray_xhttp_enabled=False, hysteria2_enabled=False),
         )
 
         # Entered from the main menu -> back returns to the main menu.

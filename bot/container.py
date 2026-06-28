@@ -9,6 +9,7 @@ from services.audit import AuditService
 from services.awg import AwgService
 from services.backend_health import BackendHealth
 from services.dashboard import DashboardService
+from services.hysteria import HysteriaService
 from services.key_expiry import KeyExpiryService
 from services.maintenance import MaintenanceService
 from services.mtproto import MtProtoService
@@ -39,6 +40,7 @@ class Services:
     access: AccessApprovalService
     xray: XrayService
     awg: AwgService
+    hysteria: HysteriaService
     proxy: ProxyService
     socks5: Socks5Service
     mtproto: MtProtoService
