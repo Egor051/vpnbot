@@ -17,6 +17,7 @@ def create_key_keyboard(
     xray_enabled: bool = True,
     awg_enabled: bool = True,
     xhttp_enabled: bool = False,
+    hysteria2_enabled: bool = False,
     back_data: str = "keys:list",
 ) -> InlineKeyboardMarkup:
     """Build the protocol selection keyboard for creating a new key (step 1).
@@ -34,6 +35,8 @@ def create_key_keyboard(
         rows.append([InlineKeyboardButton(text="VLESS", callback_data=vless_data)])
     if awg_enabled:
         rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="keys:create:awg")])
+    if hysteria2_enabled:
+        rows.append([InlineKeyboardButton(text="Hysteria2", callback_data="keys:create:hy2")])
     rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data=back_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

@@ -8,7 +8,7 @@ from repositories.protocol_modules import PROTOCOL_DISPLAY, ProtocolModule
 def modules_panel_keyboard(modules: list[ProtocolModule]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     by_name = {m.name: m for m in modules}
-    for name in ("xray", "awg", "socks5", "mtproto"):
+    for name in ("xray", "awg", "socks5", "mtproto", "hysteria2"):
         module = by_name.get(name)
         enabled = module.enabled if module else True
         label = PROTOCOL_DISPLAY.get(name, name)

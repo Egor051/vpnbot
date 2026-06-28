@@ -53,6 +53,7 @@ from services.audit import AuditService
 from services.awg import AwgService
 from services.backend_health import BackendHealth
 from services.dashboard import DashboardService
+from services.hysteria import HysteriaService
 from services.key_expiry import KeyExpiryService
 from services.maintenance import MaintenanceService
 from services.offsite_backup import OffsiteBackupService
@@ -279,6 +280,16 @@ async def _build_app(
         user_locks=user_locks,
         backend_health=backend_health,
     )
+    hysteria_service = HysteriaService(
+        vpn_keys=vpn_keys_repo,
+        users=user_service,
+        settings=settings,
+        clock=clock,
+        ids=ids,
+        audit=audit_service,
+        modules=protocol_modules_service,
+        user_locks=user_locks,
+    )
     # block_user is reachable by moderators, who are neither superadmin nor the
     # key owner. Wire the *system* revokers (authorisation is already done by
     # block_user) so a moderator-initiated block actually revokes backend access
@@ -291,6 +302,9 @@ async def _build_app(
             ),
             VpnKeyType.AWG: lambda actor, key_id: awg_service.revoke_awg_key_system(
                 key_id, actor_user_id=actor, action="awg_key_revoked"
+            ),
+            VpnKeyType.HYSTERIA2: lambda actor, key_id: hysteria_service.revoke_hysteria2_key_system(
+                key_id, actor_user_id=actor, action="hysteria2_key_revoked"
             ),
         },
     )
@@ -332,6 +346,7 @@ async def _build_app(
         key_purgers={
             VpnKeyType.XRAY: xray_service.delete_xray_key,
             VpnKeyType.AWG: awg_service.delete_awg_key,
+            VpnKeyType.HYSTERIA2: hysteria_service.delete_hysteria2_key,
         },
         proxy_purgers={
             ProxyAccessType.SOCKS5: socks5_service.delete_socks5_proxy,
@@ -365,6 +380,7 @@ async def _build_app(
         users=users_repo,
         xray=xray_service,
         awg=awg_service,
+        hysteria=hysteria_service,
         audit=audit_service,
         clock=clock,
         notify_days=settings.key_expiry_notify_days,
@@ -466,6 +482,7 @@ async def _build_app(
         access=access_service,
         xray=xray_service,
         awg=awg_service,
+        hysteria=hysteria_service,
         proxy=proxy_service,
         socks5=socks5_service,
         mtproto=mtproto_service,

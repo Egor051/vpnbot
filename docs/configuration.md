@@ -148,6 +148,24 @@ _Legacy alias: `AWG_CLIENT_DNS` (= `AWG_DNS`)._
 | `MTPROTO_ROLLBACK_ON_APPLY_FAILURE` | No | `true` | Automatically restore backup on apply failure. | `true` |
 | `MTPROTO_KEEP_LAST_BACKUPS` | No | `10` | Number of managed-file backups to retain (0–1000). | `10` |
 
+## Hysteria2
+
+Hysteria2 runs as a standalone data plane (the `hysteria` server plus the
+separate `hy2_auth` endpoint), independent of the bot process. These variables
+let the bot build client links and gate issuance. `HYSTERIA2_OBFS_PASSWORD` must
+match the salamander obfuscation password in `/etc/hysteria/config.yaml` — a
+mismatch is a silent client timeout, not an error.
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `HYSTERIA2_ENABLED` | No | `false` | Enable Hysteria2 key issuance in the bot. The data plane runs regardless. | `true` |
+| `HYSTERIA2_HOST` | No* | — | Public hostname/IP clients connect to. Required to issue keys. | `vpn.example.com` |
+| `HYSTERIA2_PORT` | No | `15650` | Public UDP port of the Hysteria2 server (1–65535). | `15650` |
+| `HYSTERIA2_SNI` | No* | — | TLS SNI used in the client link. Required to issue keys. | `googletagmanager.com` |
+| `HYSTERIA2_OBFS_PASSWORD` | No* | — | Salamander obfuscation password; MUST match `/etc/hysteria/config.yaml`. 🔒 | `s3cret` |
+| `HYSTERIA2_INSECURE` | No | `true` | Set `insecure=1` in the link (self-signed server cert). | `true` |
+| `HYSTERIA2_AUTH_LISTEN` | No | `127.0.0.1:8444` | Loopback `host:port` the `hy2_auth` endpoint binds. Host must be loopback. | `127.0.0.1:8444` |
+
 ## Key Expiry and Trial Access
 
 | Variable | Required | Default | Description | Example |

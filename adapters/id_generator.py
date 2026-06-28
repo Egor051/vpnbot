@@ -31,6 +31,15 @@ class IdGenerator:
         """Generate a key name from the prefix plus a random suffix."""
         return f"{prefix}_{''.join(secrets.choice(KEY_NAME_ALPHABET) for _ in range(5))}"
 
+    def hysteria2_label(self) -> str:
+        """Generate a Hysteria2 stats/log label: ``hy2_`` + 16 hex chars.
+
+        Mirrors the prefixed Xray scheme (``xray_tcp_`` / ``xray_http_``) but uses
+        a hex suffix. The label is a stats identifier returned to Hysteria's
+        traffic-stats API — it is NOT the auth secret.
+        """
+        return f"hy2_{secrets.token_hex(8)}"
+
     def _label_base(self, telegram_user_id: int, username: str | None) -> str:
         if username:
             value = username.lstrip("@").strip().lower()

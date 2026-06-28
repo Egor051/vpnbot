@@ -154,6 +154,35 @@ def _fernet_key(name: str) -> str:
     return value
 
 
+def _loopback_host_port(name: str, value: str) -> str:
+    """Validate a ``host:port`` whose host must be loopback.
+
+    The hy2_auth endpoint must never be reachable off the box, so the bind host
+    is constrained to a loopback address here (defence-in-depth alongside the
+    hy2_auth process enforcing the same invariant).
+    """
+    value = _no_control_chars(name, value).strip()
+    host, sep, port_raw = value.rpartition(":")
+    if not sep or not host:
+        raise SettingsError(f"{name} должен быть в формате host:port")
+    host = host.strip("[]")  # tolerate bracketed IPv6 loopback ([::1]:8444)
+    try:
+        port = int(port_raw)
+    except ValueError as exc:
+        raise SettingsError(f"{name}: порт должен быть целым числом") from exc
+    if not 1 <= port <= 65535:
+        raise SettingsError(f"{name}: порт должен быть в диапазоне 1–65535")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        if host == "localhost":
+            return value
+        raise SettingsError(f"{name}: host должен быть loopback (127.0.0.1, ::1 или localhost)") from exc
+    if not address.is_loopback:
+        raise SettingsError(f"{name}: host должен быть loopback (127.0.0.1, ::1 или localhost)")
+    return value
+
+
 def _admin_ids(raw: str) -> frozenset[int]:
     values: set[int] = set()
     for item in raw.split(","):
@@ -381,6 +410,21 @@ class Settings:
     # stream-up (two-request) is only for environments without single-request full-duplex
     # and is not needed on direct REALITY.
     xray_xhttp_mode: str = "stream-one"
+    # Hysteria2 (apernet v2) integration. The data plane (a standalone hysteria
+    # server + the hy2_auth endpoint) runs independently of the bot; these settings
+    # only let the bot build client links and gate issuance. HOST/PORT/SNI/OBFS are
+    # global (one server, shared by every issued key). OBFS_PASSWORD is the
+    # salamander obfuscation password and MUST match /etc/hysteria/config.yaml — a
+    # mismatch is a silent client timeout, not an error. AUTH_LISTEN is the
+    # loopback host:port the separate hy2_auth process binds (used by the operator
+    # to point hysteria's auth url at it); the bot never binds it.
+    hysteria2_enabled: bool = False
+    hysteria2_host: str = ""
+    hysteria2_port: int = 15650
+    hysteria2_sni: str = ""
+    hysteria2_obfs_password: str = field(default="", repr=False)
+    hysteria2_insecure: bool = True
+    hysteria2_auth_listen: str = "127.0.0.1:8444"
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -425,6 +469,21 @@ class Settings:
             raise SettingsError("XRAY_FINGERPRINT содержит неподдерживаемое значение")
         if re.fullmatch(r"[A-Za-z0-9_-]+", self.xray_reality_public_key) is None:
             raise SettingsError("XRAY_REALITY_PUBLIC_KEY должен быть base64url-совместимой строкой")
+
+    def validate_hysteria2_ready(self) -> None:
+        missing = [
+            name
+            for name, value in {
+                "HYSTERIA2_HOST": self.hysteria2_host,
+                "HYSTERIA2_SNI": self.hysteria2_sni,
+                "HYSTERIA2_OBFS_PASSWORD": self.hysteria2_obfs_password,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise SettingsError("Для создания Hysteria2-ключа не заданы: " + ", ".join(missing))
+        if not 1 <= self.hysteria2_port <= 65535:
+            raise SettingsError("Для создания Hysteria2-ключа HYSTERIA2_PORT должен быть в диапазоне 1–65535")
 
     def validate_awg_ready(self) -> None:
         missing = [
@@ -680,4 +739,13 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         ),
         warp_proxy_egress_enabled=_bool("WARP_PROXY_EGRESS", False),
         bot_language=_choice("BOT_LANGUAGE", "ru", {"ru", "en"}),
+        hysteria2_enabled=_bool("HYSTERIA2_ENABLED", False),
+        hysteria2_host=_no_control_chars("HYSTERIA2_HOST", _optional("HYSTERIA2_HOST")),
+        hysteria2_port=_int_range("HYSTERIA2_PORT", 15650, 1, 65535),
+        hysteria2_sni=_no_control_chars("HYSTERIA2_SNI", _optional("HYSTERIA2_SNI")),
+        hysteria2_obfs_password=_no_control_chars("HYSTERIA2_OBFS_PASSWORD", _optional("HYSTERIA2_OBFS_PASSWORD")),
+        hysteria2_insecure=_bool("HYSTERIA2_INSECURE", True),
+        hysteria2_auth_listen=_loopback_host_port(
+            "HYSTERIA2_AUTH_LISTEN", _optional("HYSTERIA2_AUTH_LISTEN", "127.0.0.1:8444")
+        ),
     )

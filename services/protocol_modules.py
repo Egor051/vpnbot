@@ -18,7 +18,7 @@ from services.errors import InvalidOperation
 
 logger = logging.getLogger(__name__)
 
-_VPN_KEY_TYPES = {"xray", "awg"}
+_VPN_KEY_TYPES = {"xray", "awg", "hysteria2"}
 _PROXY_TYPES = {"socks5", "mtproto"}
 
 # Purger contracts: each removes the backend artefact (Xray client / AWG peer /
