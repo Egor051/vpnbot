@@ -19,6 +19,7 @@ from repositories.vpn_keys import VpnKeyRepository
 from services.errors import AccessDenied, InvalidOperation
 from services.hysteria import HysteriaService
 from services.protocol_modules import ProtocolModulesService
+from services.vpn_keys import VpnKeyQueryService
 
 
 def _settings(tmp_path: Path, **overrides: object) -> Settings:
@@ -155,6 +156,17 @@ def test_issued_secret_has_uri_safe_format(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+# ── readiness gate (L7) ──────────────────────────────────────────────────────
+
+def test_is_hysteria2_ready_reflects_required_settings(tmp_path: Path) -> None:
+    # Fully configured → ready.
+    assert _settings(tmp_path).is_hysteria2_ready() is True
+    # Any required field missing → not ready (button stays hidden, no raise).
+    assert _settings(tmp_path, hysteria2_host="").is_hysteria2_ready() is False
+    assert _settings(tmp_path, hysteria2_sni="").is_hysteria2_ready() is False
+    assert _settings(tmp_path, hysteria2_obfs_password="").is_hysteria2_ready() is False
+
+
 # ── link formatting ─────────────────────────────────────────────────────────
 
 def test_format_hysteria2_link_round_trip() -> None:
@@ -221,6 +233,28 @@ def test_idor_user_cannot_revoke_or_view_others_key(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+# ── cabinet summary counts hysteria2 (L3) ────────────────────────────────────
+
+def test_personal_summary_counts_active_hysteria2(tmp_path: Path) -> None:
+    async def run() -> None:
+        db, service = await _build(tmp_path)
+        try:
+            await service.issue(100, TelegramUserProfile(100, "user100", "User"), note=None)
+            query = VpnKeyQueryService(vpn_keys=VpnKeyRepository(db), users=_Users())  # type: ignore[arg-type]
+            active_xray, active_awg, active_hy2, _down, _up = await query.personal_summary_for_actor(100)
+            assert active_hy2 == 1
+            assert active_xray == 0 and active_awg == 0
+            # A revoked key drops out of the active count.
+            keys = await service.list_user_keys(100)
+            await service.revoke(100, keys[0].id)
+            _, _, active_hy2_after, _d, _u = await query.personal_summary_for_actor(100)
+            assert active_hy2_after == 0
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 # ── issuance gated by protocol toggle ────────────────────────────────────────
 
 def test_issue_rejected_when_module_disabled(tmp_path: Path) -> None:
@@ -257,6 +291,11 @@ def test_revoke_blocks_new_handshakes_but_row_stays(tmp_path: Path) -> None:
             # Revoked keys no longer appear among active hy2 keys (endpoint won't match).
             active = await repo.list_active_hysteria2()
             assert all(k.id != result.key.id for k in active)
+            # ...but the row itself is NOT deleted — it persists as REVOKED (revoke
+            # is a status flip, not a delete; only delete_hysteria2_key drops it).
+            row = await repo.get_by_id(result.key.id)
+            assert row is not None
+            assert row.status == VpnKeyStatus.REVOKED
         finally:
             await db.close()
 
@@ -412,5 +451,128 @@ def test_migration_v29_widens_check_idempotently_and_preserves_uuids(tmp_path: P
         active = await repo.list_active_hysteria2()
         assert len(active) == 1 and active[0].email_label == "hy2_deadbeefdeadbeef"
         await db.close()
+
+    asyncio.run(run())
+
+
+# ── migration v29: crash safety (H1) ─────────────────────────────────────────
+
+
+async def _seed_v28_with_xray_uuid(db_path: Path) -> None:
+    """Bootstrap a DB, seed a user + xray key (uuid=keep-me), revert to v28."""
+    db = Database(db_path)
+    await db.connect()
+    await db.bootstrap()
+    await UserRepository(db).upsert_profile(
+        TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now"
+    )
+    await VpnKeyRepository(db).create_pending(
+        owner_user_id=100,
+        username="user",
+        key_type=VpnKeyType.XRAY,
+        note=None,
+        payload={"uuid": "uuid-keep-me"},
+        public_payload={},
+        created_by=100,
+        now="now",
+        uuid="uuid-keep-me",
+        email_label="xray_tcp_AAAAA",
+    )
+    await db.close()
+    await _revert_to_legacy_check(db_path)
+
+
+def test_migration_v29_recovers_from_orphan_vpn_keys_new(tmp_path: Path) -> None:
+    """A leftover vpn_keys_new (from an older non-atomic rebuild that crashed
+    mid-way) must not wedge the migration: the DROP IF EXISTS guard clears it and
+    the rebuild completes, preserving every other key's UUID."""
+
+    async def run() -> None:
+        db_path = tmp_path / "vpn.db"
+        await _seed_v28_with_xray_uuid(db_path)
+
+        # Simulate the orphan an old crash would have autocommitted: an empty
+        # vpn_keys_new table sitting next to the live (still-legacy) vpn_keys.
+        conn = await aiosqlite.connect(db_path)
+        try:
+            await conn.execute("CREATE TABLE vpn_keys_new (id INTEGER PRIMARY KEY)")
+            await conn.commit()
+        finally:
+            await conn.close()
+
+        db = Database(db_path)
+        await db.connect()
+        await db.bootstrap()  # must NOT raise "table vpn_keys_new already exists"
+        try:
+            assert int(await db.get_meta("schema_version") or "0") == CURRENT_SCHEMA_VERSION
+            cur = await db.conn.execute("SELECT sql FROM sqlite_master WHERE name = 'vpn_keys'")
+            assert "hysteria2" in (await cur.fetchone())["sql"]
+            # No orphan left behind after recovery.
+            cur = await db.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vpn_keys_new'"
+            )
+            assert await cur.fetchone() is None
+            # The pre-existing xray UUID survived the rebuild verbatim.
+            kept = await VpnKeyRepository(db).find_by_uuid("uuid-keep-me")
+            assert kept is not None
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_migration_v29_rebuild_rolls_back_atomically_on_crash(tmp_path: Path) -> None:
+    """A crash partway through the rebuild must roll back as a unit: the explicit
+    BEGIN…COMMIT leaves the original vpn_keys (and schema_version 28) untouched
+    and drops no orphan, so the next clean run still succeeds."""
+
+    async def run() -> None:
+        db_path = tmp_path / "vpn.db"
+        await _seed_v28_with_xray_uuid(db_path)
+
+        db = Database(db_path)
+        await db.connect()
+        # Inject a failure at the RENAME step — the last statement of the rebuild,
+        # well after CREATE TABLE vpn_keys_new and the data copy. Without the
+        # surrounding transaction the CREATE would have autocommitted and orphaned.
+        original_execute = db._conn.execute  # type: ignore[union-attr]
+
+        async def failing_execute(sql, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if isinstance(sql, str) and "ALTER TABLE vpn_keys_new RENAME" in sql:
+                raise RuntimeError("simulated crash mid-rebuild")
+            return await original_execute(sql, *args, **kwargs)
+
+        db._conn.execute = failing_execute  # type: ignore[union-attr]
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            await db.bootstrap()
+        db._conn.execute = original_execute  # type: ignore[union-attr]
+
+        raw = db._conn
+        # Original table is intact: still the legacy CHECK, data still present.
+        cur = await raw.execute("SELECT sql FROM sqlite_master WHERE name = 'vpn_keys'")
+        vpn_keys_sql = (await cur.fetchone())["sql"]
+        assert "hysteria2" not in vpn_keys_sql
+        cur = await raw.execute("SELECT uuid FROM vpn_keys WHERE uuid = 'uuid-keep-me'")
+        assert await cur.fetchone() is not None
+        # The half-built table was rolled back, not autocommitted.
+        cur = await raw.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vpn_keys_new'"
+        )
+        assert await cur.fetchone() is None
+        # schema_version never advanced past 28.
+        assert int(await db.get_meta("schema_version") or "0") == 28
+        await db.close()
+
+        # A subsequent clean bootstrap completes the migration normally.
+        db = Database(db_path)
+        await db.connect()
+        await db.bootstrap()
+        try:
+            assert int(await db.get_meta("schema_version") or "0") == CURRENT_SCHEMA_VERSION
+            cur = await db.conn.execute("SELECT sql FROM sqlite_master WHERE name = 'vpn_keys'")
+            assert "hysteria2" in (await cur.fetchone())["sql"]
+            assert await VpnKeyRepository(db).find_by_uuid("uuid-keep-me") is not None
+        finally:
+            await db.close()
 
     asyncio.run(run())

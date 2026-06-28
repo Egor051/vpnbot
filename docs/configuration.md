@@ -163,8 +163,26 @@ mismatch is a silent client timeout, not an error.
 | `HYSTERIA2_PORT` | No | `15650` | Public UDP port of the Hysteria2 server (1–65535). | `15650` |
 | `HYSTERIA2_SNI` | No* | — | TLS SNI used in the client link. Required to issue keys. | `googletagmanager.com` |
 | `HYSTERIA2_OBFS_PASSWORD` | No* | — | Salamander obfuscation password; MUST match `/etc/hysteria/config.yaml`. 🔒 | `s3cret` |
-| `HYSTERIA2_INSECURE` | No | `true` | Set `insecure=1` in the link (self-signed server cert). | `true` |
+| `HYSTERIA2_INSECURE` | No | `true` | Set `insecure=1` in the link (self-signed server cert). See the MITM tradeoff below. | `true` |
 | `HYSTERIA2_AUTH_LISTEN` | No | `127.0.0.1:8444` | Loopback `host:port` the `hy2_auth` endpoint binds. Host must be loopback. | `127.0.0.1:8444` |
+
+### `HYSTERIA2_INSECURE=true` — MITM tradeoff (known and accepted)
+
+`true` is the deliberate default, not an oversight. The server certificate is
+self-signed (the deployment has no domain), and the target GUI clients
+(Hiddify / Happ / sing-box) do **not** reliably support hysteria2 `pinSHA256`
+certificate pinning — so flipping to `insecure=0` would break **every** link the
+bot has issued, an outage rather than a hardening.
+
+The residual risk is narrow. Salamander is a *keyed* PSK obfuscation, so a blind
+on-path attacker who does not hold the PSK cannot even parse — let alone forge —
+the QUIC handshake. The only party who could impersonate the server is one who
+already holds a valid client link, and therefore already knows the global
+salamander PSK. With `insecure=1` the client simply skips TLS certificate
+validation; it does not weaken the obfuscation or the per-key auth secret.
+
+The real fix is a proper domain plus an ACME-issued certificate, after which you
+can safely set `HYSTERIA2_INSECURE=false`. Until then, keep this `true`.
 
 ## Key Expiry and Trial Access
 
