@@ -129,7 +129,11 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
     if callback.message:
         xray_on = await services.modules.is_enabled("xray")
         awg_on = await services.modules.is_enabled("awg")
-        hy2_on = services.settings.hysteria2_enabled and await services.modules.is_enabled("hysteria2")
+        hy2_on = (
+            services.settings.hysteria2_enabled
+            and services.settings.is_hysteria2_ready()
+            and await services.modules.is_enabled("hysteria2")
+        )
         back_data = "menu:main" if callback.data == "keys:create:menu" else "keys:list"
         await safe_edit_message_text(
             callback.message,
@@ -155,7 +159,11 @@ async def create_key_menu_message(message: Message, services: Services) -> None:
         await _ensure_can_enter_create(message.from_user.id, services)
         xray_on = await services.modules.is_enabled("xray")
         awg_on = await services.modules.is_enabled("awg")
-        hy2_on = services.settings.hysteria2_enabled and await services.modules.is_enabled("hysteria2")
+        hy2_on = (
+            services.settings.hysteria2_enabled
+            and services.settings.is_hysteria2_ready()
+            and await services.modules.is_enabled("hysteria2")
+        )
         await message.answer(
             f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
             reply_markup=create_key_keyboard(

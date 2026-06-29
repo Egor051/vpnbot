@@ -729,6 +729,12 @@ class Database:
         raw = self._raw_conn()
         await raw.execute("PRAGMA foreign_keys = OFF")
         try:
+            # One explicit transaction so a crash mid-rebuild rolls back atomically;
+            # the DROP IF EXISTS guard makes a re-run self-healing if an older build
+            # ever left an orphan _new table behind (see _migrate_v29 for the full
+            # rationale on sqlite3 legacy autocommit-of-leading-DDL).
+            await raw.execute("BEGIN")
+            await raw.execute("DROP TABLE IF EXISTS announcement_batches_new")
             await raw.execute("DROP INDEX IF EXISTS idx_announcement_batches_status")
             await raw.execute(
                 """
@@ -790,6 +796,12 @@ class Database:
         raw = self._raw_conn()
         await raw.execute("PRAGMA foreign_keys = OFF")
         try:
+            # One explicit transaction so a crash mid-rebuild rolls back atomically;
+            # the DROP IF EXISTS guard makes a re-run self-healing if an older build
+            # ever left an orphan _new table behind (see _migrate_v29 for the full
+            # rationale on sqlite3 legacy autocommit-of-leading-DDL).
+            await raw.execute("BEGIN")
+            await raw.execute("DROP TABLE IF EXISTS users_new")
             await raw.execute("DROP INDEX IF EXISTS idx_users_role")
             await raw.execute("DROP INDEX IF EXISTS idx_users_active_role")
             await raw.execute(
@@ -1065,10 +1077,27 @@ class Database:
         # OFF so dropping the old table does not cascade into vpn_key_traffic_stats
         # / trial_key_requests, then re-enable FK AFTER the commit (SQLite ignores
         # the pragma inside a transaction).
+        #
+        # Crash safety: the whole rebuild runs inside one explicit BEGIN…COMMIT.
+        # Without it the leading `CREATE TABLE vpn_keys_new` (DDL) would autocommit
+        # under sqlite3's legacy isolation mode — an implicit transaction only opens
+        # before the first DML — so a crash between that CREATE and the final commit
+        # would leave an orphan vpn_keys_new behind and the re-run would die on
+        # "table vpn_keys_new already exists". The `DROP TABLE IF EXISTS` guard makes
+        # the re-run self-healing even for a DB orphaned by an older build, and the
+        # explicit transaction makes the rebuild atomic going forward.
+        #
+        # FORWARD-NOTE (not implemented here): if the connection default ever flips
+        # to PRAGMA foreign_keys=ON *without* this local OFF toggle, the RENAME step
+        # would have to keep foreign_keys=OFF for the duration anyway, because
+        # vpn_key_traffic_stats holds an FK → vpn_keys(id). Today the toggle above
+        # already guarantees that, so it does not bite.
         await self.commit()
         raw = self._raw_conn()
         await raw.execute("PRAGMA foreign_keys = OFF")
         try:
+            await raw.execute("BEGIN")
+            await raw.execute("DROP TABLE IF EXISTS vpn_keys_new")
             for index_name in (
                 "idx_vpn_keys_owner",
                 "idx_vpn_keys_type_status",

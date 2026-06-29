@@ -1,7 +1,9 @@
+import logging
 import subprocess
 import sys
 from pathlib import Path
 
+import aiosqlite
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -9,7 +11,7 @@ import hy2_auth.store as store_mod
 from db.database import Database
 from hy2_auth.config import Hy2AuthConfigError, load_config, parse_loopback_listen
 from hy2_auth.server import build_app
-from hy2_auth.store import ReadOnlyKeyStore
+from hy2_auth.store import KeyStoreUnavailable, ReadOnlyKeyStore
 from models.dto import TelegramUserProfile
 from models.enums import UserRole, VpnKeyType
 from repositories.users import UserRepository
@@ -151,6 +153,78 @@ async def test_store_uses_compare_digest(tmp_path: Path, monkeypatch: pytest.Mon
         await db.close()
 
 
+async def test_store_reads_wal_db_with_writable_sidecars(tmp_path: Path) -> None:
+    """The bot keeps vpn.db in WAL mode; a read-only reader still needs writable
+    -shm/-wal sidecars (hence ReadWritePaths in the systemd unit). Reads must
+    work, the sidecars must materialise, and writes to the main DB must still
+    raise readonly."""
+    db = await _seed_db(tmp_path)
+    cur = await db.conn.execute("PRAGMA journal_mode")
+    assert str((await cur.fetchone())[0]).lower() == "wal"
+    store = ReadOnlyKeyStore(db.path)
+    await store.connect()
+    try:
+        # Live read over a WAL database succeeds.
+        assert await store.match(ACTIVE_SECRET) == ACTIVE_LABEL
+        # The WAL sidecars the reader maps exist next to the DB.
+        assert Path(f"{db.path}-shm").exists() or Path(f"{db.path}-wal").exists()
+        # Still read-only: a write to the main DB raises despite the writable dir.
+        with pytest.raises(Exception) as exc:  # sqlite3.OperationalError: readonly
+            await store._conn.execute("UPDATE vpn_keys SET note = 'x' WHERE id = -1")  # type: ignore[union-attr]
+        assert "readonly" in str(exc.value).lower()
+    finally:
+        await store.close()
+        await db.close()
+
+
+async def test_store_non_ascii_token_is_clean_non_match(tmp_path: Path) -> None:
+    """A non-ASCII client token must be a constant-time non-match, NOT a TypeError
+    from hmac.compare_digest (which rejects non-ASCII str). Encoding both operands
+    to bytes is what keeps it a clean rejection rather than leaning on a broad
+    except upstream."""
+    db = await _seed_db(tmp_path)
+    store = ReadOnlyKeyStore(db.path)
+    await store.connect()
+    try:
+        assert await store.match("Ω-非ascii-токен") is None
+    finally:
+        await store.close()
+        await db.close()
+
+
+async def test_store_distinguishes_mismatch_from_infra_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wrong token stays quiet (no error log, returns None); a DB fault is loud
+    (error log + counter) and propagates as KeyStoreUnavailable. Both still fail
+    closed for the caller."""
+    db = await _seed_db(tmp_path)
+    store = ReadOnlyKeyStore(db.path)
+    await store.connect()
+    try:
+        # Mismatch: quiet. No error-level record, plain None.
+        with caplog.at_level(logging.DEBUG, logger="hy2_auth.store"):
+            caplog.clear()
+            assert await store.match("z" * 48) is None
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert store.infra_failures == 0
+
+        # Infra fault: loud. Error-level record, counter bumped, raises.
+        async def _boom(*args: object, **kwargs: object) -> object:
+            raise aiosqlite.OperationalError("database disk image is malformed")
+
+        monkeypatch.setattr(store._conn, "execute", _boom)
+        with caplog.at_level(logging.ERROR, logger="hy2_auth.store"):
+            caplog.clear()
+            with pytest.raises(KeyStoreUnavailable):
+                await store.match(ACTIVE_SECRET)
+        assert [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert store.infra_failures == 1
+    finally:
+        await store.close()
+        await db.close()
+
+
 # ── endpoint: always 200, {ok,id} ────────────────────────────────────────────
 
 async def _client(tmp_path: Path) -> tuple[TestClient, Database, ReadOnlyKeyStore]:
@@ -199,6 +273,49 @@ async def test_endpoint_malformed_body_returns_200_not_500(tmp_path: Path) -> No
             resp = await client.post("/auth", json=body)
             assert resp.status == 200
             assert await resp.json() == {"ok": False}
+    finally:
+        await client.close()
+        await store.close()
+        await db.close()
+
+
+async def test_endpoint_non_ascii_auth_rejected(tmp_path: Path) -> None:
+    client, db, store = await _client(tmp_path)
+    try:
+        resp = await client.post("/auth", json={"auth": "Ω-非ascii-токен"})
+        assert resp.status == 200
+        assert await resp.json() == {"ok": False}
+    finally:
+        await client.close()
+        await store.close()
+        await db.close()
+
+
+# ── healthz: read probe → 200/503 (M3) ───────────────────────────────────────
+
+async def test_healthz_ok_when_db_readable(tmp_path: Path) -> None:
+    client, db, store = await _client(tmp_path)
+    try:
+        resp = await client.get("/healthz")
+        assert resp.status == 200
+        assert await resp.json() == {"ok": True}
+    finally:
+        await client.close()
+        await store.close()
+        await db.close()
+
+
+async def test_healthz_503_when_db_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, db, store = await _client(tmp_path)
+    try:
+        async def _boom(*args: object, **kwargs: object) -> object:
+            raise aiosqlite.OperationalError("database is locked")
+
+        monkeypatch.setattr(store._conn, "execute", _boom)
+        resp = await client.get("/healthz")
+        assert resp.status == 503
+        assert await resp.json() == {"ok": False}
+        assert store.infra_failures >= 1
     finally:
         await client.close()
         await store.close()

@@ -52,14 +52,16 @@ RestrictAddressFamilies=AF_INET AF_INET6
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
-# The endpoint never writes the database. The directory is exposed read-only.
-# NOTE: if the bot keeps vpn.db in WAL mode (it does), a read-only SQLite reader
-# still needs to write the `-shm` wal-index. If reads fail with "unable to open
-# database file", replace the ReadOnlyPaths line below with:
-#   ReadWritePaths=/opt/vpn-service/data
-# The application still opens the connection with mode=ro, so the main DB file is
-# never written regardless.
-ReadOnlyPaths=/opt/vpn-service/data
+# The bot keeps vpn.db in WAL mode, and a WAL *reader* must be able to write the
+# shared-memory wal-index (`-shm`) and append/rotate the `-wal` file — even when
+# it only ever reads rows. With ProtectSystem=strict the data directory would be
+# read-only, so SQLite would fail to open those sidecars (SQLITE_CANTOPEN /
+# "unable to open database file") and every handshake would be rejected. We
+# therefore expose the data directory read-write. This does NOT loosen the
+# read-only guarantee on the data itself: the application opens the connection
+# with `mode=ro`, so any attempt to write the main DB still raises — the
+# read-write grant covers only the WAL sidecars.
+ReadWritePaths=/opt/vpn-service/data
 
 [Install]
 WantedBy=multi-user.target

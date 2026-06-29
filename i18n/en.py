@@ -544,7 +544,7 @@ STRINGS: dict[str, str] = {
     ),
     "cabinet_title": "<b>👤 Personal cabinet</b>",
     "field_registered": "Registered",
-    "cabinet_active_keys": "Active keys: {total} (Xray: {xray}, AWG: {awg})",
+    "cabinet_active_keys": "Active keys: {total} (Xray: {xray}, AWG: {awg}, Hysteria2: {hysteria2})",
     "cabinet_traffic": "Traffic: ↓ {down} · ↑ {up}",
     "cabinet_proxy_count": "Proxy accesses: {count}",
     "settings_language_changed": "Language changed",

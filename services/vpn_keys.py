@@ -33,14 +33,15 @@ class VpnKeyQueryService:
             raise AccessDenied("Нельзя смотреть чужие ключи")
         return await self.vpn_keys.count_by_owner(target)
 
-    async def personal_summary_for_actor(self, actor_user_id: int) -> tuple[int, int, int, int]:
-        """Return (active_xray, active_awg, downloaded_bytes, uploaded_bytes) for the actor's own keys."""
+    async def personal_summary_for_actor(self, actor_user_id: int) -> tuple[int, int, int, int, int]:
+        """Return (active_xray, active_awg, active_hysteria2, downloaded, uploaded) for own keys."""
         await self.users.require_approved_or_admin(actor_user_id)
         active = await self.vpn_keys.list_by_owner_statuses(actor_user_id, {VpnKeyStatus.ACTIVE}, limit=500)
         active_xray = sum(1 for key in active if key.key_type == VpnKeyType.XRAY)
         active_awg = sum(1 for key in active if key.key_type == VpnKeyType.AWG)
+        active_hysteria2 = sum(1 for key in active if key.key_type == VpnKeyType.HYSTERIA2)
         downloaded, uploaded = await self.vpn_keys.sum_traffic_for_owner(actor_user_id)
-        return active_xray, active_awg, downloaded, uploaded
+        return active_xray, active_awg, active_hysteria2, downloaded, uploaded
 
     async def list_active_trial_by_owner(self, owner_user_id: int) -> list[VpnKey]:
         """Return the owner's active trial VPN keys."""

@@ -1,9 +1,10 @@
 # VPN Telegram Bot
 
 Telegram bot for self-hosted VPN access management on an Ubuntu VDS. The bot manages users,
-access approval, Xray VLESS Reality keys, AmneziaWG keys, key revocation/deletion, SOCKS5 and
-MTProto proxy access, audit records, and basic traffic statistics — designed for a
-single-server deployment without Docker, Redis, PostgreSQL, or a heavy ORM.
+access approval, Xray VLESS Reality keys, AmneziaWG keys, Hysteria2 keys, key
+revocation/deletion, SOCKS5 and MTProto proxy access, audit records, and basic traffic
+statistics — designed for a single-server deployment without Docker, Redis, PostgreSQL,
+or a heavy ORM.
 
 🇷🇺 Russian version: [README_RU.md](README_RU.md)
 
@@ -62,6 +63,7 @@ follow the [Deployment](#deployment) section rather than this evaluation flow.
 - Admin panel for pending requests, users, key issuance, audit, stats, and announcements.
 - Xray VLESS Reality key creation, config delivery, revocation, deletion, and startup reconciliation.
 - AmneziaWG key creation, client config delivery, revocation, deletion, IP allocation, and startup reconciliation.
+- Hysteria2 (apernet v2) key creation, link delivery, revocation, and deletion with **no data-plane restart**: a standalone `hy2_auth` HTTP endpoint authenticates handshakes against the live database, so revokes take effect on the next handshake. Disabled by default — see [Deployment](docs/deployment.md).
 - Separate one-page Telegram section "Прокси" for SOCKS5/Dante auto-issue and Telegram MTProto Proxy links.
 - MTProto supports `static` compatibility mode and `managed` mode with per-user secrets, safe apply, and rollback.
 - Optional WARP outbound-IP masking module: server-side AmneziaWG (`out-warp`) tunnel that hides the server's outbound IP for selected "spy" apps, with automatic health-based fallback. Disabled by default — see [WARP](docs/warp.md).
