@@ -912,16 +912,31 @@ async def trial_request_start(callback: CallbackQuery, state: FSMContext, servic
         await state.set_state(TrialRequestStates.choosing_protocol)
         xray_on = await services.modules.is_enabled("xray")
         awg_on = await services.modules.is_enabled("awg")
+        hy2_on = (
+            services.settings.hysteria2_enabled
+            and services.settings.is_hysteria2_ready()
+            and await services.modules.is_enabled("hysteria2")
+        )
         await safe_edit_message_text(
             callback.message,
             t("trial_choose_protocol"),
-            reply_markup=trial_protocol_keyboard(xray_enabled=xray_on, awg_enabled=awg_on),
+            reply_markup=trial_protocol_keyboard(xray_enabled=xray_on, awg_enabled=awg_on, hysteria2_enabled=hy2_on),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(TrialRequestStates.choosing_protocol, F.data.regexp(r"^trial:proto:(xray|awg)$"))
+# Maps the trial protocol callback token to (VpnKeyType, display label). The
+# token differs from the enum value for Hysteria2 ("hy2" vs "hysteria2"), so the
+# mapping is explicit rather than VpnKeyType(token).
+_TRIAL_PROTO_CHOICE: dict[str, tuple[VpnKeyType, str]] = {
+    "xray": (VpnKeyType.XRAY, "Xray"),
+    "awg": (VpnKeyType.AWG, "AWG"),
+    "hy2": (VpnKeyType.HYSTERIA2, "Hysteria2"),
+}
+
+
+@router.callback_query(TrialRequestStates.choosing_protocol, F.data.regexp(r"^trial:proto:(xray|awg|hy2)$"))
 async def trial_request_proto(callback: CallbackQuery, state: FSMContext, services: Services, bot: Bot, rate_limiter: RateLimiter) -> None:
     """Submit the trial request for the chosen protocol and notify admins."""
     if not await ensure_private_callback(callback):
@@ -936,7 +951,7 @@ async def trial_request_proto(callback: CallbackQuery, state: FSMContext, servic
             return
         rate_limiter.check(callback.from_user.id, "trial_request", 300)
         proto = callback.data.rsplit(":", 1)[-1]
-        key_type = VpnKeyType(proto)
+        key_type, type_label = _TRIAL_PROTO_CHOICE[proto]
         can = await services.trial_access.can_request_trial(callback.from_user.id)
         if not can:
             await state.clear()
@@ -945,7 +960,6 @@ async def trial_request_proto(callback: CallbackQuery, state: FSMContext, servic
         req = await services.trial_access.create_trial_request(callback.from_user.id, key_type)
         await state.clear()
         await safe_callback_answer(callback, t("trial_request_sent"))
-        type_label = "Xray" if proto == "xray" else "AWG"
         await safe_edit_message_text(
             callback.message,
             t("trial_request_submitted"),

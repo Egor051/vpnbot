@@ -63,6 +63,7 @@ def test_trial_double_tap(tmp_path: Path) -> None:
                 users_repo=users_repo,
                 xray=object(),
                 awg=object(),
+                hysteria=object(),
                 audit=audit,
                 clock=clock,
             )

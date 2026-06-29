@@ -56,6 +56,7 @@ TARGETABLE_ROLES: tuple[str, ...] = (
 SEGMENT_PROTOCOLS: tuple[str, ...] = (
     VpnKeyType.XRAY.value,
     VpnKeyType.AWG.value,
+    VpnKeyType.HYSTERIA2.value,
     ProxyAccessType.SOCKS5.value,
     ProxyAccessType.MTPROTO.value,
 )

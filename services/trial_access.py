@@ -32,6 +32,7 @@ class TrialAccessService:
         users_repo: UserRepository,
         xray: object,
         awg: object,
+        hysteria: object,
         audit: AuditService,
         clock: ClockProvider,
         bot: Bot | None = None,
@@ -40,6 +41,7 @@ class TrialAccessService:
         self.users_repo = users_repo
         self.xray = xray
         self.awg = awg
+        self.hysteria = hysteria
         self.audit = audit
         self.clock = clock
         self.bot = bot
@@ -143,6 +145,14 @@ class TrialAccessService:
                     expires_at=expires_at,
                     allow_pending_owner=True,
                 )
+            elif req.key_type == VpnKeyType.HYSTERIA2:
+                result = await self.hysteria.issue(  # type: ignore[attr-defined]
+                    actor_user_id,
+                    profile,
+                    None,
+                    expires_at=expires_at,
+                    allow_pending_owner=True,
+                )
             else:
                 result = await self.awg.create_awg_key(  # type: ignore[attr-defined]
                     actor_user_id,
@@ -225,9 +235,10 @@ class TrialAccessService:
                     caption=f"Ваш пробный AWG-ключ #{result.key.id} (7 дней). Используйте этот файл для подключения.",
                 )
             else:
+                label = "Hysteria2" if result.key.key_type == VpnKeyType.HYSTERIA2 else "Xray"
                 await self.bot.send_message(
                     user_id,
-                    f"Ваш пробный Xray-ключ #{result.key.id} (7 дней) одобрен!\n\n{result.config_text}",
+                    f"Ваш пробный {label}-ключ #{result.key.id} (7 дней) одобрен!\n\n{result.config_text}",
                 )
         except Exception:
             logger.warning("Не удалось доставить пробный ключ пользователю %s", user_id, exc_info=True)

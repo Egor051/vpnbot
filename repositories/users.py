@@ -78,6 +78,11 @@ def _build_segment_where(recipient_filter: RecipientFilter) -> tuple[str, list[o
                     "EXISTS (SELECT 1 FROM vpn_keys k WHERE k.owner_user_id = u.telegram_user_id "
                     "AND k.key_type = 'awg' AND k.status = 'active')"
                 )
+            elif protocol == VpnKeyType.HYSTERIA2.value:
+                protocol_clauses.append(
+                    "EXISTS (SELECT 1 FROM vpn_keys k WHERE k.owner_user_id = u.telegram_user_id "
+                    "AND k.key_type = 'hysteria2' AND k.status = 'active')"
+                )
             elif protocol == ProxyAccessType.SOCKS5.value:
                 protocol_clauses.append(
                     "EXISTS (SELECT 1 FROM proxy_accesses p WHERE p.owner_user_id = u.telegram_user_id "

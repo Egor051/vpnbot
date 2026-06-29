@@ -1307,6 +1307,11 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
         text = f"{user_card_text(user)}\n\n{t('one_key_one_device')}\n\n{t('choose_key_type')}"
         xray_on = await services.modules.is_enabled("xray")
         awg_on = await services.modules.is_enabled("awg")
+        hy2_on = (
+            services.settings.hysteria2_enabled
+            and services.settings.is_hysteria2_ready()
+            and await services.modules.is_enabled("hysteria2")
+        )
         await safe_edit_message_text(
             callback.message,
             text,
@@ -1315,6 +1320,7 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
                 xray_enabled=xray_on,
                 awg_enabled=awg_on,
                 xhttp_enabled=services.settings.xray_xhttp_enabled,
+                hysteria2_enabled=hy2_on,
             ),
         )
     except Exception as exc:
@@ -1353,10 +1359,12 @@ _ADMIN_CTYPE_CHOICE: dict[str, tuple[str, str]] = {
     "awg": (VpnKeyType.AWG.value, "tcp"),
     "xray": (VpnKeyType.XRAY.value, "tcp"),
     "xhttp": (VpnKeyType.XRAY.value, "http"),
+    # Hysteria2 has no transport variants; the value is unused for hy2 keys.
+    "hy2": (VpnKeyType.HYSTERIA2.value, "tcp"),
 }
 
 
-@router.callback_query(AdminCreateKeyStates.choosing_type, F.data.regexp(r"^admin:ctype:(xray|awg|xhttp):\d+$"))
+@router.callback_query(AdminCreateKeyStates.choosing_type, F.data.regexp(r"^admin:ctype:(xray|awg|hy2|xhttp):\d+$"))
 async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Record the chosen key type/transport and prompt for a note."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -1710,6 +1718,12 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
                 expires_at=expires_at,
                 allow_pending_owner=owner_is_pending,
                 mtu=mtu,
+            )
+        elif key_type == VpnKeyType.HYSTERIA2.value:
+            result = await services.hysteria.issue(
+                callback.from_user.id, profile, note,
+                expires_at=expires_at,
+                allow_pending_owner=owner_is_pending,
             )
         else:
             await safe_edit_message_text(callback.message, t("key_unknown_type"))

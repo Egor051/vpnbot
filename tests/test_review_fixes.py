@@ -186,6 +186,7 @@ def _trial_service(db: Database, fake_xray: _FakeXray) -> TrialAccessService:
         users_repo=UserRepository(db),
         xray=fake_xray,
         awg=object(),
+        hysteria=object(),
         audit=AuditService(AuditLogRepository(db), ClockProvider()),
         clock=ClockProvider(),
     )

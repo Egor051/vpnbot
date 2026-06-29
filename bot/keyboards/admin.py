@@ -139,6 +139,7 @@ ANNOUNCEMENT_ROLE_OPTIONS: tuple[tuple[str, str], ...] = (
 ANNOUNCEMENT_PROTOCOL_OPTIONS: tuple[tuple[str, str], ...] = (
     ("xray", "VLESS"),
     ("awg", "AmneziaWG"),
+    ("hysteria2", "Hysteria2"),
     ("socks5", "SOCKS5"),
     ("mtproto", "MTProto"),
 )
@@ -334,6 +335,7 @@ def admin_key_type_keyboard(
     xray_enabled: bool = True,
     awg_enabled: bool = True,
     xhttp_enabled: bool = False,
+    hysteria2_enabled: bool = False,
 ) -> InlineKeyboardMarkup:
     """Build the protocol selection keyboard for issuing a key to a user (step 1).
 
@@ -347,6 +349,8 @@ def admin_key_type_keyboard(
         rows.append([InlineKeyboardButton(text="VLESS", callback_data=vless_data)])
     if awg_enabled:
         rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data=f"admin:ctype:awg:{user_id}")])
+    if hysteria2_enabled:
+        rows.append([InlineKeyboardButton(text="Hysteria2", callback_data=f"admin:ctype:hy2:{user_id}")])
     rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
