@@ -120,13 +120,14 @@ def test_segment_queries_filter_by_role_protocol_and_transport(tmp_path: Path) -
             await _add_user(users, 3, UserRole.MODERATOR)
             await _add_user(users, 4, UserRole.PENDING_USER)
             await _add_user(users, 5, UserRole.APPROVED_USER)
-            await _add_user(users, 6, UserRole.APPROVED_USER)  # no access at all
+            await _add_user(users, 6, UserRole.APPROVED_USER)  # hysteria2 only
             await _add_user(users, 7, UserRole.APPROVED_USER, blocked=True)  # always excluded
             await _add_vpn_key(db, 1, "xray", transport="tcp")
             await _add_vpn_key(db, 2, "xray", transport="http")
             await _add_vpn_key(db, 3, "awg")
             await _add_proxy(db, 4, "socks5")
             await _add_proxy(db, 5, "mtproto")
+            await _add_vpn_key(db, 6, "hysteria2")
             await _add_vpn_key(db, 7, "xray", transport="tcp")  # blocked owner
 
             async def collect(rf: RecipientFilter) -> list[int]:
@@ -153,6 +154,8 @@ def test_segment_queries_filter_by_role_protocol_and_transport(tmp_path: Path) -
             assert await collect(RecipientFilter.create(protocols=("xray",))) == [1, 2]
             assert await collect(RecipientFilter.create(protocols=("awg", "socks5"))) == [3, 4]
             assert await collect(RecipientFilter.create(protocols=("mtproto",))) == [5]
+            assert await collect(RecipientFilter.create(protocols=("hysteria2",))) == [6]
+            assert await collect(RecipientFilter.create(protocols=("awg", "hysteria2"))) == [3, 6]
 
             # By transport (xray only).
             assert await collect(RecipientFilter.create(protocols=("xray",), transports=("http",))) == [2]

@@ -227,13 +227,17 @@ def request_trial_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def trial_protocol_keyboard(*, xray_enabled: bool = True, awg_enabled: bool = True) -> InlineKeyboardMarkup:
+def trial_protocol_keyboard(
+    *, xray_enabled: bool = True, awg_enabled: bool = True, hysteria2_enabled: bool = False
+) -> InlineKeyboardMarkup:
     """Build the protocol selection keyboard for a trial key."""
     rows: list[list[InlineKeyboardButton]] = []
     if xray_enabled:
         rows.append([InlineKeyboardButton(text="Xray(VLESS+XReality)", callback_data="trial:proto:xray")])
     if awg_enabled:
         rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="trial:proto:awg")])
+    if hysteria2_enabled:
+        rows.append([InlineKeyboardButton(text="Hysteria2", callback_data="trial:proto:hy2")])
     rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

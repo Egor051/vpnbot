@@ -390,6 +390,7 @@ async def _build_app(
         users_repo=users_repo,
         xray=xray_service,
         awg=awg_service,
+        hysteria=hysteria_service,
         audit=audit_service,
         clock=clock,
     )
