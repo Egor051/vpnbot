@@ -435,6 +435,23 @@ def test_server_status_text_detailed_view_shows_loadavg_and_uptime() -> None:
     assert "↑" in text and "→" in text  # trend arrows
 
 
+def test_server_status_text_detailed_block_orders_uptime_before_loadavg() -> None:
+    """Within the detailed block uptime comes first, the load average second."""
+    status = _base_status(
+        detailed_enabled=True,
+        load1=0.5,
+        load5=1.0,
+        load15=1.5,
+        cpu_count=2,
+        uptime_seconds=90061.0,
+    )
+    text = server_status_text(status, _ONLINE_COLLECTING)
+    lines = text.splitlines()
+    uptime_idx = next(i for i, line in enumerate(lines) if "Аптайм" in line)
+    load_idx = next(i for i, line in enumerate(lines) if "Средняя нагрузка" in line)
+    assert uptime_idx < load_idx
+
+
 def test_loadavg_falls_back_to_raw_figures_without_cpu_count() -> None:
     """Without a CPU count to normalise against, the load line keeps raw figures."""
     status = _base_status(
@@ -536,6 +553,41 @@ def test_set_detailed_off_clears_history(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(service._bucket_out_samples) == 0
     assert len(service._net_in_buckets) == 0
     assert len(service._net_out_buckets) == 0
+
+
+def test_set_detailed_off_resets_cached_detailed_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turning detailed off zeroes the detailed fields on the cached samples, so a
+    render taken before the next sampler tick shows no stale detailed data."""
+    monkeypatch.setattr(ss, "_read_cpu_times", lambda: (1000, 500, 0))
+    monkeypatch.setattr(ss, "_read_net_bytes", lambda: (0, 0))
+    monkeypatch.setattr(ss, "_read_mem_gb", lambda: (1.0, 2.0))
+    monkeypatch.setattr(ss, "_read_swap_gb", lambda: (0.0, 0.0))
+    monkeypatch.setattr(ss, "_read_loadavg", lambda: (0.1, 0.2, 0.3))
+    monkeypatch.setattr(ss, "_read_uptime", lambda: 12345.0)
+    monkeypatch.setattr(ServerStatusService, "_read_disk", lambda self: (5.0, 10.0))
+
+    service = ServerStatusService()
+    service.set_detailed(True)
+    for _ in range(4):
+        service._latest = service._sample_once()
+    asyncio.run(service.snapshot_averaged())  # freeze a column into the window
+    # Detailed data is present before the toggle flips off.
+    assert service._latest is not None and service._latest.uptime_seconds is not None
+
+    service.set_detailed(False)
+
+    # The cached samples no longer carry any detailed metric...
+    assert service._latest.detailed_enabled is False
+    assert service._latest.load1 is None and service._latest.uptime_seconds is None
+    for status in service._recent:
+        assert status.detailed_enabled is False
+        assert status.load1 is None and status.uptime_seconds is None
+    # ...so a render taken right away reports the detailed block as "no data",
+    # without waiting for the sampler to overwrite the cache.
+    rendered = asyncio.run(service.snapshot_averaged())
+    assert rendered.detailed_enabled is False
+    assert rendered.uptime_seconds is None and rendered.load1 is None
+    assert rendered.net_sparkline is None
 
 
 def test_reset_network_history_clears_window_without_disabling_detailed(

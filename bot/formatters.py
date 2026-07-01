@@ -1326,8 +1326,14 @@ def _online_clients_line(online: OnlineClients) -> str:
 
 
 def _detailed_lines(status: ServerStatus) -> list[str]:
-    """Build the extra detailed-metrics block (load average, uptime, net trends)."""
+    """Build the extra detailed-metrics block (uptime, load average, net trends).
+
+    Order within the block: uptime first, then the load average, then the
+    network avg/peak/trend figures and the sparkline.
+    """
     lines: list[str] = [""]
+    if status.uptime_seconds is not None:
+        lines.append(f"⏱ {t('server_status_uptime_label')}: {h(_format_uptime(status.uptime_seconds))}")
     if status.load1 is not None and status.load5 is not None and status.load15 is not None:
         if status.cpu_count and status.cpu_count > 0:
             # Normalise each load average by the CPU count so all three read as a
@@ -1340,8 +1346,6 @@ def _detailed_lines(status: ServerStatus) -> list[str]:
             # No CPU count to normalise against — fall back to the raw figures.
             load = f"{status.load1:.2f} / {status.load5:.2f} / {status.load15:.2f}"
         lines.append(f"📈 {t('server_status_loadavg_label')}: {h(load)}")
-    if status.uptime_seconds is not None:
-        lines.append(f"⏱ {t('server_status_uptime_label')}: {h(_format_uptime(status.uptime_seconds))}")
     if status.net_in_avg is not None and status.net_out_avg is not None:
         in_arrow = _TREND_ARROW.get(status.net_in_trend or "flat", "→")
         out_arrow = _TREND_ARROW.get(status.net_out_trend or "flat", "→")

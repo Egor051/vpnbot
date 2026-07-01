@@ -30,6 +30,26 @@ _SPARKLINE_POINTS = 20
 # jittering on a single-second slice. Independent of the 60s detailed history.
 _AVERAGING_SAMPLES = 3
 
+# The detailed-only fields of :class:`ServerStatus`, mapped back to their
+# "no data" defaults. Used to strip detailed metrics off the cached samples the
+# moment the detailed-metrics toggle is switched off, so a render taken before
+# the sampler produces a fresh base reading shows no stale detailed data.
+_DETAILED_FIELDS_CLEARED: dict[str, Any] = {
+    "detailed_enabled": False,
+    "load1": None,
+    "load5": None,
+    "load15": None,
+    "cpu_count": None,
+    "uptime_seconds": None,
+    "net_in_avg": None,
+    "net_out_avg": None,
+    "net_in_peak": None,
+    "net_out_peak": None,
+    "net_in_trend": None,
+    "net_out_trend": None,
+    "net_sparkline": None,
+}
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -333,14 +353,35 @@ class ServerStatusService:
     def set_detailed(self, enabled: bool) -> None:
         """Enable or disable detailed-metrics collection.
 
-        Turning the mode off clears the accumulated network history so a later
-        re-enable starts from a clean window rather than stale samples.
+        Turning the mode off resets all detailed-metrics state: it clears the
+        accumulated network history (so a later re-enable starts from a clean
+        window rather than stale samples) and strips the detailed fields off the
+        cached samples, so a render taken right after the toggle flips off
+        collapses the detailed block instead of lingering on the last detailed
+        reading until the sampler produces a fresh base one.
         """
         if enabled == self._detailed:
             return
         self._detailed = enabled
         if not enabled:
             self.reset_network_history()
+            self._clear_detailed_state()
+
+    def _clear_detailed_state(self) -> None:
+        """Zero the detailed-only fields on every cached sample.
+
+        The averaging window (:attr:`_recent`) and the latest cached reading may
+        still carry detailed metrics gathered while the mode was on. Rewriting
+        them with the detailed fields cleared means the next :meth:`snapshot` or
+        :meth:`snapshot_averaged` reports the detailed block as "no data" at
+        once, without waiting for the sampler to overwrite the cache.
+        """
+        self._recent = deque(
+            (replace(status, **_DETAILED_FIELDS_CLEARED) for status in self._recent),
+            maxlen=_AVERAGING_SAMPLES,
+        )
+        if self._latest is not None:
+            self._latest = replace(self._latest, **_DETAILED_FIELDS_CLEARED)
 
     def reset_network_history(self) -> None:
         """Drop the accumulated network-history window.
