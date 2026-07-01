@@ -50,6 +50,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Server status detailed block reordered, and its state resets on toggle-off.**
+  In the "статус сервера" panel's detailed-metrics block the **uptime** («Аптайм»)
+  now comes first and the **load average** («Средняя нагрузка») second (previously
+  the reverse). Turning the detailed-metrics toggle off now fully resets the
+  detailed state: alongside clearing the accumulated network history, the detailed
+  fields are stripped off the cached samples so the block collapses to "no data"
+  on the very next render instead of lingering on the last detailed reading until
+  the sampler produces a fresh base one.
 - **Documentation restructured into a short README plus topical `docs/`.** `README.md`
   and `README_RU.md` are now concise overviews (~260 lines each, down from ~1400) with a
   Quick Start, an architecture diagram, a key-variable table, and a documentation index.
