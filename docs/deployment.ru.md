@@ -228,6 +228,27 @@ auth:
 `hysteria-server.service` после `vpnbot-hy2-auth` (юнит объявляет
 `Before=hysteria-server.service`).
 
+### 2b. (Опционально) Traffic Stats API — трафик, онлайн, kick при отзыве
+
+Per-key счётчики трафика, счётчик онлайн-клиентов и мгновенный разрыв сессии при
+отзыве требуют **Traffic Stats API** Hysteria2 — отдельного аутентифицируемого
+HTTP-сервера, который поднимает сам `hysteria-server`. Включите его в том же
+`/etc/hysteria/config.yaml`:
+
+```yaml
+trafficStats:
+  listen: 127.0.0.1:9999   # должно совпадать с HYSTERIA2_STATS_LISTEN (только loopback)
+  secret: <случайный-секрет>  # должно совпадать с HYSTERIA2_STATS_SECRET
+```
+
+Затем задайте `HYSTERIA2_STATS_SECRET` (и, если меняли порт,
+`HYSTERIA2_STATS_LISTEN`) в `.env`. Бот только *читает* этот API и делает
+`POST /kick` при отзыве/удалении/истечении ключа. Оставьте
+`HYSTERIA2_STATS_SECRET` пустым, чтобы отключить: тогда hy2-ключи не показывают
+трафик/онлайн, а отзыв блокирует только новые хендшейки (живая сессия доживает
+до переподключения). Все переменные `HYSTERIA2_STATS_*` и
+`ANOMALY_HYSTERIA2_MAX_CONN` — в [Конфигурации → Hysteria2](configuration.ru.md#hysteria2).
+
 ### 3. Поведение fail-closed и health
 
 - Эндпоинт **всегда отвечает HTTP 200** с `{"ok": <bool>, "id": "<label>"}`,

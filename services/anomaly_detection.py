@@ -50,6 +50,9 @@ class AnomalyDetectionService:
         cooldown_seconds: int = 7200,
         xray_access_log_path: str = "",
         concurrent_window_seconds: int = 0,
+        hysteria_stats: object | None = None,
+        hysteria_service: object | None = None,
+        hysteria2_max_conn: int = 0,
         bot: Bot | None = None,
         backend_health: object | None = None,
     ) -> None:
@@ -63,6 +66,13 @@ class AnomalyDetectionService:
         self._auto_revoke = auto_revoke
         self._cooldown_seconds = cooldown_seconds
         self._xray_access_log_path = xray_access_log_path
+        # Hysteria2 uses a different signal: the Traffic Stats API /online gives an
+        # instantaneous per-key concurrent-connection count (there is no usable
+        # per-IP feed). When both the adapter and a positive threshold are set, a
+        # key with >= hysteria2_max_conn live connections is flagged as sharing.
+        self._hysteria_stats = hysteria_stats
+        self._hysteria_service = hysteria_service
+        self._hysteria2_max_conn = hysteria2_max_conn
         # When > 0, threshold is checked against this shorter window instead of the full window.
         # Prevents false positives from mobile users whose IPs rotate over time.
         self._concurrent_window_seconds = concurrent_window_seconds
@@ -90,6 +100,7 @@ class AnomalyDetectionService:
         await self._sample_awg_endpoints(now)
         await self._sample_xray_log(now)
         await self._check_thresholds(now)
+        await self._check_hysteria_online(now)
 
     # ------------------------------------------------------------------ AWG
 
@@ -205,26 +216,7 @@ class AnomalyDetectionService:
             len(all_ips),
             sorted(trigger_ips),
         )
-        auto_revoked = False
-        revoke_error: str | None = None
-        if self._auto_revoke_effective:
-            try:
-                await self._revoke_key(key)
-                auto_revoked = True
-            except Exception as exc:
-                revoke_error = str(exc)
-                logger.warning(
-                    "Anomaly auto-revoke failed key_id=%s owner_user_id=%s key_type=%s reason=%s",
-                    key.id,
-                    key.owner_user_id,
-                    key.key_type.value,
-                    exc,
-                    exc_info=True,
-                )
-                if self._backend_health is not None:
-                    record = getattr(self._backend_health, "record_skipped_revocation", None)
-                    if record is not None:
-                        record()
+        auto_revoked, revoke_error = await self._try_auto_revoke(key, enabled=self._auto_revoke_effective)
 
         if self.bot is None:
             return
@@ -260,8 +252,94 @@ class AnomalyDetectionService:
             lines.append("🔒 <b>Ключ автоматически отозван</b>")
         elif revoke_error:
             lines.append(f"⚠️ Авто-отзыв не удался: {revoke_error[:120]}")
-        text = "\n".join(lines)
+        await self._send_alert_to_admins("\n".join(lines))
 
+    # ------------------------------------------------------ Hysteria2 (conn count)
+
+    async def _check_hysteria_online(self, now: float) -> None:
+        """Flag Hysteria2 keys with too many concurrent connections (key sharing).
+
+        Uses the Traffic Stats API /online instantaneous count instead of unique
+        IPs. Because the count is inherently a concurrency signal (not a long
+        window of rotating mobile IPs), auto-revoke here is gated on the raw
+        ``auto_revoke`` flag rather than requiring a concurrent IP window.
+        """
+        if self._hysteria_stats is None or self._hysteria2_max_conn <= 0:
+            return
+        try:
+            online = await self._hysteria_stats.query_online()  # type: ignore[attr-defined]
+        except Exception:
+            logger.warning("Failed to fetch Hysteria2 online counts for anomaly detection", exc_info=True)
+            return
+        if not online:
+            return
+        active_keys = await self._list_active_keys(VpnKeyType.HYSTERIA2)
+        label_to_key: dict[str, VpnKey] = {k.email_label: k for k in active_keys if k.email_label}
+        for label, count in online.items():
+            if count < self._hysteria2_max_conn:
+                continue
+            key = label_to_key.get(label)
+            if key is None:
+                continue
+            last = self._last_alerted.get(key.id, 0.0)
+            if now - last < self._cooldown_seconds:
+                continue
+            self._last_alerted[key.id] = now
+            await self._fire_hysteria_alert(key, count)
+
+    async def _fire_hysteria_alert(self, key: VpnKey, conn_count: int) -> None:
+        logger.warning(
+            "Anomaly: key #%d (HYSTERIA2) owner=%d concurrent_conns=%d",
+            key.id,
+            key.owner_user_id,
+            conn_count,
+        )
+        auto_revoked, revoke_error = await self._try_auto_revoke(key, enabled=self._auto_revoke)
+        if self.bot is None:
+            return
+        owner_str = f"@{key.username}" if key.username else f"user_id={key.owner_user_id}"
+        lines = [
+            f"⚠️ <b>Аномалия: ключ #{key.id} (HYSTERIA2)</b>",
+            f"Одновременных соединений: <b>{conn_count}</b> (порог: {self._hysteria2_max_conn})",
+            f"Владелец: {owner_str}",
+        ]
+        if auto_revoked:
+            lines.append("🔒 <b>Ключ автоматически отозван</b>")
+        elif revoke_error:
+            lines.append(f"⚠️ Авто-отзыв не удался: {revoke_error[:120]}")
+        await self._send_alert_to_admins("\n".join(lines))
+
+    # ------------------------------------------------------------------ Alert I/O
+
+    async def _try_auto_revoke(self, key: VpnKey, *, enabled: bool) -> tuple[bool, str | None]:
+        """Revoke the key on the backend when auto-revoke is enabled.
+
+        Returns ``(auto_revoked, revoke_error)``; records a skipped revocation on
+        the backend-health counter when the revoke raises.
+        """
+        if not enabled:
+            return False, None
+        try:
+            await self._revoke_key(key)
+            return True, None
+        except Exception as exc:
+            logger.warning(
+                "Anomaly auto-revoke failed key_id=%s owner_user_id=%s key_type=%s reason=%s",
+                key.id,
+                key.owner_user_id,
+                key.key_type.value,
+                exc,
+                exc_info=True,
+            )
+            if self._backend_health is not None:
+                record = getattr(self._backend_health, "record_skipped_revocation", None)
+                if record is not None:
+                    record()
+            return False, str(exc)
+
+    async def _send_alert_to_admins(self, text: str) -> None:
+        if self.bot is None:
+            return
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text=t("btn_anomaly_dismiss"), callback_data="admin:anomaly:dismiss")]]
         )
@@ -274,6 +352,8 @@ class AnomalyDetectionService:
     async def _revoke_key(self, key: VpnKey) -> None:
         if key.key_type == VpnKeyType.XRAY:
             await self._xray_service.revoke_xray_key_system(key.id)  # type: ignore[attr-defined]
+        elif key.key_type == VpnKeyType.HYSTERIA2:
+            await self._hysteria_service.revoke_hysteria2_key_system(key.id)  # type: ignore[union-attr]
         else:
             await self._awg_service.revoke_awg_key_system(key.id)  # type: ignore[attr-defined]
 

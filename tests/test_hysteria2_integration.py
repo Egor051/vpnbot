@@ -109,7 +109,21 @@ class _Modules:
         return self._enabled
 
 
+class _FakeStats:
+    """Traffic Stats API stub recording every /kick call (and optionally failing)."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.kicked: list[list[str]] = []
+        self._fail = fail
+
+    async def kick(self, labels: list[str]) -> None:
+        self.kicked.append(list(labels))
+        if self._fail:
+            raise RuntimeError("stats API down")
+
+
 async def _build(tmp_path: Path, *, owners: tuple[int, ...] = (100, 200), module_enabled: bool = True,
+                 stats: object | None = None,
                  **settings_overrides: object) -> tuple[Database, HysteriaService]:
     db = Database(tmp_path / "vpn.db")
     await db.connect()
@@ -125,6 +139,7 @@ async def _build(tmp_path: Path, *, owners: tuple[int, ...] = (100, 200), module
         ids=IdGenerator(),
         audit=_Audit(),  # type: ignore[arg-type]
         modules=_Modules(module_enabled),  # type: ignore[arg-type]
+        stats=stats,  # type: ignore[arg-type]
     )
     return db, service
 
@@ -321,6 +336,88 @@ def test_disable_protocol_purges_hysteria2_keys(tmp_path: Path) -> None:
             assert not await modules.is_enabled("hysteria2")
             # The key row is hard-deleted (cascade-purge mirrors MTProto disable).
             assert await VpnKeyRepository(db).get_by_id(result.key.id) is None
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+# ── revoke/delete kick live sessions via the Traffic Stats API ────────────────
+
+def test_revoke_kicks_live_session_when_stats_configured(tmp_path: Path) -> None:
+    async def run() -> None:
+        stats = _FakeStats()
+        db, service = await _build(tmp_path, stats=stats)
+        try:
+            result = await service.issue(100, TelegramUserProfile(100, "user100", "User"), note=None)
+            label = result.key.email_label
+            await service.revoke(100, result.key.id)
+            assert stats.kicked == [[label]]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_delete_kicks_live_session_when_stats_configured(tmp_path: Path) -> None:
+    async def run() -> None:
+        stats = _FakeStats()
+        db, service = await _build(tmp_path, stats=stats)
+        try:
+            result = await service.issue(100, TelegramUserProfile(100, "user100", "User"), note=None)
+            label = result.key.email_label
+            await service.delete_hysteria2_key(100, result.key.id)
+            assert stats.kicked == [[label]]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_system_revoke_kicks_live_session(tmp_path: Path) -> None:
+    async def run() -> None:
+        stats = _FakeStats()
+        db, service = await _build(tmp_path, stats=stats)
+        try:
+            result = await service.issue(100, TelegramUserProfile(100, "user100", "User"), note=None)
+            label = result.key.email_label
+            # The path used by expiry + block-user (no interactive role check).
+            await service.revoke_hysteria2_key_system(result.key.id)
+            assert stats.kicked == [[label]]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_revoke_succeeds_even_if_kick_fails(tmp_path: Path) -> None:
+    async def run() -> None:
+        stats = _FakeStats(fail=True)
+        db, service = await _build(tmp_path, stats=stats)
+        repo = VpnKeyRepository(db)
+        try:
+            result = await service.issue(100, TelegramUserProfile(100, "user100", "User"), note=None)
+            # A failing /kick must not abort the revoke: the DB flip is what blocks
+            # new handshakes, so the key still lands in REVOKED.
+            updated = await service.revoke(100, result.key.id)
+            assert updated.status == VpnKeyStatus.REVOKED
+            assert stats.kicked == [[result.key.email_label]]
+            row = await repo.get_by_id(result.key.id)
+            assert row is not None and row.status == VpnKeyStatus.REVOKED
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_revoke_without_stats_adapter_skips_kick(tmp_path: Path) -> None:
+    async def run() -> None:
+        # No stats adapter wired: revoke still works, just no kick (pre-API behaviour).
+        db, service = await _build(tmp_path, stats=None)
+        try:
+            result = await service.issue(100, TelegramUserProfile(100, "user100", "User"), note=None)
+            updated = await service.revoke(100, result.key.id)
+            assert updated.status == VpnKeyStatus.REVOKED
         finally:
             await db.close()
 

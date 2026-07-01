@@ -239,6 +239,27 @@ password in this file — a mismatch is a silent client timeout, not an error.
 Start `hysteria-server.service` after `vpnbot-hy2-auth` (the unit declares
 `Before=hysteria-server.service`).
 
+### 2b. (Optional) Enable the Traffic Stats API — traffic, online, revoke-kick
+
+Per-key traffic counters, the online-clients count and immediate session
+termination on revoke require the Hysteria2 **Traffic Stats API** — a separate
+authenticated HTTP server that `hysteria-server` exposes itself. Enable it in the
+same `/etc/hysteria/config.yaml`:
+
+```yaml
+trafficStats:
+  listen: 127.0.0.1:9999   # must equal HYSTERIA2_STATS_LISTEN (loopback only)
+  secret: <random-secret>  # must equal HYSTERIA2_STATS_SECRET
+```
+
+Then set `HYSTERIA2_STATS_SECRET` (and, if you changed the port,
+`HYSTERIA2_STATS_LISTEN`) in `.env`. The bot only *reads* this API and POSTs
+`/kick` when a key is revoked/deleted/expired. Leave `HYSTERIA2_STATS_SECRET`
+empty to keep this disabled — then hy2 keys simply show no traffic/online, and a
+revoke blocks only new handshakes (the live session survives until reconnect).
+See [Configuration → Hysteria2](configuration.md#hysteria2) for all
+`HYSTERIA2_STATS_*` variables and `ANOMALY_HYSTERIA2_MAX_CONN`.
+
 ### 3. Fail-closed behaviour and health
 
 - The endpoint **always replies HTTP 200** with `{"ok": <bool>, "id": "<label>"}`

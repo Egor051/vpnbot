@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Hysteria2 technical parity via the Traffic Stats API.** Hysteria2 keys now
+  reach feature parity with Xray/AWG for observability and lifecycle. A new
+  `adapters/hysteria_stats.py` (`HysteriaStatsAdapter`) reads the Hysteria2
+  Traffic Stats API (`GET /traffic`, `GET /online`) over loopback and POSTs
+  `/kick`, keyed by the same `hy2_<hex>` label the auth endpoint returns. This adds:
+  per-key **traffic stats** (background `_hysteria_stats_loop` + on-demand views,
+  non-destructive reads), the **online-clients** counter (Hy2 leg in the server
+  status panel), **dashboard** per-protocol breakdown (active keys + traffic
+  bytes), a **backend-health** entry, **anomaly detection** by concurrent-connection
+  count (`ANOMALY_HYSTERIA2_MAX_CONN`, alert + optional auto-revoke), and
+  **immediate session termination on revoke/delete/expiry/block** via a best-effort
+  `/kick` (previously a live session survived until the client reconnected). New
+  settings: `HYSTERIA2_STATS_{LISTEN,SECRET,INTERVAL}` and
+  `ANOMALY_HYSTERIA2_MAX_CONN`. The whole surface stays inert unless
+  `HYSTERIA2_STATS_SECRET` is set (which must equal `trafficStats.secret` in
+  `/etc/hysteria/config.yaml`), so existing deployments are unaffected.
 - **Hysteria2 (apernet v2) integration with `auth: type: http`.** The bot can now
   issue, revoke and delete Hysteria2 `vpn_key`s dynamically with **no data-plane
   restarts**. Authentication is handled by a new standalone process,

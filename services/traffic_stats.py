@@ -3,6 +3,7 @@ import asyncio
 import logging
 
 from adapters.awg_config import AwgConfigAdapter
+from adapters.hysteria_stats import HysteriaStatsAdapter
 from adapters.xray_stats import XrayStatsAdapter
 from models.dto import KeyTrafficStatsView, TrafficStats, VpnKey
 from models.enums import UserRole, VpnKeyStatus, VpnKeyType
@@ -26,6 +27,7 @@ class TrafficStatsService:
         users: UserService,
         awg: AwgConfigAdapter,
         xray: XrayStatsAdapter,
+        hysteria: HysteriaStatsAdapter | None = None,
     ) -> None:
         self.stats = stats
         self.vpn_keys = vpn_keys
@@ -33,6 +35,9 @@ class TrafficStatsService:
         self.users = users
         self.awg = awg
         self.xray = xray
+        # None when the Hysteria2 Traffic Stats API is not configured; hy2 keys
+        # then surface as "stats unavailable" instead of accumulating counters.
+        self.hysteria = hysteria
         self._refresh_lock = asyncio.Lock()
 
     async def refresh_for_actor(self, actor_user_id: int, key_id: int) -> KeyTrafficStatsView:
@@ -85,11 +90,16 @@ class TrafficStatsService:
         # also serialises the background loops against manual refreshes of the same
         # keys, so concurrent live reads never interleave their commits.
         async with self._refresh_lock:
-            # AWG and Xray queries run in parallel to keep the lock time bounded by
-            # max(awg_latency, xray_latency) rather than their sum.
-            (awg_transfers, awg_error), (xray_stats, xray_error) = await asyncio.gather(
+            # AWG, Xray and Hysteria2 queries run in parallel to keep the lock time
+            # bounded by max(latencies) rather than their sum.
+            (
+                (awg_transfers, awg_error),
+                (xray_stats, xray_error),
+                (hysteria_stats, hysteria_error),
+            ) = await asyncio.gather(
                 self._load_awg_transfers(keys),
                 self._load_xray_stats(keys),
+                self._load_hysteria_stats(keys),
             )
             current_stats = await self.stats.list_by_key_ids(key_ids)
             views: list[KeyTrafficStatsView] = []
@@ -103,6 +113,10 @@ class TrafficStatsService:
                         stats = await self._refresh_awg_key(key, current_stats.get(key.id), awg_transfers, awg_error)
                     elif key.key_type == VpnKeyType.XRAY:
                         stats = await self._refresh_xray_key(key, current_stats.get(key.id), xray_stats, xray_error)
+                    elif key.key_type == VpnKeyType.HYSTERIA2:
+                        stats = await self._refresh_hysteria_key(
+                            key, current_stats.get(key.id), hysteria_stats, hysteria_error
+                        )
                     else:
                         stats = None
                     views.append(KeyTrafficStatsView(key=key, owner=owners.get(key.owner_user_id), stats=stats))
@@ -164,6 +178,40 @@ class TrafficStatsService:
         if keys:
             await self.refresh_views(keys)
 
+    async def refresh_all_hysteria(self) -> None:
+        """Refresh traffic stats for all Hysteria2 keys whose session may still exist.
+
+        Like Xray, ``GET /traffic`` returns every user's counters in one call, so
+        the whole fleet is paginated out of the DB and handed to a single
+        ``refresh_views`` call. The read is non-destructive (no ``?clear=1``), so
+        manual per-key views poll it live too; this loop only keeps the cache warm.
+        A no-op when the Traffic Stats API is not configured.
+        """
+        if self.hysteria is None:
+            return
+        statuses = {
+            VpnKeyStatus.ACTIVE,
+            VpnKeyStatus.PENDING_REVOKE,
+            VpnKeyStatus.APPLY_FAILED,
+            VpnKeyStatus.PENDING_DELETE,
+            VpnKeyStatus.DELETE_FAILED,
+        }
+        keys: list[VpnKey] = []
+        after_id: int | None = None
+        while True:
+            batch = await self.vpn_keys.list_by_type_statuses(
+                key_type=VpnKeyType.HYSTERIA2,
+                statuses=statuses,
+                limit=200,
+                after_id=after_id,
+            )
+            if not batch:
+                break
+            keys.extend(batch)
+            after_id = batch[-1].id
+        if keys:
+            await self.refresh_views(keys)
+
     async def cached_for_keys(self, keys: list[VpnKey]) -> dict[int, TrafficStats]:
         """Return cached traffic stats for the given keys without refreshing."""
         return await self.stats.list_by_key_ids([key.id for key in keys])
@@ -184,6 +232,17 @@ class TrafficStatsService:
             return await self.xray.query_all(), None
         except Exception as exc:
             logger.warning("Xray stats API недоступен: %s", exc, exc_info=True)
+            return {}, PUBLIC_BACKEND_STATS_ERROR
+
+    async def _load_hysteria_stats(self, keys: list[VpnKey]) -> tuple[dict[str, tuple[int, int]], str | None]:
+        if not any(key.key_type == VpnKeyType.HYSTERIA2 for key in keys):
+            return {}, None
+        if self.hysteria is None:
+            return {}, PUBLIC_BACKEND_STATS_ERROR
+        try:
+            return await self.hysteria.query_all(), None
+        except Exception as exc:
+            logger.warning("Hysteria2 stats API недоступен: %s", exc, exc_info=True)
             return {}, PUBLIC_BACKEND_STATS_ERROR
 
     async def _refresh_awg_key(
@@ -259,6 +318,45 @@ class TrafficStatsService:
             raw_downloaded_bytes=raw_downloaded,
             raw_uploaded_bytes=raw_uploaded,
             source="xray statsquery",
+            now=now,
+        )
+
+    async def _refresh_hysteria_key(
+        self,
+        key: VpnKey,
+        previous: TrafficStats | None,
+        raw_stats: dict[str, tuple[int, int]],
+        load_error: str | None,
+    ) -> TrafficStats:
+        now = self.users.clock.now()
+        source = "hysteria2 trafficStats"
+        if load_error:
+            return await self.stats.upsert_unavailable(key_id=key.id, reason=load_error, now=now, source=source)
+        if not key.email_label:
+            return await self.stats.upsert_unavailable(
+                key_id=key.id,
+                reason="У Hysteria2-ключа нет label для сопоставления статистики",
+                now=now,
+                source=source,
+            )
+        raw = raw_stats.get(key.email_label)
+        if raw is None:
+            # /traffic only lists ids that have moved data since the server started
+            # (or since the last ?clear). A missing id means "no traffic yet", not
+            # an error; preserve accumulated totals and resume when it reappears.
+            return await self.stats.upsert_unavailable(
+                key_id=key.id,
+                reason="Hysteria2 trafficStats не вернул счётчики для label ключа",
+                now=now,
+                source=source,
+            )
+        uploaded_bytes, downloaded_bytes = raw
+        return await self._store_success(
+            key=key,
+            previous=previous,
+            raw_downloaded_bytes=downloaded_bytes,
+            raw_uploaded_bytes=uploaded_bytes,
+            source=source,
             now=now,
         )
 

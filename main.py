@@ -18,7 +18,7 @@ async def main() -> None:
     setup_logging(settings.log_dir)
 
     from adapters.health_server import create_health_app
-    from bot.app import _awg_stats_loop, _xray_stats_loop, create_app
+    from bot.app import _awg_stats_loop, _hysteria_stats_loop, _xray_stats_loop, create_app
     from bot.commands import setup_bot_commands
     from bot.fsm.ttl_storage import TTLMemoryStorage, fsm_cleanup_loop
     from services.anomaly_detection import anomaly_detection_loop
@@ -31,6 +31,7 @@ async def main() -> None:
         runner: web.AppRunner | None = None
         awg_stats_task: asyncio.Task[None] | None = None
         xray_stats_task: asyncio.Task[None] | None = None
+        hysteria_stats_task: asyncio.Task[None] | None = None
         expiry_task: asyncio.Task[None] | None = None
         backup_task: asyncio.Task[None] | None = None
         anomaly_task: asyncio.Task[None] | None = None
@@ -56,6 +57,14 @@ async def main() -> None:
                     name="xray-stats-collector",
                 )
                 logger.info("Xray stats collector started (interval=%ds)", settings.xray_stats_interval)
+            if settings.is_hysteria2_stats_ready() and settings.hysteria2_stats_interval > 0:
+                hysteria_stats_task = asyncio.create_task(
+                    _hysteria_stats_loop(services.traffic_stats, settings.hysteria2_stats_interval),
+                    name="hysteria-stats-collector",
+                )
+                logger.info(
+                    "Hysteria2 stats collector started (interval=%ds)", settings.hysteria2_stats_interval
+                )
             if settings.key_expiry_check_interval > 0:
                 expiry_task = asyncio.create_task(
                     key_expiry_loop(services.key_expiry, settings.key_expiry_check_interval),
@@ -118,6 +127,9 @@ async def main() -> None:
             if xray_stats_task is not None:
                 xray_stats_task.cancel()
                 await asyncio.gather(xray_stats_task, return_exceptions=True)
+            if hysteria_stats_task is not None:
+                hysteria_stats_task.cancel()
+                await asyncio.gather(hysteria_stats_task, return_exceptions=True)
             if expiry_task is not None:
                 expiry_task.cancel()
                 await asyncio.gather(expiry_task, return_exceptions=True)

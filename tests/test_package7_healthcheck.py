@@ -155,7 +155,7 @@ def test_check_backends_all_healthy() -> None:
     health = BackendHealth()
     items = check_backends(health.snapshot())
     assert all(i.status == "ok" for i in items)
-    assert len(items) == 4  # Xray, AWG, SOCKS5, MTProto
+    assert len(items) == 5  # Xray, AWG, Hysteria2, SOCKS5, MTProto
 
 
 def test_check_backends_degraded_reason_is_redacted() -> None:

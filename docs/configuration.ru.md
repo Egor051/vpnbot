@@ -164,6 +164,29 @@ Hysteria2 работает как отдельный data plane (сервер `h
 | `HYSTERIA2_OBFS_PASSWORD` | Нет* | — | Пароль salamander-обфускации; ОБЯЗАН совпадать с `/etc/hysteria/config.yaml`. 🔒 |
 | `HYSTERIA2_INSECURE` | Нет | `true` | Ставит `insecure=1` в ссылку (самоподписанный серверный сертификат). См. MITM-компромисс ниже. |
 | `HYSTERIA2_AUTH_LISTEN` | Нет | `127.0.0.1:8444` | Loopback `host:port`, который слушает эндпоинт `hy2_auth`. Хост обязан быть loopback. |
+| `HYSTERIA2_STATS_LISTEN` | Нет | `127.0.0.1:9999` | Loopback `host:port` Traffic Stats API. Должен совпадать с `trafficStats.listen` в `config.yaml`; хост обязан быть loopback. |
+| `HYSTERIA2_STATS_SECRET` | Нет | — | Секрет Traffic Stats API; ОБЯЗАН совпадать с `trafficStats.secret` в `config.yaml`. Пусто — трафик/онлайн/kick для hy2 отключены. 🔒 |
+| `HYSTERIA2_STATS_INTERVAL` | Нет | `60` | Интервал фонового сбора статистики hy2 в секундах (0–3600; 0 отключает цикл). |
+
+### Traffic Stats API (`HYSTERIA2_STATS_*`) — трафик, онлайн, kick при отзыве
+
+В отличие от `hy2_auth` (который только аутентифицирует хендшейки), per-key
+счётчики трафика, счётчик онлайн-клиентов и мгновенный разрыв сессии при отзыве
+обслуживает **Traffic Stats API** Hysteria2 — отдельный аутентифицируемый
+HTTP-сервер, который поднимает сам `hysteria-server`. Включите его в
+`/etc/hysteria/config.yaml`:
+
+```yaml
+trafficStats:
+  listen: 127.0.0.1:9999   # должно совпадать с HYSTERIA2_STATS_LISTEN (только loopback)
+  secret: s3cret           # должно совпадать с HYSTERIA2_STATS_SECRET
+```
+
+Бот только *читает* API (`GET /traffic`, `GET /online`) и делает `POST /kick`
+при отзыве/удалении/истечении ключа. Без `HYSTERIA2_STATS_SECRET` hy2-ключи не
+показывают трафик и онлайн, а отзыв блокирует только новые хендшейки (живая
+сессия доживает до переподключения) — поведение до Stats API. `id` из API — это
+stats-label ключа (`hy2_<hex>`), тот же, что возвращает `hy2_auth`.
 
 ### `HYSTERIA2_INSECURE=true` — MITM-компромисс (известный и принятый)
 
@@ -210,6 +233,7 @@ Hysteria2 работает как отдельный data plane (сервер `h
 | `ANOMALY_AUTO_REVOKE` | Нет | `false` | Автоматически отзывать помеченные ключи без подтверждения администратора. |
 | `ANOMALY_COOLDOWN_SECONDS` | Нет | `7200` | Cooldown перед повторным флагом того же ключа (0–86400). |
 | `ANOMALY_CONCURRENT_WINDOW_SECONDS` | Нет | `600` | Окно для обнаружения одновременных соединений (0–86400). |
+| `ANOMALY_HYSTERIA2_MAX_CONN` | Нет | `0` | Флаг для Hysteria2-ключа с >= стольким числом одновременных соединений (через Traffic Stats API `/online`). `0` отключает проверку hy2; требует `HYSTERIA2_STATS_SECRET`. |
 
 ## WARP-сокрытие исходящего IP
 

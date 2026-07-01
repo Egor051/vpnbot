@@ -165,6 +165,30 @@ mismatch is a silent client timeout, not an error.
 | `HYSTERIA2_OBFS_PASSWORD` | No* | — | Salamander obfuscation password; MUST match `/etc/hysteria/config.yaml`. 🔒 | `s3cret` |
 | `HYSTERIA2_INSECURE` | No | `true` | Set `insecure=1` in the link (self-signed server cert). See the MITM tradeoff below. | `true` |
 | `HYSTERIA2_AUTH_LISTEN` | No | `127.0.0.1:8444` | Loopback `host:port` the `hy2_auth` endpoint binds. Host must be loopback. | `127.0.0.1:8444` |
+| `HYSTERIA2_STATS_LISTEN` | No | `127.0.0.1:9999` | Loopback `host:port` of the Traffic Stats API. Must match `trafficStats.listen` in `config.yaml`; host must be loopback. | `127.0.0.1:9999` |
+| `HYSTERIA2_STATS_SECRET` | No | — | Shared secret for the Traffic Stats API; MUST equal `trafficStats.secret` in `config.yaml`. Empty disables hy2 traffic/online/kick. 🔒 | `s3cret` |
+| `HYSTERIA2_STATS_INTERVAL` | No | `60` | Background hy2 traffic-stats sampling interval in seconds (0–3600; 0 disables the loop). | `60` |
+
+### Traffic Stats API (`HYSTERIA2_STATS_*`) — traffic, online, revoke-kick
+
+Unlike `hy2_auth` (which only authenticates handshakes), per-key traffic
+counters, the online-clients count and immediate session termination on revoke
+are served by the Hysteria2 **Traffic Stats API** — a separate authenticated
+HTTP server exposed by `hysteria-server` itself. Enable it in
+`/etc/hysteria/config.yaml`:
+
+```yaml
+trafficStats:
+  listen: 127.0.0.1:9999   # must equal HYSTERIA2_STATS_LISTEN (loopback only)
+  secret: s3cret           # must equal HYSTERIA2_STATS_SECRET
+```
+
+The bot only *reads* it (`GET /traffic`, `GET /online`) and POSTs `/kick` when a
+key is revoked/deleted/expired. Without `HYSTERIA2_STATS_SECRET` set, hy2 keys
+show no traffic and no online count, and a revoke blocks only new handshakes
+(the live session survives until the client reconnects) — the pre-Stats-API
+behaviour. The `id` reported by the API is the key's stats label (`hy2_<hex>`),
+the same id `hy2_auth` returns.
 
 ### `HYSTERIA2_INSECURE=true` — MITM tradeoff (known and accepted)
 
@@ -211,6 +235,7 @@ can safely set `HYSTERIA2_INSECURE=false`. Until then, keep this `true`.
 | `ANOMALY_AUTO_REVOKE` | No | `false` | Automatically revoke flagged keys without admin confirmation. | `false` |
 | `ANOMALY_COOLDOWN_SECONDS` | No | `7200` | Cooldown before re-flagging the same key (0–86400). | `7200` |
 | `ANOMALY_CONCURRENT_WINDOW_SECONDS` | No | `600` | Window for concurrent-connection anomaly detection (0–86400). | `600` |
+| `ANOMALY_HYSTERIA2_MAX_CONN` | No | `0` | Flag a Hysteria2 key with >= this many concurrent connections (via the Traffic Stats API `/online`). `0` disables the hy2 check; requires `HYSTERIA2_STATS_SECRET`. | `5` |
 
 ## WARP Outbound IP Masking
 
