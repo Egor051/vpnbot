@@ -1,4 +1,4 @@
-"""Best-effort counter of currently-online VPN clients (WireGuard + Xray).
+"""Best-effort counter of currently-online VPN clients (WireGuard + Xray + Hysteria2).
 
 "Online" is inferred from traffic movement: a client counts as online when its
 cumulative transfer counters grew since the previous poll. Both backends expose
@@ -46,6 +46,7 @@ class OnlineClients:
     xray: int | None
     total: int | None
     available: bool
+    hysteria2: int | None = None
 
 
 class _AwgTransferSource(Protocol):
@@ -56,17 +57,24 @@ class _XrayStatsSource(Protocol):
     async def query_all(self) -> dict[str, int]: ...
 
 
+class _HysteriaOnlineSource(Protocol):
+    async def query_online(self) -> dict[str, int]: ...
+
+
 class OnlineClientsService:
     def __init__(
         self,
         *,
         awg_adapter: _AwgTransferSource,
         xray_stats: _XrayStatsSource,
+        hysteria_stats: _HysteriaOnlineSource | None = None,
         ttl: float = DEFAULT_TTL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._awg_adapter = awg_adapter
         self._xray_stats = xray_stats
+        # None when the Hysteria2 Traffic Stats API is not configured.
+        self._hysteria_stats = hysteria_stats
         self._ttl = ttl
         self._clock = clock
         self._lock = asyncio.Lock()
@@ -100,10 +108,11 @@ class OnlineClientsService:
     async def _compute(self) -> OnlineClients:
         wg = await self._count_wg()
         xray = await self._count_xray()
-        if wg is None and xray is None:
-            return OnlineClients(wg=None, xray=None, total=None, available=False)
-        total = (wg or 0) + (xray or 0)
-        return OnlineClients(wg=wg, xray=xray, total=total, available=True)
+        hysteria2 = await self._count_hysteria()
+        if wg is None and xray is None and hysteria2 is None:
+            return OnlineClients(wg=None, xray=None, hysteria2=None, total=None, available=False)
+        total = (wg or 0) + (xray or 0) + (hysteria2 or 0)
+        return OnlineClients(wg=wg, xray=xray, hysteria2=hysteria2, total=total, available=True)
 
     async def _count_wg(self) -> int | None:
         try:
@@ -126,6 +135,19 @@ class OnlineClientsService:
         prev = self._prev_xray
         self._prev_xray = cur
         return self._count_increased(cur, prev)
+
+    async def _count_hysteria(self) -> int | None:
+        # Unlike wg/xray, Hysteria2's /online is an instantaneous connection count,
+        # so "online" is a direct read (labels with >=1 live connection) with no
+        # baseline needed. Returns None when the API is unconfigured/unreachable.
+        if self._hysteria_stats is None:
+            return None
+        try:
+            online = await self._hysteria_stats.query_online()
+        except Exception:
+            logger.debug("online Hysteria2 stats read failed", exc_info=True)
+            return None
+        return sum(1 for count in online.values() if count > 0)
 
     @staticmethod
     def _count_increased(cur: dict[str, int], prev: dict[str, int] | None) -> int | None:

@@ -73,6 +73,7 @@ class BackendHealth:
 _BACKEND_LABELS: dict[BackendType, str] = {
     VpnKeyType.XRAY: "Xray",
     VpnKeyType.AWG: "AWG",
+    VpnKeyType.HYSTERIA2: "Hysteria2",
     ProxyAccessType.SOCKS5: "SOCKS5",
     ProxyAccessType.MTPROTO: "MTProto",
 }

@@ -13,6 +13,7 @@ class KeysSummary:
     active: int
     xray_active: int
     awg_active: int
+    hysteria2_active: int
     expiring_7d: int
     expiring_30d: int
     stuck: int
@@ -24,6 +25,7 @@ class TrafficTotals:
     total_bytes: int
     xray_bytes: int
     awg_bytes: int
+    hysteria2_bytes: int
     avg_per_key_bytes: int
 
 
@@ -72,6 +74,7 @@ class DashboardRepository:
               SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
               SUM(CASE WHEN status = 'active' AND key_type = 'xray' THEN 1 ELSE 0 END) AS xray_active,
               SUM(CASE WHEN status = 'active' AND key_type = 'awg'  THEN 1 ELSE 0 END) AS awg_active,
+              SUM(CASE WHEN status = 'active' AND key_type = 'hysteria2' THEN 1 ELSE 0 END) AS hysteria2_active,
               SUM(CASE WHEN status = 'active' AND expires_at IS NOT NULL
                             AND expires_at > ? AND expires_at <= ?   THEN 1 ELSE 0 END) AS expiring_7d,
               SUM(CASE WHEN status = 'active' AND expires_at IS NOT NULL
@@ -85,7 +88,7 @@ class DashboardRepository:
         )
         if row is None:
             return KeysSummary(
-                total=0, active=0, xray_active=0, awg_active=0,
+                total=0, active=0, xray_active=0, awg_active=0, hysteria2_active=0,
                 expiring_7d=0, expiring_30d=0, stuck=0, avg_per_user=0.0,
             )
         avg_row = await self.db.conn.execute_fetchone(
@@ -105,6 +108,7 @@ class DashboardRepository:
             active=int(row["active"] or 0),
             xray_active=int(row["xray_active"] or 0),
             awg_active=int(row["awg_active"] or 0),
+            hysteria2_active=int(row["hysteria2_active"] or 0),
             expiring_7d=int(row["expiring_7d"] or 0),
             expiring_30d=int(row["expiring_30d"] or 0),
             stuck=int(row["stuck"] or 0),
@@ -125,6 +129,7 @@ class DashboardRepository:
             SELECT
               COALESCE(SUM(CASE WHEN key_type = 'xray' THEN total_bytes END), 0) AS xray_bytes,
               COALESCE(SUM(CASE WHEN key_type = 'awg' THEN total_bytes END), 0) AS awg_bytes,
+              COALESCE(SUM(CASE WHEN key_type = 'hysteria2' THEN total_bytes END), 0) AS hysteria2_bytes,
               AVG(total_bytes) AS avg_bytes
             FROM (
                 SELECT k.key_type AS key_type,
@@ -140,11 +145,13 @@ class DashboardRepository:
         )
         xray_bytes = int(row["xray_bytes"] or 0) if row else 0
         awg_bytes = int(row["awg_bytes"] or 0) if row else 0
+        hysteria2_bytes = int(row["hysteria2_bytes"] or 0) if row else 0
         avg = int(row["avg_bytes"]) if row and row["avg_bytes"] is not None else 0
         return TrafficTotals(
-            total_bytes=xray_bytes + awg_bytes,
+            total_bytes=xray_bytes + awg_bytes + hysteria2_bytes,
             xray_bytes=xray_bytes,
             awg_bytes=awg_bytes,
+            hysteria2_bytes=hysteria2_bytes,
             avg_per_key_bytes=avg,
         )
 

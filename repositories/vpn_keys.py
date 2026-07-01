@@ -177,8 +177,13 @@ class VpnKeyRepository:
     async def count_traffic_supported(self) -> int:
         """Return the number of non-deleted keys whose type supports traffic stats."""
         cursor = await self.db.conn.execute(
-            "SELECT COUNT(*) AS cnt FROM vpn_keys WHERE key_type IN (?, ?) AND status != ?",
-            (VpnKeyType.XRAY.value, VpnKeyType.AWG.value, VpnKeyStatus.DELETED.value),
+            "SELECT COUNT(*) AS cnt FROM vpn_keys WHERE key_type IN (?, ?, ?) AND status != ?",
+            (
+                VpnKeyType.XRAY.value,
+                VpnKeyType.AWG.value,
+                VpnKeyType.HYSTERIA2.value,
+                VpnKeyStatus.DELETED.value,
+            ),
         )
         row = await cursor.fetchone()
         return int(row["cnt"]) if row is not None else 0
@@ -188,11 +193,18 @@ class VpnKeyRepository:
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM vpn_keys
-            WHERE key_type IN (?, ?) AND status != ?
+            WHERE key_type IN (?, ?, ?) AND status != ?
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
             """,
-            (VpnKeyType.XRAY.value, VpnKeyType.AWG.value, VpnKeyStatus.DELETED.value, _clamp_limit(limit), _clamp_offset(offset)),
+            (
+                VpnKeyType.XRAY.value,
+                VpnKeyType.AWG.value,
+                VpnKeyType.HYSTERIA2.value,
+                VpnKeyStatus.DELETED.value,
+                _clamp_limit(limit),
+                _clamp_offset(offset),
+            ),
         )
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]

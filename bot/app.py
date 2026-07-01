@@ -13,6 +13,7 @@ from bot.fsm.ttl_storage import TTLMemoryStorage
 from adapters.awg_config import AwgConfigAdapter
 from adapters.backup import BackupAdapter
 from adapters.clock import ClockProvider
+from adapters.hysteria_stats import HysteriaStatsAdapter
 from adapters.dante_users import DanteUserAdapter
 from adapters.id_generator import IdGenerator
 from adapters.ip_allocator import IpAllocator
@@ -95,6 +96,19 @@ async def _xray_stats_loop(traffic_stats: TrafficStatsService, interval: int) ->
             await traffic_stats.refresh_all_xray()
         except Exception:
             logger.warning("Xray background stats collection failed", exc_info=True)
+        await asyncio.sleep(interval)
+
+
+async def _hysteria_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> None:
+    # GET /traffic is read without ?clear (non-destructive), so manual per-key views
+    # poll it live; this loop only keeps the cache warm between them, mirroring the
+    # Xray loop (see TrafficStatsService.refresh_all_hysteria). A no-op when the
+    # Traffic Stats API is not configured.
+    while True:
+        try:
+            await traffic_stats.refresh_all_hysteria()
+        except Exception:
+            logger.warning("Hysteria2 background stats collection failed", exc_info=True)
         await asyncio.sleep(interval)
 
 
@@ -210,6 +224,16 @@ async def _build_app(
         else None
     )
     xray_stats_adapter = XrayStatsAdapter(shell=shell, stats_server=settings.xray_stats_server)
+    # Hysteria2 Traffic Stats API client — only when the operator configured it
+    # (listen + secret). None keeps hy2 traffic/online/kick fully inert.
+    hysteria_stats_adapter = (
+        HysteriaStatsAdapter(
+            listen=settings.hysteria2_stats_listen,
+            secret=settings.hysteria2_stats_secret,
+        )
+        if settings.is_hysteria2_stats_ready()
+        else None
+    )
     awg_adapter = AwgConfigAdapter(
         config_path=settings.awg_config_path,
         interface=settings.awg_interface,
@@ -289,6 +313,7 @@ async def _build_app(
         audit=audit_service,
         modules=protocol_modules_service,
         user_locks=user_locks,
+        stats=hysteria_stats_adapter,
     )
     # block_user is reachable by moderators, who are neither superadmin nor the
     # key owner. Wire the *system* revokers (authorisation is already done by
@@ -368,6 +393,7 @@ async def _build_app(
         users=user_service,
         awg=awg_adapter,
         xray=xray_stats_adapter,
+        hysteria=hysteria_stats_adapter,
     )
     announcement_service = AnnouncementService(
         users=user_service,
@@ -431,6 +457,9 @@ async def _build_app(
         cooldown_seconds=settings.anomaly_cooldown_seconds,
         xray_access_log_path=settings.xray_access_log_path,
         concurrent_window_seconds=settings.anomaly_concurrent_window_seconds,
+        hysteria_stats=hysteria_stats_adapter,
+        hysteria_service=hysteria_service,
+        hysteria2_max_conn=settings.anomaly_hysteria2_max_conn,
     )
 
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
@@ -459,6 +488,7 @@ async def _build_app(
     online_clients_service = OnlineClientsService(
         awg_adapter=awg_service.adapter,
         xray_stats=xray_stats_adapter,
+        hysteria_stats=hysteria_stats_adapter,
     )
     auto_refresh_manager = LiveRefreshManager()
 

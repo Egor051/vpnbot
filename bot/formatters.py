@@ -1183,7 +1183,7 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
     k = snap.keys
     lines += [
         "<b>🔑 VPN-ключи</b>",
-        f"  Активных: <b>{h(k.active)}</b>  (Xray: {h(k.xray_active)} | AWG: {h(k.awg_active)})  · всего: {h(k.total)}",
+        f"  Активных: <b>{h(k.active)}</b>  (Xray: {h(k.xray_active)} | AWG: {h(k.awg_active)} | Hy2: {h(k.hysteria2_active)})  · всего: {h(k.total)}",
         f"  Истекают 7д: {h(k.expiring_7d)} | 30д: {h(k.expiring_30d)}",
         f"  Зависших: {'⚠️ ' + str(k.stuck) if k.stuck else '0'} | Ср. на пользователя: {h(f'{k.avg_per_user:.1f}')}",
         "",
@@ -1197,7 +1197,7 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
         top_parts.append(f"{h(name)} {h(format_bytes(entry.total_bytes))}")
     lines += [
         "<b>📊 Трафик</b>",
-        f"  Итого: <b>{h(format_bytes(t_.total_bytes))}</b>  (Xray: {h(format_bytes(t_.xray_bytes))} | AWG: {h(format_bytes(t_.awg_bytes))})",
+        f"  Итого: <b>{h(format_bytes(t_.total_bytes))}</b>  (Xray: {h(format_bytes(t_.xray_bytes))} | AWG: {h(format_bytes(t_.awg_bytes))} | Hy2: {h(format_bytes(t_.hysteria2_bytes))})",
         f"  Среднее на ключ: {h(format_bytes(t_.avg_per_key_bytes))}",
     ]
     if top_parts:
@@ -1314,9 +1314,14 @@ def _online_clients_line(online: OnlineClients) -> str:
     total = no_data if online.total is None else str(online.total)
     wg = no_data if online.wg is None else str(online.wg)
     xray = no_data if online.xray is None else str(online.xray)
+    parts = f"WG: {h(wg)} · Xray: {h(xray)}"
+    # Only surface the Hysteria2 leg when the Traffic Stats API is configured
+    # (otherwise online.hysteria2 is None and a count would be misleading).
+    if online.hysteria2 is not None:
+        parts += f" · Hy2: {h(str(online.hysteria2))}"
     return (
         f"🔗 {t('server_status_online_label')}: <b>{h(total)}</b>"
-        f"  (WG: {h(wg)} · Xray: {h(xray)})"
+        f"  ({parts})"
     )
 
 

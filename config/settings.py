@@ -390,6 +390,9 @@ class Settings:
     anomaly_auto_revoke: bool = False
     anomaly_cooldown_seconds: int = 7200
     anomaly_concurrent_window_seconds: int = 600
+    # Hysteria2 key-sharing threshold: alert when a key has >= this many concurrent
+    # connections (via the Traffic Stats API /online). 0 disables the hy2 check.
+    anomaly_hysteria2_max_conn: int = 0
     xray_access_log_path: str = ""
     bot_language: str = "ru"
     # Second VLESS transport (XHTTP+REALITY) as a separate inbound. Inert while
@@ -425,6 +428,14 @@ class Settings:
     hysteria2_obfs_password: str = field(default="", repr=False)
     hysteria2_insecure: bool = True
     hysteria2_auth_listen: str = "127.0.0.1:8444"
+    # Hysteria2 Traffic Stats API (config.yaml `trafficStats: {listen, secret}`).
+    # A loopback HTTP server exposed by hysteria-server itself that powers per-key
+    # traffic, the online-clients counter and revoke-kick. The bot only *reads*
+    # it (and POSTs /kick); it never binds it. SECRET must equal the config.yaml
+    # value. Without a secret the whole hy2 stats/online/kick surface stays inert.
+    hysteria2_stats_listen: str = "127.0.0.1:9999"
+    hysteria2_stats_secret: str = field(default="", repr=False)
+    hysteria2_stats_interval: int = 60
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -497,6 +508,15 @@ class Settings:
         except SettingsError:
             return False
         return True
+
+    def is_hysteria2_stats_ready(self) -> bool:
+        """Whether the Hysteria2 Traffic Stats API is configured (listen + secret).
+
+        Gates construction of the HysteriaStatsAdapter: without both, hy2 traffic
+        stats, the online-clients counter and revoke-kick stay inert exactly as
+        they were before this feature.
+        """
+        return bool(self.hysteria2_stats_listen and self.hysteria2_stats_secret)
 
     def validate_awg_ready(self) -> None:
         missing = [
@@ -717,6 +737,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         anomaly_auto_revoke=_bool("ANOMALY_AUTO_REVOKE", False),
         anomaly_cooldown_seconds=_int_range("ANOMALY_COOLDOWN_SECONDS", 7200, 0, 86400),
         anomaly_concurrent_window_seconds=_int_range("ANOMALY_CONCURRENT_WINDOW_SECONDS", 600, 0, 86400),
+        anomaly_hysteria2_max_conn=_int_range("ANOMALY_HYSTERIA2_MAX_CONN", 0, 0, 10000),
         xray_access_log_path=_optional("XRAY_ACCESS_LOG_PATH"),
         socks5_user_helper_path=Path(_optional("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/vpnbot-socks5-user")),
         xray_apply_helper_path=Path(_optional("XRAY_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-xray-apply")),
@@ -761,4 +782,9 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         hysteria2_auth_listen=_loopback_host_port(
             "HYSTERIA2_AUTH_LISTEN", _optional("HYSTERIA2_AUTH_LISTEN", "127.0.0.1:8444")
         ),
+        hysteria2_stats_listen=_loopback_host_port(
+            "HYSTERIA2_STATS_LISTEN", _optional("HYSTERIA2_STATS_LISTEN", "127.0.0.1:9999")
+        ),
+        hysteria2_stats_secret=_no_control_chars("HYSTERIA2_STATS_SECRET", _optional("HYSTERIA2_STATS_SECRET")),
+        hysteria2_stats_interval=_int_range("HYSTERIA2_STATS_INTERVAL", 60, 0, 3600),
     )

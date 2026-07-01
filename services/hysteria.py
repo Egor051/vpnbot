@@ -4,6 +4,7 @@ import logging
 import secrets
 
 from adapters.clock import ClockProvider
+from adapters.hysteria_stats import HysteriaStatsAdapter
 from adapters.id_generator import IdGenerator
 from bot.formatters import format_hysteria2_link, key_note_for_viewer, status_text
 from config.settings import Settings
@@ -51,6 +52,7 @@ class HysteriaService:
         audit: AuditService,
         modules: ProtocolModulesService,
         user_locks: UserLockManager | None = None,
+        stats: HysteriaStatsAdapter | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
         self.users = users
@@ -59,6 +61,10 @@ class HysteriaService:
         self.ids = ids
         self.audit = audit
         self.modules = modules
+        # Traffic Stats API client; when configured, revoke/delete/expiry/block
+        # kick any live session so the flip to REVOKED takes effect immediately
+        # instead of surviving until the client reconnects. None => no kick.
+        self.stats = stats
         self.user_locks: UserLockManager = (
             user_locks if user_locks is not None else getattr(users, "user_locks", UserLockManager())
         )
@@ -138,9 +144,10 @@ class HysteriaService:
 
         Semantics: flipping the row to REVOKED blocks every NEW handshake
         immediately (the endpoint matches only ACTIVE rows on its live read). An
-        already-established session survives until the client reconnects —
-        Hysteria cannot kill a live session without restarting the data plane, an
-        intentional and documented property of this design.
+        already-established session is then terminated by a best-effort ``/kick``
+        against the Traffic Stats API when it is configured; without that API the
+        live session survives until the client reconnects (the original
+        no-data-plane behaviour).
         """
         async with self._lock:
             key = await self._get_key_for_manage(actor_user_id, key_id)
@@ -149,6 +156,7 @@ class HysteriaService:
             if key.status not in HYSTERIA2_REVOCABLE_STATUSES:
                 raise InvalidOperation("Отозвать можно только активный Hysteria2-ключ")
             await self.vpn_keys.mark_revoked(key_id, actor_user_id, self.clock.now())
+            await self._kick_best_effort(key.email_label)
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action="hysteria2_key_revoked",
@@ -180,6 +188,7 @@ class HysteriaService:
                 raise InvalidOperation("Отозвать можно только активный Hysteria2-ключ")
             revoked_by = actor_user_id if actor_user_id is not None else key.created_by
             await self.vpn_keys.mark_revoked(key_id, revoked_by, self.clock.now())
+            await self._kick_best_effort(key.email_label)
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action=action,
@@ -199,6 +208,7 @@ class HysteriaService:
             key = await self._get_key_for_manage(actor_user_id, key_id)
             previous_status = key.status
             await self.vpn_keys.hard_delete_with_stats(key_id, self.clock.now())
+            await self._kick_best_effort(key.email_label)
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action="hysteria2_key_hard_deleted",
@@ -277,6 +287,19 @@ class HysteriaService:
         if key is None:
             raise NotFound("Ключ не найден")
         return key
+
+    async def _kick_best_effort(self, label: str | None) -> None:
+        """Terminate any live session for *label* via the Traffic Stats API.
+
+        No-op when the API is not configured. Never raises: the DB flip already
+        blocks new handshakes, so a kick failure must not fail the revoke/delete.
+        """
+        if self.stats is None or not label:
+            return
+        try:
+            await self.stats.kick([label])
+        except Exception:
+            logger.warning("Hysteria2 kick failed for label=%s (revoke still applied)", label, exc_info=True)
 
     async def _generate_unique_label(self) -> str:
         for _ in range(5):
