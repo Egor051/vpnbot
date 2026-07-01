@@ -78,6 +78,9 @@ def _make_settings(**overrides: object) -> SimpleNamespace:
         socks5_service_name="danted",
         mtproto_enabled=True,
         mtproto_service_name="mtproxy",
+        hysteria2_enabled=False,
+        hysteria2_service_name="hysteria-server",
+        hysteria2_auth_service_name="vpnbot-hy2-auth",
         privilege_helpers_enabled=True,
     )
     defaults.update(overrides)
@@ -682,6 +685,47 @@ def test_admin_diagnostics_excludes_disabled_proxy_services(monkeypatch: pytest.
         assert "mtproxy" not in captured_service_names
         assert "xray" in captured_service_names
         assert "vpn-bot" in captured_service_names
+        # Hysteria2 disabled (default in _make_settings) -> its units are absent.
+        assert "hysteria-server" not in captured_service_names
+        assert "vpnbot-hy2-auth" not in captured_service_names
+
+    asyncio.run(run())
+
+
+def test_admin_diagnostics_includes_hysteria2_services_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When Hysteria2 is enabled, both hy2 units are checked, at parity with Xray/AWG."""
+    from bot.handlers.admin import admin_backend_diagnostics
+
+    captured_service_names: list[str] = []
+
+    async def fake_run_bot_health(**kwargs: object) -> object:
+        captured_service_names.extend(kwargs.get("service_names", []))  # type: ignore[arg-type]
+        return build_result([
+            HealthCheckItem(name="bot_runtime", status="ok", severity="info", message="ok"),
+        ])
+
+    async def allow_private(*args: object, **kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr("bot.handlers.admin.run_bot_health", fake_run_bot_health)
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", allow_private)
+
+    async def _no_modules() -> list[object]:
+        return []
+
+    async def run() -> None:
+        callback = _AdminCallback()
+        modules_mock = SimpleNamespace(get_all=_no_modules)
+        services = SimpleNamespace(
+            users=_AdminUsers(),
+            backend_health=BackendHealth(),
+            settings=_make_settings(hysteria2_enabled=True),
+            db=MagicMock(),
+            modules=modules_mock,
+        )
+        await admin_backend_diagnostics(callback, services)
+        assert "vpnbot-hy2-auth" in captured_service_names
+        assert "hysteria-server" in captured_service_names
 
     asyncio.run(run())
 

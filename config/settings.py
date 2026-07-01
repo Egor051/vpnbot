@@ -436,6 +436,19 @@ class Settings:
     hysteria2_stats_listen: str = "127.0.0.1:9999"
     hysteria2_stats_secret: str = field(default="", repr=False)
     hysteria2_stats_interval: int = 60
+    # systemd unit names for the Hysteria2 data plane. Used ONLY by the on-demand
+    # health diagnostics (systemctl is-active), so a down hy2 data plane surfaces
+    # in the panel exactly like Xray/AWG. The bot never manages these units.
+    hysteria2_service_name: str = "hysteria-server"
+    hysteria2_auth_service_name: str = "vpnbot-hy2-auth"
+    # /etc/hysteria/config.yaml — the hysteria-server config (obfs password, TLS,
+    # trafficStats). Bundled into the offsite recovery archive so a rebuilt box can
+    # restore the data plane, mirroring the Xray config.json / AWG .conf backup.
+    hysteria2_config_path: Path = Path("/etc/hysteria/config.yaml")
+    # Background hy2_auth /healthz probe interval in seconds (0-3600; 0 disables the
+    # loop, leaving Hysteria2 backend-health unmonitored). Powers the dashboard /
+    # health "Hysteria2: OK/DEGRADED" entry, at parity with Xray/AWG reconciliation.
+    hysteria2_health_interval: int = 60
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -787,4 +800,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         ),
         hysteria2_stats_secret=_no_control_chars("HYSTERIA2_STATS_SECRET", _optional("HYSTERIA2_STATS_SECRET")),
         hysteria2_stats_interval=_int_range("HYSTERIA2_STATS_INTERVAL", 60, 0, 3600),
+        hysteria2_service_name=_optional("HYSTERIA2_SERVICE_NAME", "hysteria-server"),
+        hysteria2_auth_service_name=_optional("HYSTERIA2_AUTH_SERVICE_NAME", "vpnbot-hy2-auth"),
+        hysteria2_config_path=Path(_optional("HYSTERIA2_CONFIG_PATH", "/etc/hysteria/config.yaml")),
+        hysteria2_health_interval=_int_range("HYSTERIA2_HEALTH_INTERVAL", 60, 0, 3600),
     )

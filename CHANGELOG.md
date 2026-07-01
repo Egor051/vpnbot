@@ -8,6 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Hysteria2 operational parity: backend-health, diagnostics & recovery backup.**
+  Closes the last non-Traffic-Stats-API gaps between Hysteria2 and Xray/AWG. (1) A
+  new `adapters/hysteria_auth_health.py` probe polls the `hy2_auth` `GET /healthz`
+  endpoint on a background loop (`HYSTERIA2_HEALTH_INTERVAL`, default 60 s) and
+  reflects it as the **Hysteria2: OK/DEGRADED** entry in `BackendHealth` — the
+  dashboard and health panel no longer report Hysteria2 permanently "OK" while its
+  data plane is down. Because Hysteria2 issuance/revocation are pure `vpn.db` writes
+  with no apply step, a degraded mark is informational only and never blocks
+  mutations. (2) The admin **diagnostics** panel now runs `systemctl is-active` on
+  the Hysteria2 units (`HYSTERIA2_AUTH_SERVICE_NAME`=`vpnbot-hy2-auth`,
+  `HYSTERIA2_SERVICE_NAME`=`hysteria-server`) when Hysteria2 is enabled. (3) The
+  hysteria-server config (`HYSTERIA2_CONFIG_PATH`, default `/etc/hysteria/config.yaml`)
+  is bundled into the offsite recovery archive, mirroring the Xray/AWG config backup.
+  (4) `AnomalyDetectionService` is now wired to `BackendHealth`, so its
+  skipped-revocation counter increments across all protocols. New settings:
+  `HYSTERIA2_{HEALTH_INTERVAL,SERVICE_NAME,AUTH_SERVICE_NAME,CONFIG_PATH}`. Note:
+  per-key traffic, the online count and revoke-kick remain gated on the Traffic
+  Stats API (`HYSTERIA2_STATS_SECRET`) — that data is only obtainable from
+  `hysteria-server` itself and cannot be synthesised by the bot.
 - **Hysteria2 technical parity via the Traffic Stats API.** Hysteria2 keys now
   reach feature parity with Xray/AWG for observability and lifecycle. A new
   `adapters/hysteria_stats.py` (`HysteriaStatsAdapter`) reads the Hysteria2
