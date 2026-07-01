@@ -1,6 +1,7 @@
 
 from dataclasses import dataclass
 
+from adapters.hysteria_auth_health import Hysteria2AuthHealthProbe
 from config.settings import Settings
 from db.database import Database
 from services.access_approval import AccessApprovalService
@@ -63,3 +64,7 @@ class Services:
     online_clients: OnlineClientsService
     auto_refresh: LiveRefreshManager
     maintenance: MaintenanceService
+    # Loopback /healthz probe for the hy2_auth data plane; None when Hysteria2 is
+    # disabled. Drives the background health loop that marks the Hysteria2 backend
+    # degraded/healthy in BackendHealth.
+    hysteria_health_probe: Hysteria2AuthHealthProbe | None = None

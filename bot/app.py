@@ -13,6 +13,7 @@ from bot.fsm.ttl_storage import TTLMemoryStorage
 from adapters.awg_config import AwgConfigAdapter
 from adapters.backup import BackupAdapter
 from adapters.clock import ClockProvider
+from adapters.hysteria_auth_health import Hysteria2AuthHealthProbe
 from adapters.hysteria_stats import HysteriaStatsAdapter
 from adapters.dante_users import DanteUserAdapter
 from adapters.id_generator import IdGenerator
@@ -109,6 +110,25 @@ async def _hysteria_stats_loop(traffic_stats: TrafficStatsService, interval: int
             await traffic_stats.refresh_all_hysteria()
         except Exception:
             logger.warning("Hysteria2 background stats collection failed", exc_info=True)
+        await asyncio.sleep(interval)
+
+
+async def _hysteria_health_loop(
+    probe: Hysteria2AuthHealthProbe, backend_health: BackendHealth, interval: int
+) -> None:
+    # Poll hy2_auth /healthz and reflect it in backend_health so the dashboard and
+    # health panel show "Hysteria2: OK/DEGRADED" like Xray/AWG. Hysteria2 has no
+    # data-plane apply — its mutations are pure DB writes that never call
+    # require_mutation_allowed — so a degraded mark here is purely informational
+    # (data-plane liveness) and never blocks issuance/revocation.
+    while True:
+        try:
+            if await probe.healthy():
+                backend_health.mark_healthy(VpnKeyType.HYSTERIA2)
+            else:
+                backend_health.mark_degraded(VpnKeyType.HYSTERIA2, "hy2_auth /healthz недоступен")
+        except Exception:
+            logger.warning("Hysteria2 health probe failed", exc_info=True)
         await asyncio.sleep(interval)
 
 
@@ -232,6 +252,14 @@ async def _build_app(
             secret=settings.hysteria2_stats_secret,
         )
         if settings.is_hysteria2_stats_ready()
+        else None
+    )
+    # Loopback /healthz probe for the hy2_auth endpoint. Present whenever Hysteria2
+    # is enabled (independent of the Traffic Stats API): it drives the background
+    # health loop that marks the Hysteria2 backend degraded/healthy.
+    hysteria_health_probe = (
+        Hysteria2AuthHealthProbe(auth_listen=settings.hysteria2_auth_listen)
+        if settings.hysteria2_enabled
         else None
     )
     awg_adapter = AwgConfigAdapter(
@@ -435,6 +463,12 @@ async def _build_app(
         recovery_sources.append(settings.mtproto_managed_secrets_path)
         recovery_sources.append(settings.mtproto_managed_env_path)
     recovery_sources.append(settings.warp_config_path)
+    # Hysteria2 per-key secrets live in vpn.db (already in the DB snapshot) and the
+    # obfs/stats secrets in .env, but the hysteria-server config.yaml itself is not
+    # otherwise captured. Bundle it so a rebuilt box can restore the hy2 data plane,
+    # mirroring the Xray/AWG config backup. Missing file is skipped best-effort.
+    if settings.hysteria2_enabled:
+        recovery_sources.append(settings.hysteria2_config_path)
 
     offsite_backup_service = OffsiteBackupService(
         db=db,
@@ -460,6 +494,7 @@ async def _build_app(
         hysteria_stats=hysteria_stats_adapter,
         hysteria_service=hysteria_service,
         hysteria2_max_conn=settings.anomaly_hysteria2_max_conn,
+        backend_health=backend_health,
     )
 
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
@@ -536,6 +571,7 @@ async def _build_app(
         online_clients=online_clients_service,
         auto_refresh=auto_refresh_manager,
         maintenance=maintenance_service,
+        hysteria_health_probe=hysteria_health_probe,
     )
 
     await _startup_reconcile_keys(services)
