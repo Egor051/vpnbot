@@ -237,6 +237,12 @@ can safely set `HYSTERIA2_INSECURE=false`. Until then, keep this `true`.
 | `KEY_EXPIRY_NOTIFY_DAYS` | No | _(empty)_ | Comma-separated list of days before expiry to send user notifications. | `7,3,1` |
 | `KEY_MAX_TRIAL_DAYS` | No | `365` | Maximum duration (days) for trial VPN keys (1–3650). | `30` |
 
+## Announcements
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `SCHEDULED_ANNOUNCEMENTS_INTERVAL` | No | `60` | How often (seconds) the background loop delivers due scheduled announcements (0–86400). `0` disables the loop; announcements can still be scheduled and are delivered after a restart. | `60` |
+
 ## Off-site Encrypted Backup
 
 | Variable | Required | Default | Description | Example |
@@ -284,7 +290,7 @@ sudo failures. Change only if you know what you are doing.
 | `WARP_SPLIT_APPLY_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-split-apply` | Privileged helper that validates, atomically writes the split list, and restarts `vpnbot-warp-split`. Must be root:root 0755 with a `NOPASSWD` sudoers grant. |
 | `WARP_SPLIT_STATE_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-split-state` | Privileged on/off/restart/status helper for the split **routing** (table T). The On/Off/Restart buttons call it to retract/re-apply the per-prefix `dev out-warp` routes and write the disabled marker — it never touches `awg-quick@out-warp`. Must be root:root 0755 with pinned-verb `NOPASSWD` grants. |
 | `WARP_SPLIT_DISABLED_MARKER_PATH` | `/etc/vpnbot/warp-split.disabled` | Root-owned (0644) marker recording the "off" intent. When present, `vpnbot-warp-split` reconciles table T to empty on every boot-apply, so an "off" state survives reboot. The bot reads it directly; only the state helper writes it. |
-| `WARP_PROXY_EGRESS` | `false` | Route LOCAL proxy egress (Dante/Xray/MTProto) through the WARP tunnel too. When `true` the Xray config writer binds the freedom outbound's egress source to the tunnel IP (`sendThrough` = the config's `[Interface] Address`) so its traffic is diverted into the tunnel by `vpnbot-warp-routes`. Off by default; flip on only as part of the manual [WARP proxy egress](warp.md#warp-proxy-egress-masking-the-proxies-outbound-ip) activation runbook. |
+| `WARP_PROXY_EGRESS_ENABLED` | `false` | Route LOCAL proxy egress (Dante/Xray/MTProto) through the WARP tunnel too. When `true` the Xray config writer binds the freedom outbound's egress source to the tunnel IP (`sendThrough` = the config's `[Interface] Address`) so its traffic is diverted into the tunnel by `vpnbot-warp-routes`. Off by default; flip on only as part of the manual [WARP proxy egress](warp.md#warp-proxy-egress-masking-the-proxies-outbound-ip) activation runbook. Legacy alias: `WARP_PROXY_EGRESS`. |
 
 ## Legacy / Compatibility
 

@@ -1,7 +1,7 @@
 
 import asyncio
 
-from config.settings import Settings, load_settings
+from config.settings import Settings, SettingsError, load_settings
 from db.database import Database
 from utils.single_instance import SingleInstanceError, SingleInstanceLock
 
@@ -29,3 +29,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except SingleInstanceError as exc:
         raise SystemExit(f"init_db: {exc}") from exc
+    except SettingsError as exc:
+        raise SystemExit(f"init_db: ошибка конфигурации: {exc}") from exc

@@ -18,6 +18,10 @@ def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
         raise SettingsError(f"Не задана обязательная переменная окружения {name}")
+    if value.startswith("<") and value.endswith(">"):
+        raise SettingsError(
+            f"Переменная {name} содержит незаполненный плейсхолдер из .env.example — задайте реальное значение"
+        )
     return value
 
 
@@ -293,7 +297,7 @@ class Settings:
     socks5_system_user_shell: str = "/usr/sbin/nologin"
     socks5_service_name: str = "danted"
     socks5_public_name: str = "SOCKS5 Proxy"
-    socks5_note: str = "SOCKS5 Dante proxy on VDS"
+    socks5_note: str = "SOCKS5 Dante proxy on server"
     mtproto_enabled: bool = False
     mtproto_mode: str = "static"
     mtproto_host: str = ""
@@ -393,6 +397,9 @@ class Settings:
     # Hysteria2 key-sharing threshold: alert when a key has >= this many concurrent
     # connections (via the Traffic Stats API /online). 0 disables the hy2 check.
     anomaly_hysteria2_max_conn: int = 0
+    # How often (seconds) the background loop sends due scheduled announcements.
+    # 0 disables the loop (announcements can still be scheduled; they just wait for a restart).
+    scheduled_announcements_interval: int = 60
     xray_access_log_path: str = ""
     bot_language: str = "ru"
     # Second VLESS transport (XHTTP+REALITY) as a separate inbound. Inert while
@@ -590,9 +597,16 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
     mtproto_run_user = _optional("MTPROTO_RUN_USER", "mtproxy")
     mtproto_run_group = _optional("MTPROTO_RUN_GROUP", "mtproxy")
     mtproto_config_dir = _optional("MTPROTO_CONFIG_DIR", "/etc/mtproxy")
-    mtproto_proxy_secret_path = _optional("MTPROTO_PROXY_SECRET_PATH", "/etc/mtproxy/proxy-secret")
-    mtproto_proxy_multi_conf_path = _optional("MTPROTO_PROXY_MULTI_CONF_PATH", "/etc/mtproxy/proxy-multi.conf")
-    mtproto_managed_dir = _optional("MTPROTO_MANAGED_DIR", "/etc/mtproxy/vpnbot")
+    # The upstream mtproxy files and the bot's managed subtree default under
+    # MTPROTO_CONFIG_DIR so relocating it moves them together (each path can still be
+    # overridden individually). Defaults are unchanged when MTPROTO_CONFIG_DIR=/etc/mtproxy.
+    mtproto_proxy_secret_path = _optional(
+        "MTPROTO_PROXY_SECRET_PATH", str(Path(mtproto_config_dir) / "proxy-secret")
+    )
+    mtproto_proxy_multi_conf_path = _optional(
+        "MTPROTO_PROXY_MULTI_CONF_PATH", str(Path(mtproto_config_dir) / "proxy-multi.conf")
+    )
+    mtproto_managed_dir = _optional("MTPROTO_MANAGED_DIR", str(Path(mtproto_config_dir) / "vpnbot"))
     mtproto_managed_secrets_path = _optional(
         "MTPROTO_MANAGED_SECRETS_PATH",
         str(Path(mtproto_managed_dir) / "managed-secrets.json"),
@@ -619,9 +633,20 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         _optional("AWG_SERVER_ADDRESS", "10.0.0.1"),
         awg_network,
     )
+    xray_apply_mode = _choice("XRAY_APPLY_MODE", "api", {"reload", "restart", "api"})
+    privilege_helpers_enabled = _bool("PRIVILEGE_HELPERS_ENABLED", False)
+    # api mode drives Xray over its own gRPC API as root and is fundamentally
+    # incompatible with the non-root privilege-helper model; reject the contradiction
+    # here so startup fails clearly instead of only when XrayConfigAdapter is built.
+    if xray_apply_mode == "api" and privilege_helpers_enabled:
+        raise SettingsError(
+            "XRAY_APPLY_MODE=api несовместим с PRIVILEGE_HELPERS_ENABLED=true. "
+            "Отключите PRIVILEGE_HELPERS_ENABLED или выберите другой XRAY_APPLY_MODE."
+        )
     xray_xhttp_enabled = _bool("XRAY_XHTTP_ENABLED", False)
     xray_inbound_tag = _optional("XRAY_INBOUND_TAG")
     xray_xhttp_inbound_tag = _optional("XRAY_XHTTP_INBOUND_TAG", "vless-xhttp-reality")
+    xray_xhttp_path = _no_control_chars("XRAY_XHTTP_PATH", _optional("XRAY_XHTTP_PATH", "/v1/messages/stream"))
     if xray_xhttp_enabled:
         # Catch XHTTP misconfig at startup rather than lazily on the first key
         # issuance (validate_xray_ready). A blank tag, or one colliding with the
@@ -630,6 +655,17 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
             raise SettingsError("XRAY_XHTTP_ENABLED=true требует непустой XRAY_XHTTP_INBOUND_TAG")
         if xray_xhttp_inbound_tag == xray_inbound_tag:
             raise SettingsError("XRAY_XHTTP_INBOUND_TAG не должен совпадать с XRAY_INBOUND_TAG")
+        if not xray_xhttp_path.startswith("/"):
+            raise SettingsError("XRAY_XHTTP_PATH должен начинаться с '/'")
+    anomaly_hysteria2_max_conn = _int_range("ANOMALY_HYSTERIA2_MAX_CONN", 0, 0, 10000)
+    hysteria2_stats_secret = _no_control_chars("HYSTERIA2_STATS_SECRET", _optional("HYSTERIA2_STATS_SECRET"))
+    # The concurrent-connection check reads the Hysteria2 Traffic Stats API, which is
+    # inert without its secret; refuse a threshold that could never fire.
+    if anomaly_hysteria2_max_conn > 0 and not hysteria2_stats_secret:
+        raise SettingsError(
+            "ANOMALY_HYSTERIA2_MAX_CONN>0 требует HYSTERIA2_STATS_SECRET "
+            "(проверка одновременных подключений Hysteria2 использует Traffic Stats API)"
+        )
     return Settings(
         bot_token=_required("BOT_TOKEN"),
         admin_ids=_admin_ids(_required("ADMIN_IDS")),
@@ -640,7 +676,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         bot_drop_pending_updates=_bool("BOT_DROP_PENDING_UPDATES", False),
         xray_config_path=Path(_optional("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")),
         xray_service_name=_optional("XRAY_SERVICE_NAME", "xray"),
-        xray_apply_mode=_choice("XRAY_APPLY_MODE", "api", {"reload", "restart", "api"}),
+        xray_apply_mode=xray_apply_mode,
         xray_inbound_tag=xray_inbound_tag,
         xray_public_host=_no_control_chars(
             "XRAY_PUBLIC_HOST", _optional("XRAY_PUBLIC_HOST") or _optional("XRAY_SERVER_ADDRESS")
@@ -666,7 +702,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_xhttp_enabled=xray_xhttp_enabled,
         xray_xhttp_inbound_tag=xray_xhttp_inbound_tag,
         xray_xhttp_port=_int_range("XRAY_XHTTP_PORT", 8443, 1, 65535),
-        xray_xhttp_path=_no_control_chars("XRAY_XHTTP_PATH", _optional("XRAY_XHTTP_PATH", "/v1/messages/stream")),
+        xray_xhttp_path=xray_xhttp_path,
         xray_xhttp_mode=_choice(
             "XRAY_XHTTP_MODE",
             "stream-one",
@@ -701,7 +737,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         socks5_system_user_shell=_optional("SOCKS5_SYSTEM_USER_SHELL", "/usr/sbin/nologin"),
         socks5_service_name=_optional("SOCKS5_SERVICE_NAME", "danted"),
         socks5_public_name=_optional("SOCKS5_PUBLIC_NAME", "SOCKS5 Proxy"),
-        socks5_note=_optional("SOCKS5_NOTE", "SOCKS5 Dante proxy on VDS"),
+        socks5_note=_optional("SOCKS5_NOTE", "SOCKS5 Dante proxy on server"),
         mtproto_enabled=mtproto_enabled,
         mtproto_mode=mtproto_mode,
         mtproto_host=_no_control_chars("MTPROTO_HOST", mtproto_host),
@@ -738,7 +774,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         key_expiry_check_interval=_int_range("KEY_EXPIRY_CHECK_INTERVAL", 1800, 0, 86400),
         key_expiry_notify_days=_int_list_positive("KEY_EXPIRY_NOTIFY_DAYS", ()),
         key_max_trial_days=_int_range("KEY_MAX_TRIAL_DAYS", 365, 1, 3650),
-        privilege_helpers_enabled=_bool("PRIVILEGE_HELPERS_ENABLED", False),
+        privilege_helpers_enabled=privilege_helpers_enabled,
         helper_staging_root=helper_staging_root,
         offsite_backup_encryption_key=_fernet_key("OFFSITE_BACKUP_ENCRYPTION_KEY"),
         offsite_backup_interval=_int_range("OFFSITE_BACKUP_INTERVAL", 604800, 0, 365 * 24 * 3600),
@@ -750,7 +786,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         anomaly_auto_revoke=_bool("ANOMALY_AUTO_REVOKE", False),
         anomaly_cooldown_seconds=_int_range("ANOMALY_COOLDOWN_SECONDS", 7200, 0, 86400),
         anomaly_concurrent_window_seconds=_int_range("ANOMALY_CONCURRENT_WINDOW_SECONDS", 600, 0, 86400),
-        anomaly_hysteria2_max_conn=_int_range("ANOMALY_HYSTERIA2_MAX_CONN", 0, 0, 10000),
+        anomaly_hysteria2_max_conn=anomaly_hysteria2_max_conn,
+        scheduled_announcements_interval=_int_range("SCHEDULED_ANNOUNCEMENTS_INTERVAL", 60, 0, 86400),
         xray_access_log_path=_optional("XRAY_ACCESS_LOG_PATH"),
         socks5_user_helper_path=Path(_optional("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/vpnbot-socks5-user")),
         xray_apply_helper_path=Path(_optional("XRAY_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-xray-apply")),
@@ -784,7 +821,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         warp_split_disabled_marker_path=Path(
             _optional("WARP_SPLIT_DISABLED_MARKER_PATH", "/etc/vpnbot/warp-split.disabled")
         ),
-        warp_proxy_egress_enabled=_bool("WARP_PROXY_EGRESS", False),
+        warp_proxy_egress_enabled=_bool("WARP_PROXY_EGRESS_ENABLED", _bool("WARP_PROXY_EGRESS", False)),
         bot_language=_choice("BOT_LANGUAGE", "ru", {"ru", "en"}),
         hysteria2_enabled=_bool("HYSTERIA2_ENABLED", False),
         hysteria2_host=_no_control_chars("HYSTERIA2_HOST", _optional("HYSTERIA2_HOST")),
@@ -798,7 +835,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         hysteria2_stats_listen=_loopback_host_port(
             "HYSTERIA2_STATS_LISTEN", _optional("HYSTERIA2_STATS_LISTEN", "127.0.0.1:9999")
         ),
-        hysteria2_stats_secret=_no_control_chars("HYSTERIA2_STATS_SECRET", _optional("HYSTERIA2_STATS_SECRET")),
+        hysteria2_stats_secret=hysteria2_stats_secret,
         hysteria2_stats_interval=_int_range("HYSTERIA2_STATS_INTERVAL", 60, 0, 3600),
         hysteria2_service_name=_optional("HYSTERIA2_SERVICE_NAME", "hysteria-server"),
         hysteria2_auth_service_name=_optional("HYSTERIA2_AUTH_SERVICE_NAME", "vpnbot-hy2-auth"),

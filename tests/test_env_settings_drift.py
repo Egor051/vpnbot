@@ -47,6 +47,7 @@ LEGACY_ALIASES = frozenset(
         "XRAY_PUBLIC_KEY",
         "XRAY_SERVER_NAME",
         "AWG_CLIENT_DNS",
+        "WARP_PROXY_EGRESS",
     }
 )
 
