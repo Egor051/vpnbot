@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 
 from config.settings import Settings
@@ -89,5 +88,7 @@ async def setup_bot_commands(bot: Bot, settings: Settings) -> None:
             len(admin_commands),
             len(settings.admin_ids),
         )
-    except TelegramAPIError:
+    except Exception:
+        # Publishing the menu is best-effort and must never block startup: swallow every
+        # error (Telegram API/network as well as e.g. a missing i18n key) and log it.
         logger.warning("Failed to publish bot command menu to Telegram", exc_info=True)

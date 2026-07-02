@@ -68,6 +68,9 @@ def test_socks5_disabled_does_not_require_host_or_port(monkeypatch: pytest.Monke
 def test_privilege_helper_settings_are_explicit_opt_in(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("PRIVILEGE_HELPERS_ENABLED", "true")
+    # api apply mode is incompatible with privilege helpers, so helper mode requires a
+    # non-api apply mode (restart/reload) — set it here to match a valid deployment.
+    monkeypatch.setenv("XRAY_APPLY_MODE", "restart")
     monkeypatch.setenv("HELPER_STAGING_ROOT", "/run/custom-vpn-bot")
     monkeypatch.setenv("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/custom-socks")
 

@@ -1,21 +1,45 @@
 
 import asyncio
+import ipaddress
 import logging
+import os
 
 from aiohttp import web
 
 import i18n
-from config.settings import load_settings
+from bot.app import StartupReconcileError
+from config.settings import SettingsError, load_settings
 from utils.logging import setup_logging
 from utils.single_instance import SingleInstanceError, SingleInstanceLock
 
 logger = logging.getLogger(__name__)
+
+# Cadence of the background task that expires idle in-memory FSM sessions. Kept next
+# to the log line below so the two cannot drift; the per-session TTL lives on the
+# TTLMemoryStorage instance (see bot/app.py) and is read back for the log.
+FSM_CLEANUP_INTERVAL_SECONDS = 3600
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host in {"localhost", ""}:
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
 
 
 async def main() -> None:
     settings = load_settings()
     i18n.configure(settings.bot_language)
     setup_logging(settings.log_dir)
+
+    if settings.xray_apply_mode == "api" and os.name == "posix" and os.geteuid() != 0:
+        logger.warning(
+            "XRAY_APPLY_MODE=api requires root but the bot is running as uid=%d — "
+            "Xray key apply operations will fail",
+            os.geteuid(),
+        )
 
     from adapters.health_server import create_health_app
     from bot.app import (
@@ -48,10 +72,14 @@ async def main() -> None:
         try:
             if isinstance(dp.storage, TTLMemoryStorage):
                 fsm_cleanup_task = asyncio.create_task(
-                    fsm_cleanup_loop(dp.storage, interval_seconds=3600),
+                    fsm_cleanup_loop(dp.storage, interval_seconds=FSM_CLEANUP_INTERVAL_SECONDS),
                     name="fsm-cleanup",
                 )
-                logger.info("FSM session cleanup started (TTL=1800s, interval=3600s)")
+                logger.info(
+                    "FSM session cleanup started (TTL=%ds, interval=%ds)",
+                    getattr(dp.storage, "_ttl", 1800),
+                    FSM_CLEANUP_INTERVAL_SECONDS,
+                )
             if settings.awg_stats_interval > 0:
                 awg_stats_task = asyncio.create_task(
                     _awg_stats_loop(services.traffic_stats, settings.awg_stats_interval),
@@ -107,18 +135,29 @@ async def main() -> None:
                     name="offsite-backup",
                 )
                 logger.info("Offsite backup scheduler started (interval=%ds)", settings.offsite_backup_interval)
-            if services.announcements.announcements is not None:
+            if settings.scheduled_announcements_interval > 0:
                 scheduled_announcements_task = asyncio.create_task(
-                    scheduled_announcements_loop(services.announcements, bot, 60),
+                    scheduled_announcements_loop(
+                        services.announcements, bot, settings.scheduled_announcements_interval
+                    ),
                     name="scheduled-announcements",
                 )
-                logger.info("Scheduled announcements checker started (interval=60s)")
+                logger.info(
+                    "Scheduled announcements checker started (interval=%ds)",
+                    settings.scheduled_announcements_interval,
+                )
             server_status_task = asyncio.create_task(
                 services.server_status.run(),
                 name="server-status-sampler",
             )
             logger.info("Server status sampler started (continuous /proc sampling)")
             if settings.health_port is not None:
+                if not _is_loopback_host(settings.health_host):
+                    logger.warning(
+                        "Health check endpoint bound to non-loopback host %s — it is unauthenticated; "
+                        "expose it off-localhost only behind a trusted proxy/firewall",
+                        settings.health_host,
+                    )
                 health_app = create_health_app(backend_health)
                 runner = web.AppRunner(health_app)
                 await runner.setup()
@@ -190,5 +229,11 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except SingleInstanceError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc
+    except SettingsError as exc:
+        logger.error("Ошибка конфигурации: %s", exc)
+        raise SystemExit(1) from exc
+    except StartupReconcileError as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc

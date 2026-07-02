@@ -79,6 +79,12 @@ from warp.split_manager import WarpSplitManager
 logger = logging.getLogger(__name__)
 
 
+class StartupReconcileError(RuntimeError):
+    """Raised when a backend's startup reconciliation fails fatally and the bot must
+    not continue. Propagates out of create_app so main.py aborts with a clean exit
+    instead of running with a silently broken data plane."""
+
+
 async def _awg_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> None:
     while True:
         try:
@@ -676,6 +682,11 @@ async def _startup_reconcile_keys(services: Services) -> None:
         mtproto_summary,
         socks5_summary,
     )
+    # MTProto manages per-user secrets on a live proxy; a fatal reconcile failure means
+    # the runtime and DB have drifted in a way the bot cannot safely paper over, so abort
+    # startup instead of running degraded (backend already marked degraded above).
+    if mtproto_summary.get("fatal", 0):
+        raise StartupReconcileError("MTProto startup reconciliation failed; aborting startup")
     any_checked = (
         xray_summary.get("checked", 0)
         or xray_label_summary.get("checked", 0)
@@ -705,8 +716,18 @@ async def _startup_reconcile_keys(services: Services) -> None:
 async def _safe_startup_reconcile(name: str, reconcile: Any, *, fatal_on_error: bool = False) -> dict[str, int]:
     try:
         return await reconcile()  # type: ignore[no-any-return]
-    except Exception:
-        logger.warning("Startup VPN key reconciliation for %s failed; bot startup continues", name, exc_info=True)
+    except Exception as exc:
+        # Log at error (not warning) with the concrete exception type so a real backend
+        # outage is diagnosable rather than blending into routine noise. Non-fatal
+        # backends still let startup continue; a fatal one signals the abort via
+        # summary["fatal"], which _startup_reconcile_keys turns into a StartupReconcileError.
+        logger.error(
+            "Startup VPN key reconciliation for %s failed (%s); %s",
+            name,
+            type(exc).__name__,
+            "aborting startup" if fatal_on_error else "bot startup continues",
+            exc_info=True,
+        )
         summary = {"checked": 0, "recovered": 0, "failed": 1}
         if fatal_on_error:
             summary["fatal"] = 1

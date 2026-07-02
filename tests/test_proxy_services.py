@@ -10,7 +10,7 @@ from adapters.clock import ClockProvider
 from adapters.dante_users import DanteUserAdapter
 from adapters.errors import DanteUserError
 from adapters.mtproxy import MtProxyApplyResult, MtProxyManagedSecret
-from bot.app import _startup_reconcile_keys
+from bot.app import StartupReconcileError, _startup_reconcile_keys
 from bot.formatters import backend_diagnostics_text
 from config.settings import Settings
 from db.database import Database
@@ -931,7 +931,7 @@ def test_mtproto_historical_apply_failed_summary_is_not_backend_fatal(tmp_path: 
     asyncio.run(run())
 
 
-def test_mtproto_startup_reconcile_exception_degrades_backend() -> None:
+def test_mtproto_startup_reconcile_fatal_aborts_startup() -> None:
     class OkBackend:
         async def startup_reconcile(self) -> dict[str, int]:
             return {"checked": 0, "recovered": 0, "failed": 0}
@@ -953,8 +953,11 @@ def test_mtproto_startup_reconcile_exception_degrades_backend() -> None:
         backend_health=health,
     )
 
-    asyncio.run(_startup_reconcile_keys(services))  # type: ignore[arg-type]
+    # A fatal MTProto reconcile must abort startup rather than silently run degraded.
+    with pytest.raises(StartupReconcileError):
+        asyncio.run(_startup_reconcile_keys(services))  # type: ignore[arg-type]
 
+    # The backend is marked degraded before the abort; other backends stay usable.
     with pytest.raises(InvalidOperation, match="MTProto-операции временно заблокированы"):
         health.require_mutation_allowed(ProxyAccessType.MTPROTO)
     health.require_mutation_allowed(VpnKeyType.XRAY)
