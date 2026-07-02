@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Hysteria2 documented in the in-bot FAQ ("Помощь").** The help section's
+  protocol-related answers now cover Hysteria2 alongside AWG and Xray, so users
+  who receive a Hysteria2 key get matching guidance. The *connect* tab recommends
+  NekoBox/Hiddify and notes Hysteria2 is a link-only profile; the *choice* tab
+  becomes a three-way AWG/Xray/Hysteria2 comparison (its button relabelled to
+  "Какой протокол выбрать?" / "Which protocol to choose?"); *trouble* gains a
+  Hysteria2/UDP block (client support, UDP throttling, no MTU/fingerprint knobs);
+  and the *security* and *support* tabs list Hysteria2 too. No new FAQ topic was
+  added — the existing tabs were adapted, with the `ru` and `en` locales updated
+  in lockstep.
 - **Hysteria2 operational parity: backend-health, diagnostics & recovery backup.**
   Closes the last non-Traffic-Stats-API gaps between Hysteria2 and Xray/AWG. (1) A
   new `adapters/hysteria_auth_health.py` probe polls the `hy2_auth` `GET /healthz`
