@@ -10,7 +10,7 @@ from aiogram.enums import ChatType
 from adapters.clock import ClockProvider
 from adapters.ip_allocator import IpAllocator
 from bot.fsm.states import AdminCreateKeyStates, CreateKeyStates
-from bot.handlers.admin import admin_announcement_message, admin_announcement_send, admin_announcement_start, admin_issue_confirm
+from bot.handlers.admin import admin_announcement_message, admin_announcement_send, admin_announcement_start, admin_issue_confirm, admin_issue_user_selected
 from bot.handlers.keys import create_key_confirm
 from bot.keyboards.keys import keys_list_keyboard
 from bot.rate_limit import RateLimitExceeded
@@ -1143,6 +1143,74 @@ def test_admin_issue_confirm_keeps_fsm_data_when_rate_limited_after_owner_valida
         assert state.current_state == AdminCreateKeyStates.confirming
         assert state.data == {"owner_user_id": 200, "key_type": VpnKeyType.XRAY.value, "note": "admin note"}
         assert callback.answers == [("Слишком часто. Повторите через 9 сек.", True)]
+
+    asyncio.run(run())
+
+
+def test_admin_issue_user_selected_alerts_for_blocked_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def allow_private_callback(callback: object, text: str = "") -> bool:
+        return True
+
+    monkeypatch.setattr("bot.handlers.admin.ensure_private_callback", allow_private_callback)
+
+    class State:
+        def __init__(self) -> None:
+            self.current_state: object = None
+            self.data: dict[str, object] = {}
+
+        async def set_state(self, state: object) -> None:
+            self.current_state = state
+
+        async def update_data(self, **kwargs: object) -> None:
+            self.data.update(kwargs)
+
+    class Callback:
+        def __init__(self) -> None:
+            self.from_user = SimpleNamespace(id=1, username="admin", first_name="Admin")
+            self.message = SimpleNamespace()
+            self.data = "admin:issue:300"
+            self.answers: list[tuple[str, bool | None]] = []
+
+        async def answer(self, text: str | None = None, show_alert: bool | None = None, **kwargs: object) -> None:
+            self.answers.append((text or "", show_alert))
+
+    class Users:
+        async def require_superadmin(self, telegram_user_id: int) -> User:
+            return User(
+                telegram_user_id=telegram_user_id,
+                username="admin",
+                first_name="Admin",
+                role=UserRole.SUPERADMIN,
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                blocked_at=None,
+            )
+
+        async def get_user(self, telegram_user_id: int) -> User:
+            return User(
+                telegram_user_id=telegram_user_id,
+                username="blocked",
+                first_name="Blocked",
+                role=UserRole.BLOCKED_USER,
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                blocked_at="2026-01-01T00:00:00+00:00",
+            )
+
+    async def run() -> None:
+        state = State()
+        callback = Callback()
+        services = SimpleNamespace(users=Users())
+
+        # Regression test: the handler used to answer the callback query
+        # (dismissing the loading spinner) *before* validating the chosen
+        # user, then tried to answer it a second time with the error alert
+        # once the blocked-user check failed. Telegram only honors the
+        # first answerCallbackQuery per callback, so the admin saw nothing.
+        await admin_issue_user_selected(callback, state, services)  # type: ignore[arg-type]
+
+        assert callback.answers == [("Нельзя выдать ключ заблокированному пользователю", True)]
+        assert state.current_state is None
 
     asyncio.run(run())
 
