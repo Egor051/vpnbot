@@ -1298,7 +1298,6 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
     """Start key issuance for the chosen user by prompting for key type."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
-    await safe_callback_answer(callback)
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
@@ -1308,6 +1307,7 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
         if is_blocked_user(user):
             raise AccessDenied(t("cannot_issue_to_blocked"))
         owner_is_pending = user.role == UserRole.PENDING_USER
+        await safe_callback_answer(callback)
         await state.set_state(AdminCreateKeyStates.choosing_type)
         await state.update_data(owner_user_id=user.telegram_user_id, owner_is_pending=owner_is_pending, cancel_target="admin:panel")
         text = f"{user_card_text(user)}\n\n{t('one_key_one_device')}\n\n{t('choose_key_type')}"
@@ -1705,6 +1705,8 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
         owner_is_pending = bool(data.get("owner_is_pending", False))
         owner = await services.users.get_user(owner_user_id)
         await require_superadmin(services, callback.from_user.id)
+        if is_blocked_user(owner):
+            raise AccessDenied(t("cannot_issue_to_blocked"))
         profile = TelegramUserProfile(owner.telegram_user_id, owner.username, owner.first_name)
         rate_limiter.check(callback.from_user.id, "key_create", 20)
         await state.clear()
