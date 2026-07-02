@@ -209,13 +209,15 @@ STRINGS: dict[str, str] = {
     "faq_page_title": "<b>Frequently Asked Questions</b> · page {page} of {total}",
     "faq_connect": (
         "After creating a key, the bot will provide the configuration. Copy it into a suitable VPN app "
-        "or import the file if available. Depending on the client, both AWG and Xray keys can be added "
-        "either via a link (profile) or via a config file. After importing, enable the connection in your app.\n\n"
+        "or import the file if available. Depending on the client, a key is added either via a link "
+        "(profile) or via a config file: Xray and Hysteria2 keys are issued as a link, AWG as a link or "
+        "a file. After importing, enable the connection in your app.\n\n"
         "<b>Recommended apps:</b> for AWG — the official AmneziaVPN client; "
-        "for Xray — v2RayTun (or alternatives such as Hiddify or NekoBox).\n\n"
+        "for Xray — v2RayTun (or alternatives such as Hiddify or NekoBox); "
+        "for Hysteria2 — NekoBox or Hiddify.\n\n"
         "<b>Tip:</b> keep several different keys — with different protocols and/or transports "
-        "(e.g. AWG and Xray TCP/XHTTP). If one of them starts to degrade due to blocking, you can "
-        "switch to another and won't be left without a connection."
+        "(e.g. AWG, Xray TCP/XHTTP and Hysteria2). If one of them starts to degrade due to blocking, "
+        "you can switch to another and won't be left without a connection."
     ),
     "faq_trouble": (
         "Check your internet, the imported profile, the access expiry date, and whether the same key "
@@ -227,6 +229,10 @@ STRINGS: dict[str, str] = {
         "(use the «Change Fingerprint» button in the key settings). Good starting options: Firefox or Edge. "
         "If that doesn't help, try creating a new Xray key with a different transport (TCP / XHTTP) — "
         "the transport choice is offered during key creation.\n\n"
+        "<b>Hysteria2:</b> make sure your client supports Hysteria2 (e.g. NekoBox or Hiddify). "
+        "The protocol runs over UDP — if your network throttles or blocks it, try a different network "
+        "(e.g. mobile instead of Wi-Fi) or switch to an Xray/AWG key. MTU and fingerprint settings "
+        "don't apply to Hysteria2.\n\n"
         "If the problem persists, contact support."
     ),
     "faq_key_statuses": (
@@ -260,8 +266,12 @@ STRINGS: dict[str, str] = {
         "A good pick when VPNs aren't blocked.\n\n"
         "<b>Xray (VLESS + REALITY)</b> — disguises traffic as ordinary HTTPS, better at bypassing "
         "blocks and DPI, but a bit more complex and sometimes slightly slower.\n\n"
+        "<b>Hysteria2</b> — QUIC/UDP-based with traffic obfuscation: keeps high speed on unstable and "
+        "mobile networks (packet loss, high latency) and helps bypass blocking. "
+        "Requires a Hysteria2-capable client (NekoBox or Hiddify).\n\n"
         "If you're not sure what to choose, start with Xray — it's more reliable under blocking. "
-        "If top speed matters and there's no blocking, go with AWG."
+        "If top speed matters and there's no blocking, go with AWG. "
+        "On flaky mobile connections with packet loss, try Hysteria2."
     ),
     "faq_fingerprint": (
         "A fingerprint is an imitation of the TLS stack of a popular browser or device. "
@@ -305,7 +315,7 @@ STRINGS: dict[str, str] = {
         "<b>We don't log your activity.</b> We don't record which sites you open, and we don't "
         "store the contents of your traffic — the tunnel is opaque to us.\n\n"
         "<b>Encryption.</b> The connection is protected by modern protocols (AmneziaWG / "
-        "VLESS+REALITY), and the traffic can't be read from the outside.\n\n"
+        "VLESS+REALITY / Hysteria2), and the traffic can't be read from the outside.\n\n"
         "<b>Only you can see your key notes</b> — they just help you tell devices apart and are "
         "not shown to anyone.\n\n"
         "Still have privacy questions? Contact support."
@@ -313,7 +323,7 @@ STRINGS: dict[str, str] = {
     "faq_support": (
         "Support: @ktotakmoje\n\n"
         "To help you faster, please include up front:\n"
-        "• the key type (AWG or Xray) and its number;\n"
+        "• the key type (AWG, Xray or Hysteria2) and its number;\n"
         "• your device and app;\n"
         "• what you've already tried (see «Why doesn't it work?»).\n\n"
         "We usually reply within a day."
@@ -513,7 +523,7 @@ STRINGS: dict[str, str] = {
     "btn_faq_expired": "What if my key has expired?",
     "btn_faq_device": "1 key = 1 device?",
     "btn_faq_stats": "How to check traffic stats?",
-    "btn_faq_choice": "What to choose: AWG or Xray?",
+    "btn_faq_choice": "Which protocol to choose?",
     "btn_faq_fingerprint": "What is a fingerprint?",
     "btn_faq_mtu": "What is MTU?",
     "btn_faq_note_why": "Why add a note to a key?",
