@@ -100,6 +100,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Admin panel silently did nothing when issuing a key to a blocked user.** In
+  `admin_issue_user_selected`, the callback query was answered (dismissing the
+  loading spinner) *before* the blocked-user check ran; when that check then
+  raised, the error handler tried to answer the same callback a second time with
+  the alert, which Telegram silently ignores — the admin saw no feedback at all.
+  The handler now validates the chosen user first and answers the callback exactly
+  once, so the "Нельзя выдать ключ заблокированному пользователю" alert actually
+  shows. The same guard was added to the issue-confirmation step to close a related
+  race where a user could be blocked between selection and confirmation.
 - **«Создать ключ» → «Назад» from the main menu now returns to the main menu.**
   The create-key screen's back button was hard-wired to «Мои ключи», so entering
   it from the main-menu **➕ Создать ключ** button and pressing back dropped the
