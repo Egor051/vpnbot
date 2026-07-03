@@ -355,3 +355,72 @@ def test_delete_revoked_key_after_migration_no_integrity_error(tmp_path: Path) -
             await db.close()
 
     asyncio.run(run())
+
+
+def test_mark_active_without_payload_preserves_corrupt_payload_json(tmp_path: Path) -> None:
+    """A no-payload mark_active must NOT overwrite corrupt payload_json with the sentinel.
+
+    Regression for the bug where json_loads_dict() turns unparseable payload_json
+    into {"_corrupted": true}; re-serializing that DTO on mark_active would clobber
+    the recoverable original bytes.
+    """
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await UserRepository(db).upsert_profile(
+                TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "2026-01-01T00:00:00"
+            )
+            repo = VpnKeyRepository(db)
+            key = await repo.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.XRAY,
+                note=None,
+                payload={"uuid": "keep-me"},
+                public_payload={"link": "keep-me-too"},
+                created_by=100,
+                now="2026-01-01T00:00:00",
+                uuid="00000000-0000-4000-8000-000000000010",
+                email_label="corrupt-label",
+            )
+
+            # Simulate on-disk corruption of both JSON columns.
+            raw = db._raw_conn()
+            await raw.execute(
+                "UPDATE vpn_keys SET payload_json = ?, public_payload_json = ? WHERE id = ?",
+                ("{oops-not-json", "also{broken", key.id),
+            )
+            await raw.commit()
+
+            # No-payload transition: must flip status but leave the JSON untouched.
+            await repo.mark_active(key.id, "2026-01-01T00:01:00")
+
+            cur = await raw.execute(
+                "SELECT status, payload_json, public_payload_json FROM vpn_keys WHERE id = ?",
+                (key.id,),
+            )
+            row = await cur.fetchone()
+            assert row is not None
+            assert row[0] == VpnKeyStatus.ACTIVE.value
+            assert row[1] == "{oops-not-json", "corrupt payload_json must be preserved, not overwritten"
+            assert row[2] == "also{broken", "corrupt public_payload_json must be preserved"
+
+            # An explicit payload still overwrites as before.
+            await repo.set_status(key.id, VpnKeyStatus.PENDING_APPLY, "2026-01-01T00:02:00")
+            await repo.mark_active(
+                key.id,
+                "2026-01-01T00:03:00",
+                payload={"uuid": "fresh"},
+                public_payload={"link": "fresh"},
+            )
+            refreshed = await repo.get_by_id(key.id)
+            assert refreshed is not None
+            assert refreshed.payload == {"uuid": "fresh"}
+            assert refreshed.public_payload == {"link": "fresh"}
+        finally:
+            await db.close()
+
+    asyncio.run(run())

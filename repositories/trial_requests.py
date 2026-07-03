@@ -79,7 +79,9 @@ class TrialKeyRequestRepository:
 
     async def count_used_since_reset(self, telegram_user_id: int, reset_at: str | None) -> int:
         """Return the number of non-rejected trial requests a user made since the reset time."""
-        threshold = reset_at or "1970-01-01T00:00:00"
+        # Carry the same '+00:00' UTC offset the stored timestamps use, so the
+        # lexicographic comparison compares like-shaped ISO-8601 strings.
+        threshold = reset_at or "1970-01-01T00:00:00+00:00"
         cursor = await self.db.conn.execute(
             """
             SELECT COUNT(*) AS cnt FROM trial_key_requests

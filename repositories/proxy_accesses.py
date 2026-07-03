@@ -343,40 +343,43 @@ class ProxyAccessRepository:
         public_payload: dict[str, Any] | None = None,
         apply_generation: int | None = None,
     ) -> None:
-        """Transition a pending or apply-failed proxy access to active, updating payloads."""
+        """Transition a pending or apply-failed proxy access to active, updating payloads.
+
+        payload/public_payload are written ONLY when provided; when omitted the
+        stored JSON is left byte-for-byte untouched. This avoids clobbering an
+        already-corrupt payload_json with the ``{"_corrupted": true}`` sentinel
+        that ``json_loads_dict`` substitutes on a parse failure — re-serializing
+        the parsed DTO would otherwise overwrite the recoverable original bytes.
+        """
         async with self.db.transaction():
             current = await self.get_by_id(access_id)
             if current is None:
                 raise RuntimeError("Proxy access not found")
+            # Only column-name fragments (internal constants) are interpolated;
+            # every value is bound via a placeholder — no user input reaches SQL.
+            set_parts = [
+                "status = ?",
+                "updated_at = ?",
+                "activated_at = COALESCE(activated_at, ?)",
+                "last_apply_at = ?",
+                "apply_generation = COALESCE(?, apply_generation)",
+                "error = NULL",
+            ]
+            params: list[object] = [ProxyAccessStatus.ACTIVE.value, now, now, now, apply_generation]
+            if payload is not None:
+                set_parts.append("payload_json = ?")
+                params.append(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            if public_payload is not None:
+                set_parts.append("public_payload_json = ?")
+                params.append(json.dumps(public_payload, ensure_ascii=False, separators=(",", ":")))
+            params.extend([access_id, ProxyAccessStatus.PENDING_APPLY.value, ProxyAccessStatus.APPLY_FAILED.value])
             cursor = await self.db.conn.execute(
-                """
+                f"""
                 UPDATE proxy_accesses
-                SET status = ?,
-                    updated_at = ?,
-                    activated_at = COALESCE(activated_at, ?),
-                    last_apply_at = ?,
-                    apply_generation = COALESCE(?, apply_generation),
-                    error = NULL,
-                    payload_json = ?,
-                    public_payload_json = ?
+                SET {", ".join(set_parts)}
                 WHERE id = ? AND status IN (?, ?)
                 """,
-                (
-                    ProxyAccessStatus.ACTIVE.value,
-                    now,
-                    now,
-                    now,
-                    apply_generation,
-                    json.dumps(payload if payload is not None else current.payload, ensure_ascii=False, separators=(",", ":")),
-                    json.dumps(
-                        public_payload if public_payload is not None else current.public_payload,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    access_id,
-                    ProxyAccessStatus.PENDING_APPLY.value,
-                    ProxyAccessStatus.APPLY_FAILED.value,
-                ),
+                tuple(params),
             )
             if cursor.rowcount == 0:
                 logger.warning(

@@ -280,6 +280,7 @@ class Database:
         if version < 24:
             await self._migrate_v24()
             await self._set_schema_version(24)
+            version = 24
         if version < 25:
             await self._migrate_v25()
             await self._set_schema_version(25)

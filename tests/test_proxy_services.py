@@ -1631,3 +1631,56 @@ def test_hard_block_revokes_managed_mtproto_secret_without_touching_other_users(
             await db.close()
 
     asyncio.run(run())
+
+
+def test_proxy_mark_active_without_payload_preserves_corrupt_payload_json(tmp_path: Path) -> None:
+    """Regression: a no-payload mark_active must not clobber corrupt payload_json.
+
+    json_loads_dict() turns unparseable payload_json into {"_corrupted": true};
+    re-serializing that DTO on mark_active would overwrite the recoverable bytes.
+    """
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await UserRepository(db).upsert_profile(
+                TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "2026-01-01T00:00:00"
+            )
+            repo = ProxyAccessRepository(db)
+            # MTProto: unlike SOCKS5, its indexes never json_extract payload_json,
+            # so a row CAN hold malformed JSON (the corruption this test exercises).
+            access = await repo.create(
+                owner_user_id=100,
+                username="user",
+                access_type=ProxyAccessType.MTPROTO,
+                status=ProxyAccessStatus.PENDING_APPLY,
+                payload={"secret": "keep"},
+                public_payload={"host": "keep"},
+                created_by=100,
+                now="2026-01-01T00:00:00",
+            )
+
+            raw = db._raw_conn()
+            await raw.execute(
+                "UPDATE proxy_accesses SET payload_json = ?, public_payload_json = ? WHERE id = ?",
+                ("{oops-not-json", "also{broken", access.id),
+            )
+            await raw.commit()
+
+            await repo.mark_active(access.id, "2026-01-01T00:01:00")
+
+            cur = await raw.execute(
+                "SELECT status, payload_json, public_payload_json FROM proxy_accesses WHERE id = ?",
+                (access.id,),
+            )
+            row = await cur.fetchone()
+            assert row is not None
+            assert row[0] == ProxyAccessStatus.ACTIVE.value
+            assert row[1] == "{oops-not-json", "corrupt payload_json must be preserved, not overwritten"
+            assert row[2] == "also{broken", "corrupt public_payload_json must be preserved"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
