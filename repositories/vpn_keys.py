@@ -127,6 +127,7 @@ class VpnKeyRepository:
         client_ip: str | None = None,
         expires_at: str | None = None,
         transport: str = "tcp",
+        xhttp_profile: str = "base",
     ) -> VpnKey:
         """Create a new VPN key and return it."""
         return await self.create_pending(
@@ -144,6 +145,7 @@ class VpnKeyRepository:
             client_ip=client_ip,
             expires_at=expires_at,
             transport=transport,
+            xhttp_profile=xhttp_profile,
         )
 
     async def get_by_id(self, key_id: int) -> VpnKey | None:
@@ -425,30 +427,36 @@ class VpnKeyRepository:
         payload: dict[str, Any] | None = None,
         public_payload: dict[str, Any] | None = None,
     ) -> None:
-        """Transition a pending or apply-failed VPN key to active, updating payloads."""
+        """Transition a pending or apply-failed VPN key to active, updating payloads.
+
+        payload/public_payload are written ONLY when provided; when omitted the
+        stored JSON is left byte-for-byte untouched. This avoids clobbering an
+        already-corrupt payload_json with the ``{"_corrupted": true}`` sentinel
+        that ``json_loads_dict`` substitutes on a parse failure — re-serializing
+        the parsed DTO would otherwise overwrite the recoverable original bytes.
+        """
         async with self.db.transaction():
             current = await self.get_by_id(key_id)
             if current is None:
                 raise RuntimeError("VPN key not found")
+            # Only column-name fragments (internal constants) are interpolated;
+            # every value is bound via a placeholder — no user input reaches SQL.
+            set_parts = ["status = ?", "updated_at = ?"]
+            params: list[object] = [VpnKeyStatus.ACTIVE.value, now]
+            if payload is not None:
+                set_parts.append("payload_json = ?")
+                params.append(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+            if public_payload is not None:
+                set_parts.append("public_payload_json = ?")
+                params.append(json.dumps(public_payload, ensure_ascii=False, separators=(",", ":")))
+            params.extend([key_id, VpnKeyStatus.PENDING_APPLY.value, VpnKeyStatus.APPLY_FAILED.value])
             cursor = await self.db.conn.execute(
-                """
+                f"""
                 UPDATE vpn_keys
-                SET status = ?, updated_at = ?, payload_json = ?, public_payload_json = ?
+                SET {", ".join(set_parts)}
                 WHERE id = ? AND status IN (?, ?)
                 """,
-                (
-                    VpnKeyStatus.ACTIVE.value,
-                    now,
-                    json.dumps(payload if payload is not None else current.payload, ensure_ascii=False, separators=(",", ":")),
-                    json.dumps(
-                        public_payload if public_payload is not None else current.public_payload,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    key_id,
-                    VpnKeyStatus.PENDING_APPLY.value,
-                    VpnKeyStatus.APPLY_FAILED.value,
-                ),
+                tuple(params),
             )
             if cursor.rowcount == 0:
                 logger.warning(

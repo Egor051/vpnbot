@@ -120,9 +120,10 @@ class DashboardRepository:
 
         Both the per-protocol totals and the per-key average are computed over
         the SAME dataset — live traffic stats UNION the deleted-key archive — so
-        ``avg_per_key_bytes`` stays consistent with ``total_bytes`` (i.e.
-        avg * key_count == total) instead of drifting because deleted keys count
-        toward the total but not the average.
+        ``avg_per_key_bytes`` tracks ``total_bytes`` (deleted keys count toward
+        both) instead of drifting because they counted toward the total but not
+        the average. Note ``avg_per_key_bytes`` is truncated to a whole number
+        (``int(AVG(...))``), so ``avg * key_count`` only approximates ``total``.
         """
         row = await self.db.conn.execute_fetchone(
             """

@@ -1,0 +1,26 @@
+-- Migration 029: Hysteria2 protocol support.
+--
+-- This project applies migrations programmatically from db/database.py
+-- (schema_version bumped to 29, see Database._migrate_v29). This file documents
+-- migration 029 as a standalone, reviewable artifact and is kept in sync with
+-- both _migrate_v29 and db/schema.sql. The number is the next one in sequence
+-- after the existing schema version (28 -> 29).
+--
+-- Two idempotent parts:
+--
+-- 1) Allow 'hysteria2' as a vpn_keys.key_type. SQLite CANNOT ALTER a CHECK
+--    constraint in place, so _migrate_v29 rebuilds the table when the legacy
+--    CHECK is present: create vpn_keys_new with the widened CHECK, copy every
+--    row/id verbatim (UUIDs and all columns preserved so the FK targets in
+--    vpn_key_traffic_stats / trial_key_requests do not dangle), drop the old
+--    table and rename, then recreate every vpn_keys index. The rebuild runs on
+--    the raw connection with foreign_keys=OFF inside one explicit transaction
+--    and re-enables FK after commit. Fresh DBs created from db/schema.sql already
+--    ship the widened CHECK, so this rebuild is skipped there (no-op). The
+--    intended end state of the widened CHECK is:
+--
+--      key_type TEXT NOT NULL CHECK(key_type IN ('xray','awg','hysteria2'))
+--
+-- 2) Seed the 'hysteria2' protocol module row (mirrors db/schema.sql).
+
+INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('hysteria2', 1);
