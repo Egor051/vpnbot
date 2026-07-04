@@ -34,9 +34,9 @@ class IdGenerator:
     def hysteria2_label(self) -> str:
         """Generate a Hysteria2 stats/log label: ``hy2_`` + 16 hex chars.
 
-        Mirrors the prefixed Xray scheme (``xray_tcp_`` / ``xray_http_``) but uses
-        a hex suffix. The label is a stats identifier returned to Hysteria's
-        traffic-stats API — it is NOT the auth secret.
+        A short prefixed identifier (like the other key labels) with a hex suffix. The
+        label is a stats identifier returned to Hysteria's traffic-stats API — it is NOT
+        the auth secret.
         """
         return f"hy2_{secrets.token_hex(8)}"
 

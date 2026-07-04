@@ -20,6 +20,7 @@ from adapters.privileged_helpers import (
 )
 from adapters.shell_runner import ShellRunner
 from adapters.systemctl import SystemCtlAdapter
+from adapters.validation import reject_option_like
 from models.dto import ShellResult
 
 _MANAGED_RUNTIME_NOT_INITIALIZED = (
@@ -76,6 +77,8 @@ class MtProxyAdapter:
     ) -> None:
         self.shell = shell
         self.systemctl = systemctl
+        # The service name reaches a systemctl argv slot; reject option-like values.
+        reject_option_like(service_name, "MTPROTO service_name", error=MtProxyError)
         self.service_name = service_name
         self.binary_path = binary_path
         self.run_user = run_user
@@ -215,11 +218,17 @@ class MtProxyAdapter:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError) as exc:
             raise MtProxyRollbackError("MTProxy backup manifest not found or invalid") from exc
+        # Only ever restore onto the known managed files, and never through a symlink:
+        # the manifest lives in a bot-owned dir but must not be able to redirect a write
+        # to an arbitrary path or through a planted symlink.
+        allowed_targets = {str(path) for path in self._managed_files()}
         for item in manifest.get("files", []):
             target = Path(str(item.get("target") or ""))
             backup_value = item.get("backup")
-            if not target:
-                continue
+            if str(target) not in allowed_targets:
+                raise MtProxyRollbackError("MTProxy backup target is outside the managed set")
+            if target.is_symlink():
+                raise MtProxyRollbackError("MTProxy backup target must not be a symlink")
             if backup_value is None:
                 raise MtProxyRollbackError("MTProxy backup is incomplete")
             backup_path = Path(str(backup_value))
@@ -471,6 +480,11 @@ class MtProxyAdapter:
             "MTPROTO_INTERNAL_STATS_PORT": str(self.internal_stats_port or 8888),
             "MTPROTO_WORKERS": str(self.workers),
         }
+        for key, value in values.items():
+            # A newline/CR/NUL in an operator-supplied value (run_user/group/paths) would
+            # inject an extra KEY=VALUE record into the env file consumed by the wrapper.
+            if any(ch in value for ch in ("\n", "\r", "\x00")):
+                raise MtProxyError(f"MTProxy env value for {key} содержит недопустимые управляющие символы")
         return "".join(f"{key}={value}\n" for key, value in values.items())
 
     def _json_dump(self, value: dict[str, Any]) -> str:

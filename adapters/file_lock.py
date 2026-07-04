@@ -20,6 +20,10 @@ class ConfigFileLock:
         *,
         lock_dir: Path | None = None,
     ) -> None:
+        # In privileged-helper mode the bot is unprivileged and cannot create a lock file
+        # next to a root-owned config, so callers pass a bot-writable `lock_dir` (the helper
+        # staging dir). A deployment runs a single mode, so every writer of a given config
+        # agrees on one lock location.
         if lock_dir is not None:
             self.lock_path = lock_dir / f".{target.name}.lock"
             self._lock_dir_private = True

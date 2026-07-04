@@ -49,9 +49,12 @@ class HysteriaStatsAdapter:
     @staticmethod
     def _build_base_url(listen: str) -> str:
         host, sep, port = listen.strip().rpartition(":")
-        if not sep or not host:
+        if not sep or not port.isdigit():
             raise HysteriaStatsUnavailable(f"Некорректный HYSTERIA2_STATS_LISTEN: {listen!r}")
         host = host.strip("[]")
+        # An empty host means "bind all interfaces" (":9999"); reach it over loopback.
+        if not host:
+            host = "127.0.0.1"
         # Bracket IPv6 literals for the URL authority ([::1]:9999).
         authority = f"[{host}]" if ":" in host else host
         return f"http://{authority}:{port}"
@@ -143,5 +146,7 @@ def _coerce_int(value: object) -> int:
         try:
             return max(int(value), 0)
         except (TypeError, ValueError):
+            logger.warning("Hysteria2 stats: не удалось привести счётчик к int, использую 0: %r", value)
             return 0
+    logger.warning("Hysteria2 stats: счётчик неожиданного типа, использую 0: %r", value)
     return 0

@@ -33,11 +33,12 @@ class ShellRunner:
         sensitive_values: Sequence[str] = (),
         max_output_chars: int | None = None,
     ) -> ShellResult:
-        """Execute a subprocess; redact sensitive_values from all logged and returned stderr.
+        """Execute a subprocess; redact sensitive_values from logged/returned stderr and args.
 
-        Note: stdout is returned verbatim because some callers consume it (e.g. ``wg genkey``
-        writes the generated key to stdout). stderr stored on the result is redacted, so
-        surfacing ``result.stderr`` in an error message cannot leak a secret.
+        The stored ``result.stderr`` and ``result.args`` are redacted, so surfacing either in
+        an error message cannot leak a value passed via ``sensitive_values``. ``result.stdout``
+        is returned verbatim because some callers consume it (e.g. ``wg genkey`` writes the
+        generated key to stdout); treat stdout as potentially sensitive and never log it raw.
         """
         if not args:
             raise ValueError("args must not be empty")
@@ -56,7 +57,7 @@ class ShellRunner:
             )
         except FileNotFoundError:
             logger.warning("Команда не найдена: %s", safe_args[0])
-            return ShellResult(tuple(args), COMMAND_NOT_FOUND_RETURNCODE, "", COMMAND_NOT_FOUND_STDERR)
+            return ShellResult(tuple(safe_args), COMMAND_NOT_FOUND_RETURNCODE, "", COMMAND_NOT_FOUND_STDERR)
 
         stdout_task: asyncio.Task[tuple[bytes, bool]] | None = None
         stderr_task: asyncio.Task[tuple[bytes, bool]] | None = None
@@ -73,7 +74,7 @@ class ShellRunner:
             await self._terminate(process)
             await self._drain_tasks(stdout_task, stderr_task, stdin_task)
             logger.error("Команда превысила timeout: %s", " ".join(safe_args))
-            return ShellResult(tuple(args), TIMEOUT_RETURNCODE, "", TIMEOUT_STDERR)
+            return ShellResult(tuple(safe_args), TIMEOUT_RETURNCODE, "", TIMEOUT_STDERR)
 
         stdout = self._compact(stdout_raw, stdout_truncated, output_limit)
         # Redact secrets from the full decoded stderr BEFORE truncating, so a value that
@@ -87,7 +88,7 @@ class ShellRunner:
                 " ".join(safe_args),
                 stderr,
             )
-        return ShellResult(tuple(args), int(process.returncode or 0), stdout, stderr)
+        return ShellResult(tuple(safe_args), int(process.returncode or 0), stdout, stderr)
 
     async def _terminate(self, process: asyncio.subprocess.Process) -> None:
         """Kill the timed-out child and its process group, then reap it.
@@ -103,14 +104,28 @@ class ShellRunner:
                 try:
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError, OSError):
-                    process.kill()
+                    self._safe_kill(process)
             else:
-                process.kill()
+                self._safe_kill(process)
         except ProcessLookupError:
             pass
         try:
             await process.wait()
         except ProcessLookupError:
+            pass
+
+    @staticmethod
+    def _safe_kill(process: asyncio.subprocess.Process) -> None:
+        """SIGKILL the child, swallowing errors.
+
+        On a timed-out ``sudo`` helper the root child may be unsignalable by the
+        unprivileged bot; ``process.kill()`` then raises ``PermissionError``. That must
+        not escape ``_terminate`` (and thus ``run()``), or callers would see a raw
+        exception instead of a ``ShellResult`` with ``TIMEOUT_RETURNCODE``.
+        """
+        try:
+            process.kill()
+        except (ProcessLookupError, PermissionError, OSError):
             pass
 
     async def _drain_tasks(self, *tasks: asyncio.Task[object] | None) -> None:

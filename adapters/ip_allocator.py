@@ -1,4 +1,5 @@
 
+import asyncio
 import ipaddress
 from typing import Protocol
 
@@ -34,7 +35,10 @@ class IpAllocator:
             raise AwgIpAllocationError("AWG_SERVER_ADDRESS не должен быть network или broadcast address")
         self.awg_config = awg_config
 
-    # NOT THREAD-SAFE: caller must hold awg service lock
+    # NOT reservation-safe on its own: it reads occupancy but does not atomically claim
+    # the returned IP. Callers must serialize allocate->persist under the AWG service lock
+    # (see services/awg.py `self._lock`), otherwise two concurrent calls can hand out the
+    # same address.
     async def next_free_ip(self) -> str:
         """Allocate and return the next free IP address in the AWG pool."""
         occupied: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
@@ -50,7 +54,9 @@ class IpAllocator:
         occupied_networks: list[ipaddress.IPv4Network] = []
         if self.awg_config is not None:
             try:
-                for value in self.awg_config.list_peer_allowed_ips():
+                # Offload the (blocking) config file read off the event loop.
+                peer_allowed_ips = await asyncio.to_thread(self.awg_config.list_peer_allowed_ips)
+                for value in peer_allowed_ips:
                     if not value:
                         continue
                     network = ipaddress.ip_network(value, strict=False)
@@ -65,6 +71,8 @@ class IpAllocator:
         # Revoked/deleted/failed keys are intentionally excluded by the repository query,
         # so their IPs can be reused from DB. Existing peers in AWG config are always reserved,
         # including unmanaged peers that are not represented in SQLite.
+        # Linear scan from the pool start with O(1) set membership and an early return;
+        # fine for the expected pool sizes (a /24 has 254 hosts).
         for candidate in self.network.hosts():
             if candidate == self.server_address:
                 continue
@@ -74,13 +82,3 @@ class IpAllocator:
                 continue
             return str(candidate)
         raise AwgIpAllocationError("В AWG-пуле не осталось свободных IP")
-
-
-def self_check_ip_allocator_sources() -> bool:
-    """Self-test that the peer IP source protocol returns the expected set."""
-    class Source:
-        def list_peer_allowed_ips(self) -> set[str]:
-            return {"10.0.0.2", "10.0.0.3"}
-
-    source = Source()
-    return source.list_peer_allowed_ips() == {"10.0.0.2", "10.0.0.3"}

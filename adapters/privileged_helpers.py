@@ -18,9 +18,12 @@ class PrivilegedHelperRunner:
     """Invokes fixed sudo helper scripts that perform privileged VPN/proxy operations.
 
     Allowed commands: only absolute-path scripts listed in the sudo policy file
-    (typically /etc/sudoers.d/vpnbot or a drop-in under /etc/sudoers.d/).  Each
-    script must be owned by root:root with mode 0o755 and must not be writable by
-    the bot user.
+    (typically /etc/sudoers.d/vpnbot or a drop-in under /etc/sudoers.d/).  The sudoers
+    exact-path allowlist is the real security boundary and it — together with the
+    deploy step — is what guarantees each script is owned by root:root, mode 0o755, and
+    not writable by the bot user; this class does NOT verify ownership/mode. Its own
+    checks are defence-in-depth only: the helper path must be absolute, contain no ``..``
+    segment, and not be a symlink.
 
     Sudo policy template (non-interactive, no-password for specific scripts):
         vpnbot ALL=(root) NOPASSWD: /opt/vpnbot/scripts/awg_apply.sh, \\
@@ -82,6 +85,10 @@ def _mkdir_private(path: Path) -> None:
     while not p.exists():
         to_create.append(p)
         p = p.parent
+    # `exists()` follows symlinks, so the first existing ancestor could itself be a symlink
+    # planted to redirect where the private staging tree is created. Reject that.
+    if p.is_symlink():
+        raise PrivilegedHelperError(f"Staging parent must not be a symlink: {p}")
     for d in reversed(to_create):
         d.mkdir(mode=0o700, exist_ok=True)
         if os.name == "posix":

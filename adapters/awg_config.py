@@ -18,6 +18,7 @@ from adapters.shell_runner import (
     COMMAND_NOT_FOUND_STDERR,
     ShellRunner,
 )
+from adapters.validation import reject_option_like, validate_ip, validate_wireguard_key
 from models.dto import ShellResult
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,9 @@ class AwgConfigAdapter:
         if config_path.is_symlink():
             raise AwgConfigError("AWG config path не должен быть symlink. Укажите реальный путь к awg0.conf.")
         self.config_path = config_path
+        # The interface name reaches a subprocess argv slot (awg show <iface>, awg set
+        # <iface> ...); reject option-like values so it can never be parsed as a flag.
+        reject_option_like(interface, "AWG interface", error=AwgConfigError)
         self.interface = interface
         self.backup = backup
         self.shell = shell
@@ -165,6 +169,13 @@ class AwgConfigAdapter:
         label: str | None = None,
     ) -> None:
         """Add a peer to the config and runtime, rolling back on failure."""
+        # Defence-in-depth: keys are server-generated, but validate at the adapter boundary
+        # so a malformed value can never be interpolated into an awg0.conf [Peer] block or
+        # an `awg set` argv (mirrors the strict label check).
+        validate_wireguard_key(public_key, "AWG public_key", error=AwgConfigError)
+        if preshared_key is not None:
+            validate_wireguard_key(preshared_key, "AWG preshared_key", error=AwgConfigError)
+        validate_ip(client_ip, "AWG client_ip", error=AwgConfigError)
         if self._using_helper():
             await self._add_peer_via_helper(
                 key_id=key_id,
@@ -225,6 +236,8 @@ class AwgConfigAdapter:
 
     async def remove_peer(self, *, key_id: int, public_key: str | None) -> None:
         """Remove a peer from the config and runtime, rolling back on failure."""
+        if public_key is not None:
+            validate_wireguard_key(public_key, "AWG public_key", error=AwgConfigError)
         if self._using_helper():
             await self._remove_peer_via_helper(key_id=key_id, public_key=public_key)
             return
@@ -422,6 +435,7 @@ class AwgConfigAdapter:
 
     async def remove_runtime_peer(self, public_key: str) -> None:
         """Remove the peer with the given public key from the AWG runtime."""
+        validate_wireguard_key(public_key, "AWG public_key", error=AwgConfigError)
         if self._using_helper():
             lock_dir = self.helper_staging_dir
             async with ConfigFileLock(self.config_path, lock_dir=lock_dir):
@@ -462,7 +476,11 @@ class AwgConfigAdapter:
 
     @staticmethod
     def parse_transfer_output(text: str, *, source: str = "awg") -> dict[str, tuple[int, int]]:
-        """Parse awg/wg transfer output into a mapping of public key to byte counts."""
+        """Parse awg/wg transfer output into a mapping of public key to byte counts.
+
+        Malformed lines are skipped (and logged), not fatal: a single junk line from a
+        format drift must not discard the whole transfer snapshot.
+        """
         transfers: dict[str, tuple[int, int]] = {}
         for raw_line in text.splitlines():
             line = raw_line.strip()
@@ -470,13 +488,15 @@ class AwgConfigAdapter:
                 continue
             parts = line.split()
             if len(parts) != 3:
-                raise AwgApplyError(f"Некорректная строка {source} transfer: {line}")
+                logger.warning("Пропущена некорректная строка %s transfer: %r", source, line)
+                continue
             public_key, received_raw, sent_raw = parts
             try:
                 received_bytes = int(received_raw)
                 sent_bytes = int(sent_raw)
-            except ValueError as exc:
-                raise AwgApplyError(f"Некорректные байты {source} transfer: {line}") from exc
+            except ValueError:
+                logger.warning("Пропущены некорректные байты %s transfer: %r", source, line)
+                continue
             transfers[public_key] = (received_bytes, sent_bytes)
         return transfers
 
@@ -496,7 +516,7 @@ class AwgConfigAdapter:
                 raw = self.config_path.read_bytes()
             except FileNotFoundError as exc:
                 raise AwgConfigError(f"AWG config не найден: {self.config_path}") from exc
-            return stat.st_mtime_ns, stat.st_size, hashlib.blake2b(raw[:65536]).digest()
+            return stat.st_mtime_ns, stat.st_size, hashlib.blake2b(raw).digest()
         return await asyncio.to_thread(_do)
 
     async def _assert_config_unchanged(self, snapshot: tuple[int, int, bytes]) -> None:
@@ -509,12 +529,13 @@ class AwgConfigAdapter:
                 raise AwgConfigError(f"AWG config не найден: {self.config_path}") from exc
             if (current_stat.st_mtime_ns, current_stat.st_size) != (mtime_ns, size):
                 raise AwgConfigError("AWG config изменился во время операции. Изменения не применены.")
-            # mtime+size match: verify content hash to catch same-size same-mtime substitutions
+            # mtime+size match: verify a hash of the WHOLE file to catch same-size
+            # same-mtime substitutions anywhere in the config (not just the first 64 KiB).
             try:
                 current_raw = self.config_path.read_bytes()
             except FileNotFoundError as exc:
                 raise AwgConfigError(f"AWG config не найден: {self.config_path}") from exc
-            if hashlib.blake2b(current_raw[:65536]).digest() != expected_hash:
+            if hashlib.blake2b(current_raw).digest() != expected_hash:
                 raise AwgConfigError("AWG config изменился во время операции. Изменения не применены.")
 
         await asyncio.to_thread(_do)
@@ -525,7 +546,14 @@ class AwgConfigAdapter:
         try:
             old_umask = os.umask(0o177)
             try:
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.config_path.parent, suffix=".conf", delete=False) as tmp:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    dir=self.config_path.parent,
+                    prefix=f".{self.config_path.name}.",
+                    suffix=".conf",
+                    delete=False,
+                ) as tmp:
                     tmp.write(text)
                     tmp.flush()
                     await asyncio.to_thread(os.fsync, tmp.fileno())
@@ -563,7 +591,14 @@ class AwgConfigAdapter:
                 raise AwgApplyError("Не удалось подготовить AWG config для syncconf")
             old_umask = os.umask(0o177)
             try:
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=config_path.parent, suffix=".conf", delete=False) as tmp:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    dir=config_path.parent,
+                    prefix=f".{config_path.name}.",
+                    suffix=".conf",
+                    delete=False,
+                ) as tmp:
                     tmp.write(stripped.stdout)
                     tmp.flush()
                     await asyncio.to_thread(os.fsync, tmp.fileno())
@@ -895,9 +930,19 @@ class AwgConfigAdapter:
         temp_path: str | None = None
         try:
             if preshared_key:
+                # Write the PSK next to the (private) config, not the world-shared /tmp,
+                # with a hidden prefix — content is 0600 but the private dir avoids leaving
+                # secret-bearing temp files in a shared tmpfs. Direct mode only (the bot owns
+                # this dir here); helper mode embeds the PSK in the applied config text.
                 old_umask = os.umask(0o177)
                 try:
-                    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+                    with tempfile.NamedTemporaryFile(
+                        "w",
+                        encoding="utf-8",
+                        dir=self.config_path.parent,
+                        prefix=f".{self.config_path.name}.psk.",
+                        delete=False,
+                    ) as tmp:
                         tmp.write(preshared_key + "\n")
                         tmp.flush()
                         await asyncio.to_thread(os.fsync, tmp.fileno())
@@ -964,36 +1009,3 @@ class AwgConfigAdapter:
 
     def _ip_address(self, value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
         return ipaddress.ip_address(value)
-
-
-def self_check_allowed_ips_parser() -> bool:
-    """Self-test that the section parser extracts AllowedIPs correctly."""
-    text = """
-[Interface]
-PrivateKey = server
-Address = 10.0.0.1/24
-
-[Peer]
-PublicKey = a
-AllowedIPs = 10.0.0.2/32, fd00::2/128
-
-[Peer]
-PublicKey = b
-AllowedIPs = 10.0.0.3/32
-"""
-    adapter = AwgConfigAdapter(
-        config_path=Path("/tmp/unused-awg.conf"),  # noqa: S108
-        interface="unused",
-        backup=BackupAdapter.__new__(BackupAdapter),
-        shell=ShellRunner(),
-        persistent_keepalive=25,
-    )
-    sections = adapter._parse_sections(text)
-    ips: set[str] = set()
-    for section in sections:
-        if section.name != "Peer":
-            continue
-        for part in section.options.get("AllowedIPs", "").split(","):
-            if part.strip():
-                ips.add(part.strip())
-    return {"10.0.0.2/32", "fd00::2/128", "10.0.0.3/32"} == ips
