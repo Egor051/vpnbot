@@ -104,7 +104,9 @@ class ProtocolModulesService:
     async def _require_superadmin(self, actor_id: int) -> None:
         users = self._users
         if users is None:
-            return
+            # Fail closed: without the RBAC dependency wired we cannot verify the
+            # actor, so refuse rather than silently authorising enable/disable.
+            raise InvalidOperation("Protocol RBAC не подключён")
         require = getattr(users, "require_superadmin", None)
         if require is not None:
             await require(actor_id)

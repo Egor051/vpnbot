@@ -103,12 +103,14 @@ class TrialAccessService:
             raise NotFound("Заявка на пробный доступ не найдена")
         return req
 
-    async def count_pending_requests(self) -> int:
-        """Return the number of pending trial key requests."""
+    async def count_pending_requests(self, actor_user_id: int) -> int:
+        """Return the number of pending trial key requests; requires superadmin."""
+        await self._require_superadmin(actor_user_id)
         return await self.trial_requests.count_pending()
 
-    async def list_pending_requests(self, limit: int = 20, offset: int = 0) -> list[TrialKeyRequest]:
-        """Return a paginated list of pending trial key requests."""
+    async def list_pending_requests(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[TrialKeyRequest]:
+        """Return a paginated list of pending trial key requests; requires superadmin."""
+        await self._require_superadmin(actor_user_id)
         return await self.trial_requests.list_pending(limit=limit, offset=offset)
 
     async def approve_trial_request(
@@ -161,12 +163,20 @@ class TrialAccessService:
                     expires_at=expires_at,
                     allow_pending_owner=True,
                 )
-            await self.trial_requests.approve(
-                request_id=request_id,
-                key_id=result.key.id,
-                decided_by=actor_user_id,
-                decided_at=now,
-            )
+            try:
+                await self.trial_requests.approve(
+                    request_id=request_id,
+                    key_id=result.key.id,
+                    decided_by=actor_user_id,
+                    decided_at=now,
+                )
+            except Exception:
+                # The key was already provisioned on the backend. If we cannot mark
+                # the request approved, it stays pending and a retry would provision
+                # a *second* key. Best-effort revoke the orphan so no live key
+                # survives a still-pending request, then re-raise the original error.
+                await self._rollback_provisioned_trial_key(req.key_type, result.key.id, actor_user_id)
+                raise
         await self.audit.write(
             actor_user_id=actor_user_id,
             action="trial_key_approved",
@@ -218,6 +228,40 @@ class TrialAccessService:
             entity_id=target_user_id,
             details={"reset_at": now},
         )
+
+    async def _rollback_provisioned_trial_key(
+        self, key_type: VpnKeyType, key_id: int, actor_user_id: int
+    ) -> None:
+        """Best-effort revoke a trial key whose request could not be marked approved.
+
+        Never raises: the caller re-raises the original approve() failure, and a
+        rollback failure must not mask it. A failed rollback is logged so an admin
+        can clean up the orphaned live key manually.
+        """
+        try:
+            if key_type == VpnKeyType.XRAY:
+                await self.xray.revoke_xray_key_system(key_id, actor_user_id=actor_user_id)  # type: ignore[attr-defined]
+            elif key_type == VpnKeyType.HYSTERIA2:
+                await self.hysteria.revoke_hysteria2_key_system(key_id, actor_user_id=actor_user_id)  # type: ignore[attr-defined]
+            else:
+                await self.awg.revoke_awg_key_system(key_id, actor_user_id=actor_user_id)  # type: ignore[attr-defined]
+        except Exception:
+            logger.warning(
+                "Не удалось откатить пробный ключ key_id=%s после сбоя approve(); требуется ручная очистка",
+                key_id,
+                exc_info=True,
+            )
+            return
+        try:
+            await self.audit.write(
+                actor_user_id=actor_user_id,
+                action="trial_key_approve_rolled_back",
+                entity_type=AuditEntityType.VPN_KEY,
+                entity_id=key_id,
+                details={"key_type": key_type.value},
+            )
+        except Exception:
+            logger.warning("Audit write failed after trial key rollback key_id=%s", key_id, exc_info=True)
 
     async def _deliver_key_to_user(self, result: VpnKeyCreateResult, user_id: int) -> None:
         if self.bot is None:

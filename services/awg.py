@@ -25,6 +25,7 @@ from services.notes import normalize_note
 from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
+from utils.redact import redact_value
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,10 @@ class AwgService:
         async with self.user_locks.lock(owner.telegram_user_id):
             await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
             async with self._lock:
+                # Re-check under the serialization lock: the backend may have been
+                # marked degraded (by reconcile or a failed compensation) while we
+                # waited to acquire _lock, after the pre-lock check above passed.
+                self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
                 await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
                 server_config = self.adapter.read_server_config()
                 self._ensure_server_address_matches_config(server_config)
@@ -154,7 +159,7 @@ class AwgService:
                         action="awg_create_failed",
                         entity_type=AuditEntityType.VPN_KEY,
                         entity_id=key.id,
-                        details={"owner_user_id": owner.telegram_user_id, "client_ip": client_ip, "error": str(exc)},
+                        details={"owner_user_id": owner.telegram_user_id, "client_ip": client_ip, "error": redact_value(str(exc))},
                     )
                     raise
 
@@ -194,6 +199,8 @@ class AwgService:
         """Remove the AWG peer and mark the key revoked."""
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         async with self._lock:
+            # Re-check under the lock (degraded may have been set while we waited).
+            self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
             key = await self._get_awg_key_for_manage(actor_user_id, key_id)
             if key.status == VpnKeyStatus.REVOKED:
                 return key
@@ -241,6 +248,8 @@ class AwgService:
         """
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         async with self._lock:
+            # Re-check under the lock (degraded may have been set while we waited).
+            self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
             key = await self._get_key(key_id)
             if key.key_type != VpnKeyType.AWG:
                 raise InvalidOperation("Это не AWG-ключ")
@@ -274,6 +283,8 @@ class AwgService:
         """Remove the AWG peer and hard-delete the key with its stats."""
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
         async with self._lock:
+            # Re-check under the lock (degraded may have been set while we waited).
+            self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
             key = await self._get_awg_key_for_manage(actor_user_id, key_id)
             previous_status = key.status
             await self.vpn_keys.set_status(key_id, VpnKeyStatus.PENDING_DELETE, self.clock.now())
@@ -287,7 +298,7 @@ class AwgService:
                     action="awg_delete_failed",
                     entity_type=AuditEntityType.VPN_KEY,
                     entity_id=key_id,
-                    details={"previous_status": previous_status.value, "client_ip": key.client_ip, "error": str(exc)},
+                    details={"previous_status": previous_status.value, "client_ip": key.client_ip, "error": redact_value(str(exc))},
                 )
                 raise
             await self.vpn_keys.hard_delete_with_stats(key_id, self.clock.now())

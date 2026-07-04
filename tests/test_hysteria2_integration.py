@@ -673,3 +673,30 @@ def test_migration_v29_rebuild_rolls_back_atomically_on_crash(tmp_path: Path) ->
             await db.close()
 
     asyncio.run(run())
+
+
+# ── F3 (P4-005): mark_active failure during issue ────────────────────────────
+
+def test_issue_marks_apply_failed_when_mark_active_fails(tmp_path: Path) -> None:
+    """A mark_active failure during issue leaves the key APPLY_FAILED (not a dangling
+    PENDING_APPLY, which Hysteria has no startup reconcile to clean up) and audits it."""
+    async def run() -> None:
+        db, service = await _build(tmp_path)
+        try:
+            async def _boom(*args: object, **kwargs: object) -> None:
+                raise RuntimeError("db write failed")
+
+            service.vpn_keys.mark_active = _boom  # type: ignore[method-assign]
+
+            with pytest.raises(RuntimeError):
+                await service.issue(100, TelegramUserProfile(100, "user100", "User"), note=None)
+
+            keys = await service.vpn_keys.list_by_owner(100, limit=50, offset=0)
+            assert len(keys) == 1
+            assert keys[0].status == VpnKeyStatus.APPLY_FAILED
+            actions = [i.get("action") for i in service.audit.items]
+            assert "hysteria2_apply_failed" in actions
+        finally:
+            await db.close()
+
+    asyncio.run(run())

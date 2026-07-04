@@ -1787,9 +1787,10 @@ async def admin_trial_list(callback: CallbackQuery, services: Services) -> None:
     page = _page_from_callback(callback.data)
     try:
         await require_superadmin(services, callback.from_user.id)
-        total = await services.trial_access.count_pending_requests()
+        total = await services.trial_access.count_pending_requests(callback.from_user.id)
         total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
         items = await services.trial_access.list_pending_requests(
+            callback.from_user.id,
             limit=ADMIN_PAGE_SIZE + 1,
             offset=page_offset(page, ADMIN_PAGE_SIZE),
         )

@@ -391,3 +391,278 @@ async def test_disable_protocol_revokes_backend_before_delete(tmp_path: Path) ->
         assert remaining == []
     finally:
         await db.close()
+
+
+# ===========================================================================
+# P4 review fixes
+# ===========================================================================
+
+
+class _CapturingAudit:
+    """Records every audit write so tests can assert on redaction/actions."""
+
+    def __init__(self) -> None:
+        self.items: list[dict[str, object]] = []
+
+    async def write(self, **kwargs: object) -> None:
+        self.items.append(kwargs)
+
+    async def write_best_effort(self, **kwargs: object) -> None:
+        self.items.append(kwargs)
+
+
+class _NullXrayAdapter:
+    async def add_client(self, **kwargs: object) -> None:
+        return None
+
+    async def remove_client(self, **kwargs: object) -> None:
+        return None
+
+
+class _FailingXrayAdapter:
+    async def add_client(self, **kwargs: object) -> None:
+        raise RuntimeError("apply blew up secret=deadbeefdeadbeefdeadbeefdeadbeef")
+
+    async def remove_client(self, **kwargs: object) -> None:
+        return None
+
+
+class _XrayIds:
+    def uuid4(self) -> str:
+        return "00000000-0000-4000-8000-000000000123"
+
+    def generated_key_name(self, prefix: str) -> str:
+        return f"{prefix}_AbCdE"
+
+    def xray_short_id(self) -> str:
+        return "abcd1234"
+
+
+class _FakeXrayTrackingRevoke(_FakeXray):
+    """Provisions a real key and records system-revoke calls (rollback tracking)."""
+
+    def __init__(self, keys_repo: VpnKeyRepository) -> None:
+        super().__init__(keys_repo)
+        self.revoked: list[int] = []
+
+    async def revoke_xray_key_system(
+        self, key_id: int, *, actor_user_id: int | None = None, action: str = "xray_key_expired"
+    ):
+        self.revoked.append(key_id)
+        await self._keys.mark_revoked(key_id, actor_user_id or 0, "now")
+        return await self._keys.get_by_id(key_id)
+
+
+async def test_trial_list_and_count_require_superadmin(tmp_path: Path) -> None:
+    """F2 (P4-010): reading trial requests is gated at the service, not only in the UI."""
+    db = await _db(tmp_path)
+    try:
+        users_repo = UserRepository(db)
+        await _user(users_repo, 1, UserRole.SUPERADMIN)
+        await _user(users_repo, 2, UserRole.MODERATOR)
+        await _user(users_repo, 100, UserRole.PENDING_USER)
+        await TrialKeyRequestRepository(db).create(
+            telegram_user_id=100, key_type=VpnKeyType.XRAY, requested_at="now"
+        )
+        svc = _trial_service(db, _FakeXray(VpnKeyRepository(db)))
+
+        with pytest.raises(AccessDenied):
+            await svc.count_pending_requests(2)
+        with pytest.raises(AccessDenied):
+            await svc.list_pending_requests(2)
+
+        assert await svc.count_pending_requests(1) == 1
+        assert len(await svc.list_pending_requests(1)) == 1
+    finally:
+        await db.close()
+
+
+async def test_protocol_enable_disable_fail_closed_without_rbac(tmp_path: Path) -> None:
+    """F1 (P4-004): enable/disable must refuse when the RBAC dependency is unwired."""
+    db = await _db(tmp_path)
+    try:
+        svc = ProtocolModulesService(ProtocolModulesRepository(db), db)
+        before = await svc.is_enabled("xray")
+        with pytest.raises(InvalidOperation):
+            await svc.enable_protocol("xray", 1)
+        with pytest.raises(InvalidOperation):
+            await svc.disable_protocol("xray", 1)
+        # State must be untouched by the unauthorised calls.
+        assert await svc.is_enabled("xray") == before
+    finally:
+        await db.close()
+
+
+async def test_block_user_audit_reports_proxy_incomplete_when_unwired(tmp_path: Path) -> None:
+    """F4 (P4-006): proxy_revoke_complete is False when proxy revokers are not wired."""
+    db = await _db(tmp_path)
+    try:
+        users_repo = UserRepository(db)
+        await _user(users_repo, 1, UserRole.SUPERADMIN)
+        await _user(users_repo, 100, UserRole.APPROVED_USER)
+        audit = AuditService(AuditLogRepository(db), ClockProvider(), users=users_repo)
+        user_service = UserService(
+            users=users_repo, settings=_settings(tmp_path), clock=ClockProvider(), audit=audit
+        )
+        # No key/proxy revokers attached at all.
+        await user_service.block_user(1, 100, revoke_active_keys=True)
+        items = await audit.recent_for_entity_internal(
+            entity_type=AuditEntityType.USER,
+            entity_id=100,
+            actions={"user_blocked", "user_blocked_with_revoke_errors"},
+            limit=5,
+        )
+        detail = next(
+            i["details"]
+            for i in items
+            if isinstance(i.get("details"), dict) and "proxy_revoke_complete" in i["details"]
+        )
+        assert detail["proxy_revoke_complete"] is False
+    finally:
+        await db.close()
+
+
+async def test_inspect_unblock_risk_flags_inactive_static_mtproto(tmp_path: Path) -> None:
+    """F6 (P4-002): a deactivated static-MTProto access (working shared secret) is
+    surfaced as residual-access risk before unblocking."""
+    db = await _db(tmp_path)
+    try:
+        users_repo = UserRepository(db)
+        await _user(users_repo, 1, UserRole.SUPERADMIN)
+        await _user(users_repo, 100, UserRole.APPROVED_USER)
+        audit = AuditService(AuditLogRepository(db), ClockProvider(), users=users_repo)
+        user_service = UserService(
+            users=users_repo, settings=_settings(tmp_path), clock=ClockProvider(), audit=audit
+        )
+        proxy_repo = ProxyAccessRepository(db)
+        user_service.attach_proxy_access_management(proxy_repo, {})
+        access = await proxy_repo.create(
+            owner_user_id=100,
+            username="u100",
+            access_type=ProxyAccessType.MTPROTO,
+            status=ProxyAccessStatus.ACTIVE,
+            payload={"mode": "static"},
+            public_payload={"mode": "static"},
+            created_by=1,
+            now="now",
+        )
+        await proxy_repo.mark_inactive(access.id, 1, "now")
+
+        warning = await user_service.inspect_unblock_risk(1, 100)
+        assert warning.has_warning
+        assert warning.active_or_problem_key_count >= 1
+        assert any("MTPROTO_SECRET" in reason for reason in warning.reasons)
+    finally:
+        await db.close()
+
+
+async def test_xray_create_failure_audit_redacts_error(tmp_path: Path) -> None:
+    """F5 (P4-008): a raw backend error string is redacted before landing in the audit."""
+    from services.xray import XrayService
+
+    db = await _db(tmp_path)
+    try:
+        users_repo = UserRepository(db)
+        await _user(users_repo, 100, UserRole.APPROVED_USER)
+        audit = _CapturingAudit()
+        user_svc = UserService(
+            users=users_repo, settings=_settings(tmp_path), clock=ClockProvider(), audit=audit  # type: ignore[arg-type]
+        )
+        xray = XrayService(
+            vpn_keys=VpnKeyRepository(db),
+            users=user_svc,
+            adapter=_FailingXrayAdapter(),  # type: ignore[arg-type]
+            settings=_settings(tmp_path),
+            clock=ClockProvider(),
+            ids=_XrayIds(),  # type: ignore[arg-type]
+            audit=audit,  # type: ignore[arg-type]
+        )
+        with pytest.raises(RuntimeError):
+            await xray.create_xray_key(100, TelegramUserProfile(100, "u100", "U"), None)
+
+        failed = [i for i in audit.items if i.get("action") == "xray_create_failed"]
+        assert failed, "expected an xray_create_failed audit entry"
+        error_text = str(failed[0]["details"]["error"])  # type: ignore[index]
+        assert "deadbeef" not in error_text
+        assert "***" in error_text
+    finally:
+        await db.close()
+
+
+async def test_xray_create_rechecks_degraded_under_lock(tmp_path: Path) -> None:
+    """F7 (P4-003): a backend that becomes degraded while a create waits on the
+    serialization lock must cause that create to be refused."""
+    from services.backend_health import BackendHealth
+    from services.xray import XrayService
+
+    db = await _db(tmp_path)
+    try:
+        users_repo = UserRepository(db)
+        await _user(users_repo, 100, UserRole.APPROVED_USER)
+        audit = _CapturingAudit()
+        bh = BackendHealth()
+        user_svc = UserService(
+            users=users_repo, settings=_settings(tmp_path), clock=ClockProvider(), audit=audit  # type: ignore[arg-type]
+        )
+        xray = XrayService(
+            vpn_keys=VpnKeyRepository(db),
+            users=user_svc,
+            adapter=_NullXrayAdapter(),  # type: ignore[arg-type]
+            settings=_settings(tmp_path),
+            clock=ClockProvider(),
+            ids=_XrayIds(),  # type: ignore[arg-type]
+            audit=audit,  # type: ignore[arg-type]
+            backend_health=bh,
+        )
+
+        # Hold the service lock so a create that has already passed the pre-lock
+        # health check blocks inside the critical section.
+        await xray._lock.acquire()
+        started = asyncio.Event()
+
+        async def do_create() -> object:
+            started.set()
+            return await xray.create_xray_key(100, TelegramUserProfile(100, "u100", "U"), None)
+
+        task = asyncio.create_task(do_create())
+        await started.wait()
+        await asyncio.sleep(0.05)  # let the create block on _lock
+        bh.mark_degraded(VpnKeyType.XRAY, "reconcile in progress")
+        xray._lock.release()
+
+        with pytest.raises(InvalidOperation):
+            await task
+    finally:
+        await db.close()
+
+
+async def test_trial_approve_rolls_back_key_when_mark_approved_fails(tmp_path: Path) -> None:
+    """F8 (P4-012): if the request cannot be marked approved after provisioning, the
+    just-created key is rolled back so no live key survives a still-pending request."""
+    db = await _db(tmp_path)
+    try:
+        users_repo = UserRepository(db)
+        await _user(users_repo, 1, UserRole.SUPERADMIN)
+        await _user(users_repo, 100, UserRole.PENDING_USER)
+        trial_repo = TrialKeyRequestRepository(db)
+        req = await trial_repo.create(telegram_user_id=100, key_type=VpnKeyType.XRAY, requested_at="now")
+        fake_xray = _FakeXrayTrackingRevoke(VpnKeyRepository(db))
+        svc = _trial_service(db, fake_xray)
+
+        async def _boom(**kwargs: object) -> None:
+            raise RuntimeError("db down")
+
+        svc.trial_requests.approve = _boom  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError):
+            await svc.approve_trial_request(1, req.id)
+
+        assert fake_xray.created == 1
+        assert len(fake_xray.revoked) == 1, "provisioned key must be rolled back"
+        rolled_back = await VpnKeyRepository(db).get_by_id(fake_xray.revoked[0])
+        assert rolled_back is not None and rolled_back.status == VpnKeyStatus.REVOKED
+        # The request stays pending (no false 'approved' record).
+        again = await trial_repo.get_by_id(req.id)
+        assert again is not None and again.status == "pending"
+    finally:
+        await db.close()
