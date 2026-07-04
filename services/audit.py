@@ -28,6 +28,24 @@ class AuditService:
         "mtproto_secret",
         "token",
         "bot_token",
+        # Common credential/token synonyms so a secret under one of these keys is
+        # masked even when its value has no high-entropy pattern the regex catches.
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "api_key",
+        "apikey",
+        "authorization",
+        "auth",
+        "credential",
+        "credentials",
+        "session",
+        "cookie",
+        "passphrase",
+        "seed",
+        "mnemonic",
+        "otp",
+        "totp",
         "payload_json",
         "config",
         "link",
@@ -177,9 +195,14 @@ class AuditService:
         if isinstance(value, (list, tuple)):
             return [self._sanitize_value(item) for item in value]
         if isinstance(value, str):
+            # Redact BEFORE truncating: a secret pattern (e.g. a 43/44-char base64
+            # key or a 32+ hex run) that straddles the 256-char boundary would be
+            # split by an up-front truncation, so the regex would no longer match
+            # the whole pattern and a prefix of the secret would survive. Masking
+            # first guarantees the full pattern is seen, then we cap the length.
+            value = redact_value(value)
             if len(value) > 256:
                 value = value[:256] + "...[truncated]"
-            value = redact_value(value)
         return value
 
     def _is_secret_key(self, key: str) -> bool:

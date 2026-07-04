@@ -170,6 +170,46 @@ async def test_send_recovery_to_admins_delivers_per_admin(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_encrypted_db_backup_roundtrips_and_verifies_integrity(tmp_path: Path) -> None:
+    # P5-006: a real DB snapshot round-trips through create -> decrypt and opens as
+    # a consistent SQLite image. P5-005: the filename carries seconds resolution.
+    import sqlite3
+
+    from db.database import Database
+
+    db_path = tmp_path / "vpn.db"
+    db = Database(db_path)
+    await db.connect()
+    try:
+        await db.bootstrap()
+    finally:
+        await db.close()
+
+    service = OffsiteBackupService(
+        db=object(),  # type: ignore[arg-type]
+        db_path=db_path,
+        encryption_key=Fernet.generate_key().decode(),
+        clock=ClockProvider(),
+    )
+
+    encrypted, filename = await service.create_encrypted_backup()
+    assert filename.startswith("vpnbot_backup_") and filename.endswith(".db.enc")
+    # Stamp keeps seconds: YYYYMMDDThhmmss -> "T" at index 8, 15-char stamp.
+    stamp = filename[len("vpnbot_backup_") : -len(".db.enc")]
+    assert len(stamp) == 15 and stamp[8] == "T"
+
+    raw = service.decrypt_backup(encrypted)
+    restored = tmp_path / "restored.db"
+    restored.write_bytes(raw)
+    conn = sqlite3.connect(str(restored))
+    try:
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone() is not None
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
 async def test_dedupes_recovery_sources(tmp_path: Path) -> None:
     present = tmp_path / "x.conf"
     present.write_text("data", encoding="utf-8")

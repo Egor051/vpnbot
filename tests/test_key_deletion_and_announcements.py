@@ -1820,3 +1820,120 @@ def test_announcement_keyset_pagination_does_not_duplicate_when_lower_ids_change
         assert result.failed == 0
 
     asyncio.run(run())
+
+
+def test_concurrent_resume_does_not_double_deliver(tmp_path: Path) -> None:
+    """P5-012: two concurrent resumes of one batch must not double-send.
+
+    The per-batch lock serialises the send loop, so even when both coroutines
+    interleave at every await, each recipient's message is copied exactly once
+    and the batch does not abort into ``failed`` on a delivery-transition race.
+    """
+    class AuditWithClock:
+        def __init__(self) -> None:
+            self.clock = ClockProvider()
+
+        async def write(self, **kwargs: object) -> None:
+            return None
+
+    class Bot:
+        pass
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            users_repo = UserRepository(db)
+            for user_id in (1, 2):
+                await users_repo.upsert_profile(
+                    TelegramUserProfile(user_id, f"user{user_id}", f"User {user_id}"),
+                    UserRole.SUPERADMIN if user_id == 1 else UserRole.APPROVED_USER,
+                    "now",
+                )
+            announcements = AnnouncementRepository(db)
+            service = AnnouncementService(
+                users=Users(),  # type: ignore[arg-type]
+                users_repo=users_repo,
+                announcements=announcements,
+                audit=AuditWithClock(),  # type: ignore[arg-type]
+                delay_seconds=0,
+            )
+            batch = await announcements.create_batch(
+                actor_user_id=1, from_chat_id=1, message_id=77, recipient_ids=[1, 2], now="now"
+            )
+
+            copies: list[int] = []
+
+            async def slow_copy(_bot: object, target_id: int, from_chat_id: int, message_id: int) -> tuple[bool, str | None]:
+                copies.append(target_id)
+                await asyncio.sleep(0)  # yield so a racing sender could interleave if unlocked
+                return True, None
+
+            service._copy_message = slow_copy  # type: ignore[method-assign]
+
+            await asyncio.gather(
+                service.resume_batch(actor_user_id=1, bot=Bot(), announcement_id=batch.id, retry_failed=False),  # type: ignore[arg-type]
+                service.resume_batch(actor_user_id=1, bot=Bot(), announcement_id=batch.id, retry_failed=False),  # type: ignore[arg-type]
+            )
+
+            assert sorted(copies) == [1, 2]  # each recipient exactly once
+            cursor = await db.conn.execute(
+                "SELECT status FROM announcement_deliveries WHERE announcement_id = ? ORDER BY user_id",
+                (batch.id,),
+            )
+            rows = await cursor.fetchall()
+            assert [row["status"] for row in rows] == ["sent", "sent"]
+            final = await announcements.get_batch(batch.id)
+            assert final is not None and final.status == "completed"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_copy_message_retries_on_flood_control_then_succeeds() -> None:
+    """P5-014: a TelegramRetryAfter is retried (bounded) instead of failing at once."""
+    from aiogram.exceptions import TelegramRetryAfter
+
+    class AuditWithClock:
+        def __init__(self) -> None:
+            self.clock = ClockProvider()
+
+        async def write(self, **kwargs: object) -> None:
+            return None
+
+    class FloodBot:
+        def __init__(self, fail_times: int) -> None:
+            self.calls = 0
+            self._fail_times = fail_times
+
+        async def copy_message(self, *, chat_id: int, from_chat_id: int, message_id: int) -> None:
+            self.calls += 1
+            if self.calls <= self._fail_times:
+                raise TelegramRetryAfter(
+                    method=SimpleNamespace(), message="Too Many Requests: retry after 0", retry_after=0
+                )
+
+    async def run() -> None:
+        service = AnnouncementService(
+            users=Users(),  # type: ignore[arg-type]
+            users_repo=SimpleNamespace(),  # type: ignore[arg-type]
+            announcements=None,
+            audit=AuditWithClock(),  # type: ignore[arg-type]
+            delay_seconds=0,
+        )
+
+        # Throttled twice, succeeds on the third attempt (within the cap).
+        bot = FloodBot(fail_times=2)
+        sent, error = await service._copy_message(bot, 5, 1, 77)  # type: ignore[arg-type]
+        assert sent is True and error is None
+        assert bot.calls == 3
+
+        # Throttled on every attempt: fails after the cap without looping forever.
+        always = FloodBot(fail_times=99)
+        sent, error = await service._copy_message(always, 5, 1, 77)  # type: ignore[arg-type]
+        assert sent is False and error is not None
+        assert always.calls == 3
+
+    asyncio.run(run())

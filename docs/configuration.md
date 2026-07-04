@@ -259,10 +259,19 @@ can safely set `HYSTERIA2_INSECURE=false`. Until then, keep this `true`.
 | `ANOMALY_CHECK_INTERVAL` | No | `300` | How often (seconds) to run the anomaly detection scan (0–86400). | `300` |
 | `ANOMALY_WINDOW_SECONDS` | No | `3600` | Traffic observation window in seconds (60–86400). | `3600` |
 | `ANOMALY_MIN_UNIQUE_IPS` | No | `3` | Minimum unique source IPs within the window to flag a key (1–1000). | `3` |
-| `ANOMALY_AUTO_REVOKE` | No | `false` | Automatically revoke flagged keys without admin confirmation. | `false` |
+| `ANOMALY_AUTO_REVOKE` | No | `false` | Automatically revoke flagged keys without admin confirmation. For AWG/Xray (IP-based detection) auto-revoke only takes effect when `ANOMALY_CONCURRENT_WINDOW_SECONDS > 0` — see the note below. | `false` |
 | `ANOMALY_COOLDOWN_SECONDS` | No | `7200` | Cooldown before re-flagging the same key (0–86400). | `7200` |
 | `ANOMALY_CONCURRENT_WINDOW_SECONDS` | No | `600` | Window for concurrent-connection anomaly detection (0–86400). | `600` |
 | `ANOMALY_HYSTERIA2_MAX_CONN` | No | `0` | Flag a Hysteria2 key with >= this many concurrent connections (via the Traffic Stats API `/online`). `0` disables the hy2 check; requires `HYSTERIA2_STATS_SECRET`. | `5` |
+
+> **Auto-revoke gating.** Over the full observation window a single roaming/mobile
+> user legitimately accumulates many IPs, so revoking on that signal alone would
+> hit legitimate users. Therefore, for AWG/Xray, `ANOMALY_AUTO_REVOKE=true` only
+> revokes when `ANOMALY_CONCURRENT_WINDOW_SECONDS > 0` (a concurrency signal is
+> required); with the concurrent window at `0` the detector is alert-only and logs
+> a warning at startup. Hysteria2 uses the inherently concurrent `/online` count,
+> so its auto-revoke follows `ANOMALY_AUTO_REVOKE` directly regardless of the
+> concurrent-window setting.
 
 ## WARP Outbound IP Masking
 

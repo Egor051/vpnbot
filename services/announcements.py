@@ -1,6 +1,7 @@
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from aiogram import Bot
@@ -11,10 +12,15 @@ from models.enums import AuditEntityType
 from repositories.announcements import AnnouncementBatch, AnnouncementRepository
 from repositories.users import UserRepository
 from services.audit import AuditService
-from services.errors import InvalidOperation, NotFound
+from services.errors import InvalidOperation, InvalidTransition, NotFound
 from services.users import UserService
 
 logger = logging.getLogger(__name__)
+
+# Max attempts when Telegram flood-control (TelegramRetryAfter) throttles a send.
+# Each attempt honours the server's retry_after before the next try; after the
+# cap the delivery is marked failed and can be retried by resuming the batch.
+_MAX_SEND_ATTEMPTS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +59,13 @@ class AnnouncementService:
         self.audit = audit
         self.delay_seconds = delay_seconds
         self.batch_size = max(batch_size, 1)
+        # One lock per announcement batch id. The bot is a single process / single
+        # event loop, so this serialises every send path for a given batch — the
+        # scheduled-due loop and a manual resume can otherwise interleave and
+        # deliver the same message twice (both copy_message before either marks the
+        # delivery). Entries are tiny and few (one per batch ever sent), so the map
+        # is left to grow rather than risk a cleanup racing a waiting sender.
+        self._batch_locks: dict[int, asyncio.Lock] = {}
 
     async def count_recipients(self, actor_user_id: int, *, recipient_filter: RecipientFilter | None = None) -> int:
         """Return the number of users eligible to receive an announcement.
@@ -339,7 +352,21 @@ class AnnouncementService:
             logger.warning("Announcement was sent, but audit write failed", exc_info=True)
         return result
 
+    def _batch_lock(self, announcement_id: int) -> asyncio.Lock:
+        lock = self._batch_locks.get(announcement_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._batch_locks[announcement_id] = lock
+        return lock
+
     async def _send_batch(self, *, bot: Bot, batch: AnnouncementBatch, retry_failed: bool) -> AnnouncementResult:
+        # Serialise all sends for this batch so a scheduled-due run and a manual
+        # resume (or two resumes) can never both be inside the send loop at once
+        # and double-deliver.
+        async with self._batch_lock(batch.id):
+            return await self._send_batch_locked(bot=bot, batch=batch, retry_failed=retry_failed)
+
+    async def _send_batch_locked(self, *, bot: Bot, batch: AnnouncementBatch, retry_failed: bool) -> AnnouncementResult:
         if self.announcements is None:
             raise RuntimeError("Announcement ledger is not configured")
         now = self._now()
@@ -366,7 +393,7 @@ class AnnouncementService:
                     now = self._now()
                     if delivery.user_id <= 0:
                         logger.warning("Skipping announcement recipient with non-private chat id=%s", delivery.user_id)
-                        await self.announcements.mark_delivery(batch.id, delivery.user_id, "skipped", now, "non-private chat id")
+                        await self._mark_delivery_safe(batch.id, delivery.user_id, "skipped", now, "non-private chat id")
                         continue
                     # Recipients are snapshotted when the batch is created; for
                     # scheduled/resumed batches a user may have been blocked or
@@ -380,13 +407,13 @@ class AnnouncementService:
                         still_eligible = await self.users_repo.is_announcement_recipient(delivery.user_id)
                     if not still_eligible:
                         logger.info("Skipping announcement recipient no longer eligible id=%s", delivery.user_id)
-                        await self.announcements.mark_delivery(batch.id, delivery.user_id, "skipped", now, "recipient no longer eligible")
+                        await self._mark_delivery_safe(batch.id, delivery.user_id, "skipped", now, "recipient no longer eligible")
                         continue
                     sent, error = await self._copy_message(bot, delivery.user_id, batch.from_chat_id, batch.message_id)
                     if sent:
-                        await self.announcements.mark_delivery(batch.id, delivery.user_id, "sent", now)
+                        await self._mark_delivery_safe(batch.id, delivery.user_id, "sent", now)
                     else:
-                        await self.announcements.mark_delivery(batch.id, delivery.user_id, "failed", now, error or "send failed")
+                        await self._mark_delivery_safe(batch.id, delivery.user_id, "failed", now, error or "send failed")
                     if self.delay_seconds > 0:
                         await asyncio.sleep(self.delay_seconds)
         except Exception:
@@ -497,37 +524,64 @@ class AnnouncementService:
             last_seen_id = batch[-1].telegram_user_id
         return recipients
 
-    async def _copy_message(self, bot: Bot, target_id: int, from_chat_id: int, message_id: int) -> tuple[bool, str | None]:
+    async def _mark_delivery_safe(
+        self, announcement_id: int, user_id: int, status: str, now: str, error_text: str | None = None
+    ) -> None:
+        """Mark a delivery, tolerating a lost race instead of failing the batch.
+
+        The per-batch lock already serialises sends, but if a delivery has somehow
+        already advanced out of pending/failed (a duplicate row, or a resume that
+        raced past the lock in a future multi-worker deployment) ``mark_delivery``
+        raises :class:`InvalidTransition`. Treat that as "already handled" and skip
+        the recipient rather than aborting the whole batch into ``failed``.
+        """
+        if self.announcements is None:
+            raise RuntimeError("Announcement ledger is not configured")
         try:
-            await bot.copy_message(chat_id=target_id, from_chat_id=from_chat_id, message_id=message_id)
-            return True, None
-        except TelegramRetryAfter as exc:
-            await asyncio.sleep(max(exc.retry_after, 0))
+            await self.announcements.mark_delivery(announcement_id, user_id, status, now, error_text)
+        except InvalidTransition:
+            logger.info(
+                "Announcement delivery already finalized, skipping mark: id=%s user_id=%s",
+                announcement_id,
+                user_id,
+            )
+
+    async def _send_with_retry(
+        self, send: Callable[[], Awaitable[None]], target_id: int, *, what: str
+    ) -> tuple[bool, str | None]:
+        """Run ``send`` with bounded retries that honour Telegram flood-control.
+
+        A ``TelegramRetryAfter`` is retried (after sleeping the requested back-off)
+        up to :data:`_MAX_SEND_ATTEMPTS` times; any other error fails immediately.
+        """
+        for attempt in range(1, _MAX_SEND_ATTEMPTS + 1):
             try:
-                await bot.copy_message(chat_id=target_id, from_chat_id=from_chat_id, message_id=message_id)
+                await send()
                 return True, None
-            except Exception as retry_error:
-                logger.warning("Announcement copy retry failed for user_id=%s", target_id, exc_info=True)
-                return False, _public_error_text(retry_error)
-        except Exception as error:
-            logger.warning("Announcement copy failed for user_id=%s", target_id, exc_info=True)
-            return False, _public_error_text(error)
+            except TelegramRetryAfter as exc:
+                if attempt < _MAX_SEND_ATTEMPTS:
+                    await asyncio.sleep(max(exc.retry_after, 0))
+                    continue
+                logger.warning(
+                    "%s still throttled after %d attempts for user_id=%s", what, attempt, target_id, exc_info=True
+                )
+                return False, _public_error_text(exc)
+            except Exception as error:
+                logger.warning("%s failed for user_id=%s", what, target_id, exc_info=True)
+                return False, _public_error_text(error)
+        return False, None  # unreachable; keeps the type checker satisfied
+
+    async def _copy_message(self, bot: Bot, target_id: int, from_chat_id: int, message_id: int) -> tuple[bool, str | None]:
+        async def _do() -> None:
+            await bot.copy_message(chat_id=target_id, from_chat_id=from_chat_id, message_id=message_id)
+
+        return await self._send_with_retry(_do, target_id, what="Announcement copy")
 
     async def _send_text(self, bot: Bot, target_id: int, text: str) -> tuple[bool, str | None]:
-        try:
+        async def _do() -> None:
             await bot.send_message(chat_id=target_id, text=text)
-            return True, None
-        except TelegramRetryAfter as exc:
-            await asyncio.sleep(max(exc.retry_after, 0))
-            try:
-                await bot.send_message(chat_id=target_id, text=text)
-                return True, None
-            except Exception as retry_error:
-                logger.warning("Text broadcast retry failed for user_id=%s", target_id, exc_info=True)
-                return False, _public_error_text(retry_error)
-        except Exception as error:
-            logger.warning("Text broadcast failed for user_id=%s", target_id, exc_info=True)
-            return False, _public_error_text(error)
+
+        return await self._send_with_retry(_do, target_id, what="Text broadcast")
 
     def _now(self) -> str:
         return self.audit.clock.now()
