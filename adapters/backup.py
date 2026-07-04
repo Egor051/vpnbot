@@ -20,13 +20,20 @@ class BackupAdapter:
         if not target.exists():
             raise AdapterError(f"Файл не найден для backup: {target}")
         stamp = self.clock.now().replace(":", "").replace("+", "_").replace(".", "")
+        # _copy_private opens the destination with O_CREAT|O_EXCL, so a name collision
+        # surfaces as FileExistsError rather than silently overwriting; retry with a fresh
+        # (time_ns + 128-bit token) name. Collisions are astronomically unlikely.
+        backup_path: Path | None = None
         for _ in range(10):
-            backup_path = target.with_name(f"{target.name}.{stamp}.{time.time_ns()}.{secrets.token_urlsafe(16)}.bak")
-            if not backup_path.exists():
-                break
-        else:
+            candidate = target.with_name(f"{target.name}.{stamp}.{time.time_ns()}.{secrets.token_urlsafe(16)}.bak")
+            try:
+                self._copy_private(target, candidate)
+            except FileExistsError:
+                continue
+            backup_path = candidate
+            break
+        if backup_path is None:
             raise AdapterError(f"Не удалось создать уникальное имя backup для {target}")
-        self._copy_private(target, backup_path)
         if self.keep_last:
             self.cleanup_old_backups(target.parent, pattern=f"{target.name}.*.bak", keep_last=self.keep_last)
         return backup_path

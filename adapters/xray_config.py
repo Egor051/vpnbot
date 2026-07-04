@@ -23,8 +23,10 @@ from adapters.file_ops import async_copy_stat, async_fsync_parent
 from adapters.privileged_helpers import PrivilegedHelperRunner, cleanup_staging_path, write_private_staging_file
 from adapters.shell_runner import TIMEOUT_RETURNCODE, ShellRunner
 from adapters.systemctl import SystemCtlAdapter
+from adapters.validation import reject_option_like
 from adapters.xray_stats import MACHINE_OUTPUT_LIMIT as STATS_MAX_OUTPUT_CHARS
 from adapters.xray_stats import XrayStatsAdapter
+from utils.redact import redact
 
 
 logger = logging.getLogger(__name__)
@@ -145,6 +147,12 @@ class XrayConfigAdapter:
         if config_path.is_symlink():
             raise XrayConfigError("Xray config path не должен быть symlink. Укажите реальный путь к config.json.")
         self.config_path = config_path
+        # Reject option-like service/tag names: both reach a subprocess argv slot
+        # (systemctl <service>, xray api rmi ... <tag>) where a leading '-' would be
+        # parsed as a flag.
+        reject_option_like(service_name, "XRAY_SERVICE_NAME", error=XrayConfigError)
+        if inbound_tag:
+            reject_option_like(inbound_tag, "XRAY_INBOUND_TAG", error=XrayConfigError)
         self.service_name = service_name
         if apply_mode not in {"reload", "restart", "api"}:
             raise XrayConfigError("Xray apply mode должен быть reload, restart или api")
@@ -224,11 +232,9 @@ class XrayConfigAdapter:
 
                 temp_path = await self._write_temp_config(config, self.config_path)
                 if not self._using_helper() and self.apply_mode == "api" and not short_id_inserted:
-                    await self._install_candidate_api(
-                        temp_path, snapshot, backup_path,
-                        action="add", uuid_value=uuid_value,
-                        email_label=email_label, flow=flow,
-                    )
+                    # Pure client add: reload the inbound via the API. A shortId insert
+                    # instead takes the systemctl path (below), so it is excluded here.
+                    await self._install_candidate_api(temp_path, snapshot, backup_path, action="add")
                 else:
                     await self._install_candidate(temp_path, snapshot, backup_path)
                 return XrayClientApplyResult(short_id_inserted=short_id_inserted)
@@ -260,11 +266,6 @@ class XrayConfigAdapter:
                 clients = self._clients(inbound)
                 changed = False
 
-                api_email = ""
-                if not self._using_helper() and self.apply_mode == "api":
-                    found = self._find_client_in_list(clients, uuid_value=uuid_value, email_label=email_label)
-                    api_email = found.get("email", "") if found else (email_label or "")
-
                 new_clients = [client for client in clients if not self._matches_client_for_remove(client, uuid_value, email_label)]
                 if len(new_clients) != len(clients):
                     inbound["settings"]["clients"] = new_clients
@@ -278,10 +279,9 @@ class XrayConfigAdapter:
 
                 temp_path = await self._write_temp_config(config, self.config_path)
                 if not self._using_helper() and self.apply_mode == "api" and not short_id_removed:
-                    await self._install_candidate_api(
-                        temp_path, snapshot, backup_path,
-                        action="remove", email_label=api_email,
-                    )
+                    # Pure client remove: reload the inbound via the API. A shortId removal
+                    # instead takes the systemctl path (below).
+                    await self._install_candidate_api(temp_path, snapshot, backup_path, action="remove")
                 else:
                     await self._install_candidate(temp_path, snapshot, backup_path)
             finally:
@@ -428,7 +428,7 @@ class XrayConfigAdapter:
                 raw = self.config_path.read_bytes()
             except FileNotFoundError as exc:
                 raise XrayConfigError(f"Xray config не найден: {self.config_path}") from exc
-            return stat.st_mtime_ns, stat.st_size, hashlib.blake2b(raw[:65536]).digest()
+            return stat.st_mtime_ns, stat.st_size, hashlib.blake2b(raw).digest()
         return await asyncio.to_thread(_do)
 
     async def _assert_config_unchanged(self, snapshot: tuple[int, int, bytes]) -> None:
@@ -441,12 +441,13 @@ class XrayConfigAdapter:
                 raise XrayConfigError(f"Xray config не найден: {self.config_path}") from exc
             if (current_stat.st_mtime_ns, current_stat.st_size) != (mtime_ns, size):
                 raise XrayConfigError("Xray config изменился во время операции. Изменения не применены.")
-            # mtime+size match: verify content hash to catch same-size same-mtime substitutions
+            # mtime+size match: verify a hash of the WHOLE file to catch same-size
+            # same-mtime substitutions anywhere in the config (not just the first 64 KiB).
             try:
                 current_raw = self.config_path.read_bytes()
             except FileNotFoundError as exc:
                 raise XrayConfigError(f"Xray config не найден: {self.config_path}") from exc
-            if hashlib.blake2b(current_raw[:65536]).digest() != expected_hash:
+            if hashlib.blake2b(current_raw).digest() != expected_hash:
                 raise XrayConfigError("Xray config изменился во время операции. Изменения не применены.")
 
         await asyncio.to_thread(_do)
@@ -554,7 +555,15 @@ class XrayConfigAdapter:
         # Re-assert (or strip) the WARP egress source-bind on the freedom outbound so
         # it survives the bot's config rewrites. No-op on non-WARP deploys.
         if self._warp_send_through is not None:
-            apply_warp_send_through(config, self._warp_send_through())
+            try:
+                tunnel_ip = self._warp_send_through()
+            except Exception:
+                logger.warning(
+                    "WARP sendThrough provider raised; leaving freedom outbound egress unchanged",
+                    exc_info=True,
+                )
+            else:
+                apply_warp_send_through(config, tunnel_ip)
         content = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
         json.loads(content)
         if self._using_helper():
@@ -750,25 +759,26 @@ class XrayConfigAdapter:
         backup_path: Path | None,
         *,
         action: str,
-        uuid_value: str = "",
-        email_label: str = "",
-        flow: str = "",
     ) -> None:
+        """Apply a pure client add/remove in ``api`` mode by rebuilding the inbound.
+
+        Only client-list edits reach here: shortId changes and renames deliberately take
+        the ``systemctl`` reload/restart path (see the call sites), because a live
+        ``rmi`` + ``adi`` would disrupt REALITY state for what are rare structural edits.
+        So this just replaces config.json and reloads the inbound via ``_api_reload_inbound``
+        (rmi + adi). ``action`` ("add"/"remove") only labels the error on failure.
+        """
         if backup_path is None:
             raise XrayApplyError("Xray backup is not available for API apply")
         await self._test_config(temp_path)
         await self._assert_config_unchanged(snapshot)
         await self._replace_main_config(temp_path, self.config_path)
         try:
-            if action == "add":
-                await self._api_add_user(uuid_value, email_label, flow)
-            else:
-                await self._api_remove_user(email_label)
+            await self._api_reload_inbound()
         except Exception as exc:
             await asyncio.to_thread(self.backup.restore, backup_path, self.config_path, mode_from=self.config_path)
-            # Restore xray runtime from the backup inbound config via adi.
-            # After rmi+adi failure the inbound may be absent from runtime;
-            # adi with the just-restored disk config brings it back.
+            # After rmi+adi failure the inbound may be absent from runtime; adi with the
+            # just-restored disk config brings it back.
             try:
                 await self._api_reload_inbound()
             except Exception:
@@ -780,12 +790,6 @@ class XrayConfigAdapter:
                     except Exception:
                         logger.error("Xray restart after API rollback also failed", exc_info=True)
             raise XrayApplyError(f"xray api {action} failed, config restored from backup") from exc
-
-    async def _api_add_user(self, uuid_value: str, email_label: str, flow: str) -> None:
-        await self._api_reload_inbound()
-
-    async def _api_remove_user(self, email_label: str) -> None:
-        await self._api_reload_inbound()
 
     async def _api_reload_inbound(self) -> None:
         """Sync the running xray inbound with the current on-disk config via rmi + adi."""
@@ -834,7 +838,7 @@ class XrayConfigAdapter:
                 timeout=10,
             )
             if not adi_result.ok:
-                raise XrayApplyError(f"xray api adi failed: {adi_result.stderr or adi_result.stdout}")
+                raise XrayApplyError(f"xray api adi failed: {redact(adi_result.stderr or adi_result.stdout)}")
         finally:
             if tmp_path is not None:
                 tmp_path.unlink(missing_ok=True)

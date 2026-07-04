@@ -29,9 +29,12 @@ class Hysteria2AuthHealthProbe:
     @staticmethod
     def _build_base_url(listen: str) -> str:
         host, sep, port = listen.strip().rpartition(":")
-        if not sep or not host:
+        if not sep or not port.isdigit():
             raise ValueError(f"Некорректный HYSTERIA2_AUTH_LISTEN: {listen!r}")
         host = host.strip("[]")
+        # An empty host means "bind all interfaces" (":8444"); reach it over loopback.
+        if not host:
+            host = "127.0.0.1"
         # Bracket IPv6 literals for the URL authority ([::1]:8444).
         authority = f"[{host}]" if ":" in host else host
         return f"http://{authority}:{port}"

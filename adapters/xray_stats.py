@@ -1,7 +1,10 @@
 
 import json
+import logging
 
 from adapters.shell_runner import ShellRunner
+
+logger = logging.getLogger(__name__)
 
 MACHINE_OUTPUT_LIMIT = 1024 * 1024
 
@@ -51,5 +54,6 @@ class XrayStatsAdapter:
             try:
                 result[name] = int(value)  # type: ignore[arg-type]
             except (TypeError, ValueError):
+                logger.warning("Xray stats: нечисловое значение счётчика %r=%r, использую 0", name, value)
                 result[name] = 0
         return result
