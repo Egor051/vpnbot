@@ -46,10 +46,14 @@ class NotesService:
 
     async def update_key_note(self, actor_user_id: int, key_id: int, note: str | None) -> None:
         """Update the note on a VPN key owned by the requester."""
+        # Authorize before touching the repository, mirroring update_user_note /
+        # update_proxy_note. Checking existence first would let an unapproved caller
+        # distinguish real key ids (NotFound) from ones they may not touch
+        # (AccessDenied) — a key-id enumeration oracle.
+        await self.users.require_approved_or_admin(actor_user_id)
         key = await self.vpn_keys.get_by_id(key_id)
         if key is None:
             raise NotFound("Ключ не найден")
-        await self.users.require_approved_or_admin(actor_user_id)
         if key.owner_user_id != actor_user_id:
             raise AccessDenied("Можно менять заметку только своих ключей")
         clean_note = normalize_note(note)

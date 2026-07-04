@@ -95,8 +95,7 @@ class OffsiteBackupService:
         # The Fernet token already embeds a creation timestamp used by
         # decrypt_backup() to enforce the TTL; the filename stamp is for
         # human reference only.
-        stamp = self.clock.now().replace(":", "").replace("+", "_").replace(".", "")[:15]
-        filename = f"vpnbot_backup_{stamp}.db.enc"
+        filename = f"vpnbot_backup_{self._filename_stamp()}.db.enc"
         return encrypted, filename
 
     def decrypt_backup(self, encrypted_data: bytes, *, max_age_days: int = BACKUP_MAX_AGE_DAYS) -> bytes:
@@ -154,9 +153,20 @@ class OffsiteBackupService:
         fernet = Fernet(self._encryption_key.encode())
         encrypted = fernet.encrypt(tar_bytes)
 
-        stamp = self.clock.now().replace(":", "").replace("+", "_").replace(".", "")[:15]
-        filename = f"vpnbot_recovery_{stamp}.tar.gz.enc"
+        filename = f"vpnbot_recovery_{self._filename_stamp()}.tar.gz.enc"
         return encrypted, filename
+
+    def _filename_stamp(self) -> str:
+        """Compact UTC ``YYYYMMDDThhmmss`` stamp for the (human-facing) filename.
+
+        Seconds are kept so two backups in the same minute don't collide (the old
+        ``[:15]`` on the ``-``/``:``-separated ISO string silently dropped them,
+        leaving minute resolution). This is reference only — the authoritative
+        creation time lives in the Fernet token and drives the decrypt TTL.
+        """
+        return (
+            self.clock.now().replace("-", "").replace(":", "").replace("+", "_").replace(".", "")[:15]
+        )
 
     def _build_recovery_tar(self) -> bytes | None:
         """Build an in-memory tar.gz of the recovery sources plus MANIFEST.json.
@@ -231,6 +241,15 @@ class OffsiteBackupService:
             dst = sqlite3.connect(":memory:")
             try:
                 src.backup(dst)
+                # Verify the snapshot is a consistent, readable SQLite image before
+                # it is encrypted and shipped, so a corrupt backup fails loudly (the
+                # backup loop then retries) rather than silently delivering an
+                # unrestorable file. quick_check is far cheaper than integrity_check
+                # and still catches structural corruption.
+                row = dst.execute("PRAGMA quick_check").fetchone()
+                if not row or row[0] != "ok":
+                    detail = row[0] if row else "нет результата"
+                    raise RuntimeError(f"Снимок БД не прошёл проверку целостности: {detail}")
                 return dst.serialize()
             finally:
                 dst.close()

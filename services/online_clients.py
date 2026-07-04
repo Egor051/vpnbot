@@ -10,6 +10,10 @@ non-destructive cumulative counters that are cheap to read:
   disconnected peer's counters stay flat.
 * Xray via ``xray api statsquery`` per-user uplink/downlink totals — these only
   move with real traffic, so Xray "online" means "transferred data recently".
+* Hysteria2 via the Traffic Stats API ``/online`` — unlike the two above this is
+  an *instantaneous* per-key concurrent-connection count, so "online" is a direct
+  read (labels with >= 1 live connection) that needs no previous-poll baseline.
+  ``None`` when the API is not configured or unreachable.
 
 Because the panel re-renders every second but online counts change slowly, the
 result is cached for ``ttl`` seconds; renders within the window are served from

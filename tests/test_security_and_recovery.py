@@ -367,6 +367,50 @@ def test_audit_sanitizer_masks_nested_secrets() -> None:
     assert clean["uuid"] == "***"
 
 
+def test_audit_sanitizer_masks_secret_under_extended_key_names() -> None:
+    # P5-002: credential/token synonyms are masked even when the value has no
+    # high-entropy pattern the value-regex would otherwise catch.
+    audit = AuditService(audit_logs=object(), clock=ClockProvider())  # type: ignore[arg-type]
+
+    clean = audit._sanitize(
+        {
+            "access_token": "hunter2",
+            "api_key": "plainkey",
+            "client_secret": "s3cr3t",
+            "cookie": "sessionid=abc",
+            "note": "ok",
+        }
+    )
+
+    assert clean["access_token"] == "***"
+    assert clean["api_key"] == "***"
+    assert clean["client_secret"] == "***"
+    assert clean["cookie"] == "***"
+    assert clean["note"] == "ok"
+
+
+def test_audit_sanitizer_redacts_secret_straddling_truncation_boundary() -> None:
+    # P5-001: a base64 key that crosses the 256-char cap must be fully masked.
+    # Redaction runs BEFORE truncation, so the whole pattern is matched and no
+    # prefix of the secret survives into the stored details.
+    audit = AuditService(audit_logs=object(), clock=ClockProvider())  # type: ignore[arg-type]
+
+    fernet_like = "A" * 43 + "="  # matches the WG/base64 private-key pattern
+    # Place the key so it straddles the 256-char cap (a word boundary — here a
+    # space — precedes it, as with any real space/punctuation-separated secret):
+    # with truncate-first (the old order) value[:256] would keep ~36 chars of the
+    # key, too short for the 43-char pattern to match, so that prefix would leak.
+    # Redact-first masks the whole key before the cap is applied.
+    filler = "x" * 219 + " "
+    payload = f"{filler}{fernet_like} trailing"
+
+    clean = audit._sanitize({"message": payload})
+
+    assert fernet_like not in clean["message"]
+    # No long run of the original key survives anywhere in the stored value.
+    assert "A" * 30 not in clean["message"]
+
+
 def test_awg_remove_managed_block() -> None:
     adapter = AwgConfigAdapter(
         config_path=Path("/tmp/unused-awg.conf"),

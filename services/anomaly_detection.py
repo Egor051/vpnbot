@@ -18,6 +18,13 @@ from repositories.vpn_keys import VpnKeyRepository
 logger = logging.getLogger(__name__)
 
 _XRAY_LOG_TAIL_BYTES = 2 * 1024 * 1024  # 2 MB tail read
+# Xray access-log timestamps carry no timezone, so they are interpreted in the
+# host's local time (time.mktime below), which matches how Xray writes them by
+# default and therefore lines up with time.time(). If Xray is (mis)configured to
+# log in a different zone, entries land in the future/past and are dropped by the
+# cutoff / this skew guard, degrading to "no Xray anomaly signal" rather than a
+# wrong one. A small tolerance absorbs benign clock jitter between write and read.
+_XRAY_LOG_FUTURE_SKEW_SECONDS = 120.0
 _XRAY_LOG_RE = re.compile(
     r"from ([\d.]+|\[[\da-fA-F:]+\]):\d+.*?email: (\S+)"
 )
@@ -33,6 +40,31 @@ def _parse_xray_log_timestamp(line: str) -> float | None:
         return time_module.mktime(t)
     except ValueError:
         return None
+
+
+def _mask_ip_for_log(ip: str) -> str:
+    """Reduce an IP to a subnet-ish form for server logs (drop host identity).
+
+    Admins still receive full IPs in the Telegram alert where they are needed to
+    act; the server log only needs enough to spot a pattern, so the host portion
+    is masked to limit PII sitting in log files.
+    """
+    if ":" in ip:  # IPv6 — keep the first three hextets, mask the rest
+        parts = ip.split(":")
+        return ":".join(parts[:3]) + ":*" if len(parts) > 3 else ip
+    octets = ip.split(".")
+    if len(octets) == 4:
+        return ".".join([*octets[:3], "*"])  # /24, host octet masked
+    return "*"
+
+
+def _mask_ips_for_log(ips: frozenset[str], limit: int = 5) -> str:
+    """Render a bounded, host-masked sample of IPs for a log line."""
+    sample = sorted(ips)
+    masked = [_mask_ip_for_log(ip) for ip in sample[:limit]]
+    if len(sample) > limit:
+        masked.append(f"+{len(sample) - limit}")
+    return ", ".join(masked)
 
 
 class AnomalyDetectionService:
@@ -75,6 +107,9 @@ class AnomalyDetectionService:
         self._hysteria2_max_conn = hysteria2_max_conn
         # When > 0, threshold is checked against this shorter window instead of the full window.
         # Prevents false positives from mobile users whose IPs rotate over time.
+        # NOTE: the constructor default is 0 (full-window/legacy behaviour); the
+        # running bot passes the configured value, whose default is 600 (see
+        # config.settings.anomaly_concurrent_window_seconds and docs/configuration.md).
         self._concurrent_window_seconds = concurrent_window_seconds
         # Destructive auto-revoke is only safe when there is a *concurrency*
         # signal: over the full (default 1h) window a single roaming/mobile user
@@ -93,14 +128,34 @@ class AnomalyDetectionService:
         self._observations: dict[int, collections.deque[tuple[float, str]]] = {}
         # {key_id: last_alerted_wall_clock_float}
         self._last_alerted: dict[int, float] = {}
+        # Highest Xray access-log timestamp already ingested. The 2 MB log tail is
+        # re-parsed on every scan, so this high-water mark stops a historical line
+        # from being re-recorded each scan (which would re-stamp it to "now",
+        # doubling the effective window and defeating the concurrent-window check).
+        self._xray_log_high_water: float = 0.0
 
     async def check_all(self) -> None:
         """Sample all backends for connection IPs and fire alerts when thresholds are exceeded."""
         now = time_module.time()
+        self._evict_stale_last_alerted(now)
         await self._sample_awg_endpoints(now)
         await self._sample_xray_log(now)
         await self._check_thresholds(now)
         await self._check_hysteria_online(now)
+
+    def _evict_stale_last_alerted(self, now: float) -> None:
+        """Drop cooldown timestamps once their cooldown has fully elapsed.
+
+        Past the cooldown the entry no longer suppresses anything, so it can be
+        forgotten. Without this, Hysteria2 keys — which never get an observation
+        deque and so are never dropped by :meth:`_check_thresholds` — would
+        accumulate in ``_last_alerted`` for the process's lifetime.
+        """
+        if not self._last_alerted:
+            return
+        horizon = now - self._cooldown_seconds
+        for key_id in [kid for kid, ts in self._last_alerted.items() if ts < horizon]:
+            del self._last_alerted[key_id]
 
     # ------------------------------------------------------------------ AWG
 
@@ -142,12 +197,27 @@ class AnomalyDetectionService:
                 "Failed to parse Xray access log at %s", self._xray_access_log_path, exc_info=True
             )
             return
-        for key_id, ip in entries:
-            self._record_ip(key_id, now, ip)
+        # Record each connection at its OWN log timestamp (not `now`) and ingest
+        # only lines newer than the previous scan's high-water mark. The tail is
+        # re-parsed every scan, so recording at `now` and without a high-water gate
+        # would re-stamp the same historical line on every scan — persisting an IP
+        # for ~2x the window and letting a single past event count as "concurrent"
+        # across many scans. The future-skew guard drops timestamps ahead of our
+        # clock (e.g. a log written in a different timezone) instead of trusting them.
+        future_bound = now + _XRAY_LOG_FUTURE_SKEW_SECONDS
+        previous_high_water = self._xray_log_high_water
+        max_ts = previous_high_water
+        for key_id, ip, ts in entries:
+            if ts <= previous_high_water or ts > future_bound:
+                continue
+            self._record_ip(key_id, ts, ip)
+            if ts > max_ts:
+                max_ts = ts
+        self._xray_log_high_water = max_ts
 
     def _parse_xray_log_tail(
         self, cutoff: float, label_to_key: dict[str, int]
-    ) -> list[tuple[int, str]]:
+    ) -> list[tuple[int, str, float]]:
         path = Path(self._xray_access_log_path)
         if not path.exists():
             return []
@@ -158,7 +228,7 @@ class AnomalyDetectionService:
                 f.seek(read_from)
                 f.readline()  # skip possible partial line at seek boundary
             text = f.read().decode("utf-8", errors="replace")
-        entries: list[tuple[int, str]] = []
+        entries: list[tuple[int, str, float]] = []
         for line in text.splitlines():
             ts = _parse_xray_log_timestamp(line)
             if ts is None or ts < cutoff:
@@ -171,7 +241,7 @@ class AnomalyDetectionService:
             if key_id is None:
                 continue
             ip = ip_raw.strip("[]")
-            entries.append((key_id, ip))
+            entries.append((key_id, ip, ts))
         return entries
 
     # ------------------------------------------------------------ Threshold check
@@ -207,6 +277,9 @@ class AnomalyDetectionService:
         trigger_ips: frozenset[str],
         all_ips: frozenset[str],
     ) -> None:
+        # Log host-masked IPs only: the full IPs go to admins in the Telegram alert
+        # below (where they are needed to act), so the server log keeps just enough
+        # to spot a pattern without accumulating PII in log files.
         logger.warning(
             "Anomaly: key #%d (%s) owner=%d trigger_ips=%d all_ips=%d ips=%s",
             key.id,
@@ -214,7 +287,7 @@ class AnomalyDetectionService:
             key.owner_user_id,
             len(trigger_ips),
             len(all_ips),
-            sorted(trigger_ips),
+            _mask_ips_for_log(trigger_ips),
         )
         auto_revoked, revoke_error = await self._try_auto_revoke(key, enabled=self._auto_revoke_effective)
 

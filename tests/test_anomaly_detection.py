@@ -197,7 +197,8 @@ def test_parse_xray_log_tail_extracts_ips(tmp_path):
     label_to_key = {"xray_label1": 10, "xray_label2": 20}
     entries = svc._parse_xray_log_tail(now - 3600, label_to_key)
     key_ips: dict[int, set[str]] = {}
-    for key_id, ip in entries:
+    for key_id, ip, ts in entries:
+        assert isinstance(ts, float)
         key_ips.setdefault(key_id, set()).add(ip)
     assert key_ips.get(10) == {"1.2.3.4", "5.6.7.8"}
     assert key_ips.get(20) == {"9.9.9.9"}
@@ -379,3 +380,67 @@ def test_unique_ips_in_concurrent_window():
     # Prune main window first
     svc._unique_ips_in_window(1, now)
     assert svc._unique_ips_in_concurrent_window(1, now) == frozenset({"new.ip.1", "new.ip.2"})
+
+
+# ------------------------------------------------------------------ P5-007: Xray ts + high-water
+
+
+def test_sample_xray_log_records_real_ts_and_dedupes_on_rescan(tmp_path):
+    """A historical Xray log line is recorded at its own timestamp and only once.
+
+    The 2 MB tail is re-parsed every scan; without the high-water gate and with
+    recording at `now`, the same past event would be re-stamped to "now" each
+    scan — inflating the window and wrongly counting as "concurrent". Here the
+    event is 50 min old (inside the 60-min window, outside the 10-min concurrent
+    window) and must never register as concurrent, even after a re-scan.
+    """
+    import datetime as dt
+
+    key = _xray_key(key_id=30, email_label="xray_label1")
+
+    def _list(key_type, statuses, limit, after_id):
+        return [key] if after_id == 0 else []
+
+    vpn_keys_mock = AsyncMock()
+    vpn_keys_mock.list_by_type_statuses = AsyncMock(side_effect=_list)
+
+    svc = _make_service(
+        vpn_keys=vpn_keys_mock,
+        xray_access_log_path=str(tmp_path / "access.log"),
+        window_seconds=3600,
+        concurrent_window_seconds=600,
+    )
+
+    now = time_module.time()
+    event_ts = now - 3000  # 50 min ago
+    ts_str = dt.datetime.fromtimestamp(event_ts).strftime("%Y/%m/%d %H:%M:%S")
+    (tmp_path / "access.log").write_text(
+        f"{ts_str} from 1.2.3.4:5678 accepted tcp:x.com:443 email: xray_label1 [vless]\n"
+    )
+
+    asyncio.run(svc._sample_xray_log(now))
+
+    obs = svc._observations.get(30)
+    assert obs is not None and len(obs) == 1
+    recorded_ts, recorded_ip = obs[0]
+    assert recorded_ip == "1.2.3.4"
+    # Recorded at the event's OWN timestamp (not `now`).
+    assert abs(recorded_ts - event_ts) < 1.0
+    # 50-min-old event is NOT within the 10-min concurrent window.
+    assert svc._unique_ips_in_concurrent_window(30, now) == frozenset()
+
+    # Re-scanning the identical tail must not re-record the line.
+    asyncio.run(svc._sample_xray_log(now + 1))
+    assert len(svc._observations[30]) == 1
+    assert svc._unique_ips_in_concurrent_window(30, now + 1) == frozenset()
+
+
+def test_evict_stale_last_alerted_drops_expired_entries():
+    """Cooldown timestamps past the cooldown horizon are forgotten (P5-010)."""
+    svc = _make_service(cooldown_seconds=7200)
+    now = time_module.time()
+    svc._last_alerted[1] = now - 100      # fresh — keep
+    svc._last_alerted[2] = now - 10_000   # older than cooldown — evict
+    svc._evict_stale_last_alerted(now)
+    assert 1 in svc._last_alerted
+    assert 2 not in svc._last_alerted
