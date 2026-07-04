@@ -73,6 +73,10 @@ class Socks5Service:
             # _lock serialises Dante adapter calls against concurrent revoke/delete.
             # Lock order: user_lock (per-user dedup) → _lock (Dante serialisation).
             async with self._lock:
+                # Re-check under the serialization lock: the backend may have been
+                # marked degraded while we waited to acquire _lock, after the
+                # pre-lock check above passed.
+                self.backend_health.require_mutation_allowed(ProxyAccessType.SOCKS5)
                 await self._ensure_can_issue(actor_user_id, profile.telegram_user_id)
                 login = await self._unique_login(profile.telegram_user_id)
                 password = self._generate_password()

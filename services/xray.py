@@ -21,6 +21,7 @@ from services.notes import normalize_note
 from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
+from utils.redact import redact_value
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +211,10 @@ class XrayService:
         async with self.user_locks.lock(owner.telegram_user_id):
             await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
             async with self._lock:
+                # Re-check under the serialization lock: the backend may have been
+                # marked degraded (by reconcile or a failed compensation) while we
+                # waited to acquire _lock, after the pre-lock check above passed.
+                self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
                 await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
                 uuid_value, email_label = await self._unique_identity(self._email_prefix(transport, profile))
                 # http keys ride vless-in's REALITY via the XHTTP fallback dest,
@@ -269,7 +274,7 @@ class XrayService:
                         action="xray_create_failed",
                         entity_type=AuditEntityType.VPN_KEY,
                         entity_id=key.id,
-                        details={"owner_user_id": owner.telegram_user_id, "error": str(exc)},
+                        details={"owner_user_id": owner.telegram_user_id, "error": redact_value(str(exc))},
                     )
                     raise
 
@@ -312,6 +317,8 @@ class XrayService:
         """Revoke an Xray key and remove its client from the running config."""
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         async with self._lock:
+            # Re-check under the lock (degraded may have been set while we waited).
+            self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
             key = await self._get_xray_key_for_manage(actor_user_id, key_id)
             if key.status == VpnKeyStatus.REVOKED:
                 return key
@@ -359,6 +366,8 @@ class XrayService:
         """
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         async with self._lock:
+            # Re-check under the lock (degraded may have been set while we waited).
+            self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
             key = await self._get_key(key_id)
             if key.key_type != VpnKeyType.XRAY:
                 raise InvalidOperation("Это не Xray-ключ")
@@ -392,6 +401,8 @@ class XrayService:
         """Remove the Xray client and hard-delete the key record."""
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         async with self._lock:
+            # Re-check under the lock (degraded may have been set while we waited).
+            self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
             key = await self._get_xray_key_for_manage(actor_user_id, key_id)
             previous_status = key.status
             await self.vpn_keys.set_status(key_id, VpnKeyStatus.PENDING_DELETE, self.clock.now())

@@ -120,9 +120,31 @@ class HysteriaService:
                 # Flip straight to ACTIVE: mark_active transitions PENDING_APPLY ->
                 # ACTIVE, so the status guard stays intact even though there is no
                 # backend apply between the two writes.
-                await self.vpn_keys.mark_active(
-                    key.id, self.clock.now(), payload=payload, public_payload=public_payload
-                )
+                try:
+                    await self.vpn_keys.mark_active(
+                        key.id, self.clock.now(), payload=payload, public_payload=public_payload
+                    )
+                except Exception as exc:
+                    # There is no backend artefact to unwind (the hy2_auth endpoint
+                    # authenticates only ACTIVE rows, so a stuck PENDING_APPLY key is
+                    # never usable). Best-effort mark it APPLY_FAILED so it does not
+                    # linger as a dangling PENDING_APPLY row (Hysteria has no startup
+                    # reconcile), then re-raise.
+                    try:
+                        await self.vpn_keys.set_status(key.id, VpnKeyStatus.APPLY_FAILED, self.clock.now())
+                    except Exception:
+                        logger.warning(
+                            "Hysteria2 mark_active failed and could not mark key apply_failed key_id=%s",
+                            key.id,
+                            exc_info=True,
+                        )
+                    await self._write_audit_best_effort(
+                        actor_user_id=actor_user_id,
+                        action="hysteria2_apply_failed",
+                        entity_id=key.id,
+                        details={"owner_user_id": owner.telegram_user_id, "label": label, "error": str(exc)},
+                    )
+                    raise
                 await self._write_audit_best_effort(
                     actor_user_id=actor_user_id,
                     action="hysteria2_key_created",

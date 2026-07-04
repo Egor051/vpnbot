@@ -247,13 +247,23 @@ class UserService:
                 },
             )
             await self.clear_user_state(target_user_id)
+            proxy_wired = self._proxy_accesses is not None and bool(self._proxy_revokers)
             if revoke_active_keys:
                 if self._vpn_keys is None or not self._key_revokers:
                     errors.append(KeyOperationError(0, VpnKeyType.XRAY, "Сервисы отзыва ключей не подключены"))
                 else:
                     await self._revoke_all_access_keys(actor_user_id, target_user_id, revoked_key_ids, errors)
-                if self._proxy_accesses is not None and self._proxy_revokers:
+                if proxy_wired:
                     await self._revoke_all_proxy_accesses(actor_user_id, target_user_id, revoked_proxy_ids, errors)
+
+            # Report VPN and proxy completeness independently, keyed off the error's
+            # backend family, so a proxy-only failure does not flag VPN as incomplete
+            # and vice versa. Proxy revocation counts as complete only when it was
+            # actually wired/attempted — otherwise residual proxy access may remain.
+            proxy_error_types = {ProxyAccessType.SOCKS5, ProxyAccessType.MTPROTO}
+            proxy_errors = [item for item in errors if item.key_type in proxy_error_types]
+            vpn_errors = [item for item in errors if item.key_type not in proxy_error_types]
+            proxy_attempted = revoke_active_keys and proxy_wired
 
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
@@ -267,8 +277,8 @@ class UserService:
                     "error_count": len(errors),
                     "errors": [{"key_id": item.key_id, "key_type": item.key_type.value, "error": item.error} for item in errors],
                     "bot_access_blocked": True,
-                    "vpn_revoke_complete": not errors,
-                    "proxy_revoke_complete": not any(getattr(item.key_type, "value", "") in {"socks5", "mtproto"} for item in errors),
+                    "vpn_revoke_complete": not vpn_errors,
+                    "proxy_revoke_complete": proxy_attempted and not proxy_errors,
                 },
             )
             user = await self.get_user(target_user_id)
@@ -408,6 +418,7 @@ class UserService:
                 target_user_id,
                 UNBLOCK_ACCESS_MAY_EXIST_STATUSES,
             )
+        inactive_static_mtproto_count = 0
         if self._proxy_accesses is not None:
             proxy_accesses = await self._proxy_accesses.list_by_owner_statuses(
                 target_user_id,
@@ -419,17 +430,31 @@ class UserService:
                     ProxyAccessStatus.REVOKE_FAILED,
                     ProxyAccessStatus.PENDING_DELETE,
                     ProxyAccessStatus.DELETE_FAILED,
+                    # INACTIVE is produced only by static-MTProto deactivation, where
+                    # the shared MTPROTO_SECRET keeps working until it is rotated — a
+                    # residual-access signal the admin must see before unblocking.
+                    ProxyAccessStatus.INACTIVE,
                 },
                 limit=500,
             )
             active_or_problem_key_count += len(proxy_accesses)
+            inactive_static_mtproto_count = sum(
+                1
+                for access in proxy_accesses
+                if access.status == ProxyAccessStatus.INACTIVE and access.access_type == ProxyAccessType.MTPROTO
+            )
         previous_revoke_error_count, last_block_error_at = await self._last_block_revoke_error(target_user_id)
 
         reasons: list[str] = []
         if previous_revoke_error_count:
             reasons.append(f"предыдущая блокировка завершилась с ошибками отзыва: {previous_revoke_error_count}")
         if active_or_problem_key_count:
-            reasons.append(f"ключей в статусах, где VPN-доступ мог сохраниться: {active_or_problem_key_count}")
+            reasons.append(f"ключей/доступов в статусах, где доступ мог сохраниться: {active_or_problem_key_count}")
+        if inactive_static_mtproto_count:
+            reasons.append(
+                "static-MTProto деактивирован, но общий секрет работает до ротации MTPROTO_SECRET: "
+                f"{inactive_static_mtproto_count}"
+            )
         return UnblockUserWarning(
             user=target,
             has_warning=bool(reasons),

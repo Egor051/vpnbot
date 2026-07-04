@@ -274,6 +274,10 @@ class MtProtoService:
                 await self._mark_shown(active, actor_user_id)
                 return self._with_current_payload(await self._get_access(existing.id))
             async with self._apply_lock:
+                # Re-check under the apply lock: the backend may have been marked
+                # degraded while we waited, after the pre-lock check in
+                # issue_mtproto_proxy passed.
+                self.backend_health.require_mutation_allowed(ProxyAccessType.MTPROTO)
                 existing = await self._active_access(profile.telegram_user_id)
                 if existing is not None:
                     active = self._with_current_payload(existing)
@@ -365,6 +369,8 @@ class MtProtoService:
 
     async def _revoke_managed(self, access: ProxyAccess, actor_user_id: int, reason: str | None) -> ProxyAccess:
         async with self._apply_lock:
+            # Re-check under the apply lock (degraded may have been set while we waited).
+            self.backend_health.require_mutation_allowed(ProxyAccessType.MTPROTO)
             access = await self._get_access(access.id)
             if access.status in {ProxyAccessStatus.REVOKED, ProxyAccessStatus.INACTIVE, ProxyAccessStatus.DELETED}:
                 return self._with_current_payload(access)

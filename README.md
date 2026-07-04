@@ -67,7 +67,7 @@ follow the [Deployment](#deployment) section rather than this evaluation flow.
 - Separate one-page Telegram section "Прокси" for SOCKS5/Dante auto-issue and Telegram MTProto Proxy links.
 - MTProto supports `static` compatibility mode and `managed` mode with per-user secrets, safe apply, and rollback.
 - Optional WARP outbound-IP masking module: server-side AmneziaWG (`out-warp`) tunnel that hides the server's outbound IP for selected "spy" apps, with automatic health-based fallback. Disabled by default — see [WARP](docs/warp.md).
-- Ownership checks so users can view their own configs/stats; destructive VPN and proxy lifecycle actions are admin-only.
+- Ownership checks so users can view their own configs/stats; proxy (SOCKS5/MTProto) revoke/delete are admin-only, while VPN key (Xray/AWG/Hysteria2) revoke/delete are available to the key owner and to admins.
 - Audit log with recursive masking for sensitive values.
 - SQLite storage with migrations from `db/schema.sql`, rotating local logs, and a systemd deployment unit.
 - Background workers: key-expiry checks, traffic-stats sampling, anomaly detection, scheduled announcements, and encrypted off-site backups.
