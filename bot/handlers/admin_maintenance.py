@@ -85,6 +85,7 @@ async def admin_maintenance_enable_message(message: Message, state: FSMContext, 
         return
     await state.clear()
     try:
+        await require_superadmin(services, message.from_user.id)
         await _enable_and_broadcast(message.from_user.id, message.text, services, bot)
         await message.answer(
             _panel_text(services),
@@ -104,6 +105,7 @@ async def admin_maintenance_enable_default(callback: CallbackQuery, state: FSMCo
     if callback.from_user is None or callback.message is None:
         return
     try:
+        await require_superadmin(services, callback.from_user.id)
         await _enable_and_broadcast(callback.from_user.id, None, services, bot)
         await safe_edit_message_text(
             callback.message,

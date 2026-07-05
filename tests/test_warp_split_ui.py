@@ -148,13 +148,13 @@ def test_panel_renders_entries_from_manager(monkeypatch) -> None:
 
     assert st.cleared is True
     text, markup = cb.message.edits[-1]
-    assert "2 префиксов" in text
+    assert "префиксов: 2" in text
     btns = _buttons(markup)
     assert ("1.0.0.0/24", "noop") in btns
     assert ("🗑", "wsplit:del:1.0.0.0/24") in btns
     assert any(data == "wsplit:add" for _, data in btns)
-    # Split GUI is now entered from «Настройки WARP», so Back returns there.
-    assert ("⬅ Назад в настройки", "admin:warp:settings") in btns
+    # Split GUI is entered from WARP settings, so Back returns there.
+    assert ("‹ К настройкам", "admin:warp:settings") in btns
 
 
 def test_empty_panel_has_no_apply_button(monkeypatch) -> None:
@@ -167,7 +167,7 @@ def test_empty_panel_has_no_apply_button(monkeypatch) -> None:
     btns = _buttons(cb.message.edits[-1][1])
     assert any(data == "wsplit:add" for _, data in btns)
     assert all(data != "wsplit:apply" for _, data in btns)
-    assert "0 префиксов" in cb.message.edits[-1][0]
+    assert "префиксов: 0" in cb.message.edits[-1][0]
 
 
 # ── add (FSM) ────────────────────────────────────────────────────────────────
@@ -203,7 +203,7 @@ def test_add_receive_parses_and_applies(monkeypatch) -> None:
     assert st.cleared is True
     # panel re-sent as a fresh message after the report
     assert msg.answers
-    assert "selective-split" in msg.answers[-1][0]
+    assert "split-маршруты" in msg.answers[-1][0]
 
 
 def test_add_receive_no_tokens_keeps_waiting(monkeypatch) -> None:

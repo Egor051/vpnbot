@@ -767,4 +767,60 @@ STRINGS: dict[str, str] = {
     "warp_restarted_ok": "🔄 Модуль WARP перезапущен.",
     "warp_last_error": "⚠️ {error}",
     "warp_processing": "Выполняется…",
+    # ── Дашборд ──────────────────────────────────────────────────────────────
+    "btn_dashboard": "📊 Дашборд",
+    "btn_dashboard_refresh": "🔄 Обновить",
+    "dashboard_refreshing": "Обновляю…",
+    # ── Пакеты рассылок ──────────────────────────────────────────────────────
+    "btn_batch_continue": "▶️ Продолжить #{id}",
+    "btn_batch_retry": "🔁 Повторить ошибки #{id}",
+    "btn_batch_cancel": "🚫 Отменить #{id}",
+    # ── WARP split-маршруты ──────────────────────────────────────────────────
+    "btn_warp_split_add": "➕ Добавить",
+    "btn_warp_split_apply": "🔄 Применить",
+    "btn_yes": "✅ Да",
+    "btn_no": "❌ Нет",
+    "warp_split_panel_title": "<b>WARP split-маршруты</b> — префиксов: {count}",
+    "warp_split_empty_hint": "Список пуст. Нажмите «➕ Добавить», чтобы добавить первый префикс.",
+    "warp_split_add_prompt": (
+        "Пришлите IPv4 CIDR (можно несколько через пробел, запятую или перенос строки).\n"
+        "Маска обязательна, например: <code>91.108.4.0/22 142.250.0.0/15</code>\n\n"
+        "Для отмены нажмите кнопку ниже или отправьте /cancel."
+    ),
+    "warp_split_no_cidr": "Не найдено ни одного CIDR. Пришлите префикс(ы) или нажмите «Отмена».",
+    "warp_split_delete_confirm": "Удалить префикс {cidr} из списка split-маршрутов?",
+    "warp_split_apply_empty": "Список пуст — применять нечего. Добавьте хотя бы один префикс.",
+    "warp_split_applied": "🔄 Маршрутизация WARP-split перезапущена. Применено префиксов: {count}.",
+    "warp_split_reject": "Отказ: {error}",
+    "warp_split_apply_error": "Ошибка применения: {error}",
+    "warp_split_list_empty": "Список split-маршрутов пуст или файл не существует.",
+    "warp_split_list_header": "<b>Список split-маршрутов</b> — префиксов: {count}",
+    "warp_split_add_usage": (
+        "Использование: /warp_split_add &lt;cidr&gt; [&lt;cidr&gt; ...]\n"
+        "Пример: /warp_split_add 91.108.4.0/22 142.250.0.0/15\n"
+        "Маска обязательна (голый IP отклоняется)."
+    ),
+    "warp_split_del_usage": (
+        "Использование: /warp_split_del &lt;cidr&gt; [&lt;cidr&gt; ...]\n"
+        "Пример: /warp_split_del 91.108.4.0/22"
+    ),
+    "warp_split_no_tokens": "Не найдено ни одного токена для разбора.",
+    "warp_split_reload_empty": (
+        "Список пуст или файл не существует — перезагрузка невозможна.\n"
+        "Добавьте хотя бы один префикс командой /warp_split_add."
+    ),
+    "warp_split_reload_error": "Ошибка перезагрузки: {error}",
+    "warp_split_reloaded": (
+        "Маршрутизация WARP-split перезапущена.\n"
+        "Применено {count} префиксов из текущего файла."
+    ),
+    "warp_split_report_added": "✓ добавлен {cidr}",
+    "warp_split_report_added_note": "✓ добавлен {cidr} ({note})",
+    "warp_split_report_dup": "— уже есть {cidr}",
+    "warp_split_report_rejected": "✗ отклонён {cidr} — {note}",
+    "warp_split_report_removed": "✓ удалён {cidr}",
+    "warp_split_report_not_found": "— не найден {cidr}{note}",
+    "warp_split_report_unchanged": "Список не изменён.",
+    "warp_split_report_applied_add": "Применено: +{count} префиксов, маршрутизация WARP-split перезапущена.",
+    "warp_split_report_applied_del": "Применено: -{count} префиксов, маршрутизация WARP-split перезапущена.",
 }

@@ -51,7 +51,7 @@ async def admin_dashboard_refresh(callback: CallbackQuery, services: Services) -
     """Refresh the admin live dashboard in place."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
-    await safe_callback_answer(callback, "Обновляю...")
+    await safe_callback_answer(callback, t("dashboard_refreshing"))
     await _render_dashboard(callback, services)
 
 
@@ -120,6 +120,16 @@ def stop_server_status_auto_refresh(message: Message | InaccessibleMessage | Non
 async def admin_server_status(callback: CallbackQuery, services: Services) -> None:
     """Open the real-time server status panel."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None:
+        return
+    # Enforce the superadmin gate before any side-effect: reset_network_history()
+    # mutates the shared sampler and the auto-refresh loop touches the host, so a
+    # forged callback must not reach them just because it renders nothing.
+    try:
+        await require_superadmin(services, callback.from_user.id)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
         return
     await safe_callback_answer(callback, t("updating_server_status"))
     # Start each freshly opened panel from an empty sparkline window so columns

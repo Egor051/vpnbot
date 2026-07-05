@@ -197,7 +197,7 @@ def after_key_created_keyboard(key: VpnKey) -> InlineKeyboardMarkup:
     )
 
 
-def expiry_choice_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+def expiry_choice_keyboard() -> InlineKeyboardMarkup:
     """Build the key expiry duration selection keyboard."""
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text=t("btn_permanent"), callback_data="expiry:permanent")],

@@ -75,3 +75,14 @@ def t(key: str, **kwargs: object) -> str:
     if kwargs:
         return value.format_map(kwargs)
     return value
+
+
+def all_variants(key: str) -> frozenset[str]:
+    """Return every non-empty translation of *key* across all catalogues.
+
+    Message-text filters (e.g. matching a reply-keyboard button press) are built
+    once at import time, before any per-user locale is active, so a plain
+    ``F.text == t(key)`` only ever matches the process-default locale. Matching
+    against this set instead accepts the button in any language.
+    """
+    return frozenset(value for catalog in _CATALOGS.values() if (value := catalog.get(key)))
