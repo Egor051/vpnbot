@@ -46,7 +46,7 @@ def dashboard_keyboard() -> InlineKeyboardMarkup:
     """Build the refresh/back inline keyboard for the admin dashboard."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:dashboard:refresh")],
+            [InlineKeyboardButton(text=t("btn_dashboard_refresh"), callback_data="admin:dashboard:refresh")],
             [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")],
         ]
     )
@@ -97,7 +97,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_server_status"), callback_data="admin:server_status")],
-            [InlineKeyboardButton(text="📊 Дашборд", callback_data="admin:dashboard")],
+            [InlineKeyboardButton(text=t("btn_dashboard"), callback_data="admin:dashboard")],
             [InlineKeyboardButton(text=t("btn_access_requests"), callback_data="admin:reqs")],
             [InlineKeyboardButton(text=t("btn_users"), callback_data="admin:users")],
             [InlineKeyboardButton(text=t("btn_issue_key_to_user"), callback_data="admin:issue")],
@@ -204,12 +204,12 @@ def announcement_batches_keyboard(batches: list[AnnouncementBatch]) -> InlineKey
         if batch.status == "scheduled":
             actions.append(InlineKeyboardButton(text=f"{t('btn_send_now')} #{batch.id}", callback_data=f"admin:announce:resume:{batch.id}"))
         if batch.status in {"pending", "sending"}:
-            actions.append(InlineKeyboardButton(text=f"Continue #{batch.id}", callback_data=f"admin:announce:resume:{batch.id}"))
+            actions.append(InlineKeyboardButton(text=t("btn_batch_continue", id=batch.id), callback_data=f"admin:announce:resume:{batch.id}"))
         if batch.status == "failed":
-            actions.append(InlineKeyboardButton(text=f"Retry errors #{batch.id}", callback_data=f"admin:announce:retry:{batch.id}"))
+            actions.append(InlineKeyboardButton(text=t("btn_batch_retry", id=batch.id), callback_data=f"admin:announce:retry:{batch.id}"))
         if actions:
             rows.append(actions)
-        rows.append([InlineKeyboardButton(text=f"Cancel #{batch.id}", callback_data=f"admin:announce:cancelbatch:{batch.id}")])
+        rows.append([InlineKeyboardButton(text=t("btn_batch_cancel", id=batch.id), callback_data=f"admin:announce:cancelbatch:{batch.id}")])
     rows.append([InlineKeyboardButton(text=t("btn_refresh"), callback_data="admin:announce_batches")])
     rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

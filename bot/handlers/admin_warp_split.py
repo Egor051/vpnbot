@@ -24,6 +24,7 @@ from bot.handlers.common import answer_message_error
 from bot.private_chat import ensure_private_message
 from i18n import t
 from services.errors import InvalidOperation
+from utils.formatting import code, h
 from warp.split_manager import WarpSplitError, parse_cidr_tokens
 
 router = Router()
@@ -45,10 +46,10 @@ async def warp_split_list_cmd(message: Message, services: Services) -> None:
         mgr = services.warp_split
         entries = mgr.read_list()
         if not entries:
-            await message.answer("Список WARP split пуст или файл не существует.")
+            await message.answer(t("warp_split_list_empty"))
             return
-        lines = [f"<b>WARP split-list</b> ({len(entries)} prefix'ов):"]
-        lines.extend(f"  <code>{e}</code>" for e in entries)
+        lines = [t("warp_split_list_header", count=len(entries))]
+        lines.extend(f"  {code(e)}" for e in entries)
         await message.answer("\n".join(lines))
     except Exception as exc:
         await answer_message_error(message, exc)
@@ -74,16 +75,12 @@ async def warp_split_add_cmd(message: Message, services: Services) -> None:
 
         raw_args = _extract_args(message.text or "", "/warp_split_add")
         if not raw_args.strip():
-            await message.answer(
-                "Использование: /warp_split_add <cidr> [<cidr> ...]\n"
-                "Пример: /warp_split_add 91.108.4.0/22 142.250.0.0/15\n"
-                "Маска обязательна (голый IP отклоняется)."
-            )
+            await message.answer(t("warp_split_add_usage"))
             return
 
         tokens = parse_cidr_tokens(raw_args)
         if not tokens:
-            await message.answer("Не найдено ни одного токена для разбора.")
+            await message.answer(t("warp_split_no_tokens"))
             return
 
         mgr = services.warp_split
@@ -108,9 +105,9 @@ async def warp_split_add_cmd(message: Message, services: Services) -> None:
         await message.answer(_format_add_report(results, changed=True))
 
     except WarpSplitError as exc:
-        await message.answer(f"Ошибка применения: {exc}")
+        await message.answer(t("warp_split_apply_error", error=h(exc)))
     except InvalidOperation as exc:
-        await message.answer(f"Отказ: {exc}")
+        await message.answer(t("warp_split_reject", error=h(exc)))
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -134,15 +131,12 @@ async def warp_split_del_cmd(message: Message, services: Services) -> None:
 
         raw_args = _extract_args(message.text or "", "/warp_split_del")
         if not raw_args.strip():
-            await message.answer(
-                "Использование: /warp_split_del <cidr> [<cidr> ...]\n"
-                "Пример: /warp_split_del 91.108.4.0/22"
-            )
+            await message.answer(t("warp_split_del_usage"))
             return
 
         tokens = parse_cidr_tokens(raw_args)
         if not tokens:
-            await message.answer("Не найдено ни одного токена для разбора.")
+            await message.answer(t("warp_split_no_tokens"))
             return
 
         mgr = services.warp_split
@@ -159,9 +153,9 @@ async def warp_split_del_cmd(message: Message, services: Services) -> None:
         await message.answer(_format_del_report(results, changed=True))
 
     except WarpSplitError as exc:
-        await message.answer(f"Отказ: {exc}")
+        await message.answer(t("warp_split_reject", error=h(exc)))
     except InvalidOperation as exc:
-        await message.answer(f"Отказ: {exc}")
+        await message.answer(t("warp_split_reject", error=h(exc)))
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -182,20 +176,14 @@ async def warp_split_reload_cmd(message: Message, services: Services) -> None:
         mgr = services.warp_split
         current_list = mgr.read_list()
         if not current_list:
-            await message.answer(
-                "Список пуст или файл не существует — перезагрузка невозможна.\n"
-                "Добавь хотя бы один префикс командой /warp_split_add."
-            )
+            await message.answer(t("warp_split_reload_empty"))
             return
 
         await mgr.apply_list(current_list)
-        await message.answer(
-            f"vpnbot-warp-split перезапущен.\n"
-            f"Применено {len(current_list)} prefix'ов из текущего файла."
-        )
+        await message.answer(t("warp_split_reloaded", count=len(current_list)))
 
     except WarpSplitError as exc:
-        await message.answer(f"Ошибка перезагрузки: {exc}")
+        await message.answer(t("warp_split_reload_error", error=h(exc)))
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -208,19 +196,19 @@ def _format_add_report(results: list, *, changed: bool) -> str:  # type: ignore[
     for r in results:
         if r.status == "added":
             if r.note:
-                lines.append(f"✓ добавлен <code>{r.canonical}</code> ({r.note})")
+                lines.append(t("warp_split_report_added_note", cidr=code(r.canonical), note=h(r.note)))
             else:
-                lines.append(f"✓ добавлен <code>{r.canonical}</code>")
+                lines.append(t("warp_split_report_added", cidr=code(r.canonical)))
         elif r.status == "dup":
-            lines.append(f"— уже есть <code>{r.canonical or r.raw}</code>")
+            lines.append(t("warp_split_report_dup", cidr=code(r.canonical or r.raw)))
         elif r.status == "rejected":
-            lines.append(f"✗ отклонён <code>{r.raw}</code> — {r.note}")
+            lines.append(t("warp_split_report_rejected", cidr=code(r.raw), note=h(r.note)))
 
     if not changed:
-        lines.append("\nСписок не изменён.")
+        lines.append("\n" + t("warp_split_report_unchanged"))
     else:
         added_count = sum(1 for r in results if r.status == "added")
-        lines.append(f"\nПрименено: +{added_count} prefix'ов, vpnbot-warp-split перезапущен.")
+        lines.append("\n" + t("warp_split_report_applied_add", count=added_count))
 
     return "\n".join(lines)
 
@@ -229,16 +217,16 @@ def _format_del_report(results: list, *, changed: bool) -> str:  # type: ignore[
     lines: list[str] = []
     for r in results:
         if r.status == "removed":
-            lines.append(f"✓ удалён <code>{r.canonical}</code>")
+            lines.append(t("warp_split_report_removed", cidr=code(r.canonical)))
         elif r.status == "not_found":
-            note = f" ({r.note})" if r.note else ""
-            lines.append(f"— не найден <code>{r.canonical or r.raw}</code>{note}")
+            note = f" ({h(r.note)})" if r.note else ""
+            lines.append(t("warp_split_report_not_found", cidr=code(r.canonical or r.raw), note=note))
 
     if not changed:
-        lines.append("\nСписок не изменён.")
+        lines.append("\n" + t("warp_split_report_unchanged"))
     else:
         removed_count = sum(1 for r in results if r.status == "removed")
-        lines.append(f"\nПрименено: -{removed_count} prefix'ов, vpnbot-warp-split перезапущен.")
+        lines.append("\n" + t("warp_split_report_applied_del", count=removed_count))
 
     return "\n".join(lines)
 

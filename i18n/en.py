@@ -763,4 +763,60 @@ STRINGS: dict[str, str] = {
     "warp_restarted_ok": "🔄 WARP module restarted.",
     "warp_last_error": "⚠️ {error}",
     "warp_processing": "Working…",
+    # ── Dashboard ────────────────────────────────────────────────────────────
+    "btn_dashboard": "📊 Dashboard",
+    "btn_dashboard_refresh": "🔄 Refresh",
+    "dashboard_refreshing": "Refreshing…",
+    # ── Announcement batches ─────────────────────────────────────────────────
+    "btn_batch_continue": "▶️ Continue #{id}",
+    "btn_batch_retry": "🔁 Retry errors #{id}",
+    "btn_batch_cancel": "🚫 Cancel #{id}",
+    # ── WARP split routes ────────────────────────────────────────────────────
+    "btn_warp_split_add": "➕ Add",
+    "btn_warp_split_apply": "🔄 Apply",
+    "btn_yes": "✅ Yes",
+    "btn_no": "❌ No",
+    "warp_split_panel_title": "<b>WARP split routes</b> — prefixes: {count}",
+    "warp_split_empty_hint": "The list is empty. Tap “➕ Add” to add the first prefix.",
+    "warp_split_add_prompt": (
+        "Send one or more IPv4 CIDRs (separated by spaces, commas or newlines).\n"
+        "The mask is required, e.g.: <code>91.108.4.0/22 142.250.0.0/15</code>\n\n"
+        "Tap the button below or send /cancel to abort."
+    ),
+    "warp_split_no_cidr": "No CIDR found. Send prefix(es) or tap “Cancel”.",
+    "warp_split_delete_confirm": "Remove prefix {cidr} from the split routes list?",
+    "warp_split_apply_empty": "The list is empty — nothing to apply. Add at least one prefix.",
+    "warp_split_applied": "🔄 WARP split routing restarted. Prefixes applied: {count}.",
+    "warp_split_reject": "Rejected: {error}",
+    "warp_split_apply_error": "Apply error: {error}",
+    "warp_split_list_empty": "The split routes list is empty or the file does not exist.",
+    "warp_split_list_header": "<b>Split routes list</b> — prefixes: {count}",
+    "warp_split_add_usage": (
+        "Usage: /warp_split_add &lt;cidr&gt; [&lt;cidr&gt; ...]\n"
+        "Example: /warp_split_add 91.108.4.0/22 142.250.0.0/15\n"
+        "The mask is required (a bare IP is rejected)."
+    ),
+    "warp_split_del_usage": (
+        "Usage: /warp_split_del &lt;cidr&gt; [&lt;cidr&gt; ...]\n"
+        "Example: /warp_split_del 91.108.4.0/22"
+    ),
+    "warp_split_no_tokens": "No tokens to parse were found.",
+    "warp_split_reload_empty": (
+        "The list is empty or the file does not exist — reload is not possible.\n"
+        "Add at least one prefix with /warp_split_add."
+    ),
+    "warp_split_reload_error": "Reload error: {error}",
+    "warp_split_reloaded": (
+        "WARP split routing restarted.\n"
+        "Applied {count} prefixes from the current file."
+    ),
+    "warp_split_report_added": "✓ added {cidr}",
+    "warp_split_report_added_note": "✓ added {cidr} ({note})",
+    "warp_split_report_dup": "— already present {cidr}",
+    "warp_split_report_rejected": "✗ rejected {cidr} — {note}",
+    "warp_split_report_removed": "✓ removed {cidr}",
+    "warp_split_report_not_found": "— not found {cidr}{note}",
+    "warp_split_report_unchanged": "List unchanged.",
+    "warp_split_report_applied_add": "Applied: +{count} prefixes, WARP split routing restarted.",
+    "warp_split_report_applied_del": "Applied: -{count} prefixes, WARP split routing restarted.",
 }

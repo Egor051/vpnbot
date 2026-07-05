@@ -37,27 +37,21 @@ from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from i18n import t
 from services.errors import InvalidOperation
-from utils.formatting import code
+from utils.formatting import code, h
 from warp.split_manager import parse_cidr_tokens
 
 router = Router()
 logger = logging.getLogger(__name__)
-
-_PROMPT = (
-    "Пришли IPv4 CIDR (можно несколько через пробел, запятую или перенос строки).\n"
-    "Маска обязательна, например: <code>91.108.4.0/22 142.250.0.0/15</code>\n\n"
-    "Для отмены нажми кнопку ниже или отправь /cancel."
-)
 
 
 # ── text / render helpers ────────────────────────────────────────────────────
 
 
 def _panel_text(entries: list[str]) -> str:
-    lines = [f"<b>WARP selective-split</b> — {len(entries)} префиксов"]
+    lines = [t("warp_split_panel_title", count=len(entries))]
     if not entries:
         lines.append("")
-        lines.append("Список пуст. Нажми «➕ Добавить», чтобы добавить первый префикс.")
+        lines.append(t("warp_split_empty_hint"))
     return "\n".join(lines)
 
 
@@ -132,7 +126,7 @@ async def warp_split_add_start(callback: CallbackQuery, state: FSMContext, servi
     try:
         await require_superadmin(services, callback.from_user.id)
         await state.set_state(WarpSplitStates.waiting_cidrs)
-        await safe_edit_message_text(callback.message, _PROMPT, reply_markup=warp_split_add_keyboard())
+        await safe_edit_message_text(callback.message, t("warp_split_add_prompt"), reply_markup=warp_split_add_keyboard())
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -149,7 +143,7 @@ async def warp_split_add_receive(message: Message, state: FSMContext, services: 
         tokens = parse_cidr_tokens(message.text or "")
         if not tokens:
             await message.answer(
-                "Не найдено ни одного CIDR. Пришли префикс(ы) или нажми «Отмена».",
+                t("warp_split_no_cidr"),
                 reply_markup=warp_split_add_keyboard(),
             )
             return
@@ -166,7 +160,7 @@ async def warp_split_add_receive(message: Message, state: FSMContext, services: 
         await _answer_panel(message, services, prefix=_format_add_report(results, changed=changed))
     except InvalidOperation as exc:
         await state.clear()
-        await _answer_panel(message, services, prefix=f"Отказ: {exc}")
+        await _answer_panel(message, services, prefix=t("warp_split_reject", error=h(exc)))
     except Exception as exc:
         await state.clear()
         await answer_message_error(message, exc)
@@ -195,7 +189,7 @@ async def warp_split_del_execute(callback: CallbackQuery, services: Services) ->
         await _render_panel(callback, services, 0, prefix=_format_del_report(results, changed=changed))
     except InvalidOperation as exc:
         # guard-reject / del-to-empty / helper failure — show it, don't crash.
-        await _render_panel(callback, services, 0, prefix=f"Отказ: {exc}")
+        await _render_panel(callback, services, 0, prefix=t("warp_split_reject", error=h(exc)))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -213,7 +207,7 @@ async def warp_split_del_confirm(callback: CallbackQuery, services: Services) ->
         cidr = _cidr_from_data(callback.data)
         await safe_edit_message_text(
             callback.message,
-            f"Удалить префикс {code(cidr)} из split-листа?",
+            t("warp_split_delete_confirm", cidr=code(cidr)),
             reply_markup=warp_split_del_confirm_keyboard(cidr),
         )
     except Exception as exc:
@@ -236,18 +230,11 @@ async def warp_split_apply(callback: CallbackQuery, services: Services) -> None:
         mgr = services.warp_split
         current = mgr.read_list()
         if not current:
-            await _render_panel(
-                callback, services, 0, prefix="Список пуст — применять нечего. Добавь хотя бы один префикс."
-            )
+            await _render_panel(callback, services, 0, prefix=t("warp_split_apply_empty"))
             return
         await mgr.apply_list(current)
-        await _render_panel(
-            callback,
-            services,
-            0,
-            prefix=f"🔄 vpnbot-warp-split перезапущен. Применено {len(current)} префиксов.",
-        )
+        await _render_panel(callback, services, 0, prefix=t("warp_split_applied", count=len(current)))
     except InvalidOperation as exc:
-        await _render_panel(callback, services, 0, prefix=f"Ошибка применения: {exc}")
+        await _render_panel(callback, services, 0, prefix=t("warp_split_apply_error", error=h(exc)))
     except Exception as exc:
         await answer_callback_error(callback, exc)

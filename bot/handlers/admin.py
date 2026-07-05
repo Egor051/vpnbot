@@ -64,7 +64,7 @@ from bot.messages import awg_config_filename, remember_config_document, safe_cal
 from bot.pagination import MAX_PAGE, page_offset, split_page
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimitExceeded, RateLimiter
-from i18n import t
+from i18n import all_variants, t
 from models.dto import RecipientFilter, TelegramUserProfile
 from models.access import is_blocked_user
 from models.enums import AccessRequestStatus, UserRole, VpnKeyType
@@ -75,6 +75,9 @@ from utils.formatting import h
 router = Router()
 logger = logging.getLogger(__name__)
 _announcement_confirm_locks = UserLockManager()
+# Serialise a single admin's key-issue confirmations so a rapid double-tap on the
+# confirm button cannot slip two creations past the early state.clear().
+_key_issue_locks = UserLockManager()
 
 ADMIN_PAGE_SIZE = 8
 ADMIN_KEYS_PAGE_SIZE = 5
@@ -96,7 +99,7 @@ async def admin_command(message: Message, services: Services) -> None:
         await answer_message_error(message, exc)
 
 
-@router.message(F.text == t("btn_admin_panel"))
+@router.message(F.text.in_(all_variants("btn_admin_panel")))
 async def admin_menu_message(message: Message, services: Services) -> None:
     """Open the admin panel in response to the admin panel button."""
     if message.from_user is None:
@@ -113,6 +116,8 @@ async def admin_menu_message(message: Message, services: Services) -> None:
 @router.callback_query(F.data == "admin:anomaly:dismiss")
 async def anomaly_alert_dismiss(callback: CallbackQuery) -> None:
     """Delete the anomaly alert message for the admin who clicked the button."""
+    if not await ensure_private_callback(callback):
+        return
     await safe_callback_answer(callback)
     if callback.message is None or isinstance(callback.message, InaccessibleMessage):
         return
@@ -123,6 +128,8 @@ async def anomaly_alert_dismiss(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "admin:warp:alert:dismiss")
 async def warp_alert_dismiss(callback: CallbackQuery) -> None:
     """Delete the WARP tunnel alert message for the admin who clicked the button."""
+    if not await ensure_private_callback(callback):
+        return
     await safe_callback_answer(callback)
     if callback.message is None or isinstance(callback.message, InaccessibleMessage):
         return
@@ -131,13 +138,16 @@ async def warp_alert_dismiss(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "admin:panel")
-async def admin_panel(callback: CallbackQuery, services: Services) -> None:
+async def admin_panel(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Show the admin panel via callback."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
     if callback.from_user is None or callback.message is None:
         return
+    # Returning to the root panel abandons any in-progress flow, so drop the FSM
+    # state to avoid a stale half-finished dialog lingering across navigation.
+    await state.clear()
     # Leaving the server-status card (its "Back" button lands here) ends the live
     # auto-refresh loop before we overwrite the card, so it cannot fight us for
     # the message.
@@ -163,7 +173,7 @@ async def moderator_command(message: Message, services: Services) -> None:
         await answer_message_error(message, exc)
 
 
-@router.message(F.text == t("moderator_panel_title"))
+@router.message(F.text.in_(all_variants("moderator_panel_title")))
 async def moderator_menu_message(message: Message, services: Services) -> None:
     """Open the moderator panel in response to the moderator panel button."""
     if message.from_user is None:
@@ -178,13 +188,15 @@ async def moderator_menu_message(message: Message, services: Services) -> None:
 
 
 @router.callback_query(F.data == "admin:moderator_panel")
-async def moderator_panel_callback(callback: CallbackQuery, services: Services) -> None:
+async def moderator_panel_callback(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Show the moderator panel via callback."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
     if callback.from_user is None or callback.message is None:
         return
+    # Returning to the root panel abandons any in-progress flow (see admin_panel).
+    await state.clear()
     try:
         await require_moderator_or_admin(services, callback.from_user.id)
         await safe_edit_message_text(callback.message, t("moderator_panel_title"), reply_markup=moderator_panel_keyboard())
@@ -1518,7 +1530,7 @@ async def admin_issue_fp(callback: CallbackQuery, state: FSMContext, services: S
         await safe_edit_message_text(
             callback.message,
             t("expiry_prompt"),
-            reply_markup=expiry_choice_keyboard(is_admin=True),
+            reply_markup=expiry_choice_keyboard(),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1692,63 +1704,69 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
-    data = await state.get_data()
     try:
-        owner_user_id = int(data["owner_user_id"])
-        key_type = str(data["key_type"])
-        transport = str(data.get("transport") or "tcp")
-        note = data.get("note")
-        expires_at: str | None = data.get("expires_at")
-        mtu = int(data["mtu"]) if data.get("mtu") is not None else None
-        fingerprint: str | None = data.get("fingerprint")
-        xhttp_profile = str(data.get("xhttp_profile") or "base")
-        owner_is_pending = bool(data.get("owner_is_pending", False))
-        owner = await services.users.get_user(owner_user_id)
-        await require_superadmin(services, callback.from_user.id)
-        if is_blocked_user(owner):
-            raise AccessDenied(t("cannot_issue_to_blocked"))
-        profile = TelegramUserProfile(owner.telegram_user_id, owner.username, owner.first_name)
-        rate_limiter.check(callback.from_user.id, "key_create", 20)
-        await state.clear()
-        await safe_callback_answer(callback, t("creating_key"))
-        if key_type == VpnKeyType.XRAY.value:
-            result = await services.xray.create_xray_key(
-                callback.from_user.id, profile, note,
-                expires_at=expires_at,
-                allow_pending_owner=owner_is_pending,
-                fingerprint=fingerprint,
-                transport=transport,
-                xhttp_profile=xhttp_profile,
+        async with _key_issue_locks.lock(callback.from_user.id):
+            data = await state.get_data()
+            if "owner_user_id" not in data or "key_type" not in data:
+                # A concurrent confirm already consumed this flow (double-tap), or
+                # the session expired: don't issue a second key.
+                await safe_callback_answer(callback, t("action_stale"), show_alert=True)
+                return
+            owner_user_id = int(data["owner_user_id"])
+            key_type = str(data["key_type"])
+            transport = str(data.get("transport") or "tcp")
+            note = data.get("note")
+            expires_at: str | None = data.get("expires_at")
+            mtu = int(data["mtu"]) if data.get("mtu") is not None else None
+            fingerprint: str | None = data.get("fingerprint")
+            xhttp_profile = str(data.get("xhttp_profile") or "base")
+            owner_is_pending = bool(data.get("owner_is_pending", False))
+            owner = await services.users.get_user(owner_user_id)
+            await require_superadmin(services, callback.from_user.id)
+            if is_blocked_user(owner):
+                raise AccessDenied(t("cannot_issue_to_blocked"))
+            profile = TelegramUserProfile(owner.telegram_user_id, owner.username, owner.first_name)
+            rate_limiter.check(callback.from_user.id, "key_create", 20)
+            await state.clear()
+            await safe_callback_answer(callback, t("creating_key"))
+            if key_type == VpnKeyType.XRAY.value:
+                result = await services.xray.create_xray_key(
+                    callback.from_user.id, profile, note,
+                    expires_at=expires_at,
+                    allow_pending_owner=owner_is_pending,
+                    fingerprint=fingerprint,
+                    transport=transport,
+                    xhttp_profile=xhttp_profile,
+                )
+            elif key_type == VpnKeyType.AWG.value:
+                result = await services.awg.create_awg_key(
+                    callback.from_user.id, profile, note,
+                    expires_at=expires_at,
+                    allow_pending_owner=owner_is_pending,
+                    mtu=mtu,
+                )
+            elif key_type == VpnKeyType.HYSTERIA2.value:
+                result = await services.hysteria.issue(
+                    callback.from_user.id, profile, note,
+                    expires_at=expires_at,
+                    allow_pending_owner=owner_is_pending,
+                )
+            else:
+                await safe_edit_message_text(callback.message, t("key_unknown_type"))
+                return
+            await safe_edit_message_text(
+                callback.message,
+                result.config_text,
+                reply_markup=key_actions_keyboard(result.key, owner_user_id=result.key.owner_user_id),
             )
-        elif key_type == VpnKeyType.AWG.value:
-            result = await services.awg.create_awg_key(
-                callback.from_user.id, profile, note,
-                expires_at=expires_at,
-                allow_pending_owner=owner_is_pending,
-                mtu=mtu,
-            )
-        elif key_type == VpnKeyType.HYSTERIA2.value:
-            result = await services.hysteria.issue(
-                callback.from_user.id, profile, note,
-                expires_at=expires_at,
-                allow_pending_owner=owner_is_pending,
-            )
-        else:
-            await safe_edit_message_text(callback.message, t("key_unknown_type"))
-            return
-        await safe_edit_message_text(
-            callback.message,
-            result.config_text,
-            reply_markup=key_actions_keyboard(result.key, owner_user_id=result.key.owner_user_id),
-        )
-        plain_awg_config: str | None = None
-        if result.key.key_type == VpnKeyType.AWG:
-            plain_awg_config = await services.awg.get_awg_client_config_plain(callback.from_user.id, result.key.id, audit=False)
-            filename = awg_config_filename(result.key)
-            sent = await callback.message.answer_document(BufferedInputFile(plain_awg_config.encode("utf-8"), filename=filename))
-            await remember_config_document(state, key_id=result.key.id, message_id=sent.message_id)
-        if owner_is_pending:
-            await _deliver_key_to_pending_user(bot, result, owner_user_id, plain_awg_config=plain_awg_config)
+            plain_awg_config: str | None = None
+            if result.key.key_type == VpnKeyType.AWG:
+                plain_awg_config = await services.awg.get_awg_client_config_plain(callback.from_user.id, result.key.id, audit=False)
+                filename = awg_config_filename(result.key)
+                sent = await callback.message.answer_document(BufferedInputFile(plain_awg_config.encode("utf-8"), filename=filename))
+                await remember_config_document(state, key_id=result.key.id, message_id=sent.message_id)
+            if owner_is_pending:
+                await _deliver_key_to_pending_user(bot, result, owner_user_id, plain_awg_config=plain_awg_config)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

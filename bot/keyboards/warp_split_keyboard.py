@@ -9,6 +9,7 @@ callback_data budget (Telegram limit is 64 bytes):
 """
 from __future__ import annotations
 
+import ipaddress
 from math import ceil
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,6 +19,20 @@ from i18n import t
 # Keep a page small enough that a full page of two-button rows never approaches
 # the Telegram message/keyboard size limits.
 SPLIT_PAGE_SIZE = 8
+
+# Telegram rejects the whole inline keyboard if any button's callback_data
+# exceeds 64 bytes, so a manually-edited/oversized list line must not get a
+# delete button (which embeds the CIDR) or it would break the entire panel.
+_CALLBACK_LIMIT = 64
+
+
+def _deletable(cidr: str) -> bool:
+    """Whether ``wsplit:del:{cidr}`` is a safe, in-limit callback for a real IPv4 CIDR."""
+    try:
+        ipaddress.IPv4Network(cidr)
+    except ValueError:
+        return False
+    return len(f"wsplit:del:{cidr}".encode("utf-8")) <= _CALLBACK_LIMIT
 
 
 def split_total_pages(total: int) -> int:
@@ -47,16 +62,18 @@ def warp_split_panel_keyboard(entries: list[str], page: int) -> InlineKeyboardMa
 
     rows: list[list[InlineKeyboardButton]] = []
     for cidr in split_page_slice(entries, page):
-        rows.append(
-            [
-                InlineKeyboardButton(text=cidr, callback_data="noop"),
-                InlineKeyboardButton(text="🗑", callback_data=f"wsplit:del:{cidr}"),
-            ]
-        )
+        row = [InlineKeyboardButton(text=cidr, callback_data="noop")]
+        # Skip the delete button for an entry that would blow the callback_data
+        # limit or isn't a valid IPv4 CIDR; the whole keyboard would fail to
+        # render otherwise. Such an entry is still shown (read-only) so the
+        # operator can spot and fix it via the file / commands.
+        if _deletable(cidr):
+            row.append(InlineKeyboardButton(text="🗑", callback_data=f"wsplit:del:{cidr}"))
+        rows.append(row)
 
-    action_row = [InlineKeyboardButton(text="➕ Добавить", callback_data="wsplit:add")]
+    action_row = [InlineKeyboardButton(text=t("btn_warp_split_add"), callback_data="wsplit:add")]
     if total > 0:
-        action_row.append(InlineKeyboardButton(text="🔄 Применить", callback_data="wsplit:apply"))
+        action_row.append(InlineKeyboardButton(text=t("btn_warp_split_apply"), callback_data="wsplit:apply"))
     rows.append(action_row)
 
     if total_pages > 1:
@@ -71,8 +88,8 @@ def warp_split_panel_keyboard(entries: list[str], page: int) -> InlineKeyboardMa
             nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"wsplit:p:{page + 1}"))
         rows.append(nav)
 
-    # The Split GUI is entered from «Настройки WARP», so Back returns there.
-    rows.append([InlineKeyboardButton(text="⬅ Назад в настройки", callback_data="admin:warp:settings")])
+    # The Split GUI is entered from WARP settings, so Back returns there.
+    rows.append([InlineKeyboardButton(text=t("btn_back_to_settings"), callback_data="admin:warp:settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -88,8 +105,8 @@ def warp_split_del_confirm_keyboard(cidr: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Да", callback_data=f"wsplit:delok:{cidr}"),
-                InlineKeyboardButton(text="❌ Нет", callback_data="wsplit:p:0"),
+                InlineKeyboardButton(text=t("btn_yes"), callback_data=f"wsplit:delok:{cidr}"),
+                InlineKeyboardButton(text=t("btn_no"), callback_data="wsplit:p:0"),
             ]
         ]
     )
