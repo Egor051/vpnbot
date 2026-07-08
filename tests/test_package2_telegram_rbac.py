@@ -11,11 +11,12 @@ from aiogram.types import CallbackQuery, Chat, Message, User as TgUser
 from adapters.clock import ClockProvider
 from bot.handlers.callbacks import cancel_callback
 from bot.handlers.common import help_command, menu_callback, menu_command
-from bot.handlers.keys import create_key_choose, create_key_confirm, create_key_menu_message, show_key_config
+from bot.handlers.keys import create_key_choose, create_key_confirm, show_key_config
 from bot.handlers.proxy import proxy_get_prompt
 from bot.handlers.start import start_command
-from bot.middlewares.access import BLOCKED_CALLBACK_TEXT, BLOCKED_MESSAGE_TEXT, BlockedUserMiddleware
+from bot.middlewares.access import BlockedUserMiddleware
 from config.settings import Settings
+from i18n import t
 from db.database import Database
 from models.dto import TelegramUserProfile, User, VpnKey
 from models.enums import AccessRequestStatus, AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
@@ -392,8 +393,8 @@ def test_blocked_user_cannot_use_approved_message_or_stale_callback(monkeypatch:
 
         assert calls == 0
         assert state.cleared == 2
-        assert message_answers == [BLOCKED_MESSAGE_TEXT]
-        assert callback_answers == [(BLOCKED_CALLBACK_TEXT, True)]
+        assert message_answers == [t("blocked_message")]
+        assert callback_answers == [(t("blocked_callback"), True)]
 
     asyncio.run(run())
 
@@ -404,7 +405,7 @@ def test_pending_user_cannot_enter_key_create_fsm(callback_data: str, monkeypatc
 
     class Users:
         async def require_approved_or_admin(self, actor_user_id: int) -> User:
-            raise AccessDenied("Доступ не одобрен")
+            raise AccessDenied("Доступ не одобрен", key="access_not_approved")
 
     async def run() -> None:
         state = _State()
@@ -423,7 +424,7 @@ def test_pending_user_cannot_issue_proxy(callback_data: str, monkeypatch: pytest
 
     class Proxy:
         async def list_user_accesses(self, actor_user_id: int) -> list[object]:
-            raise AccessDenied("Доступ не одобрен")
+            raise AccessDenied("Доступ не одобрен", key="access_not_approved")
 
     async def run() -> None:
         state = _State()
@@ -431,7 +432,7 @@ def test_pending_user_cannot_issue_proxy(callback_data: str, monkeypatch: pytest
         services = SimpleNamespace(proxy=Proxy(), settings=SimpleNamespace(socks5_enabled=True, mtproto_enabled=True))
         await proxy_get_prompt(callback, state, services)  # type: ignore[arg-type]
         assert state.state is None
-        assert callback.answers == [("Доступ не одобрен", True)]
+        assert callback.answers == [("Доступ ещё не одобрен. Дождитесь решения администратора.", True)]
 
     asyncio.run(run())
 
@@ -441,7 +442,7 @@ def test_pending_user_cannot_confirm_old_key_create_state(monkeypatch: pytest.Mo
 
     class Users:
         async def require_approved_or_admin(self, actor_user_id: int) -> User:
-            raise AccessDenied("Доступ не одобрен")
+            raise AccessDenied("Доступ не одобрен", key="access_not_approved")
 
     async def run() -> None:
         state = _State({"key_type": VpnKeyType.XRAY.value, "note": "old"})

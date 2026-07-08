@@ -53,7 +53,7 @@ class TrialAccessService:
         """Service-level RBAC: only a superadmin may decide trial requests."""
         actor = await self.users_repo.get_by_id(actor_user_id)
         if actor is None or actor.role != UserRole.SUPERADMIN:
-            raise AccessDenied("Недостаточно прав")
+            raise AccessDenied("Недостаточно прав", key="err_insufficient_rights")
 
     async def can_request_trial(self, telegram_user_id: int) -> bool:
         """Return whether the user still has an unused trial quota."""
@@ -69,16 +69,16 @@ class TrialAccessService:
         # even if a handler forgets to gate the call.
         requester = await self.users_repo.get_by_id(telegram_user_id)
         if requester is None:
-            raise NotFound("Пользователь не найден")
+            raise NotFound("Пользователь не найден", key="err_user_not_found")
         if is_blocked_user(requester):
-            raise AccessDenied("Доступ заблокирован")
+            raise AccessDenied("Доступ заблокирован", key="err_access_blocked")
         # BEGIN IMMEDIATE serialises the quota check (SELECT) and the INSERT so
         # that two concurrent double-taps cannot both pass can_request_trial and
         # then both succeed at create.  The idx_trial_requests_one_pending
         # partial unique index provides an additional DB-level guard.
         async with self.trial_requests.db.transaction():
             if not await self.can_request_trial(telegram_user_id):
-                raise AccessDenied("Вы уже использовали свой пробный доступ")
+                raise AccessDenied("Вы уже использовали свой пробный доступ", key="err_trial_already_used")
             now = self.clock.now()
             req = await self.trial_requests.create(
                 telegram_user_id=telegram_user_id,
@@ -100,7 +100,7 @@ class TrialAccessService:
         """Return a trial key request by id."""
         req = await self.trial_requests.get_by_id(request_id)
         if req is None:
-            raise NotFound("Заявка на пробный доступ не найдена")
+            raise NotFound("Заявка на пробный доступ не найдена", key="err_trial_request_not_found")
         return req
 
     async def count_pending_requests(self, actor_user_id: int) -> int:
@@ -128,10 +128,10 @@ class TrialAccessService:
         async with self._decision_lock:
             req = await self.get_request(request_id)
             if req.status != "pending":
-                raise AccessDenied("Заявка уже обработана")
+                raise AccessDenied("Заявка уже обработана", key="err_trial_request_processed")
             owner = await self.users_repo.get_by_id(req.telegram_user_id)
             if owner is None:
-                raise NotFound("Пользователь-владелец не найден")
+                raise NotFound("Пользователь-владелец не найден", key="err_trial_owner_not_found")
             now = self.clock.now()
             expires_at = _trial_expires_at(now)
             profile = TelegramUserProfile(
@@ -200,7 +200,7 @@ class TrialAccessService:
         async with self._decision_lock:
             req = await self.get_request(request_id)
             if req.status != "pending":
-                raise AccessDenied("Заявка уже обработана")
+                raise AccessDenied("Заявка уже обработана", key="err_trial_request_processed")
             now = self.clock.now()
             await self.trial_requests.reject(
                 request_id=request_id,

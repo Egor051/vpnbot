@@ -22,7 +22,7 @@ from adapters.xray_config import XrayConfigAdapter
 from bot.app import _startup_reconcile_keys
 from bot.handlers.common import answer_callback_error
 from bot.messages import MAX_TEXT_CONFIG_LEN, safe_callback_answer, safe_edit_message_text, send_awg_config
-from bot.middlewares.access import BLOCKED_CALLBACK_TEXT, BLOCKED_MESSAGE_TEXT, BlockedUserMiddleware
+from bot.middlewares.access import BlockedUserMiddleware
 import i18n
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from config.settings import Settings
@@ -519,7 +519,7 @@ def test_blocked_middleware_blocks_message_and_clears_fsm(monkeypatch: pytest.Mo
 
         assert handler_called is False
         assert state.cleared is True
-        assert answers == [BLOCKED_MESSAGE_TEXT]
+        assert answers == [i18n.t("blocked_message")]
 
     asyncio.run(run())
 
@@ -614,7 +614,7 @@ def test_blocked_middleware_blocks_callback_before_handlers(monkeypatch: pytest.
 
         assert handler_called is False
         assert state.cleared is True
-        assert answers == [(BLOCKED_CALLBACK_TEXT, True)]
+        assert answers == [(i18n.t("blocked_callback"), True)]
 
     asyncio.run(run())
 
@@ -682,8 +682,8 @@ def test_blocked_middleware_treats_blocked_at_only_user_as_blocked(monkeypatch: 
 
         assert handler_calls == 1
         assert state.cleared == 2
-        assert message_answers == [BLOCKED_MESSAGE_TEXT]
-        assert callback_answers == [(BLOCKED_CALLBACK_TEXT, True)]
+        assert message_answers == [i18n.t("blocked_message")]
+        assert callback_answers == [(i18n.t("blocked_callback"), True)]
 
     asyncio.run(run())
 

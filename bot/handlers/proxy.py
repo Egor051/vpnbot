@@ -5,36 +5,23 @@ from typing import Any
 from aiogram import F, Router
 
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery
 
 from bot.container import Services
 from bot.formatters import main_menu_text, proxy_access_text, user_proxy_stats_text
 from bot.fsm.states import ProxyStates
-from bot.handlers.common import answer_callback_error, answer_message_error, is_admin, profile_from_tg
+from bot.handlers.common import answer_callback_error, is_admin, profile_from_tg
 from bot.keyboards.common import main_menu
 from bot.keyboards.proxy import proxy_back_keyboard, proxy_confirm_keyboard, proxy_menu_keyboard
 from bot.messages import safe_callback_answer, safe_edit_message_text
-from bot.private_chat import ensure_private_callback, ensure_private_message
+from bot.private_chat import ensure_private_callback
+from bot.rate_limit import RateLimiter
 from i18n import t
 from models.enums import ProxyAccessType
 from services.user_locks import UserLockManager
 
 router = Router()
 _proxy_confirm_locks = UserLockManager()
-
-
-@router.message(F.text == t("btn_proxy"))
-async def show_proxy_message(message: Message, services: Services) -> None:
-    """Show the proxy menu in response to the proxy button."""
-    if message.from_user is None:
-        return
-    if not await ensure_private_message(message):
-        return
-    try:
-        text, markup = await _proxy_menu_view(services, message.from_user.id)
-        await message.answer(text, reply_markup=markup)
-    except Exception as exc:
-        await answer_message_error(message, exc)
 
 
 @router.callback_query(F.data.in_({"proxy:show", "proxy:menu"}))
@@ -112,7 +99,7 @@ async def proxy_stats(callback: CallbackQuery, services: Services) -> None:
 
 
 @router.callback_query(F.data.regexp(r"^proxy:confirm:(socks5|mtproto):[-_A-Za-z0-9]+$"))
-async def proxy_confirm(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+async def proxy_confirm(callback: CallbackQuery, state: FSMContext, services: Services, rate_limiter: RateLimiter) -> None:
     """Issue the requested proxy access after confirmation."""
     if not await ensure_private_callback(callback):
         return
@@ -140,6 +127,10 @@ async def proxy_confirm(callback: CallbackQuery, state: FSMContext, services: Se
                 )
                 return
 
+            # Cooldown before a real backend issuance (creates a Dante Linux user
+            # or manages an MTProxy secret). Checked before clearing state so a
+            # throttled retry keeps the same valid nonce.
+            rate_limiter.check(callback.from_user.id, "proxy_issue", 10)
             await state.clear()
             await safe_callback_answer(callback, t("executing_proxy"))
             profile = profile_from_tg(callback.from_user)

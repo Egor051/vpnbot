@@ -64,8 +64,18 @@ _SAFE_EXCEPTIONS = (
 
 
 def service_error_text(exc: Exception) -> str:
-    """Return a user-safe message for the exception, hiding internal errors."""
+    """Return a user-safe message for the exception, hiding internal errors.
+
+    When a service error carries an i18n ``key`` it is rendered in the actor's
+    active locale; otherwise the exception's own (Russian) message is shown, so
+    un-migrated raises degrade to the pre-i18n behaviour rather than leaking a
+    raw identifier or an internal error.
+    """
     if isinstance(exc, _SAFE_EXCEPTIONS):
+        key = getattr(exc, "key", None)
+        if key:
+            params = getattr(exc, "params", None) or {}
+            return t(key, **params)
         return str(exc)
     return t("internal_error")
 
@@ -162,16 +172,6 @@ async def faq_answer_callback(callback: CallbackQuery) -> None:
     valid_topics = {key for key, _ in FAQ_TOPICS}
     text = t(f"faq_{topic}") if topic in valid_topics else t("faq_not_found")
     await safe_edit_message_text(callback.message, text, reply_markup=faq_answer_keyboard(page))
-
-
-@router.message(F.text == t("btn_help"))
-async def help_menu_message(message: Message, services: Services) -> None:
-    """Show the FAQ list in response to the help menu button."""
-    if message.from_user is None:
-        return
-    if not await ensure_private_message(message):
-        return
-    await message.answer(_faq_page_title(1), reply_markup=faq_keyboard(1))
 
 
 @router.message(Command("menu"))

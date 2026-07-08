@@ -12,6 +12,7 @@ from bot.handlers.common import answer_callback_error, answer_message_error
 from bot.keyboards.settings import personal_cabinet_keyboard, settings_menu_keyboard
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
+from bot.rate_limit import RateLimiter
 from i18n import t
 from models.dto import User
 from models.enums import ProxyAccessStatus
@@ -91,7 +92,7 @@ async def settings_cabinet_callback(callback: CallbackQuery, services: Services)
 
 
 @router.callback_query(F.data == "settings:lang:toggle")
-async def settings_language_toggle(callback: CallbackQuery, services: Services) -> None:
+async def settings_language_toggle(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
     """Flip the user's interface language between ru and en, then re-render."""
     if not await ensure_private_callback(callback):
         return
@@ -99,6 +100,7 @@ async def settings_language_toggle(callback: CallbackQuery, services: Services) 
         await safe_callback_answer(callback)
         return
     try:
+        rate_limiter.check(callback.from_user.id, "settings_toggle", 2)
         new_language = "en" if i18n.resolve_locale() == "ru" else "ru"
         user = await services.users.set_language(callback.from_user.id, new_language)
         # Apply for the current render so the panel is shown in the new language.
@@ -110,7 +112,7 @@ async def settings_language_toggle(callback: CallbackQuery, services: Services) 
 
 
 @router.callback_query(F.data == "settings:notify:toggle")
-async def settings_notifications_toggle(callback: CallbackQuery, services: Services) -> None:
+async def settings_notifications_toggle(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
     """Toggle the user's expiry-reminder opt-out, then re-render the panel."""
     if not await ensure_private_callback(callback):
         return
@@ -118,6 +120,7 @@ async def settings_notifications_toggle(callback: CallbackQuery, services: Servi
         await safe_callback_answer(callback)
         return
     try:
+        rate_limiter.check(callback.from_user.id, "settings_toggle", 2)
         current = await services.users.get_user(callback.from_user.id)
         new_enabled = not current.expiry_notifications_enabled
         user = await services.users.set_expiry_notifications(callback.from_user.id, new_enabled)

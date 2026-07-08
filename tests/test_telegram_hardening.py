@@ -632,7 +632,7 @@ def test_pending_user_cannot_open_create_menu(monkeypatch) -> None:
 
     class Users:
         async def require_approved_or_admin(self, actor_user_id: int) -> User:
-            raise AccessDenied("Доступ не одобрен")
+            raise AccessDenied("Доступ не одобрен", key="access_not_approved")
 
     async def run() -> None:
         callback = _Callback("keys:create", user_id=100)
