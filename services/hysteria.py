@@ -176,7 +176,7 @@ class HysteriaService:
             if key.status in {VpnKeyStatus.REVOKED, VpnKeyStatus.DELETED}:
                 return key
             if key.status not in HYSTERIA2_REVOCABLE_STATUSES:
-                raise InvalidOperation("Отозвать можно только активный Hysteria2-ключ")
+                raise InvalidOperation("Отозвать можно только активный Hysteria2-ключ", key="err_revoke_active_hy2_only")
             await self.vpn_keys.mark_revoked(key_id, actor_user_id, self.clock.now())
             await self._kick_best_effort(key.email_label)
             await self._write_audit_best_effort(
@@ -203,11 +203,11 @@ class HysteriaService:
         async with self._lock:
             key = await self._get_key(key_id)
             if key.key_type != VpnKeyType.HYSTERIA2:
-                raise InvalidOperation("Это не Hysteria2-ключ")
+                raise InvalidOperation("Это не Hysteria2-ключ", key="err_not_hy2_key")
             if key.status in {VpnKeyStatus.REVOKED, VpnKeyStatus.DELETED}:
                 return key
             if key.status not in HYSTERIA2_REVOCABLE_STATUSES:
-                raise InvalidOperation("Отозвать можно только активный Hysteria2-ключ")
+                raise InvalidOperation("Отозвать можно только активный Hysteria2-ключ", key="err_revoke_active_hy2_only")
             revoked_by = actor_user_id if actor_user_id is not None else key.created_by
             await self.vpn_keys.mark_revoked(key_id, revoked_by, self.clock.now())
             await self._kick_best_effort(key.email_label)
@@ -247,7 +247,7 @@ class HysteriaService:
         async with self._lock:
             key = await self._get_key_for_manage(actor_user_id, key_id, allow_read=True)
             if key.status != VpnKeyStatus.ACTIVE:
-                raise InvalidOperation("Конфигурация доступна только для активного ключа")
+                raise InvalidOperation("Конфигурация доступна только для активного ключа", key="err_config_active_only")
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action="hysteria2_config_shown",
@@ -267,47 +267,47 @@ class HysteriaService:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         target = owner_user_id or actor_user_id
         if actor.role != UserRole.SUPERADMIN and target != actor_user_id:
-            raise AccessDenied("Нельзя смотреть чужие ключи")
+            raise AccessDenied("Нельзя смотреть чужие ключи", key="err_foreign_keys_view")
         return await self.vpn_keys.list_by_owner_and_type(target, VpnKeyType.HYSTERIA2, limit=limit, offset=offset)
 
     async def _ensure_module_enabled(self) -> None:
         if not self.settings.hysteria2_enabled:
-            raise InvalidOperation("Hysteria2 сейчас отключён")
+            raise InvalidOperation("Hysteria2 сейчас отключён", key="err_hy2_disabled")
         if not await self.modules.is_enabled("hysteria2"):
-            raise InvalidOperation("Hysteria2 сейчас отключён")
+            raise InvalidOperation("Hysteria2 сейчас отключён", key="err_hy2_disabled")
 
     async def _ensure_can_create(
         self, actor_user_id: int, owner_user_id: int, *, allow_pending_owner: bool = False
     ) -> None:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         if actor.role != UserRole.SUPERADMIN and actor_user_id != owner_user_id:
-            raise AccessDenied("Нельзя создавать ключи для другого пользователя")
+            raise AccessDenied("Нельзя создавать ключи для другого пользователя", key="err_create_for_other")
         if allow_pending_owner:
             if actor.role != UserRole.SUPERADMIN:
-                raise AccessDenied("Только администратор может выдавать ключи гостям")
+                raise AccessDenied("Только администратор может выдавать ключи гостям", key="err_guest_admin_only")
             owner = await self.users.get_user(owner_user_id)
             from models.access import is_blocked_user
 
             if is_blocked_user(owner):
-                raise AccessDenied("Нельзя выдать ключ заблокированному пользователю")
+                raise AccessDenied("Нельзя выдать ключ заблокированному пользователю", key="err_issue_to_blocked")
         else:
             owner = await self.users.require_approved_or_admin(owner_user_id)
             if owner.role not in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
-                raise AccessDenied("Владелец ключа не имеет доступа")
+                raise AccessDenied("Владелец ключа не имеет доступа", key="err_owner_no_access")
 
     async def _get_key_for_manage(self, actor_user_id: int, key_id: int, allow_read: bool = False) -> VpnKey:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         key = await self._get_key(key_id)
         if key.key_type != VpnKeyType.HYSTERIA2:
-            raise InvalidOperation("Это не Hysteria2-ключ")
+            raise InvalidOperation("Это не Hysteria2-ключ", key="err_not_hy2_key")
         if actor.role != UserRole.SUPERADMIN and key.owner_user_id != actor_user_id:
-            raise AccessDenied("Нельзя управлять чужим ключом")
+            raise AccessDenied("Нельзя управлять чужим ключом", key="err_foreign_key_manage")
         return key
 
     async def _get_key(self, key_id: int) -> VpnKey:
         key = await self.vpn_keys.get_by_id(key_id)
         if key is None:
-            raise NotFound("Ключ не найден")
+            raise NotFound("Ключ не найден", key="err_key_not_found")
         return key
 
     async def _kick_best_effort(self, label: str | None) -> None:

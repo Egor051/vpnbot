@@ -597,9 +597,12 @@ async def _build_app(
         lambda user_id: dp.fsm.get_context(bot=bot, chat_id=user_id, user_id=user_id).clear()
     )
 
-    # Maintenance gate runs as the outermost outer-middleware: while maintenance
-    # is on, every non-superadmin update is short-circuited with the banner before
-    # the blocked-user gate or any handler sees it. When off it is a zero-DB no-op.
+    # Locale runs as the outermost outer-middleware so the user's stored language
+    # is active for everything downstream — including the maintenance and blocked
+    # banners, which are localized. It does one get_user (the same lookup the
+    # blocked gate already performs), so the net DB cost is unchanged. Maintenance
+    # then gates the update (short-circuits non-superadmins with the banner before
+    # the blocked gate or any handler sees it), and the blocked gate runs last.
     maintenance_middleware = MaintenanceModeMiddleware(maintenance_service, settings)
     blocked_middleware = BlockedUserMiddleware(user_service)
     locale_middleware = LocaleMiddleware(user_service)
@@ -611,11 +614,9 @@ async def _build_app(
         dp.channel_post,
         dp.my_chat_member,
     ):
+        observer.outer_middleware(locale_middleware)
         observer.outer_middleware(maintenance_middleware)
         observer.outer_middleware(blocked_middleware)
-        # Activate the user's stored language after the access gates so handlers
-        # and keyboard builders render in their preferred locale.
-        observer.outer_middleware(locale_middleware)
 
     # Runs after the blocked-user gate so the cleanup only fires for callbacks
     # that are actually about to be handled.

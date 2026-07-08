@@ -12,6 +12,7 @@ from bot.formatters import (
 )
 from bot.handlers.admin import admin_proxy_combined
 from bot.handlers.proxy import proxy_confirm, proxy_stats
+from bot.rate_limit import RateLimiter
 from bot.keyboards.admin import admin_panel_keyboard
 from bot.keyboards.proxy import proxy_menu_keyboard
 from models.dto import (
@@ -518,7 +519,7 @@ def test_proxy_confirm_issues_socks5_and_edits_same_message(monkeypatch) -> None
         )
         state = _State({"proxy_type": "socks5", "nonce": "abc"})
         callback = _Callback("proxy:confirm:socks5:abc")
-        await proxy_confirm(callback, state, services)  # type: ignore[arg-type]
+        await proxy_confirm(callback, state, services, RateLimiter())  # type: ignore[arg-type]
 
         assert state.cleared is True
         assert socks5.calls == 1
@@ -581,7 +582,7 @@ def test_proxy_confirm_stale_without_existing_access_returns_to_proxy(monkeypatc
             settings=SimpleNamespace(socks5_enabled=True, mtproto_enabled=True),
             modules=_modules_enabled(),
         )
-        await proxy_confirm(callback, state, services)  # type: ignore[arg-type]
+        await proxy_confirm(callback, state, services, RateLimiter())  # type: ignore[arg-type]
 
         assert state.cleared is True
         assert callback.answers == [("Действие устарело", True)]
@@ -622,7 +623,7 @@ def test_proxy_confirm_stale_with_existing_access_shows_existing_without_reissue
             settings=SimpleNamespace(socks5_enabled=True, mtproto_enabled=True),
             modules=_modules_enabled(),
         )
-        await proxy_confirm(callback, state, services)  # type: ignore[arg-type]
+        await proxy_confirm(callback, state, services, RateLimiter())  # type: ignore[arg-type]
 
         assert mtproto.calls == 0
         assert callback.message.edits

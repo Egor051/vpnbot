@@ -1,5 +1,5 @@
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from i18n import t
 
@@ -36,17 +36,6 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     if is_admin:
         rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def main_reply_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
-    """Build the main menu reply keyboard, optionally with the admin panel button."""
-    rows = [
-        [KeyboardButton(text=t("btn_my_keys")), KeyboardButton(text=t("btn_create_key"))],
-        [KeyboardButton(text=t("btn_proxy")), KeyboardButton(text=t("btn_help"))],
-    ]
-    if is_admin:
-        rows.append([KeyboardButton(text=t("btn_admin_panel"))])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, input_field_placeholder=t("btn_keyboard_placeholder"))
 
 
 def back_to_menu() -> InlineKeyboardMarkup:

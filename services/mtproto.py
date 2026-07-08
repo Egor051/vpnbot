@@ -82,7 +82,7 @@ class MtProtoService:
         await self.users.require_approved_or_admin(actor_user_id)
         access = await self._active_access(actor_user_id)
         if access is None:
-            raise NotFound("MTProto-доступ не найден")
+            raise NotFound("MTProto-доступ не найден", key="err_mtproto_access_not_found")
         active = self._with_current_payload(access)
         await self._mark_shown(active, actor_user_id)
         return self._with_current_payload(await self._get_access(access.id))
@@ -103,7 +103,7 @@ class MtProtoService:
     async def _revoke_mtproto_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
         access = await self._get_access(access_id)
         if access.access_type != ProxyAccessType.MTPROTO:
-            raise InvalidOperation("Это не MTProto-доступ")
+            raise InvalidOperation("Это не MTProto-доступ", key="err_not_mtproto_access")
         if access.status in {ProxyAccessStatus.REVOKED, ProxyAccessStatus.INACTIVE, ProxyAccessStatus.DELETED}:
             return self._with_current_payload(access)
         self.backend_health.require_mutation_allowed(ProxyAccessType.MTPROTO)
@@ -450,9 +450,9 @@ class MtProtoService:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         owner = await self.users.require_approved_or_admin(owner_user_id)
         if actor.role != UserRole.SUPERADMIN and actor_user_id != owner_user_id:
-            raise AccessDenied("Нельзя создавать прокси для другого пользователя")
+            raise AccessDenied("Нельзя создавать прокси для другого пользователя", key="err_create_proxy_for_other")
         if owner.role not in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
-            raise AccessDenied("Владелец прокси не имеет доступа")
+            raise AccessDenied("Владелец прокси не имеет доступа", key="err_proxy_owner_no_access")
 
     async def _active_access(self, owner_user_id: int) -> ProxyAccess | None:
         return await self.accesses.find_user_access_by_type_statuses(
@@ -814,18 +814,18 @@ class MtProtoService:
 
     def _ensure_enabled(self) -> None:
         if not self.settings.mtproto_enabled:
-            raise InvalidOperation("MTProto Proxy сейчас недоступен")
+            raise InvalidOperation("MTProto Proxy сейчас недоступен", key="err_mtproto_unavailable")
         if not self.settings.mtproto_host:
-            raise InvalidOperation("MTProto Proxy не настроен")
+            raise InvalidOperation("MTProto Proxy не настроен", key="err_mtproto_not_configured")
         if self.settings.mtproto_mode == "static" and not self.settings.mtproto_secret:
-            raise InvalidOperation("MTProto Proxy не настроен")
+            raise InvalidOperation("MTProto Proxy не настроен", key="err_mtproto_not_configured")
         if self.settings.mtproto_mode == "managed" and self.adapter is None:
             raise InvalidOperation("MTProto managed mode не подключён")
 
     async def _get_access(self, access_id: int) -> ProxyAccess:
         access = await self.accesses.get_by_id(access_id)
         if access is None:
-            raise NotFound("Прокси-доступ не найден")
+            raise NotFound("Прокси-доступ не найден", key="err_proxy_access_not_found")
         return access
 
     async def _mark_shown(self, access: ProxyAccess, actor_user_id: int) -> None:

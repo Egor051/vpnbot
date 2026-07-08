@@ -12,17 +12,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineQuery, Message, TelegramObject
 
 from bot.messages import safe_callback_answer
+from i18n import t
 from models.access import is_blocked_user
 from services.errors import NotFound
 from services.users import UserService
-
-BLOCKED_MESSAGE_TEXT = "🚫 Доступ к боту заблокирован. Напишите /start для повторной заявки."
-BLOCKED_CALLBACK_TEXT = "🚫 Доступ заблокирован. Напишите /start для повторной заявки."
-BLOCKED_START_TEXT = (
-    "🚫 Ваш доступ к боту заблокирован.\n\n"
-    "Вы можете повторно отправить заявку на доступ через /start.\n"
-    "До повторного одобрения команды и кнопки недоступны."
-)
 
 
 class BlockedUserMiddleware(BaseMiddleware):
@@ -51,10 +44,12 @@ class BlockedUserMiddleware(BaseMiddleware):
         if not is_blocked_user(user):
             return await handler(event, data)
         await _clear_state(data)
+        # Rendered in the user's active locale: the locale middleware runs ahead
+        # of this gate (see bot/app.py), so t() resolves to their language.
         if isinstance(event, Message):
-            await event.answer(BLOCKED_MESSAGE_TEXT)
+            await event.answer(t("blocked_message"))
         elif isinstance(event, CallbackQuery):
-            await safe_callback_answer(event, BLOCKED_CALLBACK_TEXT, show_alert=True)
+            await safe_callback_answer(event, t("blocked_callback"), show_alert=True)
         elif isinstance(event, InlineQuery):
             await event.answer(results=[], cache_time=60, is_personal=True)
         return None

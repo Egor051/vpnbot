@@ -139,7 +139,7 @@ class Socks5Service:
         await self.users.require_approved_or_admin(actor_user_id)
         access = await self._active_access(actor_user_id)
         if access is None:
-            raise NotFound("SOCKS5-доступ не найден")
+            raise NotFound("SOCKS5-доступ не найден", key="err_socks5_access_not_found")
         await self._mark_shown(access, actor_user_id)
         return await self._get_access(access.id)
 
@@ -164,7 +164,7 @@ class Socks5Service:
     async def _revoke_socks5_proxy(self, actor_user_id: int, access_id: int, reason: str | None = None) -> ProxyAccess:
         access = await self._get_access(access_id)
         if access.access_type != ProxyAccessType.SOCKS5:
-            raise InvalidOperation("Это не SOCKS5-доступ")
+            raise InvalidOperation("Это не SOCKS5-доступ", key="err_not_socks5_access")
         # _lock serialises revoke against concurrent issue/delete.
         # Does NOT acquire user_lock: block_user already holds user_lock for
         # the owner and would deadlock if we tried to re-acquire it here.
@@ -204,7 +204,7 @@ class Socks5Service:
         await self.users.require_superadmin(actor_user_id)
         access = await self._get_access(access_id)
         if access.access_type != ProxyAccessType.SOCKS5:
-            raise InvalidOperation("Это не SOCKS5-доступ")
+            raise InvalidOperation("Это не SOCKS5-доступ", key="err_not_socks5_access")
         # _lock serialises delete against concurrent issue/revoke.
         # Does NOT acquire user_lock: block_user already holds user_lock for
         # the owner and would deadlock if we tried to re-acquire it here.
@@ -368,9 +368,9 @@ class Socks5Service:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         owner = await self.users.require_approved_or_admin(owner_user_id)
         if actor.role != UserRole.SUPERADMIN and actor_user_id != owner_user_id:
-            raise AccessDenied("Нельзя создавать прокси для другого пользователя")
+            raise AccessDenied("Нельзя создавать прокси для другого пользователя", key="err_create_proxy_for_other")
         if owner.role not in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
-            raise AccessDenied("Владелец прокси не имеет доступа")
+            raise AccessDenied("Владелец прокси не имеет доступа", key="err_proxy_owner_no_access")
 
     async def _active_access(self, owner_user_id: int) -> ProxyAccess | None:
         return await self.accesses.find_user_access_by_type_statuses(
@@ -426,14 +426,14 @@ class Socks5Service:
 
     def _ensure_enabled(self) -> None:
         if not self.settings.socks5_enabled:
-            raise InvalidOperation("SOCKS5 сейчас недоступен")
+            raise InvalidOperation("SOCKS5 сейчас недоступен", key="err_socks5_unavailable")
         if not self.settings.socks5_host or self.settings.socks5_port is None:
-            raise InvalidOperation("SOCKS5 не настроен")
+            raise InvalidOperation("SOCKS5 не настроен", key="err_socks5_not_configured")
 
     async def _get_access(self, access_id: int) -> ProxyAccess:
         access = await self.accesses.get_by_id(access_id)
         if access is None:
-            raise NotFound("Прокси-доступ не найден")
+            raise NotFound("Прокси-доступ не найден", key="err_proxy_access_not_found")
         return access
 
     async def _mark_shown(self, access: ProxyAccess, actor_user_id: int) -> None:

@@ -27,7 +27,14 @@ class TTLMemoryStorage(MemoryStorage):
         await super().set_state(key, state)
 
     async def set_data(self, key: StorageKey, data: Mapping[str, Any]) -> None:
-        self._touched[key] = time.monotonic()
+        # Only track sessions that actually hold data. Empty data means there is
+        # nothing to expire — notably ``state.clear()`` issues ``set_state(None)``
+        # (which drops the entry) followed by ``set_data({})``; re-adding the key
+        # here would resurrect a cleared session, keep it alive for a full TTL and
+        # inflate the expire_stale counter. Leaving an already-tracked entry alone
+        # on an empty write lets TTL retire it normally.
+        if data:
+            self._touched[key] = time.monotonic()
         await super().set_data(key, data)
 
     async def expire_stale(self) -> int:

@@ -166,7 +166,7 @@ class XrayService:
         """Return the adapter for *transport* or raise a clear, user-facing error."""
         adapter = self._adapter_optional(transport)
         if adapter is None:
-            raise InvalidOperation("Транспорт VLESS (HTTP) недоступен: XHTTP-inbound не настроен")
+            raise InvalidOperation("Транспорт VLESS (HTTP) недоступен: XHTTP-inbound не настроен", key="err_xhttp_not_configured")
         return adapter
 
     def _iter_adapters(self) -> list[tuple[str, XrayConfigAdapter]]:
@@ -200,7 +200,7 @@ class XrayService:
         # (revoke/delete/reconcile) is intentionally NOT gated by the flag — it
         # depends only on the inbound's adapter being present (see app.py).
         if transport == "http" and not self.settings.xray_xhttp_enabled:
-            raise InvalidOperation("VLESS (HTTP) сейчас отключён")
+            raise InvalidOperation("VLESS (HTTP) сейчас отключён", key="err_vless_http_disabled")
         # Fail closed with a clear message if VLESS (HTTP) was requested but the
         # XHTTP inbound is not configured — no DB row, no partial apply. Create
         # stays strict.
@@ -325,7 +325,7 @@ class XrayService:
             if key.status == VpnKeyStatus.DELETED:
                 return key
             if key.status not in XRAY_ACCESS_MAY_EXIST_STATUSES:
-                raise InvalidOperation("Отозвать можно только активный Xray-ключ")
+                raise InvalidOperation("Отозвать можно только активный Xray-ключ", key="err_revoke_active_xray_only")
             previous_status = key.status
             await self.vpn_keys.set_status(key_id, VpnKeyStatus.PENDING_REVOKE, self.clock.now())
             try:
@@ -370,11 +370,11 @@ class XrayService:
             self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
             key = await self._get_key(key_id)
             if key.key_type != VpnKeyType.XRAY:
-                raise InvalidOperation("Это не Xray-ключ")
+                raise InvalidOperation("Это не Xray-ключ", key="err_not_xray_key")
             if key.status in {VpnKeyStatus.REVOKED, VpnKeyStatus.DELETED}:
                 return key
             if key.status not in XRAY_ACCESS_MAY_EXIST_STATUSES:
-                raise InvalidOperation("Отозвать можно только активный Xray-ключ")
+                raise InvalidOperation("Отозвать можно только активный Xray-ключ", key="err_revoke_active_xray_only")
             previous_status = key.status
             await self.vpn_keys.set_status(key_id, VpnKeyStatus.PENDING_REVOKE, self.clock.now())
             try:
@@ -523,7 +523,7 @@ class XrayService:
         async with self._lock:  # Prevents returning config for a key being concurrently deleted
             key = await self._get_xray_key_for_manage(actor_user_id, key_id, allow_read=True)
             if key.status != VpnKeyStatus.ACTIVE:
-                raise InvalidOperation("Конфигурация доступна только для активного ключа")
+                raise InvalidOperation("Конфигурация доступна только для активного ключа", key="err_config_active_only")
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
                 action="xray_config_shown",
@@ -538,24 +538,24 @@ class XrayService:
         async with self._lock:  # Prevents returning config for a key being concurrently deleted
             key = await self._get_key(key_id)
             if key.key_type != VpnKeyType.XRAY:
-                raise InvalidOperation("Это не Xray-ключ")
+                raise InvalidOperation("Это не Xray-ключ", key="err_not_xray_key")
             if key.owner_user_id != owner_user_id:
-                raise AccessDenied("Нельзя смотреть чужой ключ")
+                raise AccessDenied("Нельзя смотреть чужой ключ", key="err_foreign_key_view")
             if key.status != VpnKeyStatus.ACTIVE:
-                raise InvalidOperation("Конфигурация доступна только для активного ключа")
+                raise InvalidOperation("Конфигурация доступна только для активного ключа", key="err_config_active_only")
             return self._format_config(key, viewer_user_id=owner_user_id)
 
     async def change_fingerprint(self, actor_user_id: int, key_id: int, fingerprint: str) -> VpnKey:
         """Update the per-key fingerprint and rebuild the stored VLESS link."""
         from bot.keyboards.keys import VALID_FINGERPRINTS
         if fingerprint not in VALID_FINGERPRINTS:
-            raise InvalidOperation("Неподдерживаемый fingerprint")
+            raise InvalidOperation("Неподдерживаемый fingerprint", key="err_fp_unsupported")
         # Serialise against concurrent revoke/delete so the status check and the
         # payload write cannot straddle a state change for the same key.
         async with self._lock:
             key = await self._get_xray_key_for_manage(actor_user_id, key_id)
             if key.status != VpnKeyStatus.ACTIVE:
-                raise InvalidOperation("Fingerprint можно изменить только у активного ключа")
+                raise InvalidOperation("Fingerprint можно изменить только у активного ключа", key="err_fp_active_only")
             new_payload = {**key.payload, "fingerprint": fingerprint}
             uuid_value = str(new_payload.get("uuid") or key.uuid or "")
             short_id = str(new_payload.get("short_id") or key.public_payload.get("short_id") or "")
@@ -596,7 +596,7 @@ class XrayService:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         target = owner_user_id or actor_user_id
         if actor.role != UserRole.SUPERADMIN and target != actor_user_id:
-            raise AccessDenied("Нельзя смотреть чужие ключи")
+            raise AccessDenied("Нельзя смотреть чужие ключи", key="err_foreign_keys_view")
         return await self.vpn_keys.list_by_owner_and_type(target, VpnKeyType.XRAY, limit=limit, offset=offset)
 
     async def update_xray_note(self, actor_user_id: int, key_id: int, note: str | None) -> VpnKey:
@@ -604,7 +604,7 @@ class XrayService:
         async with self._lock:  # Prevents note update racing with concurrent key deletion
             key = await self._get_xray_key_for_manage(actor_user_id, key_id, allow_read=True)
             if key.owner_user_id != actor_user_id:
-                raise AccessDenied("Можно менять заметку только своих ключей")
+                raise AccessDenied("Можно менять заметку только своих ключей", key="err_note_own_only")
             clean_note = normalize_note(note)
             await self.vpn_keys.update_note(key.id, clean_note, self.clock.now())
             await self._write_audit_best_effort(
@@ -624,7 +624,7 @@ class XrayService:
         async with self._lock:
             key = await self._get_key(key_id)
             if key.key_type != VpnKeyType.XRAY:
-                raise InvalidOperation("Это не Xray-ключ")
+                raise InvalidOperation("Это не Xray-ключ", key="err_not_xray_key")
             # Tolerant of a missing adapter (optional XHTTP inbound not configured):
             # treat an absent inbound as "client not found" instead of raising, so a
             # manual reconcile never hard-fails on a transport whose inbound is gone.
@@ -655,32 +655,32 @@ class XrayService:
     ) -> None:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         if actor.role != UserRole.SUPERADMIN and actor_user_id != owner_user_id:
-            raise AccessDenied("Нельзя создавать ключи для другого пользователя")
+            raise AccessDenied("Нельзя создавать ключи для другого пользователя", key="err_create_for_other")
         if allow_pending_owner:
             if actor.role != UserRole.SUPERADMIN:
-                raise AccessDenied("Только администратор может выдавать ключи гостям")
+                raise AccessDenied("Только администратор может выдавать ключи гостям", key="err_guest_admin_only")
             owner = await self.users.get_user(owner_user_id)
             from models.access import is_blocked_user
             if is_blocked_user(owner):
-                raise AccessDenied("Нельзя выдать ключ заблокированному пользователю")
+                raise AccessDenied("Нельзя выдать ключ заблокированному пользователю", key="err_issue_to_blocked")
         else:
             owner = await self.users.require_approved_or_admin(owner_user_id)
             if owner.role not in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
-                raise AccessDenied("Владелец ключа не имеет доступа")
+                raise AccessDenied("Владелец ключа не имеет доступа", key="err_owner_no_access")
 
     async def _get_xray_key_for_manage(self, actor_user_id: int, key_id: int, allow_read: bool = False) -> VpnKey:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         key = await self._get_key(key_id)
         if key.key_type != VpnKeyType.XRAY:
-            raise InvalidOperation("Это не Xray-ключ")
+            raise InvalidOperation("Это не Xray-ключ", key="err_not_xray_key")
         if actor.role != UserRole.SUPERADMIN and key.owner_user_id != actor_user_id:
-            raise AccessDenied("Нельзя управлять чужим ключом")
+            raise AccessDenied("Нельзя управлять чужим ключом", key="err_foreign_key_manage")
         return key
 
     async def _get_key(self, key_id: int) -> VpnKey:
         key = await self.vpn_keys.get_by_id(key_id)
         if key is None:
-            raise NotFound("Ключ не найден")
+            raise NotFound("Ключ не найден", key="err_key_not_found")
         return key
 
     async def _can_remove_short_id(self, key: VpnKey) -> bool:

@@ -226,7 +226,7 @@ def traffic_stats_text(view: KeyTrafficStatsView, *, viewer_user_id: int) -> str
     label = key_display_label(key, viewer_user_id=viewer_user_id)
     lines = [
         t("stats_title", key_title=key_title(key)),
-        f"{t('field_type')}: {h(key.key_type.value.upper())}",
+        f"{t('field_type')}: {h(key_type_label(key))}",
         f"{t('field_label')}: {code(label)}",
         f"{t('field_owner')}: {owner_text}",
     ]
@@ -282,7 +282,7 @@ def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer
             updated = t("stats_attempt_fmt", at=format_msk_datetime(stats.last_attempt_at))
         label = key_display_label(view.key, viewer_user_id=viewer_user_id)
         line = (
-            f"{h(view.key.key_type.value.upper())} · {code(label)} · "
+            f"{h(key_type_label(view.key))} · {code(label)} · "
             f"{owner_text} · {h(traffic + updated)}"
         )
         note = key_note_for_viewer(view.key, viewer_user_id)
@@ -1022,7 +1022,7 @@ def user_card_text(
                     traffic = f" · ↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
                 elif stats:
                     traffic = f" · {t('user_stats_unavailable')}"
-                lines.append(f"{h(key.key_type.value.upper())} · {code(key_display_label(key, viewer_user_id=viewer_user_id))}{traffic}")
+                lines.append(f"{h(key_type_label(key))} · {code(key_display_label(key, viewer_user_id=viewer_user_id))}{traffic}")
     return "\n".join(lines)
 
 

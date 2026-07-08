@@ -188,9 +188,9 @@ checklist, and day-2 operations live in:
 
 ## Access Lifecycle Policy
 
-- Approved users may create their own Xray/AWG keys, view their own active configs and stats, and edit their own key notes.
+- Approved users may create their own Xray/AWG/Hysteria2 keys, view their own active configs and stats, and edit their own key notes.
 - Approved users may issue and view their own SOCKS5/MTProto proxy access when the backend is enabled.
-- Revoke/delete for Xray, AWG, SOCKS5, and MTProto access is **admin-only**. Normal users do not get revoke/delete buttons, and direct callbacks/service calls are rejected.
+- Revoke/delete of **VPN keys (Xray/AWG/Hysteria2)** is available **to the key owner and to admins**: the owner sees revoke/delete buttons for their own keys, and direct callbacks/service calls verify ownership (another user's key is rejected). Revoke/delete of **proxy access (SOCKS5/MTProto)** is **admin-only**.
 - Blocking a user is an admin action: it blocks bot access and attempts to revoke active/problem VPN keys and proxy access.
 - In `MTPROTO_MODE=static`, blocking/revoking only deactivates the bot/SQLite record; a copied shared secret keeps working until the shared secret is rotated. In `MTPROTO_MODE=managed`, admin revoke removes that user's secret from the managed active list while other users remain active.
 

@@ -53,9 +53,9 @@ class NotesService:
         await self.users.require_approved_or_admin(actor_user_id)
         key = await self.vpn_keys.get_by_id(key_id)
         if key is None:
-            raise NotFound("Ключ не найден")
+            raise NotFound("Ключ не найден", key="err_key_not_found")
         if key.owner_user_id != actor_user_id:
-            raise AccessDenied("Можно менять заметку только своих ключей")
+            raise AccessDenied("Можно менять заметку только своих ключей", key="err_note_own_only")
         clean_note = normalize_note(note)
         await self.vpn_keys.update_note(key_id, clean_note, self.users.clock.now())
         await self._write_audit_best_effort(
@@ -71,7 +71,7 @@ class NotesService:
         await self.users.require_superadmin(actor_user_id)
         user = await self.users_repo.get_by_id(target_user_id)
         if user is None:
-            raise NotFound("Пользователь не найден")
+            raise NotFound("Пользователь не найден", key="err_user_not_found")
         clean_note = normalize_note(note)
         await self.users_repo.update_note(target_user_id, clean_note, self.users.clock.now())
         await self._write_audit_best_effort(
@@ -87,7 +87,7 @@ class NotesService:
         await self.users.require_superadmin(actor_user_id)
         proxy = await self.proxies.get_by_id(proxy_id)
         if proxy is None:
-            raise NotFound("Прокси не найден")
+            raise NotFound("Прокси не найден", key="err_proxy_not_found")
         clean_note = normalize_note(note)
         await self.proxies.update_note(proxy_id, clean_note, self.users.clock.now())
         await self._write_audit_best_effort(

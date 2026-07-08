@@ -49,12 +49,12 @@ from bot.messages import (
 )
 from bot.pagination import MAX_PAGE, page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
-from bot.middlewares.access import BLOCKED_CALLBACK_TEXT
 from bot.rate_limit import RateLimiter
 from i18n import t
 from models.access import is_blocked_user
 from models.enums import AuditEntityType, VpnKeyType
 from services.errors import AccessDenied, NotFound
+from services.notes import MAX_NOTE_LENGTH
 
 router = Router()
 KEYS_PAGE_SIZE = 5
@@ -84,28 +84,6 @@ async def list_keys(callback: CallbackQuery, services: Services) -> None:
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
-
-
-@router.message(F.text == t("btn_my_keys"))
-async def list_keys_message(message: Message, services: Services) -> None:
-    """Show the current user's key list in response to the my-keys button."""
-    if message.from_user is None:
-        return
-    if not await ensure_private_message(message):
-        return
-    try:
-        keys, current_page, total_pages, has_next = await load_keys_page(
-            services,
-            message.from_user.id,
-            page=0,
-            page_size=KEYS_PAGE_SIZE,
-        )
-        await message.answer(
-            keys_page_text(keys, current_page, viewer_user_id=message.from_user.id),
-            reply_markup=keys_list_keyboard(keys, page=current_page, has_next=has_next, total_pages=total_pages),
-        )
-    except Exception as exc:
-        await answer_message_error(message, exc)
 
 
 @router.callback_query(F.data.in_({"keys:create", "keys:create:menu"}))
@@ -148,36 +126,6 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
         )
 
 
-@router.message(F.text == t("btn_create_key"))
-async def create_key_menu_message(message: Message, services: Services) -> None:
-    """Show the key type selection menu in response to the create-key button."""
-    if not await ensure_private_message(message):
-        return
-    if message.from_user is None:
-        return
-    try:
-        await _ensure_can_enter_create(message.from_user.id, services)
-        xray_on = await services.modules.is_enabled("xray")
-        awg_on = await services.modules.is_enabled("awg")
-        hy2_on = (
-            services.settings.hysteria2_enabled
-            and services.settings.is_hysteria2_ready()
-            and await services.modules.is_enabled("hysteria2")
-        )
-        await message.answer(
-            f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
-            reply_markup=create_key_keyboard(
-                xray_enabled=xray_on,
-                awg_enabled=awg_on,
-                xhttp_enabled=services.settings.xray_xhttp_enabled,
-                hysteria2_enabled=hy2_on,
-                back_data="menu:main",
-            ),
-        )
-    except Exception as exc:
-        await answer_message_error(message, exc)
-
-
 @router.callback_query(F.data == "keys:proto:vless")
 async def create_key_proto_vless(callback: CallbackQuery, services: Services) -> None:
     """Show the VLESS transport selection (step 2) for the chosen VLESS protocol."""
@@ -217,6 +165,9 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext, services
     try:
         await _ensure_can_enter_create(callback.from_user.id, services)
         key_type, transport = _CREATE_CHOICE[callback.data]
+        if not await _protocol_enabled(services, key_type):
+            await safe_callback_answer(callback, t("protocol_unavailable"), show_alert=True)
+            return
         await safe_callback_answer(callback)
         await state.set_state(CreateKeyStates.waiting_note)
         await state.update_data(
@@ -301,6 +252,10 @@ async def create_key_note(message: Message, state: FSMContext, services: Service
     try:
         await _ensure_can_enter_create(message.from_user.id, services)
         note = _clean_note(message.text)
+        note_error = _note_input_error(note)
+        if note_error is not None:
+            await message.answer(note_error)
+            return
         data = await state.get_data()
         key_type = str(data.get("key_type") or "")
         note_prompt_msg_id = data.get("note_prompt_msg_id")
@@ -318,6 +273,7 @@ async def create_key_note(message: Message, state: FSMContext, services: Service
             await state.set_state(CreateKeyStates.waiting_expiry)
             await message.answer(t("expiry_prompt"), reply_markup=expiry_choice_keyboard())
     except Exception as exc:
+        await state.clear()
         await answer_message_error(message, exc)
 
 
@@ -808,6 +764,10 @@ async def edit_note_waiting(message: Message, state: FSMContext, services: Servi
         note_prompt_msg_id = data.get("note_prompt_msg_id")
         key = await services.vpn_keys.get_for_actor(message.from_user.id, key_id)
         note = _clean_note(message.text)
+        note_error = _note_input_error(note)
+        if note_error is not None:
+            await message.answer(note_error)
+            return
         await state.update_data(note=note)
         if note_prompt_msg_id:
             with suppress(Exception):
@@ -820,16 +780,18 @@ async def edit_note_waiting(message: Message, state: FSMContext, services: Servi
 
 
 @router.callback_query(EditNoteStates.confirming, F.data == "note:confirm")
-async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services: Services, rate_limiter: RateLimiter) -> None:
     """Save the updated note for the key and return to its detail view."""
     if callback.from_user is None or callback.message is None:
         return
     if not await ensure_private_callback(callback):
         return
-    await safe_callback_answer(callback, t("saving"))
-    data = await state.get_data()
-    await state.clear()
     try:
+        # Checked before clearing state so a throttled tap keeps the pending note.
+        rate_limiter.check(callback.from_user.id, "note_edit", 5)
+        await safe_callback_answer(callback, t("saving"))
+        data = await state.get_data()
+        await state.clear()
         key_id = int(data["key_id"])
         note = data.get("note")
         await services.notes.update_key_note(callback.from_user.id, key_id, note)
@@ -902,7 +864,7 @@ async def trial_request_start(callback: CallbackQuery, state: FSMContext, servic
     try:
         user = await services.users.get_user(callback.from_user.id)
         if is_blocked_user(user):
-            await safe_callback_answer(callback, BLOCKED_CALLBACK_TEXT, show_alert=True)
+            await safe_callback_answer(callback, t("blocked_callback"), show_alert=True)
             return
         can = await services.trial_access.can_request_trial(callback.from_user.id)
         if not can:
@@ -947,11 +909,15 @@ async def trial_request_proto(callback: CallbackQuery, state: FSMContext, servic
         user = await services.users.get_user(callback.from_user.id)
         if is_blocked_user(user):
             await state.clear()
-            await safe_callback_answer(callback, BLOCKED_CALLBACK_TEXT, show_alert=True)
+            await safe_callback_answer(callback, t("blocked_callback"), show_alert=True)
             return
         rate_limiter.check(callback.from_user.id, "trial_request", 300)
         proto = callback.data.rsplit(":", 1)[-1]
         key_type, type_label = _TRIAL_PROTO_CHOICE[proto]
+        if not await _protocol_enabled(services, key_type.value):
+            await state.clear()
+            await safe_callback_answer(callback, t("protocol_unavailable"), show_alert=True)
+            return
         can = await services.trial_access.can_request_trial(callback.from_user.id)
         if not can:
             await state.clear()
@@ -982,7 +948,7 @@ async def trial_request_proto(callback: CallbackQuery, state: FSMContext, servic
 
 
 @router.callback_query(F.data.regexp(r"^trial:show:\d+$"))
-async def trial_key_show(callback: CallbackQuery, services: Services) -> None:
+async def trial_key_show(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Show the configuration for the user's trial key."""
     if not await ensure_private_callback(callback):
         return
@@ -1002,9 +968,12 @@ async def trial_key_show(callback: CallbackQuery, services: Services) -> None:
             text = awg_config_text(await services.awg.get_awg_formatted_config_for_owner(callback.from_user.id, key_id))
             plain = await services.awg.get_awg_client_config_for_owner(callback.from_user.id, key_id)
             await safe_edit_message_text(callback.message, text)
-            await callback.message.answer_document(
+            sent = await callback.message.answer_document(
                 BufferedInputFile(plain.encode("utf-8"), filename=awg_config_filename(key))
             )
+            # Track the sent AWG config file so the config-cleanup middleware
+            # removes it when the user navigates away, like the main key flow.
+            await remember_config_document(state, key_id=key_id, message_id=sent.message_id)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -1024,6 +993,23 @@ def _clean_note(value: str | None) -> str | None:
     return None if note in {"", "-"} else note
 
 
+def _note_input_error(note: str | None) -> str | None:
+    """Return a localized error if the cleaned note is invalid, else None.
+
+    Validating here (at input time) gives the user a fixable message and keeps
+    them in the same wizard step, instead of walking the whole flow and hitting
+    ``normalize_note``'s ValueError at confirm time (surfaced as a generic
+    "internal error"). ``normalize_note`` stays as the service-layer backstop.
+    """
+    if note is None:
+        return None
+    if "\n" in note or "\r" in note:
+        return t("note_no_newlines")
+    if len(note) > MAX_NOTE_LENGTH:
+        return t("note_too_long", max=MAX_NOTE_LENGTH)
+    return None
+
+
 def _admin_owner_context(key: Any, actor_user_id: int) -> int | None:
     return key.owner_user_id if key.owner_user_id != actor_user_id else None
 
@@ -1032,11 +1018,31 @@ async def _ensure_can_enter_create(actor_user_id: int, services: Services) -> No
     try:
         await services.users.require_approved_or_admin(actor_user_id)
     except NotFound as exc:
-        raise AccessDenied(t("ensure_send_start")) from exc
-    except AccessDenied as exc:
-        if "не одобрен" in str(exc) or "not approved" in str(exc).lower():
-            raise AccessDenied(t("access_not_approved")) from exc
-        raise
+        # The user has no account yet: point them at /start. Other AccessDenied
+        # cases (blocked / not approved) already carry their own localized key
+        # from require_approved_or_admin, so they propagate unchanged.
+        raise AccessDenied(t("ensure_send_start"), key="ensure_send_start") from exc
+
+
+async def _protocol_enabled(services: Services, key_type: str) -> bool:
+    """Whether the given protocol is currently offered for key creation.
+
+    Mirrors the availability checks that gate the create-menu buttons, so a
+    replayed/stale ``keys:create:*`` (or ``trial:proto:*``) callback for a
+    disabled protocol is refused up front instead of walking the whole wizard
+    only to fail at the service layer.
+    """
+    if key_type == VpnKeyType.XRAY.value:
+        return await services.modules.is_enabled("xray")
+    if key_type == VpnKeyType.AWG.value:
+        return await services.modules.is_enabled("awg")
+    if key_type == VpnKeyType.HYSTERIA2.value:
+        return (
+            services.settings.hysteria2_enabled
+            and services.settings.is_hysteria2_ready()
+            and await services.modules.is_enabled("hysteria2")
+        )
+    return False
 
 
 def _parse_key_context(data: str | None, prefix: str) -> tuple[int, int | None, int]:

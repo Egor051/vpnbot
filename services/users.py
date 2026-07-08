@@ -103,7 +103,7 @@ class UserService:
         """Return the user by Telegram ID or raise NotFound."""
         user = await self.users.get_by_id(telegram_user_id)
         if user is None:
-            raise NotFound("Пользователь не найден")
+            raise NotFound("Пользователь не найден", key="err_user_not_found")
         return user
 
     async def set_language(self, actor_user_id: int, language: str | None) -> User:
@@ -124,7 +124,7 @@ class UserService:
         """Return the actor only if they are a superadmin, else raise AccessDenied."""
         user = await self.get_user(actor_user_id)
         if user.role != UserRole.SUPERADMIN:
-            raise AccessDenied("Недостаточно прав")
+            raise AccessDenied("Недостаточно прав", key="err_insufficient_rights")
         return user
 
     async def require_moderator_or_admin(self, actor_user_id: int) -> User:
@@ -132,7 +132,7 @@ class UserService:
         user = await self.get_user(actor_user_id)
         if user.role in {UserRole.SUPERADMIN, UserRole.MODERATOR}:
             return user
-        raise AccessDenied("Недостаточно прав")
+        raise AccessDenied("Недостаточно прав", key="err_insufficient_rights")
 
     async def require_approved_or_admin(self, actor_user_id: int) -> User:
         """Return the actor only if they are approved, a moderator, or a superadmin."""
@@ -140,9 +140,9 @@ class UserService:
         if user.role in {UserRole.SUPERADMIN, UserRole.MODERATOR}:
             return user
         if is_blocked_user(user):
-            raise AccessDenied("Доступ заблокирован")
+            raise AccessDenied("Доступ заблокирован", key="err_access_blocked")
         if user.role != UserRole.APPROVED_USER:
-            raise AccessDenied("Доступ не одобрен")
+            raise AccessDenied("Доступ не одобрен", key="access_not_approved")
         return user
 
     async def can_manage_owner(self, actor_user_id: int, owner_user_id: int) -> bool:

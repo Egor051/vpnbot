@@ -45,12 +45,12 @@ class TrafficStatsService:
         actor = await self.users.require_approved_or_admin(actor_user_id)
         key = await self.vpn_keys.get_by_id(key_id)
         if key is None or key.status == VpnKeyStatus.DELETED:
-            raise NotFound("Ключ не найден")
+            raise NotFound("Ключ не найден", key="err_key_not_found")
         if actor.role != UserRole.SUPERADMIN and key.owner_user_id != actor_user_id:
-            raise AccessDenied("Нельзя смотреть статистику чужого ключа")
+            raise AccessDenied("Нельзя смотреть статистику чужого ключа", key="err_foreign_stats_view")
         views = await self.refresh_views([key])
         if not views:
-            raise NotFound("Ключ не найден")
+            raise NotFound("Ключ не найден", key="err_key_not_found")
         return views[0]
 
     async def count_for_superadmin(self, actor_user_id: int) -> int:
