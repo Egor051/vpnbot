@@ -715,6 +715,8 @@ STRINGS: dict[str, str] = {
     "btn_warp_restart": "🔄 Перезапустить",
     "btn_warp_settings": "⚙️ Настройки",
     "btn_warp_split": "🌐 Split-маршруты",
+    "btn_warp_killswitch_enable": "🛡 Включить kill-switch",
+    "btn_warp_killswitch_disable": "🛡 Выключить kill-switch",
     "warp_title": "📡 <b>Сокрытие outbound IP</b>",
     "warp_settings_title": "⚙️ <b>Настройки WARP</b>",
     "warp_status_disabled": "Статус: 🔴 Выключен",
@@ -737,6 +739,7 @@ STRINGS: dict[str, str] = {
     "warp_routes_fallback": "⚠️ Fallback (трафик → прямо)",
     "warp_routes_inactive": "⏸ Неактивны",
     "warp_routes_off": "⚪ Выключены (весь трафик direct)",
+    "warp_routes_unverified": "(факт. таблица не прочитана)",
     "warp_routes_drift": "⚠️ Рассинхрон (маркер: {marker}, в таблице: {table}, в списке: {count})",
     "warp_routes_hint": (
         "ℹ️ Кнопки Вкл/Выкл/Перезапустить управляют split-<b>маршрутами</b> (table T), "
@@ -750,6 +753,15 @@ STRINGS: dict[str, str] = {
     "warp_settings_config": "Конфиг:",
     "warp_settings_iface": "Интерфейс:",
     "warp_settings_routes": "Маршрутов:",
+    "warp_settings_killswitch": "Kill-switch:",
+    "warp_killswitch_on": "🛡 включён",
+    "warp_killswitch_off": "⚪ выключен",
+    "warp_killswitch_hint": (
+        "🛡 Kill-switch: при обрыве туннеля трафик <b>блокируется</b>, а не уходит "
+        "напрямую с реальным IP. По умолчанию выключен.\n"
+        "ℹ️ Действует в legacy-режиме (когда маршрутами управляет бот). В observer-"
+        "режиме маршрутами владеет systemd — блокировку обеспечивает <code>warp-failsafe</code>."
+    ),
     "warp_upload_prompt": (
         "Отправьте файл конфигурации AmneziaWG (<code>.conf</code>) как документ.\n\n"
         "Конфиг должен содержать поля AmneziaWG (Jc, S1, S2) и непустой AllowedIPs. "

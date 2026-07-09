@@ -73,7 +73,15 @@ class WarpManager:
         self._interval = settings.warp_monitor_interval_seconds
         self._fast_interval = settings.warp_monitor_fast_interval_seconds
         self._lock = asyncio.Lock()
+        # Serialises every ip-route mutation (monitor-driven activate/deactivate and
+        # the stop-time teardown) so they can never interleave into an indeterminate
+        # routing state. Separate from ``_lock`` because the monitor's route callbacks
+        # run outside the state lock.
+        self._route_lock = asyncio.Lock()
         self._running = False
+        # Operator kill-switch, loaded from persisted state on start and updated live
+        # by ``set_kill_switch``. Read by the health monitor on every down latch.
+        self._kill_switch = False
         self._monitor: WarpHealthMonitor | None = None
         self._last_error: str | None = None
         self.bot: Bot | None = None
@@ -120,6 +128,20 @@ class WarpManager:
         async with self._lock:
             await self._stop_locked()
             await self._start_locked()
+
+    async def set_kill_switch(self, enabled: bool) -> None:
+        """Persist the kill-switch flag and apply it to a running monitor live.
+
+        When ON, a tunnel-down in legacy (non-observer) mode keeps the routes in
+        place so masked traffic blackholes on the dead interface instead of leaking
+        out the real server IP. Off by default. Takes effect immediately: the
+        monitor reads ``self._kill_switch`` on every down-latch crossing, so no
+        restart (and no tunnel blip) is needed.
+        """
+        async with self._lock:
+            await self._repo.set_kill_switch(enabled)
+            self._kill_switch = enabled
+            logger.info("WARP kill-switch set to %s", "on" if enabled else "off")
 
     # ── config management ──────────────────────────────────────────────────
 
@@ -186,6 +208,7 @@ class WarpManager:
         if not state.config_present:
             self._last_error = "Конфиг WARP не загружен."
             raise WarpError(self._last_error)
+        self._kill_switch = state.kill_switch
 
         if self._observer_mode:
             await self._start_observer_locked()
@@ -204,8 +227,14 @@ class WarpManager:
         routes_active = added.ok
         if not added.ok:
             logger.warning("WARP routes add failed rc=%s: %s", added.returncode, added.stderr)
-
-        self._last_error = None
+            # Surface the half-applied state: the interface is up but no routes were
+            # installed, so nothing is being masked. The monitor still starts and
+            # will retry via _activate_routes once the tunnel is confirmed healthy.
+            self._last_error = _helper_error_message(
+                added, "Интерфейс out-warp поднят, но маршруты не установлены — маскировка не активна"
+            )
+        else:
+            self._last_error = None
         self._running = True
 
         probe_ok = await self._ping()
@@ -232,16 +261,20 @@ class WarpManager:
             on_update=self._on_health_update,
             on_tunnel_down=self._notify_tunnel_down,
             on_tunnel_recovered=self._notify_tunnel_recovered,
+            on_degraded=self._notify_degraded,
+            on_degraded_cleared=self._notify_degraded_cleared,
             interval=self._interval,
             fast_interval=self._fast_interval,
             fail_window=self._fail_window,
             recover_window=self._recover_window,
             initial_routes_active=routes_active,
+            kill_switch=lambda: self._kill_switch,
         )
         self._monitor.start()
         logger.info(
-            "WARP module started: interface up, routes %s",
+            "WARP module started: interface up, routes %s, kill-switch %s",
             "active" if routes_active else "inactive (fallback)",
+            "on" if self._kill_switch else "off",
         )
 
     async def _start_observer_locked(self) -> None:
@@ -267,7 +300,10 @@ class WarpManager:
         self._running = True
         await self._repo.update_runtime(
             tunnel_up=iface_up,
-            routes_active=True,  # owned by warp-routes.service; not the bot's to track
+            # Routes are owned by warp-routes.service, so the bot can only report a
+            # best-effort signal: the interface being up. Don't assert an
+            # unconditional "active" that could mask a failed warp-routes.service.
+            routes_active=iface_up,
             fail_streak=0,
             success_streak=0,
             last_handshake=handshake,
@@ -280,12 +316,15 @@ class WarpManager:
             on_update=self._on_health_update,
             on_tunnel_down=self._notify_tunnel_down,
             on_tunnel_recovered=self._notify_tunnel_recovered,
+            on_degraded=self._notify_degraded,
+            on_degraded_cleared=self._notify_degraded_cleared,
             interval=self._interval,
             fast_interval=self._fast_interval,
             fail_window=self._fail_window,
             recover_window=self._recover_window,
-            initial_routes_active=True,
+            initial_routes_active=iface_up,
             observer_mode=True,
+            kill_switch=lambda: self._kill_switch,
         )
         self._monitor.start()
         logger.info(
@@ -295,27 +334,30 @@ class WarpManager:
         )
 
     async def _stop_locked(self) -> None:
-        # Stop (cancel + await) the monitor before tearing down routes/interface so
-        # its out-of-lock activate/deactivate_routes calls cannot race this teardown.
-        if self._monitor is not None:
-            await self._monitor.stop()
-            self._monitor = None
-        if self._observer_mode:
-            # The interface and routes are owned by systemd — leave them untouched so
-            # toggling the bot's monitor off never strands the tunnel or wipes the
-            # policy rules (the exact failure that prompted observer mode).
-            if self._running:
-                logger.info(
-                    "WARP observer stopped: interface and routes left in place (owned by systemd)"
-                )
-        elif self._running:
-            removed = await self._routes.remove()
-            if not removed.ok:
-                logger.warning("WARP routes remove failed rc=%s: %s", removed.returncode, removed.stderr)
-            down = await self._interface.down()
-            if not down.ok:
-                logger.warning("WARP interface down failed rc=%s: %s", down.returncode, down.stderr)
-            logger.info("WARP module stopped: routes removed, interface down")
+        # Hold the route lock across the whole teardown so an in-flight monitor
+        # route op finishes first (or, if it was only waiting for the lock, is
+        # cleanly cancelled before it starts) — its out-of-lock activate/deactivate
+        # calls can never race this teardown into an indeterminate routing state.
+        async with self._route_lock:
+            if self._monitor is not None:
+                await self._monitor.stop()
+                self._monitor = None
+            if self._observer_mode:
+                # The interface and routes are owned by systemd — leave them untouched
+                # so toggling the bot's monitor off never strands the tunnel or wipes
+                # the policy rules (the exact failure that prompted observer mode).
+                if self._running:
+                    logger.info(
+                        "WARP observer stopped: interface and routes left in place (owned by systemd)"
+                    )
+            elif self._running:
+                removed = await self._routes.remove()
+                if not removed.ok:
+                    logger.warning("WARP routes remove failed rc=%s: %s", removed.returncode, removed.stderr)
+                down = await self._interface.down()
+                if not down.ok:
+                    logger.warning("WARP interface down failed rc=%s: %s", down.returncode, down.stderr)
+                logger.info("WARP module stopped: routes removed, interface down")
         self._running = False
         await self._repo.update_runtime(
             tunnel_up=False,
@@ -351,15 +393,29 @@ class WarpManager:
         # filter ICMP. A recent WireGuard handshake still proves the tunnel is alive,
         # so honour it instead of stranding the routes in fallback on a false "down".
         handshake = await self._safe_handshake()
-        return handshake > 0 and (int(time.time()) - handshake) <= HANDSHAKE_FRESH_SECONDS
+        now = int(time.time())
+        fresh = handshake > 0 and (now - handshake) <= HANDSHAKE_FRESH_SECONDS
+        if fresh:
+            # The control plane is alive but the ICMP data-plane probe failed, so
+            # actual routing through the tunnel is unverified. Log the divergence so a
+            # blackholed data path is not silently hidden behind a fresh handshake.
+            logger.debug(
+                "WARP: ICMP probe to %s failed but a handshake %ds ago keeps the tunnel "
+                "'up' — data-plane routing is unverified",
+                self._ping_target,
+                now - handshake,
+            )
+        return fresh
 
     async def _activate_routes(self) -> None:
-        result = await self._routes.add()
+        async with self._route_lock:
+            result = await self._routes.add()
         if not result.ok:
             logger.warning("WARP route restore failed rc=%s: %s", result.returncode, result.stderr)
 
     async def _deactivate_routes(self) -> None:
-        result = await self._routes.remove()
+        async with self._route_lock:
+            result = await self._routes.remove()
         if not result.ok:
             logger.warning("WARP route removal (fallback) failed rc=%s: %s", result.returncode, result.stderr)
 
@@ -387,23 +443,19 @@ class WarpManager:
                 "(<code>warp-routes.service</code>) — проверьте "
                 "<code>awg-quick@out-warp</code>."
             )
+        elif self._kill_switch:
+            text = (
+                "🔴 <b>WARP-туннель недоступен</b>\n"
+                "Kill-switch включён — трафик заблокирован (не уходит напрямую с реальным IP)."
+            )
         else:
             text = (
                 "🔴 <b>WARP-туннель недоступен</b>\n"
                 "Маршруты сняты — трафик идёт напрямую."
             )
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text=t("btn_warp_alert_dismiss"), callback_data="admin:warp:alert:dismiss")]]
-        )
-        for admin_id in self._settings.admin_ids:
-            try:
-                await self.bot.send_message(admin_id, text, reply_markup=keyboard)
-            except Exception:
-                logger.warning("Failed to send WARP down alert to admin %d", admin_id, exc_info=True)
+        await self._broadcast_admins(text, "down")
 
     async def _notify_tunnel_recovered(self) -> None:
-        if self.bot is None:
-            return
         if self._observer_mode:
             text = (
                 "🟢 <b>WARP-туннель восстановлен</b>\n"
@@ -414,6 +466,26 @@ class WarpManager:
                 "🟢 <b>WARP-туннель восстановлен</b>\n"
                 "Маршруты восстановлены."
             )
+        await self._broadcast_admins(text, "recovered")
+
+    async def _notify_degraded(self, loss: float) -> None:
+        text = (
+            "🟠 <b>WARP-туннель деградирует</b>\n"
+            f"Потеря проб ≈ {round(loss * 100)}%. Маршруты не тронуты — это только "
+            "предупреждение; проверьте <code>awg-quick@out-warp</code>."
+        )
+        await self._broadcast_admins(text, "degraded")
+
+    async def _notify_degraded_cleared(self) -> None:
+        text = (
+            "🟢 <b>WARP-туннель в норме</b>\n"
+            "Деградация прекратилась."
+        )
+        await self._broadcast_admins(text, "degraded-cleared")
+
+    async def _broadcast_admins(self, text: str, kind: str) -> None:
+        if self.bot is None:
+            return
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text=t("btn_warp_alert_dismiss"), callback_data="admin:warp:alert:dismiss")]]
         )
@@ -421,7 +493,7 @@ class WarpManager:
             try:
                 await self.bot.send_message(admin_id, text, reply_markup=keyboard)
             except Exception:
-                logger.warning("Failed to send WARP recovered alert to admin %d", admin_id, exc_info=True)
+                logger.warning("Failed to send WARP %s alert to admin %d", kind, admin_id, exc_info=True)
 
     async def _safe_handshake(self) -> int:
         try:

@@ -35,16 +35,21 @@ def warp_main_keyboard(state: WarpState, split_status: SplitStatus) -> InlineKey
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def warp_settings_keyboard() -> InlineKeyboardMarkup:
+def warp_settings_keyboard(state: WarpState) -> InlineKeyboardMarkup:
     """Build the WARP settings screen keyboard.
 
-    Hosts config management (replace/delete — unchanged) plus the entry point to
-    the selective-split list GUI, which moved here from the main WARP panel.
+    Hosts config management (replace/delete — unchanged), the kill-switch toggle
+    (fail-closed on tunnel-down instead of leaking the real IP), plus the entry
+    point to the selective-split list GUI, which moved here from the main WARP panel.
     """
+    kill_label = (
+        t("btn_warp_killswitch_disable") if state.kill_switch else t("btn_warp_killswitch_enable")
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_warp_replace"), callback_data="admin:warp:upload")],
             [InlineKeyboardButton(text=t("btn_warp_delete"), callback_data="admin:warp:delete")],
+            [InlineKeyboardButton(text=kill_label, callback_data="admin:warp:killswitch:toggle")],
             [InlineKeyboardButton(text=t("btn_warp_split"), callback_data="wsplit:p:0")],
             [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:warp")],
         ]

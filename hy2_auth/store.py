@@ -3,6 +3,8 @@ import asyncio
 import hmac
 import json
 import logging
+import os
+from contextlib import suppress
 from pathlib import Path
 
 import aiosqlite
@@ -37,7 +39,15 @@ class ReadOnlyKeyStore:
 
     Opens the database with ``mode=ro`` (writes raise) and re-queries on every
     handshake — there is NO cache, so a revoke (status flip away from 'active')
-    or delete takes effect on the very next authentication.
+    or delete takes effect on the very next authentication. The per-handshake
+    full scan of active keys is deliberate: caching secrets would delay revokes,
+    which is the exact property this module exists to guarantee, so it is kept
+    O(active-keys) per handshake on purpose.
+
+    The connection pins an inode. To keep the revoke guarantee across an operator
+    restoring vpn.db by swapping the file (atomic rename), each read checks whether
+    the on-disk inode changed and reopens before querying — otherwise it would keep
+    reading the stale, deleted inode and authenticate revoked keys.
     """
 
     def __init__(self, db_path: str | Path) -> None:
@@ -45,6 +55,9 @@ class ReadOnlyKeyStore:
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._infra_failures = 0
+        # (st_dev, st_ino) of the file backing the open connection, so a file swap
+        # (restore/atomic rename) can be detected and the connection reopened.
+        self._file_id: tuple[int, int] | None = None
 
     @property
     def uri(self) -> str:
@@ -62,11 +75,54 @@ class ReadOnlyKeyStore:
 
     async def connect(self) -> None:
         """Open the read-only connection. Raises if the DB file is missing."""
+        await self._open()
+
+    async def _open(self) -> None:
         conn = await aiosqlite.connect(self.uri, uri=True)
         # busy_timeout matters here: the bot is the live writer, so a read that
         # lands during a checkpoint/commit must wait briefly instead of failing.
         await conn.execute("PRAGMA busy_timeout = 5000")
         self._conn = conn
+        self._file_id = self._current_file_id()
+
+    def _current_file_id(self) -> tuple[int, int] | None:
+        """Return ``(st_dev, st_ino)`` of the DB file, or ``None`` if unstatable."""
+        try:
+            st = os.stat(self._db_path)
+        except OSError:
+            return None
+        return (st.st_dev, st.st_ino)
+
+    async def _reopen_if_replaced(self) -> None:
+        """Reopen the connection if vpn.db was swapped on disk (restore/rename).
+
+        A missing/unstatable file leaves the existing connection in place; the
+        query below then fails and surfaces as :class:`KeyStoreUnavailable`
+        (fail-closed), rather than us reopening against a half-written file.
+        """
+        current = self._current_file_id()
+        if current is None or current == self._file_id:
+            return
+        logger.warning(
+            "hy2_auth: vpn.db was replaced on disk (inode changed) — reopening read-only connection"
+        )
+        if self._conn is not None:
+            with suppress(Exception):
+                await self._conn.close()
+            self._conn = None
+        try:
+            await self._open()
+        except (aiosqlite.Error, OSError) as exc:
+            # A swap to a missing/broken DB must stay fail-closed, matching a live
+            # read fault: count it and surface KeyStoreUnavailable so healthcheck
+            # returns 503 and auth returns ok:false rather than a raw 5xx.
+            self._infra_failures += 1
+            logger.error(
+                "hy2_auth: reopening vpn.db after a file swap failed (infra failure #%d): %s",
+                self._infra_failures,
+                exc,
+            )
+            raise KeyStoreUnavailable(str(exc)) from exc
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -75,9 +131,10 @@ class ReadOnlyKeyStore:
 
     async def _read_active_rows(self) -> list[aiosqlite.Row]:
         """Run the live SELECT, mapping any DB fault to KeyStoreUnavailable."""
-        if self._conn is None:
-            raise KeyStoreUnavailable("ReadOnlyKeyStore is not connected")
         async with self._lock:
+            await self._reopen_if_replaced()
+            if self._conn is None:
+                raise KeyStoreUnavailable("ReadOnlyKeyStore is not connected")
             try:
                 cursor = await self._conn.execute(
                     _ACTIVE_SECRETS_SQL, (_KEY_TYPE_HYSTERIA2, _STATUS_ACTIVE)
@@ -102,15 +159,22 @@ class ReadOnlyKeyStore:
         rows = await self._read_active_rows()
         result: list[tuple[str, str]] = []
         for label, payload_json in rows:
+            # A skipped row is a silent per-user auth outage otherwise; log it at
+            # debug (by label — never the secret) so "my key stopped working" is
+            # diagnosable and distinguishable from "no active key".
             try:
                 data = json.loads(payload_json)
             except (TypeError, ValueError):
+                logger.debug("hy2_auth: skipping active key %r — unparseable payload_json", label)
                 continue
             if not isinstance(data, dict):
+                logger.debug("hy2_auth: skipping active key %r — payload_json is not an object", label)
                 continue
             secret = data.get("secret")
             if isinstance(label, str) and label and isinstance(secret, str) and secret:
                 result.append((label, secret))
+            else:
+                logger.debug("hy2_auth: skipping active key %r — missing/invalid label or secret", label)
         return result
 
     async def match(self, incoming_auth: str) -> str | None:

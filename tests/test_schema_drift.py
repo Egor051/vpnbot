@@ -115,6 +115,43 @@ def test_schema_only_objects_are_reensured_on_every_bootstrap(tmp_path: Path) ->
     asyncio.run(run())
 
 
+def test_v30_backfills_config_installed_from_routes_count(tmp_path: Path) -> None:
+    """P8-013: _migrate_v30 backfills config_installed=1 for a pre-v30 row that
+    already produced routes (existing installs keep their "config present" state),
+    adds kill_switch defaulting off, and is idempotent."""
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            # Pre-v30 warp_settings: no kill_switch / config_installed columns, with
+            # an installed config (routes_count>0).
+            await db.conn.execute("DROP TABLE IF EXISTS warp_settings")
+            await db.conn.execute(
+                "CREATE TABLE warp_settings (id INTEGER PRIMARY KEY DEFAULT 1, "
+                "routes_count INTEGER NOT NULL DEFAULT 0)"
+            )
+            await db.conn.execute("INSERT INTO warp_settings (id, routes_count) VALUES (1, 5)")
+            await db.commit()
+
+            await db._migrate_v30()
+            await db.commit()
+
+            row = await db.conn.execute_fetchone(
+                "SELECT config_installed, kill_switch FROM warp_settings WHERE id = 1"
+            )
+            assert row is not None
+            assert int(row["config_installed"]) == 1  # backfilled from routes_count>0
+            assert int(row["kill_switch"]) == 0        # defaults off
+
+            # Idempotent: a second run must not raise (columns already present).
+            await db._migrate_v30()
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_foreign_keys_enforced_after_bootstrap(tmp_path: Path) -> None:
     """After bootstrap (which rewrites tables with FK toggled off in v16/v17),
     foreign-key enforcement must be back ON."""

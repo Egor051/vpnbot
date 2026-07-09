@@ -33,3 +33,15 @@ RECOVER_WINDOW_SECONDS = 60  # continuous success before the tunnel is declared 
 # fixed ICMP probe target is unreachable (e.g. it is not inside the user's
 # AllowedIPs or it filters ICMP), preventing a permanent false "tunnel down".
 HANDSHAKE_FRESH_SECONDS = 180
+
+# Sustained-degradation detector (observability only — NEVER removes routes). The
+# continuous-fail latch above requires an *uninterrupted* run of failures, so a
+# tunnel dropping (say) half its probes can stay "up" indefinitely while badly
+# degraded. This sliding window flags that case for an admin alert without ever
+# touching routing. The MIN_SAMPLES floor guarantees a single (or a couple of)
+# isolated failures can never raise the alert. Hysteresis: raise at LOSS, clear at
+# the lower CLEAR threshold.
+DEGRADED_WINDOW_SECONDS = 120   # trailing window over which loss is measured
+DEGRADED_MIN_SAMPLES = 10       # need at least this many probes in-window to judge
+DEGRADED_LOSS_THRESHOLD = 0.5   # failure ratio at/above which the tunnel is degraded
+DEGRADED_CLEAR_THRESHOLD = 0.2  # failure ratio below which the degraded flag clears

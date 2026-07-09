@@ -335,3 +335,121 @@ def test_hy2_auth_imports_without_bot_or_aiogram() -> None:
         [sys.executable, "-c", code], cwd=str(ROOT), capture_output=True, text=True, timeout=60
     )
     assert result.returncode == 0, f"bot/aiogram leaked into hy2_auth import: {result.stdout}{result.stderr}"
+
+
+# ── P8-002: reconnect after the DB file is swapped on disk (restore) ───────────
+
+
+async def _seed_revoked_replacement(tmp_path: Path) -> Path:
+    """Build a standalone vpn.db where ACTIVE_SECRET's key is revoked; return its path."""
+    repl_path = tmp_path / "replacement" / "vpn.db"
+    repl = Database(repl_path)
+    await repl.connect()
+    await repl.bootstrap()
+    users = UserRepository(repl)
+    await users.upsert_profile(TelegramUserProfile(100, "user", "User"), UserRole.APPROVED_USER, "now")
+    keys = VpnKeyRepository(repl)
+    key = await keys.create_pending(
+        owner_user_id=100,
+        username="user",
+        key_type=VpnKeyType.HYSTERIA2,
+        note=None,
+        payload={"secret": ACTIVE_SECRET, "email_label": ACTIVE_LABEL},
+        public_payload={"email_label": ACTIVE_LABEL},
+        created_by=100,
+        now="now",
+        email_label=ACTIVE_LABEL,
+    )
+    await keys.mark_active(key.id, "now")
+    await keys.mark_revoked(key.id, 100, "now")
+    await repl.close()  # checkpoints the WAL into the main file
+    return repl_path
+
+
+async def test_store_reopens_after_db_file_swap(tmp_path: Path) -> None:
+    """A restore that atomically replaces vpn.db must be reflected on the next read:
+    the store pins an inode, so it has to detect the swap and reopen — otherwise a
+    revoked key would keep authenticating against the old, deleted inode."""
+    import os
+
+    db = await _seed_db(tmp_path)
+    store = ReadOnlyKeyStore(db.path)
+    await store.connect()
+    try:
+        assert await store.match(ACTIVE_SECRET) == ACTIVE_LABEL
+        replacement = await _seed_revoked_replacement(tmp_path)
+        os.replace(replacement, db.path)
+        # Remove the original's stale WAL sidecars so the reopened read-only
+        # connection reads the swapped-in (checkpointed) database cleanly.
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{db.path}{suffix}")
+            if sidecar.exists():
+                sidecar.unlink()
+        # The revoke in the swapped-in DB must now be visible (inode change → reopen).
+        assert await store.match(ACTIVE_SECRET) is None
+    finally:
+        await store.close()
+        await db.close()
+
+
+# ── P8-003: a skipped active row is logged (diagnosable, never the secret) ─────
+
+
+async def test_fetch_active_secrets_logs_skipped_rows(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    db = await _seed_db(tmp_path)
+    store = ReadOnlyKeyStore(db.path)
+    await store.connect()
+
+    async def _rows() -> list[tuple[str, str]]:
+        return [
+            ("good", '{"secret": "goodtoken"}'),
+            ("bad", '{"secret": "LEAKME broken json'),  # unparseable; payload holds a sentinel
+            ("nosecret", '{"email_label": "x"}'),
+        ]
+
+    store._read_active_rows = _rows  # type: ignore[assignment,method-assign]
+    try:
+        with caplog.at_level(logging.DEBUG, logger="hy2_auth.store"):
+            caplog.clear()
+            result = await store.fetch_active_secrets()
+        assert result == [("good", "goodtoken")]
+        messages = " ".join(r.getMessage() for r in caplog.records)
+        # Labels are logged (diagnosable) but the payload/secret content never is.
+        assert "bad" in messages and "nosecret" in messages
+        assert "LEAKME" not in messages and "goodtoken" not in messages
+    finally:
+        await store.close()
+        await db.close()
+
+
+# ── P8-007: the auth body is bounded ──────────────────────────────────────────
+
+
+async def test_endpoint_oversized_body_fails_closed(tmp_path: Path) -> None:
+    client, db, store = await _client(tmp_path)
+    try:
+        oversized = b"a" * (64 * 1024 + 32)
+        resp = await client.post(
+            "/auth", data=oversized, headers={"Content-Type": "application/json"}
+        )
+        # Never authenticated, never a 5xx: either the handler catches the
+        # too-large read (200 {ok:false}) or aiohttp rejects it (413).
+        assert resp.status in (200, 413)
+        if resp.status == 200:
+            assert await resp.json() == {"ok": False}
+    finally:
+        await client.close()
+        await store.close()
+        await db.close()
+
+
+# ── P8-005: the /healthz probe URL matches the loopback hy2_auth binds ─────────
+
+
+def test_health_probe_normalises_localhost() -> None:
+    from adapters.hysteria_auth_health import Hysteria2AuthHealthProbe
+
+    probe = Hysteria2AuthHealthProbe(auth_listen="localhost:8444")
+    assert probe._url == "http://127.0.0.1:8444/healthz"

@@ -15,7 +15,7 @@ from typing import Any, ClassVar
 import aiosqlite
 
 
-CURRENT_SCHEMA_VERSION = 29
+CURRENT_SCHEMA_VERSION = 30
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -301,6 +301,10 @@ class Database:
             await self._migrate_v29()
             await self._set_schema_version(29)
             version = 29
+        if version < 30:
+            await self._migrate_v30()
+            await self._set_schema_version(30)
+            version = 30
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1201,6 +1205,32 @@ class Database:
             # Re-enable FK after committing so the pragma actually takes effect
             # (SQLite ignores PRAGMA foreign_keys while a transaction is open).
             await raw.execute("PRAGMA foreign_keys = ON")
+
+    async def _migrate_v30(self) -> None:
+        # WARP module: two new warp_settings columns, both idempotent and also
+        # declared in schema.sql for fresh DBs.
+        #  1) kill_switch — operator opt-in fail-closed. When ON (and the monitor
+        #     runs in legacy non-observer mode) the health monitor keeps the tunnel
+        #     routes on a tunnel-down instead of removing them, so masked traffic
+        #     blackholes on the down interface rather than leaking out the real IP.
+        #     Defaults OFF (0) to preserve the existing fallback-to-direct behaviour.
+        #  2) config_installed — decouples "a config is installed" from "routes_count
+        #     > 0". A full-tunnel AllowedIPs (0.0.0.0/0) is stripped by the routes
+        #     helper, leaving routes_count == 0, which previously made the module
+        #     refuse to start. Backfilled to 1 for any row that already produced
+        #     routes so existing installs keep their "config present" state.
+        warp_cols = await self._table_columns("warp_settings")
+        if "kill_switch" not in warp_cols:
+            await self.conn.execute(
+                "ALTER TABLE warp_settings ADD COLUMN kill_switch INTEGER NOT NULL DEFAULT 0"
+            )
+        if "config_installed" not in warp_cols:
+            await self.conn.execute(
+                "ALTER TABLE warp_settings ADD COLUMN config_installed INTEGER NOT NULL DEFAULT 0"
+            )
+            await self.conn.execute(
+                "UPDATE warp_settings SET config_installed = 1 WHERE routes_count > 0"
+            )
 
     async def _relabel_xray_emails_v28(self) -> None:
         cursor = await self.conn.execute(

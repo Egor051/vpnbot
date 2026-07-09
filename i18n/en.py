@@ -711,6 +711,8 @@ STRINGS: dict[str, str] = {
     "btn_warp_restart": "🔄 Restart",
     "btn_warp_settings": "⚙️ Settings",
     "btn_warp_split": "🌐 Split routes",
+    "btn_warp_killswitch_enable": "🛡 Enable kill-switch",
+    "btn_warp_killswitch_disable": "🛡 Disable kill-switch",
     "warp_title": "📡 <b>Outbound IP masking</b>",
     "warp_settings_title": "⚙️ <b>WARP Settings</b>",
     "warp_status_disabled": "Status: 🔴 Disabled",
@@ -733,6 +735,7 @@ STRINGS: dict[str, str] = {
     "warp_routes_fallback": "⚠️ Fallback (traffic → direct)",
     "warp_routes_inactive": "⏸ Inactive",
     "warp_routes_off": "⚪ Disabled (all traffic direct)",
+    "warp_routes_unverified": "(actual table not read)",
     "warp_routes_drift": "⚠️ Out of sync (marker: {marker}, in table: {table}, in list: {count})",
     "warp_routes_hint": (
         "ℹ️ The On/Off/Restart buttons control the split <b>routes</b> (table T), "
@@ -746,6 +749,15 @@ STRINGS: dict[str, str] = {
     "warp_settings_config": "Config:",
     "warp_settings_iface": "Interface:",
     "warp_settings_routes": "Routes:",
+    "warp_settings_killswitch": "Kill-switch:",
+    "warp_killswitch_on": "🛡 on",
+    "warp_killswitch_off": "⚪ off",
+    "warp_killswitch_hint": (
+        "🛡 Kill-switch: on tunnel-down, traffic is <b>blocked</b> instead of leaving "
+        "directly on the real IP. Off by default.\n"
+        "ℹ️ Effective in legacy mode (bot-managed routes). In observer mode systemd "
+        "owns the routes — blocking is provided by <code>warp-failsafe</code>."
+    ),
     "warp_upload_prompt": (
         "Send the AmneziaWG configuration file (<code>.conf</code>) as a document.\n\n"
         "It must contain the AmneziaWG fields (Jc, S1, S2) and a non-empty AllowedIPs. "

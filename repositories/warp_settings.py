@@ -23,6 +23,8 @@ def _row_to_state(row: Row | None) -> WarpState:
         config_path=str(row["config_path"]),
         interface_name=str(row["interface_name"]),
         routes_count=int(row["routes_count"]),
+        config_installed=bool(row["config_installed"]),
+        kill_switch=bool(row["kill_switch"]),
         tunnel_up=bool(row["tunnel_up"]),
         routes_active=bool(row["routes_active"]),
         fail_streak=int(row["fail_streak"]),
@@ -41,6 +43,7 @@ class WarpSettingsRepository:
         row = await self.db.conn.execute_fetchone(
             """
             SELECT enabled, config_path, interface_name, routes_count,
+                   config_installed, kill_switch,
                    tunnel_up, routes_active, fail_streak, success_streak,
                    last_handshake, last_check_ts, updated_at
             FROM warp_settings WHERE id = 1
@@ -55,11 +58,19 @@ class WarpSettingsRepository:
         )
         await self.db.conn.commit()
 
+    async def set_kill_switch(self, enabled: bool) -> None:
+        await self.db.conn.execute(
+            "UPDATE warp_settings SET kill_switch = ?, updated_at = ? WHERE id = 1",
+            (1 if enabled else 0, int(time.time())),
+        )
+        await self.db.conn.commit()
+
     async def update_config(self, *, config_path: str, interface_name: str, routes_count: int) -> None:
         await self.db.conn.execute(
             """
             UPDATE warp_settings
-            SET config_path = ?, interface_name = ?, routes_count = ?, updated_at = ?
+            SET config_path = ?, interface_name = ?, routes_count = ?,
+                config_installed = 1, updated_at = ?
             WHERE id = 1
             """,
             (config_path, interface_name, routes_count, int(time.time())),
@@ -68,7 +79,7 @@ class WarpSettingsRepository:
 
     async def clear_config(self) -> None:
         await self.db.conn.execute(
-            "UPDATE warp_settings SET routes_count = 0, updated_at = ? WHERE id = 1",
+            "UPDATE warp_settings SET routes_count = 0, config_installed = 0, updated_at = ? WHERE id = 1",
             (int(time.time()),),
         )
         await self.db.conn.commit()

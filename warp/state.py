@@ -18,6 +18,16 @@ class WarpState:
     config_path: str = "/etc/amnezia/out-warp.conf"
     interface_name: str = "out-warp"
     routes_count: int = 0
+    # ``config_installed`` is the authoritative "a config was installed" flag,
+    # persisted independently of ``routes_count``: a full-tunnel AllowedIPs
+    # (0.0.0.0/0) is stripped by the routes helper and yields zero routes, yet the
+    # config is present and the module must be startable.
+    config_installed: bool = False
+    # Operator opt-in kill-switch. When enabled, the legacy (non-observer) health
+    # monitor keeps the tunnel routes on a tunnel-down instead of removing them, so
+    # masked traffic blackholes on the down interface rather than leaking out the
+    # real server IP. Off by default (preserves fallback-to-direct behaviour).
+    kill_switch: bool = False
     # runtime state (reset on bot restart)
     tunnel_up: bool = False
     routes_active: bool = False
@@ -29,5 +39,10 @@ class WarpState:
 
     @property
     def config_present(self) -> bool:
-        """A config is considered installed once it produced at least one route."""
-        return self.routes_count > 0
+        """Whether a config is installed.
+
+        True when the persisted ``config_installed`` flag is set OR at least one
+        route was produced. The ``routes_count > 0`` fallback keeps legacy rows
+        (and unit fixtures) that predate the flag working unchanged.
+        """
+        return self.config_installed or self.routes_count > 0
