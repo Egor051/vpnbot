@@ -23,10 +23,14 @@ _ADDRESS_RE = re.compile(r"^[ \t]*Address[ \t]*=[ \t]*(.+?)[ \t]*$", re.IGNORECA
 def read_tunnel_address(config_path: Path | str) -> str | None:
     """Return the IPv4 tunnel address from a WARP config's ``[Interface] Address``.
 
-    Takes the first comma-separated token of the first ``Address =`` line (the
-    [Peer] section has no ``Address``), strips the CIDR mask and validates it as an
-    IPv4 address. Returns ``None`` when the file is unreadable, has no ``Address``
-    line or carries only an IPv6 address — callers treat that as "no WARP egress".
+    Scans the comma-separated tokens of the first ``Address =`` line (the [Peer]
+    section has no ``Address``) and returns the first that parses as an IPv4
+    address, stripping the CIDR mask. Scanning every token — not just the first —
+    means a dual-stack ``Address = fd00::2/128, 172.16.0.2/32`` (IPv6 listed first)
+    still yields the IPv4 tunnel IP instead of silently disabling proxy egress and
+    leaking the real IP. Returns ``None`` when the file is unreadable, has no
+    ``Address`` line or carries no IPv4 address — callers treat that as "no WARP
+    egress".
     """
     try:
         content = Path(config_path).read_text(encoding="utf-8")
@@ -35,12 +39,15 @@ def read_tunnel_address(config_path: Path | str) -> str | None:
     match = _ADDRESS_RE.search(content)
     if match is None:
         return None
-    token = match.group(1).split(",")[0].strip()
-    candidate = token.split("/")[0].strip()
-    try:
-        return str(ipaddress.IPv4Address(candidate))
-    except ValueError:
-        return None
+    for token in match.group(1).split(","):
+        candidate = token.split("/")[0].strip()
+        if not candidate:
+            continue
+        try:
+            return str(ipaddress.IPv4Address(candidate))
+        except ValueError:
+            continue
+    return None
 
 
 def make_send_through_provider(

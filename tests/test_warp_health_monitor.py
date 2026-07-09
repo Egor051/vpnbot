@@ -1,6 +1,7 @@
 """State-transition tests for the WARP health monitor."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from unittest.mock import AsyncMock, MagicMock
 
@@ -375,6 +376,7 @@ def _make_manager(
     settings.admin_ids = admin_ids
     manager._settings = settings
     manager._observer_mode = observer_mode
+    manager._kill_switch = False
     manager.bot = None
     return manager
 
@@ -460,6 +462,8 @@ def _lifecycle_manager(*, observer_mode: bool) -> WarpManager:
     manager._running = False
     manager._monitor = None
     manager._last_error = None
+    manager._kill_switch = False
+    manager._route_lock = asyncio.Lock()
     manager.bot = None
     manager._interface_name = "out-warp"
     manager._interface = AsyncMock()
@@ -543,3 +547,125 @@ async def test_legacy_stop_removes_routes_and_brings_interface_down() -> None:
     manager._routes.remove.assert_awaited()
     manager._interface.down.assert_awaited()
     assert manager._running is False
+
+
+# ── P8-010: kill-switch (legacy route teardown gating) ────────────────────────
+
+
+def _killswitch_monitor(rec: _Recorder, *, kill_switch: bool, observer_mode: bool, clk: _Clock) -> WarpHealthMonitor:
+    return WarpHealthMonitor(
+        ping=rec.ping,
+        activate_routes=rec.activate,
+        deactivate_routes=rec.deactivate,
+        on_update=rec.on_update,
+        fail_window=2,
+        recover_window=3,
+        initial_routes_active=True,
+        observer_mode=observer_mode,
+        kill_switch=lambda: kill_switch,
+        clock=clk,
+    )
+
+
+async def test_kill_switch_on_keeps_routes_on_tunnel_down() -> None:
+    """Legacy mode + kill-switch ON: a tunnel-down must NOT remove routes (masked
+    traffic blackholes on the dead interface instead of leaking the real IP)."""
+    clk = _Clock()
+    rec = _Recorder([False, False])
+    monitor = _killswitch_monitor(rec, kill_switch=True, observer_mode=False, clk=clk)
+    await _check_at(monitor, clk, 0)
+    await _check_at(monitor, clk, 3)  # continuous fail >= fail_window → mark down
+    assert rec.deactivations == 0
+    assert monitor.routes_active is True
+
+
+async def test_kill_switch_off_removes_routes_on_tunnel_down() -> None:
+    """Legacy mode + kill-switch OFF (default): tunnel-down removes routes as before."""
+    clk = _Clock()
+    rec = _Recorder([False, False])
+    monitor = _killswitch_monitor(rec, kill_switch=False, observer_mode=False, clk=clk)
+    await _check_at(monitor, clk, 0)
+    await _check_at(monitor, clk, 3)
+    assert rec.deactivations == 1
+    assert monitor.routes_active is False
+
+
+async def test_kill_switch_noop_in_observer_mode() -> None:
+    """Observer mode never touches routes regardless of the kill-switch."""
+    clk = _Clock()
+    rec = _Recorder([False, False])
+    monitor = _killswitch_monitor(rec, kill_switch=True, observer_mode=True, clk=clk)
+    await _check_at(monitor, clk, 0)
+    await _check_at(monitor, clk, 3)
+    assert rec.deactivations == 0
+    assert monitor.routes_active is True
+
+
+# ── P8-017: sustained-degradation detector (alert-only, never removes routes) ──
+
+
+class _DegradeRecorder(_Recorder):
+    def __init__(self, ping_results: list[bool]) -> None:
+        super().__init__(ping_results)
+        self.degraded_losses: list[float] = []
+        self.degraded_cleared = 0
+
+    async def on_degraded(self, loss: float) -> None:
+        self.degraded_losses.append(loss)
+
+    async def on_degraded_cleared(self) -> None:
+        self.degraded_cleared += 1
+
+
+def _degrade_monitor(rec: _DegradeRecorder, clk: _Clock) -> WarpHealthMonitor:
+    # Huge fail/recover windows so the continuous-fail latch never fires: this
+    # isolates the sliding-window degraded detector from route teardown.
+    return WarpHealthMonitor(
+        ping=rec.ping,
+        activate_routes=rec.activate,
+        deactivate_routes=rec.deactivate,
+        on_update=rec.on_update,
+        on_degraded=rec.on_degraded,
+        on_degraded_cleared=rec.on_degraded_cleared,
+        fail_window=10_000,
+        recover_window=10_000,
+        initial_routes_active=True,
+        observer_mode=False,
+        clock=clk,
+    )
+
+
+async def test_degraded_fires_on_sustained_loss_without_touching_routes() -> None:
+    clk = _Clock()
+    rec = _DegradeRecorder([True, False] * 8)  # alternating → 50% loss, 16 samples
+    monitor = _degrade_monitor(rec, clk)
+    for i in range(16):
+        await _check_at(monitor, clk, float(i))
+    assert rec.degraded_losses, "degraded alert must fire on sustained ~50% loss"
+    assert monitor.degraded is True
+    # Observability only: routes are never activated/deactivated.
+    assert rec.activations == 0 and rec.deactivations == 0
+    assert monitor.routes_active is True
+
+
+async def test_single_failure_never_raises_degraded() -> None:
+    clk = _Clock()
+    rec = _DegradeRecorder([True] * 9 + [False])  # 1 fail in 10 → 10% loss
+    monitor = _degrade_monitor(rec, clk)
+    for i in range(10):
+        await _check_at(monitor, clk, float(i))
+    assert rec.degraded_losses == []
+    assert monitor.degraded is False
+
+
+async def test_degraded_clears_after_recovery() -> None:
+    clk = _Clock()
+    # 10 straight fails (loss 1.0 → degraded), then a long run of successes drags
+    # the windowed loss below the clear threshold.
+    rec = _DegradeRecorder([False] * 10 + [True] * 50)
+    monitor = _degrade_monitor(rec, clk)
+    for i in range(60):
+        await _check_at(monitor, clk, float(i))
+    assert rec.degraded_losses  # raised at some point
+    assert rec.degraded_cleared >= 1
+    assert monitor.degraded is False

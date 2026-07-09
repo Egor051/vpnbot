@@ -826,9 +826,55 @@ def test_read_tunnel_address_from_interface_address(tmp_path: Path) -> None:
     (tmp_path / "v6.conf").write_text("[Interface]\nAddress = fd00::2/128\n", encoding="utf-8")
     assert read_tunnel_address(tmp_path / "v6.conf") is None
 
+    # P8-011: a dual-stack Address with IPv6 listed FIRST must still yield the IPv4
+    # tunnel IP (scan all tokens), not silently disable egress and leak the real IP.
+    (tmp_path / "dual.conf").write_text(
+        "[Interface]\nAddress = fd00::2/128, 172.16.0.2/32\n", encoding="utf-8"
+    )
+    assert read_tunnel_address(tmp_path / "dual.conf") == "172.16.0.2"
+
     # The provider gates on the enabled flag and reads the tunnel IP live.
     assert make_send_through_provider(enabled=True, config_path=conf)() == "172.16.0.2"
     assert make_send_through_provider(enabled=False, config_path=conf)() is None
+
+
+def test_wan_network_uses_default_route_iface(monkeypatch) -> None:
+    """P8-012: the SSH-subnet guard follows the default-route interface, not a
+    hardcoded eth0, so modern predictable names (ens3/enp1s0) keep the guard."""
+    import ipaddress
+
+    from warp import split_manager
+
+    monkeypatch.setattr(split_manager, "_default_route_iface", lambda: "ens3")
+    monkeypatch.setattr(
+        split_manager,
+        "_iface_network",
+        lambda iface: ipaddress.IPv4Network("192.168.0.0/24") if iface == "ens3" else None,
+    )
+    assert split_manager._wan_network() == (ipaddress.IPv4Network("192.168.0.0/24"), "ens3")
+
+
+def test_default_route_iface_parses_proc_net_route(monkeypatch, tmp_path: Path) -> None:
+    """_default_route_iface picks the row whose destination and mask are both zero."""
+    from warp import split_manager
+
+    proc_route = (
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+        "enp1s0\t0000A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n"
+        "enp1s0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+    )
+    fake = tmp_path / "route"
+    fake.write_text(proc_route, encoding="utf-8")
+
+    class _FakePath:
+        def __init__(self, *_a, **_k) -> None:
+            pass
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            return fake.read_text(encoding=encoding)
+
+    monkeypatch.setattr(split_manager, "Path", _FakePath)
+    assert split_manager._default_route_iface() == "enp1s0"
 
 
 async def test_xray_adapter_writes_send_through_only_when_provider_set(tmp_path: Path) -> None:

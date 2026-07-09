@@ -218,6 +218,8 @@ CREATE TABLE IF NOT EXISTS warp_settings (
   success_streak  INTEGER NOT NULL DEFAULT 0,
   last_handshake  INTEGER NOT NULL DEFAULT 0,
   last_check_ts   INTEGER NOT NULL DEFAULT 0,
+  kill_switch     INTEGER NOT NULL DEFAULT 0,
+  config_installed INTEGER NOT NULL DEFAULT 0,
   updated_at      INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO warp_settings (id) VALUES (1);

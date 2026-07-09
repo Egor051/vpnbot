@@ -52,8 +52,15 @@ def _split_routes_value(split_status: SplitStatus) -> str:
             count=split_status.n_list,
         )
     if split_status.intended_state == "on":
-        return t("warp_routes_active", count=split_status.n_list)
-    return t("warp_routes_off")
+        base = t("warp_routes_active", count=split_status.n_list)
+    else:
+        base = t("warp_routes_off")
+    # in_sync is True here — but when the table could not be read it is an
+    # "assumed in sync", not a verified one. Flag that so the panel never presents
+    # an unproven state as confirmed.
+    if split_status.n_table is None:
+        return f"{base} {t('warp_routes_unverified')}"
+    return base
 
 
 def warp_main_text(
@@ -82,15 +89,18 @@ def warp_main_text(
 
 
 def warp_settings_text(state: WarpState) -> str:
-    return "\n".join(
-        [
-            t("warp_settings_title"),
-            _SEP,
-            f"{t('warp_settings_config')} {code(state.config_path)}",
-            f"{t('warp_settings_iface')} {code(state.interface_name)}",
-            f"{t('warp_settings_routes')} {state.routes_count}",
-        ]
-    )
+    kill_value = t("warp_killswitch_on") if state.kill_switch else t("warp_killswitch_off")
+    lines = [
+        t("warp_settings_title"),
+        _SEP,
+        f"{t('warp_settings_config')} {code(state.config_path)}",
+        f"{t('warp_settings_iface')} {code(state.interface_name)}",
+        f"{t('warp_settings_routes')} {state.routes_count}",
+        f"{t('warp_settings_killswitch')} {kill_value}",
+        "",
+        t("warp_killswitch_hint"),
+    ]
+    return "\n".join(lines)
 
 
 async def _render_main(callback: CallbackQuery, services: Services) -> None:
@@ -136,8 +146,36 @@ async def warp_settings(callback: CallbackQuery, services: Services) -> None:
         await safe_edit_message_text(
             callback.message,
             warp_settings_text(state),
-            reply_markup=warp_settings_keyboard(),
+            reply_markup=warp_settings_keyboard(state),
         )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:warp:killswitch:toggle")
+async def warp_killswitch_toggle(
+    callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None
+) -> None:
+    """Flip the WARP kill-switch (fail-closed on tunnel-down) and re-render settings."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        if rate_limiter is not None:
+            rate_limiter.check(callback.from_user.id, "warp_toggle", 10)
+        state = await services.warp.get_state()
+        await services.warp.set_kill_switch(not state.kill_switch)
+        await safe_callback_answer(callback)
+        new_state = await services.warp.get_state()
+        await safe_edit_message_text(
+            callback.message,
+            warp_settings_text(new_state),
+            reply_markup=warp_settings_keyboard(new_state),
+        )
+    except RateLimitExceeded as exc:
+        await answer_callback_error(callback, exc)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

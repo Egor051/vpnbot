@@ -20,6 +20,25 @@ All WARP environment variables are documented in
    are removed (traffic → direct); after **60 s** of continuous success they are restored.
 4. Disabling the module removes the routes and brings the interface down.
 
+> **Steps 1–4 describe the legacy (non-observer) mode.** The production default is
+> **observer mode** (see below), where systemd owns the interface and routes and the
+> bot never adds/removes them.
+>
+> **Failure semantics differ by mode.** In legacy mode a tunnel-down *removes* the
+> routes, so masked traffic falls back to the **direct path and exits on the real
+> server IP** — availability over masking. If you need the opposite (fail-closed),
+> turn on the **kill-switch** (⚙️ Settings): on a tunnel-down the routes are *kept*,
+> so masked traffic blackholes on the dead interface instead of leaking the real IP.
+> The kill-switch is **off by default** and only enforces in legacy mode — in observer
+> mode the routes are systemd-owned and any fail-closed behaviour comes from
+> `warp-failsafe`, not the bot.
+>
+> Independently of the routes, a **degraded** detector watches a sliding window of
+> recent probes and alerts the admins when the tunnel keeps dropping probes without
+> ever failing *continuously* (so the down latch never trips). This alert is
+> observability-only — it never removes routes, and a single dropped probe can never
+> raise it.
+
 The bot runs unprivileged: every root action goes through the `vpnbot-warp-*`
 sudo helpers. The server DNS resolver is never touched. Default routes
 (`0.0.0.0/0`, `::/0`) in `AllowedIPs` are silently skipped by the routes helper
@@ -251,7 +270,19 @@ boot-apply, so an "off" state survives a reboot. All table-`T` mutation goes thr
 `vpnbot-warp-split-state` (sudoers grants the exact `on|off|restart|status` verbs,
 no wildcard). The panel's Tunnel (observer) and Routes (marker intent + actual table
 `T`) lines come from `status()`; a drift between intent and reality is shown as a
-warning and the status never fails in any state.
+warning and the status never fails in any state. When the actual table `T` cannot be
+read, the Routes line is shown with a "(actual table not read)" note rather than
+being presented as a confirmed in-sync state.
+
+### Kill-switch (fail-closed on tunnel-down)
+
+The **⚙️ Settings** sub-panel has a **🛡 kill-switch** toggle, persisted in
+`warp_settings.kill_switch` and **off by default**. When on, a tunnel-down in legacy
+(non-observer) mode keeps the routes in place so masked traffic blackholes on the
+dead interface instead of falling back to the direct path and leaking the real
+server IP. It is a bot-side control and therefore only enforces in legacy mode; in
+observer mode the routes are owned by systemd, so fail-closed behaviour there is the
+job of `warp-failsafe`.
 
 ### Managing the split list from the bot (superadmin)
 

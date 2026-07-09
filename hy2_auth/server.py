@@ -16,10 +16,11 @@ async def _auth_handler(request: web.Request) -> web.Response:
     Request body (v2 schema): ``{"addr": "<ip:port>", "auth": "<token>", "tx": <int>}``.
     We use only ``auth`` (the client's single token = our per-key secret); ``tx``
     is ignored. The endpoint ALWAYS replies HTTP 200 — even on rejection, a
-    malformed body or an infra fault — with ``{"ok": <bool>, "id": "<label>"}`` so
-    Hysteria never sees a 5xx (which it would treat differently). ``ok`` is false
-    on any error. The mismatch-vs-infra distinction lives in the store: a wrong
-    token is quiet (debug), a broken DB is loud (error + counter), both fail closed.
+    malformed body or an infra fault — so Hysteria never sees a 5xx (which it would
+    treat differently). On success the body is ``{"ok": true, "id": "<label>"}``;
+    on any rejection/error it is ``{"ok": false}`` (no ``id``). The mismatch-vs-infra
+    distinction lives in the store: a wrong token is quiet (debug), a broken DB is
+    loud (error + counter), both fail closed.
     """
     store: ReadOnlyKeyStore = request.app[_STORE_KEY]
     try:
@@ -59,9 +60,16 @@ async def _healthz_handler(request: web.Request) -> web.Response:
     return web.json_response({"ok": healthy}, status=200 if healthy else 503)
 
 
+# The auth body is a tiny JSON object ({addr, auth, tx}); a per-key secret is
+# 48 hex chars. 64 KiB is far more than any legitimate request, so cap the body
+# there instead of relying on aiohttp's 1 MiB default — a loopback peer cannot
+# make us buffer megabytes per handshake.
+_MAX_AUTH_BODY_BYTES = 64 * 1024
+
+
 def build_app(store: ReadOnlyKeyStore) -> web.Application:
     """Build the aiohttp app with the POST /auth and GET /healthz routes."""
-    app = web.Application()
+    app = web.Application(client_max_size=_MAX_AUTH_BODY_BYTES)
     app[_STORE_KEY] = store
     app.router.add_post("/auth", _auth_handler)
     app.router.add_get("/healthz", _healthz_handler)

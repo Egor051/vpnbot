@@ -67,8 +67,31 @@ def test_main_keyboard_no_config_shows_upload_only() -> None:
     assert any(d == "admin:warp:settings" for _, d in btns)
 
 
+def test_settings_keyboard_has_killswitch_toggle() -> None:
+    off = _buttons(warp_settings_keyboard(WarpState(routes_count=2, kill_switch=False)))
+    assert (t("btn_warp_killswitch_enable"), "admin:warp:killswitch:toggle") in off
+    on = _buttons(warp_settings_keyboard(WarpState(routes_count=2, kill_switch=True)))
+    assert (t("btn_warp_killswitch_disable"), "admin:warp:killswitch:toggle") in on
+
+
+def test_killswitch_toggle_handler_flips_and_persists(monkeypatch) -> None:
+    from bot.handlers.admin_warp import warp_killswitch_toggle
+
+    monkeypatch.setattr(mod, "ensure_private_callback", _ok_cb)
+    split = _FakeSplit(_split_status("on"))
+    warp = _FakeWarp(WarpState(enabled=True, routes_count=2, kill_switch=False))
+    cb = _Callback("admin:warp:killswitch:toggle")
+    asyncio.run(warp_killswitch_toggle(cb, _services(split, warp)))  # type: ignore[arg-type]
+    assert warp._state.kill_switch is True  # flipped on
+    assert cb.message.edits  # settings screen re-rendered
+
+    cb2 = _Callback("admin:warp:killswitch:toggle")
+    asyncio.run(warp_killswitch_toggle(cb2, _services(split, warp)))  # type: ignore[arg-type]
+    assert warp._state.kill_switch is False  # flipped back off
+
+
 def test_settings_keyboard_hosts_split_entry() -> None:
-    btns = _buttons(warp_settings_keyboard())
+    btns = _buttons(warp_settings_keyboard(WarpState(routes_count=2)))
     assert (t("btn_warp_split"), "wsplit:p:0") in btns
     assert (t("btn_warp_replace"), "admin:warp:upload") in btns
     assert (t("btn_warp_delete"), "admin:warp:delete") in btns
@@ -127,6 +150,11 @@ class _FakeWarp:
 
     async def get_state(self) -> WarpState:
         return self._state
+
+    async def set_kill_switch(self, enabled: bool) -> None:
+        from dataclasses import replace
+
+        self._state = replace(self._state, kill_switch=enabled)
 
 
 class _Message:

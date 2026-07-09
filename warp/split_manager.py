@@ -114,6 +114,12 @@ class WarpSplitManager:
                 net = ipaddress.ip_network(line, strict=False)
                 if net.version == 4:
                     result.append(net)
+                else:
+                    logger.warning(
+                        "warp-split list: skipping non-IPv4 entry %r (list is IPv4-only) — "
+                        "displayed count may differ from what the helper routes",
+                        line,
+                    )
             except ValueError:
                 logger.warning("warp-split list: skipping unparseable line %r", line)
         result.sort(key=lambda n: (n.network_address, n.prefixlen))
@@ -293,9 +299,10 @@ class WarpSplitManager:
     def _build_guards(self) -> list[tuple[ipaddress.IPv4Network, str]]:
         guards: list[tuple[ipaddress.IPv4Network, str]] = list(_STATIC_GUARDS)
         guards.append((self._awg_network, f"AWG client subnet ({self._awg_network})"))
-        eth0 = _eth0_network()
-        if eth0 is not None:
-            guards.append((eth0, f"server eth0 network ({eth0}) — would break SSH"))
+        wan = _wan_network()
+        if wan is not None:
+            net, iface = wan
+            guards.append((net, f"server {iface} network ({net}) — would break SSH"))
         return guards
 
 
@@ -428,17 +435,38 @@ def _iface_up(iface: str) -> bool:
         return False
 
 
-def _eth0_network() -> ipaddress.IPv4Network | None:
-    """Detect the eth0 subnet at runtime; returns None if unavailable."""
+def _default_route_iface() -> str | None:
+    """Return the interface that carries the IPv4 default route, or None.
+
+    Reads ``/proc/net/route`` and returns the interface of the row whose
+    Destination and Mask are both zero. Pure file read, no shell. Returns None on
+    any error so the caller can fall back to a sensible default.
+    """
+    try:
+        lines = Path("/proc/net/route").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines[1:]:  # skip the header row
+        fields = line.split()
+        if len(fields) < 8:
+            continue
+        iface, destination, mask = fields[0], fields[1], fields[7]
+        if destination == "00000000" and mask == "00000000":
+            return iface
+    return None
+
+
+def _iface_network(iface: str) -> ipaddress.IPv4Network | None:
+    """Return the IPv4 subnet configured on *iface*, or None if unavailable."""
     try:
         import fcntl
         import struct
 
         SIOCGIFADDR = 0x8915
         SIOCGIFNETMASK = 0x891B
-        iface = b"eth0"
-        # ifreq: 16 bytes interface name + 16 bytes padding
-        ifreq = struct.pack("16s16x", iface)
+        # ifreq: 16 bytes interface name (NUL-padded, name capped at 15 chars) +
+        # 16 bytes padding.
+        ifreq = struct.pack("16s16x", iface.encode("utf-8")[:15])
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             addr_bytes = fcntl.ioctl(sock.fileno(), SIOCGIFADDR, ifreq)[20:24]
@@ -450,6 +478,21 @@ def _eth0_network() -> ipaddress.IPv4Network | None:
         return ipaddress.IPv4Network(f"{addr}/{mask}", strict=False)
     except Exception:
         return None
+
+
+def _wan_network() -> tuple[ipaddress.IPv4Network, str] | None:
+    """Detect the server's WAN subnet — the one carrying the default route.
+
+    Falls back to ``eth0`` when the default-route interface cannot be determined,
+    so legacy boxes still get the guard, while modern predictable names
+    (``ens3``/``enp1s0``/…) are handled instead of silently dropping the "would
+    break SSH" guard. Returns ``(network, iface_name)`` or None if unavailable.
+    """
+    iface = _default_route_iface() or "eth0"
+    net = _iface_network(iface)
+    if net is None:
+        return None
+    return net, iface
 
 
 def parse_cidr_tokens(text: str) -> list[str]:
