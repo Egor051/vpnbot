@@ -164,6 +164,9 @@ def check_unit(path: Path, reporter: Reporter) -> None:
         else:
             reporter.fail(f"{path}: missing {item}")
 
+    # "future example" is a sentinel: it guards against installing a placeholder /
+    # example unit that still carries that marker line as its active (non-comment)
+    # content. The other three reject the root+api directives in a non-root unit.
     forbidden = ("User=root", "Group=root", "NoNewPrivileges=true", "future example")
     for item in forbidden:
         if item in active:
@@ -454,7 +457,12 @@ def check_active_services(reporter: Reporter) -> None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate production non-root sudo-helper deployment")
-    parser.add_argument("--unit", help="systemd unit path; defaults to installed unit or deploy/vpn-bot.service")
+    parser.add_argument(
+        "--unit",
+        help="systemd unit path; defaults to the installed unit or, from a checkout, "
+        "deploy/vpn-bot.nonroot.example.service (the shipped deploy/vpn-bot.service is "
+        "root+api and intentionally fails these non-root checks)",
+    )
     parser.add_argument("--sudoers", default="/etc/sudoers.d/vpnbot", help="installed sudoers file")
     parser.add_argument("--repo", default="/opt/vpn-service", help="production checkout path")
     parser.add_argument("--db", help="SQLite DB path (default: <repo>/data/vpn.db)")

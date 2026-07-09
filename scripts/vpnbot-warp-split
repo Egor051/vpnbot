@@ -4,19 +4,39 @@
 set -euo pipefail
 
 IFACE="${WARP_IFACE:-out-warp}"
+# WAN uplink: default to the interface of the main-table default route (portable to
+# ens3/enp1s0/… names), not a hardcoded eth0. Still overridable via WAN_DEV.
+WAN_DEV="${WAN_DEV:-$(ip route show default 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' || true)}"
 WAN_DEV="${WAN_DEV:-eth0}"
 PROXY_SRC="${WARP_PROXY_SRC:-172.16.0.2}"
 CLIENT_NET="${WARP_CLIENT_NET:-10.0.0.0/24}"
-ENDPOINT_IP="${WARP_ENDPOINT_IP:-162.159.195.1}"
-LIST="${WARP_SPLIT_LIST:-/etc/vpnbot/warp-split.list}"
-# Root-owned intent marker: when present the split routing is "off" — table T is
-# reconciled to EMPTY (all-direct) instead of to the list. Written/removed by the
-# vpnbot-warp-split-state helper; honoured here so an "off" state survives reboot.
-MARKER="${WARP_SPLIT_DISABLED_MARKER:-/etc/vpnbot/warp-split.disabled}"
+# WARP endpoint: default to the live endpoint from `awg show` (never hardcoded) so a
+# non-Cloudflare / self-hosted endpoint still gets the correct anti-loop /32 pin.
+ENDPOINT_IP="${WARP_ENDPOINT_IP:-$(awg show "$IFACE" endpoints 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1 || true)}"
+# Security: when invoked via sudo (SUDO_UID set by sudo, survives env_reset), ignore
+# caller-supplied path overrides for the list and the intent marker and use the fixed
+# defaults (defense-in-depth beyond sudoers env_reset). Non-sudo callers (the systemd
+# unit, tests) may still override via env.
+if [ -n "${SUDO_UID:-}" ]; then
+    LIST="/etc/vpnbot/warp-split.list"
+    MARKER="/etc/vpnbot/warp-split.disabled"
+else
+    LIST="${WARP_SPLIT_LIST:-/etc/vpnbot/warp-split.list}"
+    # Root-owned intent marker: when present the split routing is "off" — table T is
+    # reconciled to EMPTY (all-direct) instead of to the list. Written/removed by the
+    # vpnbot-warp-split-state helper; honoured here so an "off" state survives reboot.
+    MARKER="${WARP_SPLIT_DISABLED_MARKER:-/etc/vpnbot/warp-split.disabled}"
+fi
 log(){ echo "[warp-split] $*"; }
 
 fwmark="$(awg show "$IFACE" fwmark 2>/dev/null || true)"
 [ -n "$fwmark" ] && [ "$fwmark" != off ] || { log "no fwmark for $IFACE (tunnel down?) — abort, routing left as-is"; exit 0; }
+# Validate the hex shape before the arithmetic table conversion (parity with
+# vpnbot-warp-routes) so a malformed fwmark never reaches $(( )).
+case "$fwmark" in
+  0x[0-9a-fA-F]*) : ;;
+  *) log "unexpected fwmark '$fwmark' for $IFACE — abort"; exit 0 ;;
+esac
 T=$(( fwmark ))
 GW="$(ip route show default dev "$WAN_DEV" | awk '/default/{print $3; exit}')"
 [ -n "$GW" ] || { log "no default gw on $WAN_DEV — abort"; exit 0; }
@@ -40,7 +60,11 @@ apply)
   fi
   [ -s "$LIST" ] || { log "empty/missing $LIST — abort (refuse to blackhole)"; exit 0; }
   ip route del default dev "$IFACE" table "$T" 2>/dev/null || true
-  ip route replace "$ENDPOINT_IP/32" via "$GW" dev "$WAN_DEV" table "$T"
+  if [ -n "$ENDPOINT_IP" ]; then
+    ip route replace "$ENDPOINT_IP/32" via "$GW" dev "$WAN_DEV" table "$T"
+  else
+    log "WARNING: no WARP endpoint resolved — skipping anti-loop /32 pin"
+  fi
   # Build the wanted prefix set from the list (comments/blanks/default-routes dropped).
   WANT=" "
   while read -r pfx; do

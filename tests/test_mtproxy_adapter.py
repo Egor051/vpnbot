@@ -181,11 +181,14 @@ def test_mtproxy_systemd_dropin_template_contains_no_raw_secret_surface() -> Non
     assert "-S" not in dropin
     assert "MTPROTO_SECRET" not in dropin
     assert "managed-secrets.json" not in dropin
-    # Service must run as an unprivileged user, not root (empty User= would default to root)
-    assert "User=\n" not in dropin
-    assert "Group=\n" not in dropin
-    assert "User=mtproxy" in dropin
-    assert "Group=mtproxy" in dropin
+    # Root-wrapper model: the drop-in clears any inherited User=/Group= (empty) so
+    # systemd runs the wrapper as root; the wrapper reads the root-owned managed files
+    # and drops the proxy to MTPROTO_RUN_USER via `-u`. A non-root User= here could
+    # neither exec the 0700 root:root wrapper nor read the root-owned files.
+    assert "User=\n" in dropin
+    assert "Group=\n" in dropin
+    assert "User=mtproxy" not in dropin
+    assert "Group=mtproxy" not in dropin
     assert "ExecStart=/opt/vpn-service/scripts/run-mtproxy-managed" in dropin
 
 

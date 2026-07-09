@@ -1,19 +1,24 @@
 #!/bin/bash
-# Boot watchdog: если flip оставил собственный egress хоста в туннеле (единственный
-# способ убить SSH), рушим туннель-роутинг → хост падает обратно на eth0 → SSH
-# возвращается. No-op, когда хост здоров (egress через eth0).
+# Boot watchdog: if the WARP flip left the host's OWN egress inside the tunnel (the
+# only way it can kill SSH), tear the tunnel routing down so the host falls back to
+# its WAN uplink and SSH returns. A no-op when the host is healthy (egress not via
+# the tunnel).
 set +e
 WARP_IFACE="${WARP_IFACE:-out-warp}"
 WAN_DEV="${WAN_DEV:-eth0}"
 WARP_FAILSAFE_DELAY="${WARP_FAILSAFE_DELAY:-75}"
 
-sleep "$WARP_FAILSAFE_DELAY"   # дать awg-quick@out-warp + warp-routes устаканиться
+sleep "$WARP_FAILSAFE_DELAY"   # let awg-quick@out-warp + warp-routes settle
 route="$(ip route get 1.1.1.1 2>/dev/null)"
-if echo "$route" | grep -qw "dev $WAN_DEV"; then
-    logger -t warp-failsafe "host egress via $WAN_DEV — healthy, no action"
+# Broken iff the host's own egress goes THROUGH the WARP tunnel. Testing for the
+# tunnel interface (not a specific WAN device name) keeps the check correct on hosts
+# whose WAN is not eth0, and avoids a false revert on transient loss of the default
+# route. WAN_DEV is used only for the log messages.
+if ! echo "$route" | grep -qw "dev $WARP_IFACE"; then
+    logger -t warp-failsafe "host egress not via $WARP_IFACE (WAN $WAN_DEV) — healthy, no action"
     exit 0
 fi
-logger -t warp-failsafe "host egress NOT via $WAN_DEV ($route) — reverting to restore SSH"
+logger -t warp-failsafe "host egress via $WARP_IFACE ($route) — reverting to restore SSH"
 systemctl stop warp-routes.service 2>/dev/null
 systemctl stop "awg-quick@${WARP_IFACE}.service" 2>/dev/null
 awg-quick down "$WARP_IFACE" 2>/dev/null

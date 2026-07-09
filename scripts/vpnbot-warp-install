@@ -34,20 +34,12 @@ case "${ACTION}" in
     # From here on operate on the resolved path only.
     SRC="$realpath_source"
 
-    # Validation: AmneziaWG format
-    grep -qE "^[[:space:]]*\\[Interface\\]"       "$SRC" || { echo "Missing [Interface] section" >&2; exit 1; }
-    grep -qE "^[[:space:]]*\\[Peer\\]"            "$SRC" || { echo "Missing [Peer] section" >&2; exit 1; }
-    grep -qE "^[[:space:]]*Jc[[:space:]]*="     "$SRC" || { echo "Not AmneziaWG format (missing Jc)" >&2; exit 1; }
-    grep -qE "^[[:space:]]*S1[[:space:]]*="     "$SRC" || { echo "Not AmneziaWG format (missing S1)" >&2; exit 1; }
-    grep -qE "^[[:space:]]*S2[[:space:]]*="     "$SRC" || { echo "Not AmneziaWG format (missing S2)" >&2; exit 1; }
-    grep -qE "^[[:space:]]*AllowedIPs[[:space:]]*=" "$SRC" || { echo "Missing AllowedIPs" >&2; exit 1; }
-
-    # Security: reject script-execution hooks. awg-quick/wg-quick run PreUp/PostUp/
-    # PreDown/PostDown as root when the interface is brought up or down — a config
-    # must never be allowed to smuggle commands across the privilege boundary.
-    if grep -qiE "^[[:space:]]*(Pre|Post)(Up|Down)[[:space:]]*=" "$SRC"; then
-        echo "Config must not contain PreUp/PostUp/PreDown/PostDown directives" >&2; exit 1
-    fi
+    # NOTE: AmneziaWG format validation AND PreUp/PostUp/PreDown/PostDown hook
+    # rejection are performed inside the single O_NOFOLLOW read in the Python block
+    # below — on the exact bytes that get written to $DEST. Doing them here with a
+    # separate grep pass would reopen a file the bot still owns and create a TOCTOU:
+    # a hook-free config could pass the check while a hook-bearing one is written to
+    # disk and later executed as root by awg-quick. One read == no revalidation window.
 
     mkdir -p /etc/amnezia
 
@@ -69,10 +61,35 @@ dest = os.environ["DEST_TMP"]
 routes_list = os.environ["ROUTES_TMP"]
 
 # O_NOFOLLOW guards against a TOCTOU swap of the validated source to a symlink
-# between the shell-side realpath check and this read.
+# between the shell-side realpath check and this read. Every check below runs on
+# THIS single read (never a separate pre-read grep pass), so a racing writer in
+# the bot-owned staging dir cannot slip a hook-free config past validation while a
+# hook-bearing one is what actually gets written.
 fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
 with os.fdopen(fd, "r", encoding="utf-8") as f:
     content = f.read()
+
+# Validate the AmneziaWG format markers on the exact bytes about to be installed.
+_required = (
+    (r'^[ \t]*\[Interface\]', "Missing [Interface] section"),
+    (r'^[ \t]*\[Peer\]', "Missing [Peer] section"),
+    (r'^[ \t]*Jc[ \t]*=', "Not AmneziaWG format (missing Jc)"),
+    (r'^[ \t]*S1[ \t]*=', "Not AmneziaWG format (missing S1)"),
+    (r'^[ \t]*S2[ \t]*=', "Not AmneziaWG format (missing S2)"),
+    (r'^[ \t]*AllowedIPs[ \t]*=', "Missing AllowedIPs"),
+)
+for pattern, message in _required:
+    if not re.search(pattern, content, re.MULTILINE):
+        print(message, file=sys.stderr)
+        sys.exit(1)
+
+# Security: reject script-execution hooks. awg-quick/wg-quick run PreUp/PostUp/
+# PreDown/PostDown as root when the interface is brought up or down — a config must
+# never smuggle commands across the privilege boundary. Checked (case-insensitively)
+# on the same read that is written, so there is no revalidation window to race.
+if re.search(r'^[ \t]*(Pre|Post)(Up|Down)[ \t]*=', content, re.MULTILINE | re.IGNORECASE):
+    print("Config must not contain PreUp/PostUp/PreDown/PostDown directives", file=sys.stderr)
+    sys.exit(1)
 
 # Drop DNS (do not touch the server resolver)
 content = re.sub(r'^DNS\s*=.*\n?', '', content, flags=re.MULTILINE)

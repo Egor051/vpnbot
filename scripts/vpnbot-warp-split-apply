@@ -19,7 +19,15 @@
 #
 set -euo pipefail
 
-SPLIT_LIST="${WARP_SPLIT_LIST_PATH:-/etc/vpnbot/warp-split.list}"
+# Security: when invoked via sudo (SUDO_UID is set by sudo and survives env_reset),
+# ignore a caller-supplied WARP_SPLIT_LIST_PATH and write only the fixed list path
+# (defense-in-depth beyond sudoers env_reset). Non-sudo callers (the test harness)
+# may still override via WARP_SPLIT_LIST_PATH.
+if [ -n "${SUDO_UID:-}" ]; then
+    SPLIT_LIST="/etc/vpnbot/warp-split.list"
+else
+    SPLIT_LIST="${WARP_SPLIT_LIST_PATH:-/etc/vpnbot/warp-split.list}"
+fi
 ME="vpnbot-warp-split-apply"
 
 # Read all stdin before doing anything — reject immediately on empty.

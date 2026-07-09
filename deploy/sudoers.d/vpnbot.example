@@ -57,6 +57,9 @@ Cmnd_Alias VPNBOT_MTPROTO = \
 # WARP outbound-IP masking module. The install helper consumes a staged config
 # from the bot's private staging dir; iface/routes/status are pinned to the fixed
 # out-warp interface and /etc/amnezia/out-warp.conf config.
+# NOTE: the iface up/down and routes add/del grants are only exercised in the legacy
+# self-managed mode (WARP_MONITOR_OBSERVER_MODE=false). In the default observer model
+# systemd owns the interface and its routes and the bot only reads status.
 Cmnd_Alias VPNBOT_WARP = \
     /usr/local/sbin/vpnbot-warp-install install /run/vpn-bot/warp/*, \
     /usr/local/sbin/vpnbot-warp-install remove, \
@@ -74,8 +77,10 @@ Cmnd_Alias VPNBOT_WARP = \
 # The split-state helper toggles the split ROUTING (table T) on/off/restart and
 # reports observer status. Each verb is pinned exactly (no wildcard); it only
 # manages the per-prefix routes + the root-owned marker, never the tunnel.
+# The apply helper is pinned to zero arguments ("") — the list arrives on stdin — so
+# sudo rejects any trailing argv, not just wildcards.
 Cmnd_Alias VPNBOT_WARP_SPLIT = \
-    /usr/local/sbin/vpnbot-warp-split-apply, \
+    /usr/local/sbin/vpnbot-warp-split-apply "", \
     /usr/local/sbin/vpnbot-warp-split-state on, \
     /usr/local/sbin/vpnbot-warp-split-state off, \
     /usr/local/sbin/vpnbot-warp-split-state restart, \

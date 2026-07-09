@@ -151,7 +151,7 @@ sudo-helper non-root production preparation is installed.
 Next manual steps:
 - set PRIVILEGE_HELPERS_ENABLED=true and helper paths in ${ENV_FILE};
 - run: python3 deploy/check-nonroot-helper-mode.py
-- install deploy/vpn-bot.service if the active unit is not already non-root.
+- install deploy/vpn-bot.nonroot.example.service as the active unit if it is not already non-root (deploy/vpn-bot.service is the root+api default, not the non-root unit).
 
 This script did not restart vpn-bot or replace the active systemd unit.
 EOF

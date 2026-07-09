@@ -23,8 +23,19 @@
 #   sudo -n vpnbot-warp-split-state {on|off|restart|status}
 set -euo pipefail
 
-MARKER="${WARP_SPLIT_DISABLED_MARKER:-/etc/vpnbot/warp-split.disabled}"
-SPLIT_HELPER="${WARP_SPLIT_HELPER:-/usr/local/sbin/vpnbot-warp-split}"
+# Security: when invoked via sudo (SUDO_UID is set by sudo itself and survives
+# env_reset), ignore caller-supplied overrides for the security-critical paths — the
+# root-written marker and, especially, the helper binary executed as root — and use
+# the fixed defaults. This keeps the root actions independent of the untrusted bot
+# environment even if sudoers ever loses env_reset. Non-sudo callers may still
+# override via env (used by the test harness).
+if [ -n "${SUDO_UID:-}" ]; then
+    MARKER="/etc/vpnbot/warp-split.disabled"
+    SPLIT_HELPER="/usr/local/sbin/vpnbot-warp-split"
+else
+    MARKER="${WARP_SPLIT_DISABLED_MARKER:-/etc/vpnbot/warp-split.disabled}"
+    SPLIT_HELPER="${WARP_SPLIT_HELPER:-/usr/local/sbin/vpnbot-warp-split}"
+fi
 IFACE="${WARP_IFACE:-out-warp}"
 ME="vpnbot-warp-split-state"
 
@@ -68,18 +79,23 @@ restart)
 status)
     # Observer only: a present fwmark means the out-warp interface is up. Count the
     # script-managed per-prefix `dev $IFACE` routes currently in table T.
+    # Validate the hex shape before the arithmetic table conversion (parity with
+    # vpnbot-warp-routes); a non-hex value (e.g. "off"/empty) means the tunnel is down.
     fwmark="$(awg show "$IFACE" fwmark 2>/dev/null || true)"
-    if [ -n "$fwmark" ] && [ "$fwmark" != off ]; then
-        echo "tunnel_up=1"
-        T=$(( fwmark ))
-        n="$(ip route show table "$T" 2>/dev/null \
-            | awk -v dev="$IFACE" '$1!="default" && $2=="dev" && $3==dev' \
-            | wc -l | tr -d ' ')"
-        echo "n_table=${n:-0}"
-    else
-        echo "tunnel_up=0"
-        echo "n_table=0"
-    fi
+    case "$fwmark" in
+        0x[0-9a-fA-F]*)
+            echo "tunnel_up=1"
+            T=$(( fwmark ))
+            n="$(ip route show table "$T" 2>/dev/null \
+                | awk -v dev="$IFACE" '$1!="default" && $2=="dev" && $3==dev' \
+                | wc -l | tr -d ' ')"
+            echo "n_table=${n:-0}"
+            ;;
+        *)
+            echo "tunnel_up=0"
+            echo "n_table=0"
+            ;;
+    esac
     if [ -e "$MARKER" ]; then
         echo "marker=off"
     else

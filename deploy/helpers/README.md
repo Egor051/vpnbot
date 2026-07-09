@@ -79,6 +79,8 @@ MTProxy:
 
 The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpnbot/managed-secrets.json` and `/etc/mtproxy/vpnbot/mtproxy.env` atomically as `root:vpn-bot` mode `0640` in a `0750` `root:vpn-bot` directory (world-unreadable; group-readable for non-root reads), restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure.
 
+These `root:vpn-bot 0640` modes are for the **non-root helper deployment**: they let the unprivileged bot read managed status, and the managed-mode wrapper (which always runs as root — see [Proxy → MTProto managed mode](../../docs/proxy.md)) reads them regardless. The **root+direct manual install** documented in `docs/proxy.md` instead uses `root:root 0600`. Both are correct because the wrapper runs as root and drops the proxy to `MTPROTO_RUN_USER` via `-u`; they are not a contradiction.
+
 ## WARP outbound-IP masking helpers
 
 The WARP module ships four additional sudo helpers (in `scripts/`, installed to
@@ -224,7 +226,7 @@ add the `setcap` call to your server provisioning script.
 1. Install helpers and `/etc/sudoers.d/vpnbot` with the ownership and modes above.
 2. Validate sudoers with `visudo -cf /etc/sudoers.d/vpnbot`.
 3. Set `PRIVILEGE_HELPERS_ENABLED=true` and `BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock`.
-4. Install `deploy/vpn-bot.service` as the production non-root unit.
+4. Install `deploy/vpn-bot.nonroot.example.service` as the active non-root unit. (The shipped `deploy/vpn-bot.service` is the root+api default; if you install from it instead, edit it to the non-root profile — `User=vpn-bot`, `Group=vpn-bot`, `ProtectSystem=strict`, `ReadWritePaths` — first.)
 5. Run `python deploy/check-nonroot-helper-mode.py` before and after restarting the service.
 6. Run a staged issue/revoke test for Xray, AWG, SOCKS5, and managed MTProxy.
 
