@@ -27,7 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   data plane is down. Because Hysteria2 issuance/revocation are pure `vpn.db` writes
   with no apply step, a degraded mark is informational only and never blocks
   mutations. (2) The admin **diagnostics** panel now runs `systemctl is-active` on
-  the Hysteria2 units (`HYSTERIA2_AUTH_SERVICE_NAME`=`vpnbot-hy2-auth`,
+  the Hysteria2 units (`HYSTERIA2_AUTH_SERVICE_NAME`=`vpn-bot-hy2-auth`,
   `HYSTERIA2_SERVICE_NAME`=`hysteria-server`) when Hysteria2 is enabled. (3) The
   hysteria-server config (`HYSTERIA2_CONFIG_PATH`, default `/etc/hysteria/config.yaml`)
   is bundled into the offsite recovery archive, mirroring the Xray/AWG config backup.
@@ -65,7 +65,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `hy2_<hex>`. New settings: `HYSTERIA2_{ENABLED,HOST,PORT,SNI,OBFS_PASSWORD,INSECURE,AUTH_LISTEN}`
   (`HYSTERIA2_OBFS_PASSWORD` must match the salamander password in
   `/etc/hysteria/config.yaml`). A new `hysteria2` protocol module gates issuance in
-  the admin panel, and `deploy/vpnbot-hy2-auth.service` is provided for the operator.
+  the admin panel, and `deploy/vpn-bot-hy2-auth.service` is provided for the operator.
   Includes a table-rebuild migration (schema v29) that widens the `vpn_keys.key_type`
   CHECK to allow `'hysteria2'` (idempotent; UUIDs of existing keys preserved).
 - **Slash-command menu in Telegram (`set_my_commands`).** On startup the bot now
@@ -79,6 +79,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **BREAKING: `vpnbot-*` → `vpn-bot-*` naming unified.** The privileged helpers,
+  systemd units, sudoers file/aliases and the `/etc/vpnbot` + `/etc/mtproxy/vpnbot`
+  config directories were renamed from the inconsistent `vpnbot` token to the
+  hyphenated `vpn-bot` that already names the service, user and `/run/vpn-bot`.
+  Helpers are now `/usr/local/sbin/vpn-bot-*`; the sudoers file installs to
+  `/etc/sudoers.d/vpn-bot` with `VPN_BOT_*` aliases; units are
+  `vpn-bot-hy2-auth.service` / `vpn-bot-warp-split.service`; config lives under
+  `/etc/vpn-bot` and `/etc/mtproxy/vpn-bot`. `deploy/setup-nonroot-helper-mode.sh`
+  migrates existing installs (moves the config dirs; removes the stale
+  helpers/sudoers/unit/drop-in). The offsite backup filename prefixes
+  (`vpnbot_backup_`/`vpnbot_recovery_`) and the GitHub repository name are
+  intentionally unchanged.
+- **deploy/ & scripts/ security-review hardening.** Closed a TOCTOU in the WARP
+  config-install helper that could smuggle an `awg-quick` `PostUp` hook onto disk
+  (root code-exec) by validating on a single `O_NOFOLLOW` read; run the MTProxy
+  managed wrapper as root so it can read the root-owned managed files and drop the
+  proxy via `-u`; gated security-critical env overrides behind sudo in the WARP
+  split helpers; pinned the split-apply sudoers grant to zero arguments; made the
+  WARP WAN device and endpoint dynamic (no hardcoded `eth0`/Cloudflare IP); and
+  corrected docs that mislabelled the root+api unit as the non-root production unit.
 - **Server status detailed block reordered, and its state resets on toggle-off.**
   In the "статус сервера" panel's detailed-metrics block the **uptime** («Аптайм»)
   now comes first and the **load average** («Средняя нагрузка») second (previously

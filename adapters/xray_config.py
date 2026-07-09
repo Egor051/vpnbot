@@ -100,7 +100,7 @@ def apply_warp_send_through(config: dict[str, Any], tunnel_ip: str | None) -> bo
     ``sendThrough`` would be lost; the writer re-asserts it here instead. When
     *tunnel_ip* is a non-empty string, each outbound with ``protocol == "freedom"``
     gets ``"sendThrough": tunnel_ip`` so Xray sources its direct egress from the
-    tunnel address (which ``vpnbot-warp-routes`` diverts into the tunnel). When
+    tunnel address (which ``vpn-bot-warp-routes`` diverts into the tunnel). When
     *tunnel_ip* is falsy the field is removed again, leaving a disabled/non-WARP
     deploy clean.
 
@@ -180,7 +180,7 @@ class XrayConfigAdapter:
         self.shell = shell
         self.stats_server = stats_server
         self.helper_runner = helper_runner
-        self.helper_path = helper_path or Path("/usr/local/sbin/vpnbot-xray-apply")
+        self.helper_path = helper_path or Path("/usr/local/sbin/vpn-bot-xray-apply")
         self.helper_staging_dir = helper_staging_dir or Path("/run/vpn-bot/xray")
         # Optional provider of the WARP tunnel IP. When set, every config write binds
         # the freedom outbound's egress source to it (sendThrough); when it yields

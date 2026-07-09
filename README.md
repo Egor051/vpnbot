@@ -44,7 +44,7 @@ Minimal run for evaluation (only `BOT_TOKEN` and `ADMIN_IDS` are required to sta
 
 ```bash
 git clone https://github.com/Egor051/vpnbot.git
-cd vpnbot
+cd vpn-bot
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt -c constraints.txt
 cp .env.example .env
@@ -128,7 +128,7 @@ services/                  # Business workflows and permissions
 repositories/              # SQLite access layer
 adapters/                  # Xray, AWG, systemctl, backups, shell adapters
 warp/                      # WARP outbound-IP masking module (tunnel, routes, health monitor)
-scripts/                   # vpnbot-warp-* sudo helpers
+scripts/                   # vpn-bot-warp-* sudo helpers
 config/settings.py         # Environment parsing and validation
 tests/                     # Regression and hardening tests
 docs/                      # Configuration, deployment, operations, WARP, proxy docs

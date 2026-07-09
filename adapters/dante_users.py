@@ -23,7 +23,7 @@ class DanteUserAdapter:
         self.login_prefix = login_prefix
         self.system_user_shell = system_user_shell
         self.helper_runner = helper_runner
-        self.helper_path = helper_path or Path("/usr/local/sbin/vpnbot-socks5-user")
+        self.helper_path = helper_path or Path("/usr/local/sbin/vpn-bot-socks5-user")
 
     async def exists(self, login: str) -> bool:
         """Return whether the managed SOCKS5 Linux user exists."""

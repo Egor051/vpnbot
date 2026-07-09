@@ -11,23 +11,23 @@ from pathlib import Path
 
 
 HELPERS = (
-    Path("/usr/local/sbin/vpnbot-socks5-user"),
-    Path("/usr/local/sbin/vpnbot-xray-apply"),
-    Path("/usr/local/sbin/vpnbot-awg-apply"),
-    Path("/usr/local/sbin/vpnbot-mtproxy-apply"),
+    Path("/usr/local/sbin/vpn-bot-socks5-user"),
+    Path("/usr/local/sbin/vpn-bot-xray-apply"),
+    Path("/usr/local/sbin/vpn-bot-awg-apply"),
+    Path("/usr/local/sbin/vpn-bot-mtproxy-apply"),
 )
 # Optional WARP routing helpers (only used when the WARP module is enabled).
 WARP_HELPERS = (
-    Path("/usr/local/sbin/vpnbot-warp-install"),
-    Path("/usr/local/sbin/vpnbot-warp-iface"),
-    Path("/usr/local/sbin/vpnbot-warp-routes"),
-    Path("/usr/local/sbin/vpnbot-warp-status"),
+    Path("/usr/local/sbin/vpn-bot-warp-install"),
+    Path("/usr/local/sbin/vpn-bot-warp-iface"),
+    Path("/usr/local/sbin/vpn-bot-warp-routes"),
+    Path("/usr/local/sbin/vpn-bot-warp-status"),
     # Split-list management helper (reads new list from stdin, writes atomically,
-    # restarts vpnbot-warp-split). Required when bot-controlled split is in use.
-    Path("/usr/local/sbin/vpnbot-warp-split-apply"),
+    # restarts vpn-bot-warp-split). Required when bot-controlled split is in use.
+    Path("/usr/local/sbin/vpn-bot-warp-split-apply"),
     # Split-routing on/off/restart/status helper (manages table T + the disabled
     # marker). Required when the bot-controlled split toggle is in use.
-    Path("/usr/local/sbin/vpnbot-warp-split-state"),
+    Path("/usr/local/sbin/vpn-bot-warp-split-state"),
 )
 FORBIDDEN_WRITE_PATHS = (
     "/etc/passwd",
@@ -463,7 +463,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "deploy/vpn-bot.nonroot.example.service (the shipped deploy/vpn-bot.service is "
         "root+api and intentionally fails these non-root checks)",
     )
-    parser.add_argument("--sudoers", default="/etc/sudoers.d/vpnbot", help="installed sudoers file")
+    parser.add_argument("--sudoers", default="/etc/sudoers.d/vpn-bot", help="installed sudoers file")
     parser.add_argument("--repo", default="/opt/vpn-service", help="production checkout path")
     parser.add_argument("--db", help="SQLite DB path (default: <repo>/data/vpn.db)")
     parser.add_argument(
@@ -505,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
     check_sqlite(db_path, reporter)
     check_xray_config(Path("/usr/local/etc/xray/config.json"), reporter)
     check_awg_config(Path("/etc/amnezia/amneziawg/awg0.conf"), reporter)
-    check_mtproxy_managed_files(Path("/etc/mtproxy/vpnbot"), reporter)
+    check_mtproxy_managed_files(Path("/etc/mtproxy/vpn-bot"), reporter)
     check_sudo_helpers(reporter)
     check_active_services(reporter)
 

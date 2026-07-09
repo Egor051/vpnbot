@@ -7,13 +7,13 @@
 #   them. A /32 for a stable single-IP endpoint is fine.
 #
 # ENDPOINT EXCLUSION
-#   Do NOT add 162.159.195.1/32 (the WARP endpoint itself) — vpnbot-warp-split
+#   Do NOT add 162.159.195.1/32 (the WARP endpoint itself) — vpn-bot-warp-split
 #   always installs an explicit /32 route for the endpoint via eth0 in the routing
 #   table, regardless of what is listed here. Adding it here would be a no-op.
 #
 # APPLYING CHANGES
 #   After editing the live list restart the service to re-apply:
-#     systemctl restart vpnbot-warp-split
+#     systemctl restart vpn-bot-warp-split
 #   Verify: ip route show table <T>   (T = fwmark from `awg show out-warp fwmark`)
 
 # ── Telegram ─────────────────────────────────────────────────────────────────
@@ -48,7 +48,7 @@
 # ── Cloudflare ────────────────────────────────────────────────────────────────
 # Cloudflare CDN (1.1.1.1 DNS, Workers, Pages, broad CDN traffic).
 # Note: the WARP endpoint 162.159.195.1 lives inside 162.159.192.0/22 —
-# vpnbot-warp-split pins it to eth0 via an anti-loop /32, so including the
+# vpn-bot-warp-split pins it to eth0 via an anti-loop /32, so including the
 # broader block here is safe and routes the rest via WARP.
 104.16.0.0/12
 162.158.0.0/15

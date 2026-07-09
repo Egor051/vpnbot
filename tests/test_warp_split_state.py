@@ -3,10 +3,10 @@
 Two surfaces are covered, both with a fake PATH that intercepts every privileged
 command (no real ip/awg/systemctl, no root):
 
-  1. scripts/vpnbot-warp-split-state — the on/off/restart/status helper. It manages
+  1. scripts/vpn-bot-warp-split-state — the on/off/restart/status helper. It manages
      the root-owned disabled marker and delegates table-T mutation to
-     vpnbot-warp-split (here stubbed so we can assert the orchestration).
-  2. scripts/vpnbot-warp-split apply — the marker honour added for boot/state:
+     vpn-bot-warp-split (here stubbed so we can assert the orchestration).
+  2. scripts/vpn-bot-warp-split apply — the marker honour added for boot/state:
      when the marker is present, table T is reconciled to EMPTY (all-direct),
      touching ONLY the per-prefix `dev out-warp` routes; the anti-loop endpoint
      route is preserved and the saved list file is never erased.
@@ -22,8 +22,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-STATE_SCRIPT = ROOT / "scripts" / "vpnbot-warp-split-state"
-SPLIT_SCRIPT = ROOT / "scripts" / "vpnbot-warp-split"
+STATE_SCRIPT = ROOT / "scripts" / "vpn-bot-warp-split-state"
+SPLIT_SCRIPT = ROOT / "scripts" / "vpn-bot-warp-split"
 
 FWMARK_HEX = "0x1234"
 FWMARK_DEC = str(int(FWMARK_HEX, 16))  # "4660"
@@ -50,19 +50,19 @@ def _log_lines(log_file: Path) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# vpnbot-warp-split-state — orchestration (split helper stubbed)
+# vpn-bot-warp-split-state — orchestration (split helper stubbed)
 # ---------------------------------------------------------------------------
 
 
 def _state_env(tmp_path: Path, *, fwmark: str = FWMARK_HEX, seed: list[str] | None = None) -> dict[str, str]:
-    """Stub vpnbot-warp-split + awg/ip/chown; return env for the state helper."""
+    """Stub vpn-bot-warp-split + awg/ip/chown; return env for the state helper."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     log_file = tmp_path / "calls.log"
     marker = tmp_path / "warp-split.disabled"
     split_helper = tmp_path / "fake-warp-split"
 
-    # Fake vpnbot-warp-split: just records every invocation.
+    # Fake vpn-bot-warp-split: just records every invocation.
     _write_stub(split_helper, f"""\
     #!/bin/sh
     echo "split-helper $@" >> {log_file}
@@ -115,7 +115,7 @@ class TestSplitStateHelper:
         assert Path(env["_MARKER"]).exists(), "off must write the disabled marker"
         lines = _log_lines(Path(env["_LOG"]))
         assert any("split-helper apply" in ln for ln in lines), \
-            "off must reconcile via vpnbot-warp-split apply; got:\n" + "\n".join(lines)
+            "off must reconcile via vpn-bot-warp-split apply; got:\n" + "\n".join(lines)
 
     def test_on_removes_marker_and_applies(self, tmp_path: Path) -> None:
         env = _state_env(tmp_path)
@@ -177,7 +177,7 @@ class TestSplitStateHelper:
 
 
 # ---------------------------------------------------------------------------
-# vpnbot-warp-split apply — marker honour (boot/state → table T empty)
+# vpn-bot-warp-split apply — marker honour (boot/state → table T empty)
 # ---------------------------------------------------------------------------
 
 
@@ -318,22 +318,22 @@ class TestSplitApplyMarkerHonour:
 
 class TestStateHelperDeployWiring:
     def test_sudoers_grants_state_verbs_without_wildcard(self) -> None:
-        text = (ROOT / "deploy" / "sudoers.d" / "vpnbot.example").read_text(encoding="utf-8")
+        text = (ROOT / "deploy" / "sudoers.d" / "vpn-bot.example").read_text(encoding="utf-8")
         active = "\n".join(
             ln for ln in text.splitlines() if ln.strip() and not ln.strip().startswith(("#", ";"))
         )
         for verb in ("on", "off", "restart", "status"):
-            assert f"/usr/local/sbin/vpnbot-warp-split-state {verb}" in active, \
+            assert f"/usr/local/sbin/vpn-bot-warp-split-state {verb}" in active, \
                 f"sudoers must pin the '{verb}' verb"
         for ln in text.splitlines():
-            if "vpnbot-warp-split-state" in ln and not ln.strip().startswith("#"):
+            if "vpn-bot-warp-split-state" in ln and not ln.strip().startswith("#"):
                 assert "*" not in ln, "split-state verbs must not use argument wildcards"
 
     def test_check_nonroot_lists_state_helper(self) -> None:
         text = (ROOT / "deploy" / "check-nonroot-helper-mode.py").read_text(encoding="utf-8")
-        assert "vpnbot-warp-split-state" in text
+        assert "vpn-bot-warp-split-state" in text
 
     def test_setup_installs_state_helper(self) -> None:
         text = (ROOT / "deploy" / "setup-nonroot-helper-mode.sh").read_text(encoding="utf-8")
-        assert "/usr/local/sbin/vpnbot-warp-split-state" in text
-        assert "vpnbot-warp-split-state" in text
+        assert "/usr/local/sbin/vpn-bot-warp-split-state" in text
+        assert "vpn-bot-warp-split-state" in text

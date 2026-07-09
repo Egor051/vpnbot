@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# vpnbot-warp-split-apply — privileged helper: validate + atomically write warp-split.list.
+# vpn-bot-warp-split-apply — privileged helper: validate + atomically write warp-split.list.
 #
 # Reads the desired CIDR list from stdin (one entry per line; blank lines and
 # lines starting with # are allowed and passed through as-is). Any non-blank
@@ -7,7 +7,7 @@
 # causes the helper to abort with exit status 1 — nothing is written.
 #
 # On success: writes SPLIT_LIST atomically (temp rename in the same directory,
-# root:root 0644) then restarts vpnbot-warp-split via systemctl.
+# root:root 0644) then restarts vpn-bot-warp-split via systemctl.
 #
 # Defence-in-depth: this helper provides syntactic safety only. The calling bot
 # is responsible for policy decisions (which prefixes are allowed, dedup, etc.).
@@ -15,7 +15,7 @@
 # non-comment line is validated against ipaddress.ip_network.
 #
 # Usage (bot calls via sudo -n):
-#   printf '%s\n' "1.2.3.0/24" "5.6.0.0/16" | sudo -n vpnbot-warp-split-apply
+#   printf '%s\n' "1.2.3.0/24" "5.6.0.0/16" | sudo -n vpn-bot-warp-split-apply
 #
 set -euo pipefail
 
@@ -24,11 +24,11 @@ set -euo pipefail
 # (defense-in-depth beyond sudoers env_reset). Non-sudo callers (the test harness)
 # may still override via WARP_SPLIT_LIST_PATH.
 if [ -n "${SUDO_UID:-}" ]; then
-    SPLIT_LIST="/etc/vpnbot/warp-split.list"
+    SPLIT_LIST="/etc/vpn-bot/warp-split.list"
 else
-    SPLIT_LIST="${WARP_SPLIT_LIST_PATH:-/etc/vpnbot/warp-split.list}"
+    SPLIT_LIST="${WARP_SPLIT_LIST_PATH:-/etc/vpn-bot/warp-split.list}"
 fi
-ME="vpnbot-warp-split-apply"
+ME="vpn-bot-warp-split-apply"
 
 # Read all stdin before doing anything — reject immediately on empty.
 content="$(cat)"
@@ -92,5 +92,5 @@ trap - EXIT
 n_prefixes="$(printf '%s\n' "$content" | grep -cvE '^\s*(#|$)' || true)"
 echo "${ME}: wrote ${n_prefixes} prefix(es) to ${SPLIT_LIST}"
 
-systemctl restart vpnbot-warp-split
-echo "${ME}: vpnbot-warp-split restarted"
+systemctl restart vpn-bot-warp-split
+echo "${ME}: vpn-bot-warp-split restarted"

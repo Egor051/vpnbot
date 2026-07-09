@@ -44,7 +44,7 @@ Docker, Redis, PostgreSQL и тяжёлых ORM.
 
 ```bash
 git clone https://github.com/Egor051/vpnbot.git
-cd vpnbot
+cd vpn-bot
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt -c constraints.txt
 cp .env.example .env
@@ -128,7 +128,7 @@ services/                  # Бизнес-логика и управление �
 repositories/              # Слой доступа к SQLite
 adapters/                  # Адаптеры для Xray, AWG, systemctl, backup, shell
 warp/                      # Модуль WARP-сокрытия исходящего IP (туннель, маршруты, health-монитор)
-scripts/                   # sudo-хелперы vpnbot-warp-*
+scripts/                   # sudo-хелперы vpn-bot-warp-*
 config/settings.py         # Разбор переменных окружения и валидация
 tests/                     # Регрессионные тесты и hardening-тесты
 docs/                      # Документация: конфигурация, развёртывание, эксплуатация, WARP, прокси

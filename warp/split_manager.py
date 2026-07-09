@@ -1,7 +1,7 @@
 """WARP selective-split list management.
 
 Read-only access goes directly to the list file (0644, readable by the bot
-user). Writes go exclusively through ``vpnbot-warp-split-apply`` (root helper)
+user). Writes go exclusively through ``vpn-bot-warp-split-apply`` (root helper)
 which validates every CIDR, writes atomically, and restarts the service.
 The bot never touches ip/route/iptables — all of that lives in the helper.
 """
@@ -83,8 +83,8 @@ class WarpSplitManager:
         apply_helper_path: Path,
         awg_network: str,
         shell: ShellRunner,
-        state_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-split-state"),
-        marker_path: Path = Path("/etc/vpnbot/warp-split.disabled"),
+        state_helper_path: Path = Path("/usr/local/sbin/vpn-bot-warp-split-state"),
+        marker_path: Path = Path("/etc/vpn-bot/warp-split.disabled"),
         interface_name: str = "out-warp",
     ) -> None:
         self._list_path = list_path
@@ -93,7 +93,7 @@ class WarpSplitManager:
         self._marker_path = marker_path
         self._interface_name = interface_name
         self._awg_network = _parse_ipv4_network(awg_network, default="10.0.0.0/24")
-        # Always use sudo — the helper needs root to write /etc/vpnbot/ and
+        # Always use sudo — the helper needs root to write /etc/vpn-bot/ and
         # restart systemd, regardless of whether the bot itself runs as root.
         self._runner = PrivilegedHelperRunner(shell=shell, use_sudo=True)
 
@@ -131,7 +131,7 @@ class WarpSplitManager:
         """Write *cidr_list* to the split file via the privileged helper.
 
         The helper validates every entry again (defence-in-depth), writes
-        atomically, and restarts vpnbot-warp-split. Raises WarpSplitError on
+        atomically, and restarts vpn-bot-warp-split. Raises WarpSplitError on
         failure.
         """
         if not cidr_list:
@@ -289,7 +289,7 @@ class WarpSplitManager:
         if to_remove and not remaining:
             raise WarpSplitError(
                 "удаление опустошит список — отказано. "
-                "Для full-tunnel: выключи split (systemctl disable vpnbot-warp-split). "
+                "Для full-tunnel: выключи split (systemctl disable vpn-bot-warp-split). "
                 "Для all-direct: оставь хотя бы один sentinel-префикс."
             )
         return results, remaining
@@ -407,7 +407,7 @@ def _validate_del(token: str, result: CidrResult, current: set[str]) -> None:
 
 
 def _parse_state_status(stdout: str) -> dict[str, str]:
-    """Parse ``key=value`` lines emitted by ``vpnbot-warp-split-state status``."""
+    """Parse ``key=value`` lines emitted by ``vpn-bot-warp-split-state status``."""
     facts: dict[str, str] = {}
     for raw in stdout.splitlines():
         line = raw.strip()

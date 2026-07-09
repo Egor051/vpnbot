@@ -119,7 +119,7 @@ def test_mtproxy_adapter_apply_writes_managed_files_and_restarts(tmp_path: Path)
         assert "a" * 32 not in (tmp_path / "mtproxy.env").read_text(encoding="utf-8")
         assert ("daemon-reload", None) not in systemctl.calls
         assert ("restart", "mtproxy") in systemctl.calls
-        assert not (tmp_path / "mtproxy.service.d" / "vpnbot-managed.conf").exists()
+        assert not (tmp_path / "mtproxy.service.d" / "vpn-bot-managed.conf").exists()
         if os.name == "posix":
             assert stat.S_IMODE((tmp_path / "managed-secrets.json").stat().st_mode) == 0o600
 
@@ -172,12 +172,12 @@ def test_vpn_bot_service_write_paths_are_narrow() -> None:
     nonroot_rw = [line for line in nonroot.splitlines() if line.startswith("ReadWritePaths=")]
     if nonroot_rw:
         read_write = nonroot_rw[0]
-        assert "/etc/mtproxy/vpnbot" not in read_write
+        assert "/etc/mtproxy/vpn-bot" not in read_write
         assert "/etc/systemd/system" not in read_write
 
 
 def test_mtproxy_systemd_dropin_template_contains_no_raw_secret_surface() -> None:
-    dropin = Path("deploy/mtproxy-vpnbot-managed.conf").read_text(encoding="utf-8")
+    dropin = Path("deploy/mtproxy-vpn-bot-managed.conf").read_text(encoding="utf-8")
     assert "-S" not in dropin
     assert "MTPROTO_SECRET" not in dropin
     assert "managed-secrets.json" not in dropin

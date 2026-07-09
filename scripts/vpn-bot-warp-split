@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# vpnbot-warp-split — selective WARP: listed prefixes via out-warp, rest direct via eth0.
-# Runs AFTER vpnbot-warp-routes (full-tunnel setup). Host stays direct — never touches main/SSH.
+# vpn-bot-warp-split — selective WARP: listed prefixes via out-warp, rest direct via eth0.
+# Runs AFTER vpn-bot-warp-routes (full-tunnel setup). Host stays direct — never touches main/SSH.
 set -euo pipefail
 
 IFACE="${WARP_IFACE:-out-warp}"
@@ -18,21 +18,21 @@ ENDPOINT_IP="${WARP_ENDPOINT_IP:-$(awg show "$IFACE" endpoints 2>/dev/null | gre
 # defaults (defense-in-depth beyond sudoers env_reset). Non-sudo callers (the systemd
 # unit, tests) may still override via env.
 if [ -n "${SUDO_UID:-}" ]; then
-    LIST="/etc/vpnbot/warp-split.list"
-    MARKER="/etc/vpnbot/warp-split.disabled"
+    LIST="/etc/vpn-bot/warp-split.list"
+    MARKER="/etc/vpn-bot/warp-split.disabled"
 else
-    LIST="${WARP_SPLIT_LIST:-/etc/vpnbot/warp-split.list}"
+    LIST="${WARP_SPLIT_LIST:-/etc/vpn-bot/warp-split.list}"
     # Root-owned intent marker: when present the split routing is "off" — table T is
     # reconciled to EMPTY (all-direct) instead of to the list. Written/removed by the
-    # vpnbot-warp-split-state helper; honoured here so an "off" state survives reboot.
-    MARKER="${WARP_SPLIT_DISABLED_MARKER:-/etc/vpnbot/warp-split.disabled}"
+    # vpn-bot-warp-split-state helper; honoured here so an "off" state survives reboot.
+    MARKER="${WARP_SPLIT_DISABLED_MARKER:-/etc/vpn-bot/warp-split.disabled}"
 fi
 log(){ echo "[warp-split] $*"; }
 
 fwmark="$(awg show "$IFACE" fwmark 2>/dev/null || true)"
 [ -n "$fwmark" ] && [ "$fwmark" != off ] || { log "no fwmark for $IFACE (tunnel down?) — abort, routing left as-is"; exit 0; }
 # Validate the hex shape before the arithmetic table conversion (parity with
-# vpnbot-warp-routes) so a malformed fwmark never reaches $(( )).
+# vpn-bot-warp-routes) so a malformed fwmark never reaches $(( )).
 case "$fwmark" in
   0x[0-9a-fA-F]*) : ;;
   *) log "unexpected fwmark '$fwmark' for $IFACE — abort"; exit 0 ;;

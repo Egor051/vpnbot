@@ -5,9 +5,9 @@
 # binds loopback only and opens the DB read-only.
 #
 # Operator install:
-#   sudo cp deploy/vpnbot-hy2-auth.service /etc/systemd/system/
+#   sudo cp deploy/vpn-bot-hy2-auth.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now vpnbot-hy2-auth
+#   sudo systemctl enable --now vpn-bot-hy2-auth
 # Point Hysteria at it in /etc/hysteria/config.yaml:
 #   auth:
 #     type: http
@@ -15,7 +15,7 @@
 #       url: http://127.0.0.1:8444/auth      # must match HYSTERIA2_AUTH_LISTEN
 
 [Unit]
-Description=vpnbot Hysteria2 HTTP-auth endpoint (loopback, read-only DB)
+Description=vpn-bot Hysteria2 HTTP-auth endpoint (loopback, read-only DB)
 After=network.target
 # The hysteria server depends on this for auth; start it first when present.
 Before=hysteria-server.service

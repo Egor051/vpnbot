@@ -41,10 +41,10 @@ optional with the shown default.
 |---|---|---|---|---|
 | `PRIVILEGE_HELPERS_ENABLED` | No | `false` | Enable non-root deployment via sudo helpers. Incompatible with `XRAY_APPLY_MODE=api`. | `false` |
 | `HELPER_STAGING_ROOT` | No | `/run/vpn-bot` | Root directory for staging files passed to sudo helpers. | `/run/vpn-bot` |
-| `SOCKS5_USER_HELPER_PATH` | No | `/usr/local/sbin/vpnbot-socks5-user` | Absolute path to the SOCKS5 user management sudo helper. | `/usr/local/sbin/vpnbot-socks5-user` |
-| `XRAY_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpnbot-xray-apply` | Absolute path to the Xray config apply sudo helper. | `/usr/local/sbin/vpnbot-xray-apply` |
-| `AWG_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpnbot-awg-apply` | Absolute path to the AWG config apply sudo helper. | `/usr/local/sbin/vpnbot-awg-apply` |
-| `MTPROTO_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpnbot-mtproxy-apply` | Absolute path to the MTProto apply sudo helper. | `/usr/local/sbin/vpnbot-mtproxy-apply` |
+| `SOCKS5_USER_HELPER_PATH` | No | `/usr/local/sbin/vpn-bot-socks5-user` | Absolute path to the SOCKS5 user management sudo helper. | `/usr/local/sbin/vpn-bot-socks5-user` |
+| `XRAY_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpn-bot-xray-apply` | Absolute path to the Xray config apply sudo helper. | `/usr/local/sbin/vpn-bot-xray-apply` |
+| `AWG_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpn-bot-awg-apply` | Absolute path to the AWG config apply sudo helper. | `/usr/local/sbin/vpn-bot-awg-apply` |
+| `MTPROTO_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpn-bot-mtproxy-apply` | Absolute path to the MTProto apply sudo helper. | `/usr/local/sbin/vpn-bot-mtproxy-apply` |
 | `XRAY_HELPER_STAGING_DIR` | No | `$HELPER_STAGING_ROOT/xray` | Staging directory for Xray helper files. | `/run/vpn-bot/xray` |
 | `AWG_HELPER_STAGING_DIR` | No | `$HELPER_STAGING_ROOT/awg` | Staging directory for AWG helper files. | `/run/vpn-bot/awg` |
 | `MTPROTO_HELPER_STAGING_DIR` | No | `$HELPER_STAGING_ROOT/mtproxy` | Staging directory for MTProto helper files. | `/run/vpn-bot/mtproxy` |
@@ -137,11 +137,11 @@ _Legacy alias: `AWG_CLIENT_DNS` (= `AWG_DNS`)._
 | `MTPROTO_CONFIG_DIR` | No | `/etc/mtproxy` | Directory containing MTProxy base config files. | `/etc/mtproxy` |
 | `MTPROTO_PROXY_SECRET_PATH` | No | `/etc/mtproxy/proxy-secret` | Path to the MTProxy `proxy-secret` file. | `/etc/mtproxy/proxy-secret` |
 | `MTPROTO_PROXY_MULTI_CONF_PATH` | No | `/etc/mtproxy/proxy-multi.conf` | Path to the MTProxy `proxy-multi.conf` file. | `/etc/mtproxy/proxy-multi.conf` |
-| `MTPROTO_MANAGED_DIR` | No | `/etc/mtproxy/vpnbot` | Directory for bot-managed MTProto files. | `/etc/mtproxy/vpnbot` |
-| `MTPROTO_MANAGED_SECRETS_PATH` | No | `$MTPROTO_MANAGED_DIR/managed-secrets.json` | 🔒 Path to managed secrets JSON. | `/etc/mtproxy/vpnbot/managed-secrets.json` |
-| `MTPROTO_MANAGED_ENV_PATH` | No | `$MTPROTO_MANAGED_DIR/mtproxy.env` | Path to managed MTProxy env file. | `/etc/mtproxy/vpnbot/mtproxy.env` |
+| `MTPROTO_MANAGED_DIR` | No | `/etc/mtproxy/vpn-bot` | Directory for bot-managed MTProto files. | `/etc/mtproxy/vpn-bot` |
+| `MTPROTO_MANAGED_SECRETS_PATH` | No | `$MTPROTO_MANAGED_DIR/managed-secrets.json` | 🔒 Path to managed secrets JSON. | `/etc/mtproxy/vpn-bot/managed-secrets.json` |
+| `MTPROTO_MANAGED_ENV_PATH` | No | `$MTPROTO_MANAGED_DIR/mtproxy.env` | Path to managed MTProxy env file. | `/etc/mtproxy/vpn-bot/mtproxy.env` |
 | `MTPROTO_MANAGED_WRAPPER_PATH` | No | `/opt/vpn-service/scripts/run-mtproxy-managed` | Path to the managed-mode wrapper script. | `/opt/vpn-service/scripts/run-mtproxy-managed` |
-| `MTPROTO_BACKUP_DIR` | No | `$MTPROTO_MANAGED_DIR/backups` | Directory for MTProto managed-file backups. | `/etc/mtproxy/vpnbot/backups` |
+| `MTPROTO_BACKUP_DIR` | No | `$MTPROTO_MANAGED_DIR/backups` | Directory for MTProto managed-file backups. | `/etc/mtproxy/vpn-bot/backups` |
 | `MTPROTO_INTERNAL_STATS_PORT` | No | `8888` | Internal MTProxy stats port (1–65535). | `8888` |
 | `MTPROTO_WORKERS` | No | `1` | Number of MTProxy worker processes (1–1024). | `1` |
 | `MTPROTO_APPLY_TIMEOUT_SECONDS` | No | `10` | Timeout in seconds for apply + health check (1–3600). | `10` |
@@ -169,7 +169,7 @@ mismatch is a silent client timeout, not an error.
 | `HYSTERIA2_STATS_SECRET` | No | — | Shared secret for the Traffic Stats API; MUST equal `trafficStats.secret` in `config.yaml`. Empty disables hy2 traffic/online/kick. 🔒 | `s3cret` |
 | `HYSTERIA2_STATS_INTERVAL` | No | `60` | Background hy2 traffic-stats sampling interval in seconds (0–3600; 0 disables the loop). | `60` |
 | `HYSTERIA2_SERVICE_NAME` | No | `hysteria-server` | systemd unit of the Hysteria2 server, checked by the admin health diagnostics (`systemctl is-active`). | `hysteria-server` |
-| `HYSTERIA2_AUTH_SERVICE_NAME` | No | `vpnbot-hy2-auth` | systemd unit of the `hy2_auth` endpoint, checked by the admin health diagnostics. | `vpnbot-hy2-auth` |
+| `HYSTERIA2_AUTH_SERVICE_NAME` | No | `vpn-bot-hy2-auth` | systemd unit of the `hy2_auth` endpoint, checked by the admin health diagnostics. | `vpn-bot-hy2-auth` |
 | `HYSTERIA2_CONFIG_PATH` | No | `/etc/hysteria/config.yaml` | Path to the hysteria-server config, bundled into the offsite recovery archive (when recovery is enabled) so a rebuilt box can restore the data plane. A missing file is skipped. | `/etc/hysteria/config.yaml` |
 | `HYSTERIA2_HEALTH_INTERVAL` | No | `60` | How often (seconds) to probe `hy2_auth` `GET /healthz` and reflect it in the dashboard/health **Hysteria2: OK/DEGRADED** entry (0–3600; 0 disables the probe). Only active when `HYSTERIA2_ENABLED`. | `60` |
 
@@ -277,17 +277,17 @@ can safely set `HYSTERIA2_INSECURE=false`. Until then, keep this `true`.
 
 Operational details are in [`warp.md`](warp.md). Defaults match the provided sudoers
 template paths. Changing `WARP_CONFIG_PATH` or `WARP_INTERFACE` requires matching updates
-to `/etc/sudoers.d/vpnbot` and the `vpnbot-warp-*` helper scripts; mismatches cause silent
+to `/etc/sudoers.d/vpn-bot` and the `vpn-bot-warp-*` helper scripts; mismatches cause silent
 sudo failures. Change only if you know what you are doing.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `WARP_CONFIG_PATH` | `/etc/amnezia/out-warp.conf` | Installed tunnel config path |
 | `WARP_INTERFACE` | `out-warp` | AmneziaWG interface name |
-| `WARP_INSTALL_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-install` | Config install helper |
-| `WARP_IFACE_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-iface` | Interface up/down helper |
-| `WARP_ROUTES_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-routes` | Route add/del helper |
-| `WARP_STATUS_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-status` | `awg show` helper |
+| `WARP_INSTALL_HELPER_PATH` | `/usr/local/sbin/vpn-bot-warp-install` | Config install helper |
+| `WARP_IFACE_HELPER_PATH` | `/usr/local/sbin/vpn-bot-warp-iface` | Interface up/down helper |
+| `WARP_ROUTES_HELPER_PATH` | `/usr/local/sbin/vpn-bot-warp-routes` | Route add/del helper |
+| `WARP_STATUS_HELPER_PATH` | `/usr/local/sbin/vpn-bot-warp-status` | `awg show` helper |
 | `WARP_HELPER_STAGING_DIR` | `/run/vpn-bot/warp` | Private dir for staged uploads |
 | `WARP_PING_TARGET` | `162.159.140.245` | ICMP target the health monitor pings to decide tunnel up/down. Default is a Cloudflare anycast address present in typical WARP `AllowedIPs`. Override if your `AllowedIPs` does not cover this address, otherwise the monitor reports false failures. |
 | `WARP_MONITOR_OBSERVER_MODE` | `true` | When true (default) the bot's health monitor only **observes** the tunnel (probes, DB state, admin notifications) and never touches the interface or routes — those are owned by systemd (`awg-quick@out-warp` + `warp-routes.service`). Set to `false` only to restore the legacy model where the bot itself brings the interface up/down and adds/removes the routes. |
@@ -295,11 +295,11 @@ sudo failures. Change only if you know what you are doing.
 | `WARP_MONITOR_RECOVER_WINDOW_SECONDS` | `60` | Seconds of **continuous** success before the monitor declares the tunnel recovered. A single failed probe resets the window. |
 | `WARP_MONITOR_INTERVAL_SECONDS` | `10` | Probe interval during normal operation. |
 | `WARP_MONITOR_FAST_INTERVAL_SECONDS` | `3` | Faster probe interval used the moment a probe gets no response, so an outage (and the start of recovery) is detected quickly. |
-| `WARP_SPLIT_LIST_PATH` | `/etc/vpnbot/warp-split.list` | Path to the selective-split prefix list. The bot reads this file directly (0644); writes go exclusively via `WARP_SPLIT_APPLY_HELPER_PATH`. Change only if you relocate the file — update the sudoers grant to match. |
-| `WARP_SPLIT_APPLY_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-split-apply` | Privileged helper that validates, atomically writes the split list, and restarts `vpnbot-warp-split`. Must be root:root 0755 with a `NOPASSWD` sudoers grant. |
-| `WARP_SPLIT_STATE_HELPER_PATH` | `/usr/local/sbin/vpnbot-warp-split-state` | Privileged on/off/restart/status helper for the split **routing** (table T). The On/Off/Restart buttons call it to retract/re-apply the per-prefix `dev out-warp` routes and write the disabled marker — it never touches `awg-quick@out-warp`. Must be root:root 0755 with pinned-verb `NOPASSWD` grants. |
-| `WARP_SPLIT_DISABLED_MARKER_PATH` | `/etc/vpnbot/warp-split.disabled` | Root-owned (0644) marker recording the "off" intent. When present, `vpnbot-warp-split` reconciles table T to empty on every boot-apply, so an "off" state survives reboot. The bot reads it directly; only the state helper writes it. |
-| `WARP_PROXY_EGRESS_ENABLED` | `false` | Route LOCAL proxy egress (Dante/Xray/MTProto) through the WARP tunnel too. When `true` the Xray config writer binds the freedom outbound's egress source to the tunnel IP (`sendThrough` = the config's `[Interface] Address`) so its traffic is diverted into the tunnel by `vpnbot-warp-routes`. Off by default; flip on only as part of the manual [WARP proxy egress](warp.md#warp-proxy-egress-masking-the-proxies-outbound-ip) activation runbook. Legacy alias: `WARP_PROXY_EGRESS`. |
+| `WARP_SPLIT_LIST_PATH` | `/etc/vpn-bot/warp-split.list` | Path to the selective-split prefix list. The bot reads this file directly (0644); writes go exclusively via `WARP_SPLIT_APPLY_HELPER_PATH`. Change only if you relocate the file — update the sudoers grant to match. |
+| `WARP_SPLIT_APPLY_HELPER_PATH` | `/usr/local/sbin/vpn-bot-warp-split-apply` | Privileged helper that validates, atomically writes the split list, and restarts `vpn-bot-warp-split`. Must be root:root 0755 with a `NOPASSWD` sudoers grant. |
+| `WARP_SPLIT_STATE_HELPER_PATH` | `/usr/local/sbin/vpn-bot-warp-split-state` | Privileged on/off/restart/status helper for the split **routing** (table T). The On/Off/Restart buttons call it to retract/re-apply the per-prefix `dev out-warp` routes and write the disabled marker — it never touches `awg-quick@out-warp`. Must be root:root 0755 with pinned-verb `NOPASSWD` grants. |
+| `WARP_SPLIT_DISABLED_MARKER_PATH` | `/etc/vpn-bot/warp-split.disabled` | Root-owned (0644) marker recording the "off" intent. When present, `vpn-bot-warp-split` reconciles table T to empty on every boot-apply, so an "off" state survives reboot. The bot reads it directly; only the state helper writes it. |
+| `WARP_PROXY_EGRESS_ENABLED` | `false` | Route LOCAL proxy egress (Dante/Xray/MTProto) through the WARP tunnel too. When `true` the Xray config writer binds the freedom outbound's egress source to the tunnel IP (`sendThrough` = the config's `[Interface] Address`) so its traffic is diverted into the tunnel by `vpn-bot-warp-routes`. Off by default; flip on only as part of the manual [WARP proxy egress](warp.md#warp-proxy-egress-masking-the-proxies-outbound-ip) activation runbook. Legacy alias: `WARP_PROXY_EGRESS`. |
 
 ## Legacy / Compatibility
 
@@ -317,7 +317,7 @@ sudo failures. Change only if you know what you are doing.
 - If `XRAY_INBOUND_TAG` is empty, the adapter uses the first inbound with `settings.clients`.
 - If `XRAY_MANAGE_SHORT_IDS=false`, `XRAY_SHORT_ID` must be set.
 - `XRAY_APPLY_MODE=api` is the default apply mode (root deployment; adds/removes keys without restarting Xray, so no connections drop). Use `restart`/`reload` only in the non-root privilege-helper model — the helper ignores `api`/`reload` and always restarts Xray.
-- `XRAY_APPLY_MODE=api` is incompatible with `PRIVILEGE_HELPERS_ENABLED=true`. When privilege helpers are enabled the bot applies Xray config changes through the `vpnbot-xray-apply` sudo helper, which always calls `systemctl restart xray` regardless of `XRAY_APPLY_MODE`. Use `restart` mode with privilege helpers; `reload` and `api` modes are not honoured by the helper. See [Deployment → Xray API Mode](deployment.md#xray-api-mode).
+- `XRAY_APPLY_MODE=api` is incompatible with `PRIVILEGE_HELPERS_ENABLED=true`. When privilege helpers are enabled the bot applies Xray config changes through the `vpn-bot-xray-apply` sudo helper, which always calls `systemctl restart xray` regardless of `XRAY_APPLY_MODE`. Use `restart` mode with privilege helpers; `reload` and `api` modes are not honoured by the helper. See [Deployment → Xray API Mode](deployment.md#xray-api-mode).
 - `SQLITE_SYNCHRONOUS=FULL` is the safer default for this control-plane database. `NORMAL` is faster but can lose the last committed transactions on OS or power failure while VPN backend state has already changed.
 - `AWG_CLIENT_DNS` is supported only as a legacy alias; use `AWG_DNS` for new deployments.
 - `AWG_ENDPOINT_HOST` and `AWG_ENDPOINT_PORT` should point to the public AWG endpoint clients will use.

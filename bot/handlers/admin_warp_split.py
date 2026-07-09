@@ -7,7 +7,7 @@ Admin-only commands (superadmin gate via require_superadmin):
   /warp_split_reload  — re-apply the current file (recovery after manual edits)
 
 The bot is a thin controller: it reads the list file directly (0644) and writes
-exclusively through the privileged helper (vpnbot-warp-split-apply). It never
+exclusively through the privileged helper (vpn-bot-warp-split-apply). It never
 calls ip/route/iptables/awg-quick — all of that lives in the helper script.
 """
 from __future__ import annotations

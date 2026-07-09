@@ -117,7 +117,7 @@ sudo systemctl status vpn-bot
 1. Держите `/opt/vpn-service`, файлы деплоя, `.env` и `.venv` под владением root/оператора, недоступными для записи от `vpn-bot`.
 2. Создайте системную учётную запись `vpn-bot:vpn-bot`.
 3. Дайте `vpn-bot` право на запись только в runtime-состояние: `/opt/vpn-service/data`, `/opt/vpn-service/logs` (если включены файловые логи) и `/run/vpn-bot`, создаваемый systemd.
-4. Установите фиксированные хелперы в `/usr/local/sbin` и `/etc/sudoers.d/vpnbot` только с этими точками входа.
+4. Установите фиксированные хелперы в `/usr/local/sbin` и `/etc/sudoers.d/vpn-bot` только с этими точками входа.
 5. Включите `PRIVILEGE_HELPERS_ENABLED=true`.
 6. Установите `deploy/vpn-bot.service`.
 
@@ -146,12 +146,12 @@ sudoedit .env
 Установка хелперов и sudoers:
 
 ```bash
-sudo install -o root -g root -m 0755 deploy/helpers/vpnbot-socks5-user /usr/local/sbin/vpnbot-socks5-user
-sudo install -o root -g root -m 0755 deploy/helpers/vpnbot-xray-apply /usr/local/sbin/vpnbot-xray-apply
-sudo install -o root -g root -m 0755 deploy/helpers/vpnbot-awg-apply /usr/local/sbin/vpnbot-awg-apply
-sudo install -o root -g root -m 0755 deploy/helpers/vpnbot-mtproxy-apply /usr/local/sbin/vpnbot-mtproxy-apply
-sudo install -o root -g root -m 0440 deploy/sudoers.d/vpnbot.example /etc/sudoers.d/vpnbot
-sudo visudo -cf /etc/sudoers.d/vpnbot
+sudo install -o root -g root -m 0755 deploy/helpers/vpn-bot-socks5-user /usr/local/sbin/vpn-bot-socks5-user
+sudo install -o root -g root -m 0755 deploy/helpers/vpn-bot-xray-apply /usr/local/sbin/vpn-bot-xray-apply
+sudo install -o root -g root -m 0755 deploy/helpers/vpn-bot-awg-apply /usr/local/sbin/vpn-bot-awg-apply
+sudo install -o root -g root -m 0755 deploy/helpers/vpn-bot-mtproxy-apply /usr/local/sbin/vpn-bot-mtproxy-apply
+sudo install -o root -g root -m 0440 deploy/sudoers.d/vpn-bot.example /etc/sudoers.d/vpn-bot
+sudo visudo -cf /etc/sudoers.d/vpn-bot
 ```
 
 Установка и запуск systemd-сервиса:
@@ -170,7 +170,7 @@ python deploy/check-nonroot-helper-mode.py
 `vpn-bot`; скомпрометированный процесс бота не должен иметь возможности переписать собственный
 код, зависимости, units или исходники хелперов.
 
-Если включён `MTPROTO_MODE=managed`, держите `/etc/mtproxy/vpnbot` под владением root и
+Если включён `MTPROTO_MODE=managed`, держите `/etc/mtproxy/vpn-bot` под владением root и
 управлением хелпером. Не давайте `vpn-bot.service` права на запись в `/etc/systemd/system` или
 широкий write-доступ в `/etc/mtproxy`; устанавливайте/обновляйте MTProxy drop-in и wrapper
 вручную при деплое, затем запускайте `systemctl daemon-reload` вне runtime бота.
@@ -185,14 +185,14 @@ plane, независимо от `vpn-bot.service`. Бот только пише
 handshake — нет шага apply и нет перезапуска data plane.
 
 Устанавливаются три вещи: сам сервер `hysteria`, его HTTP-auth, указывающий на
-`hy2_auth`, и systemd-юнит `vpnbot-hy2-auth.service`.
+`hy2_auth`, и systemd-юнит `vpn-bot-hy2-auth.service`.
 
 ### 1. Установка systemd-юнита `hy2_auth`
 
 ```bash
-sudo cp deploy/vpnbot-hy2-auth.service /etc/systemd/system/
+sudo cp deploy/vpn-bot-hy2-auth.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now vpnbot-hy2-auth
+sudo systemctl enable --now vpn-bot-hy2-auth
 ```
 
 Юнит запускает `python -m hy2_auth` из venv проекта, читает тот же
@@ -225,7 +225,7 @@ auth:
 
 `HYSTERIA2_OBFS_PASSWORD` в `.env` обязан совпадать с паролем salamander-обфускации
 в этом файле — несовпадение даёт тихий таймаут клиента, а не ошибку. Запускайте
-`hysteria-server.service` после `vpnbot-hy2-auth` (юнит объявляет
+`hysteria-server.service` после `vpn-bot-hy2-auth` (юнит объявляет
 `Before=hysteria-server.service`).
 
 ### 2b. (Опционально) Traffic Stats API — трафик, онлайн, kick при отзыве
@@ -257,7 +257,7 @@ trafficStats:
   отказывает **закрыто** (fail-closed).
 - Неподошедший токен логируется тихо (debug); сбой базы (locked, corrupt)
   логируется на уровне **error** со счётчиком сбоев, поэтому сломанный data plane
-  виден в `journalctl -u vpnbot-hy2-auth`, а не прячется за безобидными отказами.
+  виден в `journalctl -u vpn-bot-hy2-auth`, а не прячется за безобидными отказами.
 - `GET /healthz` делает пробный read: **200** `{"ok": true}`, когда база читается,
   и **503** `{"ok": false}`, когда нет — пригодно для watchdog или ручного
   `curl http://127.0.0.1:8444/healthz`.
@@ -270,7 +270,7 @@ trafficStats:
 1. `python deploy/check-nonroot-helper-mode.py` проходит.
 2. `systemctl show vpn-bot -p User -p Group -p RuntimeDirectory -p NoNewPrivileges -p ReadWritePaths` показывает `vpn-bot`, `vpn-bot`, `vpn-bot`, без включённого `NoNewPrivileges` и только ожидаемые writable paths.
 3. `sudo -u vpn-bot test ! -w /opt/vpn-service/.venv && sudo -u vpn-bot test ! -w /opt/vpn-service/deploy`.
-4. `sudo visudo -cf /etc/sudoers.d/vpnbot` проходит и файл не содержит `NOPASSWD: ALL`.
+4. `sudo visudo -cf /etc/sudoers.d/vpn-bot` проходит и файл не содержит `NOPASSWD: ALL`.
 5. Выдайте/отзовите один тестовый ключ Xray или AWG и один proxy access для включённого backend, затем проверьте `journalctl -u vpn-bot -n 100 --no-pager` на ошибки хелпера или утечку секретов.
 
 > Чекер `deploy/check-nonroot-helper-mode.py` — обязательный preflight и postflight инструмент

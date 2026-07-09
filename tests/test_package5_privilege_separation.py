@@ -95,16 +95,16 @@ def test_production_service_root_mode_has_no_readwrite_paths() -> None:
 
 
 def test_sudoers_example_grants_only_fixed_helpers() -> None:
-    text = _read("deploy/sudoers.d/vpnbot.example")
+    text = _read("deploy/sudoers.d/vpn-bot.example")
 
     assert "NOPASSWD: ALL" not in text
     assert "ALL=(ALL)" not in text
     for forbidden in ("systemctl", "useradd", "chpasswd", "userdel", "passwd -l"):
         assert forbidden not in text
-    assert "/usr/local/sbin/vpnbot-socks5-user" in text
-    assert "/usr/local/sbin/vpnbot-xray-apply" in text
-    assert "/usr/local/sbin/vpnbot-awg-apply" in text
-    assert "/usr/local/sbin/vpnbot-mtproxy-apply" in text
+    assert "/usr/local/sbin/vpn-bot-socks5-user" in text
+    assert "/usr/local/sbin/vpn-bot-xray-apply" in text
+    assert "/usr/local/sbin/vpn-bot-awg-apply" in text
+    assert "/usr/local/sbin/vpn-bot-mtproxy-apply" in text
     assert re.search(r"vpn-bot\s+ALL=\(root\)\s+NOPASSWD:", text)
 
 
@@ -181,7 +181,7 @@ def test_docs_require_nonroot_helper_preflight_postflight() -> None:
 
 
 def test_helper_install_docs_pin_ownership_and_modes() -> None:
-    text = _read("deploy/helpers/README.md") + "\n" + _read("deploy/sudoers.d/vpnbot.example")
+    text = _read("deploy/helpers/README.md") + "\n" + _read("deploy/sudoers.d/vpn-bot.example")
 
     assert "root:root" in text
     assert "0755" in text
@@ -228,7 +228,7 @@ def test_helper_contracts_require_socks5_prefix_password_stdin_and_secret_redact
 )
 def test_socks5_helper_validate_login_rejects_forbidden_names_behavioral() -> None:
     """validate_login raises HelperError for reserved and structurally invalid logins."""
-    helper = _load_helper("vpnbot-socks5-user")
+    helper = _load_helper("vpn-bot-socks5-user")
     HelperError = getattr(helper, "HelperError")
     validate_login = getattr(helper, "validate_login")
 
@@ -246,7 +246,7 @@ def test_socks5_helper_validate_login_rejects_forbidden_names_behavioral() -> No
 )
 def test_xray_helper_validate_candidate_rejects_path_traversal_behavioral(tmp_path: Path) -> None:
     """validate_candidate_path raises HelperError when the path is outside the staging root."""
-    helper = _load_helper("vpnbot-xray-apply")
+    helper = _load_helper("vpn-bot-xray-apply")
     HelperError = getattr(helper, "HelperError")
     validate_candidate_path = getattr(helper, "validate_candidate_path")
 

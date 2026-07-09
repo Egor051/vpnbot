@@ -1,8 +1,8 @@
 #!/bin/bash
-# vpnbot-warp-routes — divert the VPN-client subnet out through the Cloudflare
+# vpn-bot-warp-routes — divert the VPN-client subnet out through the Cloudflare
 # WARP AmneziaWG tunnel (out-warp) while the host itself stays on the direct path.
 #
-# Usage: vpnbot-warp-routes <add|del> <iface>
+# Usage: vpn-bot-warp-routes <add|del> <iface>
 #
 # This is the production-proven recipe. The tunnel itself is brought up by
 # awg-quick@out-warp with `Table = auto` in /etc/amnezia/out-warp.conf, which:

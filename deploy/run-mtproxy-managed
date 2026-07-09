@@ -6,7 +6,7 @@ import os
 import sys
 
 
-ENV_PATH = os.environ.get("MTPROTO_MANAGED_ENV_PATH", "/etc/mtproxy/vpnbot/mtproxy.env")
+ENV_PATH = os.environ.get("MTPROTO_MANAGED_ENV_PATH", "/etc/mtproxy/vpn-bot/mtproxy.env")
 
 # Security: only these binaries may be exec'd; guards against a tampered env file causing arbitrary RCE
 _ALLOWED_BINARY_PATHS: frozenset[str] = frozenset({

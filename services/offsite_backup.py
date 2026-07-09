@@ -219,7 +219,7 @@ class OffsiteBackupService:
 
         Leading slashes and any ``..``/``.`` components are stripped so extraction
         can never escape the destination directory. The remaining path preserves
-        the file's origin (e.g. ``home/user/vpnbot/.env``), and the original
+        the file's origin (e.g. ``home/user/vpn-bot/.env``), and the original
         absolute path is also recorded in MANIFEST.json.
         """
         parts = [part for part in source.as_posix().split("/") if part not in ("", ".", "..")]

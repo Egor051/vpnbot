@@ -19,21 +19,21 @@ Status: The privilege-separation helper architecture is implemented and shipped.
 - Canonical backend state remains root-owned:
   - `/usr/local/etc/xray/config.json`
   - `/etc/amnezia/amneziawg/awg0.conf`
-  - `/etc/mtproxy/vpnbot`
+  - `/etc/mtproxy/vpn-bot`
   - `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`, and `/etc/.pwd.lock`
 
-The only privileged entrypoints allowed through `/etc/sudoers.d/vpnbot` are:
+The only privileged entrypoints allowed through `/etc/sudoers.d/vpn-bot` are:
 
-- `/usr/local/sbin/vpnbot-socks5-user`
-- `/usr/local/sbin/vpnbot-xray-apply`
-- `/usr/local/sbin/vpnbot-awg-apply`
-- `/usr/local/sbin/vpnbot-mtproxy-apply`
+- `/usr/local/sbin/vpn-bot-socks5-user`
+- `/usr/local/sbin/vpn-bot-xray-apply`
+- `/usr/local/sbin/vpn-bot-awg-apply`
+- `/usr/local/sbin/vpn-bot-mtproxy-apply`
 
 Validate live hosts before and after service restarts:
 
 ```bash
 python deploy/check-nonroot-helper-mode.py
-visudo -cf /etc/sudoers.d/vpnbot
+visudo -cf /etc/sudoers.d/vpn-bot
 ```
 
 ## Why NoNewPrivileges Is Not Enabled
@@ -45,7 +45,7 @@ The security boundary is therefore:
 - the bot process remains non-root;
 - sudoers grants only fixed helper commands, never `NOPASSWD: ALL`;
 - helper files are `root:root` `0755`;
-- `/etc/sudoers.d/vpnbot` is `root:root` `0440`;
+- `/etc/sudoers.d/vpn-bot` is `root:root` `0440`;
 - helpers validate argv, staged paths, prefixes, file shape, and backend targets before mutating root-owned state.
 
 ## Privileged Operation Inventory
@@ -56,12 +56,12 @@ The security boundary is therefore:
 | SQLite data directory | `DB_PATH` defaults to `/opt/vpn-service/data/vpn.db`; DB/WAL/SHM files are bot runtime state. | No sudoers needed. | Yes, direct read/write to SQLite is expected. |
 | `.env` handling | systemd reads `EnvironmentFile=/opt/vpn-service/.env`; file must not be writable by `vpn-bot`. | Root/operator owns production secrets and restart-time config. | Environment is inherited; no direct write. |
 | Logs and lock paths | `LOG_DIR=/opt/vpn-service/logs`; `BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock`; `RuntimeDirectory=vpn-bot`. | No sudoers needed. | Yes, direct write to narrow runtime paths. |
-| Xray config apply | Bot stages a candidate under `/run/vpn-bot/xray`; helper validates JSON and Xray syntax, installs canonical config atomically, restarts fixed service `xray`, verifies active state, and rolls back on failure. | `/usr/local/sbin/vpnbot-xray-apply` via sudoers. | No direct write to canonical Xray config or generic service control. |
-| AWG config/runtime apply | Bot stages a candidate under `/run/vpn-bot/awg`; helper validates with `awg-quick strip` or compatible tooling, installs `/etc/amnezia/amneziawg/awg0.conf`, applies fixed-interface runtime sync, and verifies `awg-quick@awg0`. | `/usr/local/sbin/vpnbot-awg-apply` via sudoers. | No direct write to canonical AWG config or generic network mutation. |
-| AWG status/traffic reads | Helper returns sanitized status, peer, and transfer data for fixed interface `awg0`. | `/usr/local/sbin/vpnbot-awg-apply status`, `show-peers`, and `show-transfer`. | No raw AWG/WG command grant in sudoers. |
-| SOCKS5 Linux user lifecycle | Helper manages only logins with the configured login prefix such as `vpn_socks_`; password remains stdin-only. | `/usr/local/sbin/vpnbot-socks5-user` actions `exists`, `create`, `set-password`, `lock`, and `delete`. | No direct account database write or raw `useradd`/`chpasswd`/`passwd`/`userdel` grant. |
+| Xray config apply | Bot stages a candidate under `/run/vpn-bot/xray`; helper validates JSON and Xray syntax, installs canonical config atomically, restarts fixed service `xray`, verifies active state, and rolls back on failure. | `/usr/local/sbin/vpn-bot-xray-apply` via sudoers. | No direct write to canonical Xray config or generic service control. |
+| AWG config/runtime apply | Bot stages a candidate under `/run/vpn-bot/awg`; helper validates with `awg-quick strip` or compatible tooling, installs `/etc/amnezia/amneziawg/awg0.conf`, applies fixed-interface runtime sync, and verifies `awg-quick@awg0`. | `/usr/local/sbin/vpn-bot-awg-apply` via sudoers. | No direct write to canonical AWG config or generic network mutation. |
+| AWG status/traffic reads | Helper returns sanitized status, peer, and transfer data for fixed interface `awg0`. | `/usr/local/sbin/vpn-bot-awg-apply status`, `show-peers`, and `show-transfer`. | No raw AWG/WG command grant in sudoers. |
+| SOCKS5 Linux user lifecycle | Helper manages only logins with the configured login prefix such as `vpn_socks_`; password remains stdin-only. | `/usr/local/sbin/vpn-bot-socks5-user` actions `exists`, `create`, `set-password`, `lock`, and `delete`. | No direct account database write or raw `useradd`/`chpasswd`/`passwd`/`userdel` grant. |
 | Dante service state | Bot assumes Dante is installed and listening; it does not restart Dante. | Service lifecycle remains operator/root work unless a future fixed helper is added. | No service mutation. |
-| MTProxy managed files/apply | Bot stages `managed-secrets.json` and `mtproxy.env` under `/run/vpn-bot/mtproxy`; helper validates shape without printing secrets, installs `/etc/mtproxy/vpnbot` files atomically, restarts fixed service `mtproxy`, verifies service/port, and rolls back on failure. | `/usr/local/sbin/vpnbot-mtproxy-apply` via sudoers. | No direct `/etc/mtproxy` write or generic service control. |
+| MTProxy managed files/apply | Bot stages `managed-secrets.json` and `mtproxy.env` under `/run/vpn-bot/mtproxy`; helper validates shape without printing secrets, installs `/etc/mtproxy/vpn-bot` files atomically, restarts fixed service `mtproxy`, verifies service/port, and rolls back on failure. | `/usr/local/sbin/vpn-bot-mtproxy-apply` via sudoers. | No direct `/etc/mtproxy` write or generic service control. |
 | Backend backups | Helpers create and retain backups for canonical Xray/AWG/MTProxy files with private modes. | Helper-owned root paths. | No direct backend backup write. |
 | Deployment scripts and ownership | Deploy and updates are root/operator work. Recursive ownership changes must not make code or `.venv` writable by `vpn-bot`. | `deploy/create-vpn-bot-user.sh`, helper install, sudoers install, and unit install. | No deploy-time write access to code or unit files. |
 
@@ -69,7 +69,7 @@ The security boundary is therefore:
 
 ### SOCKS5 helper
 
-Path: `/usr/local/sbin/vpnbot-socks5-user`.
+Path: `/usr/local/sbin/vpn-bot-socks5-user`.
 
 Required properties:
 
@@ -85,7 +85,7 @@ Required properties:
 
 ### Xray helper
 
-Path: `/usr/local/sbin/vpnbot-xray-apply`.
+Path: `/usr/local/sbin/vpn-bot-xray-apply`.
 
 Required properties:
 
@@ -99,7 +99,7 @@ Required properties:
 
 ### AWG helper
 
-Path: `/usr/local/sbin/vpnbot-awg-apply`.
+Path: `/usr/local/sbin/vpn-bot-awg-apply`.
 
 Required properties:
 
@@ -113,7 +113,7 @@ Required properties:
 
 ### MTProxy helper
 
-Path: `/usr/local/sbin/vpnbot-mtproxy-apply`.
+Path: `/usr/local/sbin/vpn-bot-mtproxy-apply`.
 
 Required properties:
 
@@ -126,7 +126,7 @@ Required properties:
 
 ## Sudoers Boundary
 
-`/etc/sudoers.d/vpnbot` must grant only the helper aliases from `deploy/sudoers.d/vpnbot.example`. It must not contain `NOPASSWD: ALL`, `ALL=(ALL) ALL`, raw `systemctl`, raw Linux account tools, copy/install tools, raw `xray`, raw `awg`/`wg`, or raw MTProxy binaries.
+`/etc/sudoers.d/vpn-bot` must grant only the helper aliases from `deploy/sudoers.d/vpn-bot.example`. It must not contain `NOPASSWD: ALL`, `ALL=(ALL) ALL`, raw `systemctl`, raw Linux account tools, copy/install tools, raw `xray`, raw `awg`/`wg`, or raw MTProxy binaries.
 
 Wildcard arguments in sudoers are acceptable only because they are attached to fixed helper entrypoints and the helpers independently validate staging roots, symlinks, action names, and backend identifiers.
 

@@ -1,9 +1,9 @@
 #!/bin/bash
-# vpnbot-warp-install — install or remove the WARP AmneziaWG config.
+# vpn-bot-warp-install — install or remove the WARP AmneziaWG config.
 #
 # Usage:
-#   vpnbot-warp-install install <staged_config>
-#   vpnbot-warp-install remove
+#   vpn-bot-warp-install install <staged_config>
+#   vpn-bot-warp-install remove
 #
 # install: validates the AmneziaWG format, strips/normalises the config, writes
 # the canonical config and the routes.list (one CIDR per line, extracted from
@@ -96,7 +96,7 @@ content = re.sub(r'^DNS\s*=.*\n?', '', content, flags=re.MULTILINE)
 
 # Force "Table = auto" in [Interface]. Table=auto makes awg-quick put an fwmark on
 # the WireGuard socket (loop protection) and create a dedicated routing table with
-# a default route via the tunnel; vpnbot-warp-routes then strips the host-bypass
+# a default route via the tunnel; vpn-bot-warp-routes then strips the host-bypass
 # and diverts only the client subnet. Any stale value is rewritten — a disabled
 # table is what broke the previous routing-loop implementation.
 if re.search(r'^[ \t]*Table\s*=', content, re.MULTILINE):

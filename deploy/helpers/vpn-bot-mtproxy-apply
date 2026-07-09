@@ -14,7 +14,7 @@ from typing import Any, TextIO
 
 
 STAGING_ROOT = Path("/run/vpn-bot/mtproxy")
-TARGET_DIR = Path("/etc/mtproxy/vpnbot")
+TARGET_DIR = Path("/etc/mtproxy/vpn-bot")
 TARGET_SECRETS = TARGET_DIR / "managed-secrets.json"
 TARGET_ENV = TARGET_DIR / "mtproxy.env"
 SERVICE_NAME = "mtproxy"

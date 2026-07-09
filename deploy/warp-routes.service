@@ -27,7 +27,7 @@
 # is ordered first as well.
 #
 # Install (interfaces first, then the routes that ride on them):
-#   install -o root -g root -m 0755 scripts/vpnbot-warp-routes /usr/local/sbin/vpnbot-warp-routes
+#   install -o root -g root -m 0755 scripts/vpn-bot-warp-routes /usr/local/sbin/vpn-bot-warp-routes
 #   install -o root -g root -m 0644 deploy/warp-routes.service /etc/systemd/system/warp-routes.service
 #   systemctl daemon-reload
 #   systemctl enable --now awg-quick@out-warp
@@ -45,8 +45,8 @@ Type=oneshot
 RemainAfterExit=yes
 Environment=MTPROXY_UNIT=mtproxy
 Environment=WARP_CONFIG=/etc/amnezia/out-warp.conf
-ExecStart=/usr/local/sbin/vpnbot-warp-routes add out-warp
-ExecStop=/usr/local/sbin/vpnbot-warp-routes del out-warp
+ExecStart=/usr/local/sbin/vpn-bot-warp-routes add out-warp
+ExecStop=/usr/local/sbin/vpn-bot-warp-routes del out-warp
 
 [Install]
 WantedBy=multi-user.target

@@ -25,10 +25,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # ---------------------------------------------------------------------------
 
 HELPERS = (
-    "vpnbot-socks5-user",
-    "vpnbot-xray-apply",
-    "vpnbot-awg-apply",
-    "vpnbot-mtproxy-apply",
+    "vpn-bot-socks5-user",
+    "vpn-bot-xray-apply",
+    "vpn-bot-awg-apply",
+    "vpn-bot-mtproxy-apply",
 )
 
 # ---------------------------------------------------------------------------
@@ -83,14 +83,14 @@ def test_socks5_helper_rejects_unsafe_login_names(
     load_helper: object, login: str
 ) -> None:
     """validate_login raises HelperError for any login that is not a safe managed name."""
-    helper = load_helper("vpnbot-socks5-user")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-socks5-user")  # type: ignore[operator]
     with pytest.raises(helper.HelperError):
         helper.validate_login(login)
 
 
 def test_socks5_helper_accepts_valid_managed_login(load_helper: object) -> None:
     """validate_login returns the login unchanged when it passes all checks."""
-    helper = load_helper("vpnbot-socks5-user")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-socks5-user")  # type: ignore[operator]
     assert helper.validate_login("vpn_socks_100_abcd") == "vpn_socks_100_abcd"
 
 
@@ -103,7 +103,7 @@ def test_socks5_set_password_reads_secret_from_stdin_and_uses_argv(
     load_helper: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Password is read from stdin and never appears in subprocess argv."""
-    helper = load_helper("vpnbot-socks5-user")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-socks5-user")  # type: ignore[operator]
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -132,7 +132,7 @@ def test_socks5_set_password_reads_secret_from_stdin_and_uses_argv(
 
 def test_socks5_set_password_rejects_secret_in_argv(load_helper: object) -> None:
     """Passing the password as a positional argument exits with non-zero status."""
-    helper = load_helper("vpnbot-socks5-user")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-socks5-user")  # type: ignore[operator]
     with pytest.raises(SystemExit):
         helper.main(["set-password", "vpn_socks_100_abcd", "secret-password"])
 
@@ -141,7 +141,7 @@ def test_socks5_helper_error_output_redacts_password(
     load_helper: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When the underlying command fails, stderr output must not contain the password."""
-    helper = load_helper("vpnbot-socks5-user")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-socks5-user")  # type: ignore[operator]
 
     def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args, 1, "", "tool failed with secret-password")
@@ -168,7 +168,7 @@ def test_xray_helper_rejects_candidate_outside_staging_root(
     load_helper: object, tmp_path: Path
 ) -> None:
     """Config candidate outside the staging root is rejected to prevent path traversal."""
-    helper = load_helper("vpnbot-xray-apply")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-xray-apply")  # type: ignore[operator]
     helper.STAGING_ROOT = tmp_path / "staging"
     outside = tmp_path / "outside.json"
     outside.write_text("{}", encoding="utf-8")
@@ -182,7 +182,7 @@ def test_xray_helper_rejects_symlink_candidate(
     """Symlinked candidate files are rejected to prevent symlink-based escapes."""
     if not hasattr(os, "symlink"):
         pytest.skip("symlink unavailable")
-    helper = load_helper("vpnbot-xray-apply")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-xray-apply")  # type: ignore[operator]
     helper.STAGING_ROOT = tmp_path / "staging"
     helper.STAGING_ROOT.mkdir()
     real = helper.STAGING_ROOT / "real.json"
@@ -200,7 +200,7 @@ def test_xray_helper_uses_fixed_target_service_and_argv(
     load_helper: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Xray helper always calls the xray binary with fixed argv (no injection possible)."""
-    helper = load_helper("vpnbot-xray-apply")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-xray-apply")  # type: ignore[operator]
     calls: list[list[str]] = []
 
     def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -228,7 +228,7 @@ def test_awg_helper_rejects_candidate_outside_staging_root(
     load_helper: object, tmp_path: Path
 ) -> None:
     """AWG config candidate outside the staging root is rejected."""
-    helper = load_helper("vpnbot-awg-apply")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-awg-apply")  # type: ignore[operator]
     helper.STAGING_ROOT = tmp_path / "staging"
     outside = tmp_path / "outside.conf"
     outside.write_text("[Interface]\nPrivateKey = secret\n", encoding="utf-8")
@@ -238,7 +238,7 @@ def test_awg_helper_rejects_candidate_outside_staging_root(
 
 def test_awg_helper_uses_fixed_target_and_interface(load_helper: object) -> None:
     """AWG helper has hard-coded target config, interface, and service name."""
-    helper = load_helper("vpnbot-awg-apply")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-awg-apply")  # type: ignore[operator]
     assert helper.CANONICAL_CONFIG == Path("/etc/amnezia/amneziawg/awg0.conf")
     assert helper.INTERFACE_NAME == "awg0"
     assert helper.SERVICE_NAME == "awg-quick@awg0"
@@ -253,9 +253,9 @@ def test_helper_installed_permissions_preserve_vpn_bot_read_access(
     load_helper: object,
 ) -> None:
     """Installed config files are group-readable by vpn-bot, world-unreadable."""
-    xray = load_helper("vpnbot-xray-apply")  # type: ignore[operator]
-    awg = load_helper("vpnbot-awg-apply")  # type: ignore[operator]
-    mtproxy = load_helper("vpnbot-mtproxy-apply")  # type: ignore[operator]
+    xray = load_helper("vpn-bot-xray-apply")  # type: ignore[operator]
+    awg = load_helper("vpn-bot-awg-apply")  # type: ignore[operator]
+    mtproxy = load_helper("vpn-bot-mtproxy-apply")  # type: ignore[operator]
 
     assert xray.FINAL_USER == "nobody"
     assert xray.FINAL_GROUP == "vpn-bot"
@@ -276,7 +276,7 @@ def test_xray_helper_install_and_restore_use_final_stat(
     load_helper: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """install_candidate and restore_backup both apply the final ownership/mode."""
-    helper = load_helper("vpnbot-xray-apply")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-xray-apply")  # type: ignore[operator]
     helper.CANONICAL_CONFIG = tmp_path / "config.json"
     candidate = tmp_path / "candidate.json"
     candidate.write_text("{}", encoding="utf-8")
@@ -297,7 +297,7 @@ def test_awg_helper_install_and_restore_use_final_stat(
     load_helper: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AWG install and restore roundtrip calls _set_final_stat for each file."""
-    helper = load_helper("vpnbot-awg-apply")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-awg-apply")  # type: ignore[operator]
     helper.CANONICAL_CONFIG = tmp_path / "awg0.conf"
     candidate = tmp_path / "candidate.conf"
     candidate.write_text("[Interface]\nPrivateKey = server\n", encoding="utf-8")
@@ -320,8 +320,8 @@ def test_mtproxy_helper_install_and_restore_use_group_readable_stat(
     load_helper: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """MTProxy install/restore sets group-readable, world-unreadable permissions on every file."""
-    helper = load_helper("vpnbot-mtproxy-apply")  # type: ignore[operator]
-    helper.TARGET_DIR = tmp_path / "vpnbot"
+    helper = load_helper("vpn-bot-mtproxy-apply")  # type: ignore[operator]
+    helper.TARGET_DIR = tmp_path / "vpn-bot"
     helper.TARGET_SECRETS = helper.TARGET_DIR / "managed-secrets.json"
     helper.TARGET_ENV = helper.TARGET_DIR / "mtproxy.env"
     source = tmp_path / "source.json"
@@ -379,7 +379,7 @@ def test_awg_helper_redacts_private_config_on_failure(
     load_helper: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AWG helper stderr must not contain the WireGuard PrivateKey on validation failure."""
-    helper = load_helper("vpnbot-awg-apply")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-awg-apply")  # type: ignore[operator]
     helper.STAGING_ROOT = tmp_path / "staging"
     helper.STAGING_ROOT.mkdir()
     secret = "private-key-that-must-not-leak"
@@ -402,7 +402,7 @@ def test_mtproxy_helper_rejects_candidate_outside_staging_root(
     load_helper: object, tmp_path: Path
 ) -> None:
     """MTProxy candidate directory outside the staging root is rejected."""
-    helper = load_helper("vpnbot-mtproxy-apply")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-mtproxy-apply")  # type: ignore[operator]
     helper.STAGING_ROOT = tmp_path / "staging"
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -414,7 +414,7 @@ def test_mtproxy_helper_redacts_managed_secret_on_failure(
     load_helper: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """MTProxy helper stderr must not contain managed secrets when restart fails."""
-    helper = load_helper("vpnbot-mtproxy-apply")  # type: ignore[operator]
+    helper = load_helper("vpn-bot-mtproxy-apply")  # type: ignore[operator]
     helper.STAGING_ROOT = tmp_path / "staging"
     candidate = helper.STAGING_ROOT / "candidate"
     candidate.mkdir(parents=True)
@@ -483,7 +483,7 @@ def test_helper_mode_uses_sudo_n_and_configured_helper_path(tmp_path: Path) -> N
 
     async def run() -> None:
         shell = Shell()
-        helper_path = tmp_path / "vpnbot-socks5-user"
+        helper_path = tmp_path / "vpn-bot-socks5-user"
         adapter = DanteUserAdapter(
             shell=shell,  # type: ignore[arg-type]
             login_prefix="vpn_socks_",
@@ -541,7 +541,7 @@ def test_xray_adapter_helper_mode_stages_candidate_and_calls_fixed_helper(
 
     async def run() -> None:
         shell = Shell()
-        helper_path = tmp_path / "vpnbot-xray-apply"
+        helper_path = tmp_path / "vpn-bot-xray-apply"
         adapter = XrayConfigAdapter(
             config_path=config_path,
             service_name="xray",
@@ -591,7 +591,7 @@ def test_awg_adapter_helper_mode_stages_candidate_and_calls_fixed_helper(
 
     async def run() -> None:
         shell = Shell()
-        helper_path = tmp_path / "vpnbot-awg-apply"
+        helper_path = tmp_path / "vpn-bot-awg-apply"
         adapter = AwgConfigAdapter(
             config_path=config_path,
             interface="awg0",
@@ -654,7 +654,7 @@ def test_mtproxy_adapter_helper_mode_stages_files_and_calls_fixed_helper(
 
     async def run() -> None:
         shell = Shell()
-        helper_path = tmp_path / "vpnbot-mtproxy-apply"
+        helper_path = tmp_path / "vpn-bot-mtproxy-apply"
         adapter = MtProxyAdapter(
             shell=shell,  # type: ignore[arg-type]
             systemctl=SystemCtl(),  # type: ignore[arg-type]

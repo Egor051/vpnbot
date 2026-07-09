@@ -7,18 +7,18 @@ The non-root deployment runs `vpn-bot.service` as `User=vpn-bot` and `Group=vpn-
 Install helpers and sudoers as root:
 
 ```bash
-install -o root -g root -m 0755 deploy/helpers/vpnbot-socks5-user /usr/local/sbin/vpnbot-socks5-user
-install -o root -g root -m 0755 deploy/helpers/vpnbot-xray-apply /usr/local/sbin/vpnbot-xray-apply
-install -o root -g root -m 0755 deploy/helpers/vpnbot-awg-apply /usr/local/sbin/vpnbot-awg-apply
-install -o root -g root -m 0755 deploy/helpers/vpnbot-mtproxy-apply /usr/local/sbin/vpnbot-mtproxy-apply
-install -o root -g root -m 0440 deploy/sudoers.d/vpnbot.example /etc/sudoers.d/vpnbot
-visudo -cf /etc/sudoers.d/vpnbot
+install -o root -g root -m 0755 deploy/helpers/vpn-bot-socks5-user /usr/local/sbin/vpn-bot-socks5-user
+install -o root -g root -m 0755 deploy/helpers/vpn-bot-xray-apply /usr/local/sbin/vpn-bot-xray-apply
+install -o root -g root -m 0755 deploy/helpers/vpn-bot-awg-apply /usr/local/sbin/vpn-bot-awg-apply
+install -o root -g root -m 0755 deploy/helpers/vpn-bot-mtproxy-apply /usr/local/sbin/vpn-bot-mtproxy-apply
+install -o root -g root -m 0440 deploy/sudoers.d/vpn-bot.example /etc/sudoers.d/vpn-bot
+visudo -cf /etc/sudoers.d/vpn-bot
 ```
 
 Expected ownership and modes:
 
 - Helpers: `root:root` `0755`.
-- Sudoers: `/etc/sudoers.d/vpnbot` `root:root` `0440`.
+- Sudoers: `/etc/sudoers.d/vpn-bot` `root:root` `0440`.
 - Code, deploy files, and `.venv`: not writable by `vpn-bot`.
 - Runtime state writable by `vpn-bot`: `/opt/vpn-service/data`, `/opt/vpn-service/logs` if file logs are enabled, and `/run/vpn-bot`.
 
@@ -29,10 +29,10 @@ Production helper mode uses:
 ```env
 PRIVILEGE_HELPERS_ENABLED=true
 HELPER_STAGING_ROOT=/run/vpn-bot
-SOCKS5_USER_HELPER_PATH=/usr/local/sbin/vpnbot-socks5-user
-XRAY_APPLY_HELPER_PATH=/usr/local/sbin/vpnbot-xray-apply
-AWG_APPLY_HELPER_PATH=/usr/local/sbin/vpnbot-awg-apply
-MTPROTO_APPLY_HELPER_PATH=/usr/local/sbin/vpnbot-mtproxy-apply
+SOCKS5_USER_HELPER_PATH=/usr/local/sbin/vpn-bot-socks5-user
+XRAY_APPLY_HELPER_PATH=/usr/local/sbin/vpn-bot-xray-apply
+AWG_APPLY_HELPER_PATH=/usr/local/sbin/vpn-bot-awg-apply
+MTPROTO_APPLY_HELPER_PATH=/usr/local/sbin/vpn-bot-mtproxy-apply
 XRAY_HELPER_STAGING_DIR=/run/vpn-bot/xray
 AWG_HELPER_STAGING_DIR=/run/vpn-bot/awg
 MTPROTO_HELPER_STAGING_DIR=/run/vpn-bot/mtproxy
@@ -46,38 +46,38 @@ Helpers are not a generic root shell. Sudoers grants no raw account-management, 
 
 SOCKS5:
 
-- `vpnbot-socks5-user exists <login>`
-- `vpnbot-socks5-user create <login>`
-- `vpnbot-socks5-user set-password <login>` with the password read from stdin
-- `vpnbot-socks5-user lock <login>`
-- `vpnbot-socks5-user delete <login>`
+- `vpn-bot-socks5-user exists <login>`
+- `vpn-bot-socks5-user create <login>`
+- `vpn-bot-socks5-user set-password <login>` with the password read from stdin
+- `vpn-bot-socks5-user lock <login>`
+- `vpn-bot-socks5-user delete <login>`
 
 The SOCKS5 helper enforces `vpn_socks_` and `^[A-Za-z_][A-Za-z0-9_]{0,31}$`, uses `/usr/sbin/nologin`, never accepts password material in argv, and must never print passwords.
 
 Xray:
 
-- `vpnbot-xray-apply apply <candidate_config_path>`
-- `vpnbot-xray-apply validate <candidate_config_path>`
-- `vpnbot-xray-apply status`
+- `vpn-bot-xray-apply apply <candidate_config_path>`
+- `vpn-bot-xray-apply validate <candidate_config_path>`
+- `vpn-bot-xray-apply status`
 
 Candidates must live under `/run/vpn-bot/xray`. The helper validates JSON, runs `/usr/local/bin/xray run -test -config <candidate>`, installs `/usr/local/etc/xray/config.json` atomically as `nobody:vpn-bot` mode `0640` (world-unreadable; group-readable for non-root reads), restarts fixed service `xray`, verifies active state, and restores the previous config on failure.
 
 AWG:
 
-- `vpnbot-awg-apply apply <candidate_config_path>`
-- `vpnbot-awg-apply validate <candidate_config_path>`
-- `vpnbot-awg-apply status`
-- `vpnbot-awg-apply show-peers`
-- `vpnbot-awg-apply show-transfer`
+- `vpn-bot-awg-apply apply <candidate_config_path>`
+- `vpn-bot-awg-apply validate <candidate_config_path>`
+- `vpn-bot-awg-apply status`
+- `vpn-bot-awg-apply show-peers`
+- `vpn-bot-awg-apply show-transfer`
 
 Candidates must live under `/run/vpn-bot/awg`. The helper validates with `awg-quick strip` or `wg-quick strip`, installs `/etc/amnezia/amneziawg/awg0.conf` atomically as `root:vpn-bot` mode `0640` (world-unreadable; group-readable for non-root reads — note this exposes the server WireGuard PrivateKey to the `vpn-bot` group, an accepted trade-off), applies runtime with fixed-interface `syncconf` for `awg0`, checks `awg-quick@awg0`, and restores the previous config on failure.
 
 MTProxy:
 
-- `vpnbot-mtproxy-apply apply <candidate_dir>`
-- `vpnbot-mtproxy-apply status`
+- `vpn-bot-mtproxy-apply apply <candidate_dir>`
+- `vpn-bot-mtproxy-apply status`
 
-The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpnbot/managed-secrets.json` and `/etc/mtproxy/vpnbot/mtproxy.env` atomically as `root:vpn-bot` mode `0640` in a `0750` `root:vpn-bot` directory (world-unreadable; group-readable for non-root reads), restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure.
+The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpn-bot/managed-secrets.json` and `/etc/mtproxy/vpn-bot/mtproxy.env` atomically as `root:vpn-bot` mode `0640` in a `0750` `root:vpn-bot` directory (world-unreadable; group-readable for non-root reads), restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure.
 
 These `root:vpn-bot 0640` modes are for the **non-root helper deployment**: they let the unprivileged bot read managed status, and the managed-mode wrapper (which always runs as root — see [Proxy → MTProto managed mode](../../docs/proxy.md)) reads them regardless. The **root+direct manual install** documented in `docs/proxy.md` instead uses `root:root 0600`. Both are correct because the wrapper runs as root and drops the proxy to `MTPROTO_RUN_USER` via `-u`; they are not a contradiction.
 
@@ -92,16 +92,16 @@ outbound IP; the bot itself stays unprivileged). The module is disabled by
 default and does nothing until an admin uploads a config and enables it.
 
 ```bash
-install -o root -g root -m 0755 scripts/vpnbot-warp-install /usr/local/sbin/vpnbot-warp-install
-install -o root -g root -m 0755 scripts/vpnbot-warp-iface   /usr/local/sbin/vpnbot-warp-iface
-install -o root -g root -m 0755 scripts/vpnbot-warp-routes  /usr/local/sbin/vpnbot-warp-routes
-install -o root -g root -m 0755 scripts/vpnbot-warp-status  /usr/local/sbin/vpnbot-warp-status
+install -o root -g root -m 0755 scripts/vpn-bot-warp-install /usr/local/sbin/vpn-bot-warp-install
+install -o root -g root -m 0755 scripts/vpn-bot-warp-iface   /usr/local/sbin/vpn-bot-warp-iface
+install -o root -g root -m 0755 scripts/vpn-bot-warp-routes  /usr/local/sbin/vpn-bot-warp-routes
+install -o root -g root -m 0755 scripts/vpn-bot-warp-status  /usr/local/sbin/vpn-bot-warp-status
 ```
 
 `deploy/setup-nonroot-helper-mode.sh` now installs (and refreshes) these four
 WARP helpers as well, so a standard non-root deploy keeps `/usr/local/sbin` in
 sync with the checkout. Previously they were not part of any deploy step, so a
-`git reset` left the stale `/usr/local/sbin/vpnbot-warp-routes` in place — which
+`git reset` left the stale `/usr/local/sbin/vpn-bot-warp-routes` in place — which
 is how the broken routing helper kept running after the source was fixed. Re-run
 that script (or the `install` commands above) after pulling new helper versions.
 
@@ -151,7 +151,7 @@ To restore the legacy model where the bot manages the interface and routes itsel
 
 Interfaces:
 
-- `vpnbot-warp-install install <staged_config>` — validates the AmneziaWG format
+- `vpn-bot-warp-install install <staged_config>` — validates the AmneziaWG format
   (`[Interface]`/`[Peer]`, `Jc`/`S1`/`S2`, non-empty `AllowedIPs`), **rejects**
   `PreUp`/`PostUp`/`PreDown`/`PostDown` hooks (awg-quick would run them as root),
   validates every `AllowedIPs` token as a real CIDR, strips `DNS`, forces
@@ -165,13 +165,13 @@ Interfaces:
   the client subnet into; the previous `Table = off` is what caused the routing
   loop. The source must be a non-symlink file inside the staging dir; the bot
   stages the upload under `/run/vpn-bot/warp/warp-upload-*.conf`.
-- `vpnbot-warp-install remove` — deletes `/etc/amnezia/out-warp.conf`,
+- `vpn-bot-warp-install remove` — deletes `/etc/amnezia/out-warp.conf`,
   `/etc/amnezia/out-warp-routes.list` and the
   `/etc/amnezia/amneziawg/out-warp.conf` symlink from disk. Called by
   `delete_config` to ensure the PrivateKey does not persist after config removal.
-- `vpnbot-warp-iface {up|down} /etc/amnezia/out-warp.conf` — runs
+- `vpn-bot-warp-iface {up|down} /etc/amnezia/out-warp.conf` — runs
   `awg-quick up|down` (AmneziaWG, **not** `wg-quick`).
-- `vpnbot-warp-routes {add|del} out-warp` — installs the production-proven policy
+- `vpn-bot-warp-routes {add|del} out-warp` — installs the production-proven policy
   routing that diverts the **AmneziaWG client subnet** (`10.0.0.0/24`) through the
   tunnel while the host itself stays on the direct path. The tunnel is brought up
   by `awg-quick@out-warp` with `Table = auto`, which creates a **dynamic** routing
@@ -194,7 +194,7 @@ Interfaces:
   always stay direct). The table number and endpoint are always resolved at
   runtime. Forwarding **Dante/Xray/MTProto** through WARP is out of scope here —
   this helper diverts AmneziaWG clients only.
-- `vpnbot-warp-status out-warp` — runs `awg show out-warp`.
+- `vpn-bot-warp-status out-warp` — runs `awg show out-warp`.
 
 `awg-quick`/`awg` (AmneziaWG userspace tools) must be installed at
 `/usr/bin/awg-quick` and `/usr/bin/awg`; the module blocks startup with a clear
@@ -223,8 +223,8 @@ add the `setcap` call to your server provisioning script.
 
 ## Rollout Checks
 
-1. Install helpers and `/etc/sudoers.d/vpnbot` with the ownership and modes above.
-2. Validate sudoers with `visudo -cf /etc/sudoers.d/vpnbot`.
+1. Install helpers and `/etc/sudoers.d/vpn-bot` with the ownership and modes above.
+2. Validate sudoers with `visudo -cf /etc/sudoers.d/vpn-bot`.
 3. Set `PRIVILEGE_HELPERS_ENABLED=true` and `BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock`.
 4. Install `deploy/vpn-bot.nonroot.example.service` as the active non-root unit. (The shipped `deploy/vpn-bot.service` is the root+api default; if you install from it instead, edit it to the non-root profile — `User=vpn-bot`, `Group=vpn-bot`, `ProtectSystem=strict`, `ReadWritePaths` — first.)
 5. Run `python deploy/check-nonroot-helper-mode.py` before and after restarting the service.
