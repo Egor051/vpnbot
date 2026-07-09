@@ -80,7 +80,7 @@ def _make_settings(**overrides: object) -> SimpleNamespace:
         mtproto_service_name="mtproxy",
         hysteria2_enabled=False,
         hysteria2_service_name="hysteria-server",
-        hysteria2_auth_service_name="vpnbot-hy2-auth",
+        hysteria2_auth_service_name="vpn-bot-hy2-auth",
         privilege_helpers_enabled=True,
     )
     defaults.update(overrides)
@@ -373,7 +373,7 @@ def test_cli_json_output_structure(
             "--json",
             "--repo", str(tmp_path),
             "--db", str(tmp_path / "vpn.db"),
-            "--sudoers", str(tmp_path / "vpnbot"),
+            "--sudoers", str(tmp_path / "vpn-bot"),
             "--mode", "pre-start",
         ])
     data = json.loads(captured.getvalue())
@@ -396,7 +396,7 @@ def test_cli_json_no_secrets_in_output(
             "--json",
             "--repo", str(tmp_path),
             "--db", str(tmp_path / "vpn.db"),
-            "--sudoers", str(tmp_path / "vpnbot"),
+            "--sudoers", str(tmp_path / "vpn-bot"),
         ])
 
     output = captured.getvalue()
@@ -416,7 +416,7 @@ def test_cli_returns_nonzero_on_critical_failure(
             "--unit", str(bad_unit),
             "--repo", str(tmp_path),
             "--db", str(tmp_path / "vpn.db"),
-            "--sudoers", str(tmp_path / "vpnbot"),
+            "--sudoers", str(tmp_path / "vpn-bot"),
         ])
 
     assert ret == 1
@@ -452,7 +452,7 @@ def test_cli_returns_zero_on_ok_or_warnings(
             "--unit", str(_NONROOT_UNIT),
             "--repo", str(tmp_path),
             "--db", str(tmp_path / "vpn.db"),
-            "--sudoers", str(tmp_path / "vpnbot"),
+            "--sudoers", str(tmp_path / "vpn-bot"),
         ])
 
     assert ret == 0
@@ -519,7 +519,7 @@ def test_check_sudoers_catches_broad_grants(
     must_appear_in_failures: list[str],
 ) -> None:
     """Sudoers file with overly broad privilege grants is flagged as a failure."""
-    sudoers = tmp_path / "vpnbot"
+    sudoers = tmp_path / "vpn-bot"
     sudoers.write_text(sudoers_content)
     reporter = checker.Reporter()
     checker.check_sudoers(sudoers, reporter)
@@ -687,7 +687,7 @@ def test_admin_diagnostics_excludes_disabled_proxy_services(monkeypatch: pytest.
         assert "vpn-bot" in captured_service_names
         # Hysteria2 disabled (default in _make_settings) -> its units are absent.
         assert "hysteria-server" not in captured_service_names
-        assert "vpnbot-hy2-auth" not in captured_service_names
+        assert "vpn-bot-hy2-auth" not in captured_service_names
 
     asyncio.run(run())
 
@@ -724,7 +724,7 @@ def test_admin_diagnostics_includes_hysteria2_services_when_enabled(monkeypatch:
             modules=modules_mock,
         )
         await admin_backend_diagnostics(callback, services)
-        assert "vpnbot-hy2-auth" in captured_service_names
+        assert "vpn-bot-hy2-auth" in captured_service_names
         assert "hysteria-server" in captured_service_names
 
     asyncio.run(run())

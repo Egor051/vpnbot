@@ -193,7 +193,7 @@ async def _build_app(
 
     # When WARP proxy egress is enabled, every Xray config write binds the freedom
     # outbound's egress source to the tunnel IP (sendThrough) so its traffic is
-    # diverted into the tunnel by vpnbot-warp-routes. Both adapters share it because
+    # diverted into the tunnel by vpn-bot-warp-routes. Both adapters share it because
     # they write the same config.json (and therefore the same outbounds).
     warp_send_through = make_send_through_provider(
         enabled=settings.warp_proxy_egress_enabled,

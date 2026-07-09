@@ -1,6 +1,6 @@
 """Integrity and behaviour checks for the WARP sudo helper scripts.
 
-The ``vpnbot-warp-routes`` helper implements the production-proven recipe: the
+The ``vpn-bot-warp-routes`` helper implements the production-proven recipe: the
 tunnel is brought up by ``awg-quick@out-warp`` with ``Table = auto`` (which sets
 an fwmark on the WG socket and creates a DYNAMIC routing table plus host-bypass
 rules), and the helper then strips the host-bypass and diverts only the client
@@ -22,10 +22,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 WARP_HELPERS = (
-    "vpnbot-warp-install",
-    "vpnbot-warp-iface",
-    "vpnbot-warp-routes",
-    "vpnbot-warp-status",
+    "vpn-bot-warp-install",
+    "vpn-bot-warp-iface",
+    "vpn-bot-warp-routes",
+    "vpn-bot-warp-status",
 )
 
 # The AmneziaWG client subnet is a SOURCE selector (which clients' traffic to
@@ -35,7 +35,7 @@ CLIENT_SUBNET = "10.0.0.0/24"
 
 
 def _routes_text() -> str:
-    return (SCRIPTS / "vpnbot-warp-routes").read_text(encoding="utf-8")
+    return (SCRIPTS / "vpn-bot-warp-routes").read_text(encoding="utf-8")
 
 
 # ── generic helper integrity ──────────────────────────────────────────────────
@@ -56,7 +56,7 @@ def test_helper_is_executable(name: str) -> None:
 
 def test_uses_awg_quick_not_wg_quick() -> None:
     """The module must drive AmneziaWG (awg-quick/awg), never plain wg-quick."""
-    for name in ("vpnbot-warp-iface", "vpnbot-warp-status", "vpnbot-warp-routes"):
+    for name in ("vpn-bot-warp-iface", "vpn-bot-warp-status", "vpn-bot-warp-routes"):
         text = (SCRIPTS / name).read_text(encoding="utf-8")
         assert "awg-quick" in text or "awg show" in text
         # "wg-quick"/"wg show" must not appear except as part of "awg-quick"/"awg show".
@@ -71,17 +71,17 @@ def test_no_helper_uses_shell_injection_patterns() -> None:
 
     # The install helper must use a quoted here-doc delimiter so the shell does
     # not interpolate $SOURCE/$DEST/$ROUTES_LIST into the Python source code.
-    install_text = (SCRIPTS / "vpnbot-warp-install").read_text(encoding="utf-8")
+    install_text = (SCRIPTS / "vpn-bot-warp-install").read_text(encoding="utf-8")
     assert "<<'PYEOF'" in install_text or "<< 'PYEOF'" in install_text
 
 
 def test_install_helper_validates_source_path() -> None:
-    text = (SCRIPTS / "vpnbot-warp-install").read_text(encoding="utf-8")
+    text = (SCRIPTS / "vpn-bot-warp-install").read_text(encoding="utf-8")
     assert "ALLOWED_DIR" in text or "realpath" in text
 
 
 def test_install_helper_preprocessing_rules() -> None:
-    text = (SCRIPTS / "vpnbot-warp-install").read_text(encoding="utf-8")
+    text = (SCRIPTS / "vpn-bot-warp-install").read_text(encoding="utf-8")
     # Validates AmneziaWG markers.
     for marker in ("Jc", "S1", "S2", "AllowedIPs"):
         assert marker in text
@@ -96,7 +96,7 @@ def test_install_helper_preprocessing_rules() -> None:
 
 def test_install_helper_creates_amneziawg_symlink() -> None:
     """awg-quick@out-warp resolves the config by name from the amneziawg dir."""
-    text = (SCRIPTS / "vpnbot-warp-install").read_text(encoding="utf-8")
+    text = (SCRIPTS / "vpn-bot-warp-install").read_text(encoding="utf-8")
     assert "/etc/amnezia/amneziawg/out-warp.conf" in text
     assert "ln -sf" in text
     # remove tears the symlink down too.
@@ -537,7 +537,7 @@ def _run_routes(
         "MOCK_MTPROXY_PRESENT": "1" if mtproxy_present else "0",
     }
     proc = subprocess.run(
-        ["bash", str(SCRIPTS / "vpnbot-warp-routes"), action, "out-warp"],
+        ["bash", str(SCRIPTS / "vpn-bot-warp-routes"), action, "out-warp"],
         env=env,
         capture_output=True,
         text=True,
@@ -580,7 +580,7 @@ def test_functional_add_is_idempotent(tmp_path: Path) -> None:
     # Second add over the same state must still exit cleanly.
     bindir = tmp_path / "bin"
     proc = subprocess.run(
-        ["bash", str(SCRIPTS / "vpnbot-warp-routes"), "add", "out-warp"],
+        ["bash", str(SCRIPTS / "vpn-bot-warp-routes"), "add", "out-warp"],
         env={
             **os.environ,
             "PATH": f"{bindir}:{os.environ['PATH']}",
@@ -701,7 +701,7 @@ def test_functional_add_proxy_routing_is_idempotent(tmp_path: Path) -> None:
 
     bindir = tmp_path / "bin"
     proc = subprocess.run(
-        ["bash", str(SCRIPTS / "vpnbot-warp-routes"), "add", "out-warp"],
+        ["bash", str(SCRIPTS / "vpn-bot-warp-routes"), "add", "out-warp"],
         env={
             **os.environ,
             "PATH": f"{bindir}:{os.environ['PATH']}",

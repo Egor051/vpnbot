@@ -8,7 +8,7 @@ backup/restore, восстановление по бэкендам из degraded
 - `.env` существует, не закоммичен и доступен только оператору/root.
 - Родительский каталог `DB_PATH` и `LOG_DIR` существуют и не доступны для чтения всем.
 - Установленный systemd unit соответствует `deploy/vpn-bot.service`. В дефолте root+api: `User=root`, `Group=root`, `ProtectSystem=false`, `RuntimeDirectory=vpn-bot`, `BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock`.
-- Для root+api: `PRIVILEGE_HELPERS_ENABLED=false` (или отсутствует), `XRAY_APPLY_MODE=api`, `XRAY_INBOUND_TAG` задан, `XRAY_STATS_SERVER` указывает на адрес Xray API. Для non-root helper mode: `PRIVILEGE_HELPERS_ENABLED=true`, пути хелперов на `/usr/local/sbin/vpnbot-*`, `/etc/sudoers.d/vpnbot` проходит `visudo -cf`.
+- Для root+api: `PRIVILEGE_HELPERS_ENABLED=false` (или отсутствует), `XRAY_APPLY_MODE=api`, `XRAY_INBOUND_TAG` задан, `XRAY_STATS_SERVER` указывает на адрес Xray API. Для non-root helper mode: `PRIVILEGE_HELPERS_ENABLED=true`, пути хелперов на `/usr/local/sbin/vpn-bot-*`, `/etc/sudoers.d/vpn-bot` проходит `visudo -cf`.
 - `python deploy/check-nonroot-helper-mode.py` проходит перед перезапуском сервиса (non-root).
 - Конфиг Xray существует по `XRAY_CONFIG_PATH` и валиден до того, как бот начнёт в него писать.
 - Конфиг/интерфейс AWG существуют, если будут выдаваться AWG-ключи.
@@ -16,7 +16,7 @@ backup/restore, восстановление по бэкендам из degraded
 - Место назначения backup существует и файлы не доступны для чтения всем.
 - Код, файлы деплоя и `.venv` недоступны для записи от `vpn-bot` или других недоверенных пользователей.
 - Если включён managed MTProto, `vpn-bot.service` не имеет `ReadWritePaths=/etc/systemd/system`; MTProxy wrapper/drop-in установлены вручную и не содержат сырых секретов.
-- Если включён managed MTProto, `/etc/mtproxy/vpnbot/managed-secrets.json`, `mtproxy.env` и `backups/*` доступны для чтения только root/операторам.
+- Если включён managed MTProto, `/etc/mtproxy/vpn-bot/managed-secrets.json`, `mtproxy.env` и `backups/*` доступны для чтения только root/операторам.
 
 ## Общая проверка работоспособности
 
@@ -82,7 +82,7 @@ failure.
 
 - `vpn-bot.service` содержит `User=vpn-bot`, `Group=vpn-bot`, `RuntimeDirectory=vpn-bot`, `RuntimeDirectoryMode=0700`, `ProtectSystem=strict`
 - `vpn-bot.service` не содержит `User=root`, `Group=root`, `NoNewPrivileges=true`
-- `/etc/sudoers.d/vpnbot` root:root 0440, права только на 4 фиксированных хелпера, без широких грантов (`NOPASSWD: ALL`, `ALL=(ALL)`)
+- `/etc/sudoers.d/vpn-bot` root:root 0440, права только на 4 фиксированных хелпера, без широких грантов (`NOPASSWD: ALL`, `ALL=(ALL)`)
 - Бинарники хелперов root:root 0755
 - `/opt/vpn-service`, `.venv`, `deploy` не доступны для записи от `vpn-bot`
 - Существование и writability `/run/vpn-bot` (зависит от mode)
@@ -259,7 +259,7 @@ AWG DEGRADED блокирует только AWG create/revoke/delete/manual rec
 ```bash
 sudo systemctl status awg-quick@awg0 --no-pager
 sudo awg show
-sudo awk '/^# vpnbot key_id=|^PublicKey =|^AllowedIPs =/{print}' /etc/amnezia/amneziawg/awg0.conf
+sudo awk '/^# vpn-bot key_id=|^PublicKey =|^AllowedIPs =/{print}' /etc/amnezia/amneziawg/awg0.conf
 sqlite3 /opt/vpn-service/data/vpn.db "SELECT status, key_type, COUNT(*) FROM vpn_keys WHERE key_type='awg' GROUP BY status, key_type;"
 sudo journalctl -u vpn-bot -n 150 --no-pager
 ```
@@ -291,14 +291,14 @@ MTProto DEGRADED блокирует только MTProto issue/revoke/delete. Xr
 
 ```bash
 sudo systemctl status mtproxy --no-pager
-sudo jq '{secret_count: (.secrets | length), fingerprints: [.secrets[]?.fingerprint]}' /etc/mtproxy/vpnbot/managed-secrets.json
+sudo jq '{secret_count: (.secrets | length), fingerprints: [.secrets[]?.fingerprint]}' /etc/mtproxy/vpn-bot/managed-secrets.json
 sqlite3 /opt/vpn-service/data/vpn.db "SELECT status, access_type, COUNT(*) FROM proxy_accesses WHERE access_type='mtproto' GROUP BY status, access_type;"
 sudo journalctl -u vpn-bot -n 150 --no-pager
 ```
 
 Не выводите сырые MTProto-секреты. В static-режиме per-user server-side revoke невозможен;
 ротируйте `MTPROTO_SECRET`, если нужно инвалидировать скопированный общий секрет. В managed mode
-сравнивайте счётчики/fingerprints, восстановите managed-файлы из `/etc/mtproxy/vpnbot/backups`
+сравнивайте счётчики/fingerprints, восстановите managed-файлы из `/etc/mtproxy/vpn-bot/backups`
 при необходимости, перезапустите `mtproxy`, затем `vpn-bot`.
 
 ## Rollback после неудачного деплоя
@@ -394,7 +394,7 @@ python deploy/check-nonroot-helper-mode.py
 14. Проверьте `systemctl cat mtproxy`, `systemctl show mtproxy -p User -p Group -p ExecStart -p Environment` и `journalctl -u mtproxy -n 100 --no-pager` на отсутствие сырых MTProto-секретов.
 15. Проверьте права managed-файлов:
     ```bash
-    sudo stat -c '%U:%G %a %n' /opt/vpn-service/scripts/run-mtproxy-managed /etc/mtproxy/vpnbot/managed-secrets.json /etc/mtproxy/vpnbot/mtproxy.env
-    sudo find /etc/mtproxy/vpnbot/backups -maxdepth 2 -printf '%u:%g %m %p\n'
+    sudo stat -c '%U:%G %a %n' /opt/vpn-service/scripts/run-mtproxy-managed /etc/mtproxy/vpn-bot/managed-secrets.json /etc/mtproxy/vpn-bot/mtproxy.env
+    sudo find /etc/mtproxy/vpn-bot/backups -maxdepth 2 -printf '%u:%g %m %p\n'
     ```
 16. Отправьте объявление с одобренными, ожидающими и заблокированными тестовыми пользователями; его должны получить только одобренные пользователи и superadmin'ы.

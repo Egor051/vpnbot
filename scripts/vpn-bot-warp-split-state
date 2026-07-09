@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# vpnbot-warp-split-state — privileged on/off/restart/status for WARP split ROUTING.
+# vpn-bot-warp-split-state — privileged on/off/restart/status for WARP split ROUTING.
 #
 # This helper manages ONLY the selective-split routing in the dynamic tunnel
 # table T (the per-prefix `<prefix> dev out-warp` routes) plus a root-owned intent
 # marker. It NEVER touches awg-quick@out-warp, the out-warp interface/process, the
 # anti-loop endpoint route, the ip rules, or the NAT/FORWARD chains — those stay
-# exactly as the observer model and #160/#161 left them. All table-T mutation is
-# delegated to `vpnbot-warp-split` (apply), which honours the marker.
+# exactly as the observer model left them. All table-T mutation is
+# delegated to `vpn-bot-warp-split` (apply), which honours the marker.
 #
 # Verbs:
 #   on       remove the marker, then reconcile table T → saved list (selective).
@@ -16,17 +16,28 @@
 #            after each step; the final state is "on".
 #   status   print observer facts as key=value lines (tunnel_up, n_table, marker).
 #
-# The on/off state is persistent: vpnbot-warp-split honours the marker on every
+# The on/off state is persistent: vpn-bot-warp-split honours the marker on every
 # boot-apply, so "off" survives a reboot until the operator turns it back on.
 #
 # Usage (bot calls via sudo -n):
-#   sudo -n vpnbot-warp-split-state {on|off|restart|status}
+#   sudo -n vpn-bot-warp-split-state {on|off|restart|status}
 set -euo pipefail
 
-MARKER="${WARP_SPLIT_DISABLED_MARKER:-/etc/vpnbot/warp-split.disabled}"
-SPLIT_HELPER="${WARP_SPLIT_HELPER:-/usr/local/sbin/vpnbot-warp-split}"
+# Security: when invoked via sudo (SUDO_UID is set by sudo itself and survives
+# env_reset), ignore caller-supplied overrides for the security-critical paths — the
+# root-written marker and, especially, the helper binary executed as root — and use
+# the fixed defaults. This keeps the root actions independent of the untrusted bot
+# environment even if sudoers ever loses env_reset. Non-sudo callers may still
+# override via env (used by the test harness).
+if [ -n "${SUDO_UID:-}" ]; then
+    MARKER="/etc/vpn-bot/warp-split.disabled"
+    SPLIT_HELPER="/usr/local/sbin/vpn-bot-warp-split"
+else
+    MARKER="${WARP_SPLIT_DISABLED_MARKER:-/etc/vpn-bot/warp-split.disabled}"
+    SPLIT_HELPER="${WARP_SPLIT_HELPER:-/usr/local/sbin/vpn-bot-warp-split}"
+fi
 IFACE="${WARP_IFACE:-out-warp}"
-ME="vpnbot-warp-split-state"
+ME="vpn-bot-warp-split-state"
 
 write_marker() {
     local mdir tmp
@@ -68,18 +79,23 @@ restart)
 status)
     # Observer only: a present fwmark means the out-warp interface is up. Count the
     # script-managed per-prefix `dev $IFACE` routes currently in table T.
+    # Validate the hex shape before the arithmetic table conversion (parity with
+    # vpn-bot-warp-routes); a non-hex value (e.g. "off"/empty) means the tunnel is down.
     fwmark="$(awg show "$IFACE" fwmark 2>/dev/null || true)"
-    if [ -n "$fwmark" ] && [ "$fwmark" != off ]; then
-        echo "tunnel_up=1"
-        T=$(( fwmark ))
-        n="$(ip route show table "$T" 2>/dev/null \
-            | awk -v dev="$IFACE" '$1!="default" && $2=="dev" && $3==dev' \
-            | wc -l | tr -d ' ')"
-        echo "n_table=${n:-0}"
-    else
-        echo "tunnel_up=0"
-        echo "n_table=0"
-    fi
+    case "$fwmark" in
+        0x[0-9a-fA-F]*)
+            echo "tunnel_up=1"
+            T=$(( fwmark ))
+            n="$(ip route show table "$T" 2>/dev/null \
+                | awk -v dev="$IFACE" '$1!="default" && $2=="dev" && $3==dev' \
+                | wc -l | tr -d ' ')"
+            echo "n_table=${n:-0}"
+            ;;
+        *)
+            echo "tunnel_up=0"
+            echo "n_table=0"
+            ;;
+    esac
     if [ -e "$MARKER" ]; then
         echo "marker=off"
     else

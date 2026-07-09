@@ -39,7 +39,7 @@ All WARP environment variables are documented in
 > observability-only — it never removes routes, and a single dropped probe can never
 > raise it.
 
-The bot runs unprivileged: every root action goes through the `vpnbot-warp-*`
+The bot runs unprivileged: every root action goes through the `vpn-bot-warp-*`
 sudo helpers. The server DNS resolver is never touched. Default routes
 (`0.0.0.0/0`, `::/0`) in `AllowedIPs` are silently skipped by the routes helper
 to prevent accidental host isolation — the helper logs a warning when it skips
@@ -60,7 +60,7 @@ is never modified: the install helper extracts it verbatim into
 `/etc/amnezia/out-warp-routes.list` (one CIDR per line, kept for the admin-panel
 route count).
 
-> **Note:** the host is protected by design — `vpnbot-warp-routes` strips the
+> **Note:** the host is protected by design — `vpn-bot-warp-routes` strips the
 > awg-quick host-bypass immediately after the interface comes up and installs a
 > single narrow `from 10.0.0.0/24` policy rule, so a full-tunnel `AllowedIPs`
 > never pulls the host (or your SSH session) into the tunnel. The helper
@@ -75,15 +75,15 @@ table; the old `Table = off` caused a routing loop) and adds
 
 `awg-quick`/`awg` (AmneziaWG userspace tools) must be installed at
 `/usr/bin/awg-quick` / `/usr/bin/awg`. Install the helpers and grant sudo
-(see [`../deploy/helpers/README.md`](../deploy/helpers/README.md) and `deploy/sudoers.d/vpnbot.example`):
+(see [`../deploy/helpers/README.md`](../deploy/helpers/README.md) and `deploy/sudoers.d/vpn-bot.example`):
 
 ```bash
-install -o root -g root -m 0755 scripts/vpnbot-warp-install /usr/local/sbin/vpnbot-warp-install
-install -o root -g root -m 0755 scripts/vpnbot-warp-iface   /usr/local/sbin/vpnbot-warp-iface
-install -o root -g root -m 0755 scripts/vpnbot-warp-routes  /usr/local/sbin/vpnbot-warp-routes
-install -o root -g root -m 0755 scripts/vpnbot-warp-status  /usr/local/sbin/vpnbot-warp-status
-install -o root -g root -m 0440 deploy/sudoers.d/vpnbot.example /etc/sudoers.d/vpnbot
-visudo -cf /etc/sudoers.d/vpnbot
+install -o root -g root -m 0755 scripts/vpn-bot-warp-install /usr/local/sbin/vpn-bot-warp-install
+install -o root -g root -m 0755 scripts/vpn-bot-warp-iface   /usr/local/sbin/vpn-bot-warp-iface
+install -o root -g root -m 0755 scripts/vpn-bot-warp-routes  /usr/local/sbin/vpn-bot-warp-routes
+install -o root -g root -m 0755 scripts/vpn-bot-warp-status  /usr/local/sbin/vpn-bot-warp-status
+install -o root -g root -m 0440 deploy/sudoers.d/vpn-bot.example /etc/sudoers.d/vpn-bot
+visudo -cf /etc/sudoers.d/vpn-bot
 ```
 
 If `awg-quick` is missing, the module refuses to start and shows a clear error in
@@ -125,7 +125,7 @@ drop them). The fix makes the inner source equal to the tunnel IP
 (`[Interface] Address`, e.g. `172.16.0.2`) two ways:
 
 - **Source-bind daemons** (Dante, Xray) bind their egress source to the tunnel IP;
-  `vpnbot-warp-routes` then adds a single `ip rule from <tunnel-ip> lookup <T>` and
+  `vpn-bot-warp-routes` then adds a single `ip rule from <tunnel-ip> lookup <T>` and
   needs **no** NAT (the source is already correct):
   - **Xray** — bot-managed. `config.json` is rewritten by the bot, so a hand-added
     field is lost; instead set `WARP_PROXY_EGRESS=true` and the config writer emits
@@ -135,13 +135,13 @@ drop them). The fix makes the inner source equal to the tunnel IP
     `external: 172.16.0.2` (the tunnel IP) in place of the WAN device, then install
     the ordering drop-in `deploy/danted-warp.conf` so it starts after the tunnel is
     up.
-- **MTProto / mtg** cannot source-bind. `vpnbot-warp-routes` cgroup-marks its unit's
+- **MTProto / mtg** cannot source-bind. `vpn-bot-warp-routes` cgroup-marks its unit's
   egress (`fwmark 0x2`) and adds an **explicit SNAT** to the tunnel IP, inserted
   *above* the broad `out-warp` MASQUERADE. Because the `-m cgroup --path` match needs
   the daemon's cgroup to exist, the unit drop-in `deploy/mtproxy-warp.conf` re-asserts
   it from a privileged `ExecStartPost` once mtg is running.
 
-The tunnel IP is never hardcoded — both `vpnbot-warp-routes` and the Xray writer read
+The tunnel IP is never hardcoded — both `vpn-bot-warp-routes` and the Xray writer read
 it from the config's `[Interface] Address`. The `add`/`del` recipe is idempotent and
 safe when a proxy daemon is absent.
 
@@ -152,15 +152,15 @@ safe when a proxy daemon is absent.
 > 1. Back up the working setup (`.WORKING` snapshot).
 > 2. `deploy/setup-nonroot-helper-mode.sh` — refresh the helpers in `/usr/local/sbin`.
 > 3. Re-install the tunnel config so `[Interface]` carries `Table = auto`
->    (`vpnbot-warp-install`).
+>    (`vpn-bot-warp-install`).
 > 4. Set the proxy source-binds: `external: 172.16.0.2` in `danted.conf`;
 >    `WARP_PROXY_EGRESS=true` in `.env` (Xray `sendThrough` is then emitted by the bot).
 > 5. Install the ordering drop-ins:
 >    ```bash
 >    install -m 700 -d /etc/systemd/system/danted.service.d
->    install -m 644 deploy/danted-warp.conf  /etc/systemd/system/danted.service.d/vpnbot-warp.conf
+>    install -m 644 deploy/danted-warp.conf  /etc/systemd/system/danted.service.d/vpn-bot-warp.conf
 >    install -m 700 -d /etc/systemd/system/mtproxy.service.d   # only if MTProto is enabled
->    install -m 644 deploy/mtproxy-warp.conf /etc/systemd/system/mtproxy.service.d/vpnbot-warp.conf
+>    install -m 644 deploy/mtproxy-warp.conf /etc/systemd/system/mtproxy.service.d/vpn-bot-warp.conf
 >    systemctl daemon-reload
 >    ```
 > 6. `systemctl disable --now warp-clients.service` (the legacy schema), then
@@ -174,7 +174,7 @@ safe when a proxy daemon is absent.
 
 ## WARP selective-split and boot-failsafe activation
 
-The selective-split layer routes only the prefixes in `/etc/vpnbot/warp-split.list`
+The selective-split layer routes only the prefixes in `/etc/vpn-bot/warp-split.list`
 through WARP; everything else exits directly via `eth0`. The boot-failsafe watchdog
 prevents a misconfigured tunnel from locking out SSH after a reboot.
 
@@ -199,16 +199,16 @@ tested (full-tunnel working).
    sudo bash deploy/setup-nonroot-helper-mode.sh
    ```
 
-   This installs `vpnbot-warp-split`, `warp-failsafe`, their unit files, reloads
+   This installs `vpn-bot-warp-split`, `warp-failsafe`, their unit files, reloads
    systemd, and updates the danted drop-in (removing the stale `10-after-warp.conf`).
    It does NOT auto-enable either unit.
 
 3. *(Optional)* **Enable selective-split:**
 
    ```bash
-   sudo cp deploy/warp-split.list.example /etc/vpnbot/warp-split.list
+   sudo cp deploy/warp-split.list.example /etc/vpn-bot/warp-split.list
    # Edit the list — add/remove CIDRs to taste. Broad ranges preferred over /32s.
-   sudo systemctl enable --now vpnbot-warp-split
+   sudo systemctl enable --now vpn-bot-warp-split
    ```
 
 4. **Enable the boot-failsafe** (always recommended):
@@ -244,7 +244,7 @@ tested (full-tunnel working).
 
 ### Rollback
 
-- **Selective-split only:** `sudo systemctl disable --now vpnbot-warp-split` then
+- **Selective-split only:** `sudo systemctl disable --now vpn-bot-warp-split` then
   reboot → returns to full-tunnel (every client prefix exits via WARP again).
 - **Full WARP rollback:** `sudo systemctl disable --now warp-routes awg-quick@out-warp`
   then reboot.
@@ -258,16 +258,16 @@ model) and the bot never touches them.
 
 - **Disable** — reconcile table `T` to empty: every per-prefix `<prefix> dev
   out-warp` route is retracted and all client/proxy traffic egresses direct. The
-  saved list (`/etc/vpnbot/warp-split.list`) is **not erased**, and the anti-loop
+  saved list (`/etc/vpn-bot/warp-split.list`) is **not erased**, and the anti-loop
   `162.159.195.1/32 via eth0-gw`, the `ip rules` and the NAT/FORWARD chains are
   left untouched.
 - **Enable** — reconcile table `T` back to the saved list (selective).
 - **Restart** — flush then re-apply the list (final state: enabled).
 
 The on/off state is **persistent**: "disable" writes a root-owned marker
-(`/etc/vpnbot/warp-split.disabled`) that `vpnbot-warp-split` honours on every
+(`/etc/vpn-bot/warp-split.disabled`) that `vpn-bot-warp-split` honours on every
 boot-apply, so an "off" state survives a reboot. All table-`T` mutation goes through
-`vpnbot-warp-split-state` (sudoers grants the exact `on|off|restart|status` verbs,
+`vpn-bot-warp-split-state` (sudoers grants the exact `on|off|restart|status` verbs,
 no wildcard). The panel's Tunnel (observer) and Routes (marker intent + actual table
 `T`) lines come from `status()`; a drift between intent and reality is shown as a
 warning and the status never fails in any state. When the actual table `T` cannot be
@@ -286,7 +286,7 @@ job of `warp-failsafe`.
 
 ### Managing the split list from the bot (superadmin)
 
-Once `vpnbot-warp-split` is active, the prefix list can be managed from Telegram —
+Once `vpn-bot-warp-split` is active, the prefix list can be managed from Telegram —
 no SSH required:
 
 - **GUI:** the **WARP settings** sub-panel (⚙️ Settings) has a **🌐 Split routes**

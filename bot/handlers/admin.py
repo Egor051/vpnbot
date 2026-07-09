@@ -1233,7 +1233,7 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Services)
             service_names.append(settings.mtproto_service_name)
         if settings.hysteria2_enabled:
             # The Hysteria2 data plane is two units: the auth endpoint the bot
-            # feeds (vpnbot-hy2-auth) and hysteria-server itself. Check both so a
+            # feeds (vpn-bot-hy2-auth) and hysteria-server itself. Check both so a
             # down hy2 data plane surfaces here exactly like Xray/AWG.
             service_names.append(settings.hysteria2_auth_service_name)
             service_names.append(settings.hysteria2_service_name)

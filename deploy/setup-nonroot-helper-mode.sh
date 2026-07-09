@@ -13,11 +13,11 @@ APP_DIR="${APP_DIR:-/opt/vpn-service}"
 ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
 XRAY_CONFIG_PATH="${XRAY_CONFIG_PATH:-/usr/local/etc/xray/config.json}"
 AWG_CONFIG_PATH="${AWG_CONFIG_PATH:-/etc/amnezia/amneziawg/awg0.conf}"
-MTPROTO_MANAGED_DIR="${MTPROTO_MANAGED_DIR:-/etc/mtproxy/vpnbot}"
+MTPROTO_MANAGED_DIR="${MTPROTO_MANAGED_DIR:-/etc/mtproxy/vpn-bot}"
 HELPER_SOURCE_DIR="${HELPER_SOURCE_DIR:-deploy/helpers}"
 WARP_HELPER_SOURCE_DIR="${WARP_HELPER_SOURCE_DIR:-scripts}"
-SUDOERS_SOURCE="${SUDOERS_SOURCE:-deploy/sudoers.d/vpnbot.example}"
-SUDOERS_TARGET="${SUDOERS_TARGET:-/etc/sudoers.d/vpnbot}"
+SUDOERS_SOURCE="${SUDOERS_SOURCE:-deploy/sudoers.d/vpn-bot.example}"
+SUDOERS_TARGET="${SUDOERS_TARGET:-/etc/sudoers.d/vpn-bot}"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this script as root on the VDS." >&2
@@ -61,36 +61,36 @@ if [[ -f "${ENV_FILE}" ]]; then
   chmod 0640 "${ENV_FILE}"
 fi
 
-install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-socks5-user" /usr/local/sbin/vpnbot-socks5-user
-install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-xray-apply" /usr/local/sbin/vpnbot-xray-apply
-install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-awg-apply" /usr/local/sbin/vpnbot-awg-apply
-install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpnbot-mtproxy-apply" /usr/local/sbin/vpnbot-mtproxy-apply
+install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpn-bot-socks5-user" /usr/local/sbin/vpn-bot-socks5-user
+install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpn-bot-xray-apply" /usr/local/sbin/vpn-bot-xray-apply
+install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpn-bot-awg-apply" /usr/local/sbin/vpn-bot-awg-apply
+install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpn-bot-mtproxy-apply" /usr/local/sbin/vpn-bot-mtproxy-apply
 
 # WARP outbound-IP masking helpers live in scripts/ (not deploy/helpers/). They
 # must be (re)installed here too, otherwise a `git reset` deploy leaves the stale
 # /usr/local/sbin copy in place — which is exactly what shipped the broken routing
 # helper before. Keep them byte-for-byte in sync with the checkout on every run.
-install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-install" /usr/local/sbin/vpnbot-warp-install
-install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-iface" /usr/local/sbin/vpnbot-warp-iface
-install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-routes" /usr/local/sbin/vpnbot-warp-routes
-install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-status" /usr/local/sbin/vpnbot-warp-status
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpn-bot-warp-install" /usr/local/sbin/vpn-bot-warp-install
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpn-bot-warp-iface" /usr/local/sbin/vpn-bot-warp-iface
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpn-bot-warp-routes" /usr/local/sbin/vpn-bot-warp-routes
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpn-bot-warp-status" /usr/local/sbin/vpn-bot-warp-status
 
 # WARP post-activation layer: selective-split and boot-failsafe.
 # These are additive on top of the full-tunnel base (warp-routes). They are
 # installed unconditionally so a git-reset deploy keeps /usr/local/sbin in sync,
 # but NOT auto-enabled — the operator enables them via the runbook.
-install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-split" /usr/local/sbin/vpnbot-warp-split
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpn-bot-warp-split" /usr/local/sbin/vpn-bot-warp-split
 install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/warp-failsafe" /usr/local/sbin/warp-failsafe
 
 # WARP split-list bot-control helper: validates + atomically writes
-# /etc/vpnbot/warp-split.list and restarts vpnbot-warp-split. Grants are in
+# /etc/vpn-bot/warp-split.list and restarts vpn-bot-warp-split. Grants are in
 # the sudoers file below; the helper is root:root 0755 like all other helpers.
-install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-split-apply" /usr/local/sbin/vpnbot-warp-split-apply
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpn-bot-warp-split-apply" /usr/local/sbin/vpn-bot-warp-split-apply
 # WARP split-routing on/off/restart/status helper: manages the per-prefix routes
-# in table T + the root-owned disabled marker (honoured by vpnbot-warp-split on
+# in table T + the root-owned disabled marker (honoured by vpn-bot-warp-split on
 # every boot-apply). Never touches the awg-quick@out-warp interface/process.
-install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpnbot-warp-split-state" /usr/local/sbin/vpnbot-warp-split-state
-install -o root -g root -m 0644 deploy/vpnbot-warp-split.service /etc/systemd/system/vpnbot-warp-split.service
+install -o root -g root -m 0755 "${WARP_HELPER_SOURCE_DIR}/vpn-bot-warp-split-state" /usr/local/sbin/vpn-bot-warp-split-state
+install -o root -g root -m 0644 deploy/vpn-bot-warp-split.service /etc/systemd/system/vpn-bot-warp-split.service
 install -o root -g root -m 0644 deploy/warp-failsafe.service /etc/systemd/system/warp-failsafe.service
 systemctl daemon-reload
 
@@ -98,7 +98,7 @@ systemctl daemon-reload
 # 10-after-warp.conf (After=warp-clients.service, now disabled).
 install -d -o root -g root -m 0755 /etc/systemd/system/danted.service.d
 install -o root -g root -m 0644 deploy/danted-warp.conf \
-  /etc/systemd/system/danted.service.d/vpnbot-warp.conf
+  /etc/systemd/system/danted.service.d/vpn-bot-warp.conf
 if [[ -f /etc/systemd/system/danted.service.d/10-after-warp.conf ]]; then
   rm -f /etc/systemd/system/danted.service.d/10-after-warp.conf
   echo "Removed stale danted drop-in 10-after-warp.conf."
@@ -119,9 +119,46 @@ if [[ -f /etc/amnezia/tg-warp-routes.list ]]; then
   echo "Removed stale legacy WARP routes list tg-warp-routes.list."
 fi
 
-# /etc/vpnbot/warp-split.list is deployment-specific — the operator creates it
+# Legacy vpnbot -> vpn-bot rename migration. Earlier releases named the helpers,
+# sudoers file, config dir and the split unit "vpnbot-*" / "/etc/vpnbot". Everything
+# is now "vpn-bot-*". Move live state to the new paths and remove the stale
+# old-named artifacts so the two never coexist. Each step is guarded so a re-run is a
+# safe no-op. (dir renames are atomic and do not disturb a running process's open FDs.)
+if [[ -d /etc/vpnbot && ! -e /etc/vpn-bot ]]; then
+  mv /etc/vpnbot /etc/vpn-bot
+  echo "Migrated /etc/vpnbot -> /etc/vpn-bot."
+fi
+if [[ -d /etc/mtproxy/vpnbot && ! -e /etc/mtproxy/vpn-bot ]]; then
+  mv /etc/mtproxy/vpnbot /etc/mtproxy/vpn-bot
+  echo "Migrated /etc/mtproxy/vpnbot -> /etc/mtproxy/vpn-bot."
+fi
+for stale in \
+  vpnbot-socks5-user vpnbot-xray-apply vpnbot-awg-apply vpnbot-mtproxy-apply \
+  vpnbot-warp-install vpnbot-warp-iface vpnbot-warp-routes vpnbot-warp-status \
+  vpnbot-warp-split vpnbot-warp-split-apply vpnbot-warp-split-state; do
+  if [[ -e "/usr/local/sbin/${stale}" ]]; then
+    rm -f "/usr/local/sbin/${stale}"
+    echo "Removed stale helper /usr/local/sbin/${stale}."
+  fi
+done
+if [[ -f /etc/sudoers.d/vpnbot ]]; then
+  rm -f /etc/sudoers.d/vpnbot
+  echo "Removed stale sudoers /etc/sudoers.d/vpnbot."
+fi
+if [[ -f /etc/systemd/system/vpnbot-warp-split.service ]]; then
+  systemctl disable --now vpnbot-warp-split.service 2>/dev/null || true
+  rm -f /etc/systemd/system/vpnbot-warp-split.service
+  systemctl daemon-reload
+  echo "Removed stale unit vpnbot-warp-split.service (reinstalled as vpn-bot-warp-split.service)."
+fi
+if [[ -f /etc/systemd/system/danted.service.d/vpnbot-warp.conf ]]; then
+  rm -f /etc/systemd/system/danted.service.d/vpnbot-warp.conf
+  echo "Removed stale danted drop-in vpnbot-warp.conf."
+fi
+
+# /etc/vpn-bot/warp-split.list is deployment-specific — the operator creates it
 # from deploy/warp-split.list.example (see runbook). Never overwrite the live file.
-install -d -o root -g root -m 0755 /etc/vpnbot
+install -d -o root -g root -m 0755 /etc/vpn-bot
 
 if [[ -f "${XRAY_CONFIG_PATH}" ]]; then
   chown nobody:"${BOT_GROUP}" "${XRAY_CONFIG_PATH}"
@@ -151,7 +188,7 @@ sudo-helper non-root production preparation is installed.
 Next manual steps:
 - set PRIVILEGE_HELPERS_ENABLED=true and helper paths in ${ENV_FILE};
 - run: python3 deploy/check-nonroot-helper-mode.py
-- install deploy/vpn-bot.service if the active unit is not already non-root.
+- install deploy/vpn-bot.nonroot.example.service as the active unit if it is not already non-root (deploy/vpn-bot.service is the root+api default, not the non-root unit).
 
 This script did not restart vpn-bot or replace the active systemd unit.
 EOF

@@ -7,7 +7,7 @@
 
 - Dante слушает на настроенном публичном host/порту, например `0.0.0.0:31337`.
 - Аутентификация — через логин/пароль системного Linux-пользователя.
-- В production процесс бота не вызывает инструменты управления аккаунтами напрямую. Он использует `sudo -n /usr/local/sbin/vpnbot-socks5-user ...`; только хелпер имеет право вызывать `getent`, `useradd`, `chpasswd`, `passwd -l` и `userdel`.
+- В production процесс бота не вызывает инструменты управления аккаунтами напрямую. Он использует `sudo -n /usr/local/sbin/vpn-bot-socks5-user ...`; только хелпер имеет право вызывать `getent`, `useradd`, `chpasswd`, `passwd -l` и `userdel`.
 - Бот отказывается управлять Linux-пользователями, логин которых не начинается с `SOCKS5_LOGIN_PREFIX`.
 
 ## MTProto static mode
@@ -30,13 +30,13 @@
   sudo install -m 700 -d /opt/vpn-service/scripts
   sudo install -m 700 deploy/run-mtproxy-managed /opt/vpn-service/scripts/run-mtproxy-managed
   sudo install -m 700 -d /etc/systemd/system/mtproxy.service.d
-  sudo install -m 600 deploy/mtproxy-vpnbot-managed.conf /etc/systemd/system/mtproxy.service.d/vpnbot-managed.conf
-  sudo install -m 700 -d /etc/mtproxy/vpnbot /etc/mtproxy/vpnbot/backups
-  sudo chown root:root /opt/vpn-service/scripts/run-mtproxy-managed /etc/mtproxy/vpnbot /etc/mtproxy/vpnbot/backups
+  sudo install -m 600 deploy/mtproxy-vpn-bot-managed.conf /etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf
+  sudo install -m 700 -d /etc/mtproxy/vpn-bot /etc/mtproxy/vpn-bot/backups
+  sudo chown root:root /opt/vpn-service/scripts/run-mtproxy-managed /etc/mtproxy/vpn-bot /etc/mtproxy/vpn-bot/backups
   sudo /opt/vpn-service/.venv/bin/python - <<'PY'
   import json, secrets
   from pathlib import Path
-  managed = Path("/etc/mtproxy/vpnbot")
+  managed = Path("/etc/mtproxy/vpn-bot")
   placeholder = secrets.token_hex(16)
   (managed / "managed-secrets.json").write_text(json.dumps({
       "version": 1,
@@ -51,15 +51,15 @@
       "MTPROTO_RUN_GROUP=mtproxy\n"
       "MTPROTO_PROXY_SECRET_PATH=/etc/mtproxy/proxy-secret\n"
       "MTPROTO_PROXY_MULTI_CONF_PATH=/etc/mtproxy/proxy-multi.conf\n"
-      "MTPROTO_MANAGED_SECRETS_PATH=/etc/mtproxy/vpnbot/managed-secrets.json\n"
+      "MTPROTO_MANAGED_SECRETS_PATH=/etc/mtproxy/vpn-bot/managed-secrets.json\n"
       "MTPROTO_PORT=8443\n"
       "MTPROTO_INTERNAL_STATS_PORT=8888\n"
       "MTPROTO_WORKERS=1\n",
       encoding="utf-8",
   )
   PY
-  sudo chmod 600 /etc/mtproxy/vpnbot/managed-secrets.json /etc/mtproxy/vpnbot/mtproxy.env
-  sudo chown root:root /etc/mtproxy/vpnbot/managed-secrets.json /etc/mtproxy/vpnbot/mtproxy.env
+  sudo chmod 600 /etc/mtproxy/vpn-bot/managed-secrets.json /etc/mtproxy/vpn-bot/mtproxy.env
+  sudo chown root:root /etc/mtproxy/vpn-bot/managed-secrets.json /etc/mtproxy/vpn-bot/mtproxy.env
   sudo systemctl daemon-reload
   sudo systemctl restart mtproxy
   sudo systemctl status mtproxy --no-pager
@@ -68,7 +68,7 @@
 - Drop-in очищает любые существующие `User=`/`Group=` из `mtproxy.service`; вывод `systemctl show mtproxy -p User -p Group -p ExecStart` должен показывать пустые `User`/`Group` и `ExecStart=/opt/vpn-service/scripts/run-mtproxy-managed`.
 - Если `MTPROTO_MANAGED_WRAPPER_PATH` или `MTPROTO_MANAGED_ENV_PATH` отличаются от дефолтов, отредактируйте установленный wrapper/drop-in при деплое и вручную выполните `systemctl daemon-reload`.
 - Не устанавливайте `MTPROTO_MODE=managed` в `vpn-bot`, пока baseline-конфигурация выше не перезапустится успешно и `mtproxy` не будет активен/слушает порт. Issue/revoke откажут, если `MTPROTO_MANAGED_SECRETS_PATH` или `MTPROTO_MANAGED_ENV_PATH` отсутствуют, поэтому первый apply хелпера всегда имеет known-good файлы для rollback.
-- Во время работы бот размещает MTProxy-кандидаты в `/run/vpn-bot/mtproxy`. Хелпер `/usr/local/sbin/vpnbot-mtproxy-apply` валидирует эти файлы, записывает `MTPROTO_MANAGED_SECRETS_PATH`, записывает `MTPROTO_MANAGED_ENV_PATH`, поддерживает `MTPROTO_BACKUP_DIR/<backup-id>/`, перезапускает `mtproxy`, проверяет `systemctl is-active`, проверяет, что `MTPROTO_PORT` слушает, и восстанавливает предыдущие managed-файлы при ошибке apply.
+- Во время работы бот размещает MTProxy-кандидаты в `/run/vpn-bot/mtproxy`. Хелпер `/usr/local/sbin/vpn-bot-mtproxy-apply` валидирует эти файлы, записывает `MTPROTO_MANAGED_SECRETS_PATH`, записывает `MTPROTO_MANAGED_ENV_PATH`, поддерживает `MTPROTO_BACKUP_DIR/<backup-id>/`, перезапускает `mtproxy`, проверяет `systemctl is-active`, проверяет, что `MTPROTO_PORT` слушает, и восстанавливает предыдущие managed-файлы при ошибке apply.
 - Обычные issue/revoke не пишут в `/etc/systemd/system` и не запускают `systemctl daemon-reload`; устанавливайте/обновляйте MTProxy unit/drop-in вручную при деплое.
 - Managed mode обеспечивает реальный per-user revoke: удаляется только секрет конкретного пользователя из active MTProxy list. Секреты других остаются в managed-файле.
 - Сырые MTProto-секреты не отображаются в статусе администратора, audit log, логах, README или `.env.example`; диагностика использует только счётчики и fingerprint'ы.
@@ -83,7 +83,7 @@
 ### Ручной rollback для managed MTProto
 
 1. Остановите `vpn-bot`.
-2. Проверьте `MTPROTO_BACKUP_DIR`, по умолчанию `/etc/mtproxy/vpnbot/backups`.
+2. Проверьте `MTPROTO_BACKUP_DIR`, по умолчанию `/etc/mtproxy/vpn-bot/backups`.
 3. Восстановите предыдущие managed secrets/env-файлы из последнего known-good backup, если автоматический rollback не сработал.
 4. Выполните `sudo systemctl restart mtproxy`.
 5. Проверьте `sudo systemctl status mtproxy --no-pager` и `sudo ss -tlnp | grep 8443`.

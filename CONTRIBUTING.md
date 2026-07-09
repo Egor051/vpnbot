@@ -12,7 +12,7 @@
 
 ```bash
 git clone https://github.com/Egor051/vpnbot.git
-cd vpnbot
+cd vpn-bot
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip

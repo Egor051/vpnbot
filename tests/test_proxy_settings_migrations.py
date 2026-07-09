@@ -156,10 +156,10 @@ def test_mtproto_managed_does_not_require_static_secret(monkeypatch: pytest.Monk
     assert settings.mtproto_mode == "managed"
     assert settings.mtproto_secret == ""
     assert settings.mtproto_service_name == "mtproxy"
-    assert settings.mtproto_managed_dir == Path("/etc/mtproxy/vpnbot")
-    assert settings.mtproto_managed_secrets_path == Path("/etc/mtproxy/vpnbot/managed-secrets.json")
-    assert settings.mtproto_managed_env_path == Path("/etc/mtproxy/vpnbot/mtproxy.env")
-    assert settings.mtproto_backup_dir == Path("/etc/mtproxy/vpnbot/backups")
+    assert settings.mtproto_managed_dir == Path("/etc/mtproxy/vpn-bot")
+    assert settings.mtproto_managed_secrets_path == Path("/etc/mtproxy/vpn-bot/managed-secrets.json")
+    assert settings.mtproto_managed_env_path == Path("/etc/mtproxy/vpn-bot/mtproxy.env")
+    assert settings.mtproto_backup_dir == Path("/etc/mtproxy/vpn-bot/backups")
 
 
 def test_mtproto_managed_requires_managed_paths_when_blank(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

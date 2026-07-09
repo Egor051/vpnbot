@@ -313,11 +313,11 @@ class Settings:
     mtproto_config_dir: Path = Path("/etc/mtproxy")
     mtproto_proxy_secret_path: Path = Path("/etc/mtproxy/proxy-secret")
     mtproto_proxy_multi_conf_path: Path = Path("/etc/mtproxy/proxy-multi.conf")
-    mtproto_managed_dir: Path = Path("/etc/mtproxy/vpnbot")
-    mtproto_managed_secrets_path: Path = Path("/etc/mtproxy/vpnbot/managed-secrets.json")
-    mtproto_managed_env_path: Path = Path("/etc/mtproxy/vpnbot/mtproxy.env")
+    mtproto_managed_dir: Path = Path("/etc/mtproxy/vpn-bot")
+    mtproto_managed_secrets_path: Path = Path("/etc/mtproxy/vpn-bot/managed-secrets.json")
+    mtproto_managed_env_path: Path = Path("/etc/mtproxy/vpn-bot/mtproxy.env")
     mtproto_managed_wrapper_path: Path = Path("/opt/vpn-service/scripts/run-mtproxy-managed")
-    mtproto_backup_dir: Path = Path("/etc/mtproxy/vpnbot/backups")
+    mtproto_backup_dir: Path = Path("/etc/mtproxy/vpn-bot/backups")
     mtproto_internal_stats_port: int | None = 8888
     mtproto_workers: int = 1
     mtproto_apply_timeout_seconds: int = 10
@@ -325,20 +325,20 @@ class Settings:
     mtproto_keep_last_backups: int = 10
     privilege_helpers_enabled: bool = False
     helper_staging_root: Path = Path("/run/vpn-bot")
-    socks5_user_helper_path: Path = Path("/usr/local/sbin/vpnbot-socks5-user")
-    xray_apply_helper_path: Path = Path("/usr/local/sbin/vpnbot-xray-apply")
-    awg_apply_helper_path: Path = Path("/usr/local/sbin/vpnbot-awg-apply")
-    mtproto_apply_helper_path: Path = Path("/usr/local/sbin/vpnbot-mtproxy-apply")
+    socks5_user_helper_path: Path = Path("/usr/local/sbin/vpn-bot-socks5-user")
+    xray_apply_helper_path: Path = Path("/usr/local/sbin/vpn-bot-xray-apply")
+    awg_apply_helper_path: Path = Path("/usr/local/sbin/vpn-bot-awg-apply")
+    mtproto_apply_helper_path: Path = Path("/usr/local/sbin/vpn-bot-mtproxy-apply")
     xray_helper_staging_dir: Path = Path("/run/vpn-bot/xray")
     awg_helper_staging_dir: Path = Path("/run/vpn-bot/awg")
     mtproto_helper_staging_dir: Path = Path("/run/vpn-bot/mtproxy")
     warp_config_path: Path = Path("/etc/amnezia/out-warp.conf")
     warp_interface: str = "out-warp"
     warp_ping_target: str = "162.159.140.245"
-    warp_install_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-install")
-    warp_iface_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-iface")
-    warp_routes_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-routes")
-    warp_status_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-status")
+    warp_install_helper_path: Path = Path("/usr/local/sbin/vpn-bot-warp-install")
+    warp_iface_helper_path: Path = Path("/usr/local/sbin/vpn-bot-warp-iface")
+    warp_routes_helper_path: Path = Path("/usr/local/sbin/vpn-bot-warp-routes")
+    warp_status_helper_path: Path = Path("/usr/local/sbin/vpn-bot-warp-status")
     warp_helper_staging_dir: Path = Path("/run/vpn-bot/warp")
     # Observer mode (default): the bot's health monitor only watches the tunnel
     # (probes, DB state, admin notifications) and NEVER touches the interface or
@@ -359,19 +359,19 @@ class Settings:
     # Selective-split list and its privileged apply helper.
     # The bot reads the list file directly (0644); writes go exclusively through
     # the helper which validates, writes atomically, and restarts the service.
-    warp_split_list_path: Path = Path("/etc/vpnbot/warp-split.list")
-    warp_split_apply_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-split-apply")
+    warp_split_list_path: Path = Path("/etc/vpn-bot/warp-split.list")
+    warp_split_apply_helper_path: Path = Path("/usr/local/sbin/vpn-bot-warp-split-apply")
     # Privileged on/off/restart/status helper for split ROUTING (table T) plus the
     # root-owned intent marker it manages. Toggling these buttons operates on the
     # selective-split routes only — never the awg-quick@out-warp interface/process.
     # The bot reads the marker directly (root:root 0644) but mutates routing solely
     # through this helper.
-    warp_split_state_helper_path: Path = Path("/usr/local/sbin/vpnbot-warp-split-state")
-    warp_split_disabled_marker_path: Path = Path("/etc/vpnbot/warp-split.disabled")
+    warp_split_state_helper_path: Path = Path("/usr/local/sbin/vpn-bot-warp-split-state")
+    warp_split_disabled_marker_path: Path = Path("/etc/vpn-bot/warp-split.disabled")
     # Route LOCAL proxy egress (Dante/Xray/MTProto) through the WARP tunnel too.
     # When true the Xray config writer binds the freedom outbound's egress source to
     # the tunnel IP (``sendThrough``) so its traffic is diverted into the tunnel by
-    # ``vpnbot-warp-routes``. Off by default; flipped on as part of the manual WARP
+    # ``vpn-bot-warp-routes``. Off by default; flipped on as part of the manual WARP
     # proxy-egress activation runbook. Independent of the tunnel-up monitor above.
     warp_proxy_egress_enabled: bool = False
     health_port: int | None = None
@@ -447,7 +447,7 @@ class Settings:
     # health diagnostics (systemctl is-active), so a down hy2 data plane surfaces
     # in the panel exactly like Xray/AWG. The bot never manages these units.
     hysteria2_service_name: str = "hysteria-server"
-    hysteria2_auth_service_name: str = "vpnbot-hy2-auth"
+    hysteria2_auth_service_name: str = "vpn-bot-hy2-auth"
     # /etc/hysteria/config.yaml — the hysteria-server config (obfs password, TLS,
     # trafficStats). Bundled into the offsite recovery archive so a rebuilt box can
     # restore the data plane, mirroring the Xray config.json / AWG .conf backup.
@@ -606,7 +606,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
     mtproto_proxy_multi_conf_path = _optional(
         "MTPROTO_PROXY_MULTI_CONF_PATH", str(Path(mtproto_config_dir) / "proxy-multi.conf")
     )
-    mtproto_managed_dir = _optional("MTPROTO_MANAGED_DIR", str(Path(mtproto_config_dir) / "vpnbot"))
+    mtproto_managed_dir = _optional("MTPROTO_MANAGED_DIR", str(Path(mtproto_config_dir) / "vpn-bot"))
     mtproto_managed_secrets_path = _optional(
         "MTPROTO_MANAGED_SECRETS_PATH",
         str(Path(mtproto_managed_dir) / "managed-secrets.json"),
@@ -789,20 +789,20 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         anomaly_hysteria2_max_conn=anomaly_hysteria2_max_conn,
         scheduled_announcements_interval=_int_range("SCHEDULED_ANNOUNCEMENTS_INTERVAL", 60, 0, 86400),
         xray_access_log_path=_optional("XRAY_ACCESS_LOG_PATH"),
-        socks5_user_helper_path=Path(_optional("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/vpnbot-socks5-user")),
-        xray_apply_helper_path=Path(_optional("XRAY_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-xray-apply")),
-        awg_apply_helper_path=Path(_optional("AWG_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-awg-apply")),
-        mtproto_apply_helper_path=Path(_optional("MTPROTO_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-mtproxy-apply")),
+        socks5_user_helper_path=Path(_optional("SOCKS5_USER_HELPER_PATH", "/usr/local/sbin/vpn-bot-socks5-user")),
+        xray_apply_helper_path=Path(_optional("XRAY_APPLY_HELPER_PATH", "/usr/local/sbin/vpn-bot-xray-apply")),
+        awg_apply_helper_path=Path(_optional("AWG_APPLY_HELPER_PATH", "/usr/local/sbin/vpn-bot-awg-apply")),
+        mtproto_apply_helper_path=Path(_optional("MTPROTO_APPLY_HELPER_PATH", "/usr/local/sbin/vpn-bot-mtproxy-apply")),
         xray_helper_staging_dir=Path(_optional("XRAY_HELPER_STAGING_DIR", str(helper_staging_root / "xray"))),
         awg_helper_staging_dir=Path(_optional("AWG_HELPER_STAGING_DIR", str(helper_staging_root / "awg"))),
         mtproto_helper_staging_dir=Path(_optional("MTPROTO_HELPER_STAGING_DIR", str(helper_staging_root / "mtproxy"))),
         warp_config_path=Path(_optional("WARP_CONFIG_PATH", "/etc/amnezia/out-warp.conf")),
         warp_interface=_optional("WARP_INTERFACE", "out-warp"),
         warp_ping_target=_optional("WARP_PING_TARGET", "162.159.140.245"),
-        warp_install_helper_path=Path(_optional("WARP_INSTALL_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-install")),
-        warp_iface_helper_path=Path(_optional("WARP_IFACE_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-iface")),
-        warp_routes_helper_path=Path(_optional("WARP_ROUTES_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-routes")),
-        warp_status_helper_path=Path(_optional("WARP_STATUS_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-status")),
+        warp_install_helper_path=Path(_optional("WARP_INSTALL_HELPER_PATH", "/usr/local/sbin/vpn-bot-warp-install")),
+        warp_iface_helper_path=Path(_optional("WARP_IFACE_HELPER_PATH", "/usr/local/sbin/vpn-bot-warp-iface")),
+        warp_routes_helper_path=Path(_optional("WARP_ROUTES_HELPER_PATH", "/usr/local/sbin/vpn-bot-warp-routes")),
+        warp_status_helper_path=Path(_optional("WARP_STATUS_HELPER_PATH", "/usr/local/sbin/vpn-bot-warp-status")),
         warp_helper_staging_dir=Path(_optional("WARP_HELPER_STAGING_DIR", str(helper_staging_root / "warp"))),
         warp_monitor_observer_mode=_bool("WARP_MONITOR_OBSERVER_MODE", True),
         warp_monitor_fail_window_seconds=_int_range("WARP_MONITOR_FAIL_WINDOW_SECONDS", 60, 1, 3600),
@@ -810,16 +810,16 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         warp_monitor_interval_seconds=_int_range("WARP_MONITOR_INTERVAL_SECONDS", 10, 1, 3600),
         warp_monitor_fast_interval_seconds=_int_range("WARP_MONITOR_FAST_INTERVAL_SECONDS", 3, 1, 3600),
         warp_split_list_path=Path(
-            _optional("WARP_SPLIT_LIST_PATH", "/etc/vpnbot/warp-split.list")
+            _optional("WARP_SPLIT_LIST_PATH", "/etc/vpn-bot/warp-split.list")
         ),
         warp_split_apply_helper_path=Path(
-            _optional("WARP_SPLIT_APPLY_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-split-apply")
+            _optional("WARP_SPLIT_APPLY_HELPER_PATH", "/usr/local/sbin/vpn-bot-warp-split-apply")
         ),
         warp_split_state_helper_path=Path(
-            _optional("WARP_SPLIT_STATE_HELPER_PATH", "/usr/local/sbin/vpnbot-warp-split-state")
+            _optional("WARP_SPLIT_STATE_HELPER_PATH", "/usr/local/sbin/vpn-bot-warp-split-state")
         ),
         warp_split_disabled_marker_path=Path(
-            _optional("WARP_SPLIT_DISABLED_MARKER_PATH", "/etc/vpnbot/warp-split.disabled")
+            _optional("WARP_SPLIT_DISABLED_MARKER_PATH", "/etc/vpn-bot/warp-split.disabled")
         ),
         warp_proxy_egress_enabled=_bool("WARP_PROXY_EGRESS_ENABLED", _bool("WARP_PROXY_EGRESS", False)),
         bot_language=_choice("BOT_LANGUAGE", "ru", {"ru", "en"}),
@@ -838,7 +838,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         hysteria2_stats_secret=hysteria2_stats_secret,
         hysteria2_stats_interval=_int_range("HYSTERIA2_STATS_INTERVAL", 60, 0, 3600),
         hysteria2_service_name=_optional("HYSTERIA2_SERVICE_NAME", "hysteria-server"),
-        hysteria2_auth_service_name=_optional("HYSTERIA2_AUTH_SERVICE_NAME", "vpnbot-hy2-auth"),
+        hysteria2_auth_service_name=_optional("HYSTERIA2_AUTH_SERVICE_NAME", "vpn-bot-hy2-auth"),
         hysteria2_config_path=Path(_optional("HYSTERIA2_CONFIG_PATH", "/etc/hysteria/config.yaml")),
         hysteria2_health_interval=_int_range("HYSTERIA2_HEALTH_INTERVAL", 60, 0, 3600),
     )

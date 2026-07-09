@@ -6,7 +6,7 @@ import os
 import sys
 
 
-ENV_PATH = os.environ.get("MTPROTO_MANAGED_ENV_PATH", "/etc/mtproxy/vpnbot/mtproxy.env")
+ENV_PATH = os.environ.get("MTPROTO_MANAGED_ENV_PATH", "/etc/mtproxy/vpn-bot/mtproxy.env")
 
 # Security: only these binaries may be exec'd; guards against a tampered env file causing arbitrary RCE
 _ALLOWED_BINARY_PATHS: frozenset[str] = frozenset({
@@ -55,6 +55,22 @@ def _require_port(env: dict[str, str], key: str) -> str:
 
 def main() -> None:
     env = read_env(ENV_PATH)
+    # Fail with a clear message (not a bare KeyError traceback) when the managed env
+    # file is missing a required key.
+    required_keys = (
+        "MTPROTO_BINARY_PATH",
+        "MTPROTO_RUN_USER",
+        "MTPROTO_PROXY_SECRET_PATH",
+        "MTPROTO_PROXY_MULTI_CONF_PATH",
+        "MTPROTO_MANAGED_SECRETS_PATH",
+        "MTPROTO_PORT",
+        "MTPROTO_INTERNAL_STATS_PORT",
+        "MTPROTO_WORKERS",
+    )
+    missing = [key for key in required_keys if key not in env]
+    if missing:
+        print(f"error: {ENV_PATH} is missing required keys: {', '.join(missing)}", file=sys.stderr)
+        raise SystemExit(1)
     binary_path = env["MTPROTO_BINARY_PATH"]
     # Security: validate binary path against allowlist before execv
     if binary_path not in _ALLOWED_BINARY_PATHS:

@@ -1,4 +1,4 @@
-"""Tests for scripts/vpnbot-warp-split and scripts/warp-failsafe.
+"""Tests for scripts/vpn-bot-warp-split and scripts/warp-failsafe.
 
 Strategy: run the bash scripts in a subprocess with a fake PATH that intercepts
 every privileged command (ip, iptables, awg, awg-quick, systemctl, logger).
@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SPLIT_SCRIPT = ROOT / "scripts" / "vpnbot-warp-split"
+SPLIT_SCRIPT = ROOT / "scripts" / "vpn-bot-warp-split"
 FAILSAFE_SCRIPT = ROOT / "scripts" / "warp-failsafe"
 
 FWMARK_HEX = "0x1234"
@@ -225,7 +225,7 @@ def failsafe_env_broken(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# vpnbot-warp-split apply
+# vpn-bot-warp-split apply
 # ---------------------------------------------------------------------------
 
 class TestWarpSplitApply:
@@ -366,7 +366,7 @@ class TestWarpSplitApply:
 
 
 # ---------------------------------------------------------------------------
-# vpnbot-warp-split apply — reconcile (table T == list after restart/apply)
+# vpn-bot-warp-split apply — reconcile (table T == list after restart/apply)
 # ---------------------------------------------------------------------------
 
 class TestWarpSplitReconcile:
@@ -485,7 +485,7 @@ class TestWarpSplitReconcile:
 
 
 # ---------------------------------------------------------------------------
-# vpnbot-warp-split revert
+# vpn-bot-warp-split revert
 # ---------------------------------------------------------------------------
 
 class TestWarpSplitRevert:
@@ -659,13 +659,13 @@ class TestScriptMetadata:
         assert "WARP_FAILSAFE_DELAY" in text
 
     def test_split_service_file_exists(self):
-        svc = ROOT / "deploy" / "vpnbot-warp-split.service"
+        svc = ROOT / "deploy" / "vpn-bot-warp-split.service"
         assert svc.exists()
         text = svc.read_text(encoding="utf-8")
         assert "Type=oneshot" in text
         assert "RemainAfterExit=yes" in text
         assert "PartOf=warp-routes.service" in text
-        assert "ConditionPathExists=/etc/vpnbot/warp-split.list" in text
+        assert "ConditionPathExists=/etc/vpn-bot/warp-split.list" in text
 
     def test_failsafe_service_file_exists(self):
         svc = ROOT / "deploy" / "warp-failsafe.service"

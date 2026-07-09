@@ -8,7 +8,7 @@ checks, backup/restore, per-backend degraded recovery, rollback, and manual veri
 - `.env` exists, is not committed, and is readable only by the service operator/root.
 - `DB_PATH` parent and `LOG_DIR` exist and are not world-readable.
 - The installed systemd unit matches `deploy/vpn-bot.service`. In the default root+api configuration: `User=root`, `Group=root`, `ProtectSystem=false`, `RuntimeDirectory=vpn-bot`, `BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock`.
-- For root+api mode: `PRIVILEGE_HELPERS_ENABLED=false` (or absent), `XRAY_APPLY_MODE=api`, `XRAY_INBOUND_TAG` set, `XRAY_STATS_SERVER` pointing to the Xray API address. For non-root helper mode: `PRIVILEGE_HELPERS_ENABLED=true`, helper paths point to `/usr/local/sbin/vpnbot-*`, and `/etc/sudoers.d/vpnbot` validates with `visudo -cf`.
+- For root+api mode: `PRIVILEGE_HELPERS_ENABLED=false` (or absent), `XRAY_APPLY_MODE=api`, `XRAY_INBOUND_TAG` set, `XRAY_STATS_SERVER` pointing to the Xray API address. For non-root helper mode: `PRIVILEGE_HELPERS_ENABLED=true`, helper paths point to `/usr/local/sbin/vpn-bot-*`, and `/etc/sudoers.d/vpn-bot` validates with `visudo -cf`.
 - `python deploy/check-nonroot-helper-mode.py` passes before the service restart (non-root mode).
 - Xray config exists at `XRAY_CONFIG_PATH` and validates before the bot writes to it.
 - AWG config/interface exist if AWG keys will be issued.
@@ -16,7 +16,7 @@ checks, backup/restore, per-backend degraded recovery, rollback, and manual veri
 - Backup destination exists and backup files are not world-readable.
 - Code, deploy files, and `.venv` are not writable by `vpn-bot` or other untrusted users.
 - If managed MTProto is enabled, `vpn-bot.service` does not have `ReadWritePaths=/etc/systemd/system`; the MTProxy wrapper/drop-in were installed manually and contain no raw secrets.
-- If managed MTProto is enabled, `/etc/mtproxy/vpnbot/managed-secrets.json`, `/etc/mtproxy/vpnbot/mtproxy.env`, and `/etc/mtproxy/vpnbot/backups/*` are readable only by root/service operators.
+- If managed MTProto is enabled, `/etc/mtproxy/vpn-bot/managed-secrets.json`, `/etc/mtproxy/vpn-bot/mtproxy.env`, and `/etc/mtproxy/vpn-bot/backups/*` are readable only by root/service operators.
 
 ## General bot health check
 
@@ -83,7 +83,7 @@ failure.
 
 - `vpn-bot.service` contains `User=vpn-bot`, `Group=vpn-bot`, `RuntimeDirectory=vpn-bot`, `RuntimeDirectoryMode=0700`, `ProtectSystem=strict`
 - `vpn-bot.service` does not contain `User=root`, `Group=root`, `NoNewPrivileges=true`
-- `/etc/sudoers.d/vpnbot` is root:root 0440, grants only the 4 fixed helpers, no broad grants (`NOPASSWD: ALL`, `ALL=(ALL)`)
+- `/etc/sudoers.d/vpn-bot` is root:root 0440, grants only the 4 fixed helpers, no broad grants (`NOPASSWD: ALL`, `ALL=(ALL)`)
 - Helper binaries are root:root 0755
 - `/opt/vpn-service`, `.venv`, `deploy` are not writable by `vpn-bot`
 - `/run/vpn-bot` existence and writability (mode-dependent)
@@ -126,7 +126,7 @@ When `PRIVILEGE_HELPERS_ENABLED=true`, every privileged operation (Xray/AWG conf
 SOCKS5 user create/delete, MTProto secret apply) produces a sudo log entry like:
 
 ```
-vpn-bot : TTY=... ; PWD=... ; USER=root ; COMMAND=/usr/local/sbin/vpnbot-xray-apply apply ...
+vpn-bot : TTY=... ; PWD=... ; USER=root ; COMMAND=/usr/local/sbin/vpn-bot-xray-apply apply ...
 ```
 
 These entries are **expected and normal**. They confirm the least-privilege model is working
@@ -272,7 +272,7 @@ continue unless separately degraded.
 ```bash
 sudo systemctl status awg-quick@awg0 --no-pager
 sudo awg show
-sudo awk '/^# vpnbot key_id=|^PublicKey =|^AllowedIPs =/{print}' /etc/amnezia/amneziawg/awg0.conf
+sudo awk '/^# vpn-bot key_id=|^PublicKey =|^AllowedIPs =/{print}' /etc/amnezia/amneziawg/awg0.conf
 sqlite3 /opt/vpn-service/data/vpn.db "SELECT status, key_type, COUNT(*) FROM vpn_keys WHERE key_type='awg' GROUP BY status, key_type;"
 sudo journalctl -u vpn-bot -n 150 --no-pager
 ```
@@ -303,14 +303,14 @@ separately degraded.
 
 ```bash
 sudo systemctl status mtproxy --no-pager
-sudo jq '{secret_count: (.secrets | length), fingerprints: [.secrets[]?.fingerprint]}' /etc/mtproxy/vpnbot/managed-secrets.json
+sudo jq '{secret_count: (.secrets | length), fingerprints: [.secrets[]?.fingerprint]}' /etc/mtproxy/vpn-bot/managed-secrets.json
 sqlite3 /opt/vpn-service/data/vpn.db "SELECT status, access_type, COUNT(*) FROM proxy_accesses WHERE access_type='mtproto' GROUP BY status, access_type;"
 sudo journalctl -u vpn-bot -n 150 --no-pager
 ```
 
 Do not print raw MTProto secrets. In static mode, per-user server-side revoke is impossible;
 rotate `MTPROTO_SECRET` if a copied shared secret must be invalidated. In managed mode, compare
-counts/fingerprints, restore managed files from `/etc/mtproxy/vpnbot/backups` if needed, restart
+counts/fingerprints, restore managed files from `/etc/mtproxy/vpn-bot/backups` if needed, restart
 `mtproxy`, then restart `vpn-bot`.
 
 ## Rollback after a bad deploy
@@ -406,7 +406,7 @@ On a staging user before production use:
 14. Check `systemctl cat mtproxy`, `systemctl show mtproxy -p User -p Group -p ExecStart -p Environment`, and `journalctl -u mtproxy -n 100 --no-pager` for absence of raw MTProto secrets.
 15. Check managed file permissions:
     ```bash
-    sudo stat -c '%U:%G %a %n' /opt/vpn-service/scripts/run-mtproxy-managed /etc/mtproxy/vpnbot/managed-secrets.json /etc/mtproxy/vpnbot/mtproxy.env
-    sudo find /etc/mtproxy/vpnbot/backups -maxdepth 2 -printf '%u:%g %m %p\n'
+    sudo stat -c '%U:%G %a %n' /opt/vpn-service/scripts/run-mtproxy-managed /etc/mtproxy/vpn-bot/managed-secrets.json /etc/mtproxy/vpn-bot/mtproxy.env
+    sudo find /etc/mtproxy/vpn-bot/backups -maxdepth 2 -printf '%u:%g %m %p\n'
     ```
 16. Send an announcement with approved, pending, and blocked test users; only approved users and superadmins should receive it.

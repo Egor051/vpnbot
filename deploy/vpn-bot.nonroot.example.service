@@ -1,6 +1,9 @@
-# Compatibility reference for older Package 5A/5B rollout notes.
-# The production unit is now deploy/vpn-bot.service; keep this file aligned with
-# that non-root sudo-helper model if retained.
+# Reference unit for the non-root sudo-helper deployment model. Install THIS file as
+# the active vpn-bot.service when running non-root helper mode.
+#
+# The shipped deploy/vpn-bot.service is the root+api default (runs as root with
+# ProtectSystem=false) and is intentionally NOT this model — use it only for the
+# root+api deployment.
 #
 # Code, deploy files, and .venv should remain root-owned and not writable by
 # the vpn-bot runtime user.

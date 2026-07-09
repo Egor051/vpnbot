@@ -18,7 +18,7 @@ class PrivilegedHelperRunner:
     """Invokes fixed sudo helper scripts that perform privileged VPN/proxy operations.
 
     Allowed commands: only absolute-path scripts listed in the sudo policy file
-    (typically /etc/sudoers.d/vpnbot or a drop-in under /etc/sudoers.d/).  The sudoers
+    (typically /etc/sudoers.d/vpn-bot or a drop-in under /etc/sudoers.d/).  The sudoers
     exact-path allowlist is the real security boundary and it — together with the
     deploy step — is what guarantees each script is owned by root:root, mode 0o755, and
     not writable by the bot user; this class does NOT verify ownership/mode. Its own
@@ -26,8 +26,8 @@ class PrivilegedHelperRunner:
     segment, and not be a symlink.
 
     Sudo policy template (non-interactive, no-password for specific scripts):
-        vpnbot ALL=(root) NOPASSWD: /opt/vpnbot/scripts/awg_apply.sh, \\
-                                    /opt/vpnbot/scripts/xray_apply.sh, \\
+        vpn-bot ALL=(root) NOPASSWD: /opt/vpn-bot/scripts/awg_apply.sh, \\
+                                    /opt/vpn-bot/scripts/xray_apply.sh, \\
                                     ...
 
     To add a new helper: (1) write the script, (2) chmod/chown it, (3) add it to

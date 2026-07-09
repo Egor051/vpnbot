@@ -1,5 +1,5 @@
 #!/bin/bash
-# vpnbot-warp-iface — bring the WARP AmneziaWG interface up or down.
+# vpn-bot-warp-iface — bring the WARP AmneziaWG interface up or down.
 set -euo pipefail
 ACTION="${1:-}"; CONFIG="${2:-}"
 case "$ACTION" in

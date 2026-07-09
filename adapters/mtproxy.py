@@ -96,7 +96,7 @@ class MtProxyAdapter:
         self.rollback_on_apply_failure = rollback_on_apply_failure
         self.keep_last_backups = keep_last_backups
         self.helper_runner = helper_runner
-        self.helper_path = helper_path or Path("/usr/local/sbin/vpnbot-mtproxy-apply")
+        self.helper_path = helper_path or Path("/usr/local/sbin/vpn-bot-mtproxy-apply")
         self.helper_staging_dir = helper_staging_dir or Path("/run/vpn-bot/mtproxy")
         self._listen_port_re = re.compile(rf":{re.escape(str(port))}(?:\s|$)")
 

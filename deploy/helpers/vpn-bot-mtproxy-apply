@@ -14,7 +14,7 @@ from typing import Any, TextIO
 
 
 STAGING_ROOT = Path("/run/vpn-bot/mtproxy")
-TARGET_DIR = Path("/etc/mtproxy/vpnbot")
+TARGET_DIR = Path("/etc/mtproxy/vpn-bot")
 TARGET_SECRETS = TARGET_DIR / "managed-secrets.json"
 TARGET_ENV = TARGET_DIR / "mtproxy.env"
 SERVICE_NAME = "mtproxy"
@@ -281,10 +281,20 @@ def port_listening(port: int) -> bool:
     result = run_command(["ss", "-tln"])
     if result.returncode != 0:
         return False
-    token = f":{port}"
+    # ss -tln columns: State Recv-Q Send-Q Local-Address:Port Peer-Address:Port.
+    # Compare the port at a field boundary (after the final ':') so ":8443" does not
+    # falsely match ":84430" or a peer-column port.
     for line in result.stdout.splitlines():
-        if "LISTEN" in line and token in line:
-            return True
+        if "LISTEN" not in line:
+            continue
+        fields = line.split()
+        if len(fields) < 4 or ":" not in fields[3]:
+            continue
+        try:
+            if int(fields[3].rsplit(":", 1)[1]) == port:
+                return True
+        except ValueError:
+            continue
     return False
 
 

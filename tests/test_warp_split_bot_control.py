@@ -2,7 +2,7 @@
 
 Coverage:
  1. CIDR parsing / normalisation / guard / dedup logic (warp.split_manager)
- 2. vpnbot-warp-split-apply helper script (functional shell tests, Linux-only)
+ 2. vpn-bot-warp-split-apply helper script (functional shell tests, Linux-only)
  3. Sudoers file contains the new helper grant
  4. check-nonroot-helper-mode.py expects the new helper
  5. Invariant: no bot code directly calls ip/iptables/awg-quick
@@ -19,8 +19,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-APPLY_SCRIPT = ROOT / "scripts" / "vpnbot-warp-split-apply"
-SUDOERS = ROOT / "deploy" / "sudoers.d" / "vpnbot.example"
+APPLY_SCRIPT = ROOT / "scripts" / "vpn-bot-warp-split-apply"
+SUDOERS = ROOT / "deploy" / "sudoers.d" / "vpn-bot.example"
 CHECK_SCRIPT = ROOT / "deploy" / "check-nonroot-helper-mode.py"
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ def _make_manager(tmp_path: Path) -> WarpSplitManager:
     shell = MagicMock()
     return WarpSplitManager(
         list_path=tmp_path / "warp-split.list",
-        apply_helper_path=Path("/usr/local/sbin/vpnbot-warp-split-apply"),
+        apply_helper_path=Path("/usr/local/sbin/vpn-bot-warp-split-apply"),
         awg_network=AWG_NETWORK,
         shell=shell,
     )
@@ -246,10 +246,10 @@ def _state_manager(tmp_path: Path, shell: _FakeShell, *, marker_present: bool = 
         marker.write_text("disabled\n", encoding="utf-8")
     return WarpSplitManager(
         list_path=tmp_path / "warp-split.list",
-        apply_helper_path=Path("/usr/local/sbin/vpnbot-warp-split-apply"),
+        apply_helper_path=Path("/usr/local/sbin/vpn-bot-warp-split-apply"),
         awg_network=AWG_NETWORK,
         shell=shell,  # type: ignore[arg-type]
-        state_helper_path=Path("/usr/local/sbin/vpnbot-warp-split-state"),
+        state_helper_path=Path("/usr/local/sbin/vpn-bot-warp-split-state"),
         marker_path=marker,
         interface_name="out-warp-nonexistent-xyz",  # _iface_up fallback → False
     )
@@ -285,7 +285,7 @@ class TestSplitStateManager:
         mgr = _state_manager(tmp_path, shell)
         asyncio.run(mgr.enable())
         # command = ["sudo", "-n", <state-helper>, "on"]
-        assert shell.calls[-1][-2] == "/usr/local/sbin/vpnbot-warp-split-state"
+        assert shell.calls[-1][-2] == "/usr/local/sbin/vpn-bot-warp-split-state"
 
     def test_state_helper_failure_raises(self, tmp_path: Path) -> None:
         shell = _FakeShell({"off": _status_result("boom", rc=1)})
@@ -388,7 +388,7 @@ class TestParseTokens:
 
 
 # ---------------------------------------------------------------------------
-# vpnbot-warp-split-apply helper functional tests (Linux-only, subprocess)
+# vpn-bot-warp-split-apply helper functional tests (Linux-only, subprocess)
 # ---------------------------------------------------------------------------
 
 _LINUX_ONLY = pytest.mark.skipif(
@@ -403,7 +403,7 @@ def _write_stub(path: Path, body: str) -> None:
 
 
 def _run_apply(input_data: str, tmp_path: Path, *, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    """Run vpnbot-warp-split-apply with stubbed systemctl and a temp list path."""
+    """Run vpn-bot-warp-split-apply with stubbed systemctl and a temp list path."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     list_file = tmp_path / "warp-split.list"
@@ -511,8 +511,8 @@ class TestSudoersGrant:
             line for line in text.splitlines()
             if line.strip() and not line.strip().startswith(("#", ";"))
         )
-        assert "/usr/local/sbin/vpnbot-warp-split-apply" in active, (
-            "sudoers must grant vpnbot-warp-split-apply; "
+        assert "/usr/local/sbin/vpn-bot-warp-split-apply" in active, (
+            "sudoers must grant vpn-bot-warp-split-apply; "
             f"active lines:\n{active}"
         )
 
@@ -524,15 +524,15 @@ class TestSudoersGrant:
         )
         assert "NOPASSWD" in active
         # Helper must be reachable via a NOPASSWD alias
-        assert "VPNBOT_WARP_SPLIT" in active
+        assert "VPN_BOT_WARP_SPLIT" in active
 
     def test_no_wildcards_on_helper(self) -> None:
         text = SUDOERS.read_text(encoding="utf-8")
         # The apply helper takes no arguments (list on stdin), so no * on its line
         for line in text.splitlines():
-            if "vpnbot-warp-split-apply" in line and not line.strip().startswith("#"):
+            if "vpn-bot-warp-split-apply" in line and not line.strip().startswith("#"):
                 assert "*" not in line, (
-                    "vpnbot-warp-split-apply should have no argument wildcards"
+                    "vpn-bot-warp-split-apply should have no argument wildcards"
                 )
 
 
@@ -543,8 +543,8 @@ class TestSudoersGrant:
 class TestCheckNonrootHelper:
     def test_apply_helper_in_warp_helpers_list(self) -> None:
         text = CHECK_SCRIPT.read_text(encoding="utf-8")
-        assert "vpnbot-warp-split-apply" in text, (
-            "check-nonroot-helper-mode.py must list vpnbot-warp-split-apply in WARP_HELPERS"
+        assert "vpn-bot-warp-split-apply" in text, (
+            "check-nonroot-helper-mode.py must list vpn-bot-warp-split-apply in WARP_HELPERS"
         )
 
     def test_warp_helpers_tuple_contains_apply(self) -> None:
@@ -571,8 +571,8 @@ class TestCheckNonrootHelper:
                     end_pos = i
                     break
         block = chunk[:end_pos + 1]
-        assert "vpnbot-warp-split-apply" in block, (
-            f"vpnbot-warp-split-apply not found in WARP_HELPERS block:\n{block}"
+        assert "vpn-bot-warp-split-apply" in block, (
+            f"vpn-bot-warp-split-apply not found in WARP_HELPERS block:\n{block}"
         )
 
 
@@ -655,8 +655,8 @@ class TestSettings:
         from config.settings import load_settings
         settings = load_settings()
         from pathlib import Path
-        assert settings.warp_split_list_path == Path("/etc/vpnbot/warp-split.list")
-        assert settings.warp_split_apply_helper_path == Path("/usr/local/sbin/vpnbot-warp-split-apply")
+        assert settings.warp_split_list_path == Path("/etc/vpn-bot/warp-split.list")
+        assert settings.warp_split_apply_helper_path == Path("/usr/local/sbin/vpn-bot-warp-split-apply")
 
     def test_load_settings_custom_paths(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         import os

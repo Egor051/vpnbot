@@ -2,7 +2,7 @@
 
 The tunnel IP that the proxies must source their egress from is the WARP config's
 ``[Interface] Address`` — it is never hardcoded. The shell helper
-``vpnbot-warp-routes`` reads the same value for its ``ip rule``/SNAT setup; this
+``vpn-bot-warp-routes`` reads the same value for its ``ip rule``/SNAT setup; this
 module is the Python counterpart used by the Xray config writer to emit
 ``sendThrough`` on the freedom outbound.
 """

@@ -1,0 +1,15 @@
+[Unit]
+Description=vpn-bot WARP selective-split (listed prefixes via WARP, rest direct)
+After=warp-routes.service network-online.target
+Wants=network-online.target
+PartOf=warp-routes.service
+ConditionPathExists=/etc/vpn-bot/warp-split.list
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vpn-bot-warp-split apply
+ExecStop=/usr/local/sbin/vpn-bot-warp-split revert
+
+[Install]
+WantedBy=multi-user.target

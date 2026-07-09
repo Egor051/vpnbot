@@ -6,7 +6,7 @@ exactly like the ``/warp_split_*`` commands do. This module never touches
 ip/route/iptables, never writes the list file, and never calls the privileged
 helper directly — all of that already lives behind the manager.
 
-The split list is governed by its own ``vpnbot-warp-split`` service, so this GUI
+The split list is governed by its own ``vpn-bot-warp-split`` service, so this GUI
 is reachable from the WARP section regardless of the WARP tunnel-module state.
 
 Every callback and the FSM input handler is superadmin-gated: a callback can be

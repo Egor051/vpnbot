@@ -148,6 +148,13 @@ def _prepare_target_dir() -> None:
     for d in reversed(to_create):
         d.mkdir(mode=0o700, exist_ok=True)
         os.chmod(d, 0o700)
+    # The leaf config dir must be traversable by whatever user the xray service runs
+    # as (root, nobody, or a dedicated user) so it can open the 0640 config. Widen the
+    # leaf to 0755 (standard xray packaging) — only when WE created it, never touching
+    # an operator-provisioned dir. The secret stays in the 0640 file, which a 0755
+    # directory does not expose; freshly-created intermediate dirs stay 0700.
+    if to_create:
+        os.chmod(CANONICAL_CONFIG.parent, 0o755)
 
 
 def backup_current() -> Path | None:

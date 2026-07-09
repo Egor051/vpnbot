@@ -108,7 +108,7 @@ class AwgConfigAdapter:
         self.shell = shell
         self.persistent_keepalive = persistent_keepalive
         self.helper_runner = helper_runner
-        self.helper_path = helper_path or Path("/usr/local/sbin/vpnbot-awg-apply")
+        self.helper_path = helper_path or Path("/usr/local/sbin/vpn-bot-awg-apply")
         self.helper_staging_dir = helper_staging_dir or Path("/run/vpn-bot/awg")
 
     async def generate_private_key(self) -> str:

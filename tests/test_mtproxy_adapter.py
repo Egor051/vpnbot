@@ -119,7 +119,7 @@ def test_mtproxy_adapter_apply_writes_managed_files_and_restarts(tmp_path: Path)
         assert "a" * 32 not in (tmp_path / "mtproxy.env").read_text(encoding="utf-8")
         assert ("daemon-reload", None) not in systemctl.calls
         assert ("restart", "mtproxy") in systemctl.calls
-        assert not (tmp_path / "mtproxy.service.d" / "vpnbot-managed.conf").exists()
+        assert not (tmp_path / "mtproxy.service.d" / "vpn-bot-managed.conf").exists()
         if os.name == "posix":
             assert stat.S_IMODE((tmp_path / "managed-secrets.json").stat().st_mode) == 0o600
 
@@ -172,20 +172,23 @@ def test_vpn_bot_service_write_paths_are_narrow() -> None:
     nonroot_rw = [line for line in nonroot.splitlines() if line.startswith("ReadWritePaths=")]
     if nonroot_rw:
         read_write = nonroot_rw[0]
-        assert "/etc/mtproxy/vpnbot" not in read_write
+        assert "/etc/mtproxy/vpn-bot" not in read_write
         assert "/etc/systemd/system" not in read_write
 
 
 def test_mtproxy_systemd_dropin_template_contains_no_raw_secret_surface() -> None:
-    dropin = Path("deploy/mtproxy-vpnbot-managed.conf").read_text(encoding="utf-8")
+    dropin = Path("deploy/mtproxy-vpn-bot-managed.conf").read_text(encoding="utf-8")
     assert "-S" not in dropin
     assert "MTPROTO_SECRET" not in dropin
     assert "managed-secrets.json" not in dropin
-    # Service must run as an unprivileged user, not root (empty User= would default to root)
-    assert "User=\n" not in dropin
-    assert "Group=\n" not in dropin
-    assert "User=mtproxy" in dropin
-    assert "Group=mtproxy" in dropin
+    # Root-wrapper model: the drop-in clears any inherited User=/Group= (empty) so
+    # systemd runs the wrapper as root; the wrapper reads the root-owned managed files
+    # and drops the proxy to MTPROTO_RUN_USER via `-u`. A non-root User= here could
+    # neither exec the 0700 root:root wrapper nor read the root-owned files.
+    assert "User=\n" in dropin
+    assert "Group=\n" in dropin
+    assert "User=mtproxy" not in dropin
+    assert "Group=mtproxy" not in dropin
     assert "ExecStart=/opt/vpn-service/scripts/run-mtproxy-managed" in dropin
 
 
