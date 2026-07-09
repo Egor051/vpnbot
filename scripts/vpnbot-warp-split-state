@@ -5,7 +5,7 @@
 # table T (the per-prefix `<prefix> dev out-warp` routes) plus a root-owned intent
 # marker. It NEVER touches awg-quick@out-warp, the out-warp interface/process, the
 # anti-loop endpoint route, the ip rules, or the NAT/FORWARD chains — those stay
-# exactly as the observer model and #160/#161 left them. All table-T mutation is
+# exactly as the observer model left them. All table-T mutation is
 # delegated to `vpnbot-warp-split` (apply), which honours the marker.
 #
 # Verbs:

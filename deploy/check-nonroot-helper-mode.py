@@ -489,7 +489,7 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     reporter = Reporter(json_mode=args.json_output)
 
-    # Package 5D checks
+    # Unit / sudoers / helper ownership checks
     check_unit(_resolve_unit_path(args.unit, repo_root), reporter)
     check_sudoers(Path(args.sudoers), reporter)
     check_helpers(reporter)
@@ -498,7 +498,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         reporter.warn("runtime ownership checks skipped on non-POSIX host")
 
-    # Package 7 checks
+    # Runtime state / DB / backend config checks
     check_run_dir(reporter, args.mode)
     check_env_file(Path(args.repo), reporter)
     db_path = Path(args.db) if args.db else Path(args.repo) / "data" / "vpn.db"

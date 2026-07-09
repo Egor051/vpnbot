@@ -4,7 +4,7 @@
 # vpn.db and must keep running even when the bot (vpn-bot.service) is down. It
 # binds loopback only and opens the DB read-only.
 #
-# Operator install (Package PART B):
+# Operator install:
 #   sudo cp deploy/vpnbot-hy2-auth.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now vpnbot-hy2-auth
