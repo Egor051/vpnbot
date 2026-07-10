@@ -39,8 +39,8 @@ STRINGS: dict[str, str] = {
     "one_key_one_device": "<b>⚠️ 1 KEY = 1 DEVICE</b>",
     "note_create_warning": "<b>We recommend filling in this field to avoid confusing your keys.</b>",
     "server_restart_warning": (
-        "<b>⚠️ The server restarts on even-numbered dates at 04:00 MSK. "
-        "The restart takes a few minutes; your connection may briefly drop during this time.</b>"
+        "<b>⚠️ The server restarts on dates that are multiples of five at 04:00 MSK. "
+        "The restart takes a few tens of seconds; your connection may briefly drop during this time.</b>"
     ),
     # ── common field labels ───────────────────────────────────────────────────
     "field_status": "Status",
@@ -134,9 +134,9 @@ STRINGS: dict[str, str] = {
     "unblock_manual_check": "<b>Manual VPN check required</b>",
     "unblock_manual_check_desc": "There may be previously active or problematic VPN keys.",
     "unblock_warning_last_error": "Last block error: {at}",
-    "unblock_no_auto_fix": "Unblocking will restore bot access, but will not fix Xray/AWG runtime automatically.",
+    "unblock_no_auto_fix": "Unblocking will restore bot access, but will not fix Xray/AWG on the server automatically.",
     "unblock_confirm_success": "After confirmation, the user will regain access to the bot.",
-    "unblock_success": "User unblocked. FSM state cleared, flows will restart.",
+    "unblock_success": "User unblocked. Unfinished dialogs were reset, flows will restart.",
     "unblock_vpn_check_warning": (
         "Warning: before unblocking, there were signs of incomplete VPN access revocation. "
         "Check Xray/AWG runtime and config manually."
@@ -184,13 +184,13 @@ STRINGS: dict[str, str] = {
     "proxy_recent_errors_header": "<b>Recent issuance errors:</b>",
     "proxy_hidden_old": "Older failed attempts hidden: {n}.",
     "proxy_traffic_header": "<b>Traffic:</b>",
-    "proxy_traffic_unavailable": "Per-user traffic accounting for SOCKS5/MTProto is not available and is not faked.",
+    "proxy_traffic_unavailable": "Per-user traffic accounting for SOCKS5/MTProto is unavailable; no estimated figures are shown.",
     # ── proxy admin stats ─────────────────────────────────────────────────────
     "proxy_stats_no_users": "No users with proxy accesses.",
-    "proxy_stats_hidden_users": "{n} more users hidden.",
-    "proxy_stats_traffic_note": "Traffic: per-user traffic accounting for SOCKS5/MTProto is not available and is not faked.",
+    "proxy_stats_hidden_users": "More users hidden: {n}.",
+    "proxy_stats_traffic_note": "Traffic: per-user traffic accounting for SOCKS5/MTProto is unavailable; no estimated figures are shown.",
     "proxy_socks5_traffic_note": "Traffic: stats unavailable for this proxy type without per-login Dante accounting.",
-    "proxy_runtime_unavailable": "Runtime status: unavailable",
+    "proxy_runtime_unavailable": "Server-side status: unavailable",
     # ── proxy stat access lines ───────────────────────────────────────────────
     "proxy_stat_status": "Status",
     "proxy_stat_issued": "Issued",
@@ -201,7 +201,7 @@ STRINGS: dict[str, str] = {
     "proxy_stat_type": "Type",
     # ── announcement batches ─────────────────────────────────────────────────
     "announce_batches_title": "<b>Pending announcements</b>",
-    "announce_batches_empty": "<b>Pending announcements</b>\n\nNo pending batch records.",
+    "announce_batches_empty": "<b>Pending announcements</b>\n\nNo pending announcement records.",
     # ── private chat guard ────────────────────────────────────────────────────
     "private_only_text": "This operation is available in private chat with the bot only.",
     "admin_private_only_text": "Admin panel is available in private chat with the bot only.",
@@ -223,10 +223,10 @@ STRINGS: dict[str, str] = {
         "Check your internet, the imported profile, the access expiry date, and whether the same key "
         "is being used on another device. Also try toggling the VPN app off and on. If that doesn't help, "
         "try enabling and disabling airplane mode or restarting the device.\n\n"
-        "<b>AWG:</b> if the connection is unstable or won't connect, try lowering the MTU to 1280 "
-        "(use the «Change MTU» button in the key settings).\n\n"
+        "<b>AWG:</b> if the connection is unstable or won't connect, try creating a new AWG key "
+        "and choosing a lower MTU — 1280 — during creation.\n\n"
         "<b>Xray:</b> if the connection won't establish, try changing the fingerprint "
-        "(use the «Change Fingerprint» button in the key settings). Good starting options: Firefox or Edge. "
+        "(use the \"Change Fingerprint\" button in the key settings). Good starting options: Firefox or Edge. "
         "If that doesn't help, try creating a new Xray key with a different transport (TCP / XHTTP) — "
         "the transport choice is offered during key creation.\n\n"
         "<b>Hysteria2:</b> make sure your client supports Hysteria2 (e.g. NekoBox or Hiddify). "
@@ -244,11 +244,11 @@ STRINGS: dict[str, str] = {
     ),
     "faq_revoke_delete": (
         "<b>Revoke</b> — irreversibly disables the key on the server. "
-        "Stats and note are kept in the bot; the key remains visible in the list with the «Revoked» status.\n\n"
+        "Stats and note are kept in the bot; the key remains visible in the list with the \"Revoked\" status.\n\n"
         "<b>Delete</b> — irreversibly removes the key along with its stats and note from the bot."
     ),
     "faq_expired": (
-        "Create a new key via «Create key». "
+        "Create a new key via \"Create key\". "
         "The validity period is chosen at creation time: 7 days, 30 days, custom, or permanent. "
         "Extending an existing key is not possible."
     ),
@@ -258,7 +258,7 @@ STRINGS: dict[str, str] = {
         "other), and statistics and access management get mixed up. Create a separate key for each device."
     ),
     "faq_stats": (
-        "Open «My keys», select the key, and tap «Statistics». "
+        "Open \"My keys\", select the key, and tap \"Statistics\". "
         "You'll see incoming and outgoing traffic volumes. Data is updated automatically."
     ),
     "faq_choice": (
@@ -290,7 +290,7 @@ STRINGS: dict[str, str] = {
         "Increase it (e.g. to 1370 or 1420) if the connection is stable but speed seems low."
     ),
     "faq_note_why": (
-        "A note helps you identify which device a key belongs to — for example, «Laptop» or «Phone». "
+        "A note helps you identify which device a key belongs to — for example, \"Laptop\" or \"Phone\". "
         "Without a note, it's easy to mix up multiple keys."
     ),
     "faq_proxy": (
@@ -308,8 +308,8 @@ STRINGS: dict[str, str] = {
         "off. The message about an already-expired key being auto-revoked is sent regardless."
     ),
     "faq_server_restart": (
-        "Yes, this is expected. The server restarts on even-numbered dates at 04:00 MSK. "
-        "The restart takes a few minutes — the connection briefly drops and reconnects automatically."
+        "Yes, this is expected. The server restarts on dates that are multiples of five at 04:00 MSK. "
+        "The restart takes a few tens of seconds — the connection briefly drops and reconnects automatically."
     ),
     "faq_security": (
         "<b>We don't log your activity.</b> We don't record which sites you open, and we don't "
@@ -325,7 +325,7 @@ STRINGS: dict[str, str] = {
         "To help you faster, please include up front:\n"
         "• the key type (AWG, Xray or Hysteria2) and its number;\n"
         "• your device and app;\n"
-        "• what you've already tried (see «Why doesn't it work?»).\n\n"
+        "• what you've already tried (see \"Why doesn't it work?\").\n\n"
         "We usually reply within a day."
     ),
     "faq_not_found": "Answer not found.",
@@ -408,8 +408,8 @@ STRINGS: dict[str, str] = {
     "fp_updated": "Fingerprint updated.",
     "expiry_invalid": "Invalid period: 1–{max} days",
     "expiry_prompt": "Choose key validity period:",
-    "expiry_custom_prompt": "Enter number of days (1 to 365):",
-    "days_enter_integer": "Enter an integer number of days (1 to 365):",
+    "expiry_custom_prompt": "Enter number of days (1 to {max}):",
+    "days_enter_integer": "Enter an integer number of days (1 to {max}):",
     "days_enter_range": "Enter a number from 1 to {max}:",
     "key_note_prompt": "Enter a note for the key or send <code>-</code> to leave it empty.",
     "choose_key_type": "Choose protocol:",
@@ -443,7 +443,7 @@ STRINGS: dict[str, str] = {
     "backup_sent": "Backup sent.\nSuccessful: {success}\nFailed: {failed}",
     "backup_sent_with_recovery": (
         "Backup sent.\nSuccessful: {success}\nFailed: {failed}\n"
-        "Recovery bundle: {recovery_success} sent, {recovery_failed} failed"
+        "Recovery bundle: {recovery_success} succeeded, {recovery_failed} failed"
     ),
     "moderator_role_removed": "Moderator role removed. User is now a regular approved user.",
     "moderator_role_assigned": "User set as moderator.",
@@ -522,7 +522,7 @@ STRINGS: dict[str, str] = {
     "btn_faq_revoke_delete": "Revoke vs delete a key?",
     "btn_faq_expired": "What if my key has expired?",
     "btn_faq_device": "1 key = 1 device?",
-    "btn_faq_stats": "How to check traffic stats?",
+    "btn_faq_stats": "How to check key statistics?",
     "btn_faq_choice": "Which protocol to choose?",
     "btn_faq_fingerprint": "What is a fingerprint?",
     "btn_faq_mtu": "What is MTU?",
@@ -569,7 +569,7 @@ STRINGS: dict[str, str] = {
     "btn_access_requests": "📋 Access requests",
     "btn_users": "👥 Users",
     "btn_key_stats": "📊 Key statistics",
-    "btn_proxy_status": "🌐 Proxy status",
+    "btn_proxy_status": "🌐 Proxy: status & stats",
     "btn_modules": "⚙️ Protocol modules",
     "btn_maintenance": "🛠 Maintenance mode",
     "btn_backend_diagnostics": "🔍 Backend diagnostics",
@@ -617,7 +617,7 @@ STRINGS: dict[str, str] = {
     "btn_server_status_detailed_off": "🔬 Detailed metrics: OFF",
     # ── maintenance mode ──────────────────────────────────────────────────────
     "btn_maintenance_enable": "🛠 Enable maintenance mode",
-    "btn_maintenance_disable": "✅ Finish works",
+    "btn_maintenance_disable": "✅ End maintenance",
     "btn_maintenance_skip_text": "No text (default)",
     "maintenance_panel_title": "<b>🛠 Maintenance mode</b>",
     "maintenance_status_on": "Status: 🔴 ON",
@@ -625,7 +625,7 @@ STRINGS: dict[str, str] = {
     "maintenance_started_at": "Enabled: {time}",
     "maintenance_current_banner": "Banner shown to users:\n{banner}",
     "maintenance_enable_prompt": (
-        "Send the banner text users will see during the works, "
+        "Send the banner text users will see during maintenance, "
         "or tap \"No text\" to show the default message."
     ),
     "maintenance_default_banner": (
@@ -633,11 +633,11 @@ STRINGS: dict[str, str] = {
         "Please try again later."
     ),
     "maintenance_enabling": "Enabling maintenance mode…",
-    "maintenance_disabling": "Finishing works…",
+    "maintenance_disabling": "Ending maintenance…",
     "maintenance_broadcast_on": "🛠 Dear users!\n\n{banner}",
     "maintenance_broadcast_off": "✅ Maintenance is finished. The bot is available again. Thanks for waiting!",
-    "maintenance_enabled_ok": "Maintenance mode enabled. {count} users notified.",
-    "maintenance_disabled_ok": "Maintenance mode disabled. {count} users notified.",
+    "maintenance_enabled_ok": "Maintenance mode enabled. Users notified: {count}.",
+    "maintenance_disabled_ok": "Maintenance mode disabled. Users notified: {count}.",
     # ── keyboard buttons (keys) ───────────────────────────────────────────────
     "btn_back": "Back",
     "btn_config": "Config",
@@ -677,7 +677,7 @@ STRINGS: dict[str, str] = {
         "<b>⚙️ Protocol modules</b>\n\n"
         "Disabling a protocol <b>permanently deletes</b> all related bot-side data (keys, proxy accesses, database records).\n"
         "Server-side accounts (AWG/Xray configs, Linux users, MTProto secrets) are NOT removed — clean them up manually.\n"
-        "Once disabled, the protocol is completely hidden; only «Backend diagnostics» will show it was disabled.\n\n"
+        "Once disabled, the protocol is completely hidden; only \"Backend diagnostics\" will show it was disabled.\n\n"
         "You can re-enable a protocol at any time."
     ),
     "module_disable_confirm1": (
@@ -789,13 +789,13 @@ STRINGS: dict[str, str] = {
     "btn_yes": "✅ Yes",
     "btn_no": "❌ No",
     "warp_split_panel_title": "<b>WARP split routes</b> — prefixes: {count}",
-    "warp_split_empty_hint": "The list is empty. Tap “➕ Add” to add the first prefix.",
+    "warp_split_empty_hint": "The list is empty. Tap \"➕ Add\" to add the first prefix.",
     "warp_split_add_prompt": (
         "Send one or more IPv4 CIDRs (separated by spaces, commas or newlines).\n"
         "The mask is required, e.g.: <code>91.108.4.0/22 142.250.0.0/15</code>\n\n"
         "Tap the button below or send /cancel to abort."
     ),
-    "warp_split_no_cidr": "No CIDR found. Send prefix(es) or tap “Cancel”.",
+    "warp_split_no_cidr": "No CIDR found. Send prefix(es) or tap \"Cancel\".",
     "warp_split_delete_confirm": "Remove prefix {cidr} from the split routes list?",
     "warp_split_apply_empty": "The list is empty — nothing to apply. Add at least one prefix.",
     "warp_split_applied": "🔄 WARP split routing restarted. Prefixes applied: {count}.",

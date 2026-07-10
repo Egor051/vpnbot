@@ -134,9 +134,9 @@ STRINGS: dict[str, str] = {
     "unblock_manual_check": "<b>Требуется ручная проверка VPN</b>",
     "unblock_manual_check_desc": "Ранее могли остаться активные или проблемные VPN-ключи.",
     "unblock_warning_last_error": "Последняя ошибка блокировки: {at}",
-    "unblock_no_auto_fix": "Разблокировка восстановит доступ к боту, но не исправит Xray/AWG runtime автоматически.",
+    "unblock_no_auto_fix": "Разблокировка восстановит доступ к боту, но не восстановит доступ Xray/AWG на сервере автоматически.",
     "unblock_confirm_success": "После подтверждения пользователь снова получит доступ к боту.",
-    "unblock_success": "Пользователь разблокирован. FSM-состояние очищено, сценарии начнутся заново.",
+    "unblock_success": "Пользователь разблокирован. Незавершённые диалоги сброшены, сценарии начнутся заново.",
     "unblock_vpn_check_warning": (
         "Внимание: перед разблокировкой были признаки неполного отзыва VPN-доступа. "
         "Проверьте Xray/AWG runtime и config вручную."
@@ -184,13 +184,13 @@ STRINGS: dict[str, str] = {
     "proxy_recent_errors_header": "<b>Последние ошибки выдачи:</b>",
     "proxy_hidden_old": "Старые неудачные попытки скрыты: {n}.",
     "proxy_traffic_header": "<b>Трафик:</b>",
-    "proxy_traffic_unavailable": "Per-user traffic accounting для SOCKS5/MTProto сейчас недоступен и не фейкуется.",
+    "proxy_traffic_unavailable": "Учёт трафика по каждому пользователю для SOCKS5/MTProto сейчас недоступен; приблизительные цифры не показываются.",
     # ── proxy admin stats ─────────────────────────────────────────────────────
-    "proxy_stats_no_users": "Пользователей с proxy_accesses нет.",
-    "proxy_stats_hidden_users": "Ещё {n} пользователей скрыто.",
-    "proxy_stats_traffic_note": "Traffic: per-user traffic accounting для SOCKS5/MTProto сейчас недоступен и не фейкуется.",
-    "proxy_socks5_traffic_note": "Traffic: статистика трафика недоступна для этого типа прокси без per-login accounting Dante.",
-    "proxy_runtime_unavailable": "Runtime status: недоступно",
+    "proxy_stats_no_users": "Пользователей с прокси-доступами нет.",
+    "proxy_stats_hidden_users": "Скрыто ещё пользователей: {n}.",
+    "proxy_stats_traffic_note": "Трафик: учёт по каждому пользователю для SOCKS5/MTProto сейчас недоступен; приблизительные цифры не показываются.",
+    "proxy_socks5_traffic_note": "Трафик: статистика трафика недоступна для этого типа прокси без индивидуального (per-login) учёта в Dante.",
+    "proxy_runtime_unavailable": "Состояние на сервере: недоступно",
     # ── proxy stat access lines ───────────────────────────────────────────────
     "proxy_stat_status": "Статус",
     "proxy_stat_issued": "Выдан",
@@ -201,7 +201,7 @@ STRINGS: dict[str, str] = {
     "proxy_stat_type": "Тип",
     # ── announcement batches ─────────────────────────────────────────────────
     "announce_batches_title": "<b>Незавершённые объявления</b>",
-    "announce_batches_empty": "<b>Незавершённые объявления</b>\n\nНезавершённых batch-записей нет.",
+    "announce_batches_empty": "<b>Незавершённые объявления</b>\n\nНезавершённых рассылок нет.",
     # ── private chat guard ────────────────────────────────────────────────────
     "private_only_text": "Эта операция доступна только в личном чате с ботом.",
     "admin_private_only_text": "Админ-панель доступна только в личном чате с ботом.",
@@ -223,8 +223,8 @@ STRINGS: dict[str, str] = {
         "Проверьте интернет, правильность импортированного профиля, дату окончания доступа и не используется ли "
         "этот же ключ на другом устройстве. Также попробуйте выключить и включить VPN-приложение. Если и это не "
         "помогло, попробуйте включить и выключить \"режим самолета\" или перезагрузить устройство.\n\n"
-        "<b>AWG:</b> если соединение нестабильно или не устанавливается, попробуйте уменьшить MTU до 1280 "
-        "(кнопка «Изменить MTU» в настройках ключа).\n\n"
+        "<b>AWG:</b> если соединение нестабильно или не устанавливается, попробуйте создать новый AWG-ключ "
+        "и при создании выбрать меньшее значение MTU — 1280.\n\n"
         "<b>Xray:</b> если соединение не устанавливается, попробуйте сменить fingerprint "
         "(кнопка «Изменить Fingerprint» в настройках ключа). Хорошие варианты для начала: Firefox или Edge. "
         "Если это не помогло, попробуйте создать новый Xray-ключ с другим транспортом (TCP / XHTTP) — "
@@ -411,8 +411,8 @@ STRINGS: dict[str, str] = {
     "fp_updated": "Fingerprint обновлён.",
     "expiry_invalid": "Недопустимый срок: 1–{max} дней",
     "expiry_prompt": "Выберите срок действия ключа:",
-    "expiry_custom_prompt": "Введите количество дней (от 1 до 365):",
-    "days_enter_integer": "Введите целое число дней (от 1 до 365):",
+    "expiry_custom_prompt": "Введите количество дней (от 1 до {max}):",
+    "days_enter_integer": "Введите целое число дней (от 1 до {max}):",
     "days_enter_range": "Введите число от 1 до {max}:",
     "key_note_prompt": "Введите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
     "choose_key_type": "Выберите протокол:",
@@ -517,7 +517,7 @@ STRINGS: dict[str, str] = {
     "btn_back_to_faq": "К вопросам",
     "btn_cancel": "Отмена",
     "btn_confirm": "Подтвердить",
-    "btn_prev": "Назад",
+    "btn_prev": "‹ Пред.",
     "btn_next": "Далее",
     "btn_faq_connect": "Как подключиться?",
     "btn_faq_trouble": "Почему не работает?",
@@ -717,7 +717,7 @@ STRINGS: dict[str, str] = {
     "btn_warp_split": "🌐 Split-маршруты",
     "btn_warp_killswitch_enable": "🛡 Включить kill-switch",
     "btn_warp_killswitch_disable": "🛡 Выключить kill-switch",
-    "warp_title": "📡 <b>Сокрытие outbound IP</b>",
+    "warp_title": "📡 <b>Скрытие исходящего IP</b>",
     "warp_settings_title": "⚙️ <b>Настройки WARP</b>",
     "warp_status_disabled": "Статус: 🔴 Выключен",
     "warp_intro": (
@@ -771,7 +771,7 @@ STRINGS: dict[str, str] = {
     "warp_upload_too_large": "Файл слишком большой для конфигурации.",
     "warp_upload_read_failed": "Не удалось прочитать файл. Попробуйте ещё раз.",
     "warp_config_invalid": "❌ Конфиг отклонён: {error}",
-    "warp_config_installed": "✅ Конфиг загружен, маршрутов: {count}",
+    "warp_config_installed": "✅ Конфиг установлен, маршрутов: {count}",
     "warp_delete_confirm": "Удалить конфиг WARP и выключить модуль?",
     "warp_deleted": "🗑 Конфиг удалён, модуль выключен.",
     "warp_enabled_ok": "✅ Модуль WARP включён.",
