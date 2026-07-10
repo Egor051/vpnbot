@@ -406,7 +406,7 @@ async def create_key_expiry(callback: CallbackQuery, state: FSMContext, services
 
 
 @router.callback_query(CreateKeyStates.waiting_expiry, F.data == "expiry:custom")
-async def create_key_expiry_custom(callback: CallbackQuery, state: FSMContext) -> None:
+async def create_key_expiry_custom(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Prompt the user to enter a custom number of expiry days."""
     if not await ensure_private_callback(callback):
         return
@@ -416,7 +416,7 @@ async def create_key_expiry_custom(callback: CallbackQuery, state: FSMContext) -
     await state.set_state(CreateKeyStates.waiting_custom_days)
     await safe_edit_message_text(
         callback.message,
-        t("expiry_custom_prompt"),
+        t("expiry_custom_prompt", max=services.settings.key_max_trial_days),
         reply_markup=cancel_keyboard(),
     )
 
@@ -432,7 +432,7 @@ async def create_key_custom_days(message: Message, state: FSMContext, services: 
         await _ensure_can_enter_create(message.from_user.id, services)
         text = (message.text or "").strip()
         if not text.isdigit():
-            await message.answer(t("days_enter_integer"))
+            await message.answer(t("days_enter_integer", max=services.settings.key_max_trial_days))
             return
         days = int(text)
         max_days = services.settings.key_max_trial_days
