@@ -19,8 +19,9 @@ RU = ru_mod.STRINGS
 EN = en_mod.STRINGS
 
 _PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
-_OPEN_TAG = re.compile(r"<([a-zA-Z]+)>")
-_CLOSE_TAG = re.compile(r"</([a-zA-Z]+)>")
+# Matches a bare open (``<b>``) or close (``</b>``) tag; group(1) is the optional
+# leading slash, group(2) the tag name.
+_TAG = re.compile(r"<(/?)([a-zA-Z]+)>")
 
 
 def _placeholders(text: str) -> set[str]:
@@ -44,15 +45,38 @@ def test_placeholders_match_per_key() -> None:
     assert not mismatches, f"placeholder drift between ru/en: {mismatches}"
 
 
+def _first_tag_imbalance(value: str) -> str | None:
+    """Return a description of the first tag-nesting error, or None if balanced.
+
+    Uses a LIFO stack so *mis-nested* tags (e.g. ``<b><i>x</b></i>``) are caught,
+    not merely count mismatches — a plain multiset comparison treats that broken
+    string as balanced and would let a parse_mode=HTML render error through.
+    """
+    stack: list[str] = []
+    for match in _TAG.finditer(value):
+        is_close = match.group(1) == "/"
+        name = match.group(2)
+        if is_close:
+            if not stack:
+                return f"unexpected </{name}> with no matching open tag"
+            top = stack.pop()
+            if top != name:
+                return f"</{name}> closes <{top}> (mis-nested)"
+        else:
+            stack.append(name)
+    if stack:
+        return f"unclosed tags: {stack}"
+    return None
+
+
 def test_html_tags_balanced() -> None:
     bad: dict[str, str] = {}
     for locale, table in (("ru", RU), ("en", EN)):
         for key, value in table.items():
-            opens = sorted(_OPEN_TAG.findall(value))
-            closes = sorted(_CLOSE_TAG.findall(value))
-            if opens != closes:
-                bad[f"{locale}:{key}"] = f"opens={opens} closes={closes}"
-    assert not bad, f"unbalanced HTML tags: {bad}"
+            problem = _first_tag_imbalance(value)
+            if problem is not None:
+                bad[f"{locale}:{key}"] = problem
+    assert not bad, f"unbalanced/mis-nested HTML tags: {bad}"
 
 
 def test_no_empty_values() -> None:

@@ -44,11 +44,11 @@ def test_helper_scripts_exist_and_are_intended_executable() -> None:
         assert path.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3")
 
 
-def test_helper_scripts_do_not_use_shell_true() -> None:
-    """No helper script uses shell=True, preventing shell injection."""
-    for name in HELPERS:
-        text = (ROOT / "deploy" / "helpers" / name).read_text(encoding="utf-8")
-        assert "shell=True" not in text
+# NOTE: shell-injection safety is asserted behaviourally, not by grepping source
+# for "shell=True" (which os.system / string-built commands would slip past). The
+# tests below check each helper invokes tools with a fixed argv *list* and shell
+# left unset (see test_socks5_set_password_..., test_xray_helper_uses_fixed_target
+# _service_and_argv), which is the property that actually matters.
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +252,14 @@ def test_awg_helper_uses_fixed_target_and_interface(load_helper: object) -> None
 def test_helper_installed_permissions_preserve_vpn_bot_read_access(
     load_helper: object,
 ) -> None:
-    """Installed config files are group-readable by vpn-bot, world-unreadable."""
+    """Installed config files are group-readable by vpn-bot, world-unreadable.
+
+    This pins the shipped permission constants (owner/group/mode) rather than the
+    resulting on-disk stat: a real install chowns to nobody:vpn-bot and needs root,
+    so it cannot run unprivileged in CI. The install/restore roundtrip tests below
+    assert the *effect* (that these constants are applied and are world-unreadable);
+    this test guards the constants themselves from an accidental weakening.
+    """
     xray = load_helper("vpn-bot-xray-apply")  # type: ignore[operator]
     awg = load_helper("vpn-bot-awg-apply")  # type: ignore[operator]
     mtproxy = load_helper("vpn-bot-mtproxy-apply")  # type: ignore[operator]

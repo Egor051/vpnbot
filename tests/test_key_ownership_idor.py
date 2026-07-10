@@ -43,24 +43,6 @@ def _user(user_id: int, role: UserRole = UserRole.APPROVED_USER) -> User:
     return User(user_id, "user", "User", role, "now", "now", None)
 
 
-def _query_service(key: VpnKey, actor_role: UserRole = UserRole.APPROVED_USER) -> VpnKeyQueryService:
-    vpn_keys_mock = AsyncMock()
-    vpn_keys_mock.get_by_id.return_value = key
-
-    users_mock = AsyncMock()
-    users_mock.require_approved_or_admin.side_effect = (
-        lambda uid: asyncio.coroutine(lambda: _user(uid, actor_role))()
-        if False  # replaced below
-        else asyncio.ensure_future(_coro(_user(uid, actor_role)))
-    )
-
-    return VpnKeyQueryService(vpn_keys=vpn_keys_mock, users=users_mock)
-
-
-async def _coro(val: object) -> object:
-    return val
-
-
 def _make_query_service(key: VpnKey, actor_role: UserRole = UserRole.APPROVED_USER) -> VpnKeyQueryService:
     vpn_keys_mock = AsyncMock()
     vpn_keys_mock.get_by_id.return_value = key
@@ -76,7 +58,7 @@ def _make_query_service(key: VpnKey, actor_role: UserRole = UserRole.APPROVED_US
 
 
 # ---------------------------------------------------------------------------
-# G3 — IDOR: get_for_actor
+# IDOR: get_for_actor
 # ---------------------------------------------------------------------------
 
 
@@ -136,7 +118,7 @@ def test_get_for_actor_missing_key_raises_not_found() -> None:
 
 
 # ---------------------------------------------------------------------------
-# G3 — IDOR: NotesService.update_key_note
+# IDOR: NotesService.update_key_note
 # ---------------------------------------------------------------------------
 
 

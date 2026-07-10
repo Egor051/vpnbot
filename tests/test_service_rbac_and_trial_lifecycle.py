@@ -1,12 +1,15 @@
-"""Regression tests for the service-layer review fixes.
+"""Service-layer access-control and trial-lifecycle regression tests.
 
 Covers:
-  H1  moderator-initiated block_user revokes backend access (system revokers)
-  H3  concurrent trial approval provisions exactly one key
-  M1  trial decisions require superadmin at the service layer
-  M3  scheduled announcements skip recipients blocked after scheduling
-  M5  AuditService.recent_for_entity is access-gated
-  L1  UserService.set_role refuses to block (must use block_user)
+  - moderator-initiated block_user revokes backend access (system revokers)
+  - concurrent trial approval provisions exactly one key
+  - trial decisions require superadmin at the service layer
+  - scheduled announcements skip recipients blocked after scheduling
+  - AuditService.recent_for_entity is access-gated
+  - UserService.set_role refuses to block (must use block_user)
+  - assorted follow-up fixes: RBAC fail-closed wiring, backend-error redaction in
+    audit, degraded re-check under the serialization lock, trial rollback on
+    post-provision failure
 """
 from __future__ import annotations
 
@@ -42,6 +45,7 @@ from services.users import UserService
 from repositories.announcements import AnnouncementRepository
 from repositories.protocol_modules import ProtocolModulesRepository
 
+from conftest import wait_until_lock_contended
 from test_proxy_services import _LockOnlyAdapter, _settings
 
 
@@ -56,7 +60,7 @@ async def _user(repo: UserRepository, uid: int, role: UserRole) -> None:
     await repo.upsert_profile(TelegramUserProfile(uid, f"u{uid}", f"U{uid}"), role, "now")
 
 
-# --------------------------------------------------------------------------- H1
+# --- moderator block revokes backend keys and proxies -----------------------
 
 
 async def test_moderator_block_revokes_keys_and_proxies(tmp_path: Path) -> None:
@@ -155,7 +159,7 @@ async def test_public_socks5_revoke_requires_superadmin_but_system_does_not(tmp_
         await db.close()
 
 
-# --------------------------------------------------------------------------- H3 / M1
+# --- concurrent trial approval / trial-decision RBAC ------------------------
 
 
 class _FakeXray:
@@ -243,7 +247,7 @@ async def test_trial_decisions_require_superadmin(tmp_path: Path) -> None:
         await db.close()
 
 
-# --------------------------------------------------------------------------- M5
+# --- audit recent_for_entity access gating ----------------------------------
 
 
 async def test_recent_for_entity_requires_superadmin(tmp_path: Path) -> None:
@@ -266,7 +270,7 @@ async def test_recent_for_entity_requires_superadmin(tmp_path: Path) -> None:
         await db.close()
 
 
-# --------------------------------------------------------------------------- L1
+# --- set_role must refuse to block (block_user is the only path) ------------
 
 
 async def test_set_role_refuses_to_block(tmp_path: Path) -> None:
@@ -287,7 +291,7 @@ async def test_set_role_refuses_to_block(tmp_path: Path) -> None:
         await db.close()
 
 
-# --------------------------------------------------------------------------- M3
+# --- scheduled announcements skip recipients blocked after scheduling -------
 
 
 async def test_scheduled_announcement_skips_user_blocked_after_scheduling(tmp_path: Path) -> None:
@@ -394,7 +398,7 @@ async def test_disable_protocol_revokes_backend_before_delete(tmp_path: Path) ->
 
 
 # ===========================================================================
-# P4 review fixes
+# --- follow-up service-layer fixes ------------------------------------------
 # ===========================================================================
 
 
@@ -454,7 +458,7 @@ class _FakeXrayTrackingRevoke(_FakeXray):
 
 
 async def test_trial_list_and_count_require_superadmin(tmp_path: Path) -> None:
-    """F2 (P4-010): reading trial requests is gated at the service, not only in the UI."""
+    """reading trial requests is gated at the service, not only in the UI."""
     db = await _db(tmp_path)
     try:
         users_repo = UserRepository(db)
@@ -478,7 +482,7 @@ async def test_trial_list_and_count_require_superadmin(tmp_path: Path) -> None:
 
 
 async def test_protocol_enable_disable_fail_closed_without_rbac(tmp_path: Path) -> None:
-    """F1 (P4-004): enable/disable must refuse when the RBAC dependency is unwired."""
+    """enable/disable must refuse when the RBAC dependency is unwired."""
     db = await _db(tmp_path)
     try:
         svc = ProtocolModulesService(ProtocolModulesRepository(db), db)
@@ -494,7 +498,7 @@ async def test_protocol_enable_disable_fail_closed_without_rbac(tmp_path: Path) 
 
 
 async def test_block_user_audit_reports_proxy_incomplete_when_unwired(tmp_path: Path) -> None:
-    """F4 (P4-006): proxy_revoke_complete is False when proxy revokers are not wired."""
+    """proxy_revoke_complete is False when proxy revokers are not wired."""
     db = await _db(tmp_path)
     try:
         users_repo = UserRepository(db)
@@ -523,7 +527,7 @@ async def test_block_user_audit_reports_proxy_incomplete_when_unwired(tmp_path: 
 
 
 async def test_inspect_unblock_risk_flags_inactive_static_mtproto(tmp_path: Path) -> None:
-    """F6 (P4-002): a deactivated static-MTProto access (working shared secret) is
+    """a deactivated static-MTProto access (working shared secret) is
     surfaced as residual-access risk before unblocking."""
     db = await _db(tmp_path)
     try:
@@ -557,7 +561,7 @@ async def test_inspect_unblock_risk_flags_inactive_static_mtproto(tmp_path: Path
 
 
 async def test_xray_create_failure_audit_redacts_error(tmp_path: Path) -> None:
-    """F5 (P4-008): a raw backend error string is redacted before landing in the audit."""
+    """a raw backend error string is redacted before landing in the audit."""
     from services.xray import XrayService
 
     db = await _db(tmp_path)
@@ -590,7 +594,7 @@ async def test_xray_create_failure_audit_redacts_error(tmp_path: Path) -> None:
 
 
 async def test_xray_create_rechecks_degraded_under_lock(tmp_path: Path) -> None:
-    """F7 (P4-003): a backend that becomes degraded while a create waits on the
+    """a backend that becomes degraded while a create waits on the
     serialization lock must cause that create to be refused."""
     from services.backend_health import BackendHealth
     from services.xray import XrayService
@@ -626,7 +630,7 @@ async def test_xray_create_rechecks_degraded_under_lock(tmp_path: Path) -> None:
 
         task = asyncio.create_task(do_create())
         await started.wait()
-        await asyncio.sleep(0.05)  # let the create block on _lock
+        await wait_until_lock_contended(xray._lock)  # create is now parked on _lock
         bh.mark_degraded(VpnKeyType.XRAY, "reconcile in progress")
         xray._lock.release()
 
@@ -637,7 +641,7 @@ async def test_xray_create_rechecks_degraded_under_lock(tmp_path: Path) -> None:
 
 
 async def test_trial_approve_rolls_back_key_when_mark_approved_fails(tmp_path: Path) -> None:
-    """F8 (P4-012): if the request cannot be marked approved after provisioning, the
+    """if the request cannot be marked approved after provisioning, the
     just-created key is rolled back so no live key survives a still-pending request."""
     db = await _db(tmp_path)
     try:
