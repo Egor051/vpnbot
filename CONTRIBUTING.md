@@ -12,7 +12,7 @@
 
 ```bash
 git clone https://github.com/Egor051/vpnbot.git
-cd vpn-bot
+cd vpnbot
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
@@ -82,10 +82,10 @@ All modules under those packages require full type annotations
 make audit
 ```
 
-This runs `pip_audit` over `requirements.txt` + `constraints.txt` with the
-documented `--ignore-vuln` list (see `PIP_AUDIT_IGNORES` in the `Makefile`).
-Run it before adding or upgrading a dependency. If you add a `--ignore-vuln`
-entry, document why and link the upstream tracking issue.
+This runs `pip_audit` over `requirements.txt` + `constraints.txt` with no
+ignored advisories (`make audit` carries no `--ignore-vuln` exceptions). Run it
+before adding or upgrading a dependency; a clean run must report no known
+vulnerabilities.
 
 ## Running Tests
 

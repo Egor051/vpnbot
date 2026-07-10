@@ -122,16 +122,17 @@ create a `vpn-bot` system user or install sudo helpers for this model.
 
 ## Non-root deployment model (privilege-helper mode, `User=vpn-bot`)
 
-Update `deploy/vpn-bot.service` to set `User=vpn-bot`, `Group=vpn-bot`,
-`ProtectSystem=strict`, and restore `ReadWritePaths` before deploying. Then follow these
-steps:
+Install `deploy/vpn-bot.nonroot.example.service` as the active unit — it is the
+ready-made non-root profile (`User=vpn-bot`, `Group=vpn-bot`, `ProtectSystem=strict`,
+`ReadWritePaths`). The shipped `deploy/vpn-bot.service` is the root+api default; if you
+install from it instead, edit it to that non-root profile first. Then follow these steps:
 
 1. Keep `/opt/vpn-service`, deploy files, `.env`, and `.venv` owned by root/operator and not writable by `vpn-bot`.
 2. Create the `vpn-bot:vpn-bot` system identity.
 3. Grant `vpn-bot` write access only to runtime state: `/opt/vpn-service/data`, `/opt/vpn-service/logs` if file logs are enabled, and `/run/vpn-bot` created by systemd.
 4. Install fixed helpers under `/usr/local/sbin` and install `/etc/sudoers.d/vpn-bot` with only those helper entrypoints.
 5. Enable `PRIVILEGE_HELPERS_ENABLED=true`.
-6. Install `deploy/vpn-bot.service`; it is the non-root unit.
+6. Install `deploy/vpn-bot.nonroot.example.service` as `/etc/systemd/system/vpn-bot.service` — the ready-made non-root unit.
 
 Use `XRAY_APPLY_MODE=restart` (or `reload`) in this model; api mode is not honoured by the
 helper. The full privilege-separation architecture is documented in
@@ -170,7 +171,7 @@ Install and start the systemd service:
 
 ```bash
 python deploy/check-nonroot-helper-mode.py
-sudo cp deploy/vpn-bot.service /etc/systemd/system/vpn-bot.service
+sudo cp deploy/vpn-bot.nonroot.example.service /etc/systemd/system/vpn-bot.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now vpn-bot
 sudo systemctl status vpn-bot
@@ -275,7 +276,11 @@ See [Configuration → Hysteria2](configuration.md#hysteria2) for all
 See [Configuration → Hysteria2](configuration.md#hysteria2) for the `.env`
 variables, including the `HYSTERIA2_INSECURE=true` MITM tradeoff.
 
-## Post-deploy smoke checklist
+## Post-deploy smoke checklist (non-root helper mode)
+
+These steps assume the non-root privilege-helper model (`User=vpn-bot`). In root+api mode
+use `systemctl status vpn-bot` plus the bot's admin diagnostics instead (see the note after
+the list).
 
 1. `python deploy/check-nonroot-helper-mode.py` passes.
 2. `systemctl show vpn-bot -p User -p Group -p RuntimeDirectory -p NoNewPrivileges -p ReadWritePaths` shows `vpn-bot`, `vpn-bot`, `vpn-bot`, no enabled `NoNewPrivileges`, and only the expected writable paths.

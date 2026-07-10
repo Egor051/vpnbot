@@ -44,7 +44,7 @@ Docker, Redis, PostgreSQL и тяжёлых ORM.
 
 ```bash
 git clone https://github.com/Egor051/vpnbot.git
-cd vpn-bot
+cd vpnbot
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt -c constraints.txt
 cp .env.example .env
@@ -67,7 +67,7 @@ python main.py
 - Отдельный раздел «Прокси» в Telegram для автоматической выдачи SOCKS5/Dante и ссылок Telegram MTProto Proxy.
 - MTProto поддерживает режим совместимости `static` и режим `managed` с персональными секретами, safe apply и rollback.
 - Опциональный модуль WARP-сокрытия исходящего IP: серверный AmneziaWG-туннель (`out-warp`), скрывающий outbound IP сервера для выбранных «приложений-шпионов», с автоматическим health-based fallback. Выключен по умолчанию — см. [WARP](docs/warp.ru.md).
-- Проверки владельца: пользователи видят свои конфигурации и статистику; деструктивные операции с VPN и прокси — только для администраторов.
+- Проверки владельца: пользователи могут просматривать свои конфигурации и статистику; revoke/delete прокси (SOCKS5/MTProto) — только для администраторов, а revoke/delete VPN-ключей (Xray/AWG/Hysteria2) доступны владельцу ключа и администраторам.
 - Audit log с рекурсивной маскировкой чувствительных значений.
 - Хранилище SQLite с миграциями из `db/schema.sql`, ротируемые локальные логи и развёртывание через systemd.
 - Фоновые задачи: проверка истечения ключей, сбор статистики трафика, обнаружение аномалий, плановые объявления, зашифрованные офсайтовые бэкапы.
@@ -230,9 +230,10 @@ SQLite — локальный backend хранилища; путь по умол
 старте. Текущие таблицы:
 
 `users`, `access_requests`, `vpn_keys`, `trial_key_requests`, `proxy_entries`,
-`proxy_accesses`, `audit_log`, `vpn_key_traffic_stats`, `announcement_batches`,
-`announcement_deliveries`, `protocol_modules`, `warp_settings` (`schema_meta` внутренне
-отслеживает применённую версию схемы).
+`proxy_accesses`, `audit_log`, `vpn_key_traffic_stats`, `deleted_key_traffic_archive`,
+`announcement_batches`, `announcement_deliveries`, `protocol_modules`, `warp_settings`,
+`server_status_settings`, `maintenance_settings` (`schema_meta` внутренне отслеживает
+применённую версию схемы).
 
 ## Документация
 
@@ -260,4 +261,4 @@ Xray/AWG/сервера.
 MIT License. См. [LICENSE](LICENSE).
 
 Сторонние runtime-зависимости сохраняют свои лицензии (все permissive —
-MIT / Apache-2.0 / BSD / MPL-2.0 — совместимы с распространением под MIT).
+MIT / Apache-2.0 / BSD / MPL-2.0 / PSF — совместимы с распространением под MIT).

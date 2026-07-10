@@ -39,7 +39,8 @@ jobs:
           python -m pip install --require-hashes -r constraints-dev-hashed.txt
 
       - name: Audit pinned runtime dependency set
-        # `make audit` carries the documented --ignore-vuln list (see Makefile).
+        # `make audit` runs pip-audit over requirements.txt + constraints.txt with
+        # no --ignore-vuln exceptions (see Makefile).
         run: make audit
 
   tests:

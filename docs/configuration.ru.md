@@ -115,7 +115,7 @@ _Legacy-alias: `AWG_CLIENT_DNS` (= `AWG_DNS`)._
 | `SOCKS5_SYSTEM_USER_SHELL` | Нет | `/usr/sbin/nologin` | Shell для управляемых SOCKS5 Linux-пользователей. |
 | `SOCKS5_SERVICE_NAME` | Нет | `danted` | Имя systemd-сервиса Dante. |
 | `SOCKS5_PUBLIC_NAME` | Нет | `SOCKS5 Proxy` | Отображаемое имя в UI бота. |
-| `SOCKS5_NOTE` | Нет | `SOCKS5 Dante proxy on VDS` | Описание в карточках proxy access. |
+| `SOCKS5_NOTE` | Нет | `SOCKS5 Dante proxy on server` | Описание в карточках proxy access. |
 
 ## MTProto Proxy
 

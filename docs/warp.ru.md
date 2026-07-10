@@ -113,7 +113,7 @@ systemctl enable --now warp-routes.service
 туннеля (`[Interface] Address`, напр. `172.16.0.2`) двумя способами:
 
 - **Source-bind демоны** (Dante, Xray) биндят source egress на IP туннеля; `vpn-bot-warp-routes` добавляет одно правило `ip rule from <tunnel-ip> lookup <T>` и **NAT не нужен** (src уже корректный):
-  - **Xray** — управляется ботом. `config.json` перезаписывается ботом, поэтому ручная правка слетает; вместо неё ставьте `WARP_PROXY_EGRESS=true`, и генератор конфига эмитит `"sendThrough": "<tunnel-ip>"` на **freedom outbound** при каждой записи (трогается только outbound — гибридные REALITY/XHTTP inbound не задеты).
+  - **Xray** — управляется ботом. `config.json` перезаписывается ботом, поэтому ручная правка слетает; вместо неё ставьте `WARP_PROXY_EGRESS_ENABLED=true`, и генератор конфига эмитит `"sendThrough": "<tunnel-ip>"` на **freedom outbound** при каждой записи (трогается только outbound — гибридные REALITY/XHTTP inbound не задеты).
   - **Dante** — *не* управляется ботом (prerequisite). В `/etc/danted.conf` поставьте `external: 172.16.0.2` (IP туннеля) вместо WAN-устройства и установите drop-in `deploy/danted-warp.conf`, чтобы демон стартовал после подъёма туннеля.
 - **MTProto / mtg** не умеет source-bind. `vpn-bot-warp-routes` помечает egress его юнита по cgroup (`fwmark 0x2`) и добавляет **явный SNAT** на IP туннеля, вставкой *перед* широким `out-warp` MASQUERADE. Так как матч `-m cgroup --path` требует существующего cgroup демона, drop-in `deploy/mtproxy-warp.conf` переприменяет правило из привилегированного `ExecStartPost` после старта mtg.
 
@@ -127,7 +127,7 @@ IP туннеля нигде не хардкодится — и `vpn-bot-warp-ro
 > 1. Сделайте бэкап рабочей конфигурации (снимок `.WORKING`).
 > 2. `deploy/setup-nonroot-helper-mode.sh` — обновите хелперы в `/usr/local/sbin`.
 > 3. Переустановите конфиг туннеля, чтобы в `[Interface]` был `Table = auto` (`vpn-bot-warp-install`).
-> 4. Настройте source-bind прокси: `external: 172.16.0.2` в `danted.conf`; `WARP_PROXY_EGRESS=true` в `.env` (Xray `sendThrough` тогда эмитит бот).
+> 4. Настройте source-bind прокси: `external: 172.16.0.2` в `danted.conf`; `WARP_PROXY_EGRESS_ENABLED=true` в `.env` (Xray `sendThrough` тогда эмитит бот).
 > 5. Установите ordering drop-in'ы:
 >    ```bash
 >    install -m 700 -d /etc/systemd/system/danted.service.d

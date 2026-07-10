@@ -269,8 +269,6 @@ backups/
 # Ignore WireGuard/AWG server interface configs (contain private keys)
 wg0.conf
 awg0.conf
-/etc/**/*.conf
-/usr/local/etc/**/*.conf
 # Ignore MTProxy runtime configs (contain secrets)
 /etc/mtproxy/**/*.conf
 # Keep tracked deploy and docs configs

@@ -128,7 +128,7 @@ drop them). The fix makes the inner source equal to the tunnel IP
   `vpn-bot-warp-routes` then adds a single `ip rule from <tunnel-ip> lookup <T>` and
   needs **no** NAT (the source is already correct):
   - **Xray** — bot-managed. `config.json` is rewritten by the bot, so a hand-added
-    field is lost; instead set `WARP_PROXY_EGRESS=true` and the config writer emits
+    field is lost; instead set `WARP_PROXY_EGRESS_ENABLED=true` and the config writer emits
     `"sendThrough": "<tunnel-ip>"` on the **freedom outbound** on every write (only
     the outbound is touched — the hybrid REALITY/XHTTP inbounds are untouched).
   - **Dante** — *not* bot-managed (a prerequisite). Edit `/etc/danted.conf` and set
@@ -154,7 +154,7 @@ safe when a proxy daemon is absent.
 > 3. Re-install the tunnel config so `[Interface]` carries `Table = auto`
 >    (`vpn-bot-warp-install`).
 > 4. Set the proxy source-binds: `external: 172.16.0.2` in `danted.conf`;
->    `WARP_PROXY_EGRESS=true` in `.env` (Xray `sendThrough` is then emitted by the bot).
+>    `WARP_PROXY_EGRESS_ENABLED=true` in `.env` (Xray `sendThrough` is then emitted by the bot).
 > 5. Install the ordering drop-ins:
 >    ```bash
 >    install -m 700 -d /etc/systemd/system/danted.service.d
