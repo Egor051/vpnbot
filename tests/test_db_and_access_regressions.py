@@ -1,3 +1,16 @@
+"""Broad regression suite for the SQLite access layer and user access-control.
+
+Groups several related invariants that were historically bundled together:
+  - transaction gating in the shared aiosqlite connection proxy (writes serialize
+    behind an open transaction; same-task reads do not);
+  - blocked-user middleware and role predicates (blocked users are stopped before
+    handlers, FSM state is cleared, repeat access requests stay single);
+  - approval/rejection rollback and audit ordering;
+  - AWG/Xray config assembly and startup reconciliation edge cases.
+
+This file is large by history; splitting it along the groups above (e.g. a
+dedicated transaction-gating module) is a reasonable future cleanup.
+"""
 
 import asyncio
 import base64
@@ -14,6 +27,7 @@ from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Chat, Message, User as TgUser
 
+from conftest import wait_until_write_parked
 from adapters.awg_config import AwgServerConfig
 from adapters.backup import BackupAdapter
 from adapters.clock import ClockProvider
@@ -270,7 +284,7 @@ def test_shared_connection_write_waits_for_active_transaction(tmp_path: Path) ->
                 task = asyncio.create_task(
                     users.upsert_profile(TelegramUserProfile(telegram_user_id=200, username="u", first_name="U"), UserRole.PENDING_USER, "now")
                 )
-                await asyncio.sleep(0.05)
+                await wait_until_write_parked(db)
                 assert not task.done()
             await asyncio.wait_for(task, timeout=1)
         finally:
@@ -298,7 +312,7 @@ def test_connection_proxy_gates_execute_insert_and_execute_fetchall_writes(tmp_p
 
             async with db.transaction():
                 task = asyncio.create_task(insert_via_execute_insert())
-                await asyncio.sleep(0.05)
+                await wait_until_write_parked(db)
                 assert not task.done()
             await asyncio.wait_for(task, timeout=1)
 
@@ -316,7 +330,7 @@ def test_connection_proxy_gates_execute_insert_and_execute_fetchall_writes(tmp_p
 
             async with db.transaction():
                 task = asyncio.create_task(insert_via_execute_fetchall())
-                await asyncio.sleep(0.05)
+                await wait_until_write_parked(db)
                 assert not task.done()
             await asyncio.wait_for(task, timeout=1)
 
@@ -404,7 +418,7 @@ def test_connection_proxy_treats_with_mutation_as_gated_write(tmp_path: Path) ->
 
             async with db.transaction():
                 task = asyncio.create_task(insert_with_cte())
-                await asyncio.sleep(0.05)
+                await wait_until_write_parked(db)
                 assert not task.done()
             await asyncio.wait_for(task, timeout=1)
             cursor = await db.conn.execute("SELECT username FROM users WHERE telegram_user_id = 501")

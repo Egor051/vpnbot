@@ -1,3 +1,15 @@
+"""Generated key naming and backend failure-recovery regressions.
+
+Covers two related areas:
+  - generated key names / email labels (required alphabet, collision retry, and how
+    the label flows into AWG filenames and Xray link fragments);
+  - backend apply-failure handling: compensation when a create half-applies,
+    degraded-mode gating per backend, and recovery of apply_failed keys once the
+    client/peer is confirmed present or absent.
+
+Large by history; the two areas above are natural split points for a future
+cleanup.
+"""
 
 import asyncio
 import json
@@ -836,7 +848,9 @@ def test_announcement_double_confirm_sends_once(monkeypatch: pytest.MonkeyPatch)
 
         async def send_to_all(self, **kwargs: object) -> SimpleNamespace:
             self.calls += 1
-            await asyncio.sleep(0.01)
+            # Yield once so the second concurrent send interleaves here and hits the
+            # already-sent guard — a deterministic hand-off, not a wall-clock delay.
+            await asyncio.sleep(0)
             return SimpleNamespace(total=1, success=1, failed=0)
 
     async def run() -> None:

@@ -28,7 +28,7 @@ def _adapter() -> DanteUserAdapter:
 
 
 # ---------------------------------------------------------------------------
-# G5 — chpasswd newline injection
+# chpasswd newline injection
 # ---------------------------------------------------------------------------
 
 
@@ -55,7 +55,7 @@ def test_chpasswd_newline_injection_valid_login_passes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# G5 — AWG config note newline injection
+# AWG config note newline injection
 # ---------------------------------------------------------------------------
 
 

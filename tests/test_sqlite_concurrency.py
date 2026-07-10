@@ -7,6 +7,7 @@ import aiosqlite
 import pytest
 
 import init_db
+from conftest import wait_until_write_parked
 from db.database import CURRENT_SCHEMA_VERSION, Database
 from models.dto import TelegramUserProfile
 from models.enums import UserRole
@@ -85,7 +86,7 @@ def test_read_waits_for_other_task_transaction_and_does_not_see_rollback(tmp_pat
             writer_task = asyncio.create_task(writer())
             await started.wait()
             reader_task = asyncio.create_task(UserRepository(db).get_by_id(100))
-            await asyncio.sleep(0.05)
+            await wait_until_write_parked(db)
             assert not reader_task.done()
             release.set()
             with pytest.raises(RuntimeError, match="rollback"):

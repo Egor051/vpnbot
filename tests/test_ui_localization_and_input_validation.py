@@ -1,9 +1,8 @@
-"""Regression tests for the P7 user-interface review fixes.
+"""User-interface regression tests.
 
-Covers: localized service errors (P7-003), note input validation (P7-004),
-friendly key-type labels in stats (P7-005), TTL storage not resurrecting cleared
-sessions (P7-006), protocol-availability gating (P7-007), and locale-aware
-blocked-user banners (P7-002).
+Covers: localized service errors, note input validation, friendly key-type
+labels in stats, TTL storage not resurrecting cleared sessions, protocol-
+availability gating, and locale-aware blocked-user banners.
 """
 import asyncio
 from datetime import datetime, timezone
@@ -26,7 +25,7 @@ from services.errors import AccessDenied
 from services.notes import MAX_NOTE_LENGTH
 
 
-# ── P7-003: service errors rendered in the actor's active locale ──────────────
+# ── service errors rendered in the actor's active locale ──────────────
 def test_service_error_text_renders_key_in_active_locale() -> None:
     exc = AccessDenied("Нельзя смотреть чужой ключ", key="err_foreign_key_view")
     with i18n.use_locale("en"):
@@ -43,7 +42,7 @@ def test_service_error_text_falls_back_to_message_without_key() -> None:
         assert service_error_text(exc) == "Некий сырой текст"
 
 
-# ── P7-004: note validation happens at input, with a fixable message ──────────
+# ── note validation happens at input, with a fixable message ──────────
 def test_note_input_error_rejects_too_long() -> None:
     assert _note_input_error("a" * (MAX_NOTE_LENGTH + 1)) == i18n.t("note_too_long", max=MAX_NOTE_LENGTH)
 
@@ -59,7 +58,7 @@ def test_note_input_error_accepts_valid_and_empty() -> None:
     assert _note_input_error(None) is None
 
 
-# ── P7-005: stats show friendly protocol labels, not the raw enum ─────────────
+# ── stats show friendly protocol labels, not the raw enum ─────────────
 def _key(key_type: VpnKeyType) -> VpnKey:
     return VpnKey(
         id=10,
@@ -94,7 +93,7 @@ def test_traffic_stats_uses_friendly_key_type_labels() -> None:
     assert "AWG ·" not in awg
 
 
-# ── P7-006: clearing a session must not resurrect it in the TTL tracker ───────
+# ── clearing a session must not resurrect it in the TTL tracker ───────
 def test_ttl_storage_cleared_session_not_tracked() -> None:
     async def run() -> None:
         storage = TTLMemoryStorage(ttl_seconds=1800)
@@ -113,7 +112,7 @@ def test_ttl_storage_cleared_session_not_tracked() -> None:
     asyncio.run(run())
 
 
-# ── P7-007: a stale/crafted create callback for a disabled protocol is gated ──
+# ── a stale/crafted create callback for a disabled protocol is gated ──
 def test_protocol_enabled_honors_module_and_settings_flags() -> None:
     async def run() -> None:
         class Modules:
@@ -139,7 +138,7 @@ def test_protocol_enabled_honors_module_and_settings_flags() -> None:
     asyncio.run(run())
 
 
-# ── P7-002: the blocked-user banner renders in the user's active locale ───────
+# ── the blocked-user banner renders in the user's active locale ───────
 def test_blocked_banner_uses_active_locale(monkeypatch: pytest.MonkeyPatch) -> None:
     answers: list[str] = []
 

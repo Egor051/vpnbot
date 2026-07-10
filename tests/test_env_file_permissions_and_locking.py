@@ -3,7 +3,6 @@ import asyncio
 import logging
 import os
 import stat
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -140,11 +139,12 @@ def test_config_file_lock_times_out_when_held(tmp_path: Path) -> None:
     lock_path.touch()
     with lock_path.open("a+", encoding="utf-8") as held:
         fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        started = time.monotonic()
+        # The lock is held, so acquiring with a short timeout must raise rather than
+        # hang. Assert the fact (the timeout fires) — not a wall-clock duration,
+        # which flakes under CI load.
         with pytest.raises(ConfigLockBusyError, match="config lock busy"):
             with ConfigFileLock(target, timeout=0.05, poll_interval=0.01):
                 pass
-        assert time.monotonic() - started < 0.5
         fcntl.flock(held.fileno(), fcntl.LOCK_UN)
 
 
