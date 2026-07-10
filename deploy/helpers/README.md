@@ -109,7 +109,9 @@ that script (or the `install` commands above) after pulling new helper versions.
 
 The `out-warp` interface and its policy routes have **one** owner: **systemd**.
 The interface is brought up by the stock `awg-quick@out-warp.service`; the policy
-rules, table-200 default route and per-daemon marks by `warp-routes.service`. The
+rules, the dynamic routing table's default route (table number read at runtime from
+`awg show out-warp fwmark`, never hardcoded) and per-daemon marks by
+`warp-routes.service`. The
 bot's WARP health monitor runs in **observer mode** (the default,
 `WARP_MONITOR_OBSERVER_MODE=true`): it pings the tunnel, records state in the DB
 and notifies admins, but it **never** runs `awg-quick`, `ip route` or `ip rule`.

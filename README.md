@@ -44,7 +44,7 @@ Minimal run for evaluation (only `BOT_TOKEN` and `ADMIN_IDS` are required to sta
 
 ```bash
 git clone https://github.com/Egor051/vpnbot.git
-cd vpn-bot
+cd vpnbot
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt -c constraints.txt
 cp .env.example .env
@@ -229,9 +229,10 @@ SQLite is the local storage backend; the default path is `/opt/vpn-service/data/
 startup. Current tables:
 
 `users`, `access_requests`, `vpn_keys`, `trial_key_requests`, `proxy_entries`,
-`proxy_accesses`, `audit_log`, `vpn_key_traffic_stats`, `announcement_batches`,
-`announcement_deliveries`, `protocol_modules`, `warp_settings` (`schema_meta` tracks the
-applied schema version internally).
+`proxy_accesses`, `audit_log`, `vpn_key_traffic_stats`, `deleted_key_traffic_archive`,
+`announcement_batches`, `announcement_deliveries`, `protocol_modules`, `warp_settings`,
+`server_status_settings`, `maintenance_settings` (`schema_meta` tracks the applied
+schema version internally).
 
 ## Documentation
 
@@ -258,4 +259,4 @@ discipline, and hardening of the surrounding Xray/AWG/server setup.
 MIT License. See [LICENSE](LICENSE).
 
 Third-party runtime dependencies retain their own licenses (all permissive —
-MIT / Apache-2.0 / BSD / MPL-2.0 — and compatible with MIT distribution).
+MIT / Apache-2.0 / BSD / MPL-2.0 / PSF — and compatible with MIT distribution).
