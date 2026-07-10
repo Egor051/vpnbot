@@ -15,6 +15,7 @@ from bot.handlers.proxy import proxy_confirm, proxy_stats
 from bot.rate_limit import RateLimiter
 from bot.keyboards.admin import admin_panel_keyboard
 from bot.keyboards.proxy import proxy_menu_keyboard
+from i18n import t
 from models.dto import (
     ProxyAccess,
     ProxyAccessStatsItem,
@@ -275,7 +276,7 @@ def test_proxy_admin_combined_shows_status_stats_and_traffic_note() -> None:
     assert "issued: 2" in text
     assert "active: 1" in text
     assert "0123456789abcdef" not in text
-    assert "traffic" in text.lower()
+    assert t("proxy_stats_traffic_note") in text
 
 
 def test_user_proxy_stats_empty_message() -> None:

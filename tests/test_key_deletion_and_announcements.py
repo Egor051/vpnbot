@@ -16,6 +16,7 @@ from bot.keyboards.keys import keys_list_keyboard
 from bot.rate_limit import RateLimitExceeded
 from config.settings import Settings
 from db.database import Database
+from i18n import t
 from models.dto import TelegramUserProfile, User, VpnKey
 from models.enums import UserRole, VpnKeyStatus, VpnKeyType
 from repositories.users import UserRepository
@@ -819,9 +820,9 @@ def test_keys_list_keyboard_target_page_labels() -> None:
     buttons = [button for row in keyboard.inline_keyboard for button in row]
     by_text = {button.text: button.callback_data for button in buttons}
 
-    assert by_text["Назад"] == "keys:list:0"
+    assert by_text[t("btn_prev")] == "keys:list:0"
     assert by_text["2 / 4"] == "noop"
-    assert by_text["Далее"] == "keys:list:2"
+    assert by_text[t("btn_next")] == "keys:list:2"
 
 
 def test_announcement_waits_for_confirmation_before_sending() -> None:
