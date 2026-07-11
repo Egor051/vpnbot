@@ -28,6 +28,19 @@ class _FakeXray:
         return snap
 
 
+class _FakeHysteria:
+    """Traffic Stats /online stub: instantaneous per-key connection counts."""
+
+    def __init__(self, snapshots: list[dict[str, int]]) -> None:
+        self._snapshots = snapshots
+        self.calls = 0
+
+    async def query_online(self) -> dict[str, int]:
+        snap = self._snapshots[min(self.calls, len(self._snapshots) - 1)]
+        self.calls += 1
+        return snap
+
+
 def _xray_user(email: str, up: int, down: int) -> dict[str, int]:
     return {
         f"user>>>{email}>>>traffic>>>uplink": up,
@@ -41,6 +54,65 @@ def test_first_poll_has_no_baseline() -> None:
     svc = OnlineClientsService(awg_adapter=awg, xray_stats=xray, clock=lambda: 0.0)
     result = asyncio.run(svc.get())
     assert result == OnlineClients(wg=None, xray=None, total=None, available=False)
+
+
+def test_first_poll_collecting_even_when_hysteria_reads_zero() -> None:
+    # Regression: Hysteria2's /online is an instantaneous read that returns a
+    # real 0 on the first poll, while WG/Xray have no baseline yet. The snapshot
+    # must still report "collecting" (available=False) instead of a misleading
+    # total that renders "WG: нет данных · Xray: нет данных · Hy2: 0".
+    awg = _FakeAwg([{"p1": (10, 20)}])
+    xray = _FakeXray([_xray_user("a@x", 1, 1)])
+    hysteria = _FakeHysteria([{"k1": 0}])
+    svc = OnlineClientsService(
+        awg_adapter=awg, xray_stats=xray, hysteria_stats=hysteria, clock=lambda: 0.0
+    )
+    result = asyncio.run(svc.get())
+    assert result.available is False
+    assert result.wg is None and result.xray is None and result.total is None
+
+
+def test_second_poll_available_with_all_three_backends() -> None:
+    # After a baseline exists, WG/Xray produce real deltas and the snapshot goes
+    # available, summing all three legs including the instantaneous Hy2 count.
+    awg = _FakeAwg([{"p1": (10, 20)}, {"p1": (30, 40)}])
+    xray = _FakeXray([_xray_user("a@x", 1, 1), _xray_user("a@x", 5, 5)])
+    hysteria = _FakeHysteria([{"k1": 1}, {"k1": 1}])
+    clock = count(0, 100)  # each call advances well past the TTL
+    svc = OnlineClientsService(
+        awg_adapter=awg, xray_stats=xray, hysteria_stats=hysteria, clock=lambda: next(clock)
+    )
+
+    asyncio.run(svc.get())  # establishes baseline (collecting)
+    result = asyncio.run(svc.get())
+    assert result.wg == 1
+    assert result.xray == 1
+    assert result.hysteria2 == 1
+    assert result.total == 3
+    assert result.available is True
+
+
+def test_broken_delta_leg_does_not_trap_snapshot_in_collecting() -> None:
+    # A permanently-failing counter-based leg reads as unavailable (None), not
+    # "collecting", so once the working leg has a baseline the snapshot becomes
+    # available with the broken leg shown as "no data" rather than stuck forever.
+    class _BrokenAwg:
+        async def list_transfer(self) -> dict[str, tuple[int, int]]:
+            raise RuntimeError("interface down")
+
+    xray = _FakeXray([_xray_user("a@x", 1, 1), _xray_user("a@x", 5, 5)])
+    hysteria = _FakeHysteria([{"k1": 0}, {"k1": 0}])
+    clock = count(0, 100)
+    svc = OnlineClientsService(
+        awg_adapter=_BrokenAwg(), xray_stats=xray, hysteria_stats=hysteria, clock=lambda: next(clock)
+    )
+
+    first = asyncio.run(svc.get())  # xray still collecting its baseline
+    assert first.available is False
+    second = asyncio.run(svc.get())
+    assert second.available is True
+    assert second.wg is None  # broken leg — unavailable, not collecting
+    assert second.xray == 1
 
 
 def test_second_poll_counts_increased_identities() -> None:
