@@ -18,7 +18,7 @@ optional with the shown default.
 | Variable | Required | Default | Description | Example |
 |---|---|---|---|---|
 | `BOT_TOKEN` | **Yes** | — | Telegram Bot API token from BotFather. 🔒 | `123456:ABC-DEF...` |
-| `ADMIN_IDS` | **Yes** | — | Comma-separated list of Telegram user IDs with full admin access. | `123456,789012` |
+| `ADMIN_IDS` | **Yes** | — | Comma-separated Telegram user IDs with **superadmin** access. Additional moderators are assigned in-bot by a superadmin (no env var). | `123456,789012` |
 | `DB_PATH` | No | `/opt/vpn-service/data/vpn.db` | Path to the SQLite database file. | `/opt/vpn-service/data/vpn.db` |
 | `SQLITE_SYNCHRONOUS` | No | `FULL` | SQLite synchronous mode: `FULL`, `NORMAL`, or `EXTRA`. `FULL` is safest. | `FULL` |
 | `LOG_DIR` | No | `/opt/vpn-service/logs` | Directory for rotating log files. | `/opt/vpn-service/logs` |
@@ -244,6 +244,8 @@ can safely set `HYSTERIA2_INSECURE=false`. Until then, keep this `true`.
 | `KEY_EXPIRY_NOTIFY_DAYS` | No | _(empty)_ | Comma-separated list of days before expiry to send user notifications. | `7,3,1` |
 | `KEY_MAX_TRIAL_DAYS` | No | `365` | Maximum duration (days) for trial VPN keys (1–3650). | `30` |
 
+> **Trial access flow.** An approved user without an active key can request a short-lived *trial* key; a superadmin or moderator approves/rejects it from the admin panel, and the granted key is capped at `KEY_MAX_TRIAL_DAYS`. Per-user trial eligibility is tracked (`users.trial_quota_reset_at`) so trials cannot be farmed; the requests live in the `trial_key_requests` table.
+
 ## Announcements
 
 | Variable | Required | Default | Description | Example |
@@ -256,7 +258,7 @@ can safely set `HYSTERIA2_INSECURE=false`. Until then, keep this `true`.
 |---|---|---|---|---|
 | `OFFSITE_BACKUP_ENCRYPTION_KEY` | No | _(disabled)_ | 🔒 Fernet key for encrypting off-site DB backups. Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Leave empty to disable off-site backups. | _(44-char base64url)_ |
 | `OFFSITE_BACKUP_INTERVAL` | No | `604800` | Interval (seconds) between off-site backup uploads (0 = disabled). Default is 7 days. | `604800` |
-| `OFFSITE_BACKUP_INCLUDE_CONFIGS` | No | `true` | Also send a second encrypted **recovery bundle** (`.env` + Xray/AWG/MTProto/WARP configs) alongside the DB backup so the service can be rebuilt on a clean server. Encrypted with the same key; delivered as `vpnbot_recovery_*.tar.gz.enc`. | `true` |
+| `OFFSITE_BACKUP_INCLUDE_CONFIGS` | No | `true` | Also send a second encrypted **recovery bundle** (`.env` + Xray/AWG/Hysteria2/MTProto/WARP configs) alongside the DB backup so the service can be rebuilt on a clean server. Encrypted with the same key; delivered as `vpnbot_recovery_*.tar.gz.enc`. | `true` |
 | `OFFSITE_BACKUP_ENV_PATH` | No | _(auto)_ | 🔒 Path to the `.env` placed in the recovery bundle. Empty = auto-detect the `.env` loaded at startup. | `/opt/vpn-service/.env` |
 
 ## Anomaly Detection

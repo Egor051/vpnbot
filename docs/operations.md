@@ -144,6 +144,14 @@ correctly.
 
 If rollback is needed, see [Rollback after a bad deploy](#rollback-after-a-bad-deploy) below.
 
+## Maintenance mode (bot lockdown)
+
+A superadmin can put the whole bot into maintenance from the admin panel (🛠 *Maintenance mode* → enable). While it is on, `MaintenanceModeMiddleware` drops every incoming update from non-superadmins and replies with the maintenance banner; only the superadmins in `ADMIN_IDS` keep full access. The state is persisted in the `maintenance_settings` table, so it **survives a bot restart** — turn it off from the panel when you are done. Use it as a bot-level lockdown for safe DB or backend edits; it is independent of the systemd unit and of backend DEGRADED state (which gates a single backend rather than the whole bot).
+
+## Server status panel
+
+The admin panel's server-status view shows a real-time snapshot (CPU, disk, network, online clients). A superadmin toggle enables the detailed view; the choice is persisted in `server_status_settings.detailed_enabled`. It is a read-only observability panel and never changes backend state.
+
 ## Backup
 
 Back up at least these files before deploys, migrations, and manual backend edits:
@@ -190,7 +198,7 @@ The scheduled off-site backup (`OFFSITE_BACKUP_ENCRYPTION_KEY`) delivers two enc
 documents to admins via Telegram:
 
 - `vpnbot_backup_*.db.enc` — full SQLite snapshot (users, keys, proxy accesses, traffic stats, settings). Per-client data is re-applied into the live configs on startup.
-- `vpnbot_recovery_*.tar.gz.enc` — the **recovery bundle** (when `OFFSITE_BACKUP_INCLUDE_CONFIGS=true`): `.env`, Xray `config.json` (REALITY private key + shortIds), AWG `.conf` (interface private key), managed MTProto secrets, and the WARP config. These are the irreplaceable server-side secrets that are **not** in the DB — without them a rebuilt server issues new keypairs and breaks every already-issued client. Unreadable/missing files are skipped and recorded in the bundle's `MANIFEST.json`.
+- `vpnbot_recovery_*.tar.gz.enc` — the **recovery bundle** (when `OFFSITE_BACKUP_INCLUDE_CONFIGS=true`): `.env`, Xray `config.json` (REALITY private key + shortIds), AWG `.conf` (interface private key), managed MTProto secrets, the WARP config, and (when Hysteria2 is enabled) the hysteria-server `config.yaml`. These are the irreplaceable server-side secrets that are **not** in the DB — without them a rebuilt server issues new keypairs and breaks every already-issued client. Unreadable/missing files are skipped and recorded in the bundle's `MANIFEST.json`.
 
 To restore from the bundle on a clean server:
 

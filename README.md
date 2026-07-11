@@ -60,17 +60,20 @@ follow the [Deployment](#deployment) section rather than this evaluation flow.
 ## Features
 
 - Telegram user registration and access approval flow.
-- Admin panel for pending requests, users, key issuance, audit, stats, and announcements.
+- Admin panel for pending requests, users, key issuance, audit, stats, announcements, backend diagnostics, protocol modules, and the WARP panel.
 - Xray VLESS Reality key creation, config delivery, revocation, deletion, and startup reconciliation.
 - AmneziaWG key creation, client config delivery, revocation, deletion, IP allocation, and startup reconciliation.
 - Hysteria2 (apernet v2) key creation, link delivery, revocation, and deletion with **no data-plane restart**: a standalone `hy2_auth` HTTP endpoint authenticates handshakes against the live database, so revokes take effect on the next handshake. Disabled by default — see [Deployment](docs/deployment.md).
 - Separate one-page Telegram section "Прокси" for SOCKS5/Dante auto-issue and Telegram MTProto Proxy links.
 - MTProto supports `static` compatibility mode and `managed` mode with per-user secrets, safe apply, and rollback.
 - Optional WARP outbound-IP masking module: server-side AmneziaWG (`out-warp`) tunnel that hides the server's outbound IP for selected "spy" apps, with automatic health-based fallback. Disabled by default — see [WARP](docs/warp.md).
+- Maintenance mode: a superadmin can put the whole bot into maintenance from the admin panel — everyone except superadmins gets a maintenance banner and their updates are dropped; the state is persisted (`maintenance_settings`) and survives restarts.
+- Real-time server-status panel (CPU, disk, network, online clients) with an optional detailed-view toggle.
+- Roles: superadmins (from `ADMIN_IDS`) plus an in-bot **moderator** role for day-to-day user/request management — see [Access Lifecycle Policy](#access-lifecycle-policy).
 - Ownership checks so users can view their own configs/stats; proxy (SOCKS5/MTProto) revoke/delete are admin-only, while VPN key (Xray/AWG/Hysteria2) revoke/delete are available to the key owner and to admins.
 - Audit log with recursive masking for sensitive values.
-- SQLite storage with migrations from `db/schema.sql`, rotating local logs, and a systemd deployment unit.
-- Background workers: key-expiry checks, traffic-stats sampling, anomaly detection, scheduled announcements, and encrypted off-site backups.
+- SQLite storage bootstrapped from `db/schema.sql` (the baseline schema) with version migrations applied programmatically on startup, rotating local logs, and a systemd deployment unit.
+- Background workers: key-expiry checks, traffic-stats sampling, Hysteria2 backend-health probing, anomaly detection, scheduled announcements, and encrypted off-site backups.
 
 ## Architecture
 
@@ -129,7 +132,7 @@ repositories/              # SQLite access layer
 adapters/                  # Xray, AWG, systemctl, backups, shell adapters
 warp/                      # WARP outbound-IP masking module (tunnel, routes, health monitor)
 hy2_auth/                  # Standalone Hysteria2 handshake-auth HTTP endpoint (separate process)
-scripts/                   # vpn-bot-warp-* sudo helpers
+scripts/                   # WARP sudo helpers (vpn-bot-warp-*) and the warp-failsafe watchdog
 config/settings.py         # Environment parsing and validation
 tests/                     # Regression and hardening tests
 docs/                      # Configuration, deployment, operations, WARP, proxy docs
@@ -158,7 +161,7 @@ issuing that key type.
 | Variable | Required | Purpose |
 |---|---|---|
 | `BOT_TOKEN` | **Yes** | Telegram Bot API token from BotFather. 🔒 |
-| `ADMIN_IDS` | **Yes** | Comma-separated Telegram user IDs with admin access. |
+| `ADMIN_IDS` | **Yes** | Comma-separated Telegram user IDs with **superadmin** access. Additional moderators are assigned in-bot by a superadmin. |
 | `BOT_LANGUAGE` | No (`ru`) | Bot UI language: `ru` or `en`. |
 | `SQLITE_SYNCHRONOUS` | No (`FULL`) | SQLite durability mode; `FULL` is the safe control-plane default. |
 | `XRAY_PUBLIC_HOST`, `XRAY_REALITY_PUBLIC_KEY`, `XRAY_SNI`, `XRAY_SHORT_ID` | For Xray keys | Reality connection parameters clients need. |
@@ -189,10 +192,17 @@ checklist, and day-2 operations live in:
 
 ## Access Lifecycle Policy
 
+**Roles.** Access is tiered:
+
+- **Superadmin** — every ID in `ADMIN_IDS`. Full control, including assigning/removing the moderator role and all backend and user actions.
+- **Moderator** — assigned by a superadmin from the admin panel (there is no env var for it). Can approve/reject access requests and block/unblock and manage users, but **cannot** assign/remove the moderator role, block another moderator or a superadmin, or manage another owner's keys/proxy access (that stays superadmin- or owner-only).
+- **Approved user** — issues and manages their own keys/proxy access.
+- **Pending user** — awaiting approval; **Blocked user** — bot access revoked.
+
 - Approved users may create their own Xray/AWG/Hysteria2 keys, view their own active configs and stats, and edit their own key notes.
 - Approved users may issue and view their own SOCKS5/MTProto proxy access when the backend is enabled.
 - Revoke/delete of **VPN keys (Xray/AWG/Hysteria2)** is available **to the key owner and to admins**: the owner sees revoke/delete buttons for their own keys, and direct callbacks/service calls verify ownership (another user's key is rejected). Revoke/delete of **proxy access (SOCKS5/MTProto)** is **admin-only**.
-- Blocking a user is an admin action: it blocks bot access and attempts to revoke active/problem VPN keys and proxy access.
+- Blocking a user is a moderator/admin action: it blocks bot access and attempts to revoke active/problem VPN keys and proxy access (a moderator cannot block another moderator or a superadmin).
 - In `MTPROTO_MODE=static`, blocking/revoking only deactivates the bot/SQLite record; a copied shared secret keeps working until the shared secret is rotated. In `MTPROTO_MODE=managed`, admin revoke removes that user's secret from the managed active list while other users remain active.
 
 ## Backend Degraded Mode
