@@ -88,6 +88,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   chat (`BotCommandScopeChat`) so they never leak into the public menu. Descriptions
   are served in ru/en plus the configured `BOT_LANGUAGE` fallback. A failed sync is
   logged and never blocks startup — commands still work by typing them.
+- **WARP kill-switch (fail-closed) and config-installed state (schema v30).** The
+  ⚙️ Settings sub-panel of the WARP («Outbound IP masking») panel gains a **🛡 kill-switch**
+  toggle, persisted in `warp_settings.kill_switch` (migration v30, default off). When on **and**
+  the health monitor runs in legacy (non-observer) mode, a tunnel-down now *keeps* the routes in
+  place so masked traffic blackholes on the dead interface instead of falling back to the direct
+  path and leaking the real server IP. It is a bot-side control and only enforces in legacy mode;
+  in observer mode the routes are systemd-owned, so fail-closed there is `warp-failsafe`'s job.
+  The same migration adds `warp_settings.config_installed`, decoupling "a config is installed"
+  from `routes_count > 0` so a full-tunnel `AllowedIPs = 0.0.0.0/0` (whose routes the helper
+  strips) no longer makes the module refuse to start; installs that already produced routes are
+  backfilled to installed. Documented in `docs/warp.md` (Kill-switch).
 
 ### Changed
 

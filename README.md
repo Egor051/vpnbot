@@ -92,20 +92,23 @@ flowchart TD
     ADP --> AWG[AmneziaWG]
     ADP --> DANTE[Dante SOCKS5]
     ADP --> MT[MTProxy]
+    ADP --> HY2[Hysteria2 server + stats API]
     WARP["warp/ — out-warp tunnel + health monitor"] -. optional .-> AWG
+    HY2AUTH["hy2_auth — Hysteria2 handshake auth<br/>(separate process)"] --> DB
     SVC -. background loops:<br/>stats, key-expiry, anomaly,<br/>announcements, off-site backup .-> SVC
 ```
 
 - `bot/` parses updates, enforces guards (admin-only actions, private-chat-only), and renders keyboards/FSM flows.
 - `services/` holds the workflows (access approval, key lifecycle, proxy issuance, backend health, etc.) and the permission checks.
-- `repositories/` is the only layer that touches SQLite; `adapters/` is the only layer that touches Xray/AWG/Dante/MTProxy/systemd, going through sudo helpers in non-root mode.
+- `repositories/` is the only layer that touches SQLite; `adapters/` is the only layer that touches Xray/AWG/Dante/MTProxy/Hysteria2/systemd, going through sudo helpers in non-root mode.
 - `warp/` is an optional, self-contained module (tunnel, routes, split, health monitor).
+- `hy2_auth/` is a standalone process (not the bot) that authenticates Hysteria2 handshakes against the live database over loopback and keeps working while the bot is down — see [Hysteria2](docs/hysteria.md).
 - In non-root deployments, privileged backend mutations are isolated behind fixed sudo helpers — see [Privilege Separation](docs/security/privilege-separation-plan.md).
 
 ## Stack & Prerequisites
 
 **Stack:** Python 3.12 · aiogram 3 · SQLite (aiosqlite) · python-dotenv · systemd ·
-Xray VLESS Reality · AmneziaWG / WireGuard-compatible tooling.
+Xray VLESS Reality · AmneziaWG / WireGuard-compatible tooling · Hysteria2 (apernet v2).
 
 **Prerequisites:**
 
@@ -113,6 +116,7 @@ Xray VLESS Reality · AmneziaWG / WireGuard-compatible tooling.
 - **Python 3.12** (the only supported runtime; dependency pinning targets 3.12.x).
 - A Telegram bot token from BotFather and your numeric admin user ID(s).
 - For VPN keys: an existing **Xray** (VLESS Reality) and/or **AmneziaWG** installation on the server.
+- For **Hysteria2** keys (optional): a **hysteria** server (apernet v2) plus the standalone `hy2_auth` handshake-auth endpoint. Disabled by default — see [Hysteria2](docs/hysteria.md).
 - For proxy backends (optional): **Dante** (SOCKS5) and/or **MTProxy** already installed and listening — the bot manages access, not installation.
 
 ## Repository Layout
@@ -155,8 +159,8 @@ operational messages.
 ## Configuration
 
 Copy `.env.example` to `.env` and replace placeholders with values for your server. Only
-`BOT_TOKEN` and `ADMIN_IDS` are required to start; fill the relevant Xray or AWG values before
-issuing that key type.
+`BOT_TOKEN` and `ADMIN_IDS` are required to start; fill the relevant Xray, AWG, or Hysteria2
+values before issuing that key type.
 
 | Variable | Required | Purpose |
 |---|---|---|
@@ -166,6 +170,7 @@ issuing that key type.
 | `SQLITE_SYNCHRONOUS` | No (`FULL`) | SQLite durability mode; `FULL` is the safe control-plane default. |
 | `XRAY_PUBLIC_HOST`, `XRAY_REALITY_PUBLIC_KEY`, `XRAY_SNI`, `XRAY_SHORT_ID` | For Xray keys | Reality connection parameters clients need. |
 | `AWG_ENDPOINT_HOST`, `AWG_ENDPOINT_PORT`, `AWG_SERVER_PUBLIC_KEY` | For AWG keys | Public AmneziaWG endpoint shown in client configs. |
+| `HYSTERIA2_HOST`, `HYSTERIA2_SNI`, `HYSTERIA2_OBFS_PASSWORD` | For Hysteria2 keys | Public endpoint + salamander obfuscation password clients need (`OBFS_PASSWORD` must match the server). 🔒 |
 
 📖 **Every variable** (defaults, ranges, security notes, legacy aliases) is documented in
 **[docs/configuration.md](docs/configuration.md)**. The copy-paste template with inline comments
@@ -252,6 +257,7 @@ schema version internally).
 | [docs/configuration.md](docs/configuration.md) | Complete environment-variable reference (all backends, WARP, legacy aliases). |
 | [docs/deployment.md](docs/deployment.md) | Install steps for both models, Xray API mode, one-time server setup, smoke checklist. |
 | [docs/operations.md](docs/operations.md) | Production runbook: health checks, backup/restore, degraded recovery, rollback, manual verification. |
+| [docs/hysteria.md](docs/hysteria.md) | Hysteria2 (apernet v2): data plane, `hy2_auth` endpoint, Traffic Stats API, health & recovery. |
 | [docs/proxy.md](docs/proxy.md) | SOCKS5/Dante and MTProto (static + managed) deployment and recovery. |
 | [docs/warp.md](docs/warp.md) | WARP outbound-IP masking: config format, install, proxy egress, selective-split. |
 | [docs/xray-xhttp-inbound.md](docs/xray-xhttp-inbound.md) | One-time server-side setup for the VLESS (HTTP) / XHTTP transport. |

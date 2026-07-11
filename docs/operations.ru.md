@@ -24,6 +24,7 @@ backup/restore, восстановление по бэкендам из degraded
 cd /opt/vpn-service
 python deploy/check-nonroot-helper-mode.py
 sudo systemctl status vpn-bot --no-pager
+sudo systemctl status vpn-bot-hy2-auth hysteria-server --no-pager  # если включён Hysteria2
 sudo journalctl -u vpn-bot -n 100 --no-pager
 sqlite3 /opt/vpn-service/data/vpn.db "PRAGMA quick_check;"
 .venv/bin/python -m compileall .
@@ -107,12 +108,14 @@ Diagnostics  OK
 ✓ PRIVILEGE_HELPERS_ENABLED=true
 ✓ Xray: OK
 ✓ AWG: OK
+✓ Hysteria2: OK        (при HYSTERIA2_ENABLED; liveness data plane, выдачу ключей не гейтит)
 ✓ SOCKS5: OK
 ✓ MTProto: OK
 ✓ SQLite PRAGMA quick_check: ok
 ✓ vpn-bot: active
 ✓ xray: active
 ✓ awg-quick@awg0: active
+✓ vpn-bot-hy2-auth: active   (когда включён Hysteria2)
 ...
 ```
 
@@ -151,11 +154,16 @@ sudo tar --xattrs --acls -czf /root/vpn-service-backups/vpn-service-$(date -u +%
   /opt/vpn-service/data/vpn.db \
   /usr/local/etc/xray/config.json \
   /etc/amnezia/amneziawg/awg0.conf \
+  /etc/hysteria/config.yaml \
   /etc/mtproxy
 sudo chmod 600 /root/vpn-service-backups/vpn-service-*.tar.gz
 ```
 
-Включайте `/opt/vpn-service/logs` только если логи нужны для анализа инцидентов. Все backup
+При включённом Hysteria2 держите `/etc/hysteria/config.yaml` в списке — в нём незаменимые
+секреты salamander/TLS/trafficStats (тот же файл, что сохраняет офсайтовый бандл
+восстановления); на развёртываниях без Hysteria2 уберите строку, чтобы `tar` не ругался на
+отсутствующий путь. Включайте `/opt/vpn-service/logs` только если логи нужны для анализа
+инцидентов. Все backup
 конфиденциальны: могут содержать токены Telegram, VPN-ключи, Xray UUID, AWG private/preshared
 keys и серверные endpoints.
 
@@ -205,6 +213,7 @@ tar xzf recovery.tar.gz            # MANIFEST.json содержит исходн
 - По возможности держите SSH открытым только для доверенных источников.
 - Откройте публичный TCP-порт Xray, обычно `443/tcp`.
 - Откройте публичный UDP-порт AWG endpoint из `AWG_ENDPOINT_PORT` или `ListenPort` в конфиге AWG.
+- Если включён Hysteria2, откройте публичный **UDP**-порт Hysteria2 из `HYSTERIA2_PORT` (дефолт `15650`). Эндпоинт `hy2_auth` (`HYSTERIA2_AUTH_LISTEN`) и Traffic Stats API (`HYSTERIA2_STATS_LISTEN`) держите только на loopback — никогда не открывайте их в интернет.
 - Открывайте Dante/SOCKS только если намеренно развёртываете отдельный прокси с защитой.
 - Держите `XRAY_STATS_SERVER` привязанным только к localhost, например `127.0.0.1:<port>`. Никогда не открывайте Xray stats API в интернет.
 - Если политика UFW для перенаправленного трафика по умолчанию `deny`, явно разрешите трафик AWG-клиентов.
@@ -225,6 +234,9 @@ sudo systemctl status danted --no-pager
 sudo ss -tlnp | grep 31337
 sudo systemctl status mtproxy --no-pager
 sudo ss -tlnp | grep 8443
+sudo systemctl status hysteria-server vpn-bot-hy2-auth --no-pager   # если включён Hysteria2
+sudo ss -ulnp | grep 15650                                         # публичный UDP-порт Hysteria2
+curl -s http://127.0.0.1:8444/healthz                              # liveness hy2_auth (loopback)
 sudo journalctl -u vpn-bot -n 100 --no-pager
 sudo xray run -test -config /usr/local/etc/xray/config.json
 sudo awg show
@@ -309,6 +321,32 @@ sudo journalctl -u vpn-bot -n 150 --no-pager
 сравнивайте счётчики/fingerprints, восстановите managed-файлы из `/etc/mtproxy/vpn-bot/backups`
 при необходимости, перезапустите `mtproxy`, затем `vpn-bot`.
 
+### Health и восстановление Hysteria2
+
+В отличие от Xray/AWG/SOCKS5/MTProto, отметка Hysteria2 `DEGRADED` — **информационная и никогда
+не блокирует** выдачу/отзыв ключей: issuance/revocation Hysteria2 — это чистые записи в `vpn.db`
+без apply-шага, гейтить нечего. Запись `Hysteria2: OK/DEGRADED` отражает только **liveness data
+plane**: фоновый цикл опрашивает эндпоинт `hy2_auth` `GET /healthz` каждые
+`HYSTERIA2_HEALTH_INTERVAL` секунд. Поэтому `DEGRADED` означает «data plane авторизации handshake
+недоступен», т.е. новые handshake отклоняются, хотя строки ключей в БД целы.
+
+```bash
+sudo systemctl status vpn-bot-hy2-auth --no-pager        # loopback-эндпоинт авторизации handshake
+sudo systemctl status hysteria-server --no-pager         # собственно data plane Hysteria2
+curl -s http://127.0.0.1:8444/healthz                    # 200 {"ok":true}, когда vpn.db читается
+sudo journalctl -u vpn-bot-hy2-auth -n 100 --no-pager    # ошибки БД логируются здесь на ERROR
+sqlite3 /opt/vpn-service/data/vpn.db "SELECT status, COUNT(*) FROM vpn_keys WHERE key_type='hysteria2' GROUP BY status;"
+```
+
+Восстановление — на уровне сервиса, а не сверки конфигов: верните `vpn-bot-hy2-auth` (и при
+необходимости `hysteria-server`) в active — эндпоинт читает **живую** базу, поэтому после
+восстановления отзывы/выдачи применяются на следующем handshake без перезапуска data plane. Если
+`GET /healthz` вернул `503`, эндпоинт не может прочитать `vpn.db` (locked/corrupt или отсутствует
+WAL-грант `ReadWritePaths` — см. [Развёртывание → Hysteria2 data plane](deployment.ru.md#hysteria2-data-plane-эндпоинт-hy2_auth));
+сначала почините доступ к базе. Per-key трафик, счётчик онлайна и revoke-`/kick` дополнительно
+требуют Traffic Stats API (`HYSTERIA2_STATS_SECRET`); без него они остаются пустыми, но на
+авторизацию handshake и на health-запись не влияют.
+
 ## Rollback после неудачного деплоя
 
 > ⚠️ **Сначала сделайте backup.** Всегда создавайте резервную копию перед откатом кода (см.
@@ -390,19 +428,21 @@ python deploy/check-nonroot-helper-mode.py
 2. Отзовите и удалите Xray-ключ, убедитесь, что DB/config/runtime больше не дают доступ.
 3. Создайте один AWG-ключ, убедитесь, что DB, `awg0.conf` и `awg show` согласованы.
 4. Отзовите и удалите AWG-ключ, убедитесь, что peer удалён из config и runtime.
-5. Откройте «Прокси» от одобренного тестового пользователя, выдайте SOCKS5 после подтверждения и убедитесь, что сообщение содержит Host, Port, Login, Password и URL.
-6. Выдайте MTProto после подтверждения и убедитесь, что обычная Telegram-ссылка идёт перед `dd`-ссылкой.
-7. В `MTPROTO_MODE=managed` выдайте MTProto пользователю A и запишите только несекретный fingerprint/count из статуса администратора.
-8. Выдайте MTProto пользователю B и убедитесь, что статус показывает два активных managed MTProto access.
-9. Заблокируйте или admin-revoke пользователя A, затем убедитесь, что managed secrets file больше не содержит fingerprint A, а fingerprint B остаётся активным.
-10. Убедитесь, что Telegram MTProto-ссылка пользователя B работает после отзыва A.
-11. Симулируйте неудачный apply на staging (например, временно направив `MTPROTO_SERVICE_NAME` на failing test unit или остановив проверку порта), затем revoke/issue и убедитесь, что rollback восстанавливает предыдущие managed secrets/env-файлы и `mtproxy` возвращается в active/listening.
-12. В `MTPROTO_MODE=static` заблокируйте пользователя и убедитесь, что MTProto деактивирован только в SQLite.
-13. Убедитесь, что логи бота и audit-вывод не содержат SOCKS5-паролей, `MTPROTO_SECRET` или сырых managed MTProto-секретов.
-14. Проверьте `systemctl cat mtproxy`, `systemctl show mtproxy -p User -p Group -p ExecStart -p Environment` и `journalctl -u mtproxy -n 100 --no-pager` на отсутствие сырых MTProto-секретов.
-15. Проверьте права managed-файлов:
+5. (Hysteria2, при `HYSTERIA2_ENABLED`) Создайте один Hysteria2-ключ, убедитесь, что он активен в БД (`key_type='hysteria2'`) и что свежий client handshake авторизуется — принятый handshake виден в `journalctl -u vpn-bot-hy2-auth`.
+6. Отзовите Hysteria2-ключ и убедитесь, что следующий handshake отклоняется **без перезапуска data plane** (эндпоинт `hy2_auth` читает живую БД). При включённом Traffic Stats API (`HYSTERIA2_STATS_SECRET`) убедитесь, что уже установленная сессия также рвётся best-effort `/kick`.
+7. Откройте «Прокси» от одобренного тестового пользователя, выдайте SOCKS5 после подтверждения и убедитесь, что сообщение содержит Host, Port, Login, Password и URL.
+8. Выдайте MTProto после подтверждения и убедитесь, что обычная Telegram-ссылка идёт перед `dd`-ссылкой.
+9. В `MTPROTO_MODE=managed` выдайте MTProto пользователю A и запишите только несекретный fingerprint/count из статуса администратора.
+10. Выдайте MTProto пользователю B и убедитесь, что статус показывает два активных managed MTProto access.
+11. Заблокируйте или admin-revoke пользователя A, затем убедитесь, что managed secrets file больше не содержит fingerprint A, а fingerprint B остаётся активным.
+12. Убедитесь, что Telegram MTProto-ссылка пользователя B работает после отзыва A.
+13. Симулируйте неудачный apply на staging (например, временно направив `MTPROTO_SERVICE_NAME` на failing test unit или остановив проверку порта), затем revoke/issue и убедитесь, что rollback восстанавливает предыдущие managed secrets/env-файлы и `mtproxy` возвращается в active/listening.
+14. В `MTPROTO_MODE=static` заблокируйте пользователя и убедитесь, что MTProto деактивирован только в SQLite.
+15. Убедитесь, что логи бота и audit-вывод не содержат SOCKS5-паролей, `MTPROTO_SECRET` или сырых managed MTProto-секретов.
+16. Проверьте `systemctl cat mtproxy`, `systemctl show mtproxy -p User -p Group -p ExecStart -p Environment` и `journalctl -u mtproxy -n 100 --no-pager` на отсутствие сырых MTProto-секретов.
+17. Проверьте права managed-файлов:
     ```bash
     sudo stat -c '%U:%G %a %n' /opt/vpn-service/scripts/run-mtproxy-managed /etc/mtproxy/vpn-bot/managed-secrets.json /etc/mtproxy/vpn-bot/mtproxy.env
     sudo find /etc/mtproxy/vpn-bot/backups -maxdepth 2 -printf '%u:%g %m %p\n'
     ```
-16. Отправьте объявление с одобренными, ожидающими и заблокированными тестовыми пользователями; его должны получить только одобренные пользователи и superadmin'ы.
+18. Отправьте объявление с одобренными, ожидающими и заблокированными тестовыми пользователями; его должны получить только одобренные пользователи и superadmin'ы.
