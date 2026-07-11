@@ -963,13 +963,18 @@ def test_create_key_keyboard_back_button_honours_entry_point() -> None:
 
 def test_vless_transport_keyboard_hides_http_when_disabled() -> None:
     enabled = vless_transport_keyboard(xhttp_enabled=True)
-    assert "VLESS (TCP)" in _button_texts(enabled)
-    assert "VLESS (HTTP)" in _button_texts(enabled)
+    # Each transport button keeps its "VLESS (TCP)"/"VLESS (HTTP)" identity and
+    # carries an extra parenthetical marking TCP as the base transport and HTTP
+    # as the alternative.
+    tcp_label = next(text for text in _button_texts(enabled) if text.startswith("VLESS (TCP)"))
+    http_label = next(text for text in _button_texts(enabled) if text.startswith("VLESS (HTTP)"))
+    assert tcp_label != "VLESS (TCP)"
+    assert http_label != "VLESS (HTTP)"
     assert "keys:create:xray" in _button_callbacks(enabled)
     assert "keys:create:xhttp" in _button_callbacks(enabled)
 
     disabled = vless_transport_keyboard(xhttp_enabled=False)
-    assert "VLESS (HTTP)" not in _button_texts(disabled)
+    assert not any(text.startswith("VLESS (HTTP)") for text in _button_texts(disabled))
     assert "keys:create:xhttp" not in _button_callbacks(disabled)
 
 

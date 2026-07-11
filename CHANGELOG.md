@@ -102,6 +102,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **VLESS transport buttons now spell out which transport is which.** On the
+  "Choose VLESS transport" step, the two buttons carry an extra parenthetical —
+  `VLESS (TCP) (базовый)` / `VLESS (TCP) (basic)` and
+  `VLESS (HTTP) (альтернативный)` / `VLESS (HTTP) (alternative)` — so users pick
+  the base transport by default and reach for HTTP only as the alternative. The
+  new labels are localised (`btn_vless_tcp` / `btn_vless_http`) and apply to both
+  the self-service and admin key-issuing flows; the underlying callbacks, key
+  display names and transport identity are unchanged.
 - **Dev-gate docs realigned with CI.** `README.md`, `README_RU.md` and
   `CONTRIBUTING.md` now show the exact gates CI (`.github/workflows/ci.yml`) and the
   `Makefile` run: `mypy --strict` also covers `db/ hy2_auth/ warp/`, and the pytest
