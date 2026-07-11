@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **XHTTP client transport profiles for VLESS (HTTP) keys.** Creating a VLESS (HTTP)
+  key now has a third step — a client-side transport profile: **base** (universal,
+  byte-for-byte the previous link), **antisib** (anti-blocking: single-channel xmux to
+  survive TLS-handshake-count blocking) and **multi** (multi-connection: `packet-up`
+  with split-post + rotating xmux for throttling-resistant long sessions). All three
+  are clients on the same loopback XHTTP inbound (`mode: auto`), so nothing changes
+  server-side — the profile only tunes `mode` / `xhttpSettings.extra` in the generated
+  link and is immutable per key. `multi` needs Xray-core v25.3.6+ on the client
+  (`hMaxReusableSecs`). Adds the `xhttp_profile` column (migration v28, backfilled to
+  `base`) and rewrites existing Xray email labels into the transport/profile-aware
+  scheme (`xray_tcp_<rnd>` / `xray_http_<profile>_<rnd>`; UUIDs are never touched).
+  Documented in `docs/xray-xhttp-inbound.md`.
 - **Hysteria2 documented in the in-bot FAQ ("Помощь").** The help section's
   protocol-related answers now cover Hysteria2 alongside AWG and Xray, so users
   who receive a Hysteria2 key get matching guidance. The *connect* tab recommends
@@ -79,6 +91,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Dev-gate docs realigned with CI.** `README.md`, `README_RU.md` and
+  `CONTRIBUTING.md` now show the exact gates CI (`.github/workflows/ci.yml`) and the
+  `Makefile` run: `mypy --strict` also covers `db/ hy2_auth/ warp/`, and the pytest
+  coverage floor is `--cov-fail-under=62` (both were previously documented as the
+  shorter mypy set and 60%). Also documented the previously undocumented XHTTP
+  client transport profiles and corrected the privilege-separation plan's sudoers
+  entrypoint list to include the optional WARP helpers.
 - **BREAKING: `vpnbot-*` → `vpn-bot-*` naming unified.** The privileged helpers,
   systemd units, sudoers file/aliases and the `/etc/vpnbot` + `/etc/mtproxy/vpnbot`
   config directories were renamed from the inconsistent `vpnbot` token to the

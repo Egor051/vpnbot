@@ -84,6 +84,13 @@ _Legacy-aliases: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SERVER_PORT
 > форвардит на loopback XHTTP-inbound, где валидируется путь. Path-based fallback **не** матчит
 > HTTP/2 XHTTP (h2 `:path` лежит в HPACK), поэтому catch-all обязателен.
 
+> **Профили транспорта по ключу.** `XRAY_XHTTP_MODE` задаёт клиентский `mode` только
+> для профиля **base**. Флоу создания ключа VLESS (HTTP) предлагает три клиентских
+> профиля — **base** / **antisib** (анти-блокировка) / **multi** (мультиподключение), —
+> которые переопределяют `mode` и добавляют тюнинг `xhttpSettings.extra` в генерируемую
+> ссылку (без изменений на сервере; профиль хранится по ключу). См.
+> [`xray-xhttp-inbound.ru.md`](xray-xhttp-inbound.ru.md#клиентские-профили-транспорта-vless-http).
+
 ## AmneziaWG
 
 | Переменная | Обязательна | По умолчанию | Описание |

@@ -82,7 +82,7 @@ failure.
 
 - `vpn-bot.service` содержит `User=vpn-bot`, `Group=vpn-bot`, `RuntimeDirectory=vpn-bot`, `RuntimeDirectoryMode=0700`, `ProtectSystem=strict`
 - `vpn-bot.service` не содержит `User=root`, `Group=root`, `NoNewPrivileges=true`
-- `/etc/sudoers.d/vpn-bot` root:root 0440, права только на 4 фиксированных хелпера, без широких грантов (`NOPASSWD: ALL`, `ALL=(ALL)`)
+- `/etc/sudoers.d/vpn-bot` root:root 0440, права на 4 фиксированных базовых хелпера (и, когда включён модуль WARP, на его хелперы `vpn-bot-warp-*` / `vpn-bot-warp-split-*`), без широких грантов (`NOPASSWD: ALL`, `ALL=(ALL)`)
 - Бинарники хелперов root:root 0755
 - `/opt/vpn-service`, `.venv`, `deploy` не доступны для записи от `vpn-bot`
 - Существование и writability `/run/vpn-bot` (зависит от mode)

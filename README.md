@@ -128,6 +128,7 @@ services/                  # Business workflows and permissions
 repositories/              # SQLite access layer
 adapters/                  # Xray, AWG, systemctl, backups, shell adapters
 warp/                      # WARP outbound-IP masking module (tunnel, routes, health monitor)
+hy2_auth/                  # Standalone Hysteria2 handshake-auth HTTP endpoint (separate process)
 scripts/                   # vpn-bot-warp-* sudo helpers
 config/settings.py         # Environment parsing and validation
 tests/                     # Regression and hardening tests
@@ -214,8 +215,8 @@ python -m pip install -r requirements-dev.txt
 make audit                 # pip-audit over requirements + constraints
 python -m ruff check .
 python -m compileall .
-python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ main.py init_db.py
-python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=60
+python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ warp/ main.py init_db.py
+python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=62
 ```
 
 GitHub Actions runs these gates without production secrets or live services. Contribution

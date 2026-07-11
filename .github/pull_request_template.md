@@ -19,6 +19,9 @@
 - [ ] Access approval
 - [ ] Xray integration
 - [ ] AmneziaWG integration
+- [ ] Hysteria2 integration
+- [ ] SOCKS5/MTProto proxy
+- [ ] WARP outbound-IP masking
 - [ ] SQLite/database/migrations
 - [ ] Stats/traffic accounting
 - [ ] Systemd/deployment

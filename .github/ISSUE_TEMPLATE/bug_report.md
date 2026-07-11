@@ -35,6 +35,9 @@ Do not paste Telegram tokens, private keys, `.env` files, full VPN configs, SQLi
 - [ ] Access approval
 - [ ] Xray integration
 - [ ] AmneziaWG integration
+- [ ] Hysteria2 integration
+- [ ] SOCKS5/MTProto proxy
+- [ ] WARP outbound-IP masking
 - [ ] SQLite/database/migrations
 - [ ] Stats/traffic accounting
 - [ ] Systemd/deployment
@@ -54,7 +57,7 @@ Do not paste Telegram tokens, private keys, `.env` files, full VPN configs, SQLi
 - OS and version:
 - Python version:
 - Bot commit/branch:
-- Relevant protocol/component: (Xray / AWG / SOCKS5 / MTProto / other)
+- Relevant protocol/component: (Xray / AWG / Hysteria2 / SOCKS5 / MTProto / WARP / other)
 - Deployment path:
 - Running under systemd: yes/no
 - Xray version, if relevant:
