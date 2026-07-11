@@ -42,8 +42,11 @@ class OnlineClients:
     """Snapshot of online VPN client counts.
 
     A ``None`` per-backend count means that backend could not be read (not
-    configured or a transient error); ``available`` is ``False`` only while no
-    baseline exists yet (the very first poll), rendered as "collecting".
+    configured or a transient error). ``available`` is ``False`` while either
+    counter-based backend (WireGuard / Xray) still lacks a previous-poll
+    baseline — the very first poll after a restart — rendered as "collecting";
+    Hysteria2's instantaneous read is non-``None`` from the first poll and does
+    not by itself make an otherwise-baseline-less snapshot available.
     """
 
     wg: int | None
@@ -110,35 +113,58 @@ class OnlineClientsService:
         )
 
     async def _compute(self) -> OnlineClients:
-        wg = await self._count_wg()
-        xray = await self._count_xray()
+        # Each counter-based leg reports (count, collecting). "collecting" is
+        # True only when a first non-empty read established this poll's baseline,
+        # so its per-identity delta is not available yet. An empty, failed or
+        # unconfigured read is (None, False) — not collecting — so a
+        # peerless/broken leg never traps the snapshot in "collecting".
+        wg, wg_collecting = await self._count_wg()
+        xray, xray_collecting = await self._count_xray()
         hysteria2 = await self._count_hysteria()
+        if wg_collecting or xray_collecting:
+            # A delta-based leg still lacks a baseline: report "collecting"
+            # rather than a misleading total built from the instantaneous
+            # Hysteria2 read alone (the bug that showed "нет данных" for WG/Xray
+            # while Hy2 rendered a real 0 on the first open after a restart).
+            return OnlineClients(wg=None, xray=None, hysteria2=hysteria2, total=None, available=False)
         if wg is None and xray is None and hysteria2 is None:
             return OnlineClients(wg=None, xray=None, hysteria2=None, total=None, available=False)
         total = (wg or 0) + (xray or 0) + (hysteria2 or 0)
         return OnlineClients(wg=wg, xray=xray, hysteria2=hysteria2, total=total, available=True)
 
-    async def _count_wg(self) -> int | None:
+    async def _count_wg(self) -> tuple[int | None, bool]:
         try:
             transfer = await self._awg_adapter.list_transfer()
         except Exception:
             logger.debug("online WG transfer read failed", exc_info=True)
-            return None
+            return None, False
         cur = {pubkey: rx + tx for pubkey, (rx, tx) in transfer.items()}
         prev = self._prev_wg
         self._prev_wg = cur
-        return self._count_increased(cur, prev)
+        if prev is None:
+            # First poll: a non-empty snapshot has identities whose per-poll
+            # deltas need a second read to resolve, so report "collecting". An
+            # empty snapshot has nothing to baseline — leave it "unknown" (None)
+            # so it neither blocks availability nor fabricates a count.
+            return None, bool(cur)
+        return self._count_increased(cur, prev), False
 
-    async def _count_xray(self) -> int | None:
+    async def _count_xray(self) -> tuple[int | None, bool]:
         try:
             stats = await self._xray_stats.query_all()
         except Exception:
             logger.debug("online Xray stats read failed", exc_info=True)
-            return None
+            return None, False
         cur = self._group_xray_by_email(stats)
         prev = self._prev_xray
         self._prev_xray = cur
-        return self._count_increased(cur, prev)
+        if prev is None:
+            # First poll: a non-empty snapshot has identities whose per-poll
+            # deltas need a second read to resolve, so report "collecting". An
+            # empty snapshot has nothing to baseline — leave it "unknown" (None)
+            # so it neither blocks availability nor fabricates a count.
+            return None, bool(cur)
+        return self._count_increased(cur, prev), False
 
     async def _count_hysteria(self) -> int | None:
         # Unlike wg/xray, Hysteria2's /online is an instantaneous connection count,
@@ -154,10 +180,10 @@ class OnlineClientsService:
         return sum(1 for count in online.values() if count > 0)
 
     @staticmethod
-    def _count_increased(cur: dict[str, int], prev: dict[str, int] | None) -> int | None:
-        # No baseline yet: report "unknown" rather than a misleading zero.
-        if prev is None:
-            return None
+    def _count_increased(cur: dict[str, int], prev: dict[str, int]) -> int:
+        # Callers only reach here once a baseline exists (see _count_wg /
+        # _count_xray); an identity counts as online when its cumulative
+        # transfer grew since the previous poll.
         count = 0
         for identity, total in cur.items():
             prev_total = prev.get(identity)
