@@ -358,10 +358,10 @@ def admin_key_type_keyboard(
 def admin_vless_transport_keyboard(user_id: int, *, xhttp_enabled: bool = False) -> InlineKeyboardMarkup:
     """Build the VLESS transport selection keyboard for issuing a key (step 2)."""
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="VLESS (TCP)", callback_data=f"admin:ctype:xray:{user_id}")],
+        [InlineKeyboardButton(text=t("btn_vless_tcp"), callback_data=f"admin:ctype:xray:{user_id}")],
     ]
     if xhttp_enabled:
-        rows.append([InlineKeyboardButton(text="VLESS (HTTP)", callback_data=f"admin:ctype:xhttp:{user_id}")])
+        rows.append([InlineKeyboardButton(text=t("btn_vless_http"), callback_data=f"admin:ctype:xhttp:{user_id}")])
     rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data=f"admin:issue:{user_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

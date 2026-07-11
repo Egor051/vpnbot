@@ -414,6 +414,8 @@ STRINGS: dict[str, str] = {
     "key_note_prompt": "Enter a note for the key or send <code>-</code> to leave it empty.",
     "choose_key_type": "Choose protocol:",
     "choose_vless_transport": "Choose VLESS transport:",
+    "btn_vless_tcp": "VLESS (TCP) (basic)",
+    "btn_vless_http": "VLESS (HTTP) (alternative)",
     "vless_http_unavailable": "VLESS (HTTP) is temporarily unavailable.",
     "choose_xhttp_profile": "Choose the XHTTP transport profile:",
     "xhttp_profile_invalid": "Unknown transport profile.",

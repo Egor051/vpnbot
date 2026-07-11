@@ -44,10 +44,10 @@ def create_key_keyboard(
 def vless_transport_keyboard(*, xhttp_enabled: bool = False) -> InlineKeyboardMarkup:
     """Build the VLESS transport selection keyboard (step 2, VLESS only)."""
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="VLESS (TCP)", callback_data="keys:create:xray")],
+        [InlineKeyboardButton(text=t("btn_vless_tcp"), callback_data="keys:create:xray")],
     ]
     if xhttp_enabled:
-        rows.append([InlineKeyboardButton(text="VLESS (HTTP)", callback_data="keys:create:xhttp")])
+        rows.append([InlineKeyboardButton(text=t("btn_vless_http"), callback_data="keys:create:xhttp")])
     rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="keys:create")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

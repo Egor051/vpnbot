@@ -417,6 +417,8 @@ STRINGS: dict[str, str] = {
     "key_note_prompt": "Введите заметку для ключа или отправьте <code>-</code>, чтобы оставить пустой.",
     "choose_key_type": "Выберите протокол:",
     "choose_vless_transport": "Выберите транспорт VLESS:",
+    "btn_vless_tcp": "VLESS (TCP) (базовый)",
+    "btn_vless_http": "VLESS (HTTP) (альтернативный)",
     "vless_http_unavailable": "VLESS (HTTP) временно недоступен.",
     "choose_xhttp_profile": "Выберите профиль транспорта XHTTP:",
     "xhttp_profile_invalid": "Неизвестный профиль транспорта.",
