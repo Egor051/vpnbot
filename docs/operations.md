@@ -83,7 +83,7 @@ failure.
 
 - `vpn-bot.service` contains `User=vpn-bot`, `Group=vpn-bot`, `RuntimeDirectory=vpn-bot`, `RuntimeDirectoryMode=0700`, `ProtectSystem=strict`
 - `vpn-bot.service` does not contain `User=root`, `Group=root`, `NoNewPrivileges=true`
-- `/etc/sudoers.d/vpn-bot` is root:root 0440, grants only the 4 fixed helpers, no broad grants (`NOPASSWD: ALL`, `ALL=(ALL)`)
+- `/etc/sudoers.d/vpn-bot` is root:root 0440, grants the 4 fixed core helpers (and, when the WARP module is enabled, its `vpn-bot-warp-*` / `vpn-bot-warp-split-*` helpers), no broad grants (`NOPASSWD: ALL`, `ALL=(ALL)`)
 - Helper binaries are root:root 0755
 - `/opt/vpn-service`, `.venv`, `deploy` are not writable by `vpn-bot`
 - `/run/vpn-bot` existence and writability (mode-dependent)

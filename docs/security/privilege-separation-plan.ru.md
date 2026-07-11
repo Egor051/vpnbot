@@ -23,12 +23,22 @@
   - `/etc/mtproxy/vpn-bot`
   - `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow` и `/etc/.pwd.lock`
 
-Единственные привилегированные точки входа, разрешённые через `/etc/sudoers.d/vpn-bot`:
+Базовые привилегированные точки входа бэкендов, разрешённые через `/etc/sudoers.d/vpn-bot`:
 
 - `/usr/local/sbin/vpn-bot-socks5-user`
 - `/usr/local/sbin/vpn-bot-xray-apply`
 - `/usr/local/sbin/vpn-bot-awg-apply`
 - `/usr/local/sbin/vpn-bot-mtproxy-apply`
+
+Когда включён опциональный модуль WARP-сокрытия исходящего IP, тот же sudoers-файл
+дополнительно грантит фиксированные точки входа его хелперов — `vpn-bot-warp-install`,
+`vpn-bot-warp-iface`, `vpn-bot-warp-routes`, `vpn-bot-warp-status` и хелперы
+split-маршрутизации `vpn-bot-warp-split-apply` / `vpn-bot-warp-split-state` (см.
+[`../warp.ru.md`](../warp.ru.md) и `deploy/sudoers.d/vpn-bot.example`). Они подчиняются
+той же границе, что и хелперы бэкендов: фиксированные пути, пиннинг по глаголам (без
+wildcard на split-глаголах) и валидация argv на стороне хелпера. Авторитетный список
+грантов — `deploy/sudoers.d/vpn-bot.example`, а `deploy/check-nonroot-helper-mode.py`
+валидирует и базовый, и WARP-набор хелперов.
 
 Валидируйте живые хосты до и после рестартов сервиса:
 

@@ -22,12 +22,22 @@ Status: The privilege-separation helper architecture is implemented and shipped.
   - `/etc/mtproxy/vpn-bot`
   - `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`, and `/etc/.pwd.lock`
 
-The only privileged entrypoints allowed through `/etc/sudoers.d/vpn-bot` are:
+The core backend privileged entrypoints allowed through `/etc/sudoers.d/vpn-bot` are:
 
 - `/usr/local/sbin/vpn-bot-socks5-user`
 - `/usr/local/sbin/vpn-bot-xray-apply`
 - `/usr/local/sbin/vpn-bot-awg-apply`
 - `/usr/local/sbin/vpn-bot-mtproxy-apply`
+
+When the optional WARP outbound-IP masking module is enabled, the same sudoers file
+additionally grants its fixed helper entrypoints — `vpn-bot-warp-install`,
+`vpn-bot-warp-iface`, `vpn-bot-warp-routes`, `vpn-bot-warp-status`, and the
+split-routing helpers `vpn-bot-warp-split-apply` / `vpn-bot-warp-split-state` (see
+[`../warp.md`](../warp.md) and `deploy/sudoers.d/vpn-bot.example`). They obey the same
+boundary as the backend helpers: fixed paths, per-verb pinning (no wildcard on the
+split verbs), and helper-side argv validation. The authoritative grant list is
+`deploy/sudoers.d/vpn-bot.example`, and `deploy/check-nonroot-helper-mode.py`
+validates both the core and the WARP helper sets.
 
 Validate live hosts before and after service restarts:
 

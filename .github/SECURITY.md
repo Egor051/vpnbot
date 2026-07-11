@@ -26,7 +26,7 @@ If a vulnerability exposes secrets, live VPN configs, access control bypasses, d
 
 Use responsible disclosure:
 
-1. Contact the maintainer privately through GitHub or another private channel known to you.
+1. Open a private report via [GitHub Security Advisories](https://github.com/Egor051/vpnbot/security/advisories/new), or contact the maintainer through another private channel known to you.
 2. Share the minimal technical description needed to confirm the issue.
 3. Redact tokens, keys, client configs, database rows, server IPs, and user identifiers.
 4. Provide safe reproduction steps using placeholders or a local test setup.

@@ -155,6 +155,32 @@ systemctl start vpn-bot
 - Delete both and confirm each disappears from its own inbound.
 - Confirm an existing (legacy) key still works and is labelled `VLESS (TCP)`.
 
+## Client transport profiles (VLESS (HTTP))
+
+When `XRAY_XHTTP_ENABLED=true`, creating a **VLESS (HTTP)** key adds a final step
+where the user/admin picks a **client transport profile**. This is a purely
+**client-side** choice: all three profiles are clients on the **same** loopback XHTTP
+inbound (`mode: auto`), so **no server-side change is required** — the seeding above is
+unchanged. The profile only tunes the `mode` and the `extra` (`xhttpSettings`) block
+written into the generated VLESS (HTTP) link, and is **immutable** for a key (switching
+profiles means issuing a new key).
+
+| Profile | Link label | `mode` | Client tuning | When to use |
+|---|---|---|---|---|
+| **Basic** (`base`, default) | `VLESS (HTTP)` | `XRAY_XHTTP_MODE` (default `stream-one`) | none | Universal — best balance of speed and stability; the link is byte-for-byte the pre-profile output. |
+| **Anti-blocking** (`antisib`) | `VLESS (HTTP) · 🛡 Anti-blocking` | `stream-one` | single-channel xmux (`maxConnections:1`, `cMaxReuseTimes:64-128`) | The connection drops at connect time because of TLS-handshake-count blocking. One channel — may be slower on a weak network. |
+| **Multi-connection** (`multi`) | `VLESS (HTTP) · 🔀 Multi-connection` | `packet-up` | split-post + rotating xmux (`scMaxEachPostBytes`, `scMinPostsIntervalMs`, `maxConnections:2`, `cMaxReuseTimes:8-16`, `hMaxReusableSecs:30-60`) | Resilient long sessions: splits traffic into short connections to resist speed-throttling on long-lived connections. |
+
+> ⚠️ **Client version.** The `multi` profile uses `hMaxReusableSecs` (seconds-based
+> xmux rotation), which requires **Xray-core v25.3.6+** on the client; on older cores
+> the rotation tuning is silently dropped. `base` and `antisib` do not depend on it.
+
+The `base` profile is the default and reproduces the exact pre-profile link, so
+existing deployments and already-issued keys are unaffected. `XRAY_XHTTP_MODE` sets the
+`mode` for the `base` profile only; `antisib`/`multi` carry their own mode. The chosen
+profile is stored per key (the `xhttp_profile` column, migration v28) and encoded into
+the key's Xray email label (`xray_http_{base,antisib,multi}_<rnd>`).
+
 ## Rollback
 
 - **Code:** revert the deploy via git.

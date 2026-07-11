@@ -85,6 +85,13 @@ _Legacy aliases accepted: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SE
 > does **not** match HTTP/2 XHTTP (the h2 `:path` lives in HPACK), so the catch-all is
 > mandatory.
 
+> **Per-key transport profiles.** `XRAY_XHTTP_MODE` sets the client `mode` for the
+> **base** profile only. The VLESS (HTTP) key-creation flow offers three client-side
+> profiles — **base** / **antisib** (anti-blocking) / **multi** (multi-connection) —
+> that override the mode and add `xhttpSettings.extra` tuning in the generated link
+> (no server-side change; the profile is stored per key). See
+> [`xray-xhttp-inbound.md`](xray-xhttp-inbound.md#client-transport-profiles-vless-http).
+
 ## AmneziaWG
 
 | Variable | Required | Default | Description | Example |

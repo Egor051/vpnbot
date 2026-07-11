@@ -70,7 +70,7 @@ python -m compileall .
 CI runs strict mypy over the source packages plus the entry points:
 
 ```bash
-python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ main.py init_db.py
+python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ warp/ main.py init_db.py
 ```
 
 All modules under those packages require full type annotations
@@ -99,7 +99,7 @@ With coverage report:
 python -m pytest --cov=. --cov-report=term-missing
 ```
 
-CI enforces a minimum of 60% branch coverage. Tests live in `tests/` and do not
+CI enforces a minimum of 62% branch coverage. Tests live in `tests/` and do not
 require a live VPN server — all system-level calls are mocked.
 
 When adding a feature, add or update tests in `tests/`. Name files after the
@@ -110,8 +110,8 @@ feature area, e.g. `test_<area>.py`.
 ```bash
 python -m ruff check .
 python -m compileall .
-python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ main.py init_db.py
-python -m pytest --cov=. --cov-fail-under=60
+python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ warp/ main.py init_db.py
+python -m pytest --cov=. --cov-fail-under=62
 make audit
 ```
 
@@ -216,7 +216,7 @@ When adding features, observe these requirements:
 1. Open a PR against `main` with a descriptive title following the commit format.
 2. Fill in the PR template: summary, change type, affected areas, testing steps,
    and security checklist.
-3. All CI gates must pass (ruff, compileall, mypy, pytest ≥ 60% coverage, pip_audit).
+3. All CI gates must pass (ruff, compileall, mypy, pytest ≥ 62% coverage, pip_audit).
 4. A reviewer will check security implications, code clarity, test coverage, and
    adherence to project conventions.
 5. Address review comments.
