@@ -195,6 +195,28 @@ checklist, and day-2 operations live in:
 - **[docs/deployment.md](docs/deployment.md)** — install, both models, Xray API mode.
 - **[docs/operations.md](docs/operations.md)** — runbook: health checks, backup/restore, degraded recovery, rollback.
 
+### Deploy (`scripts/deploy.sh`)
+
+Redeploy a backward-compatible change from `origin/main` with the versioned, idempotent
+deploy script. It is fetched *from* `origin/main`, so it always deploys itself from the tip
+of main. Bootstrap:
+
+```bash
+git -C /opt/vpn-service fetch origin main
+git -C /opt/vpn-service show origin/main:scripts/deploy.sh > /tmp/deploy.sh
+# Recommended: run detached so an SSH disconnect can never strand a half-finished deploy.
+sudo systemd-run --unit=vpn-bot-deploy --collect --pty bash /tmp/deploy.sh   # fallback: tmux/screen
+```
+
+It is a no-op when the checkout already matches `origin/main` (`FORCE=1` overrides). It runs
+ruff/compileall/pytest in an isolated worktree *before* touching production, detects the
+privilege model (api-root vs helper-nonroot) and refuses a unit↔`.env` mismatch with **zero
+downtime**, backs up the DB and control-plane configs, and on any failed assertion rolls
+back code, venv, DB, configs, and the unit — leaving the bot running. A unit-model change
+requires `ALLOW_MODEL_SWITCH=1` (after the host has been migrated); pending changes to other
+`deploy/*.service` units surface as a drift check (`ALLOW_UNIT_DRIFT=1` to override). Day-2
+operations remain in [docs/operations.md](docs/operations.md).
+
 ## Access Lifecycle Policy
 
 **Roles.** Access is tiered:
