@@ -390,7 +390,13 @@ class Settings:
     offsite_backup_env_path: Path | None = None
     anomaly_check_interval: int = 300
     anomaly_window_seconds: int = 3600
+    # DEPRECATED: retained only as the default for anomaly_unique_nets. The
+    # detector now thresholds on distinct networks, not raw IPs.
     anomaly_min_unique_ips: int = 3
+    # Alert threshold in distinct networks (ASN or /24) per key within the
+    # window. Replaces the raw-IP count so carrier IP rotation / mobile↔Wi-Fi
+    # switching for one user no longer trips a false positive.
+    anomaly_unique_nets: int = 3
     anomaly_auto_revoke: bool = False
     anomaly_cooldown_seconds: int = 7200
     anomaly_concurrent_window_seconds: int = 600
@@ -658,6 +664,9 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         if not xray_xhttp_path.startswith("/"):
             raise SettingsError("XRAY_XHTTP_PATH должен начинаться с '/'")
     anomaly_hysteria2_max_conn = _int_range("ANOMALY_HYSTERIA2_MAX_CONN", 0, 0, 10000)
+    # ANOMALY_UNIQUE_NETS defaults to the (deprecated) ANOMALY_MIN_UNIQUE_IPS so
+    # an operator's existing threshold tuning carries over unchanged.
+    anomaly_min_unique_ips = _int_range("ANOMALY_MIN_UNIQUE_IPS", 3, 1, 1000)
     hysteria2_stats_secret = _no_control_chars("HYSTERIA2_STATS_SECRET", _optional("HYSTERIA2_STATS_SECRET"))
     # The concurrent-connection check reads the Hysteria2 Traffic Stats API, which is
     # inert without its secret; refuse a threshold that could never fire.
@@ -782,7 +791,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         offsite_backup_env_path=_offsite_env_path(env_path),
         anomaly_check_interval=_int_range("ANOMALY_CHECK_INTERVAL", 300, 0, 86400),
         anomaly_window_seconds=_int_range("ANOMALY_WINDOW_SECONDS", 3600, 60, 86400),
-        anomaly_min_unique_ips=_int_range("ANOMALY_MIN_UNIQUE_IPS", 3, 1, 1000),
+        anomaly_min_unique_ips=anomaly_min_unique_ips,
+        anomaly_unique_nets=_int_range("ANOMALY_UNIQUE_NETS", anomaly_min_unique_ips, 1, 1000),
         anomaly_auto_revoke=_bool("ANOMALY_AUTO_REVOKE", False),
         anomaly_cooldown_seconds=_int_range("ANOMALY_COOLDOWN_SECONDS", 7200, 0, 86400),
         anomaly_concurrent_window_seconds=_int_range("ANOMALY_CONCURRENT_WINDOW_SECONDS", 600, 0, 86400),

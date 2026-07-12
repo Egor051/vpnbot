@@ -1,0 +1,35 @@
+# Refresh the iptoasn IPv4->ASN database used by the anomaly detector.
+# Timer-activated (deploy/vpn-bot-ip2asn.timer); no [Install] of its own.
+# Runs unprivileged as vpn-bot and can only write /opt/vpn-service/data.
+[Unit]
+Description=vpn-bot IP-to-ASN database refresh (iptoasn)
+Documentation=https://iptoasn.com/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vpn-service
+EnvironmentFile=-/opt/vpn-service/.env
+ExecStart=/opt/vpn-service/deploy/update-ip2asn.sh
+User=vpn-bot
+Group=vpn-bot
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ReadWritePaths=/opt/vpn-service/data

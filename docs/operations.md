@@ -155,6 +155,26 @@ A superadmin can put the whole bot into maintenance from the admin panel (🛠 *
 
 The admin panel's server-status view shows a real-time snapshot (CPU, disk, network, online clients). A superadmin toggle enables the detailed view; the choice is persisted in `server_status_settings.detailed_enabled`. It is a read-only observability panel and never changes backend state.
 
+## Anomaly detection: IP-to-ASN database
+
+The anomaly detector flags a key when it sees too many **distinct networks** in the window (`ANOMALY_UNIQUE_NETS`). To turn a source IP into a network it uses a local copy of the iptoasn IPv4→ASN table at `/opt/vpn-service/data/ip2asn-v4.tsv` (override with `IP2ASN_DB_PATH`). Lookups are an in-memory `bisect`, so the detector never makes a network call. If the file is missing the detector still works — it falls back to `/24` grouping — but ASN grouping is more precise, so keep the file present and fresh.
+
+Refresh it with the shipped units (runs unprivileged as `vpn-bot`, writes only `/opt/vpn-service/data`):
+
+```bash
+# One-off refresh (safe to run by hand):
+sudo -u vpn-bot /opt/vpn-service/deploy/update-ip2asn.sh
+
+# Install + enable the daily timer:
+install -m 0644 /opt/vpn-service/deploy/vpn-bot-ip2asn.service /etc/systemd/system/
+install -m 0644 /opt/vpn-service/deploy/vpn-bot-ip2asn.timer   /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now vpn-bot-ip2asn.timer
+systemctl list-timers vpn-bot-ip2asn.timer   # confirm the next run
+```
+
+`update-ip2asn.sh` downloads to a temp file, validates it (≥100k rows, first/last row parse), and only then atomically renames it into place — any failure leaves the existing database untouched. The cache picks up the new file automatically (it watches the file's mtime/size), so no bot restart is needed.
+
 ## Backup
 
 Back up at least these files before deploys, migrations, and manual backend edits:
