@@ -1,0 +1,15 @@
+# Journal allowlist for scripts/deploy.sh's post-deploy log scan.
+#
+# After starting the new bot, deploy.sh scans `journalctl -u vpn-bot` for error
+# signatures (a "Traceback (most recent call last)" line, or an ERROR/CRITICAL
+# level token). Any line here (matched as an extended regex, grep -E) is treated
+# as benign and removed before the scan decides whether to roll back.
+#
+# One regex per line; '#' starts a comment; blank lines ignored. Keep this tight
+# — an over-broad pattern can mask a real crash. Verify additions against real
+# journals before trusting them.
+
+# Routine sudo privilege escalation from the bot to a read-only helper verb is
+# logged by sudo but is not an error. The helper binary is vpn-bot-awg-apply on
+# current deploys (older hosts may still carry the vpnbot-awg-apply spelling).
+USER=root ; COMMAND=/usr/local/sbin/vpn-?bot-awg-apply (show-peers|show-transfer|status)

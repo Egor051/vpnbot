@@ -1,0 +1,29 @@
+# Managed unit inventory consumed by scripts/deploy.sh.
+#
+# deploy.sh watches these units for an active-state regression across a deploy:
+# a unit that was active BEFORE and is not active AFTER fails the deploy and
+# triggers rollback. The effective UNIT_SET is the union of:
+#   (a) the names listed here, and
+#   (b) the basenames of every deploy/*.service shipped on origin/main
+#       (excluding *.example.service).
+# Repo-shipped units come from (b) automatically, so a PR that renames one of
+# them shows up in this diff. List here ONLY the external/system units the bot
+# depends on that are NOT shipped as deploy/*.service.
+#
+# One unit name per line; '#' starts a comment. deploy.sh hard-fails at start if
+# this file is missing (it never substitutes a silent default).
+#
+# IMPORTANT: verify every name against the actual host
+# (`systemctl list-unit-files`). A wrong name is skipped (and printed), never a
+# hard fail — so a typo here silently drops a unit from the safety net.
+
+# --- External backend services (not shipped as deploy/*.service) ---
+xray.service
+awg-quick@awg0.service
+awg-quick@out-warp.service
+danted.service
+mtproxy.service                 # repo ships only a drop-in (deploy/mtproxy-vpn-bot-managed.conf)
+
+# --- Names to confirm on the host (PR #222 renamed some vpnbot-* -> vpn-bot-,
+#     but not the Hysteria2/WARP units) ---
+vpnbot-hy2-warp-mark.service    # VERIFY exact unit name on host
