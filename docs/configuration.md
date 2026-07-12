@@ -267,7 +267,8 @@ can safely set `HYSTERIA2_INSECURE=false`. Until then, keep this `true`.
 |---|---|---|---|---|
 | `ANOMALY_CHECK_INTERVAL` | No | `300` | How often (seconds) to run the anomaly detection scan (0–86400). | `300` |
 | `ANOMALY_WINDOW_SECONDS` | No | `3600` | Traffic observation window in seconds (60–86400). | `3600` |
-| `ANOMALY_MIN_UNIQUE_IPS` | No | `3` | Minimum unique source IPs within the window to flag a key (1–1000). | `3` |
+| `ANOMALY_MIN_UNIQUE_IPS` | No | `3` | **Deprecated.** Retained only as the default for `ANOMALY_UNIQUE_NETS`; the detector no longer counts raw IPs (1–1000). | `3` |
+| `ANOMALY_UNIQUE_NETS` | No | `ANOMALY_MIN_UNIQUE_IPS` | Alert threshold in **distinct networks** per key within the window (1–1000). Each source IP is normalized to its ASN (via the local iptoasn database at `IP2ASN_DB_PATH`, default `/opt/vpn-service/data/ip2asn-v4.tsv`) or, when the ASN is unknown, to its `/24`. Counting networks instead of raw IPs stops carrier IP rotation and mobile↔Wi-Fi switching for one legitimate user from raising false positives. Keep the database fresh with `deploy/vpn-bot-ip2asn.timer`. | `3` |
 | `ANOMALY_AUTO_REVOKE` | No | `false` | Automatically revoke flagged keys without admin confirmation. For AWG/Xray (IP-based detection) auto-revoke only takes effect when `ANOMALY_CONCURRENT_WINDOW_SECONDS > 0` — see the note below. | `false` |
 | `ANOMALY_COOLDOWN_SECONDS` | No | `7200` | Cooldown before re-flagging the same key (0–86400). | `7200` |
 | `ANOMALY_CONCURRENT_WINDOW_SECONDS` | No | `600` | Window for concurrent-connection anomaly detection (0–86400). | `600` |

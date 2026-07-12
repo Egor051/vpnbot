@@ -2,9 +2,13 @@
 import asyncio
 import collections
 import time as time_module
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from adapters import ip_asn
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 from services.anomaly_detection import (
@@ -72,12 +76,15 @@ def _make_service(**kwargs) -> AnomalyDetectionService:
         awg_service=AsyncMock(),
         admin_ids=frozenset([999]),
         window_seconds=3600,
-        min_unique_ips=3,
+        unique_nets=3,
         auto_revoke=False,
         cooldown_seconds=7200,
         xray_access_log_path="",
         concurrent_window_seconds=0,
     )
+    # No IP2ASN_DB_PATH is set for these tests, so normalize_ip degrades to /24
+    # grouping; the IPs below are chosen to live in distinct /24s where a test
+    # expects an alert. See test_ip_asn.py for the ASN-database path.
     defaults.update(kwargs)
     svc = AnomalyDetectionService(**defaults)
     svc.bot = AsyncMock()
@@ -236,16 +243,17 @@ def test_alert_fires_when_threshold_exceeded():
     svc = _make_service(
         vpn_keys=vpn_keys_mock,
         awg=awg_mock,
-        min_unique_ips=3,
+        unique_nets=3,
         window_seconds=3600,
         cooldown_seconds=0,
     )
     svc.bot = AsyncMock()
 
     now = time_module.time()
+    # Three IPs in three distinct /24s => 3 unique networks (real sharing).
     svc._record_ip(5, now - 100, "10.0.0.1")
-    svc._record_ip(5, now - 80, "10.0.0.2")
-    svc._record_ip(5, now - 60, "10.0.0.3")
+    svc._record_ip(5, now - 80, "10.1.0.2")
+    svc._record_ip(5, now - 60, "10.2.0.3")
 
     asyncio.run(svc._check_thresholds(now))
 
@@ -262,7 +270,7 @@ def test_alert_respects_cooldown():
 
     svc = _make_service(
         vpn_keys=vpn_keys_mock,
-        min_unique_ips=1,
+        unique_nets=1,
         cooldown_seconds=3600,
     )
     svc.bot = AsyncMock()
@@ -280,7 +288,7 @@ def test_no_alert_below_threshold():
     vpn_keys_mock = AsyncMock()
     vpn_keys_mock.get_by_id.return_value = key
 
-    svc = _make_service(vpn_keys=vpn_keys_mock, min_unique_ips=5, cooldown_seconds=0)
+    svc = _make_service(vpn_keys=vpn_keys_mock, unique_nets=5, cooldown_seconds=0)
     svc.bot = AsyncMock()
 
     now = time_module.time()
@@ -302,7 +310,7 @@ def test_no_alert_mobile_roaming():
 
     svc = _make_service(
         vpn_keys=vpn_keys_mock,
-        min_unique_ips=3,
+        unique_nets=3,
         cooldown_seconds=0,
         window_seconds=3600,
         concurrent_window_seconds=600,
@@ -330,7 +338,7 @@ def test_alert_fires_concurrent_sharing():
 
     svc = _make_service(
         vpn_keys=vpn_keys_mock,
-        min_unique_ips=3,
+        unique_nets=3,
         cooldown_seconds=0,
         window_seconds=3600,
         concurrent_window_seconds=600,
@@ -338,9 +346,10 @@ def test_alert_fires_concurrent_sharing():
     svc.bot = AsyncMock()
 
     now = time_module.time()
+    # Three concurrent IPs in three distinct /24s => 3 unique networks.
     svc._record_ip(11, now - 120, "10.0.0.1")
-    svc._record_ip(11, now - 90, "10.0.0.2")
-    svc._record_ip(11, now - 60, "10.0.0.3")
+    svc._record_ip(11, now - 90, "10.1.0.2")
+    svc._record_ip(11, now - 60, "10.2.0.3")
 
     asyncio.run(svc._check_thresholds(now))
     svc.bot.send_message.assert_called_once()
@@ -354,7 +363,7 @@ def test_concurrent_window_disabled_falls_back_to_full_window():
 
     svc = _make_service(
         vpn_keys=vpn_keys_mock,
-        min_unique_ips=3,
+        unique_nets=3,
         cooldown_seconds=0,
         window_seconds=3600,
         concurrent_window_seconds=0,
@@ -444,3 +453,101 @@ def test_evict_stale_last_alerted_drops_expired_entries():
     svc._evict_stale_last_alerted(now)
     assert 1 in svc._last_alerted
     assert 2 not in svc._last_alerted
+
+
+# ------------------------------------------------------------------ ASN/network normalization
+
+
+# The false-positive report: one home-ISP IP (AS25513) plus six rotating LTE
+# addresses inside 91.79.3.0/24 (AS8359). Under network counting these collapse
+# to two groups, below the default threshold of three.
+_REPORT_ASN_TSV = (
+    "91.79.3.0\t91.79.3.255\t8359\tRU\tMTS\n"
+    "109.252.72.0\t109.252.79.255\t25513\tRU\tMGTS\n"
+)
+_REPORT_IPS = [
+    "109.252.72.195",
+    "91.79.3.141",
+    "91.79.3.145",
+    "91.79.3.151",
+    "91.79.3.189",
+    "91.79.3.222",
+    "91.79.3.227",
+]
+
+
+@pytest.fixture
+def report_asn_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    db = tmp_path / "ip2asn-v4.tsv"
+    db.write_text(_REPORT_ASN_TSV, encoding="utf-8")
+    monkeypatch.setenv("IP2ASN_DB_PATH", str(db))
+    ip_asn.reset_cache()
+    yield db
+    ip_asn.reset_cache()
+
+
+def test_report_seven_ips_do_not_alert_at_threshold_3(report_asn_db):
+    """The 7 report IPs collapse to 2 ASN groups -> no alert at unique_nets=3."""
+    key = _awg_key(key_id=20, public_key="pkReport")
+    vpn_keys_mock = AsyncMock()
+    vpn_keys_mock.get_by_id.return_value = key
+
+    svc = _make_service(vpn_keys=vpn_keys_mock, unique_nets=3, cooldown_seconds=0)
+    svc.bot = AsyncMock()
+
+    now = time_module.time()
+    for offset, ip in enumerate(_REPORT_IPS):
+        svc._record_ip(20, now - offset, ip)
+
+    # Sanity: the raw IPs (7) would have tripped the old count; the networks (2) do not.
+    assert len(svc._unique_ips_in_window(20, now)) == len(_REPORT_IPS)
+    nets = {ip_asn.normalize_ip(ip) for ip in _REPORT_IPS}
+    assert nets == {"AS8359", "AS25513"}
+
+    asyncio.run(svc._check_thresholds(now))
+    svc.bot.send_message.assert_not_called()
+    assert 20 not in svc._last_alerted
+
+
+def test_report_alert_shows_grouped_breakdown(report_asn_db):
+    """Lowering the threshold to 2 fires an alert grouped by network."""
+    key = _awg_key(key_id=21, public_key="pkReport2")
+    vpn_keys_mock = AsyncMock()
+    vpn_keys_mock.get_by_id.return_value = key
+
+    svc = _make_service(vpn_keys=vpn_keys_mock, unique_nets=2, cooldown_seconds=0)
+    svc.bot = AsyncMock()
+
+    now = time_module.time()
+    for offset, ip in enumerate(_REPORT_IPS):
+        svc._record_ip(21, now - offset, ip)
+
+    asyncio.run(svc._check_thresholds(now))
+    svc.bot.send_message.assert_called_once()
+    text = svc.bot.send_message.call_args.args[1]
+    assert "AS8359: 6 IP" in text
+    assert "AS25513: 1 IP" in text
+    assert "2 уник. сетей" in text
+
+
+def test_garbage_ip_does_not_crash_detector():
+    """A non-IP string from a malformed log line must not break the check."""
+    key = _awg_key(key_id=22, public_key="pkGarbage")
+    vpn_keys_mock = AsyncMock()
+    vpn_keys_mock.get_by_id.return_value = key
+
+    svc = _make_service(vpn_keys=vpn_keys_mock, unique_nets=3, cooldown_seconds=0)
+    svc.bot = AsyncMock()
+
+    now = time_module.time()
+    # One garbage token plus two IPs in distinct /24s => 3 networks, alert fires,
+    # exercising both the threshold count and the grouped alert text with junk.
+    svc._record_ip(22, now - 30, "garbage-not-an-ip")
+    svc._record_ip(22, now - 20, "203.0.113.10")
+    svc._record_ip(22, now - 10, "198.51.100.10")
+
+    asyncio.run(svc._check_thresholds(now))  # must not raise
+
+    svc.bot.send_message.assert_called_once()
+    text = svc.bot.send_message.call_args.args[1]
+    assert "garbage-not-an-ip: 1 IP" in text

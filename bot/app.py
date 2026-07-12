@@ -492,7 +492,7 @@ async def _build_app(
         awg_service=awg_service,
         admin_ids=settings.admin_ids,
         window_seconds=settings.anomaly_window_seconds,
-        min_unique_ips=settings.anomaly_min_unique_ips,
+        unique_nets=settings.anomaly_unique_nets,
         auto_revoke=settings.anomaly_auto_revoke,
         cooldown_seconds=settings.anomaly_cooldown_seconds,
         xray_access_log_path=settings.xray_access_log_path,

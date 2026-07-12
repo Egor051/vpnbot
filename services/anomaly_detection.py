@@ -9,6 +9,7 @@ from pathlib import Path
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from adapters import ip_asn
 from adapters.awg_config import AwgConfigAdapter
 from i18n import t
 from models.dto import VpnKey
@@ -77,7 +78,7 @@ class AnomalyDetectionService:
         awg_service: object,
         admin_ids: frozenset[int],
         window_seconds: int = 3600,
-        min_unique_ips: int = 3,
+        unique_nets: int = 3,
         auto_revoke: bool = False,
         cooldown_seconds: int = 7200,
         xray_access_log_path: str = "",
@@ -94,7 +95,11 @@ class AnomalyDetectionService:
         self._awg_service = awg_service
         self._admin_ids = admin_ids
         self._window_seconds = window_seconds
-        self._min_unique_ips = min_unique_ips
+        # Alert threshold, expressed in *distinct networks* (ASN or /24) rather
+        # than raw IPs — see adapters.ip_asn.normalize_ip. Counting networks
+        # collapses carrier IP rotation and mobile/Wi-Fi switching that would
+        # otherwise trip the raw-IP count for a single legitimate user.
+        self._min_unique_nets = unique_nets
         self._auto_revoke = auto_revoke
         self._cooldown_seconds = cooldown_seconds
         self._xray_access_log_path = xray_access_log_path
@@ -258,7 +263,10 @@ class AnomalyDetectionService:
                 trigger_ips = self._unique_ips_in_concurrent_window(key_id, now)
             else:
                 trigger_ips = all_ips
-            if len(trigger_ips) < self._min_unique_ips:
+            # Count distinct networks, not raw IPs: normalize each IP to its ASN
+            # (or /24). This is a local bisect lookup — no network/blocking I/O.
+            trigger_nets = {ip_asn.normalize_ip(ip) for ip in trigger_ips}
+            if len(trigger_nets) < self._min_unique_nets:
                 continue
             last = self._last_alerted.get(key_id, 0.0)
             if now - last < self._cooldown_seconds:
@@ -299,27 +307,41 @@ class AnomalyDetectionService:
 
         using_concurrent = self._concurrent_window_seconds > 0 and trigger_ips != all_ips
         ips_for_display = trigger_ips if using_concurrent else all_ips
-        ips_sorted = sorted(ips_for_display)
-        ips_preview = ", ".join(ips_sorted[:10])
-        if len(ips_for_display) > 10:
-            ips_preview += f" + ещё {len(ips_for_display) - 10}"
+        # Group the unique raw IPs by their normalized network so the alert reads
+        # e.g. "AS8359: 6 IP, AS25513: 1 IP" instead of a flat, noisy IP list.
+        # Each network's count is its number of distinct raw IPs.
+        net_counts = collections.Counter(
+            ip_asn.normalize_ip(ip) for ip in ips_for_display
+        )
+        groups_str = ", ".join(
+            f"{net}: {count} IP" for net, count in net_counts.most_common()
+        )
 
         if using_concurrent:
+            all_net_total = len({ip_asn.normalize_ip(ip) for ip in all_ips})
             count_line = (
                 f"За последние {_window_str(self._concurrent_window_seconds)}: "
-                f"<b>{len(trigger_ips)} уник. IP</b> "
-                f"(всего за {_window_str(self._window_seconds)}: {len(all_ips)})"
+                f"<b>{len(net_counts)} уник. сетей</b> ({len(ips_for_display)} IP) "
+                f"(всего за {_window_str(self._window_seconds)}: "
+                f"{all_net_total} сетей / {len(all_ips)} IP)"
             )
         else:
-            count_line = f"За последние {_window_str(self._window_seconds)}: <b>{len(all_ips)} уник. IP</b>"
+            count_line = (
+                f"За последние {_window_str(self._window_seconds)}: "
+                f"<b>{len(net_counts)} уник. сетей</b> ({len(ips_for_display)} IP)"
+            )
 
         owner_str = f"@{key.username}" if key.username else f"user_id={key.owner_user_id}"
-        ip_label = f"IP ({_window_str(self._concurrent_window_seconds)})" if using_concurrent else "IP"
+        net_label = (
+            f"Сети ({_window_str(self._concurrent_window_seconds)})"
+            if using_concurrent
+            else "Сети"
+        )
         lines = [
             f"⚠️ <b>Аномалия: ключ #{key.id} ({key.key_type.value.upper()})</b>",
             count_line,
             f"Владелец: {owner_str}",
-            f"{ip_label}: <code>{ips_preview}</code>",
+            f"{net_label}: <code>{groups_str}</code>",
         ]
         if auto_revoked:
             lines.append("🔒 <b>Ключ автоматически отозван</b>")

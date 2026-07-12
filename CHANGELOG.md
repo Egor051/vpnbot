@@ -168,6 +168,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Anomaly detector false positives from one legitimate user.** The
+  suspicious-key check counted distinct *raw source IPs*, so a single client
+  whose LTE carrier rotates its address (many IPs in one block, e.g. six inside
+  `91.79.3.0/24`) or who switches between mobile data and home Wi-Fi looked like
+  key sharing. It now counts distinct **networks**: each IP is collapsed to its
+  ASN via a local iptoasn database (`AS8359`, …) or, when the ASN is unknown, to
+  its `/24`. The threshold moves to `ANOMALY_UNIQUE_NETS` (defaults to the now
+  deprecated `ANOMALY_MIN_UNIQUE_IPS`, ≥3 networks) and the alert lists a grouped
+  breakdown (`AS8359: 6 IP, AS25513: 1 IP`). Lookups are an in-memory `bisect`
+  with no network call on the detector's hot path. New module `adapters/ip_asn.py`;
+  the database is refreshed daily by `deploy/update-ip2asn.sh` +
+  `deploy/vpn-bot-ip2asn.{service,timer}` (unprivileged, atomic, validated). No
+  database schema change.
 - **Admin panel silently did nothing when issuing a key to a blocked user.** In
   `admin_issue_user_selected`, the callback query was answered (dismissing the
   loading spinner) *before* the blocked-user check ran; when that check then

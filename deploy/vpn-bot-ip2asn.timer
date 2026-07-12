@@ -1,0 +1,14 @@
+# Daily refresh of the iptoasn IPv4->ASN database. Enable with:
+#   systemctl enable --now vpn-bot-ip2asn.timer
+[Unit]
+Description=Daily refresh of the vpn-bot IP-to-ASN database (iptoasn)
+Documentation=https://iptoasn.com/
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+Unit=vpn-bot-ip2asn.service
+
+[Install]
+WantedBy=timers.target
