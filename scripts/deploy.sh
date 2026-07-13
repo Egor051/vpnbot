@@ -144,7 +144,9 @@ unit_val() {
   [[ -f "$file" ]] || { printf ''; return 0; }
   line=$(grep -E "^[[:space:]]*${key}=" "$file" 2>/dev/null | grep -vE '^[[:space:]]*[#;]' | tail -n1 || true)
   line="${line#*=}"
-  printf '%s' "$(printf '%s' "$line" | xargs)"
+  # Trim surrounding whitespace (same approach as env_val; avoids xargs de-quoting/splitting).
+  line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  printf '%s' "$line"
 }
 unit_has() { grep -E "^[[:space:]]*${2}=" "$1" 2>/dev/null | grep -qvE '^[[:space:]]*[#;]'; }
 
@@ -169,16 +171,19 @@ schema_version() {
 
 rotate_backups() {
   local f
+  # `|| true`: on a fresh host the glob matches nothing and `ls` exits non-zero;
+  # with `set -o pipefail` + `set -e` that would otherwise abort the whole deploy.
   ls -1t "$BACKUP_DIR"/backup-*.tar.gz 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | while IFS= read -r f; do
     rm -f "$f"
-  done
+  done || true
 }
 
 # --------------------------------------------------------------------------- #
 # Hardening non-regression (compare VALUES, not just presence)
 # --------------------------------------------------------------------------- #
 ps_rank()   { case "${1,,}" in strict) echo 3;; full) echo 2;; yes|true) echo 1;; *) echo 0;; esac; }
-ph_rank()   { case "${1,,}" in tmpfs|read-only) echo 2;; yes|true) echo 1;; *) echo 0;; esac; }
+# yes/tmpfs make $HOME empty+inaccessible (strongest); read-only only blocks writes.
+ph_rank()   { case "${1,,}" in yes|true|tmpfs) echo 2;; read-only) echo 1;; *) echo 0;; esac; }
 bool_rank() { case "${1,,}" in yes|true|1|on) echo 1;; *) echo 0;; esac; }
 
 check_hardening_regression() {
@@ -309,7 +314,8 @@ fix_db_perms() {
 # PHASE 1 — validate with the bot still running (zero-downtime, no rollback)
 # =========================================================================== #
 [[ "${EUID}" -eq 0 ]] || die "run as root (recommended: sudo systemd-run --unit=vpn-bot-deploy --collect --pty bash /tmp/deploy.sh)"
-require_tools git sqlite3 flock systemd-analyze systemctl tar visudo python3 sha256sum
+require_tools git sqlite3 flock systemd-analyze systemctl tar visudo python3 sha256sum \
+              awk df du date journalctl
 
 cd "$APP_DIR" || die "APP_DIR ${APP_DIR} not found"
 git worktree prune >/dev/null 2>&1 || true

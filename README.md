@@ -217,6 +217,18 @@ requires `ALLOW_MODEL_SWITCH=1` (after the host has been migrated); pending chan
 `deploy/*.service` units surface as a drift check (`ALLOW_UNIT_DRIFT=1` to override). Day-2
 operations remain in [docs/operations.md](docs/operations.md).
 
+> **Model authority & scope.** The `deploy/vpn-bot.service` shipped on `origin/main` is
+> authoritative and defines the privilege model that gets installed. The script only
+> performs a *backward-compatible, same-model* deploy: on a host whose installed model
+> differs from what that unit declares (for example a helper-nonroot host against the
+> default root+api unit), every run trips the model-switch gate and refuses at zero
+> downtime. The `main` you deploy from must carry the unit for the model you actually run.
+>
+> **Rollback data window.** On a failed assertion the script restores the DB from the
+> snapshot taken *before* the new code started. Any writes the new bot made while it was
+> live during the post-start health checks are rolled back with it. The window is short
+> (seconds), but it is not zero.
+
 ## Access Lifecycle Policy
 
 **Roles.** Access is tiered:
