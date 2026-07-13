@@ -22,8 +22,15 @@
 # deploy/vpn-bot.service is authoritative and is installed verbatim; the model is
 # switched by editing that repo file (guarded by ALLOW_MODEL_SWITCH).
 #
-# Env knobs (all overridable): FORCE, ALLOW_MODEL_SWITCH, ALLOW_UNIT_DRIFT, and
-# the paths listed below.
+# Env knobs (all overridable): FORCE, ALLOW_MODEL_SWITCH, ALLOW_UNIT_DRIFT,
+# PHASE1_ONLY, and the paths listed below.
+#
+# PHASE1_ONLY=1 runs the entire read-only Phase 1 (guards, lock, fetch, tests,
+# model detection, pre-flight matrix, drift check, UNIT_SET snapshot, WARP
+# rollback-path facts), prints a full report, and exits 0 WITHOUT entering
+# Phase 2 — no `systemctl stop`, no config/unit/venv mutations. It is the
+# mandatory first step on a new host: it surfaces every fact an operator must
+# vet before allowing a real deploy. Independent of FORCE.
 
 set -euo pipefail
 
@@ -43,6 +50,7 @@ BACKUP_KEEP="${BACKUP_KEEP:-10}"
 ALLOW_MODEL_SWITCH="${ALLOW_MODEL_SWITCH:-0}"
 ALLOW_UNIT_DRIFT="${ALLOW_UNIT_DRIFT:-0}"
 FORCE="${FORCE:-0}"
+PHASE1_ONLY="${PHASE1_ONLY:-0}"   # 1 = run all of Phase 1, print report, exit 0 (no mutations)
 
 ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
 XRAY_CONF="${XRAY_CONF:-/usr/local/etc/xray/config.json}"
@@ -84,6 +92,7 @@ MODE=""
 VENV_SNAPSHOT_DONE=0
 PHASE="preflight"   # preflight | interim | armed | done
 declare -a UNIT_SET=()
+declare -a MANAGED_LIST=()   # only the names read from deploy/managed-units.list, in order
 declare -A U_CLASS=() U_TARGET=() U_PRE_ACTIVE=() U_PRE_ENABLED=()
 
 # --------------------------------------------------------------------------- #
@@ -331,11 +340,14 @@ git fetch origin main
 TAG="$(git rev-parse --short origin/main)"
 
 if [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]]; then
-  if [[ "$FORCE" != "1" ]]; then
+  if [[ "$PHASE1_ONLY" == "1" ]]; then
+    log "HEAD already at origin/main (${TAG}); PHASE1_ONLY=1: running Phase 1 checks anyway (no deploy)."
+  elif [[ "$FORCE" != "1" ]]; then
     log "HEAD already at origin/main (${TAG}); nothing to deploy. Set FORCE=1 to redeploy anyway."
     exit 0
+  else
+    warn "FORCE=1: redeploying although HEAD already equals origin/main"
   fi
-  warn "FORCE=1: redeploying although HEAD already equals origin/main"
 fi
 
 # Preconditions -------------------------------------------------------------
@@ -482,6 +494,8 @@ if [[ ${#drift[@]} -gt 0 ]]; then
   done
   if [[ "$ALLOW_UNIT_DRIFT" == "1" ]]; then
     warn "ALLOW_UNIT_DRIFT=1: continuing despite the drift above"
+  elif [[ "$PHASE1_ONLY" == "1" ]]; then
+    warn "PHASE1_ONLY=1: drift reported (above and in the report) but not fatal in inspection mode"
   else
     die "unit drift detected (set ALLOW_UNIT_DRIFT=1 to deploy vpn-bot anyway and apply the rest by hand)"
   fi
@@ -490,7 +504,7 @@ fi
 # UNIT_SET assembly + classification + pre-state snapshot --------------------
 while IFS= read -r raw; do
   line="${raw%%#*}"; line="$(printf '%s' "$line" | xargs)"
-  [[ -n "$line" ]] && UNIT_SET+=("$line")
+  [[ -n "$line" ]] && { UNIT_SET+=("$line"); MANAGED_LIST+=("$line"); }
 done < "$WT/deploy/managed-units.list"
 shopt -s nullglob
 for f in "$WT"/deploy/*.service; do
@@ -521,6 +535,150 @@ for u in "${UNIT_SET[@]}"; do
 done
 if [[ ${#skipped[@]} -gt 0 ]]; then
   log "units not installed (skipped from the health check): ${skipped[*]}"
+fi
+
+# --------------------------------------------------------------------------- #
+# PHASE1_ONLY report — consolidate every Phase 1 fact an operator must vet on a
+# new host before any mutation is permitted. Reads only globals populated above.
+# --------------------------------------------------------------------------- #
+phase1_report() {
+  printf '\n===== PHASE 1 REPORT (PHASE1_ONLY=1 — no mutations performed) =====\n'
+
+  local head_sha uptodate=""
+  head_sha="$(git rev-parse --short HEAD)"
+  [[ "$head_sha" == "$TAG" ]] && uptodate=" (already up to date)"
+  printf '  checkout          : %s -> origin/main %s%s\n' "$head_sha" "$TAG" "$uptodate"
+
+  # --- Model detection: MODE and the exact facts it was derived from ---
+  local basis="helper-nonroot"
+  [[ "$INCOMING_USER" == "root" ]] && basis="api-root"
+  printf '\n  --- Model detection (MODE + basis) ---\n'
+  printf '    incoming User  (origin/main deploy/vpn-bot.service) : %s\n' "$INCOMING_USER"
+  printf '    installed User (%s) : %s\n' "$SYSTEM_UNIT" "${INSTALLED_USER:-<none> (fresh install)}"
+  printf '    .env XRAY_APPLY_MODE                                : %s\n' "${XRAY_APPLY_MODE:-<unset>}"
+  printf '    .env PRIVILEGE_HELPERS_ENABLED                      : %s\n' "${PRIV_HELPERS:-<unset>}"
+  printf '    => detected MODE : %s  (basis: incoming User=%s => %s)\n' "$MODE" "$INCOMING_USER" "$basis"
+
+  # --- Pre-flight compatibility matrix (reaching here means it passed) ---
+  printf '\n  --- Pre-flight compatibility matrix (incoming unit vs .env) ---\n'
+  printf '    XRAY_APPLY_MODE=api       : %s\n' "$api"
+  printf '    PRIVILEGE_HELPERS_ENABLED : %s\n' "$helpers"
+  printf '    result                    : PASS (no api+helpers clash, no api/non-root clash)\n'
+
+  # --- Model-switch gate ---
+  printf '\n  --- Model-switch gate ---\n'
+  if [[ -n "$INSTALLED_USER" && "$INSTALLED_USER" != "$INCOMING_USER" ]]; then
+    printf '    switch %s -> %s : ALLOW_MODEL_SWITCH=%s, target preconditions verified above\n' \
+      "$INSTALLED_USER" "$INCOMING_USER" "$ALLOW_MODEL_SWITCH"
+  else
+    printf '    no switch (installed and incoming User match, or fresh install)\n'
+  fi
+
+  # --- Unit drift: diverged units + ready-to-run apply commands ---
+  printf '\n  --- Unit drift (PR deploy/*.service units deploy.sh does NOT install) ---\n'
+  if [[ ${#drift[@]} -gt 0 ]]; then
+    printf '    %d unit(s) differ from the host — apply by hand:\n' "${#drift[@]}"
+    local d src dst unit
+    for d in "${drift[@]}"; do
+      src="${d%%|*}"; dst="${d##*|}"; unit="$(basename "$dst")"
+      printf '      install -m0644 %s %s\n' "$src" "$dst"
+      printf '      systemctl daemon-reload && systemctl restart %s\n' "$unit"
+    done
+    [[ "$ALLOW_UNIT_DRIFT" == "1" ]] && printf '    (ALLOW_UNIT_DRIFT=1 set — a real deploy would continue past this)\n'
+  else
+    printf '    none (shipped deploy/*.service units match the host, or are not installed there)\n'
+  fi
+
+  # --- UNIT_SET: per-unit class + current is-active/is-enabled ---
+  printf '\n  --- UNIT_SET (watched for an active-state regression across a deploy) ---\n'
+  local u class disp t via
+  for u in "${UNIT_SET[@]}"; do
+    if [[ "$u" == "$BOT_UNIT" ]]; then
+      printf '    %-40s %-16s is-active=%s is-enabled=%s\n' "$u" "bot-unit" \
+        "$(systemctl is-active "$u" 2>/dev/null || true)" \
+        "$(systemctl is-enabled "$u" 2>/dev/null || true)"
+      continue
+    fi
+    class="${U_CLASS[$u]:-}"
+    if [[ -z "$class" ]]; then
+      printf '    %-40s %s\n' "$u" "NOT INSTALLED (skipped)"
+      continue
+    fi
+    case "$class" in
+      regular)          disp="normal" ;;
+      state-only)       disp="state-only" ;;
+      timer)            disp="timer-backed" ;;
+      oneshot-no-timer) disp="oneshot-no-timer" ;;
+      *)                disp="$class" ;;
+    esac
+    t="${U_TARGET[$u]}"; via=""
+    [[ "$t" != "$u" ]] && via=" (via ${t})"
+    printf '    %-40s %-16s is-active=%s is-enabled=%s%s\n' "$u" "$disp" \
+      "${U_PRE_ACTIVE[$u]}" "${U_PRE_ENABLED[$u]}" "$via"
+  done
+
+  # --- LOUD: managed-units.list names that are NOT installed on this host ---
+  local missing=()
+  if [[ ${#MANAGED_LIST[@]} -gt 0 ]]; then
+    for u in "${MANAGED_LIST[@]}"; do
+      unit_installed "$u" || missing+=("$u")
+    done
+  fi
+  printf '\n'
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    printf '  ##############################################################################\n'
+    printf '  ## CONFIG ERROR: managed-units.list names NOT present on this host           ##\n'
+    printf '  ## This is a configuration error, not normal. A wrong or renamed name        ##\n'
+    printf '  ## silently drops a unit from the deploy safety net. Fix                      ##\n'
+    printf '  ## deploy/managed-units.list to match real names (systemctl list-unit-files) ##\n'
+    printf '  ## before deploying:                                                          ##\n'
+    printf '  ##############################################################################\n'
+    for u in "${missing[@]}"; do printf '  ##   MISSING ON HOST: %s\n' "$u"; done
+    printf '  ##############################################################################\n'
+  else
+    printf '  managed-units.list: every listed name resolves to an installed unit. OK\n'
+  fi
+
+  # --- WARP rollback-path facts (verify BEFORE a rollback would need them) ---
+  printf '\n  --- WARP rollback-path data-plane facts (verified now, pre-emptively) ---\n'
+  printf '    WARP_IFACE : %s\n' "$WARP_IFACE"
+  printf '    WARP_SRC   : %s\n' "$WARP_SRC"
+  local fwmark tbl ruleok warp_msg warp_rc
+  if command -v awg >/dev/null 2>&1; then
+    fwmark="$(awg show "$WARP_IFACE" fwmark 2>/dev/null || true)"
+  else
+    fwmark=""; printf '    (awg not found on host — fwmark undetermined)\n'
+  fi
+  if [[ -n "$fwmark" && "$fwmark" != "off" && "$fwmark" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$ ]]; then
+    tbl=$(( fwmark ))
+    printf '    awg fwmark : %s -> WARP routing table (decimal) : %s\n' "$fwmark" "$tbl"
+  else
+    printf '    awg fwmark : %s -> WARP routing table : UNDETERMINED (rollback cannot verify WARP)\n' "${fwmark:-<none>}"
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    if ip rule show 2>/dev/null | grep -qF "from ${WARP_SRC}"; then ruleok="present"; else ruleok="ABSENT"; fi
+  else
+    ruleok="ip not found on host"
+  fi
+  printf '    ip rule from %s : %s\n' "$WARP_SRC" "$ruleok"
+  warp_msg="$(warp_dataplane_ok)" && warp_rc=0 || warp_rc=$?
+  if (( warp_rc == 0 )); then
+    printf '    rollback WARP check : PASS (%s)\n' "$warp_msg"
+  else
+    printf '    rollback WARP check : NOT VERIFIED (%s)\n' "$warp_msg"
+    printf '                          if a rollback restarts AWG, WARP may need manual reapply\n'
+  fi
+
+  printf '\n===================================================================\n'
+}
+
+# --------------------------------------------------------------------------- #
+# PHASE1_ONLY exit — print the full report and stop before any mutation.
+# --------------------------------------------------------------------------- #
+if [[ "$PHASE1_ONLY" == "1" ]]; then
+  phase1_report
+  log "PHASE1_ONLY=1: Phase 1 complete; NOT entering Phase 2 (no systemctl stop, no mutations)."
+  exit 0
 fi
 
 # =========================================================================== #

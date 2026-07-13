@@ -208,6 +208,33 @@ git -C /opt/vpn-service show origin/main:scripts/deploy.sh > /tmp/deploy.sh
 sudo systemd-run --unit=vpn-bot-deploy --collect --pty bash /tmp/deploy.sh   # fallback: tmux/screen
 ```
 
+> **Mandatory first step on a new host — `PHASE1_ONLY=1`.** Before the *first*
+> real deploy on any host, run the script once in inspection mode. It executes
+> the entire read-only Phase 1 (guards, lock, fetch, preconditions, ruff /
+> compileall / pytest in an isolated worktree, model detection, pre-flight
+> matrix, model-switch gate, unit + sudoers asserts, drift check, `UNIT_SET`
+> classification, and pre-state snapshot), prints a full report, and exits `0`
+> **without entering Phase 2** — no `systemctl stop`, no config/unit/venv
+> mutations. It is independent of `FORCE` (it runs even when the checkout
+> already matches `origin/main`).
+>
+> ```bash
+> sudo PHASE1_ONLY=1 bash /tmp/deploy.sh
+> ```
+>
+> Read the report before allowing a real deploy. It states, explicitly: the
+> detected `MODE` and the facts it was derived from (incoming `User`, installed
+> `User`, `.env`); the pre-flight matrix result; any unit drift together with
+> the exact `install` / `systemctl` commands to apply it by hand; each
+> `UNIT_SET` member's class (`normal` / `state-only` / `timer-backed` / `NOT
+> INSTALLED (skipped)`) and its current `is-active`/`is-enabled`; a **loud**
+> list of any `deploy/managed-units.list` names that are **not present on the
+> host** (a configuration error — a wrong or renamed name silently drops a unit
+> from the safety net, so fix `deploy/managed-units.list` to match the real
+> names); and the WARP rollback-path facts (the routing table in decimal from
+> `awg show <iface> fwmark` and the `ip rule from $WARP_SRC` check) so the
+> rollback path is verified **before** a rollback ever needs it.
+
 It is a no-op when the checkout already matches `origin/main` (`FORCE=1` overrides). It runs
 ruff/compileall/pytest in an isolated worktree *before* touching production, detects the
 privilege model (api-root vs helper-nonroot) and refuses a unit↔`.env` mismatch with **zero
