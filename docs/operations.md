@@ -385,6 +385,14 @@ not affect handshake auth or the health entry.
 > A code rollback does not roll back runtime state — SQLite, Xray config, and AWG config need
 > separate restoration if the deploy already modified them.
 
+> **Automated deploys (`scripts/deploy.sh`).** The deploy script rolls back automatically on a
+> failed assertion, restoring code, venv, DB, configs, and the unit. Two things to know: it
+> restores the DB snapshot taken *before* the new code started, so writes made while the new
+> bot was live during the post-start health-check window are discarded; and it only performs a
+> same-privilege-model deploy (a model switch is gated behind `ALLOW_MODEL_SWITCH=1` and a
+> prior host migration — see the Deploy section in the [README](../README.md)). The manual
+> steps below are for a hand-rollback when you are not using the script.
+
 **Step 1 — stop the service and back up runtime state:**
 
 ```bash
