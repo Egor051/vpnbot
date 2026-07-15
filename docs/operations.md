@@ -456,6 +456,27 @@ sudo systemctl restart vpn-bot
 python deploy/check-nonroot-helper-mode.py
 ```
 
+**Managed MTProto: refresh the wrapper after every update.** The pull above updates
+the tracked source `deploy/run-mtproxy-managed`, but the wrapper that systemd actually
+runs is the installed runtime copy at `/opt/vpn-service/scripts/run-mtproxy-managed`
+(`MTPROTO_MANAGED_WRAPPER_PATH`). That path is a gitignored install artifact: neither
+`git pull`/`git reset` nor `scripts/deploy.sh` (which installs only `vpn-bot.service`)
+refreshes it, so an updated wrapper — including security fixes such as the env-key
+allowlist and port validation — does not reach the running proxy until you re-install
+it explicitly. Skip this step and the proxy keeps running a stale wrapper.
+
+```bash
+# Refresh the managed-MTProto wrapper from its updated tracked source (root:root 0700).
+sudo install -m 700 -o root -g root \
+  deploy/run-mtproxy-managed /opt/vpn-service/scripts/run-mtproxy-managed
+sudo systemctl restart mtproxy
+sudo systemctl status mtproxy --no-pager
+# Confirm the runtime copy now matches the source, and the tree stays clean:
+sudo cmp deploy/run-mtproxy-managed /opt/vpn-service/scripts/run-mtproxy-managed \
+  && echo "wrapper up to date"
+git status --porcelain   # scripts/run-mtproxy-managed is gitignored -> not listed
+```
+
 Do not run production DB migrations as root against `/opt/vpn-service/data/vpn.db`. The
 service bootstraps schema/migrations on startup as `vpn-bot`; if you must run `init_db.py`
 manually, run it with the same non-root identity and environment as the service.
