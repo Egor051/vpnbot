@@ -76,24 +76,34 @@ def _isolate_i18n_locale() -> Generator[None, None, None]:
         i18n._current_locale.set(None)
 
 
-async def wait_until_lock_contended(lock: asyncio.Lock, *, max_spins: int = 2000) -> None:
-    """Spin the event loop until ``lock`` is held and at least one task is waiting
-    to acquire it, then return.
+async def wait_until_lock_contended(lock: asyncio.Lock, *, timeout: float = 5.0) -> None:
+    """Wait until ``lock`` is held and at least one task is waiting to acquire it,
+    then return.
 
-    Deterministic replacement for ``await asyncio.sleep(0.05); assert not
-    task.done()``: on a single-threaded loop a launched task runs until it blocks
-    on ``lock.acquire()``, registering as a waiter. Observing that state (lock held
-    + a waiter present) is race-free and needs no wall-clock delay. Raises if no
-    task parks within ``max_spins`` iterations.
+    Preferred over ``await asyncio.sleep(0.05); assert not task.done()``: it
+    returns the instant the contended state is observed (lock held + a waiter
+    present), which is race-free, and only ever blocks until that happens.
+
+    A launched task parks on ``lock.acquire()`` only after any *preceding* awaits
+    resolve. Some of those awaits (e.g. aiosqlite queries) complete on a worker
+    thread and therefore need wall-clock time, not just event-loop turns — so a
+    fixed number of ``asyncio.sleep(0)`` spins can exhaust its budget in
+    microseconds before the thread finishes and the task ever reaches the lock,
+    which made this flaky on loaded CI runners. Poll against a wall-clock
+    ``timeout`` instead, yielding briefly between checks. Raises if no task parks
+    within ``timeout`` seconds.
     """
-    for _ in range(max_spins):
-        await asyncio.sleep(0)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
         if lock.locked() and lock._waiters:  # type: ignore[attr-defined]
             return
-    raise AssertionError("no task parked on the lock")
+        if loop.time() >= deadline:
+            raise AssertionError("no task parked on the lock")
+        await asyncio.sleep(0.001)
 
 
-async def wait_until_write_parked(db: object, *, max_spins: int = 2000) -> None:
+async def wait_until_write_parked(db: object, *, timeout: float = 5.0) -> None:
     """Convenience wrapper: wait until a competing write/read has parked on the
     ``Database`` transaction serialization lock."""
-    await wait_until_lock_contended(db._transaction_lock, max_spins=max_spins)  # type: ignore[attr-defined]
+    await wait_until_lock_contended(db._transaction_lock, timeout=timeout)  # type: ignore[attr-defined]
