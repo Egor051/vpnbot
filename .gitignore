@@ -300,3 +300,15 @@ build/
 tmp/
 temp/
 .claude/
+
+# Installed runtime copies of tracked deploy/ sources
+#
+# /opt/vpn-service is BOTH the git checkout and the install root, so anything
+# installed into the checkout tree shows up as untracked and trips the clean-tree
+# gate in scripts/deploy.sh (git status --porcelain). The MTProxy managed-mode
+# wrapper is installed from its tracked source deploy/run-mtproxy-managed to this
+# path (see docs/proxy.md and MTPROTO_MANAGED_WRAPPER_PATH in docs/configuration.md).
+# It is a runtime artifact, not a source, so it is ignored here rather than tracked:
+# tracking it would create a second, drift-prone copy of the wrapper. The data/ and
+# logs/ runtime directories above are ignored for the same reason.
+/scripts/run-mtproxy-managed
