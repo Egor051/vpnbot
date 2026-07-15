@@ -643,7 +643,19 @@ fi
 log "running ruff / compileall / pytest against origin/main"
 ( cd "$WT" && "${TEST_VENV}/bin/python" -m ruff check . )
 ( cd "$WT" && "${TEST_VENV}/bin/python" -m compileall -q . )
-( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q )
+# INVARIANT: this test phase is DETERMINISTIC and reproduces CI 1:1, so Phase 1
+# is a real gate — a flaky pass here would silently green-light a broken deploy.
+#   * `-p no:cacheprovider`: never read/write a .pytest_cache. From this detached
+#     worktree pytest's rootdir/cache could resolve under $APP_DIR (/opt/vpn-service),
+#     which is not writable from the worktree; a cold first run would then diverge
+#     from warm reruns (the historical warp-split flake). Disabling the cache makes
+#     the FIRST run in a fresh worktree identical to every later run.
+#   * Collection order matches CI by construction: same rootdir-relative paths
+#     (testpaths=["tests"] in pyproject.toml), no pytest-xdist (no parallelism) and
+#     no pytest-randomly (no shuffle) in constraints-dev-hashed.txt. If either
+#     plugin is ever added it MUST go to BOTH this phase and .github/workflows/ci.yml
+#     with a pinned seed, or the two stop reproducing each other.
+( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider )
 
 # Model detection -----------------------------------------------------------
 INCOMING_USER="$(unit_val "$WT/deploy/vpn-bot.service" User)"; [[ -n "$INCOMING_USER" ]] || INCOMING_USER="root"

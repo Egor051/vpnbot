@@ -8,10 +8,28 @@ The fwmark stub returns a fixed hex value 0x1234 → decimal 4660 for "awg show"
 and "off" or empty when told to simulate a missing interface.
 
 WARP_FAILSAFE_DELAY is set to 0 so tests do not actually sleep.
+
+Isolation invariant (order-independence)
+----------------------------------------
+The stub PATH lives ONLY inside the per-test ``env`` dict that is handed to
+``subprocess.run(env=...)`` — it is never exported to ``os.environ`` and never
+installed via a ``monkeypatch``-ed global. Every test builds its own ``bin_dir``
+under its own ``tmp_path``, so no stub can leak into another test and the file
+passes in ANY collection order.
+
+To make a regression of that invariant fail LOUDLY rather than silently, every
+stub is stamped with a per-test random token and refuses to run unless the same
+token is present in ``WARP_STUB_TOKEN`` (see :func:`_guard_preamble`). If a stub
+is ever resolved through a leaked PATH (another test's ``bin_dir``) or a real
+system binary shadows it, the token will not match, the stub writes a marker to
+``WARP_STUB_GUARD`` and exits non-zero, and :func:`_run_script` turns that marker
+into an explicit "stub executed outside its test context" assertion failure.
 """
 from __future__ import annotations
 
 import os
+import secrets
+import shutil
 import stat
 import subprocess
 import textwrap
@@ -42,13 +60,56 @@ def _write_stub(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _make_stubs(bin_dir: Path, log_file: Path, *, fwmark: str = FWMARK_HEX, egress_dev: str = WAN_DEV) -> None:
-    """Write all command stubs into bin_dir."""
+def _guard_preamble(name: str, token: str, guard_file: Path) -> str:
+    """Return a flush-left ``/bin/sh`` snippet that fails loudly on a PATH leak.
+
+    Each stub is stamped with the per-test ``token``; the subprocess env carries
+    the same token in ``WARP_STUB_TOKEN``. If this stub is ever executed by a
+    process whose env does NOT carry the matching token — i.e. it was resolved
+    through another test's leaked ``bin_dir``, or a real ``{name}`` on the system
+    shadowed the stub — the tokens differ. The stub then appends an explicit
+    marker to ``WARP_STUB_GUARD`` (the invoking test's guard file) and exits 97
+    instead of returning a bogus result that would make the script take a wrong,
+    silent ``exit 0`` branch. :func:`_run_script` promotes that marker into a
+    clear assertion failure.
+    """
+    msg = (
+        f"LEAK: stub '{name}' executed outside its own test context "
+        f"(WARP_STUB_TOKEN mismatch) — a real '{name}' shadowed the stub or the "
+        f"stub PATH leaked from another test"
+    )
+    return (
+        f"__expect='{token}'\n"
+        f'__guard="${{WARP_STUB_GUARD:-{guard_file}}}"\n'
+        f'if [ "${{WARP_STUB_TOKEN:-}}" != "$__expect" ]; then\n'
+        f"    printf '%s\\n' \"{msg}\" >> \"$__guard\"\n"
+        f"    exit 97\n"
+        f"fi\n"
+    )
+
+
+def _make_stubs(
+    bin_dir: Path,
+    log_file: Path,
+    *,
+    token: str,
+    guard_file: Path,
+    fwmark: str = FWMARK_HEX,
+    egress_dev: str = WAN_DEV,
+) -> None:
+    """Write all command stubs into bin_dir.
+
+    Every stub opens with :func:`_guard_preamble` so a leaked PATH (a stub picked
+    up from another test's ``bin_dir``) or a real system binary shadowing a stub
+    fails the test with an explicit message rather than silently.
+    """
+    def guard(name: str) -> str:
+        return _guard_preamble(name, token, guard_file)
 
     # awg: handles `awg show <iface> fwmark` and `awg show <iface> endpoints`
     _write_stub(bin_dir / "awg", f"""\
 #!/bin/sh
-echo "$@" >> {log_file}
+{guard("awg")}echo "$@" >> {log_file}
 if [ "$1" = "show" ] && [ "$3" = "fwmark" ]; then
     echo '{fwmark}'
 elif [ "$1" = "show" ] && [ "$3" = "endpoints" ]; then
@@ -59,7 +120,7 @@ fi
     # awg-quick: records calls, does nothing
     _write_stub(bin_dir / "awg-quick", f"""\
 #!/bin/sh
-echo "awg-quick $@" >> {log_file}
+{guard("awg-quick")}echo "awg-quick $@" >> {log_file}
 """)
 
     # ip: handles route/rule subcommands; for "ip route show default dev eth0"
@@ -67,7 +128,7 @@ echo "awg-quick $@" >> {log_file}
     # simulates egress on the configured device.
     _write_stub(bin_dir / "ip", f"""\
 #!/bin/sh
-echo "ip $@" >> {log_file}
+{guard("ip")}echo "ip $@" >> {log_file}
 # route show default dev eth0 → provide gateway for GW discovery
 if [ "$1" = "route" ] && [ "$2" = "show" ] && [ "$3" = "default" ]; then
     echo "default via {WAN_GW} dev {WAN_DEV}"
@@ -98,7 +159,7 @@ exit 0
     # iptables: -C always exits 1 (rule not present) → stubs trigger -A/-I
     _write_stub(bin_dir / "iptables", f"""\
 #!/bin/sh
-echo "iptables $@" >> {log_file}
+{guard("iptables")}echo "iptables $@" >> {log_file}
 # Simulate rule-not-present for -C so idempotent blocks execute -A/-I
 if [ "$1" = "-t" ] && [ "$3" = "-C" ]; then exit 1; fi
 if [ "$1" = "-C" ]; then exit 1; fi
@@ -108,30 +169,85 @@ exit 0
     # systemctl: records calls, no-op
     _write_stub(bin_dir / "systemctl", f"""\
 #!/bin/sh
-echo "systemctl $@" >> {log_file}
+{guard("systemctl")}echo "systemctl $@" >> {log_file}
 """)
 
     # logger: records calls, no-op
     _write_stub(bin_dir / "logger", f"""\
 #!/bin/sh
-echo "logger $@" >> {log_file}
+{guard("logger")}echo "logger $@" >> {log_file}
 """)
 
     # sleep: no-op (eliminates WARP_FAILSAFE_DELAY wait in CI), but logs the call
     _write_stub(bin_dir / "sleep", f"""\
 #!/bin/sh
-echo "sleep $@" >> {log_file}
+{guard("sleep")}echo "sleep $@" >> {log_file}
 exit 0
 """)
 
 
+def _make_env(bin_dir: Path, guard_file: Path, token: str, **extra: str) -> dict[str, str]:
+    """Build a FULLY self-contained subprocess environment.
+
+    The stub PATH and the per-test leak-guard token live ONLY in the returned
+    dict, which is handed to ``subprocess.run(env=...)`` and nowhere else — never
+    merged into ``os.environ`` and never installed through a monkeypatched
+    global. Each test therefore runs with its own isolated PATH that cannot leak
+    into another test, so the file is order-independent by construction.
+    """
+    env = {
+        "PATH": str(bin_dir) + ":/usr/bin:/bin",
+        # Leak guard: the stubs refuse to run unless they see this exact token.
+        "WARP_STUB_TOKEN": token,
+        "WARP_STUB_GUARD": str(guard_file),
+    }
+    env.update(extra)
+    return env
+
+
+def _assert_stubs_win_path(env: dict[str, str]) -> None:
+    """Pre-flight: the test's own ``bin_dir`` must win PATH resolution.
+
+    If a PATH-ordering regression ever let a real system ``ip``/``awg``/``iptables``
+    shadow the stub, the script would silently run the REAL binary and take a wrong
+    ``exit 0`` branch. Assert here — before running — that each privileged tool
+    resolves to the stub in the first PATH entry, so "a real ip ran, not the stub"
+    fails explicitly instead of silently.
+    """
+    bindir = env["PATH"].split(os.pathsep, 1)[0]
+    for tool in ("ip", "awg", "iptables"):
+        resolved = shutil.which(tool, path=env["PATH"])
+        assert resolved is not None and Path(resolved).parent == Path(bindir), (
+            f"stub isolation broken: '{tool}' resolves to {resolved!r}, not the "
+            f"test stub in {bindir!r} — a real system binary would shadow the stub"
+        )
+
+
 def _run_script(script: Path, args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    _assert_stubs_win_path(env)
+    proc = subprocess.run(
         [str(script), *args],
         env=env,
         capture_output=True,
         text=True,
     )
+    # Fail LOUDLY if any stub tripped the leak guard (a stub was executed with the
+    # wrong token → PATH leaked from another test, or a real binary shadowed the
+    # stub). Without this, such a leak would surface only as a confusing "expected
+    # route X, got nothing" further down; here it names the exact cause.
+    guard = env.get("WARP_STUB_GUARD")
+    if guard:
+        gpath = Path(guard)
+        if gpath.exists() and gpath.read_text(encoding="utf-8").strip():
+            raise AssertionError(
+                "warp-split stub isolation broken — a stub ran outside its own "
+                "test context (PATH leaked from another test, or a real system "
+                "binary shadowed the stub):\n"
+                + gpath.read_text(encoding="utf-8")
+                + f"\n--- script stdout ---\n{proc.stdout}"
+                + f"--- script stderr ---\n{proc.stderr}"
+            )
+    return proc
 
 
 def _log_lines(log_file: Path) -> list[str]:
@@ -151,18 +267,20 @@ def env_dir(tmp_path: Path):
     bin_dir.mkdir()
     log_file = tmp_path / "calls.log"
     split_list = tmp_path / "warp-split.list"
+    guard_file = tmp_path / "stub_guard"
+    token = secrets.token_hex(8)
 
-    _make_stubs(bin_dir, log_file)
+    _make_stubs(bin_dir, log_file, token=token, guard_file=guard_file)
 
-    base_env = {
-        "PATH": str(bin_dir) + ":/usr/bin:/bin",
-        "WARP_IFACE": WARP_IFACE,
-        "WAN_DEV": WAN_DEV,
-        "WARP_PROXY_SRC": PROXY_SRC,
-        "WARP_CLIENT_NET": CLIENT_NET,
-        "WARP_ENDPOINT_IP": ENDPOINT_IP,
-        "WARP_SPLIT_LIST": str(split_list),
-    }
+    base_env = _make_env(
+        bin_dir, guard_file, token,
+        WARP_IFACE=WARP_IFACE,
+        WAN_DEV=WAN_DEV,
+        WARP_PROXY_SRC=PROXY_SRC,
+        WARP_CLIENT_NET=CLIENT_NET,
+        WARP_ENDPOINT_IP=ENDPOINT_IP,
+        WARP_SPLIT_LIST=str(split_list),
+    )
     return bin_dir, log_file, split_list, base_env
 
 
@@ -173,18 +291,20 @@ def env_dir_fwmark_off(tmp_path: Path):
     bin_dir.mkdir()
     log_file = tmp_path / "calls.log"
     split_list = tmp_path / "warp-split.list"
+    guard_file = tmp_path / "stub_guard"
+    token = secrets.token_hex(8)
 
-    _make_stubs(bin_dir, log_file, fwmark="off")
+    _make_stubs(bin_dir, log_file, token=token, guard_file=guard_file, fwmark="off")
 
-    base_env = {
-        "PATH": str(bin_dir) + ":/usr/bin:/bin",
-        "WARP_IFACE": WARP_IFACE,
-        "WAN_DEV": WAN_DEV,
-        "WARP_PROXY_SRC": PROXY_SRC,
-        "WARP_CLIENT_NET": CLIENT_NET,
-        "WARP_ENDPOINT_IP": ENDPOINT_IP,
-        "WARP_SPLIT_LIST": str(split_list),
-    }
+    base_env = _make_env(
+        bin_dir, guard_file, token,
+        WARP_IFACE=WARP_IFACE,
+        WAN_DEV=WAN_DEV,
+        WARP_PROXY_SRC=PROXY_SRC,
+        WARP_CLIENT_NET=CLIENT_NET,
+        WARP_ENDPOINT_IP=ENDPOINT_IP,
+        WARP_SPLIT_LIST=str(split_list),
+    )
     return bin_dir, log_file, split_list, base_env
 
 
@@ -194,15 +314,17 @@ def failsafe_env_healthy(tmp_path: Path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log_file = tmp_path / "calls.log"
+    guard_file = tmp_path / "stub_guard"
+    token = secrets.token_hex(8)
 
-    _make_stubs(bin_dir, log_file, egress_dev=WAN_DEV)
+    _make_stubs(bin_dir, log_file, token=token, guard_file=guard_file, egress_dev=WAN_DEV)
 
-    env = {
-        "PATH": str(bin_dir) + ":/usr/bin:/bin",
-        "WARP_IFACE": WARP_IFACE,
-        "WAN_DEV": WAN_DEV,
-        "WARP_FAILSAFE_DELAY": "0",
-    }
+    env = _make_env(
+        bin_dir, guard_file, token,
+        WARP_IFACE=WARP_IFACE,
+        WAN_DEV=WAN_DEV,
+        WARP_FAILSAFE_DELAY="0",
+    )
     return bin_dir, log_file, env
 
 
@@ -212,15 +334,17 @@ def failsafe_env_broken(tmp_path: Path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log_file = tmp_path / "calls.log"
+    guard_file = tmp_path / "stub_guard"
+    token = secrets.token_hex(8)
 
-    _make_stubs(bin_dir, log_file, egress_dev=WARP_IFACE)
+    _make_stubs(bin_dir, log_file, token=token, guard_file=guard_file, egress_dev=WARP_IFACE)
 
-    env = {
-        "PATH": str(bin_dir) + ":/usr/bin:/bin",
-        "WARP_IFACE": WARP_IFACE,
-        "WAN_DEV": WAN_DEV,
-        "WARP_FAILSAFE_DELAY": "0",
-    }
+    env = _make_env(
+        bin_dir, guard_file, token,
+        WARP_IFACE=WARP_IFACE,
+        WAN_DEV=WAN_DEV,
+        WARP_FAILSAFE_DELAY="0",
+    )
     return bin_dir, log_file, env
 
 
