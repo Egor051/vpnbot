@@ -197,17 +197,44 @@ def test_routes_add_sets_loose_rp_filter() -> None:
 
 
 def test_routes_add_self_check_and_rollback() -> None:
-    """add verifies host=direct + client=tunnel and rolls back on failure."""
+    """add verifies host=direct + client routing installed, and rolls back on failure."""
     text = _routes_text()
-    # Host must NOT be in the tunnel; client 10.0.0.4 must route via the tunnel.
+    # Host must NOT be in the tunnel — a HOST route (no conntrack) probes correctly.
     assert "ip route get 1.1.1.1" in text
-    assert "from 10.0.0.4" in text
     assert "warp=" in text  # host curl trace check
     # On failure the add path rolls back to direct client egress.
     add_section = text[text.index("    add)") : text.index("    del)")]
     assert "self_check" in add_section
     assert "teardown_client_routing" in add_section
     assert 'strip_host_bypass "$TABLE"' in add_section[add_section.index("self_check") :]
+
+
+def test_routes_self_check_never_simulates_the_client_path() -> None:
+    """The client mark is set FROM CONNTRACK (nft `ct mark set meta mark`); a
+    stateless `ip route get` cannot reproduce it and returns false negatives. The
+    self-check must therefore NEVER probe the client path with any form of
+    `ip route get` (``iif`` / ``mark`` / ``from <client>``) and must instead OBSERVE
+    real tunnel byte counters. It must also not hardcode a client IP — the live peer
+    comes from ``awg show <iface> latest-handshakes``. This test guards against a
+    regression back to the ip-route-get-based client probe."""
+    text = _routes_text()
+    # No ip-route-get form that simulates the CLIENT path may appear in actual CODE
+    # (comments explaining what we deliberately avoid are fine). The bare host probe
+    # `ip route get 1.1.1.1` (no from/iif/mark) is the only one kept.
+    code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+    assert re.search(r"ip route get[^\n]*\biif\b", code) is None
+    assert re.search(r"ip route get[^\n]*\bmark\b", code) is None
+    assert re.search(r"ip route get[^\n]*\bfrom\b", code) is None
+    # The client data plane is verified by OBSERVING real counters, not simulating.
+    assert "warp_bytes" in text
+    assert 'awg show "$IFACE" transfer' in text
+    assert "statistics/rx_bytes" in text and "statistics/tx_bytes" in text
+    # No hardcoded client address anywhere; the live peer is read from awg.
+    assert "10.0.0.4" not in text
+    assert "latest-handshakes" in text
+    # Absence of traffic must SKIP, not fail (an idle tunnel is not a broken one).
+    assert "have_active_clients" in text
+    assert "skipping data-plane" in text
 
 
 def test_routes_add_is_idempotent() -> None:
@@ -390,7 +417,19 @@ _MOCK_IP = textwrap.dedent(
             if [[ "$rest" == *"table"* ]]; then echo "default dev out-warp";
             elif [[ "$rest" == *"default"* ]]; then echo "default via 203.0.113.1 dev eth0"; fi ;;
           get)
-            if [[ "$rest" == *"from 10.0.0.4"* ]]; then echo "1.1.1.1 from 10.0.0.4 dev out-warp";
+            # A conntrack-mark simulation is structurally unreachable — mirror the
+            # real bug so a reintroduced `mark` probe fails the self-check.
+            if [[ "$rest" == *"mark"* ]]; then
+              echo "RTNETLINK answers: Network is unreachable" >&2; exit 2
+            # A client-path simulation (`iif …` / `from <addr>`) reports whatever
+            # MOCK_ROUTE_GET_CLIENT_DEV says (default out-warp). Set it to eth0 to
+            # model the false-negative the counter-based check must survive.
+            elif [[ "$rest" == *"iif"* || "$rest" == *"from 10."* ]]; then
+              echo "1.1.1.1 dev ${MOCK_ROUTE_GET_CLIENT_DEV:-out-warp}";
+            # The bare host probe resolves to the WAN (host stays direct) unless the
+            # host has (wrongly) been captured by the tunnel.
+            elif [[ "${MOCK_HOST_IN_TUNNEL:-0}" == "1" ]]; then
+              echo "1.1.1.1 dev out-warp";
             else echo "1.1.1.1 via 203.0.113.1 dev eth0"; fi ;;
         esac ;;
     esac
@@ -405,6 +444,29 @@ _MOCK_AWG = textwrap.dedent(
     if [[ "${1:-}" == "show" && "${3:-}" == "fwmark" ]]; then echo "${MOCK_FWMARK:-0xca6c}"; exit 0; fi
     if [[ "${1:-}" == "show" && "${3:-}" == "endpoints" ]]; then
       [[ -n "${MOCK_ENDPOINT:-162.159.195.1}" ]] && printf 'PUBKEY\t%s:2408\n' "${MOCK_ENDPOINT:-162.159.195.1}"
+      exit 0
+    fi
+    # latest-handshakes → "<pubkey>\t<unix-ts>". A live client is emitted only when
+    # MOCK_HANDSHAKE_AGE (seconds-ago) is set, so by default there are no active
+    # clients and the data-plane check SKIPS. This is how have_active_clients reads
+    # the live peer instead of hardcoding a client IP.
+    if [[ "${1:-}" == "show" && "${3:-}" == "latest-handshakes" ]]; then
+      if [[ -n "${MOCK_HANDSHAKE_AGE:-}" ]]; then
+        printf 'CLIENTPUBKEY\t%s\n' "$(( $(date +%s) - MOCK_HANDSHAKE_AGE ))"
+      fi
+      exit 0
+    fi
+    # transfer → "<pubkey>\t<rx>\t<tx>". Counters GROW across successive calls when
+    # MOCK_TRANSFER_STEP>0 (call count tracked in TRANSFER_STATE), so the second
+    # sample exceeds the first — the real-traffic signal the self-check observes.
+    if [[ "${1:-}" == "show" && "${3:-}" == "transfer" ]]; then
+      step="${MOCK_TRANSFER_STEP:-0}"; n=0
+      if [[ -n "${TRANSFER_STATE:-}" ]]; then
+        n="$(cat "$TRANSFER_STATE" 2>/dev/null || echo 0)"
+        echo "$((n + 1))" > "$TRANSFER_STATE"
+      fi
+      val="$(( 1000 + step * n ))"
+      printf 'CLIENTPUBKEY\t%s\t%s\n' "$val" "$val"
       exit 0
     fi
     exit 0
@@ -515,6 +577,7 @@ def _run_routes(
     endpoint: str = "162.159.195.1",
     warp_config: str | None = None,
     mtproxy_present: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     bindir = _make_bin(tmp_path)
     cmd_log = tmp_path / "cmd.log"
@@ -535,6 +598,7 @@ def _run_routes(
         "MOCK_ENDPOINT": endpoint,
         "WARP_CONFIG": str(warp_config_path),
         "MOCK_MTPROXY_PRESENT": "1" if mtproxy_present else "0",
+        **(extra_env or {}),
     }
     proc = subprocess.run(
         ["bash", str(SCRIPTS / "vpn-bot-warp-routes"), action, "out-warp"],
@@ -621,6 +685,76 @@ def test_functional_add_aborts_when_no_auto_table(tmp_path: Path) -> None:
     rc, _, stderr = _run_routes(tmp_path, "add", initial_rules="", fwmark="off")
     assert rc != 0
     assert "Table = auto" in stderr or "no auto routing table" in stderr
+
+
+# ── self-check: conntrack-mark data plane (real traffic, not `ip route get`) ───
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_functional_self_check_passes_on_conntrack_false_negative(tmp_path: Path) -> None:
+    """The exact production regression. The client mark is set from CONNTRACK, so a
+    stateless `ip route get … iif` mis-reports the client path as ``eth0`` even
+    though real client traffic IS riding out-warp (its byte counters grow). The
+    counter-based self-check must PASS (rc 0, no rollback) instead of tearing down
+    working routing. A return to the ip-route-get client probe would resolve the
+    (mocked) path to eth0 and fail this assertion — that is the regression guard."""
+    rc, log, stderr = _run_routes(
+        tmp_path,
+        "add",
+        initial_rules=_INITIAL_RULES,
+        warp_config=_WARP_CONFIG,
+        extra_env={
+            # A live client (handshake 10s ago): there IS traffic to observe.
+            "MOCK_HANDSHAKE_AGE": "10",
+            # out-warp byte counters grow across the two samples → egress via tunnel.
+            "MOCK_TRANSFER_STEP": "500",
+            "TRANSFER_STATE": str(tmp_path / "transfer.state"),
+            # The stateless client-path simulation would (wrongly) resolve to eth0…
+            "MOCK_ROUTE_GET_CLIENT_DEV": "eth0",
+            # …and keep the two-sample probe instant.
+            "SELF_CHECK_INTERVAL": "0",
+        },
+    )
+    assert rc == 0, stderr
+    assert "rolling back" not in stderr
+    # The pass came from OBSERVED counter growth, not a route-get simulation.
+    assert "counters grew" in stderr
+    assert "awg show out-warp transfer" in log
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_functional_self_check_skips_data_plane_without_clients(tmp_path: Path) -> None:
+    """No live client (no recent handshake) → nothing to measure, so the data-plane
+    check SKIPS and the unit stays active. Absence of traffic is not a breakage."""
+    rc, _, stderr = _run_routes(
+        tmp_path,
+        "add",
+        initial_rules=_INITIAL_RULES,
+        warp_config=_WARP_CONFIG,
+        # No MOCK_HANDSHAKE_AGE → have_active_clients is false.
+        extra_env={"SELF_CHECK_INTERVAL": "0"},
+    )
+    assert rc == 0, stderr
+    assert "rolling back" not in stderr
+    assert "skipping data-plane check" in stderr
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_functional_self_check_still_fails_when_host_is_tunneled(tmp_path: Path) -> None:
+    """The host-safety teeth remain: if the host's OWN egress resolves to out-warp
+    (SSH would be tunneled) the self-check fails and rolls back to direct egress."""
+    rc, log, stderr = _run_routes(
+        tmp_path,
+        "add",
+        initial_rules=_INITIAL_RULES,
+        warp_config=_WARP_CONFIG,
+        extra_env={"MOCK_HOST_IN_TUNNEL": "1", "SELF_CHECK_INTERVAL": "0"},
+    )
+    assert rc != 0
+    assert "host egress is inside the WARP tunnel" in stderr
+    assert "rolling back" in stderr
+    # Rollback restored the direct client MASQUERADE.
+    assert "iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE" in log
 
 
 # ── routes helper: del reverses the proxy egress ──────────────────────────────

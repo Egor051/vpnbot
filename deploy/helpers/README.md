@@ -189,8 +189,14 @@ Interfaces:
   direct `MASQUERADE -s 10.0.0.0/24 -o <wan>` and adds `MASQUERADE -o out-warp`;
   (6) inserts the `FORWARD` accepts **above UFW** (`-I FORWARD 1`, `awg0`↔`out-warp`,
   since UFW's FORWARD policy is DROP); (7) sets `rp_filter=2`. It then self-checks
-  (host egress NOT in the tunnel + client subnet routed via `out-warp`) and rolls
-  back to direct client egress on failure. Every add step is idempotent. `del`
+  and rolls back to direct client egress on failure. The self-check confirms the
+  **host** is NOT in the tunnel (host route + `warp=off` curl trace) and the client
+  routing is installed (rule + tunnel-table default), then **observes the tunnel's
+  byte counters** to confirm real client egress. It deliberately never simulates the
+  client path with `ip route get`: that mark is set from **conntrack**, which the
+  stateless `ip route get` cannot reproduce, so it would report false negatives. A
+  quiet tunnel (no live client) skips the data-plane check rather than failing.
+  Every add step is idempotent. `del`
   reverses everything, restores the direct WAN `MASQUERADE` for the client subnet
   and is safe on a clean system; it never restores the host-bypass (the host must
   always stay direct). The table number and endpoint are always resolved at
