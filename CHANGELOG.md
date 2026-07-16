@@ -168,6 +168,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`warp-routes.service` self-check false-negative on conntrack-mark split
+  routing.** The client subnet is steered into the WARP tunnel table by an fwmark
+  that nftables sets **from conntrack** (`ct mark set meta mark`). The self-check
+  probed that path with `ip route get … from <client> iif awg0` (and a
+  `mark`-based variant), but `ip route get` is a **stateless** simulation with no
+  conntrack state, so it could not reproduce a real packet's mark and reported the
+  client egressing via `eth0` even while live traffic was demonstrably riding
+  `out-warp` (its byte counters grew). That false negative triggered a destructive
+  rollback and left the unit `failed` on a host where WARP actually worked. The
+  client path is no longer simulated: the self-check now **observes the real data
+  plane** — it samples the tunnel's byte counters (`/sys/class/net/out-warp/statistics`
+  with an `awg show <iface> transfer` fallback) before and after a short interval,
+  and counter growth while a live peer is connected confirms egress rides the
+  tunnel. The live peer is read from `awg show <iface> latest-handshakes` (no
+  hardcoded `10.0.0.4`), and when no client is connected the data-plane check is
+  **skipped**, not failed (an idle tunnel is not a broken one). The still-correct,
+  conntrack-independent checks are kept and retain their rollback teeth: the host
+  must not be captured by the tunnel (`ip route get 1.1.1.1` + `warp=off` trace)
+  and the narrow client rule plus tunnel-table default must be installed.
 - **Anomaly detector false positives from one legitimate user.** The
   suspicious-key check counted distinct *raw source IPs*, so a single client
   whose LTE carrier rotates its address (many IPs in one block, e.g. six inside

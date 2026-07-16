@@ -32,8 +32,14 @@
 #      `from <tunnel-ip>` for the source-bind daemons and a cgroup-mark + explicit
 #      SNAT for MTProto (which cannot source-bind). The tunnel IP is read from the
 #      config's [Interface] Address; the MTProto step runs only when its unit exists.
-# Finally it self-checks (host egress NOT in the tunnel + client subnet routed
-# via out-warp) and rolls back to direct client egress if the check fails.
+# Finally it self-checks and rolls back to direct client egress if the check
+# fails. The self-check verifies the host is NOT in the tunnel (host route +
+# curl trace) and the client routing is installed (rule + tunnel-table default),
+# then OBSERVES the tunnel's byte counters to confirm real client egress. It
+# deliberately never simulates the client path with `ip route get`: that mark is
+# set from conntrack, which the stateless `ip route get` cannot reproduce, so it
+# would report false negatives. A quiet tunnel (no live client) skips the
+# data-plane check rather than failing.
 #
 # `del` reverses everything (proxy egress first, then the client path) and restores
 # the direct WAN MASQUERADE for the client subnet; it is safe to run on a clean
@@ -260,31 +266,123 @@ remove_proxy_routing() {
     fi
 }
 
-# Self-check: the host must NOT be inside the tunnel and the client subnet MUST
-# route via out-warp. Returns non-zero on any failure.
-self_check() {
-    local t="$1" rc=0 out trace
+# Self-check — how far a valid probe can go in a conntrack-mark architecture.
+#
+# The client subnet is steered into the tunnel table by an fwmark that nftables
+# sets FROM CONNTRACK (`ct mark set meta mark` / `meta mark <m> ct mark set meta
+# mark`). `ip route get` is a STATELESS simulation with no conntrack state: it
+# cannot reproduce a real packet's mark, so every form of it — `iif`, `mark`,
+# bare `from <client>` — structurally mis-measures conntrack-mark routing and
+# yields FALSE NEGATIVES (the simulated packet resolves to the WAN even while
+# real client egress rides out-warp). We therefore NEVER probe the client path
+# with `ip route get`; we OBSERVE the real data plane instead (byte counters).
+#
+# Two kinds of check live here:
+#   * HOST checks (SSH safety) — the host must NOT be captured by the tunnel.
+#     These are HOST routes / the host's own curl: no conntrack is involved, so
+#     `ip route get 1.1.1.1` (no from/iif) and a `warp=off` trace measure them
+#     correctly. A failure is dangerous (it would tunnel SSH) and DOES roll back.
+#   * CLIENT checks — control plane (the narrow rule + tunnel-table default are
+#     actually installed; conntrack-independent, deterministic) plus a data-plane
+#     OBSERVATION of tunnel byte counters. The observation confirms-or-skips and
+#     never rolls back: growth proves egress rides out-warp, but a flat counter is
+#     ambiguous (an idle/absent client is not a broken tunnel), so it must not
+#     fail. Rollback teeth stay with the host checks and the control-plane presence.
 
-    # Host egress must stay on the direct path (SSH safety). If the host-bypass
-    # were still present, a locally-originated unmarked packet would resolve to
-    # out-warp.
+# Recent-handshake window (seconds) within which an awg0 peer counts as a live
+# client worth measuring. Overridable for tests.
+CLIENT_HANDSHAKE_WINDOW="${CLIENT_HANDSHAKE_WINDOW:-180}"
+# Interval (seconds) between the two tunnel-counter samples. Overridable for tests.
+SELF_CHECK_INTERVAL="${SELF_CHECK_INTERVAL:-4}"
+
+# Total bytes seen on the tunnel netdev (rx+tx). Prefer the kernel counters in
+# sysfs (one integer each, cheapest and always current); fall back to summing the
+# per-peer counters `awg show <iface> transfer` reports. Prints one integer.
+warp_bytes() {
+    local rx tx sum=0 _pk
+    if [[ -r "/sys/class/net/$IFACE/statistics/rx_bytes" \
+       && -r "/sys/class/net/$IFACE/statistics/tx_bytes" ]]; then
+        rx="$(cat "/sys/class/net/$IFACE/statistics/rx_bytes" 2>/dev/null || true)"
+        tx="$(cat "/sys/class/net/$IFACE/statistics/tx_bytes" 2>/dev/null || true)"
+        if [[ "$rx" =~ ^[0-9]+$ && "$tx" =~ ^[0-9]+$ ]]; then
+            echo "$((rx + tx))"; return 0
+        fi
+    fi
+    # `awg show <iface> transfer` → "<pubkey>\t<rx>\t<tx>" per peer.
+    while IFS=$'\t' read -r _pk rx tx; do
+        [[ "$rx" =~ ^[0-9]+$ ]] && sum=$((sum + rx))
+        [[ "$tx" =~ ^[0-9]+$ ]] && sum=$((sum + tx))
+    done < <(awg show "$IFACE" transfer 2>/dev/null || true)
+    echo "$sum"
+}
+
+# True when at least one client peer completed a handshake within the window —
+# i.e. a live client whose egress the counter sample could actually observe. The
+# peer list is read from `awg show <client-iface> latest-handshakes`; no client IP
+# is ever hardcoded. A stale peer (old or zero handshake) does not count.
+have_active_clients() {
+    local now _pk ts
+    now="$(date +%s 2>/dev/null || echo 0)"
+    [[ "$now" -gt 0 ]] || return 1
+    while read -r _pk ts; do
+        [[ "$ts" =~ ^[0-9]+$ ]] || continue
+        (( ts > 0 && now - ts <= CLIENT_HANDSHAKE_WINDOW )) && return 0
+    done < <(awg show "$CLIENT_IFACE" latest-handshakes 2>/dev/null || true)
+    return 1
+}
+
+# Data-plane observation of client egress. Does NOT simulate the path (see the
+# block comment above) — it samples the tunnel byte counters across a short
+# interval. Growth while a client is connected proves egress really rides the
+# tunnel. With no live client there is nothing to measure, so it SKIPS. It never
+# returns failure: a flat counter cannot distinguish "idle" from "broken", and
+# failing on that ambiguity is exactly the false-negative rollback we are fixing.
+check_client_dataplane() {
+    local before after
+    if ! have_active_clients; then
+        echo "self-check: no live clients on $CLIENT_IFACE (recent handshake) — skipping data-plane check; an idle tunnel is not a broken one" >&2
+        return 0
+    fi
+    before="$(warp_bytes)"
+    sleep "$SELF_CHECK_INTERVAL"
+    after="$(warp_bytes)"
+    if [[ "$before" =~ ^[0-9]+$ && "$after" =~ ^[0-9]+$ && "$after" -gt "$before" ]]; then
+        echo "self-check: $IFACE counters grew ${before}→${after} B — client egress via the tunnel confirmed" >&2
+    else
+        echo "self-check: $IFACE counters flat (${before}→${after} B) with a live client — inconclusive (client may be idle); skipping the data-plane assertion" >&2
+    fi
+    return 0
+}
+
+# Self-check: the host must NOT be inside the tunnel, the client routing MUST be
+# installed, and — when there is traffic to observe — the client subnet's egress
+# is confirmed via real counters (never via a stateless `ip route get`). Returns
+# non-zero only on host capture or a missing client route.
+self_check() {
+    local t="$1" rc=0 trace
+
+    # HOST egress must stay on the direct path (SSH safety). A HOST route, no
+    # conntrack involved, so `ip route get` measures it correctly. If the
+    # host-bypass were still present a locally-originated unmarked packet would
+    # resolve to out-warp.
     if ip route get 1.1.1.1 2>/dev/null | grep -q "dev $IFACE"; then
         echo "self-check FAILED: host egress is inside the WARP tunnel" >&2
         rc=1
     fi
 
-    # Client subnet must resolve through the tunnel. Prefer a forwarding-style
-    # lookup; fall back to verifying the rule + tunnel-table default when the
-    # client interface is not up yet.
-    out="$(ip route get 1.1.1.1 from 10.0.0.4 iif "$CLIENT_IFACE" 2>/dev/null || true)"
-    if [[ -n "$out" ]]; then
-        printf '%s' "$out" | grep -q "dev $IFACE" \
-            || { echo "self-check FAILED: client 10.0.0.4 is not routed via $IFACE" >&2; rc=1; }
-    elif ! { ip -4 rule show 2>/dev/null | grep -q "from $CLIENT_SUBNET lookup $t" \
-             && ip -4 route show table "$t" 2>/dev/null | grep -q "dev $IFACE"; }; then
-        echo "self-check FAILED: client 10.0.0.4 is not routed via $IFACE" >&2
+    # CLIENT control plane: the narrow client rule and the tunnel-table default
+    # via out-warp must actually be present. This is conntrack-independent, so a
+    # missing rule is a genuine install failure worth rolling back — unlike a
+    # stateless `ip route get` of the client path, which is structurally invalid.
+    if ! { ip -4 rule show 2>/dev/null | grep -q "from $CLIENT_SUBNET lookup $t" \
+           && ip -4 route show table "$t" 2>/dev/null | grep -q "dev $IFACE"; }; then
+        echo "self-check FAILED: client routing not installed (rule/table missing for $CLIENT_SUBNET via $IFACE)" >&2
         rc=1
     fi
+
+    # CLIENT data plane: observe real egress instead of simulating it. Confirms or
+    # skips; never fails (see check_client_dataplane).
+    check_client_dataplane
 
     # Best-effort: the host's own curl must report warp=off (it must NOT egress
     # through the tunnel). Skipped when curl or the network is unavailable.

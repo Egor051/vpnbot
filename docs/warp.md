@@ -64,7 +64,10 @@ route count).
 > awg-quick host-bypass immediately after the interface comes up and installs a
 > single narrow `from 10.0.0.0/24` policy rule, so a full-tunnel `AllowedIPs`
 > never pulls the host (or your SSH session) into the tunnel. The helper
-> self-checks this and rolls back to direct client egress if it ever fails.
+> self-checks this — it confirms the host is NOT tunneled and then **observes the
+> `out-warp` byte counters** (real client traffic) rather than simulating the
+> client path with `ip route get`, which cannot see the conntrack-set mark — and
+> rolls back to direct client egress if the host is ever captured.
 
 On install the helper strips any `DNS = …` line, forces `Table = auto` on
 `[Interface]` (mandatory — it sets the WG-socket fwmark and the dynamic routing
