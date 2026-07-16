@@ -147,6 +147,114 @@ correctly.
 
 If rollback is needed, see [Rollback after a bad deploy](#rollback-after-a-bad-deploy) below.
 
+## Deploy-gate sudoers audit: cloud-init `NOPASSWD: ALL` artifacts
+
+`scripts/deploy.sh` audits the **whole** `/etc/sudoers.d/` directory during Phase 1
+(`check_sudoers_dir`), not just `/etc/sudoers.d/vpn-bot`. Any *active* file that grants
+`NOPASSWD: ALL` (or a generic shell/interpreter) is a hard failure that aborts the deploy:
+
+```
+[deploy][FAIL] /etc/sudoers.d/<file> contains a NOPASSWD: ALL grant
+```
+
+Files whose name contains a `.` or ends in `~` are inert (sudo ignores them) and downgrade to
+a `WARN` instead — but one rename makes them live, so they are still flagged. Run the audit
+read-only, without mutating anything, with `PHASE1_ONLY=1 sudo scripts/deploy.sh`.
+
+**This is a correct finding, not a false positive. Do not relax the audit and do not
+allowlist the offending file by name.**
+
+### cloud-init writes `90-cloud-init-users`
+
+On cloud-init–provisioned images, `/etc/sudoers.d/90-cloud-init-users` typically contains:
+
+```
+ubuntu ALL=(ALL) NOPASSWD:ALL
+```
+
+cloud-init **regenerates this file whenever its `users-groups` module runs at boot** — a
+re-provision, or a first boot after the instance's cloud-init state is cleared. So even after
+you delete it, a re-imaged/re-provisioned host brings it back: that is expected behaviour, not
+a regression, and the audit will correctly fail again until the removal is re-applied. On a
+static, long-lived VDS that is never re-imaged, the steps below make the removal stick.
+
+### 1. Confirm the grant is inert before removing it
+
+The `ubuntu` grant is only exploitable if someone can actually log in as `ubuntu`. Prove they
+cannot:
+
+```bash
+# Password login must be locked ("L"). "P"/"NP" means a usable (or empty!) password.
+sudo passwd -S ubuntu
+
+# authorized_keys must be empty (0 bytes) or absent — no keys means key login can't succeed.
+sudo stat -c '%s %n' /home/ubuntu/.ssh/authorized_keys 2>/dev/null || echo "no authorized_keys"
+
+# sshd must not accept passwords and must not source keys from an unexpected location.
+sudo sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|authorizedkeysfile|authorizedkeyscommand)\b'
+
+# Shell (informational): a nologin/false shell is by itself proof no interactive login is possible.
+getent passwd ubuntu
+```
+
+The grant is **inert** when *either* the account's shell is `nologin`/`false`, **or** all of
+these hold together: password locked (`passwd -S` → `L`), `passwordauthentication no` and
+keyboard-interactive/challenge-response off, `authorizedkeysfile` pointing only at the
+empty/absent `~/.ssh/authorized_keys`, and no `authorizedkeyscommand` serving keys from
+elsewhere. If any check fails (usable/empty password, non-empty `authorized_keys`, keys served
+from another path, password auth on), treat the grant as **live** and revoke the login path
+first (`sudo passwd -l ubuntu`, disable password auth, clear stray keys).
+
+### 2. Remove the grant
+
+The bot runs as root, so the `ubuntu` grant is unnecessary regardless of whether it is inert:
+
+```bash
+sudo rm -f /etc/sudoers.d/90-cloud-init-users
+sudo visudo -c                          # remaining sudoers set still valid
+PHASE1_ONLY=1 sudo scripts/deploy.sh    # audit is green again
+```
+
+### 3. Stop cloud-init from recreating it
+
+**Preferred on a static, already-provisioned VDS — disable cloud-init entirely:**
+
+```bash
+sudo touch /etc/cloud/cloud-init.disabled
+```
+
+With that flag present cloud-init does nothing on subsequent boots, so it never rewrites
+`90-cloud-init-users`. Trade-off: cloud-init then stops applying **any** boot-time config
+(user/SSH-key seeding, network, mounts, growpart, etc.). For a host provisioned once long ago
+and now managed by hand, that is the desired posture — cloud-init has no remaining job to do,
+and freezing it removes a whole class of boot-time surprises. Do **not** set this flag on a
+host that is re-imaged, autoscaled, or relies on cloud-init for network/SSH seeding.
+
+**If you must keep cloud-init but stop only its user/sudo writes**, add a drop-in instead of
+the global kill switch:
+
+```bash
+sudo tee /etc/cloud/cloud.cfg.d/99-no-users-sudo.cfg >/dev/null <<'EOF'
+# Keep cloud-init active, but stop it managing users and re-writing the
+# `ubuntu` NOPASSWD sudoers grant in /etc/sudoers.d/90-cloud-init-users.
+users: []
+disable_root: true
+EOF
+```
+
+`users: []` leaves the existing `ubuntu` account untouched but tells cloud-init not to manage
+any user, so the `users-groups` module no longer emits the sudoers file. (This also stops
+cloud-init seeding SSH keys for cloud users — fine on a hand-managed host.) Re-run
+`PHASE1_ONLY=1 sudo scripts/deploy.sh` after either change and, if practical, reboot once to
+confirm the file does not come back.
+
+> **Planned deploy-gate improvement (separate work).** A future change may make the audit
+> *semantic* rather than pattern-only: a `NOPASSWD: ALL` grant is treated as safe **only** when
+> the target user provably cannot log in interactively (nologin/false shell, **or** locked
+> password **and** empty/absent `authorized_keys` **and** password auth off); any such grant for
+> a user who *can* log in stays a hard failure. That is intentionally a deliberate, separate PR —
+> not a shortcut to unblock a single deploy. Until it lands, remove the grant on the host as above.
+
 ## Maintenance mode (bot lockdown)
 
 A superadmin can put the whole bot into maintenance from the admin panel (🛠 *Maintenance mode* → enable). While it is on, `MaintenanceModeMiddleware` drops every incoming update from non-superadmins and replies with the maintenance banner; only the superadmins in `ADMIN_IDS` keep full access. The state is persisted in the `maintenance_settings` table, so it **survives a bot restart** — turn it off from the panel when you are done. Use it as a bot-level lockdown for safe DB or backend edits; it is independent of the systemd unit and of backend DEGRADED state (which gates a single backend rather than the whole bot).
