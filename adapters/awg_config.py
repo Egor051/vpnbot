@@ -3,6 +3,8 @@ import asyncio
 import hashlib
 import ipaddress
 import os
+import re
+import shutil
 import tempfile
 import logging
 from dataclasses import dataclass
@@ -42,6 +44,11 @@ class _AwgSection:
 
 
 class AwgConfigAdapter:
+    # wg-quick/awg-quick accept a config path only if the segment right after the
+    # last '/' is an interface name matching this pattern, immediately followed by
+    # `.conf`. The validation candidate filename is derived from the interface name
+    # so its stem always satisfies this (awg0 -> awg0.conf).
+    _INTERFACE_NAME_RE: ClassVar[re.Pattern[str]] = re.compile(r"^[a-zA-Z0-9_=+.-]{1,15}$")
     _CLIENT_INTERFACE_KEYS: ClassVar[set[str]] = {
         "DNS",
         "MTU",
@@ -540,32 +547,54 @@ class AwgConfigAdapter:
 
         await asyncio.to_thread(_do)
 
+    def _validation_candidate_filename(self) -> str:
+        """Filename for the awg-quick/wg-quick `strip` validation candidate.
+
+        wg-quick/awg-quick reject a config path unless the segment right after the
+        last '/' is `<iface>.conf`, where `<iface>` matches ^[a-zA-Z0-9_=+.-]{1,15}$.
+        Deriving the name from the interface (awg0 -> awg0.conf) guarantees a valid,
+        short stem regardless of AWG_CONFIG_PATH's own basename. Fail loudly if the
+        interface itself cannot form a valid stem.
+        """
+        if not self._INTERFACE_NAME_RE.match(self.interface):
+            raise AwgConfigError(
+                f"AWG interface {self.interface!r} не является валидным именем интерфейса "
+                "для awg-quick/wg-quick (ожидается ^[a-zA-Z0-9_=+.-]{1,15}$)"
+            )
+        return f"{self.interface}.conf"
+
+    def _validation_candidate_path(self, directory: Path) -> Path:
+        """Path of the awg-quick/wg-quick `strip` validation candidate in `directory`."""
+        return directory / self._validation_candidate_filename()
+
+    def _write_candidate_file(self, path: Path, text: str) -> None:
+        old_umask = os.umask(0o177)
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            os.umask(old_umask)
+
     async def _validate_candidate_config(self, text: str) -> None:
         self._parse_sections(text)
-        tmp_path: Path | None = None
+        # Validate under a private mkdtemp dir named `<iface>.conf`, NOT next to the
+        # real config: a NamedTemporaryFile beside awg0.conf produced e.g.
+        # `.awg0.conf.<token>.conf`, whose 19-char stem breaks wg-quick's 15-char
+        # interface-name rule and made `awg-quick strip` reject every add/remove.
+        # The atomic write to AWG_CONFIG_PATH is unchanged; only this candidate moves.
+        tmp_dir: Path | None = None
         try:
-            old_umask = os.umask(0o177)
-            try:
-                with tempfile.NamedTemporaryFile(
-                    "w",
-                    encoding="utf-8",
-                    dir=self.config_path.parent,
-                    prefix=f".{self.config_path.name}.",
-                    suffix=".conf",
-                    delete=False,
-                ) as tmp:
-                    tmp.write(text)
-                    tmp.flush()
-                    await asyncio.to_thread(os.fsync, tmp.fileno())
-                    tmp_path = Path(tmp.name)
-            finally:
-                os.umask(old_umask)
-            result = await self._quick_strip(tmp_path)
+            tmp_dir = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="vpn-bot-awg-validate-"))
+            candidate_path = self._validation_candidate_path(tmp_dir)
+            await asyncio.to_thread(self._write_candidate_file, candidate_path, text)
+            result = await self._quick_strip(candidate_path)
             if not result.ok:
                 raise AwgConfigError("AWG config не прошёл проверку awg-quick/wg-quick strip")
         finally:
-            if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
+            if tmp_dir is not None:
+                await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
 
     @staticmethod
     def _is_command_missing(result: ShellResult) -> bool:
