@@ -18,6 +18,20 @@ checks, backup/restore, per-backend degraded recovery, rollback, and manual veri
 - If managed MTProto is enabled, `vpn-bot.service` does not have `ReadWritePaths=/etc/systemd/system`; the MTProxy wrapper/drop-in were installed manually and contain no raw secrets.
 - If managed MTProto is enabled, `/etc/mtproxy/vpn-bot/managed-secrets.json`, `/etc/mtproxy/vpn-bot/mtproxy.env`, and `/etc/mtproxy/vpn-bot/backups/*` are readable only by root/service operators.
 
+**Deploy entry point.** Deploy `origin/main` with the single wrapper — inspect first, then
+deploy:
+
+```bash
+sudo CHECK=1 bash scripts/redeploy.sh    # read-only Phase 1 (PHASE1_ONLY=1) — read the report
+sudo bash scripts/redeploy.sh            # deploy
+```
+
+`redeploy.sh` fetches `origin/main`, runs `deploy.sh` from tip-of-main detached under
+systemd, and (in Phase 2) refreshes the out-of-repo `/usr/local/sbin` helpers automatically.
+Run mutating deploys in a low-traffic window — see [Rollback after a bad
+deploy](#rollback-after-a-bad-deploy) for why. Details in the [README Deploy
+section](../README.md).
+
 ## General bot health check
 
 ```bash
@@ -493,13 +507,25 @@ not affect handshake auth or the health entry.
 > A code rollback does not roll back runtime state — SQLite, Xray config, and AWG config need
 > separate restoration if the deploy already modified them.
 
-> **Automated deploys (`scripts/deploy.sh`).** The deploy script rolls back automatically on a
-> failed assertion, restoring code, venv, DB, configs, and the unit. Two things to know: it
-> restores the DB snapshot taken *before* the new code started, so writes made while the new
-> bot was live during the post-start health-check window are discarded; and it only performs a
-> same-privilege-model deploy (a model switch is gated behind `ALLOW_MODEL_SWITCH=1` and a
-> prior host migration — see the Deploy section in the [README](../README.md)). The manual
-> steps below are for a hand-rollback when you are not using the script.
+> **Automated deploys (`scripts/redeploy.sh` → `scripts/deploy.sh`).** The deploy script rolls
+> back automatically on a failed assertion, restoring code, venv, DB, configs, and the unit.
+> Two things to know: it restores the DB snapshot taken *before* the new code started, so
+> writes made while the new bot was live during the post-start health-check window are
+> discarded; and it only performs a same-privilege-model deploy (a model switch is gated behind
+> `ALLOW_MODEL_SWITCH=1` and a prior host migration — see the Deploy section in the
+> [README](../README.md)). The manual steps below are for a hand-rollback when you are not
+> using the script.
+
+> ⏱️ **Rollback loses the health-poll data window — deploy mutating changes at low traffic.**
+> Rollback restores the DB from the backup snapshot taken *before* the mutation. But the new
+> bot is started and then health-polled for up to `HEALTH_TIMEOUT` (**~60 s** by default)
+> before the deploy is verified. Any rows the new bot writes *inside that window* — a key
+> issued, a payment recorded, a config handed out in that minute — are **not** in the
+> pre-mutation snapshot, so a rollback **discards them**: the key issued in that minute simply
+> vanishes. The window is short but not zero. The rule that follows: **run any mutating deploy
+> in a low-traffic window**, so that if it does roll back, no freshly issued key or record is
+> lost. (`scripts/redeploy.sh` with `CHECK=1` / `PHASE1_ONLY=1` is read-only and has no such
+> window — only the real Phase 2 deploy does.)
 
 **Step 1 — stop the service and back up runtime state:**
 
