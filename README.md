@@ -195,37 +195,63 @@ checklist, and day-2 operations live in:
 - **[docs/deployment.md](docs/deployment.md)** — install, both models, Xray API mode.
 - **[docs/operations.md](docs/operations.md)** — runbook: health checks, backup/restore, degraded recovery, rollback.
 
-### Deploy (`scripts/deploy.sh`)
+### Deploy (`scripts/redeploy.sh` → `scripts/deploy.sh`)
 
-Redeploy a backward-compatible change from `origin/main` with the versioned, idempotent
-deploy script. It is fetched *from* `origin/main`, so it always deploys itself from the tip
-of main. Bootstrap:
+Redeploy a backward-compatible change from `origin/main` with `scripts/redeploy.sh`, the
+single entry point. It is a thin wrapper that fetches `origin/main`, extracts `deploy.sh`
+straight from tip-of-main (never the working tree), and launches it detached under systemd
+(`systemd-run --unit=vpn-bot-deploy`) so an SSH disconnect can never strand a half-finished
+deploy. The versioned, idempotent `deploy.sh` does all the real work.
+
+```bash
+# 1. Inspect first (read-only Phase 1, no mutations) — then deploy.
+sudo CHECK=1 bash scripts/redeploy.sh
+sudo bash scripts/redeploy.sh
+
+# FORCE=1 redeploys even when HEAD already equals origin/main:
+sudo FORCE=1 bash scripts/redeploy.sh
+```
+
+`CHECK=1` maps to `deploy.sh`'s `PHASE1_ONLY=1`; `FORCE=1` is passed through. The wrapper
+does **not** touch the out-of-repo `/usr/local/sbin` helpers — `deploy.sh` refreshes those
+itself in Phase 2 (see below), so a plain redeploy keeps them in sync with the checkout.
+
+<details><summary>Under the hood / no-wrapper fallback</summary>
+
+`redeploy.sh` runs the equivalent of:
 
 ```bash
 git -C /opt/vpn-service fetch origin main
 git -C /opt/vpn-service show origin/main:scripts/deploy.sh > /tmp/deploy.sh
-# Recommended: run detached so an SSH disconnect can never strand a half-finished deploy.
-sudo systemd-run --unit=vpn-bot-deploy --collect --pty bash /tmp/deploy.sh   # fallback: tmux/screen
+sudo systemctl reset-failed vpn-bot-deploy 2>/dev/null || true
+sudo systemd-run --unit=vpn-bot-deploy --collect --pty \
+  env bash -c "bash /tmp/deploy.sh 2>&1 | tee /root/deploy-$(date -u +%Y%m%dT%H%M%SZ).log"
 ```
 
-> **Mandatory first step on a new host — `PHASE1_ONLY=1`.** Before the *first*
-> real deploy on any host, run the script once in inspection mode. It executes
-> the entire read-only Phase 1 (guards, lock, fetch, preconditions, ruff /
+Pass `env PHASE1_ONLY=1` / `env FORCE=1` to `systemd-run` for the inspection/force variants.
+</details>
+
+> **Mandatory first step on a new host — `CHECK=1` (`PHASE1_ONLY=1`).** Before the
+> *first* real deploy on any host, run the wrapper once in inspection mode. It
+> executes the entire read-only Phase 1 (guards, lock, fetch, preconditions, ruff /
 > compileall / pytest in an isolated worktree, model detection, pre-flight
-> matrix, model-switch gate, unit + sudoers asserts, drift check, `UNIT_SET`
-> classification, and pre-state snapshot), prints a full report, and exits `0`
-> **without entering Phase 2** — no `systemctl stop`, no config/unit/venv
-> mutations. It is independent of `FORCE` (it runs even when the checkout
-> already matches `origin/main`).
+> matrix, model-switch gate, unit + sudoers asserts, unit-drift + helper-drift
+> scan, `UNIT_SET` classification, and pre-state snapshot), prints a full report,
+> and exits `0` **without entering Phase 2** — no `systemctl stop`, no
+> config/unit/venv/helper mutations. It is independent of `FORCE` (it runs even
+> when the checkout already matches `origin/main`).
 >
 > ```bash
-> sudo PHASE1_ONLY=1 bash /tmp/deploy.sh
+> sudo CHECK=1 bash scripts/redeploy.sh
 > ```
 >
 > Read the report before allowing a real deploy. It states, explicitly: the
 > detected `MODE` and the facts it was derived from (incoming `User`, installed
 > `User`, `.env`); the pre-flight matrix result; any unit drift together with
-> the exact `install` / `systemctl` commands to apply it by hand; each
+> the exact `install` / `systemctl` commands to apply it by hand; any
+> out-of-repo `/usr/local/sbin` **helper drift** (informational only — a real
+> deploy refreshes those helpers itself, so no manual step and no override knob);
+> each
 > `UNIT_SET` member's class (`normal` / `state-only` / `timer-backed` / `NOT
 > INSTALLED (skipped)`) and its current `is-active`/`is-enabled`; a **loud**
 > list of any `deploy/managed-units.list` names that are **not present on the
@@ -239,8 +265,11 @@ It is a no-op when the checkout already matches `origin/main` (`FORCE=1` overrid
 ruff/compileall/pytest in an isolated worktree *before* touching production, detects the
 privilege model (api-root vs helper-nonroot) and refuses a unit↔`.env` mismatch with **zero
 downtime**, backs up the DB and control-plane configs, and on any failed assertion rolls
-back code, venv, DB, configs, and the unit — leaving the bot running. A unit-model change
-requires `ALLOW_MODEL_SWITCH=1` (after the host has been migrated); pending changes to other
+back code, venv, DB, configs, and the unit — leaving the bot running. It also reinstalls any
+out-of-repo `/usr/local/sbin` helper (e.g. `vpn-bot-warp-routes`) whose installed copy has
+drifted from the checkout, and restarts `warp-routes.service` when that helper changed — so a
+fixed helper can no longer keep running stale after a deploy. A unit-model change requires
+`ALLOW_MODEL_SWITCH=1` (after the host has been migrated); pending changes to other
 `deploy/*.service` units surface as a drift check (`ALLOW_UNIT_DRIFT=1` to override). Day-2
 operations remain in [docs/operations.md](docs/operations.md).
 

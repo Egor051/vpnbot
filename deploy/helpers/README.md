@@ -98,12 +98,32 @@ install -o root -g root -m 0755 scripts/vpn-bot-warp-routes  /usr/local/sbin/vpn
 install -o root -g root -m 0755 scripts/vpn-bot-warp-status  /usr/local/sbin/vpn-bot-warp-status
 ```
 
-`deploy/setup-nonroot-helper-mode.sh` now installs (and refreshes) these four
-WARP helpers as well, so a standard non-root deploy keeps `/usr/local/sbin` in
-sync with the checkout. Previously they were not part of any deploy step, so a
-`git reset` left the stale `/usr/local/sbin/vpn-bot-warp-routes` in place — which
-is how the broken routing helper kept running after the source was fixed. Re-run
-that script (or the `install` commands above) after pulling new helper versions.
+`scripts/deploy.sh` now refreshes these WARP helpers itself in Phase 2
+(`install_out_of_repo_helpers`): after it advances the tree to `origin/main` it
+reinstalls any helper whose installed `/usr/local/sbin` copy differs from the
+checkout, and — because `warp-routes.service` *executes*
+`vpn-bot-warp-routes` — it runs `systemctl daemon-reload && systemctl restart
+warp-routes.service` whenever that helper changed and the unit was active before
+the deploy. So a normal `sudo bash scripts/redeploy.sh` keeps `/usr/local/sbin`
+in sync automatically; you no longer install these by hand after a deploy.
+
+> **Why this step exists (the drift it closes).** The helpers' tracked source
+> lives in the checkout, but the installed copy lives out-of-repo under
+> `/usr/local/sbin`. `git reset --hard` advances the source and **never** the
+> installed copy, so before this step a `git reset` left the stale
+> `/usr/local/sbin/vpn-bot-warp-routes` in place — which is exactly how the broken
+> routing helper kept running after the source was fixed, taking
+> `warp-routes.service` down. Phase 2 now closes that drift structurally; the
+> `PHASE1_ONLY=1` / `CHECK=1` report lists any helper drift it *would* refresh, as
+> information only (there is no `ALLOW_*` override for it — it is not a gate).
+> `deploy/setup-nonroot-helper-mode.sh` also still installs (and refreshes) these
+> four helpers, for first-time setup and for hosts provisioned outside the deploy
+> script; the `install` commands above remain the manual equivalent.
+>
+> The restart runs the helper's counter self-check (#242). On an idle client the
+> data-plane probe **skips** (an idle tunnel is not a broken one) and the helper
+> still exits `0`, so a skipped probe never fails the deploy; only a genuine
+> routing failure (non-zero exit) does, and that triggers the normal rollback.
 
 ### Ownership model: systemd owns the interface and routes; the bot only observes
 

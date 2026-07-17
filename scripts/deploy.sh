@@ -4,12 +4,17 @@
 #
 # This script replaces the ad-hoc "paste a command block into an ssh shell"
 # redeploy. It always deploys the current origin/main and is fetched FROM
-# origin/main so it deploys itself from tip-of-main:
+# origin/main so it deploys itself from tip-of-main.
 #
-#   git -C /opt/vpn-service fetch origin main
-#   git -C /opt/vpn-service show origin/main:scripts/deploy.sh > /tmp/deploy.sh
-#   # run detached so an ssh disconnect can never strand a half-finished deploy:
-#   sudo systemd-run --unit=vpn-bot-deploy --collect --pty bash /tmp/deploy.sh
+# The supported entry point is scripts/redeploy.sh, which does exactly this:
+#
+#   sudo CHECK=1 bash scripts/redeploy.sh    # inspect (PHASE1_ONLY=1), then:
+#   sudo bash scripts/redeploy.sh            # deploy
+#
+# The wrapper fetches origin/main, extracts THIS file from tip-of-main
+# (`git show origin/main:scripts/deploy.sh > /tmp/deploy.sh`) and runs it detached
+# under `systemd-run --unit=vpn-bot-deploy` so an ssh disconnect can never strand
+# a half-finished deploy. Running that sequence by hand is the no-wrapper fallback.
 #
 # Invariant: after a run either the new code is running with every assertion
 # green, or the system is rolled back to PREV_SHA (code + venv + DB + control-
@@ -22,15 +27,71 @@
 # deploy/vpn-bot.service is authoritative and is installed verbatim; the model is
 # switched by editing that repo file (guarded by ALLOW_MODEL_SWITCH).
 #
-# Env knobs (all overridable): FORCE, ALLOW_MODEL_SWITCH, ALLOW_UNIT_DRIFT,
-# PHASE1_ONLY, and the paths listed below.
+# --------------------------------------------------------------------------- #
+# ENVIRONMENT KNOBS
+# --------------------------------------------------------------------------- #
+# Every knob defaults to the safe value; you opt into risk explicitly. The four
+# behaviour knobs below change WHAT the script does. The path knobs further down
+# in the Configuration block only relocate files and are covered there.
 #
-# PHASE1_ONLY=1 runs the entire read-only Phase 1 (guards, lock, fetch, tests,
-# model detection, pre-flight matrix, drift check, UNIT_SET snapshot, WARP
-# rollback-path facts), prints a full report, and exits 0 WITHOUT entering
-# Phase 2 — no `systemctl stop`, no config/unit/venv mutations. It is the
-# mandatory first step on a new host: it surfaces every fact an operator must
-# vet before allowing a real deploy. Independent of FORCE.
+#   PHASE1_ONLY=1
+#     What:   Run the ENTIRE read-only Phase 1 (guards, lock, fetch, ruff /
+#             compileall / pytest in an isolated worktree, model detection,
+#             pre-flight matrix, unit-drift + helper-drift scan, UNIT_SET
+#             snapshot, WARP rollback-path facts), print the full report, and
+#             exit 0 WITHOUT entering Phase 2 — no `systemctl stop`, no
+#             config/unit/venv/helper mutations. Independent of FORCE (runs even
+#             when the checkout already matches origin/main).
+#     When:   The MANDATORY first step on any new host, and any time you want to
+#             inspect what a deploy would do without touching production.
+#     Risk:   None — it never mutates. The only "risk" is skipping it and
+#             deploying a host you have not vetted.
+#
+#   FORCE=1
+#     What:   Redeploy even when HEAD already equals origin/main (normally that
+#             is a no-op exit 0).
+#     When:   Re-running a deploy to re-assert unit/helper/config state on a host
+#             that is already at tip-of-main (e.g. after a manual change on the
+#             box), or to force the helper-drift refresh without a new commit.
+#     Risk:   Repeats the full Phase 2 mutation (stop bot, backup, restart) with
+#             its brief health-poll data window (see the rollback note below) for
+#             no code change. Cheap, but not free — do it in low-traffic windows.
+#
+#   ALLOW_MODEL_SWITCH=1
+#     What:   Permit a deploy whose incoming deploy/vpn-bot.service changes the
+#             privilege model (api-root <-> helper-nonroot) relative to the unit
+#             installed on the host. Without it, a model mismatch aborts at zero
+#             downtime.
+#     When:   ONLY after the host itself has already been migrated to the target
+#             model (user created, sudoers + helpers installed, .env aligned) and
+#             you have verified the target-model preconditions. This script never
+#             migrates the host for you.
+#     Risk:   Set on an un-migrated host, the bot restarts under a model the host
+#             cannot support (wrong user, missing sudoers/helpers) and fails —
+#             triggering a rollback. Never a shortcut for the migration itself.
+#
+#   ALLOW_UNIT_DRIFT=1
+#     What:   BYPASSES THE REAL UNIT-DRIFT GATE. deploy.sh installs only
+#             vpn-bot.service; when another shipped deploy/*.service differs from
+#             the copy installed on the host, that is drift and the deploy stops.
+#             This knob continues past it anyway, deploying vpn-bot while leaving
+#             the other units stale.
+#     When:   Apply ONLY consciously, when the drift is already known and safe —
+#             e.g. you have inspected the diff, it is cosmetic or you will apply
+#             the units by hand immediately after (the report prints the exact
+#             install/restart commands). Never as a reflex to silence the gate.
+#     Risk:   You ship new bot code against stale data-plane units. That is
+#             exactly the class of failure this gate exists to catch; overriding
+#             it blindly can leave a backend running the wrong config.
+#             (Out-of-repo HELPER drift is different: Phase 2 now refreshes those
+#             helpers itself — see install_out_of_repo_helpers — so it needs no
+#             override knob.)
+#
+#   DEPLOY_SELFTEST=1
+#     What:   Test seam only. Sources every function definition then returns
+#             before Phase 1, so the pytest harness can drive individual
+#             functions with stubbed systemctl/awg/ip/install. NEVER set in
+#             production — it would turn a real deploy into a no-op.
 
 set -euo pipefail
 
@@ -71,6 +132,29 @@ read -r -a WARP_SRCS <<< "${WARP_SRCS:-10.0.0.0/24 172.16.0.2}"
 # (per each unit's After=/Requires=, NOT alphabetical). Host-verify the names.
 WARP_ONESHOTS=(warp-routes.service vpn-bot-warp-split.service vpnbot-hy2-warp-mark.service warp-failsafe.service)
 
+# Out-of-repo privileged helpers: tracked SOURCE lives in the checkout, the
+# INSTALLED copy lives under /usr/local/sbin. `git reset --hard origin/main`
+# advances the source but NEVER the installed copy, so a fixed helper would keep
+# running stale — which is exactly how a broken vpn-bot-warp-routes survived a
+# source fix and took warp-routes.service down (deploy/helpers/README.md L101-106).
+# Phase 2 (install_out_of_repo_helpers) now closes that drift: it reinstalls any
+# helper whose installed copy differs from the checkout. Only the WARP helpers are
+# managed here — they are the ones the WARP deploy presupposes (README L94-99) with
+# no other install step; the backend helpers under deploy/helpers/ are installed by
+# deploy/setup-nonroot-helper-mode.sh and are out of scope for this refresh.
+# Format per entry: "<checkout-relative-source>|<installed-absolute-path>".
+OUT_OF_REPO_HELPERS=(
+  "scripts/vpn-bot-warp-install|/usr/local/sbin/vpn-bot-warp-install"
+  "scripts/vpn-bot-warp-iface|/usr/local/sbin/vpn-bot-warp-iface"
+  "scripts/vpn-bot-warp-routes|/usr/local/sbin/vpn-bot-warp-routes"
+  "scripts/vpn-bot-warp-status|/usr/local/sbin/vpn-bot-warp-status"
+)
+# The one helper that is EXECUTED by a systemd unit (warp-routes.service runs it),
+# so a fresh binary only takes effect on restart. Refreshing it triggers a
+# daemon-reload + `systemctl restart warp-routes` (guarded on pre-state below).
+WARP_ROUTES_HELPER="/usr/local/sbin/vpn-bot-warp-routes"
+WARP_ROUTES_UNIT="warp-routes.service"
+
 BOT_UNIT="vpn-bot.service"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
 
@@ -103,6 +187,9 @@ declare -A U_CLASS=() U_TARGET=() U_PRE_ACTIVE=() U_PRE_ENABLED=()
 # unit names + modular-protocol gates). Declared here so the report is set -u safe.
 LOG_DIR=""
 declare -a drift=() absent=()
+# Out-of-repo helper drift, scanned read-only in Phase 1 (against the origin/main
+# worktree) and closed by Phase 2. Each entry: "<base>|<src>|<dst>|<state>".
+declare -a helper_drift=()
 MTPROXY_DROPIN_FOUND=""
 # Modular-protocol matrix (parallel arrays): label, gate var, gate on (yes/no), unit.
 declare -a PROTO_LABEL=() PROTO_GATE=() PROTO_ON=() PROTO_UNIT=()
@@ -168,6 +255,86 @@ unit_states() {
   load="$(systemctl show -p LoadState  --value "$1" 2>/dev/null || true)"
   act="$(systemctl show -p ActiveState --value "$1" 2>/dev/null || true)"
   printf '%s/%s' "${load:-unknown}" "${act:-unknown}"
+}
+
+# --------------------------------------------------------------------------- #
+# Out-of-repo helper drift (see OUT_OF_REPO_HELPERS above)
+# --------------------------------------------------------------------------- #
+# Scan each managed helper's installed copy against the tracked source under
+# <root> (Phase 1 passes $WT = origin/main worktree; Phase 2 passes $APP_DIR =
+# the post-`git reset` working tree). Prints one line per helper:
+#   "<base>|<resolved-src>|<dst>|<state>"   state ∈ absent | synced | drift
+# ABSENT (no installed copy) means WARP is not deployed on this host — installing
+# a helper without its config/units/symlink would be pointless, so absent is NOT
+# drift and is never "fixed" here. Only a present-but-different copy is drift.
+scan_out_of_repo_helpers() {
+  local root="${1%/}" entry src_rel dst base src
+  for entry in "${OUT_OF_REPO_HELPERS[@]}"; do
+    src_rel="${entry%%|*}"; dst="${entry##*|}"; base="$(basename "$dst")"
+    src="${root}/${src_rel}"
+    if   [[ ! -e "$dst" ]];    then printf '%s|%s|%s|absent\n' "$base" "$src" "$dst"
+    elif cmp -s "$src" "$dst"; then printf '%s|%s|%s|synced\n' "$base" "$src" "$dst"
+    else                            printf '%s|%s|%s|drift\n'  "$base" "$src" "$dst"; fi
+  done
+}
+
+# Phase 2: close out-of-repo helper drift from the checkout. Reinstalls every
+# drifted helper, restarts warp-routes ONLY when its helper actually changed AND
+# it was active pre-deploy, then verifies no drift remains. Runs while traps are
+# armed, so a failure routes through rollback_now (bot never left stopped).
+install_out_of_repo_helpers() {
+  local base src dst state changed=0 routes_changed=0
+  log "refreshing out-of-repo privileged helpers from the checkout (closes helper drift)"
+  # Process substitution (not a pipe) keeps the loop in this shell so changed /
+  # routes_changed survive it.
+  while IFS='|' read -r base src dst state; do
+    [[ -n "$base" ]] || continue
+    case "$state" in
+      absent) log "  ${base}: not installed on this host (WARP not deployed here) — leaving absent" ;;
+      synced) log "  ${base}: already in sync with the checkout" ;;
+      drift)
+        log "  ${base}: installed copy drifted from the checkout — reinstalling"
+        install -o root -g root -m 0755 "$src" "$dst" \
+          || rollback_now "failed to install ${base} from ${src} to ${dst}"
+        changed=1
+        [[ "$dst" == "$WARP_ROUTES_HELPER" ]] && routes_changed=1
+        ;;
+    esac
+  done < <(scan_out_of_repo_helpers "$APP_DIR")
+
+  # The routes helper is the code warp-routes.service executes; a fresh binary
+  # only takes effect on restart. Restart ONLY when it changed AND the unit was
+  # active before this deploy — restarting a unit an operator had deliberately
+  # stopped would re-activate WARP they took down (mirrors rollback()'s policy).
+  if [[ "$routes_changed" == "1" ]]; then
+    local pre="${U_PRE_ACTIVE[$WARP_ROUTES_UNIT]:-}"
+    if [[ "$pre" == "active" ]]; then
+      log "  ${WARP_ROUTES_UNIT} was active pre-deploy — daemon-reload + restart to load the fresh helper"
+      systemctl daemon-reload
+      # The restart runs the helper's counter self-check (#242). With an idle
+      # client the data-plane probe SKIPS and the helper still exits 0, so a skip
+      # can never fail this restart — we deliberately do NOT fail the deploy on a
+      # skipped data-plane check. A non-zero exit here is a REAL routing failure.
+      systemctl restart "$WARP_ROUTES_UNIT" \
+        || rollback_now "${WARP_ROUTES_UNIT} restart failed after the helper refresh (real routing failure — an idle-client data-plane SKIP would have exited 0)"
+    else
+      warn "  ${WARP_ROUTES_UNIT} pre-state=${pre:-<none>} (not active) — fresh helper installed but NOT restarted (respecting operator intent)"
+    fi
+  fi
+
+  # Verify: after the install no managed helper may still be in drift. This is the
+  # hard gate the task requires — the repo copy and the installed copy MUST match.
+  local bad=()
+  while IFS='|' read -r base src dst state; do
+    [[ "$state" == "drift" ]] && bad+=("$base")
+  done < <(scan_out_of_repo_helpers "$APP_DIR")
+  [[ ${#bad[@]} -eq 0 ]] || rollback_now "out-of-repo helper drift NOT closed after install: ${bad[*]}"
+
+  if [[ "$changed" == "1" ]]; then
+    log "out-of-repo helpers now match the checkout (drift closed)"
+  else
+    log "out-of-repo helpers already matched the checkout (no drift to close)"
+  fi
 }
 
 # --------------------------------------------------------------------------- #
@@ -565,7 +732,7 @@ running_not_watched() {
 # running a real deploy. Never set DEPLOY_SELFTEST in production.
 if [[ "${DEPLOY_SELFTEST:-0}" == "1" ]]; then return 0 2>/dev/null || exit 0; fi
 
-[[ "${EUID}" -eq 0 ]] || die "run as root (recommended: sudo systemd-run --unit=vpn-bot-deploy --collect --pty bash /tmp/deploy.sh)"
+[[ "${EUID}" -eq 0 ]] || die "run as root (recommended entry point: sudo bash scripts/redeploy.sh)"
 require_tools git sqlite3 flock systemd-analyze systemctl tar visudo python3 sha256sum \
               awk df du date journalctl stat tail
 
@@ -782,6 +949,22 @@ if [[ ${#drift[@]} -gt 0 ]]; then
   fi
 fi
 
+# Out-of-repo helper drift (R3b): read-only scan against origin/main ($WT). Unlike
+# unit drift this is NOT a gate — Phase 2 closes it automatically
+# (install_out_of_repo_helpers), so here we only record + report it. Helpers that
+# are absent (WARP not deployed on this host) are not drift and stay silent.
+helper_drift=()
+while IFS='|' read -r hd_base hd_src hd_dst hd_state; do
+  [[ "$hd_state" == "drift" ]] && helper_drift+=("${hd_base}|${hd_src}|${hd_dst}|${hd_state}")
+done < <(scan_out_of_repo_helpers "$WT")
+if [[ ${#helper_drift[@]} -gt 0 ]]; then
+  log "out-of-repo helper drift (installed copy != origin/main) — Phase 2 will refresh these automatically:"
+  for hd in "${helper_drift[@]}"; do
+    IFS='|' read -r hd_base _ hd_dst _ <<< "$hd"
+    log "    ${hd_base} -> ${hd_dst}"
+  done
+fi
+
 # UNIT_SET assembly + classification + pre-state snapshot (see assemble_unit_set).
 assemble_unit_set
 if [[ ${#skipped[@]} -gt 0 ]]; then
@@ -838,6 +1021,21 @@ phase1_report() {
     [[ "$ALLOW_UNIT_DRIFT" == "1" ]] && printf '    (ALLOW_UNIT_DRIFT=1 set — a real deploy would continue past this)\n'
   else
     printf '    none (shipped deploy/*.service units match the host, or are not installed there)\n'
+  fi
+
+  # --- Out-of-repo helper drift: closed automatically by Phase 2 (no gate) ---
+  printf '\n  --- Out-of-repo helper drift (/usr/local/sbin copies vs origin/main) ---\n'
+  if [[ ${#helper_drift[@]} -gt 0 ]]; then
+    printf '    %d helper(s) differ from origin/main — a REAL deploy refreshes them itself:\n' "${#helper_drift[@]}"
+    local hrow hbase hsrc hdst
+    for hrow in "${helper_drift[@]}"; do
+      IFS='|' read -r hbase hsrc hdst _ <<< "$hrow"
+      printf '      install -o root -g root -m 0755 %s %s\n' "$hsrc" "$hdst"
+    done
+    printf '    (no override knob needed — Phase 2 install_out_of_repo_helpers closes this,\n'
+    printf '     and restarts %s when its helper changed and it was active.)\n' "$WARP_ROUTES_UNIT"
+  else
+    printf '    none (installed helpers match origin/main, or WARP is not deployed on this host)\n'
   fi
 
   # --- UNIT_SET: per-unit class + LoadState/ActiveState + is-enabled ---
@@ -1060,6 +1258,15 @@ VENV_SNAPSHOT_DONE=1
 log "installing prod dependencies"
 "${VENV}/bin/pip" install -r requirements.txt -c constraints.txt
 "${VENV}/bin/pip" check
+
+# Refresh out-of-repo privileged helpers from the freshly-advanced tree. This is
+# the structural fix for the /usr/local/sbin drift: `git reset` above updated the
+# tracked source but not the installed copy, so without this step a fixed helper
+# would keep running stale (the vpn-bot-warp-routes incident). Done here, right
+# before the unit install, so the helper the units execute is current before any
+# unit is (re)started. Restarting warp-routes may run its idle-tolerant self-check;
+# a skipped data-plane probe does NOT fail the deploy (see the function).
+install_out_of_repo_helpers
 
 log "installing ${BOT_UNIT} from deploy/vpn-bot.service (verbatim)"
 install -m0644 "deploy/vpn-bot.service" "$SYSTEM_UNIT"
