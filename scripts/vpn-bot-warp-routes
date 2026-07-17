@@ -298,9 +298,23 @@ SELF_CHECK_INTERVAL="${SELF_CHECK_INTERVAL:-4}"
 # Total bytes seen on the tunnel netdev (rx+tx). Prefer the kernel counters in
 # sysfs (one integer each, cheapest and always current); fall back to summing the
 # per-peer counters `awg show <iface> transfer` reports. Prints one integer.
+#
+# TEST SEAM (inert in production — MOCK_TRANSFER_STEP is NEVER set in the field):
+# the counter-growth injection the self-check tests rely on lives in the mockable
+# `awg show <iface> transfer` fallback, so the sysfs fast-path MUST be skipped
+# whenever that injection is active. Guard it BEFORE the `-r /sys/...` probe rather
+# than after: on a real host the tunnel netdev exists, so its /sys statistics ARE
+# readable and — sampled across a short interval — momentarily flat. If the fast-
+# path ran it would read those live, flat counters and ignore the injected growth,
+# making the regression test that is green in CI (no tunnel netdev → fast-path
+# unreadable → fallback → mock honoured) FALSELY SKIP on the host (netdev present →
+# fast-path wins → mock bypassed). Bypassing the fast-path in test mode makes the
+# counter source deterministic regardless of whether the interface exists on the
+# machine running the tests. Production takes the sysfs path exactly as before.
 warp_bytes() {
     local rx tx sum=0 _pk
-    if [[ -r "/sys/class/net/$IFACE/statistics/rx_bytes" \
+    if [[ -z "${MOCK_TRANSFER_STEP:-}" \
+       && -r "/sys/class/net/$IFACE/statistics/rx_bytes" \
        && -r "/sys/class/net/$IFACE/statistics/tx_bytes" ]]; then
         rx="$(cat "/sys/class/net/$IFACE/statistics/rx_bytes" 2>/dev/null || true)"
         tx="$(cat "/sys/class/net/$IFACE/statistics/tx_bytes" 2>/dev/null || true)"
