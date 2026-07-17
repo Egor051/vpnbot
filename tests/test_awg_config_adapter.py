@@ -1,5 +1,6 @@
 
 import asyncio
+import re
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,6 +73,48 @@ def _adapter(config_path: Path) -> AwgConfigAdapter:
         shell=ShellRunner(),
         persistent_keepalive=25,
     )
+
+
+# Mirrors wg-quick/awg-quick's own acceptance rule: the interface stem must match
+# ^[a-zA-Z0-9_=+.-]{1,15}$ and sit immediately after the last '/' (or string start),
+# followed by `.conf`. This is exactly the check that rejected the old candidate name.
+_WG_QUICK_STEM_RE = re.compile(r"(^|/)[a-zA-Z0-9_=+.-]{1,15}\.conf$")
+
+
+def test_validation_candidate_path_matches_wg_quick_stem(tmp_path: Path) -> None:
+    # The validation candidate path is built by production code from the real
+    # interface name; it must satisfy wg-quick's interface-name rule.
+    adapter = _adapter(tmp_path / "awg0.conf")
+
+    candidate = adapter._validation_candidate_path(tmp_path)
+
+    assert candidate.name == "awg0.conf"
+    assert _WG_QUICK_STEM_RE.search(str(candidate)) is not None
+
+
+def test_old_candidate_name_fails_wg_quick_stem() -> None:
+    # Regression guard documenting the bug: the previous NamedTemporaryFile naming
+    # (prefix=".<config>.", suffix=".conf") produced e.g.
+    # /etc/amnezia/amneziawg/.awg0.conf.deadbeef.conf whose stem
+    # (.awg0.conf.deadbeef, 19 chars) exceeds wg-quick's 15-char limit and is not the
+    # segment right after '/', so `awg-quick strip` rejected it and every add/remove
+    # of a peer aborted with AwgConfigError.
+    old_style = "/etc/amnezia/amneziawg/.awg0.conf.deadbeef.conf"
+
+    assert _WG_QUICK_STEM_RE.search(old_style) is None
+
+
+def test_validation_candidate_rejects_overlong_interface(tmp_path: Path) -> None:
+    adapter = AwgConfigAdapter(
+        config_path=tmp_path / "awg0.conf",
+        interface="a" * 16,
+        backup=BackupAdapter.__new__(BackupAdapter),
+        shell=ShellRunner(),
+        persistent_keepalive=25,
+    )
+
+    with pytest.raises(AwgConfigError, match="валидн"):
+        adapter._validation_candidate_path(tmp_path)
 
 
 class _Repo:
