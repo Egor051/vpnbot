@@ -214,17 +214,29 @@ sudo systemctl enable --now vpn-bot-hy2-auth
 
 ### 2. Указать серверу `hysteria` на эндпоинт
 
-В `/etc/hysteria/config.yaml` используйте HTTP-auth и тот же адрес прослушивания:
+`deploy/hysteria/config.yaml` — трекнутый источник истины для
+`/etc/hysteria/config.yaml`: чистый QUIC на UDP/443 (без salamander-обфускации,
+без ACME/masquerade; TLS-сертификат остаётся самоподписанным). Скопируйте его
+и заполните пути к cert/key:
 
 ```yaml
+listen: :443
+
+tls:
+  cert: /etc/hysteria/cert.pem
+  key: /etc/hysteria/key.pem
+
 auth:
   type: http
   http:
     url: http://127.0.0.1:8444/auth   # должно совпадать с HYSTERIA2_AUTH_LISTEN
 ```
 
-`HYSTERIA2_OBFS_PASSWORD` в `.env` обязан совпадать с паролем salamander-обфускации
-в этом файле — несовпадение даёт тихий таймаут клиента, а не ошибку. Запускайте
+`HYSTERIA2_PORT` в `.env` обязан совпадать с портом `listen` выше — бот
+собирает клиентские ссылки только из `HYSTERIA2_PORT`, он не темплейтит и не
+применяет этот файл. Перед рестартом сервиса запускайте
+`deploy/hysteria/preflight-udp443.sh` (fail-closed, если UDP/443 занят
+чужим процессом; TCP/443, т.е. Xray, игнорируется). Запускайте
 `hysteria-server.service` после `vpn-bot-hy2-auth` (юнит объявляет
 `Before=hysteria-server.service`).
 

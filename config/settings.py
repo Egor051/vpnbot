@@ -1,6 +1,7 @@
 
 import base64
 import binascii
+import logging
 import os
 import ipaddress
 import re
@@ -8,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
+
+logger = logging.getLogger(__name__)
 
 
 class SettingsError(RuntimeError):
@@ -99,6 +102,22 @@ def _no_control_chars(name: str, value: str) -> str:
     """
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
         raise SettingsError(f"{name} содержит недопустимые управляющие символы")
+    return value
+
+
+def _hysteria2_obfs_password_deprecated() -> str:
+    """DEPRECATED: salamander obfuscation was dropped (plain QUIC on UDP/443).
+
+    The value is still parsed (so a live .env that pins HYSTERIA2_OBFS_PASSWORD
+    does not fail startup) but is otherwise unused — logs once instead of
+    raising, per the fail-closed-only-where-it-matters policy for this var.
+    """
+    value = _no_control_chars("HYSTERIA2_OBFS_PASSWORD", _optional("HYSTERIA2_OBFS_PASSWORD"))
+    if value:
+        logger.warning(
+            "HYSTERIA2_OBFS_PASSWORD is set but deprecated (salamander obfuscation was "
+            "dropped, Hysteria2 now runs plain QUIC on UDP/443) — the value is ignored"
+        )
     return value
 
 
@@ -428,16 +447,20 @@ class Settings:
     xray_xhttp_mode: str = "stream-one"
     # Hysteria2 (apernet v2) integration. The data plane (a standalone hysteria
     # server + the hy2_auth endpoint) runs independently of the bot; these settings
-    # only let the bot build client links and gate issuance. HOST/PORT/SNI/OBFS are
-    # global (one server, shared by every issued key). OBFS_PASSWORD is the
-    # salamander obfuscation password and MUST match /etc/hysteria/config.yaml — a
-    # mismatch is a silent client timeout, not an error. AUTH_LISTEN is the
-    # loopback host:port the separate hy2_auth process binds (used by the operator
-    # to point hysteria's auth url at it); the bot never binds it.
+    # only let the bot build client links and gate issuance. HOST/PORT/SNI are
+    # global (one server, shared by every issued key). Salamander obfuscation was
+    # dropped (plain QUIC on UDP/443, see deploy/hysteria/config.yaml) — OBFS_PASSWORD
+    # is deprecated, ignored at issuance and no longer required to match the server
+    # config. AUTH_LISTEN is the loopback host:port the separate hy2_auth process
+    # binds (used by the operator to point hysteria's auth url at it); the bot
+    # never binds it.
     hysteria2_enabled: bool = False
     hysteria2_host: str = ""
-    hysteria2_port: int = 15650
+    hysteria2_port: int = 443
     hysteria2_sni: str = ""
+    # DEPRECATED: salamander obfuscation was dropped (UDP/443 plain QUIC). Retained
+    # only so an existing HYSTERIA2_OBFS_PASSWORD in a live .env does not fail
+    # startup; the value is parsed but never used.
     hysteria2_obfs_password: str = field(default="", repr=False)
     hysteria2_insecure: bool = True
     hysteria2_auth_listen: str = "127.0.0.1:8444"
@@ -513,7 +536,6 @@ class Settings:
             for name, value in {
                 "HYSTERIA2_HOST": self.hysteria2_host,
                 "HYSTERIA2_SNI": self.hysteria2_sni,
-                "HYSTERIA2_OBFS_PASSWORD": self.hysteria2_obfs_password,
             }.items()
             if not value
         ]
@@ -525,7 +547,7 @@ class Settings:
     def is_hysteria2_ready(self) -> bool:
         """Non-raising form of validate_hysteria2_ready() for gating UI affordances.
 
-        Used to hide the Hysteria2 create button when HOST/SNI/OBFS are not yet
+        Used to hide the Hysteria2 create button when HOST/SNI are not yet
         configured, so the user never sees an option that would fail on issuance.
         Reuses validate_hysteria2_ready() so the two cannot drift.
         """
@@ -835,9 +857,9 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         bot_language=_choice("BOT_LANGUAGE", "ru", {"ru", "en"}),
         hysteria2_enabled=_bool("HYSTERIA2_ENABLED", False),
         hysteria2_host=_no_control_chars("HYSTERIA2_HOST", _optional("HYSTERIA2_HOST")),
-        hysteria2_port=_int_range("HYSTERIA2_PORT", 15650, 1, 65535),
+        hysteria2_port=_int_range("HYSTERIA2_PORT", 443, 1, 65535),
         hysteria2_sni=_no_control_chars("HYSTERIA2_SNI", _optional("HYSTERIA2_SNI")),
-        hysteria2_obfs_password=_no_control_chars("HYSTERIA2_OBFS_PASSWORD", _optional("HYSTERIA2_OBFS_PASSWORD")),
+        hysteria2_obfs_password=_hysteria2_obfs_password_deprecated(),
         hysteria2_insecure=_bool("HYSTERIA2_INSECURE", True),
         hysteria2_auth_listen=_loopback_host_port(
             "HYSTERIA2_AUTH_LISTEN", _optional("HYSTERIA2_AUTH_LISTEN", "127.0.0.1:8444")

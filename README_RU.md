@@ -170,7 +170,7 @@ docs/                      # Документация: конфигурация,
 | `SQLITE_SYNCHRONOUS` | Нет (`FULL`) | Режим надёжности SQLite; `FULL` — безопасный дефолт для control-plane. |
 | `XRAY_PUBLIC_HOST`, `XRAY_REALITY_PUBLIC_KEY`, `XRAY_SNI`, `XRAY_SHORT_ID` | Для Xray-ключей | Параметры Reality, нужные клиентам. |
 | `AWG_ENDPOINT_HOST`, `AWG_ENDPOINT_PORT`, `AWG_SERVER_PUBLIC_KEY` | Для AWG-ключей | Публичный AmneziaWG endpoint в клиентских конфигах. |
-| `HYSTERIA2_HOST`, `HYSTERIA2_SNI`, `HYSTERIA2_OBFS_PASSWORD` | Для Hysteria2-ключей | Публичный endpoint + пароль обфускации salamander, нужные клиентам (`OBFS_PASSWORD` должен совпадать с сервером). 🔒 |
+| `HYSTERIA2_HOST`, `HYSTERIA2_SNI` | Для Hysteria2-ключей | Публичный endpoint, нужный клиентам. Чистый QUIC на UDP/443 — `HYSTERIA2_OBFS_PASSWORD` задепрекейчен (salamander-обфускация убрана). |
 
 📖 **Все переменные** (значения по умолчанию, диапазоны, security-заметки, legacy-aliases)
 описаны в **[docs/configuration.ru.md](docs/configuration.ru.md)**. Шаблон для копирования с

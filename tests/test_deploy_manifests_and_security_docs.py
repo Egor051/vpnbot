@@ -8,6 +8,7 @@ test_documentation_content; privileged-helper behaviour in
 test_privileged_helper_scripts.
 """
 
+import os
 import re
 from pathlib import Path
 
@@ -145,3 +146,31 @@ def test_create_user_script_is_non_destructive_scaffold() -> None:
 # load_helper fixture and runs unconditionally. Earlier PRIVILEGE_HELPERS_ENABLED-
 # gated copies here were skipped in CI and duplicated that coverage, so they were
 # removed. This module only guards the shipped deploy manifests and security docs.
+
+
+def test_hysteria_config_yaml_has_no_obfs_and_listens_on_udp_443() -> None:
+    # Salamander obfuscation was dropped and Hysteria2 moved from UDP/15650 to
+    # plain QUIC on UDP/443 — this pins the two structural facts a regression
+    # could silently break, without asserting cert/key paths, TLS details or
+    # secrets (those are host-specific / operator-filled).
+    text = _read("deploy/hysteria/config.yaml")
+
+    assert re.search(r"^listen:\s*:443\s*$", text, re.MULTILINE), "listen must be :443"
+    # No `obfs:` config key — comments are allowed to explain the absence.
+    assert not re.search(r"^\s*obfs\s*:", text, re.MULTILINE), "salamander obfuscation must not be configured"
+
+
+def test_hysteria_preflight_script_is_present_and_fail_closed() -> None:
+    # Static guard only — the script's own `--selftest` mode (canned ss(8)
+    # input, no real socket) is the source of truth for its runtime behaviour
+    # and is exercised by hand / in CI shell steps, not reimplemented here.
+    script_path = ROOT / "deploy" / "hysteria" / "preflight-udp443.sh"
+    assert script_path.exists()
+    assert os.access(script_path, os.X_OK), "preflight-udp443.sh must be executable"
+
+    text = _read("deploy/hysteria/preflight-udp443.sh")
+    assert text.startswith("#!/usr/bin/env bash")
+    assert "set -euo pipefail" in text
+    assert "--selftest" in text
+    # TCP/443 (Xray) must be irrelevant to the UDP/443 verdict.
+    assert "netid" in text.lower()

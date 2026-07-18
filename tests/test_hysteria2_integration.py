@@ -67,9 +67,9 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         config_backup_keep_last=20,
         hysteria2_enabled=True,
         hysteria2_host="vpn.example.com",
-        hysteria2_port=15650,
+        hysteria2_port=443,
         hysteria2_sni="googletagmanager.com",
-        hysteria2_obfs_password="obfs pw/with=special:&chars",
+        hysteria2_obfs_password="",
         hysteria2_insecure=True,
     )
     values.update(overrides)
@@ -179,7 +179,9 @@ def test_is_hysteria2_ready_reflects_required_settings(tmp_path: Path) -> None:
     # Any required field missing → not ready (button stays hidden, no raise).
     assert _settings(tmp_path, hysteria2_host="").is_hysteria2_ready() is False
     assert _settings(tmp_path, hysteria2_sni="").is_hysteria2_ready() is False
-    assert _settings(tmp_path, hysteria2_obfs_password="").is_hysteria2_ready() is False
+    # OBFS_PASSWORD is deprecated (salamander was dropped) and no longer gates
+    # readiness — an empty value must NOT make the key unready.
+    assert _settings(tmp_path, hysteria2_obfs_password="").is_hysteria2_ready() is True
 
 
 # ── link formatting ─────────────────────────────────────────────────────────
@@ -188,38 +190,33 @@ def test_format_hysteria2_link_round_trip() -> None:
     from urllib.parse import parse_qs, unquote, urlsplit
 
     secret = "deadbeef" * 6
-    obfs = "p@ss w/ord=+:&x"
     link = format_hysteria2_link(
         "hy2_abc123",
         secret,
         host="vpn.example.com",
-        port=15650,
+        port=443,
         sni="googletagmanager.com",
-        obfs_password=obfs,
         insecure=True,
     )
     parts = urlsplit(link)
     assert parts.scheme == "hysteria2"
     assert parts.hostname == "vpn.example.com"
-    assert parts.port == 15650
+    assert parts.port == 443
     # userinfo is the single token (the secret), round-trips exactly.
     assert unquote(parts.username or "") == secret
     assert parts.password is None
     query = parse_qs(parts.query)
-    assert query["obfs"] == ["salamander"]
-    assert query["obfs-password"] == [obfs]  # special chars survived URL-encoding
+    assert "obfs" not in query
+    assert "obfs-password" not in query
     assert query["sni"] == ["googletagmanager.com"]
     assert query["insecure"] == ["1"]
     assert unquote(parts.fragment) == "hy2_abc123"
-    # The encoded password must not leak raw metacharacters into the link.
-    assert " " not in link and "&chars" not in link
 
 
 def test_format_hysteria2_link_insecure_false() -> None:
-    link = format_hysteria2_link(
-        "hy2_x", "abcd", host="h", port=1, sni="s", obfs_password="o", insecure=False
-    )
+    link = format_hysteria2_link("hy2_x", "abcd", host="h", port=1, sni="s", insecure=False)
     assert "insecure=0" in link
+    assert "obfs" not in link
 
 
 # ── IDOR ─────────────────────────────────────────────────────────────────────

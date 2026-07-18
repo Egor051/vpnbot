@@ -1,0 +1,36 @@
+# hysteria-server config.yaml — source of truth for the Hysteria2 data plane.
+#
+# Plain QUIC on UDP/443 (no salamander obfuscation, no ACME/masquerade — cert stays
+# self-signed). Coexists with Xray REALITY on TCP/443: different transport
+# (UDP vs TCP), same port number is fine.
+#
+# Operator install:
+#   sudo cp deploy/hysteria/config.yaml /etc/hysteria/config.yaml
+#   # edit tls.cert / tls.key below to point at your self-signed cert/key
+#   bash deploy/hysteria/preflight-udp443.sh   # must exit 0 before (re)starting
+#   sudo systemctl restart hysteria-server
+#
+# HYSTERIA2_PORT in .env must match `listen` below (the bot only builds client
+# links from HYSTERIA2_PORT; it does not template or apply this file).
+
+listen: :443
+
+tls:
+  # Self-signed — there is no domain, so no ACME/masquerade here. Paths are
+  # host-local; the cert/key files themselves are never committed to git.
+  cert: /etc/hysteria/cert.pem
+  key: /etc/hysteria/key.pem
+
+# HTTP auth against vpn.db via the separate hy2_auth endpoint (deploy/vpn-bot-hy2-auth.service).
+# url host:port must match HYSTERIA2_AUTH_LISTEN in .env.
+auth:
+  type: http
+  http:
+    url: http://127.0.0.1:8444/auth
+
+# Per-key traffic counters, online-clients count and revoke-kick. listen must
+# match HYSTERIA2_STATS_LISTEN (loopback only — never expose to the internet);
+# secret must match HYSTERIA2_STATS_SECRET.
+trafficStats:
+  listen: 127.0.0.1:9999
+  secret: "<random-secret>"

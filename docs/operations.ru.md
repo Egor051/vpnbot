@@ -273,7 +273,7 @@ sudo chmod 600 /root/vpn-service-backups/vpn-service-*.tar.gz
 ```
 
 При включённом Hysteria2 держите `/etc/hysteria/config.yaml` в списке — в нём незаменимые
-секреты salamander/TLS/trafficStats (тот же файл, что сохраняет офсайтовый бандл
+секреты TLS/trafficStats (тот же файл, что сохраняет офсайтовый бандл
 восстановления); на развёртываниях без Hysteria2 уберите строку, чтобы `tar` не ругался на
 отсутствующий путь. Включайте `/opt/vpn-service/logs` только если логи нужны для анализа
 инцидентов. Все backup
@@ -326,7 +326,7 @@ tar xzf recovery.tar.gz            # MANIFEST.json содержит исходн
 - По возможности держите SSH открытым только для доверенных источников.
 - Откройте публичный TCP-порт Xray, обычно `443/tcp`.
 - Откройте публичный UDP-порт AWG endpoint из `AWG_ENDPOINT_PORT` или `ListenPort` в конфиге AWG.
-- Если включён Hysteria2, откройте публичный **UDP**-порт Hysteria2 из `HYSTERIA2_PORT` (дефолт `15650`). Эндпоинт `hy2_auth` (`HYSTERIA2_AUTH_LISTEN`) и Traffic Stats API (`HYSTERIA2_STATS_LISTEN`) держите только на loopback — никогда не открывайте их в интернет.
+- Если включён Hysteria2, откройте публичный **UDP**-порт Hysteria2 из `HYSTERIA2_PORT` (дефолт `443` — чистый QUIC, без salamander; сосуществует с Xray на TCP/443, другой транспорт). Эндпоинт `hy2_auth` (`HYSTERIA2_AUTH_LISTEN`) и Traffic Stats API (`HYSTERIA2_STATS_LISTEN`) держите только на loopback — никогда не открывайте их в интернет.
 - Открывайте Dante/SOCKS только если намеренно развёртываете отдельный прокси с защитой.
 - Держите `XRAY_STATS_SERVER` привязанным только к localhost, например `127.0.0.1:<port>`. Никогда не открывайте Xray stats API в интернет.
 - Если политика UFW для перенаправленного трафика по умолчанию `deny`, явно разрешите трафик AWG-клиентов.
@@ -348,7 +348,7 @@ sudo ss -tlnp | grep 31337
 sudo systemctl status mtproxy --no-pager
 sudo ss -tlnp | grep 8443
 sudo systemctl status hysteria-server vpn-bot-hy2-auth --no-pager   # если включён Hysteria2
-sudo ss -ulnp | grep 15650                                         # публичный UDP-порт Hysteria2
+sudo ss -ulnp | grep :443                                          # публичный UDP-порт Hysteria2
 curl -s http://127.0.0.1:8444/healthz                              # liveness hy2_auth (loopback)
 sudo journalctl -u vpn-bot -n 100 --no-pager
 sudo xray run -test -config /usr/local/etc/xray/config.json

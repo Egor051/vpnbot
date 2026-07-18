@@ -170,7 +170,7 @@ values before issuing that key type.
 | `SQLITE_SYNCHRONOUS` | No (`FULL`) | SQLite durability mode; `FULL` is the safe control-plane default. |
 | `XRAY_PUBLIC_HOST`, `XRAY_REALITY_PUBLIC_KEY`, `XRAY_SNI`, `XRAY_SHORT_ID` | For Xray keys | Reality connection parameters clients need. |
 | `AWG_ENDPOINT_HOST`, `AWG_ENDPOINT_PORT`, `AWG_SERVER_PUBLIC_KEY` | For AWG keys | Public AmneziaWG endpoint shown in client configs. |
-| `HYSTERIA2_HOST`, `HYSTERIA2_SNI`, `HYSTERIA2_OBFS_PASSWORD` | For Hysteria2 keys | Public endpoint + salamander obfuscation password clients need (`OBFS_PASSWORD` must match the server). 🔒 |
+| `HYSTERIA2_HOST`, `HYSTERIA2_SNI` | For Hysteria2 keys | Public endpoint clients need. Plain QUIC on UDP/443 — `HYSTERIA2_OBFS_PASSWORD` is deprecated (salamander obfuscation was dropped). |
 
 📖 **Every variable** (defaults, ranges, security notes, legacy aliases) is documented in
 **[docs/configuration.md](docs/configuration.md)**. The copy-paste template with inline comments

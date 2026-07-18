@@ -226,19 +226,30 @@ running even when `vpn-bot.service` is down.
 
 ### 2. Point the `hysteria` server at the endpoint
 
-In `/etc/hysteria/config.yaml`, use HTTP auth and the same listen address:
+`deploy/hysteria/config.yaml` is the tracked source of truth for
+`/etc/hysteria/config.yaml` — plain QUIC on UDP/443 (no salamander
+obfuscation, no ACME/masquerade; the TLS cert stays self-signed). Copy it in
+and fill in the cert/key paths:
 
 ```yaml
+listen: :443
+
+tls:
+  cert: /etc/hysteria/cert.pem
+  key: /etc/hysteria/key.pem
+
 auth:
   type: http
   http:
     url: http://127.0.0.1:8444/auth   # must match HYSTERIA2_AUTH_LISTEN
 ```
 
-`HYSTERIA2_OBFS_PASSWORD` in `.env` must equal the salamander obfuscation
-password in this file — a mismatch is a silent client timeout, not an error.
-Start `hysteria-server.service` after `vpn-bot-hy2-auth` (the unit declares
-`Before=hysteria-server.service`).
+`HYSTERIA2_PORT` in `.env` must equal the `listen` port above — the bot only
+builds client links from `HYSTERIA2_PORT`, it does not template or apply this
+file. Run `deploy/hysteria/preflight-udp443.sh` before restarting the service
+(fails closed if UDP/443 is held by a non-hysteria process; TCP/443, i.e.
+Xray, is ignored). Start `hysteria-server.service` after `vpn-bot-hy2-auth`
+(the unit declares `Before=hysteria-server.service`).
 
 ### 2b. (Optional) Enable the Traffic Stats API — traffic, online, revoke-kick
 

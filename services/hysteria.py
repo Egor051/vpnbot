@@ -339,7 +339,6 @@ class HysteriaService:
             host=self.settings.hysteria2_host,
             port=self.settings.hysteria2_port,
             sni=self.settings.hysteria2_sni,
-            obfs_password=self.settings.hysteria2_obfs_password,
             insecure=self.settings.hysteria2_insecure,
         )
         visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
