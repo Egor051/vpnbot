@@ -6,14 +6,90 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import os
 import sys
 from collections.abc import Callable, Generator
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Prod env-var families the settings loader reads. In tests a Settings build must
+# come only from what the test sets explicitly (monkeypatch.setenv or an explicit
+# env_path), NEVER from the host's ambient environment or the production
+# /opt/vpn-service/.env that python-dotenv would auto-discover from the cwd. See
+# _isolate_settings_env below. ANOMALY_ is included because
+# ANOMALY_HYSTERIA2_MAX_CONN cross-validates against HYSTERIA2_STATS_SECRET (a
+# Hysteria2-family value) — the two must be cleared together or a leaked
+# HYSTERIA2_STATS_SECRET-less-but-ANOMALY_HYSTERIA2_MAX_CONN-set combination raises
+# a spurious SettingsError.
+_ISOLATED_ENV_PREFIXES: tuple[str, ...] = (
+    "HYSTERIA2_",
+    "SOCKS5_",
+    "XRAY_",
+    "MTPROTO_",
+    "WARP_",
+    "ANOMALY_",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make Settings construction deterministic and host-independent.
+
+    Two leaks, both a host-only class (cf. #239/#241/#242 — green in clean CI, red
+    on the box, because the box's live state bleeds in):
+
+    1. ``load_settings()`` with no explicit path calls ``load_dotenv(None)``, which
+       walks up from the cwd (``/opt/vpn-service`` in the test run) and slurps the
+       **production** ``.env`` into ``os.environ`` — so a test that carefully
+       ``delenv``'d ``SOCKS5_ENABLED`` gets it (and every other prod value) handed
+       right back. We block ONLY dotenv auto-discovery: an **explicit** ``env_path``
+       (used by tests that genuinely exercise .env-file parsing) is still honoured.
+       ``hy2_auth/config.py`` has its own independent ``load_dotenv()`` call (it
+       cannot import config.settings — see its module docstring) and must be
+       blocked the same way, or a single test that reaches it (e.g.
+       ``test_hy2_auth.py``) permanently pollutes ``os.environ`` with the live
+       ``.env`` for every test that runs afterward in the same session — this is
+       exactly how ``ANOMALY_HYSTERIA2_MAX_CONN``/``HYSTERIA2_STATS_SECRET`` from
+       the box's real ``.env`` were observed leaking into unrelated later tests.
+
+    2. Any of the prod control-var families already exported in the ambient
+       environment would likewise leak. We strip them up-front so each test starts
+       from the documented defaults.
+
+    This is deliberately narrow. It does NOT stop the loader from reading the
+    environment: a test that sets a var (this autouse fixture runs *before* the
+    test body's ``monkeypatch.setenv``) still sees it, so "the loader reads X from
+    the environment" tests keep their teeth.
+    """
+    for key in list(os.environ):
+        if key.startswith(_ISOLATED_ENV_PREFIXES):
+            monkeypatch.delenv(key, raising=False)
+
+    import dotenv
+
+    real_dotenv_load_dotenv = dotenv.load_dotenv
+
+    def _no_autodiscovery_load_dotenv(dotenv_path: Any = None, *args: Any, **kwargs: Any) -> bool:
+        # Falsy path == python-dotenv auto-discovery (the prod-.env leak): no-op,
+        # mirroring load_dotenv's "nothing loaded" return. An explicit path is
+        # forwarded to the real loader untouched.
+        if not dotenv_path:
+            return False
+        return bool(real_dotenv_load_dotenv(dotenv_path, *args, **kwargs))
+
+    # Patch every module-local `load_dotenv` name bound via `from dotenv import
+    # load_dotenv` — patching the `dotenv` package attribute alone would not reach
+    # these, since `from ... import ...` copies the reference at import time.
+    import config.settings as settings_module
+    import hy2_auth.config as hy2_auth_config_module
+
+    monkeypatch.setattr(settings_module, "load_dotenv", _no_autodiscovery_load_dotenv)
+    monkeypatch.setattr(hy2_auth_config_module, "load_dotenv", _no_autodiscovery_load_dotenv)
 
 
 def _load_module(module_name: str, path: Path) -> ModuleType:
