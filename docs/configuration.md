@@ -159,17 +159,17 @@ _Legacy alias: `AWG_CLIENT_DNS` (= `AWG_DNS`)._
 
 Hysteria2 runs as a standalone data plane (the `hysteria` server plus the
 separate `hy2_auth` endpoint), independent of the bot process. These variables
-let the bot build client links and gate issuance. `HYSTERIA2_OBFS_PASSWORD` must
-match the salamander obfuscation password in `/etc/hysteria/config.yaml` — a
-mismatch is a silent client timeout, not an error.
+let the bot build client links and gate issuance. Hysteria2 runs plain QUIC on
+UDP/443 (see `deploy/hysteria/config.yaml`) — salamander obfuscation was
+dropped; `HYSTERIA2_OBFS_PASSWORD` is deprecated and ignored.
 
 | Variable | Required | Default | Description | Example |
 |---|---|---|---|---|
 | `HYSTERIA2_ENABLED` | No | `false` | Enable Hysteria2 key issuance in the bot. The data plane runs regardless. | `true` |
 | `HYSTERIA2_HOST` | No* | — | Public hostname/IP clients connect to. Required to issue keys. | `vpn.example.com` |
-| `HYSTERIA2_PORT` | No | `15650` | Public UDP port of the Hysteria2 server (1–65535). | `15650` |
+| `HYSTERIA2_PORT` | No | `443` | Public UDP port of the Hysteria2 server (1–65535). Coexists with Xray REALITY on TCP/443. | `443` |
 | `HYSTERIA2_SNI` | No* | — | TLS SNI used in the client link. Required to issue keys. | `googletagmanager.com` |
-| `HYSTERIA2_OBFS_PASSWORD` | No* | — | Salamander obfuscation password; MUST match `/etc/hysteria/config.yaml`. 🔒 | `s3cret` |
+| `HYSTERIA2_OBFS_PASSWORD` | No | — | **Deprecated** — salamander obfuscation was dropped; the value is parsed (so an existing `.env` doesn't fail startup) but no longer used. 🔒 | _(unset)_ |
 | `HYSTERIA2_INSECURE` | No | `true` | Set `insecure=1` in the link (self-signed server cert). See the MITM tradeoff below. | `true` |
 | `HYSTERIA2_AUTH_LISTEN` | No | `127.0.0.1:8444` | Loopback `host:port` the `hy2_auth` endpoint binds. Host must be loopback. | `127.0.0.1:8444` |
 | `HYSTERIA2_STATS_LISTEN` | No | `127.0.0.1:9999` | Loopback `host:port` of the Traffic Stats API. Must match `trafficStats.listen` in `config.yaml`; host must be loopback. | `127.0.0.1:9999` |
@@ -226,12 +226,11 @@ self-signed (the deployment has no domain), and the target GUI clients
 certificate pinning — so flipping to `insecure=0` would break **every** link the
 bot has issued, an outage rather than a hardening.
 
-The residual risk is narrow. Salamander is a *keyed* PSK obfuscation, so a blind
-on-path attacker who does not hold the PSK cannot even parse — let alone forge —
-the QUIC handshake. The only party who could impersonate the server is one who
-already holds a valid client link, and therefore already knows the global
-salamander PSK. With `insecure=1` the client simply skips TLS certificate
-validation; it does not weaken the obfuscation or the per-key auth secret.
+With `insecure=1` the client simply skips TLS certificate validation; it does
+not weaken the per-key auth secret. Since salamander obfuscation was dropped
+(plain QUIC on UDP/443), there is no PSK narrowing this further — a blind
+on-path attacker can see and probe the handshake, though not decrypt QUIC
+application data or authenticate without a valid per-key secret.
 
 The real fix is a proper domain plus an ACME-issued certificate, after which you
 can safely set `HYSTERIA2_INSECURE=false`. Until then, keep this `true`.

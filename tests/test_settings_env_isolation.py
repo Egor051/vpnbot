@@ -56,7 +56,7 @@ def test_build_ignores_ambient_prod_env_vars(monkeypatch: pytest.MonkeyPatch, tm
 
     assert settings.socks5_enabled is False          # ambient true was stripped
     assert settings.socks5_host == ""                # ambient 203.0.113.9 was stripped
-    assert settings.hysteria2_port == 15650          # default, not the ambient 50000
+    assert settings.hysteria2_port == 443            # default, not the ambient 50000
 
 
 def test_build_ignores_auto_discovered_dotenv_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -73,7 +73,7 @@ def test_build_ignores_auto_discovered_dotenv_file(monkeypatch: pytest.MonkeyPat
 
     assert settings.socks5_enabled is False          # default, not the file's true
     assert settings.socks5_host == ""                # default, not 198.51.100.7
-    assert settings.hysteria2_port == 15650          # default, not 40000
+    assert settings.hysteria2_port == 443            # default, not 40000
 
 
 def test_isolation_does_not_blind_loader_to_explicit_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -81,14 +81,18 @@ def test_isolation_does_not_blind_loader_to_explicit_env(monkeypatch: pytest.Mon
     green: a value the test sets explicitly (after the autouse fixture ran) still
     takes effect — even when the same var was ambient before."""
     _minimal_required(monkeypatch, tmp_path)
-    monkeypatch.setenv("HYSTERIA2_PORT", "443")
+    # 34567 is neither the HYSTERIA2_PORT default (443) nor any other
+    # project-significant port (51820 is the WARP policy table, not a port) —
+    # a value that only proves "explicit env wins" if it differs from both the
+    # default and the _AMBIENT value above.
+    monkeypatch.setenv("HYSTERIA2_PORT", "34567")
     monkeypatch.setenv("SOCKS5_ENABLED", "true")
     monkeypatch.setenv("SOCKS5_HOST", "10.0.0.5")
     monkeypatch.setenv("SOCKS5_PORT", "1080")
 
     settings = load_settings()
 
-    assert settings.hysteria2_port == 443
+    assert settings.hysteria2_port == 34567
     assert settings.socks5_enabled is True
     assert settings.socks5_host == "10.0.0.5"
 

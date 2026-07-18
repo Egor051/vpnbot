@@ -18,8 +18,11 @@
 Три части, и только одна из них — бот:
 
 1. **Сервер `hysteria`** (apernet v2) — собственно data plane, настроенный с `auth: type: http`
-   в `/etc/hysteria/config.yaml`. Терминирует клиентские QUIC/Salamander-сессии на публичном
-   **UDP**-порту `HYSTERIA2_PORT` (дефолт `15650`).
+   в `/etc/hysteria/config.yaml` (трекнутый источник: `deploy/hysteria/config.yaml`). Терминирует
+   клиентские сессии на чистом QUIC — без salamander-обфускации, без ACME/masquerade
+   (самоподписанный сертификат) — на публичном **UDP**-порту `HYSTERIA2_PORT` (дефолт `443`;
+   сосуществует с Xray REALITY на TCP/443). Перед рестартом сервиса запускайте
+   `deploy/hysteria/preflight-udp443.sh`.
 2. **Эндпоинт `hy2_auth`** (`python -m hy2_auth`, `deploy/vpn-bot-hy2-auth.service`) — небольшой
    **отдельный** процесс, к которому сервер `hysteria` обращается по loopback на каждый handshake.
    Он открывает `vpn.db` **read-only** и проверяет персональный токен ключа в постоянное время
@@ -63,7 +66,7 @@
 
 | Возможность | Требует | Примечания |
 |---|---|---|
-| Выдача / отзыв / удаление | `HYSTERIA2_HOST`, `HYSTERIA2_SNI`, `HYSTERIA2_OBFS_PASSWORD` | Чистые записи в `vpn.db`; действуют на следующем handshake. |
+| Выдача / отзыв / удаление | `HYSTERIA2_HOST`, `HYSTERIA2_SNI` | Чистые записи в `vpn.db`; действуют на следующем handshake. |
 | Админ-**диагностика** (`systemctl is-active`) | `HYSTERIA2_SERVICE_NAME`, `HYSTERIA2_AUTH_SERVICE_NAME` | Проверяет `hysteria-server` и `vpn-bot-hy2-auth`. |
 | **Backend-health** `Hysteria2: OK/DEGRADED` | `HYSTERIA2_HEALTH_INTERVAL` (>0) | Только liveness data plane — **никогда не блокирует** выдачу/отзыв (в отличие от Xray/AWG). |
 | Офсайтовый **бандл восстановления** | `OFFSITE_BACKUP_INCLUDE_CONFIGS=true` | Кладёт `HYSTERIA2_CONFIG_PATH` (`/etc/hysteria/config.yaml`). |

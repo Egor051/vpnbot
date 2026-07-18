@@ -375,25 +375,23 @@ def format_hysteria2_link(
     host: str,
     port: int,
     sni: str,
-    obfs_password: str,
     insecure: bool = True,
 ) -> str:
     """Build a ``hysteria2://`` client URI for a single issued key.
 
     The userinfo component is the single auth token (our per-key secret) — NOT a
     ``user:pass`` pair. Every interpolated value is percent-encoded via
-    ``urllib.parse.quote`` so an obfs password (or label) containing URL
-    metacharacters cannot break the link. ``host``/``port``/``sni``/
-    ``obfs_password`` are the global server settings shared by every key.
+    ``urllib.parse.quote`` so a label containing URL metacharacters cannot break
+    the link. ``host``/``port``/``sni`` are the global server settings shared by
+    every key. Plain QUIC (no salamander obfuscation) on UDP/443 — no obfs params.
     """
     user = quote(secret, safe="")
     sni_q = quote(sni, safe="")
-    obfs_q = quote(obfs_password, safe="")
     label_q = quote(label, safe="")
     insecure_flag = 1 if insecure else 0
     return (
         f"hysteria2://{user}@{host}:{port}/"
-        f"?sni={sni_q}&obfs=salamander&obfs-password={obfs_q}&insecure={insecure_flag}"
+        f"?sni={sni_q}&insecure={insecure_flag}"
         f"#{label_q}"
     )
 
