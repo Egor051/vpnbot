@@ -42,6 +42,22 @@ The bot itself never binds any of these ports; it only reads the stats/health AP
 `adapters/hysteria_stats.py` / `adapters/hysteria_auth_health.py`) and writes `vpn_keys` rows
 (`key_type='hysteria2'`, per-key secret in `payload_json`, stats label `hy2_<hex>`).
 
+### WARP egress marking (`vpnbot-hy2-warp-mark`)
+
+When WARP split-tunnel is deployed, `vpnbot-hy2-warp-mark` fwmarks locally-generated
+Hysteria2 packets (matched by owner-uid) into the WARP policy table so hy2 egress follows the
+same split as the rest of WARP. It is a **tracked** helper (`scripts/vpnbot-hy2-warp-mark`) and
+is **self-installed** by `scripts/deploy.sh` Phase 2 (`install_out_of_repo_helpers`), exactly
+like the WARP helpers — a `sudo bash scripts/redeploy.sh` keeps
+`/usr/local/sbin/vpnbot-hy2-warp-mark` in sync with the checkout, no hand-install after a deploy.
+Its `iptables --sport` exemption is **derived from `HYSTERIA2_PORT`** (the single source of
+truth), resolved from the bot `.env` and range-checked before touching the network (fails closed
+on a missing/garbage/out-of-range value), so the marking port can never drift from the port
+`hysteria-server` listens on. Because the port lives in `.env` (not git), deploy re-applies
+`vpnbot-hy2-warp-mark.service` whenever it was active pre-deploy — so the exemption follows the
+current `HYSTERIA2_PORT` even when the helper file is unchanged. See
+[deploy/helpers/README.md](../deploy/helpers/README.md#vpnbot-hy2-warp-mark--hysteria2-egress--warp-port-from-hysteria2_port).
+
 ## Feature parity with Xray/AWG
 
 When `HYSTERIA2_ENABLED=true`, Hysteria2 reaches operational parity with Xray/AWG:

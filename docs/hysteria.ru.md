@@ -41,6 +41,22 @@
 `adapters/hysteria_stats.py` / `adapters/hysteria_auth_health.py`) и пишет строки `vpn_keys`
 (`key_type='hysteria2'`, персональный секрет в `payload_json`, stats-label `hy2_<hex>`).
 
+### Маркировка WARP-egress (`vpnbot-hy2-warp-mark`)
+
+Когда развёрнут WARP split-tunnel, `vpnbot-hy2-warp-mark` fwmark-ит локально-порождённые
+пакеты Hysteria2 (по owner-uid) в WARP policy-таблицу, чтобы hy2-egress подчинялся тому же
+сплиту, что и остальной WARP. Это **tracked**-хелпер (`scripts/vpnbot-hy2-warp-mark`), который
+**самоустанавливается** в Phase 2 `scripts/deploy.sh` (`install_out_of_repo_helpers`) — так же,
+как WARP-хелперы: `sudo bash scripts/redeploy.sh` держит
+`/usr/local/sbin/vpnbot-hy2-warp-mark` в синхроне с чекаутом, ручная установка после деплоя не
+нужна. Его `iptables --sport`-исключение **выводится из `HYSTERIA2_PORT`** (единый источник
+правды): порт резолвится из `.env` бота и проверяется на диапазон **до** первого касания сети
+(fail-closed на отсутствующем/мусорном/вне-диапазона значении), поэтому порт маркировки не может
+разъехаться с портом, который слушает `hysteria-server`. Так как порт живёт в `.env` (не в git),
+деплой **переприменяет** `vpnbot-hy2-warp-mark.service`, если он был active до деплоя — чтобы
+исключение следовало за текущим `HYSTERIA2_PORT` даже когда файл хелпера не менялся. См.
+[deploy/helpers/README.md](../deploy/helpers/README.md#vpnbot-hy2-warp-mark--hysteria2-egress--warp-port-from-hysteria2_port).
+
 ## Паритет с Xray/AWG
 
 При `HYSTERIA2_ENABLED=true` Hysteria2 достигает операционного паритета с Xray/AWG:
