@@ -138,22 +138,29 @@ WARP_ONESHOTS=(warp-routes.service vpn-bot-warp-split.service vpnbot-hy2-warp-ma
 # running stale — which is exactly how a broken vpn-bot-warp-routes survived a
 # source fix and took warp-routes.service down (deploy/helpers/README.md L101-106).
 # Phase 2 (install_out_of_repo_helpers) now closes that drift: it reinstalls any
-# helper whose installed copy differs from the checkout. Only the WARP helpers are
-# managed here — they are the ones the WARP deploy presupposes (README L94-99) with
-# no other install step; the backend helpers under deploy/helpers/ are installed by
-# deploy/setup-nonroot-helper-mode.sh and are out of scope for this refresh.
+# helper whose installed copy differs from the checkout. Managed here are the WARP
+# helpers (the ones the WARP deploy presupposes, README L94-99, with no other
+# install step) plus vpnbot-hy2-warp-mark (the Hysteria2 -> WARP fwmark tagger,
+# previously hand-maintained on the box); the backend helpers under deploy/helpers/
+# are installed by deploy/setup-nonroot-helper-mode.sh and are out of scope here.
 # Format per entry: "<checkout-relative-source>|<installed-absolute-path>".
 OUT_OF_REPO_HELPERS=(
   "scripts/vpn-bot-warp-install|/usr/local/sbin/vpn-bot-warp-install"
   "scripts/vpn-bot-warp-iface|/usr/local/sbin/vpn-bot-warp-iface"
   "scripts/vpn-bot-warp-routes|/usr/local/sbin/vpn-bot-warp-routes"
   "scripts/vpn-bot-warp-status|/usr/local/sbin/vpn-bot-warp-status"
+  "scripts/vpnbot-hy2-warp-mark|/usr/local/sbin/vpnbot-hy2-warp-mark"
 )
 # The one helper that is EXECUTED by a systemd unit (warp-routes.service runs it),
 # so a fresh binary only takes effect on restart. Refreshing it triggers a
 # daemon-reload + `systemctl restart warp-routes` (guarded on pre-state below).
 WARP_ROUTES_HELPER="/usr/local/sbin/vpn-bot-warp-routes"
 WARP_ROUTES_UNIT="warp-routes.service"
+# The Hysteria2 fwmark helper is ALSO executed by a systemd oneshot
+# (vpnbot-hy2-warp-mark.service). Unlike warp-routes it is re-applied on a
+# was-active basis rather than only on a file change — see the rationale in
+# install_out_of_repo_helpers where HY2_MARK_UNIT is re-applied.
+HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"
 
 BOT_UNIT="vpn-bot.service"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
@@ -320,6 +327,26 @@ install_out_of_repo_helpers() {
     else
       warn "  ${WARP_ROUTES_UNIT} pre-state=${pre:-<none>} (not active) — fresh helper installed but NOT restarted (respecting operator intent)"
     fi
+  fi
+
+  # The Hysteria2 fwmark helper is executed by an idempotent oneshot
+  # (vpnbot-hy2-warp-mark.service). Unlike warp-routes, its effective input can go
+  # stale WITHOUT the helper file changing: the --sport exemption is derived from
+  # HYSTERIA2_PORT (in .env, NOT git), so PR-B flips the port while the helper text
+  # stays byte-identical and the "helper changed" trigger above would miss it,
+  # leaving the RETURN rule pinned to the old port. So re-apply the oneshot whenever
+  # it was active pre-deploy — NOT gated on a file change — to re-derive the
+  # exemption from the current HYSTERIA2_PORT. The unit is idempotent, so on an
+  # unchanged port this is a no-op (first exercised live in PR-A at 15650). Skip
+  # when it was not active pre-deploy, mirroring the warp-routes operator-intent
+  # policy. No daemon-reload: the unit file is unchanged; only ExecStart re-runs.
+  local hy2_pre="${U_PRE_ACTIVE[$HY2_MARK_UNIT]:-}"
+  if [[ "$hy2_pre" == "active" ]]; then
+    log "  ${HY2_MARK_UNIT} was active pre-deploy — re-applying to sync the --sport exemption with the current HYSTERIA2_PORT"
+    systemctl restart "$HY2_MARK_UNIT" \
+      || rollback_now "${HY2_MARK_UNIT} re-apply failed (fwmark --sport exemption may be stale for the current HYSTERIA2_PORT)"
+  else
+    log "  ${HY2_MARK_UNIT} pre-state=${hy2_pre:-<none>} (not active) — not re-applied (respecting operator intent)"
   fi
 
   # Verify: after the install no managed helper may still be in drift. This is the

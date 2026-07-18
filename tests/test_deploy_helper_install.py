@@ -82,6 +82,32 @@ def test_deploy_sh_lists_all_four_warp_helpers() -> None:
         assert f"/usr/local/sbin/{helper}" in text, f"{helper} must be in OUT_OF_REPO_HELPERS"
 
 
+def test_deploy_sh_manages_hy2_warp_mark_helper() -> None:
+    """The Hysteria2 fwmark helper is now a tracked, self-installed out-of-repo
+    helper (PR-A) — its OUT_OF_REPO_HELPERS entry must be present so deploy closes
+    its drift from the checkout like the WARP helpers."""
+    text = _read(DEPLOY_SH)
+    assert (
+        "scripts/vpnbot-hy2-warp-mark|/usr/local/sbin/vpnbot-hy2-warp-mark" in text
+    ), "vpnbot-hy2-warp-mark must be in OUT_OF_REPO_HELPERS"
+
+
+def test_deploy_sh_reapplies_hy2_mark_on_was_active_not_on_file_change() -> None:
+    """The fwmark oneshot must be re-applied whenever it was active pre-deploy —
+    NOT only when the helper file changed — so a HYSTERIA2_PORT flip (PR-B), which
+    leaves the helper text byte-identical, still re-derives the --sport exemption.
+    The rationale comment must pin that intent so it is not "simplified" into a
+    file-change gate."""
+    text = _read(DEPLOY_SH)
+    assert 'HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"' in text
+    assert 'systemctl restart "$HY2_MARK_UNIT"' in text
+    # The was-active guard reads pre-state, mirroring warp-routes' operator-intent policy.
+    assert 'U_PRE_ACTIVE[$HY2_MARK_UNIT]' in text
+    lowered = text.lower()
+    assert "not gated on a file change" in lowered or "not gated on a file-change" in lowered
+    assert "hysteria2_port" in lowered and "exemption" in lowered
+
+
 def test_deploy_sh_helper_step_runs_after_tree_advance_and_before_unit_install() -> None:
     """The refresh must happen after `git reset --hard origin/main` (fresh source)
     and before the unit install (so units execute the current helper)."""
@@ -192,7 +218,7 @@ def _make_stub(path: Path, body: str) -> None:
 
 def _driver(tmp_path: Path, *, installed: dict[str, str], sources: dict[str, str],
             mode: str, warp_pre: str = "active", fail_restart: bool = False,
-            stub_rollback: bool = False) -> subprocess.CompletedProcess[str]:
+            stub_rollback: bool = False, hy2_pre: str | None = None) -> subprocess.CompletedProcess[str]:
     """Source deploy.sh (selftest seam) and call one helper function under stubs.
 
     installed: helper basename -> file contents to place in the fake /usr/local/sbin
@@ -234,6 +260,12 @@ def _driver(tmp_path: Path, *, installed: dict[str, str], sources: dict[str, str
     rollback_override = (
         'rollback() { echo "ROLLBACK_CALLED"; exit 42; }\n' if stub_rollback else ""
     )
+    # HY2_MARK_UNIT is defined by sourcing deploy.sh; only its pre-state varies per
+    # test. Leaving hy2_pre=None keeps U_PRE_ACTIVE[$HY2_MARK_UNIT] unset (defaults
+    # to "not active" -> no re-apply), so existing WARP tests are unaffected.
+    hy2_pre_line = (
+        f'U_PRE_ACTIVE["$HY2_MARK_UNIT"]="{hy2_pre}"\n' if hy2_pre is not None else ""
+    )
     driver = tmp_path / "driver.sh"
     driver.write_text(
         "set -uo pipefail\n"
@@ -247,6 +279,7 @@ def _driver(tmp_path: Path, *, installed: dict[str, str], sources: dict[str, str
         f'WARP_ROUTES_HELPER="{sbin}/vpn-bot-warp-routes"\n'
         'WARP_ROUTES_UNIT="warp-routes.service"\n'
         f'U_PRE_ACTIVE["warp-routes.service"]="{warp_pre}"\n'
+        f"{hy2_pre_line}"
         f"{rollback_override}"
         f'if [[ "{mode}" == "scan" ]]; then scan_out_of_repo_helpers "$APP_DIR"; '
         f'else install_out_of_repo_helpers; fi\n',
@@ -373,3 +406,61 @@ def test_install_is_noop_when_everything_is_in_sync(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr + proc.stdout
     assert "systemctl restart warp-routes.service" not in proc.stdout
     assert "no drift to close" in proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Behavioural: hy2-mark fwmark oneshot re-apply (PR-A) — driven via the same seam
+# --------------------------------------------------------------------------- #
+def test_install_reapplies_hy2_mark_when_active_even_without_file_change(tmp_path: Path) -> None:
+    """Everything in sync (no helper file changed), but the fwmark oneshot was
+    active pre-deploy: it must STILL be restarted so the --sport exemption is
+    re-derived from the current HYSTERIA2_PORT. This is the PR-B safety net proven
+    on the PR-A no-op path."""
+    proc = _driver(
+        tmp_path,
+        sources={n: "SAME\n" for n in WARP_HELPERS},
+        installed={n: "SAME\n" for n in WARP_HELPERS},
+        mode="install",
+        warp_pre="active",
+        hy2_pre="active",
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    # No helper drifted, so warp-routes is NOT restarted...
+    assert "systemctl restart warp-routes.service" not in proc.stdout
+    # ...but the fwmark oneshot IS re-applied purely on its was-active pre-state.
+    assert "systemctl restart vpnbot-hy2-warp-mark.service" in proc.stdout
+    assert "no drift to close" in proc.stdout
+
+
+def test_install_skips_hy2_mark_reapply_when_inactive(tmp_path: Path) -> None:
+    """When the fwmark oneshot was NOT active pre-deploy, it must not be
+    re-activated (respect operator intent, mirroring warp-routes)."""
+    proc = _driver(
+        tmp_path,
+        sources={n: "SAME\n" for n in WARP_HELPERS},
+        installed={n: "SAME\n" for n in WARP_HELPERS},
+        mode="install",
+        warp_pre="inactive",
+        hy2_pre="inactive",
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "systemctl restart vpnbot-hy2-warp-mark.service" not in proc.stdout
+    assert "not re-applied" in proc.stdout.lower()
+
+
+def test_install_hy2_mark_reapply_failure_routes_through_rollback(tmp_path: Path) -> None:
+    """A non-zero fwmark re-apply must route through rollback — a stale --sport
+    exemption for the current HYSTERIA2_PORT is a real routing fault, not tolerated
+    like an idle-client skip."""
+    proc = _driver(
+        tmp_path,
+        sources={n: "SAME\n" for n in WARP_HELPERS},
+        installed={n: "SAME\n" for n in WARP_HELPERS},
+        mode="install",
+        warp_pre="inactive",   # isolate: only the hy2 restart runs (and fails)
+        hy2_pre="active",
+        fail_restart=True,
+        stub_rollback=True,
+    )
+    assert proc.returncode == 42, proc.stdout + proc.stderr
+    assert "ROLLBACK_CALLED" in proc.stdout

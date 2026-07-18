@@ -1,0 +1,27 @@
+#!/bin/bash
+# vpnbot-hy2-warp-mark — hysteria egress подчиняется WARP policy table 51820.
+# Наполнение table 51820 принадлежит vpnbot-warp-split; здесь только fwmark на
+# локально-порождённые пакеты hy2: listed prefixes -> out-warp, остальное -> direct.
+set -uo pipefail
+MARK=0x3d22; TABLE=51820; HYUID=992
+# HYPORT is derived from HYSTERIA2_PORT (single source of truth) — never hardcoded
+# — resolved + range-checked BEFORE the first iptables touch, fails closed.
+HY2_ENV="${HY2_ENV:-/opt/vpn-service/.env}"
+port="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?HYSTERIA2_PORT[[:space:]]*=[[:space:]]*//p' "$HY2_ENV" \
+       | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/" -e 's/[[:space:]]*$//')"
+case "$port" in ''|*[!0-9]*) echo "vpnbot-hy2-warp-mark: HYSTERIA2_PORT not resolved from $HY2_ENV" >&2; exit 3 ;; esac
+[ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { echo "vpnbot-hy2-warp-mark: HYSTERIA2_PORT out of range: $port" >&2; exit 3; }
+HYPORT="$port"
+apply(){
+  ip rule show | grep -q "fwmark $MARK lookup $TABLE" || ip rule add fwmark $MARK lookup $TABLE priority 998
+  iptables -t mangle -C OUTPUT -m owner --uid-owner $HYUID -p udp --sport $HYPORT -j RETURN 2>/dev/null || iptables -t mangle -I OUTPUT 1 -m owner --uid-owner $HYUID -p udp --sport $HYPORT -j RETURN
+  iptables -t mangle -C OUTPUT -m owner --uid-owner $HYUID -j MARK --set-mark $MARK 2>/dev/null || iptables -t mangle -A OUTPUT -m owner --uid-owner $HYUID -j MARK --set-mark $MARK
+  ip rule show | grep -q "fwmark $MARK lookup $TABLE" || { echo "verify: ip rule missing" >&2; exit 1; }
+  iptables -t mangle -C OUTPUT -m owner --uid-owner $HYUID -j MARK --set-mark $MARK 2>/dev/null || { echo "verify: mark missing" >&2; exit 1; }
+}
+flush(){
+  iptables -t mangle -D OUTPUT -m owner --uid-owner $HYUID -j MARK --set-mark $MARK 2>/dev/null || true
+  iptables -t mangle -D OUTPUT -m owner --uid-owner $HYUID -p udp --sport $HYPORT -j RETURN 2>/dev/null || true
+  while ip rule show | grep -q "fwmark $MARK lookup $TABLE"; do ip rule del fwmark $MARK lookup $TABLE 2>/dev/null || break; done
+}
+case "${1:-apply}" in apply) apply;; clear) flush;; *) echo "usage: $0 {apply|clear}"; exit 2;; esac

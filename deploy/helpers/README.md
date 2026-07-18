@@ -125,6 +125,27 @@ in sync automatically; you no longer install these by hand after a deploy.
 > still exits `0`, so a skipped probe never fails the deploy; only a genuine
 > routing failure (non-zero exit) does, and that triggers the normal rollback.
 
+### `vpnbot-hy2-warp-mark` — Hysteria2 egress → WARP, port from `HYSTERIA2_PORT`
+
+`vpnbot-hy2-warp-mark` marks locally-generated Hysteria2 packets (owner-uid) into
+the WARP policy table so hy2 egress obeys the same split as the rest of WARP. It
+was hand-maintained on the box; it is now a **tracked** helper
+(`scripts/vpnbot-hy2-warp-mark`) and is **self-installed** by the same Phase 2
+step as the WARP helpers — its `OUT_OF_REPO_HELPERS` entry closes any drift
+between the checkout and `/usr/local/sbin/vpnbot-hy2-warp-mark` on every deploy.
+
+The one difference from the WARP helpers is how it is re-applied. The `--sport`
+RETURN exemption is **derived from `HYSTERIA2_PORT`** (the single source of truth
+the bot reads too) instead of a hardcoded port — resolved from the bot `.env`
+(override with `HY2_ENV`) and range-checked **before** the first `iptables` touch,
+so a missing / non-numeric / out-of-range value fails closed (exit `3`) without
+applying a rule built on a bad port. Because the port lives in `.env` (not git), a
+port change leaves the helper file byte-identical, so the "helper changed" trigger
+would miss it. Phase 2 therefore **re-applies `vpnbot-hy2-warp-mark.service`
+whenever it was active pre-deploy** — not only when the file changed — so the
+exemption always follows the current `HYSTERIA2_PORT`. The oneshot is idempotent,
+so on an unchanged port this re-apply is a no-op.
+
 ### Ownership model: systemd owns the interface and routes; the bot only observes
 
 The `out-warp` interface and its policy routes have **one** owner: **systemd**.
