@@ -280,6 +280,13 @@ def env_dir(tmp_path: Path):
         WARP_CLIENT_NET=CLIENT_NET,
         WARP_ENDPOINT_IP=ENDPOINT_IP,
         WARP_SPLIT_LIST=str(split_list),
+        # Isolate the "split disabled" intent marker to a per-test path that does
+        # NOT exist. Without this the script falls back to the real host marker
+        # /etc/vpn-bot/warp-split.disabled; when an operator has toggled split
+        # routing off on the box, apply/reconcile take the disabled branch (flush
+        # table T, emit no route/NAT/FORWARD) and every apply test fails — green in
+        # CI, red on the host. Keep the mock authoritative over host state.
+        WARP_SPLIT_DISABLED_MARKER=str(tmp_path / "warp-split.disabled"),
     )
     return bin_dir, log_file, split_list, base_env
 
@@ -304,6 +311,9 @@ def env_dir_fwmark_off(tmp_path: Path):
         WARP_CLIENT_NET=CLIENT_NET,
         WARP_ENDPOINT_IP=ENDPOINT_IP,
         WARP_SPLIT_LIST=str(split_list),
+        # Same host-state isolation as env_dir: pin the disabled marker to a
+        # non-existent per-test path so the host's real marker never leaks in.
+        WARP_SPLIT_DISABLED_MARKER=str(tmp_path / "warp-split.disabled"),
     )
     return bin_dir, log_file, split_list, base_env
 
