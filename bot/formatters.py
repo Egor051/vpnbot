@@ -375,7 +375,7 @@ def format_hysteria2_link(
     host: str,
     port: int,
     sni: str,
-    insecure: bool = True,
+    insecure: bool = False,
 ) -> str:
     """Build a ``hysteria2://`` client URI for a single issued key.
 
@@ -384,16 +384,16 @@ def format_hysteria2_link(
     ``urllib.parse.quote`` so a label containing URL metacharacters cannot break
     the link. ``host``/``port``/``sni`` are the global server settings shared by
     every key. Plain QUIC (no salamander obfuscation) on UDP/443 — no obfs params.
+    The server presents a valid cert for the SNI domain, so ``insecure`` defaults
+    to off and is only added to the link when explicitly requested.
     """
     user = quote(secret, safe="")
     sni_q = quote(sni, safe="")
     label_q = quote(label, safe="")
-    insecure_flag = 1 if insecure else 0
-    return (
-        f"hysteria2://{user}@{host}:{port}/"
-        f"?sni={sni_q}&insecure={insecure_flag}"
-        f"#{label_q}"
-    )
+    query = f"sni={sni_q}"
+    if insecure:
+        query += "&insecure=1"
+    return f"hysteria2://{user}@{host}:{port}/?{query}#{label_q}"
 
 
 def proxy_section_separator() -> str:

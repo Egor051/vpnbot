@@ -68,9 +68,9 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         hysteria2_enabled=True,
         hysteria2_host="vpn.example.com",
         hysteria2_port=443,
-        hysteria2_sni="googletagmanager.com",
+        hysteria2_sni="anycastedge.duckdns.org",
         hysteria2_obfs_password="",
-        hysteria2_insecure=True,
+        hysteria2_insecure=False,
     )
     values.update(overrides)
     return Settings(**values)
@@ -215,7 +215,22 @@ def test_format_hysteria2_link_round_trip() -> None:
 
 def test_format_hysteria2_link_insecure_false() -> None:
     link = format_hysteria2_link("hy2_x", "abcd", host="h", port=1, sni="s", insecure=False)
-    assert "insecure=0" in link
+    assert "insecure=" not in link
+    assert "sni=" in link
+    assert "obfs" not in link
+
+
+def test_format_hysteria2_link_default_insecure_off_valid_cert_domain() -> None:
+    link = format_hysteria2_link(
+        "hy2_abc123",
+        "deadbeef" * 6,
+        host="vpn.example.com",
+        port=443,
+        sni="anycastedge.duckdns.org",
+    )
+    assert "sni=anycastedge.duckdns.org" in link
+    assert "insecure=1" not in link
+    assert "insecure=" not in link
     assert "obfs" not in link
 
 

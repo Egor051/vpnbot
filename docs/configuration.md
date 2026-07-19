@@ -168,9 +168,9 @@ dropped; `HYSTERIA2_OBFS_PASSWORD` is deprecated and ignored.
 | `HYSTERIA2_ENABLED` | No | `false` | Enable Hysteria2 key issuance in the bot. The data plane runs regardless. | `true` |
 | `HYSTERIA2_HOST` | No* | — | Public hostname/IP clients connect to. Required to issue keys. | `vpn.example.com` |
 | `HYSTERIA2_PORT` | No | `443` | Public UDP port of the Hysteria2 server (1–65535). Coexists with Xray REALITY on TCP/443. | `443` |
-| `HYSTERIA2_SNI` | No* | — | TLS SNI used in the client link. Required to issue keys. | `googletagmanager.com` |
+| `HYSTERIA2_SNI` | No* | — | TLS SNI used in the client link. Must match the CN/SAN of the server's cert. Required to issue keys. | `anycastedge.duckdns.org` |
 | `HYSTERIA2_OBFS_PASSWORD` | No | — | **Deprecated** — salamander obfuscation was dropped; the value is parsed (so an existing `.env` doesn't fail startup) but no longer used. 🔒 | _(unset)_ |
-| `HYSTERIA2_INSECURE` | No | `true` | Set `insecure=1` in the link (self-signed server cert). See the MITM tradeoff below. | `true` |
+| `HYSTERIA2_INSECURE` | No | `false` | Set `insecure=1` in the link (skip TLS cert validation on the client). See below. | `false` |
 | `HYSTERIA2_AUTH_LISTEN` | No | `127.0.0.1:8444` | Loopback `host:port` the `hy2_auth` endpoint binds. Host must be loopback. | `127.0.0.1:8444` |
 | `HYSTERIA2_STATS_LISTEN` | No | `127.0.0.1:9999` | Loopback `host:port` of the Traffic Stats API. Must match `trafficStats.listen` in `config.yaml`; host must be loopback. | `127.0.0.1:9999` |
 | `HYSTERIA2_STATS_SECRET` | No | — | Shared secret for the Traffic Stats API; MUST equal `trafficStats.secret` in `config.yaml`. Empty disables hy2 traffic/online/kick. 🔒 | `s3cret` |
@@ -218,22 +218,19 @@ show no traffic and no online count, and a revoke blocks only new handshakes
 behaviour. The `id` reported by the API is the key's stats label (`hy2_<hex>`),
 the same id `hy2_auth` returns.
 
-### `HYSTERIA2_INSECURE=true` — MITM tradeoff (known and accepted)
+### `HYSTERIA2_INSECURE` — off by default (valid cert)
 
-`true` is the deliberate default, not an oversight. The server certificate is
-self-signed (the deployment has no domain), and the target GUI clients
-(Hiddify / Happ / sing-box) do **not** reliably support hysteria2 `pinSHA256`
-certificate pinning — so flipping to `insecure=0` would break **every** link the
-bot has issued, an outage rather than a hardening.
+The server presents a valid Let's Encrypt certificate for `HYSTERIA2_SNI`,
+issued and renewed by `acme.sh` (dns_duckdns) outside this repo — see
+`deploy/hysteria/config.yaml`. With a real cert there is no need for clients to
+skip TLS validation, so `HYSTERIA2_INSECURE` defaults to `false` and
+`insecure=1` is not added to issued links at all.
 
-With `insecure=1` the client simply skips TLS certificate validation; it does
-not weaken the per-key auth secret. Since salamander obfuscation was dropped
-(plain QUIC on UDP/443), there is no PSK narrowing this further — a blind
-on-path attacker can see and probe the handshake, though not decrypt QUIC
-application data or authenticate without a valid per-key secret.
-
-The real fix is a proper domain plus an ACME-issued certificate, after which you
-can safely set `HYSTERIA2_INSECURE=false`. Until then, keep this `true`.
+Only flip it to `true` temporarily (e.g. the cert hasn't been provisioned yet
+for a fresh domain). While `true`, the client skips TLS certificate validation;
+this does not weaken the per-key auth secret, but a blind on-path attacker can
+see and probe the handshake, though not decrypt QUIC application data or
+authenticate without a valid per-key secret.
 
 ## Key Expiry and Trial Access
 

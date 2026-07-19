@@ -158,6 +158,11 @@ def test_hysteria_config_yaml_has_no_obfs_and_listens_on_udp_443() -> None:
     assert re.search(r"^listen:\s*:443\s*$", text, re.MULTILINE), "listen must be :443"
     # No `obfs:` config key — comments are allowed to explain the absence.
     assert not re.search(r"^\s*obfs\s*:", text, re.MULTILINE), "salamander obfuscation must not be configured"
+    assert re.search(r"^\s*cert:\s*/etc/hysteria/cert\.pem\s*$", text, re.MULTILINE)
+    assert re.search(r"^\s*key:\s*/etc/hysteria/key\.pem\s*$", text, re.MULTILINE)
+    # Cert is a valid Let's Encrypt cert managed by acme.sh outside this repo —
+    # no lingering "self-signed" language from before the domain/ACME switch.
+    assert "self-signed" not in text.lower()
 
 
 def test_hysteria_preflight_script_is_present_and_fail_closed() -> None:
