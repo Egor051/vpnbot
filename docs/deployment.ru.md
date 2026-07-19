@@ -215,9 +215,12 @@ sudo systemctl enable --now vpn-bot-hy2-auth
 ### 2. Указать серверу `hysteria` на эндпоинт
 
 `deploy/hysteria/config.yaml` — трекнутый источник истины для
-`/etc/hysteria/config.yaml`: чистый QUIC на UDP/443 (без salamander-обфускации,
-без ACME/masquerade; TLS-сертификат остаётся самоподписанным). Скопируйте его
-и заполните пути к cert/key:
+`/etc/hysteria/config.yaml`: чистый QUIC на UDP/443 (без salamander-обфускации).
+`tls.cert`/`tls.key` указывают на валидный сертификат Let's Encrypt для домена
+сервера, который выпускает и продлевает `acme.sh` (`dns_duckdns`) вне этого
+репозитория — `acme.sh --install-cert` перезаписывает эти же пути, а его
+`reloadcmd` рестартит `hysteria-server`, так что вручную править cert/key не
+нужно. Скопируйте файл как есть:
 
 ```yaml
 listen: :443
@@ -275,7 +278,8 @@ trafficStats:
   `curl http://127.0.0.1:8444/healthz`.
 
 См. [Конфигурация → Hysteria2](configuration.ru.md#hysteria2) по переменным
-`.env`, включая MITM-компромисс `HYSTERIA2_INSECURE=true`.
+`.env`, включая `HYSTERIA2_INSECURE` (по умолчанию `false` — сертификат
+сервера валиден, клиентам не нужно пропускать проверку TLS).
 
 ## Smoke-чеклист после деплоя
 

@@ -462,7 +462,7 @@ class Settings:
     # only so an existing HYSTERIA2_OBFS_PASSWORD in a live .env does not fail
     # startup; the value is parsed but never used.
     hysteria2_obfs_password: str = field(default="", repr=False)
-    hysteria2_insecure: bool = True
+    hysteria2_insecure: bool = False
     hysteria2_auth_listen: str = "127.0.0.1:8444"
     # Hysteria2 Traffic Stats API (config.yaml `trafficStats: {listen, secret}`).
     # A loopback HTTP server exposed by hysteria-server itself that powers per-key
@@ -860,7 +860,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         hysteria2_port=_int_range("HYSTERIA2_PORT", 443, 1, 65535),
         hysteria2_sni=_no_control_chars("HYSTERIA2_SNI", _optional("HYSTERIA2_SNI")),
         hysteria2_obfs_password=_hysteria2_obfs_password_deprecated(),
-        hysteria2_insecure=_bool("HYSTERIA2_INSECURE", True),
+        hysteria2_insecure=_bool("HYSTERIA2_INSECURE", False),
         hysteria2_auth_listen=_loopback_host_port(
             "HYSTERIA2_AUTH_LISTEN", _optional("HYSTERIA2_AUTH_LISTEN", "127.0.0.1:8444")
         ),

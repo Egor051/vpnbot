@@ -228,8 +228,11 @@ running even when `vpn-bot.service` is down.
 
 `deploy/hysteria/config.yaml` is the tracked source of truth for
 `/etc/hysteria/config.yaml` — plain QUIC on UDP/443 (no salamander
-obfuscation, no ACME/masquerade; the TLS cert stays self-signed). Copy it in
-and fill in the cert/key paths:
+obfuscation). `tls.cert`/`tls.key` point at a valid Let's Encrypt cert for the
+server's domain, issued and renewed by `acme.sh` (`dns_duckdns`) outside this
+repo — `acme.sh --install-cert` writes to these same paths and its
+`reloadcmd` restarts `hysteria-server`, so no manual cert/key edits are
+needed. Copy the file in as-is:
 
 ```yaml
 listen: :443
@@ -285,7 +288,8 @@ See [Configuration → Hysteria2](configuration.md#hysteria2) for all
   manual `curl http://127.0.0.1:8444/healthz`.
 
 See [Configuration → Hysteria2](configuration.md#hysteria2) for the `.env`
-variables, including the `HYSTERIA2_INSECURE=true` MITM tradeoff.
+variables, including `HYSTERIA2_INSECURE` (defaults to `false` — the server's
+cert is valid, so clients don't need to skip TLS verification).
 
 ## Post-deploy smoke checklist (non-root helper mode)
 

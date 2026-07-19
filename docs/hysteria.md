@@ -9,8 +9,8 @@ This page is the topical entry point. The canonical references live where every 
 do:
 
 - **Environment variables** → [Configuration → Hysteria2](configuration.md#hysteria2)
-  (all `HYSTERIA2_*` and `ANOMALY_HYSTERIA2_MAX_CONN`, defaults, the `HYSTERIA2_INSECURE` MITM
-  tradeoff, and the Traffic Stats API).
+  (all `HYSTERIA2_*` and `ANOMALY_HYSTERIA2_MAX_CONN`, defaults, `HYSTERIA2_INSECURE`, and the
+  Traffic Stats API).
 - **Server-side install** → [Deployment → Hysteria2 data plane](deployment.md#hysteria2-data-plane-hy2_auth-endpoint).
 - **Health, degraded meaning & recovery** → [Operations → Hysteria2 backend health & recovery](operations.md#hysteria2-backend-health--recovery).
 
@@ -20,9 +20,10 @@ Three moving parts, only one of which is the bot:
 
 1. **`hysteria` server** (apernet v2) — the actual data plane, configured with `auth: type: http`
    in `/etc/hysteria/config.yaml` (tracked source: `deploy/hysteria/config.yaml`). Terminates
-   plain-QUIC client sessions — no salamander obfuscation, no ACME/masquerade (self-signed cert)
-   — on the public **UDP** port `HYSTERIA2_PORT` (default `443`; coexists with Xray REALITY on
-   TCP/443). Run `deploy/hysteria/preflight-udp443.sh` before restarting the service.
+   plain-QUIC client sessions — no salamander obfuscation — on the public **UDP** port
+   `HYSTERIA2_PORT` (default `443`; coexists with Xray REALITY on TCP/443), presenting a valid
+   Let's Encrypt cert for the server's domain (issued/renewed by `acme.sh` outside this repo). Run
+   `deploy/hysteria/preflight-udp443.sh` before restarting the service.
 2. **`hy2_auth` endpoint** (`python -m hy2_auth`, `deploy/vpn-bot-hy2-auth.service`) — a small,
    **separate** process the `hysteria` server calls over loopback for every handshake. It opens
    `vpn.db` **read-only** and validates the per-key token in constant time

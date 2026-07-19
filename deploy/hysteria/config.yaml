@@ -1,12 +1,17 @@
 # hysteria-server config.yaml — source of truth for the Hysteria2 data plane.
 #
-# Plain QUIC on UDP/443 (no salamander obfuscation, no ACME/masquerade — cert stays
-# self-signed). Coexists with Xray REALITY on TCP/443: different transport
-# (UDP vs TCP), same port number is fine.
+# Plain QUIC on UDP/443 (no salamander obfuscation, no in-process ACME/masquerade).
+# Coexists with Xray REALITY on TCP/443: different transport (UDP vs TCP), same
+# port number is fine.
+#
+# tls.cert/tls.key point at a valid Let's Encrypt cert for the server's domain,
+# issued and renewed by acme.sh (dns_duckdns) outside this repo. `acme.sh
+# --install-cert` writes to these same paths and its reloadcmd restarts
+# hysteria-server, so the process always picks up the current cert/key.
 #
 # Operator install:
 #   sudo cp deploy/hysteria/config.yaml /etc/hysteria/config.yaml
-#   # edit tls.cert / tls.key below to point at your self-signed cert/key
+#   # tls.cert / tls.key below are managed by acme.sh --install-cert; no manual edit needed
 #   bash deploy/hysteria/preflight-udp443.sh   # must exit 0 before (re)starting
 #   sudo systemctl restart hysteria-server
 #
@@ -16,8 +21,8 @@
 listen: :443
 
 tls:
-  # Self-signed — there is no domain, so no ACME/masquerade here. Paths are
-  # host-local; the cert/key files themselves are never committed to git.
+  # Paths are host-local; the cert/key files themselves are never committed to
+  # git. Populated/refreshed by acme.sh --install-cert (see header above).
   cert: /etc/hysteria/cert.pem
   key: /etc/hysteria/key.pem
 

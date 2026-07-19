@@ -8,7 +8,7 @@
 Эта страница — точка входа. Канонические справочники лежат там же, где и для остальных бэкендов:
 
 - **Переменные окружения** → [Конфигурация → Hysteria2](configuration.ru.md#hysteria2)
-  (все `HYSTERIA2_*` и `ANOMALY_HYSTERIA2_MAX_CONN`, дефолты, MITM-tradeoff `HYSTERIA2_INSECURE`
+  (все `HYSTERIA2_*` и `ANOMALY_HYSTERIA2_MAX_CONN`, дефолты, `HYSTERIA2_INSECURE`
   и Traffic Stats API).
 - **Серверная установка** → [Развёртывание → Hysteria2 data plane](deployment.ru.md#hysteria2-data-plane-эндпоинт-hy2_auth).
 - **Health, смысл degraded и восстановление** → [Эксплуатация → Health и восстановление Hysteria2](operations.ru.md#health-и-восстановление-hysteria2).
@@ -19,10 +19,10 @@
 
 1. **Сервер `hysteria`** (apernet v2) — собственно data plane, настроенный с `auth: type: http`
    в `/etc/hysteria/config.yaml` (трекнутый источник: `deploy/hysteria/config.yaml`). Терминирует
-   клиентские сессии на чистом QUIC — без salamander-обфускации, без ACME/masquerade
-   (самоподписанный сертификат) — на публичном **UDP**-порту `HYSTERIA2_PORT` (дефолт `443`;
-   сосуществует с Xray REALITY на TCP/443). Перед рестартом сервиса запускайте
-   `deploy/hysteria/preflight-udp443.sh`.
+   клиентские сессии на чистом QUIC — без salamander-обфускации — на публичном **UDP**-порту
+   `HYSTERIA2_PORT` (дефолт `443`; сосуществует с Xray REALITY на TCP/443), предъявляя валидный
+   сертификат Let's Encrypt для домена сервера (выпускается/продлевается `acme.sh` вне этого
+   репозитория). Перед рестартом сервиса запускайте `deploy/hysteria/preflight-udp443.sh`.
 2. **Эндпоинт `hy2_auth`** (`python -m hy2_auth`, `deploy/vpn-bot-hy2-auth.service`) — небольшой
    **отдельный** процесс, к которому сервер `hysteria` обращается по loopback на каждый handshake.
    Он открывает `vpn.db` **read-only** и проверяет персональный токен ключа в постоянное время
