@@ -18,11 +18,14 @@
 Три части, и только одна из них — бот:
 
 1. **Сервер `hysteria`** (apernet v2) — собственно data plane, настроенный с `auth: type: http`
-   в `/etc/hysteria/config.yaml` (трекнутый источник: `deploy/hysteria/config.yaml`). Терминирует
-   клиентские сессии на чистом QUIC — без salamander-обфускации — на публичном **UDP**-порту
-   `HYSTERIA2_PORT` (дефолт `443`; сосуществует с Xray REALITY на TCP/443), предъявляя валидный
-   сертификат Let's Encrypt для домена сервера (выпускается/продлевается `acme.sh` вне этого
-   репозитория). Перед рестартом сервиса запускайте `deploy/hysteria/preflight-udp443.sh`.
+   в `/etc/hysteria/config.yaml` (трекнутый источник: `deploy/hysteria/config.yaml`, устанавливается
+   через `sudo bash deploy/hysteria/install-config.sh` — **никогда** не голым `cp`, т.к.
+   `trafficStats.secret` в трекнутом файле — плейсхолдер, и именно установщик подставляет
+   настоящий `HYSTERIA2_STATS_SECRET` из `.env`). Терминирует клиентские сессии на чистом QUIC —
+   без salamander-обфускации — на публичном **UDP**-порту `HYSTERIA2_PORT` (дефолт `443`;
+   сосуществует с Xray REALITY на TCP/443), предъявляя валидный сертификат Let's Encrypt для
+   домена сервера (выпускается/продлевается `acme.sh` вне этого репозитория). Перед рестартом
+   сервиса запускайте `deploy/hysteria/preflight-udp443.sh`.
 2. **Эндпоинт `hy2_auth`** (`python -m hy2_auth`, `deploy/vpn-bot-hy2-auth.service`) — небольшой
    **отдельный** процесс, к которому сервер `hysteria` обращается по loopback на каждый handshake.
    Он открывает `vpn.db` **read-only** и проверяет персональный токен ключа в постоянное время

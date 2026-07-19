@@ -9,9 +9,15 @@
 # --install-cert` writes to these same paths and its reloadcmd restarts
 # hysteria-server, so the process always picks up the current cert/key.
 #
-# Operator install:
-#   sudo cp deploy/hysteria/config.yaml /etc/hysteria/config.yaml
-#   # tls.cert / tls.key below are managed by acme.sh --install-cert; no manual edit needed
+# !!! DO NOT `cp` THIS FILE TO /etc/hysteria/config.yaml DIRECTLY !!!
+# The secret below is a PLACEHOLDER. A bare cp overwrites the live
+# trafficStats secret with it, and hysteria-server starts rejecting the bot's
+# stats/online/kick calls with 401 (stats/online/kick break silently — the
+# data plane itself still starts fine). Always install through:
+#
+#   sudo bash deploy/hysteria/install-config.sh
+#   # copies this file AND injects the real secret from HYSTERIA2_STATS_SECRET
+#   # in .env, so the placeholder below never reaches disk
 #   bash deploy/hysteria/preflight-udp443.sh   # must exit 0 before (re)starting
 #   sudo systemctl restart hysteria-server
 #
@@ -38,4 +44,4 @@ auth:
 # secret must match HYSTERIA2_STATS_SECRET.
 trafficStats:
   listen: 127.0.0.1:9999
-  secret: "<random-secret>"
+  secret: "<random-secret>"  # placeholder; filled in by install-config.sh — never edit/deploy by hand
