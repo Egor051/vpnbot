@@ -220,22 +220,26 @@ sudo systemctl enable --now vpn-bot-hy2-auth
 сервера, который выпускает и продлевает `acme.sh` (`dns_duckdns`) вне этого
 репозитория — `acme.sh --install-cert` перезаписывает эти же пути, а его
 `reloadcmd` рестартит `hysteria-server`, так что вручную править cert/key не
-нужно. Скопируйте файл как есть:
+нужно.
 
-```yaml
-listen: :443
+**Никогда не копируйте файл из репозитория напрямую (`cp`)** — его
+`trafficStats.secret` это плейсхолдер, и голый `cp` затирает живой
+stats-секрет, из-за чего `hysteria-server` начинает отвечать 401 на
+stats/online/kick-запросы бота (тихо — сам data plane при этом стартует
+нормально). Устанавливайте файл через:
 
-tls:
-  cert: /etc/hysteria/cert.pem
-  key: /etc/hysteria/key.pem
-
-auth:
-  type: http
-  http:
-    url: http://127.0.0.1:8444/auth   # должно совпадать с HYSTERIA2_AUTH_LISTEN
+```bash
+sudo bash deploy/hysteria/install-config.sh
 ```
 
-`HYSTERIA2_PORT` в `.env` обязан совпадать с портом `listen` выше — бот
+Скрипт копирует `deploy/hysteria/config.yaml` в `/etc/hysteria/config.yaml`
+и подставляет в плейсхолдер `HYSTERIA2_STATS_SECRET` из `.env`, так что
+установленный файл всегда несёт настоящий секрет — см.
+[2b](#2b-опционально-traffic-stats-api--трафик-онлайн-kick-при-отзыве) ниже
+про эту переменную (скрипт fail-closed, если её нет в `.env`). Сервис
+`hysteria-server` он не рестартит.
+
+`HYSTERIA2_PORT` в `.env` обязан совпадать с портом `listen` в конфиге — бот
 собирает клиентские ссылки только из `HYSTERIA2_PORT`, он не темплейтит и не
 применяет этот файл. Перед рестартом сервиса запускайте
 `deploy/hysteria/preflight-udp443.sh` (fail-closed, если UDP/443 занят
@@ -247,22 +251,25 @@ auth:
 
 Per-key счётчики трафика, счётчик онлайн-клиентов и мгновенный разрыв сессии при
 отзыве требуют **Traffic Stats API** Hysteria2 — отдельного аутентифицируемого
-HTTP-сервера, который поднимает сам `hysteria-server`. Включите его в том же
-`/etc/hysteria/config.yaml`:
+HTTP-сервера, который поднимает сам `hysteria-server`, уже объявленного в
+`deploy/hysteria/config.yaml`:
 
 ```yaml
 trafficStats:
-  listen: 127.0.0.1:9999   # должно совпадать с HYSTERIA2_STATS_LISTEN (только loopback)
-  secret: <случайный-секрет>  # должно совпадать с HYSTERIA2_STATS_SECRET
+  listen: 127.0.0.1:9999     # должно совпадать с HYSTERIA2_STATS_LISTEN (только loopback)
+  secret: "<random-secret>"  # плейсхолдер — install-config.sh подставит его из HYSTERIA2_STATS_SECRET
 ```
 
-Затем задайте `HYSTERIA2_STATS_SECRET` (и, если меняли порт,
-`HYSTERIA2_STATS_LISTEN`) в `.env`. Бот только *читает* этот API и делает
-`POST /kick` при отзыве/удалении/истечении ключа. Оставьте
-`HYSTERIA2_STATS_SECRET` пустым, чтобы отключить: тогда hy2-ключи не показывают
-трафик/онлайн, а отзыв блокирует только новые хендшейки (живая сессия доживает
-до переподключения). Все переменные `HYSTERIA2_STATS_*` и
-`ANOMALY_HYSTERIA2_MAX_CONN` — в [Конфигурации → Hysteria2](configuration.ru.md#hysteria2).
+Задайте `HYSTERIA2_STATS_SECRET` (и, если меняли порт,
+`HYSTERIA2_STATS_LISTEN`) в `.env`, затем повторно выполните
+`sudo bash deploy/hysteria/install-config.sh`, чтобы подставить секрет. Бот
+только *читает* этот API и делает `POST /kick` при отзыве/удалении/истечении
+ключа. Оставьте `HYSTERIA2_STATS_SECRET` пустым, чтобы отключить —
+`install-config.sh` всё равно установит файл (с предупреждением): тогда
+hy2-ключи не показывают трафик/онлайн, а отзыв блокирует только новые
+хендшейки (живая сессия доживает до переподключения). Все переменные
+`HYSTERIA2_STATS_*` и `ANOMALY_HYSTERIA2_MAX_CONN` — в
+[Конфигурации → Hysteria2](configuration.ru.md#hysteria2).
 
 ### 3. Поведение fail-closed и health
 

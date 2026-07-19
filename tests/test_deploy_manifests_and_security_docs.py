@@ -179,3 +179,25 @@ def test_hysteria_preflight_script_is_present_and_fail_closed() -> None:
     assert "--selftest" in text
     # TCP/443 (Xray) must be irrelevant to the UDP/443 verdict.
     assert "netid" in text.lower()
+
+
+def test_hysteria_docs_reference_install_config_not_bare_cp() -> None:
+    # A bare `cp deploy/hysteria/config.yaml /etc/hysteria/config.yaml` clobbers
+    # the live trafficStats secret with the tracked placeholder, so
+    # hysteria-server starts returning 401 on the bot's stats/online/kick calls.
+    # Every doc/manifest that tells the operator how to install the file must
+    # point at install-config.sh instead — full behavioural coverage of the
+    # script itself lives in test_hysteria_install_config.py.
+    bare_cp = re.compile(r"cp\s+deploy/hysteria/config\.yaml\s+/etc/hysteria/config\.yaml")
+    for relative_path in (
+        "docs/deployment.md",
+        "docs/deployment.ru.md",
+        "docs/hysteria.md",
+        "docs/hysteria.ru.md",
+        "deploy/hysteria/config.yaml",
+    ):
+        text = _read(relative_path)
+        assert "install-config.sh" in text, f"{relative_path} must reference install-config.sh"
+        assert not bare_cp.search(text), (
+            f"{relative_path} must not instruct a bare cp of the hysteria config"
+        )

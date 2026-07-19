@@ -232,48 +232,53 @@ obfuscation). `tls.cert`/`tls.key` point at a valid Let's Encrypt cert for the
 server's domain, issued and renewed by `acme.sh` (`dns_duckdns`) outside this
 repo — `acme.sh --install-cert` writes to these same paths and its
 `reloadcmd` restarts `hysteria-server`, so no manual cert/key edits are
-needed. Copy the file in as-is:
+needed.
 
-```yaml
-listen: :443
+**Never `cp` the repo file in directly** — its `trafficStats.secret` is a
+placeholder, and a bare copy overwrites the live stats secret, so
+`hysteria-server` starts rejecting the bot's stats/online/kick calls with 401
+(silently — the data plane itself still starts fine). Install it with:
 
-tls:
-  cert: /etc/hysteria/cert.pem
-  key: /etc/hysteria/key.pem
-
-auth:
-  type: http
-  http:
-    url: http://127.0.0.1:8444/auth   # must match HYSTERIA2_AUTH_LISTEN
+```bash
+sudo bash deploy/hysteria/install-config.sh
 ```
 
-`HYSTERIA2_PORT` in `.env` must equal the `listen` port above — the bot only
-builds client links from `HYSTERIA2_PORT`, it does not template or apply this
-file. Run `deploy/hysteria/preflight-udp443.sh` before restarting the service
-(fails closed if UDP/443 is held by a non-hysteria process; TCP/443, i.e.
-Xray, is ignored). Start `hysteria-server.service` after `vpn-bot-hy2-auth`
-(the unit declares `Before=hysteria-server.service`).
+This copies `deploy/hysteria/config.yaml` to `/etc/hysteria/config.yaml` and
+injects `HYSTERIA2_STATS_SECRET` from `.env` into the placeholder, so the
+installed file always carries the real secret — see
+[2b](#2b-optional-enable-the-traffic-stats-api--traffic-online-revoke-kick)
+below for that variable (the installer fails closed if it is missing from
+`.env`). It never restarts `hysteria-server`.
+
+`HYSTERIA2_PORT` in `.env` must equal the `listen` port in the config — the
+bot only builds client links from `HYSTERIA2_PORT`, it does not template or
+apply this file. Run `deploy/hysteria/preflight-udp443.sh` before restarting
+the service (fails closed if UDP/443 is held by a non-hysteria process;
+TCP/443, i.e. Xray, is ignored). Start `hysteria-server.service` after
+`vpn-bot-hy2-auth` (the unit declares `Before=hysteria-server.service`).
 
 ### 2b. (Optional) Enable the Traffic Stats API — traffic, online, revoke-kick
 
 Per-key traffic counters, the online-clients count and immediate session
 termination on revoke require the Hysteria2 **Traffic Stats API** — a separate
-authenticated HTTP server that `hysteria-server` exposes itself. Enable it in the
-same `/etc/hysteria/config.yaml`:
+authenticated HTTP server that `hysteria-server` exposes itself, already
+declared in `deploy/hysteria/config.yaml`:
 
 ```yaml
 trafficStats:
-  listen: 127.0.0.1:9999   # must equal HYSTERIA2_STATS_LISTEN (loopback only)
-  secret: <random-secret>  # must equal HYSTERIA2_STATS_SECRET
+  listen: 127.0.0.1:9999     # must equal HYSTERIA2_STATS_LISTEN (loopback only)
+  secret: "<random-secret>"  # placeholder — install-config.sh fills it from HYSTERIA2_STATS_SECRET
 ```
 
-Then set `HYSTERIA2_STATS_SECRET` (and, if you changed the port,
-`HYSTERIA2_STATS_LISTEN`) in `.env`. The bot only *reads* this API and POSTs
-`/kick` when a key is revoked/deleted/expired. Leave `HYSTERIA2_STATS_SECRET`
-empty to keep this disabled — then hy2 keys simply show no traffic/online, and a
-revoke blocks only new handshakes (the live session survives until reconnect).
-See [Configuration → Hysteria2](configuration.md#hysteria2) for all
-`HYSTERIA2_STATS_*` variables and `ANOMALY_HYSTERIA2_MAX_CONN`.
+Set `HYSTERIA2_STATS_SECRET` (and, if you changed the port,
+`HYSTERIA2_STATS_LISTEN`) in `.env`, then (re-)run
+`sudo bash deploy/hysteria/install-config.sh` to inject it. The bot only
+*reads* this API and POSTs `/kick` when a key is revoked/deleted/expired.
+Leave `HYSTERIA2_STATS_SECRET` empty to keep this disabled — `install-config.sh`
+still installs the file (with a warning) — then hy2 keys simply show no
+traffic/online, and a revoke blocks only new handshakes (the live session
+survives until reconnect). See [Configuration → Hysteria2](configuration.md#hysteria2)
+for all `HYSTERIA2_STATS_*` variables and `ANOMALY_HYSTERIA2_MAX_CONN`.
 
 ### 3. Fail-closed behaviour and health
 
