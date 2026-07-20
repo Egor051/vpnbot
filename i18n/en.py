@@ -631,8 +631,10 @@ STRINGS: dict[str, str] = {
         "or tap \"No text\" to show the default message."
     ),
     "maintenance_default_banner": (
-        "🛠 Maintenance is in progress. The bot is temporarily unavailable. "
-        "Please try again later."
+        "🛠 Maintenance is in progress on the bot. The bot is temporarily unavailable. "
+        "Your VPN keeps working as usual — connections and all servers "
+        "remain fully available.\n\n"
+        "Please try reaching the bot again later."
     ),
     "maintenance_enabling": "Enabling maintenance mode…",
     "maintenance_disabling": "Ending maintenance…",
