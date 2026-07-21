@@ -1,6 +1,6 @@
 # hysteria-server config.yaml — source of truth for the Hysteria2 data plane.
 #
-# Plain QUIC on UDP/443 (no salamander obfuscation, no in-process ACME/masquerade).
+# Plain QUIC on UDP/443 (no salamander obfuscation, no in-process ACME).
 # Coexists with Xray REALITY on TCP/443: different transport (UDP vs TCP), same
 # port number is fine.
 #
@@ -45,3 +45,17 @@ auth:
 trafficStats:
   listen: 127.0.0.1:9999
   secret: "<random-secret>"  # placeholder; filled in by install-config.sh — never edit/deploy by hand
+
+# Masquerade: probed over the hysteria QUIC/UDP listener itself (a client that
+# doesn't complete the Hysteria2 handshake gets served this decoy instead of a
+# reset). This is NOT listenHTTP/listenHTTPS — those open separate plaintext
+# TCP :80/:443 listeners, and TCP/443 on this host is already held by Xray
+# REALITY; adding them would collide. Only the file dir below is needed for a
+# static-site decoy on the existing UDP/443 path.
+#
+# /etc/hysteria/masq is populated by hand on the host (outside this repo),
+# same as tls.cert/tls.key above — install-config.sh does not manage it.
+masquerade:
+  type: file
+  file:
+    dir: /etc/hysteria/masq
