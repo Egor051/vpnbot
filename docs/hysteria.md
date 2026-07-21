@@ -48,6 +48,17 @@ The bot itself never binds any of these ports; it only reads the stats/health AP
 `adapters/hysteria_stats.py` / `adapters/hysteria_auth_health.py`) and writes `vpn_keys` rows
 (`key_type='hysteria2'`, per-key secret in `payload_json`, stats label `hy2_<hex>`).
 
+### Masquerade decoy (static file)
+
+`deploy/hysteria/config.yaml` enables Hysteria2's file-based masquerade
+(`masquerade.type: file`, `masquerade.file.dir: /etc/hysteria/masq`): a probe that doesn't
+complete the Hysteria2 handshake is served whatever static site sits in that directory instead
+of a reset. `/etc/hysteria/masq` is **not** tracked in this repo — populated by hand on the
+host, the same way as `tls.cert`/`tls.key`; `install-config.sh` does not manage it. No
+`listenHTTP`/`listenHTTPS` are configured, since those would open separate plaintext TCP
+`:80`/`:443` listeners and TCP/443 is already held by Xray REALITY on this host — the decoy is
+served over the existing UDP/443 path instead.
+
 ### WARP egress marking (`vpnbot-hy2-warp-mark`)
 
 When WARP split-tunnel is deployed, `vpnbot-hy2-warp-mark` fwmarks locally-generated

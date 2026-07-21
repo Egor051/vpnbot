@@ -280,6 +280,24 @@ traffic/online, and a revoke blocks only new handshakes (the live session
 survives until reconnect). See [Configuration → Hysteria2](configuration.md#hysteria2)
 for all `HYSTERIA2_STATS_*` variables and `ANOMALY_HYSTERIA2_MAX_CONN`.
 
+### 2c. (Optional) Masquerade decoy
+
+`deploy/hysteria/config.yaml` also declares a file-based masquerade:
+
+```yaml
+masquerade:
+  type: file
+  file:
+    dir: /etc/hysteria/masq
+```
+
+A probe that doesn't complete the Hysteria2 handshake is served whatever static site sits in
+`/etc/hysteria/masq`, over the existing UDP/443 QUIC path. That directory is **not** tracked in
+this repo — populate it by hand on the host, the same way as `tls.cert`/`tls.key`;
+`install-config.sh` does not manage it. `listenHTTP`/`listenHTTPS` are deliberately **not**
+configured: those open separate plaintext TCP `:80`/`:443` listeners, and TCP/443 on this host
+is already held by Xray REALITY.
+
 ### 3. Fail-closed behaviour and health
 
 - The endpoint **always replies HTTP 200** with `{"ok": <bool>, "id": "<label>"}`

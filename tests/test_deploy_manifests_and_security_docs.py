@@ -165,6 +165,21 @@ def test_hysteria_config_yaml_has_no_obfs_and_listens_on_udp_443() -> None:
     assert "self-signed" not in text.lower()
 
 
+def test_hysteria_config_yaml_has_file_masquerade_no_http_listeners() -> None:
+    # File-based masquerade decoys Hysteria2 probes that never complete the
+    # handshake, served over the existing UDP/443 QUIC path. listenHTTP/
+    # listenHTTPS must stay absent: those bind separate plaintext TCP :80/:443
+    # listeners, and TCP/443 on this host is already held by Xray REALITY.
+    text = _read("deploy/hysteria/config.yaml")
+
+    assert re.search(r"^\s*type:\s*file\s*$", text, re.MULTILINE), "masquerade.type must be file"
+    assert re.search(r"^\s*dir:\s*/etc/hysteria/masq\s*$", text, re.MULTILINE), (
+        "masquerade.file.dir must be /etc/hysteria/masq"
+    )
+    assert not re.search(r"^\s*listenHTTP\s*:", text, re.MULTILINE), "listenHTTP must not be configured"
+    assert not re.search(r"^\s*listenHTTPS\s*:", text, re.MULTILINE), "listenHTTPS must not be configured"
+
+
 def test_hysteria_preflight_script_is_present_and_fail_closed() -> None:
     # Static guard only — the script's own `--selftest` mode (canned ss(8)
     # input, no real socket) is the source of truth for its runtime behaviour

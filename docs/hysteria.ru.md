@@ -47,6 +47,16 @@
 `adapters/hysteria_stats.py` / `adapters/hysteria_auth_health.py`) и пишет строки `vpn_keys`
 (`key_type='hysteria2'`, персональный секрет в `payload_json`, stats-label `hy2_<hex>`).
 
+### Маскарад-decoy (статический файл)
+
+`deploy/hysteria/config.yaml` включает файловый masquerade Hysteria2 (`masquerade.type: file`,
+`masquerade.file.dir: /etc/hysteria/masq`): пробе, которая не завершает Hysteria2-handshake,
+отдаётся статический сайт из этого каталога вместо разрыва соединения. `/etc/hysteria/masq` **не**
+трекается в этом репозитории — кладётся на хост вручную, так же как `tls.cert`/`tls.key`;
+`install-config.sh` этот каталог не трогает. `listenHTTP`/`listenHTTPS` не настроены, так как они
+открыли бы отдельные plaintext TCP-листенеры `:80`/`:443`, а TCP/443 на этом хосте уже занят Xray
+REALITY — decoy отдаётся по существующему UDP/443-пути.
+
 ### Маркировка WARP-egress (`vpnbot-hy2-warp-mark`)
 
 Когда развёрнут WARP split-tunnel, `vpnbot-hy2-warp-mark` fwmark-ит локально-порождённые
