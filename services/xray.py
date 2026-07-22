@@ -76,17 +76,33 @@ _XHTTP_PROFILE_MODE: dict[str, str | None] = {
     "multi": "packet-up",
 }
 # Per-profile ``extra`` block. None => no ``extra=`` in the link.
+#
+# The ``multi`` profile's xmux rotation is deliberately tuned for a 3-5 minute
+# window (``hMaxReusableSecs`` "180-300"): the sole purpose of rotation here is
+# to keep any single connection from surviving long enough to hit the
+# long-lived-session shaping threshold — NOT to reshuffle every minute. The
+# reuse counter (``cMaxReuseTimes`` "64-128") is intentionally raised high so
+# that DURATION, not the number of multiplexed streams, is the dominant rotation
+# trigger; each rotation is a fresh REALITY handshake (extra RTT, mobile
+# micro-freezes) and a high rate of short-lived TLS sessions to one IP is itself
+# a statistical fingerprint, so we rotate as rarely as the shaping window allows.
 _XHTTP_PROFILE_EXTRA: dict[str, dict[str, object] | None] = {
     "base": None,
     "antisib": {
         "xmux": {"maxConnections": 1, "cMaxReuseTimes": "64-128"},
     },
     "multi": {
-        "scMaxEachPostBytes": "800000-1200000",
+        "scMaxEachPostBytes": "800000-1000000",
         "scMinPostsIntervalMs": "30-50",
-        "xmux": {"maxConnections": 2, "cMaxReuseTimes": "8-16", "hMaxReusableSecs": "30-60"},
+        "xmux": {"maxConnections": 2, "cMaxReuseTimes": "64-128", "hMaxReusableSecs": "180-300"},
     },
 }
+# Mirrors xhttpSettings.extra.scMaxEachPostBytes of the server inbound
+# (XRAY_XHTTP_INBOUND_TAG) in the hand-maintained /usr/local/etc/xray/config.json,
+# which is NOT part of this repository. No client profile may advertise an upper
+# bound above this value — the server would reject oversized POSTs. Bump BOTH
+# sides together if this ever changes.
+_XHTTP_SERVER_MAX_EACH_POST_BYTES: int = 1_000_000
 
 
 class XrayService:
