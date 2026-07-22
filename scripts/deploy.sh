@@ -412,6 +412,23 @@ scan_text_for_errors() {
   printf '%s' "$hits"
 }
 
+# Print up to $2 (default 3) LOG_ERR_RE matches from the text in $1, each line
+# indented by six spaces — the "up to N examples" sample used by the report.
+#
+# SIGPIPE-SAFETY (why `awk 'NR<=n'`, never `grep ... | head -n N`):
+#   Under `set -o pipefail` + `set -e`, a downstream `head -n N` closes the pipe
+#   after N lines; the upstream `grep` then takes SIGPIPE and exits 141, pipefail
+#   propagates 141, and errexit aborts the whole deploy. This only fires when the
+#   scan finds MORE than N matches (a dirty log) — invisible on a clean one — so
+#   it is exactly the crash you get in the incident you were scanning for. `awk
+#   'NR<=n'` reads its input to EOF (it just stops PRINTING after n lines), so the
+#   producer is never killed. Kept as a named function so the DEPLOY_SELFTEST seam
+#   can drive it directly (it is defined before the seam's early return).
+print_log_scan_examples() {
+  local text="$1" limit="${2:-3}"
+  printf '%s\n' "$text" | grep -E "$LOG_ERR_RE" | awk -v n="$limit" 'NR<=n' | sed 's/^/      /'
+}
+
 # Last active (non-comment) value of KEY= in a unit file; empty if absent.
 unit_val() {
   local file="$1" key="$2" line
@@ -422,7 +439,10 @@ unit_val() {
   line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   printf '%s' "$line"
 }
-unit_has() { grep -E "^[[:space:]]*${2}=" "$1" 2>/dev/null | grep -qvE '^[[:space:]]*[#;]'; }
+# The downstream grep reads to EOF (no `-q`, output discarded) so a unit file with
+# a duplicate KEY= cannot SIGPIPE the upstream grep and flip this to a false "no"
+# under pipefail. Exit status is unchanged: 0 iff an active KEY= line exists.
+unit_has() { grep -E "^[[:space:]]*${2}=" "$1" 2>/dev/null | grep -vE '^[[:space:]]*[#;]' >/dev/null; }
 
 # Read a KEY from the (root-owned) .env file; last active wins, quotes stripped.
 env_val() {
@@ -498,11 +518,13 @@ check_sudoers_dir() {
       else warn "${f} fails visudo -c (inert: sudo ignores this name)"; fi
     fi
     active="$(grep -vE '^[[:space:]]*[#;]' "$f" 2>/dev/null || true)"
-    if printf '%s\n' "$active" | grep -qE 'NOPASSWD:[[:space:]]*ALL'; then
+    # grep reads to EOF (no `-q`, output discarded): a match on an early line of a
+    # multi-line $active must not SIGPIPE the printf and hide the grant under pipefail.
+    if printf '%s\n' "$active" | grep -E 'NOPASSWD:[[:space:]]*ALL' >/dev/null; then
       if [[ "$inert" == "no" ]]; then die "${f} contains a NOPASSWD: ALL grant"
       else warn "${f} contains a NOPASSWD: ALL grant (currently inert)"; fi
     fi
-    if printf '%s\n' "$active" | grep -qE "$shell_re"; then
+    if printf '%s\n' "$active" | grep -E "$shell_re" >/dev/null; then
       if [[ "$inert" == "no" ]]; then die "${f} grants a generic shell / interpreter command"
       else warn "${f} grants a generic shell / interpreter command (currently inert)"; fi
     fi
@@ -520,7 +542,10 @@ warp_dataplane_ok() {
   local fwmark tbl src rules missing=()
   rules="$(ip rule show 2>/dev/null || true)"
   for src in "${WARP_SRCS[@]}"; do
-    printf '%s\n' "$rules" | grep -qF "from ${src}" || missing+=("$src")
+    # grep reads to EOF (no `-q`, output discarded): an early hit in a many-line
+    # `ip rule` dump must not SIGPIPE the printf and mark a present rule "missing"
+    # under pipefail — this runs on the rollback path where a false miss is costly.
+    printf '%s\n' "$rules" | grep -F "from ${src}" >/dev/null || missing+=("$src")
   done
   if (( ${#missing[@]} > 0 )); then
     echo "ip rule 'from <src>' absent for: ${missing[*]}"; return 1
@@ -747,6 +772,9 @@ running_not_watched() {
              | awk '{for(i=1;i<=NF;i++) if($i ~ /\.service$/){print $i; break}}' || true)"
   while IFS= read -r svc; do
     [[ -n "$svc" ]] || continue
+    # The producer is `printf '%s'` of a SINGLE service token (no newline), so it
+    # finishes writing before grep -q can exit — the upstream cannot take SIGPIPE.
+    # sigpipe-safe: single-token producer completes before the consumer can exit.
     printf '%s' "$svc" | grep -qiE 'vpn|xray|awg|hy2|hyster|warp|mtpro|dante|socks' || continue
     [[ -n "${inset[$svc]:-}" ]] || printf '%s\n' "$svc"
   done <<< "$running"
@@ -900,7 +928,10 @@ fi
 log "systemd-analyze verify (advisory) on incoming unit"
 sa_out="$(systemd-analyze verify "$WT/deploy/vpn-bot.service" 2>&1)" || true
 if [[ -n "$sa_out" ]]; then
-  if printf '%s\n' "$sa_out" | grep -qiE 'Unknown lvalue|Invalid|Failed to parse|not a valid'; then
+  # grep reads to EOF (no `-q`, output discarded): an error keyword on an early
+  # line of multi-line verify output must not SIGPIPE the printf and let a broken
+  # unit slip through as "clean" under pipefail.
+  if printf '%s\n' "$sa_out" | grep -iE 'Unknown lvalue|Invalid|Failed to parse|not a valid' >/dev/null; then
     printf '%s\n' "$sa_out" >&2
     die "systemd-analyze verify reported errors in deploy/vpn-bot.service"
   fi
@@ -1172,7 +1203,9 @@ phase1_report() {
   fi
   if command -v ip >/dev/null 2>&1; then
     for src in "${WARP_SRCS[@]}"; do
-      if ip rule show 2>/dev/null | grep -qF "from ${src}"; then
+      # grep reads to EOF (no `-q`, output discarded): an early match must not
+      # SIGPIPE `ip rule show` and mis-report a present rule as ABSENT under pipefail.
+      if ip rule show 2>/dev/null | grep -F "from ${src}" >/dev/null; then
         printf '    ip rule from %-16s : present\n' "$src"
       else
         printf '    ip rule from %-16s : ABSENT\n' "$src"
@@ -1208,7 +1241,7 @@ phase1_report() {
     printf '    bot.log ERROR/CRITICAL/Traceback matches (last 7 days, pre-allowlist) : %s\n' "${nmatch:-0}"
     if [[ "${nmatch:-0}" != "0" ]]; then
       printf '    up to 3 examples:\n'
-      printf '%s\n' "$recent" | grep -E "$LOG_ERR_RE" | head -n3 | sed 's/^/      /'
+      print_log_scan_examples "$recent" 3
     fi
   else
     printf '    (bot.log absent or date unavailable — cannot sample last 7 days)\n'
@@ -1268,7 +1301,10 @@ log "backup archive ${ARCHIVE}"
 [[ -s "$ARCHIVE" ]] || { warn "backup archive is empty"; false; }
 listing="$(tar -tzf "$ARCHIVE")"
 for entry in "${manifest[@]}"; do
-  printf '%s\n' "$listing" | grep -qF "$entry" || { warn "backup archive is missing ${entry}"; false; }
+  # grep reads to EOF (no `-q`, output discarded): an early match in a many-file
+  # archive listing must not SIGPIPE the printf and wrongly report a present entry
+  # "missing" under pipefail — here that false miss would trigger a spurious rollback.
+  printf '%s\n' "$listing" | grep -F "$entry" >/dev/null || { warn "backup archive is missing ${entry}"; false; }
 done
 log "backup verified (${#manifest[@]} entries)"
 
