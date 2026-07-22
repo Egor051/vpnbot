@@ -694,7 +694,7 @@ def test_build_vless_link_http_profiles_roundtrip(tmp_path: Path) -> None:
             assert "extra" in multi_q
             multi_extra = json.loads(multi_q["extra"][0])
             assert multi_extra["xmux"]["maxConnections"] == 2
-            assert multi_extra["xmux"]["hMaxReusableSecs"] == "30-60"
+            assert multi_extra["xmux"]["hMaxReusableSecs"] == "180-300"
             assert "scMaxEachPostBytes" in multi_extra
             assert "scMinPostsIntervalMs" in multi_extra
 
