@@ -46,7 +46,8 @@ def test_deploy_sh_documents_every_behaviour_env_knob() -> None:
     text = _read(DEPLOY_SH)
     # The header carries a dedicated ENVIRONMENT KNOBS block documenting each one.
     assert "ENVIRONMENT KNOBS" in text
-    for knob in ("PHASE1_ONLY", "FORCE", "ALLOW_MODEL_SWITCH", "ALLOW_UNIT_DRIFT", "DEPLOY_SELFTEST"):
+    for knob in ("PHASE1_ONLY", "FORCE", "ALLOW_MODEL_SWITCH", "ALLOW_UNIT_DRIFT",
+                 "ALLOW_SCHEMA_DOWNGRADE", "DEPLOY_SELFTEST"):
         assert knob in text, f"env knob {knob} must be documented in the header"
 
 
@@ -59,6 +60,17 @@ def test_allow_unit_drift_doc_flags_it_as_a_real_gate_bypass() -> None:
     window = text[idx : idx + 900].lower()
     assert "gate" in window and ("bypass" in window or "bypasses" in window)
     assert "known" in window and "safe" in window
+
+
+def test_allow_schema_downgrade_doc_flags_it_as_a_real_gate_bypass() -> None:
+    """ALLOW_SCHEMA_DOWNGRADE must be documented in the same 'real gate-bypass'
+    style as ALLOW_UNIT_DRIFT: it lets a newer-than-target (downgrade) schema past
+    the rollback, only for a conscious rollback to a forward-compatible release."""
+    text = _read(DEPLOY_SH)
+    idx = text.index("ALLOW_SCHEMA_DOWNGRADE=1")
+    window = text[idx : idx + 900].lower()
+    assert "gate" in window and ("bypass" in window or "bypasses" in window)
+    assert "downgrade" in window
 
 
 # --------------------------------------------------------------------------- #
