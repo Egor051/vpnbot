@@ -101,9 +101,10 @@ _Legacy aliases accepted: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SE
 > by hashing the key UUID (so it is stable across restarts and reproducible). The
 > value is stored per key in the `vpn_keys.spider_x` column (nullable; `NULL` = not
 > emitted, full backward compatibility with pre-existing keys). Leaving the variable
-> empty or unset changes nothing. When set, it also **backfills** existing xray keys
-> on the next startup migration (schema v31); already-assigned values are never
-> overwritten. Every entry must start with `/` (validated at startup).
+> empty or unset changes nothing. When set, existing xray keys are **backfilled** on
+> the next startup (idempotent; already-assigned values are never overwritten), so it
+> can be enabled at any time — not only at the initial v31 upgrade. Every entry must
+> start with `/` (validated at startup).
 
 ## AmneziaWG
 

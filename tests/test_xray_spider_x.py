@@ -313,15 +313,15 @@ def test_v31_backfills_only_with_pool_and_is_idempotent(
                 public_key="wg-pub-key",
             )
 
-            # No pool env -> bootstrap's v31 left every row NULL (default behaviour).
+            # No pool env -> the backfill left every row NULL (default behaviour).
             for uuid_value in xray_uuids:
                 key = await repo.find_by_uuid(uuid_value)
                 assert key is not None and key.spider_x is None
 
-            # With the pool set, a direct v31 run backfills the NULL xray rows only,
-            # each to its deterministic pick.
+            # With the pool set, the backfill fills the NULL xray rows only, each to
+            # its deterministic pick.
             monkeypatch.setenv("XRAY_SPIDER_X_POOL", ",".join(pool))
-            await db._migrate_v31()
+            await db._ensure_spider_x_backfill()
             await db.commit()
             assigned: dict[str, str | None] = {}
             for uuid_value in xray_uuids:
@@ -333,11 +333,62 @@ def test_v31_backfills_only_with_pool_and_is_idempotent(
             assert awg_after is not None and awg_after.spider_x is None
 
             # Idempotent: a second run overwrites nothing (only NULL rows are filled).
-            await db._migrate_v31()
+            await db._ensure_spider_x_backfill()
             await db.commit()
             for uuid_value in xray_uuids:
                 key = await repo.find_by_uuid(uuid_value)
                 assert key is not None and key.spider_x == assigned[uuid_value]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_enabling_pool_after_v31_backfills_on_next_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a deployment that first boots v31 with an empty pool and enables
+    it on a LATER restart must still backfill its pre-existing xray keys — the
+    every-bootstrap backfill covers what the one-shot v31 migration cannot."""
+
+    async def run() -> None:
+        pool = ("/", "/api", "/blog/")
+        db_path = tmp_path / "vpn.db"
+        uuid_value = "cccc3333-0000-4000-8000-000000000003"
+
+        # First boot: empty pool. v31 adds the column; the key stays NULL.
+        db = Database(db_path)
+        await db.connect()
+        try:
+            await db.bootstrap()
+            repo = VpnKeyRepository(db)
+            await db.conn.execute(
+                "INSERT INTO users (telegram_user_id, username, first_name, role, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (100, "user", "User", UserRole.APPROVED_USER.value, "now", "now"),
+            )
+            await db.commit()
+            await repo.create_pending(
+                owner_user_id=100, username="user", key_type=VpnKeyType.XRAY, note=None,
+                payload={"uuid": uuid_value}, public_payload={}, created_by=100, now="now",
+                uuid=uuid_value,
+            )
+            key = await repo.find_by_uuid(uuid_value)
+            assert key is not None and key.spider_x is None
+        finally:
+            await db.close()
+
+        # Second boot: pool enabled. schema is already v31, so the migration never
+        # re-runs — the every-bootstrap backfill is what fills the existing key.
+        monkeypatch.setenv("XRAY_SPIDER_X_POOL", ",".join(pool))
+        db = Database(db_path)
+        await db.connect()
+        try:
+            await db.bootstrap()
+            repo = VpnKeyRepository(db)
+            key = await repo.find_by_uuid(uuid_value)
+            assert key is not None
+            assert key.spider_x == pick_spider_x(uuid_value, pool)
         finally:
             await db.close()
 

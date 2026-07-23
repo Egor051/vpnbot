@@ -113,6 +113,10 @@ class Database:
         try:
             await self.conn.executescript(sql)
             await self._apply_migrations()
+            # Re-run on every bootstrap (idempotent, not version-gated) so enabling
+            # XRAY_SPIDER_X_POOL after the one-shot v31 migration still backfills
+            # pre-existing xray keys. No-op when the pool is empty.
+            await self._ensure_spider_x_backfill()
             await self.commit()
             self._chmod_sqlite_files()
         except Exception:
@@ -1241,25 +1245,41 @@ class Database:
     async def _migrate_v31(self) -> None:
         # Per-key REALITY spiderX (spx) for VLESS client links. Purely client-side:
         # the value is emitted into the client link only, never into the server
-        # inbound, so xray is never touched or restarted. Two idempotent parts:
-        #  1) Add the nullable spider_x column. NULL means "do not emit spx", so
-        #     every pre-v31 row (and every non-xray row) stays fully backward
-        #     compatible. Guarded by a column check; also declared in schema.sql
-        #     for fresh DBs.
-        #  2) If XRAY_SPIDER_X_POOL is set, backfill xray keys whose spider_x is
-        #     still NULL with a value picked deterministically from the pool by
-        #     hashing the key UUID (reproducible, never random). An empty/unset
-        #     pool leaves every row NULL and the bot behaves exactly as before.
-        #     Only NULL rows are filled, so a re-run never overwrites an already
-        #     assigned value. Runs in bootstrap()'s transaction — a failure rolls
-        #     the whole thing back, so no partial state and no separate rollback
-        #     mechanism is needed.
+        # inbound, so xray is never touched or restarted. This migration only adds
+        # the nullable spider_x column. NULL means "do not emit spx", so every
+        # pre-v31 row (and every non-xray row) stays fully backward compatible.
+        # Guarded by a column check; also declared in schema.sql for fresh DBs.
+        #
+        # The pool BACKFILL is intentionally NOT done here: a version-gated
+        # migration runs only once, so an operator who first boots this version
+        # with an empty XRAY_SPIDER_X_POOL and enables it on a later restart would
+        # never get their existing keys backfilled. The fill lives in
+        # _ensure_spider_x_backfill(), which bootstrap() re-runs every startup
+        # (idempotent), so enabling the pool at any time backfills the old keys.
         vpn_cols = await self._table_columns("vpn_keys")
         if "spider_x" not in vpn_cols:
             await self.conn.execute("ALTER TABLE vpn_keys ADD COLUMN spider_x TEXT")
+
+    async def _ensure_spider_x_backfill(self) -> None:
+        # Idempotent per-key spiderX backfill, run on EVERY bootstrap (not gated by
+        # schema version) so enabling XRAY_SPIDER_X_POOL at any later restart fills
+        # the keys that predate it — the one-shot v31 migration alone could not do
+        # that. Runs inside bootstrap()'s transaction (committed by bootstrap), so a
+        # failure rolls back with everything else; no separate rollback is needed.
+        #
+        # Fills only xray rows whose spider_x IS NULL, each with a value picked
+        # deterministically from the pool by hashing the key UUID (reproducible,
+        # never random). An empty/unset pool is a no-op (spx stays disabled for
+        # everyone). Because only NULL rows are touched, a re-run never overwrites
+        # an already assigned value, and the value never drifts across restarts.
+        vpn_cols = await self._table_columns("vpn_keys")
+        if "spider_x" not in vpn_cols:
+            # Column not present yet (e.g. helper invoked before migrations in a
+            # test); the v31 migration adds it, so there is nothing to fill.
+            return
         # Defensive: settings already rejects any pool entry not starting with '/',
-        # but the migration re-reads the raw env, so filter here too so a malformed
-        # value can never reach a stored link.
+        # but this re-reads the raw env, so filter here too so a malformed value can
+        # never reach a stored link.
         pool = tuple(p for p in parse_spider_x_pool(os.getenv("XRAY_SPIDER_X_POOL")) if p.startswith("/"))
         if not pool:
             return
