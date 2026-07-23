@@ -87,6 +87,22 @@
 #             helpers itself — see install_out_of_repo_helpers — so it needs no
 #             override knob.)
 #
+#   ALLOW_SCHEMA_DOWNGRADE=1
+#     What:   BYPASSES THE SCHEMA-DOWNGRADE GATE. After start, deploy.sh waits for
+#             the live schema_version to reach the value the deployed code targets
+#             (CURRENT_SCHEMA_VERSION in db/database.py). A live schema NEWER than
+#             that target is a downgrade or a foreign schema and normally triggers
+#             a rollback. This knob lets a deliberate downgrade — deploying older
+#             code onto a DB a newer build already migrated — proceed anyway.
+#     When:   ONLY for a conscious rollback to a prior release whose schema you
+#             know is forward-compatible with the newer on-disk data. Never to
+#             silence an unexpected "schema newer than code" surprise.
+#     Risk:   Older code runs against a newer on-disk schema. Migrations are not
+#             reversed, so columns/tables the old code never learned about remain;
+#             if it cannot tolerate them it will misbehave or crash. Does NOT relax
+#             the "migration did not reach the target" rollback or the hard-fail on
+#             an unreadable schema — only the newer-than-target case.
+#
 #   DEPLOY_SELFTEST=1
 #     What:   Test seam only. Sources every function definition then returns
 #             before Phase 1, so the pytest harness can drive individual
@@ -110,6 +126,7 @@ LOCK="${LOCK:-/run/vpn-bot-deploy.lock}"
 BACKUP_KEEP="${BACKUP_KEEP:-10}"
 ALLOW_MODEL_SWITCH="${ALLOW_MODEL_SWITCH:-0}"
 ALLOW_UNIT_DRIFT="${ALLOW_UNIT_DRIFT:-0}"
+ALLOW_SCHEMA_DOWNGRADE="${ALLOW_SCHEMA_DOWNGRADE:-0}"
 FORCE="${FORCE:-0}"
 PHASE1_ONLY="${PHASE1_ONLY:-0}"   # 1 = run all of Phase 1, print report, exit 0 (no mutations)
 
@@ -164,6 +181,14 @@ HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"
 
 BOT_UNIT="vpn-bot.service"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
+# Post-start schema gate: how long to wait for bootstrap() to apply migrations up
+# to the deployed code's CURRENT_SCHEMA_VERSION (schema_version is polled every 2s
+# over this window — is-active goes true before migrations run under Type=simple,
+# so a single read would race the migration). SQLITE_BUSY_TIMEOUT_MS is the sqlite3
+# CLI busy-wait (matches the bot's own `PRAGMA busy_timeout = 5000`) so a transient
+# SQLITE_BUSY while the bot writes is waited out, never misread as an unreadable DB.
+SCHEMA_WAIT_TIMEOUT="${SCHEMA_WAIT_TIMEOUT:-60}"
+SQLITE_BUSY_TIMEOUT_MS="${SQLITE_BUSY_TIMEOUT_MS:-5000}"
 
 # --------------------------------------------------------------------------- #
 # Output helpers
@@ -181,6 +206,8 @@ LOCK_FD=""
 ARCHIVE=""
 PREV_SHA=""
 SCHEMA_BEFORE=""
+SCHEMA_AFTER=""
+SCHEMA_EXPECT=""
 DEPLOY_START=""
 INSTALLED_USER=""
 INCOMING_USER=""
@@ -470,11 +497,76 @@ env_val() {
 }
 is_true() { case "${1,,}" in true|1|yes|on) return 0;; *) return 1;; esac; }
 
+# Read schema_meta.schema_version from the live DB. Prints the bare integer on a
+# clean read, or NOTHING (empty) when the value cannot be read — a missing DB, a
+# sqlite3 error, or a busy that outlasts the CLI timeout. The caller MUST treat
+# empty as "unknown", never as the number 0: coercing an unreadable read to 0 (the
+# old behaviour) makes a healthy deploy indistinguishable from a schema that
+# regressed to 0, which is how a transient SQLITE_BUSY faked a rollback. `-cmd
+# '.timeout N'` makes the CLI wait out a momentary SQLITE_BUSY (the default CLI
+# busy_timeout is 0) — the same contention the bot rides out with its own 5000ms
+# timeout while it applies migrations at startup — so a passing lock is not a miss.
+# Always returns 0 so `VAR=$(schema_version)` is safe under `set -e`.
 schema_version() {
   local v
-  v=$(sqlite3 "$DB_PATH" "SELECT value FROM schema_meta WHERE key='schema_version';" 2>/dev/null || true)
-  [[ "$v" =~ ^[0-9]+$ ]] || v=0
-  printf '%s' "$v"
+  v=$(sqlite3 -cmd ".timeout ${SQLITE_BUSY_TIMEOUT_MS}" "$DB_PATH" \
+        "SELECT value FROM schema_meta WHERE key='schema_version';" 2>/dev/null || true)
+  if [[ "$v" =~ ^[0-9]+$ ]]; then printf '%s' "$v"; fi
+  return 0
+}
+
+# The schema version the DEPLOYED code targets, read from the just-checked-out
+# db/database.py (`CURRENT_SCHEMA_VERSION = N`). MUST be called AFTER `git reset
+# --hard origin/main` so it reflects the incoming SHA, not the outgoing tree. The
+# assignment is anchored to the start of line (^CURRENT_SCHEMA_VERSION) and must
+# match EXACTLY once: zero matches (constant renamed/moved) or more than one
+# (ambiguous) is a hard fail, never a silent default — a wrong target would turn
+# the gate back into theatre. Sets SCHEMA_EXPECT; die()s (does NOT roll back) on
+# any ambiguity, so it never fabricates a value.
+resolve_expected_schema() {
+  local file="db/database.py" n line
+  [[ -f "$file" ]] || die "cannot resolve expected schema: ${file} missing from the checkout"
+  n="$(grep -cE '^CURRENT_SCHEMA_VERSION[[:space:]]*=[[:space:]]*[0-9]+' "$file" || true)"
+  [[ "$n" == "1" ]] || die "expected schema: need exactly one ^CURRENT_SCHEMA_VERSION assignment in ${file}, found ${n} — refusing to guess"
+  line="$(grep -E '^CURRENT_SCHEMA_VERSION[[:space:]]*=[[:space:]]*[0-9]+' "$file")"
+  SCHEMA_EXPECT="$(printf '%s' "$line" | sed -E 's/^CURRENT_SCHEMA_VERSION[[:space:]]*=[[:space:]]*([0-9]+).*$/\1/')"
+}
+
+# Wait for the live schema to reach the deployed code's target ($1 = expected),
+# then gate on the ACTUAL observed value. Polls schema_version() every 2s (a
+# transient SQLITE_BUSY is already ridden out inside schema_version by the CLI
+# .timeout, so a poll yields a real number or a real "unknown") until the schema
+# reaches the target or SCHEMA_WAIT_TIMEOUT elapses. Sets SCHEMA_AFTER (global,
+# for the report). Decision after the wait:
+#   after == expected             -> OK
+#   after  < expected (timed out) -> rollback_now (migration stuck / regressed)
+#   after  > expected             -> rollback_now, unless ALLOW_SCHEMA_DOWNGRADE=1
+#   after unreadable              -> die (hard fail; never a fabricated-zero rollback)
+verify_schema_migration() {
+  local expected="$1" deadline
+  SCHEMA_AFTER=""
+  deadline=$(( SECONDS + SCHEMA_WAIT_TIMEOUT ))
+  log "waiting up to ${SCHEMA_WAIT_TIMEOUT}s for schema to reach ${expected} (polling schema_version every 2s)"
+  while :; do
+    SCHEMA_AFTER="$(schema_version)"
+    if [[ "$SCHEMA_AFTER" =~ ^[0-9]+$ ]] && (( SCHEMA_AFTER >= expected )); then break; fi
+    (( SECONDS < deadline )) || break
+    sleep 2
+  done
+
+  if ! [[ "$SCHEMA_AFTER" =~ ^[0-9]+$ ]]; then
+    die "schema_version unreadable after ${SCHEMA_WAIT_TIMEOUT}s (sqlite3/DB error, empty read) — refusing to treat an unreadable schema as a regression"
+  fi
+  if (( SCHEMA_AFTER < expected )); then
+    rollback_now "schema migration did not reach ${expected} within ${SCHEMA_WAIT_TIMEOUT}s (stuck at ${SCHEMA_AFTER})"
+  elif (( SCHEMA_AFTER > expected )); then
+    if [[ "$ALLOW_SCHEMA_DOWNGRADE" == "1" ]]; then
+      warn "live schema ${SCHEMA_AFTER} is newer than the deployed code target ${expected}; ALLOW_SCHEMA_DOWNGRADE=1 set — proceeding with the downgrade"
+    else
+      rollback_now "live schema ${SCHEMA_AFTER} is newer than the deployed code target ${expected} (regression or foreign schema); set ALLOW_SCHEMA_DOWNGRADE=1 to allow a deliberate downgrade"
+    fi
+  fi
+  log "schema_version(after)=${SCHEMA_AFTER} (target ${expected})"
 }
 
 rotate_backups() {
@@ -1407,10 +1499,18 @@ if [[ "$MODE" == "helper-nonroot" ]]; then
     || rollback_now "helper-nonroot post-start validation failed"
 fi
 
-# Schema non-regression -----------------------------------------------------
-SCHEMA_AFTER="$(schema_version)"
-(( SCHEMA_AFTER >= SCHEMA_BEFORE )) || rollback_now "schema_version regressed: ${SCHEMA_BEFORE} -> ${SCHEMA_AFTER}"
-log "schema_version(after)=${SCHEMA_AFTER}"
+# Schema migration gate -----------------------------------------------------
+# Read the target from the JUST-CHECKED-OUT code (post `git reset`), then WAIT for
+# migrations to actually reach it before deciding. A single read here would race
+# bootstrap(): under Type=simple is-active is true before migrations run, so the
+# old `>= SCHEMA_BEFORE` check read the stale pre-migration value and reported
+# "30 -> 30" DEPLOY OK on a migration that had not run yet. resolve_expected_schema
+# hard-fails on an ambiguous target; verify_schema_migration polls, sets
+# SCHEMA_AFTER, and routes a stuck/regressed/newer schema through rollback (or a
+# hard fail on an unreadable one) — never a silent rollback on a coerced 0.
+resolve_expected_schema
+log "deployed code targets schema_version=${SCHEMA_EXPECT}; verifying live migration"
+verify_schema_migration "$SCHEMA_EXPECT"
 
 # Log scan for this run only (content-based, allowlist-filtered) ------------
 # PRIMARY source: bot.log tail (the bot logs to a file, not journald), read by
@@ -1449,7 +1549,7 @@ cat <<EOF
 ===== DEPLOY OK =====
   model            : ${MODE}
   deployed         : ${PREV_SHA} -> ${TAG}
-  schema_version   : ${SCHEMA_BEFORE} -> ${SCHEMA_AFTER}
+  schema_version   : ${SCHEMA_BEFORE} -> ${SCHEMA_AFTER} (target ${SCHEMA_EXPECT})
   backup           : ${ARCHIVE}
   units skipped    : ${skipped[*]:-none}
 =====================
