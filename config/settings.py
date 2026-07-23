@@ -10,6 +10,8 @@ from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
+from utils.spider_x import parse_spider_x_pool
+
 logger = logging.getLogger(__name__)
 
 
@@ -445,6 +447,11 @@ class Settings:
     # stream-up (two-request) is only for environments without single-request full-duplex
     # and is not needed on direct REALITY.
     xray_xhttp_mode: str = "stream-one"
+    # Per-key REALITY spiderX (spx) pool. Empty tuple = never emit spx (default,
+    # bot behaviour unchanged). When populated, each VLESS link gets a value
+    # picked deterministically from this pool by hashing the key UUID. Purely
+    # client-side: the server inbound / xray config are never touched.
+    xray_spider_x_pool: tuple[str, ...] = ()
     # Hysteria2 (apernet v2) integration. The data plane (a standalone hysteria
     # server + the hy2_auth endpoint) runs independently of the bot; these settings
     # only let the bot build client links and gate issuance. HOST/PORT/SNI are
@@ -685,6 +692,14 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
             raise SettingsError("XRAY_XHTTP_INBOUND_TAG не должен совпадать с XRAY_INBOUND_TAG")
         if not xray_xhttp_path.startswith("/"):
             raise SettingsError("XRAY_XHTTP_PATH должен начинаться с '/'")
+    # Per-key REALITY spiderX pool. Empty/unset => spx never emitted (default).
+    # Every entry must be a path starting with '/', mirroring the XTLS spiderX
+    # convention; reject control chars so a value can't break the generated link.
+    xray_spider_x_pool = parse_spider_x_pool(_optional("XRAY_SPIDER_X_POOL"))
+    for spider_x_path in xray_spider_x_pool:
+        _no_control_chars("XRAY_SPIDER_X_POOL", spider_x_path)
+        if not spider_x_path.startswith("/"):
+            raise SettingsError("XRAY_SPIDER_X_POOL: каждый путь должен начинаться с '/'")
     anomaly_hysteria2_max_conn = _int_range("ANOMALY_HYSTERIA2_MAX_CONN", 0, 0, 10000)
     # ANOMALY_UNIQUE_NETS defaults to the (deprecated) ANOMALY_MIN_UNIQUE_IPS so
     # an operator's existing threshold tuning carries over unchanged.
@@ -739,6 +754,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
             "stream-one",
             {"auto", "packet-up", "stream-up", "stream-one"},
         ),
+        xray_spider_x_pool=xray_spider_x_pool,
         awg_config_path=Path(_optional("AWG_CONFIG_PATH", "/etc/amnezia/amneziawg/awg0.conf")),
         awg_interface=_optional("AWG_INTERFACE", "awg0"),
         awg_network=awg_network,

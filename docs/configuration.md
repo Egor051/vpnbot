@@ -74,6 +74,7 @@ optional with the shown default.
 | `XRAY_XHTTP_PORT` | No | `8443` | Retained for back-compat; **not** used to build VLESS (HTTP) links. The link rides `vless-in`'s public port (`XRAY_PUBLIC_PORT`); the XHTTP inbound listens on loopback as the REALITY fallback dest. | `8001` |
 | `XRAY_XHTTP_PATH` | No | `/v1/messages/stream` | XHTTP path used in VLESS (HTTP) links; must match the inbound's `xhttpSettings.path` (validated on the inbound, not in the fallback). | `/v1/messages/stream` |
 | `XRAY_XHTTP_MODE` | No | `stream-one` | Client-side XHTTP mode in VLESS (HTTP) links: `auto`, `packet-up`, `stream-up`, `stream-one`. Default `stream-one` (single full-duplex h2 session, cleanest for direct REALITY); `packet-up` is switchable for throttling on long sessions or CDN passthrough. | `stream-one` |
+| `XRAY_SPIDER_X_POOL` | No | _(empty)_ | Per-key REALITY spiderX (`spx`) pool: comma-separated paths, each starting with `/`. Empty = `spx` not emitted (default). See the note below. | `/,/api,/blog/` |
 | `XRAY_ACCESS_LOG_PATH` | No | _(empty)_ | Path to the Xray access log for anomaly detection. Leave empty to disable. | `/var/log/xray/access.log` |
 
 _Legacy aliases accepted: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SERVER_PORT` (= `XRAY_PUBLIC_PORT`), `XRAY_PUBLIC_KEY` (= `XRAY_REALITY_PUBLIC_KEY`), `XRAY_SERVER_NAME` (= `XRAY_SNI`)._
@@ -91,6 +92,19 @@ _Legacy aliases accepted: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SE
 > that override the mode and add `xhttpSettings.extra` tuning in the generated link
 > (no server-side change; the profile is stored per key). See
 > [`xray-xhttp-inbound.md`](xray-xhttp-inbound.md#client-transport-profiles-vless-http).
+
+> **Per-key spiderX (`XRAY_SPIDER_X_POOL`).** spiderX is a purely **client-side**
+> REALITY parameter: it is emitted into VLESS client links as `&spx=<url-encoded>`
+> and is **never** written to the server inbound — `config.json` is untouched and
+> xray is not restarted. XTLS recommends a value unique per client, so instead of a
+> global constant each key draws a value from this pool, picked **deterministically**
+> by hashing the key UUID (so it is stable across restarts and reproducible). The
+> value is stored per key in the `vpn_keys.spider_x` column (nullable; `NULL` = not
+> emitted, full backward compatibility with pre-existing keys). Leaving the variable
+> empty or unset changes nothing. When set, existing xray keys are **backfilled** on
+> the next startup (idempotent; already-assigned values are never overwritten), so it
+> can be enabled at any time — not only at the initial v31 upgrade. Every entry must
+> start with `/` (validated at startup).
 
 ## AmneziaWG
 
