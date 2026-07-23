@@ -189,6 +189,20 @@ VENV_SNAPSHOT_DONE=0
 PHASE="preflight"   # preflight | interim | armed | done
 declare -a UNIT_SET=()
 declare -a MANAGED_LIST=()   # only the names read from deploy/managed-units.list, in order
+# Self-diagnostic allowlist for the running-but-not-watched detector ONLY.
+# redeploy.sh launches deploy.sh DETACHED as a transient systemd unit via
+# `systemd-run --unit="${DEPLOY_UNIT:-vpn-bot-deploy}"`, so while a deploy runs the
+# host is genuinely running a `vpn-bot-deploy.service` — the deploy EXECUTOR, not a
+# watched backend. It matches the /vpn/ filter in running_not_watched(), so without
+# this allowlist every single run reports its own carrier unit as a rename/config
+# gap. That is the deploy mechanism observing itself, never a real drift, so it is
+# excluded from THAT detector only (UNIT_SET, the health check, the drift/absent
+# scans and the protocol report are all untouched). systemd-run appends `.service`
+# when the --unit name carries no unit-type suffix, and DEPLOY_UNIT is overridable,
+# so membership is tested on the suffix-stripped name to cover both spellings.
+declare -a DEPLOY_SELF_UNITS=(
+  "vpn-bot-deploy.service"   # redeploy.sh default: systemd-run --unit=vpn-bot-deploy
+)
 declare -A U_CLASS=() U_TARGET=() U_PRE_ACTIVE=() U_PRE_ENABLED=()
 # .env-derived facts, resolved once .env is readable (source of truth for backend
 # unit names + modular-protocol gates). Declared here so the report is set -u safe.
@@ -765,9 +779,13 @@ classify_proto() {
 # Reverse guard: running services (vpn/xray/awg/warp/hy2/proxy) that are NOT in
 # UNIT_SET — the real detector of a rename or a config gap. Prints one per line.
 running_not_watched() {
-  local -A inset=()
+  local -A inset=() selfdiag=()
   local x svc running
   for x in "${UNIT_SET[@]}"; do inset["$x"]=1; done
+  # Key the self-diagnostic allowlist by its suffix-stripped name so an override
+  # that adds or omits the `.service` suffix on DEPLOY_UNIT still matches (see the
+  # DEPLOY_SELF_UNITS comment near its declaration).
+  for x in "${DEPLOY_SELF_UNITS[@]}"; do selfdiag["${x%.service}"]=1; done
   running="$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null \
              | awk '{for(i=1;i<=NF;i++) if($i ~ /\.service$/){print $i; break}}' || true)"
   while IFS= read -r svc; do
@@ -776,7 +794,11 @@ running_not_watched() {
     # finishes writing before grep -q can exit — the upstream cannot take SIGPIPE.
     # sigpipe-safe: single-token producer completes before the consumer can exit.
     printf '%s' "$svc" | grep -qiE 'vpn|xray|awg|hy2|hyster|warp|mtpro|dante|socks' || continue
-    [[ -n "${inset[$svc]:-}" ]] || printf '%s\n' "$svc"
+    [[ -n "${inset[$svc]:-}" ]] && continue
+    # The deploy executor's own transient carrier unit is NOT a watched service:
+    # exclude it from this detector only, never from UNIT_SET or any drift check.
+    [[ -n "${selfdiag[${svc%.service}]:-}" ]] && continue
+    printf '%s\n' "$svc"
   done <<< "$running"
 }
 
