@@ -74,6 +74,7 @@
 | `XRAY_XHTTP_PORT` | Нет | `8443` | Оставлен для обратной совместимости; **не** используется при построении ссылок VLESS (HTTP). Ссылка идёт через публичный порт `vless-in` (`XRAY_PUBLIC_PORT`); XHTTP-inbound слушает loopback как fallback-dest REALITY. |
 | `XRAY_XHTTP_PATH` | Нет | `/v1/messages/stream` | Путь XHTTP в ссылках VLESS (HTTP); должен совпадать с `xhttpSettings.path` inbound (валидируется на inbound, не в fallback). |
 | `XRAY_XHTTP_MODE` | Нет | `stream-one` | Клиентский режим XHTTP в ссылках VLESS (HTTP): `auto`, `packet-up`, `stream-up`, `stream-one`. Дефолт `stream-one` (одна full-duplex h2-сессия, чище для direct REALITY); `packet-up` — для троттлинга на длинных сессиях или прохода через CDN. |
+| `XRAY_SPIDER_X_POOL` | Нет | _(пусто)_ | Пул per-key REALITY spiderX (`spx`): пути через запятую, каждый начинается с `/`. Пусто — `spx` не эмитится (дефолт). См. примечание ниже. |
 | `XRAY_ACCESS_LOG_PATH` | Нет | _(пусто)_ | Путь к access-логу Xray для обнаружения аномалий. Пусто — отключено. |
 
 _Legacy-aliases: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SERVER_PORT` (= `XRAY_PUBLIC_PORT`), `XRAY_PUBLIC_KEY` (= `XRAY_REALITY_PUBLIC_KEY`), `XRAY_SERVER_NAME` (= `XRAY_SNI`)._
@@ -90,6 +91,18 @@ _Legacy-aliases: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SERVER_PORT
 > которые переопределяют `mode` и добавляют тюнинг `xhttpSettings.extra` в генерируемую
 > ссылку (без изменений на сервере; профиль хранится по ключу). См.
 > [`xray-xhttp-inbound.ru.md`](xray-xhttp-inbound.ru.md#клиентские-профили-транспорта-vless-http).
+
+> **Per-key spiderX (`XRAY_SPIDER_X_POOL`).** spiderX — чисто **клиентский** параметр
+> REALITY: он добавляется в клиентские ссылки VLESS как `&spx=<url-encoded>` и **никогда**
+> не пишется в серверный inbound — `config.json` не трогается, xray не перезапускается.
+> XTLS рекомендует уникальное значение на каждого клиента, поэтому вместо глобальной
+> константы каждый ключ берёт значение из этого пула, выбранное **детерминированно** по
+> хэшу UUID ключа (стабильно между перезапусками и воспроизводимо). Значение хранится по
+> ключу в колонке `vpn_keys.spider_x` (nullable; `NULL` = не эмитить, полная обратная
+> совместимость со старыми ключами). Пустая или незаданная переменная ничего не меняет.
+> Если задать — при следующем старте миграция (схема v31) также **backfill**-ит
+> существующие xray-ключи; уже проставленные значения не перезаписываются. Каждый путь
+> должен начинаться с `/` (проверяется при старте).
 
 ## AmneziaWG
 

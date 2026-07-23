@@ -177,6 +177,10 @@ class VpnKey:
     # for http keys; always "base" for tcp/AWG keys and legacy rows. Immutable per
     # key (changing it means creating a new key) and encoded in the email label.
     xhttp_profile: str = "base"
+    # Per-key REALITY spiderX (spx) value emitted into the VLESS client link. None
+    # (the default, and every pre-v31 / non-xray row) means spx is not emitted.
+    # Purely client-side: never written to the server inbound.
+    spider_x: str | None = None
 
     def __repr__(self) -> str:
         # payload carries AWG private_key/preshared_key — never expose it in repr.

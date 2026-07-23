@@ -46,6 +46,7 @@ def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
         deleted_by=row["deleted_by"],
         transport=str(row["transport"]) if "transport" in keys and row["transport"] else "tcp",
         xhttp_profile=str(row["xhttp_profile"]) if "xhttp_profile" in keys and row["xhttp_profile"] else "base",
+        spider_x=str(row["spider_x"]) if "spider_x" in keys and row["spider_x"] else None,
     )
 
 
@@ -71,6 +72,7 @@ class VpnKeyRepository:
         expires_at: str | None = None,
         transport: str = "tcp",
         xhttp_profile: str = "base",
+        spider_x: str | None = None,
     ) -> VpnKey:
         """Insert a new VPN key in pending-apply status and return it."""
         cursor = await self.db.conn.execute(
@@ -79,9 +81,9 @@ class VpnKeyRepository:
               owner_user_id, username, key_type, status, note,
               uuid, email_label, public_key, client_ip,
               payload_json, public_payload_json,
-              created_at, updated_at, created_by, expires_at, transport, xhttp_profile
+              created_at, updated_at, created_by, expires_at, transport, xhttp_profile, spider_x
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 owner_user_id,
@@ -101,6 +103,7 @@ class VpnKeyRepository:
                 expires_at,
                 transport,
                 xhttp_profile,
+                spider_x,
             ),
         )
         await self.db.commit()
@@ -128,6 +131,7 @@ class VpnKeyRepository:
         expires_at: str | None = None,
         transport: str = "tcp",
         xhttp_profile: str = "base",
+        spider_x: str | None = None,
     ) -> VpnKey:
         """Create a new VPN key and return it."""
         return await self.create_pending(
@@ -146,6 +150,7 @@ class VpnKeyRepository:
             expires_at=expires_at,
             transport=transport,
             xhttp_profile=xhttp_profile,
+            spider_x=spider_x,
         )
 
     async def get_by_id(self, key_id: int) -> VpnKey | None:

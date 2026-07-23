@@ -68,6 +68,10 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   -- XHTTP client transport profile: 'base' | 'antisib' | 'multi'. Meaningful only
   -- for http keys; 'base' for tcp/AWG keys and legacy rows. Mirrors _migrate_v28.
   xhttp_profile TEXT NOT NULL DEFAULT 'base',
+  -- Per-key REALITY spiderX (spx) emitted into the VLESS client link. NULL means
+  -- spx is not emitted (default, full backward compat). Client-side only: never
+  -- written to the server inbound. Nullable by design. Mirrors _migrate_v31.
+  spider_x TEXT,
   deleted_at TEXT,
   -- created_by/revoked_by/deleted_by intentionally have NO foreign key (unlike
   -- proxy_accesses): users are NEVER hard-deleted (only blocked via role), so

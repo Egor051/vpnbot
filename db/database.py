@@ -14,8 +14,10 @@ from typing import Any, ClassVar
 
 import aiosqlite
 
+from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
-CURRENT_SCHEMA_VERSION = 30
+
+CURRENT_SCHEMA_VERSION = 31
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -305,6 +307,10 @@ class Database:
             await self._migrate_v30()
             await self._set_schema_version(30)
             version = 30
+        if version < 31:
+            await self._migrate_v31()
+            await self._set_schema_version(31)
+            version = 31
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1230,6 +1236,48 @@ class Database:
             )
             await self.conn.execute(
                 "UPDATE warp_settings SET config_installed = 1 WHERE routes_count > 0"
+            )
+
+    async def _migrate_v31(self) -> None:
+        # Per-key REALITY spiderX (spx) for VLESS client links. Purely client-side:
+        # the value is emitted into the client link only, never into the server
+        # inbound, so xray is never touched or restarted. Two idempotent parts:
+        #  1) Add the nullable spider_x column. NULL means "do not emit spx", so
+        #     every pre-v31 row (and every non-xray row) stays fully backward
+        #     compatible. Guarded by a column check; also declared in schema.sql
+        #     for fresh DBs.
+        #  2) If XRAY_SPIDER_X_POOL is set, backfill xray keys whose spider_x is
+        #     still NULL with a value picked deterministically from the pool by
+        #     hashing the key UUID (reproducible, never random). An empty/unset
+        #     pool leaves every row NULL and the bot behaves exactly as before.
+        #     Only NULL rows are filled, so a re-run never overwrites an already
+        #     assigned value. Runs in bootstrap()'s transaction — a failure rolls
+        #     the whole thing back, so no partial state and no separate rollback
+        #     mechanism is needed.
+        vpn_cols = await self._table_columns("vpn_keys")
+        if "spider_x" not in vpn_cols:
+            await self.conn.execute("ALTER TABLE vpn_keys ADD COLUMN spider_x TEXT")
+        # Defensive: settings already rejects any pool entry not starting with '/',
+        # but the migration re-reads the raw env, so filter here too so a malformed
+        # value can never reach a stored link.
+        pool = tuple(p for p in parse_spider_x_pool(os.getenv("XRAY_SPIDER_X_POOL")) if p.startswith("/"))
+        if not pool:
+            return
+        cursor = await self.conn.execute(
+            "SELECT id, uuid, payload_json FROM vpn_keys "
+            "WHERE key_type = 'xray' AND spider_x IS NULL"
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            uuid_value = str(row["uuid"] or self._v28_load_json(row["payload_json"]).get("uuid") or "").strip()
+            if not uuid_value:
+                continue
+            value = pick_spider_x(uuid_value, pool)
+            if value is None:
+                continue
+            await self.conn.execute(
+                "UPDATE vpn_keys SET spider_x = ? WHERE id = ?",
+                (value, int(row["id"])),
             )
 
     async def _relabel_xray_emails_v28(self) -> None:

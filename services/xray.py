@@ -22,6 +22,7 @@ from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
 from utils.redact import redact_value
+from utils.spider_x import pick_spider_x
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +172,16 @@ class XrayService:
                 return profile
         return XHTTP_DEFAULT_PROFILE
 
+    @staticmethod
+    def _key_spider_x(key: VpnKey) -> str | None:
+        """Resolve a key's per-key spiderX from the DB column, falling back to payload.
+
+        None (the default for pre-v31 / non-pool keys) means spx is not emitted.
+        """
+        value = getattr(key, "spider_x", None) or key.payload.get("spider_x")
+        text = str(value).strip() if value else ""
+        return text or None
+
     def _flow_for_transport(self, transport: str) -> str:
         """XHTTP clients must never carry a flow; TCP keeps xtls-rprx-vision."""
         return "" if self._normalize_transport(transport) == "http" else self.settings.xray_flow
@@ -239,8 +250,12 @@ class XrayService:
                 # the TCP link uses), read from settings.
                 short_id_managed = self.settings.xray_manage_short_ids and transport != "http"
                 short_id = self.ids.xray_short_id() if short_id_managed else self.settings.xray_short_id
+                # Per-key spiderX: deterministic pick from the configured pool by
+                # UUID hash. None when the pool is empty (spx never emitted).
+                spider_x = pick_spider_x(uuid_value, self.settings.xray_spider_x_pool)
                 link = self._build_vless_link(
-                    uuid_value, short_id, email_label, fingerprint=fingerprint, transport=transport, profile=profile
+                    uuid_value, short_id, email_label, fingerprint=fingerprint,
+                    transport=transport, profile=profile, spider_x=spider_x,
                 )
                 payload = {
                     "uuid": uuid_value,
@@ -251,6 +266,7 @@ class XrayService:
                     "fingerprint": fingerprint,
                     "transport": transport,
                     "xhttp_profile": profile,
+                    "spider_x": spider_x,
                 }
                 public_payload = {
                     "email_label": email_label,
@@ -272,6 +288,7 @@ class XrayService:
                     expires_at=expires_at,
                     transport=transport,
                     xhttp_profile=profile,
+                    spider_x=spider_x,
                 )
                 xray_apply_result = None
                 try:
@@ -579,6 +596,7 @@ class XrayService:
             link = self._build_vless_link(
                 uuid_value, short_id, email_label,
                 fingerprint=fingerprint, transport=self._key_transport(key), profile=self._key_profile(key),
+                spider_x=self._key_spider_x(key),
             )
             new_public_payload = {**key.public_payload, "link": link}
             await self.vpn_keys.update_payload(key_id, new_payload, new_public_payload, self.clock.now())
@@ -1207,6 +1225,20 @@ class XrayService:
                 return uuid_value, email_label
         raise InvalidOperation("Не удалось сгенерировать уникальные Xray-идентификаторы")
 
+    @staticmethod
+    def _spx_suffix(spider_x: str | None) -> str:
+        """Client-side spiderX (spx) query fragment, or "" when not set.
+
+        Encoded with ``quote(value, safe="")`` per the XTLS convention so path
+        separators become %2F. Emitted as ``&spx=`` and appended AFTER urlencode()
+        so it keeps this exact encoding and stays before the ``#fragment``.
+        Returns "" when *spider_x* is None so the parameter is omitted entirely
+        (never a bare ``&spx=``).
+        """
+        if not spider_x:
+            return ""
+        return f"&spx={quote(spider_x, safe='')}"
+
     def _build_vless_link(
         self,
         uuid_value: str,
@@ -1215,6 +1247,7 @@ class XrayService:
         fingerprint: str | None = None,
         transport: str = "tcp",
         profile: str = XHTTP_DEFAULT_PROFILE,
+        spider_x: str | None = None,
     ) -> str:
         host = self._format_host(self.settings.xray_public_host)
         fragment = quote(email_label or "xray")
@@ -1249,7 +1282,7 @@ class XrayService:
             extra = _XHTTP_PROFILE_EXTRA.get(norm_profile)
             if extra is not None:
                 params["extra"] = json.dumps(extra, separators=(",", ":"), ensure_ascii=False)
-            query = urlencode(params)
+            query = urlencode(params) + self._spx_suffix(spider_x)
             return f"vless://{uuid_value}@{host}:{self.settings.xray_public_port}?{query}#{fragment}"
         params = {
             # Always advertise type=tcp (not raw) for the widest client
@@ -1264,7 +1297,7 @@ class XrayService:
         }
         if self.settings.xray_flow:
             params["flow"] = self.settings.xray_flow
-        query = urlencode(params)
+        query = urlencode(params) + self._spx_suffix(spider_x)
         return f"vless://{uuid_value}@{host}:{self.settings.xray_public_port}?{query}#{fragment}"
 
     def _format_host(self, host: str) -> str:
@@ -1288,6 +1321,7 @@ class XrayService:
         link = self._build_vless_link(
             uuid_value, short_id, email_label,
             fingerprint=fingerprint, transport=self._key_transport(key), profile=self._key_profile(key),
+            spider_x=self._key_spider_x(key),
         )
         visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
         note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
