@@ -21,6 +21,7 @@ MIGRATION_ONLY_INDEXES = frozenset(
         "idx_vpn_keys_client_ip_reserved",
         "idx_trial_requests_one_pending",
         "idx_vpn_keys_expires_at",
+        "idx_vpn_keys_bundle_id",
     }
 )
 
@@ -39,9 +40,44 @@ async def _table_names(conn: aiosqlite.Connection) -> set[str]:
     return {str(row[0]) for row in await cursor.fetchall()}
 
 
+# name -> (type, notnull, default, pk). Keyed by column name so a legitimate
+# column-ORDER divergence (an ALTER appends at the end while schema.sql lists the
+# column mid-table — e.g. spider_x, bundle_id) is not treated as drift, while any
+# type / nullability / default / primary-key difference still is.
+async def _column_details(conn: aiosqlite.Connection, table: str) -> dict[str, tuple[str, int, object, int]]:
+    cursor = await conn.execute(f"PRAGMA table_info({table})")
+    return {
+        str(row[1]): (str(row[2]).upper(), int(row[3]), row[4], int(row[5]))
+        for row in await cursor.fetchall()
+    }
+
+
+# Set of (from_col, parent_table, to_col, on_update, on_delete) so ON DELETE
+# actions (e.g. bundle_id RESTRICT vs user_id CASCADE) are compared regardless of
+# the order SQLite reports the foreign keys in.
+async def _foreign_keys(conn: aiosqlite.Connection, table: str) -> set[tuple[str, str, str, str, str]]:
+    cursor = await conn.execute(f"PRAGMA foreign_key_list({table})")
+    return {
+        (str(row[3]), str(row[2]), str(row[4]), str(row[5]), str(row[6]))
+        for row in await cursor.fetchall()
+    }
+
+
+async def _schema_shape(conn: aiosqlite.Connection) -> tuple[
+    dict[str, dict[str, tuple[str, int, object, int]]],
+    dict[str, set[tuple[str, str, str, str, str]]],
+]:
+    tables = await _table_names(conn)
+    columns = {table: await _column_details(conn, table) for table in tables}
+    fks = {table: await _foreign_keys(conn, table) for table in tables}
+    return columns, fks
+
+
 def test_schema_sql_matches_fully_migrated_database(tmp_path: Path) -> None:
-    """A fully migrated DB and executescript(schema.sql) must agree on the schema,
-    except for the documented migration-only index set."""
+    """A fully migrated DB and executescript(schema.sql) must agree on the schema —
+    tables, columns, types, defaults, nullability, primary keys, and foreign keys
+    (including ON DELETE actions) — except for the documented migration-only index
+    set. This is the main guard against schema.sql drifting from the migrations."""
 
     async def run() -> None:
         boot = Database(tmp_path / "boot.db")
@@ -50,6 +86,7 @@ def test_schema_sql_matches_fully_migrated_database(tmp_path: Path) -> None:
             await boot.bootstrap()
             boot_indexes = await _named_indexes(boot._raw_conn())
             boot_tables = await _table_names(boot._raw_conn())
+            boot_columns, boot_fks = await _schema_shape(boot._raw_conn())
             version_row = await boot.conn.execute_fetchone(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             )
@@ -63,6 +100,7 @@ def test_schema_sql_matches_fully_migrated_database(tmp_path: Path) -> None:
             await conn.commit()
             schema_indexes = await _named_indexes(conn)
             schema_tables = await _table_names(conn)
+            schema_columns, schema_fks = await _schema_shape(conn)
 
         # schema.sql must never contain an index the migrated DB lacks.
         assert schema_indexes - boot_indexes == set()
@@ -71,6 +109,11 @@ def test_schema_sql_matches_fully_migrated_database(tmp_path: Path) -> None:
         assert boot_indexes - schema_indexes == MIGRATION_ONLY_INDEXES
         # Baseline tables come exclusively from schema.sql; both paths agree.
         assert boot_tables == schema_tables
+        # Columns (name/type/notnull/default/pk) and foreign keys (incl. ON DELETE)
+        # must be identical per table across both construction paths.
+        for table in sorted(boot_tables):
+            assert boot_columns[table] == schema_columns[table], f"column drift in {table}"
+            assert boot_fks[table] == schema_fks[table], f"foreign-key drift in {table}"
 
     asyncio.run(run())
 

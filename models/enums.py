@@ -43,6 +43,24 @@ class VpnKeyStatus(StrEnum):
     FAILED = "failed"
 
 
+class KeyBundleStatus(StrEnum):
+    """Lifecycle status of an all-in-one subscription bundle.
+
+    Shares the exact string vocabulary of :class:`VpnKeyStatus` (so a bundle and
+    its child keys speak the same status language), restricted to the states a
+    bundle can occupy. A bundle has no backend of its own to apply, so the
+    apply-side states (``pending_apply`` / ``apply_failed`` / ``failed``) are
+    intentionally absent.
+    """
+
+    ACTIVE = "active"
+    PENDING_REVOKE = "pending_revoke"
+    REVOKED = "revoked"
+    PENDING_DELETE = "pending_delete"
+    DELETE_FAILED = "delete_failed"
+    DELETED = "deleted"
+
+
 class ProxyAccessType(StrEnum):
     SOCKS5 = "socks5"
     MTPROTO = "mtproto"
