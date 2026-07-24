@@ -19,7 +19,7 @@ aiosignal==1.4.0
 aiosqlite==0.22.1
 annotated-types==0.7.0
 attrs==26.1.0
-certifi==2026.5.20
+certifi==2026.6.17
 cffi==2.0.0
 cryptography==48.0.1
 frozenlist==1.8.0
