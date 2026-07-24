@@ -2,7 +2,7 @@
 
 # Mirror the checks run in CI (.github/workflows/ci.yml) so `make check` locally
 # matches what the pipeline enforces.
-MYPY_PATHS = bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ warp/ main.py init_db.py
+MYPY_PATHS = bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ subscription_server/ warp/ main.py init_db.py
 
 lint:
 	python -m ruff check .

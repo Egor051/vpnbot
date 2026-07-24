@@ -259,7 +259,19 @@ TLS-сертификата; это не ослабляет секрет авто
 
 | Переменная | Обязательна | По умолчанию | Описание |
 |---|---|---|---|
-| `SUBSCRIPTION_ENABLED` | Нет | `false` | Включает all-in-one подписки: одна родительская запись (`key_bundles`) владеет несколькими VPN-ключами, чтобы один sub-URL отдавал сразу все протоколы. Пока `false`, сервис подписок отказывает в любой операции. |
+| `SUBSCRIPTION_ENABLED` | Нет | `false` | Включает all-in-one подписки: одна родительская запись (`key_bundles`) владеет несколькими VPN-ключами, чтобы один sub-URL отдавал сразу все протоколы. Пока `false`, сервис подписок отказывает в любой операции, **а** HTTP-эндпоинт подписки отвечает `404` на любой запрос. |
+| `SUBSCRIPTION_BIND_HOST` | Нет | `127.0.0.1` | Loopback-хост, на котором слушает отдельный процесс подписки. Внутри — обычный HTTP, поэтому адрес обязан быть loopback. |
+| `SUBSCRIPTION_BIND_PORT` | Нет | `8445` | Loopback-порт этого процесса. Сознательно не `8443`: он уже занят дважды (`XRAY_XHTTP_PORT` на loopback и `MTPROTO_PORT` наружу). |
+| `SUBSCRIPTION_PUBLIC_PORT` | Нет | `0` | Публичный HTTPS-порт того же процесса (TLS терминирует сам aiohttp — reverse-proxy в стеке нет). `0` выключает публичный слушатель. Требует обе TLS-переменные ниже; порт открывается через `deploy/ufw-subscription.sh`. |
+| `SUBSCRIPTION_TLS_CERT` | Нет | *(пусто)* | PEM-цепочка сертификата для `SUBSCRIPTION_PUBLIC_PORT`. Групп-читаемая копия уже выпущенного Let's Encrypt-сертификата, владелец `root:vpn-bot`. |
+| `SUBSCRIPTION_TLS_KEY` | Нет | *(пусто)* | PEM-ключ к этому сертификату, права `0640`, группа `vpn-bot` — процесс читает его непривилегированным пользователем `vpn-bot`. |
+| `SUBSCRIPTION_UPDATE_INTERVAL_HOURS` | Нет | `12` | Значение заголовка `Profile-Update-Interval` в часах (1–168). |
+| `SUBSCRIPTION_RATE_LIMIT_SECONDS` | Нет | `5` | Кулдаун на клиента для `GET /sub/{token}`; `0` отключает throttling (0–3600). |
+| `SUBSCRIPTION_LOCK_PATH` | Нет | `/run/vpn-bot-subscription/subscription.lock` | Файл single-instance-локи процесса подписки (свой, не ботовский). |
+
+Сам эндпоинт — **отдельный процесс** (`python -m subscription_server`, юнит
+`deploy/vpn-bot-subscription.service`): открывает `vpn.db` только на чтение и
+продолжает отдавать подписки, пока бот лежит — см. [docs/subscription.ru.md](subscription.ru.md).
 
 Бандл провижнит **по одному дочернему ключу на каждый включённый протокол** —
 VLESS (TCP), каждый профиль VLESS (HTTP) (`base`, `antisib`, `multi`) и

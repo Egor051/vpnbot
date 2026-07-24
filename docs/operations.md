@@ -424,6 +424,9 @@ sudo ss -tlnp | grep 8443
 sudo systemctl status hysteria-server vpn-bot-hy2-auth --no-pager   # if Hysteria2 is enabled
 sudo ss -ulnp | grep :443                                           # public Hysteria2 UDP port
 curl -s http://127.0.0.1:8444/healthz                               # hy2_auth liveness (loopback)
+sudo systemctl status vpn-bot-subscription --no-pager               # if the subscription endpoint is deployed
+sudo ss -tlnp | grep -E '8445|2096'                                 # its loopback + public HTTPS ports
+curl -si http://127.0.0.1:8445/sub/not-a-real-token | head -1        # expect 404 (see docs/subscription.md)
 sudo journalctl -u vpn-bot -n 100 --no-pager
 sudo xray run -test -config /usr/local/etc/xray/config.json
 sudo awg show

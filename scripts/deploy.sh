@@ -156,6 +156,13 @@ WARP_ONESHOTS=(warp-routes.service vpn-bot-warp-split.service vpnbot-hy2-warp-ma
 NETWORKD_DROPIN_SRC="${NETWORKD_DROPIN_SRC:-deploy/networkd/10-keep-foreign-rules.conf}"
 NETWORKD_DROPIN_DST="${NETWORKD_DROPIN_DST:-/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf}"
 
+# All-in-one subscription endpoint. Shipped as deploy/vpn-bot-subscription.service,
+# so UNIT_SET picks it up automatically (source (c) in assemble_unit_set) and
+# deploy.sh reports it as drift instead of installing it — same treatment as every
+# non-bot unit. The Phase 1 check below is informational only: the endpoint is
+# gated by SUBSCRIPTION_ENABLED and a host that has not deployed it is normal.
+SUBSCRIPTION_UNIT="${SUBSCRIPTION_UNIT:-vpn-bot-subscription.service}"
+
 # Out-of-repo privileged helpers: tracked SOURCE lives in the checkout, the
 # INSTALLED copy lives under /usr/local/sbin. `git reset --hard origin/main`
 # advances the source but NEVER the installed copy, so a fixed helper would keep
@@ -704,6 +711,45 @@ networkd_foreign_rules_ok() {
 }
 
 # --------------------------------------------------------------------------- #
+# All-in-one subscription endpoint (informational Phase 1 check)
+# --------------------------------------------------------------------------- #
+# Reports whether the endpoint unit is installed/active and whether the ports it
+# is configured to bind are actually listening. NEVER fatal: the feature is
+# gated by SUBSCRIPTION_ENABLED, the unit is drift-installed by hand, and a host
+# that has not deployed it at all is a normal, expected state. Echoes one status
+# phrase and returns 0 (nothing to flag) / 1 (worth an operator's eye).
+subscription_endpoint_status() {
+  local enabled bind_host bind_port public_port states listening="" missing=()
+  enabled="$(env_val SUBSCRIPTION_ENABLED)"
+  if ! is_true "$enabled"; then
+    echo "SUBSCRIPTION_ENABLED is not true — endpoint intentionally inert (INFO)"; return 0
+  fi
+  bind_host="$(env_or SUBSCRIPTION_BIND_HOST 127.0.0.1)"
+  bind_port="$(env_or SUBSCRIPTION_BIND_PORT 8445)"
+  public_port="$(env_or SUBSCRIPTION_PUBLIC_PORT 0)"
+  states="$(unit_states "$SUBSCRIPTION_UNIT")"
+  if ! unit_exists "$SUBSCRIPTION_UNIT"; then
+    echo "SUBSCRIPTION_ENABLED=true but ${SUBSCRIPTION_UNIT} is not installed (${states}) — install it by hand (see the unit header)"
+    return 1
+  fi
+  if ! command -v ss >/dev/null 2>&1; then
+    echo "${SUBSCRIPTION_UNIT} ${states}; listening state UNKNOWN (ss not found)"; return 0
+  fi
+  # grep reads to EOF (output discarded) so an early hit cannot SIGPIPE `ss`
+  # under pipefail and make a listening port look absent.
+  listening="$(ss -tln 2>/dev/null || true)"
+  printf '%s\n' "$listening" | grep -E "[^0-9]${bind_port}[[:space:]]" >/dev/null || missing+=("${bind_host}:${bind_port} (loopback)")
+  if [[ "$public_port" != "0" ]]; then
+    printf '%s\n' "$listening" | grep -E "[^0-9]${public_port}[[:space:]]" >/dev/null || missing+=(":${public_port} (public HTTPS)")
+  fi
+  if (( ${#missing[@]} > 0 )); then
+    echo "${SUBSCRIPTION_UNIT} ${states}, but NOT listening on: ${missing[*]}"; return 1
+  fi
+  echo "${SUBSCRIPTION_UNIT} ${states}, listening on ${bind_host}:${bind_port}$([[ "$public_port" != "0" ]] && printf ' and :%s' "$public_port")"
+  return 0
+}
+
+# --------------------------------------------------------------------------- #
 # Rollback — fault-tolerant, data-plane-aware, always reports
 # --------------------------------------------------------------------------- #
 rollback() {
@@ -1185,6 +1231,18 @@ else
   warn "  install -o root -g root -m 0644 ${NETWORKD_DROPIN_SRC} ${NETWORKD_DROPIN_DST} && systemctl restart systemd-networkd"
 fi
 
+# All-in-one subscription endpoint (informational, never fatal). The unit is
+# drift-installed by hand, so this only tells the operator what the host is
+# actually running; a missing unit or a closed port never blocks a deploy.
+SUB_LIVE_MSG="$(subscription_endpoint_status)" && SUB_LIVE_RC=0 || SUB_LIVE_RC=$?
+if (( SUB_LIVE_RC == 0 )); then
+  log "subscription endpoint: ${SUB_LIVE_MSG}"
+else
+  warn "subscription endpoint: ${SUB_LIVE_MSG}"
+  warn "  install -m0644 deploy/${SUBSCRIPTION_UNIT} /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now ${SUBSCRIPTION_UNIT%.service}"
+  warn "  (public port also needs: bash deploy/ufw-subscription.sh)"
+fi
+
 # UNIT_SET assembly + classification + pre-state snapshot (see assemble_unit_set).
 assemble_unit_set
 if [[ ${#skipped[@]} -gt 0 ]]; then
@@ -1284,6 +1342,14 @@ phase1_report() {
     printf '    %-40s %-16s %-18s is-enabled=%s%s\n' "$u" "$disp" \
       "$(unit_states "$t")" "${U_PRE_ENABLED[$u]}" "$via"
   done
+
+  # --- All-in-one subscription endpoint (drift-installed, gated by .env) ---
+  printf '\n  --- Subscription endpoint (%s — drift-installed by hand) ---\n' "$SUBSCRIPTION_UNIT"
+  printf '    %s\n' "${SUB_LIVE_MSG:-<not checked>}"
+  if (( ${SUB_LIVE_RC:-0} != 0 )); then
+    printf '      install -m0644 deploy/%s /etc/systemd/system/ && systemctl daemon-reload\n' "$SUBSCRIPTION_UNIT"
+    printf '      systemctl enable --now %s   # plus deploy/ufw-subscription.sh for the public port\n' "${SUBSCRIPTION_UNIT%.service}"
+  fi
 
   # --- Modular protocols (backend units derived from .env) ---
   # A disabled protocol whose unit is absent is a NORMAL, expected state — INFO,
