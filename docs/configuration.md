@@ -260,7 +260,19 @@ authenticate without a valid per-key secret.
 
 | Variable | Required | Default | Description | Example |
 |---|---|---|---|---|
-| `SUBSCRIPTION_ENABLED` | No | `false` | Enable all-in-one subscription bundles: one parent record (`key_bundles`) owning several VPN keys so a single subscription URL carries every protocol at once. While `false` the bundle service refuses every operation. | `false` |
+| `SUBSCRIPTION_ENABLED` | No | `false` | Enable all-in-one subscription bundles: one parent record (`key_bundles`) owning several VPN keys so a single subscription URL carries every protocol at once. While `false` the bundle service refuses every operation **and** the subscription endpoint answers `404` on every request. | `false` |
+| `SUBSCRIPTION_BIND_HOST` | No | `127.0.0.1` | Loopback bind host of the standalone subscription endpoint. Plain HTTP — must be a loopback address. | `127.0.0.1` |
+| `SUBSCRIPTION_BIND_PORT` | No | `8445` | Loopback bind port of that endpoint. Deliberately not `8443` (already used by `XRAY_XHTTP_PORT` on loopback and `MTPROTO_PORT` publicly). | `8445` |
+| `SUBSCRIPTION_PUBLIC_PORT` | No | `0` | Public HTTPS port the same process listens on (aiohttp terminates TLS itself; no reverse proxy in this stack). `0` disables it. Requires both TLS values below; open it in ufw via `deploy/ufw-subscription.sh`. | `2096` |
+| `SUBSCRIPTION_TLS_CERT` | No | *(unset)* | PEM certificate chain served on `SUBSCRIPTION_PUBLIC_PORT`. A group-readable copy of the existing Let's Encrypt material, owned `root:vpn-bot`. | `/etc/vpn-bot/tls/sub-fullchain.pem` |
+| `SUBSCRIPTION_TLS_KEY` | No | *(unset)* | PEM private key for that certificate, mode `0640`, group `vpn-bot` — the endpoint reads it as the unprivileged `vpn-bot` user. | `/etc/vpn-bot/tls/sub-key.pem` |
+| `SUBSCRIPTION_UPDATE_INTERVAL_HOURS` | No | `12` | Value of the `Profile-Update-Interval` response header, in hours (1–168). | `12` |
+| `SUBSCRIPTION_RATE_LIMIT_SECONDS` | No | `5` | Per-client cooldown on `GET /sub/{token}`; `0` disables throttling (0–3600). | `5` |
+| `SUBSCRIPTION_LOCK_PATH` | No | `/run/vpn-bot-subscription/subscription.lock` | Single-instance lock file of the endpoint process (its own, not the bot's). | `/run/vpn-bot-subscription/subscription.lock` |
+
+The endpoint itself is a **separate process** (`python -m subscription_server`,
+shipped as `deploy/vpn-bot-subscription.service`) that opens `vpn.db` read-only
+and keeps serving while the bot is down — see [docs/subscription.md](subscription.md).
 
 A bundle provisions **one child key per enabled protocol** — VLESS (TCP), each
 VLESS (HTTP) profile (`base`, `antisib`, `multi`) and Hysteria2 — through the

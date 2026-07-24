@@ -1,0 +1,74 @@
+# All-in-one subscription endpoint (GET /sub/{token}).
+#
+# Independent process, like vpn-bot-hy2-auth.service: it serves subscription
+# URLs straight from vpn.db (read-only) and must keep working while the bot
+# (vpn-bot.service) is down. It binds plain HTTP on loopback and, when
+# SUBSCRIPTION_PUBLIC_PORT + SUBSCRIPTION_TLS_* are set, terminates TLS itself
+# on the public port — there is no reverse proxy in this stack.
+#
+# deploy.sh does NOT install this unit (it only auto-installs vpn-bot.service);
+# it reports it as drift. Operator install:
+#   sudo install -m0644 deploy/vpn-bot-subscription.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vpn-bot-subscription
+#   sudo bash deploy/ufw-subscription.sh          # only when the public port is on
+# Full runbook (incl. the TLS material this reads): docs/subscription.md
+
+[Unit]
+Description=vpn-bot all-in-one subscription endpoint (read-only DB, self-terminated TLS)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vpn-service
+EnvironmentFile=/opt/vpn-service/.env
+ExecStart=/opt/vpn-service/.venv/bin/python -m subscription_server
+Restart=on-failure
+RestartSec=5
+User=vpn-bot
+Group=vpn-bot
+UMask=0077
+
+# Single-instance lock lives here (SUBSCRIPTION_LOCK_PATH); systemd creates and
+# cleans up the directory, so nothing under /run needs to pre-exist.
+RuntimeDirectory=vpn-bot-subscription
+RuntimeDirectoryMode=0700
+
+# Hardening. Like vpn-bot-hy2-auth this unit runs no sudo helpers, so it locks
+# down fully — including NoNewPrivileges.
+NoNewPrivileges=yes
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# The bot keeps vpn.db in WAL mode, and a WAL *reader* must be able to write the
+# shared-memory wal-index (`-shm`) and the `-wal` file even when it only reads
+# rows; with ProtectSystem=strict the data directory would be read-only and every
+# request would fail closed with SQLITE_CANTOPEN. This is the ONLY writable path
+# and it does NOT weaken the read-only guarantee on the data: the process opens
+# the connection with `mode=ro`, so a write to the database itself still raises.
+ReadWritePaths=/opt/vpn-service/data
+
+# TLS material for the public listener needs NO directive here: ProtectSystem=strict
+# makes /etc read-only, not invisible, so /etc/vpn-bot/tls stays readable and the
+# file permissions are what actually gate access — the directory is root:vpn-bot
+# 0750 with the key at 0640, so this process reads it as the unprivileged vpn-bot
+# user and never as root (docs/subscription.md). The key is read ONCE at startup,
+# so an acme.sh renewal is picked up by restarting this unit from its --reloadcmd.
+
+[Install]
+WantedBy=multi-user.target

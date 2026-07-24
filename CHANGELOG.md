@@ -8,6 +8,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **All-in-one subscription HTTP endpoint — a separate process (`SUBSCRIPTION_ENABLED`,
+  still `false` by default).** `python -m subscription_server` (unit
+  `deploy/vpn-bot-subscription.service`) serves exactly one route, `GET /sub/{token}`,
+  returning the base64 subscription body of a bundle: each active child rendered by
+  **the same link builders the single-key view uses** (`XrayService._build_vless_link`,
+  `bot.formatters.format_hysteria2_link`), so a sub-URL link can never drift from the
+  link the bot hands out — pinned by a test that compares the two. Built to the
+  `hy2_auth` pattern: it opens `vpn.db` **read-only** (`mode=ro`, reads go through the
+  ordinary repositories) and re-reads it live on every request, so a revoke, a token
+  rotation or a delete applies on the very next fetch, without a restart and while the
+  bot is down; it also reopens the connection if the database file is swapped
+  underneath it (restore by rename). Fail-closed throughout: unknown token, revoked or
+  deleted bundle, a bundle left with no active children, a malformed child row, an
+  unreadable DB and the feature flag being off all return **the same empty 404**, so
+  the endpoint cannot confirm that a token exists and never emits a partial config or
+  a 5xx traceback. Response headers: `Profile-Title` (the bundle's label),
+  `Profile-Update-Interval`, `Subscription-Userinfo` (`upload`/`download` only when
+  traffic was actually measured, `expire` from the children's shared `expires_at`;
+  `total` is never invented) and `Cache-Control: no-store`. Per-client rate limiting
+  (`SUBSCRIPTION_RATE_LIMIT_SECONDS`) is applied before the DB is touched. The token
+  never reaches a log: the runner disables aiohttp's access log, the app installs a
+  redacting filter on it, `aiosqlite`'s parameter-printing DEBUG log is pinned to
+  INFO, and every log line identifies a request by a SHA-256 fingerprint instead.
+  **TLS is terminated by the process itself** (aiohttp `ssl_context`) on
+  `SUBSCRIPTION_PUBLIC_PORT` — no reverse proxy is introduced — reading a
+  group-readable copy of the existing Let's Encrypt material as the unprivileged
+  `vpn-bot` user; a public port without TLS material makes the process refuse to
+  start, and the plain-HTTP bind is validated to be loopback (default `127.0.0.1:8445`,
+  deliberately not `8443`, which is already used by `XRAY_XHTTP_PORT` and
+  `MTPROTO_PORT`). The unit is reported as **drift** and installed by hand like every
+  other non-bot unit (`deploy.sh` auto-installs only `vpn-bot.service`); Phase 1 gains
+  an informational, never-fatal check that the unit is loaded and the configured ports
+  are listening, and the firewall rule ships as the tracked, re-runnable
+  `deploy/ufw-subscription.sh` instead of a hand-typed `ufw allow`. Runbook:
+  `docs/subscription.md`. Still no bot UI — nothing changes for users yet.
+
 - **All-in-one subscription bundles — service layer (`SUBSCRIPTION_ENABLED`, default
   `false`).** A bundle is a parent `key_bundles` record owning one child VPN key per
   enabled protocol — VLESS (TCP), every VLESS (HTTP) profile and Hysteria2 — so a

@@ -33,6 +33,10 @@ _ISOLATED_ENV_PREFIXES: tuple[str, ...] = (
     "MTPROTO_",
     "WARP_",
     "ANOMALY_",
+    # SUBSCRIPTION_* for the same reason: the box's live .env sets the endpoint's
+    # bind/TLS values, and a test asserting the documented defaults would read the
+    # host's ports instead (green in CI, red on the box).
+    "SUBSCRIPTION_",
 )
 
 

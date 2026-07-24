@@ -208,6 +208,32 @@ def _loopback_host_port(name: str, value: str) -> str:
     return value
 
 
+def _loopback_host(name: str, value: str) -> str:
+    """Validate a bare bind HOST that must be loopback (no port component).
+
+    Sibling of :func:`_loopback_host_port` for settings that carry host and port
+    separately (SUBSCRIPTION_BIND_HOST/PORT). The subscription endpoint speaks
+    plain HTTP, so binding it off-loopback would put every client link of a bundle
+    on a cleartext socket — refused here rather than silently bound.
+    """
+    host = _no_control_chars(name, value).strip().strip("[]")
+    if host == "localhost":
+        return host
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise SettingsError(f"{name}: host должен быть loopback (127.0.0.1, ::1 или localhost)") from exc
+    if not address.is_loopback:
+        raise SettingsError(f"{name}: host должен быть loopback (127.0.0.1, ::1 или localhost)")
+    return host
+
+
+def _optional_path(name: str) -> Path | None:
+    """Return an optional filesystem path setting, or None when unset/blank."""
+    value = _no_control_chars(name, _optional(name))
+    return Path(value) if value else None
+
+
 def _admin_ids(raw: str) -> frozenset[int]:
     values: set[int] = set()
     for item in raw.split(","):
@@ -495,8 +521,32 @@ class Settings:
     # All-in-one subscription bundles: one parent row owning several VPN keys so a
     # single subscription URL hands a client every protocol at once. Off by default
     # and gated at the SERVICE layer (KeyBundleService refuses every mutation while
-    # this is false), so the flag has teeth before the endpoint and the UI exist.
+    # this is false) AND at the endpoint (subscription_server answers 404 on every
+    # route while this is false), so the flag has teeth before the UI exists.
     subscription_enabled: bool = False
+    # Loopback bind of the standalone subscription endpoint (`python -m
+    # subscription_server`). PLAIN HTTP, loopback only — a subscription body is a
+    # bundle's every client link, so it must never travel a cleartext socket that
+    # leaves the box. The default port is 8445 and NOT 8443: 8443 is already taken
+    # twice on this host (XRAY_XHTTP_PORT on loopback, MTPROTO_PORT publicly).
+    subscription_bind_host: str = "127.0.0.1"
+    subscription_bind_port: int = 8445
+    # Public HTTPS listener of the same process (aiohttp terminates TLS itself —
+    # there is no reverse proxy in this stack). 0 disables it, leaving the endpoint
+    # reachable on loopback only. Requires BOTH cert and key: see
+    # validate_subscription_ready(), which the sub-server calls at startup.
+    subscription_public_port: int = 0
+    subscription_tls_cert: Path | None = None
+    subscription_tls_key: Path | None = None
+    # `Profile-Update-Interval` header (hours): how often a client should re-fetch
+    # the subscription. Not a data value — a refresh policy the endpoint advertises.
+    subscription_update_interval_hours: int = 12
+    # Per-client cooldown (seconds) on GET /sub/{token}; 0 disables throttling.
+    subscription_rate_limit_seconds: int = 5
+    # Single-instance lock of the endpoint process (mirrors BOT_LOCK_PATH). Its
+    # own file, never the bot's: the two are independent processes and either
+    # must be able to run while the other is down.
+    subscription_lock_path: Path = Path("/run/vpn-bot-subscription/subscription.lock")
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -577,6 +627,31 @@ class Settings:
         they were before this feature.
         """
         return bool(self.hysteria2_stats_listen and self.hysteria2_stats_secret)
+
+    def validate_subscription_ready(self) -> None:
+        """Fail closed on an unsafe subscription-endpoint configuration.
+
+        Called by the STANDALONE ``subscription_server`` process at startup, never
+        by the bot: a misconfigured subscription endpoint must stop that endpoint,
+        not take the bot down with it. The one invariant worth refusing to start
+        over is a public listener without TLS material — the response body is every
+        client link of a bundle, so serving it in cleartext off-loopback would leak
+        the whole subscription to any on-path observer.
+        """
+        if self.subscription_public_port == 0:
+            return
+        missing = [
+            name
+            for name, value in {
+                "SUBSCRIPTION_TLS_CERT": self.subscription_tls_cert,
+                "SUBSCRIPTION_TLS_KEY": self.subscription_tls_key,
+            }.items()
+            if value is None
+        ]
+        if missing:
+            raise SettingsError(
+                "SUBSCRIPTION_PUBLIC_PORT требует TLS: не заданы " + ", ".join(missing)
+            )
 
     def validate_awg_ready(self) -> None:
         missing = [
@@ -895,4 +970,16 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         hysteria2_config_path=Path(_optional("HYSTERIA2_CONFIG_PATH", "/etc/hysteria/config.yaml")),
         hysteria2_health_interval=_int_range("HYSTERIA2_HEALTH_INTERVAL", 60, 0, 3600),
         subscription_enabled=_bool("SUBSCRIPTION_ENABLED", False),
+        subscription_bind_host=_loopback_host(
+            "SUBSCRIPTION_BIND_HOST", _optional("SUBSCRIPTION_BIND_HOST", "127.0.0.1") or "127.0.0.1"
+        ),
+        subscription_bind_port=_int_range("SUBSCRIPTION_BIND_PORT", 8445, 1, 65535),
+        subscription_public_port=_int_range("SUBSCRIPTION_PUBLIC_PORT", 0, 0, 65535),
+        subscription_tls_cert=_optional_path("SUBSCRIPTION_TLS_CERT"),
+        subscription_tls_key=_optional_path("SUBSCRIPTION_TLS_KEY"),
+        subscription_update_interval_hours=_int_range("SUBSCRIPTION_UPDATE_INTERVAL_HOURS", 12, 1, 168),
+        subscription_rate_limit_seconds=_int_range("SUBSCRIPTION_RATE_LIMIT_SECONDS", 5, 0, 3600),
+        subscription_lock_path=Path(
+            _optional("SUBSCRIPTION_LOCK_PATH", "/run/vpn-bot-subscription/subscription.lock")
+        ),
     )
