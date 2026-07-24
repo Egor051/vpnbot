@@ -492,6 +492,11 @@ class Settings:
     # loop, leaving Hysteria2 backend-health unmonitored). Powers the dashboard /
     # health "Hysteria2: OK/DEGRADED" entry, at parity with Xray/AWG reconciliation.
     hysteria2_health_interval: int = 60
+    # All-in-one subscription bundles: one parent row owning several VPN keys so a
+    # single subscription URL hands a client every protocol at once. Off by default
+    # and gated at the SERVICE layer (KeyBundleService refuses every mutation while
+    # this is false), so the flag has teeth before the endpoint and the UI exist.
+    subscription_enabled: bool = False
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -889,4 +894,5 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         hysteria2_auth_service_name=_optional("HYSTERIA2_AUTH_SERVICE_NAME", "vpn-bot-hy2-auth"),
         hysteria2_config_path=Path(_optional("HYSTERIA2_CONFIG_PATH", "/etc/hysteria/config.yaml")),
         hysteria2_health_interval=_int_range("HYSTERIA2_HEALTH_INTERVAL", 60, 0, 3600),
+        subscription_enabled=_bool("SUBSCRIPTION_ENABLED", False),
     )

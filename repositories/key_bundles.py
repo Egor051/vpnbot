@@ -146,6 +146,18 @@ class KeyBundleRepository:
                 "(concurrent modification?)"
             )
 
+    async def delete(self, bundle_id: int) -> None:
+        """Hard-delete a bundle row.
+
+        Raises ``sqlite3.IntegrityError`` while any VPN key still points at the
+        bundle: ``vpn_keys.bundle_id`` is ON DELETE RESTRICT, so the wrong order
+        (bundle before its children) is impossible by construction rather than by
+        convention. Callers must remove the children first — see
+        :meth:`services.key_bundles.KeyBundleService.delete_bundle`.
+        """
+        await self.db.conn.execute("DELETE FROM key_bundles WHERE id = ?", (bundle_id,))
+        await self.db.commit()
+
     async def rotate_token(self, bundle_id: int, now: str) -> str:
         """Replace a bundle's secret token with a fresh one and return it."""
         token = _generate_token()

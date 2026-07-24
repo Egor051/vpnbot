@@ -38,6 +38,7 @@ from repositories.access_requests import AccessRequestRepository
 from repositories.announcements import AnnouncementRepository
 from repositories.audit_log import AuditLogRepository
 from repositories.dashboard import DashboardRepository
+from repositories.key_bundles import KeyBundleRepository
 from repositories.protocol_modules import ProtocolModulesRepository
 from repositories.proxy_entries import ProxyRepository
 from repositories.proxy_accesses import ProxyAccessRepository
@@ -56,6 +57,7 @@ from services.awg import AwgService
 from services.backend_health import BackendHealth
 from services.dashboard import DashboardService
 from services.hysteria import HysteriaService
+from services.key_bundles import KeyBundleService
 from services.key_expiry import KeyExpiryService
 from services.maintenance import MaintenanceService
 from services.offsite_backup import OffsiteBackupService
@@ -445,6 +447,21 @@ async def _build_app(
         clock=clock,
         notify_days=settings.key_expiry_notify_days,
     )
+    # All-in-one subscription bundles. Built on top of the per-protocol services
+    # (it never re-implements their create/revoke/delete paths) and inert until
+    # SUBSCRIPTION_ENABLED is turned on; nothing calls it yet.
+    key_bundle_service = KeyBundleService(
+        bundles=KeyBundleRepository(db),
+        users=user_service,
+        xray=xray_service,
+        hysteria=hysteria_service,
+        modules=protocol_modules_service,
+        settings=settings,
+        clock=clock,
+        ids=ids,
+        audit=audit_service,
+        backend_health=backend_health,
+    )
     trial_access_service = TrialAccessService(
         trial_requests=trial_requests_repo,
         users_repo=users_repo,
@@ -577,6 +594,7 @@ async def _build_app(
         online_clients=online_clients_service,
         auto_refresh=auto_refresh_manager,
         maintenance=maintenance_service,
+        key_bundles=key_bundle_service,
         hysteria_health_probe=hysteria_health_probe,
     )
 

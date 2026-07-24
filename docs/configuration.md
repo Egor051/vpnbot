@@ -256,6 +256,27 @@ authenticate without a valid per-key secret.
 
 > **Trial access flow.** An approved user without an active key can request a short-lived *trial* key; a superadmin or moderator approves/rejects it from the admin panel, and the granted key is capped at `KEY_MAX_TRIAL_DAYS`. Per-user trial eligibility is tracked (`users.trial_quota_reset_at`) so trials cannot be farmed; the requests live in the `trial_key_requests` table.
 
+## All-in-One Subscription
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `SUBSCRIPTION_ENABLED` | No | `false` | Enable all-in-one subscription bundles: one parent record (`key_bundles`) owning several VPN keys so a single subscription URL carries every protocol at once. While `false` the bundle service refuses every operation. | `false` |
+
+A bundle provisions **one child key per enabled protocol** — VLESS (TCP), each
+VLESS (HTTP) profile (`base`, `antisib`, `multi`) and Hysteria2 — through the
+same per-protocol create path a standalone key uses, so children keep the usual
+`xray_tcp_*` / `xray_http_*` / `hy2_*` email labels and stay visible to
+reconciliation and anomaly detection. AWG is excluded (WireGuard configs do not
+ride a base64 v2ray subscription) and so are the SOCKS5/MTProto proxies (a
+different entity). Every child of a bundle gets the same `expires_at`, so they
+expire together.
+
+Partial-provisioning policy: a protocol switched **off** (its `.env` flag or the
+admin protocol-module toggle) is skipped silently and the resulting composition
+is recorded in the audit log; a protocol that is **on but degraded** aborts the
+whole creation, because a bundle that silently lacks a protocol stays defective
+forever while an aborted creation is simply retried.
+
 ## Announcements
 
 | Variable | Required | Default | Description | Example |
