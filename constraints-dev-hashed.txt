@@ -540,9 +540,9 @@ cryptography==48.0.1 \
     --hash=sha256:f817adc181390bd54f2f700107a7419040fb7c1bdf2fc26f36551a06a68c3345 \
     --hash=sha256:fe0180af5bf9236518a087e35bf2d9a347d5f5f51e63c579d683ddff424e3d46
     # via -r requirements.txt
-cyclonedx-python-lib==11.7.0 \
-    --hash=sha256:02fa4f15ddbba21ac9093039f8137c0d1813af7fe88b760c5dcd3311a8da2178 \
-    --hash=sha256:fb1bc3dedfa31208444dbd743007f478ab6984010a184e5bd466bffd969e936e
+cyclonedx-python-lib==11.11.0 \
+    --hash=sha256:3049fc83e06a059b5c5907a527625a8ed5073caab10607ed4c9e5503b590fd44 \
+    --hash=sha256:4b3194db72b613717f2912447e67ab618c75ff7dcac6c4af3c0e9e1ac617c102
     # via pip-audit
 defusedxml==0.7.1 \
     --hash=sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69 \
