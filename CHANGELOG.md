@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **All-in-one subscription bundles — service layer (`SUBSCRIPTION_ENABLED`, default
+  `false`).** A bundle is a parent `key_bundles` record owning one child VPN key per
+  enabled protocol — VLESS (TCP), every VLESS (HTTP) profile and Hysteria2 — so a
+  single subscription URL can later carry them all. Children are provisioned,
+  revoked and deleted exclusively through the existing per-protocol service paths,
+  so they keep the usual `xray_tcp_*` / `xray_http_*` / `hy2_*` labels and stay
+  visible to reconciliation and anomaly detection; the bundle's own `bundle_*` label
+  is display-only. Creation is atomic (a failure part-way unwinds the already-created
+  children on both the backends and in the DB), all children share one `expires_at`,
+  and deletion always removes children before the bundle row — the `ON DELETE
+  RESTRICT` from the v32 schema makes the wrong order impossible. Partial-provisioning
+  policy: a protocol switched **off** is skipped silently, a protocol that is **on but
+  degraded** aborts the whole creation. There is no UI and no subscription endpoint
+  yet, and the service refuses every operation while `SUBSCRIPTION_ENABLED` is `false`,
+  so bot behaviour is unchanged.
+
 - **XHTTP client transport profiles for VLESS (HTTP) keys.** Creating a VLESS (HTTP)
   key now has a third step — a client-side transport profile: **base** (universal,
   byte-for-byte the previous link), **antisib** (anti-blocking: single-channel xmux to

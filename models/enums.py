@@ -88,5 +88,6 @@ class AuditEntityType(StrEnum):
     USER = "user"
     ACCESS_REQUEST = "access_request"
     VPN_KEY = "vpn_key"
+    KEY_BUNDLE = "key_bundle"
     PROXY = "proxy"
     SYSTEM = "system"
