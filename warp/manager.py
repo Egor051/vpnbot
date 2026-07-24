@@ -33,6 +33,7 @@ from services.errors import ServiceError
 from warp.constants import HANDSHAKE_FRESH_SECONDS, ROUTES_LIST
 from warp.health import HealthSnapshot, WarpHealthMonitor, ping_interface
 from warp.interface import WarpInterface
+from warp.proxy_egress import read_tunnel_address
 from warp.routes import WarpRoutes
 from warp.state import WarpState
 
@@ -50,7 +51,16 @@ class WarpManager:
         self._settings = settings
         self._repo = WarpSettingsRepository(db)
         self._runner = PrivilegedHelperRunner(shell=shell, use_sudo=True)
+        # Plain (non-sudo) runner for the read-only source-rule check. `ip rule show`
+        # is an unprivileged NETLINK dump (no mutation, no sudo needed); in the default
+        # root+api deploy the bot is root anyway. A failed/absent read yields None
+        # ("no signal"), so this never escalates and never raises a false alarm.
+        self._shell = shell
         self._config_path = settings.warp_config_path
+        # The AWG client subnet is a SOURCE selector: the `ip rule from <subnet>` that
+        # steers client traffic into the tunnel table. It is the primary rule a
+        # networkd flush wipes, so the monitor watches for its presence.
+        self._client_subnet = settings.awg_network
         self._interface_name = settings.warp_interface
         self._ping_target = settings.warp_ping_target
         self._install_helper = settings.warp_install_helper_path
@@ -263,6 +273,10 @@ class WarpManager:
             on_tunnel_recovered=self._notify_tunnel_recovered,
             on_degraded=self._notify_degraded,
             on_degraded_cleared=self._notify_degraded_cleared,
+            # No source-rule detector in legacy mode: there the monitor OWNS the rules
+            # (it adds/removes them on the up/down latch), so an external-wipe detector
+            # would double-alert on a deliberate deactivate. It belongs in observer mode,
+            # where systemd owns the rules and the bot is a pure observer.
             interval=self._interval,
             fast_interval=self._fast_interval,
             fail_window=self._fail_window,
@@ -318,6 +332,9 @@ class WarpManager:
             on_tunnel_recovered=self._notify_tunnel_recovered,
             on_degraded=self._notify_degraded,
             on_degraded_cleared=self._notify_degraded_cleared,
+            check_source_rules=self._check_source_rules,
+            on_routes_missing=self._notify_routes_missing,
+            on_routes_restored=self._notify_routes_restored,
             interval=self._interval,
             fast_interval=self._fast_interval,
             fail_window=self._fail_window,
@@ -495,12 +512,69 @@ class WarpManager:
             except Exception:
                 logger.warning("Failed to send WARP %s alert to admin %d", kind, admin_id, exc_info=True)
 
+    async def _check_source_rules(self) -> bool | None:
+        """Report whether the WARP source `ip rule`s are installed (observer detector).
+
+        Returns True when every expected ``from <src>`` policy rule is present, False
+        when at least one is GONE (the systemd-networkd flush), and None when the check
+        is indeterminate — ``ip`` missing, a non-zero read, or no tunnel IP to build the
+        expected set from. None is "no signal": the monitor keeps its last known state
+        and never alerts. Read-only: this never mutates or repairs the rules.
+        """
+        result = await self._shell.run(["ip", "-4", "rule", "show"], timeout=10)
+        if result.returncode != 0:
+            return None
+        rules = result.stdout
+        # Always expect the client-subnet rule; add the proxy (tunnel-IP) rule only
+        # when a tunnel IP resolves — a config without an [Interface] Address installs
+        # no proxy rule, so requiring it there would raise a false "missing".
+        expected = [self._client_subnet]
+        tunnel_ip = read_tunnel_address(self._config_path)
+        if tunnel_ip:
+            expected.append(tunnel_ip)
+        for src in expected:
+            if not _rule_present(rules, src):
+                return False
+        return True
+
+    async def _notify_routes_missing(self) -> None:
+        text = (
+            "🔴 <b>WARP-правила маршрутизации пропали</b>\n"
+            "Туннель жив, но <code>ip rule from &lt;src&gt;</code> отсутствуют — "
+            "клиентский трафик идёт мимо WARP. Правилами владеет systemd "
+            "(<code>warp-routes-reassert.timer</code> переприменяет их) — проверьте "
+            "<code>systemd-networkd</code> и дроп-ин <code>10-keep-foreign-rules.conf</code>."
+        )
+        await self._broadcast_admins(text, "routes-missing")
+
+    async def _notify_routes_restored(self) -> None:
+        text = (
+            "🟢 <b>WARP-правила маршрутизации восстановлены</b>\n"
+            "Source-правила снова на месте — клиентский трафик снова маскируется."
+        )
+        await self._broadcast_admins(text, "routes-restored")
+
     async def _safe_handshake(self) -> int:
         try:
             return await self._interface.latest_handshake()
         except Exception:
             logger.debug("WARP handshake read failed", exc_info=True)
             return 0
+
+
+def _rule_present(rules_output: str, src: str) -> bool:
+    """True when ``ip -4 rule show`` output carries a ``from <src>`` rule.
+
+    Token-based (not substring) so ``172.16.0.2`` never matches ``172.16.0.20`` and a
+    ``/24`` never matches a longer prefix — each rule line is like
+    ``1000:\tfrom 10.0.0.0/24 lookup 51820``, so the src must appear as its own token
+    on a line that also carries ``from``.
+    """
+    for line in rules_output.splitlines():
+        tokens = line.split()
+        if "from" in tokens and src in tokens:
+            return True
+    return False
 
 
 async def _noop_route() -> None:

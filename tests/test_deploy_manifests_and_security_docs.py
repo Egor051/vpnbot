@@ -216,3 +216,77 @@ def test_hysteria_docs_reference_install_config_not_bare_cp() -> None:
         assert not bare_cp.search(text), (
             f"{relative_path} must not instruct a bare cp of the hysteria config"
         )
+
+
+# --------------------------------------------------------------------------- #
+# WARP reassert units + systemd-networkd foreign-rule drop-in (2026-07-24 fix)
+# --------------------------------------------------------------------------- #
+def test_warp_reassert_service_is_oneshot_and_never_tears_down() -> None:
+    """The reassert service runs the ADD-ONLY `reassert` verb and has NO ExecStop.
+    A `del`/ExecStop would drop live clients' routing on every stop — the exact
+    reason this is a separate verb from restarting warp-routes.service."""
+    text = _read("deploy/warp-routes-reassert.service")
+    assert "Type=oneshot" in text
+    assert "ExecStart=/usr/local/sbin/vpn-bot-warp-routes reassert out-warp" in text
+    # No ExecStop directive on any DIRECTIVE line (a comment may explain why a restart
+    # of warp-routes.service would be destructive — matched on real directives only).
+    directives = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    assert not any(ln.startswith("ExecStop") for ln in directives)
+    for ln in directives:
+        if ln.startswith("ExecStart="):
+            assert ln.endswith("reassert out-warp"), f"unexpected ExecStart: {ln!r}"
+            assert " del " not in ln and not ln.endswith(" del")
+    # Ordered AFTER the boot-time warp-routes.service (rides on the same table).
+    assert "After=" in text
+    after_line = next(ln for ln in text.splitlines() if ln.startswith("After="))
+    assert "warp-routes.service" in after_line
+
+
+def test_warp_reassert_timer_fires_every_five_minutes_spread_out() -> None:
+    """5-minute cadence, jittered so it never lines up with the other periodic jobs,
+    and Persistent=false (a missed reassert is worthless; re-assert live state next tick)."""
+    text = _read("deploy/warp-routes-reassert.timer")
+    assert "OnUnitActiveSec=5min" in text
+    assert re.search(r"^AccuracySec=", text, re.MULTILINE), "timer must set AccuracySec"
+    assert re.search(r"^RandomizedDelaySec=", text, re.MULTILINE), "timer must set RandomizedDelaySec"
+    assert "Persistent=false" in text
+    assert "Unit=warp-routes-reassert.service" in text
+    assert "WantedBy=timers.target" in text
+
+
+def test_warp_reassert_units_registered_in_managed_units_list() -> None:
+    """Phase 1 must see both units — they are listed in managed-units.list so the
+    UNIT_SET assembly and the report pick them up (the 15 July gap was units deploy.sh
+    could not see)."""
+    text = _read("deploy/managed-units.list")
+    assert "warp-routes-reassert.service" in text
+    assert "warp-routes-reassert.timer" in text
+
+
+def test_networkd_keep_foreign_rules_dropin_content_is_exact() -> None:
+    """The drop-in must set BOTH foreign-management flags to no; anything else would
+    let systemd-networkd flush WARP's ip rules again (the 2026-07-24 incident)."""
+    text = _read("deploy/networkd/10-keep-foreign-rules.conf")
+    assert "[Network]" in text
+    assert re.search(r"^ManageForeignRoutingPolicyRules=no\s*$", text, re.MULTILINE)
+    assert re.search(r"^ManageForeignRoutes=no\s*$", text, re.MULTILINE)
+    # The dangerous `=yes` value must never appear as an active setting.
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or "=" not in stripped:
+            continue
+        assert not stripped.endswith("=yes"), f"drop-in must not enable foreign management: {line!r}"
+
+
+def test_deploy_sh_checks_networkd_dropin_informationally() -> None:
+    """deploy.sh Phase 1 verifies the drop-in is present AND active via
+    `systemd-analyze cat-config systemd/networkd.conf`, and the check is never fatal."""
+    text = _read("scripts/deploy.sh")
+    assert "networkd_foreign_rules_ok" in text
+    assert "systemd-analyze cat-config systemd/networkd.conf" in text
+    assert "ManageForeignRoutingPolicyRules" in text
+    # It is wired as an informational warn (never a die) in the live Phase 1 path.
+    idx = text.index("networkd_foreign_rules_ok")
+    # A `die` must not be the handler for a failed networkd check.
+    window = text[idx : idx + 1200]
+    assert "die " not in window or "warn " in window

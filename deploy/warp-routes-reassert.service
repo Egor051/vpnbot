@@ -1,0 +1,34 @@
+# WARP source-rule reassert — periodic, idempotent, NON-destructive re-apply.
+#
+# WHY THIS EXISTS
+# On 2026-07-24 an unattended libpam upgrade cascaded restarts into
+# systemd-networkd, which came up with the default
+# ManageForeignRoutingPolicyRules=yes and flushed every `ip rule` it had not
+# created — wiping the WARP source rules (from <client-subnet>, from <tunnel-ip>,
+# the hy2 fwmark rule). The routes in the tunnel table survived (out-warp/awg0 are
+# unmanaged by networkd), so warp-routes.service (oneshot + RemainAfterExit) still
+# read "active" and the bot's monitor kept reporting routes_active=1 for days while
+# AWG clients silently egressed direct. deploy/networkd/10-keep-foreign-rules.conf
+# is the primary fix; this timer is the belt-and-braces re-assertion.
+#
+# WHY A SEPARATE VERB, NOT `systemctl restart warp-routes`
+# warp-routes.service has ExecStop=`vpn-bot-warp-routes del out-warp`, so a restart
+# runs the FULL teardown (del) and briefly REMOVES the client rule + NAT before the
+# ExecStart re-adds them — a multi-second window with no WARP path for LIVE clients.
+# Unacceptable on a five-minute cycle. `reassert` only ADDS what is missing and
+# tears nothing down, so it is safe to run against connected clients repeatedly.
+#
+# There is deliberately NO ExecStop: this unit installs rules idempotently and must
+# never remove them on stop.
+[Unit]
+Description=Reassert WARP source routing-policy rules (idempotent, non-destructive)
+Documentation=https://github.com/Egor051/vpnbot/blob/main/docs/warp.md
+After=network-online.target awg-quick@out-warp.service warp-routes.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=MTPROXY_UNIT=mtproxy
+Environment=WARP_CONFIG=/etc/amnezia/out-warp.conf
+# No ExecStop: reassert is add-only. `del` would drop live clients' routing.
+ExecStart=/usr/local/sbin/vpn-bot-warp-routes reassert out-warp
