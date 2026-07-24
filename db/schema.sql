@@ -81,7 +81,32 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   -- the next bootstrap on created_by, which is validated as non-nullable).
   created_by INTEGER NOT NULL,
   revoked_by INTEGER,
-  deleted_by INTEGER
+  deleted_by INTEGER,
+  -- All-in-one subscription bundle this key belongs to. NULL = standalone key
+  -- (the default and every pre-v32 row). ON DELETE RESTRICT is deliberate: a
+  -- bundle can never be deleted while a child key still points at it — PR-2's
+  -- service must first revoke the backend credentials and clear/delete the
+  -- children, and only then the bundle row. CASCADE would silently drop the
+  -- children and leave orphaned Xray/hysteria credentials behind. Mirrors
+  -- _migrate_v32.
+  bundle_id INTEGER REFERENCES key_bundles(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS key_bundles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+  label TEXT NOT NULL UNIQUE,
+  note TEXT,
+  status TEXT NOT NULL CHECK(status IN ('active','pending_revoke','revoked','pending_delete','delete_failed','deleted')),
+  -- Secret embedded in the subscription sub-URL. Stored in plain text on purpose,
+  -- consistent with how the child keys' vless uuid / hy2 auth already live in this
+  -- table, and because the "Config" button must be able to re-render the sub-URL
+  -- later. UNIQUE so a token maps to exactly one bundle. Mirrors _migrate_v32.
+  token TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  revoked_at TEXT,
+  deleted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS trial_key_requests (
@@ -257,6 +282,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_email_label ON vpn_keys(email_lab
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_public_key ON vpn_keys(public_key) WHERE public_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_short_id ON vpn_keys(json_extract(payload_json, '$.short_id')) WHERE key_type = 'xray' AND json_valid(payload_json) AND json_extract(payload_json, '$.short_id') IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner_type_status ON vpn_keys(owner_user_id, key_type, status);
+CREATE INDEX IF NOT EXISTS idx_key_bundles_user_id ON key_bundles(user_id);
+CREATE INDEX IF NOT EXISTS idx_key_bundles_status ON key_bundles(status);
 CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner ON proxy_accesses(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner_type_status ON proxy_accesses(owner_user_id, access_type, status);
 CREATE INDEX IF NOT EXISTS idx_proxy_accesses_status_type ON proxy_accesses(status, access_type);
@@ -284,5 +311,6 @@ CREATE INDEX IF NOT EXISTS idx_announcement_deliveries_status ON announcement_de
 --   idx_vpn_keys_client_ip_reserved   (UNIQUE, migrations v5/v6 — after AWG client_ip repair)
 --   idx_trial_requests_one_pending    (UNIQUE, migration v18 — after duplicate-pending collapse)
 --   idx_vpn_keys_expires_at           (migration v13 — depends on the expires_at column it adds)
+--   idx_vpn_keys_bundle_id            (migration v32 — depends on the bundle_id column it adds)
 -- tests/test_schema_drift.py asserts this exact set is the ONLY difference
 -- between schema.sql and a fully migrated database.

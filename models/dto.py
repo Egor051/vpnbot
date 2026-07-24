@@ -3,7 +3,16 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
 
-from models.enums import AccessRequestStatus, ProxyAccessStatus, ProxyAccessType, ProxyStatus, UserRole, VpnKeyStatus, VpnKeyType
+from models.enums import (
+    AccessRequestStatus,
+    KeyBundleStatus,
+    ProxyAccessStatus,
+    ProxyAccessType,
+    ProxyStatus,
+    UserRole,
+    VpnKeyStatus,
+    VpnKeyType,
+)
 
 
 def _redacted_repr(obj: object, redacted: frozenset[str]) -> str:
@@ -185,6 +194,29 @@ class VpnKey:
     def __repr__(self) -> str:
         # payload carries AWG private_key/preshared_key — never expose it in repr.
         return _redacted_repr(self, frozenset({"payload"}))
+
+
+@dataclass(frozen=True, slots=True)
+class KeyBundle:
+    """An all-in-one subscription bundle grouping several VPN keys under one
+    sub-URL. ``token`` is the secret embedded in that sub-URL and is stored in
+    plain text (consistent with how the child keys' vless uuid / hy2 auth are
+    stored) so the config view can re-render the URL later."""
+
+    id: int
+    user_id: int
+    label: str
+    note: str | None
+    status: KeyBundleStatus
+    token: str
+    created_at: str
+    updated_at: str
+    revoked_at: str | None
+    deleted_at: str | None
+
+    def __repr__(self) -> str:
+        # token is the secret sub-URL credential — never expose it in repr.
+        return _redacted_repr(self, frozenset({"token"}))
 
 
 @dataclass(frozen=True, slots=True)

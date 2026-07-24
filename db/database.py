@@ -17,7 +17,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 31
+CURRENT_SCHEMA_VERSION = 32
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -315,6 +315,10 @@ class Database:
             await self._migrate_v31()
             await self._set_schema_version(31)
             version = 31
+        if version < 32:
+            await self._migrate_v32()
+            await self._set_schema_version(32)
+            version = 32
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -553,6 +557,7 @@ class Database:
             ("vpn_keys", "created_by", False),
             ("vpn_keys", "revoked_by", True),
             ("vpn_keys", "deleted_by", True),
+            ("key_bundles", "user_id", False),
             ("proxy_accesses", "owner_user_id", False),
             ("proxy_accesses", "created_by", False),
             ("proxy_accesses", "revoked_by", True),
@@ -621,6 +626,18 @@ class Database:
                     "delete_failed",
                     "deleted",
                     "failed",
+                ),
+            ),
+            (
+                "key_bundles",
+                "status",
+                (
+                    "active",
+                    "pending_revoke",
+                    "revoked",
+                    "pending_delete",
+                    "delete_failed",
+                    "deleted",
                 ),
             ),
             ("proxy_entries", "proxy_type", ("socks5", "socks4", "http", "https")),
@@ -1259,6 +1276,57 @@ class Database:
         vpn_cols = await self._table_columns("vpn_keys")
         if "spider_x" not in vpn_cols:
             await self.conn.execute("ALTER TABLE vpn_keys ADD COLUMN spider_x TEXT")
+
+    async def _migrate_v32(self) -> None:
+        # All-in-one subscription: the key_bundles table plus a vpn_keys.bundle_id
+        # link. Pure DB layer — no observable bot behaviour changes until PR-2 wires
+        # a service on top. All statements are idempotent (IF NOT EXISTS + a column
+        # guard) and mirror schema.sql for fresh DBs.
+        #
+        # No table-rebuild is needed here, so none is done: bundle_id is added with a
+        # plain ADD COLUMN. SQLite allows ADD COLUMN with a REFERENCES clause ONLY
+        # when the column's default is NULL, so bundle_id has no DEFAULT at all (its
+        # implicit default is NULL) and every pre-v32 row becomes a standalone key
+        # (bundle_id IS NULL). Foreign-key enforcement stays ON throughout — a plain
+        # ADD COLUMN never re-checks existing rows (they are all NULL) and never
+        # cascades, so there is nothing to toggle off.
+        #
+        # key_bundles must exist BEFORE the ALTER that references it, so it is
+        # created first. ON DELETE RESTRICT on bundle_id is deliberate (see
+        # schema.sql): a bundle cannot be deleted while any child key still points at
+        # it. CASCADE would silently drop the children and orphan their backend
+        # credentials, so PR-2's service must revoke on the backends and clear the
+        # children before deleting a bundle row.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS key_bundles (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+              label TEXT NOT NULL UNIQUE,
+              note TEXT,
+              status TEXT NOT NULL CHECK(status IN ('active','pending_revoke','revoked','pending_delete','delete_failed','deleted')),
+              token TEXT NOT NULL UNIQUE,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              revoked_at TEXT,
+              deleted_at TEXT
+            )
+            """
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_key_bundles_user_id ON key_bundles(user_id)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_key_bundles_status ON key_bundles(status)"
+        )
+        vpn_cols = await self._table_columns("vpn_keys")
+        if "bundle_id" not in vpn_cols:
+            await self.conn.execute(
+                "ALTER TABLE vpn_keys ADD COLUMN bundle_id INTEGER REFERENCES key_bundles(id) ON DELETE RESTRICT"
+            )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vpn_keys_bundle_id ON vpn_keys(bundle_id) WHERE bundle_id IS NOT NULL"
+        )
 
     async def _ensure_spider_x_backfill(self) -> None:
         # Idempotent per-key spiderX backfill, run on EVERY bootstrap (not gated by
