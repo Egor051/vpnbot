@@ -1032,7 +1032,16 @@ def _self_signed_pair(tmp_path: Path) -> tuple[Path, Path]:
 # ── the runner: which sockets actually come up ────────────────────────────────
 
 
-async def _run_sites(harness: _Harness, config: SubscriptionConfig) -> tuple[object, ReadOnlyBundleStore, list[int]]:
+async def _run_sites(
+    harness: _Harness, config: SubscriptionConfig
+) -> tuple[object, ReadOnlyBundleStore, list[tuple[str, int]]]:
+    """Start the real sites and return (host, port) per bound socket.
+
+    Assertions below are written against hosts and ports rather than a socket
+    COUNT on purpose: `host=None` binds a dual-stack machine twice (`0.0.0.0`
+    and `::`) and a v4-only one once, so a count is a property of the runner, not
+    of the endpoint.
+    """
     from aiohttp import web
 
     from subscription_server.__main__ import _start_sites
@@ -1042,8 +1051,17 @@ async def _run_sites(harness: _Harness, config: SubscriptionConfig) -> tuple[obj
     runner = web.AppRunner(build_app(store, config), access_log=None)
     await runner.setup()
     await _start_sites(runner, config)
-    ports = [sock[1] for sock in runner.addresses]
-    return runner, store, ports
+    bound = [(str(address[0]), int(address[1])) for address in runner.addresses]
+    return runner, store, bound
+
+
+def _is_loopback(host: str) -> bool:
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _config(harness: _Harness, tmp_path: Path, **overrides: object) -> SubscriptionConfig:
@@ -1062,14 +1080,13 @@ def _config(harness: _Harness, tmp_path: Path, **overrides: object) -> Subscript
 
 
 async def test_runner_binds_loopback_only_while_tls_is_off(tmp_path: Path) -> None:
-    """Without TLS material the process exposes exactly one socket, on loopback —
-    there is no configuration in which it serves cleartext off the box."""
+    """Without TLS material every socket the process holds is on loopback — there
+    is no configuration in which it serves cleartext off the box."""
     harness = await _seed(tmp_path)
-    runner, store, ports = await _run_sites(harness, _config(harness, tmp_path))
+    runner, store, bound = await _run_sites(harness, _config(harness, tmp_path))
     try:
-        assert len(runner.addresses) == 1  # type: ignore[attr-defined]
-        assert runner.addresses[0][0] == "127.0.0.1"  # type: ignore[attr-defined]
-        assert len(ports) == 1
+        assert bound, "the loopback site must be up"
+        assert all(_is_loopback(host) for host, _ in bound), bound
     finally:
         await runner.cleanup()  # type: ignore[attr-defined]
         await store.close()
@@ -1091,9 +1108,15 @@ async def test_public_listener_terminates_tls_in_process(tmp_path: Path) -> None
         free_port = int(probe.getsockname()[1])
     config = _config(harness, tmp_path, public_port=free_port, tls_cert=cert_path, tls_key=key_path)
 
-    runner, store, _ = await _run_sites(harness, config)
+    runner, store, bound = await _run_sites(harness, config)
     try:
-        assert len(runner.addresses) == 2, "loopback plain site + public TLS site"  # type: ignore[attr-defined]
+        # The public site binds every interface, so a dual-stack runner reports it
+        # twice (0.0.0.0 + ::) and a v4-only one once: assert on what is actually
+        # promised — a loopback plain socket plus a non-loopback TLS socket.
+        assert any(_is_loopback(host) and port != free_port for host, port in bound), bound
+        public = [(host, port) for host, port in bound if port == free_port]
+        assert public, bound
+        assert any(not _is_loopback(host) for host, _ in public), public
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 f"https://127.0.0.1:{free_port}/sub/{harness.token}", ssl=False
@@ -1118,10 +1141,11 @@ async def test_disabled_feature_holds_no_public_socket(tmp_path: Path) -> None:
         free_port = int(probe.getsockname()[1])
     config = _config(harness, tmp_path, public_port=free_port, tls_cert=cert_path, tls_key=key_path)
 
-    runner, store, _ = await _run_sites(harness, config)
+    runner, store, bound = await _run_sites(harness, config)
     try:
-        assert len(runner.addresses) == 1, "only the loopback site may be up"  # type: ignore[attr-defined]
-        assert runner.addresses[0][0] == "127.0.0.1"  # type: ignore[attr-defined]
+        assert bound, "the loopback site must still be up"
+        assert all(_is_loopback(host) for host, _ in bound), bound
+        assert all(port != free_port for _, port in bound), f"public port bound while disabled: {bound}"
     finally:
         await runner.cleanup()  # type: ignore[attr-defined]
         await store.close()
