@@ -329,6 +329,190 @@ def test_routes_add_applies_proxy_routing_before_self_check() -> None:
     assert i_proxy < i_check
 
 
+# ── routes helper: reassert (idempotent, non-destructive re-apply) ────────────
+
+
+def _reassert_section() -> str:
+    """The ``reassert)`` case body, up to the catch-all usage branch."""
+    text = _routes_text()
+    return text[text.index("    reassert)") : text.index("    *)")]
+
+
+def _reassert_code() -> str:
+    """The reassert case body with comment lines stripped, so guards match on real
+    code (a comment that merely NAMES a forbidden call is not a call)."""
+    return "\n".join(
+        ln for ln in _reassert_section().splitlines() if not ln.lstrip().startswith("#")
+    )
+
+
+def test_routes_reassert_verb_exists_and_is_documented() -> None:
+    """The reassert verb exists and is named in the header usage comment."""
+    text = _routes_text()
+    assert "    reassert)" in text
+    # Header documents it as idempotent + non-destructive.
+    assert "reassert" in text[: text.index("set -euo pipefail")]
+    assert "add|del|proxy-add|proxy-del|reassert" in text
+
+
+def test_routes_reassert_never_tears_down_client_routing() -> None:
+    """STATIC GUARD (mirrors the self-check guard): the reassert path must be strictly
+    additive. It runs on a short timer against LIVE clients, so it must NEVER call
+    teardown_client_routing / remove_proxy_routing, NEVER run the destructive
+    self_check, and NEVER delete the client (or proxy) source rule — a false negative
+    there would drop a connected client's routing. It keeps strip_host_bypass (which
+    only removes the host-wide bypass, protecting SSH) and re-adds the rules."""
+    code = _reassert_code()
+    # The destructive teardown paths are absent from the reassert CODE (comments that
+    # merely name them, to explain what we avoid, are fine — matched on code only).
+    assert "teardown_client_routing" not in code
+    assert "remove_proxy_routing" not in code
+    assert "self_check" not in code
+    # No rule DELETION of the client / proxy source rules (strip_host_bypass, which
+    # only strips the host-wide bypass, is a function call — its name, not a `del`).
+    assert "rule del from" not in code
+    assert "ip -4 rule del" not in code
+    # It keeps the SSH-protecting host-bypass strip and re-adds the client rule.
+    assert 'strip_host_bypass "$TABLE"' in code
+    assert 'ip -4 rule add from "$CLIENT_SUBNET" lookup "$TABLE" priority "$CLIENT_RULE_PRIO"' in code
+    assert 'apply_proxy_routing "$TABLE"' in code
+
+
+def test_routes_reassert_exits_quietly_when_warp_absent() -> None:
+    """No auto table (WARP not deployed / interface down) → exit 0 with no mutation.
+    WARP is modular, so its absence is a normal state, not an error the timer spams."""
+    code = _reassert_code()
+    i_table = code.index('TABLE="$(warp_table')
+    i_exit = code.index("exit 0")
+    # The empty-table guard comes first and exits 0 before any rule mutation.
+    assert i_table < i_exit
+    assert 'if [[ -z "$TABLE" ]]; then' in code
+    # No hard error like the `add` branch raises on a missing table.
+    assert "no auto routing table" not in _reassert_section()
+
+
+def test_routes_reassert_report_is_reporting_only_never_fatal() -> None:
+    """reassert_report WARNs on a still-missing rule but never exits non-zero and
+    never mutates — the reporting-only counterpart to the destructive self_check."""
+    text = _routes_text()
+    report = text[text.index("reassert_report() {") : text.index("remove_proxy_routing() {")]
+    assert "WARNING" in report
+    assert "return 0" in report
+    # No exit / no rollback / no mutation inside the reporting check.
+    assert "exit 1" not in report
+    assert "teardown_client_routing" not in report
+    assert "rule add" not in report and "rule del" not in report
+
+
+def test_routes_add_branch_is_untouched_by_reassert() -> None:
+    """The production add branch keeps its load-bearing self-check + rollback
+    (#241/#242); reassert must reuse the building blocks, not weaken add."""
+    text = _routes_text()
+    add_section = text[text.index("    add)") : text.index("    del)")]
+    assert "self_check" in add_section
+    assert "teardown_client_routing" in add_section
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_functional_reassert_restores_wiped_rules_idempotently(tmp_path: Path) -> None:
+    """The incident: systemd-networkd flushed the WARP source rules. reassert must
+    re-deliver the client rule + proxy rule (rc 0), and a second run must add
+    nothing (idempotent) — the whole point of a five-minute timer."""
+    # Start from the fresh post-`awg-quick up` state: host-bypass present, the
+    # client + proxy source rules WIPED.
+    rc, log, stderr = _run_routes(
+        tmp_path, "reassert", initial_rules=_INITIAL_RULES, warp_config=_WARP_CONFIG
+    )
+    assert rc == 0, stderr
+    # Host-bypass stripped, narrow client rule re-added, proxy source rule re-added.
+    assert "ip -4 rule del not fwmark 51820 table 51820" in log
+    assert "ip -4 rule add from 10.0.0.0/24 lookup 51820 priority 1000" in log
+    assert "ip -4 rule add from 172.16.0.2 lookup 51820 priority 999" in log
+    rules_after = (tmp_path / "rules").read_text(encoding="utf-8")
+    assert "from 10.0.0.0/24 lookup 51820" in rules_after
+    assert "from 172.16.0.2 lookup 51820" in rules_after
+
+    # Second run over the now-applied state must ADD nothing.
+    bindir = tmp_path / "bin"
+    proc = subprocess.run(
+        ["bash", str(SCRIPTS / "vpn-bot-warp-routes"), "reassert", "out-warp"],
+        env={
+            **os.environ,
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "CMD_LOG": str(tmp_path / "cmd2.log"),
+            "IP_RULES": str(tmp_path / "rules"),
+            "MOCK_FWMARK": "0xca6c",
+            "MOCK_ENDPOINT": "162.159.195.1",
+            "WARP_CONFIG": str(tmp_path / "out-warp.conf"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    log2 = (tmp_path / "cmd2.log").read_text(encoding="utf-8")
+    assert "rule add" not in log2  # nothing new to add
+    rules_after2 = (tmp_path / "rules").read_text(encoding="utf-8")
+    assert rules_after2.count("from 10.0.0.0/24 lookup 51820") == 1
+    assert rules_after2.count("from 172.16.0.2 lookup 51820") == 1
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_functional_reassert_silent_exit_when_no_interface(tmp_path: Path) -> None:
+    """Interface down (fwmark off) → exit 0, no output, and no ip mutation at all."""
+    rc, log, stderr = _run_routes(
+        tmp_path, "reassert", initial_rules="", fwmark="off", endpoint=""
+    )
+    assert rc == 0, stderr
+    assert stderr.strip() == ""
+    # It queried the table and stopped — no rule/route mutations were attempted.
+    assert "rule add" not in log
+    assert "rule del" not in log
+    assert "route replace" not in log
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_functional_reassert_reports_but_does_not_fail_on_missing_rule(tmp_path: Path) -> None:
+    """If a rule cannot be confirmed after the re-apply, reassert WARNs to stderr but
+    still exits 0 — it must never drop a live client on a false negative."""
+    # A mock `ip` whose `rule add` is a silent no-op: the client rule never appears,
+    # so reassert_report warns, but the exit code stays 0.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "ip").write_text(
+        "#!/bin/bash\n"
+        'printf "ip %s\\n" "$*" >> "$CMD_LOG"\n'
+        # rule show always reports an empty set; every other verb is a no-op.
+        'if [[ "$*" == *"rule show"* ]]; then exit 0; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    (bindir / "awg").write_text(
+        '#!/bin/bash\nif [[ "$3" == "fwmark" ]]; then echo "0xca6c"; fi\nexit 0\n',
+        encoding="utf-8",
+    )
+    for name in ("iptables", "sysctl", "systemctl", "curl"):
+        (bindir / name).write_text('#!/bin/bash\nexit 0\n', encoding="utf-8")
+    for p in bindir.iterdir():
+        p.chmod(0o755)
+    (tmp_path / "out-warp.conf").write_text(_WARP_CONFIG, encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(SCRIPTS / "vpn-bot-warp-routes"), "reassert", "out-warp"],
+        env={
+            **os.environ,
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "CMD_LOG": str(tmp_path / "cmd.log"),
+            "MOCK_FWMARK": "0xca6c",
+            "WARP_CONFIG": str(tmp_path / "out-warp.conf"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "could not confirm the client rule" in proc.stderr
+
+
 # ── routes helper: del is the reverse and is safe ─────────────────────────────
 
 

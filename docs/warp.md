@@ -114,6 +114,46 @@ systemctl enable --now awg-quick@out-warp
 systemctl enable --now warp-routes.service
 ```
 
+### Keep the routing rules alive: reassert timer + networkd drop-in
+
+`warp-routes.service` installs the WARP source rules **once** at boot. Anything that
+later flushes the routing-policy rules leaves the tunnel and its table healthy while
+client traffic silently egresses direct — the tunnel looks fine, so nothing alerts.
+The concrete trigger seen in production (2026-07-24) was **systemd-networkd**: it
+defaults to `ManageForeignRoutingPolicyRules=yes` and, on any (re)start, removes every
+`ip rule` it did not create — including WARP's `from <client-subnet>` /
+`from <tunnel-ip>` rules. Two additive, non-destructive safeguards close that gap.
+
+> **deploy.sh does not auto-install these** (it only installs `vpn-bot.service`
+> itself; every other unit is reported as drift for a conscious `install`). Phase 1
+> *sees* them — both are in `deploy/managed-units.list` and the informational
+> networkd check runs on every deploy — but you apply them by hand:
+
+```bash
+# 1. Stop networkd from flushing WARP's foreign ip rules (primary fix).
+install -o root -g root -m 0644 deploy/networkd/10-keep-foreign-rules.conf \
+    /etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf
+systemctl restart systemd-networkd
+# verify it merged into the effective config:
+systemd-analyze cat-config systemd/networkd.conf | grep -i ManageForeign
+
+# 2. Belt-and-braces: reassert the source rules every 5 minutes. `reassert` is
+#    idempotent and ADD-ONLY (never a teardown), so it is safe against live clients.
+install -o root -g root -m 0644 deploy/warp-routes-reassert.service /etc/systemd/system/warp-routes-reassert.service
+install -o root -g root -m 0644 deploy/warp-routes-reassert.timer   /etc/systemd/system/warp-routes-reassert.timer
+systemctl daemon-reload
+systemctl enable --now warp-routes-reassert.timer
+```
+
+Why a separate `reassert` verb instead of `systemctl restart warp-routes.service`?
+`warp-routes.service` has `ExecStop=… del out-warp`, so a restart runs the full
+teardown and briefly **removes** the client rule + NAT before re-adding them — a
+multi-second window with no WARP path for connected clients. Unacceptable on a
+five-minute cycle. `reassert` only re-delivers what is missing and tears nothing
+down. The bot's health monitor also watches for the source rules directly now: if
+they vanish it reports `routes_active=false` and raises a degraded alert (observer
+mode — it reports, systemd owns the repair via the timer).
+
 ## WARP proxy egress (masking the proxies' outbound IP)
 
 By default WARP diverts only the AmneziaWG **client** subnet (`10.0.0.0/24`). The

@@ -2,7 +2,12 @@
 # vpn-bot-warp-routes — divert the VPN-client subnet out through the Cloudflare
 # WARP AmneziaWG tunnel (out-warp) while the host itself stays on the direct path.
 #
-# Usage: vpn-bot-warp-routes <add|del> <iface>
+# Usage: vpn-bot-warp-routes <add|del|proxy-add|proxy-del|reassert> <iface>
+#
+# `reassert` idempotently re-delivers the WARP source rules (client + proxy) that a
+# foreign process may have flushed — e.g. systemd-networkd starting with the default
+# ManageForeignRoutingPolicyRules=yes. It never tears anything down and never runs a
+# destructive self-check; it is safe to run on a short timer against live clients.
 #
 # This is the production-proven recipe. The tunnel itself is brought up by
 # awg-quick@out-warp with `Table = auto` in /etc/amnezia/out-warp.conf, which:
@@ -237,6 +242,24 @@ apply_proxy_routing() {
     #    MASQUERADE so the marked packets get the tunnel source before masquerade.
     iptables -t nat -C POSTROUTING -o "$IFACE" -m mark --mark "$MTPROTO_MARK" -j SNAT --to-source "$tip" 2>/dev/null \
         || iptables -t nat -I POSTROUTING 1 -o "$IFACE" -m mark --mark "$MTPROTO_MARK" -j SNAT --to-source "$tip"
+}
+
+# Reporting-only presence check for the WARP SOURCE rules, used by `reassert`.
+# Prints a WARNING to stderr for any rule still missing AFTER a reassert but NEVER
+# exits non-zero and NEVER mutates or tears anything down: the reassert path runs
+# on a live system every few minutes, so a false negative must not drop a client's
+# routing. This is the deliberately non-destructive counterpart to self_check().
+reassert_report() {
+    local t="$1" tip rules
+    rules="$(ip -4 rule show 2>/dev/null || true)"
+    if ! printf '%s\n' "$rules" | grep -q "from $CLIENT_SUBNET lookup $t"; then
+        echo "WARNING: reassert could not confirm the client rule (from $CLIENT_SUBNET lookup $t)" >&2
+    fi
+    tip="$(tunnel_ip || true)"
+    if [[ -n "$tip" ]] && ! printf '%s\n' "$rules" | grep -q "from $tip lookup $t"; then
+        echo "WARNING: reassert could not confirm the proxy rule (from $tip lookup $t)" >&2
+    fi
+    return 0
 }
 
 # Reverse of apply_proxy_routing. Safe on a clean system and when no proxy daemon is
@@ -500,6 +523,44 @@ case "$ACTION" in
         # Remove ONLY the local-proxy egress rules; leaves host/client routing intact.
         remove_proxy_routing "$(warp_table || true)"
         ;;
+    reassert)
+        # Idempotently RE-DELIVER the WARP source rules a foreign process may have
+        # wiped — the real incident being systemd-networkd starting with the default
+        # ManageForeignRoutingPolicyRules=yes and flushing every `ip rule` it did not
+        # create (the client rule, the proxy rule, the hy2 fwmark rule). Meant to run
+        # on a short timer against a LIVE system, so it is strictly additive:
+        #   * NEVER tears down client routing (no teardown_client_routing), and
+        #   * NEVER runs a destructive self-check/rollback — only reassert_report,
+        #     which WARNS on a still-missing rule but never exits non-zero.
+        # Absence of WARP (no out-warp / no auto table) is a NORMAL, modular state:
+        # exit 0 quietly so the timer does not spam a host that never enabled WARP.
+        #
+        # The production `add` branch (its self-check + rollback are load-bearing,
+        # #241/#242) is deliberately untouched: `reassert` reuses only the idempotent
+        # building blocks, never `add`'s verification path.
+        TABLE="$(warp_table || true)"
+        if [[ -z "$TABLE" ]]; then
+            exit 0
+        fi
+
+        # Re-strip the awg-quick host-bypass so the host (SSH/bot/apt) stays on the
+        # direct path. Safe and DESIRABLE to re-apply: if networkd's flush + an
+        # awg-quick re-up left the box-wide bypass in place, this removes it again.
+        strip_host_bypass "$TABLE"
+
+        # Narrow client rule: only the AWG client subnet uses the tunnel table.
+        ip -4 rule show | grep -q "from $CLIENT_SUBNET lookup $TABLE" \
+            || ip -4 rule add from "$CLIENT_SUBNET" lookup "$TABLE" priority "$CLIENT_RULE_PRIO"
+
+        # Local-proxy egress rules (source-bind `from <tunnel-ip>` + MTProto). Fully
+        # idempotent and a safe no-op when no tunnel IP / proxy daemon is present.
+        apply_proxy_routing "$TABLE"
+
+        # Reporting-only: warn on anything still missing, never fail (see the function).
+        reassert_report "$TABLE"
+        ;;
     *)
-        echo "Usage: $0 {add|del|proxy-add|proxy-del} <iface>" >&2; exit 1 ;;
+        echo "Usage: $0 {add|del|proxy-add|proxy-del} <iface>" >&2
+        echo "       (also: reassert — idempotent, non-destructive re-apply of the WARP source rules)" >&2
+        exit 1 ;;
 esac

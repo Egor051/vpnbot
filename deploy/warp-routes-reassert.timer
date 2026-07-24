@@ -1,0 +1,25 @@
+# Fire warp-routes-reassert.service every 5 minutes to re-deliver any WARP source
+# rule a foreign process (systemd-networkd, a manual `ip rule flush`) may have
+# wiped between deploys. The service verb is idempotent and non-destructive, so a
+# five-minute cadence is safe against live clients.
+#
+# AccuracySec + RandomizedDelaySec spread the firing so it does not line up with
+# the other periodic jobs (ip2asn refresh, the deploy carrier, backups) and never
+# stampedes the box on the same tick. Persistent=false: this is a "keep the current
+# state correct" job, not a catch-up one — a reassert missed while the box was off
+# is worthless (the next tick re-asserts against live state); running a backlog on
+# boot would only add noise.
+[Unit]
+Description=Periodic reassert of WARP source routing-policy rules
+Documentation=https://github.com/Egor051/vpnbot/blob/main/docs/warp.md
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+RandomizedDelaySec=45s
+Persistent=false
+Unit=warp-routes-reassert.service
+
+[Install]
+WantedBy=timers.target

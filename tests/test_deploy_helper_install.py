@@ -476,3 +476,56 @@ def test_install_hy2_mark_reapply_failure_routes_through_rollback(tmp_path: Path
     )
     assert proc.returncode == 42, proc.stdout + proc.stderr
     assert "ROLLBACK_CALLED" in proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Behavioural: networkd_foreign_rules_ok (informational Phase 1 guard)
+# --------------------------------------------------------------------------- #
+def _run_networkd_check(tmp_path: Path, *, dropin_present: bool, analyze_value: str) -> subprocess.CompletedProcess[str]:
+    """Source deploy.sh (selftest seam) and call networkd_foreign_rules_ok under a
+    stubbed `systemd-analyze` that prints a merged networkd.conf carrying the given
+    ManageForeignRoutingPolicyRules value."""
+    stub_dir = tmp_path / "stub"
+    stub_dir.mkdir()
+    _make_stub(stub_dir / "systemd-analyze", (
+        'if [[ "$1" == "cat-config" ]]; then\n'
+        '  printf "[Network]\\nManageForeignRoutingPolicyRules=%s\\n" '
+        f'"{analyze_value}"\n'
+        'fi\n'
+        'exit 0\n'
+    ))
+    dst = tmp_path / "10-keep-foreign-rules.conf"
+    if dropin_present:
+        dst.write_text("[Network]\nManageForeignRoutingPolicyRules=no\n", encoding="utf-8")
+    driver = tmp_path / "driver.sh"
+    driver.write_text(
+        "set -uo pipefail\n"
+        "export DEPLOY_SELFTEST=1\n"
+        f'export PATH="{stub_dir}:$PATH"\n'
+        f'source "{DEPLOY_SH}"\n'
+        'VENV=/nonexistent; VENV_PREV=/nonexistent; WT=""; STAGE=""\n'
+        f'NETWORKD_DROPIN_DST="{dst}"\n'
+        # Sourcing deploy.sh re-enables `set -e`, so capture rc in a set -e-safe form.
+        'networkd_foreign_rules_ok && rc=0 || rc=$?; echo "RC=$rc"\n',
+        encoding="utf-8",
+    )
+    return subprocess.run(["bash", str(driver)], cwd=str(tmp_path), capture_output=True, text=True)
+
+
+def test_networkd_check_ok_when_present_and_active(tmp_path: Path) -> None:
+    proc = _run_networkd_check(tmp_path, dropin_present=True, analyze_value="no")
+    assert "RC=0" in proc.stdout
+    assert "present and ACTIVE" in proc.stdout
+
+
+def test_networkd_check_flags_active_yes_as_not_ok(tmp_path: Path) -> None:
+    """The drop-in file exists but the effective config still says =yes (shadowed /
+    mis-ordered): the merged `systemd-analyze cat-config` view catches it."""
+    proc = _run_networkd_check(tmp_path, dropin_present=True, analyze_value="yes")
+    assert "RC=1" in proc.stdout
+
+
+def test_networkd_check_flags_absent_dropin(tmp_path: Path) -> None:
+    proc = _run_networkd_check(tmp_path, dropin_present=False, analyze_value="yes")
+    assert "RC=1" in proc.stdout
+    assert "absent" in proc.stdout

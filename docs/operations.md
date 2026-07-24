@@ -295,6 +295,38 @@ systemctl enable --now vpn-bot-ip2asn.timer
 systemctl list-timers vpn-bot-ip2asn.timer   # confirm the next run
 ```
 
+## WARP routing-rule guard (reassert timer + networkd drop-in)
+
+`warp-routes.service` installs WARP's `ip rule` source rules once at boot. If a
+foreign process flushes them later, the tunnel and its table stay healthy while
+client traffic silently egresses direct. The 2026-07-24 incident was
+**systemd-networkd**, which defaults to `ManageForeignRoutingPolicyRules=yes` and
+removes every `ip rule` it did not create on any restart (an unattended `libpam`
+upgrade cascaded that restart). Two additive safeguards ship in the repo; **deploy.sh
+does not auto-install them** (it installs only `vpn-bot.service`) — Phase 1 reports
+them and the informational networkd check runs each deploy, but you apply them by
+hand. Full rationale and the exact commands are in
+[`../docs/warp.md`](warp.md#keep-the-routing-rules-alive-reassert-timer--networkd-drop-in):
+
+```bash
+# 1. networkd drop-in (primary fix): stop networkd flushing WARP's foreign ip rules.
+install -o root -g root -m 0644 /opt/vpn-service/deploy/networkd/10-keep-foreign-rules.conf \
+    /etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf
+systemctl restart systemd-networkd
+systemd-analyze cat-config systemd/networkd.conf | grep -i ManageForeign  # verify
+
+# 2. reassert timer (belt-and-braces): idempotent, add-only re-apply every 5 minutes.
+install -m 0644 /opt/vpn-service/deploy/warp-routes-reassert.service /etc/systemd/system/
+install -m 0644 /opt/vpn-service/deploy/warp-routes-reassert.timer   /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now warp-routes-reassert.timer
+systemctl list-timers warp-routes-reassert.timer   # confirm the next run
+```
+
+A restart of `warp-routes.service` is **not** a substitute: its `ExecStop` runs
+`vpn-bot-warp-routes del`, briefly dropping live clients' routing. The `reassert`
+verb only re-delivers missing rules and never tears anything down.
+
 `update-ip2asn.sh` downloads to a temp file, validates it (≥100k rows, first/last row parse), and only then atomically renames it into place — any failure leaves the existing database untouched. The cache picks up the new file automatically (it watches the file's mtime/size), so no bot restart is needed.
 
 ## Backup

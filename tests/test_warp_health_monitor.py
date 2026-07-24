@@ -669,3 +669,229 @@ async def test_degraded_clears_after_recovery() -> None:
     assert rec.degraded_losses  # raised at some point
     assert rec.degraded_cleared >= 1
     assert monitor.degraded is False
+
+
+# ── source-rule detector (the systemd-networkd wipe): report-only, never repair ──
+
+
+class _RulesRecorder(_Recorder):
+    """Recorder that also drives the source-rule checker and its alerts."""
+
+    def __init__(self, ping_results: list[bool], rule_results: list[bool | None]) -> None:
+        super().__init__(ping_results)
+        self._rule_results: Iterator[bool | None] = iter(rule_results)
+        self.routes_missing_calls = 0
+        self.routes_restored_calls = 0
+
+    async def check_source_rules(self) -> bool | None:
+        return next(self._rule_results)
+
+    async def on_routes_missing(self) -> None:
+        self.routes_missing_calls += 1
+
+    async def on_routes_restored(self) -> None:
+        self.routes_restored_calls += 1
+
+
+def _rules_monitor(
+    rec: _RulesRecorder,
+    *,
+    observer_mode: bool = True,
+    clk: _Clock | None = None,
+) -> WarpHealthMonitor:
+    # Big windows so the tunnel-up latch never interferes; the ping always succeeds
+    # here so we isolate the source-rule signal from the up/down latch.
+    return WarpHealthMonitor(
+        ping=rec.ping,
+        activate_routes=rec.activate,
+        deactivate_routes=rec.deactivate,
+        on_update=rec.on_update,
+        check_source_rules=rec.check_source_rules,
+        on_routes_missing=rec.on_routes_missing,
+        on_routes_restored=rec.on_routes_restored,
+        fail_window=10_000,
+        recover_window=10_000,
+        initial_routes_active=True,
+        observer_mode=observer_mode,
+        clock=clk if clk is not None else _Clock(),
+    )
+
+
+async def test_missing_source_rules_report_inactive_and_degraded() -> None:
+    """Tunnel healthy but the `ip rule from <src>` rules are GONE → the snapshot must
+    report routes_active=False and degraded=True, and fire the missing alert once."""
+    rec = _RulesRecorder(ping_results=[True], rule_results=[False])
+    monitor = _rules_monitor(rec)
+    snap = await monitor.check_once()
+    assert snap.tunnel_up is True
+    assert snap.routes_active is False
+    assert snap.degraded is True
+    assert rec.routes_missing_calls == 1
+
+
+async def test_present_source_rules_keep_routes_active() -> None:
+    """Rules present → routes_active stays True and no alert fires."""
+    rec = _RulesRecorder(ping_results=[True], rule_results=[True])
+    monitor = _rules_monitor(rec)
+    snap = await monitor.check_once()
+    assert snap.routes_active is True
+    assert snap.degraded is False
+    assert rec.routes_missing_calls == 0
+
+
+async def test_observer_mode_missing_rules_never_mutates_routes() -> None:
+    """The key incident guard: even with the rules gone, the observer monitor must
+    NOT call activate/deactivate — the routing rules are owned by systemd."""
+    rec = _RulesRecorder(ping_results=[True, True], rule_results=[False, False])
+    monitor = _rules_monitor(rec, observer_mode=True)
+    await monitor.check_once()
+    await monitor.check_once()
+    assert rec.activations == 0
+    assert rec.deactivations == 0
+    # Anti-spam: the missing alert fired exactly once across the sustained absence.
+    assert rec.routes_missing_calls == 1
+
+
+async def test_legacy_mode_missing_rules_also_never_repairs() -> None:
+    """Even in legacy mode the source-rule signal is report-only (the monitor is not
+    a repairing agent for it): no activate/deactivate is triggered by missing rules."""
+    rec = _RulesRecorder(ping_results=[True], rule_results=[False])
+    monitor = _rules_monitor(rec, observer_mode=False)
+    await monitor.check_once()
+    assert rec.activations == 0
+    assert rec.deactivations == 0
+    assert rec.routes_missing_calls == 1
+
+
+async def test_source_rules_restored_fires_restored_alert() -> None:
+    """Missing → restored fires the restored alert once and clears the degraded flag."""
+    rec = _RulesRecorder(ping_results=[True, True, True], rule_results=[False, True, True])
+    monitor = _rules_monitor(rec)
+    s_missing = await monitor.check_once()
+    assert s_missing.routes_active is False and s_missing.degraded is True
+    s_back = await monitor.check_once()
+    assert s_back.routes_active is True and s_back.degraded is False
+    await monitor.check_once()  # still present → no duplicate restored alert
+    assert rec.routes_missing_calls == 1
+    assert rec.routes_restored_calls == 1
+
+
+async def test_indeterminate_source_rule_check_keeps_last_state_and_is_silent() -> None:
+    """A None result (cannot read `ip rule` / WARP absent) must not alert and must
+    keep the last known state — no false 'rules missing' from a transient read error."""
+    rec = _RulesRecorder(ping_results=[True, True], rule_results=[True, None])
+    monitor = _rules_monitor(rec)
+    s1 = await monitor.check_once()
+    assert s1.routes_active is True
+    s2 = await monitor.check_once()  # None → keep last (present)
+    assert s2.routes_active is True
+    assert rec.routes_missing_calls == 0
+    assert rec.routes_restored_calls == 0
+
+
+async def test_no_source_rule_checker_leaves_behaviour_unchanged() -> None:
+    """With no checker wired the feature is off: routes_active tracks the latch as
+    before and no missing/restored machinery runs (backward compatibility)."""
+    clk = _Clock()
+    rec = _Recorder([True, True])
+    monitor = _monitor(rec, observer_mode=True, clock=clk)
+    snap = await _check_at(monitor, clk, 0)
+    assert snap.routes_active is True
+    assert snap.degraded is False
+
+
+# ── WarpManager._rule_present / _check_source_rules ───────────────────────────
+
+from warp.manager import _rule_present  # noqa: E402
+
+
+def test_rule_present_matches_whole_token_not_substring() -> None:
+    rules = (
+        "0:\tfrom all lookup local\n"
+        "999:\tfrom 172.16.0.2 lookup 51820\n"
+        "1000:\tfrom 10.0.0.0/24 lookup 51820\n"
+        "32766:\tfrom all lookup main\n"
+    )
+    assert _rule_present(rules, "10.0.0.0/24") is True
+    assert _rule_present(rules, "172.16.0.2") is True
+    # A longer address that merely SHARES a prefix must not match (token, not substring).
+    assert _rule_present(rules, "172.16.0.20") is False
+    assert _rule_present(rules, "10.0.0.0/16") is False
+    # An empty rule set (the networkd wipe) matches nothing.
+    assert _rule_present("", "10.0.0.0/24") is False
+
+
+def _rules_check_manager(*, ip_rc: int, ip_stdout: str, config_text: str | None) -> WarpManager:
+    from pathlib import Path
+
+    manager = object.__new__(WarpManager)
+    manager._shell = AsyncMock()
+    manager._shell.run.return_value = ShellResult(("ip",), ip_rc, ip_stdout, "")
+    manager._client_subnet = "10.0.0.0/24"
+    if config_text is None:
+        manager._config_path = Path("/nonexistent/out-warp.conf")
+    else:
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False)
+        tmp.write(config_text)
+        tmp.close()
+        manager._config_path = Path(tmp.name)
+    return manager
+
+
+_WARP_CONF = "[Interface]\nAddress = 172.16.0.2/32\nTable = auto\n"
+
+
+async def test_check_source_rules_true_when_both_rules_present() -> None:
+    rules = (
+        "999:\tfrom 172.16.0.2 lookup 51820\n"
+        "1000:\tfrom 10.0.0.0/24 lookup 51820\n"
+    )
+    manager = _rules_check_manager(ip_rc=0, ip_stdout=rules, config_text=_WARP_CONF)
+    assert await manager._check_source_rules() is True
+
+
+async def test_check_source_rules_false_when_client_rule_missing() -> None:
+    # Only the proxy rule survived; the client rule was wiped → routes not active.
+    rules = "999:\tfrom 172.16.0.2 lookup 51820\n"
+    manager = _rules_check_manager(ip_rc=0, ip_stdout=rules, config_text=_WARP_CONF)
+    assert await manager._check_source_rules() is False
+
+
+async def test_check_source_rules_false_when_all_wiped() -> None:
+    rules = "0:\tfrom all lookup local\n32766:\tfrom all lookup main\n"
+    manager = _rules_check_manager(ip_rc=0, ip_stdout=rules, config_text=_WARP_CONF)
+    assert await manager._check_source_rules() is False
+
+
+async def test_check_source_rules_none_when_ip_read_fails() -> None:
+    """A non-zero `ip rule show` is indeterminate (no signal), never a false 'missing'."""
+    manager = _rules_check_manager(ip_rc=1, ip_stdout="", config_text=_WARP_CONF)
+    assert await manager._check_source_rules() is None
+
+
+async def test_check_source_rules_only_client_rule_when_no_tunnel_ip() -> None:
+    """No resolvable tunnel IP → only the client rule is required (no false 'missing'
+    for a proxy rule that was never installed)."""
+    rules = "1000:\tfrom 10.0.0.0/24 lookup 51820\n"
+    manager = _rules_check_manager(ip_rc=0, ip_stdout=rules, config_text=None)
+    assert await manager._check_source_rules() is True
+
+
+async def test_check_source_rules_is_read_only() -> None:
+    """The check must only run a read-only `ip -4 rule show` — never a mutation."""
+    manager = _rules_check_manager(ip_rc=0, ip_stdout="from 10.0.0.0/24 lookup 51820\n", config_text=None)
+    await manager._check_source_rules()
+    args = manager._shell.run.call_args.args[0]
+    assert args == ["ip", "-4", "rule", "show"]
+
+
+async def test_notify_routes_missing_and_restored_broadcast() -> None:
+    manager = _make_manager(frozenset([7]))
+    manager.bot = AsyncMock()
+    await manager._notify_routes_missing()
+    await manager._notify_routes_restored()
+    assert manager.bot.send_message.call_count == 2
+    missing_text = manager.bot.send_message.call_args_list[0].args[1]
+    assert "пропали" in missing_text or "warp-routes-reassert" in missing_text

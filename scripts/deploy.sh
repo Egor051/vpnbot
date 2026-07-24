@@ -149,6 +149,13 @@ read -r -a WARP_SRCS <<< "${WARP_SRCS:-10.0.0.0/24 172.16.0.2}"
 # (per each unit's After=/Requires=, NOT alphabetical). Host-verify the names.
 WARP_ONESHOTS=(warp-routes.service vpn-bot-warp-split.service vpnbot-hy2-warp-mark.service warp-failsafe.service)
 
+# systemd-networkd drop-in that keeps networkd from flushing the WARP `ip rule`s it
+# did not create (ManageForeignRoutingPolicyRules/Routes=no). Tracked at
+# deploy/networkd/10-keep-foreign-rules.conf; the Phase 1 check below is
+# informational (never fatal) — WARP is modular, so its absence is not an error.
+NETWORKD_DROPIN_SRC="${NETWORKD_DROPIN_SRC:-deploy/networkd/10-keep-foreign-rules.conf}"
+NETWORKD_DROPIN_DST="${NETWORKD_DROPIN_DST:-/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf}"
+
 # Out-of-repo privileged helpers: tracked SOURCE lives in the checkout, the
 # INSTALLED copy lives under /usr/local/sbin. `git reset --hard origin/main`
 # advances the source but NEVER the installed copy, so a fixed helper would keep
@@ -668,6 +675,35 @@ warp_dataplane_ok() {
 }
 
 # --------------------------------------------------------------------------- #
+# systemd-networkd foreign-rule guard (informational Phase 1 check)
+# --------------------------------------------------------------------------- #
+# Reports whether the drop-in that stops systemd-networkd from flushing WARP's
+# `ip rule`s is BOTH present on disk AND active in the effective networkd config.
+# "Active" is read from `systemd-analyze cat-config systemd/networkd.conf`, which
+# renders the merged result of networkd.conf + every drop-in — so a shadowed or
+# mis-ordered drop-in is caught, not just a missing file. Never fatal: WARP is
+# modular and a host without networkd (or without WARP) legitimately lacks this.
+# Echoes one status phrase and returns 0 (present+active) / 1 (otherwise).
+networkd_foreign_rules_ok() {
+  local merged file_state="absent" active="no"
+  [[ -f "$NETWORKD_DROPIN_DST" ]] && file_state="present"
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    # grep reads to EOF (output discarded): an early match must not SIGPIPE
+    # systemd-analyze under pipefail and mis-report an active setting as absent.
+    merged="$(systemd-analyze cat-config systemd/networkd.conf 2>/dev/null || true)"
+    if printf '%s\n' "$merged" | grep -iE '^[[:space:]]*ManageForeignRoutingPolicyRules[[:space:]]*=[[:space:]]*no' >/dev/null; then
+      active="yes"
+    fi
+  else
+    echo "drop-in ${file_state}; effective state UNKNOWN (systemd-analyze not found)"; return 1
+  fi
+  if [[ "$file_state" == "present" && "$active" == "yes" ]]; then
+    echo "drop-in present and ACTIVE (ManageForeignRoutingPolicyRules=no in effective networkd.conf)"; return 0
+  fi
+  echo "drop-in ${file_state}; ManageForeignRoutingPolicyRules=no active: ${active}"; return 1
+}
+
+# --------------------------------------------------------------------------- #
 # Rollback — fault-tolerant, data-plane-aware, always reports
 # --------------------------------------------------------------------------- #
 rollback() {
@@ -1137,6 +1173,18 @@ if [[ ${#helper_drift[@]} -gt 0 ]]; then
   done
 fi
 
+# systemd-networkd foreign-rule guard (informational, never fatal). Keeps the WARP
+# `ip rule`s alive across a networkd (re)start; if it is missing/inactive we only
+# WARN with the one-line install command — WARP is modular, so this is never a gate.
+nwd_live_msg="$(networkd_foreign_rules_ok)" && nwd_live_rc=0 || nwd_live_rc=$?
+if (( nwd_live_rc == 0 )); then
+  log "systemd-networkd foreign-rule guard: ${nwd_live_msg}"
+else
+  warn "systemd-networkd foreign-rule guard: ${nwd_live_msg}"
+  warn "  a networkd restart could flush WARP's ip rules (2026-07-24 incident); install:"
+  warn "  install -o root -g root -m 0644 ${NETWORKD_DROPIN_SRC} ${NETWORKD_DROPIN_DST} && systemctl restart systemd-networkd"
+fi
+
 # UNIT_SET assembly + classification + pre-state snapshot (see assemble_unit_set).
 assemble_unit_set
 if [[ ${#skipped[@]} -gt 0 ]]; then
@@ -1334,6 +1382,24 @@ phase1_report() {
   else
     printf '    rollback WARP check : NOT VERIFIED (%s)\n' "$warp_msg"
     printf '                          if a rollback restarts AWG, WARP may need manual reapply\n'
+  fi
+
+  # --- systemd-networkd foreign-rule guard (informational, never fatal) ---
+  # If networkd is ever (re)started with ManageForeignRoutingPolicyRules=yes it
+  # flushes the WARP `ip rule`s it did not create (the 2026-07-24 incident). The
+  # tracked drop-in deploy/networkd/10-keep-foreign-rules.conf prevents that; this
+  # reports whether it is installed AND active in the effective networkd config.
+  printf '\n  --- systemd-networkd foreign-rule guard (keeps WARP ip rules alive) ---\n'
+  printf '    tracked drop-in : %s\n' "$NETWORKD_DROPIN_SRC"
+  printf '    host drop-in    : %s\n' "$NETWORKD_DROPIN_DST"
+  local nwd_msg nwd_rc
+  nwd_msg="$(networkd_foreign_rules_ok)" && nwd_rc=0 || nwd_rc=$?
+  if (( nwd_rc == 0 )); then
+    printf '    status          : OK (%s)\n' "$nwd_msg"
+  else
+    printf '    status          : INFO (%s)\n' "$nwd_msg"
+    printf '                      install: install -o root -g root -m 0644 %s %s && systemctl restart systemd-networkd\n' \
+      "$NETWORKD_DROPIN_SRC" "$NETWORKD_DROPIN_DST"
   fi
 
   # --- Post-deploy log scan visibility (bot.log is the PRIMARY source) ---

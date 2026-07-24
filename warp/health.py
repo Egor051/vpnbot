@@ -27,6 +27,16 @@ failing) never trips the down latch, so this raises an observability-only alert
 when the in-window loss ratio is high. It never touches routing, and a floor on
 the sample count means a single isolated failure can never raise it.
 
+A separate **source-rule** detector (wired via ``check_source_rules``) catches the
+opposite blind spot: the tunnel and its routing table stay perfectly healthy, yet
+the ``ip rule from <src>`` policy rules that steer client traffic into the tunnel
+have been flushed by a foreign process (systemd-networkd starting with the default
+``ManageForeignRoutingPolicyRules=yes`` — the 2026-07-24 incident). When the rules
+are gone the snapshot reports ``routes_active=False`` + ``degraded`` and fires the
+missing/restored alerts, but — like every other signal here — it NEVER repairs the
+routing: the rules are owned by systemd (``warp-routes-reassert.timer`` reasserts
+them), so the monitor only reports.
+
 The logic is self-contained and free of I/O details so it can be unit-tested with
 injected callables.
 """
@@ -124,6 +134,9 @@ class WarpHealthMonitor:
         on_tunnel_recovered: Callable[[], Awaitable[None]] | None = None,
         on_degraded: Callable[[float], Awaitable[None]] | None = None,
         on_degraded_cleared: Callable[[], Awaitable[None]] | None = None,
+        check_source_rules: Callable[[], Awaitable[bool | None]] | None = None,
+        on_routes_missing: Callable[[], Awaitable[None]] | None = None,
+        on_routes_restored: Callable[[], Awaitable[None]] | None = None,
         interval: int | None = None,
         fast_interval: int | None = None,
         fail_window: float | None = None,
@@ -141,6 +154,15 @@ class WarpHealthMonitor:
         self._on_tunnel_recovered = on_tunnel_recovered
         self._on_degraded = on_degraded
         self._on_degraded_cleared = on_degraded_cleared
+        # Source-rule presence checker (the systemd-networkd-wipe detector). Returns
+        # True when the expected `ip rule from <src>` policy rules are installed,
+        # False when they are GONE, and None when it cannot tell (command unreadable /
+        # WARP not deployed) — None is treated as "no signal": never alerts, keeps the
+        # last known state. The monitor NEVER repairs on this signal (observer or not);
+        # it only reports, because the routing rules are owned by systemd.
+        self._check_source_rules = check_source_rules
+        self._on_routes_missing = on_routes_missing
+        self._on_routes_restored = on_routes_restored
         self._interval = self.INTERVAL if interval is None else interval
         self._fast_interval = self.FAST_INTERVAL if fast_interval is None else fast_interval
         self._fail_window = self.FAIL_WINDOW if fail_window is None else fail_window
@@ -176,6 +198,11 @@ class WarpHealthMonitor:
         # observability-level degraded detector (never for the route decision).
         self._samples: deque[tuple[float, bool]] = deque()
         self._degraded = False
+        # Latch for the source-rule presence signal, so the missing/restored alerts
+        # fire exactly once per transition (anti-spam). Starts True (assume installed
+        # until a determinate check says otherwise); an indeterminate (None) check
+        # leaves it unchanged.
+        self._source_rules_present = True
         self._running = False
         self._task: asyncio.Task[None] | None = None
 
@@ -213,15 +240,55 @@ class WarpHealthMonitor:
             if self._healthy and (now - self._fail_since) >= self._fail_window:
                 await self._mark_down(now - self._fail_since)
         await self._evaluate_degraded(now, ok)
+        rules_present = await self._evaluate_source_rules()
+        # The source rules being gone means client traffic is NOT masked even though
+        # the tunnel/table may look healthy — report routes inactive and degraded, but
+        # never touch routing (systemd owns it; a false negative must not flap it).
+        routes_active = self._routes_active and rules_present
         snapshot = HealthSnapshot(
             tunnel_up=ok,
-            routes_active=self._routes_active,
+            routes_active=routes_active,
             fail_streak=self._fail_streak,
             success_streak=self._success_streak,
-            degraded=self._degraded,
+            degraded=self._degraded or not rules_present,
         )
         await self._on_update(snapshot)
         return snapshot
+
+    async def _evaluate_source_rules(self) -> bool:
+        """Check the WARP source rules and fire the missing/restored alerts on a flip.
+
+        Returns the effective "rules present" flag used for the snapshot. With no
+        checker wired the feature is off and this returns True (behaviour unchanged).
+        A None result from the checker is indeterminate (cannot read / WARP absent):
+        no alert, keep the last latched value. This NEVER activates/deactivates routes
+        — the monitor stays a pure observer for the routing rules in every mode.
+        """
+        if self._check_source_rules is None:
+            return True
+        present = await self._check_source_rules()
+        if present is None:
+            return self._source_rules_present
+        if present:
+            if not self._source_rules_present:
+                self._source_rules_present = True
+                logger.info("WARP source rules restored (policy rules present again)")
+                if self._on_routes_restored is not None:
+                    with suppress(Exception):
+                        await self._on_routes_restored()
+            return True
+        # present is False: the WARP `ip rule` policy rules are missing.
+        if self._source_rules_present:
+            self._source_rules_present = False
+            logger.warning(
+                "WARP source rules MISSING: the `ip rule from <src>` policy rules are gone "
+                "while the tunnel/table look healthy — client traffic is unmasked. Routes are "
+                "owned by systemd (warp-routes-reassert.timer reasserts them); alerting only."
+            )
+            if self._on_routes_missing is not None:
+                with suppress(Exception):
+                    await self._on_routes_missing()
+        return False
 
     async def _evaluate_degraded(self, now: float, ok: bool) -> None:
         """Update the sliding-window degraded flag (observability only, never routes).

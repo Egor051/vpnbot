@@ -32,5 +32,7 @@ awg-quick@awg0.service          # AWG server interface (template instance)
 awg-quick@out-warp.service      # WARP egress interface (template instance)
 vpnbot-hy2-warp-mark.service    # Hysteria2 -> WARP fwmark tagging
 warp-routes.service             # WARP policy routes (also shipped as deploy/*.service)
+warp-routes-reassert.service    # periodic idempotent reassert of WARP source rules (timer-driven; also shipped as deploy/*.service)
+warp-routes-reassert.timer      # 5-min timer driving warp-routes-reassert.service
 warp-failsafe.service           # WARP kill-switch (also shipped as deploy/*.service)
 vpn-bot-warp-split.service      # WARP split-tunnel state (also shipped as deploy/*.service)
