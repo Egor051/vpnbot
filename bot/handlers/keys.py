@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import suppress
 from typing import Any
 
@@ -20,10 +21,20 @@ from bot.formatters import (
     xhttp_profile_prompt,
     xray_config_text,
 )
+from bot.bundles import (
+    BUNDLE_KEY_TYPE,
+    bundle_create_confirm_text,
+    bundle_created_text,
+    bundle_note_confirm_text,
+    bundles_section_text,
+    require_subscription_ui,
+    subscription_ui_enabled,
+)
 from bot.container import Services
 from bot.fsm.states import CreateKeyStates, EditFpStates, EditNoteStates, TrialRequestStates
 from bot.handlers.common import InvalidCallbackData, answer_callback_error, answer_message_error, parse_int_callback, profile_from_tg
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
+from bot.keyboards.key_bundles import bundle_actions_keyboard
 from bot.keyboards.keys import (
     VALID_FINGERPRINTS,
     after_key_deleted_keyboard,
@@ -52,12 +63,20 @@ from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
 from i18n import t
 from models.access import is_blocked_user
+from models.dto import KeyBundle, TelegramUserProfile
 from models.enums import AuditEntityType, VpnKeyType
-from services.errors import AccessDenied, NotFound
+from services.errors import AccessDenied, InvalidOperation, NotFound
+from services.key_bundles import KeyBundleCreateResult
 from services.notes import MAX_NOTE_LENGTH
 
+logger = logging.getLogger(__name__)
 router = Router()
 KEYS_PAGE_SIZE = 5
+# All-in-one bundles are shown as one extra group on the FIRST page of «My keys»,
+# capped so a long bundle list cannot push the key groups out of a Telegram
+# message. One bundle already covers every protocol, so more than a handful is a
+# pathological case; the overflow is stated in the text rather than hidden.
+BUNDLES_SECTION_LIMIT = 5
 
 
 @router.callback_query(F.data.regexp(r"^keys:list(?::\d+)?$"))
@@ -76,11 +95,17 @@ async def list_keys(callback: CallbackQuery, services: Services) -> None:
             page=page,
             page_size=KEYS_PAGE_SIZE,
         )
+        bundles, bundles_total = await _load_bundles_section(services, callback.from_user.id, page=current_page)
         text = keys_page_text(keys, current_page, viewer_user_id=callback.from_user.id)
+        section = bundles_section_text(bundles, viewer_user_id=callback.from_user.id, total=bundles_total)
+        if section:
+            text = f"{text}\n\n{section}"
         await safe_edit_message_text(
             callback.message,
             text,
-            reply_markup=keys_list_keyboard(keys, page=current_page, has_next=has_next, total_pages=total_pages),
+            reply_markup=keys_list_keyboard(
+                keys, page=current_page, has_next=has_next, total_pages=total_pages, bundles=bundles
+            ),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -121,9 +146,42 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
                 awg_enabled=awg_on,
                 xhttp_enabled=services.settings.xray_xhttp_enabled,
                 hysteria2_enabled=hy2_on,
+                bundle_enabled=subscription_ui_enabled(services),
                 back_data=back_data,
             ),
         )
+
+
+@router.callback_query(F.data == "keys:create:bundle")
+async def create_key_choose_bundle(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Enter the shared create wizard for an all-in-one subscription bundle.
+
+    No separate flow: the bundle rides the very same note → expiry → confirm steps
+    a single key uses (it skips MTU/fingerprint, which are per-protocol client
+    settings the children get from their own defaults).
+    """
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        require_subscription_ui(services)
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        await safe_callback_answer(callback)
+        await state.set_state(CreateKeyStates.waiting_note)
+        await state.update_data(
+            key_type=BUNDLE_KEY_TYPE,
+            transport="tcp",
+            cancel_target="keys:create",
+            note_prompt_msg_id=callback.message.message_id,
+        )
+        await safe_edit_message_text(
+            callback.message,
+            f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
+            reply_markup=cancel_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
 
 
 @router.callback_query(F.data == "keys:proto:vless")
@@ -389,16 +447,10 @@ async def create_key_expiry(callback: CallbackQuery, state: FSMContext, services
         await state.set_state(CreateKeyStates.confirming)
         await safe_callback_answer(callback)
         data = await state.get_data()
-        key_type = str(data.get("key_type") or "")
-        transport = str(data.get("transport") or "tcp")
-        note = data.get("note")
-        mtu = int(data["mtu"]) if data.get("mtu") is not None else None
-        fingerprint = data.get("fingerprint")
-        xhttp_profile = str(data.get("xhttp_profile") or "base")
         from bot.keyboards.common import confirm_cancel_keyboard
         await safe_edit_message_text(
             callback.message,
-            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport, profile=xhttp_profile),
+            _create_confirm_screen(data, expires_at),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -444,15 +496,9 @@ async def create_key_custom_days(message: Message, state: FSMContext, services: 
         await state.update_data(expires_at=expires_at)
         await state.set_state(CreateKeyStates.confirming)
         data = await state.get_data()
-        key_type = str(data.get("key_type") or "")
-        transport = str(data.get("transport") or "tcp")
-        note = data.get("note")
-        mtu = int(data["mtu"]) if data.get("mtu") is not None else None
-        fingerprint = data.get("fingerprint")
-        xhttp_profile = str(data.get("xhttp_profile") or "base")
         from bot.keyboards.common import confirm_cancel_keyboard
         await message.answer(
-            create_confirm_text(key_type, note, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport, profile=xhttp_profile),
+            _create_confirm_screen(data, expires_at),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -479,6 +525,17 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         await _ensure_can_enter_create(callback.from_user.id, services)
         profile = profile_from_tg(callback.from_user)
         rate_limiter.check(callback.from_user.id, "key_create", 20)
+        if key_type == BUNDLE_KEY_TYPE:
+            require_subscription_ui(services)
+            await state.clear()
+            await safe_callback_answer(callback, t("creating_bundle"))
+            bundle_result = await _create_bundle(services, callback.from_user.id, profile, note, expires_at)
+            await safe_edit_message_text(
+                callback.message,
+                bundle_created_text(bundle_result, viewer_user_id=callback.from_user.id),
+                reply_markup=bundle_actions_keyboard(bundle_result.bundle),
+            )
+            return
         await state.clear()
         await safe_callback_answer(callback, t("creating_key"))
         if key_type == VpnKeyType.XRAY.value:
@@ -760,9 +817,15 @@ async def edit_note_waiting(message: Message, state: FSMContext, services: Servi
         return
     data = await state.get_data()
     try:
-        key_id = int(data["key_id"])
         note_prompt_msg_id = data.get("note_prompt_msg_id")
-        key = await services.vpn_keys.get_for_actor(message.from_user.id, key_id)
+        # The same wizard serves keys and all-in-one bundles; ``bundle_id`` in the
+        # FSM data is what says which entity the note belongs to.
+        bundle_id = data.get("bundle_id")
+        if bundle_id is not None:
+            require_subscription_ui(services)
+            bundle = await services.key_bundle_views.get_for_actor(message.from_user.id, int(bundle_id))
+        else:
+            key = await services.vpn_keys.get_for_actor(message.from_user.id, int(data["key_id"]))
         note = _clean_note(message.text)
         note_error = _note_input_error(note)
         if note_error is not None:
@@ -773,7 +836,10 @@ async def edit_note_waiting(message: Message, state: FSMContext, services: Servi
             with suppress(Exception):
                 await bot.delete_message(chat_id=message.chat.id, message_id=note_prompt_msg_id)
         await state.set_state(EditNoteStates.confirming)
-        await message.answer(note_confirm_text(key, note), reply_markup=confirm_cancel_keyboard("note:confirm"))
+        confirm_text = (
+            bundle_note_confirm_text(bundle, note) if bundle_id is not None else note_confirm_text(key, note)
+        )
+        await message.answer(confirm_text, reply_markup=confirm_cancel_keyboard("note:confirm"))
     except Exception as exc:
         await state.clear()
         await answer_message_error(message, exc)
@@ -792,8 +858,19 @@ async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services
         await safe_callback_answer(callback, t("saving"))
         data = await state.get_data()
         await state.clear()
-        key_id = int(data["key_id"])
         note = data.get("note")
+        bundle_id = data.get("bundle_id")
+        if bundle_id is not None:
+            require_subscription_ui(services)
+            await services.key_bundle_views.update_note(callback.from_user.id, int(bundle_id), note)
+            bundle = await services.key_bundle_views.get_for_actor(callback.from_user.id, int(bundle_id))
+            await safe_edit_message_text(
+                callback.message,
+                t("note_updated"),
+                reply_markup=bundle_actions_keyboard(bundle),
+            )
+            return
+        key_id = int(data["key_id"])
         await services.notes.update_key_note(callback.from_user.id, key_id, note)
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await safe_edit_message_text(
@@ -976,6 +1053,70 @@ async def trial_key_show(callback: CallbackQuery, state: FSMContext, services: S
             await remember_config_document(state, key_id=key_id, message_id=sent.message_id)
     except Exception as exc:
         await answer_callback_error(callback, exc)
+
+
+def _create_confirm_screen(data: dict[str, Any], expires_at: str | None) -> str:
+    """Build the create-wizard confirmation for whichever entity is being created."""
+    key_type = str(data.get("key_type") or "")
+    note = data.get("note")
+    if key_type == BUNDLE_KEY_TYPE:
+        return bundle_create_confirm_text(note, expires_at=expires_at)
+    return create_confirm_text(
+        key_type,
+        note,
+        expires_at=expires_at,
+        mtu=int(data["mtu"]) if data.get("mtu") is not None else None,
+        fingerprint=data.get("fingerprint"),
+        transport=str(data.get("transport") or "tcp"),
+        profile=str(data.get("xhttp_profile") or "base"),
+    )
+
+
+async def _create_bundle(
+    services: Services,
+    actor_user_id: int,
+    owner: TelegramUserProfile,
+    note: str | None,
+    expires_at: str | None,
+) -> KeyBundleCreateResult:
+    """Create an all-in-one bundle, turning a backend fault into a retry message.
+
+    ``KeyBundleService`` raises a *keyed* ``InvalidOperation`` for the states the
+    user can act on (feature off, no protocol enabled, creating for someone else)
+    and an *unkeyed* one for the transient ones — an enabled-but-degraded backend
+    aborts the creation, and a child that failed mid-way is rolled back. Those
+    unkeyed messages are operator-facing text about backends and reload modes, so
+    they become a plain localized "try again later" instead. Either way the user
+    sees an alert and never a traceback: ``InvalidOperation`` is a safe exception
+    for ``answer_callback_error``.
+    """
+    try:
+        return await services.key_bundles.create_bundle(actor_user_id, owner, note, expires_at=expires_at)
+    except InvalidOperation as exc:
+        if getattr(exc, "key", None):
+            raise
+        logger.warning(
+            "All-in-one subscription creation failed for user_id=%s", actor_user_id, exc_info=True
+        )
+        raise InvalidOperation(t("bundle_create_failed"), key="bundle_create_failed") from exc
+
+
+async def _load_bundles_section(
+    services: Services, actor_user_id: int, *, page: int
+) -> tuple[list[KeyBundle], int | None]:
+    """Load the «All-in-One» group of the «My keys» page.
+
+    Empty (and no service call at all) while the feature is off, and rendered only
+    on the first page — the key pagination counts keys, and duplicating the bundle
+    group under every page would be noise.
+    """
+    if page != 0 or not subscription_ui_enabled(services):
+        return [], None
+    total = await services.key_bundle_views.count_for_actor(actor_user_id)
+    if total == 0:
+        return [], None
+    bundles = await services.key_bundle_views.list_for_actor(actor_user_id, limit=BUNDLES_SECTION_LIMIT)
+    return bundles, total
 
 
 def _parse_mtu(text: str) -> int | None:

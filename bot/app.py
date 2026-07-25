@@ -25,7 +25,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_dashboard, admin_maintenance, admin_modules, admin_warp, admin_warp_split, admin_warp_split_ui, callbacks, common, keys, proxy, settings as settings_handler, start
+from bot.handlers import admin, admin_dashboard, admin_maintenance, admin_modules, admin_warp, admin_warp_split, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, start
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
 from bot.middlewares.locale import LocaleMiddleware
@@ -57,6 +57,7 @@ from services.awg import AwgService
 from services.backend_health import BackendHealth
 from services.dashboard import DashboardService
 from services.hysteria import HysteriaService
+from services.key_bundle_views import KeyBundleViewService
 from services.key_bundles import KeyBundleService
 from services.key_expiry import KeyExpiryService
 from services.maintenance import MaintenanceService
@@ -449,9 +450,11 @@ async def _build_app(
     )
     # All-in-one subscription bundles. Built on top of the per-protocol services
     # (it never re-implements their create/revoke/delete paths) and inert until
-    # SUBSCRIPTION_ENABLED is turned on; nothing calls it yet.
+    # SUBSCRIPTION_ENABLED is turned on: with the flag off the UI offers nothing
+    # and both services refuse every call.
+    key_bundles_repo = KeyBundleRepository(db)
     key_bundle_service = KeyBundleService(
-        bundles=KeyBundleRepository(db),
+        bundles=key_bundles_repo,
         users=user_service,
         xray=xray_service,
         hysteria=hysteria_service,
@@ -461,6 +464,12 @@ async def _build_app(
         ids=ids,
         audit=audit_service,
         backend_health=backend_health,
+    )
+    key_bundle_view_service = KeyBundleViewService(
+        bundles=key_bundles_repo,
+        users=user_service,
+        settings=settings,
+        audit=audit_service,
     )
     trial_access_service = TrialAccessService(
         trial_requests=trial_requests_repo,
@@ -595,6 +604,7 @@ async def _build_app(
         auto_refresh=auto_refresh_manager,
         maintenance=maintenance_service,
         key_bundles=key_bundle_service,
+        key_bundle_views=key_bundle_view_service,
         hysteria_health_probe=hysteria_health_probe,
     )
 
@@ -651,6 +661,7 @@ async def _build_app(
     dp.include_router(admin_modules.router)
     dp.include_router(admin_maintenance.router)
     dp.include_router(keys.router)
+    dp.include_router(key_bundles.router)
     dp.include_router(proxy.router)
     dp.include_router(callbacks.router)
 

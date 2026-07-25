@@ -471,6 +471,45 @@ STRINGS: dict[str, str] = {
     "key_revoked": "Ключ отозван.",
     "key_deleted": "Ключ полностью удалён.",
     "key_deleted_with_list": "Ключ полностью удалён.\n\n{list}",
+    # ── all-in-one subscription (bundles) ─────────────────────────────────────
+    "bundle_title": "All-in-One #{id}",
+    "bundle_type_label": "All-in-One",
+    "bundles_group_title": "<b>All-in-One</b>",
+    "bundle_composition": "Состав",
+    "bundle_awg_separate": (
+        "ℹ️ AmneziaWG в подписку не входит и выдаётся отдельным ключом: "
+        "конфиг WireGuard нельзя передать ссылкой-подпиской."
+    ),
+    "bundles_more_hint": "Показаны {shown} из {total} подписок.",
+    "bundle_create_confirm_title": "<b>Подтверждение создания подписки</b>",
+    "creating_bundle": "Создаю подписку...",
+    "bundle_created_title": "<b>Подписка создана.</b>",
+    "bundle_created_skipped": "Не вошли в подписку (протокол сейчас отключён): {skipped}",
+    "bundle_create_failed": "Не удалось создать подписку — попробуйте позже.",
+    "bundle_config_hint": (
+        "Добавьте ссылку в клиент как подписку (NekoBox, Hiddify, v2rayNG и т. п.) — "
+        "клиент сам подтянет все протоколы и будет обновлять их."
+    ),
+    "bundle_config_secret_warning": "🔒 Ссылка — это ключ доступа. Не пересылайте её никому.",
+    "bundle_config_unavailable": (
+        "Публичный адрес подписки не настроен. Обратитесь к администратору — "
+        "ссылку можно выдать только после публикации эндпоинта."
+    ),
+    "bundle_stats_title": "<b>Статистика {title}</b>",
+    "bundle_stats_total": "<b>Всего по подписке</b>",
+    "bundle_stats_by_protocol": "<b>По протоколам</b>",
+    "bundle_stats_unavailable": "статистика недоступна",
+    "bundle_stats_empty": "В подписке нет ключей.",
+    "bundle_revoke_prompt": (
+        "Отозвать подписку #{bundle_id}? Все её ключи будут отозваны, "
+        "а ссылка-подписка перестанет работать."
+    ),
+    "bundle_delete_prompt": (
+        "Полностью удалить подписку #{bundle_id}? Все её ключи будут отключены на сервере "
+        "и удалены из бота вместе со статистикой. Это действие нельзя отменить."
+    ),
+    "bundle_revoked": "Подписка отозвана.",
+    "bundle_deleted": "Подписка полностью удалена.",
     "unknown_action": "Неизвестное действие",
     "edit_note_prompt": "Новая заметка для {type} #{id}. Отправьте <code>-</code>, чтобы очистить.",
     "saving": "Сохраняю...",
@@ -672,6 +711,7 @@ STRINGS: dict[str, str] = {
     "btn_enter_days": "Ввести количество дней",
     "btn_get_config": "Получить конфиг",
     "btn_request_trial": "Запросить пробный доступ (7 дней)",
+    "btn_all_in_one": "All-in-One (одна ссылка на все протоколы)",
     # ── keyboard buttons (proxy) ──────────────────────────────────────────────
     "btn_get_socks5": "Получить SOCKS5",
     "btn_get_mtproto": "Получить MTProto",
@@ -886,6 +926,7 @@ STRINGS: dict[str, str] = {
     "err_bundle_revoke_partial": "Не удалось отозвать все ключи подписки",
     "err_bundle_delete_forbidden": "Эту подписку нельзя удалить",
     "err_bundle_has_keys": "Нельзя удалить подписку: к ней всё ещё привязаны ключи",
+    "err_foreign_bundle_view": "Нельзя смотреть чужую подписку",
     "err_trial_already_used": "Вы уже использовали свой пробный доступ",
     "err_trial_request_not_found": "Заявка на пробный доступ не найдена",
     "err_trial_request_processed": "Заявка уже обработана",

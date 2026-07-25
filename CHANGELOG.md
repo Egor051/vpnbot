@@ -8,6 +8,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **All-in-one subscription — bot UI (`SUBSCRIPTION_ENABLED`, still `false` by
+  default).** The last PR of the subscription series and the first one users can see —
+  but only once the flag is on. With it off the bot behaves exactly as before: «Create
+  key» does not offer the option, «My keys» renders no bundle group, and every
+  `bundle:*` callback is refused by a guard rather than merely hidden, so a replayed or
+  hand-typed payload cannot reach a service. No new button was added to the main menu.
+  - **Create.** «All-in-One» joins the existing protocol list and reuses the same
+    create wizard (note → expiry → confirm) rather than introducing a second flow. The
+    result screen always spells out what the bundle actually contains, and names the
+    protocols that were left out because their backend is switched off — a partial
+    bundle is never presented as a complete one. A backend that is on but degraded
+    aborts the creation, which surfaces as a plain localized "try again later" instead
+    of the operator-facing backend text.
+  - **My keys.** An «All-in-One» group renders next to VLESS / AmneziaWG / Hysteria2
+    (first page, up to five bundles, with the count stated when there are more). Every
+    card carries the same five actions as a key card — Config · Stats · Revoke · Note ·
+    Delete — plus one line explaining that **AmneziaWG is issued as a separate key**,
+    because a WireGuard config cannot ride a subscription link.
+  - **Config** shows the subscription URL built from settings — the shared Hysteria2
+    domain (`HYSTERIA2_SNI`, falling back to `HYSTERIA2_HOST`) and
+    `SUBSCRIPTION_PUBLIC_PORT` — never a hardcoded host, and says plainly that the
+    endpoint is not published when there is no public port. **No QR code:** the
+    dependency tree has no QR library and this feature is not a reason to add one, so
+    the URL is emitted as a tap-to-copy `<code>` block. The token is written to the
+    chat and nowhere else — no log line formats it.
+  - **Stats** are summed over the bundle **and split per protocol** (VLESS vs.
+    Hysteria2). The two numbers come from different sources — Xray's stats API and the
+    Hysteria2 trafficStats endpoint — so one can be unavailable while the other is
+    fine; a single figure would hide both that and where a traffic spike came from.
+  - **Revoke / Delete** ask for confirmation and then call `KeyBundleService`
+    (cascade to the children plus token rotation on revoke); **Note** reuses the
+    per-key note wizard.
+  - New `KeyBundleViewService` carries the read side and the note, leaving
+    `KeyBundleService` (lifecycle) untouched; both refuse every call while the flag is
+    off. Going live still needs the manual steps in `docs/subscription.md` — flipping
+    the flag in the live `.env`, installing the unit, and the TLS/port/ufw setup.
+
 - **All-in-one subscription HTTP endpoint — a separate process (`SUBSCRIPTION_ENABLED`,
   still `false` by default).** `python -m subscription_server` (unit
   `deploy/vpn-bot-subscription.service`) serves exactly one route, `GET /sub/{token}`,

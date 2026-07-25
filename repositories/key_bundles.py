@@ -91,6 +91,22 @@ class KeyBundleRepository:
         rows = await cursor.fetchall()
         return [bundle for row in rows if (bundle := _row_to_key_bundle(row)) is not None]
 
+    async def count_by_user(self, user_id: int) -> int:
+        """Return how many bundles a user owns (drives the list-page overflow hint)."""
+        cursor = await self.db.conn.execute(
+            "SELECT COUNT(*) AS total FROM key_bundles WHERE user_id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        return int(row["total"]) if row is not None else 0
+
+    async def update_note(self, bundle_id: int, note: str | None, now: str) -> None:
+        """Update the note text on a bundle (mirrors ``VpnKeyRepository.update_note``)."""
+        await self.db.conn.execute(
+            "UPDATE key_bundles SET note = ?, updated_at = ? WHERE id = ?",
+            (note, now, bundle_id),
+        )
+        await self.db.commit()
+
     async def attach_key_to_bundle(self, key_id: int, bundle_id: int, now: str) -> None:
         """Point a VPN key at a bundle. The FK (RESTRICT) guarantees the bundle exists."""
         await self.db.conn.execute(

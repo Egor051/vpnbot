@@ -467,6 +467,45 @@ STRINGS: dict[str, str] = {
     "key_revoked": "Key revoked.",
     "key_deleted": "Key permanently deleted.",
     "key_deleted_with_list": "Key permanently deleted.\n\n{list}",
+    # ── all-in-one subscription (bundles) ─────────────────────────────────────
+    "bundle_title": "All-in-One #{id}",
+    "bundle_type_label": "All-in-One",
+    "bundles_group_title": "<b>All-in-One</b>",
+    "bundle_composition": "Contents",
+    "bundle_awg_separate": (
+        "ℹ️ AmneziaWG is not part of the subscription and is issued as a separate key: "
+        "a WireGuard config cannot be delivered over a subscription link."
+    ),
+    "bundles_more_hint": "Showing {shown} of {total} subscriptions.",
+    "bundle_create_confirm_title": "<b>Confirm subscription creation</b>",
+    "creating_bundle": "Creating the subscription...",
+    "bundle_created_title": "<b>Subscription created.</b>",
+    "bundle_created_skipped": "Left out of the subscription (protocol currently disabled): {skipped}",
+    "bundle_create_failed": "Could not create the subscription — please try again later.",
+    "bundle_config_hint": (
+        "Add the link to your client as a subscription (NekoBox, Hiddify, v2rayNG, …) — "
+        "the client pulls in every protocol and keeps them updated."
+    ),
+    "bundle_config_secret_warning": "🔒 This link is an access credential. Do not forward it to anyone.",
+    "bundle_config_unavailable": (
+        "The public subscription address is not configured. Contact the administrator — "
+        "the link can only be issued once the endpoint is published."
+    ),
+    "bundle_stats_title": "<b>Statistics for {title}</b>",
+    "bundle_stats_total": "<b>Subscription total</b>",
+    "bundle_stats_by_protocol": "<b>By protocol</b>",
+    "bundle_stats_unavailable": "statistics unavailable",
+    "bundle_stats_empty": "The subscription has no keys.",
+    "bundle_revoke_prompt": (
+        "Revoke subscription #{bundle_id}? All of its keys will be revoked and "
+        "the subscription link will stop working."
+    ),
+    "bundle_delete_prompt": (
+        "Permanently delete subscription #{bundle_id}? All of its keys will be disabled on the "
+        "server and removed from the bot along with their statistics. This cannot be undone."
+    ),
+    "bundle_revoked": "Subscription revoked.",
+    "bundle_deleted": "Subscription permanently deleted.",
     "unknown_action": "Unknown action",
     "edit_note_prompt": "New note for {type} #{id}. Send <code>-</code> to clear it.",
     "saving": "Saving...",
@@ -668,6 +707,7 @@ STRINGS: dict[str, str] = {
     "btn_enter_days": "Enter number of days",
     "btn_get_config": "Get config",
     "btn_request_trial": "Request trial access (7 days)",
+    "btn_all_in_one": "All-in-One (one link for every protocol)",
     # ── keyboard buttons (proxy) ──────────────────────────────────────────────
     "btn_get_socks5": "Get SOCKS5",
     "btn_get_mtproto": "Get MTProto",
@@ -879,6 +919,7 @@ STRINGS: dict[str, str] = {
     "err_bundle_revoke_partial": "Some subscription keys could not be revoked",
     "err_bundle_delete_forbidden": "This subscription cannot be deleted",
     "err_bundle_has_keys": "Cannot delete the subscription: keys are still attached to it",
+    "err_foreign_bundle_view": "You cannot view someone else's subscription",
     "err_trial_already_used": "You have already used your trial access",
     "err_trial_request_not_found": "Trial access request not found",
     "err_trial_request_processed": "The request has already been processed",

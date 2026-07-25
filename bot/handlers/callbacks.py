@@ -3,10 +3,12 @@ from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
+from bot.bundles import bundle_detail_text, require_subscription_ui, subscription_ui_enabled
 from bot.container import Services
 from bot.formatters import key_detail_text
 from bot.keyboards.admin import admin_panel_keyboard
 from bot.keyboards.common import back_to_menu
+from bot.keyboards.key_bundles import bundle_actions_keyboard
 from bot.keyboards.keys import create_key_keyboard, key_actions_keyboard
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
@@ -36,11 +38,30 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext, services: 
             and services.settings.is_hysteria2_ready()
             and await services.modules.is_enabled("hysteria2")
         )
+        bundle_on = bool(services and subscription_ui_enabled(services))
         await safe_edit_message_text(
             callback.message,
             f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
-            reply_markup=create_key_keyboard(xhttp_enabled=xhttp_on, hysteria2_enabled=hy2_on),
+            reply_markup=create_key_keyboard(
+                xhttp_enabled=xhttp_on, hysteria2_enabled=hy2_on, bundle_enabled=bundle_on
+            ),
         )
+    elif cancel_target and cancel_target.startswith("bundle:open:"):
+        try:
+            bundle_id = int(cancel_target.rsplit(":", 1)[-1])
+            user_id = callback.from_user.id if callback.from_user else None
+            if user_id is None or services is None:
+                raise ValueError
+            require_subscription_ui(services)
+            bundle = await services.key_bundle_views.get_for_actor(user_id, bundle_id)
+            keys = await services.key_bundle_views.list_keys_for_actor(user_id, bundle_id)
+            await safe_edit_message_text(
+                callback.message,
+                bundle_detail_text(bundle, keys, viewer_user_id=user_id),
+                reply_markup=bundle_actions_keyboard(bundle),
+            )
+        except Exception:
+            await safe_edit_message_text(callback.message, t("cancel_done"), reply_markup=back_to_menu())
     elif cancel_target and cancel_target.startswith("key:open:"):
         try:
             key_id = int(cancel_target.rsplit(":", 1)[-1])
