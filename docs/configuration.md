@@ -289,6 +289,16 @@ is recorded in the audit log; a protocol that is **on but degraded** aborts the
 whole creation, because a bundle that silently lacks a protocol stays defective
 forever while an aborted creation is simply retried.
 
+`SUBSCRIPTION_ENABLED` also gates the **bot UI**: with it `false` the «Create key»
+menu offers no all-in-one option, «My keys» renders no bundle group, and a
+`bundle:*` callback is refused. The subscription URL the bot shows has **no host
+variable of its own** — it is `HYSTERIA2_SNI` (falling back to `HYSTERIA2_HOST`)
+plus `SUBSCRIPTION_PUBLIC_PORT`, because the endpoint terminates TLS with a copy
+of that domain's certificate. With `SUBSCRIPTION_PUBLIC_PORT=0` the endpoint is
+loopback-only and the config screen says so instead of showing an unreachable
+link. Both processes read `.env` at startup, so flipping the flag needs
+`systemctl restart vpn-bot-subscription vpn-bot`.
+
 ## Announcements
 
 | Variable | Required | Default | Description | Example |

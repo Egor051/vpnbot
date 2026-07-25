@@ -2,8 +2,9 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.formatters import key_type_label, status_text
+from bot.keyboards.key_bundles import bundle_list_rows
 from i18n import t
-from models.dto import VpnKey
+from models.dto import KeyBundle, VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 
 VALID_FINGERPRINTS = [
@@ -18,6 +19,7 @@ def create_key_keyboard(
     awg_enabled: bool = True,
     xhttp_enabled: bool = False,
     hysteria2_enabled: bool = False,
+    bundle_enabled: bool = False,
     back_data: str = "keys:list",
 ) -> InlineKeyboardMarkup:
     """Build the protocol selection keyboard for creating a new key (step 1).
@@ -25,6 +27,10 @@ def create_key_keyboard(
     With XHTTP disabled there is only one VLESS transport, so the VLESS button
     goes straight to TCP key creation (no redundant single-option transport
     step). The transport step is offered only when XHTTP is enabled.
+
+    ``bundle_enabled`` adds the all-in-one subscription option. It defaults to
+    False and the caller only passes True while ``SUBSCRIPTION_ENABLED`` is on, so
+    with the flag off this keyboard is byte-identical to what it was before.
 
     ``back_data`` controls where the «back» button returns to so the flow can
     honour its entry point (the main menu vs. the «My keys» list).
@@ -37,6 +43,8 @@ def create_key_keyboard(
         rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="keys:create:awg")])
     if hysteria2_enabled:
         rows.append([InlineKeyboardButton(text="Hysteria2", callback_data="keys:create:hy2")])
+    if bundle_enabled:
+        rows.append([InlineKeyboardButton(text=t("btn_all_in_one"), callback_data="keys:create:bundle")])
     rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data=back_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -74,9 +82,17 @@ def keys_list_keyboard(
     owner_user_id: int | None = None,
     total_pages: int = 1,
     back_data: str = "menu:main",
+    bundles: list[KeyBundle] | None = None,
 ) -> InlineKeyboardMarkup:
-    """Build the paginated keyboard listing keys with per-key actions."""
+    """Build the paginated keyboard listing keys with per-key actions.
+
+    ``bundles`` appends the «All-in-One» group after the protocol groups. It stays
+    None everywhere the feature is off (and in the admin view of another user's
+    keys), so the keyboard is unchanged from before this feature existed.
+    """
     rows: list[list[InlineKeyboardButton]] = []
+    if bundles:
+        rows.extend(bundle_list_rows(bundles))
     for key in keys:
         prefix = key_type_label(key)
         open_data = f"key:open:{key.id}"

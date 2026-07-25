@@ -11,6 +11,7 @@ from services.awg import AwgService
 from services.backend_health import BackendHealth
 from services.dashboard import DashboardService
 from services.hysteria import HysteriaService
+from services.key_bundle_views import KeyBundleViewService
 from services.key_bundles import KeyBundleService
 from services.key_expiry import KeyExpiryService
 from services.maintenance import MaintenanceService
@@ -65,9 +66,11 @@ class Services:
     online_clients: OnlineClientsService
     auto_refresh: LiveRefreshManager
     maintenance: MaintenanceService
-    # All-in-one subscription bundles. Wired unconditionally even though nothing
-    # calls it yet (the UI lands later); SUBSCRIPTION_ENABLED gates its mutations.
+    # All-in-one subscription bundles: lifecycle (create/revoke/delete) and the
+    # read side the UI renders. Wired unconditionally; SUBSCRIPTION_ENABLED gates
+    # every method on both, so with the flag off neither is reachable.
     key_bundles: KeyBundleService
+    key_bundle_views: KeyBundleViewService
     # Loopback /healthz probe for the hy2_auth data plane; None when Hysteria2 is
     # disabled. Drives the background health loop that marks the Hysteria2 backend
     # degraded/healthy in BackendHealth.

@@ -4,7 +4,7 @@ A **separate process** (`python -m subscription_server`, unit
 `deploy/vpn-bot-subscription.service`) that serves one route — `GET /sub/{token}` — returning
 the base64 subscription body for an all-in-one bundle: every child key of that bundle rendered
 as its ordinary client link. It is **disabled by default** (`SUBSCRIPTION_ENABLED=false`, in
-which case every request is answered with `404`) and there is **no bot UI for it yet**.
+which case every request is answered with `404` and the bot shows nothing about bundles).
 
 Canonical references live where every other feature's do:
 
@@ -51,6 +51,36 @@ there would be invented, and clients read a fabricated quota as a hard limit.
 The token is a working credential, so it is never logged: aiohttp's access log (which prints the
 request line, token included) is switched off in the runner, and every log line refers to a
 bundle by `bundle_id` plus a 12-hex-character SHA-256 fingerprint of the token.
+
+## Bot UI
+
+Everything below appears **only while `SUBSCRIPTION_ENABLED=true`**. With the flag off the bot
+is byte-identical to what it was before the feature: no option in «Create key», no group in «My
+keys», and a `bundle:*` callback that arrives anyway (replayed, or hand-typed) is refused by a
+guard before any service is reached. There is **no new button in the main menu**.
+
+| Where | What |
+|---|---|
+| **Create key** | An «All-in-One» option next to VLESS / AmneziaWG / Hysteria2. It reuses the ordinary create wizard (note → expiry → confirm). The result screen lists what the bundle actually contains and names any protocol left out because its backend is off. |
+| **My keys** | An «All-in-One» group next to the protocol groups (first page, up to 5 bundles; the total is stated when there are more). |
+| **Bundle card** | The same five actions a key card has — Config · Stats · Revoke · Note · Delete — plus a line saying AmneziaWG is issued as a **separate key**. |
+
+- **Config** shows `https://<host>[:<port>]/sub/<token>`. The host is **not a setting of its
+  own**: it is `HYSTERIA2_SNI` (falling back to `HYSTERIA2_HOST`), because the endpoint
+  terminates TLS with a copy of the certificate that domain already has — so the URL, the
+  certificate and the hy2 links stay on one domain by construction. The port is
+  `SUBSCRIPTION_PUBLIC_PORT`; with it at `0` (loopback-only) the screen says the endpoint is
+  not published instead of showing an unreachable link. **No QR image** — there is no QR
+  library in the dependency tree and this feature is not a reason to add one; the URL is a
+  tap-to-copy `<code>` block. The token reaches the chat and nothing else: no log line
+  formats it.
+- **Stats** are the bundle total **plus a per-protocol split** (VLESS, Hysteria2). The numbers
+  come from two different sources — Xray's stats API and the Hysteria2 trafficStats endpoint —
+  either of which can be unavailable on its own, so the split is what makes a gap (or a spike)
+  attributable. Per-key figures stay one tap away on each child key.
+- **Revoke** confirms, then cascades to the children and rotates the token, so the URL the user
+  already holds is dead. **Delete** confirms, then removes the children before the bundle row.
+  **Note** reuses the per-key note wizard.
 
 ## TLS termination
 
@@ -120,8 +150,10 @@ sudo ss -tlnp | grep -E '8445|2096'
 curl -si http://127.0.0.1:8445/sub/definitely-not-a-real-token | head -1   # expect 404
 ```
 
-Flipping `SUBSCRIPTION_ENABLED` needs a `systemctl restart vpn-bot-subscription`: the process
-reads `.env` at startup. The unit stays active either way — with the flag off it keeps the
+Flipping `SUBSCRIPTION_ENABLED` needs a restart of **both** units — `systemctl restart
+vpn-bot-subscription vpn-bot`: each process reads `.env` at startup, the endpoint for its routes
+and the bot for its UI. The flag is a **live `.env` edit, never a commit**: the repository default
+stays `false`. The unit stays active either way — with the flag off it keeps the
 loopback socket and simply answers `404`, so its state does not flap with the feature flag — but
 the **public listener is not started at all while the flag is off**, since a port that could only
 ever answer `404` is attack surface with no function.
