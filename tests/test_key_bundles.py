@@ -432,3 +432,60 @@ def test_key_bundle_repository_crud(tmp_path: Path) -> None:
             await db.close()
 
     asyncio.run(run())
+
+
+def test_get_bundle_of_key_resolves_the_parent_and_stays_silent_on_unattached(tmp_path: Path) -> None:
+    """The reverse lookup anomaly detection uses to name a bundle from a child.
+
+    None means "not attached", which covers BOTH an ordinary standalone key and a
+    bundle child whose apply died before ``attach_key_to_bundle`` ran. Callers may
+    only use None to fall back to per-key behaviour — never to conclude that the
+    row was never meant to be part of a bundle.
+    """
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await db.conn.execute(_INSERT_USERS)
+            await db.commit()
+            bundles = KeyBundleRepository(db)
+            keys = VpnKeyRepository(db)
+
+            bundle = await bundles.create(user_id=100, label="bundle_00001", now="t0")
+            attached = await keys.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.XRAY,
+                payload={},
+                public_payload={},
+                note=None,
+                now="t0",
+                created_by=1,
+            )
+            standalone = await keys.create_pending(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.XRAY,
+                payload={},
+                public_payload={},
+                note=None,
+                now="t0",
+                created_by=1,
+            )
+            await bundles.attach_key_to_bundle(attached.id, bundle.id, "t1")
+
+            parent = await bundles.get_bundle_of_key(attached.id)
+            assert parent is not None
+            assert parent.id == bundle.id
+            assert parent.label == "bundle_00001"
+
+            # An unattached row — indistinguishable here from an unfinished child.
+            assert await bundles.get_bundle_of_key(standalone.id) is None
+            # An id that does not exist at all resolves the same way, never raises.
+            assert await bundles.get_bundle_of_key(999999) is None
+        finally:
+            await db.close()
+
+    asyncio.run(run())

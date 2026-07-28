@@ -644,6 +644,27 @@ STRINGS: dict[str, str] = {
     "btn_refresh": "Обновить",
     "btn_anomaly_dismiss": "✅ Я прочитал",
     "btn_warp_alert_dismiss": "✅ Понял",
+    # ── anomaly alert rolled up onto an all-in-one bundle ──────────────────────
+    # Only the BUNDLE alert is translated. The per-key alert next to it is still
+    # composed from literals in services/anomaly_detection.py and is deliberately
+    # left byte-identical, so a single-key alert reads exactly as it always has.
+    "anomaly_bundle_title": "⚠️ <b>Аномалия: бандл #{bundle_id} ({label})</b>",
+    "anomaly_bundle_protocols": "Ключей бандла затронуто: <b>{count}</b> ({names})",
+    "anomaly_bundle_counts": "За последние {window}: <b>{nets} уник. сетей</b> ({ips} IP)",
+    "anomaly_bundle_counts_concurrent": (
+        "За последние {window}: <b>{nets} уник. сетей</b> ({ips} IP) "
+        "(всего за {full_window}: {all_nets} сетей / {all_ips} IP)"
+    ),
+    "anomaly_bundle_owner": "Владелец: {owner}",
+    "anomaly_bundle_networks": "Сети: <code>{groups}</code>",
+    "anomaly_bundle_networks_window": "Сети ({window}): <code>{groups}</code>",
+    "anomaly_bundle_auto_revoked": "🔒 <b>Ключей бандла отозвано автоматически: {count}</b>",
+    "anomaly_bundle_revoke_failed": "⚠️ Авто-отзыв не удался ({count}): {error}",
+    "anomaly_bundle_hysteria_conns": (
+        "Одновременных соединений (HYSTERIA2): <b>{count}</b> (порог: {threshold})"
+    ),
+    "anomaly_window_minutes": "{value} мин",
+    "anomaly_window_seconds": "{value} сек",
     # ── server status panel ───────────────────────────────────────────────────
     "server_status_title": "СТАТУС СЕРВЕРА В РЕАЛЬНОМ ВРЕМЕНИ",
     "server_status_updated_at": "обновлено {time}",
