@@ -13,6 +13,26 @@
 #   sudo systemctl enable --now vpn-bot-subscription
 #   sudo bash deploy/ufw-subscription.sh          # only when the public port is on
 # Full runbook (incl. the TLS material this reads): docs/subscription.md
+#
+# START-TO-BIND: expect ~20 SECONDS between `systemctl start` and the sockets
+# existing. Before binding, the process imports services.xray + bot.formatters —
+# the single source of truth for the vless:// and hy2:// link formats, reused so
+# subscription links stay byte-identical to the per-key ones — and that chain
+# pulls in aiogram, which is nearly all of the cost. So `ss -tln` right after a
+# restart legitimately shows nothing on 8445/2096; wait it out and read the
+# journal, which logs one "subscription endpoint listening on ..." line per
+# socket. The delay is startup-only and costs nothing per request.
+#
+# It is NOT worth "fixing" with a lazy import: XrayService is the base class of
+# the link renderer (a module-level subclass, so its import cannot move into a
+# function), and services.xray imports bot.formatters itself — deferring only the
+# formatters import in subscription_server/render.py would save nothing. Making
+# the bind genuinely fast means restructuring the shared link-rendering code,
+# which is not worth risking a divergence between subscription links and per-key
+# links to save 20 seconds of startup. Type=notify would let systemd track the
+# bind precisely, but the process does not speak sd_notify, so the unit stays
+# Type=simple and the wait is the operator's (and deploy.sh's — its Phase 1 port
+# check retries for SUBSCRIPTION_BIND_WAIT seconds).
 
 [Unit]
 Description=vpn-bot all-in-one subscription endpoint (read-only DB, self-terminated TLS)

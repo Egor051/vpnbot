@@ -162,6 +162,13 @@ NETWORKD_DROPIN_DST="${NETWORKD_DROPIN_DST:-/etc/systemd/networkd.conf.d/10-keep
 # non-bot unit. The Phase 1 check below is informational only: the endpoint is
 # gated by SUBSCRIPTION_ENABLED and a host that has not deployed it is normal.
 SUBSCRIPTION_UNIT="${SUBSCRIPTION_UNIT:-vpn-bot-subscription.service}"
+# How long the Phase 1 port check keeps re-testing a port that is not listening
+# yet, while the unit is ACTIVE. The endpoint takes ~20s from start to bind (it
+# imports services.xray + bot.formatters before binding — see the unit header and
+# docs/subscription.md), so a deploy that lands inside that window would otherwise
+# print a false "NOT listening" for a perfectly healthy service. Only ever costs
+# wall-clock on the path that was about to warn; the check stays never-fatal.
+SUBSCRIPTION_BIND_WAIT="${SUBSCRIPTION_BIND_WAIT:-30}"
 
 # Out-of-repo privileged helpers: tracked SOURCE lives in the checkout, the
 # INSTALLED copy lives under /usr/local/sbin. `git reset --hard origin/main`
@@ -713,13 +720,35 @@ networkd_foreign_rules_ok() {
 # --------------------------------------------------------------------------- #
 # All-in-one subscription endpoint (informational Phase 1 check)
 # --------------------------------------------------------------------------- #
+# Which of the configured ports are NOT in the current listening set. Echoes one
+# description per missing port (empty output = everything is bound). Split out of
+# subscription_endpoint_status so the start-to-bind retry can re-run just this
+# part without re-reading .env or re-deriving the unit state.
+subscription_missing_ports() {
+  local bind_host="$1" bind_port="$2" public_port="$3" listening missing=()
+  # grep reads to EOF (output discarded) so an early hit cannot SIGPIPE `ss`
+  # under pipefail and make a listening port look absent.
+  listening="$(ss -tln 2>/dev/null || true)"
+  printf '%s\n' "$listening" | grep -E "[^0-9]${bind_port}[[:space:]]" >/dev/null || missing+=("${bind_host}:${bind_port} (loopback)")
+  if [[ "$public_port" != "0" ]]; then
+    printf '%s\n' "$listening" | grep -E "[^0-9]${public_port}[[:space:]]" >/dev/null || missing+=(":${public_port} (public HTTPS)")
+  fi
+  (( ${#missing[@]} > 0 )) && printf '%s\n' "${missing[@]}"
+  return 0
+}
+
 # Reports whether the endpoint unit is installed/active and whether the ports it
-# is configured to bind are actually listening. NEVER fatal: the feature is
-# gated by SUBSCRIPTION_ENABLED, the unit is drift-installed by hand, and a host
-# that has not deployed it at all is a normal, expected state. Echoes one status
-# phrase and returns 0 (nothing to flag) / 1 (worth an operator's eye).
+# is configured to bind are actually listening. NEVER fatal: the feature is gated
+# by SUBSCRIPTION_ENABLED, the unit is drift-installed by hand, and a host that
+# has not deployed it at all is a normal, expected state. Echoes one status phrase
+# and returns 0 (nothing to flag) / 1 (worth an operator's eye).
+#
+# A non-zero return is a `warn` line and nothing else: both call sites use
+# `msg="$(subscription_endpoint_status)" && rc=0 || rc=$?`, which keeps the ERR
+# trap out of it under `set -e`. tests/test_deploy_subscription_bind_wait.py drives
+# that exact idiom and asserts execution continues past it.
 subscription_endpoint_status() {
-  local enabled bind_host bind_port public_port states listening="" missing=()
+  local enabled bind_host bind_port public_port states active missing deadline waited=0
   enabled="$(env_val SUBSCRIPTION_ENABLED)"
   if ! is_true "$enabled"; then
     echo "SUBSCRIPTION_ENABLED is not true — endpoint intentionally inert (INFO)"; return 0
@@ -735,17 +764,31 @@ subscription_endpoint_status() {
   if ! command -v ss >/dev/null 2>&1; then
     echo "${SUBSCRIPTION_UNIT} ${states}; listening state UNKNOWN (ss not found)"; return 0
   fi
-  # grep reads to EOF (output discarded) so an early hit cannot SIGPIPE `ss`
-  # under pipefail and make a listening port look absent.
-  listening="$(ss -tln 2>/dev/null || true)"
-  printf '%s\n' "$listening" | grep -E "[^0-9]${bind_port}[[:space:]]" >/dev/null || missing+=("${bind_host}:${bind_port} (loopback)")
-  if [[ "$public_port" != "0" ]]; then
-    printf '%s\n' "$listening" | grep -E "[^0-9]${public_port}[[:space:]]" >/dev/null || missing+=(":${public_port} (public HTTPS)")
+  missing="$(subscription_missing_ports "$bind_host" "$bind_port" "$public_port")"
+  # Start-to-bind tolerance: the process needs ~20s to import services.xray +
+  # bot.formatters before it binds, so an ACTIVE unit with no socket yet is the
+  # normal look of a service that was just (re)started — not a fault. Re-test for
+  # up to SUBSCRIPTION_BIND_WAIT seconds before saying anything. Gated on the unit
+  # being active: a failed/inactive unit is never going to bind, so waiting on it
+  # would only make the report slower and no more truthful.
+  active="$(systemctl show -p ActiveState --value "$SUBSCRIPTION_UNIT" 2>/dev/null || true)"
+  if [[ -n "$missing" && "$active" == "active" && "${SUBSCRIPTION_BIND_WAIT}" -gt 0 ]]; then
+    deadline=$(( SECONDS + SUBSCRIPTION_BIND_WAIT ))
+    while [[ -n "$missing" ]] && (( SECONDS < deadline )); do
+      sleep 2
+      waited=1
+      missing="$(subscription_missing_ports "$bind_host" "$bind_port" "$public_port")"
+    done
   fi
-  if (( ${#missing[@]} > 0 )); then
-    echo "${SUBSCRIPTION_UNIT} ${states}, but NOT listening on: ${missing[*]}"; return 1
+  if [[ -n "$missing" ]]; then
+    # Entries contain spaces ("127.0.0.1:8445 (loopback)"), so join by line, never
+    # by word-splitting the blob.
+    local -a missing_list=()
+    mapfile -t missing_list <<< "$missing"
+    echo "${SUBSCRIPTION_UNIT} ${states}, but NOT listening on: ${missing_list[*]}$( ((waited)) && printf ' (still absent after %ss — the ~20s start-to-bind window has passed)' "$SUBSCRIPTION_BIND_WAIT")"
+    return 1
   fi
-  echo "${SUBSCRIPTION_UNIT} ${states}, listening on ${bind_host}:${bind_port}$([[ "$public_port" != "0" ]] && printf ' and :%s' "$public_port")"
+  echo "${SUBSCRIPTION_UNIT} ${states}, listening on ${bind_host}:${bind_port}$([[ "$public_port" != "0" ]] && printf ' and :%s' "$public_port")$( ((waited)) && printf ' (bound while waiting out the ~20s start-to-bind delay)')"
   return 0
 }
 

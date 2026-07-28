@@ -97,11 +97,11 @@ sudo install -d -o root -g vpn-bot -m 0750 /etc/vpn-bot/tls
 # Добавьте ВТОРУЮ цель в существующий вызов acme.sh --install-cert (hysteria-цель
 # не трогать), чтобы обновления попадали и сюда и перезапускали юнит:
 sudo acme.sh --install-cert -d anycastedge.duckdns.org \
-  --fullchain-file /etc/vpn-bot/tls/sub-fullchain.pem \
-  --key-file       /etc/vpn-bot/tls/sub-key.pem \
-  --reloadcmd      "chown root:vpn-bot /etc/vpn-bot/tls/sub-*.pem && \
-                    chmod 0640 /etc/vpn-bot/tls/sub-key.pem && \
-                    chmod 0644 /etc/vpn-bot/tls/sub-fullchain.pem && \
+  --fullchain-file /etc/vpn-bot/tls/fullchain.pem \
+  --key-file       /etc/vpn-bot/tls/privkey.pem \
+  --reloadcmd      "chown root:vpn-bot /etc/vpn-bot/tls/fullchain.pem /etc/vpn-bot/tls/privkey.pem && \
+                    chmod 0640 /etc/vpn-bot/tls/privkey.pem && \
+                    chmod 0644 /etc/vpn-bot/tls/fullchain.pem && \
                     systemctl restart vpn-bot-subscription"
 ```
 
@@ -109,36 +109,103 @@ sudo acme.sh --install-cert -d anycastedge.duckdns.org \
 `ReadOnlyPaths` для него юниту не нужен: `ProtectSystem=strict` делает `/etc` read-only, а не
 невидимым, и доступ реально ограничивают права на файл.
 
-## Установка (drift, руками)
+## Go-live (установка drift, руками)
 
 `scripts/deploy.sh` автоматически ставит **только** `vpn-bot.service`; как и любой другой юнит из
 `deploy/`, этот печатается как drift и ставится оператором. Phase 1 дополнительно печатает
 информационную строку: установлен ли юнит, активен ли он и слушаются ли настроенные порты — она
-никогда не фатальна, потому что хост без этого эндпоинта — нормальное состояние.
+никогда не фатальна, потому что хост без этого эндпоинта — нормальное состояние, и она терпит
+юнит, который поднялся, но ещё не успел забиндиться (см. [Задержка от старта до
+бинда](#задержка-от-старта-до-бинда)).
+
+**Порядок ниже — это и есть порядок.** TLS-материал должен существовать до того, как `.env` на
+него сошлётся, а правило фаервола — до того, как порт начнёт отвечать; публичный порт без
+TLS-пары вообще не стартует (следующий раздел), так что `.env` первым шагом купит только
+неудачный рестарт.
 
 ```bash
-# 1. .env: включить фичу и выбрать порты
-#    SUBSCRIPTION_ENABLED=true
-#    SUBSCRIPTION_BIND_PORT=8445          # loopback, НЕ 8443 (занят xhttp/mtproxy)
-#    SUBSCRIPTION_PUBLIC_PORT=2096        # 0 оставляет только loopback
-#    SUBSCRIPTION_TLS_CERT=/etc/vpn-bot/tls/sub-fullchain.pem
-#    SUBSCRIPTION_TLS_KEY=/etc/vpn-bot/tls/sub-key.pem
+# 1. Копия TLS — групп-читаемая копия уже выпущенного Let's Encrypt-сертификата
+#    домена, ставится acme.sh (полная команда с --reloadcmd — в разделе выше).
+sudo install -d -o root -g vpn-bot -m 0750 /etc/vpn-bot/tls
+sudo acme.sh --install-cert -d <домен> \
+  --fullchain-file /etc/vpn-bot/tls/fullchain.pem \
+  --key-file       /etc/vpn-bot/tls/privkey.pem \
+  --reloadcmd      "... && systemctl restart vpn-bot-subscription"
+ls -l /etc/vpn-bot/tls          # ожидаем root:vpn-bot, privkey.pem 0640
 
-# 2. Юнит
-sudo install -m0644 deploy/vpn-bot-subscription.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now vpn-bot-subscription
+# 2. .env — флаг, порты и TLS-пара, одной правкой
+#    SUBSCRIPTION_ENABLED=true
+#    SUBSCRIPTION_BIND_HOST=127.0.0.1
+#    SUBSCRIPTION_BIND_PORT=8445          # loopback, НЕ 8443 (занят xhttp/mtproxy)
+#    SUBSCRIPTION_PUBLIC_PORT=2096        # пусто или 0 оставляет только loopback
+#    SUBSCRIPTION_TLS_CERT=/etc/vpn-bot/tls/fullchain.pem
+#    SUBSCRIPTION_TLS_KEY=/etc/vpn-bot/tls/privkey.pem
 
 # 3. Фаервол (трекаемое правило — никаких `ufw allow` руками)
 sudo bash deploy/ufw-subscription.sh          # порт берётся из .env
 #   ... и обратно:
 sudo bash deploy/ufw-subscription.sh --delete
 
-# 4. Проверка
-systemctl status vpn-bot-subscription --no-pager
-sudo ss -tlnp | grep -E '8445|2096'
+# 4. Юнит — ставится руками (drift); deploy.sh его не ставит
+sudo install -m0644 deploy/vpn-bot-subscription.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable vpn-bot-subscription
+
+# 5. Рестарт ОБОИХ процессов — каждый читает .env один раз, при старте
+sudo systemctl restart vpn-bot-subscription vpn-bot
+
+# 6. Подождать ~20с. Перед биндом эндпоинт импортирует рендереры ссылок, поэтому
+#    сокетов после рестарта секунд двадцать просто нет (см. ниже).
+sleep 25
+
+# 7. Проверка: сокеты, затем журнал
+sudo ss -tlnp | grep -E '8445|2096'         # ожидаем ОБА: loopback 8445 + публичный 2096
+sudo journalctl -u vpn-bot-subscription -n 30 --no-pager
+#    ожидаем: "subscription endpoint listening on 127.0.0.1:8445 ..."
+#         и  "subscription endpoint listening on :2096 (HTTPS, cert=...)"
+
+# 8. Smoke
 curl -si http://127.0.0.1:8445/sub/definitely-not-a-real-token | head -1   # ожидаем 404
+curl -si https://<домен>:2096/sub/definitely-not-a-real-token | head -1    # ожидаем 404 по TLS
+#    затем открыть реальный sub-URL из экрана «Конфиг» в боте — ожидаем 200.
 ```
+
+### Публичный порт без TLS-пары = отказ старта, и это by design
+
+Заданный `SUBSCRIPTION_PUBLIC_PORT` без **обеих** переменных `SUBSCRIPTION_TLS_CERT` и
+`SUBSCRIPTION_TLS_KEY` заставляет процесс написать в лог `subscription endpoint refuses to start:
+...` и выйти с кодом `1` (`Settings.validate_subscription_ready`, вызывается из
+`subscription_server.config`). При `Restart=on-failure` systemd повторяет попытки, и юнит
+заканчивает в состоянии `failed`. **Это фича, а не баг**: тело ответа — полный набор клиентских
+ссылок пользователя, поэтому единственная альтернатива (поднять публичный порт открытым текстом)
+обязана быть недостижима правкой `.env`. Если после правки `.env` юнит не поднимается — сначала
+читаем журнал: та строка прямо называет недостающую переменную.
+
+### Задержка от старта до бинда
+
+Процессу нужно **около 20 секунд** между `systemctl start` и захватом сокетов: перед биндом он
+импортирует `services.xray` и `bot.formatters` (единственный источник правды для форматов ссылок
+`vless://` и `hy2://` — они переиспользуются, чтобы ссылки в подписке были байт-в-байт теми же,
+что и в per-key выдаче), а эта цепочка тянет `aiogram`, на который и приходится почти вся
+стоимость.
+
+«Чинить» это отложенным импортом **не стоит**. `XrayService` — базовый класс рендерера ссылок
+(подкласс объявлен на уровне модуля, поэтому его импорт нельзя убрать внутрь функции), а
+`services.xray` сам импортирует `bot.formatters` — так что отложить один только импорт
+форматтеров в `subscription_server/render.py` не даст ничего. По-настоящему быстрый бинд требует
+переработки общего кода рендера ссылок, а расхождение между ссылками в подписке и per-key
+ссылками — не тот риск, ради которого стоит экономить 20 секунд старта.
+
+Что из этого следует на практике:
+
+- Сразу после рестарта `ss` не покажет ни `8445`, ни `2096` ещё ~20с. Это надо просто переждать —
+  `journalctl -u vpn-bot-subscription` печатает по строке `listening on ...` в момент, когда
+  соответствующий бинд состоялся.
+- `scripts/deploy.sh` в Phase 1 перепроверяет порты до `SUBSCRIPTION_BIND_WAIT` секунд (по
+  умолчанию `30`), пока юнит активен, — так что деплой, попавший в медленный старт, не напишет
+  ложное «NOT listening». Проверка в любом случае информационная и **никогда** не валит деплой.
+- Задержка только стартовая. На запросы она не влияет: `GET /sub/{token}` обслуживает уже
+  прогретый процесс.
 
 Переключение `SUBSCRIPTION_ENABLED` требует рестарта **обоих** юнитов — `systemctl restart
 vpn-bot-subscription vpn-bot`: каждый процесс читает `.env` при старте, эндпоинт — ради маршрутов,
