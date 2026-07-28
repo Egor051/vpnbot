@@ -527,6 +527,10 @@ async def _build_app(
         hysteria_service=hysteria_service,
         hysteria2_max_conn=settings.anomaly_hysteria2_max_conn,
         backend_health=backend_health,
+        # Alert shaping only: lets an alert about a bundle child name the bundle
+        # the user actually holds, and roll several children of one bundle into a
+        # single alert. Detection is untouched and still runs per child key.
+        bundles=key_bundles_repo,
     )
 
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)

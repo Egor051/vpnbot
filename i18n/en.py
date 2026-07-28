@@ -640,6 +640,27 @@ STRINGS: dict[str, str] = {
     "btn_refresh": "Refresh",
     "btn_anomaly_dismiss": "✅ I've read it",
     "btn_warp_alert_dismiss": "✅ Got it",
+    # ── anomaly alert rolled up onto an all-in-one bundle ──────────────────────
+    # Only the BUNDLE alert is translated. The per-key alert next to it is still
+    # composed from literals in services/anomaly_detection.py and is deliberately
+    # left byte-identical, so a single-key alert reads exactly as it always has.
+    "anomaly_bundle_title": "⚠️ <b>Anomaly: bundle #{bundle_id} ({label})</b>",
+    "anomaly_bundle_protocols": "Bundle keys affected: <b>{count}</b> ({names})",
+    "anomaly_bundle_counts": "In the last {window}: <b>{nets} unique networks</b> ({ips} IP)",
+    "anomaly_bundle_counts_concurrent": (
+        "In the last {window}: <b>{nets} unique networks</b> ({ips} IP) "
+        "(over the full {full_window}: {all_nets} networks / {all_ips} IP)"
+    ),
+    "anomaly_bundle_owner": "Owner: {owner}",
+    "anomaly_bundle_networks": "Networks: <code>{groups}</code>",
+    "anomaly_bundle_networks_window": "Networks ({window}): <code>{groups}</code>",
+    "anomaly_bundle_auto_revoked": "🔒 <b>Bundle keys revoked automatically: {count}</b>",
+    "anomaly_bundle_revoke_failed": "⚠️ Auto-revoke failed ({count}): {error}",
+    "anomaly_bundle_hysteria_conns": (
+        "Concurrent connections (HYSTERIA2): <b>{count}</b> (threshold: {threshold})"
+    ),
+    "anomaly_window_minutes": "{value} min",
+    "anomaly_window_seconds": "{value} sec",
     # ── server status panel ───────────────────────────────────────────────────
     "server_status_title": "REAL-TIME SERVER STATUS",
     "server_status_updated_at": "updated {time}",

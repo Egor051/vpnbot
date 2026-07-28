@@ -283,6 +283,18 @@ ride a base64 v2ray subscription) and so are the SOCKS5/MTProto proxies (a
 different entity). Every child of a bundle gets the same `expires_at`, so they
 expire together.
 
+**Anomaly alerts about a bundle child name the bundle.** Detection is unchanged —
+it still samples per child key by email label — but the alert an admin receives
+reports the bundle's id and display label rather than the child's internal label,
+which the user has never seen. Children of the **same** bundle crossing the
+threshold in one window are rolled up into a **single** alert with their IP
+evidence merged, e.g. `bundle #7 · 3 keys affected (VLESS TCP, VLESS HTTP,
+HYSTERIA2) · 7 unique networks in the last 60 min`. That is not just noise
+reduction: a shared subscription URL lights up several protocols with the same
+set of IPs at once, so the collapsed alert states the sharing signal instead of
+scattering it across one alert per protocol. Alerts about a standalone key are
+unchanged.
+
 Partial-provisioning policy: a protocol switched **off** (its `.env` flag or the
 admin protocol-module toggle) is skipped silently and the resulting composition
 is recorded in the audit log; a protocol that is **on but degraded** aborts the
