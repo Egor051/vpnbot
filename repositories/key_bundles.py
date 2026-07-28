@@ -115,6 +115,30 @@ class KeyBundleRepository:
         )
         await self.db.commit()
 
+    async def get_bundle_of_key(self, key_id: int) -> KeyBundle | None:
+        """Return the bundle a key is attached to, or None for a standalone key.
+
+        The reverse of :meth:`list_keys_of_bundle`, for callers that hold a key and
+        need the parent — anomaly detection, which samples backends per child key
+        and has to report the bundle the user actually knows about.
+
+        None means "not attached", which is deliberately NOT the same as "this is a
+        standalone key": a bundle child whose apply failed before
+        :meth:`attach_key_to_bundle` ran also has a NULL ``bundle_id``. Callers may
+        use None to fall back to per-key behaviour (that is always safe), never to
+        conclude that no bundle was ever intended.
+        """
+        cursor = await self.db.conn.execute(
+            """
+            SELECT b.* FROM key_bundles b
+            JOIN vpn_keys k ON k.bundle_id = b.id
+            WHERE k.id = ?
+            """,
+            (key_id,),
+        )
+        row = await cursor.fetchone()
+        return _row_to_key_bundle(row)
+
     async def list_keys_of_bundle(self, bundle_id: int) -> list[VpnKey]:
         """Return every VPN key attached to a bundle, oldest first."""
         cursor = await self.db.conn.execute(

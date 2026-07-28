@@ -4,6 +4,7 @@ import collections
 import logging
 import re
 import time as time_module
+from dataclasses import dataclass
 from pathlib import Path
 
 from aiogram import Bot
@@ -12,9 +13,11 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from adapters import ip_asn
 from adapters.awg_config import AwgConfigAdapter
 from i18n import t
-from models.dto import VpnKey
+from models.dto import KeyBundle, VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
+from repositories.key_bundles import KeyBundleRepository
 from repositories.vpn_keys import VpnKeyRepository
+from utils.redact import redact_value
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,46 @@ def _mask_ips_for_log(ips: frozenset[str], limit: int = 5) -> str:
     return ", ".join(masked)
 
 
+@dataclass(frozen=True, slots=True)
+class _TriggeredKey:
+    """One key that crossed the threshold in this scan, with its IP evidence.
+
+    Exists so :meth:`AnomalyDetectionService._check_thresholds` can finish judging
+    every key before any alert is sent — which is what makes rolling several
+    children of one bundle into a single alert possible.
+    """
+
+    key: VpnKey
+    trigger_ips: frozenset[str]
+    all_ips: frozenset[str]
+
+
+def _protocol_name(key: VpnKey) -> str:
+    """Human-facing protocol of a bundle child, for the rolled-up alert.
+
+    Deliberately NOT the child's ``email_label``: the label is an internal
+    detection handle (``xray_tcp_*`` / ``xray_http_*`` / ``hy2_*``) that the user
+    has never seen, and naming it in an alert about their subscription is noise.
+    The transport split is kept because "VLESS TCP and Hysteria2 both lit up" is
+    exactly the sharing signal worth reading.
+    """
+    if key.key_type is VpnKeyType.XRAY:
+        return "VLESS TCP" if key.transport == "tcp" else "VLESS HTTP"
+    return key.key_type.value.upper()
+
+
+def _window_label(seconds: int) -> str:
+    """Localised window length for the BUNDLE alert only.
+
+    The per-key alert keeps its own literal-Russian formatter so a standalone
+    alert stays byte-identical to what it has always been; only the new bundle
+    alert is built from the i18n catalogue.
+    """
+    if seconds % 60 == 0:
+        return t("anomaly_window_minutes", value=seconds // 60)
+    return t("anomaly_window_seconds", value=seconds)
+
+
 class AnomalyDetectionService:
     def __init__(
         self,
@@ -88,8 +131,16 @@ class AnomalyDetectionService:
         hysteria2_max_conn: int = 0,
         bot: Bot | None = None,
         backend_health: object | None = None,
+        bundles: KeyBundleRepository | None = None,
     ) -> None:
         self._vpn_keys = vpn_keys
+        # Read-only, alert-shaping only: used to name the parent an admin actually
+        # recognises instead of a child label the user has never seen, and to roll
+        # several children of one bundle into a single alert. DETECTION does not go
+        # through here at all — the Xray tail still matches xray_tcp_* / xray_http_*
+        # / hy2_* email labels exactly as before. None (the constructor default)
+        # means every alert stays per-key, i.e. the pre-bundle behaviour.
+        self._bundles = bundles
         self._awg = awg
         self._xray_service = xray_service
         self._awg_service = awg_service
@@ -252,6 +303,15 @@ class AnomalyDetectionService:
     # ------------------------------------------------------------ Threshold check
 
     async def _check_thresholds(self, now: float) -> None:
+        """Collect every key over threshold this scan, then emit the alerts.
+
+        The threshold logic itself is unchanged and still entirely per key. What
+        changed is that firing is deferred to :meth:`_dispatch_alerts`: several
+        children of ONE bundle crossing in the same window are a single event (one
+        shared subscription URL being used from several places), and reporting it
+        as five alerts buried the signal instead of sharpening it.
+        """
+        triggered: list[_TriggeredKey] = []
         for key_id in list(self._observations):
             all_ips = self._unique_ips_in_window(key_id, now)
             if not self._observations[key_id]:
@@ -274,8 +334,180 @@ class AnomalyDetectionService:
             key = await self._vpn_keys.get_by_id(key_id)
             if key is None or key.status not in {VpnKeyStatus.ACTIVE}:
                 continue
+            triggered.append(_TriggeredKey(key=key, trigger_ips=trigger_ips, all_ips=all_ips))
+        await self._dispatch_alerts(now, triggered)
+
+    async def _dispatch_alerts(self, now: float, triggered: list["_TriggeredKey"]) -> None:
+        """Route each triggered key to a per-key alert or a per-bundle rollup.
+
+        Standalone keys take exactly the path they always took. Children of the
+        same bundle are collapsed into ONE alert naming the bundle, because the
+        child's own label (``xray_http_*``, ``hy2_*``) is an implementation detail
+        the user has never seen — they hold one subscription URL.
+        """
+        standalone: list[_TriggeredKey] = []
+        bundles: dict[int, KeyBundle] = {}
+        grouped: dict[int, list[_TriggeredKey]] = {}
+        for item in triggered:
+            bundle = await self._bundle_of(item.key)
+            if bundle is None:
+                standalone.append(item)
+                continue
+            bundles[bundle.id] = bundle
+            grouped.setdefault(bundle.id, []).append(item)
+
+        for item in standalone:
+            self._last_alerted[item.key.id] = now
+            await self._fire_alert(item.key, item.trigger_ips, item.all_ips)
+
+        for bundle_id, members in grouped.items():
+            await self._stamp_bundle_cooldown(bundle_id, members, now)
+            await self._fire_bundle_alert(bundles[bundle_id], members)
+
+    async def _bundle_of(self, key: VpnKey) -> KeyBundle | None:
+        """The bundle this key belongs to, or None for a standalone key.
+
+        Fails OPEN to None: a repository error here must degrade the alert to the
+        per-key form it had before bundles existed, never swallow it. None is also
+        what an unattached row returns, including a bundle child whose apply died
+        before the attach — falling back to the per-key alert is correct for that
+        row too, since there is no parent to name.
+        """
+        if self._bundles is None:
+            return None
+        try:
+            return await self._bundles.get_bundle_of_key(key.id)
+        except Exception:
+            logger.warning(
+                "Failed to resolve the bundle of key_id=%s for an anomaly alert; "
+                "falling back to the per-key alert",
+                key.id,
+                exc_info=True,
+            )
+            return None
+
+    async def _stamp_bundle_cooldown(
+        self, bundle_id: int, members: list["_TriggeredKey"], now: float
+    ) -> None:
+        """Put the WHOLE bundle on cooldown, not just the children that triggered.
+
+        Without this the rollup would only defer the duplicates: a sibling crossing
+        the threshold a minute later is a different key_id, so it would pass its own
+        cooldown check and produce a second alert for the same event. Best-effort —
+        if the child list cannot be read, the triggering keys are still stamped, so
+        the worst case is the pre-rollup number of alerts, never more.
+        """
+        key_ids = {item.key.id for item in members}
+        if self._bundles is not None:
+            try:
+                key_ids.update(key.id for key in await self._bundles.list_keys_of_bundle(bundle_id))
+            except Exception:
+                logger.warning(
+                    "Failed to list the children of bundle_id=%s while stamping the "
+                    "anomaly cooldown; only the triggering keys are suppressed",
+                    bundle_id,
+                    exc_info=True,
+                )
+        for key_id in key_ids:
             self._last_alerted[key_id] = now
-            await self._fire_alert(key, trigger_ips, all_ips)
+
+    # ------------------------------------------------------- Alert (bundle rollup)
+
+    async def _fire_bundle_alert(self, bundle: KeyBundle, members: list[_TriggeredKey]) -> None:
+        """One alert for a whole bundle, with the members' IP evidence merged.
+
+        A shared subscription URL lights up several children with the SAME set of
+        IPs at once, so the union is the honest count and the number of children it
+        came from is itself part of the signal.
+
+        Auto-revoke keeps its existing per-key semantics: every member that would
+        have been revoked by its own alert is still revoked here. Only the message
+        is collapsed.
+        """
+        trigger_ips = frozenset().union(*(m.trigger_ips for m in members))
+        all_ips = frozenset().union(*(m.all_ips for m in members))
+        owner_key = members[0].key
+        # bundle.label is display-only (bundle_XXXXX), never the token — and it is
+        # still put through redact_value like every other free-form value that
+        # reaches a log line. bundle.token is never read here at all.
+        logger.warning(
+            "Anomaly: bundle #%d (%s) owner=%d children=%d trigger_ips=%d all_ips=%d ips=%s",
+            bundle.id,
+            redact_value(bundle.label),
+            bundle.user_id,
+            len(members),
+            len(trigger_ips),
+            len(all_ips),
+            _mask_ips_for_log(trigger_ips),
+        )
+
+        revoked = 0
+        revoke_error: str | None = None
+        for member in members:
+            auto_revoked, error = await self._try_auto_revoke(
+                member.key, enabled=self._auto_revoke_effective
+            )
+            if auto_revoked:
+                revoked += 1
+            elif error and revoke_error is None:
+                revoke_error = error
+
+        if self.bot is None:
+            return
+
+        using_concurrent = self._concurrent_window_seconds > 0 and trigger_ips != all_ips
+        ips_for_display = trigger_ips if using_concurrent else all_ips
+        net_counts = collections.Counter(ip_asn.normalize_ip(ip) for ip in ips_for_display)
+        groups_str = ", ".join(f"{net}: {count} IP" for net, count in net_counts.most_common())
+
+        if using_concurrent:
+            counts_line = t(
+                "anomaly_bundle_counts_concurrent",
+                window=_window_label(self._concurrent_window_seconds),
+                nets=len(net_counts),
+                ips=len(ips_for_display),
+                full_window=_window_label(self._window_seconds),
+                all_nets=len({ip_asn.normalize_ip(ip) for ip in all_ips}),
+                all_ips=len(all_ips),
+            )
+            networks_line = t(
+                "anomaly_bundle_networks_window",
+                window=_window_label(self._concurrent_window_seconds),
+                groups=groups_str,
+            )
+        else:
+            counts_line = t(
+                "anomaly_bundle_counts",
+                window=_window_label(self._window_seconds),
+                nets=len(net_counts),
+                ips=len(ips_for_display),
+            )
+            networks_line = t("anomaly_bundle_networks", groups=groups_str)
+
+        # dict.fromkeys keeps first-seen order and de-duplicates the several XHTTP
+        # profiles down to one "VLESS HTTP".
+        protocol_names = list(dict.fromkeys(_protocol_name(m.key) for m in members))
+        owner_str = (
+            f"@{owner_key.username}" if owner_key.username else f"user_id={bundle.user_id}"
+        )
+        lines = [
+            t("anomaly_bundle_title", bundle_id=bundle.id, label=bundle.label),
+            t(
+                "anomaly_bundle_protocols",
+                count=len(members),
+                names=", ".join(protocol_names),
+            ),
+            counts_line,
+            t("anomaly_bundle_owner", owner=owner_str),
+            networks_line,
+        ]
+        if revoked:
+            lines.append(t("anomaly_bundle_auto_revoked", count=revoked))
+        elif revoke_error:
+            lines.append(
+                t("anomaly_bundle_revoke_failed", count=len(members), error=revoke_error[:120])
+            )
+        await self._send_alert_to_admins("\n".join(lines))
 
     # ------------------------------------------------------------------ Alert
 
@@ -383,6 +615,18 @@ class AnomalyDetectionService:
             await self._fire_hysteria_alert(key, count)
 
     async def _fire_hysteria_alert(self, key: VpnKey, conn_count: int) -> None:
+        # A bundle's Hysteria2 child is subject to the same "name the parent"
+        # rule as the IP-based path — the user holds a subscription URL, not a
+        # hy2_* label. No aggregation is possible or needed here: a bundle has at
+        # most one Hysteria2 child, so there is never more than one to collapse.
+        # The cooldown stays per key (unlike the rollup, which stamps the whole
+        # bundle): this is an independent signal from the IP-based one, and
+        # silencing that one on the strength of a connection count would lose
+        # information rather than de-duplicate it.
+        bundle = await self._bundle_of(key)
+        if bundle is not None:
+            await self._fire_bundle_hysteria_alert(bundle, key, conn_count)
+            return
         logger.warning(
             "Anomaly: key #%d (HYSTERIA2) owner=%d concurrent_conns=%d",
             key.id,
@@ -402,6 +646,36 @@ class AnomalyDetectionService:
             lines.append("🔒 <b>Ключ автоматически отозван</b>")
         elif revoke_error:
             lines.append(f"⚠️ Авто-отзыв не удался: {revoke_error[:120]}")
+        await self._send_alert_to_admins("\n".join(lines))
+
+    async def _fire_bundle_hysteria_alert(
+        self, bundle: KeyBundle, key: VpnKey, conn_count: int
+    ) -> None:
+        """The connection-count alert, addressed to the bundle instead of the child."""
+        logger.warning(
+            "Anomaly: bundle #%d (%s) owner=%d concurrent_conns=%d",
+            bundle.id,
+            redact_value(bundle.label),
+            bundle.user_id,
+            conn_count,
+        )
+        auto_revoked, revoke_error = await self._try_auto_revoke(key, enabled=self._auto_revoke)
+        if self.bot is None:
+            return
+        owner_str = f"@{key.username}" if key.username else f"user_id={bundle.user_id}"
+        lines = [
+            t("anomaly_bundle_title", bundle_id=bundle.id, label=bundle.label),
+            t(
+                "anomaly_bundle_hysteria_conns",
+                count=conn_count,
+                threshold=self._hysteria2_max_conn,
+            ),
+            t("anomaly_bundle_owner", owner=owner_str),
+        ]
+        if auto_revoked:
+            lines.append(t("anomaly_bundle_auto_revoked", count=1))
+        elif revoke_error:
+            lines.append(t("anomaly_bundle_revoke_failed", count=1, error=revoke_error[:120]))
         await self._send_alert_to_admins("\n".join(lines))
 
     # ------------------------------------------------------------------ Alert I/O
