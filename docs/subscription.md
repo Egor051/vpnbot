@@ -106,11 +106,11 @@ sudo install -d -o root -g vpn-bot -m 0750 /etc/vpn-bot/tls
 # Add a SECOND install target to the existing acme.sh --install-cert invocation
 # (keep the hysteria one as-is) so renewals land here too and restart the unit:
 sudo acme.sh --install-cert -d anycastedge.duckdns.org \
-  --fullchain-file /etc/vpn-bot/tls/sub-fullchain.pem \
-  --key-file       /etc/vpn-bot/tls/sub-key.pem \
-  --reloadcmd      "chown root:vpn-bot /etc/vpn-bot/tls/sub-*.pem && \
-                    chmod 0640 /etc/vpn-bot/tls/sub-key.pem && \
-                    chmod 0644 /etc/vpn-bot/tls/sub-fullchain.pem && \
+  --fullchain-file /etc/vpn-bot/tls/fullchain.pem \
+  --key-file       /etc/vpn-bot/tls/privkey.pem \
+  --reloadcmd      "chown root:vpn-bot /etc/vpn-bot/tls/fullchain.pem /etc/vpn-bot/tls/privkey.pem && \
+                    chmod 0640 /etc/vpn-bot/tls/privkey.pem && \
+                    chmod 0644 /etc/vpn-bot/tls/fullchain.pem && \
                     systemctl restart vpn-bot-subscription"
 ```
 
@@ -118,37 +118,102 @@ The key is read **once at startup**, so a renewal is picked up by that restart. 
 `ReadOnlyPaths` for it: `ProtectSystem=strict` makes `/etc` read-only, not invisible, and the
 file mode is what actually gates access.
 
-## Install (drift, by hand)
+## Go-live (drift install, by hand)
 
 `scripts/deploy.sh` auto-installs **only** `vpn-bot.service`; like every other unit in `deploy/`,
 this one is reported as drift and installed by the operator. Phase 1 also prints an
 informational line telling you whether the unit is installed/active and whether the configured
 ports are listening — it is never fatal, since a host that has not deployed the endpoint is a
-normal state.
+normal state, and it tolerates a unit that is up but has not finished binding yet (see
+[Start-to-bind delay](#start-to-bind-delay)).
+
+**The order below is the order.** The TLS material must exist before the `.env` names it, and the
+firewall rule before the port answers; a public port whose TLS pair is missing does not start at
+all (next section), so putting the `.env` first would only buy a failed restart.
 
 ```bash
-# 1. .env: enable the feature and choose the ports
-#    SUBSCRIPTION_ENABLED=true
-#    SUBSCRIPTION_BIND_PORT=8445          # loopback, NOT 8443 (taken by xhttp/mtproxy)
-#    SUBSCRIPTION_PUBLIC_PORT=2096        # 0 keeps it loopback-only
-#    SUBSCRIPTION_TLS_CERT=/etc/vpn-bot/tls/sub-fullchain.pem
-#    SUBSCRIPTION_TLS_KEY=/etc/vpn-bot/tls/sub-key.pem
+# 1. TLS copy — a group-readable copy of the domain's existing Let's Encrypt
+#    material, installed by acme.sh (full command + --reloadcmd: section above).
+sudo install -d -o root -g vpn-bot -m 0750 /etc/vpn-bot/tls
+sudo acme.sh --install-cert -d <domain> \
+  --fullchain-file /etc/vpn-bot/tls/fullchain.pem \
+  --key-file       /etc/vpn-bot/tls/privkey.pem \
+  --reloadcmd      "... && systemctl restart vpn-bot-subscription"
+ls -l /etc/vpn-bot/tls          # expect root:vpn-bot, privkey.pem 0640
 
-# 2. Unit
-sudo install -m0644 deploy/vpn-bot-subscription.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now vpn-bot-subscription
+# 2. .env — the flag, the ports and the TLS pair, in one edit
+#    SUBSCRIPTION_ENABLED=true
+#    SUBSCRIPTION_BIND_HOST=127.0.0.1
+#    SUBSCRIPTION_BIND_PORT=8445          # loopback, NOT 8443 (taken by xhttp/mtproxy)
+#    SUBSCRIPTION_PUBLIC_PORT=2096        # empty or 0 keeps it loopback-only
+#    SUBSCRIPTION_TLS_CERT=/etc/vpn-bot/tls/fullchain.pem
+#    SUBSCRIPTION_TLS_KEY=/etc/vpn-bot/tls/privkey.pem
 
 # 3. Firewall (tracked rule — never a hand-typed `ufw allow`)
 sudo bash deploy/ufw-subscription.sh          # reads the port from .env
 #   ... and to close it again:
 sudo bash deploy/ufw-subscription.sh --delete
 
-# 4. Verify
-systemctl status vpn-bot-subscription --no-pager
-sudo ss -tlnp | grep -E '8445|2096'
+# 4. Unit — drift-installed by hand; deploy.sh never installs it
+sudo install -m0644 deploy/vpn-bot-subscription.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable vpn-bot-subscription
+
+# 5. Restart BOTH processes — each reads .env once, at startup
+sudo systemctl restart vpn-bot-subscription vpn-bot
+
+# 6. Wait ~20s. The endpoint imports the link renderers before it binds, so the
+#    sockets do not exist for roughly 20 seconds after the restart (see below).
+sleep 25
+
+# 7. Verify: sockets, then the journal
+sudo ss -tlnp | grep -E '8445|2096'         # expect BOTH: loopback 8445 + public 2096
+sudo journalctl -u vpn-bot-subscription -n 30 --no-pager
+#    expect: "subscription endpoint listening on 127.0.0.1:8445 ..."
+#        and "subscription endpoint listening on :2096 (HTTPS, cert=...)"
+
+# 8. Smoke
 curl -si http://127.0.0.1:8445/sub/definitely-not-a-real-token | head -1   # expect 404
+curl -si https://<domain>:2096/sub/definitely-not-a-real-token | head -1   # expect 404 over TLS
+#    then fetch a real bundle URL from the bot's «Config» screen — expect 200.
 ```
+
+### A public port without a TLS pair is a refusal to start — by design
+
+Setting `SUBSCRIPTION_PUBLIC_PORT` without **both** `SUBSCRIPTION_TLS_CERT` and
+`SUBSCRIPTION_TLS_KEY` makes the process log `subscription endpoint refuses to start: ...` and
+exit `1` (`Settings.validate_subscription_ready`, called from `subscription_server.config`).
+Under `Restart=on-failure` systemd then retries and the unit ends up `failed`. **This is the
+feature, not a bug**: the response body is a complete set of a user's client links, so the
+only alternative — binding the public port in cleartext — is the one outcome that must not be
+reachable by editing `.env`. If the unit will not come up after a `.env` change, read the
+journal before touching anything else; that line names exactly which value is missing.
+
+### Start-to-bind delay
+
+The process needs **roughly 20 seconds** between `systemctl start` and holding its sockets: before
+binding it imports `services.xray` and `bot.formatters` (the single source of truth for the
+`vless://` and `hy2://` link formats, reused so subscription links stay byte-identical to the
+per-key ones), and that chain pulls in `aiogram`, which is nearly all of the cost.
+
+This is **not** worth "fixing" with a lazy import. `XrayService` is the base class of the link
+renderer — a module-level subclass, so its import cannot move into a function — and
+`services.xray` imports `bot.formatters` itself, so deferring only the formatters import in
+`subscription_server/render.py` would save nothing. A genuinely fast bind means restructuring the
+shared link-rendering code, and a divergence between subscription links and per-key links is not
+a risk worth taking to save 20 seconds of startup.
+
+Practical consequences:
+
+- After a restart, `ss` shows nothing on `8445`/`2096` for ~20s. Wait it out before concluding
+  anything is wrong — `journalctl -u vpn-bot-subscription` prints one `listening on ...` line per
+  socket the moment each bind succeeds.
+- `scripts/deploy.sh` Phase 1 re-checks the ports for up to `SUBSCRIPTION_BIND_WAIT` seconds
+  (default `30`) while the unit is active, so a deploy that lands during a slow start does not
+  report a false "NOT listening". The check is informational either way and **never** fails a
+  deploy.
+- The delay is startup-only. It costs nothing per request: `GET /sub/{token}` is served by an
+  already-warm process.
 
 Flipping `SUBSCRIPTION_ENABLED` needs a restart of **both** units — `systemctl restart
 vpn-bot-subscription vpn-bot`: each process reads `.env` at startup, the endpoint for its routes

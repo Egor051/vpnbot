@@ -432,3 +432,138 @@ def test_key_bundle_repository_crud(tmp_path: Path) -> None:
             await db.close()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# bundle_id IS NULL is AMBIGUOUS — it is not a "standalone key" marker
+# --------------------------------------------------------------------------- #
+def test_null_bundle_id_cannot_distinguish_standalone_from_unfinished_child(tmp_path: Path) -> None:
+    """A NULL ``bundle_id`` means one of TWO things, and the row does not say which.
+
+    ``create_bundle`` provisions each child first and attaches it second
+    (``_provision_child`` -> ``attach_key_to_bundle``). When a child's own apply
+    fails, its row is already in ``vpn_keys`` — ``apply_failed``, never attached —
+    and the rollback deliberately leaves it there, exactly like the trace a failed
+    standalone create leaves behind. ``test_key_bundle_service.py::
+    test_create_bundle_rolls_back_children_on_midway_failure`` pins that the real
+    service path produces such a row.
+
+    So ``bundle_id IS NULL`` covers BOTH:
+
+    * an ordinary standalone key (every pre-v32 row, plus every key created
+      outside a bundle), and
+    * a bundle child whose apply died before the attach.
+
+    Nothing may delete or "clean up" a row on the strength of that NULL alone.
+    Both kinds can still own a live client on a backend that startup
+    reconciliation is expected to find, and the second kind is not garbage — it is
+    the same recoverable wreckage a standalone failure leaves.
+
+    This test states the invariant so that a future change which tries to make
+    NULL mean "standalone" (e.g. by back-filling it, or by adding a sweep) has to
+    come here and argue with it first. The companion static guard below fails on
+    the SQL such a sweep would be written in.
+    """
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await db.conn.execute(_INSERT_USERS)
+            # A live bundle with one attached, healthy child ...
+            await db.conn.execute(
+                "INSERT INTO key_bundles (user_id, label, status, token, created_at, updated_at) "
+                "VALUES (100, 'bundle_00001', 'active', 'tok-1', 'now', 'now')"
+            )
+            await db.conn.execute(
+                """
+                INSERT INTO vpn_keys (
+                  owner_user_id, key_type, status, email_label,
+                  payload_json, public_payload_json, created_at, updated_at, created_by, bundle_id
+                )
+                VALUES (100, 'xray', 'active', 'xray_tcp_aaaa',
+                        '{}', '{}', 'now', 'now', 1, 1)
+                """
+            )
+            # ... a sibling whose apply died BEFORE the attach (bundle_id never set) ...
+            await db.conn.execute(
+                """
+                INSERT INTO vpn_keys (
+                  owner_user_id, key_type, status, email_label,
+                  payload_json, public_payload_json, created_at, updated_at, created_by
+                )
+                VALUES (100, 'xray', 'apply_failed', 'xray_http_bbbb',
+                        '{}', '{}', 'now', 'now', 1)
+                """
+            )
+            # ... and an ordinary standalone key that failed to apply.
+            await db.conn.execute(
+                """
+                INSERT INTO vpn_keys (
+                  owner_user_id, key_type, status, email_label,
+                  payload_json, public_payload_json, created_at, updated_at, created_by
+                )
+                VALUES (100, 'xray', 'apply_failed', 'xray_tcp_cccc',
+                        '{}', '{}', 'now', 'now', 1)
+                """
+            )
+            await db.commit()
+
+            null_rows = await db.conn.execute_fetchall(
+                "SELECT id, email_label, status FROM vpn_keys WHERE bundle_id IS NULL ORDER BY id"
+            )
+            # The predicate catches the unfinished child and the standalone key
+            # alike, and the two rows are indistinguishable in every column a
+            # cleanup could key on: same status, same NULL bundle_id. The child's
+            # label is a normal child label, and standalone keys carry those too.
+            assert [row["email_label"] for row in null_rows] == ["xray_http_bbbb", "xray_tcp_cccc"]
+            assert {row["status"] for row in null_rows} == {"apply_failed"}
+
+            # Re-running the migrations must not sweep either of them: bootstrap is
+            # the one place a "tidy up the orphans" step would plausibly be added.
+            await db.bootstrap()
+            after = await db.conn.execute_fetchone("SELECT COUNT(*) AS cnt FROM vpn_keys")
+            assert int(after["cnt"]) == 3, "a migration deleted a bundle_id IS NULL row"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_no_production_query_selects_keys_by_bundle_id_is_null() -> None:
+    """No production SQL may treat ``bundle_id IS NULL`` as "this is a standalone key".
+
+    The tripwire for the invariant above. A cleanup/reconcile/listing sweep that
+    wanted "the keys that are not in a bundle" would be written exactly as
+    ``WHERE bundle_id IS NULL``, and it would silently include bundle children
+    whose apply failed before the attach.
+
+    There is currently **no** such query — the guard starts from zero, with no
+    allow-list. ``bundle_id IS NOT NULL`` stays allowed: that direction is
+    unambiguous (a set bundle_id really does mean "attached child"), and the
+    partial index in ``db/schema.sql`` uses it.
+
+    If you are here because this test failed: the fix is not to add your file to
+    an exception list. Decide what your query actually needs — usually "children
+    of THIS bundle" (``bundle_id = ?``, which is exact) — or make the row itself
+    unambiguous first.
+    """
+    root = SCHEMA_PATH.parents[1]
+    offenders: list[str] = []
+    for directory in ("db", "repositories", "services", "bot", "adapters", "hy2_auth", "warp", "subscription_server"):
+        for path in sorted((root / directory).rglob("*")):
+            if path.suffix not in {".py", ".sql"}:
+                continue
+            marker = "#" if path.suffix == ".py" else "--"
+            for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                code = raw.split(marker, 1)[0]
+                # `IS NOT NULL` is the unambiguous direction and is explicitly fine.
+                code = re.sub(r"bundle_id\s+IS\s+NOT\s+NULL", "", code, flags=re.I)
+                if re.search(r"bundle_id\s+IS\s+NULL", code, flags=re.I):
+                    offenders.append(f"{path.relative_to(root)}:{lineno}: {raw.strip()}")
+    assert not offenders, (
+        "a query classifies keys by `bundle_id IS NULL`, but that also matches a "
+        "bundle child whose apply failed before it was attached — such a row must "
+        "not be treated as a known-standalone key: " + "; ".join(offenders)
+    )
