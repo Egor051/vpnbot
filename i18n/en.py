@@ -470,13 +470,11 @@ STRINGS: dict[str, str] = {
     # ── all-in-one subscription (bundles) ─────────────────────────────────────
     "bundle_title": "All-in-One #{id}",
     "bundle_type_label": "All-in-One",
-    "bundles_group_title": "<b>All-in-One</b>",
     "bundle_composition": "Contents",
     "bundle_awg_separate": (
         "ℹ️ AmneziaWG is not part of the subscription and is issued as a separate key: "
         "a WireGuard config cannot be delivered over a subscription link."
     ),
-    "bundles_more_hint": "Showing {shown} of {total} subscriptions.",
     "bundle_fp_prompt": "Choose a fingerprint — it applies to every VLESS key in the subscription:",
     "bundle_create_confirm_title": "<b>Confirm subscription creation</b>",
     "creating_bundle": "Creating the subscription...",

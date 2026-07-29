@@ -229,7 +229,7 @@ The bot only *reads* it (`GET /traffic`, `GET /online`) and POSTs `/kick` when a
 key is revoked/deleted/expired. Without `HYSTERIA2_STATS_SECRET` set, hy2 keys
 show no traffic and no online count, and a revoke blocks only new handshakes
 (the live session survives until the client reconnects) — the pre-Stats-API
-behaviour. The `id` reported by the API is the key's stats label (`hy2_<hex>`),
+behaviour. The `id` reported by the API is the key's stats label (`hy2_<rnd>`),
 the same id `hy2_auth` returns.
 
 ### `HYSTERIA2_INSECURE` — off by default (valid cert)
@@ -302,7 +302,7 @@ whole creation, because a bundle that silently lacks a protocol stays defective
 forever while an aborted creation is simply retried.
 
 `SUBSCRIPTION_ENABLED` also gates the **bot UI**: with it `false` the «Create key»
-menu offers no all-in-one option, «My keys» renders no bundle group, and a
+menu offers no all-in-one option, «My keys» lists no bundles, and a
 `bundle:*` callback is refused. The subscription URL the bot shows has **no host
 variable of its own** — it is `HYSTERIA2_SNI` (falling back to `HYSTERIA2_HOST`)
 plus `SUBSCRIPTION_PUBLIC_PORT`, because the endpoint terminates TLS with a copy

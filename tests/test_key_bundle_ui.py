@@ -21,9 +21,9 @@ from bot.bundles import (
     bundle_created_text,
     bundle_detail_text,
     bundle_stats_text,
-    bundles_section_text,
     subscription_url,
 )
+from bot.formatters import bundle_card_text
 from bot.fsm.states import CreateKeyStates, EditNoteStates
 from bot.handlers.key_bundles import (
     confirm_bundle_action,
@@ -66,7 +66,19 @@ def _settings(**overrides: object) -> SimpleNamespace:
     return settings
 
 
-def _bundle(bundle_id: int = 7, status: KeyBundleStatus = KeyBundleStatus.ACTIVE, note: str | None = None) -> KeyBundle:
+# What a bundle's `display_no` is offset by, relative to its row id, in these
+# fixtures. Non-zero on purpose: the displayed number comes from the shared
+# key/bundle counter while callback data still addresses the row id, and a fixture
+# where the two were equal could not tell the one being used from the other.
+DISPLAY_OFFSET = 100
+
+
+def _bundle(
+    bundle_id: int = 7,
+    status: KeyBundleStatus = KeyBundleStatus.ACTIVE,
+    note: str | None = None,
+    created_at: str = "2026-07-01T10:00:00+00:00",
+) -> KeyBundle:
     return KeyBundle(
         id=bundle_id,
         user_id=OWNER,
@@ -74,10 +86,11 @@ def _bundle(bundle_id: int = 7, status: KeyBundleStatus = KeyBundleStatus.ACTIVE
         note=note,
         status=status,
         token=TOKEN,
-        created_at="2026-07-01T10:00:00+00:00",
-        updated_at="2026-07-01T10:00:00+00:00",
+        created_at=created_at,
+        updated_at=created_at,
         revoked_at=None,
         deleted_at=None,
+        display_no=bundle_id + DISPLAY_OFFSET,
     )
 
 
@@ -86,6 +99,7 @@ def _key(
     key_type: VpnKeyType = VpnKeyType.XRAY,
     transport: str = "tcp",
     xhttp_profile: str = "base",
+    created_at: str = "2026-07-01T10:00:00+00:00",
 ) -> VpnKey:
     return VpnKey(
         id=key_id,
@@ -100,8 +114,8 @@ def _key(
         client_ip=None,
         payload={},
         public_payload={},
-        created_at="2026-07-01T10:00:00+00:00",
-        updated_at="2026-07-01T10:00:00+00:00",
+        created_at=created_at,
+        updated_at=created_at,
         revoked_at=None,
         deleted_at=None,
         created_by=OWNER,
@@ -384,7 +398,7 @@ def test_create_menu_offers_all_in_one_while_flag_is_on() -> None:
     asyncio.run(run())
 
 
-def test_keys_list_has_no_bundle_group_while_flag_is_off() -> None:
+def test_keys_list_has_no_bundle_entry_while_flag_is_off() -> None:
     views = _BundleViews([_bundle()])
 
     async def run() -> None:
@@ -392,7 +406,7 @@ def test_keys_list_has_no_bundle_group_while_flag_is_off() -> None:
         services = _services(settings=_settings(subscription_enabled=False), views=views)
         await list_keys(callback, services)  # type: ignore[arg-type]
 
-        assert t("bundles_group_title") not in callback.message.last_text
+        assert t("bundle_title", id=7 + DISPLAY_OFFSET) not in callback.message.last_text
         assert all("bundle" not in (data or "") for data in _callbacks(callback.message.last_markup))
         # The view service is not even consulted while the feature is off.
         assert views.calls == []
@@ -400,26 +414,57 @@ def test_keys_list_has_no_bundle_group_while_flag_is_off() -> None:
     asyncio.run(run())
 
 
-def test_keys_list_shows_bundle_group_while_flag_is_on() -> None:
+def test_keys_list_shows_the_bundle_as_an_ordinary_entry_while_flag_is_on() -> None:
     async def run() -> None:
         callback = _Callback("keys:list")
         services = _services(views=_BundleViews([_bundle()]))
         await list_keys(callback, services)  # type: ignore[arg-type]
 
         text = callback.message.last_text
-        assert t("bundles_group_title") in text
-        assert t("bundle_title", id=7) in text
+        # Numbered from the shared counter, not from the bundle's row id.
+        assert t("bundle_title", id=7 + DISPLAY_OFFSET) in text
+        assert t("bundle_title", id=7) not in text
         assert "bundle:open:7" in _callbacks(callback.message.last_markup)
 
     asyncio.run(run())
 
 
-def test_bundle_group_states_overflow_instead_of_hiding_it() -> None:
-    bundles = [_bundle(bundle_id) for bundle_id in range(1, 8)]
+def test_keys_and_bundles_share_one_date_sorted_page_of_five() -> None:
+    """Keys and subscriptions interleave by date, five entries to a page."""
+    keys = [
+        _key(1, created_at="2026-07-01T00:00:00+00:00"),
+        _key(2, created_at="2026-07-03T00:00:00+00:00"),
+        _key(3, created_at="2026-07-05T00:00:00+00:00"),
+        _key(4, created_at="2026-07-07T00:00:00+00:00"),
+    ]
+    bundles = [
+        _bundle(11, created_at="2026-07-02T00:00:00+00:00"),
+        _bundle(12, created_at="2026-07-06T00:00:00+00:00"),
+    ]
 
-    section = bundles_section_text(bundles[:5], viewer_user_id=OWNER, total=len(bundles))
+    async def run() -> None:
+        services = _services(views=_BundleViews(bundles), vpn_keys=_VpnKeys(keys))
 
-    assert t("bundles_more_hint", shown=5, total=7) in section
+        first = _Callback("keys:list")
+        await list_keys(first, services)  # type: ignore[arg-type]
+        page_one = [data for data in _callbacks(first.message.last_markup) if ":open:" in (data or "")]
+
+        second = _Callback("keys:list:1")
+        await list_keys(second, services)  # type: ignore[arg-type]
+        page_two = [data for data in _callbacks(second.message.last_markup) if ":open:" in (data or "")]
+
+        # Newest first, across both kinds, capped at five entries.
+        assert page_one == [
+            "key:open:4",
+            "bundle:open:12",
+            "key:open:3",
+            "key:open:2",
+            "bundle:open:11",
+        ]
+        # ...and the tail continues on page 2 with nothing repeated or dropped.
+        assert page_two == ["key:open:1"]
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -689,18 +734,15 @@ def test_revoked_bundle_card_drops_config_and_revoke() -> None:
     assert "bundle:delete:7" in callbacks
 
 
-def test_key_list_rows_drop_config_and_revoke_for_a_revoked_bundle() -> None:
-    from bot.keyboards.key_bundles import bundle_list_rows
+def test_key_list_row_is_a_single_button_that_opens_the_bundle() -> None:
+    """The list only navigates — every action lives on the bundle's own screen."""
+    from bot.keyboards.key_bundles import bundle_list_row
 
-    active = [button.callback_data for row in bundle_list_rows([_bundle()]) for button in row]
-    revoked = [
-        button.callback_data
-        for row in bundle_list_rows([_bundle(status=KeyBundleStatus.REVOKED)])
-        for button in row
-    ]
+    active = [button.callback_data for button in bundle_list_row(_bundle())]
+    revoked = [button.callback_data for button in bundle_list_row(_bundle(status=KeyBundleStatus.REVOKED))]
 
-    assert active == ["bundle:open:7", "bundle:show:7", "bundle:stats:7", "bundle:revoke:7", "bundle:note:7", "bundle:delete:7"]
-    assert revoked == ["bundle:open:7", "bundle:stats:7", "bundle:note:7", "bundle:delete:7"]
+    assert active == ["bundle:open:7"]
+    assert revoked == ["bundle:open:7"]
 
 
 def test_open_bundle_renders_the_card_with_its_contents() -> None:
@@ -933,10 +975,10 @@ def test_awg_is_explained_on_every_bundle_surface(locale: str) -> None:
             _create_result((_key(1),)), viewer_user_id=OWNER, settings=_settings()
         )
 
-        # …but NOT in the «My keys» list: there the question "why is there no
-        # WireGuard in the subscription?" is out of context, and an AmneziaWG
-        # group may well be sitting a few lines above it.
-        assert note not in bundles_section_text([_bundle()], viewer_user_id=OWNER, total=1)
+        # …but NOT on the «My keys» card: there the question "why is there no
+        # WireGuard in the subscription?" is out of context, and an AmneziaWG key
+        # may well be sitting a few lines above it in the same list.
+        assert note not in bundle_card_text(_bundle(), viewer_user_id=OWNER)
 
 
 # ── 8. note privacy ───────────────────────────────────────────────────────────
@@ -968,7 +1010,7 @@ def test_note_wizard_confirms_then_saves_the_note_on_the_bundle(monkeypatch: pyt
         await edit_note_waiting(message, state, services, _Bot())  # type: ignore[arg-type]
 
         assert state.state == EditNoteStates.confirming
-        assert t("bundle_title", id=7) in message.answers[-1][0]
+        assert t("bundle_title", id=7 + DISPLAY_OFFSET) in message.answers[-1][0]
 
         callback = _Callback("note:confirm")
         await edit_note_confirm(callback, state, services, RateLimiter())  # type: ignore[arg-type]
@@ -1052,6 +1094,7 @@ def test_view_service_reads_only_the_actors_own_bundles() -> None:
         updated_at="2026-07-01T10:00:00+00:00",
         revoked_at=None,
         deleted_at=None,
+        display_no=8 + DISPLAY_OFFSET,
     )
     service, _repo = _view_service(bundles=[mine, theirs])
 

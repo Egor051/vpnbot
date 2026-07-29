@@ -9,7 +9,7 @@ the whole point of the flag gate is that these rows simply do not exist while
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from bot.bundles import bundle_status_text
+from bot.formatters import bundle_status_text, bundle_title
 from i18n import t
 from models.dto import KeyBundle
 from models.enums import KeyBundleStatus
@@ -19,39 +19,21 @@ from models.enums import KeyBundleStatus
 _LIVE_STATUSES = frozenset({KeyBundleStatus.ACTIVE})
 
 
-def bundle_list_rows(bundles: list[KeyBundle]) -> list[list[InlineKeyboardButton]]:
-    """Rows for the «All-in-One» group of the «My keys» keyboard.
+def bundle_list_row(bundle: KeyBundle) -> list[InlineKeyboardButton]:
+    """The bundle's row in the «My keys» keyboard: one button that opens its card.
 
-    Same shape as the per-key rows next to it: a title row that opens the card,
-    then the action buttons the bundle's status allows.
+    Singular, and only the title button. The list used to repeat every action
+    (config · stats · revoke · note · delete) under each entry — the same five that
+    :func:`bundle_actions_keyboard` already offers one tap away — which cost three
+    keyboard rows per bundle and made a five-entry page unreadable. Management
+    happens on the item's own screen; the list only navigates to it.
     """
-    rows: list[list[InlineKeyboardButton]] = []
-    for bundle in bundles:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{t('bundle_title', id=bundle.id)} · {bundle_status_text(bundle.status)}",
-                    callback_data=f"bundle:open:{bundle.id}",
-                )
-            ]
+    return [
+        InlineKeyboardButton(
+            text=f"{bundle_title(bundle)} · {bundle_status_text(bundle.status)}",
+            callback_data=f"bundle:open:{bundle.id}",
         )
-        if bundle.status in _LIVE_STATUSES:
-            rows.append(
-                [
-                    InlineKeyboardButton(text=t("btn_config"), callback_data=f"bundle:show:{bundle.id}"),
-                    InlineKeyboardButton(text=t("btn_stats"), callback_data=f"bundle:stats:{bundle.id}"),
-                    InlineKeyboardButton(text=t("btn_revoke"), callback_data=f"bundle:revoke:{bundle.id}"),
-                ]
-            )
-        else:
-            rows.append([InlineKeyboardButton(text=t("btn_stats"), callback_data=f"bundle:stats:{bundle.id}")])
-        rows.append(
-            [
-                InlineKeyboardButton(text=t("btn_note"), callback_data=f"bundle:note:{bundle.id}"),
-                InlineKeyboardButton(text=t("btn_delete"), callback_data=f"bundle:delete:{bundle.id}"),
-            ]
-        )
-    return rows
+    ]
 
 
 def bundle_actions_keyboard(bundle: KeyBundle) -> InlineKeyboardMarkup:

@@ -46,7 +46,7 @@ Three moving parts, only one of which is the bot:
 
 The bot itself never binds any of these ports; it only reads the stats/health APIs (via
 `adapters/hysteria_stats.py` / `adapters/hysteria_auth_health.py`) and writes `vpn_keys` rows
-(`key_type='hysteria2'`, per-key secret in `payload_json`, stats label `hy2_<hex>`).
+(`key_type='hysteria2'`, per-key secret in `payload_json`, stats label `hy2_<rnd>`).
 
 ### Masquerade decoy (static file)
 

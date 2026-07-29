@@ -18,7 +18,7 @@ from bot.handlers.admin import (
 from bot.handlers.keys import confirm_key_action, create_key_choose, create_key_menu
 from bot.handlers.start import start_command
 from bot.keyboards.common import main_menu
-from bot.keyboards.keys import keys_list_keyboard
+from bot.keyboards.keys import key_actions_keyboard, keys_list_keyboard
 from bot.messages import (
     _MAX_LIVE_REFRESH_RETRY_AFTER,
     _MAX_REFRESH_RETRY_AFTER,
@@ -739,11 +739,21 @@ def test_unknown_user_cannot_enter_create_fsm(monkeypatch) -> None:
 
 def test_admin_delete_callbacks_preserve_owner_and_page_context() -> None:
     key = _key(10, owner_user_id=200)
-    markup = keys_list_keyboard([key], page=2, owner_user_id=200)
-    callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+    list_callbacks = [
+        button.callback_data
+        for row in keys_list_keyboard([key], page=2, owner_user_id=200).inline_keyboard
+        for button in row
+    ]
+    # The list carries the owner/page context into the key's menu, which is where
+    # the destructive actions now live — so the context has to survive both hops.
+    detail_callbacks = [
+        button.callback_data
+        for row in key_actions_keyboard(key, owner_user_id=200, page=2).inline_keyboard
+        for button in row
+    ]
 
-    assert "key:open:10:200:2" in callbacks
-    assert "key:delete:10:200:2" in callbacks
+    assert "key:open:10:200:2" in list_callbacks
+    assert "key:delete:10:200:2" in detail_callbacks
 
 
 def test_admin_delete_returns_same_page_when_still_valid(monkeypatch) -> None:

@@ -474,13 +474,11 @@ STRINGS: dict[str, str] = {
     # ── all-in-one subscription (bundles) ─────────────────────────────────────
     "bundle_title": "All-in-One #{id}",
     "bundle_type_label": "All-in-One",
-    "bundles_group_title": "<b>All-in-One</b>",
     "bundle_composition": "Состав",
     "bundle_awg_separate": (
         "ℹ️ AmneziaWG в подписку не входит и выдаётся отдельным ключом: "
         "конфиг WireGuard нельзя передать ссылкой-подпиской."
     ),
-    "bundles_more_hint": "Показаны {shown} из {total} подписок.",
     "bundle_fp_prompt": "Выберите fingerprint — он применится ко всем VLESS-ключам подписки:",
     "bundle_create_confirm_title": "<b>Подтверждение создания подписки</b>",
     "creating_bundle": "Создаю подписку...",

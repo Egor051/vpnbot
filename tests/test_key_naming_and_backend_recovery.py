@@ -203,6 +203,14 @@ def test_generated_key_name_format_uses_required_alphabet() -> None:
     assert re.fullmatch(r"awg_[A-Za-z0-9]{5}", ids.generated_key_name("awg"))
 
 
+def test_hysteria2_label_uses_the_same_shape_as_every_other_label() -> None:
+    """The user reads this string under «Метка» — it must not look like a different
+    kind of thing just because the protocol is different."""
+    ids = IdGenerator()
+
+    assert re.fullmatch(r"hy2_[A-Za-z0-9]{5}", ids.hysteria2_label())
+
+
 def test_generated_names_retry_email_label_collision(tmp_path: Path) -> None:
     class Repo:
         async def find_by_uuid(self, uuid_value: str) -> None:

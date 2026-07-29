@@ -27,7 +27,7 @@ def _schema_without_v32() -> str:
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
     schema = re.sub(r"\nCREATE TABLE IF NOT EXISTS key_bundles \(.*?\n\);\n", "\n", schema, flags=re.S)
     schema = re.sub(r"\nCREATE INDEX IF NOT EXISTS idx_vpn_keys_bundle_id [^;]+;", "", schema)
-    schema = re.sub(r"\nCREATE INDEX IF NOT EXISTS idx_key_bundles_[^;]+;", "", schema)
+    schema = re.sub(r"\nCREATE (?:UNIQUE )?INDEX IF NOT EXISTS idx_key_bundles_[^;]+;", "", schema)
     schema = re.sub(
         r",\n(?:  --.*\n)*  bundle_id INTEGER REFERENCES key_bundles\(id\) ON DELETE RESTRICT",
         "",
@@ -83,7 +83,7 @@ def test_v32_migration_adds_key_bundles_and_preserves_keys(tmp_path: Path) -> No
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             )
             assert version is not None
-            assert int(version["value"]) == CURRENT_SCHEMA_VERSION == 32
+            assert int(version["value"]) == CURRENT_SCHEMA_VERSION == 33
 
             table = await db.conn.execute_fetchone(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'key_bundles'"
@@ -337,6 +337,127 @@ def test_bundle_status_check_rejects_key_only_states(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_bundles_and_keys_draw_from_one_running_number(tmp_path: Path) -> None:
+    """«All-in-One #N» continues the key numbering instead of restarting at 1.
+
+    The two live in tables with independent AUTOINCREMENT sequences, so this is the
+    property that has to be pinned: a number handed to a bundle is *consumed* — the
+    next key skips past it — and no two entries can ever show the same «#N».
+    """
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await db.conn.execute(_INSERT_USERS)
+            await db.commit()
+            bundles = KeyBundleRepository(db)
+            vpn_repo = VpnKeyRepository(db)
+
+            async def make_key(now: str) -> int:
+                key = await vpn_repo.create_key(
+                    owner_user_id=100,
+                    username="user",
+                    key_type=VpnKeyType.XRAY,
+                    note=None,
+                    payload={},
+                    public_payload={},
+                    created_by=1,
+                    now=now,
+                )
+                return key.id
+
+            first_key = await make_key("t0")
+            second_key = await make_key("t1")
+            first_bundle = await bundles.create(user_id=100, label="sub-1", now="t2")
+            second_bundle = await bundles.create(user_id=100, label="sub-2", now="t3")
+            third_key = await make_key("t4")
+
+            numbers = [
+                first_key,
+                second_key,
+                first_bundle.display_no,
+                second_bundle.display_no,
+                third_key,
+            ]
+            # Strictly increasing: each entry took the next number and nothing reused it.
+            assert numbers == sorted(numbers)
+            assert len(set(numbers)) == len(numbers)
+            # And the bundles are numbered from that shared count, not from their own
+            # table's ids (which start at 1).
+            assert first_bundle.id == 1 and second_bundle.id == 2
+            assert first_bundle.display_no > second_key
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_v33_migration_renumbers_existing_bundles_past_the_keys(tmp_path: Path) -> None:
+    """A database whose bundles were numbered «#1, #2» is renumbered, oldest first,
+    onto the shared count — and the next key created still cannot collide."""
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await db.conn.execute(_INSERT_USERS)
+            await db.conn.execute(
+                """
+                INSERT INTO vpn_keys (
+                  owner_user_id, key_type, status, payload_json, public_payload_json,
+                  created_at, updated_at, created_by
+                )
+                VALUES (100, 'xray', 'active', '{}', '{}', 'now', 'now', 1)
+                """
+            )
+            # Two pre-v33 bundles: rows written without a display_no, newest first in
+            # the table so the backfill's created_at ordering is actually exercised.
+            await db.conn.execute(
+                "INSERT INTO key_bundles (user_id, label, status, token, created_at, updated_at) "
+                "VALUES (100, 'sub-new', 'active', 'tok-new', '2026-02-01T00:00:00+00:00', 'now')"
+            )
+            await db.conn.execute(
+                "INSERT INTO key_bundles (user_id, label, status, token, created_at, updated_at) "
+                "VALUES (100, 'sub-old', 'active', 'tok-old', '2026-01-01T00:00:00+00:00', 'now')"
+            )
+            await db.conn.execute("UPDATE key_bundles SET display_no = NULL")
+            await db.conn.execute(
+                "UPDATE schema_meta SET value = '32' WHERE key = 'schema_version'"
+            )
+            await db.commit()
+
+            await db.bootstrap()
+            await db.bootstrap()  # idempotent: a second run reserves nothing more
+
+            rows = await db.conn.execute_fetchall(
+                "SELECT label, display_no FROM key_bundles ORDER BY display_no"
+            )
+            numbered = [(str(row["label"]), int(row["display_no"])) for row in rows]
+            assert [label for label, _ in numbered] == ["sub-old", "sub-new"]
+
+            max_key = await db.conn.execute_fetchone("SELECT MAX(id) AS m FROM vpn_keys")
+            assert numbered[0][1] > int(max_key["m"])
+
+            next_key = await VpnKeyRepository(db).create_key(
+                owner_user_id=100,
+                username="user",
+                key_type=VpnKeyType.XRAY,
+                note=None,
+                payload={},
+                public_payload={},
+                created_by=1,
+                now="later",
+            )
+            assert next_key.id > numbered[-1][1]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_key_bundle_repository_crud(tmp_path: Path) -> None:
     async def run() -> None:
         db = Database(tmp_path / "vpn.db")
@@ -369,7 +490,10 @@ def test_key_bundle_repository_crud(tmp_path: Path) -> None:
 
             second = await repo.create(user_id=100, label="sub-2", now="t1")
             listed = await repo.list_by_user(100)
-            assert [b.id for b in listed] == [bundle.id, second.id]
+            # Newest first, matching list_by_owner — «My keys» merges the two.
+            assert [b.id for b in listed] == [second.id, bundle.id]
+            # Numbers come from the shared vpn_keys counter, not from key_bundles.id.
+            assert second.display_no > bundle.display_no
             assert await repo.list_by_user(1) == []
 
             key = await vpn_repo.create_key(

@@ -2,7 +2,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.formatters import key_type_label, status_text
-from bot.keyboards.key_bundles import bundle_list_rows
+from bot.keyboards.key_bundles import bundle_list_row
 from i18n import t
 from models.dto import KeyBundle, VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
@@ -76,46 +76,41 @@ def xhttp_profile_keyboard() -> InlineKeyboardMarkup:
 
 
 def keys_list_keyboard(
-    keys: list[VpnKey],
+    items: list[VpnKey | KeyBundle],
     page: int = 0,
     has_next: bool = False,
     owner_user_id: int | None = None,
     total_pages: int = 1,
     back_data: str = "menu:main",
-    bundles: list[KeyBundle] | None = None,
 ) -> InlineKeyboardMarkup:
-    """Build the paginated keyboard listing keys with per-key actions.
+    """Build the paginated «My keys» keyboard: one button per entry, then the nav.
 
-    ``bundles`` appends the «All-in-One» group after the protocol groups. It stays
-    None everywhere the feature is off (and in the admin view of another user's
-    keys), so the keyboard is unchanged from before this feature existed.
+    ``items`` is the page as the text above it renders it — keys and all-in-one
+    subscriptions already interleaved in date order — so the buttons and the cards
+    are guaranteed to line up. Each entry gets exactly one button, which opens that
+    entry's own screen; every action (config, stats, revoke, note, delete) lives
+    there, in :func:`key_actions_keyboard` / :func:`bundle_actions_keyboard`.
+
+    The list used to repeat those five actions under every entry, which is where
+    most of a page's keyboard rows went — three rows per key, so a page of five
+    keys was fifteen rows of buttons duplicating a menu one tap away.
     """
     rows: list[list[InlineKeyboardButton]] = []
-    if bundles:
-        rows.extend(bundle_list_rows(bundles))
-    for key in keys:
-        prefix = key_type_label(key)
-        open_data = f"key:open:{key.id}"
+    for item in items:
+        if isinstance(item, KeyBundle):
+            rows.append(bundle_list_row(item))
+            continue
+        open_data = f"key:open:{item.id}"
         if owner_user_id is not None:
-            open_data = f"key:open:{key.id}:{owner_user_id}:{page}"
-        rows.append([InlineKeyboardButton(text=f"{prefix} #{key.id} · {status_text(key.status)}", callback_data=open_data)])
-        if key.status == VpnKeyStatus.ACTIVE:
-            buttons = [
-                InlineKeyboardButton(text=t("btn_config"), callback_data=f"key:show:{key.id}"),
-                InlineKeyboardButton(text=t("btn_stats"), callback_data=f"key:stats:{key.id}"),
+            open_data = f"key:open:{item.id}:{owner_user_id}:{page}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{key_type_label(item)} #{item.id} · {status_text(item.status)}",
+                    callback_data=open_data,
+                )
             ]
-            revoke_data = f"key:revoke:{key.id}" if owner_user_id is None else f"key:revoke:{key.id}:{owner_user_id}:{page}"
-            buttons.append(InlineKeyboardButton(text=t("btn_revoke"), callback_data=revoke_data))
-            rows.append(buttons)
-        else:
-            rows.append([InlineKeyboardButton(text=t("btn_stats"), callback_data=f"key:stats:{key.id}")])
-        if key.status != VpnKeyStatus.DELETED:
-            note_buttons: list[InlineKeyboardButton] = []
-            if owner_user_id is None:
-                note_buttons.append(InlineKeyboardButton(text=t("btn_note"), callback_data=f"key:note:{key.id}"))
-            delete_data = f"key:delete:{key.id}" if owner_user_id is None else f"key:delete:{key.id}:{owner_user_id}:{page}"
-            note_buttons.append(InlineKeyboardButton(text=t("btn_delete"), callback_data=delete_data))
-            rows.append(note_buttons)
+        )
 
     prev_page = page - 1
     next_page = page + 1

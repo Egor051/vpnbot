@@ -12,6 +12,7 @@ from adapters.ip_allocator import IpAllocator
 from bot.fsm.states import AdminCreateKeyStates, CreateKeyStates
 from bot.handlers.admin import admin_announcement_message, admin_announcement_send, admin_announcement_start, admin_issue_confirm, admin_issue_user_selected
 from bot.handlers.keys import create_key_confirm
+from bot.formatters import keys_page_text
 from bot.keyboards.keys import keys_list_keyboard
 from bot.rate_limit import RateLimitExceeded
 from config.settings import Settings
@@ -813,6 +814,36 @@ def test_revoke_succeeds_when_post_revoke_audit_fails(key_type: VpnKeyType, tmp_
             assert adapter.remove_kwargs == {"key_id": 10, "public_key": "public"}
 
     asyncio.run(run())
+
+
+def test_keys_page_text_is_flat_and_keeps_the_keyboard_in_step() -> None:
+    """No protocol groups: the cards and the buttons must read in the same order.
+
+    The grouping only ever existed in the text, so on a page mixing protocols the
+    third card was not the third button — which is exactly the mismatch that made
+    «Отозвать» land on the wrong key.
+    """
+    keys = [
+        replace(_key(VpnKeyType.XRAY), id=1),
+        replace(_key(VpnKeyType.AWG), id=2),
+        replace(_key(VpnKeyType.XRAY), id=3),
+    ]
+
+    text = keys_page_text(keys, page=0, viewer_user_id=100)
+    keyboard = keys_list_keyboard(keys, page=0, total_pages=1)
+    opens = [
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if (button.callback_data or "").startswith("key:open:")
+    ]
+
+    for header in ("<b>VLESS</b>", "<b>AmneziaWG</b>", "<b>Hysteria2</b>"):
+        assert header not in text
+    assert [text.index(f"#{key.id}") for key in keys] == sorted(
+        text.index(f"#{key.id}") for key in keys
+    )
+    assert opens == ["key:open:1", "key:open:2", "key:open:3"]
 
 
 def test_keys_list_keyboard_target_page_labels() -> None:

@@ -45,7 +45,7 @@
 
 Сам бот не биндит ни один из этих портов; он лишь читает stats/health API (через
 `adapters/hysteria_stats.py` / `adapters/hysteria_auth_health.py`) и пишет строки `vpn_keys`
-(`key_type='hysteria2'`, персональный секрет в `payload_json`, stats-label `hy2_<hex>`).
+(`key_type='hysteria2'`, персональный секрет в `payload_json`, stats-label `hy2_<rnd>`).
 
 ### Маскарад-decoy (статический файл)
 

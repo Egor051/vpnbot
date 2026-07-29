@@ -9,7 +9,7 @@ from db.exceptions import ConcurrentModificationError
 from models.dto import KeyBundle, VpnKey
 from models.enums import KeyBundleStatus
 from repositories._helpers import _clamp_limit, _clamp_offset, enum_value
-from repositories.vpn_keys import _row_to_vpn_key
+from repositories.vpn_keys import _row_to_vpn_key, reserve_key_number
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,10 @@ def _row_to_key_bundle(row: Row | None) -> KeyBundle | None:
         updated_at=row["updated_at"],
         revoked_at=row["revoked_at"],
         deleted_at=row["deleted_at"],
+        # Falls back to the primary key only for a row that predates the v33
+        # backfill, which no bootstrapped database has: the migration fills every
+        # existing row and create() always writes the column.
+        display_no=int(row["display_no"]) if row["display_no"] is not None else int(row["id"]),
     )
 
 
@@ -49,14 +53,21 @@ class KeyBundleRepository:
         note: str | None = None,
         status: KeyBundleStatus = KeyBundleStatus.ACTIVE,
     ) -> KeyBundle:
-        """Insert a new bundle with a freshly generated secret token and return it."""
+        """Insert a new bundle with a freshly generated secret token and return it.
+
+        The displayed number is reserved from the ``vpn_keys`` id space rather than
+        taken from this table's own ``id``, so «All-in-One #N» continues the same
+        count the user's ordinary keys are numbered from — see
+        :meth:`repositories.vpn_keys.VpnKeyRepository.reserve_display_number`.
+        """
         token = _generate_token()
+        display_no = await reserve_key_number(self.db)
         cursor = await self.db.conn.execute(
             """
-            INSERT INTO key_bundles (user_id, label, note, status, token, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO key_bundles (user_id, label, note, status, token, created_at, updated_at, display_no)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, label, note, status.value, token, now, now),
+            (user_id, label, note, status.value, token, now, now, display_no),
         )
         await self.db.commit()
         assert cursor.lastrowid is not None
@@ -78,12 +89,17 @@ class KeyBundleRepository:
         return _row_to_key_bundle(row)
 
     async def list_by_user(self, user_id: int, limit: int = 50, offset: int = 0) -> list[KeyBundle]:
-        """Return a user's bundles, oldest first, paginated."""
+        """Return a user's bundles, newest first, paginated.
+
+        Same order as :meth:`repositories.vpn_keys.VpnKeyRepository.list_by_owner`,
+        because «My keys» now merges the two into one date-sorted list and a
+        merge is only correct when both inputs are already sorted the same way.
+        """
         cursor = await self.db.conn.execute(
             """
             SELECT * FROM key_bundles
             WHERE user_id = ?
-            ORDER BY id ASC
+            ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
             (user_id, _clamp_limit(limit), _clamp_offset(offset)),
