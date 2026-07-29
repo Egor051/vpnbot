@@ -32,13 +32,22 @@ class IdGenerator:
         return f"{prefix}_{''.join(secrets.choice(KEY_NAME_ALPHABET) for _ in range(5))}"
 
     def hysteria2_label(self) -> str:
-        """Generate a Hysteria2 stats/log label: ``hy2_`` + 16 hex chars.
+        """Generate a Hysteria2 stats/log label: ``hy2_`` + the standard suffix.
 
-        A short prefixed identifier (like the other key labels) with a hex suffix. The
-        label is a stats identifier returned to Hysteria's traffic-stats API — it is NOT
-        the auth secret.
+        Deliberately the same shape as every other key label (``xray_tcp_*``,
+        ``awg_*``, ``bundle_*``): the label is what the user reads under «Метка», so
+        one protocol printing a 16-hex-char suffix while the rest print five just
+        looked like a bug. It is a stats identifier returned to Hysteria's
+        traffic-stats API — NOT the auth secret, which is generated separately in
+        ``HysteriaService.issue`` and keeps its full entropy. Uniqueness comes from
+        the same retry-and-check loop the other protocols use
+        (``HysteriaService._generate_unique_label``), not from the suffix width.
+
+        Existing keys keep their old ``hy2_<16 hex>`` labels: the label is the
+        connection identity ``hy2_auth`` hands to the server and the key into the
+        traffic-stats/kick APIs, so renaming a live key would orphan its stats.
         """
-        return f"hy2_{secrets.token_hex(8)}"
+        return self.generated_key_name("hy2")
 
     def _label_base(self, telegram_user_id: int, username: str | None) -> str:
         if username:

@@ -213,6 +213,13 @@ class KeyBundle:
     updated_at: str
     revoked_at: str | None
     deleted_at: str | None
+    # The number the user reads as «All-in-One #N». NOT ``id``: bundles and keys
+    # live in two tables with two independent AUTOINCREMENT sequences, so ``id``
+    # restarted at 1 and collided with the key numbering. This one is reserved out
+    # of the vpn_keys id space (VpnKeyRepository.reserve_display_number), which is
+    # what makes the two lists share a single running count. Callback data still
+    # addresses a bundle by ``id`` — only the displayed number comes from here.
+    display_no: int
 
     def __repr__(self) -> str:
         # token is the secret sub-URL credential — never expose it in repr.

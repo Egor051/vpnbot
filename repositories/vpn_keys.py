@@ -67,6 +67,48 @@ def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
     )
 
 
+async def reserve_key_number(db: Database) -> int:
+    """Reserve and return a number in the ``vpn_keys`` id space.
+
+    Exists so an all-in-one bundle — a row in a *different* table with its own
+    AUTOINCREMENT sequence — can be numbered from the same running count as
+    ordinary keys instead of restarting at «#1» next to keys numbered «#176».
+
+    The reservation is made by advancing the AUTOINCREMENT high-water mark SQLite
+    keeps in ``sqlite_sequence``: the next ``INSERT INTO vpn_keys`` then starts
+    *after* the number handed out here, so a key can never be given a number a
+    bundle already shows. That is a stronger guarantee than picking ``MAX(id) + 1``,
+    which the very next key insert would happily collide with.
+
+    This is the ONLY place in the codebase that writes to ``sqlite_sequence``.
+    Bumping the counter upwards is the one safe edit to make there — SQLite derives
+    the next rowid from it, so a larger value only skips numbers, it cannot corrupt
+    existing rows. The counter row does not exist until the table has been inserted
+    into at least once, hence the INSERT OR IGNORE seed.
+
+    Deliberately ``UPDATE`` + ``SELECT`` rather than ``UPDATE … RETURNING``:
+    RETURNING needs SQLite ≥ 3.35 and no production query relies on it today, so
+    this does not raise the project's minimum. Both statements run on the one
+    serialized aiosqlite connection, so no other writer can interleave.
+
+    A module-level function rather than a ``VpnKeyRepository`` method because no key
+    path needs it: the numbers it hands out are consumed entirely by
+    :meth:`repositories.key_bundles.KeyBundleRepository.create`.
+    """
+    await db.conn.execute(
+        """
+        INSERT OR IGNORE INTO sqlite_sequence (name, seq)
+        VALUES ('vpn_keys', (SELECT IFNULL(MAX(id), 0) FROM vpn_keys))
+        """
+    )
+    await db.conn.execute("UPDATE sqlite_sequence SET seq = seq + 1 WHERE name = 'vpn_keys'")
+    cursor = await db.conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'vpn_keys'")
+    row = await cursor.fetchone()
+    if row is None:
+        raise RuntimeError("vpn_keys AUTOINCREMENT counter is missing — cannot reserve a number")
+    return int(row["seq"])
+
+
 class VpnKeyRepository:
     def __init__(self, db: Database) -> None:
         self.db = db

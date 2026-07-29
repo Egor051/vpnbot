@@ -1,14 +1,15 @@
-"""UI layer for all-in-one subscription bundles: the flag gate, the sub-URL and
-every piece of text the bundle screens render.
+"""UI layer for all-in-one subscription bundles: the flag gate, the sub-URL and the
+text of the screens a bundle has to itself — its detail view, config, stats and the
+create wizard's confirmation.
 
-Why not ``bot/formatters.py``: that module is the *single-key* view and the
-subscription endpoint renders links with it, so it is deliberately frozen by this
-PR. Bundle text lives here instead and reuses the formatter helpers read-only
-(``key_type_label``, ``create_type_label``, …) so a bundle card and a key card
-cannot drift apart.
+What is NOT here: the bundle's list card, title and status word. Those live in
+``bot/formatters.py`` next to their key equivalents, because «My keys» renders keys
+and bundles interleaved in one list — they are the same card for two entities, and
+keeping them in separate modules is how they drift apart. This module imports them
+back for the screens above.
 
 Everything below is inert while ``SUBSCRIPTION_ENABLED`` is false: the create menu
-does not offer the option, the key list does not render the group, and
+does not offer the option, the key list contains no bundles, and
 :func:`require_subscription_ui` refuses a hand-crafted ``bundle:*`` callback
 before any service is touched.
 """
@@ -18,11 +19,17 @@ from __future__ import annotations
 from urllib.parse import quote
 
 from bot.container import Services
-from bot.formatters import create_type_label, short_note
+from bot.formatters import (
+    bundle_card_text,
+    bundle_note_for_viewer,
+    bundle_status_text,
+    bundle_title,
+    create_type_label,
+)
 from config.settings import Settings
 from i18n import t
 from models.dto import KeyBundle, KeyTrafficStatsView, VpnKey
-from models.enums import KeyBundleStatus, VpnKeyType
+from models.enums import VpnKeyType
 from services.errors import InvalidOperation
 from services.key_bundles import BundleMember, KeyBundleCreateResult
 from utils.formatting import code, format_bytes, format_expiry_date, format_msk_datetime, h
@@ -96,28 +103,6 @@ def subscription_url(settings: Settings, token: str) -> str | None:
 # ── labels ────────────────────────────────────────────────────────────────────
 
 
-def bundle_status_text(status: KeyBundleStatus) -> str:
-    """Localized bundle status.
-
-    ``KeyBundleStatus`` shares its vocabulary with ``VpnKeyStatus`` on purpose, so
-    the existing ``key_status_*`` strings are reused rather than duplicated — a
-    bundle and its children always read the same word for the same state.
-    """
-    return {
-        KeyBundleStatus.ACTIVE: t("key_status_active"),
-        KeyBundleStatus.PENDING_REVOKE: t("key_status_pending_revoke"),
-        KeyBundleStatus.REVOKED: t("key_status_revoked"),
-        KeyBundleStatus.PENDING_DELETE: t("key_status_pending_delete"),
-        KeyBundleStatus.DELETE_FAILED: t("key_status_delete_failed"),
-        KeyBundleStatus.DELETED: t("key_status_deleted"),
-    }.get(status, status.value)
-
-
-def bundle_title(bundle: KeyBundle) -> str:
-    """``All-in-One #12`` — the bundle's heading on every screen."""
-    return t("bundle_title", id=bundle.id)
-
-
 def bundle_member_label(member: BundleMember) -> str:
     """Human label for one member of the composition seam."""
     return create_type_label(member.key_type.value, member.transport, member.xhttp_profile)
@@ -128,38 +113,12 @@ def bundle_key_label(key: VpnKey) -> str:
     return create_type_label(key.key_type.value, key.transport, key.xhttp_profile)
 
 
-def _bundle_note_for_viewer(bundle: KeyBundle, viewer_user_id: int) -> str | None:
-    """A bundle note belongs to its owner and is never shown to anyone else."""
-    if not bundle.note:
-        return None
-    return bundle.note if bundle.user_id == viewer_user_id else None
-
-
 # ── cards ─────────────────────────────────────────────────────────────────────
-
-
-def bundle_card_text(bundle: KeyBundle, *, viewer_user_id: int) -> str:
-    """The compact bundle card — the same four fields a key card shows.
-
-    The AmneziaWG explanation is appended by the caller (once per screen rather
-    than once per card), so a user with several bundles does not read the same
-    paragraph five times.
-    """
-    note = _bundle_note_for_viewer(bundle, viewer_user_id)
-    return "\n".join(
-        [
-            f"<b>{h(bundle_title(bundle))}</b>",
-            f"{t('field_status')}: {h(bundle_status_text(bundle.status))}",
-            f"{t('field_label')}: {code(bundle.label)}",
-            f"{t('field_created')}: {h(format_msk_datetime(bundle.created_at))}",
-            f"{t('field_note')}: {h(short_note(note))}",
-        ]
-    )
 
 
 def bundle_detail_text(bundle: KeyBundle, keys: list[VpnKey], *, viewer_user_id: int) -> str:
     """The full bundle screen: card, what is inside it, and when it expires."""
-    note = _bundle_note_for_viewer(bundle, viewer_user_id)
+    note = bundle_note_for_viewer(bundle, viewer_user_id)
     lines = [
         f"<b>{h(bundle_title(bundle))}</b>",
         f"{t('field_status')}: {h(bundle_status_text(bundle.status))}",
@@ -183,24 +142,6 @@ def _composition_block(keys: list[VpnKey]) -> str:
         return f"{t('bundle_composition')}: {h(t('none'))}"
     entries = "\n".join(f"• {h(bundle_key_label(key))} #{key.id}" for key in keys)
     return f"{t('bundle_composition')}:\n{entries}"
-
-
-def bundles_section_text(bundles: list[KeyBundle], *, viewer_user_id: int, total: int | None = None) -> str:
-    """The «All-in-One» group of the «My keys» page, rendered next to the protocol groups.
-
-    Deliberately WITHOUT the AmneziaWG explanation. That paragraph answers "why is
-    WireGuard missing from this subscription?", which is a question about a
-    bundle's contents — it belongs on the bundle's own screens (detail, config,
-    create, created), not at the bottom of a list where AmneziaWG keys are sitting
-    in their own group a few lines up.
-    """
-    if not bundles:
-        return ""
-    cards = "\n\n".join(bundle_card_text(bundle, viewer_user_id=viewer_user_id) for bundle in bundles)
-    parts = [f"{t('bundles_group_title')}\n{cards}"]
-    if total is not None and total > len(bundles):
-        parts.append(t("bundles_more_hint", shown=len(bundles), total=total))
-    return "\n\n".join(parts)
 
 
 # ── create ────────────────────────────────────────────────────────────────────

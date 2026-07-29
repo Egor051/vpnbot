@@ -106,7 +106,15 @@ CREATE TABLE IF NOT EXISTS key_bundles (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   revoked_at TEXT,
-  deleted_at TEXT
+  deleted_at TEXT,
+  -- The number shown to the user as «All-in-One #N», reserved out of the vpn_keys
+  -- id space so bundles and keys share ONE running count (see
+  -- VpnKeyRepository.reserve_display_number). Without it `id` restarted at 1 and
+  -- the first subscription read «#1» next to keys numbered «#176».
+  -- Nullable only because ADD COLUMN cannot add a NOT NULL column without a
+  -- constant default; _migrate_v33 backfills every existing row and the
+  -- repository always writes it, so NULL never survives a bootstrap.
+  display_no INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS trial_key_requests (
@@ -284,6 +292,7 @@ CREATE INDEX IF NOT EXISTS idx_vpn_keys_short_id ON vpn_keys(json_extract(payloa
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner_type_status ON vpn_keys(owner_user_id, key_type, status);
 CREATE INDEX IF NOT EXISTS idx_key_bundles_user_id ON key_bundles(user_id);
 CREATE INDEX IF NOT EXISTS idx_key_bundles_status ON key_bundles(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_key_bundles_display_no ON key_bundles(display_no);
 CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner ON proxy_accesses(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner_type_status ON proxy_accesses(owner_user_id, access_type, status);
 CREATE INDEX IF NOT EXISTS idx_proxy_accesses_status_type ON proxy_accesses(status, access_type);

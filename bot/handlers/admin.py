@@ -57,7 +57,7 @@ from bot.keyboards.admin import (
     user_actions_keyboard,
     users_keyboard,
 )
-from bot.handlers.keys import load_keys_page
+from bot.handlers.keys import load_list_page
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import VALID_FINGERPRINTS, expiry_choice_keyboard, fp_choice_keyboard, key_actions_keyboard, keys_list_keyboard, mtu_choice_keyboard
 from bot.messages import awg_config_filename, remember_config_document, safe_callback_answer, safe_edit_message_text
@@ -1081,12 +1081,12 @@ async def admin_user_keys(callback: CallbackQuery, services: Services) -> None:
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        # Authorization enforced by load_keys_page -> count_for_actor/list_for_actor
+        # Authorization enforced by load_list_page -> count_for_actor/list_for_actor
         # (superadmin required to view another user's keys).
         _, _, raw_user_id, raw_page = callback.data.split(":", 3)
         user_id = int(raw_user_id)
         page = max(int(raw_page), 0)
-        keys, current_page, total_pages, has_next = await load_keys_page(
+        items, current_page, total_pages, has_next = await load_list_page(
             services,
             callback.from_user.id,
             owner_user_id=user_id,
@@ -1095,9 +1095,9 @@ async def admin_user_keys(callback: CallbackQuery, services: Services) -> None:
         )
         await safe_edit_message_text(
             callback.message,
-            keys_page_text(keys, current_page, viewer_user_id=callback.from_user.id, owner_user_id=user_id),
+            keys_page_text(items, current_page, viewer_user_id=callback.from_user.id, owner_user_id=user_id),
             reply_markup=keys_list_keyboard(
-                keys,
+                items,
                 page=current_page,
                 has_next=has_next,
                 owner_user_id=user_id,

@@ -62,7 +62,7 @@ guard before any service is reached. There is **no new button in the main menu**
 | Where | What |
 |---|---|
 | **Create key** | An «All-in-One» option next to VLESS / AmneziaWG / Hysteria2. It reuses the ordinary create wizard (note → expiry → confirm). The result screen lists what the bundle actually contains and names any protocol left out because its backend is off. |
-| **My keys** | An «All-in-One» group next to the protocol groups (first page, up to 5 bundles; the total is stated when there are more). |
+| **My keys** | An ordinary entry in the list, sorted by creation date among the keys and numbered from the same running count as them. |
 | **Bundle card** | The same five actions a key card has — Config · Stats · Revoke · Note · Delete — plus a line saying AmneziaWG is issued as a **separate key**. |
 
 - **Config** shows `https://<host>[:<port>]/sub/<token>`. The host is **not a setting of its

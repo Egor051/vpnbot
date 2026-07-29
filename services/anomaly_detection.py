@@ -430,8 +430,12 @@ class AnomalyDetectionService:
         # bundle.label is display-only (bundle_XXXXX), never the token — and it is
         # still put through redact_value like every other free-form value that
         # reaches a log line. bundle.token is never read here at all.
+        # The log carries the row id (what an operator queries the DB by) alongside
+        # the number the alert shows the admin, because the two differ: display_no
+        # comes from the shared key/bundle counter, bundle.id from this table.
         logger.warning(
-            "Anomaly: bundle #%d (%s) owner=%d children=%d trigger_ips=%d all_ips=%d ips=%s",
+            "Anomaly: bundle #%d (id=%d, %s) owner=%d children=%d trigger_ips=%d all_ips=%d ips=%s",
+            bundle.display_no,
             bundle.id,
             redact_value(bundle.label),
             bundle.user_id,
@@ -491,7 +495,7 @@ class AnomalyDetectionService:
             f"@{owner_key.username}" if owner_key.username else f"user_id={bundle.user_id}"
         )
         lines = [
-            t("anomaly_bundle_title", bundle_id=bundle.id, label=bundle.label),
+            t("anomaly_bundle_title", bundle_id=bundle.display_no, label=bundle.label),
             t(
                 "anomaly_bundle_protocols",
                 count=len(members),
@@ -664,7 +668,7 @@ class AnomalyDetectionService:
             return
         owner_str = f"@{key.username}" if key.username else f"user_id={bundle.user_id}"
         lines = [
-            t("anomaly_bundle_title", bundle_id=bundle.id, label=bundle.label),
+            t("anomaly_bundle_title", bundle_id=bundle.display_no, label=bundle.label),
             t(
                 "anomaly_bundle_hysteria_conns",
                 count=conn_count,

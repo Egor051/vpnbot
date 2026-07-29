@@ -7,6 +7,7 @@ from aiogram.types import User as TgUser
 from i18n import t
 from models.dto import (
     AccessRequest,
+    KeyBundle,
     KeyTrafficStatsView,
     ProxyAccessStatsItem,
     ProxyAdminStats,
@@ -21,7 +22,14 @@ from models.dto import (
     VpnKey,
 )
 from repositories.protocol_modules import PROTOCOL_DISPLAY, ProtocolModule
-from models.enums import ProxyAccessStatus, ProxyAccessType, UserRole, VpnKeyStatus, VpnKeyType
+from models.enums import (
+    KeyBundleStatus,
+    ProxyAccessStatus,
+    ProxyAccessType,
+    UserRole,
+    VpnKeyStatus,
+    VpnKeyType,
+)
 from repositories.announcements import AnnouncementBatch
 from services.backend_health import BackendHealthStatus
 from services.dashboard import DashboardSnapshot
@@ -169,21 +177,88 @@ def key_list_card(key: VpnKey, *, viewer_user_id: int) -> str:
     return "\n".join(parts)
 
 
-def keys_page_text(keys: list[VpnKey], page: int, *, viewer_user_id: int, owner_user_id: int | None = None) -> str:
+def bundle_status_text(status: KeyBundleStatus) -> str:
+    """Localized bundle status.
+
+    ``KeyBundleStatus`` shares its vocabulary with ``VpnKeyStatus`` on purpose, so
+    the existing ``key_status_*`` strings are reused rather than duplicated — a
+    bundle and its children always read the same word for the same state.
+    """
+    return {
+        KeyBundleStatus.ACTIVE: t("key_status_active"),
+        KeyBundleStatus.PENDING_REVOKE: t("key_status_pending_revoke"),
+        KeyBundleStatus.REVOKED: t("key_status_revoked"),
+        KeyBundleStatus.PENDING_DELETE: t("key_status_pending_delete"),
+        KeyBundleStatus.DELETE_FAILED: t("key_status_delete_failed"),
+        KeyBundleStatus.DELETED: t("key_status_deleted"),
+    }.get(status, status.value)
+
+
+def bundle_title(bundle: KeyBundle) -> str:
+    """``All-in-One #177`` — the bundle's heading on every screen.
+
+    Numbered from ``display_no``, which is reserved out of the vpn_keys id space, so
+    a subscription continues the same running count as the user's ordinary keys
+    instead of restarting at «#1». The bundle is still *addressed* by ``id``
+    everywhere in callback data.
+    """
+    return t("bundle_title", id=bundle.display_no)
+
+
+def bundle_note_for_viewer(bundle: KeyBundle, viewer_user_id: int) -> str | None:
+    """A bundle note belongs to its owner and is never shown to anyone else."""
+    if not bundle.note:
+        return None
+    return bundle.note if bundle.user_id == viewer_user_id else None
+
+
+def bundle_card_text(bundle: KeyBundle, *, viewer_user_id: int) -> str:
+    """The compact bundle card — the same four fields a key card shows.
+
+    Lives next to :func:`key_list_card` because «My keys» renders the two
+    interleaved in one date-sorted list: they are the same card for two entities,
+    and keeping them apart is how they drift apart.
+    """
+    note = bundle_note_for_viewer(bundle, viewer_user_id)
+    return "\n".join(
+        [
+            f"<b>{h(bundle_title(bundle))}</b>",
+            f"{t('field_status')}: {h(bundle_status_text(bundle.status))}",
+            f"{t('field_label')}: {code(bundle.label)}",
+            f"{t('field_created')}: {h(format_msk_datetime(bundle.created_at))}",
+            f"{t('field_note')}: {h(short_note(note))}",
+        ]
+    )
+
+
+def list_item_card(item: VpnKey | KeyBundle, *, viewer_user_id: int) -> str:
+    """Render one entry of «My keys», whichever kind of entry it is."""
+    if isinstance(item, KeyBundle):
+        return bundle_card_text(item, viewer_user_id=viewer_user_id)
+    return key_list_card(item, viewer_user_id=viewer_user_id)
+
+
+def keys_page_text(
+    items: list[VpnKey | KeyBundle],
+    page: int,
+    *,
+    viewer_user_id: int,
+    owner_user_id: int | None = None,
+) -> str:
+    """Render one page of «My keys» as a flat list of cards.
+
+    Deliberately NOT grouped by protocol any more. The grouping only ever existed
+    in the text — the keyboard below it listed the same entries in fetch order — so
+    on any page that mixed protocols the cards and the buttons disagreed about
+    which entry was which. One list in one order (newest first, see
+    ``load_list_page``) removes the mismatch by construction, and all-in-one
+    subscriptions take their place in it by date like everything else.
+    """
     title = t("keys_user_title") if owner_user_id else t("keys_my_title")
-    if not keys:
+    if not items:
         return f"{title}\n\n{t('one_key_one_device')}\n\n{t('keys_page_empty')}"
-    xray = [key for key in keys if key.key_type == VpnKeyType.XRAY]
-    awg = [key for key in keys if key.key_type == VpnKeyType.AWG]
-    hysteria2 = [key for key in keys if key.key_type == VpnKeyType.HYSTERIA2]
-    sections = [t("keys_page_title", title=title, page=page + 1), t("one_key_one_device")]
-    if xray:
-        sections.append("<b>VLESS</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in xray))
-    if awg:
-        sections.append("<b>AmneziaWG</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in awg))
-    if hysteria2:
-        sections.append("<b>Hysteria2</b>\n" + "\n\n".join(key_list_card(key, viewer_user_id=viewer_user_id) for key in hysteria2))
-    return "\n\n".join(sections)
+    cards = [list_item_card(item, viewer_user_id=viewer_user_id) for item in items]
+    return "\n\n".join([t("keys_page_title", title=title, page=page + 1), t("one_key_one_device"), *cards])
 
 
 def key_detail_text(key: VpnKey, *, viewer_user_id: int) -> str:

@@ -17,7 +17,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 32
+CURRENT_SCHEMA_VERSION = 33
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -319,6 +319,10 @@ class Database:
             await self._migrate_v32()
             await self._set_schema_version(32)
             version = 32
+        if version < 33:
+            await self._migrate_v33()
+            await self._set_schema_version(33)
+            version = 33
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1326,6 +1330,58 @@ class Database:
             )
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_vpn_keys_bundle_id ON vpn_keys(bundle_id) WHERE bundle_id IS NOT NULL"
+        )
+
+    async def _migrate_v33(self) -> None:
+        # key_bundles.display_no: the number the user reads as «All-in-One #N».
+        #
+        # Until now a bundle showed its own primary key, and because key_bundles has
+        # an AUTOINCREMENT sequence separate from vpn_keys, the first subscription
+        # read «#1» while ordinary keys were already at «#176» — two counters where
+        # the user sees one list. display_no is reserved out of the vpn_keys id space
+        # instead, which is what makes the count single (see
+        # repositories.vpn_keys.reserve_key_number for the mechanism and why bumping
+        # sqlite_sequence is the safe way to do it).
+        #
+        # The column is nullable because SQLite cannot ADD COLUMN a NOT NULL column
+        # without a constant default, and there is no sensible constant here. The
+        # backfill below leaves no NULL behind and the repository always writes the
+        # column, so "nullable" is a statement about ALTER TABLE, not about the data.
+        # Mirrors schema.sql.
+        cols = await self._table_columns("key_bundles")
+        if "display_no" not in cols:
+            await self.conn.execute("ALTER TABLE key_bundles ADD COLUMN display_no INTEGER")
+        # Existing bundles are renumbered oldest-first, so their order in the merged
+        # list matches the order they were created in. Every row is reserved through
+        # the same allocator the runtime uses, which also advances the vpn_keys
+        # counter past all of them — no future key can collide with a number already
+        # on screen. Idempotent: a re-run finds no NULL rows and reserves nothing.
+        cursor = await self.conn.execute(
+            "SELECT id FROM key_bundles WHERE display_no IS NULL ORDER BY created_at ASC, id ASC"
+        )
+        pending = [int(row["id"]) for row in await cursor.fetchall()]
+        for bundle_id in pending:
+            await self.conn.execute(
+                """
+                INSERT OR IGNORE INTO sqlite_sequence (name, seq)
+                VALUES ('vpn_keys', (SELECT IFNULL(MAX(id), 0) FROM vpn_keys))
+                """
+            )
+            await self.conn.execute(
+                "UPDATE sqlite_sequence SET seq = seq + 1 WHERE name = 'vpn_keys'"
+            )
+            seq_cursor = await self.conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'vpn_keys'"
+            )
+            seq_row = await seq_cursor.fetchone()
+            if seq_row is None:
+                raise RuntimeError("vpn_keys AUTOINCREMENT counter is missing — cannot renumber bundles")
+            await self.conn.execute(
+                "UPDATE key_bundles SET display_no = ? WHERE id = ?",
+                (int(seq_row["seq"]), bundle_id),
+            )
+        await self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_key_bundles_display_no ON key_bundles(display_no)"
         )
 
     async def _ensure_spider_x_backfill(self) -> None:

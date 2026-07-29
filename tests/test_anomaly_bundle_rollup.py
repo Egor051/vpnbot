@@ -81,6 +81,9 @@ def _bundle(bundle_id: int = 7, *, user_id: int = 100, label: str = "bundle_0000
         updated_at="now",
         revoked_at=None,
         deleted_at=None,
+        # Deliberately not equal to `id`: the displayed number comes from the shared
+        # key/bundle counter, so a test that confused the two would show it here.
+        display_no=bundle_id + 100,
     )
 
 
@@ -152,7 +155,7 @@ def test_bundle_child_alert_names_the_bundle_not_the_child() -> None:
     asyncio.run(svc._check_thresholds(now))
 
     (text,) = _sent(svc)
-    assert "бандл #7" in text
+    assert "бандл #107" in text
     assert "bundle_00007" in text
     # The child's internal handles must not appear: the user has never seen them.
     assert "xray_http_zzzz" not in text
@@ -214,7 +217,7 @@ def test_three_children_of_one_bundle_produce_a_single_aggregated_alert() -> Non
     texts = _sent(svc)
     assert len(texts) == 1, f"expected ONE rolled-up alert, got {len(texts)}: {texts}"
     text = texts[0]
-    assert "бандл #7" in text
+    assert "бандл #107" in text
     # 3 children affected, named by protocol (the two Xray transports stay
     # distinguishable, which is the part worth reading).
     assert "Ключей бандла затронуто: <b>3</b>" in text
@@ -273,8 +276,8 @@ def test_two_different_bundles_are_not_merged() -> None:
 
     texts = _sent(svc)
     assert len(texts) == 2
-    assert {"бандл #7" in t for t in texts} == {True, False}
-    assert {"бандл #8" in t for t in texts} == {True, False}
+    assert {"бандл #107" in t for t in texts} == {True, False}
+    assert {"бандл #108" in t for t in texts} == {True, False}
 
 
 # ------------------------------------------------------- standalone regress guard
@@ -352,7 +355,7 @@ def test_hysteria_conn_count_alert_names_the_bundle() -> None:
     asyncio.run(svc._check_hysteria_online(time_module.time()))
 
     (text,) = _sent(svc)
-    assert "бандл #7" in text
+    assert "бандл #107" in text
     assert "<b>9</b>" in text and "порог: 5" in text
     assert "ключ #13" not in text
     assert "hy2_cccc" not in text
@@ -407,11 +410,11 @@ def test_rolled_up_alert_renders_in_both_locales() -> None:
             asyncio.run(svc._check_thresholds(now))
         (rendered[locale],) = _sent(svc)
 
-    assert "Аномалия: бандл #7" in rendered["ru"]
+    assert "Аномалия: бандл #107" in rendered["ru"]
     assert "Ключей бандла затронуто" in rendered["ru"]
     assert "За последние 60 мин" in rendered["ru"]
 
-    assert "Anomaly: bundle #7" in rendered["en"]
+    assert "Anomaly: bundle #107" in rendered["en"]
     assert "Bundle keys affected" in rendered["en"]
     assert "In the last 60 min" in rendered["en"]
     # No leaked identifiers (the i18n fallback returns the raw key on a miss) and

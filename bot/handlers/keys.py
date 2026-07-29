@@ -26,7 +26,6 @@ from bot.bundles import (
     bundle_create_confirm_text,
     bundle_created_text,
     bundle_note_confirm_text,
-    bundles_section_text,
     require_subscription_ui,
     subscription_ui_enabled,
 )
@@ -63,7 +62,7 @@ from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
 from i18n import t
 from models.access import is_blocked_user
-from models.dto import KeyBundle, TelegramUserProfile
+from models.dto import KeyBundle, TelegramUserProfile, VpnKey
 from models.enums import AuditEntityType, VpnKeyType
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.key_bundles import KeyBundleCreateResult
@@ -72,11 +71,10 @@ from services.notes import MAX_NOTE_LENGTH
 logger = logging.getLogger(__name__)
 router = Router()
 KEYS_PAGE_SIZE = 5
-# All-in-one bundles are shown as one extra group on the FIRST page of «My keys»,
-# capped so a long bundle list cannot push the key groups out of a Telegram
-# message. One bundle already covers every protocol, so more than a handful is a
-# pathological case; the overflow is stated in the text rather than hidden.
-BUNDLES_SECTION_LIMIT = 5
+# How deep ``load_list_page`` reads into each source before merging them. Matches
+# the repositories' own ``_clamp_limit`` ceiling, so asking for more would silently
+# return less.
+MERGE_WINDOW_LIMIT = 500
 
 
 @router.callback_query(F.data.regexp(r"^keys:list(?::\d+)?$"))
@@ -89,27 +87,17 @@ async def list_keys(callback: CallbackQuery, services: Services) -> None:
         return
     page = _page_from_callback(callback.data, default=0)
     try:
-        keys, current_page, total_pages, has_next = await load_keys_page(
+        items, current_page, total_pages, has_next = await load_list_page(
             services,
             callback.from_user.id,
             page=page,
             page_size=KEYS_PAGE_SIZE,
-            # A bundle's children belong to the All-in-One group below, not to the
-            # protocol groups: they are revoked and deleted through their parent,
-            # and listing all five of them individually buried the bundle card
-            # (and, at five per page, pushed it off page 0 entirely).
-            exclude_bundled=True,
         )
-        bundles, bundles_total = await _load_bundles_section(services, callback.from_user.id, page=current_page)
-        text = keys_page_text(keys, current_page, viewer_user_id=callback.from_user.id)
-        section = bundles_section_text(bundles, viewer_user_id=callback.from_user.id, total=bundles_total)
-        if section:
-            text = f"{text}\n\n{section}"
         await safe_edit_message_text(
             callback.message,
-            text,
+            keys_page_text(items, current_page, viewer_user_id=callback.from_user.id),
             reply_markup=keys_list_keyboard(
-                keys, page=current_page, has_next=has_next, total_pages=total_pages, bundles=bundles
+                items, page=current_page, has_next=has_next, total_pages=total_pages
             ),
         )
     except Exception as exc:
@@ -771,7 +759,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
             else:
                 await services.awg.delete_awg_key(callback.from_user.id, key_id)
             if owner_context is not None:
-                keys, current_page, total_pages, has_next = await load_keys_page(
+                items, current_page, total_pages, has_next = await load_list_page(
                     services,
                     callback.from_user.id,
                     owner_user_id=owner_context,
@@ -780,9 +768,9 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
                 )
                 await safe_edit_message_text(
                     callback.message,
-                    t("key_deleted_with_list", list=keys_page_text(keys, current_page, viewer_user_id=callback.from_user.id, owner_user_id=owner_context)),
+                    t("key_deleted_with_list", list=keys_page_text(items, current_page, viewer_user_id=callback.from_user.id, owner_user_id=owner_context)),
                     reply_markup=keys_list_keyboard(
-                        keys,
+                        items,
                         page=current_page,
                         has_next=has_next,
                         owner_user_id=owner_context,
@@ -1123,24 +1111,6 @@ async def _create_bundle(
         raise InvalidOperation(t("bundle_create_failed"), key="bundle_create_failed") from exc
 
 
-async def _load_bundles_section(
-    services: Services, actor_user_id: int, *, page: int
-) -> tuple[list[KeyBundle], int | None]:
-    """Load the «All-in-One» group of the «My keys» page.
-
-    Empty (and no service call at all) while the feature is off, and rendered only
-    on the first page — the key pagination counts keys, and duplicating the bundle
-    group under every page would be noise.
-    """
-    if page != 0 or not subscription_ui_enabled(services):
-        return [], None
-    total = await services.key_bundle_views.count_for_actor(actor_user_id)
-    if total == 0:
-        return [], None
-    bundles = await services.key_bundle_views.list_for_actor(actor_user_id, limit=BUNDLES_SECTION_LIMIT)
-    return bundles, total
-
-
 def _parse_mtu(text: str) -> int | None:
     text = text.strip()
     if not text.isdigit():
@@ -1238,48 +1208,100 @@ def _parse_confirm_context(data: str) -> tuple[str, int, int | None, int]:
         raise InvalidCallbackData(t("invalid_callback_btn")) from None
 
 
-async def load_keys_page(
+def _list_item_sort_key(item: VpnKey | KeyBundle) -> tuple[str, int, int]:
+    """Sort key for the merged «My keys» list, applied with ``reverse=True``.
+
+    Newest first, then keys ahead of subscriptions on an identical timestamp, then
+    by id. The last two components are not cosmetic: the order has to be *total*,
+    or two entries created in the same second could swap places between two fetches
+    and a page boundary would then show one of them twice and the other never.
+    """
+    return (item.created_at, 0 if isinstance(item, KeyBundle) else 1, item.id)
+
+
+async def load_list_page(
     services: Services,
     actor_user_id: int,
     *,
     owner_user_id: int | None = None,
     page: int,
     page_size: int,
-    exclude_bundled: bool = False,
-) -> tuple[Any, int, int, bool]:
-    """Load a clamped page of keys and return them with pagination metadata.
+) -> tuple[list[VpnKey | KeyBundle], int, int, bool]:
+    """Load a clamped page of «My keys» — keys and all-in-one subscriptions in one
+    date-sorted list — with its pagination metadata.
 
-    ``exclude_bundled`` drops the children of all-in-one bundles; it is passed to
-    the count and the page alike, so the two never disagree about how many pages
-    there are.
+    The page size counts *entries*, so a page really holds ``page_size`` cards.
+    Subscriptions used to be appended to page 0 as an extra group on top of a full
+    page of keys, which is how a "5 per page" list ended up showing ten.
+
+    Two paths, because merging is only needed when there is something to merge:
+
+    * no subscriptions in play (the admin view of another user's keys, the feature
+      switched off, or simply a user without any) — the plain LIMIT/OFFSET query,
+      exactly as before and at the same cost;
+    * otherwise both sides are fetched from the top and merged in Python. A
+      window of ``(page + 1) * page_size`` rows per side is enough, since the page
+      being rendered cannot contain an entry that is deeper than that in either
+      source. The window is capped at the repositories' own ``_clamp_limit``
+      ceiling, so a user holding both subscriptions and more than 500 entries would
+      see the tail of the list mis-ordered; nothing in this bot's shape gets near
+      that, and the alternative (a UNION query spanning two repositories) is not
+      worth it until something does.
+
+    Bundle children stay hidden in the user's own view — they are revoked and
+    deleted through their parent, and listing all five under it buried the card —
+    while the admin view still shows every key, since it has no bundle screen to
+    see them on instead.
     """
-    total_count = await services.vpn_keys.count_for_actor(
-        actor_user_id, owner_user_id=owner_user_id, exclude_bundled=exclude_bundled
-    )
-    total_pages = max(1, (total_count + page_size - 1) // page_size)
-    current_page = min(max(page, 0), total_pages - 1)
-    keys = await services.vpn_keys.list_for_actor(
-        actor_user_id,
-        owner_user_id=owner_user_id,
-        limit=page_size,
-        offset=page_offset(current_page, page_size),
-        exclude_bundled=exclude_bundled,
-    )
-    if not keys and current_page > 0:
-        total_count = await services.vpn_keys.count_for_actor(
+    include_bundles = owner_user_id is None and subscription_ui_enabled(services)
+    exclude_bundled = owner_user_id is None
+
+    async def load_totals() -> tuple[int, int]:
+        keys_total = await services.vpn_keys.count_for_actor(
             actor_user_id, owner_user_id=owner_user_id, exclude_bundled=exclude_bundled
         )
-        total_pages = max(1, (total_count + page_size - 1) // page_size)
-        current_page = max(0, min(current_page - 1, total_pages - 1))
+        bundles_total = (
+            await services.key_bundle_views.count_for_actor(actor_user_id) if include_bundles else 0
+        )
+        return keys_total, bundles_total
+
+    async def load_page(current_page: int, bundles_total: int) -> list[VpnKey | KeyBundle]:
+        if bundles_total == 0:
+            keys = await services.vpn_keys.list_for_actor(
+                actor_user_id,
+                owner_user_id=owner_user_id,
+                limit=page_size,
+                offset=page_offset(current_page, page_size),
+                exclude_bundled=exclude_bundled,
+            )
+            return list(keys)
+        window = min((current_page + 1) * page_size, MERGE_WINDOW_LIMIT)
         keys = await services.vpn_keys.list_for_actor(
             actor_user_id,
             owner_user_id=owner_user_id,
-            limit=page_size,
-            offset=page_offset(current_page, page_size),
+            limit=window,
+            offset=0,
             exclude_bundled=exclude_bundled,
         )
+        bundles = await services.key_bundle_views.list_for_actor(actor_user_id, limit=window)
+        merged: list[VpnKey | KeyBundle] = [*keys, *bundles]
+        merged.sort(key=_list_item_sort_key, reverse=True)
+        start = page_offset(current_page, page_size)
+        return merged[start : start + page_size]
+
+    keys_total, bundles_total = await load_totals()
+    total_pages = max(1, (keys_total + bundles_total + page_size - 1) // page_size)
+    current_page = min(max(page, 0), total_pages - 1)
+    items = await load_page(current_page, bundles_total)
+    if not items and current_page > 0:
+        # Entries disappeared between the count and the fetch — step back a page
+        # rather than showing an empty list with a «next» button.
+        keys_total, bundles_total = await load_totals()
+        total_pages = max(1, (keys_total + bundles_total + page_size - 1) // page_size)
+        current_page = max(0, min(current_page - 1, total_pages - 1))
+        items = await load_page(current_page, bundles_total)
     has_next = current_page + 1 < total_pages
-    return keys, current_page, total_pages, has_next
+    return items, current_page, total_pages, has_next
 
 
 def _page_from_callback(data: str | None, default: int = 0) -> int:
