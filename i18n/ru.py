@@ -481,6 +481,7 @@ STRINGS: dict[str, str] = {
         "конфиг WireGuard нельзя передать ссылкой-подпиской."
     ),
     "bundles_more_hint": "Показаны {shown} из {total} подписок.",
+    "bundle_fp_prompt": "Выберите fingerprint — он применится ко всем VLESS-ключам подписки:",
     "bundle_create_confirm_title": "<b>Подтверждение создания подписки</b>",
     "creating_bundle": "Создаю подписку...",
     "bundle_created_title": "<b>Подписка создана.</b>",

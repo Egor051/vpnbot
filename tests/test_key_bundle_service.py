@@ -399,6 +399,55 @@ def test_create_bundle_provisions_every_enabled_protocol(tmp_path: Path) -> None
     asyncio.run(run())
 
 
+def test_one_fingerprint_choice_reaches_every_vless_child(tmp_path: Path) -> None:
+    """The wizard asks once; all four Xray children carry that fingerprint.
+
+    Hysteria2 has no such setting, so its child must come out untouched rather
+    than with a stray value in its payload.
+    """
+
+    async def run() -> None:
+        h = await _build(tmp_path)
+        try:
+            result = await h.service.create_bundle(
+                ADMIN, h.owner, "note", expires_at=EXPIRES_AT, fingerprint="safari"
+            )
+
+            children = await h.bundles.list_keys_of_bundle(result.bundle.id)
+            xray = [key for key in children if key.key_type is VpnKeyType.XRAY]
+            hy2 = [key for key in children if key.key_type is VpnKeyType.HYSTERIA2]
+            assert len(xray) == 4 and len(hy2) == 1
+
+            assert {key.payload.get("fingerprint") for key in xray} == {"safari"}
+            # The choice reaches the client link, not just the stored payload.
+            assert all("fp=safari" in str(key.public_payload.get("link", "")) for key in xray)
+            assert hy2[0].payload.get("fingerprint") is None
+
+            assert h.audit.details_for("key_bundle_created")["fingerprint"] == "safari"
+        finally:
+            await h.db.close()
+
+    asyncio.run(run())
+
+
+def test_no_fingerprint_choice_leaves_children_on_the_global_default(tmp_path: Path) -> None:
+    """Omitting the choice keeps the pre-existing behaviour: the .env default wins."""
+
+    async def run() -> None:
+        h = await _build(tmp_path)
+        try:
+            result = await h.service.create_bundle(ADMIN, h.owner, "note", expires_at=EXPIRES_AT)
+
+            children = await h.bundles.list_keys_of_bundle(result.bundle.id)
+            xray = [key for key in children if key.key_type is VpnKeyType.XRAY]
+            assert {key.payload.get("fingerprint") for key in xray} == {None}
+            assert h.audit.details_for("key_bundle_created")["fingerprint"] is None
+        finally:
+            await h.db.close()
+
+    asyncio.run(run())
+
+
 # ── creation: a disabled backend is skipped silently ──────────────────
 
 

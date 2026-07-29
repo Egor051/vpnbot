@@ -94,6 +94,11 @@ async def list_keys(callback: CallbackQuery, services: Services) -> None:
             callback.from_user.id,
             page=page,
             page_size=KEYS_PAGE_SIZE,
+            # A bundle's children belong to the All-in-One group below, not to the
+            # protocol groups: they are revoked and deleted through their parent,
+            # and listing all five of them individually buried the bundle card
+            # (and, at five per page, pushed it off page 0 entirely).
+            exclude_bundled=True,
         )
         bundles, bundles_total = await _load_bundles_section(services, callback.from_user.id, page=current_page)
         text = keys_page_text(keys, current_page, viewer_user_id=callback.from_user.id)
@@ -327,6 +332,14 @@ async def create_key_note(message: Message, state: FSMContext, services: Service
         elif key_type == VpnKeyType.XRAY.value:
             await state.set_state(CreateKeyStates.waiting_fp)
             await message.answer(t("fp_prompt"), reply_markup=fp_choice_keyboard())
+        elif key_type == BUNDLE_KEY_TYPE and await services.modules.is_enabled("xray"):
+            # One choice for all of the bundle's VLESS children at once — asking
+            # four times for what is a single client-side setting would be worse
+            # than the old behaviour of silently using the global default. Skipped
+            # when Xray is off, because then the bundle has no VLESS child to apply
+            # it to. Hysteria2 has no fingerprint and ignores the value.
+            await state.set_state(CreateKeyStates.waiting_fp)
+            await message.answer(t("bundle_fp_prompt"), reply_markup=fp_choice_keyboard())
         else:
             await state.set_state(CreateKeyStates.waiting_expiry)
             await message.answer(t("expiry_prompt"), reply_markup=expiry_choice_keyboard())
@@ -529,10 +542,16 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
             require_subscription_ui(services)
             await state.clear()
             await safe_callback_answer(callback, t("creating_bundle"))
-            bundle_result = await _create_bundle(services, callback.from_user.id, profile, note, expires_at)
+            bundle_result = await _create_bundle(
+                services, callback.from_user.id, profile, note, expires_at, fingerprint
+            )
             await safe_edit_message_text(
                 callback.message,
-                bundle_created_text(bundle_result, viewer_user_id=callback.from_user.id),
+                bundle_created_text(
+                    bundle_result,
+                    viewer_user_id=callback.from_user.id,
+                    settings=services.settings,
+                ),
                 reply_markup=bundle_actions_keyboard(bundle_result.bundle),
             )
             return
@@ -1060,7 +1079,7 @@ def _create_confirm_screen(data: dict[str, Any], expires_at: str | None) -> str:
     key_type = str(data.get("key_type") or "")
     note = data.get("note")
     if key_type == BUNDLE_KEY_TYPE:
-        return bundle_create_confirm_text(note, expires_at=expires_at)
+        return bundle_create_confirm_text(note, expires_at=expires_at, fingerprint=data.get("fingerprint"))
     return create_confirm_text(
         key_type,
         note,
@@ -1078,6 +1097,7 @@ async def _create_bundle(
     owner: TelegramUserProfile,
     note: str | None,
     expires_at: str | None,
+    fingerprint: str | None = None,
 ) -> KeyBundleCreateResult:
     """Create an all-in-one bundle, turning a backend fault into a retry message.
 
@@ -1091,7 +1111,9 @@ async def _create_bundle(
     for ``answer_callback_error``.
     """
     try:
-        return await services.key_bundles.create_bundle(actor_user_id, owner, note, expires_at=expires_at)
+        return await services.key_bundles.create_bundle(
+            actor_user_id, owner, note, expires_at=expires_at, fingerprint=fingerprint
+        )
     except InvalidOperation as exc:
         if getattr(exc, "key", None):
             raise
@@ -1223,9 +1245,17 @@ async def load_keys_page(
     owner_user_id: int | None = None,
     page: int,
     page_size: int,
+    exclude_bundled: bool = False,
 ) -> tuple[Any, int, int, bool]:
-    """Load a clamped page of keys and return them with pagination metadata."""
-    total_count = await services.vpn_keys.count_for_actor(actor_user_id, owner_user_id=owner_user_id)
+    """Load a clamped page of keys and return them with pagination metadata.
+
+    ``exclude_bundled`` drops the children of all-in-one bundles; it is passed to
+    the count and the page alike, so the two never disagree about how many pages
+    there are.
+    """
+    total_count = await services.vpn_keys.count_for_actor(
+        actor_user_id, owner_user_id=owner_user_id, exclude_bundled=exclude_bundled
+    )
     total_pages = max(1, (total_count + page_size - 1) // page_size)
     current_page = min(max(page, 0), total_pages - 1)
     keys = await services.vpn_keys.list_for_actor(
@@ -1233,9 +1263,12 @@ async def load_keys_page(
         owner_user_id=owner_user_id,
         limit=page_size,
         offset=page_offset(current_page, page_size),
+        exclude_bundled=exclude_bundled,
     )
     if not keys and current_page > 0:
-        total_count = await services.vpn_keys.count_for_actor(actor_user_id, owner_user_id=owner_user_id)
+        total_count = await services.vpn_keys.count_for_actor(
+            actor_user_id, owner_user_id=owner_user_id, exclude_bundled=exclude_bundled
+        )
         total_pages = max(1, (total_count + page_size - 1) // page_size)
         current_page = max(0, min(current_page - 1, total_pages - 1))
         keys = await services.vpn_keys.list_for_actor(
@@ -1243,6 +1276,7 @@ async def load_keys_page(
             owner_user_id=owner_user_id,
             limit=page_size,
             offset=page_offset(current_page, page_size),
+            exclude_bundled=exclude_bundled,
         )
     has_next = current_page + 1 < total_pages
     return keys, current_page, total_pages, has_next

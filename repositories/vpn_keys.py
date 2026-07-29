@@ -14,6 +14,23 @@ from services.errors import InvalidTransition
 
 logger = logging.getLogger(__name__)
 
+# Appended to a WHERE clause to keep the children of all-in-one bundles out of a
+# result set.
+#
+# Deliberately an anti-join and NOT ``bundle_id IS NULL``: that predicate is
+# ambiguous, because a child whose apply died before ``attach_key_to_bundle`` ran
+# also has a NULL bundle_id (see ``tests/test_key_bundles.py::
+# test_null_bundle_id_cannot_distinguish_standalone_from_unfinished_child``). This
+# form asks the exact question the list needs — "does a bundle own this row?" —
+# and so keeps such wreckage visible in the key list instead of hiding it behind a
+# bundle card that does not list it either.
+#
+# The column is added by migration v32 and is in ``schema.sql`` for a fresh
+# database, so it is always present by the time a repository call runs. Kept as a
+# constant (interpolated, never parameterised) so the two paginated queries below
+# cannot drift apart; the values themselves stay bound.
+_BUNDLED_FILTER = " AND NOT EXISTS (SELECT 1 FROM key_bundles b WHERE b.id = vpn_keys.bundle_id)"
+
 
 def _json_loads(value: str) -> dict[str, object]:
     return json_loads_dict(value, "vpn_keys payload/public_payload")
@@ -167,12 +184,26 @@ class VpnKeyRepository:
         """Return a VPN key by primary key, or None if not found."""
         return await self.get_by_id(key_id)
 
-    async def list_by_owner(self, owner_user_id: int, limit: int = 20, offset: int = 0) -> list[VpnKey]:
-        """Return a paginated list of an owner's non-deleted VPN keys, newest first."""
+    async def list_by_owner(
+        self,
+        owner_user_id: int,
+        limit: int = 20,
+        offset: int = 0,
+        *,
+        exclude_bundled: bool = False,
+    ) -> list[VpnKey]:
+        """Return a paginated list of an owner's non-deleted VPN keys, newest first.
+
+        ``exclude_bundled`` drops the children of all-in-one bundles: they are
+        managed through their parent bundle, never one by one, so the user-facing
+        key list hides them. Must always be passed together with the matching
+        :meth:`count_by_owner` call — a filter on one side only would skew the
+        page count.
+        """
         cursor = await self.db.conn.execute(
-            """
+            f"""
             SELECT * FROM vpn_keys
-            WHERE owner_user_id = ? AND status != ?
+            WHERE owner_user_id = ? AND status != ?{_BUNDLED_FILTER if exclude_bundled else ""}
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
             """,
@@ -216,13 +247,17 @@ class VpnKeyRepository:
         rows = await cursor.fetchall()
         return [key for row in rows if (key := _row_to_vpn_key(row)) is not None]
 
-    async def count_by_owner(self, owner_user_id: int) -> int:
-        """Return the number of non-deleted VPN keys owned by a user."""
+    async def count_by_owner(self, owner_user_id: int, *, exclude_bundled: bool = False) -> int:
+        """Return the number of non-deleted VPN keys owned by a user.
+
+        ``exclude_bundled`` has the same meaning as in :meth:`list_by_owner` and
+        must be kept in step with it so pagination stays consistent.
+        """
         cursor = await self.db.conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS cnt
             FROM vpn_keys
-            WHERE owner_user_id = ? AND status != ?
+            WHERE owner_user_id = ? AND status != ?{_BUNDLED_FILTER if exclude_bundled else ""}
             """,
             (owner_user_id, VpnKeyStatus.DELETED.value),
         )

@@ -624,3 +624,110 @@ def test_no_production_query_selects_keys_by_bundle_id_is_null() -> None:
         "bundle child whose apply failed before it was attached — such a row must "
         "not be treated as a known-standalone key: " + "; ".join(offenders)
     )
+
+
+# --------------------------------------------------------------------------- #
+# the key list hides a bundle's children — and only its children
+# --------------------------------------------------------------------------- #
+def test_exclude_bundled_drops_attached_children_and_keeps_everything_else(tmp_path: Path) -> None:
+    """``exclude_bundled`` filters on bundle ownership, not on a NULL bundle_id.
+
+    Three rows stand in for the three cases that matter:
+
+    * an attached child — managed through its bundle, so the key list hides it;
+    * a child whose apply died BEFORE ``attach_key_to_bundle`` ran (``apply_failed``,
+      bundle_id never set) — no bundle lists it, so the key list must keep showing
+      it or the row becomes invisible everywhere. This is the case a
+      ``bundle_id IS NULL`` filter would get wrong in the other direction;
+    * an ordinary standalone key.
+
+    The count is asserted next to the list because ``load_keys_page`` derives the
+    page count from one and the page from the other; a filter applied to only one
+    of them would silently mis-paginate.
+    """
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await db.conn.execute(_INSERT_USERS)
+            await db.conn.execute(
+                "INSERT INTO key_bundles (user_id, label, status, token, created_at, updated_at) "
+                "VALUES (100, 'bundle_00001', 'active', 'tok-1', 'now', 'now')"
+            )
+            await db.conn.execute(
+                """
+                INSERT INTO vpn_keys (
+                  owner_user_id, key_type, status, email_label,
+                  payload_json, public_payload_json, created_at, updated_at, created_by, bundle_id
+                )
+                VALUES (100, 'xray', 'active', 'xray_tcp_child', '{}', '{}', 'now', 'now', 1, 1)
+                """
+            )
+            await db.conn.execute(
+                """
+                INSERT INTO vpn_keys (
+                  owner_user_id, key_type, status, email_label,
+                  payload_json, public_payload_json, created_at, updated_at, created_by
+                )
+                VALUES (100, 'xray', 'apply_failed', 'xray_http_orphan', '{}', '{}', 'now', 'now', 1)
+                """
+            )
+            await db.conn.execute(
+                """
+                INSERT INTO vpn_keys (
+                  owner_user_id, key_type, status, email_label,
+                  payload_json, public_payload_json, created_at, updated_at, created_by
+                )
+                VALUES (100, 'hysteria2', 'active', 'hy2_standalone', '{}', '{}', 'now', 'now', 1)
+                """
+            )
+            await db.commit()
+            keys = VpnKeyRepository(db)
+
+            unfiltered = await keys.list_by_owner(100)
+            assert {key.email_label for key in unfiltered} == {
+                "xray_tcp_child",
+                "xray_http_orphan",
+                "hy2_standalone",
+            }
+            assert await keys.count_by_owner(100) == 3
+
+            filtered = await keys.list_by_owner(100, exclude_bundled=True)
+            assert {key.email_label for key in filtered} == {"xray_http_orphan", "hy2_standalone"}
+            assert await keys.count_by_owner(100, exclude_bundled=True) == len(filtered) == 2
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_exclude_bundled_leaves_another_owners_keys_alone(tmp_path: Path) -> None:
+    """The bundle filter narrows a result set; it never widens it past the owner."""
+
+    async def run() -> None:
+        db = Database(tmp_path / "vpn.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            await db.conn.execute(_INSERT_USERS)
+            await db.conn.execute(
+                """
+                INSERT INTO vpn_keys (
+                  owner_user_id, key_type, status, email_label,
+                  payload_json, public_payload_json, created_at, updated_at, created_by
+                )
+                VALUES (1, 'xray', 'active', 'xray_tcp_admin', '{}', '{}', 'now', 'now', 1)
+                """
+            )
+            await db.commit()
+            keys = VpnKeyRepository(db)
+
+            assert await keys.count_by_owner(100, exclude_bundled=True) == 0
+            assert await keys.list_by_owner(100, exclude_bundled=True) == []
+            assert await keys.count_by_owner(1, exclude_bundled=True) == 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())

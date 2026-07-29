@@ -186,11 +186,18 @@ def _composition_block(keys: list[VpnKey]) -> str:
 
 
 def bundles_section_text(bundles: list[KeyBundle], *, viewer_user_id: int, total: int | None = None) -> str:
-    """The «All-in-One» group of the «My keys» page, rendered next to the protocol groups."""
+    """The «All-in-One» group of the «My keys» page, rendered next to the protocol groups.
+
+    Deliberately WITHOUT the AmneziaWG explanation. That paragraph answers "why is
+    WireGuard missing from this subscription?", which is a question about a
+    bundle's contents — it belongs on the bundle's own screens (detail, config,
+    create, created), not at the bottom of a list where AmneziaWG keys are sitting
+    in their own group a few lines up.
+    """
     if not bundles:
         return ""
     cards = "\n\n".join(bundle_card_text(bundle, viewer_user_id=viewer_user_id) for bundle in bundles)
-    parts = [f"{t('bundles_group_title')}\n{cards}", t("bundle_awg_separate")]
+    parts = [f"{t('bundles_group_title')}\n{cards}"]
     if total is not None and total > len(bundles):
         parts.append(t("bundles_more_hint", shown=len(bundles), total=total))
     return "\n\n".join(parts)
@@ -199,27 +206,45 @@ def bundles_section_text(bundles: list[KeyBundle], *, viewer_user_id: int, total
 # ── create ────────────────────────────────────────────────────────────────────
 
 
-def bundle_create_confirm_text(note: str | None, *, expires_at: str | None) -> str:
-    """Confirmation screen of the create wizard for an all-in-one bundle."""
-    return "\n".join(
+def bundle_create_confirm_text(
+    note: str | None, *, expires_at: str | None, fingerprint: str | None = None
+) -> str:
+    """Confirmation screen of the create wizard for an all-in-one bundle.
+
+    ``fingerprint`` is absent only when the bundle will carry no VLESS child at all
+    (the Xray module is off), so the line is omitted rather than showing a value
+    that nothing would apply.
+    """
+    lines = [
+        t("bundle_create_confirm_title"),
+        f"{t('field_type')}: {h(t('bundle_type_label'))}",
+        f"{t('field_note')}: {h(note or t('none'))}",
+    ]
+    if fingerprint:
+        lines.append(f"Fingerprint: {h(fingerprint)}")
+    lines.extend(
         [
-            t("bundle_create_confirm_title"),
-            f"{t('field_type')}: {h(t('bundle_type_label'))}",
-            f"{t('field_note')}: {h(note or t('none'))}",
             f"{t('field_expires_at')}: {h(format_expiry_date(expires_at))}",
             "",
             t("bundle_awg_separate"),
         ]
     )
+    return "\n".join(lines)
 
 
-def bundle_created_text(result: KeyBundleCreateResult, *, viewer_user_id: int) -> str:
+def bundle_created_text(result: KeyBundleCreateResult, *, viewer_user_id: int, settings: Settings) -> str:
     """What the user gets after a successful create — including a partial one.
 
     A bundle may legitimately come out smaller than the full composition when a
     backend is switched off, so the actual contents are always spelled out and the
     omissions named. Staying silent here is how a user ends up believing they have
     a Hysteria2 link they never received.
+
+    Ends with the subscription URL itself, exactly as the single-key flow ends with
+    the key's ``vless://``/``hy2://`` link: the deliverable of the wizard belongs on
+    screen when the wizard finishes, not one tap away behind «Конфиг». The token
+    reaches the chat message and nothing else — no log line and no audit field
+    formats it, the same contract the config screen keeps.
     """
     lines = [
         t("bundle_created_title"),
@@ -233,6 +258,8 @@ def bundle_created_text(result: KeyBundleCreateResult, *, viewer_user_id: int) -
         lines.append("")
         lines.append(t("bundle_created_skipped", skipped=h(skipped)))
     lines.append("")
+    lines.extend(_subscription_block(result.bundle, settings))
+    lines.append("")
     lines.append(t("bundle_awg_separate"))
     return "\n".join(lines)
 
@@ -240,25 +267,29 @@ def bundle_created_text(result: KeyBundleCreateResult, *, viewer_user_id: int) -
 # ── config ────────────────────────────────────────────────────────────────────
 
 
-def bundle_config_text(bundle: KeyBundle, settings: Settings) -> str:
-    """The sub-URL screen.
+def _subscription_block(bundle: KeyBundle, settings: Settings) -> list[str]:
+    """The sub-URL with its two footnotes, or the "not published yet" notice.
 
-    No QR image: the dependency tree has no QR library (see the PR description),
-    and pulling one in to draw a picture of a string the user can already copy is
-    not a trade this feature needs. The URL is emitted as a ``<code>`` block, which
-    Telegram makes tap-to-copy.
+    Shared by the config screen and the just-created screen so the credential is
+    presented identically on both — including the warning that the link *is* the
+    credential. The URL is emitted as a ``<code>`` block, which Telegram makes
+    tap-to-copy. No QR image: the dependency tree has no QR library, and pulling
+    one in to draw a picture of a string the user can already copy is not a trade
+    this feature needs.
     """
     url = subscription_url(settings, bundle.token)
     if url is None:
-        return f"<b>{h(bundle_title(bundle))}</b>\n\n{t('bundle_config_unavailable')}"
+        return [t("bundle_config_unavailable")]
+    return [code(url), "", t("bundle_config_hint"), t("bundle_config_secret_warning")]
+
+
+def bundle_config_text(bundle: KeyBundle, settings: Settings) -> str:
+    """The sub-URL screen."""
     return "\n".join(
         [
             f"<b>{h(bundle_title(bundle))}</b>",
             "",
-            code(url),
-            "",
-            t("bundle_config_hint"),
-            t("bundle_config_secret_warning"),
+            *_subscription_block(bundle, settings),
             t("bundle_awg_separate"),
         ]
     )

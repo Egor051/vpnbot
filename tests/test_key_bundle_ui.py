@@ -24,7 +24,7 @@ from bot.bundles import (
     bundles_section_text,
     subscription_url,
 )
-from bot.fsm.states import EditNoteStates
+from bot.fsm.states import CreateKeyStates, EditNoteStates
 from bot.handlers.key_bundles import (
     confirm_bundle_action,
     delete_bundle_prompt,
@@ -34,7 +34,7 @@ from bot.handlers.key_bundles import (
     show_bundle_config,
     show_bundle_stats,
 )
-from bot.handlers.keys import create_key_confirm, create_key_menu, list_keys
+from bot.handlers.keys import create_key_confirm, create_key_menu, create_key_note, list_keys
 from bot.keyboards.key_bundles import bundle_actions_keyboard
 from bot.rate_limit import RateLimiter
 from i18n import t, use_locale
@@ -228,9 +228,15 @@ class _BundleLifecycle:
         self._create_error = create_error
 
     async def create_bundle(
-        self, actor_user_id: int, owner: object, note: str | None = None, *, expires_at: str | None = None
+        self,
+        actor_user_id: int,
+        owner: object,
+        note: str | None = None,
+        *,
+        expires_at: str | None = None,
+        fingerprint: str | None = None,
     ) -> object:
-        self.calls.append(("create", (actor_user_id, note, expires_at)))
+        self.calls.append(("create", (actor_user_id, note, expires_at, fingerprint)))
         if self._create_error is not None:
             raise self._create_error
         return self._create_result
@@ -244,16 +250,37 @@ class _BundleLifecycle:
 
 
 class _VpnKeys:
-    def __init__(self, keys: list[VpnKey] | None = None) -> None:
-        self._keys = keys or []
+    """Stand-in for VpnKeyQueryService that honours ``exclude_bundled``.
 
-    async def count_for_actor(self, actor_user_id: int, owner_user_id: int | None = None) -> int:
-        return len(self._keys)
+    ``bundled`` are the keys that belong to a bundle; a real query drops them when
+    the flag is set, so the stub does too — otherwise a test could not tell the
+    filtered list from the unfiltered one.
+    """
+
+    def __init__(self, keys: list[VpnKey] | None = None, bundled: list[VpnKey] | None = None) -> None:
+        self._keys = keys or []
+        self._bundled = bundled or []
+        self.exclude_bundled_calls: list[bool] = []
+
+    def _visible(self, exclude_bundled: bool) -> list[VpnKey]:
+        self.exclude_bundled_calls.append(exclude_bundled)
+        return self._keys if exclude_bundled else [*self._keys, *self._bundled]
+
+    async def count_for_actor(
+        self, actor_user_id: int, owner_user_id: int | None = None, *, exclude_bundled: bool = False
+    ) -> int:
+        return len(self._visible(exclude_bundled))
 
     async def list_for_actor(
-        self, actor_user_id: int, owner_user_id: int | None = None, limit: int = 20, offset: int = 0
+        self,
+        actor_user_id: int,
+        owner_user_id: int | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        *,
+        exclude_bundled: bool = False,
     ) -> list[VpnKey]:
-        return self._keys[offset : offset + limit]
+        return self._visible(exclude_bundled)[offset : offset + limit]
 
 
 class _TrafficStats:
@@ -266,9 +293,9 @@ class _TrafficStats:
         return self._views
 
 
-def _modules_enabled() -> SimpleNamespace:
+def _modules_enabled(*disabled: str) -> SimpleNamespace:
     async def _is_enabled(name: str) -> bool:
-        return True
+        return name not in disabled
 
     return SimpleNamespace(is_enabled=_is_enabled)
 
@@ -280,11 +307,12 @@ def _services(
     lifecycle: _BundleLifecycle | None = None,
     vpn_keys: _VpnKeys | None = None,
     traffic_stats: _TrafficStats | None = None,
+    modules: SimpleNamespace | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         settings=settings or _settings(),
         users=_Users(),
-        modules=_modules_enabled(),
+        modules=modules or _modules_enabled(),
         key_bundle_views=views or _BundleViews([]),
         key_bundles=lifecycle or _BundleLifecycle(),
         vpn_keys=vpn_keys or _VpnKeys(),
@@ -304,6 +332,33 @@ def _callbacks(markup: object) -> list[str]:
 def _private_chat(monkeypatch: pytest.MonkeyPatch) -> None:
     for module in ("bot.handlers.key_bundles", "bot.handlers.keys"):
         monkeypatch.setattr(f"{module}.ensure_private_callback", _allow_private)
+    monkeypatch.setattr("bot.handlers.keys.ensure_private_message", _allow_private)
+
+
+class _NoteMessage:
+    """Minimal Message stand-in for the text steps of the create/note wizards."""
+
+    def __init__(self, text: str = "phone") -> None:
+        self.text = text
+        self.from_user = SimpleNamespace(id=OWNER, username="user", first_name="User")
+        self.chat = SimpleNamespace(id=OWNER)
+        self.answers: list[tuple[str, object]] = []
+
+    async def answer(self, text: str, reply_markup: object = None) -> None:
+        self.answers.append((text, reply_markup))
+
+    @property
+    def last_text(self) -> str:
+        return self.answers[-1][0]
+
+    @property
+    def last_markup(self) -> object:
+        return self.answers[-1][1]
+
+
+class _Bot:
+    async def delete_message(self, chat_id: int, message_id: int) -> None:
+        return None
 
 
 # ── 1. flag off: nothing about bundles is visible or reachable ────────────────
@@ -438,6 +493,36 @@ def test_bundle_create_confirm_is_refused_while_flag_is_off() -> None:
     asyncio.run(run())
 
 
+# ── 1b. the key list shows the bundle, not its children ───────────────────────
+
+
+def test_keys_list_asks_for_the_children_of_bundles_to_be_left_out() -> None:
+    """«Мои ключи» lists standalone keys plus the All-in-One card — never both.
+
+    A bundle's five children used to be rendered as five ordinary keys with their
+    own Revoke/Delete buttons, which at ``KEYS_PAGE_SIZE = 5`` filled the whole
+    first page and pushed the bundle card (first page only) out of sight.
+    """
+    standalone = _key(1)
+    children = [_key(20 + index) for index in range(5)]
+    vpn_keys = _VpnKeys([standalone], bundled=children)
+    views = _BundleViews([_bundle()])
+
+    async def run() -> None:
+        callback = _Callback("keys:list")
+        await list_keys(callback, _services(views=views, vpn_keys=vpn_keys))  # type: ignore[arg-type]
+
+        # Both the count and the page must be filtered, or the two disagree about
+        # how many pages there are.
+        assert vpn_keys.exclude_bundled_calls == [True, True]
+        rows = _callbacks(callback.message.last_markup)
+        assert "bundle:open:7" in rows
+        assert "key:open:1" in rows
+        assert not [row for row in rows if row.startswith(("key:open:2", "key:revoke:2"))]
+
+    asyncio.run(run())
+
+
 # ── 2. creation ───────────────────────────────────────────────────────────────
 
 
@@ -456,13 +541,24 @@ def test_create_confirm_calls_the_bundle_service_and_shows_the_card() -> None:
 
     async def run() -> None:
         callback = _Callback("create:confirm")
-        state = _State({"key_type": "bundle", "note": "phone", "expires_at": "2030-01-01T00:00:00+00:00"})
+        state = _State(
+            {
+                "key_type": "bundle",
+                "note": "phone",
+                "expires_at": "2030-01-01T00:00:00+00:00",
+                "fingerprint": "safari",
+            }
+        )
         await create_key_confirm(callback, state, _services(lifecycle=lifecycle), RateLimiter())  # type: ignore[arg-type]
 
-        assert lifecycle.calls == [("create", (OWNER, "phone", "2030-01-01T00:00:00+00:00"))]
+        # The fingerprint chosen once in the wizard reaches the service, which
+        # hands it to every VLESS child.
+        assert lifecycle.calls == [("create", (OWNER, "phone", "2030-01-01T00:00:00+00:00", "safari"))]
         text = callback.message.last_text
         assert t("bundle_created_title") in text
         assert "VLESS (TCP)" in text and "Hysteria2" in text
+        # The wizard ends with the credential on screen, like the single-key flow.
+        assert f"https://anycastedge.duckdns.org:2096/sub/{TOKEN}" in text
         assert state.cleared is True
 
     asyncio.run(run())
@@ -479,10 +575,68 @@ def test_create_confirm_screen_names_the_bundle_and_its_expiry() -> None:
     assert t("bundle_awg_separate") in text
 
 
+def test_bundle_wizard_asks_for_a_fingerprint_once() -> None:
+    """The note step hands a bundle to the shared fingerprint step, not to expiry.
+
+    The prompt is the bundle-specific one, because the answer is applied to all
+    four VLESS children at once rather than to a single key.
+    """
+
+    async def run() -> None:
+        message = _NoteMessage()
+        state = _State({"key_type": "bundle", "note_prompt_msg_id": 1})
+        await create_key_note(message, state, _services(), _Bot())  # type: ignore[arg-type]
+
+        assert state.state == CreateKeyStates.waiting_fp
+        assert message.last_text == t("bundle_fp_prompt")
+        assert "fp:safari" in _callbacks(message.last_markup)
+
+    asyncio.run(run())
+
+
+def test_bundle_wizard_skips_the_fingerprint_step_when_xray_is_off() -> None:
+    """No VLESS child means nothing to apply a fingerprint to — so do not ask."""
+
+    async def run() -> None:
+        message = _NoteMessage()
+        state = _State({"key_type": "bundle", "note_prompt_msg_id": 1})
+        await create_key_note(  # type: ignore[arg-type]
+            message, state, _services(modules=_modules_enabled("xray")), _Bot()
+        )
+
+        assert state.state == CreateKeyStates.waiting_expiry
+        assert message.last_text == t("expiry_prompt")
+
+    asyncio.run(run())
+
+
+def test_created_screen_says_so_when_no_public_endpoint_is_configured() -> None:
+    """A bundle with nowhere to publish it says so instead of leaking a bare token."""
+    text = bundle_created_text(  # type: ignore[arg-type]
+        _create_result((_key(1),)),
+        viewer_user_id=OWNER,
+        settings=_settings(subscription_public_port=0),
+    )
+
+    assert t("bundle_config_unavailable") in text
+    assert TOKEN not in text
+
+
+def test_created_screen_carries_the_same_secret_warning_as_the_config_screen() -> None:
+    """The link is a credential wherever it is shown, so the warning travels with it."""
+    text = bundle_created_text(  # type: ignore[arg-type]
+        _create_result((_key(1),)), viewer_user_id=OWNER, settings=_settings()
+    )
+
+    assert f"https://anycastedge.duckdns.org:2096/sub/{TOKEN}" in text
+    assert t("bundle_config_secret_warning") in text
+    assert t("bundle_config_hint") in text
+
+
 def test_partial_provisioning_names_what_actually_went_in_and_what_did_not() -> None:
     result = _create_result((_key(1),), skipped=(BundleMember(VpnKeyType.HYSTERIA2),))
 
-    text = bundle_created_text(result, viewer_user_id=OWNER)
+    text = bundle_created_text(result, viewer_user_id=OWNER, settings=_settings())  # type: ignore[arg-type]
 
     assert "VLESS (TCP)" in text
     # The omission is spelled out rather than silently missing from the list.
@@ -774,9 +928,15 @@ def test_awg_is_explained_on_every_bundle_surface(locale: str) -> None:
         assert note != "bundle_awg_separate"
 
         assert note in bundle_detail_text(_bundle(), [_key(1)], viewer_user_id=OWNER)
-        assert note in bundles_section_text([_bundle()], viewer_user_id=OWNER, total=1)
         assert note in bundle_config_text(_bundle(), _settings())  # type: ignore[arg-type]
-        assert note in bundle_created_text(_create_result((_key(1),)), viewer_user_id=OWNER)
+        assert note in bundle_created_text(  # type: ignore[arg-type]
+            _create_result((_key(1),)), viewer_user_id=OWNER, settings=_settings()
+        )
+
+        # …but NOT in the «My keys» list: there the question "why is there no
+        # WireGuard in the subscription?" is out of context, and an AmneziaWG
+        # group may well be sitting a few lines above it.
+        assert note not in bundles_section_text([_bundle()], viewer_user_id=OWNER, total=1)
 
 
 # ── 8. note privacy ───────────────────────────────────────────────────────────
@@ -790,22 +950,6 @@ def test_bundle_note_is_hidden_from_a_viewer_who_is_not_the_owner() -> None:
 
 
 # ── 9. the note wizard is the SAME FSM the per-key flow uses ──────────────────
-
-
-class _NoteMessage:
-    def __init__(self, text: str) -> None:
-        self.text = text
-        self.from_user = SimpleNamespace(id=OWNER, username="user", first_name="User")
-        self.chat = SimpleNamespace(id=OWNER)
-        self.answers: list[tuple[str, object]] = []
-
-    async def answer(self, text: str, reply_markup: object = None) -> None:
-        self.answers.append((text, reply_markup))
-
-
-class _Bot:
-    async def delete_message(self, chat_id: int, message_id: int) -> None:
-        return None
 
 
 def test_note_wizard_confirms_then_saves_the_note_on_the_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
