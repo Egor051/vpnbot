@@ -103,6 +103,17 @@
 #             the "migration did not reach the target" rollback or the hard-fail on
 #             an unreadable schema — only the newer-than-target case.
 #
+#   DB_OWNER_USER=<user>   (default: vpn-bot)
+#     What:   The user that must own the data dir, vpn.db and its -wal/-shm
+#             sidecars — i.e. the user the non-root readers (vpnbot-hy2-auth,
+#             vpn-bot-subscription) run as. Used by the post-deploy and
+#             post-restore ownership assertions and by the rollback's
+#             fix_db_perms. Not a privilege-model knob: it names the OWNER of the
+#             DB file, never who runs the bot.
+#     When:   Only if the readers run as some other user on this host.
+#     Risk:   Pointing it at a user the readers do not run as makes the assertion
+#             pass while the readers still cannot open the WAL sidecars.
+#
 #   DEPLOY_SELFTEST=1
 #     What:   Test seam only. Sources every function definition then returns
 #             before Phase 1, so the pytest harness can drive individual
@@ -179,15 +190,25 @@ SUBSCRIPTION_BIND_WAIT="${SUBSCRIPTION_BIND_WAIT:-30}"
 # helper whose installed copy differs from the checkout. Managed here are the WARP
 # helpers (the ones the WARP deploy presupposes, README L94-99, with no other
 # install step) plus vpnbot-hy2-warp-mark (the Hysteria2 -> WARP fwmark tagger,
-# previously hand-maintained on the box); the backend helpers under deploy/helpers/
-# are installed by deploy/setup-nonroot-helper-mode.sh and are out of scope here.
-# Format per entry: "<checkout-relative-source>|<installed-absolute-path>".
+# previously hand-maintained on the box) and vpn-bot-db-perms (the vpn.db ownership
+# helper vpn-bot.service runs as ExecStartPre); the backend helpers under
+# deploy/helpers/ are installed by deploy/setup-nonroot-helper-mode.sh and are out
+# of scope here.
+# Format per entry: "<checkout-relative-source>|<installed-absolute-path>[|<policy>]"
+# policy (default absent-ok when the field is omitted):
+#   absent-ok  an ABSENT installed copy means the subsystem is not deployed on this
+#              host (WARP), so installing the helper alone would be pointless —
+#              absent is not drift and is never "fixed".
+#   required   the helper MUST exist on every host because a systemd unit names it
+#              in Exec*=; absent is installed, not tolerated. Without this,
+#              vpn-bot.service's ExecStartPre would fail 203/EXEC on a clean host.
 OUT_OF_REPO_HELPERS=(
-  "scripts/vpn-bot-warp-install|/usr/local/sbin/vpn-bot-warp-install"
-  "scripts/vpn-bot-warp-iface|/usr/local/sbin/vpn-bot-warp-iface"
-  "scripts/vpn-bot-warp-routes|/usr/local/sbin/vpn-bot-warp-routes"
-  "scripts/vpn-bot-warp-status|/usr/local/sbin/vpn-bot-warp-status"
-  "scripts/vpnbot-hy2-warp-mark|/usr/local/sbin/vpnbot-hy2-warp-mark"
+  "scripts/vpn-bot-warp-install|/usr/local/sbin/vpn-bot-warp-install|absent-ok"
+  "scripts/vpn-bot-warp-iface|/usr/local/sbin/vpn-bot-warp-iface|absent-ok"
+  "scripts/vpn-bot-warp-routes|/usr/local/sbin/vpn-bot-warp-routes|absent-ok"
+  "scripts/vpn-bot-warp-status|/usr/local/sbin/vpn-bot-warp-status|absent-ok"
+  "scripts/vpnbot-hy2-warp-mark|/usr/local/sbin/vpnbot-hy2-warp-mark|absent-ok"
+  "scripts/vpn-bot-db-perms|/usr/local/sbin/vpn-bot-db-perms|required"
 )
 # The one helper that is EXECUTED by a systemd unit (warp-routes.service runs it),
 # so a fresh binary only takes effect on restart. Refreshing it triggers a
@@ -332,18 +353,24 @@ unit_states() {
 # Scan each managed helper's installed copy against the tracked source under
 # <root> (Phase 1 passes $WT = origin/main worktree; Phase 2 passes $APP_DIR =
 # the post-`git reset` working tree). Prints one line per helper:
-#   "<base>|<resolved-src>|<dst>|<state>"   state ∈ absent | synced | drift
-# ABSENT (no installed copy) means WARP is not deployed on this host — installing
-# a helper without its config/units/symlink would be pointless, so absent is NOT
-# drift and is never "fixed" here. Only a present-but-different copy is drift.
+#   "<base>|<resolved-src>|<dst>|<state>|<policy>"  state ∈ absent | synced | drift
+# For an absent-ok helper, ABSENT (no installed copy) means WARP is not deployed on
+# this host — installing a helper without its config/units/symlink would be
+# pointless, so absent is NOT drift and is never "fixed" here. For a `required`
+# helper absent IS actionable (a unit's Exec*= names it). Only a present-but-
+# different copy is drift, under either policy.
 scan_out_of_repo_helpers() {
-  local root="${1%/}" entry src_rel dst base src
+  local root="${1%/}" entry src_rel dst policy base src
   for entry in "${OUT_OF_REPO_HELPERS[@]}"; do
-    src_rel="${entry%%|*}"; dst="${entry##*|}"; base="$(basename "$dst")"
+    # Read the fields positionally: the policy field is OPTIONAL and defaults to
+    # absent-ok, so a two-field entry stays valid.
+    IFS='|' read -r src_rel dst policy <<< "$entry"
+    policy="${policy:-absent-ok}"
+    base="$(basename "$dst")"
     src="${root}/${src_rel}"
-    if   [[ ! -e "$dst" ]];    then printf '%s|%s|%s|absent\n' "$base" "$src" "$dst"
-    elif cmp -s "$src" "$dst"; then printf '%s|%s|%s|synced\n' "$base" "$src" "$dst"
-    else                            printf '%s|%s|%s|drift\n'  "$base" "$src" "$dst"; fi
+    if   [[ ! -e "$dst" ]];    then printf '%s|%s|%s|absent|%s\n' "$base" "$src" "$dst" "$policy"
+    elif cmp -s "$src" "$dst"; then printf '%s|%s|%s|synced|%s\n' "$base" "$src" "$dst" "$policy"
+    else                            printf '%s|%s|%s|drift|%s\n'  "$base" "$src" "$dst" "$policy"; fi
   done
 }
 
@@ -352,14 +379,26 @@ scan_out_of_repo_helpers() {
 # it was active pre-deploy, then verifies no drift remains. Runs while traps are
 # armed, so a failure routes through rollback_now (bot never left stopped).
 install_out_of_repo_helpers() {
-  local base src dst state changed=0 routes_changed=0
+  local base src dst state policy changed=0 routes_changed=0
   log "refreshing out-of-repo privileged helpers from the checkout (closes helper drift)"
   # Process substitution (not a pipe) keeps the loop in this shell so changed /
   # routes_changed survive it.
-  while IFS='|' read -r base src dst state; do
+  while IFS='|' read -r base src dst state policy; do
     [[ -n "$base" ]] || continue
+    policy="${policy:-absent-ok}"
     case "$state" in
-      absent) log "  ${base}: not installed on this host (WARP not deployed here) — leaving absent" ;;
+      absent)
+        if [[ "$policy" == "required" ]]; then
+          # A unit names this helper in Exec*=, so an absent copy is not "subsystem
+          # not deployed" — it is a unit that would fail 203/EXEC. Install it.
+          log "  ${base}: required helper missing on this host — installing"
+          install -o root -g root -m 0755 "$src" "$dst" \
+            || rollback_now "failed to install required helper ${base} from ${src} to ${dst}"
+          changed=1
+        else
+          log "  ${base}: not installed on this host (WARP not deployed here) — leaving absent"
+        fi
+        ;;
       synced) log "  ${base}: already in sync with the checkout" ;;
       drift)
         log "  ${base}: installed copy drifted from the checkout — reinstalling"
@@ -411,11 +450,13 @@ install_out_of_repo_helpers() {
     log "  ${HY2_MARK_UNIT} pre-state=${hy2_pre:-<none>} (not active) — not re-applied (respecting operator intent)"
   fi
 
-  # Verify: after the install no managed helper may still be in drift. This is the
-  # hard gate the task requires — the repo copy and the installed copy MUST match.
+  # Verify: after the install no managed helper may still be in drift, and no
+  # `required` helper may still be absent. This is the hard gate the task requires —
+  # the repo copy and the installed copy MUST match.
   local bad=()
-  while IFS='|' read -r base src dst state; do
-    [[ "$state" == "drift" ]] && bad+=("$base")
+  while IFS='|' read -r base src dst state policy; do
+    [[ "$state" == "drift" ]] && bad+=("${base} (drift)")
+    [[ "$state" == "absent" && "${policy:-absent-ok}" == "required" ]] && bad+=("${base} (still absent)")
   done < <(scan_out_of_repo_helpers "$APP_DIR")
   [[ ${#bad[@]} -eq 0 ]] || rollback_now "out-of-repo helper drift NOT closed after install: ${bad[*]}"
 
@@ -799,7 +840,7 @@ rollback() {
   trap - ERR INT TERM HUP
   set +e
   local -a report=()
-  local rc
+  local rc db_own_msg db_own_rc line
   warn "ROLLBACK: restoring PREV_SHA=${PREV_SHA:-<unknown>}"
 
   git reset --hard "$PREV_SHA"; report+=("git reset --hard ${PREV_SHA}: rc=$?")
@@ -828,7 +869,20 @@ rollback() {
   else
     report+=("backup archive MISSING (${ARCHIVE:-<none>}) — DB/configs/unit NOT restored — MANUAL ACTION REQUIRED")
   fi
+  # THE hole this closes: `tar -xzf ... -C /` runs as root and restores vpn.db with
+  # whatever ownership the archive carries (and a root-created archive carries
+  # root:root). A root-owned vpn.db makes the next open create root:root -wal/-shm
+  # and kills both vpn-bot readers. So re-assert ownership, then ASSERT it — a
+  # rollback that silently leaves the DB root-owned is how the readers broke.
   fix_db_perms; report+=("fix DB ownership/mode: rc=$?")
+  db_own_msg="$(assert_db_ownership)" && db_own_rc=0 || db_own_rc=$?
+  if (( db_own_rc == 0 )); then
+    report+=("DB ownership after restore: ${db_own_msg}")
+  else
+    report+=("DB ownership after restore: FAIL — MANUAL ACTION REQUIRED")
+    while IFS= read -r line; do [[ -n "$line" ]] && report+=("    ${line}"); done <<< "$db_own_msg"
+    report+=("    fix by hand: chown -R ${DB_OWNER_USER}:${DB_OWNER_USER} $(dirname "$DB_PATH") && systemctl restart ${BOT_UNIT}")
+  fi
   systemctl daemon-reload; report+=("daemon-reload: rc=$?")
 
   # Data-plane: restart a service only if its config actually changed (R1).
@@ -874,15 +928,74 @@ rollback() {
   exit 1
 }
 
+# --------------------------------------------------------------------------- #
+# Shared-WAL DB ownership (see scripts/vpn-bot-db-perms for the full rationale)
+# --------------------------------------------------------------------------- #
+# vpn-bot.service may run as root, but vpnbot-hy2-auth.service and
+# vpn-bot-subscription.service run as ${DB_OWNER_USER} and open the SAME vpn.db in
+# WAL mode. SQLite's robustFchown() gives the -wal/-shm sidecars the owner of the
+# MAIN DB FILE, so vpn.db must belong to ${DB_OWNER_USER} whichever user the bot
+# runs as — a root-owned vpn.db produces root:root sidecars and both readers die
+# with "unable to open database file". This is a DB-file ownership rule, not a
+# change to who runs what: the privilege model is untouched.
+DB_OWNER_USER="${DB_OWNER_USER:-vpn-bot}"
+
+# Files whose ownership/mode the shared-WAL contract covers. -wal/-shm are absent
+# on a cleanly-closed DB, and vpn.db itself is absent on a first-run host; callers
+# skip what does not exist rather than creating it.
+db_perms_targets() {
+  printf '%s\n' "$(dirname "$DB_PATH")" "$DB_PATH" "${DB_PATH}-wal" "${DB_PATH}-shm"
+}
+
+# Same guard as the helper: an empty/rootish DB_PATH must never reach chown/chmod.
+db_path_is_sane() {
+  [[ -n "${DB_PATH:-}" && "$DB_PATH" == /* && "$DB_PATH" != "/" && "$DB_PATH" != */ ]] || return 1
+  [[ "$DB_PATH" != *..* ]] || return 1
+  [[ "$(dirname "$DB_PATH")" != "/" ]] || return 1
+  return 0
+}
+
 fix_db_perms() {
-  [[ -f "$DB_PATH" ]] || return 0
-  # The restored (previous) unit defines the run user; match its ownership.
-  local owner="root:root"
-  if [[ -n "$INSTALLED_USER" && "$INSTALLED_USER" != "root" ]]; then
+  db_path_is_sane || { warn "DB_PATH='${DB_PATH:-}' is not a sane absolute DB path — NOT touching ownership"; return 1; }
+  local owner="root:root" p
+  # Prefer the shared-reader owner; fall back to root only when that user does not
+  # exist on this host (no hy2-auth / subscription deployed, so no readers).
+  if id -u "$DB_OWNER_USER" >/dev/null 2>&1; then
+    owner="${DB_OWNER_USER}:${DB_OWNER_USER}"
+  elif [[ -n "$INSTALLED_USER" && "$INSTALLED_USER" != "root" ]]; then
     owner="${INSTALLED_USER}:${INSTALLED_USER}"
   fi
-  chown "$owner" "$DB_PATH" 2>/dev/null
-  chmod 0600 "$DB_PATH" 2>/dev/null
+  [[ -d "$(dirname "$DB_PATH")" ]] && { chown "$owner" "$(dirname "$DB_PATH")" 2>/dev/null; chmod 0700 "$(dirname "$DB_PATH")" 2>/dev/null; }
+  for p in "$DB_PATH" "${DB_PATH}-wal" "${DB_PATH}-shm"; do
+    [[ -e "$p" ]] || continue
+    chown "$owner" "$p" 2>/dev/null
+    chmod 0600 "$p" 2>/dev/null
+  done
+  return 0
+}
+
+# Post-deploy / post-restore gate: the data dir, vpn.db and any -wal/-shm sidecar
+# MUST belong to ${DB_OWNER_USER}. Prints one line per mismatch (path, actual
+# owner, expected owner) and returns 1, so callers can route it through the
+# existing rollback path with a message an operator can act on directly.
+assert_db_ownership() {
+  local p owner bad=()
+  db_path_is_sane || { echo "DB_PATH='${DB_PATH:-}' is not a sane absolute DB path"; return 1; }
+  if ! id -u "$DB_OWNER_USER" >/dev/null 2>&1; then
+    echo "user '${DB_OWNER_USER}' does not exist on this host — no non-root readers, ownership check skipped"
+    return 0
+  fi
+  while IFS= read -r p; do
+    [[ -e "$p" ]] || continue     # absent -wal/-shm (closed DB) / first-run vpn.db
+    owner="$(stat -c '%U:%G' "$p" 2>/dev/null || true)"
+    [[ "$owner" == "${DB_OWNER_USER}:${DB_OWNER_USER}" ]] \
+      || bad+=("${p} is owned by ${owner:-<unreadable>}, expected ${DB_OWNER_USER}:${DB_OWNER_USER}")
+  done < <(db_perms_targets)
+  if [[ ${#bad[@]} -gt 0 ]]; then
+    printf '%s\n' "${bad[@]}"
+    return 1
+  fi
+  echo "data dir + vpn.db + sidecars owned by ${DB_OWNER_USER}:${DB_OWNER_USER}"
   return 0
 }
 
@@ -1250,15 +1363,21 @@ fi
 # unit drift this is NOT a gate — Phase 2 closes it automatically
 # (install_out_of_repo_helpers), so here we only record + report it. Helpers that
 # are absent (WARP not deployed on this host) are not drift and stay silent.
+# A `required` helper (one a unit names in Exec*=) that is ABSENT is listed here
+# too: Phase 2 installs it, and seeing it in the report is how an operator knows a
+# clean host is about to gain the helper its unit needs.
 helper_drift=()
-while IFS='|' read -r hd_base hd_src hd_dst hd_state; do
-  [[ "$hd_state" == "drift" ]] && helper_drift+=("${hd_base}|${hd_src}|${hd_dst}|${hd_state}")
+while IFS='|' read -r hd_base hd_src hd_dst hd_state hd_policy; do
+  hd_policy="${hd_policy:-absent-ok}"
+  if [[ "$hd_state" == "drift" ]] || [[ "$hd_state" == "absent" && "$hd_policy" == "required" ]]; then
+    helper_drift+=("${hd_base}|${hd_src}|${hd_dst}|${hd_state}")
+  fi
 done < <(scan_out_of_repo_helpers "$WT")
 if [[ ${#helper_drift[@]} -gt 0 ]]; then
-  log "out-of-repo helper drift (installed copy != origin/main) — Phase 2 will refresh these automatically:"
+  log "out-of-repo helper drift (installed copy != origin/main, or a required helper is missing) — Phase 2 will refresh these automatically:"
   for hd in "${helper_drift[@]}"; do
-    IFS='|' read -r hd_base _ hd_dst _ <<< "$hd"
-    log "    ${hd_base} -> ${hd_dst}"
+    IFS='|' read -r hd_base _ hd_dst hd_state <<< "$hd"
+    log "    ${hd_base} -> ${hd_dst} (${hd_state})"
   done
 fi
 
@@ -1347,7 +1466,7 @@ phase1_report() {
   # --- Out-of-repo helper drift: closed automatically by Phase 2 (no gate) ---
   printf '\n  --- Out-of-repo helper drift (/usr/local/sbin copies vs origin/main) ---\n'
   if [[ ${#helper_drift[@]} -gt 0 ]]; then
-    printf '    %d helper(s) differ from origin/main — a REAL deploy refreshes them itself:\n' "${#helper_drift[@]}"
+    printf '    %d helper(s) differ from origin/main (or are a missing `required` helper) — a REAL deploy refreshes them itself:\n' "${#helper_drift[@]}"
     local hrow hbase hsrc hdst
     for hrow in "${helper_drift[@]}"; do
       IFS='|' read -r hbase hsrc hdst _ <<< "$hrow"
@@ -1618,6 +1737,11 @@ log "installing prod dependencies"
 # before the unit install, so the helper the units execute is current before any
 # unit is (re)started. Restarting warp-routes may run its idle-tolerant self-check;
 # a skipped data-plane probe does NOT fail the deploy (see the function).
+#
+# ORDER IS LOAD-BEARING — DO NOT MOVE THIS BELOW THE UNIT INSTALL/START: the
+# `required` helpers include /usr/local/sbin/vpn-bot-db-perms, which
+# deploy/vpn-bot.service names in ExecStartPre=. Installing it after the start
+# would fail the unit with 203/EXEC on any host that does not already have it.
 install_out_of_repo_helpers
 
 log "installing ${BOT_UNIT} from deploy/vpn-bot.service (verbatim)"
@@ -1686,6 +1810,22 @@ fi
 resolve_expected_schema
 log "deployed code targets schema_version=${SCHEMA_EXPECT}; verifying live migration"
 verify_schema_migration "$SCHEMA_EXPECT"
+
+# Shared-WAL DB ownership gate ----------------------------------------------
+# Runs here (not right after start) because the schema gate above has just waited
+# out the migrations, so the -wal/-shm sidecars have actually been created and are
+# real evidence, not a race. vpn-bot.service's ExecStartPre helper should have made
+# this a no-op; if it did not, the vpn-bot readers (vpnbot-hy2-auth,
+# vpn-bot-subscription) are one restart away from "unable to open database file",
+# so this is a hard fail through the normal rollback path.
+log "asserting shared-WAL DB ownership (${DB_OWNER_USER}:${DB_OWNER_USER})"
+db_own_msg="$(assert_db_ownership)" && db_own_rc=0 || db_own_rc=$?
+if (( db_own_rc == 0 )); then
+  log "  ${db_own_msg}"
+else
+  printf '%s\n' "$db_own_msg" | sed 's/^/    /' >&2
+  rollback_now "shared-WAL DB ownership is wrong after deploy (see the lines above): the vpn-bot readers would fail with 'unable to open database file'. Expected ${DB_OWNER_USER}:${DB_OWNER_USER} on $(dirname "$DB_PATH"), ${DB_PATH} and its -wal/-shm sidecars"
+fi
 
 # Log scan for this run only (content-based, allowlist-filtered) ------------
 # PRIMARY source: bot.log tail (the bot logs to a file, not journald), read by

@@ -8,6 +8,14 @@ Type=simple
 WorkingDirectory=/opt/vpn-service
 EnvironmentFile=/opt/vpn-service/.env
 Environment=BOT_LOCK_PATH=/run/vpn-bot/vpn-bot.lock
+# This bot runs as root but shares vpn.db (journal_mode=WAL) with the vpn-bot-owned
+# readers vpnbot-hy2-auth.service and vpn-bot-subscription.service. Re-assert the
+# DB ownership BEFORE ExecStart reopens the DB and recreates the -wal/-shm
+# sidecars: a root-owned vpn.db makes SQLite create them as root:root and both
+# readers then die with "unable to open database file". Idempotent and silent when
+# nothing needed fixing. Do not remove — deploy.sh installs the helper and asserts
+# the resulting ownership post-deploy.
+ExecStartPre=/usr/local/sbin/vpn-bot-db-perms
 ExecStart=/opt/vpn-service/.venv/bin/python /opt/vpn-service/main.py
 Restart=on-failure
 RestartSec=5

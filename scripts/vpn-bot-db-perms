@@ -1,0 +1,187 @@
+#!/bin/bash
+# vpn-bot-db-perms — hand the shared SQLite WAL database to the non-root readers
+# that share it. Runs as ExecStartPre of vpn-bot.service (root+api model).
+#
+# WHY
+#   vpn-bot.service runs as User=root, while vpnbot-hy2-auth.service and
+#   vpn-bot-subscription.service run as User=vpn-bot. All three open the SAME
+#   /opt/vpn-service/data/vpn.db in journal_mode=WAL, and a WAL *reader* must be
+#   able to create/write the -wal/-shm sidecars even when it only reads rows.
+#
+#   MEASURED ON THE HOST: SQLite's robustFchown() works here — a root process
+#   opening a DB owned by vpn-bot creates -wal/-shm already as vpn-bot:vpn-bot
+#   0600. So no setgid / group-read / UMask scheme is needed (and none is used):
+#   a vpn-bot-owned vpn.db at 0600 is sufficient AND is the tightest mode that
+#   works. Do not "improve" this into group permissions.
+#
+#   The one remaining way to break the readers is vpn.db ITSELF becoming
+#   root-owned: a root restore from a backup tar (deploy.sh rollback), a manual
+#   cp, or a DB created from scratch under root. Then -wal/-shm inherit root:root
+#   and both vpn-bot readers die with
+#       sqlite3.OperationalError: unable to open database file
+#   This helper re-asserts the ownership before the bot reopens the DB, which is
+#   the moment the sidecars get (re)created. Idempotent: silent when nothing
+#   needed fixing.
+#
+# ENVIRONMENT KNOBS (all optional; defaults are the production values)
+#   DB_PATH               DB location. Same setting name the bot reads
+#                         (config/settings.py: DB_PATH -> Settings.db_path).
+#                         vpn-bot.service pulls it in via EnvironmentFile, so
+#                         under systemd it is normally already set. Falls back to
+#                         the .env file, then to ${DB_PERMS_DATA_ROOT}/vpn.db.
+#   APP_DIR               project root (default /opt/vpn-service).
+#   DB_PERMS_ENV_FILE     .env to read DB_PATH from (default ${APP_DIR}/.env).
+#   DB_PERMS_DATA_ROOT    project data dir (default ${APP_DIR}/data). The
+#                         resolved DB path MUST live under it — see guard_target.
+#                         A host that deliberately keeps vpn.db somewhere else has
+#                         to say so: put DB_PERMS_DATA_ROOT=<that dir> in the same
+#                         .env vpn-bot.service already loads via EnvironmentFile,
+#                         otherwise the guard refuses (exit 2) and ExecStartPre
+#                         fails the unit rather than chowning an unexpected path.
+#   DB_PERMS_OWNER        target owner as user:group (default vpn-bot:vpn-bot) —
+#                         the user the non-root readers run as.
+#   DB_PERMS_SELFTEST=1   test seam only, mirrors DEPLOY_SELFTEST in deploy.sh.
+#
+# EXIT CODES
+#   0  applied (or nothing to do: non-root, DB absent, target user absent)
+#   2  refused — precondition guard tripped (never mutates anything)
+set -uo pipefail
+
+SELF="vpn-bot-db-perms"
+
+APP_DIR="${APP_DIR:-/opt/vpn-service}"
+DB_PERMS_ENV_FILE="${DB_PERMS_ENV_FILE:-${APP_DIR}/.env}"
+DB_PERMS_DATA_ROOT="${DB_PERMS_DATA_ROOT:-${APP_DIR}/data}"
+DB_PERMS_OWNER="${DB_PERMS_OWNER:-vpn-bot:vpn-bot}"
+# Fallback constant, used only when neither the environment nor .env carries
+# DB_PATH. Mirrors config/settings.py's own default.
+DB_PERMS_DEFAULT_DB="${DB_PERMS_DATA_ROOT}/vpn.db"
+DIR_MODE="700"    # data dir: owner-only, readers still get in as the owner
+FILE_MODE="600"   # vpn.db + -wal + -shm
+
+# Only real changes are reported (stderr): a correct host stays completely quiet,
+# so anything this helper prints in the journal is a fact about what it fixed.
+note() { printf '%s: %s\n' "$SELF" "$*" >&2; }
+die()  { printf '%s: %s\n' "$SELF" "$*" >&2; exit 2; }
+
+# --------------------------------------------------------------------------- #
+# DB path resolution: environment -> .env -> fallback constant
+# --------------------------------------------------------------------------- #
+# Read one assignment out of an .env file: last wins, inline comment stripped,
+# surrounding quotes removed. Anchored at line start so IP2ASN_DB_PATH & friends
+# can never be mistaken for DB_PATH.
+env_db_path() {
+  local file="${1-}"
+  [[ -n "$file" && -r "$file" ]] || return 0
+  sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?DB_PATH[[:space:]]*=[[:space:]]*//p' "$file" \
+    | tail -n1 \
+    | sed -e 's/[[:space:]]*#.*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/" -e 's/[[:space:]]*$//'
+}
+
+resolve_db_path() {
+  local v="${DB_PATH:-}"
+  [[ -n "$v" ]] || v="$(env_db_path "$DB_PERMS_ENV_FILE")"
+  [[ -n "$v" ]] || v="$DB_PERMS_DEFAULT_DB"
+  printf '%s' "$v"
+}
+
+# --------------------------------------------------------------------------- #
+# Precondition guard — MANDATORY, runs before anything is touched
+# --------------------------------------------------------------------------- #
+# An empty variable expanding into `chmod 0600 ""` / `chown vpn-bot:vpn-bot /` is
+# exactly the class of bug that took the host down on 2026-07-29. This helper
+# must not become a second instance of that rake, so it refuses to work unless
+# the resolved target is a non-empty absolute path that actually lives under the
+# project data dir. Fails closed with exit 2 and mutates NOTHING.
+guard_target() {
+  local db="${1-}" root="${DB_PERMS_DATA_ROOT:-}" dir
+  [[ -n "$db" ]]   || die "resolved DB path is EMPTY — refusing to chown/chmod anything"
+  [[ -n "$root" ]] || die "DB_PERMS_DATA_ROOT is EMPTY — refusing to chown/chmod anything"
+  [[ "$db" == "/" ]]   && die "resolved DB path is '/' — refusing to chown/chmod the filesystem root"
+  [[ "$root" == "/" ]] && die "DB_PERMS_DATA_ROOT is '/' — refusing to chown/chmod the filesystem root"
+  [[ "$db" == /* ]]   || die "resolved DB path is not absolute: '${db}'"
+  [[ "$root" == /* ]] || die "DB_PERMS_DATA_ROOT is not absolute: '${root}'"
+  [[ "$db" != */ ]] || die "resolved DB path has a trailing slash (is a directory?): '${db}'"
+  case "$db"   in *..*) die "resolved DB path contains '..': '${db}'" ;; esac
+  case "$root" in *..*) die "DB_PERMS_DATA_ROOT contains '..': '${root}'" ;; esac
+  root="${root%/}"
+  [[ -n "$root" ]] || die "DB_PERMS_DATA_ROOT collapses to empty after normalisation"
+  [[ "$db" == "${root}/"* ]] \
+    || die "resolved DB path '${db}' is outside the project data dir '${root}' — refusing"
+  dir="$(dirname "$db")"
+  [[ "$dir" == "$root" || "$dir" == "${root}/"* ]] \
+    || die "DB parent dir '${dir}' is outside the project data dir '${root}' — refusing"
+  return 0
+}
+
+# --------------------------------------------------------------------------- #
+# Idempotent chown/chmod
+# --------------------------------------------------------------------------- #
+# Compare first, act only on a real difference, and log ONLY what changed.
+ensure_owner_mode() {
+  local path="${1}" mode="${2}" cur_owner cur_mode
+  [[ -e "$path" ]] || return 0
+  cur_owner="$(stat -c '%U:%G' "$path" 2>/dev/null || true)"
+  cur_mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+  if [[ "$cur_owner" != "$DB_PERMS_OWNER" ]]; then
+    chown "$DB_PERMS_OWNER" "$path" \
+      || die "chown ${DB_PERMS_OWNER} ${path} failed (was ${cur_owner:-<unknown>})"
+    note "chown ${cur_owner:-<unknown>} -> ${DB_PERMS_OWNER}: ${path}"
+  fi
+  if [[ "$cur_mode" != "$mode" ]]; then
+    chmod "0${mode}" "$path" \
+      || die "chmod 0${mode} ${path} failed (was ${cur_mode:-<unknown>})"
+    note "chmod ${cur_mode:-<unknown>} -> 0${mode}: ${path}"
+  fi
+  return 0
+}
+
+main() {
+  local db dir owner_user
+  db="$(resolve_db_path)"
+  # Guard BEFORE the privilege check: a bad path is a configuration fault worth
+  # surfacing wherever it is seen, and the guard itself touches nothing.
+  guard_target "$db"
+
+  # Non-root privilege model (deploy/vpn-bot.nonroot.example.service): the bot
+  # itself runs as vpn-bot, so it creates the DB and its sidecars as that user and
+  # ownership can never drift to root. Nothing to re-assert — and an unprivileged
+  # process could not chown anyway. No-op, exit 0.
+  if [[ "$(id -u)" != "0" ]]; then
+    exit 0
+  fi
+
+  owner_user="${DB_PERMS_OWNER%%:*}"
+  [[ -n "$owner_user" ]] || die "DB_PERMS_OWNER='${DB_PERMS_OWNER}' has no user part"
+  if ! id -u "$owner_user" >/dev/null 2>&1; then
+    # No readers on this host (hy2-auth / subscription not deployed), so there is
+    # nobody to hand the DB to. Never fail the bot's start over it.
+    note "target user '${owner_user}' does not exist on this host — leaving ownership untouched"
+    exit 0
+  fi
+
+  dir="$(dirname "$db")"
+  ensure_owner_mode "$dir" "$DIR_MODE"
+
+  # A missing vpn.db is a valid first-run state: the bot creates it on start. We
+  # must NOT create it here (an empty file would look like a corrupt DB to
+  # SQLite), and there is nothing to chown yet — the next start fixes it.
+  if [[ ! -e "$db" ]]; then
+    exit 0
+  fi
+
+  ensure_owner_mode "$db" "$FILE_MODE"
+  # The sidecars are absent on a cleanly-closed DB — that is normal, not a fault.
+  ensure_owner_mode "${db}-wal" "$FILE_MODE"
+  ensure_owner_mode "${db}-shm" "$FILE_MODE"
+  exit 0
+}
+
+# Test seam, mirroring DEPLOY_SELFTEST in scripts/deploy.sh: with
+# DB_PERMS_SELFTEST=1 the script defines every function and then returns/exits
+# before doing any work, so pytest can drive resolve_db_path / guard_target /
+# ensure_owner_mode individually under stubbed id/chown/chmod instead of running a
+# real chown. NEVER set it in production — it turns the ExecStartPre into a no-op.
+if [[ "${DB_PERMS_SELFTEST:-0}" == "1" ]]; then return 0 2>/dev/null || exit 0; fi
+
+main "$@"

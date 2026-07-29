@@ -374,6 +374,53 @@ equivalent `wg-quick strip` check. Do not run `awg set`, `wg set`, `systemctl re
 or runtime-changing commands during restore validation until the config files have passed
 read-only checks.
 
+The `chown -R vpn-bot:vpn-bot /opt/vpn-service/data` line above is **not** cosmetic — see
+the next section.
+
+## Shared-WAL DB ownership (`vpn-bot-db-perms`)
+
+`vpn-bot.service` runs as **root**, while `vpnbot-hy2-auth.service` and
+`vpn-bot-subscription.service` run as **vpn-bot**. All three open the same
+`/opt/vpn-service/data/vpn.db` in `journal_mode=WAL`, and a WAL *reader* must be able to
+write the `-wal`/`-shm` sidecars even when it only reads rows.
+
+SQLite's `robustFchown()` gives those sidecars the owner of the **main DB file**, so one
+rule is enough: `vpn.db` must be owned by `vpn-bot`. No group-read, setgid or `UMask`
+scheme is needed (or wanted — `0600` owned by `vpn-bot` is the tightest thing that works).
+
+The failure mode is `vpn.db` itself becoming root-owned — a root `tar -xzf ... -C /`
+restore, a manual `cp`, or a DB created from scratch under root. The sidecars then come out
+`root:root` and both readers die with:
+
+```
+sqlite3.OperationalError: unable to open database file
+```
+
+Guards in place:
+
+- `/usr/local/sbin/vpn-bot-db-perms` runs as `ExecStartPre=` of `vpn-bot.service`, so every
+  bot start re-asserts `vpn-bot:vpn-bot` on the data dir (`0700`), `vpn.db`, `vpn.db-wal`
+  and `vpn.db-shm` (`0600`) before the bot reopens the DB. It is idempotent and silent when
+  nothing needed fixing, is a no-op when not run as root, never creates the DB, and refuses
+  to touch anything if the resolved path is empty, `/`, or outside the project data dir.
+  Tracked source: `scripts/vpn-bot-db-perms`; `scripts/deploy.sh` installs it (it is a
+  `required` out-of-repo helper, so a host that lacks it gets it).
+- `scripts/deploy.sh` asserts the resulting ownership after every deploy **and** after the
+  rollback branch unpacks a backup; a mismatch is a hard failure through the normal
+  rollback path, naming the file, its actual owner and the expected one.
+
+After any manual restore or `cp` of the DB, run it by hand and restart the readers:
+
+```bash
+sudo /usr/local/sbin/vpn-bot-db-perms
+sudo systemctl restart vpn-bot vpnbot-hy2-auth vpn-bot-subscription
+sudo ls -l /opt/vpn-service/data/    # expect vpn-bot:vpn-bot on vpn.db and the sidecars
+```
+
+A host that deliberately keeps `vpn.db` outside `/opt/vpn-service/data` must declare that
+directory as `DB_PERMS_DATA_ROOT=<dir>` in `/opt/vpn-service/.env` (the same file the unit
+loads via `EnvironmentFile=`); otherwise the helper's path guard refuses to run.
+
 ## Off-site backup coverage and recovery bundle
 
 The scheduled off-site backup (`OFFSITE_BACKUP_ENCRYPTION_KEY`) delivers two encrypted
