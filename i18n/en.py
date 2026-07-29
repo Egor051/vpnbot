@@ -477,6 +477,7 @@ STRINGS: dict[str, str] = {
         "a WireGuard config cannot be delivered over a subscription link."
     ),
     "bundles_more_hint": "Showing {shown} of {total} subscriptions.",
+    "bundle_fp_prompt": "Choose a fingerprint — it applies to every VLESS key in the subscription:",
     "bundle_create_confirm_title": "<b>Confirm subscription creation</b>",
     "creating_bundle": "Creating the subscription...",
     "bundle_created_title": "<b>Subscription created.</b>",

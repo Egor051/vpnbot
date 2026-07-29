@@ -759,12 +759,26 @@ def test_admin_delete_returns_same_page_when_still_valid(monkeypatch) -> None:
         async def get_for_actor(self, actor_user_id: int, key_id: int) -> VpnKey:
             return _key(key_id, owner_user_id=200)
 
-        async def count_for_actor(self, actor_user_id: int, owner_user_id: int | None = None) -> int:
+        async def count_for_actor(
+            self, actor_user_id: int, owner_user_id: int | None = None, *, exclude_bundled: bool = False
+        ) -> int:
+            # The admin view of a user's keys shows every key, bundle children
+            # included — there is no bundle screen on the admin side.
+            assert exclude_bundled is False
             return 11
 
-        async def list_for_actor(self, actor_user_id: int, owner_user_id: int | None, limit: int, offset: int) -> list[VpnKey]:
+        async def list_for_actor(
+            self,
+            actor_user_id: int,
+            owner_user_id: int | None,
+            limit: int,
+            offset: int,
+            *,
+            exclude_bundled: bool = False,
+        ) -> list[VpnKey]:
             assert owner_user_id == 200
             assert offset == 10
+            assert exclude_bundled is False
             return [_key(30, owner_user_id=200)]
 
     class Xray:
@@ -920,12 +934,24 @@ def test_admin_delete_last_key_returns_previous_valid_page(monkeypatch) -> None:
         async def get_for_actor(self, actor_user_id: int, key_id: int) -> VpnKey:
             return _key(key_id, owner_user_id=200)
 
-        async def count_for_actor(self, actor_user_id: int, owner_user_id: int | None = None) -> int:
+        async def count_for_actor(
+            self, actor_user_id: int, owner_user_id: int | None = None, *, exclude_bundled: bool = False
+        ) -> int:
+            assert exclude_bundled is False
             return 10
 
-        async def list_for_actor(self, actor_user_id: int, owner_user_id: int | None, limit: int, offset: int) -> list[VpnKey]:
+        async def list_for_actor(
+            self,
+            actor_user_id: int,
+            owner_user_id: int | None,
+            limit: int,
+            offset: int,
+            *,
+            exclude_bundled: bool = False,
+        ) -> list[VpnKey]:
             assert owner_user_id == 200
             assert offset == 5
+            assert exclude_bundled is False
             return [_key(20, owner_user_id=200)]
 
     class Xray:

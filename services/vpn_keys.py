@@ -17,21 +17,41 @@ class VpnKeyQueryService:
         owner_user_id: int | None = None,
         limit: int = 20,
         offset: int = 0,
+        *,
+        exclude_bundled: bool = False,
     ) -> list[VpnKey]:
-        """Return the VPN keys an actor is allowed to view for a given owner."""
-        actor = await self.users.require_approved_or_admin(actor_user_id)
-        target = owner_user_id or actor_user_id
-        if actor.role != UserRole.SUPERADMIN and target != actor_user_id:
-            raise AccessDenied("Нельзя смотреть чужие ключи", key="err_foreign_keys_view")
-        return await self.vpn_keys.list_by_owner(target, limit=limit, offset=offset)
+        """Return the VPN keys an actor is allowed to view for a given owner.
 
-    async def count_for_actor(self, actor_user_id: int, owner_user_id: int | None = None) -> int:
-        """Return the number of VPN keys an actor may view for a given owner."""
+        ``exclude_bundled`` hides the children of all-in-one bundles, which are
+        managed through their parent and would otherwise crowd out the list. Off
+        by default so the admin view of a user's keys still shows every key —
+        there is no bundle screen on the admin side to see them on instead.
+        """
         actor = await self.users.require_approved_or_admin(actor_user_id)
         target = owner_user_id or actor_user_id
         if actor.role != UserRole.SUPERADMIN and target != actor_user_id:
             raise AccessDenied("Нельзя смотреть чужие ключи", key="err_foreign_keys_view")
-        return await self.vpn_keys.count_by_owner(target)
+        return await self.vpn_keys.list_by_owner(
+            target, limit=limit, offset=offset, exclude_bundled=exclude_bundled
+        )
+
+    async def count_for_actor(
+        self,
+        actor_user_id: int,
+        owner_user_id: int | None = None,
+        *,
+        exclude_bundled: bool = False,
+    ) -> int:
+        """Return the number of VPN keys an actor may view for a given owner.
+
+        ``exclude_bundled`` must mirror the value passed to :meth:`list_for_actor`,
+        otherwise the page count and the page contents disagree.
+        """
+        actor = await self.users.require_approved_or_admin(actor_user_id)
+        target = owner_user_id or actor_user_id
+        if actor.role != UserRole.SUPERADMIN and target != actor_user_id:
+            raise AccessDenied("Нельзя смотреть чужие ключи", key="err_foreign_keys_view")
+        return await self.vpn_keys.count_by_owner(target, exclude_bundled=exclude_bundled)
 
     async def personal_summary_for_actor(self, actor_user_id: int) -> tuple[int, int, int, int, int]:
         """Return (active_xray, active_awg, active_hysteria2, downloaded, uploaded) for own keys."""

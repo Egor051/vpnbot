@@ -169,6 +169,7 @@ class KeyBundleService:
         *,
         expires_at: str | None = None,
         allow_pending_owner: bool = False,
+        fingerprint: str | None = None,
     ) -> KeyBundleCreateResult:
         """Provision one child key per available protocol under a single bundle.
 
@@ -176,6 +177,13 @@ class KeyBundleService:
         live and attached, or nothing is left behind on the backends or in the DB.
         All children share the same *expires_at* so they expire together and the
         key-expiry job needs no bundle awareness at all.
+
+        *fingerprint* is applied to every Xray child (Hysteria2 has no such
+        setting), so one subscription speaks with one TLS fingerprint instead of
+        four children silently taking the global ``XRAY_FINGERPRINT`` default.
+        ``None`` keeps exactly that old behaviour. The value is validated by the
+        caller against ``VALID_FINGERPRINTS``, the same contract the single-key
+        create path uses.
         """
         self._require_enabled()
         clean_note = normalize_note(note)
@@ -207,6 +215,7 @@ class KeyBundleService:
                         note=clean_note,
                         expires_at=expires_at,
                         allow_pending_owner=allow_pending_owner,
+                        fingerprint=fingerprint,
                     )
                     await self.bundles.attach_key_to_bundle(key.id, bundle.id, self.clock.now())
                     created.append(key)
@@ -222,6 +231,7 @@ class KeyBundleService:
                     "owner_user_id": owner.telegram_user_id,
                     "label": bundle.label,
                     "expires_at": expires_at,
+                    "fingerprint": fingerprint,
                     "key_ids": [key.id for key in created],
                     "included": [_member_name(member) for member in included],
                     "skipped": [_member_name(member) for member in skipped],
@@ -410,6 +420,7 @@ class KeyBundleService:
         note: str | None,
         expires_at: str | None,
         allow_pending_owner: bool,
+        fingerprint: str | None = None,
     ) -> VpnKey:
         if member.key_type is VpnKeyType.XRAY:
             result = await self.xray.create_xray_key(
@@ -418,10 +429,13 @@ class KeyBundleService:
                 note,
                 expires_at=expires_at,
                 allow_pending_owner=allow_pending_owner,
+                fingerprint=fingerprint,
                 transport=member.transport,
                 xhttp_profile=member.xhttp_profile,
             )
             return result.key
+        # Hysteria2 has no TLS fingerprint knob, so *fingerprint* is ignored here
+        # rather than threaded through and dropped further down.
         if member.key_type is VpnKeyType.HYSTERIA2:
             result = await self.hysteria.issue(
                 actor_user_id,

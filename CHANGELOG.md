@@ -15,17 +15,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `bundle:*` callback is refused by a guard rather than merely hidden, so a replayed or
   hand-typed payload cannot reach a service. No new button was added to the main menu.
   - **Create.** «All-in-One» joins the existing protocol list and reuses the same
-    create wizard (note → expiry → confirm) rather than introducing a second flow. The
-    result screen always spells out what the bundle actually contains, and names the
+    create wizard (note → fingerprint → expiry → confirm) rather than introducing a
+    second flow. The **fingerprint is asked once and applied to all four VLESS
+    children**, from the same keyboard a single VLESS key uses; the step is skipped
+    when Xray is off, because then the bundle has no VLESS child to apply it to, and
+    skipping the choice still falls back to the global `XRAY_FINGERPRINT` as before.
+    The result screen always spells out what the bundle actually contains, names the
     protocols that were left out because their backend is switched off — a partial
-    bundle is never presented as a complete one. A backend that is on but degraded
-    aborts the creation, which surfaces as a plain localized "try again later" instead
-    of the operator-facing backend text.
+    bundle is never presented as a complete one — and **ends with the subscription URL
+    itself**, exactly as the single-key flow ends with the key's link, instead of
+    parking the deliverable one tap away behind «Config». A backend that is on but
+    degraded aborts the creation, which surfaces as a plain localized "try again later"
+    instead of the operator-facing backend text.
   - **My keys.** An «All-in-One» group renders next to VLESS / AmneziaWG / Hysteria2
     (first page, up to five bundles, with the count stated when there are more). Every
     card carries the same five actions as a key card — Config · Stats · Revoke · Note ·
-    Delete — plus one line explaining that **AmneziaWG is issued as a separate key**,
-    because a WireGuard config cannot ride a subscription link.
+    Delete. A bundle's **child keys are not listed individually**: they are managed
+    through their parent, and at five per page they filled the whole first page and
+    pushed the bundle card (first page only) out of sight — plus each one offered a
+    Revoke button that would silently break the subscription. The filter asks whether a
+    bundle owns the row rather than testing `bundle_id IS NULL`, so a child whose apply
+    died before it was attached stays visible instead of disappearing from every
+    screen. The **AmneziaWG-is-a-separate-key** line lives on the bundle's own screens
+    (detail, config, create, created) and no longer trails the key list, where an
+    AmneziaWG group may well be sitting a few lines above it.
   - **Config** shows the subscription URL built from settings — the shared Hysteria2
     domain (`HYSTERIA2_SNI`, falling back to `HYSTERIA2_HOST`) and
     `SUBSCRIPTION_PUBLIC_PORT` — never a hardcoded host, and says plainly that the
