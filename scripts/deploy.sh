@@ -840,7 +840,7 @@ rollback() {
   trap - ERR INT TERM HUP
   set +e
   local -a report=()
-  local rc db_own_msg db_own_rc line
+  local rc db_own_msg db_own_rc canary_msg canary_rc line
   warn "ROLLBACK: restoring PREV_SHA=${PREV_SHA:-<unknown>}"
 
   git reset --hard "$PREV_SHA"; report+=("git reset --hard ${PREV_SHA}: rc=$?")
@@ -865,7 +865,10 @@ rollback() {
   systemctl stop "$BOT_UNIT"; report+=("stop vpn-bot: rc=$?")
   rm -f "${DB_PATH}-wal" "${DB_PATH}-shm"
   if [[ -n "$ARCHIVE" && -f "$ARCHIVE" ]]; then
-    tar -p --xattrs --acls -xzf "$ARCHIVE" -C /; rc=$?; report+=("restore DB+configs+unit from archive: rc=$rc")
+    # Single choke point: it carries --no-overwrite-dir, so the modes/owners of /,
+    # /opt, /usr and /etc survive the extraction untouched. See
+    # restore_archive_into_root for the 2026-07-29 archive listing that proves why.
+    restore_archive_into_root "$ARCHIVE"; rc=$?; report+=("restore DB+configs+unit from archive: rc=$rc")
   else
     report+=("backup archive MISSING (${ARCHIVE:-<none>}) — DB/configs/unit NOT restored — MANUAL ACTION REQUIRED")
   fi
@@ -882,6 +885,17 @@ rollback() {
     report+=("DB ownership after restore: FAIL — MANUAL ACTION REQUIRED")
     while IFS= read -r line; do [[ -n "$line" ]] && report+=("    ${line}"); done <<< "$db_own_msg"
     report+=("    fix by hand: chown -R ${DB_OWNER_USER}:${DB_OWNER_USER} $(dirname "$DB_PATH") && systemctl restart ${BOT_UNIT}")
+  fi
+  # The canary — the last line of defence if the extraction ever changes the mode
+  # of / again (200/CHDIR for every non-root unit) or leaves the DB tree loose.
+  # Runs unconditionally: on the no-archive path it still costs nothing and still
+  # catches a host left broken by an earlier restore.
+  canary_msg="$(assert_restore_permissions)" && canary_rc=0 || canary_rc=$?
+  if (( canary_rc == 0 )); then
+    report+=("restore permission canary: ${canary_msg}")
+  else
+    report+=("restore permission canary: FAIL — MANUAL ACTION REQUIRED")
+    while IFS= read -r line; do [[ -n "$line" ]] && report+=("    ${line}"); done <<< "$canary_msg"
   fi
   systemctl daemon-reload; report+=("daemon-reload: rc=$?")
 
@@ -940,6 +954,30 @@ rollback() {
 # change to who runs what: the privilege model is untouched.
 DB_OWNER_USER="${DB_OWNER_USER:-vpn-bot}"
 
+# The modes the contract requires. ONE definition for deploy.sh: fix_db_perms()
+# applies them, assert_restore_permissions() verifies them, and the backup staging
+# bakes the dir mode into the archive it builds. Must stay in step with
+# DIR_MODE/FILE_MODE in scripts/vpn-bot-db-perms.
+DB_DIR_MODE="0700"
+DB_FILE_MODE="0600"
+
+# The owner every DB file must end up with: the shared-WAL reader user when it
+# exists on this host, else the installed unit's user, else root (a host with no
+# non-root readers at all). ONE definition — fix_db_perms(), the staged sqlite
+# snapshot in the backup and the restore canary all call this, so the reader-user
+# rule cannot drift between the places that need it. Never returns root:root while
+# ${DB_OWNER_USER} exists: handing a restored vpn.db back to root is what killed
+# the readers on 2026-07-29.
+db_target_owner() {
+  if id -u "$DB_OWNER_USER" >/dev/null 2>&1; then
+    printf '%s:%s' "$DB_OWNER_USER" "$DB_OWNER_USER"
+  elif [[ -n "${INSTALLED_USER:-}" && "$INSTALLED_USER" != "root" ]]; then
+    printf '%s:%s' "$INSTALLED_USER" "$INSTALLED_USER"
+  else
+    printf 'root:root'
+  fi
+}
+
 # Files whose ownership/mode the shared-WAL contract covers. -wal/-shm are absent
 # on a cleanly-closed DB, and vpn.db itself is absent on a first-run host; callers
 # skip what does not exist rather than creating it.
@@ -957,19 +995,13 @@ db_path_is_sane() {
 
 fix_db_perms() {
   db_path_is_sane || { warn "DB_PATH='${DB_PATH:-}' is not a sane absolute DB path — NOT touching ownership"; return 1; }
-  local owner="root:root" p
-  # Prefer the shared-reader owner; fall back to root only when that user does not
-  # exist on this host (no hy2-auth / subscription deployed, so no readers).
-  if id -u "$DB_OWNER_USER" >/dev/null 2>&1; then
-    owner="${DB_OWNER_USER}:${DB_OWNER_USER}"
-  elif [[ -n "$INSTALLED_USER" && "$INSTALLED_USER" != "root" ]]; then
-    owner="${INSTALLED_USER}:${INSTALLED_USER}"
-  fi
-  [[ -d "$(dirname "$DB_PATH")" ]] && { chown "$owner" "$(dirname "$DB_PATH")" 2>/dev/null; chmod 0700 "$(dirname "$DB_PATH")" 2>/dev/null; }
+  local owner p
+  owner="$(db_target_owner)"
+  [[ -d "$(dirname "$DB_PATH")" ]] && { chown "$owner" "$(dirname "$DB_PATH")" 2>/dev/null; chmod "$DB_DIR_MODE" "$(dirname "$DB_PATH")" 2>/dev/null; }
   for p in "$DB_PATH" "${DB_PATH}-wal" "${DB_PATH}-shm"; do
     [[ -e "$p" ]] || continue
     chown "$owner" "$p" 2>/dev/null
-    chmod 0600 "$p" 2>/dev/null
+    chmod "$DB_FILE_MODE" "$p" 2>/dev/null
   done
   return 0
 }
@@ -997,6 +1029,172 @@ assert_db_ownership() {
   fi
   echo "data dir + vpn.db + sidecars owned by ${DB_OWNER_USER}:${DB_OWNER_USER}"
   return 0
+}
+
+# --------------------------------------------------------------------------- #
+# Unpacking a backup into / — and the canary that watches it
+# --------------------------------------------------------------------------- #
+# CONFIRMED ROOT CAUSE OF THE 2026-07-29 OUTAGE. The backup archive a previous
+# deploy had written carried its own staging root as a member:
+#
+#   drwx------ root/root       0  ./                            <- mktemp -d mode
+#   drwxr-xr-x root/root       0  ./opt/vpn-service/data/
+#   -rw-r--r-- root/root  602112  ./opt/vpn-service/data/vpn.db
+#
+# `tar -p -xzf … -C /` runs as root and applies the "./" member's metadata to the
+# extraction target — i.e. to / ITSELF. The rollback therefore did `chmod 700 /`,
+# and every non-root unit died with status=200/CHDIR. The same extraction put
+# vpn.db back as root:root 0644: world-readable secrets, and root-owned -wal/-shm
+# on the next open, which is what breaks the vpn-bot readers.
+#
+# Three independent defences, in the order they act:
+#   1. the archive is built correctly at the SOURCE (see the staging section: an
+#      explicit 0755 staging root, the data dir at ${DB_DIR_MODE}, the sqlite
+#      snapshot pre-chowned to the reader user at ${DB_FILE_MODE});
+#   2. --no-overwrite-dir on every extraction into / (below), so the metadata of
+#      directories that ALREADY exist — /, /opt, /usr, /etc — is never touched,
+#      whatever the archive claims;
+#   3. assert_restore_permissions(), which refuses to let a restore finish quietly
+#      if 1 and 2 both failed — e.g. an archive built before this fix, unpacked by
+#      a future deploy.sh that lost the flag.
+#
+# EVERY extraction of a backup into / goes through this one function so the flag
+# cannot be forgotten in a second call site; a static test asserts that any
+# tar-extract-into-/ in the tree carries --no-overwrite-dir.
+#
+# --no-overwrite-dir = "preserve metadata of existing directories". It is
+# LOAD-BEARING, NOT COSMETIC: without it a single 0700 directory member in a
+# stale archive takes the whole host down. Do not remove it.
+restore_archive_into_root() {
+  local archive="$1"
+  tar -p --no-overwrite-dir --xattrs --acls -xzf "$archive" -C /
+}
+
+# Directories a non-root unit must be able to TRAVERSE to reach the DB: "/" and
+# every ancestor of the data dir. The data dir itself is deliberately owner-only
+# (${DB_DIR_MODE}) and is checked as an owner+mode target instead, not here.
+restore_traverse_dirs() {
+  local d
+  d="$(dirname "$DB_PATH")"
+  while [[ -n "$d" && "$d" != "/" && "$d" != "." ]]; do
+    d="$(dirname "$d")"
+    printf '%s\n' "$d"
+  done
+}
+
+# The canary (defence 3 above). Verifies what a restore must never have changed:
+#   - others keep their traverse bit on / and on every ancestor of the data dir
+#     (losing it on / is the 200/CHDIR outage);
+#   - the data dir is ${DB_DIR_MODE} and vpn.db / -wal / -shm are ${DB_FILE_MODE},
+#     all owned by $(db_target_owner).
+# Prints one line per mismatch and returns 1. It REPORTS, it never repairs /: a
+# deploy script that chmods / by itself is the very class of bug that caused the
+# outage, so the operator gets the exact command instead.
+assert_restore_permissions() {
+  local d p entry want_mode mode owner expect_owner data_dir bad=()
+  db_path_is_sane || { echo "DB_PATH='${DB_PATH:-}' is not a sane absolute DB path"; return 1; }
+  while IFS= read -r d; do
+    [[ -d "$d" ]] || continue
+    mode="$(stat -c '%a' "$d" 2>/dev/null || true)"
+    if [[ -z "$mode" ]]; then
+      bad+=("${d}: mode unreadable — cannot verify the traverse bit")
+    elif (( (0${mode} & 0001) == 0 )); then
+      bad+=("${d} is mode 0${mode} — others cannot traverse it, so every non-root unit fails with status=200/CHDIR (this is the 2026-07-29 outage); fix by hand: chmod o+rx ${d}")
+    fi
+  done < <(restore_traverse_dirs)
+
+  data_dir="$(dirname "$DB_PATH")"
+  expect_owner="$(db_target_owner)"
+  # "<path>|<expected mode>"; an absent entry is skipped (cleanly-closed DB has no
+  # -wal/-shm, a first-run host has no vpn.db).
+  for entry in "${data_dir}|${DB_DIR_MODE}" "${DB_PATH}|${DB_FILE_MODE}" \
+               "${DB_PATH}-wal|${DB_FILE_MODE}" "${DB_PATH}-shm|${DB_FILE_MODE}"; do
+    p="${entry%%|*}"; want_mode="${entry##*|}"
+    [[ -e "$p" ]] || continue
+    mode="$(stat -c '%a' "$p" 2>/dev/null || true)"
+    owner="$(stat -c '%U:%G' "$p" 2>/dev/null || true)"
+    if [[ -z "$mode" ]]; then
+      bad+=("${p}: mode unreadable, expected ${want_mode}")
+    elif [[ "0${mode}" != "$want_mode" ]]; then
+      bad+=("${p} is mode 0${mode}, expected ${want_mode}")
+    fi
+    [[ "$owner" == "$expect_owner" ]] \
+      || bad+=("${p} is owned by ${owner:-<unreadable>}, expected ${expect_owner}")
+  done
+
+  if [[ ${#bad[@]} -gt 0 ]]; then
+    printf '%s\n' "${bad[@]}"
+    return 1
+  fi
+  echo "/ traversable, ${data_dir} ${DB_DIR_MODE}, vpn.db* ${DB_FILE_MODE}, all ${expect_owner}"
+  return 0
+}
+
+# --------------------------------------------------------------------------- #
+# Backup staging — the archive has to be RIGHT AT THE SOURCE
+# --------------------------------------------------------------------------- #
+# Everything a rollback restores is staged under $STAGE and archived with
+# `tar -C "$STAGE" .`, which records the staging root itself as the archive's "./"
+# member. `mktemp -d` creates that root 0700 — and a 0700 "./" member is exactly
+# what chmod'd / to 0700 during the 2026-07-29 rollback (see the section above).
+# Patching the consequence on the extraction side is not enough: an archive is a
+# durable artefact that outlives this script and may be unpacked by hand, so the
+# archive itself must be harmless. Hence: an explicit 0755 staging root, the data
+# dir at the same tight mode it has on the host, and the sqlite snapshot handed to
+# the reader user at ${DB_FILE_MODE} BEFORE it is archived.
+declare -a manifest=()
+
+# The staging root, created explicitly at 0755 instead of inheriting 0700.
+make_stage_dir() {
+  local d
+  d="$(mktemp -d)" || return 1
+  # mktemp -d is 0700 by design — correct for a private temp dir, wrong for a
+  # directory that also becomes the archive's "./" member, whose mode a root
+  # `tar -x -C /` applies to /. Set it explicitly; never inherit it.
+  install -d -m0755 "$d" || return 1
+  printf '%s' "$d"
+}
+
+stage_path() {
+  local p="$1"
+  if [[ -e "$p" ]]; then
+    install -d -m0755 "${STAGE}$(dirname "$p")"
+    cp -a "$p" "${STAGE}${p}"
+    manifest+=("${p#/}")
+    log "  backed up ${p}"
+  else
+    log "  (absent, skipped) ${p}"
+  fi
+}
+
+# sqlite3 runs as root here, so `.backup` lands as root:root 0644 — precisely the
+# owner/mode combination the 2026-07-29 restore wrote back onto the live DB. Fix it
+# in the STAGING copy so the archive carries the reader user and owner-only mode,
+# and a restore (by this script or by hand) reproduces them.
+stage_db_snapshot() {
+  local dest="${STAGE}${DB_PATH}" staged_dir owner
+  staged_dir="${STAGE}$(dirname "$DB_PATH")"
+  install -d -m0755 "$staged_dir"
+  # Explicit second step: `install -d -m` applies the mode to the leaf only, and
+  # the intermediate /opt, /opt/vpn-service members must stay 0755 — an archive
+  # carrying 0700 for those would be the same outage one level down.
+  chmod "$DB_DIR_MODE" "$staged_dir"
+  sqlite3 "$DB_PATH" ".backup '${dest}'"
+  owner="$(db_target_owner)"
+  # Strict on purpose (no `|| true`): an archive whose DB copy could not be secured
+  # is not a backup worth handing to a future rollback. Failing here is safe — the
+  # trap is still `interim`, so the bot is restarted and nothing else was touched.
+  chown "$owner" "$dest"
+  chmod "$DB_FILE_MODE" "$dest"
+  manifest+=("${DB_PATH#/}")
+  log "  backed up ${DB_PATH} (sqlite .backup snapshot, staged ${owner} ${DB_FILE_MODE})"
+}
+
+# The "." operand is the staging root; tar records it as the "./" member with that
+# directory's mode, which is why make_stage_dir sets it explicitly.
+create_backup_archive() {
+  local archive="$1"
+  tar --xattrs --acls -czf "$archive" -C "$STAGE" .
 }
 
 # --------------------------------------------------------------------------- #
@@ -1678,23 +1876,12 @@ arm_interim                 # a failure now (or SIGINT/TERM/HUP) just restarts t
 log "stopping vpn-bot for a consistent backup"
 systemctl stop "$BOT_UNIT"
 
-STAGE="$(mktemp -d)"
+# make_stage_dir / stage_path / stage_db_snapshot / create_backup_archive live
+# above the DEPLOY_SELFTEST seam so the archive-shape tests can drive them; they
+# are what keeps a 0700 "./" member and a root:root 0644 vpn.db out of the archive.
+STAGE="$(make_stage_dir)"
 manifest=()
-stage_path() {
-  local p="$1"
-  if [[ -e "$p" ]]; then
-    install -d "${STAGE}$(dirname "$p")"
-    cp -a "$p" "${STAGE}${p}"
-    manifest+=("${p#/}")
-    log "  backed up ${p}"
-  else
-    log "  (absent, skipped) ${p}"
-  fi
-}
-install -d "${STAGE}$(dirname "$DB_PATH")"
-sqlite3 "$DB_PATH" ".backup '${STAGE}${DB_PATH}'"
-manifest+=("${DB_PATH#/}")
-log "  backed up ${DB_PATH} (sqlite .backup snapshot)"
+stage_db_snapshot
 stage_path "$SYSTEM_UNIT"
 stage_path "$ENV_FILE"
 stage_path "$XRAY_CONF"
@@ -1702,7 +1889,7 @@ stage_path "$AWG_CONF"
 stage_path "$MTPROXY_DIR"
 
 ARCHIVE="${BACKUP_DIR}/backup-${TAG}-$(date +%Y%m%dT%H%M%S).tar.gz"
-tar --xattrs --acls -czf "$ARCHIVE" -C "$STAGE" .
+create_backup_archive "$ARCHIVE"
 log "backup archive ${ARCHIVE}"
 
 # Verify the archive lists every file that actually existed at backup time.

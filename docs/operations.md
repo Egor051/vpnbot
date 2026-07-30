@@ -357,7 +357,7 @@ UUIDs, AWG private/preshared keys, and server endpoints.
 
 ```bash
 sudo systemctl stop vpn-bot
-sudo tar -xzf /root/vpn-service-backups/<backup>.tar.gz -C /
+sudo tar --no-overwrite-dir -xzf /root/vpn-service-backups/<backup>.tar.gz -C /
 sudo xray run -test -config /usr/local/etc/xray/config.json
 sudo awg-quick strip /etc/amnezia/amneziawg/awg0.conf >/dev/null
 cd /opt/vpn-service
@@ -373,6 +373,44 @@ If `awg-quick` is unavailable but `wg-quick` is the intended tool on the server,
 equivalent `wg-quick strip` check. Do not run `awg set`, `wg set`, `systemctl restart xray`,
 or runtime-changing commands during restore validation until the config files have passed
 read-only checks.
+
+### Why every restore carries `--no-overwrite-dir`
+
+`--no-overwrite-dir` above is **load-bearing, not cosmetic**. It tells `tar` to preserve the
+metadata of directories that already exist; without it, a root `tar -p -xzf … -C /` applies
+the archive's own `./` member to `/` **itself**.
+
+That is the confirmed root cause of the 2026-07-29 outage. The archive a previous deploy had
+written was staged in a `mktemp -d` directory (mode `0700` by design), so it carried:
+
+```
+drwx------ root/root       0  ./                            <- staging root mode, 0700
+drwxr-xr-x root/root       0  ./opt/vpn-service/data/
+-rw-r--r-- root/root  602112  ./opt/vpn-service/data/vpn.db
+```
+
+Unpacking that into `/` did `chmod 700 /`, and every non-root unit immediately failed with
+`status=200/CHDIR`. The same extraction restored `vpn.db` as `root:root 0644` —
+world-readable secrets *and* root-owned WAL sidecars on the next open (see the next section).
+
+`scripts/deploy.sh` now defends this in three independent places:
+
+1. archives it builds are harmless at the source — an explicit `0755` staging root, the data
+   dir at `0700`, and the `vpn.db` snapshot chowned to `vpn-bot` at `0600` before archiving;
+2. the rollback's extraction goes through a single function that carries
+   `--no-overwrite-dir`;
+3. after any restore a canary re-checks that others can still traverse `/` and every parent
+   of the data dir, and that the data dir and `vpn.db*` still have the expected mode/owner.
+   A mismatch is reported loudly, naming the path, what it is and what it should be.
+
+**Archives written before that fix still contain the `0700` `./` member — never unpack one
+without the flag.** If a restore has already stripped the traverse bit from `/`, every
+non-root unit is down and the repair is:
+
+```bash
+sudo chmod 0755 /
+sudo systemctl start vpn-bot vpnbot-hy2-auth vpn-bot-subscription
+```
 
 The `chown -R vpn-bot:vpn-bot /opt/vpn-service/data` line above is **not** cosmetic — see
 the next section.
@@ -643,14 +681,14 @@ back an unwanted deploy.
 ```bash
 # Restore SQLite DB if the failed deploy changed DB schema or data
 sudo cp /root/vpn-service-backups/<backup>.tar.gz /tmp/
-sudo tar -xzf /tmp/<backup>.tar.gz -C / opt/vpn-service/data/vpn.db
+sudo tar --no-overwrite-dir -xzf /tmp/<backup>.tar.gz -C / opt/vpn-service/data/vpn.db
 
 # Restore Xray config if changed
-sudo tar -xzf /tmp/<backup>.tar.gz -C / usr/local/etc/xray/config.json
+sudo tar --no-overwrite-dir -xzf /tmp/<backup>.tar.gz -C / usr/local/etc/xray/config.json
 sudo xray run -test -config /usr/local/etc/xray/config.json
 
 # Restore AWG config if changed
-sudo tar -xzf /tmp/<backup>.tar.gz -C / etc/amnezia/amneziawg/awg0.conf
+sudo tar --no-overwrite-dir -xzf /tmp/<backup>.tar.gz -C / etc/amnezia/amneziawg/awg0.conf
 ```
 
 **Step 4 — restart and verify:**

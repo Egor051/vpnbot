@@ -284,7 +284,7 @@ keys и серверные endpoints.
 
 ```bash
 sudo systemctl stop vpn-bot
-sudo tar -xzf /root/vpn-service-backups/<backup>.tar.gz -C /
+sudo tar --no-overwrite-dir -xzf /root/vpn-service-backups/<backup>.tar.gz -C /
 sudo xray run -test -config /usr/local/etc/xray/config.json
 sudo awg-quick strip /etc/amnezia/amneziawg/awg0.conf >/dev/null
 cd /opt/vpn-service
@@ -299,6 +299,43 @@ sudo journalctl -u vpn-bot -n 100 --no-pager
 Если `awg-quick` недоступен, но на сервере используется `wg-quick`, запустите эквивалентную
 проверку `wg-quick strip`. Не запускайте `awg set`, `wg set`, `systemctl restart xray` и другие
 команды, изменяющие runtime, пока конфиги не прошли read-only проверки.
+
+### Зачем в каждом restore стоит `--no-overwrite-dir`
+
+`--no-overwrite-dir` выше — **несущий флаг, а не косметика**. Он говорит `tar` сохранять
+метаданные уже существующих каталогов; без него root-овый `tar -p -xzf … -C /` применяет
+режим члена архива `./` к **самому** `/`.
+
+Это подтверждённая первопричина аварии 2026-07-29. Архив, записанный предыдущим деплоем,
+собирался в каталоге от `mktemp -d` (режим `0700` by design), поэтому содержал:
+
+```
+drwx------ root/root       0  ./                            <- режим staging-каталога, 0700
+drwxr-xr-x root/root       0  ./opt/vpn-service/data/
+-rw-r--r-- root/root  602112  ./opt/vpn-service/data/vpn.db
+```
+
+Распаковка такого архива в `/` выполнила `chmod 700 /`, и все не-root юниты немедленно упали с
+`status=200/CHDIR`. Та же распаковка восстановила `vpn.db` как `root:root 0644` —
+world-readable секреты плюс root-овые WAL-сайдкары при следующем открытии (см. следующий раздел).
+
+`scripts/deploy.sh` защищает это в трёх независимых местах:
+
+1. архив корректен в источнике — staging-каталог создаётся явно с `0755`, каталог data —
+   `0700`, снапшот `vpn.db` до архивации получает владельца `vpn-bot` и режим `0600`;
+2. распаковка в rollback идёт через одну функцию, несущую `--no-overwrite-dir`;
+3. после любого restore канарейка перепроверяет, что others по-прежнему может проходить `/` и
+   все родительские каталоги data, а у data и `vpn.db*` ожидаемые режим и владелец.
+   Несовпадение — громкая ошибка с точным путём, фактическим и ожидаемым значением.
+
+**Архивы, записанные до этого исправления, всё ещё содержат член `./` с режимом `0700` —
+никогда не распаковывайте их без флага.** Если restore уже снял traverse-бит с `/`, все
+не-root юниты лежат, и ремонт такой:
+
+```bash
+sudo chmod 0755 /
+sudo systemctl start vpn-bot vpnbot-hy2-auth vpn-bot-subscription
+```
 
 ## Офсайтовый бэкап: покрытие и бандл восстановления
 
@@ -511,14 +548,14 @@ git reset --hard <previous_commit>
 ```bash
 # Восстановить SQLite DB
 sudo cp /root/vpn-service-backups/<backup>.tar.gz /tmp/
-sudo tar -xzf /tmp/<backup>.tar.gz -C / opt/vpn-service/data/vpn.db
+sudo tar --no-overwrite-dir -xzf /tmp/<backup>.tar.gz -C / opt/vpn-service/data/vpn.db
 
 # Восстановить конфиг Xray и проверить
-sudo tar -xzf /tmp/<backup>.tar.gz -C / usr/local/etc/xray/config.json
+sudo tar --no-overwrite-dir -xzf /tmp/<backup>.tar.gz -C / usr/local/etc/xray/config.json
 sudo xray run -test -config /usr/local/etc/xray/config.json
 
 # Восстановить конфиг AWG
-sudo tar -xzf /tmp/<backup>.tar.gz -C / etc/amnezia/amneziawg/awg0.conf
+sudo tar --no-overwrite-dir -xzf /tmp/<backup>.tar.gz -C / etc/amnezia/amneziawg/awg0.conf
 ```
 
 **Шаг 4 — запустите и проверьте:**

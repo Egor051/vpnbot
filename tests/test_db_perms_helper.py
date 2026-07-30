@@ -174,9 +174,13 @@ def test_deploy_sh_asserts_db_ownership_post_deploy_through_rollback() -> None:
 
 def test_deploy_sh_asserts_db_ownership_after_the_restore_in_rollback() -> None:
     """The rollback/restore branch is THE hole: `tar -xzf -C /` as root restores a
-    root-owned vpn.db. The assertion must run after the extraction."""
+    root-owned vpn.db. The assertion must run after the extraction.
+
+    The extraction itself lives behind restore_archive_into_root (the single
+    --no-overwrite-dir choke point — see tests/test_deploy_restore_permissions.py),
+    so the ordering is pinned on that call site."""
     text = _read(DEPLOY_SH)
-    extract = text.index('tar -p --xattrs --acls -xzf "$ARCHIVE" -C /')
+    extract = text.index('restore_archive_into_root "$ARCHIVE"')
     assert_call = text.index('db_own_msg="$(assert_db_ownership)"')
     assert extract < assert_call, "the ownership assertion must run AFTER the backup is unpacked"
     # The failing branch is loud and tells the operator how to fix it by hand.
@@ -192,9 +196,14 @@ def test_deploy_sh_fix_db_perms_targets_the_reader_user_and_the_sidecars() -> No
     text = _read(DEPLOY_SH)
     idx = text.index("fix_db_perms() {")
     window = text[idx : idx + 1400]
-    assert 'id -u "$DB_OWNER_USER"' in window
+    # The reader-user rule lives in db_target_owner() — one definition, shared with
+    # the backup staging and the restore canary.
+    assert "db_target_owner" in window
+    owner_fn = text[text.index("db_target_owner() {") :][:600]
+    assert 'id -u "$DB_OWNER_USER"' in owner_fn
     assert '${DB_PATH}-wal' in window and '${DB_PATH}-shm' in window
-    assert "chmod 0700" in window and "chmod 0600" in window
+    assert 'chmod "$DB_DIR_MODE"' in window and 'chmod "$DB_FILE_MODE"' in window
+    assert 'DB_DIR_MODE="0700"' in text and 'DB_FILE_MODE="0600"' in text
     # Same empty/"/" guard as the helper — deploy.sh must not chown "/" either.
     assert "db_path_is_sane" in window
     assert "db_path_is_sane()" in text

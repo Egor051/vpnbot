@@ -270,6 +270,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Root cause of the 2026-07-29 outage: a rollback that `chmod 700 /`.** Confirmed
+  from the archive the previous deploy had written
+  (`/var/backups/vpn-bot/backup-3a79aa6-20260729T131831.tar.gz`):
+
+  ```
+  drwx------ root/root       0  ./                            <- staging root mode, 0700
+  drwxr-xr-x root/root       0  ./opt/vpn-service/data/
+  -rw-r--r-- root/root  602112  ./opt/vpn-service/data/vpn.db
+  ```
+
+  The staging directory came from `mktemp -d`, which is `0700` by design, and
+  `tar -czf … -C "$STAGE" .` records that mode on the archive's own `./` member. A root
+  `tar -p -xzf … -C /` applies a `./` member's metadata to the extraction target —
+  **`/` itself** — so unpacking the backup did `chmod 700 /` and every non-root unit
+  died with `status=200/CHDIR`. The same extraction restored `vpn.db` as
+  `root:root 0644`: world-readable secrets, plus `root`-owned WAL sidecars on the next
+  open (see the entry below). Fixed in three independent places, so no single edit can
+  bring it back:
+  - **the archive is harmless at the source** — the staging root is created explicitly
+    `0755` instead of inheriting `mktemp`'s `0700`, the staged data dir carries `0700`
+    while every directory above it stays traversable, and the `sqlite3 .backup`
+    snapshot is chowned to the reader user and tightened to `0600` *before* it is
+    archived (it lands `root:root 0644`, the exact combination the restore put back);
+  - **`--no-overwrite-dir` on every extraction into `/`** — it preserves the metadata of
+    directories that already exist, so `/`, `/opt`, `/usr` and `/etc` are never touched
+    whatever the archive claims. `deploy.sh` now has a single extraction function that
+    carries the flag, the `docs/operations*.md` restore runbooks carry it too, and a
+    test scans both so it cannot be dropped again. **Archives written before this fix
+    still contain the `0700 ./` member — never unpack one without the flag;**
+  - **a post-restore canary** (`assert_restore_permissions`) — after any restore it
+    re-checks that others can still traverse `/` and every parent of the data dir, and
+    that the data dir and `vpn.db*` still have the expected mode and owner. A mismatch
+    is reported loudly, naming the path, the actual value, the expected one and the
+    manual repair. It reports and never `chmod`s `/` itself: a script that repairs `/`
+    by `chmod` is the bug class that caused the outage.
+
 - **The last way to break the shared WAL database: a root-owned `vpn.db`.**
   `vpn-bot.service` runs as `root` while `vpnbot-hy2-auth.service` and
   `vpn-bot-subscription.service` run as `vpn-bot`, and all three open the same
