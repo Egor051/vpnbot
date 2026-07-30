@@ -357,7 +357,7 @@ UUIDs, AWG private/preshared keys, and server endpoints.
 
 ```bash
 sudo systemctl stop vpn-bot
-sudo tar -xzf /root/vpn-service-backups/<backup>.tar.gz -C /
+sudo tar --no-overwrite-dir -xzf /root/vpn-service-backups/<backup>.tar.gz -C /
 sudo xray run -test -config /usr/local/etc/xray/config.json
 sudo awg-quick strip /etc/amnezia/amneziawg/awg0.conf >/dev/null
 cd /opt/vpn-service
@@ -373,6 +373,91 @@ If `awg-quick` is unavailable but `wg-quick` is the intended tool on the server,
 equivalent `wg-quick strip` check. Do not run `awg set`, `wg set`, `systemctl restart xray`,
 or runtime-changing commands during restore validation until the config files have passed
 read-only checks.
+
+### Why every restore carries `--no-overwrite-dir`
+
+`--no-overwrite-dir` above is **load-bearing, not cosmetic**. It tells `tar` to preserve the
+metadata of directories that already exist; without it, a root `tar -p -xzf … -C /` applies
+the archive's own `./` member to `/` **itself**.
+
+That is the confirmed root cause of the 2026-07-29 outage. The archive a previous deploy had
+written was staged in a `mktemp -d` directory (mode `0700` by design), so it carried:
+
+```
+drwx------ root/root       0  ./                            <- staging root mode, 0700
+drwxr-xr-x root/root       0  ./opt/vpn-service/data/
+-rw-r--r-- root/root  602112  ./opt/vpn-service/data/vpn.db
+```
+
+Unpacking that into `/` did `chmod 700 /`, and every non-root unit immediately failed with
+`status=200/CHDIR`. The same extraction restored `vpn.db` as `root:root 0644` —
+world-readable secrets *and* root-owned WAL sidecars on the next open (see the next section).
+
+`scripts/deploy.sh` now defends this in three independent places:
+
+1. archives it builds are harmless at the source — an explicit `0755` staging root, the data
+   dir at `0700`, and the `vpn.db` snapshot chowned to `vpn-bot` at `0600` before archiving;
+2. the rollback's extraction goes through a single function that carries
+   `--no-overwrite-dir`;
+3. after any restore a canary re-checks that others can still traverse `/` and every parent
+   of the data dir, and that the data dir and `vpn.db*` still have the expected mode/owner.
+   A mismatch is reported loudly, naming the path, what it is and what it should be.
+
+**Archives written before that fix still contain the `0700` `./` member — never unpack one
+without the flag.** If a restore has already stripped the traverse bit from `/`, every
+non-root unit is down and the repair is:
+
+```bash
+sudo chmod 0755 /
+sudo systemctl start vpn-bot vpnbot-hy2-auth vpn-bot-subscription
+```
+
+The `chown -R vpn-bot:vpn-bot /opt/vpn-service/data` line above is **not** cosmetic — see
+the next section.
+
+## Shared-WAL DB ownership (`vpn-bot-db-perms`)
+
+`vpn-bot.service` runs as **root**, while `vpnbot-hy2-auth.service` and
+`vpn-bot-subscription.service` run as **vpn-bot**. All three open the same
+`/opt/vpn-service/data/vpn.db` in `journal_mode=WAL`, and a WAL *reader* must be able to
+write the `-wal`/`-shm` sidecars even when it only reads rows.
+
+SQLite's `robustFchown()` gives those sidecars the owner of the **main DB file**, so one
+rule is enough: `vpn.db` must be owned by `vpn-bot`. No group-read, setgid or `UMask`
+scheme is needed (or wanted — `0600` owned by `vpn-bot` is the tightest thing that works).
+
+The failure mode is `vpn.db` itself becoming root-owned — a root `tar -xzf ... -C /`
+restore, a manual `cp`, or a DB created from scratch under root. The sidecars then come out
+`root:root` and both readers die with:
+
+```
+sqlite3.OperationalError: unable to open database file
+```
+
+Guards in place:
+
+- `/usr/local/sbin/vpn-bot-db-perms` runs as `ExecStartPre=` of `vpn-bot.service`, so every
+  bot start re-asserts `vpn-bot:vpn-bot` on the data dir (`0700`), `vpn.db`, `vpn.db-wal`
+  and `vpn.db-shm` (`0600`) before the bot reopens the DB. It is idempotent and silent when
+  nothing needed fixing, is a no-op when not run as root, never creates the DB, and refuses
+  to touch anything if the resolved path is empty, `/`, or outside the project data dir.
+  Tracked source: `scripts/vpn-bot-db-perms`; `scripts/deploy.sh` installs it (it is a
+  `required` out-of-repo helper, so a host that lacks it gets it).
+- `scripts/deploy.sh` asserts the resulting ownership after every deploy **and** after the
+  rollback branch unpacks a backup; a mismatch is a hard failure through the normal
+  rollback path, naming the file, its actual owner and the expected one.
+
+After any manual restore or `cp` of the DB, run it by hand and restart the readers:
+
+```bash
+sudo /usr/local/sbin/vpn-bot-db-perms
+sudo systemctl restart vpn-bot vpnbot-hy2-auth vpn-bot-subscription
+sudo ls -l /opt/vpn-service/data/    # expect vpn-bot:vpn-bot on vpn.db and the sidecars
+```
+
+A host that deliberately keeps `vpn.db` outside `/opt/vpn-service/data` must declare that
+directory as `DB_PERMS_DATA_ROOT=<dir>` in `/opt/vpn-service/.env` (the same file the unit
+loads via `EnvironmentFile=`); otherwise the helper's path guard refuses to run.
 
 ## Off-site backup coverage and recovery bundle
 
@@ -596,14 +681,14 @@ back an unwanted deploy.
 ```bash
 # Restore SQLite DB if the failed deploy changed DB schema or data
 sudo cp /root/vpn-service-backups/<backup>.tar.gz /tmp/
-sudo tar -xzf /tmp/<backup>.tar.gz -C / opt/vpn-service/data/vpn.db
+sudo tar --no-overwrite-dir -xzf /tmp/<backup>.tar.gz -C / opt/vpn-service/data/vpn.db
 
 # Restore Xray config if changed
-sudo tar -xzf /tmp/<backup>.tar.gz -C / usr/local/etc/xray/config.json
+sudo tar --no-overwrite-dir -xzf /tmp/<backup>.tar.gz -C / usr/local/etc/xray/config.json
 sudo xray run -test -config /usr/local/etc/xray/config.json
 
 # Restore AWG config if changed
-sudo tar -xzf /tmp/<backup>.tar.gz -C / etc/amnezia/amneziawg/awg0.conf
+sudo tar --no-overwrite-dir -xzf /tmp/<backup>.tar.gz -C / etc/amnezia/amneziawg/awg0.conf
 ```
 
 **Step 4 — restart and verify:**

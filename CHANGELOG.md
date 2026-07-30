@@ -270,6 +270,69 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Root cause of the 2026-07-29 outage: a rollback that `chmod 700 /`.** Confirmed
+  from the archive the previous deploy had written
+  (`/var/backups/vpn-bot/backup-3a79aa6-20260729T131831.tar.gz`):
+
+  ```
+  drwx------ root/root       0  ./                            <- staging root mode, 0700
+  drwxr-xr-x root/root       0  ./opt/vpn-service/data/
+  -rw-r--r-- root/root  602112  ./opt/vpn-service/data/vpn.db
+  ```
+
+  The staging directory came from `mktemp -d`, which is `0700` by design, and
+  `tar -czf … -C "$STAGE" .` records that mode on the archive's own `./` member. A root
+  `tar -p -xzf … -C /` applies a `./` member's metadata to the extraction target —
+  **`/` itself** — so unpacking the backup did `chmod 700 /` and every non-root unit
+  died with `status=200/CHDIR`. The same extraction restored `vpn.db` as
+  `root:root 0644`: world-readable secrets, plus `root`-owned WAL sidecars on the next
+  open (see the entry below). Fixed in three independent places, so no single edit can
+  bring it back:
+  - **the archive is harmless at the source** — the staging root is created explicitly
+    `0755` instead of inheriting `mktemp`'s `0700`, the staged data dir carries `0700`
+    while every directory above it stays traversable, and the `sqlite3 .backup`
+    snapshot is chowned to the reader user and tightened to `0600` *before* it is
+    archived (it lands `root:root 0644`, the exact combination the restore put back);
+  - **`--no-overwrite-dir` on every extraction into `/`** — it preserves the metadata of
+    directories that already exist, so `/`, `/opt`, `/usr` and `/etc` are never touched
+    whatever the archive claims. `deploy.sh` now has a single extraction function that
+    carries the flag, the `docs/operations*.md` restore runbooks carry it too, and a
+    test scans both so it cannot be dropped again. **Archives written before this fix
+    still contain the `0700 ./` member — never unpack one without the flag;**
+  - **a post-restore canary** (`assert_restore_permissions`) — after any restore it
+    re-checks that others can still traverse `/` and every parent of the data dir, and
+    that the data dir and `vpn.db*` still have the expected mode and owner. A mismatch
+    is reported loudly, naming the path, the actual value, the expected one and the
+    manual repair. It reports and never `chmod`s `/` itself: a script that repairs `/`
+    by `chmod` is the bug class that caused the outage.
+
+- **The last way to break the shared WAL database: a root-owned `vpn.db`.**
+  `vpn-bot.service` runs as `root` while `vpnbot-hy2-auth.service` and
+  `vpn-bot-subscription.service` run as `vpn-bot`, and all three open the same
+  `/opt/vpn-service/data/vpn.db` in `journal_mode=WAL`. SQLite's `robustFchown()`
+  gives the `-wal`/`-shm` sidecars the owner of the **main DB file**, so a
+  `vpn-bot`-owned `vpn.db` is all the two readers need — no group-read, setgid or
+  `UMask` scheme (`0600` owned by `vpn-bot` stays the tightest mode that works, and
+  the privilege model is untouched). What was left unguarded was `vpn.db` **itself**
+  turning `root`-owned — the root `tar -xzf … -C /` in `deploy.sh`'s never-yet-exercised
+  rollback branch, a manual `cp`, or a DB created from scratch under root — after which
+  the sidecars come out `root:root` and both readers die with
+  `sqlite3.OperationalError: unable to open database file`. Now: a tracked helper
+  (`scripts/vpn-bot-db-perms` → `/usr/local/sbin`) re-asserts `vpn-bot:vpn-bot` on the
+  data dir (`0700`), `vpn.db`, `vpn.db-wal` and `vpn.db-shm` (`0600`) as
+  `ExecStartPre=` of `vpn-bot.service`, i.e. at the exact moment the sidecars are
+  recreated. It is idempotent (silent unless it actually changed something), a no-op
+  when not run as root (in the non-root model the bot owns the files anyway), never
+  creates the DB (a missing `vpn.db` is a valid first-run state), and — the lesson from
+  the 2026-07-29 `chmod`-on-`/` incident — **refuses to run at all** if the resolved
+  path is empty, `/`, relative, or outside the project data dir. `deploy.sh` registers
+  it as a `required` out-of-repo helper (an absent copy is installed, unlike the
+  WARP helpers, so the new `ExecStartPre` cannot fail `203/EXEC` on a clean host) and
+  installs it before the unit install/start. Two new assertions make a wrong owner
+  fatal instead of latent: one after every deploy, and one in the rollback branch right
+  after the backup is unpacked — each naming the offending file, its actual owner and
+  the expected one, and routing through the existing rollback path.
+
 - **`warp-routes.service` self-check false-negative on conntrack-mark split
   routing.** The client subnet is steered into the WARP tunnel table by an fwmark
   that nftables sets **from conntrack** (`ct mark set meta mark`). The self-check
