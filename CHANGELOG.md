@@ -204,6 +204,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Per-test wall-clock ceilings (`pytest-timeout`), so a hung test fails instead of
+  stalling the deploy.** Insurance, not a fix — a test that trips a ceiling is
+  reporting a hang, and the hang is still the bug to go and fix. It exists because
+  `deploy.sh` runs this suite as a Phase 1 gate on the production host, where one
+  wedged test does not fail the gate, it holds it open indefinitely and blocks the
+  deploy it was supposed to protect. A bounded `FAILED` with a traceback is
+  diagnosable; an open-ended hang is not. The default is 120s (~4x the slowest
+  legitimate test) with `timeout_method = "signal"`, so only the offending test dies
+  and the run continues; the suites that shell out to `deploy.sh` set a much tighter
+  60s of their own, since a healthy run there is milliseconds. `pytest-timeout`
+  neither reorders nor parallelises collection, so Phase 1 still reproduces CI 1:1.
+
 - **VLESS transport buttons now spell out which transport is which.** On the
   "Choose VLESS transport" step, the two buttons carry an extra parenthetical —
   `VLESS (TCP) (базовый)` / `VLESS (TCP) (basic)` and
@@ -269,6 +281,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `WARP_MONITOR_FAIL_THRESHOLD` / `WARP_MONITOR_SUCCESS_THRESHOLD` env vars are removed.
 
 ### Fixed
+
+- **The deploy gate's own test suite hung on the production host, blocking Phase 1
+  entirely.** `deploy.sh`'s crash-abort path read the bot unit's journal with no
+  `-n` and no `--since`, then trimmed the result to 40 lines in the shell. That is
+  O(journal): on the live host — 1 CPU, 961 MB RAM, a journal kept since 29 July and
+  padded by a WARP-observer line every ~3s — `journalctl -u vpn-bot.service
+  --no-pager -o cat` sat at 96–99% CPU and never finished. Because Phase 1 runs
+  pytest as a gate, `tests/test_deploy_schema_gate.py::
+  test_verify_aborts_early_when_bot_crash_loops` wedged there and no deploy could
+  start. The path that hung is the one that runs *while the bot is already
+  crash-looping*, so being slow there was never affordable.
+  - **Fix — the cap is asked of `journalctl`.** `bot_journal_tail` now passes
+    `-n "$lines"` (still `--since "$DEPLOY_START"` when a deploy window is known);
+    `-n` makes journald seek to the tail and walk back N entries, which costs the
+    same on a fresh host and on one with months of logs. Nothing is trimmed after
+    the fact — no `$(...)`-then-`tail`, which reads exactly as much as before. As a
+    bonus `-n` counts *entries*, so a multi-line traceback logged as one entry
+    arrives whole instead of beheaded by a line-count trim. A non-numeric
+    `CRASH_JOURNAL_LINES` falls back to 40 rather than making `journalctl` reject
+    `-n` and (stderr silenced) print nothing at the one moment the dump matters.
+    The only other `journalctl` in the script — the post-deploy log scan — was
+    already bounded by `--since "$DEPLOY_START"` and is unchanged.
+  - **Root cause of the green CI / red host split: the test was not hermetic.** The
+    schema-gate harness stubbed `systemctl`, `sqlite3` and `sleep`, but installed a
+    `journalctl` stub only when a test opted in — so the two crash-abort tests ran
+    the host's real `journalctl` against the host's real `vpn-bot.service`. In a CI
+    container that is an empty journal and a millisecond; on the deploy target it is
+    the hang above. `journalctl` is now always stubbed, the stub records its argv and
+    honours `-n` the way the real tool does (so "the dump is capped" cannot pass
+    against a read-everything implementation), and the harness asserts on **every**
+    recorded call that a cap was present.
+  - **Guards.** A static check fails the build on any `journalctl` in `deploy.sh`
+    carrying neither `-n` nor `--since`, scoped to that command's own arguments so a
+    `| tail -n 40` on the same line does not launder it; it ships with its own
+    guard-the-guard cases. An audit of every suite that sources `deploy.sh` through
+    `DEPLOY_SELFTEST`, run by shadowing the host tools and recording what was
+    actually executed, found `journalctl` to be the only leak — the rest were already
+    fully stubbed.
 
 - **Crash-loop on every deploy to a live v32 database: the baseline schema
   referenced a column only a migration adds.** `bootstrap()` runs `db/schema.sql`

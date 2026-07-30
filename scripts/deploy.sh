@@ -597,21 +597,38 @@ resolve_expected_schema() {
   SCHEMA_EXPECT="$(printf '%s' "$line" | sed -E 's/^CURRENT_SCHEMA_VERSION[[:space:]]*=[[:space:]]*([0-9]+).*$/\1/')"
 }
 
-# Last $1 (default CRASH_JOURNAL_LINES) journal lines for the bot unit, restricted
-# to this deploy when DEPLOY_START is set. Always succeeds: a host without
-# journalctl, or an empty journal, prints nothing instead of aborting under
-# `set -e`. `tail` reads its input to EOF, so there is no SIGPIPE hazard (see
-# print_log_scan_examples for why that matters here).
+# Last $1 (default CRASH_JOURNAL_LINES) journal entries for the bot unit,
+# restricted to this deploy when DEPLOY_START is set. Always succeeds: a host
+# without journalctl, or an empty journal, prints nothing instead of aborting
+# under `set -e`.
+#
+# THE CAP IS journalctl's OWN `-n`, never a `$(...)` + `tail` trim afterwards.
+# `-n N` makes journald seek to the END of the unit's journal and walk backwards
+# N entries — constant work whatever the journal weighs. Reading the whole thing
+# and trimming later is O(journal): on a host whose journal carries days of
+# every-few-seconds observer chatter that is minutes of one core at 100%, and
+# this is the CRASH path — it runs precisely when the bot is already down and the
+# operator is waiting for the traceback, so it may never be slow. (Cost was real,
+# not theoretical: the unbounded read wedged a 60s-timeout test on the 1-CPU
+# production host and blocked the whole deploy.) `--since` is kept on top of `-n`
+# so a crash dump cannot show pre-deploy lines as if they were this deploy's.
+#
+# `-n` counts ENTRIES, not lines, so a multi-line traceback logged as one entry
+# arrives whole rather than beheaded by a line-count trim — strictly better than
+# the `tail -n` this replaced. There is no pipeline left here, hence no SIGPIPE
+# hazard to reason about (see print_log_scan_examples for why that mattered).
 bot_journal_tail() {
-  local lines="${1:-$CRASH_JOURNAL_LINES}" out
+  local lines="${1:-$CRASH_JOURNAL_LINES}"
   command -v journalctl >/dev/null 2>&1 || return 0
+  # CRASH_JOURNAL_LINES is an env knob: a non-numeric value would make journalctl
+  # reject `-n` and, with stderr silenced, silently print nothing at all — the one
+  # moment the dump matters. Fall back to the documented default instead.
+  [[ "$lines" =~ ^[1-9][0-9]*$ ]] || lines=40
   if [[ -n "$DEPLOY_START" ]]; then
-    out="$(journalctl -u "$BOT_UNIT" --since "$DEPLOY_START" --no-pager -o cat 2>/dev/null || true)"
+    journalctl -u "$BOT_UNIT" -n "$lines" --since "$DEPLOY_START" --no-pager -o cat 2>/dev/null || true
   else
-    out="$(journalctl -u "$BOT_UNIT" --no-pager -o cat 2>/dev/null || true)"
+    journalctl -u "$BOT_UNIT" -n "$lines" --no-pager -o cat 2>/dev/null || true
   fi
-  [[ -n "$out" ]] || return 0
-  printf '%s\n' "$out" | tail -n "$lines"
 }
 
 # Crash-loop detector, polled DURING the schema wait. Prints a human-readable
@@ -1489,6 +1506,11 @@ log "running ruff / compileall / pytest against origin/main"
 #     no pytest-randomly (no shuffle) in constraints-dev-hashed.txt. If either
 #     plugin is ever added it MUST go to BOTH this phase and .github/workflows/ci.yml
 #     with a pinned seed, or the two stop reproducing each other.
+#   * pytest-timeout IS in constraints-dev-hashed.txt (per-test ceilings, see
+#     pyproject.toml). It neither reorders nor parallelises collection, so the
+#     invariant above holds; what it buys HERE is that a hung test fails this gate
+#     with a traceback instead of holding the deploy open indefinitely — which is
+#     precisely how an unbounded `journalctl` read once blocked a production run.
 ( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider )
 
 # Model detection -----------------------------------------------------------
