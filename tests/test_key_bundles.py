@@ -723,7 +723,7 @@ def test_no_production_query_selects_keys_by_bundle_id_is_null() -> None:
     There is currently **no** such query — the guard starts from zero, with no
     allow-list. ``bundle_id IS NOT NULL`` stays allowed: that direction is
     unambiguous (a set bundle_id really does mean "attached child"), and the
-    partial index in ``db/schema.sql`` uses it.
+    partial index in ``db/indexes.sql`` uses it.
 
     If you are here because this test failed: the fix is not to add your file to
     an exception list. Decide what your query actually needs — usually "children

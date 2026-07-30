@@ -270,6 +270,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Crash-loop on every deploy to a live v32 database: the baseline schema
+  referenced a column only a migration adds.** `bootstrap()` runs `db/schema.sql`
+  BEFORE the migration chain, so on an existing database its
+  `CREATE TABLE IF NOT EXISTS` statements are no-ops and the columns later
+  migrations add are simply not there yet. `schema.sql` nonetheless declared
+  `CREATE UNIQUE INDEX … ON key_bundles(display_no)` — a column `_migrate_v33` adds
+  — which raised `no such column: display_no` before `_migrate_v33` could run.
+  On a clean database (every test, both CI runs) `CREATE TABLE` did create the
+  column, so the bug was invisible until it hit a real v32 box: 17 restarts,
+  schema stuck at 32, and the schema gate correctly rolling the deploy back.
+  - **Fix — DDL now runs in two phases.** `db/schema.sql` keeps the baseline tables
+    and seed rows and still runs first (the migrations assume those tables exist);
+    every index moved to the new `db/indexes.sql`, executed AFTER the migrations,
+    where both "all columns exist" and "the data has been cleaned up" hold on the
+    fresh and the upgrade path alike. That also retires the five-index exception
+    list that existed because those two conditions could not be met in the
+    baseline, and makes every index re-ensured on each start — an index dropped by
+    hand, or lost because a table-rebuild migration (v16/v17/v29) forgot to
+    recreate it, now comes back on the next boot instead of being gone for good.
+  - **Two more instances of the same class went with it:**
+    `idx_announcement_batches_scheduled` (needs `scheduled_at`, added by the v16
+    rebuild) and `idx_proxy_accesses_mtproto_fingerprint` (needs
+    `secret_fingerprint`, added by the v9 rebuild) were the same latent bug for
+    databases at v15 and v8.
+  - **Coverage.** New `tests/test_schema_upgrade_path.py` replays committed
+    snapshots of real old schemas (`tests/schema_snapshots/v29…v32.sql`, plus
+    optional seed data) through `bootstrap()` and asserts the result is
+    indistinguishable from a fresh bootstrap, with no rows lost and a second
+    bootstrap changing nothing. It is version-agnostic: a new snapshot is one file,
+    written by `scripts/dump_schema_snapshot.py`, and a guard test fails the build
+    if the version being left behind was never captured. `tests/test_schema_drift.py`
+    additionally fails if a `CREATE INDEX` reappears in the baseline.
+
 - **Root cause of the 2026-07-29 outage: a rollback that `chmod 700 /`.** Confirmed
   from the archive the previous deploy had written
   (`/var/backups/vpn-bot/backup-3a79aa6-20260729T131831.tar.gz`):
