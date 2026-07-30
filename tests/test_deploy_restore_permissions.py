@@ -43,11 +43,21 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_SH = ROOT / "scripts" / "deploy.sh"
 HELPER = ROOT / "scripts" / "vpn-bot-db-perms"
 NO_OVERWRITE_DIR = "--no-overwrite-dir"
+
+# Per-test wall-clock ceiling (pytest-timeout). Every test here drives bash through
+# stubs and finishes in milliseconds, so anything near this limit is a hang, not
+# slow work. Belt-and-braces on top of the real rule — these suites stub every host
+# command they can reach — because deploy.sh runs this suite as a Phase 1 gate on
+# the production host, where a wedged test blocks the deploy instead of failing it.
+pytestmark = pytest.mark.timeout(60)
+
 
 # Files an operator (or this script) can run as root to unpack a backup: the
 # shipped shell plus the runbooks whose command blocks are meant to be pasted.

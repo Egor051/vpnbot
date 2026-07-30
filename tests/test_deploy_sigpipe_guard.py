@@ -44,6 +44,14 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_SH = ROOT / "scripts" / "deploy.sh"
 REDEPLOY_SH = ROOT / "scripts" / "redeploy.sh"
 
+# Per-test wall-clock ceiling (pytest-timeout). Every test here drives bash through
+# stubs and finishes in milliseconds, so anything near this limit is a hang, not
+# slow work. Belt-and-braces on top of the real rule — these suites stub every host
+# command they can reach — because deploy.sh runs this suite as a Phase 1 gate on
+# the production host, where a wedged test blocks the deploy instead of failing it.
+pytestmark = pytest.mark.timeout(60)
+
+
 # A `|` (optionally with whitespace) feeding `head` — a pipe CONSUMER that closes
 # early. `head -n N file` (head reading a FILE, no leading pipe) is safe and is NOT
 # matched, because there is no `|` immediately before `head`.

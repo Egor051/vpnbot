@@ -7,6 +7,23 @@ version = "2.1.0"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["."]
+# Per-test wall-clock ceiling (pytest-timeout). This is a BACKSTOP, not a fix for
+# anything: a test that hits it is reporting a hang, and the hang is the bug.
+# It exists because deploy.sh runs this suite as a Phase 1 gate on the production
+# host, where one wedged test does not fail — it holds the whole gate open and
+# blocks the deploy it was supposed to protect (a `journalctl` read with no `-n`
+# did exactly that). A bounded FAILED is diagnosable; an open-ended hang is not.
+#
+# 120s is ~4x the slowest legitimate test (the ~30s dead-port poll in
+# test_subscription_server.py) — wide enough that a slow runner never trips it.
+# Suites that shell out to deploy.sh set a much tighter per-module limit of their
+# own, since a healthy run there is milliseconds.
+#
+# `signal` (SIGALRM in the main thread) fails the one offending test and lets the
+# run continue; the `thread` method would kill the whole pytest process instead,
+# which is the outcome this is meant to avoid.
+timeout = 120
+timeout_method = "signal"
 
 [tool.coverage.run]
 branch = true

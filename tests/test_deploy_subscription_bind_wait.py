@@ -27,9 +27,19 @@ command is a stub on PATH and the .env is a fixture under tmp_path.
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_SH = ROOT / "scripts" / "deploy.sh"
+
+# Per-test wall-clock ceiling (pytest-timeout). The slowest test here deliberately
+# lets a short bind wait run out (a few seconds), so anything near this limit is a
+# hang, not slow work. Belt-and-braces on top of the real rule — these suites stub
+# every host command they can reach — because deploy.sh runs this suite as a Phase 1
+# gate on the production host, where a wedged test blocks the deploy it should guard.
+pytestmark = pytest.mark.timeout(60)
+
 
 ENV_FIXTURE = """\
 SUBSCRIPTION_ENABLED=true
