@@ -1,92 +1,38 @@
 
 import asyncio
+import re
 import sqlite3
 from pathlib import Path
 
 import aiosqlite
 import pytest
+from conftest import assert_same_shape, named_indexes, schema_shape
 
-from db.database import CURRENT_SCHEMA_VERSION, Database
+from db.database import CURRENT_SCHEMA_VERSION, Database, _split_sql_statements
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "db" / "schema.sql"
-
-# Indexes that are intentionally created by migrations only and NOT by the
-# schema.sql baseline, because bootstrap() runs schema.sql BEFORE the migrations
-# and these depend on data cleanup (UNIQUE partials) or on a column added by a
-# later migration (expires_at). Kept in sync with the comment block at the end
-# of db/schema.sql.
-MIGRATION_ONLY_INDEXES = frozenset(
-    {
-        "idx_access_requests_one_pending",
-        "idx_vpn_keys_client_ip_reserved",
-        "idx_trial_requests_one_pending",
-        "idx_vpn_keys_expires_at",
-        "idx_vpn_keys_bundle_id",
-    }
-)
-
-
-async def _named_indexes(conn: aiosqlite.Connection) -> set[str]:
-    cursor = await conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'"
-    )
-    return {str(row[0]) for row in await cursor.fetchall()}
-
-
-async def _table_names(conn: aiosqlite.Connection) -> set[str]:
-    cursor = await conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-    )
-    return {str(row[0]) for row in await cursor.fetchall()}
-
-
-# name -> (type, notnull, default, pk). Keyed by column name so a legitimate
-# column-ORDER divergence (an ALTER appends at the end while schema.sql lists the
-# column mid-table — e.g. spider_x, bundle_id) is not treated as drift, while any
-# type / nullability / default / primary-key difference still is.
-async def _column_details(conn: aiosqlite.Connection, table: str) -> dict[str, tuple[str, int, object, int]]:
-    cursor = await conn.execute(f"PRAGMA table_info({table})")
-    return {
-        str(row[1]): (str(row[2]).upper(), int(row[3]), row[4], int(row[5]))
-        for row in await cursor.fetchall()
-    }
-
-
-# Set of (from_col, parent_table, to_col, on_update, on_delete) so ON DELETE
-# actions (e.g. bundle_id RESTRICT vs user_id CASCADE) are compared regardless of
-# the order SQLite reports the foreign keys in.
-async def _foreign_keys(conn: aiosqlite.Connection, table: str) -> set[tuple[str, str, str, str, str]]:
-    cursor = await conn.execute(f"PRAGMA foreign_key_list({table})")
-    return {
-        (str(row[3]), str(row[2]), str(row[4]), str(row[5]), str(row[6]))
-        for row in await cursor.fetchall()
-    }
-
-
-async def _schema_shape(conn: aiosqlite.Connection) -> tuple[
-    dict[str, dict[str, tuple[str, int, object, int]]],
-    dict[str, set[tuple[str, str, str, str, str]]],
-]:
-    tables = await _table_names(conn)
-    columns = {table: await _column_details(conn, table) for table in tables}
-    fks = {table: await _foreign_keys(conn, table) for table in tables}
-    return columns, fks
+INDEXES_PATH = Path(__file__).resolve().parents[1] / "db" / "indexes.sql"
 
 
 def test_schema_sql_matches_fully_migrated_database(tmp_path: Path) -> None:
-    """A fully migrated DB and executescript(schema.sql) must agree on the schema —
-    tables, columns, types, defaults, nullability, primary keys, and foreign keys
-    (including ON DELETE actions) — except for the documented migration-only index
-    set. This is the main guard against schema.sql drifting from the migrations."""
+    """A fully migrated DB and the two SQL files must agree on the schema — tables,
+    columns, types, defaults, nullability, primary keys, foreign keys (including ON
+    DELETE actions) and indexes. This is the main guard against the files drifting
+    from the migrations.
+
+    There is no exception list any more. Five indexes used to be created by their
+    migration only and deliberately left out of the baseline (they depend on a
+    migration-added column, or on a data cleanup only a migration performs); now
+    that indexes.sql runs AFTER the migrations, both conditions hold for every
+    index and the two construction paths must match exactly.
+    """
 
     async def run() -> None:
         boot = Database(tmp_path / "boot.db")
         await boot.connect()
         try:
             await boot.bootstrap()
-            boot_indexes = await _named_indexes(boot._raw_conn())
-            boot_tables = await _table_names(boot._raw_conn())
-            boot_columns, boot_fks = await _schema_shape(boot._raw_conn())
+            boot_shape = await schema_shape(boot._raw_conn())
             version_row = await boot.conn.execute_fetchone(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             )
@@ -97,42 +43,93 @@ def test_schema_sql_matches_fully_migrated_database(tmp_path: Path) -> None:
 
         async with aiosqlite.connect(tmp_path / "schema_only.db") as conn:
             await conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+            await conn.executescript(INDEXES_PATH.read_text(encoding="utf-8"))
             await conn.commit()
-            schema_indexes = await _named_indexes(conn)
-            schema_tables = await _table_names(conn)
-            schema_columns, schema_fks = await _schema_shape(conn)
+            file_shape = await schema_shape(conn)
 
-        # schema.sql must never contain an index the migrated DB lacks.
-        assert schema_indexes - boot_indexes == set()
-        # The only indexes the migrated DB has beyond schema.sql are the
-        # documented migration-only ones.
-        assert boot_indexes - schema_indexes == MIGRATION_ONLY_INDEXES
-        # Baseline tables come exclusively from schema.sql; both paths agree.
-        assert boot_tables == schema_tables
-        # Columns (name/type/notnull/default/pk) and foreign keys (incl. ON DELETE)
-        # must be identical per table across both construction paths.
-        for table in sorted(boot_tables):
-            assert boot_columns[table] == schema_columns[table], f"column drift in {table}"
-            assert boot_fks[table] == schema_fks[table], f"foreign-key drift in {table}"
+        assert_same_shape(boot_shape, file_shape, "bootstrap vs schema.sql+indexes.sql")
 
     asyncio.run(run())
 
 
-def test_schema_only_objects_are_reensured_on_every_bootstrap(tmp_path: Path) -> None:
-    """schema.sql is executed on every bootstrap, so even if a schema-only index
-    is dropped on an existing DB it is recreated on the next startup (this is why
-    no backfill migration is needed for objects that live only in schema.sql)."""
-
-    schema_only = frozenset(
-        {
-            "idx_vpn_keys_uuid",
-            "idx_vpn_keys_email_label",
-            "idx_vpn_keys_public_key",
-            "idx_vpn_keys_owner",
-            "idx_audit_log_created_at",
-            "idx_audit_log_entity",
-        }
+def test_baseline_schema_declares_no_indexes() -> None:
+    """schema.sql runs BEFORE the migrations, so a statement in it that references a
+    column — an index, a trigger, a view — raises "no such column" on any database
+    old enough to be missing that column, before the migration that adds it ever
+    runs. That is what crash-looped the bot on live v32 databases
+    (idx_key_bundles_display_no vs _migrate_v33). The baseline stays tables + seed
+    rows; anything that references a column belongs in indexes.sql.
+    """
+    baseline = SCHEMA_PATH.read_text(encoding="utf-8")
+    offenders = re.findall(
+        r"^\s*CREATE\s+(?:UNIQUE\s+)?(?:INDEX|TRIGGER|VIEW)\b.*",
+        baseline,
+        re.IGNORECASE | re.MULTILINE,
     )
+    assert offenders == [], f"db/schema.sql must not create indexes/triggers/views: {offenders}"
+
+
+def test_indexes_file_contains_only_index_ddl() -> None:
+    """The converse guard: indexes.sql runs AFTER the migrations, so a CREATE TABLE
+    hidden in it would create a table the migration chain never got to see."""
+    statements = [s for s in re.split(r";\s*\n", INDEXES_PATH.read_text(encoding="utf-8")) if s.strip()]
+    for statement in statements:
+        body = "\n".join(
+            line for line in statement.splitlines() if not line.lstrip().startswith("--")
+        ).strip()
+        if not body:
+            continue
+        assert re.match(r"^CREATE\s+(UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\b", body, re.IGNORECASE), (
+            f"db/indexes.sql may only contain CREATE INDEX IF NOT EXISTS statements, got: {body[:80]!r}"
+        )
+
+
+def test_split_sql_statements_respects_quoting_and_comments() -> None:
+    """indexes.sql is executed statement by statement (executescript would COMMIT
+    the migrations behind bootstrap's back), so the splitter must not cut on a
+    semicolon inside a string literal, and must keep leading comments attached to
+    the statement they document."""
+    statements = _split_sql_statements(
+        "-- leading comment\n"
+        "CREATE INDEX IF NOT EXISTS idx_a ON t(c) WHERE c = 'a;b';\n"
+        "\n"
+        "CREATE INDEX IF NOT EXISTS idx_b ON t(d);\n"
+        "-- trailing comment, nothing to execute\n"
+    )
+    assert len(statements) == 2
+    assert statements[0].startswith("-- leading comment")
+    assert "'a;b'" in statements[0]
+    assert statements[1] == "CREATE INDEX IF NOT EXISTS idx_b ON t(d);"
+
+
+def test_split_sql_statements_rejects_an_unterminated_statement() -> None:
+    """A missing `;` must fail loudly instead of silently dropping the statement —
+    a quietly skipped CREATE INDEX is exactly the kind of thing that only shows up
+    as a slow query months later."""
+    with pytest.raises(RuntimeError, match="Незавершённый"):
+        _split_sql_statements("CREATE INDEX IF NOT EXISTS idx_a ON t(c)\n")
+
+
+def test_indexes_file_splits_into_one_statement_per_index() -> None:
+    """Sanity-check the real file against the splitter: every statement it yields
+    is a CREATE INDEX, and none was merged or lost."""
+    text = INDEXES_PATH.read_text(encoding="utf-8")
+    statements = _split_sql_statements(text)
+    assert statements
+    # Every statement in the file begins a line (prose mentions of CREATE live in
+    # `--` comments, which never start one).
+    assert len(statements) == len(re.findall(r"(?m)^CREATE ", text))
+    for statement in statements:
+        assert statement.rstrip().endswith(";")
+        assert "CREATE " in statement
+
+
+def test_every_index_is_reensured_on_every_bootstrap(tmp_path: Path) -> None:
+    """indexes.sql is executed on every bootstrap, so an index dropped on an
+    existing DB — by hand, or by a table-rebuild migration that forgot to recreate
+    it — is back on the next startup. Before the split this held only for the
+    indexes that lived in the baseline: the migration-only ones were created once
+    by a version-gated migration, so losing one was permanent."""
 
     async def run() -> None:
         db_path = tmp_path / "vpn.db"
@@ -140,10 +137,12 @@ def test_schema_only_objects_are_reensured_on_every_bootstrap(tmp_path: Path) ->
         await db.connect()
         try:
             await db.bootstrap()
-            for name in schema_only:
+            all_indexes = await named_indexes(db._raw_conn())
+            assert all_indexes, "bootstrap created no idx_* indexes at all"
+            for name in all_indexes:
                 await db.conn.execute(f"DROP INDEX IF EXISTS {name}")
             await db.commit()
-            assert schema_only & await _named_indexes(db._raw_conn()) == set()
+            assert await named_indexes(db._raw_conn()) == set()
         finally:
             await db.close()
 
@@ -151,7 +150,7 @@ def test_schema_only_objects_are_reensured_on_every_bootstrap(tmp_path: Path) ->
         await db.connect()
         try:
             await db.bootstrap()
-            assert schema_only <= await _named_indexes(db._raw_conn())
+            assert await named_indexes(db._raw_conn()) == all_indexes
         finally:
             await db.close()
 

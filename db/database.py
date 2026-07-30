@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -40,6 +41,33 @@ def _proxy_access_default_expr(column: str) -> str:
         return defaults[column]
     except KeyError as exc:
         raise RuntimeError(f"Unsupported proxy_accesses migration column: {column}") from exc
+
+
+def _split_sql_statements(script: str) -> list[str]:
+    """Split a .sql file into individually executable statements.
+
+    Used for the DDL that must run INSIDE bootstrap's transaction (db/indexes.sql):
+    sqlite3.executescript() would COMMIT everything pending before it starts, so a
+    failure after it could no longer be rolled back with the rest of bootstrap.
+
+    Statement boundaries come from sqlite3.complete_statement, not from splitting on
+    ';', so a semicolon inside a string literal or a comment cannot cut a statement
+    in half. Leading comments stay attached to the statement that follows them —
+    SQLite accepts them, and _strip_leading_sql_noise looks past them when the
+    connection proxy classifies the statement.
+    """
+    statements: list[str] = []
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            statements.append(buffer.strip())
+            buffer = ""
+    # Anything left is either a trailing comment/blank block (fine, nothing to run)
+    # or a statement missing its terminating ';' — which must not be swallowed.
+    if any(line.split("--", 1)[0].strip() for line in buffer.splitlines()):
+        raise RuntimeError(f"Незавершённый SQL-оператор в скрипте: {buffer.strip()[:80]!r}")
+    return statements
 
 
 def _normalize_synchronous(value: str) -> str:
@@ -106,13 +134,37 @@ class Database:
             await self._raw_conn().close()
             self._conn = None
 
-    async def bootstrap(self, schema_path: Path | None = None) -> None:
+    async def bootstrap(self, schema_path: Path | None = None, indexes_path: Path | None = None) -> None:
+        # THREE PHASES, and the order is the whole design:
+        #
+        #   1. schema.sql — baseline TABLES and seed rows. Runs first because the
+        #      migrations are not self-sufficient: they assume these tables exist.
+        #      On an existing database every CREATE TABLE IF NOT EXISTS is a no-op,
+        #      which is exactly why nothing here may reference a column: the columns
+        #      later migrations add are not there yet.
+        #   2. the migration chain — brings an old database up to
+        #      CURRENT_SCHEMA_VERSION (adds columns, rebuilds tables, cleans data).
+        #   3. indexes.sql — every index, created only now that both "all columns
+        #      exist" and "the data is clean" hold on BOTH paths (fresh DB and
+        #      upgraded DB alike). Putting an index in phase 1 instead is what
+        #      crash-looped the bot on live v32 databases with "no such column:
+        #      display_no" — the baseline referenced a column _migrate_v33 had not
+        #      added yet, and phase 1 runs before phase 2 gets its chance.
+        #
+        # Phase 3 goes through _execute_script_statements rather than executescript
+        # because sqlite3.executescript COMMITs whatever is pending before it runs —
+        # that would commit the migrations behind bootstrap's back and break the
+        # all-or-nothing rollback below.
         if schema_path is None:
             schema_path = Path(__file__).with_name("schema.sql")
+        if indexes_path is None:
+            indexes_path = Path(__file__).with_name("indexes.sql")
         sql = schema_path.read_text(encoding="utf-8")
+        indexes_sql = indexes_path.read_text(encoding="utf-8")
         try:
             await self.conn.executescript(sql)
             await self._apply_migrations()
+            await self._execute_script_statements(indexes_sql)
             # Re-run on every bootstrap (idempotent, not version-gated) so enabling
             # XRAY_SPIDER_X_POOL after the one-shot v31 migration still backfills
             # pre-existing xray keys. No-op when the pool is empty.
@@ -122,6 +174,10 @@ class Database:
         except Exception:
             await self.rollback()
             raise
+
+    async def _execute_script_statements(self, script: str) -> None:
+        for statement in _split_sql_statements(script):
+            await self.conn.execute(statement)
 
     async def _apply_migrations(self) -> None:
         version = await self._schema_version()

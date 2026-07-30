@@ -211,6 +211,9 @@ def test_mtproto_secret_is_not_in_settings_repr(monkeypatch: pytest.MonkeyPatch,
 
 
 def test_proxy_accesses_migration_from_legacy_schema_is_idempotent(tmp_path: Path) -> None:
+    # Only the table has to be stripped: the proxy_accesses indexes live in
+    # db/indexes.sql, which bootstrap runs AFTER the migration that recreates the
+    # table, so they can no longer be reached before their columns exist.
     schema = Path("db/schema.sql").read_text(encoding="utf-8")
     schema = re.sub(
         r"\nCREATE TABLE IF NOT EXISTS proxy_accesses \(.*?\n\);\n",
@@ -218,7 +221,6 @@ def test_proxy_accesses_migration_from_legacy_schema_is_idempotent(tmp_path: Pat
         schema,
         flags=re.S,
     )
-    schema = re.sub(r"\nCREATE(?: UNIQUE)? INDEX IF NOT EXISTS idx_proxy_accesses_[^;]+;", "\n", schema, flags=re.S)
     old_schema_path = tmp_path / "schema_v7.sql"
     old_schema_path.write_text(schema, encoding="utf-8")
 
@@ -246,8 +248,10 @@ def test_proxy_accesses_v9_migration_preserves_static_records_and_is_idempotent(
     old_schema = old_schema.replace("'revoked','revoke_failed','inactive'", "'revoked','inactive'")
     old_schema = old_schema.replace("  secret_fingerprint TEXT,\n  apply_generation INTEGER NOT NULL DEFAULT 0,\n", "")
     old_schema = old_schema.replace("  activated_at TEXT,\n  last_apply_at TEXT,\n", "")
-    old_schema = re.sub(r"\nCREATE INDEX IF NOT EXISTS idx_proxy_accesses_mtproto_fingerprint [^;]+;", "\n", old_schema)
-    old_schema = re.sub(r"\nCREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_accesses_one_live_per_user_type.*?;\n", "\n", old_schema, flags=re.S)
+    # A v8 proxy_accesses has no secret_fingerprint column, yet db/indexes.sql
+    # declares an index ON it — and this still bootstraps, because that file runs
+    # after _migrate_proxy_accesses_v9 has rebuilt the table. The same statement in
+    # the baseline would raise "no such column" before the migration ever ran.
     old_schema_path = tmp_path / "schema_v8.sql"
     old_schema_path.write_text(old_schema, encoding="utf-8")
 

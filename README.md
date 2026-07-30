@@ -72,7 +72,7 @@ follow the [Deployment](#deployment) section rather than this evaluation flow.
 - Roles: superadmins (from `ADMIN_IDS`) plus an in-bot **moderator** role for day-to-day user/request management — see [Access Lifecycle Policy](#access-lifecycle-policy).
 - Ownership checks so users can view their own configs/stats; proxy (SOCKS5/MTProto) revoke/delete are admin-only, while VPN key (Xray/AWG/Hysteria2) revoke/delete are available to the key owner and to admins.
 - Audit log with recursive masking for sensitive values.
-- SQLite storage bootstrapped from `db/schema.sql` (the baseline schema) with version migrations applied programmatically on startup, rotating local logs, and a systemd deployment unit.
+- SQLite storage bootstrapped from `db/schema.sql` (baseline tables) with version migrations applied programmatically on startup and `db/indexes.sql` re-ensured afterwards, rotating local logs, and a systemd deployment unit.
 - Background workers: key-expiry checks, traffic-stats sampling, Hysteria2 backend-health probing, anomaly detection, scheduled announcements, and encrypted off-site backups.
 
 ## Architecture
@@ -127,7 +127,8 @@ init_db.py                 # SQLite schema bootstrap/migration entry point
 requirements.txt           # Runtime dependencies
 constraints.txt            # Pinned production dependency constraints
 .env.example               # Environment variable template
-db/schema.sql              # Database schema
+db/schema.sql              # Baseline tables + seed rows (runs before the migrations)
+db/indexes.sql             # Every index (runs after the migrations)
 deploy/vpn-bot.service     # vpn-bot systemd unit template
 deploy/run-mtproxy-managed # MTProxy managed-mode wrapper installed during deploy
 bot/                       # Telegram handlers, keyboards, FSM, formatting

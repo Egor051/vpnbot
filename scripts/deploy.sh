@@ -231,6 +231,9 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
 # SQLITE_BUSY while the bot writes is waited out, never misread as an unreadable DB.
 SCHEMA_WAIT_TIMEOUT="${SCHEMA_WAIT_TIMEOUT:-60}"
 SQLITE_BUSY_TIMEOUT_MS="${SQLITE_BUSY_TIMEOUT_MS:-5000}"
+# How many journal lines to dump when the bot is caught crash-looping during the
+# schema wait. Enough to carry a full Python traceback out of bootstrap().
+CRASH_JOURNAL_LINES="${CRASH_JOURNAL_LINES:-40}"
 
 # --------------------------------------------------------------------------- #
 # Output helpers
@@ -594,6 +597,54 @@ resolve_expected_schema() {
   SCHEMA_EXPECT="$(printf '%s' "$line" | sed -E 's/^CURRENT_SCHEMA_VERSION[[:space:]]*=[[:space:]]*([0-9]+).*$/\1/')"
 }
 
+# Last $1 (default CRASH_JOURNAL_LINES) journal lines for the bot unit, restricted
+# to this deploy when DEPLOY_START is set. Always succeeds: a host without
+# journalctl, or an empty journal, prints nothing instead of aborting under
+# `set -e`. `tail` reads its input to EOF, so there is no SIGPIPE hazard (see
+# print_log_scan_examples for why that matters here).
+bot_journal_tail() {
+  local lines="${1:-$CRASH_JOURNAL_LINES}" out
+  command -v journalctl >/dev/null 2>&1 || return 0
+  if [[ -n "$DEPLOY_START" ]]; then
+    out="$(journalctl -u "$BOT_UNIT" --since "$DEPLOY_START" --no-pager -o cat 2>/dev/null || true)"
+  else
+    out="$(journalctl -u "$BOT_UNIT" --no-pager -o cat 2>/dev/null || true)"
+  fi
+  [[ -n "$out" ]] || return 0
+  printf '%s\n' "$out" | tail -n "$lines"
+}
+
+# Crash-loop detector, polled DURING the schema wait. Prints a human-readable
+# reason and returns 0 when the bot is no longer running healthily; returns 1 and
+# prints nothing otherwise. $1 = the NRestarts value observed when the wait began.
+#
+# Why NRestarts has to be watched over time rather than read once: the old gate
+# sampled it a single time right after `is-active` went true — about 7s into the
+# start, BEFORE the first crash. A bot that dies in bootstrap() and is restarted by
+# `Restart=on-failure` therefore always passed that check with NRestarts=0, and the
+# deploy went on to spend the whole SCHEMA_WAIT_TIMEOUT window waiting for a schema
+# bump that a crash-looping process was never going to make — then blamed the
+# migration ("schema migration did not reach 33") instead of the crash that caused
+# it. Comparing against the baseline (not against 0) also keeps this correct if the
+# unit had restarts on its counter before the wait started.
+bot_crash_loop_reason() {
+  local baseline="$1" now state
+  now="$(systemctl show -p NRestarts --value "$BOT_UNIT" 2>/dev/null || true)"
+  state="$(systemctl is-active "$BOT_UNIT" 2>/dev/null || true)"
+  if [[ "$now" =~ ^[0-9]+$ && "$baseline" =~ ^[0-9]+$ ]] && (( now > baseline )); then
+    printf 'vpn-bot restarted %s time(s) during the schema wait (NRestarts=%s, was %s; is-active=%s)' \
+      "$(( now - baseline ))" "$now" "$baseline" "${state:-unknown}"
+    return 0
+  fi
+  # A unit that exhausted its start-limit stops flapping and sits in `failed`, so
+  # NRestarts can stop growing while the bot is definitively down.
+  if [[ "$state" == "failed" ]]; then
+    printf 'vpn-bot is in failed state during the schema wait (NRestarts=%s)' "${now:-unknown}"
+    return 0
+  fi
+  return 1
+}
+
 # Wait for the live schema to reach the deployed code's target ($1 = expected),
 # then gate on the ACTUAL observed value. Polls schema_version() every 2s (a
 # transient SQLITE_BUSY is already ridden out inside schema_version by the CLI
@@ -604,14 +655,25 @@ resolve_expected_schema() {
 #   after  < expected (timed out) -> rollback_now (migration stuck / regressed)
 #   after  > expected             -> rollback_now, unless ALLOW_SCHEMA_DOWNGRADE=1
 #   after unreadable              -> die (hard fail; never a fabricated-zero rollback)
+#
+# Every poll also asks bot_crash_loop_reason whether the bot is still alive. A
+# crash-looping bot short-circuits the wait immediately and rolls back with the
+# journal tail attached, so the operator gets the real traceback in ~15s instead of
+# a full timeout followed by a diagnosis that points at the wrong thing.
 verify_schema_migration() {
-  local expected="$1" deadline
+  local expected="$1" deadline reason restarts_before
   SCHEMA_AFTER=""
+  restarts_before="$(systemctl show -p NRestarts --value "$BOT_UNIT" 2>/dev/null || true)"
   deadline=$(( SECONDS + SCHEMA_WAIT_TIMEOUT ))
-  log "waiting up to ${SCHEMA_WAIT_TIMEOUT}s for schema to reach ${expected} (polling schema_version every 2s)"
+  log "waiting up to ${SCHEMA_WAIT_TIMEOUT}s for schema to reach ${expected} (polling schema_version every 2s; NRestarts=${restarts_before:-unknown} at start)"
   while :; do
     SCHEMA_AFTER="$(schema_version)"
     if [[ "$SCHEMA_AFTER" =~ ^[0-9]+$ ]] && (( SCHEMA_AFTER >= expected )); then break; fi
+    if reason="$(bot_crash_loop_reason "$restarts_before")"; then
+      warn "${reason}; aborting the ${SCHEMA_WAIT_TIMEOUT}s schema wait early — last ${CRASH_JOURNAL_LINES} journal lines of ${BOT_UNIT} follow"
+      bot_journal_tail "$CRASH_JOURNAL_LINES" >&2
+      rollback_now "${reason} — the bot never reached schema ${expected} (live schema ${SCHEMA_AFTER:-unknown}) because it is not staying up; see the journal tail above for the real error"
+    fi
     (( SECONDS < deadline )) || break
     sleep 2
   done
@@ -1947,6 +2009,11 @@ until systemctl is-active --quiet "$BOT_UNIT"; do
   (( SECONDS < deadline )) || rollback_now "vpn-bot did not become active within ${HEALTH_TIMEOUT}s"
   sleep 2
 done
+# One read, ~7s into the start: this only catches a unit that was ALREADY looping
+# (e.g. left flapping by a previous deploy). It cannot see a bot that is about to
+# die inside bootstrap(), because under Type=simple is-active goes true before
+# bootstrap runs and the first crash has not happened yet — that is what
+# verify_schema_migration's per-poll bot_crash_loop_reason check is for.
 nrestarts="$(systemctl show -p NRestarts --value "$BOT_UNIT")"
 [[ "$nrestarts" == "0" ]] || rollback_now "vpn-bot restart-loop detected (NRestarts=${nrestarts})"
 log "vpn-bot active (NRestarts=0)"
@@ -1993,7 +2060,11 @@ fi
 # "30 -> 30" DEPLOY OK on a migration that had not run yet. resolve_expected_schema
 # hard-fails on an ambiguous target; verify_schema_migration polls, sets
 # SCHEMA_AFTER, and routes a stuck/regressed/newer schema through rollback (or a
-# hard fail on an unreadable one) — never a silent rollback on a coerced 0.
+# hard fail on an unreadable one) — never a silent rollback on a coerced 0. The
+# wait also watches the unit itself: a bot crash-looping inside bootstrap() aborts
+# the wait on the next poll and rolls back with the journal tail, instead of
+# burning the full timeout and then reporting "schema migration did not reach N",
+# which describes the symptom and hides the traceback that caused it.
 resolve_expected_schema
 log "deployed code targets schema_version=${SCHEMA_EXPECT}; verifying live migration"
 verify_schema_migration "$SCHEMA_EXPECT"

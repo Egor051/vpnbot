@@ -1,4 +1,4 @@
--- Baseline schema + post-migration snapshot, hand-maintained.
+-- Baseline TABLES + post-migration snapshot, hand-maintained.
 --
 -- This file serves two roles: (1) it is the version-1 BASELINE executed by
 -- Database.bootstrap() on a fresh DB (the programmatic migrations in
@@ -6,6 +6,16 @@
 -- exist); and (2) it must stay in sync with the state produced by all
 -- migrations up to CURRENT_SCHEMA_VERSION. Keep every object below consistent
 -- with db/database.py; tests/test_schema_drift.py enforces this parity.
+--
+-- TABLES AND SEED ROWS ONLY — indexes live in db/indexes.sql.
+-- This file runs BEFORE the migrations, so on an existing database every
+-- `CREATE TABLE IF NOT EXISTS` here is a no-op and the columns a later migration
+-- adds are simply absent while this script executes. Any statement that
+-- REFERENCES a column (an index, a trigger, a view) therefore cannot live here:
+-- it would raise "no such column" on an old database before the migration that
+-- adds the column ever runs. Column comments below still document the migration
+-- each column mirrors, because CREATE TABLE only ever declares its own columns.
+-- tests/test_schema_drift.py fails the build if a CREATE INDEX reappears here.
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -277,49 +287,3 @@ CREATE TABLE IF NOT EXISTS maintenance_settings (
   updated_at INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO maintenance_settings (id) VALUES (1);
-
-CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
-CREATE INDEX IF NOT EXISTS idx_users_active_role ON users(role) WHERE blocked_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_access_requests_user_status ON access_requests(telegram_user_id, status);
-CREATE INDEX IF NOT EXISTS idx_access_requests_pending_created ON access_requests(status, requested_at);
-CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner ON vpn_keys(owner_user_id);
-CREATE INDEX IF NOT EXISTS idx_vpn_keys_type_status ON vpn_keys(key_type, status);
-CREATE INDEX IF NOT EXISTS idx_vpn_keys_status_type ON vpn_keys(status, key_type);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_uuid ON vpn_keys(uuid) WHERE uuid IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_email_label ON vpn_keys(email_label) WHERE email_label IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_public_key ON vpn_keys(public_key) WHERE public_key IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_vpn_keys_short_id ON vpn_keys(json_extract(payload_json, '$.short_id')) WHERE key_type = 'xray' AND json_valid(payload_json) AND json_extract(payload_json, '$.short_id') IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_vpn_keys_owner_type_status ON vpn_keys(owner_user_id, key_type, status);
-CREATE INDEX IF NOT EXISTS idx_key_bundles_user_id ON key_bundles(user_id);
-CREATE INDEX IF NOT EXISTS idx_key_bundles_status ON key_bundles(status);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_key_bundles_display_no ON key_bundles(display_no);
-CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner ON proxy_accesses(owner_user_id);
-CREATE INDEX IF NOT EXISTS idx_proxy_accesses_owner_type_status ON proxy_accesses(owner_user_id, access_type, status);
-CREATE INDEX IF NOT EXISTS idx_proxy_accesses_status_type ON proxy_accesses(status, access_type);
-CREATE INDEX IF NOT EXISTS idx_proxy_accesses_login ON proxy_accesses(json_extract(payload_json, '$.login')) WHERE access_type = 'socks5';
-CREATE INDEX IF NOT EXISTS idx_proxy_accesses_mtproto_fingerprint ON proxy_accesses(secret_fingerprint) WHERE access_type = 'mtproto' AND secret_fingerprint IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_accesses_one_live_per_user_type
-ON proxy_accesses(owner_user_id, access_type)
-WHERE status IN ('pending_apply','active','pending_revoke');
-CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
-CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);
-CREATE INDEX IF NOT EXISTS idx_deleted_key_traffic_archive_type ON deleted_key_traffic_archive(key_type, downloaded_bytes, uploaded_bytes);
-CREATE INDEX IF NOT EXISTS idx_deleted_key_traffic_archive_owner ON deleted_key_traffic_archive(owner_user_id, downloaded_bytes, uploaded_bytes);
-CREATE INDEX IF NOT EXISTS idx_trial_requests_user ON trial_key_requests(telegram_user_id, status);
-CREATE INDEX IF NOT EXISTS idx_announcement_batches_status ON announcement_batches(status, updated_at);
-CREATE INDEX IF NOT EXISTS idx_announcement_batches_scheduled ON announcement_batches(scheduled_at) WHERE status = 'scheduled' AND scheduled_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_announcement_deliveries_status ON announcement_deliveries(announcement_id, status, user_id);
-
--- Intentionally NOT created here (created by migrations instead). bootstrap()
--- runs THIS file BEFORE the migrations, so an index that depends on data
--- cleanup or on a column added by a later migration cannot live in the
--- baseline — creating it on a dirty/old legacy DB would raise before the
--- relevant migration runs:
---   idx_access_requests_one_pending   (UNIQUE, migration v4 — after duplicate-pending collapse)
---   idx_vpn_keys_client_ip_reserved   (UNIQUE, migrations v5/v6 — after AWG client_ip repair)
---   idx_trial_requests_one_pending    (UNIQUE, migration v18 — after duplicate-pending collapse)
---   idx_vpn_keys_expires_at           (migration v13 — depends on the expires_at column it adds)
---   idx_vpn_keys_bundle_id            (migration v32 — depends on the bundle_id column it adds)
--- tests/test_schema_drift.py asserts this exact set is the ONLY difference
--- between schema.sql and a fully migrated database.
