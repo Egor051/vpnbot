@@ -303,6 +303,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     if the version being left behind was never captured. `tests/test_schema_drift.py`
     additionally fails if a `CREATE INDEX` reappears in the baseline.
 
+- **`deploy.sh` waited out the full schema window while the bot crash-looped, then
+  blamed the migration.** `NRestarts` was sampled exactly once, ~7s after start and
+  therefore before the first crash, so a bot dying in `bootstrap()` always passed
+  that check with `NRestarts=0`; the deploy then spent the entire
+  `SCHEMA_WAIT_TIMEOUT` waiting for a schema bump a dying process was never going to
+  make, and rolled back with "schema migration did not reach 33" — a true statement
+  that pointed away from the traceback. The schema poll now checks `NRestarts` and
+  `is-active` on every iteration, aborts on the first observed restart (or a `failed`
+  unit) and dumps the last `journalctl -u vpn-bot` lines with the rollback. A ~3
+  minute wait ending in the wrong diagnosis becomes a ~15s abort carrying the real
+  error.
+
 - **Root cause of the 2026-07-29 outage: a rollback that `chmod 700 /`.** Confirmed
   from the archive the previous deploy had written
   (`/var/backups/vpn-bot/backup-3a79aa6-20260729T131831.tar.gz`):
