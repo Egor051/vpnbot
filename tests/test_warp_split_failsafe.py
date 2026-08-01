@@ -284,8 +284,9 @@ def env_dir(tmp_path: Path):
         # NOT exist. Without this the script falls back to the real host marker
         # /etc/vpn-bot/warp-split.disabled; when an operator has toggled split
         # routing off on the box, apply/reconcile take the disabled branch (flush
-        # table T, emit no route/NAT/FORWARD) and every apply test fails — green in
-        # CI, red on the host. Keep the mock authoritative over host state.
+        # table T to empty and restore the direct-WAN NAT, never adding a per-prefix
+        # route) and every apply test fails — green in CI, red on the host. Keep the
+        # mock authoritative over host state.
         WARP_SPLIT_DISABLED_MARKER=str(tmp_path / "warp-split.disabled"),
     )
     return bin_dir, log_file, split_list, base_env

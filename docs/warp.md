@@ -300,10 +300,20 @@ interface and the `awg-quick@out-warp` process stay owned by systemd (observer
 model) and the bot never touches them.
 
 - **Disable** — reconcile table `T` to empty: every per-prefix `<prefix> dev
-  out-warp` route is retracted and all client/proxy traffic egresses direct. The
-  saved list (`/etc/vpn-bot/warp-split.list`) is **not erased**, and the anti-loop
-  `162.159.195.1/32 via eth0-gw`, the `ip rules` and the NAT/FORWARD chains are
-  left untouched.
+  out-warp` route **and the table default `default dev out-warp`** are retracted, and
+  the direct-WAN `MASQUERADE` for the client subnet and the proxy source plus the
+  `awg0 <-> <wan>` FORWARD accepts are (re)installed idempotently (`-C … || -A/-I`),
+  so all client/proxy traffic egresses direct and NATed. The saved list
+  (`/etc/vpn-bot/warp-split.list`) is **not erased**, and the anti-loop
+  `162.159.195.1/32 via eth0-gw` and the `ip rules` are left untouched.
+
+  Both halves matter on the **boot path**, where this runs after `awg-quick@out-warp`
+  (`Table=auto` planted `default dev out-warp` in table `T`) and after
+  `vpn-bot-warp-routes` (which swapped the NAT: dropped the direct
+  `-s 10.0.0.0/24 -o <wan> -j MASQUERADE`, added `-o out-warp -j MASQUERADE`).
+  Retracting only the per-prefix routes there would leave the tunnel default in place
+  — "off" would silently be a **full tunnel** — while dropping the default without
+  restoring the NAT would send clients out of the WAN un-masqueraded.
 - **Enable** — reconcile table `T` back to the saved list (selective).
 - **Restart** — flush then re-apply the list (final state: enabled).
 

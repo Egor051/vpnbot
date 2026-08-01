@@ -282,6 +282,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **«Split routing off» came back after a reboot as a FULL tunnel — the exact opposite
+  of what it says.** `vpn-bot-warp-split apply` honours the root-owned disabled marker
+  by reconciling table `T` to empty, but the disabled branch only retracted the
+  per-prefix `<prefix> dev out-warp` routes — its `awk` filter explicitly skipped
+  `default`. That is fine when the operator toggles the switch on a settled host, and
+  wrong on the boot path, where the unit runs after `awg-quick@out-warp` (`Table=auto`
+  had just planted `default dev out-warp` in table `T`) and after `vpn-bot-warp-routes`
+  (which had already swapped the NAT: dropped the direct
+  `-s 10.0.0.0/24 -o <wan> -j MASQUERADE`, added `-o out-warp -j MASQUERADE`). The
+  flush removed nothing that mattered, the tunnel default stayed, and every client
+  kept egressing through WARP while the log announced "all direct".
+  - **Fix — the disabled branch now reaches all-direct instead of describing it.** It
+    retracts the table default alongside the per-prefix routes, and — because an empty
+    table `T` alone would drop clients into `main` and out of the WAN device
+    *un-masqueraded*, which is a hard outage rather than a leak — it first restores the
+    direct `MASQUERADE` for the client subnet and the proxy source and the
+    `awg0 <-> <wan>` FORWARD accepts, reusing the same idempotent `-C … || -A/-I`
+    pattern as the enabled branch. NAT/FORWARD are installed *before* the routes are
+    torn down (make-before-break), so there is no window in which a client packet
+    leaves via the WAN device un-NATed.
+  - The anti-loop `<endpoint>/32` pin, the `ip rules`, the marker itself and the saved
+    prefix list are still untouched — "off" survives the reboot and "on" re-applies the
+    list verbatim. The log line now names what it actually did.
+  - The enabled branch is byte-for-byte unchanged and is pinned by a test asserting its
+    full ordered privileged-command transcript. The boot scenario is covered on
+    stateful `ip`/`iptables` stubs that assert the resulting system state (table `T`
+    empty but for the anti-loop, both masquerades present, marker and list intact) and
+    that a second apply changes nothing.
+
 - **The deploy gate's own test suite hung on the production host, blocking Phase 1
   entirely.** `deploy.sh`'s crash-abort path read the bot unit's journal with no
   `-n` and no `--since`, then trimmed the result to 40 lines in the shell. That is
