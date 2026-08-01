@@ -1409,6 +1409,37 @@ running_not_watched() {
   done <<< "$running"
 }
 
+# --------------------------------------------------------------------------- #
+# Test-venv freshness stamp
+# --------------------------------------------------------------------------- #
+# Digest of the CONTENT of both constraints files in the given tree. Phase 1
+# compares it against ${TEST_VENV}/.constraints-stamp to decide whether the
+# cached test venv still matches the tree under test.
+#
+# INVARIANT: the stamp depends on the file CONTENT and on NOTHING else — above
+# all not on where the files live.
+#
+# WHY `cat FILE... | sha256sum` and never `sha256sum FILE... | sha256sum`:
+# `sha256sum FILE1 FILE2` prints "<hash>␠␠<path>" per file, so its output
+# CONTAINS the paths, and hashing that text hashes the paths too. The files are
+# read from $WT — a detached worktree created under a FRESH `mktemp -d` on every
+# run (/tmp/tmp.XXXXXXXXXX/...). Hashing that output therefore produced a
+# different stamp on every deploy even for byte-identical constraints: it never
+# matched the recorded stamp, the venv was wiped and rebuilt from scratch each
+# time, and the "reusing test venv" branch below was dead code. Do not
+# "simplify" this back into hashing `sha256sum`'s output.
+# (Kept above the DEPLOY_SELFTEST seam so the stamp tests can drive it.)
+constraints_stamp() {
+  local wt="$1" f
+  # A missing or unreadable file would make `cat` contribute nothing for it and
+  # still yield a well-formed stamp — silently one that ignores half the pins.
+  # Fail loudly instead; a wrong stamp means testing against the wrong deps.
+  for f in "$wt/constraints-hashed.txt" "$wt/constraints-dev-hashed.txt"; do
+    [[ -r "$f" ]] || die "constraints file not readable: ${f} — cannot compute the test venv stamp"
+  done
+  cat "$wt/constraints-hashed.txt" "$wt/constraints-dev-hashed.txt" | sha256sum | awk '{print $1}'
+}
+
 # =========================================================================== #
 # PHASE 1 — validate with the bot still running (zero-downtime, no rollback)
 # =========================================================================== #
@@ -1476,7 +1507,7 @@ WT="$(mktemp -d)"
 git worktree add --detach "$WT" origin/main >/dev/null
 log "worktree at ${WT} (origin/main ${TAG})"
 
-want_stamp="$(sha256sum "$WT/constraints-hashed.txt" "$WT/constraints-dev-hashed.txt" | sha256sum | awk '{print $1}')"
+want_stamp="$(constraints_stamp "$WT")"
 have_stamp="$(cat "${TEST_VENV}/.constraints-stamp" 2>/dev/null || true)"
 if [[ ! -x "${TEST_VENV}/bin/python" || "$have_stamp" != "$want_stamp" ]]; then
   log "building test venv ${TEST_VENV} (constraints changed or venv absent)"

@@ -2,9 +2,12 @@
 import asyncio
 import contextlib
 import json
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from adapters.awg_config import MACHINE_OUTPUT_LIMIT as AWG_MACHINE_OUTPUT_LIMIT
 from adapters.awg_config import AwgConfigAdapter
@@ -180,6 +183,62 @@ def test_xray_stats_large_json_uses_machine_output_limit() -> None:
         assert parsed["user>>>xray_00599>>>traffic>>>downlink"] == 599
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# statsquery parsing: a counter at zero is normal, not an anomaly
+#
+# protobuf3 does not serialise zero-valued fields, so `xray api statsquery`
+# returns a counter that sits at 0 with no "value" key at all. Recording 0 is
+# correct (traffic accounting was never wrong); WARNING about it was not — every
+# inbound without traffic logged two lines per minute, thousands in bot.log. Only
+# a value that is PRESENT but non-numeric is a real anomaly worth a WARNING.
+# --------------------------------------------------------------------------- #
+XRAY_STATS_LOGGER = "adapters.xray_stats"
+_COUNTER = "user>>>xray_A7kQz>>>traffic>>>downlink"
+
+
+def _parse_counters(
+    caplog: pytest.LogCaptureFixture, item: dict[str, object]
+) -> tuple[dict[str, int], list[logging.LogRecord]]:
+    """Parse a one-item statsquery payload, returning the counters and any WARNING+
+    records the parse emitted."""
+    payload = json.dumps({"stat": [item]})
+    with caplog.at_level(logging.WARNING, logger=XRAY_STATS_LOGGER):
+        caplog.clear()
+        parsed = XrayStatsAdapter.parse_statsquery_output(payload)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    return parsed, warnings
+
+
+def test_xray_counter_without_value_key_is_zero_and_silent(caplog: pytest.LogCaptureFixture) -> None:
+    # The wire shape of an idle inbound: protobuf3 omits the zero-valued field.
+    parsed, warnings = _parse_counters(caplog, {"name": _COUNTER})
+    assert parsed == {_COUNTER: 0}
+    assert warnings == [], [r.getMessage() for r in warnings]
+
+
+def test_xray_counter_with_null_value_is_zero_and_silent(caplog: pytest.LogCaptureFixture) -> None:
+    # Same steady state, spelled explicitly as JSON null.
+    parsed, warnings = _parse_counters(caplog, {"name": _COUNTER, "value": None})
+    assert parsed == {_COUNTER: 0}
+    assert warnings == [], [r.getMessage() for r in warnings]
+
+
+def test_xray_non_numeric_value_still_warns_once_and_falls_back_to_zero(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A value that is PRESENT but not a number is a genuine anomaly: keep the WARNING.
+    parsed, warnings = _parse_counters(caplog, {"name": _COUNTER, "value": "abc"})
+    assert parsed == {_COUNTER: 0}
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert "abc" in warnings[0].getMessage()
+
+
+def test_xray_numeric_value_is_parsed_without_logging(caplog: pytest.LogCaptureFixture) -> None:
+    parsed, warnings = _parse_counters(caplog, {"name": _COUNTER, "value": 123})
+    assert parsed == {_COUNTER: 123}
+    assert warnings == [], [r.getMessage() for r in warnings]
 
 
 def test_awg_transfer_large_output_uses_machine_output_limit() -> None:
