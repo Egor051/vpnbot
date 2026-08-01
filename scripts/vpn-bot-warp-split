@@ -45,17 +45,44 @@ log "table T=$T iface=$IFACE wan=$WAN_DEV gw=$GW"
 case "${1:-apply}" in
 apply)
   # Boot/state honour: if the disabled marker is present, reconcile table T to
-  # EMPTY (all-direct) instead of to the list. Only script-managed per-prefix
-  # `<prefix> dev $IFACE` routes are retracted (the reconcile loop with an
-  # empty want-set). The anti-loop endpoint route, ip rules and NAT/FORWARD are
-  # left untouched, and the saved list file is NOT modified — re-applied on "on".
+  # EMPTY (all-direct) instead of to the list.
+  #
+  # "Empty" has to include the table default, not just the per-prefix routes. On
+  # the boot path this branch runs AFTER awg-quick (Table=auto installed
+  # `default dev $IFACE` in table T) and AFTER vpn-bot-warp-routes (which did the
+  # MASQUERADE swap: dropped `-s $CLIENT_NET -o $WAN_DEV -j MASQUERADE` and added
+  # `-o $IFACE -j MASQUERADE`). Retracting only the per-prefix routes there leaves
+  # that default in place — the "disabled" state would silently be a FULL tunnel,
+  # the exact opposite of what the marker asks for and of what this branch logs.
+  #
+  # Dropping the default alone is not enough either: with an empty table T the
+  # marked client/proxy traffic falls through to main and leaves via $WAN_DEV
+  # un-masqueraded (warp-routes took that rule away), i.e. dead clients. So the
+  # direct-WAN NAT and the awg0<->$WAN_DEV FORWARD accepts are restored here with
+  # the same `-C … || -A/-I` idempotent pattern the enabled branch uses.
+  #
+  # Order is make-before-break: NAT/FORWARD are (re)installed BEFORE the tunnel
+  # routes are torn down, so there is no window in which client packets egress via
+  # $WAN_DEV without a matching MASQUERADE.
+  #
+  # The anti-loop endpoint route, the ip rules, the marker and the saved list file
+  # are NOT touched — the list is re-applied verbatim on the next "on".
   if [ -e "$MARKER" ]; then
+    for SRC in "$CLIENT_NET" "$PROXY_SRC"; do
+      iptables -t nat -C POSTROUTING -s "$SRC" -o "$WAN_DEV" -j MASQUERADE 2>/dev/null \
+        || iptables -t nat -A POSTROUTING -s "$SRC" -o "$WAN_DEV" -j MASQUERADE
+    done
+    iptables -C FORWARD -i awg0 -o "$WAN_DEV" -j ACCEPT 2>/dev/null \
+      || iptables -I FORWARD 1 -i awg0 -o "$WAN_DEV" -j ACCEPT
+    iptables -C FORWARD -i "$WAN_DEV" -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+      || iptables -I FORWARD 1 -i "$WAN_DEV" -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
     ip route show table "$T" 2>/dev/null \
       | awk -v dev="$IFACE" '$1!="default" && $2=="dev" && $3==dev {print $1}' \
       | while read -r old; do
           ip route del "$old" dev "$IFACE" table "$T" 2>/dev/null || true
         done || true
-    log "split DISABLED by marker $MARKER — per-prefix WARP routes flushed from table $T (all direct)"
+    ip route del default dev "$IFACE" table "$T" 2>/dev/null || true
+    log "split DISABLED by marker $MARKER — table $T flushed (per-prefix + default dev $IFACE), direct MASQUERADE on $WAN_DEV restored (all direct)"
     exit 0
   fi
   [ -s "$LIST" ] || { log "empty/missing $LIST — abort (refuse to blackhole)"; exit 0; }

@@ -31,6 +31,8 @@ WAN_GW = "10.0.0.1"
 ENDPOINT_IP = "162.159.195.1"
 WAN_DEV = "eth0"
 WARP_IFACE = "out-warp"
+CLIENT_NET = "10.0.0.0/24"
+PROXY_SRC = "172.16.0.2"
 
 _LINUX_ONLY = pytest.mark.skipif(
     os.name != "posix" or not Path("/proc").exists(),
@@ -227,6 +229,8 @@ class TestSplitApplyMarkerHonour:
             "WARP_IFACE": WARP_IFACE,
             "WAN_DEV": WAN_DEV,
             "WARP_ENDPOINT_IP": ENDPOINT_IP,
+            "WARP_CLIENT_NET": CLIENT_NET,
+            "WARP_PROXY_SRC": PROXY_SRC,
             "WARP_SPLIT_LIST": str(split_list),
             "WARP_SPLIT_DISABLED_MARKER": str(marker),
         }
@@ -309,6 +313,387 @@ class TestSplitApplyMarkerHonour:
             f"ip route replace 10.10.0.0/16 dev {WARP_IFACE} table {FWMARK_DEC}" in ln
             for ln in lines
         ), "without the marker, apply must reconcile to the list; got:\n" + "\n".join(lines)
+
+    def test_marker_present_removes_table_default(self, tmp_path: Path) -> None:
+        """The table default (`default dev out-warp`, planted by awg-quick Table=auto)
+        must be retracted too — otherwise "disabled" is silently a FULL tunnel."""
+        log_file, split_list, marker, env = self._env(tmp_path)
+        split_list.write_text("10.10.0.0/16\n", encoding="utf-8")
+        marker.write_text("disabled\n", encoding="utf-8")
+        self._seed(
+            tmp_path,
+            env,
+            [
+                f"default dev {WARP_IFACE}",
+                f"{ENDPOINT_IP} via {WAN_GW} dev {WAN_DEV}",
+            ],
+        )
+
+        result = subprocess.run([str(SPLIT_SCRIPT), "apply"], env=env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+        lines = _log_lines(log_file)
+        assert any(
+            f"ip route del default dev {WARP_IFACE} table {FWMARK_DEC}" in ln for ln in lines
+        ), "disabled marker must drop the table default; got:\n" + "\n".join(lines)
+
+    def test_marker_present_restores_direct_masquerade(self, tmp_path: Path) -> None:
+        """With table T emptied, client/proxy traffic leaves via $WAN_DEV — the direct
+        MASQUERADE that vpn-bot-warp-routes swapped away has to come back."""
+        log_file, split_list, marker, env = self._env(tmp_path)
+        split_list.write_text("10.10.0.0/16\n", encoding="utf-8")
+        marker.write_text("disabled\n", encoding="utf-8")
+        self._seed(tmp_path, env, [f"default dev {WARP_IFACE}"])
+
+        result = subprocess.run([str(SPLIT_SCRIPT), "apply"], env=env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+        lines = _log_lines(log_file)
+        for src in (CLIENT_NET, PROXY_SRC):
+            assert any(
+                f"iptables -t nat -A POSTROUTING -s {src} -o {WAN_DEV} -j MASQUERADE" in ln
+                for ln in lines
+            ), f"disabled marker must restore the direct MASQUERADE for {src}; got:\n" + "\n".join(lines)
+        assert any(
+            f"iptables -I FORWARD 1 -i awg0 -o {WAN_DEV} -j ACCEPT" in ln for ln in lines
+        ), "disabled marker must ensure the awg0->WAN FORWARD accept; got:\n" + "\n".join(lines)
+        assert any(
+            f"iptables -I FORWARD 1 -i {WAN_DEV} -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT" in ln
+            for ln in lines
+        ), "disabled marker must ensure the WAN->awg0 FORWARD accept; got:\n" + "\n".join(lines)
+
+    def test_marker_present_log_matches_what_it_actually_did(self, tmp_path: Path) -> None:
+        _log_file, split_list, marker, env = self._env(tmp_path)
+        split_list.write_text("10.10.0.0/16\n", encoding="utf-8")
+        marker.write_text("disabled\n", encoding="utf-8")
+        self._seed(tmp_path, env, [f"default dev {WARP_IFACE}"])
+
+        result = subprocess.run([str(SPLIT_SCRIPT), "apply"], env=env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+        out = result.stdout
+        assert "split DISABLED by marker" in out
+        assert f"default dev {WARP_IFACE}" in out, (
+            "the log must name the table default it retracted; got:\n" + out
+        )
+        assert f"MASQUERADE on {WAN_DEV} restored" in out, (
+            "the log must name the NAT it restored; got:\n" + out
+        )
+        assert "all direct" in out
+
+
+# ---------------------------------------------------------------------------
+# vpn-bot-warp-split apply — the BOOT path with the marker present
+# ---------------------------------------------------------------------------
+#
+# The stubs below are STATEFUL: table T and the iptables rule set live in files
+# that `ip route del/replace` and `iptables -A/-I/-D` actually mutate, and that
+# `ip route show table` / `iptables -C` read back. That lets these tests assert on
+# the resulting SYSTEM STATE ("table T is empty except the anti-loop, both
+# masquerades are installed") rather than on a call transcript, and it makes the
+# idempotency test meaningful — the second apply sees the first one's result.
+
+
+def _make_stateful_split_stubs(bin_dir: Path, log_file: Path, *, fwmark: str = FWMARK_HEX) -> None:
+    _write_stub(bin_dir / "awg", f"""\
+    #!/bin/sh
+    echo "awg $@" >> {log_file}
+    if [ "$1" = "show" ] && [ "$3" = "fwmark" ]; then echo '{fwmark}'; fi
+    """)
+
+    # ip: `route show table` reads WARP_TABLE_STATE; `route del`/`route replace`
+    # rewrite it. Route lines are normalised to the two shapes the script emits:
+    # "<pfx> dev <dev>" and "<pfx> via <gw> dev <dev>".
+    _write_stub(bin_dir / "ip", f"""\
+    #!/bin/sh
+    echo "ip $@" >> {log_file}
+    __tbl="${{WARP_TABLE_STATE:-}}"
+    if [ "$1" = "route" ] && [ "$2" = "show" ] && [ "$3" = "default" ]; then
+        echo "default via {WAN_GW} dev {WAN_DEV}"
+        exit 0
+    fi
+    if [ "$1" = "route" ] && [ "$2" = "show" ] && [ "$3" = "table" ]; then
+        if [ -n "$__tbl" ] && [ -f "$__tbl" ]; then cat "$__tbl"; fi
+        exit 0
+    fi
+    if [ "$1" = "route" ] && {{ [ "$2" = "del" ] || [ "$2" = "replace" ]; }}; then
+        [ -n "$__tbl" ] || exit 0
+        # `ip route show` prints host routes without the /32 — normalise so a route
+        # written as <ip>/32 round-trips through a later show/del.
+        __pfx="${{3%/32}}"
+        if [ "$4" = "dev" ]; then
+            __line="$__pfx dev $5"
+        elif [ "$4" = "via" ]; then
+            __line="$__pfx via $5 dev $7"
+        else
+            __line="$__pfx"
+        fi
+        [ -f "$__tbl" ] || : > "$__tbl"
+        grep -Fvx -e "$__line" "$__tbl" > "$__tbl.tmp" 2>/dev/null || true
+        mv "$__tbl.tmp" "$__tbl"
+        # `replace` is delete-then-append → idempotent, never duplicates a route.
+        if [ "$2" = "replace" ]; then printf '%s\\n' "$__line" >> "$__tbl"; fi
+        exit 0
+    fi
+    exit 0
+    """)
+
+    # iptables: the rule set lives in WARP_IPTABLES_STATE, one normalised rule per
+    # line (the verb -C/-A/-I/-D and the -I rule number are stripped, so a -C probe
+    # and the -A/-I that installs the same rule share a key). -C exits 1 when the
+    # rule is absent, which is what drives the script's idempotent `-C || -A` blocks.
+    _write_stub(bin_dir / "iptables", f"""\
+    #!/bin/sh
+    echo "iptables $@" >> {log_file}
+    __st="${{WARP_IPTABLES_STATE:-}}"
+    __op=""
+    __key=""
+    __n=0
+    for __a in "$@"; do
+        case "$__a" in
+            -C|-A|-D) __op="$__a"; __n=0; continue;;
+            -I) __op="-I"; __n=0; continue;;
+        esac
+        if [ -n "$__op" ]; then __n=$((__n+1)); fi
+        # `-I <chain> <rulenum>` — drop the rule number, it is not part of the rule.
+        if [ "$__op" = "-I" ] && [ "$__n" = 2 ]; then
+            case "$__a" in ''|*[!0-9]*) ;; *) continue;; esac
+        fi
+        if [ -z "$__key" ]; then __key="$__a"; else __key="$__key $__a"; fi
+    done
+    [ -n "$__st" ] || exit 0
+    [ -f "$__st" ] || : > "$__st"
+    # `-e` is required: a rule key starts with "-t nat …" and would otherwise be
+    # parsed by grep as options.
+    case "$__op" in
+        -C) grep -Fxq -e "$__key" "$__st" || exit 1; exit 0;;
+        -A|-I) grep -Fxq -e "$__key" "$__st" || printf '%s\\n' "$__key" >> "$__st"; exit 0;;
+        -D) grep -Fvx -e "$__key" "$__st" > "$__st.tmp" 2>/dev/null || true; mv "$__st.tmp" "$__st"; exit 0;;
+    esac
+    exit 0
+    """)
+
+    _write_stub(bin_dir / "systemctl", f"#!/bin/sh\necho \"systemctl $@\" >> {log_file}\n")
+    _write_stub(bin_dir / "logger", f"#!/bin/sh\necho \"logger $@\" >> {log_file}\n")
+
+
+def _state_lines(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    return [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+@_LINUX_ONLY
+class TestSplitApplyMarkerHonourOnBoot:
+    """The boot ordering that made "disabled" mean "full tunnel".
+
+    On boot the units run awg-quick@out-warp → vpn-bot-warp-routes →
+    vpn-bot-warp-split. By the time apply reaches the marker branch:
+
+      * awg-quick (``Table=auto``) has installed ``default dev out-warp`` in table T;
+      * vpn-bot-warp-routes has done the MASQUERADE swap — it dropped
+        ``-s <client net> -o <wan> -j MASQUERADE`` and added ``-o out-warp -j MASQUERADE``.
+
+    Retracting only the per-prefix routes there leaves the tunnel default in place,
+    so the "off" state is a full tunnel; dropping the default without restoring the
+    direct NAT leaves clients egressing via the WAN un-masqueraded. Both halves are
+    asserted here on real (stub-backed) state.
+    """
+
+    ANTI_LOOP = f"{ENDPOINT_IP} via {WAN_GW} dev {WAN_DEV}"
+    WARP_MASQ = f"-t nat POSTROUTING -o {WARP_IFACE} -j MASQUERADE"
+    DIRECT_MASQ_CLIENT = f"-t nat POSTROUTING -s {CLIENT_NET} -o {WAN_DEV} -j MASQUERADE"
+    DIRECT_MASQ_PROXY = f"-t nat POSTROUTING -s {PROXY_SRC} -o {WAN_DEV} -j MASQUERADE"
+    FWD_OUT = f"FORWARD -i awg0 -o {WAN_DEV} -j ACCEPT"
+    FWD_BACK = f"FORWARD -i {WAN_DEV} -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT"
+
+    def _boot_env(self, tmp_path: Path) -> tuple[Path, Path, Path, Path, Path, dict[str, str]]:
+        """Return (log, table_state, iptables_state, split_list, marker, env).
+
+        The initial state is exactly the post-warp-routes boot state: table T holds
+        the awg-quick default plus the anti-loop pin, the rule set holds only the
+        out-warp MASQUERADE (the direct one was swapped away), and the marker is set.
+        """
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        log_file = tmp_path / "calls.log"
+        table_state = tmp_path / "table_t"
+        iptables_state = tmp_path / "iptables_rules"
+        split_list = tmp_path / "warp-split.list"
+        marker = tmp_path / "warp-split.disabled"
+
+        _make_stateful_split_stubs(bin_dir, log_file)
+
+        table_state.write_text(
+            f"default dev {WARP_IFACE}\n{self.ANTI_LOOP}\n", encoding="utf-8"
+        )
+        iptables_state.write_text(self.WARP_MASQ + "\n", encoding="utf-8")
+        split_list.write_text("10.10.0.0/16\n192.168.5.0/24\n", encoding="utf-8")
+        marker.write_text("disabled\n", encoding="utf-8")
+
+        env = {
+            "PATH": str(bin_dir) + ":/usr/bin:/bin",
+            "WARP_IFACE": WARP_IFACE,
+            "WAN_DEV": WAN_DEV,
+            "WARP_ENDPOINT_IP": ENDPOINT_IP,
+            "WARP_CLIENT_NET": CLIENT_NET,
+            "WARP_PROXY_SRC": PROXY_SRC,
+            "WARP_SPLIT_LIST": str(split_list),
+            "WARP_SPLIT_DISABLED_MARKER": str(marker),
+            "WARP_TABLE_STATE": str(table_state),
+            "WARP_IPTABLES_STATE": str(iptables_state),
+        }
+        return log_file, table_state, iptables_state, split_list, marker, env
+
+    def _apply(self, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(SPLIT_SCRIPT), "apply"], env=env, capture_output=True, text=True)
+
+    def test_boot_state_is_all_direct_not_full_tunnel(self, tmp_path: Path) -> None:
+        log_file, table_state, iptables_state, split_list, marker, env = self._boot_env(tmp_path)
+        # Pre-condition: the boot state this branch has to repair.
+        assert f"default dev {WARP_IFACE}" in _state_lines(table_state)
+        assert self.DIRECT_MASQ_CLIENT not in _state_lines(iptables_state)
+
+        result = self._apply(env)
+        assert result.returncode == 0, result.stderr
+
+        # Table T is empty apart from the anti-loop pin → all client traffic direct.
+        assert _state_lines(table_state) == [self.ANTI_LOOP], (
+            "table T must hold only the anti-loop route; got "
+            f"{_state_lines(table_state)}\n--- calls ---\n" + "\n".join(_log_lines(log_file))
+        )
+        # Both direct-WAN masquerades are back, the out-warp one is left alone.
+        rules = _state_lines(iptables_state)
+        assert self.DIRECT_MASQ_CLIENT in rules, f"missing client NAT; got {rules}"
+        assert self.DIRECT_MASQ_PROXY in rules, f"missing proxy NAT; got {rules}"
+        assert self.WARP_MASQ in rules, f"out-warp NAT must not be touched; got {rules}"
+        # FORWARD accepts for awg0 <-> WAN are in place.
+        assert self.FWD_OUT in rules, f"missing awg0->WAN FORWARD accept; got {rules}"
+        assert self.FWD_BACK in rules, f"missing WAN->awg0 FORWARD accept; got {rules}"
+        # Marker and saved list are untouched — "off" survives, "on" re-applies the list.
+        assert marker.read_text(encoding="utf-8") == "disabled\n"
+        assert split_list.read_text(encoding="utf-8") == "10.10.0.0/16\n192.168.5.0/24\n"
+
+    def test_boot_flush_also_retracts_per_prefix_routes(self, tmp_path: Path) -> None:
+        """Per-prefix retraction (the pre-existing half) still happens alongside."""
+        _log, table_state, _ipt, _list, _marker, env = self._boot_env(tmp_path)
+        table_state.write_text(
+            f"default dev {WARP_IFACE}\n"
+            f"10.10.0.0/16 dev {WARP_IFACE}\n"
+            f"192.168.5.0/24 dev {WARP_IFACE}\n"
+            f"{self.ANTI_LOOP}\n",
+            encoding="utf-8",
+        )
+
+        result = self._apply(env)
+        assert result.returncode == 0, result.stderr
+        assert _state_lines(table_state) == [self.ANTI_LOOP], _state_lines(table_state)
+
+    def test_boot_apply_is_idempotent(self, tmp_path: Path) -> None:
+        log_file, table_state, iptables_state, split_list, marker, env = self._boot_env(tmp_path)
+
+        first = self._apply(env)
+        assert first.returncode == 0, first.stderr
+        table_after_first = _state_lines(table_state)
+        rules_after_first = _state_lines(iptables_state)
+        log_file.write_text("", encoding="utf-8")  # only look at the second run's calls
+
+        second = self._apply(env)
+        assert second.returncode == 0, second.stderr
+
+        # Nothing changed: same table, same rule set, no duplicated rules.
+        assert _state_lines(table_state) == table_after_first
+        assert _state_lines(iptables_state) == rules_after_first
+        assert len(rules_after_first) == len(set(rules_after_first)), (
+            f"duplicate iptables rules after re-apply: {rules_after_first}"
+        )
+        # The second run probed with -C and installed nothing.
+        second_calls = _log_lines(log_file)
+        assert not any("-A POSTROUTING" in ln for ln in second_calls), (
+            "re-apply must not re-add NAT; got:\n" + "\n".join(second_calls)
+        )
+        assert not any("-I FORWARD" in ln for ln in second_calls), (
+            "re-apply must not re-insert FORWARD accepts; got:\n" + "\n".join(second_calls)
+        )
+        assert marker.exists()
+        assert split_list.read_text(encoding="utf-8") == "10.10.0.0/16\n192.168.5.0/24\n"
+
+    def test_enabled_branch_unchanged_on_the_same_stubs(self, tmp_path: Path) -> None:
+        """Sanity counterpart: without the marker the same boot state converges to the
+        selective table (list prefixes present, tunnel default gone, anti-loop kept)."""
+        _log, table_state, iptables_state, split_list, marker, env = self._boot_env(tmp_path)
+        marker.unlink()
+
+        result = self._apply(env)
+        assert result.returncode == 0, result.stderr
+
+        assert sorted(_state_lines(table_state)) == sorted(
+            [
+                self.ANTI_LOOP,
+                f"10.10.0.0/16 dev {WARP_IFACE}",
+                f"192.168.5.0/24 dev {WARP_IFACE}",
+            ]
+        ), _state_lines(table_state)
+        rules = _state_lines(iptables_state)
+        assert self.DIRECT_MASQ_CLIENT in rules
+        assert self.DIRECT_MASQ_PROXY in rules
+        assert split_list.read_text(encoding="utf-8") == "10.10.0.0/16\n192.168.5.0/24\n"
+
+
+@_LINUX_ONLY
+class TestSplitApplyEnabledBranchPinned:
+    """Regression pin: the ENABLED (marker-absent) branch must keep emitting exactly
+    the same privileged-command sequence it did before the disabled branch was
+    completed. Written as a full ordered transcript so any change to the enabled
+    path — a reordering, an extra rule, a dropped route — fails here explicitly
+    instead of being absorbed by the looser per-behaviour assertions above.
+    """
+
+    def test_enabled_apply_emits_the_exact_same_command_sequence(self, tmp_path: Path) -> None:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        log_file = tmp_path / "calls.log"
+        split_list = tmp_path / "warp-split.list"
+        marker = tmp_path / "warp-split.disabled"  # deliberately NOT created
+        seed = tmp_path / "table_seed"
+        _make_split_stubs(bin_dir, log_file)
+        split_list.write_text("10.10.0.0/16\n", encoding="utf-8")
+        seed.write_text(
+            f"198.51.100.0/24 dev {WARP_IFACE}\n{ENDPOINT_IP} via {WAN_GW} dev {WAN_DEV}\n",
+            encoding="utf-8",
+        )
+        env = {
+            "PATH": str(bin_dir) + ":/usr/bin:/bin",
+            "WARP_IFACE": WARP_IFACE,
+            "WAN_DEV": WAN_DEV,
+            "WARP_ENDPOINT_IP": ENDPOINT_IP,
+            "WARP_CLIENT_NET": CLIENT_NET,
+            "WARP_PROXY_SRC": PROXY_SRC,
+            "WARP_SPLIT_LIST": str(split_list),
+            "WARP_SPLIT_DISABLED_MARKER": str(marker),
+            "WARP_TABLE_SEED": str(seed),
+        }
+
+        result = subprocess.run([str(SPLIT_SCRIPT), "apply"], env=env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+        assert _log_lines(log_file) == [
+            f"awg show {WARP_IFACE} fwmark",
+            f"ip route show default dev {WAN_DEV}",
+            f"ip route del default dev {WARP_IFACE} table {FWMARK_DEC}",
+            f"ip route replace {ENDPOINT_IP}/32 via {WAN_GW} dev {WAN_DEV} table {FWMARK_DEC}",
+            f"ip route show table {FWMARK_DEC}",
+            f"ip route del 198.51.100.0/24 dev {WARP_IFACE} table {FWMARK_DEC}",
+            f"ip route replace 10.10.0.0/16 dev {WARP_IFACE} table {FWMARK_DEC}",
+            f"iptables -t nat -C POSTROUTING -s {CLIENT_NET} -o {WAN_DEV} -j MASQUERADE",
+            f"iptables -t nat -A POSTROUTING -s {CLIENT_NET} -o {WAN_DEV} -j MASQUERADE",
+            f"iptables -t nat -C POSTROUTING -s {PROXY_SRC} -o {WAN_DEV} -j MASQUERADE",
+            f"iptables -t nat -A POSTROUTING -s {PROXY_SRC} -o {WAN_DEV} -j MASQUERADE",
+            f"iptables -C FORWARD -i awg0 -o {WAN_DEV} -j ACCEPT",
+            f"iptables -I FORWARD 1 -i awg0 -o {WAN_DEV} -j ACCEPT",
+            f"iptables -C FORWARD -i {WAN_DEV} -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT",
+            f"iptables -I FORWARD 1 -i {WAN_DEV} -o awg0 -m state --state RELATED,ESTABLISHED -j ACCEPT",
+        ]
 
 
 # ---------------------------------------------------------------------------
