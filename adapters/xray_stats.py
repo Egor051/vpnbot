@@ -51,8 +51,16 @@ class XrayStatsAdapter:
             value = item.get("value")
             if not isinstance(name, str):
                 continue
+            if value is None:
+                # protobuf3 does not serialise zero-valued fields, so a counter that
+                # legitimately sits at 0 comes back from `xray api statsquery` with no
+                # "value" key at all (item.get -> None). That is the normal steady
+                # state of every inbound without traffic, not an anomaly: record 0 and
+                # stay quiet. Warning here filled bot.log with thousands of lines.
+                result[name] = 0
+                continue
             try:
-                result[name] = int(value)  # type: ignore[arg-type]
+                result[name] = int(value)
             except (TypeError, ValueError):
                 logger.warning("Xray stats: нечисловое значение счётчика %r=%r, использую 0", name, value)
                 result[name] = 0

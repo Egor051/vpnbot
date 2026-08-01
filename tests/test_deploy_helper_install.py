@@ -537,3 +537,110 @@ def test_networkd_check_flags_absent_dropin(tmp_path: Path) -> None:
     proc = _run_networkd_check(tmp_path, dropin_present=False, analyze_value="yes")
     assert "RC=1" in proc.stdout
     assert "absent" in proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Test-venv freshness stamp (constraints_stamp)
+#
+# The stamp decides whether Phase 1 reuses the cached test venv or wipes and
+# rebuilds it. It is computed over the constraints files in $WT — a detached
+# worktree living under a FRESH `mktemp -d` on every run — so it must depend on
+# the file CONTENT and on nothing else. It once hashed the output of
+# `sha256sum FILE1 FILE2`, which embeds those per-run paths in the digest input:
+# the stamp changed on every deploy, never matched the recorded one, and the venv
+# was rebuilt from scratch each time (the "reusing test venv" branch was dead
+# code). These tests pin the path-independence directly.
+# --------------------------------------------------------------------------- #
+def _make_worktree(where: Path, *, prod: str = "prod-pins\n", dev: str = "dev-pins\n") -> Path:
+    """Materialise a fake $WT carrying both constraints files."""
+    where.mkdir(parents=True, exist_ok=True)
+    (where / "constraints-hashed.txt").write_text(prod, encoding="utf-8")
+    (where / "constraints-dev-hashed.txt").write_text(dev, encoding="utf-8")
+    return where
+
+
+def _run_constraints_stamp(tmp_path: Path, wt: Path) -> subprocess.CompletedProcess[str]:
+    """Source deploy.sh (selftest seam) and call constraints_stamp for `wt`."""
+    driver = tmp_path / "stamp-driver.sh"
+    driver.write_text(
+        "set -uo pipefail\n"
+        "export DEPLOY_SELFTEST=1\n"
+        f'source "{DEPLOY_SH}"\n'
+        # Neutralise the EXIT trap's venv/worktree logic for the test environment.
+        'VENV=/nonexistent; VENV_PREV=/nonexistent; WT=""; STAGE=""\n'
+        # Sourcing deploy.sh re-enables `set -e`, so capture rc in a set -e-safe form.
+        f'if out="$(constraints_stamp "{wt}")"; then printf "STAMP=%s\\n" "$out"; '
+        'else printf "RC=%s\\n" "$?"; fi\n',
+        encoding="utf-8",
+    )
+    return subprocess.run(["bash", str(driver)], cwd=str(tmp_path), capture_output=True, text=True)
+
+
+def _stamp_of(tmp_path: Path, wt: Path) -> str:
+    proc = _run_constraints_stamp(tmp_path, wt)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    stamps = [ln[len("STAMP="):] for ln in proc.stdout.splitlines() if ln.startswith("STAMP=")]
+    assert len(stamps) == 1, proc.stdout + proc.stderr
+    assert stamps[0], "constraints_stamp printed an empty stamp"
+    return stamps[0]
+
+
+def test_constraints_stamp_is_identical_across_different_directories(tmp_path: Path) -> None:
+    """THE regression: two worktrees at different paths with byte-identical
+    constraints must stamp the same, or every deploy rebuilds the test venv."""
+    first = _make_worktree(tmp_path / "wt-one")
+    second = _make_worktree(tmp_path / "some" / "deeper" / "wt-two")
+    assert _stamp_of(tmp_path, first) == _stamp_of(tmp_path, second)
+
+
+def test_constraints_stamp_changes_when_prod_constraints_change(tmp_path: Path) -> None:
+    base = _make_worktree(tmp_path / "wt")
+    before = _stamp_of(tmp_path, base)
+    (base / "constraints-hashed.txt").write_text("prod-pins-bumped\n", encoding="utf-8")
+    assert _stamp_of(tmp_path, base) != before
+
+
+def test_constraints_stamp_changes_when_dev_constraints_change(tmp_path: Path) -> None:
+    base = _make_worktree(tmp_path / "wt")
+    before = _stamp_of(tmp_path, base)
+    (base / "constraints-dev-hashed.txt").write_text("dev-pins-bumped\n", encoding="utf-8")
+    assert _stamp_of(tmp_path, base) != before
+
+
+def test_constraints_stamp_does_not_confuse_a_swap_of_the_two_files(tmp_path: Path) -> None:
+    """Concatenation order is part of the digest: swapping the two files' contents
+    is a different dependency set and must not stamp the same."""
+    straight = _make_worktree(tmp_path / "wt-straight", prod="A\n", dev="B\n")
+    swapped = _make_worktree(tmp_path / "wt-swapped", prod="B\n", dev="A\n")
+    assert _stamp_of(tmp_path, straight) != _stamp_of(tmp_path, swapped)
+
+
+@pytest.mark.parametrize("missing", ["constraints-hashed.txt", "constraints-dev-hashed.txt"])
+def test_constraints_stamp_fails_loudly_on_a_missing_constraints_file(
+    tmp_path: Path, missing: str
+) -> None:
+    """A missing file would otherwise contribute nothing to `cat` and still yield a
+    well-formed stamp — one that silently ignores half the pins."""
+    wt = _make_worktree(tmp_path / "wt")
+    (wt / missing).unlink()
+    proc = _run_constraints_stamp(tmp_path, wt)
+    assert "STAMP=" not in proc.stdout, proc.stdout
+    assert "RC=" in proc.stdout and "RC=0" not in proc.stdout, proc.stdout
+    assert missing in proc.stderr and "not readable" in proc.stderr, proc.stderr
+
+
+def test_deploy_sh_stamps_constraints_by_content_not_by_sha256sum_output() -> None:
+    """Content guard: the call site must go through constraints_stamp, the
+    path-embedding `sha256sum FILE1 FILE2 | sha256sum` form must stay gone, and the
+    rationale comment must survive so this is not "fixed" back."""
+    text = _read(DEPLOY_SH)
+    assert "constraints_stamp() {" in text
+    assert 'want_stamp="$(constraints_stamp "$WT")"' in text
+    assert 'sha256sum "$WT/constraints-hashed.txt"' not in text, (
+        "hashing `sha256sum FILE...` output re-introduces the per-run worktree path "
+        "into the stamp — the test venv would be rebuilt on every deploy"
+    )
+    window = text[text.index("# Test-venv freshness stamp"):][:2000].lower()
+    assert "content" in window and "path" in window
+    assert "mktemp" in window and "worktree" in window
+    assert "dead code" in window
