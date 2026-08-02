@@ -42,6 +42,16 @@ WARP_HELPERS = (
     "vpn-bot-warp-status",
 )
 
+# The WARP selective-split layer: installed from scripts/ to /usr/local/sbin like the
+# four above, but deliberately NEVER re-applied by the deploy (the on/off state is the
+# operator's, carried by the root-owned marker file). Registration completeness for
+# ALL scripts/ helpers is enforced by tests/test_deploy_helper_registry_guard.py.
+SPLIT_HELPERS = (
+    "vpn-bot-warp-split",
+    "vpn-bot-warp-split-state",
+    "vpn-bot-warp-split-apply",
+)
+
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -110,6 +120,39 @@ def test_deploy_sh_manages_hy2_warp_mark_helper() -> None:
     assert (
         "scripts/vpnbot-hy2-warp-mark|/usr/local/sbin/vpnbot-hy2-warp-mark" in text
     ), "vpnbot-hy2-warp-mark must be in OUT_OF_REPO_HELPERS"
+
+
+def test_deploy_sh_manages_the_warp_split_layer_and_failsafe() -> None:
+    """PR #274 changed scripts/vpn-bot-warp-split, the deploy reported "no drift to
+    close", and /usr/local/sbin/vpn-bot-warp-split stayed stale — these helpers were
+    simply absent from OUT_OF_REPO_HELPERS (2026-08-01). warp-failsafe is installed
+    from scripts/ by the same setup script and was missing for the same reason."""
+    text = _read(DEPLOY_SH)
+    for helper in (*SPLIT_HELPERS, "warp-failsafe"):
+        assert f"scripts/{helper}|/usr/local/sbin/{helper}|absent-ok" in text, (
+            f"{helper} is installed to /usr/local/sbin and must be in OUT_OF_REPO_HELPERS"
+        )
+
+
+def test_deploy_sh_never_reapplies_the_split_layer_or_the_failsafe() -> None:
+    """Registering the split helpers must not pull a restart along "for symmetry"
+    with warp-routes / vpnbot-hy2-warp-mark. The split ON/OFF state lives in the
+    root-owned marker /etc/vpn-bot/warp-split.disabled and the saved list — operator
+    state, not git state — so the deploy refreshes the files and touches nothing
+    else. warp-failsafe is a boot watchdog that sleeps ~75s before acting, so
+    re-running it mid-deploy would both stall the deploy and risk reverting live
+    WARP routing. The rationale comment must survive so this is not "completed"."""
+    text = _read(DEPLOY_SH)
+    assert "systemctl restart vpn-bot-warp-split" not in text
+    assert "systemctl restart warp-failsafe" not in text
+    # No unit variable is defined or expanded for either (the naming comment that
+    # explains their deliberate absence mentions the names, so match the code forms).
+    for var in ("SPLIT_UNIT", "FAILSAFE_UNIT"):
+        assert f"{var}=" not in text and f"${var}" not in text and f"${{{var}}}" not in text
+    lowered = text.lower()
+    assert "explicit exception" in lowered
+    assert "warp-split.disabled" in lowered
+    assert "symmetry" in lowered and "operator" in lowered
 
 
 def test_deploy_sh_reapplies_hy2_mark_on_was_active_not_on_file_change() -> None:
@@ -238,13 +281,15 @@ def _make_stub(path: Path, body: str) -> None:
 
 def _driver(tmp_path: Path, *, installed: dict[str, str], sources: dict[str, str],
             mode: str, warp_pre: str = "active", fail_restart: bool = False,
-            stub_rollback: bool = False, hy2_pre: str | None = None) -> subprocess.CompletedProcess[str]:
+            stub_rollback: bool = False, hy2_pre: str | None = None,
+            helpers: tuple[str, ...] = WARP_HELPERS) -> subprocess.CompletedProcess[str]:
     """Source deploy.sh (selftest seam) and call one helper function under stubs.
 
     installed: helper basename -> file contents to place in the fake /usr/local/sbin
                (omit a name to leave it absent).
     sources:   helper basename -> file contents for the fake checkout scripts/ dir.
     mode:      'scan' or 'install'.
+    helpers:   basenames to write into the test's OUT_OF_REPO_HELPERS override.
     """
     stub_dir = tmp_path / "stub"
     app_dir = tmp_path / "repo"
@@ -275,7 +320,7 @@ def _driver(tmp_path: Path, *, installed: dict[str, str], sources: dict[str, str
     ))
 
     helper_lines = "\n".join(
-        f'  "scripts/{name}|{sbin}/{name}"' for name in WARP_HELPERS
+        f'  "scripts/{name}|{sbin}/{name}"' for name in helpers
     )
     rollback_override = (
         'rollback() { echo "ROLLBACK_CALLED"; exit 42; }\n' if stub_rollback else ""
@@ -319,7 +364,7 @@ def _driver(tmp_path: Path, *, installed: dict[str, str], sources: dict[str, str
         + "\n---SYSTEMCTL---\n" + (sc_log.read_text() if sc_log.exists() else "")
     )
     # Stash resolved paths for assertions.
-    proc.args = {"sbin": sbin, "app_dir": app_dir}  # type: ignore[assignment]
+    proc.args = {"sbin": sbin, "app_dir": app_dir}
     return proc
 
 
@@ -354,7 +399,7 @@ def test_install_reinstalls_drifted_routes_and_restarts_when_active(tmp_path: Pa
         warp_pre="active",
     )
     assert proc.returncode == 0, proc.stderr + proc.stdout
-    sbin = proc.args["sbin"]  # type: ignore[index]
+    sbin = proc.args["sbin"]
     # The drifted routes helper now matches the fresh source.
     assert (sbin / "vpn-bot-warp-routes").read_text() == "NEW\n"
     # A changed routes helper on an active unit triggers reload + restart.
@@ -377,7 +422,7 @@ def test_install_does_not_restart_when_only_a_nonroutes_helper_drifts(tmp_path: 
         warp_pre="active",
     )
     assert proc.returncode == 0, proc.stderr + proc.stdout
-    sbin = proc.args["sbin"]  # type: ignore[index]
+    sbin = proc.args["sbin"]
     assert (sbin / "vpn-bot-warp-status").read_text() == "NEW\n"
     assert "systemctl restart warp-routes.service" not in proc.stdout
 
@@ -393,7 +438,7 @@ def test_install_reinstalls_routes_but_skips_restart_when_inactive(tmp_path: Pat
         warp_pre="inactive",
     )
     assert proc.returncode == 0, proc.stderr + proc.stdout
-    sbin = proc.args["sbin"]  # type: ignore[index]
+    sbin = proc.args["sbin"]
     assert (sbin / "vpn-bot-warp-routes").read_text() == "NEW\n"  # still refreshed
     assert "systemctl restart warp-routes.service" not in proc.stdout
     assert "not restarted" in proc.stdout.lower()
@@ -484,6 +529,55 @@ def test_install_hy2_mark_reapply_failure_routes_through_rollback(tmp_path: Path
     )
     assert proc.returncode == 42, proc.stdout + proc.stderr
     assert "ROLLBACK_CALLED" in proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Behavioural: the WARP split layer — refreshed on disk, never re-applied
+# --------------------------------------------------------------------------- #
+def test_install_refreshes_a_drifted_split_helper(tmp_path: Path) -> None:
+    """THE 2026-08-01 regression, end to end: a split helper whose installed copy
+    lags the checkout must actually be reinstalled, and the run must NOT report
+    "no drift to close" (which is exactly what the blind gate printed)."""
+    proc = _driver(
+        tmp_path,
+        sources={n: "NEW\n" for n in SPLIT_HELPERS},
+        installed={
+            "vpn-bot-warp-split": "OLD\n",          # drift -> reinstall
+            "vpn-bot-warp-split-state": "NEW\n",    # synced
+            # -split-apply absent: the split layer is not deployed everywhere
+        },
+        mode="install",
+        warp_pre="active",
+        helpers=SPLIT_HELPERS,
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    sbin = proc.args["sbin"]
+    assert (sbin / "vpn-bot-warp-split").read_text() == "NEW\n"
+    assert not (sbin / "vpn-bot-warp-split-apply").exists()  # absent-ok stays absent
+    assert "drift closed" in proc.stdout
+    assert "no drift to close" not in proc.stdout
+
+
+def test_install_does_not_restart_anything_for_a_drifted_split_helper(tmp_path: Path) -> None:
+    """The split ON/OFF state belongs to the operator (root-owned marker file), so a
+    refreshed helper must NOT be re-applied: no vpn-bot-warp-split restart, and no
+    warp-routes restart either (the drifted file is not the routes helper)."""
+    proc = _driver(
+        tmp_path,
+        sources={n: "NEW\n" for n in SPLIT_HELPERS},
+        installed={n: "OLD\n" for n in SPLIT_HELPERS},
+        mode="install",
+        warp_pre="active",
+        hy2_pre="inactive",
+        helpers=SPLIT_HELPERS,
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert "systemctl restart vpn-bot-warp-split.service" not in proc.stdout
+    assert "systemctl restart warp-routes.service" not in proc.stdout
+    # Every split helper was still refreshed on disk.
+    sbin = proc.args["sbin"]
+    for name in SPLIT_HELPERS:
+        assert (sbin / name).read_text() == "NEW\n"
 
 
 # --------------------------------------------------------------------------- #

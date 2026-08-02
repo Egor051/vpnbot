@@ -188,12 +188,24 @@ SUBSCRIPTION_BIND_WAIT="${SUBSCRIPTION_BIND_WAIT:-30}"
 # source fix and took warp-routes.service down (deploy/helpers/README.md L101-106).
 # Phase 2 (install_out_of_repo_helpers) now closes that drift: it reinstalls any
 # helper whose installed copy differs from the checkout. Managed here are the WARP
-# helpers (the ones the WARP deploy presupposes, README L94-99, with no other
-# install step) plus vpnbot-hy2-warp-mark (the Hysteria2 -> WARP fwmark tagger,
-# previously hand-maintained on the box) and vpn-bot-db-perms (the vpn.db ownership
-# helper vpn-bot.service runs as ExecStartPre); the backend helpers under
-# deploy/helpers/ are installed by deploy/setup-nonroot-helper-mode.sh and are out
-# of scope here.
+# full-tunnel helpers (the ones the WARP deploy presupposes, README L94-99, with no
+# other install step), the WARP split-routing layer + the boot failsafe (installed
+# from scripts/ by deploy/setup-nonroot-helper-mode.sh L82-92), vpnbot-hy2-warp-mark
+# (the Hysteria2 -> WARP fwmark tagger, previously hand-maintained on the box) and
+# vpn-bot-db-perms (the vpn.db ownership helper vpn-bot.service runs as
+# ExecStartPre); the backend helpers under deploy/helpers/ are installed by
+# deploy/setup-nonroot-helper-mode.sh and are out of scope here.
+#
+# THIS LIST MUST COVER EVERY scripts/ FILE THAT IS INSTALLED TO /usr/local/sbin.
+# A helper that is installed on the host but missing here is invisible to the
+# drift gate, which then reports "no drift to close" while the installed copy
+# stays stale — a green report on an unclosed drift, worse than no gate at all.
+# That is not hypothetical: PR #274 changed scripts/vpn-bot-warp-split, the deploy
+# reported green, and the installed copy never moved (2026-08-01) — the three split
+# helpers, and warp-failsafe with them, were simply absent from this array.
+# Registration completeness is now pinned by
+# tests/test_deploy_helper_registry_guard.py, which fails CI when a scripts/ helper
+# is installed to /usr/local/sbin without an entry here.
 # Format per entry: "<checkout-relative-source>|<installed-absolute-path>[|<policy>]"
 # policy (default absent-ok when the field is omitted):
 #   absent-ok  an ABSENT installed copy means the subsystem is not deployed on this
@@ -207,6 +219,13 @@ OUT_OF_REPO_HELPERS=(
   "scripts/vpn-bot-warp-iface|/usr/local/sbin/vpn-bot-warp-iface|absent-ok"
   "scripts/vpn-bot-warp-routes|/usr/local/sbin/vpn-bot-warp-routes|absent-ok"
   "scripts/vpn-bot-warp-status|/usr/local/sbin/vpn-bot-warp-status|absent-ok"
+  # WARP selective-split layer + the boot failsafe. Additive on top of the
+  # full-tunnel base, installed unconditionally by setup-nonroot-helper-mode.sh
+  # but never auto-enabled, so absent-ok is the right policy for all four.
+  "scripts/vpn-bot-warp-split|/usr/local/sbin/vpn-bot-warp-split|absent-ok"
+  "scripts/vpn-bot-warp-split-state|/usr/local/sbin/vpn-bot-warp-split-state|absent-ok"
+  "scripts/vpn-bot-warp-split-apply|/usr/local/sbin/vpn-bot-warp-split-apply|absent-ok"
+  "scripts/warp-failsafe|/usr/local/sbin/warp-failsafe|absent-ok"
   "scripts/vpnbot-hy2-warp-mark|/usr/local/sbin/vpnbot-hy2-warp-mark|absent-ok"
   "scripts/vpn-bot-db-perms|/usr/local/sbin/vpn-bot-db-perms|required"
 )
@@ -220,6 +239,10 @@ WARP_ROUTES_UNIT="warp-routes.service"
 # was-active basis rather than only on a file change — see the rationale in
 # install_out_of_repo_helpers where HY2_MARK_UNIT is re-applied.
 HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"
+# DELIBERATELY ABSENT: there is no SPLIT_UNIT / FAILSAFE_UNIT counterpart. The
+# split helpers and warp-failsafe are refreshed on disk like every other entry but
+# are NEVER re-applied by the deploy — see the rationale block in
+# install_out_of_repo_helpers. Do not add one "for symmetry" with the two above.
 
 BOT_UNIT="vpn-bot.service"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
@@ -452,6 +475,31 @@ install_out_of_repo_helpers() {
   else
     log "  ${HY2_MARK_UNIT} pre-state=${hy2_pre:-<none>} (not active) — not re-applied (respecting operator intent)"
   fi
+
+  # EXPLICIT EXCEPTION — the WARP split layer and warp-failsafe are refreshed on
+  # disk (above) but are NEVER re-applied here, and that asymmetry with
+  # warp-routes / vpnbot-hy2-warp-mark is deliberate, not an oversight:
+  #
+  #   vpn-bot-warp-split{,-state,-apply}: the split ON/OFF state belongs to the
+  #     OPERATOR, carried by the root-owned marker /etc/vpn-bot/warp-split.disabled
+  #     and the saved warp-split.list — neither of which lives in git. Restarting
+  #     vpn-bot-warp-split.service would reconcile table T right now, on the
+  #     deploy's schedule rather than the operator's, and the -state helper's
+  #     on/off/restart verbs are the only sanctioned way to move that state. This
+  #     is the same operator-intent policy already applied to the two units above
+  #     (both are gated on a was-active pre-state precisely so a deploy never
+  #     re-activates what an operator took down); for the split layer the intent
+  #     signal is the marker, not the unit's pre-state, so the correct expression
+  #     of that same policy is to touch nothing at all.
+  #   warp-failsafe: a boot watchdog that sleeps ${WARP_FAILSAFE_DELAY:-75}s and
+  #     then tears WARP routing down if the HOST's own egress ended up inside the
+  #     tunnel. Re-running it mid-deploy would burn that sleep in the deploy's
+  #     critical path and could revert live WARP routing on a healthy host.
+  #
+  # Both take effect on the next boot / next operator action, which is exactly
+  # when their input is meaningful. If you are adding a helper here and reaching
+  # for a restart "because the others have one", check first whether its state is
+  # git-derived (restart) or operator-derived (leave it).
 
   # Verify: after the install no managed helper may still be in drift, and no
   # `required` helper may still be absent. This is the hard gate the task requires —

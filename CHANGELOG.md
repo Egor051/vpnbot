@@ -282,6 +282,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The deploy's helper-drift gate was blind to the WARP split helpers and reported
+  green anyway.** `OUT_OF_REPO_HELPERS` in `scripts/deploy.sh` lists the helpers whose
+  tracked `scripts/` source is kept in sync with the installed `/usr/local/sbin` copy;
+  four installed helpers — `vpn-bot-warp-split`, `vpn-bot-warp-split-state`,
+  `vpn-bot-warp-split-apply` and `warp-failsafe` — were never registered. Observed live
+  on 2026-08-01: PR #274 changed `scripts/vpn-bot-warp-split`, the deploy succeeded and
+  printed *"out-of-repo helpers already matched the checkout (no drift to close)"*, and
+  `/usr/local/sbin/vpn-bot-warp-split` kept running the old code. A gate that cannot see
+  a file but still reports on it is worse than no gate, because the report is what the
+  operator trusts.
+  - **Fix.** All four are registered (`absent-ok` — the split layer is installed
+    unconditionally but never auto-enabled, so an absent copy means "not deployed here",
+    not drift). Phase 2 now reinstalls a drifted copy like any other helper.
+  - **They are refreshed on disk but deliberately never re-applied**, unlike
+    `warp-routes` and `vpnbot-hy2-warp-mark`. The split ON/OFF state belongs to the
+    operator via the root-owned `/etc/vpn-bot/warp-split.disabled` marker and the saved
+    list — neither lives in git — so a deploy-driven restart would reconcile table `T`
+    on the deploy's schedule instead of the operator's; that is the same operator-intent
+    policy the re-applied units already follow with their was-active pre-state gate.
+    `warp-failsafe` is a boot watchdog that sleeps ~75s before acting, so re-running it
+    mid-deploy would stall the deploy and could revert live WARP routing on a healthy
+    host. The rationale is pinned in the code and in `deploy/helpers/README.md`.
+  - **The class of bug is now caught by CI, not by hand.**
+    `tests/test_deploy_helper_registry_guard.py` cross-checks every `scripts/` file
+    against the `/usr/local/sbin/<name>` references in `deploy/`, `scripts/` and `docs/`
+    and fails — naming the install site — when one is installed without a registry
+    entry, plus guard-the-guard cases proving the detector still catches the original
+    miss and honours its documented exemption list.
+
 - **«Split routing off» came back after a reboot as a FULL tunnel — the exact opposite
   of what it says.** `vpn-bot-warp-split apply` honours the root-owned disabled marker
   by reconciling table `T` to empty, but the disabled branch only retracted the
