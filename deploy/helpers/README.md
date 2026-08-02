@@ -125,6 +125,42 @@ in sync automatically; you no longer install these by hand after a deploy.
 > still exits `0`, so a skipped probe never fails the deploy; only a genuine
 > routing failure (non-zero exit) does, and that triggers the normal rollback.
 
+### The split layer + `warp-failsafe`: refreshed, never re-applied
+
+`deploy/setup-nonroot-helper-mode.sh` installs four more `scripts/` helpers to
+`/usr/local/sbin` on top of the full-tunnel base: `vpn-bot-warp-split`,
+`vpn-bot-warp-split-state`, `vpn-bot-warp-split-apply` and `warp-failsafe`. They
+carry `OUT_OF_REPO_HELPERS` entries too, so Phase 2 closes their drift exactly
+like the four above.
+
+They were **missing** from that array until this change, and the consequence is
+the reason the registry is now CI-enforced: on 2026-08-01, PR #274 changed
+`scripts/vpn-bot-warp-split`, the deploy succeeded and printed *"out-of-repo
+helpers already matched the checkout (no drift to close)"*, and the installed copy
+never moved. The gate was blind to those files while reporting green — worse than
+having no gate. `tests/test_deploy_helper_registry_guard.py` now fails when any
+`scripts/` file is installed to `/usr/local/sbin` without an entry.
+
+Unlike `warp-routes` and `vpnbot-hy2-warp-mark`, these four are **refreshed on
+disk but never re-applied by the deploy**, and that asymmetry is deliberate:
+
+* The split ON/OFF state belongs to the **operator**, carried by the root-owned
+  marker `/etc/vpn-bot/warp-split.disabled` and the saved `warp-split.list` —
+  neither of which lives in git. Restarting `vpn-bot-warp-split.service` would
+  reconcile table T on the deploy's schedule instead of the operator's; the
+  `vpn-bot-warp-split-state on|off|restart` verbs are the sanctioned way to move
+  it. This is the same operator-intent policy the two re-applied units already
+  follow (both are gated on a was-active pre-state so a deploy never re-activates
+  what an operator took down) — for the split layer the intent signal is the
+  marker, so honouring it means touching nothing.
+* `warp-failsafe` is a boot watchdog that sleeps `WARP_FAILSAFE_DELAY` (~75s) and
+  then tears WARP routing down if the **host's own** egress ended up inside the
+  tunnel. Re-running it mid-deploy would burn that sleep in the deploy's critical
+  path and could revert live WARP routing on a healthy host.
+
+Both take effect on the next boot / next operator action, which is exactly when
+their input is meaningful.
+
 ### `vpnbot-hy2-warp-mark` — Hysteria2 egress → WARP, port from `HYSTERIA2_PORT`
 
 `vpnbot-hy2-warp-mark` marks locally-generated Hysteria2 packets (owner-uid) into
