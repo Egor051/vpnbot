@@ -325,17 +325,21 @@ def _pins(text: str) -> dict[str, str]:
 
 
 def test_constraints_file_pins_runtime_dependency_tree() -> None:
-    constraints = Path("constraints.txt").read_text(encoding="utf-8")
+    # Every direct runtime dep (pinned in requirements.txt) must be pinned to the
+    # SAME version in constraints.txt. Both sides are read from the files rather
+    # than restated here: a hardcoded list silently stops covering a dep the moment
+    # one is added to requirements.txt, and turns every version bump into a
+    # two-place edit where the second place is the one that catches real drift.
+    required = _pins(Path("requirements.txt").read_text(encoding="utf-8"))
+    constraints = _pins(Path("constraints.txt").read_text(encoding="utf-8"))
 
-    # Direct runtime deps (pinned in requirements.txt) must be present and exact.
-    for package in (
-        "aiogram==3.29.1",
-        "aiohttp==3.14.1",
-        "aiosqlite==0.22.1",
-        "cryptography==48.0.1",
-        "python-dotenv==1.2.2",
-    ):
-        assert package in constraints
+    assert required, "requirements.txt declares no pinned direct dependencies"
+    for package, version in required.items():
+        assert package in constraints, f"{package} missing from constraints.txt"
+        assert constraints[package] == version, (
+            f"{package} pinned to {version} in requirements.txt "
+            f"but {constraints[package]} in constraints.txt"
+        )
 
 
 def test_constraints_txt_is_unhashed_mirror_of_hashed() -> None:

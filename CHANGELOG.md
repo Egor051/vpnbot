@@ -560,6 +560,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   работают в штатном режиме" / "All systems operational" status line, so a healthy bot
   visibly says so instead of only ever surfacing warnings.
 
+### Security
+
+- **Every dependency bumped to its current stable release, clearing six `pip-audit`
+  advisories.** The previously pinned set was reported vulnerable in two packages:
+  `aiohttp` 3.14.1 → 3.14.3 fixes an out-of-bounds heap read in the C response parser
+  (CVE-2026-69244), a WebSocket-upgrade request-smuggling edge case in the HTTP parsers
+  (CVE-2026-69243) and acceptance of RSV1-compressed frames when `permessage-deflate`
+  was never negotiated (CVE-2026-59881); `cryptography` 48.0.1 → 50.0.0 fixes a PKCS#7
+  decryption oracle that leaked the recovered RSA length by both return value and
+  timing (CVE-2026-69247), an exponential blowup when a chain repeats a self-signed
+  certificate (CVE-2026-69249) and a name-constraint bypass where a wildcard SAN was
+  accepted as covered by a narrower permitted DNS name (CVE-2026-69248). `make audit`
+  now reports no known vulnerabilities. Also bumped: `aiogram` 3.29.1 → 3.30.0,
+  `tzdata` 2026.2 → 2026.3, the whole transitive tree (`certifi`, `cffi`, `idna`,
+  `yarl`, `typing-extensions`, `aiohappyeyeballs`, `annotated-types`), the dev
+  toolchain (`mypy` 1.15.0 → 2.3.0, `ruff` 0.15.12 → 0.16.1, `pytest` 9.0.3 → 9.1.1,
+  `pytest-asyncio` 1.3.0 → 1.4.0, `pip-audit` 2.10.0 → 2.10.1, `pip-tools` 7.5.3 →
+  7.6.0), and the SHA-pinned CI actions (`actions/checkout` v6.0.3 → v7.0.1,
+  `actions/setup-python` v6.2.0 → v7.0.0). `mypy --strict` and the suite pass unchanged
+  on the new toolchain.
+  - **`make upgrade-deps`** is a new target next to `update-hashes`: the same
+    regeneration, but with `--upgrade`, so transitive dependencies actually move.
+    Plain `update-hashes` honours the pins already in the output files, so on its own
+    it re-locks the direct bumps and leaves the tree behind them stale — the reason a
+    "bump everything" pass needs a separate target rather than a flag someone has to
+    remember. Both now export `CUSTOM_COMPILE_COMMAND`, so the generated header keeps
+    naming `make update-hashes` instead of churning to the raw `pip-compile` line.
+  - **Two new preview rules are ignored, not adopted:** ruff 0.16 adds `RUF105`
+    (`# noqa:` → `# ruff: ignore[...]`) and `RUF201` (rule names instead of codes in
+    selectors), 69 findings between them. Both are pure suppression-syntax style with
+    no behavioural effect, and adopting `ruff: ignore` would pin the repo to
+    ruff >= 0.16, so the migration is left to its own PR.
+  - **`test_constraints_file_pins_runtime_dependency_tree` now derives both sides
+    from the files** instead of restating five `name==version` strings. The hardcoded
+    list did not cover `tzdata`, and made every bump a two-place edit where the second
+    place was the one that catches real drift.
+
 ## [2.1.0] — 2026-06-22
 
 ### Added
