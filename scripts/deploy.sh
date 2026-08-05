@@ -205,7 +205,11 @@ SUBSCRIPTION_BIND_WAIT="${SUBSCRIPTION_BIND_WAIT:-30}"
 # helpers, and warp-failsafe with them, were simply absent from this array.
 # Registration completeness is now pinned by
 # tests/test_deploy_helper_registry_guard.py, which fails CI when a scripts/ helper
-# is installed to /usr/local/sbin without an entry here.
+# is installed to /usr/local/sbin without an entry here — and, from the other end,
+# when a shipped deploy/*.service or deploy/*.timer EXECUTES a /usr/local/sbin path
+# (Exec*=), or a deploy/sudoers.d/* fragment grants one, that has no entry here.
+# That second scan is anchored at the install site, so it still fires for a helper
+# whose source is not (or is no longer) a scripts/ file.
 # Format per entry: "<checkout-relative-source>|<installed-absolute-path>[|<policy>]"
 # policy (default absent-ok when the field is omitted):
 #   absent-ok  an ABSENT installed copy means the subsystem is not deployed on this

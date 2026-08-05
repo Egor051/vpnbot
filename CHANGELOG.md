@@ -310,6 +310,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     and fails — naming the install site — when one is installed without a registry
     entry, plus guard-the-guard cases proving the detector still catches the original
     miss and honours its documented exemption list.
+  - **…and from the other end, so no file listing can filter it into silence.** That
+    first scan starts from the `scripts/` listing, so a unit executing
+    `/usr/local/sbin/<name>` with no `scripts/<name>` file is invisible to it and it
+    reports green — the same blindness one level up. A second scan is anchored at the
+    install site: every `/usr/local/sbin` path a shipped `deploy/*.service` or
+    `deploy/*.timer` **executes** (`ExecStart=`, `ExecStop=` and the rest of the
+    `Exec*=` family) and every one a `deploy/sudoers.d/*` fragment **grants** must be
+    registered or carry an explicit, justified exemption; the failure names the
+    unregistered helper and the exact unit line that executes it. The sudoers source
+    covers `vpn-bot-warp-split-state` / `-apply`, which no unit executes at all. The
+    allowlist is itself checked — a stub justification, an entry that is also
+    registered, or one nothing references any more all fail — and the guard-the-guard
+    cases replay the 2026-08-01 miss against the shipped units and sudoers rather than
+    against synthetic text only.
+  - **The "never re-applied" rule is now checked on behaviour, not on strings.** The
+    intent test reads every `systemctl` call inside `install_out_of_repo_helpers` and
+    fails unless the only re-applied units are the two whose input is git-derived
+    (`warp-routes`, `vpnbot-hy2-warp-mark`) — so a split restart added later through a
+    fresh variable is caught, which a name search would miss. The one remaining path
+    that may touch `vpn-bot-warp-split.service` (the WARP oneshot reapply after an AWG
+    interface recreation) is pinned to stay inside its was-active pre-state gate.
 
 - **«Split routing off» came back after a reboot as a FULL tunnel — the exact opposite
   of what it says.** `vpn-bot-warp-split apply` honours the root-owned disabled marker
