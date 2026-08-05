@@ -141,6 +141,21 @@ never moved. The gate was blind to those files while reporting green — worse t
 having no gate. `tests/test_deploy_helper_registry_guard.py` now fails when any
 `scripts/` file is installed to `/usr/local/sbin` without an entry.
 
+That check reads the `scripts/` listing, so it can only ask about names that exist
+there — a unit executing `/usr/local/sbin/<name>` with no `scripts/<name>` file is
+filtered out of its evidence and it reports green, which is the same shape of
+blindness one level up. A second scan therefore runs from the **install site**
+instead: every `/usr/local/sbin` path a shipped `deploy/*.service` or
+`deploy/*.timer` executes (`ExecStart=`, `ExecStop=`, and the rest of the `Exec*=`
+family) and every one a `deploy/sudoers.d/*` fragment grants must be registered, or
+carry an explicit justified exemption in `EXEC_SBIN_EXEMPTIONS`. The sudoers source
+is not decorative: `vpn-bot-warp-split-state` and `vpn-bot-warp-split-apply` are
+executed by no unit at all, so units alone would cover only one of the three split
+helpers the incident was about. The `deploy/helpers/` backends are the standing
+exemption — this registry is scoped to `scripts/` files, and that layer is owned by
+`deploy/setup-nonroot-helper-mode.sh`, so refreshing it means rerunning that script,
+not deploying.
+
 Unlike `warp-routes` and `vpnbot-hy2-warp-mark`, these four are **refreshed on
 disk but never re-applied by the deploy**, and that asymmetry is deliberate:
 
