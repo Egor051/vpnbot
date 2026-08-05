@@ -62,6 +62,14 @@ ignore = [
     "RUF029", # async without await — framework handlers must be async even without internal awaits
     "RUF067", # __init__ module logic — i18n design intentional
     "S101",   # assert used in tests and internal invariants
+
+    # New in ruff 0.16 and preview-only. Both ask for a mechanical, repo-wide
+    # rewrite of suppression syntax with no behavioural effect — `# noqa: X` and
+    # rule codes in the selectors below are still honoured, just no longer the
+    # style ruff prefers. Migrating them is a separate PR (and one that would pin
+    # the repo to ruff >= 0.16, since older ruff does not parse `ruff: ignore`).
+    "RUF105", # `noqa` comment used instead of `ruff: ignore`
+    "RUF201", # rule code used instead of name in a lint selector
 ]
 
 # The subprocess (S404/S603/S607) and SQL (S608) suppressions below are scoped to
