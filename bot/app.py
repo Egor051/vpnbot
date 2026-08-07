@@ -27,6 +27,7 @@ from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
 from bot.handlers import admin, admin_dashboard, admin_maintenance, admin_modules, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, start
+from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
 from bot.middlewares.locale import LocaleMiddleware
@@ -80,6 +81,7 @@ from services.warp_split_feeds import WarpSplitFeedService
 from services.xray import XrayService
 from warp.manager import WarpManager
 from warp.proxy_egress import make_send_through_provider
+from warp.split_analysis import Thresholds
 from warp.split_manager import ApplyOutcome, WarpSplitManager
 
 logger = logging.getLogger(__name__)
@@ -553,6 +555,24 @@ async def _build_app(
             except Exception:
                 logger.warning("Failed to send WARP split alert to admin %d", admin_id, exc_info=True)
 
+    async def _warp_split_card(text: str) -> None:
+        """Same broadcast, with the approve/decline buttons attached.
+
+        Separate from ``_warp_split_alert`` so the service can stay free of
+        aiogram: it decides *that* a change needs a decision, this decides what a
+        decision looks like on Telegram. The buttons are superadmin-gated in the
+        handler, never by hiding them — a callback can be fired by anyone who can
+        see the message.
+        """
+        keyboard = warp_split_pending_keyboard()
+        for admin_id in settings.admin_ids:
+            try:
+                await bot.send_message(admin_id, text, reply_markup=keyboard)
+            except Exception:
+                logger.warning(
+                    "Failed to send WARP split approval card to admin %d", admin_id, exc_info=True
+                )
+
     async def _warp_split_audited(outcome: ApplyOutcome) -> None:
         """One audit row per applied list, carrying the +N/-N delta.
 
@@ -597,8 +617,17 @@ async def _build_app(
             max_bytes=settings.warp_split_feed_max_bytes,
         ),
         manager=warp_split_manager,
-        alert_delta_pct=settings.warp_split_feed_alert_delta_pct,
+        mode=settings.warp_split_feeds_mode,
+        thresholds=Thresholds(
+            max_shrink_pct=settings.warp_split_max_shrink_pct,
+            max_growth_pct=settings.warp_split_max_growth_pct,
+            stale_after_sec=settings.warp_split_feed_stale_after_sec,
+        ),
+        confirm_streak=settings.warp_split_confirm_streak,
+        alert_cooldown_sec=settings.warp_split_alert_cooldown_sec,
+        fail_streak_alert=settings.warp_split_feed_fail_streak,
         notify=_warp_split_alert,
+        notify_card=_warp_split_card,
     )
 
     server_status_service = ServerStatusService()

@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 34
+CURRENT_SCHEMA_VERSION = 35
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -383,6 +383,10 @@ class Database:
             await self._migrate_v34()
             await self._set_schema_version(34)
             version = 34
+        if version < 35:
+            await self._migrate_v35()
+            await self._set_schema_version(35)
+            version = 35
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1546,6 +1550,62 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 seed,
+            )
+
+    async def _migrate_v35(self) -> None:
+        # Supervised unattended refresh for the split feeds: the state the review
+        # and auto modes need to hold a change back instead of applying it.
+        # Mirrors schema.sql; every statement is idempotent.
+        #
+        # Nothing is backfilled, and that is again the whole compatibility story.
+        # An empty warp_split_baseline means "no state has been observed as
+        # applied yet", which the service reads as "nothing to ratchet against"
+        # and fills from the list file on its first run — so an upgrade neither
+        # holds a change it has no evidence about nor applies one it has not
+        # measured.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warp_split_baseline (
+              scope       TEXT PRIMARY KEY,
+              addresses   INTEGER NOT NULL DEFAULT 0,
+              prefixes    INTEGER NOT NULL DEFAULT 0,
+              list_hash   TEXT,
+              applied_ts  INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warp_split_pending (
+              id          INTEGER PRIMARY KEY CHECK (id = 1),
+              ts          INTEGER NOT NULL DEFAULT 0,
+              list_hash   TEXT    NOT NULL,
+              list_text   TEXT    NOT NULL,
+              reason      TEXT    NOT NULL DEFAULT '',
+              deltas_json TEXT    NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warp_split_runs (
+              id           INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts           INTEGER NOT NULL DEFAULT 0,
+              mode         TEXT    NOT NULL,
+              decision     TEXT    NOT NULL,
+              reason       TEXT    NOT NULL DEFAULT '',
+              list_hash    TEXT    NOT NULL DEFAULT '',
+              sources_json TEXT    NOT NULL DEFAULT '[]',
+              metrics_json TEXT    NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        # Consecutive-failure counter, so "this feed has been dead for three runs"
+        # can be told apart from "this feed failed three times since April".
+        columns = await self._table_columns("warp_split_sources")
+        if "fail_streak" not in columns:
+            await self.conn.execute(
+                "ALTER TABLE warp_split_sources ADD COLUMN fail_streak INTEGER NOT NULL DEFAULT 0"
             )
 
     async def _ensure_spider_x_backfill(self) -> None:

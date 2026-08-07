@@ -984,6 +984,77 @@ STRINGS: dict[str, str] = {
         "Nothing to move: no manual prefix is covered by an enabled source."
     ),
     "warp_split_migrated": "Moved from manual into feeds: {count} prefix(es).",
+    # ── supervised unattended refresh (approval card, holds, history) ─────────
+    "btn_warp_split_pending_apply": "✅ Apply",
+    "btn_warp_split_pending_reject": "🚫 Decline",
+    "btn_warp_split_pending_full": "📄 Show in full",
+    "btn_warp_split_history": "🕓 History",
+    "warp_split_card_title": (
+        "🛑 <b>The split list wants to change</b> — approval required (mode: {mode})"
+    ),
+    "warp_split_card_counts": (
+        "Prefixes: {before} → {after} ({delta})\n"
+        "Addresses: {addr_before} → {addr_after} ({addr_delta})"
+    ),
+    "warp_split_card_pure": (
+        "The routed address space is identical — only the number of prefixes needed to "
+        "express it changed."
+    ),
+    "warp_split_card_added": "+{count}: {sample}",
+    "warp_split_card_removed": "−{count}: {sample}",
+    "warp_split_card_source": (
+        "{slug}: {p_before} → {p_after} prefixes, {a_before} → {a_after} addresses"
+    ),
+    "warp_split_card_source_new": (
+        "{slug}: {prefixes} prefixes / {addresses} addresses (no baseline yet)"
+    ),
+    "warp_split_applied_auto": "✅ <b>Split list updated automatically</b>",
+    "warp_split_applied_approved": "✅ <b>Split list applied after approval</b>",
+    "warp_split_hold_shrink_add": (
+        "source <code>{slug}</code> lost {pct}% of its coverage ({before} → {after} addresses)"
+    ),
+    "warp_split_hold_shrink_subtract": (
+        "the subtracted source <code>{slug}</code> lost {pct}% of its coverage "
+        "({before} → {after} addresses) — less is being subtracted, so MORE foreign "
+        "address space would enter the tunnel"
+    ),
+    "warp_split_hold_growth": (
+        "the merged list would grow by {pct}% ({before} → {after} addresses)"
+    ),
+    "warp_split_hold_empty": "source <code>{slug}</code> published no usable prefix on this run",
+    "warp_split_hold_stale": (
+        "source <code>{slug}</code> has not been confirmed for {days} day(s) — the state "
+        "is incomplete"
+    ),
+    "warp_split_hold_streak": "the same candidate has not been seen enough times in a row yet",
+    "warp_split_hold_review": (
+        "review mode: every change is applied by hand. Nothing suspicious was found in this one."
+    ),
+    "warp_split_alert_fail_streak": (
+        "⚠️ Split feed <code>{slug}</code> has failed {count} runs in a row: {error}\n"
+        "The list keeps using its last good contribution."
+    ),
+    "warp_split_alert_stale": (
+        "⚠️ Split feed <code>{slug}</code> has not been confirmed for {days} day(s) — the "
+        "merged list is being computed from a stale copy."
+    ),
+    "warp_split_pending_applied": "✅ Applied. {delta}, now {count} prefixes.",
+    "warp_split_pending_declined": (
+        "🚫 Declined. Nothing was applied, and the comparison baseline was left where it "
+        "was — so the same change will be offered again on the next run."
+    ),
+    "warp_split_pending_none": "There is no change waiting for approval.",
+    "warp_split_pending_stale": (
+        "⛔ Nothing was applied: {error}\n"
+        "Open «Sources» → «Refresh all» to recompute and decide again."
+    ),
+    "warp_split_pending_full_title": "<b>Candidate in full</b> — {count} prefixes",
+    "warp_split_pending_full_counts": "Added: {added}, removed: {removed}",
+    "warp_split_pending_full_added": "<b>Added:</b>",
+    "warp_split_pending_full_removed": "<b>Removed:</b>",
+    "warp_split_history_title": "<b>Refresh history</b> (mode: {mode})",
+    "warp_split_history_line": "{ts} · {mode} · {decision} {detail}",
+    "warp_split_history_empty": "No unattended runs have been recorded yet.",
     "protocol_unavailable": "This protocol is currently unavailable. Go back to the menu and pick another.",
     # ── note input validation ─────────────────────────────────────────────────
     "note_no_newlines": "The note must not contain line breaks. Enter it on a single line.",

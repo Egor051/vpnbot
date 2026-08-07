@@ -26,6 +26,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final
 
 IPv4Net = ipaddress.IPv4Network
@@ -33,6 +34,12 @@ IPv4Net = ipaddress.IPv4Network
 # Origin marker for prefixes the operator typed in by hand, as opposed to a feed
 # slug. Stored in warp_split_prefixes.origin and shown in the panel.
 MANUAL_ORIGIN: Final = "manual"
+
+# Scope marker for the merged list itself, used where a table is keyed by "one
+# source, or the whole result" (warp_split_baseline). Reserved as a slug for the
+# same reason as MANUAL_ORIGIN: 'list' is otherwise a perfectly legal slug, and a
+# source named that would share a primary key with the list's own baseline row.
+LIST_SCOPE: Final = "list"
 
 FEED_KINDS: Final[frozenset[str]] = frozenset({"cidr_text", "google_json"})
 FEED_MODES: Final[frozenset[str]] = frozenset({"add", "subtract"})
@@ -54,6 +61,17 @@ class FeedParseError(ValueError):
     and the safe response to both is to keep the last good cache rather than to
     apply "no prefixes". A feed that legitimately contains only IPv6 is
     therefore unusable here, which is correct — this host has no IPv6.
+    """
+
+
+class EmptyFeedError(FeedParseError):
+    """The document parsed fine and contained no usable IPv4 prefix.
+
+    A subclass rather than a message check because the two cases lead to
+    different conclusions downstream: a malformed document says nothing about
+    what the publisher intends, whereas "this feed now lists nothing" is a
+    statement about the address space itself, and one the unattended path must
+    refuse to act on even though the merge still succeeds from cache.
     """
 
 
@@ -108,10 +126,34 @@ class MergeReport:
     addresses_before: int
     addresses_after: int
     per_origin: Mapping[str, int]
+    # Per-ORIGIN address space, i.e. per bucket, measured after any scoped
+    # subtraction has been carved out of it — the mirror of ``per_origin``.
+    per_origin_addresses: Mapping[str, int] = MappingProxyType({})
+    # Per-SOURCE metrics, measured on what the source itself yielded, before it
+    # takes part in anything. Separate from ``per_origin`` for two reasons: a
+    # subtract source has no bucket and would be missing entirely, and a scoped
+    # subtraction mutates its target's bucket, so a bucket can no longer answer
+    # "how much did this feed publish?" — which is exactly the question the
+    # shrink ratchet asks (see :mod:`warp.split_analysis`).
+    per_source_prefixes: Mapping[str, int] = MappingProxyType({})
+    per_source_addresses: Mapping[str, int] = MappingProxyType({})
 
     @property
     def n_after_collapse(self) -> int:
         return len(self.prefixes)
+
+    # ``prefixes_before``/``prefixes_after`` are the names the rest of the
+    # subsystem uses for a count pair; the two below are aliases so that a caller
+    # reading a MergeReport and a caller reading a ChangeAnalysis spell the same
+    # idea the same way. The originals keep their names because callers and tests
+    # already depend on them.
+    @property
+    def prefixes_before(self) -> int:
+        return self.n_before_subtract
+
+    @property
+    def prefixes_after(self) -> int:
+        return self.n_after_collapse
 
     @property
     def addresses_removed(self) -> int:
@@ -220,7 +262,7 @@ def _finish_parse(
     networks: list[IPv4Net], ipv6: int, invalid: list[str], *, kind: str
 ) -> ParsedFeed:
     if not networks:
-        raise FeedParseError(
+        raise EmptyFeedError(
             f"{kind}: no usable IPv4 prefixes "
             f"({ipv6} IPv6 skipped, {len(invalid)} unparseable) — "
             "treated as a failed fetch, not as an empty list"
@@ -300,7 +342,8 @@ def merge_split_list(
     the documented behaviour of a scope, not a bug in it — the panel warns, and
     the operator migrates the manual entries into the feed.
     """
-    buckets: dict[str, list[IPv4Net]] = {MANUAL_ORIGIN: collapse(manual)}
+    buckets_manual_snapshot = collapse(manual)
+    buckets: dict[str, list[IPv4Net]] = {MANUAL_ORIGIN: list(buckets_manual_snapshot)}
     for source in sources:
         if source.mode == "add":
             buckets[source.slug] = collapse(source.networks)
@@ -331,6 +374,26 @@ def merge_split_list(
     n_after_subtract = len(merged)
     final = collapse(merged)
     per_origin = {origin: len(bucket) for origin, bucket in buckets.items() if bucket}
+    per_origin_addresses = {
+        origin: sum(net.num_addresses for net in bucket)
+        for origin, bucket in buckets.items()
+        if bucket
+    }
+
+    # Measured on the raw contribution, collapsed but otherwise untouched, so a
+    # subtract source is reported too and a scoped subtraction does not shrink
+    # the number reported for its target.
+    per_source_prefixes: dict[str, int] = {}
+    per_source_addresses: dict[str, int] = {}
+    for source in sources:
+        merged_source = collapse(source.networks)
+        per_source_prefixes[source.slug] = len(merged_source)
+        per_source_addresses[source.slug] = sum(net.num_addresses for net in merged_source)
+    manual_collapsed = buckets_manual_snapshot
+    per_source_prefixes[MANUAL_ORIGIN] = len(manual_collapsed)
+    per_source_addresses[MANUAL_ORIGIN] = sum(
+        net.num_addresses for net in manual_collapsed
+    )
 
     return MergeReport(
         prefixes=tuple(str(net) for net in final),
@@ -339,6 +402,9 @@ def merge_split_list(
         addresses_before=addresses_before,
         addresses_after=sum(net.num_addresses for net in final),
         per_origin=per_origin,
+        per_origin_addresses=per_origin_addresses,
+        per_source_prefixes=per_source_prefixes,
+        per_source_addresses=per_source_addresses,
     )
 
 
@@ -394,6 +460,8 @@ def validate_slug(slug: str) -> None:
         )
     if slug == MANUAL_ORIGIN:
         raise ValueError(f"'{MANUAL_ORIGIN}' is reserved for hand-typed prefixes")
+    if slug == LIST_SCOPE:
+        raise ValueError(f"'{LIST_SCOPE}' is reserved for the merged list itself")
 
 
 def validate_source_relations(

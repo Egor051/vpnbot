@@ -1,12 +1,15 @@
 """Row-shaped state for the WARP selective-split feed subsystem.
 
-Mirrors ``warp_split_sources`` one-to-one, the same way :mod:`warp.state` mirrors
-``warp_settings``. Kept out of :mod:`warp.split_merge` on purpose: that module is
-pure address arithmetic and must stay free of storage concerns.
+Mirrors ``warp_split_sources``, ``warp_split_pending`` and ``warp_split_runs``
+one-to-one, the same way :mod:`warp.state` mirrors ``warp_settings``. Kept out of
+:mod:`warp.split_merge` and :mod:`warp.split_analysis` on purpose: those modules
+are pure arithmetic and must stay free of storage concerns.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +36,9 @@ class SplitSource:
     last_status: str | None = None
     prefix_count: int = 0
     last_error: str | None = None
+    # Consecutive failed fetches; any success resets it. Drives the "this feed has
+    # been dead N runs running" alert, which a per-failure alert cannot express.
+    fail_streak: int = 0
 
     @property
     def is_subtract(self) -> bool:
@@ -52,3 +58,38 @@ class SplitSource:
     @property
     def has_succeeded(self) -> bool:
         return self.last_success_ts > 0
+
+
+@dataclass(frozen=True, slots=True)
+class PendingCandidate:
+    """The one candidate list waiting for an admin's decision.
+
+    ``prefixes`` is the candidate as it was computed when the card was sent, kept
+    so "show in full" needs no recomputation. It is NOT what gets applied: the
+    apply recomputes under the manager's lock and refuses if the result no longer
+    hashes to ``list_hash`` — see :meth:`services.warp_split_feeds.
+    WarpSplitFeedService.apply_pending`.
+    """
+
+    ts: int
+    list_hash: str
+    prefixes: tuple[str, ...] = ()
+    reason: str = ""
+    deltas: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def reason_codes(self) -> tuple[str, ...]:
+        return tuple(code for code in self.reason.split(",") if code)
+
+
+@dataclass(frozen=True, slots=True)
+class SplitRun:
+    """One row of the unattended-refresh journal."""
+
+    ts: int
+    mode: str
+    decision: str              # applied | queued | nochange | rejected | failed
+    reason: str = ""
+    list_hash: str = ""
+    sources: Sequence[Mapping[str, Any]] = ()
+    metrics: Mapping[str, Any] = field(default_factory=dict)

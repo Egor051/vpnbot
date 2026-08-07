@@ -30,7 +30,9 @@ from bot.fsm.states import WarpSplitStates
 from bot.guards import require_superadmin
 from bot.handlers.common import answer_callback_error, answer_message_error
 from bot.keyboards.warp_split_sources_keyboard import (
+    warp_split_back_keyboard,
     warp_split_confirm_keyboard,
+    warp_split_pending_keyboard,
     warp_split_source_add_keyboard,
     warp_split_sources_keyboard,
 )
@@ -38,9 +40,13 @@ from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from i18n import t
 from services.errors import InvalidOperation
-from services.warp_split_feeds import MergePlan, WarpSplitFeedService
+from services.warp_split_feeds import (
+    MergePlan,
+    WarpFeedStaleCandidate,
+    WarpSplitFeedService,
+)
 from utils.formatting import code, h
-from warp.feed_state import SplitSource
+from warp.feed_state import PendingCandidate, SplitRun, SplitSource
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -543,6 +549,151 @@ async def warp_split_exclude_execute(callback: CallbackQuery, services: Services
         await _render_sources(callback, services, prefix=t("warp_split_reject", error=h(exc)))
     except Exception as exc:
         await answer_callback_error(callback, exc)
+
+
+# ── the approval queue ────────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data == "wsplit:pend:ok")
+async def warp_split_pending_apply(callback: CallbackQuery, services: Services) -> None:
+    """Apply the queued candidate from the card.
+
+    Nothing about this path is special-cased: the same merge is recomputed, the
+    same guards run, the same lock is held and the same byte-identity check
+    applies. The one addition is the hash check, which refuses a card the world
+    has moved past instead of applying "whatever the merge says now" under an
+    approval that was given for something else.
+    """
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await safe_callback_answer(callback, t("warp_processing"))
+        outcome = await services.warp_split_feeds.apply_pending(
+            actor_user_id=callback.from_user.id
+        )
+        note = (
+            t("warp_split_report_unchanged_identical")
+            if outcome.unchanged
+            else t("warp_split_pending_applied", delta=outcome.delta_text, count=outcome.count)
+        )
+        await safe_edit_message_text(callback.message, note)
+    except WarpFeedStaleCandidate as exc:
+        await safe_edit_message_text(callback.message, t("warp_split_pending_stale", error=h(exc)))
+    except InvalidOperation as exc:
+        await safe_edit_message_text(callback.message, t("warp_split_reject", error=h(exc)))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "wsplit:pend:no")
+async def warp_split_pending_reject(callback: CallbackQuery, services: Services) -> None:
+    """Discard the queued candidate. The baseline stays where it is."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await safe_callback_answer(callback)
+        await services.warp_split_feeds.reject_pending(actor_user_id=callback.from_user.id)
+        await safe_edit_message_text(callback.message, t("warp_split_pending_declined"))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "wsplit:pend:full")
+async def warp_split_pending_full(callback: CallbackQuery, services: Services) -> None:
+    """Spell out every added and removed prefix of the queued candidate."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await safe_callback_answer(callback)
+        pending = await services.warp_split_feeds.pending()
+        if pending is None:
+            await safe_edit_message_text(callback.message, t("warp_split_pending_none"))
+            return
+        await safe_edit_message_text(
+            callback.message,
+            _pending_full_text(pending),
+            reply_markup=warp_split_pending_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+def _pending_full_text(pending: PendingCandidate) -> str:
+    """Render the stored delta in full, capped to what Telegram will accept."""
+    deltas = pending.deltas
+    added = [str(item) for item in deltas.get("added", [])]
+    removed = [str(item) for item in deltas.get("removed", [])]
+    lines = [
+        t("warp_split_pending_full_title", count=len(pending.prefixes)),
+        t(
+            "warp_split_pending_full_counts",
+            added=int(deltas.get("added_total", len(added))),
+            removed=int(deltas.get("removed_total", len(removed))),
+        ),
+    ]
+    if added:
+        lines.append("")
+        lines.append(t("warp_split_pending_full_added"))
+        lines.append(code(", ".join(added)))
+    if removed:
+        lines.append("")
+        lines.append(t("warp_split_pending_full_removed"))
+        lines.append(code(", ".join(removed)))
+    return "\n".join(lines)
+
+
+# ── run history ───────────────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data == "wsplit:hist")
+async def warp_split_history(callback: CallbackQuery, services: Services) -> None:
+    """Show the last ten unattended runs.
+
+    This is the evidence for the decision the modes exist to support: after a
+    fortnight in review, "were all the changes safe?" is answered by reading this
+    rather than by remembering.
+    """
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await safe_callback_answer(callback)
+        runs = await services.warp_split_feeds.recent_runs(10)
+        if not runs:
+            await _render_sources(callback, services, prefix=t("warp_split_history_empty"))
+            return
+        lines = [t("warp_split_history_title", mode=services.warp_split_feeds.mode)]
+        lines.extend(_history_line(run) for run in runs)
+        await safe_edit_message_text(
+            callback.message, "\n".join(lines), reply_markup=warp_split_back_keyboard()
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+def _history_line(run: SplitRun) -> str:
+    metrics = run.metrics
+    detail = ""
+    if "prefixes_before" in metrics and "prefixes_after" in metrics:
+        detail = f" {metrics['prefixes_before']}→{metrics['prefixes_after']}"
+    return t(
+        "warp_split_history_line",
+        ts=_timestamp(run.ts),
+        mode=run.mode,
+        decision=run.decision,
+        detail=h(f"{detail} {run.reason}".strip()),
+    )
 
 
 def _tail(data: str) -> str:

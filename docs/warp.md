@@ -445,17 +445,140 @@ Deleting a feed-supplied prefix with 🗑 records an **exclusion** instead of de
 it — a plain delete would be undone by the next refresh. Exclusions survive
 refreshes.
 
+### Supervised refresh (review and auto)
+
+The scheduler answers *when* a refresh runs; `WARP_SPLIT_FEEDS_MODE` answers what a
+run is allowed to **do**. They are separate switches because turning automation on
+and trusting it to write unattended are separate decisions, and only one of them is
+undone by reading a message.
+
+| Mode | What a run does |
+| --- | --- |
+| `off` | Applies nothing. Only the panel's buttons touch the list. |
+| `review` (default) | Runs the full cycle — fetch, merge, analysis — and applies **nothing** on its own. Every non-empty delta, including one that passes every threshold and including pure re-aggregation, goes to the admins as a card and waits. |
+| `auto` | Applies a change that clears the ratchet *and* the confirmation streak. Everything else goes to the same card. |
+
+Interval `0` disables the run at any mode; `off` disables applying at any interval.
+
+#### The metric: addresses, not prefixes
+
+Every threshold below is computed on **address counts** (the sum of `2^(32−len)`
+after collapsing), per source and for the merged list. Prefix counts are unusable as
+a safety metric because `collapse` merges adjacent siblings: on this host, adopting
+the 108-entry list file produces **106** prefixes covering byte-identical address
+space. A prefix-count threshold would call that a change — and a subtraction that
+quietly halves a feed's coverage while keeping its entry count no change at all.
+
+That specific case has a name in the code: **pure aggregation** (identical
+addresses, different prefix count). In `auto` it is applied without waiting for the
+confirmation streak, because there is nothing to confirm; in `review` it still goes
+to the card, because `review` means every change is applied by hand.
+
+#### The ratchet
+
+The comparison point is the **last state that was actually applied** — stored in
+`warp_split_baseline`, one row per source plus one for the merged list — not the
+previous run's candidate. A feed that loses 5% of its coverage on each of four runs
+is caught on the fourth, because it is still being measured against the state a
+human accepted.
+
+A candidate is held for approval when any of these is true:
+
+* an **add** source lost more than `WARP_SPLIT_MAX_SHRINK_PCT` of its coverage;
+* a **subtract** source lost more than the same threshold — checked separately and
+  reported in its own words, because the direction is mirrored: less subtracted
+  means *more* foreign address space in the tunnel. On the Google pair, a shrunken
+  `cloud.json` silently re-admits every GCP customer range it stopped listing;
+* the merged list would **grow** by more than `WARP_SPLIT_MAX_GROWTH_PCT`;
+* a source published **no usable prefix** on this run (the merge still succeeds from
+  cache — which is exactly why this has to be noticed rather than inferred);
+* any enabled source's last successful fetch is older than
+  `WARP_SPLIT_FEED_STALE_AFTER_SEC`, which makes the whole state incomplete.
+
+The baseline moves **only when an apply actually happens** — including an apply made
+from the panel or a `/warp_split_*` command, which the next run detects by hash and
+adopts. Declining a card does not move it; if it did, a shrink refused today would be
+the accepted baseline tomorrow, and the ratchet would be decoration.
+
+#### What is *not* queued
+
+The manager's guards — the prefix cap, the minimum mask, the WARP endpoint, the
+default gateway, the server's own WAN, the AWG subnet — reject a candidate outright.
+Those are not "suspicious changes" but invalid ones, so they produce a rejection
+notice and no card: a button offering to apply a list the manager will refuse anyway
+is a button that teaches admins to distrust buttons.
+
+#### The card, and what pressing Apply does
+
+The card names the mode, lists every reason the change is held (or states that
+nothing suspicious was found, in `review`), gives before/after in prefixes **and**
+addresses for the list and for each source, and shows the first ten prefixes each way
+behind a "show in full" button.
+
+Apply takes exactly the path a manual apply takes: the merge is recomputed under the
+list lock, the guards run again, the byte-identity check still applies. The one
+addition is a hash check inside that recompute — if the merge no longer produces the
+list the card described (someone added a prefix in another chat, a feed moved on),
+nothing is written and the admin is told to recompute and decide again. Checking
+outside the lock would be a race; checking inside it is what stops a stale card from
+applying something nobody looked at.
+
+#### Notifications
+
+Admins hear about: a candidate queued for approval, a change that was applied
+(briefly: ±N prefixes, ±N addresses, per source), a rejection by a guard, a source
+that has failed `WARP_SPLIT_FEED_FAIL_STREAK` runs in a row, and a source that has
+gone stale. They do **not** hear "nothing changed" — that goes to the log only.
+
+Identical messages about the same source are suppressed for
+`WARP_SPLIT_ALERT_COOLDOWN_SEC`. That ledger is held **in memory**: a bot restart
+clears it, so the first run after a restart can repeat one message the admin already
+has. This is deliberate — persisting it would buy one avoided duplicate at the cost
+of a table whose staleness nobody would ever think about again. Approval cards are
+never suppressed by the cooldown, but re-queuing the *same* candidate does not send a
+second card, and replacing a waiting candidate with a new one sends one message
+rather than two.
+
+#### The run journal
+
+Every run writes a row to `warp_split_runs`: timestamp, mode, per-source status and
+metrics, and one of `applied | queued | nochange | rejected | failed` with a reason.
+(`nochange` means the host was not touched — either there was no delta, or `auto` is
+still waiting for the streak.) The last 200 rows are kept, trimmed by the same run
+that writes them; «Источники» → «История» shows the last ten.
+
+This is the evidence for the decision the modes exist to support. Recommended order
+for turning automation on:
+
+1. set `WARP_SPLIT_FEEDS_MODE=review` and an interval (`21600` = 6 h);
+2. live with it for a week or two, reading the history: how many changes were there,
+   and did each one look safe?
+3. when the answer is yes for all of them, switch to `auto`.
+
 #### Feed environment variables
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `WARP_SPLIT_FEEDS_INTERVAL_SEC` | `0` | Unattended refresh interval; `0` disables the scheduler. Manual refresh from the panel always works. |
+| `WARP_SPLIT_FEEDS_MODE` | `review` | What a run may do: `off` / `review` / `auto` (above). |
 | `WARP_SPLIT_FEED_TIMEOUT_SEC` | `20` | Per-fetch total timeout. |
 | `WARP_SPLIT_FEED_MAX_BYTES` | `2000000` | Response ceiling; a larger body is a failed fetch. `cloud.json` is ~112 KB. |
 | `WARP_SPLIT_FEED_CACHE_DIR` | `/var/lib/vpn-bot/warp-feeds` | Last good copy of each feed (files `0600`, directory `0700`). |
-| `WARP_SPLIT_FEED_ALERT_DELTA_PCT` | `30` | Notify admins when an **automatic** refresh changes the list by more than this. |
+| `WARP_SPLIT_MAX_SHRINK_PCT` | `20` | Coverage a source may lose before its change is held for approval. Add and subtract sources alike. |
+| `WARP_SPLIT_MAX_GROWTH_PCT` | `50` | Coverage the merged list may gain before the change is held. |
+| `WARP_SPLIT_CONFIRM_STREAK` | `2` | `auto` only: identical candidates in a row before applying. |
+| `WARP_SPLIT_FEED_STALE_AFTER_SEC` | `259200` | Age of a source's last success past which the state counts as incomplete. |
+| `WARP_SPLIT_ALERT_COOLDOWN_SEC` | `3600` | De-duplication window per source and message (in memory). |
+| `WARP_SPLIT_FEED_FAIL_STREAK` | `3` | Consecutive failures of one source before alerting. |
 | `WARP_SPLIT_MAX_PREFIXES` | `1500` | Hard ceiling; exceeding it refuses the whole update, never part of it. |
 | `WARP_SPLIT_MIN_PREFIXLEN` | `8` | Shortest accepted mask. |
+
+`WARP_SPLIT_FEED_ALERT_DELTA_PCT` was **removed** in this version. It notified when
+an automatic refresh changed the list by more than N% of its prefix *count*; both
+halves of that job are now done better — every applied change is announced, and a
+large change is held rather than applied — and keeping a third threshold on a third
+metric would have cost more clarity than it bought. A leftover value in `.env` is
+ignored.
 
 The scheduler defaults to **off**. Enabling it lets a background job rewrite the
 routing policy for every client, which should be a decision rather than something
