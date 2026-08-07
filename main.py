@@ -148,7 +148,10 @@ async def main() -> None:
                     "Scheduled announcements checker started (interval=%ds)",
                     settings.scheduled_announcements_interval,
                 )
-            if settings.warp_split_feeds_interval_sec > 0:
+            # Two independent switches, and both must be on: the interval says how
+            # often a run may happen, the mode says what a run may do. Either one at
+            # its "off" value leaves the routing policy to the panel alone.
+            if settings.warp_split_feeds_interval_sec > 0 and settings.warp_split_feeds_mode != "off":
                 warp_split_feeds_task = asyncio.create_task(
                     warp_split_feeds_loop(
                         services.warp_split_feeds, settings.warp_split_feeds_interval_sec
@@ -156,9 +159,12 @@ async def main() -> None:
                     name="warp-split-feeds",
                 )
                 logger.info(
-                    "WARP split feed refresher started (interval=%ds)",
+                    "WARP split feed refresher started (interval=%ds, mode=%s)",
                     settings.warp_split_feeds_interval_sec,
+                    settings.warp_split_feeds_mode,
                 )
+            elif settings.warp_split_feeds_interval_sec > 0:
+                logger.info("WARP split feed refresher not started: WARP_SPLIT_FEEDS_MODE=off")
             server_status_task = asyncio.create_task(
                 services.server_status.run(),
                 name="server-status-sampler",

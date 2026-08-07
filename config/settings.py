@@ -423,7 +423,33 @@ class Settings:
     warp_split_feed_timeout_sec: int = 20
     warp_split_feed_max_bytes: int = 2_000_000
     warp_split_feed_cache_dir: Path = Path("/var/lib/vpn-bot/warp-feeds")
-    warp_split_feed_alert_delta_pct: int = 30
+    # What a scheduled run may DO, as opposed to how often it runs: 'off' applies
+    # nothing, 'review' sends every change for approval, 'auto' applies what clears
+    # the guards below and queues everything else. Default 'review' so that turning
+    # the scheduler on is not also a decision to let it write unattended — two
+    # separate acts, and only one of them is undone by reading a message.
+    warp_split_feeds_mode: str = "review"
+    # Ratchet thresholds, measured in ADDRESSES against the last state actually
+    # applied — never against the previous run's candidate, or a feed that shrinks
+    # a little on every run would walk away unnoticed. Shrink applies to add and
+    # subtract sources alike: a subtrahend that shrinks routes MORE foreign address
+    # space, which is the direction that is easy to forget.
+    warp_split_max_shrink_pct: int = 20
+    warp_split_max_growth_pct: int = 50
+    # Auto mode applies a non-trivial change only after seeing the same candidate
+    # this many runs in a row, so a single broken publication that is corrected an
+    # hour later never reaches the routing table.
+    warp_split_confirm_streak: int = 2
+    # A source whose last successful fetch is older than this makes the merged
+    # state "incomplete": the candidate is held for approval rather than applied
+    # from a copy nobody has been able to confirm for days.
+    warp_split_feed_stale_after_sec: int = 259_200
+    # Per-message alert de-duplication window. Held in memory, so a restart may
+    # repeat one message; approval cards are never suppressed by it.
+    warp_split_alert_cooldown_sec: int = 3600
+    # Consecutive failed fetches of one source before the admins hear about it.
+    # One timeout is noise; three runs in a row is a feed that has stopped.
+    warp_split_feed_fail_streak: int = 3
     # Hard ceiling and shortest accepted mask for the routed list. Both are
     # whole-operation guards: exceeding either refuses the update entirely rather
     # than trimming it, because a half-applied routing policy is harder to notice
@@ -971,7 +997,22 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         warp_split_feed_cache_dir=Path(
             _optional("WARP_SPLIT_FEED_CACHE_DIR", "/var/lib/vpn-bot/warp-feeds")
         ),
-        warp_split_feed_alert_delta_pct=_int_range("WARP_SPLIT_FEED_ALERT_DELTA_PCT", 30, 1, 100),
+        warp_split_feeds_mode=_choice(
+            "WARP_SPLIT_FEEDS_MODE", "review", {"off", "review", "auto"}
+        ),
+        warp_split_max_shrink_pct=_int_range("WARP_SPLIT_MAX_SHRINK_PCT", 20, 1, 100),
+        # Growth is measured against the applied baseline and can legitimately
+        # exceed 100% (enabling a second feed doubles the list), so the ceiling is
+        # high enough to express "effectively unlimited" without special-casing 0.
+        warp_split_max_growth_pct=_int_range("WARP_SPLIT_MAX_GROWTH_PCT", 50, 1, 100_000),
+        warp_split_confirm_streak=_int_range("WARP_SPLIT_CONFIRM_STREAK", 2, 1, 10),
+        warp_split_feed_stale_after_sec=_int_range(
+            "WARP_SPLIT_FEED_STALE_AFTER_SEC", 259_200, 3600, 2_592_000
+        ),
+        warp_split_alert_cooldown_sec=_int_range(
+            "WARP_SPLIT_ALERT_COOLDOWN_SEC", 3600, 0, 86_400
+        ),
+        warp_split_feed_fail_streak=_int_range("WARP_SPLIT_FEED_FAIL_STREAK", 3, 1, 100),
         warp_split_max_prefixes=_int_range("WARP_SPLIT_MAX_PREFIXES", 1500, 1, 100_000),
         warp_split_min_prefixlen=_int_range("WARP_SPLIT_MIN_PREFIXLEN", 8, 0, 32),
         warp_proxy_egress_enabled=_bool("WARP_PROXY_EGRESS_ENABLED", _bool("WARP_PROXY_EGRESS", False)),

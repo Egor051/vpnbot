@@ -516,7 +516,41 @@ class TestMigrateManual:
 
 
 class TestAlerts:
-    async def test_large_automatic_delta_alerts(self, tmp_path: Path):
+    """Who gets told, and how often.
+
+    The property under test is restraint. A subsystem that messages the admins on
+    every failed fetch produces alerts that get muted, and a muted alert is worse
+    than no alert — it looks like coverage.
+    """
+
+    async def test_one_failure_is_recorded_but_not_broadcast(self, tmp_path: Path):
+        db, _shell, manager, fetcher, _repo, service = await _make(tmp_path)
+        try:
+            sent: list[str] = []
+
+            async def _notify(text: str) -> None:
+                sent.append(text)
+
+            service._notify = _notify  # type: ignore[assignment]
+            # Prime a good state whose merge equals the file, so the only thing
+            # these runs can produce is a failure message.
+            manager.list_path.write_text("1.2.3.0/24\n", encoding="utf-8")
+            await service.ensure_manual_adopted()
+            fetcher.payloads["telegram-cidr"] = "1.2.3.0/24\n"
+            await service.run_cycle()
+            sent.clear()
+
+            fetcher.errors["telegram-cidr"] = FeedFetchError("HTTP 503")
+            result = await service.run_cycle()
+
+            # Recorded on the source row and in the run journal, but nobody is woken
+            # for one bad fetch: the merge falls back to the last good contribution.
+            assert result.sources[0].status == "error"
+            assert not any("telegram-cidr" in text for text in sent)
+        finally:
+            await db.close()
+
+    async def test_repeated_failures_alert_once_per_cooldown(self, tmp_path: Path):
         db, _shell, manager, fetcher, _repo, service = await _make(tmp_path)
         try:
             sent: list[str] = []
@@ -527,34 +561,17 @@ class TestAlerts:
             service._notify = _notify  # type: ignore[assignment]
             manager.list_path.write_text("1.2.3.0/24\n", encoding="utf-8")
             await service.ensure_manual_adopted()
-            fetcher.payloads["telegram-cidr"] = (FIXTURES / "telegram_cidr.txt").read_text()
+            fetcher.payloads["telegram-cidr"] = "1.2.3.0/24\n"
+            await service.run_cycle()
+            sent.clear()
 
-            await service.refresh(apply=True)
+            fetcher.errors["telegram-cidr"] = FeedFetchError("HTTP 503")
+            for _ in range(4):
+                await service.run_cycle()
 
-            assert any("changed by" in text for text in sent)
-        finally:
-            await db.close()
-
-    async def test_small_delta_does_not_alert(self, tmp_path: Path):
-        db, _shell, manager, fetcher, _repo, service = await _make(tmp_path)
-        try:
-            sent: list[str] = []
-
-            async def _notify(text: str) -> None:
-                sent.append(text)
-
-            service._notify = _notify  # type: ignore[assignment]
-            # Even octets only: consecutive /24s would collapse into /21s and the
-            # resulting delta would be huge for reasons that have nothing to do
-            # with the feed.
-            manual = [f"203.0.{octet * 2}.0/24" for octet in range(40)]
-            manager.list_path.write_text("\n".join(manual) + "\n", encoding="utf-8")
-            await service.ensure_manual_adopted()
-            fetcher.payloads["telegram-cidr"] = "91.108.4.0/22\n"
-
-            await service.refresh(apply=True)
-
-            assert not any("changed by" in text for text in sent)
+            # Runs three and four both qualify (fail_streak >= 3); the cooldown
+            # collapses them into a single message.
+            assert len([text for text in sent if "telegram-cidr" in text]) == 1
         finally:
             await db.close()
 
