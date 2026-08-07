@@ -45,6 +45,9 @@ def warp_split_sources_keyboard(
             )
         )
     rows.append(actions)
+    rows.append(
+        [InlineKeyboardButton(text=t("btn_warp_split_history"), callback_data="wsplit:hist")]
+    )
     if has_migratable:
         # Only offered when it would actually do something — a button that
         # reports "nothing to move" every time trains the operator to ignore it.
@@ -71,4 +74,40 @@ def warp_split_source_add_keyboard() -> InlineKeyboardMarkup:
     """Shown while waiting for the new-source description."""
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=t("btn_cancel"), callback_data="wsplit:src")]]
+    )
+
+
+def warp_split_back_keyboard() -> InlineKeyboardMarkup:
+    """Single "back to sources" button, for read-only screens like the history."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=t("btn_back"), callback_data="wsplit:src")]]
+    )
+
+
+def warp_split_pending_keyboard() -> InlineKeyboardMarkup:
+    """Buttons on the approval card broadcast to the admins.
+
+    Deliberately three, with "show in full" first on its own row: the card shows
+    the first ten changed prefixes, and the decision on a subtraction that adds
+    163 entries should be available without a decision on the other 153 being
+    implied. No slug or hash travels in the callback data — the pending row is a
+    singleton, and putting the hash in the button would let a stale card apply
+    itself by being pressed twice.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=t("btn_warp_split_pending_full"), callback_data="wsplit:pend:full"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=t("btn_warp_split_pending_apply"), callback_data="wsplit:pend:ok"
+                ),
+                InlineKeyboardButton(
+                    text=t("btn_warp_split_pending_reject"), callback_data="wsplit:pend:no"
+                ),
+            ],
+        ]
     )

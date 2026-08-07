@@ -989,6 +989,79 @@ STRINGS: dict[str, str] = {
         "Нечего переносить: ни один manual-префикс не покрыт включёнными источниками."
     ),
     "warp_split_migrated": "Перенесено из manual в feed: {count} префикс(ов).",
+    # ── поднадзорное автообновление (карточка, причины удержания, история) ────
+    "btn_warp_split_pending_apply": "✅ Применить",
+    "btn_warp_split_pending_reject": "🚫 Отклонить",
+    "btn_warp_split_pending_full": "📄 Показать полностью",
+    "btn_warp_split_history": "🕓 История",
+    "warp_split_card_title": (
+        "🛑 <b>Split-список хочет измениться</b> — нужно подтверждение (режим: {mode})"
+    ),
+    "warp_split_card_counts": (
+        "Префиксы: {before} → {after} ({delta})\n"
+        "Адреса: {addr_before} → {addr_after} ({addr_delta})"
+    ),
+    "warp_split_card_pure": (
+        "Покрытие адресов не меняется — меняется только число префиксов, которыми оно "
+        "записано."
+    ),
+    "warp_split_card_added": "+{count}: {sample}",
+    "warp_split_card_removed": "−{count}: {sample}",
+    "warp_split_card_source": (
+        "{slug}: {p_before} → {p_after} префиксов, {a_before} → {a_after} адресов"
+    ),
+    "warp_split_card_source_new": (
+        "{slug}: {prefixes} префиксов / {addresses} адресов (базы сравнения ещё нет)"
+    ),
+    "warp_split_applied_auto": "✅ <b>Split-список обновлён автоматически</b>",
+    "warp_split_applied_approved": "✅ <b>Split-список применён после подтверждения</b>",
+    "warp_split_hold_shrink_add": (
+        "источник <code>{slug}</code> потерял {pct}% покрытия ({before} → {after} адресов)"
+    ),
+    "warp_split_hold_shrink_subtract": (
+        "вычитаемый источник <code>{slug}</code> потерял {pct}% покрытия "
+        "({before} → {after} адресов) — вычитается меньше, значит в туннель попадёт "
+        "БОЛЬШЕ чужого адресного пространства"
+    ),
+    "warp_split_hold_growth": (
+        "итоговый список вырос бы на {pct}% ({before} → {after} адресов)"
+    ),
+    "warp_split_hold_empty": (
+        "источник <code>{slug}</code> в этом прогоне не отдал ни одного пригодного префикса"
+    ),
+    "warp_split_hold_stale": (
+        "источник <code>{slug}</code> не подтверждался {days} дн. — состояние неполное"
+    ),
+    "warp_split_hold_streak": "один и тот же кандидат ещё не встретился нужное число раз подряд",
+    "warp_split_hold_review": (
+        "режим review: любое изменение применяется руками. Подозрительного в этом не "
+        "найдено."
+    ),
+    "warp_split_alert_fail_streak": (
+        "⚠️ Источник <code>{slug}</code> не загружается {count} прогонов подряд: {error}\n"
+        "Список продолжает использовать последний удачный вклад."
+    ),
+    "warp_split_alert_stale": (
+        "⚠️ Источник <code>{slug}</code> не подтверждался {days} дн. — итоговый список "
+        "считается по устаревшей копии."
+    ),
+    "warp_split_pending_applied": "✅ Применено. {delta}, теперь {count} префиксов.",
+    "warp_split_pending_declined": (
+        "🚫 Отклонено. Ничего не применено, база сравнения осталась на месте — то же "
+        "изменение будет предложено на следующем прогоне."
+    ),
+    "warp_split_pending_none": "Нет изменений, ожидающих подтверждения.",
+    "warp_split_pending_stale": (
+        "⛔ Ничего не применено: {error}\n"
+        "Откройте «Источники» → «Обновить все», чтобы пересчитать и решить заново."
+    ),
+    "warp_split_pending_full_title": "<b>Кандидат полностью</b> — {count} префиксов",
+    "warp_split_pending_full_counts": "Добавляется: {added}, убирается: {removed}",
+    "warp_split_pending_full_added": "<b>Добавляются:</b>",
+    "warp_split_pending_full_removed": "<b>Убираются:</b>",
+    "warp_split_history_title": "<b>История обновлений</b> (режим: {mode})",
+    "warp_split_history_line": "{ts} · {mode} · {decision} {detail}",
+    "warp_split_history_empty": "Автоматических прогонов ещё не было.",
     "protocol_unavailable": "Этот протокол сейчас недоступен. Вернитесь в меню и выберите другой.",
     # ── note input validation ─────────────────────────────────────────────────
     "note_no_newlines": "Заметка не должна содержать переводы строк. Введите заметку одной строкой.",
