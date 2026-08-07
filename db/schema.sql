@@ -302,6 +302,10 @@ CREATE TABLE IF NOT EXISTS warp_split_sources (
   last_status          TEXT,
   prefix_count         INTEGER NOT NULL DEFAULT 0,
   last_error           TEXT,
+  -- Consecutive failed fetches. Any success (including a 304) resets it, so the
+  -- alert threshold means "this feed has been dead N runs running" rather than
+  -- "this feed has failed N times ever".
+  fail_streak          INTEGER NOT NULL DEFAULT 0,
   -- Defence in depth for two of the three recursion rules the service also
   -- enforces with a readable message (warp.split_merge.validate_source_relations):
   -- a scope only means something for a subtract source, and no source may
@@ -343,6 +347,61 @@ INSERT OR IGNORE INTO warp_split_sources (slug, title, url, kind, mode, scope_sl
 VALUES ('google-goog', 'Google (all announced ranges)', 'https://www.gstatic.com/ipranges/goog.json', 'google_json', 'add', NULL, 0, 1);
 INSERT OR IGNORE INTO warp_split_sources (slug, title, url, kind, mode, scope_slug, enabled, include_in_list)
 VALUES ('google-cloud', 'Google Cloud (GCP customer ranges)', 'https://www.gstatic.com/ipranges/cloud.json', 'google_json', 'subtract', 'google-goog', 0, 0);
+
+-- Address coverage of the last state that was actually APPLIED, one row per
+-- source plus one for the merged list (scope = 'list'). This is the comparison
+-- point for the unattended-refresh guards: a feed that loses 5% of its coverage
+-- on each of four runs is caught on the fourth, because it is still being
+-- measured against the state a human last accepted. The counts are addresses,
+-- not prefixes, because collapse changes the prefix count without changing a
+-- single routed address (108 → 106 on this host, zero coverage difference).
+--
+-- Written ONLY when an apply actually happened. A rejected candidate must not
+-- move it, or the ratchet degrades into "compare against last time", which is
+-- exactly the guard being avoided.
+CREATE TABLE IF NOT EXISTS warp_split_baseline (
+  scope       TEXT PRIMARY KEY,   -- source slug, or 'list' for the merged result
+  addresses   INTEGER NOT NULL DEFAULT 0,
+  prefixes    INTEGER NOT NULL DEFAULT 0,
+  list_hash   TEXT,               -- set for scope='list' only
+  applied_ts  INTEGER NOT NULL DEFAULT 0
+);
+
+-- The single candidate awaiting an admin's decision. One row by construction
+-- (CHECK id = 1): a queue of pending routing policies is a queue of chances to
+-- apply the wrong one, so a newer candidate replaces the older outright and the
+-- admin always decides about the current state of the world.
+--
+-- list_text is stored so the card can show the full list without recomputing,
+-- and list_hash so that pressing "Apply" on a card the world has moved past is
+-- detected rather than obeyed.
+CREATE TABLE IF NOT EXISTS warp_split_pending (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  ts          INTEGER NOT NULL DEFAULT 0,
+  list_hash   TEXT    NOT NULL,
+  list_text   TEXT    NOT NULL,
+  reason      TEXT    NOT NULL DEFAULT '',
+  deltas_json TEXT    NOT NULL DEFAULT '{}'
+);
+
+-- One row per unattended run, whatever the outcome. This is the evidence base
+-- for the decision the whole feature exists to support: after a fortnight in
+-- review mode, "were all the changes safe?" must be answerable from data rather
+-- than from memory. Trimmed to the most recent 200 rows by the same run that
+-- writes them.
+CREATE TABLE IF NOT EXISTS warp_split_runs (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts           INTEGER NOT NULL DEFAULT 0,
+  mode         TEXT    NOT NULL,
+  -- applied | queued | nochange | rejected | failed. 'nochange' means the host
+  -- was not touched: either there was no delta, or the confirmation streak has
+  -- not been reached yet.
+  decision     TEXT    NOT NULL,
+  reason       TEXT    NOT NULL DEFAULT '',
+  list_hash    TEXT    NOT NULL DEFAULT '',
+  sources_json TEXT    NOT NULL DEFAULT '[]',
+  metrics_json TEXT    NOT NULL DEFAULT '{}'
+);
 
 CREATE TABLE IF NOT EXISTS server_status_settings (
   id               INTEGER PRIMARY KEY DEFAULT 1,

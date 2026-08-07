@@ -1,9 +1,12 @@
 """Persistence for the WARP selective-split feed tables.
 
-Three tables, one repository, because they are always read together and never
+Six tables, one repository, because they are always read together and never
 independently useful: ``warp_split_sources`` (where prefixes come from),
-``warp_split_prefixes`` (what each origin currently contributes) and
-``warp_split_exclusions`` (what the operator vetoed).
+``warp_split_prefixes`` (what each origin currently contributes),
+``warp_split_exclusions`` (what the operator vetoed), ``warp_split_baseline``
+(the coverage of the last state actually applied), ``warp_split_pending`` (the
+one candidate awaiting an admin's decision) and ``warp_split_runs`` (the journal
+of unattended runs).
 
 None of this is the routed list. That lives in ``/etc/vpn-bot/warp-split.list``
 and is written only by the privileged helper — see
@@ -11,20 +14,27 @@ and is written only by the privileged helper — see
 """
 from __future__ import annotations
 
+import json
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from aiosqlite import Row
 
 from db.database import Database
-from warp.feed_state import SplitSource
-from warp.split_merge import MANUAL_ORIGIN
+from warp.feed_state import PendingCandidate, SplitRun, SplitSource
+from warp.split_analysis import Coverage
+from warp.split_merge import LIST_SCOPE, MANUAL_ORIGIN
 
 _SOURCE_COLUMNS = (
     "id, slug, title, url, kind, mode, scope_slug, enabled, include_in_list, "
     "refresh_interval_sec, last_attempt_ts, last_success_ts, last_etag, "
-    "last_modified, last_status, prefix_count, last_error"
+    "last_modified, last_status, prefix_count, last_error, fail_streak"
 )
+
+# How many run rows to keep. Two weeks of six-hourly runs is 56 rows, so 200
+# covers the review period the feature exists to support with room to spare,
+# while staying small enough that the table never needs its own maintenance.
+RUNS_KEPT = 200
 
 
 def _row_to_source(row: Row) -> SplitSource:
@@ -46,6 +56,7 @@ def _row_to_source(row: Row) -> SplitSource:
         last_status=None if row["last_status"] is None else str(row["last_status"]),
         prefix_count=int(row["prefix_count"]),
         last_error=None if row["last_error"] is None else str(row["last_error"]),
+        fail_streak=int(row["fail_streak"]),
     )
 
 
@@ -172,7 +183,8 @@ class WarpSplitSourceRepository:
             """
             UPDATE warp_split_sources
                SET last_attempt_ts = ?, last_success_ts = ?, last_status = ?,
-                   prefix_count = ?, last_etag = ?, last_modified = ?, last_error = NULL
+                   prefix_count = ?, last_etag = ?, last_modified = ?, last_error = NULL,
+                   fail_streak = 0
              WHERE slug = ?
             """,
             (stamp, stamp, status, prefix_count, etag, last_modified, slug),
@@ -182,13 +194,17 @@ class WarpSplitSourceRepository:
     async def record_failure(
         self, slug: str, *, status: str, error: str, now: int | None = None
     ) -> None:
-        """Stamp a failed refresh. ``last_success_ts`` and the cached validators
-        are deliberately left alone — they describe the last good state, which is
-        what the merge falls back onto."""
+        """Stamp a failed refresh and advance the consecutive-failure counter.
+
+        ``last_success_ts`` and the cached validators are deliberately left alone
+        — they describe the last good state, which is what the merge falls back
+        onto, and which is also what the staleness check measures against.
+        """
         await self.db.conn.execute(
             """
             UPDATE warp_split_sources
-               SET last_attempt_ts = ?, last_status = ?, last_error = ?
+               SET last_attempt_ts = ?, last_status = ?, last_error = ?,
+                   fail_streak = fail_streak + 1
              WHERE slug = ?
             """,
             (int(time.time()) if now is None else now, status, error[:512], slug),
@@ -275,3 +291,176 @@ class WarpSplitSourceRepository:
             "DELETE FROM warp_split_exclusions WHERE prefix = ?", (prefix,)
         )
         await self.db.conn.commit()
+
+    # ── baseline (last APPLIED coverage) ──────────────────────────────────────
+
+    async def baselines(self) -> dict[str, Coverage]:
+        """Return ``{scope: Coverage}`` for every recorded baseline."""
+        rows = await self.db.conn.execute_fetchall(
+            "SELECT scope, addresses, prefixes FROM warp_split_baseline"
+        )
+        return {
+            str(row["scope"]): Coverage(
+                prefixes=int(row["prefixes"]), addresses=int(row["addresses"])
+            )
+            for row in rows
+        }
+
+    async def baseline_list_hash(self) -> str | None:
+        row = await self.db.conn.execute_fetchone(
+            "SELECT list_hash FROM warp_split_baseline WHERE scope = ?", (LIST_SCOPE,)
+        )
+        if row is None or row["list_hash"] is None:
+            return None
+        return str(row["list_hash"])
+
+    async def set_baselines(
+        self,
+        coverages: Mapping[str, Coverage],
+        *,
+        list_hash: str | None = None,
+        now: int | None = None,
+    ) -> None:
+        """Replace the baseline wholesale with the state that was just applied.
+
+        Wholesale rather than per-scope: the baseline describes one moment, and a
+        half-updated one (new list, old per-source numbers) would compare a
+        candidate against a state that never existed. A source that has gone away
+        loses its row here for the same reason.
+        """
+        stamp = int(time.time()) if now is None else now
+        await self.db.conn.execute("DELETE FROM warp_split_baseline")
+        await self.db.conn.executemany(
+            """
+            INSERT INTO warp_split_baseline (scope, addresses, prefixes, list_hash, applied_ts)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    scope,
+                    coverage.addresses,
+                    coverage.prefixes,
+                    list_hash if scope == LIST_SCOPE else None,
+                    stamp,
+                )
+                for scope, coverage in coverages.items()
+            ],
+        )
+        await self.db.conn.commit()
+
+    # ── pending candidate ─────────────────────────────────────────────────────
+
+    async def pending(self) -> PendingCandidate | None:
+        row = await self.db.conn.execute_fetchone(
+            "SELECT ts, list_hash, list_text, reason, deltas_json FROM warp_split_pending WHERE id = 1"
+        )
+        if row is None:
+            return None
+        return PendingCandidate(
+            ts=int(row["ts"]),
+            list_hash=str(row["list_hash"]),
+            prefixes=tuple(str(row["list_text"]).split()),
+            reason=str(row["reason"]),
+            deltas=json.loads(str(row["deltas_json"]) or "{}"),
+        )
+
+    async def set_pending(
+        self,
+        *,
+        list_hash: str,
+        prefixes: Sequence[str],
+        reason: str,
+        deltas: Mapping[str, object],
+        now: int | None = None,
+    ) -> None:
+        """Store the candidate awaiting approval, replacing any earlier one."""
+        await self.db.conn.execute(
+            """
+            INSERT INTO warp_split_pending (id, ts, list_hash, list_text, reason, deltas_json)
+            VALUES (1, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              ts = excluded.ts, list_hash = excluded.list_hash,
+              list_text = excluded.list_text, reason = excluded.reason,
+              deltas_json = excluded.deltas_json
+            """,
+            (
+                int(time.time()) if now is None else now,
+                list_hash,
+                "\n".join(prefixes),
+                reason,
+                json.dumps(deltas, ensure_ascii=False),
+            ),
+        )
+        await self.db.conn.commit()
+
+    async def clear_pending(self) -> None:
+        await self.db.conn.execute("DELETE FROM warp_split_pending WHERE id = 1")
+        await self.db.conn.commit()
+
+    # ── run journal ───────────────────────────────────────────────────────────
+
+    async def record_run(
+        self,
+        *,
+        mode: str,
+        decision: str,
+        reason: str = "",
+        list_hash: str = "",
+        sources: Sequence[Mapping[str, object]] = (),
+        metrics: Mapping[str, object] | None = None,
+        now: int | None = None,
+    ) -> None:
+        """Append one run row and trim the table to :data:`RUNS_KEPT`.
+
+        Trimming happens here rather than in a separate maintenance job so that
+        the table cannot grow unbounded on a host whose operator never opens the
+        panel — the write and the cleanup are the same act.
+        """
+        await self.db.conn.execute(
+            """
+            INSERT INTO warp_split_runs (ts, mode, decision, reason, list_hash, sources_json, metrics_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(time.time()) if now is None else now,
+                mode,
+                decision,
+                reason,
+                list_hash,
+                json.dumps(list(sources), ensure_ascii=False),
+                json.dumps(dict(metrics or {}), ensure_ascii=False),
+            ),
+        )
+        await self.db.conn.execute(
+            """
+            DELETE FROM warp_split_runs
+             WHERE id NOT IN (SELECT id FROM warp_split_runs ORDER BY id DESC LIMIT ?)
+            """,
+            (RUNS_KEPT,),
+        )
+        await self.db.conn.commit()
+
+    async def recent_runs(self, limit: int = 10) -> list[SplitRun]:
+        rows = await self.db.conn.execute_fetchall(
+            """
+            SELECT ts, mode, decision, reason, list_hash, sources_json, metrics_json
+              FROM warp_split_runs ORDER BY id DESC LIMIT ?
+            """,
+            (limit,),
+        )
+        return [
+            SplitRun(
+                ts=int(row["ts"]),
+                mode=str(row["mode"]),
+                decision=str(row["decision"]),
+                reason=str(row["reason"]),
+                list_hash=str(row["list_hash"]),
+                sources=json.loads(str(row["sources_json"]) or "[]"),
+                metrics=json.loads(str(row["metrics_json"]) or "{}"),
+            )
+            for row in rows
+        ]
+
+    async def count_runs(self) -> int:
+        row = await self.db.conn.execute_fetchone("SELECT COUNT(*) AS n FROM warp_split_runs")
+        return 0 if row is None else int(row["n"])
