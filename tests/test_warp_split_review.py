@@ -43,7 +43,7 @@ from warp.split_merge import LIST_SCOPE
 
 
 # 32 /24s in separate /16s, so nothing collapses and the arithmetic in each test is
-# the arithmetic being tested: 32 × 256 = 8192 addresses of feed coverage plus 256 from
+# the arithmetic being tested: 32 x 256 = 8192 addresses of feed coverage plus 256 from
 # the adopted manual prefix. Documentation space (203.0.113.0/24 is TEST-NET-3), which
 # no guard network — AWG subnet, WARP range, the host's own WAN — can overlap.
 _BASE_FEED = "".join(f"203.{octet}.0.0/24\n" for octet in range(32))
@@ -142,7 +142,7 @@ class TestReviewMode:
     async def test_pure_aggregation_is_queued_too(self, tmp_path: Path):
         """The 108 → 106 case in review: safe, and still nobody's decision but the
         admin's."""
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path)
+        db, shell, manager, _fetcher, _repo, service = await _prime(tmp_path)
         try:
             applied = len(manager.read_list())
             _split_one_prefix(manager)
@@ -159,7 +159,7 @@ class TestReviewMode:
             await db.close()
 
     async def test_approving_the_card_applies_and_moves_the_baseline(self, tmp_path: Path):
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path)
+        db, _shell, manager, fetcher, repo, service = await _prime(tmp_path)
         try:
             fetcher.payloads["telegram-cidr"] = _BASE_FEED + "203.200.0.0/24\n"
             await service.run_cycle()
@@ -188,7 +188,7 @@ class TestReviewMode:
         were computed after it, every per-source line would read "33 → 33" and the
         message would describe the change by erasing it.
         """
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path)
+        db, _shell, _manager, fetcher, _repo, service = await _prime(tmp_path)
         try:
             fetcher.payloads["telegram-cidr"] = _BASE_FEED + "203.200.0.0/24\n"
             await service.run_cycle()
@@ -209,7 +209,7 @@ class TestReviewMode:
         reference point tomorrow, and the same shrink would sail through on the
         next run. That failure would be invisible — the list would simply drift.
         """
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path)
+        db, shell, _manager, fetcher, repo, service = await _prime(tmp_path)
         try:
             fetcher.payloads["telegram-cidr"] = _BASE_FEED + "203.200.0.0/24\n"
             await service.run_cycle()
@@ -259,7 +259,7 @@ class TestReviewMode:
 
 class TestAutoMode:
     async def test_a_safe_change_applies_after_the_streak(self, tmp_path: Path):
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path, mode=MODE_AUTO)
+        db, shell, manager, fetcher, _repo, service = await _prime(tmp_path, mode=MODE_AUTO)
         try:
             fetcher.payloads["telegram-cidr"] = _BASE_FEED + "203.200.0.0/24\n"
 
@@ -281,7 +281,7 @@ class TestAutoMode:
         candidates, so an unstable source resets it every run and never reaches
         the threshold.
         """
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path, mode=MODE_AUTO)
+        db, shell, _manager, fetcher, _repo, service = await _prime(tmp_path, mode=MODE_AUTO)
         try:
             fetcher.payloads["telegram-cidr"] = _BASE_FEED + "203.200.0.0/24\n"
             await service.run_cycle()
@@ -295,7 +295,7 @@ class TestAutoMode:
             await db.close()
 
     async def test_pure_aggregation_skips_the_streak(self, tmp_path: Path):
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path, mode=MODE_AUTO)
+        db, _shell, manager, _fetcher, _repo, service = await _prime(tmp_path, mode=MODE_AUTO)
         try:
             _split_one_prefix(manager)
 
@@ -310,10 +310,10 @@ class TestAutoMode:
         self, tmp_path: Path
     ):
         """21% is over the 20% line, and 20% would not be."""
-        db, shell, manager, fetcher, repo, service = await _prime(
+        db, shell, _manager, fetcher, _repo, service = await _prime(
             tmp_path,
             mode=MODE_AUTO,
-            # 100 × /24 = 25 600 addresses of baseline coverage.
+            # 100 x /24 = 25 600 addresses of baseline coverage.
             payload="".join(f"203.{octet}.0.0/24\n" for octet in range(100)),
         )
         try:
@@ -368,7 +368,7 @@ class TestAutoMode:
             await db.close()
 
     async def test_growth_past_the_threshold_is_queued(self, tmp_path: Path):
-        db, shell, manager, fetcher, repo, service = await _prime(
+        db, shell, _manager, fetcher, _repo, service = await _prime(
             tmp_path, mode=MODE_AUTO, payload="203.10.0.0/24\n"
         )
         try:
@@ -392,7 +392,7 @@ class TestAutoMode:
         without this check the run would look completely ordinary. The candidate
         is held, and the baseline must not move, because nothing was applied.
         """
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path, mode=MODE_AUTO)
+        db, shell, _manager, fetcher, repo, service = await _prime(tmp_path, mode=MODE_AUTO)
         try:
             baseline_before = await repo.baselines()
             await repo.add_manual_prefixes(["198.51.100.0/24"])  # gives the run a delta
@@ -409,7 +409,7 @@ class TestAutoMode:
             await db.close()
 
     async def test_a_stale_source_holds_the_change(self, tmp_path: Path):
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path, mode=MODE_AUTO)
+        db, shell, _manager, fetcher, repo, service = await _prime(tmp_path, mode=MODE_AUTO)
         try:
             await repo.add_manual_prefixes(["198.51.100.0/24"])
             fetcher.errors["telegram-cidr"] = RuntimeError  # not used; see below
@@ -472,7 +472,7 @@ class TestFatalGuards:
         helper reports 162.159.195.1, and a feed that publishes that range must be
         refused outright — approving it could not make it safe.
         """
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path, mode=MODE_AUTO)
+        db, shell, _manager, fetcher, repo, service = await _prime(tmp_path, mode=MODE_AUTO)
         try:
             sent = _sent(service)
             fetcher.payloads["telegram-cidr"] = _BASE_FEED + "162.159.195.0/24\n"
@@ -494,7 +494,7 @@ class TestFatalGuards:
 
 class TestRunJournal:
     async def test_every_outcome_is_recorded(self, tmp_path: Path):
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path, mode=MODE_AUTO)
+        db, _shell, _manager, fetcher, repo, service = await _prime(tmp_path, mode=MODE_AUTO)
         try:
             # nochange
             await service.run_cycle()
@@ -541,7 +541,7 @@ class TestRunJournal:
     async def test_the_journal_is_trimmed_to_the_limit(self, tmp_path: Path):
         """Trimming happens in the same run that writes, so a host whose operator
         never opens the panel cannot grow this table without bound."""
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path)
+        db, _shell, _manager, _fetcher, repo, _service = await _prime(tmp_path)
         try:
             for index in range(RUNS_KEPT + 5):
                 await repo.record_run(
@@ -561,7 +561,7 @@ class TestCard:
     async def test_one_card_per_candidate_not_one_per_run(self, tmp_path: Path):
         """Re-queuing the same candidate says nothing new; replacing it says one
         thing, not two."""
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path)
+        db, _shell, _manager, fetcher, _repo, service = await _prime(tmp_path)
         try:
             sent = _sent(service)
             fetcher.payloads["telegram-cidr"] = _BASE_FEED + "203.200.0.0/24\n"
@@ -576,7 +576,7 @@ class TestCard:
             await db.close()
 
     async def test_the_card_reports_per_source_before_and_after(self, tmp_path: Path):
-        db, shell, manager, fetcher, repo, service = await _prime(tmp_path)
+        db, _shell, _manager, fetcher, repo, service = await _prime(tmp_path)
         try:
             sent = _sent(service)
             fetcher.payloads["telegram-cidr"] = _BASE_FEED + "203.200.0.0/24\n"
@@ -588,7 +588,7 @@ class TestCard:
             pending = await repo.pending()
             assert pending is not None
             sources = {row["slug"]: row for row in pending.deltas["sources"]}
-            # 32 × /24 applied, 33 × /24 proposed — reported per source, in
+            # 32 x /24 applied, 33 x /24 proposed — reported per source, in
             # addresses, against the baseline rather than against the file.
             assert sources["telegram-cidr"]["addresses_before"] == 32 * 256
             assert sources["telegram-cidr"]["addresses_after"] == 33 * 256

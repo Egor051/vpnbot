@@ -11,6 +11,8 @@ That measurement is the reason the thresholds count addresses at all.
 """
 from __future__ import annotations
 
+import pytest
+
 from warp.split_analysis import (
     HOLD_EMPTY_SOURCE,
     HOLD_GROWTH,
@@ -120,7 +122,7 @@ class TestShrink:
             thresholds=THRESHOLDS,
         )
         assert [hold.code for hold in analysis.holds] == [HOLD_SHRINK_ADD]
-        assert analysis.holds[0].pct == 50.0
+        assert analysis.holds[0].pct == pytest.approx(50.0)
 
     def test_a_shrink_within_the_threshold_passes(self):
         analysis = analyse_change(
