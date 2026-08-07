@@ -15,6 +15,7 @@ from adapters.backup import BackupAdapter
 from adapters.clock import ClockProvider
 from adapters.hysteria_auth_health import Hysteria2AuthHealthProbe
 from adapters.hysteria_stats import HysteriaStatsAdapter
+from adapters.warp_feed_fetcher import WarpFeedFetcher
 from adapters.dante_users import DanteUserAdapter
 from adapters.id_generator import IdGenerator
 from adapters.ip_allocator import IpAllocator
@@ -25,7 +26,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_dashboard, admin_maintenance, admin_modules, admin_warp, admin_warp_split, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, start
+from bot.handlers import admin, admin_dashboard, admin_maintenance, admin_modules, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, start
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
 from bot.middlewares.locale import LocaleMiddleware
@@ -47,6 +48,7 @@ from repositories.trial_requests import TrialKeyRequestRepository
 from repositories.users import UserRepository
 from repositories.maintenance_settings import MaintenanceSettingsRepository
 from repositories.server_status_settings import ServerStatusSettingsRepository
+from repositories.warp_split_sources import WarpSplitSourceRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.access_approval import AccessApprovalService
 from services.anomaly_detection import AnomalyDetectionService
@@ -74,10 +76,11 @@ from services.trial_access import TrialAccessService
 from services.user_locks import UserLockManager
 from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
+from services.warp_split_feeds import WarpSplitFeedService
 from services.xray import XrayService
 from warp.manager import WarpManager
 from warp.proxy_egress import make_send_through_provider
-from warp.split_manager import WarpSplitManager
+from warp.split_manager import ApplyOutcome, WarpSplitManager
 
 logger = logging.getLogger(__name__)
 
@@ -536,14 +539,66 @@ async def _build_app(
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
 
     warp_manager = WarpManager(db=db, settings=settings, shell=shell)
+
+    async def _warp_split_alert(text: str) -> None:
+        """Broadcast a split-list alert to the admins, best effort.
+
+        Mirrors WarpManager._broadcast_admins rather than reusing it: this fires
+        for list/feed faults, which are independent of the tunnel-health alerts
+        and must still reach the admin when the WARP module itself is stopped.
+        """
+        for admin_id in settings.admin_ids:
+            try:
+                await bot.send_message(admin_id, text)
+            except Exception:
+                logger.warning("Failed to send WARP split alert to admin %d", admin_id, exc_info=True)
+
+    async def _warp_split_audited(outcome: ApplyOutcome) -> None:
+        """One audit row per applied list, carrying the +N/-N delta.
+
+        Skipped when the apply was a no-op: a row saying "nothing changed" on
+        every six-hourly refresh would bury the ones that did.
+        """
+        if outcome.unchanged:
+            return
+        await audit_service.write(
+            actor_user_id=outcome.actor_user_id,
+            action="warp_split_applied",
+            entity_type=AuditEntityType.SYSTEM,
+            entity_id="warp-split",
+            details={
+                "count": outcome.count,
+                "delta": outcome.delta_text,
+                "added": list(outcome.added[:20]),
+                "removed": list(outcome.removed[:20]),
+            },
+        )
+
     warp_split_manager = WarpSplitManager(
         list_path=settings.warp_split_list_path,
         apply_helper_path=settings.warp_split_apply_helper_path,
         awg_network=settings.awg_network,
         shell=shell,
         state_helper_path=settings.warp_split_state_helper_path,
+        status_helper_path=settings.warp_status_helper_path,
         marker_path=settings.warp_split_disabled_marker_path,
         interface_name=settings.warp_interface,
+        max_prefixes=settings.warp_split_max_prefixes,
+        min_prefixlen=settings.warp_split_min_prefixlen,
+        on_applied=_warp_split_audited,
+        on_alert=_warp_split_alert,
+    )
+    warp_split_feed_service = WarpSplitFeedService(
+        db=db,
+        repo=WarpSplitSourceRepository(db),
+        fetcher=WarpFeedFetcher(
+            cache_dir=settings.warp_split_feed_cache_dir,
+            timeout=float(settings.warp_split_feed_timeout_sec),
+            max_bytes=settings.warp_split_feed_max_bytes,
+        ),
+        manager=warp_split_manager,
+        alert_delta_pct=settings.warp_split_feed_alert_delta_pct,
+        notify=_warp_split_alert,
     )
 
     server_status_service = ServerStatusService()
@@ -600,6 +655,7 @@ async def _build_app(
         anomaly_detection=anomaly_detection_service,
         warp=warp_manager,
         warp_split=warp_split_manager,
+        warp_split_feeds=warp_split_feed_service,
         modules=protocol_modules_service,
         dashboard=dashboard_service,
         server_status=server_status_service,
@@ -662,6 +718,10 @@ async def _build_app(
     dp.include_router(admin_warp.router)
     dp.include_router(admin_warp_split.router)
     dp.include_router(admin_warp_split_ui.router)
+    # The wsplit:src* callbacks are disjoint from the ones above (a trailing colon
+    # keeps "wsplit:srcdel:" from matching "wsplit:srcdelok:"), so the relative
+    # order of these two routers does not change behaviour.
+    dp.include_router(admin_warp_split_sources.router)
     dp.include_router(admin_modules.router)
     dp.include_router(admin_maintenance.router)
     dp.include_router(keys.router)

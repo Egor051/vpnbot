@@ -10,11 +10,13 @@ callback_data budget (Telegram limit is 64 bytes):
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Mapping, Sequence
 from math import ceil
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from i18n import t
+from warp.split_merge import MANUAL_ORIGIN
 
 # Keep a page small enough that a full page of two-button rows never approaches
 # the Telegram message/keyboard size limits.
@@ -54,27 +56,47 @@ def split_page_slice(entries: list[str], page: int) -> list[str]:
     return entries[start : start + SPLIT_PAGE_SIZE]
 
 
-def warp_split_panel_keyboard(entries: list[str], page: int) -> InlineKeyboardMarkup:
-    """Build the split-panel keyboard for *page* of the full *entries* list."""
+def warp_split_panel_keyboard(
+    entries: list[str],
+    page: int,
+    origins: Mapping[str, Sequence[str]] | None = None,
+) -> InlineKeyboardMarkup:
+    """Build the split-panel keyboard for *page* of the full *entries* list.
+
+    ``origins`` maps a prefix to the origins that contributed it ('manual' or a
+    feed slug). It changes two things per row: the label gains the origin, and a
+    feed-supplied prefix gets 🚫 (record an exclusion) instead of 🗑 (delete).
+    That distinction is not cosmetic — deleting a feed prefix is undone by the
+    next refresh, so offering a delete there would be offering a no-op.
+    """
     total = len(entries)
     page = split_clamp_page(page, total)
     total_pages = split_total_pages(total)
+    origins = origins or {}
 
     rows: list[list[InlineKeyboardButton]] = []
     for cidr in split_page_slice(entries, page):
-        row = [InlineKeyboardButton(text=cidr, callback_data="noop")]
-        # Skip the delete button for an entry that would blow the callback_data
+        owners = [owner for owner in origins.get(cidr, ()) if owner != MANUAL_ORIGIN]
+        label = f"{cidr} · {','.join(owners)}" if owners else cidr
+        row = [InlineKeyboardButton(text=label, callback_data="noop")]
+        # Skip the action button for an entry that would blow the callback_data
         # limit or isn't a valid IPv4 CIDR; the whole keyboard would fail to
         # render otherwise. Such an entry is still shown (read-only) so the
         # operator can spot and fix it via the file / commands.
         if _deletable(cidr):
-            row.append(InlineKeyboardButton(text="🗑", callback_data=f"wsplit:del:{cidr}"))
+            if owners:
+                row.append(InlineKeyboardButton(text="🚫", callback_data=f"wsplit:excl:{cidr}"))
+            else:
+                row.append(InlineKeyboardButton(text="🗑", callback_data=f"wsplit:del:{cidr}"))
         rows.append(row)
 
     action_row = [InlineKeyboardButton(text=t("btn_warp_split_add"), callback_data="wsplit:add")]
     if total > 0:
         action_row.append(InlineKeyboardButton(text=t("btn_warp_split_apply"), callback_data="wsplit:apply"))
     rows.append(action_row)
+    rows.append(
+        [InlineKeyboardButton(text=t("btn_warp_split_sources"), callback_data="wsplit:src")]
+    )
 
     if total_pages > 1:
         # Mirror the main-menu FAQ pagination: omit the prev/next button on the

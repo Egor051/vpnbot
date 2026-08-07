@@ -415,6 +415,21 @@ class Settings:
     # through this helper.
     warp_split_state_helper_path: Path = Path("/usr/local/sbin/vpn-bot-warp-split-state")
     warp_split_disabled_marker_path: Path = Path("/etc/vpn-bot/warp-split.disabled")
+    # Split-list prefix feeds. The scheduler is OFF by default (0): a background
+    # job that rewrites the routing policy for every client must be switched on
+    # deliberately, not inherited from an upgrade. Manual "refresh now" from the
+    # panel works regardless, and always previews the delta and asks first.
+    warp_split_feeds_interval_sec: int = 0
+    warp_split_feed_timeout_sec: int = 20
+    warp_split_feed_max_bytes: int = 2_000_000
+    warp_split_feed_cache_dir: Path = Path("/var/lib/vpn-bot/warp-feeds")
+    warp_split_feed_alert_delta_pct: int = 30
+    # Hard ceiling and shortest accepted mask for the routed list. Both are
+    # whole-operation guards: exceeding either refuses the update entirely rather
+    # than trimming it, because a half-applied routing policy is harder to notice
+    # than a refused one.
+    warp_split_max_prefixes: int = 1500
+    warp_split_min_prefixlen: int = 8
     # Route LOCAL proxy egress (Dante/Xray/MTProto) through the WARP tunnel too.
     # When true the Xray config writer binds the freedom outbound's egress source to
     # the tunnel IP (``sendThrough``) so its traffic is diverted into the tunnel by
@@ -949,6 +964,16 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         warp_split_disabled_marker_path=Path(
             _optional("WARP_SPLIT_DISABLED_MARKER_PATH", "/etc/vpn-bot/warp-split.disabled")
         ),
+        # 0 = scheduler off, same convention as every other interval here.
+        warp_split_feeds_interval_sec=_int_range("WARP_SPLIT_FEEDS_INTERVAL_SEC", 0, 0, 604800),
+        warp_split_feed_timeout_sec=_int_range("WARP_SPLIT_FEED_TIMEOUT_SEC", 20, 5, 300),
+        warp_split_feed_max_bytes=_int_range("WARP_SPLIT_FEED_MAX_BYTES", 2_000_000, 10_000, 50_000_000),
+        warp_split_feed_cache_dir=Path(
+            _optional("WARP_SPLIT_FEED_CACHE_DIR", "/var/lib/vpn-bot/warp-feeds")
+        ),
+        warp_split_feed_alert_delta_pct=_int_range("WARP_SPLIT_FEED_ALERT_DELTA_PCT", 30, 1, 100),
+        warp_split_max_prefixes=_int_range("WARP_SPLIT_MAX_PREFIXES", 1500, 1, 100_000),
+        warp_split_min_prefixlen=_int_range("WARP_SPLIT_MIN_PREFIXLEN", 8, 0, 32),
         warp_proxy_egress_enabled=_bool("WARP_PROXY_EGRESS_ENABLED", _bool("WARP_PROXY_EGRESS", False)),
         bot_language=_choice("BOT_LANGUAGE", "ru", {"ru", "en"}),
         hysteria2_enabled=_bool("HYSTERIA2_ENABLED", False),

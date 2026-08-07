@@ -354,5 +354,126 @@ no SSH required:
 Both paths are pure presentation over `WarpSplitManager`: input is IPv4-only with a
 mandatory mask, host bits are normalised, guard ranges (`0.0.0.0/0`, the AWG client
 subnet, `172.16.0.0/12`, loopback/link-local/multicast, the server's own `eth0`
-subnet) are rejected, duplicates are skipped, and emptying the list is refused. The
-bot never calls `ip`/`iptables` — writes go only through the privileged helper.
+subnet, its default gateway, and **the live WARP endpoint**) are rejected,
+duplicates are skipped, and emptying the list is refused. The bot never calls
+`ip`/`iptables` — writes go only through the privileged helper.
+
+The endpoint guard is the one worth understanding. `vpn-bot-warp-split` pins
+`<endpoint>/32 via <gw> dev <wan>` into table T *before* it installs the per-prefix
+routes, and it installs them with `ip route replace` — so an exact `<endpoint>/32`
+in the list overwrites that pin and sends the tunnel's own packets into the tunnel.
+A supernet covering the endpoint does not overwrite the pin (longest-prefix keeps it
+winning) but is rejected too, because it becomes a loop the moment the endpoint
+moves. The endpoint is read through `vpn-bot-warp-status` (already in the sudoers
+allowlist, so no new privilege is granted) and the last value seen is remembered, so
+a momentarily unreachable tunnel does not quietly drop the guard.
+
+Every mutation is a read-modify-write under one lock, shared with the feed
+refresher below: the list is a single file with no compare-and-swap, so two
+concurrent "add a prefix" flows would otherwise each read N entries and write N+1,
+losing one of the two additions with no error anywhere.
+
+The helper installs the routes with `ip -batch -` (and reconciles stale ones with
+`ip -force -batch -`) rather than one `ip` process per prefix. Feeds make lists
+large enough for that to matter: measured on this host, installing 1500 prefixes
+takes **4.275 s** as separate processes and **0.096 s** as a batch; the live
+108-prefix apply went from 0.385 s to 0.098 s. The semantics are unchanged — the
+delete phase keeps `-force`, which continues past a route that raced away, exactly
+as the old per-command `|| true` did, while the add phase uses plain `-batch`,
+which aborts at the first failure just as the loop did under `set -e`.
+
+### Prefix feeds (automatic list updates)
+
+Beyond hand-typed CIDRs, the split list can be assembled from published prefix
+feeds. **Источники** ("Sources") in the split panel lists them with their state,
+prefix count, last refresh and last error, and offers Refresh now / On / Off /
+Add URL / Delete.
+
+Three sources ship pre-configured:
+
+| Slug | Feed | Mode | Default |
+| --- | --- | --- | --- |
+| `telegram-cidr` | `core.telegram.org/resources/cidr.txt` | add | enabled |
+| `google-goog` | `gstatic.com/ipranges/goog.json` | add | **disabled** |
+| `google-cloud` | `gstatic.com/ipranges/cloud.json` | subtract from `google-goog` | **disabled** |
+
+Both Google rows ship off deliberately. `goog.json` is *everything* Google
+announces, which includes the GCP customer ranges — turning it on alone routes
+other people's cloud servers through your tunnel. `cloud.json` is exactly those GCP
+ranges, so subtracting it leaves Google's own services (search, YouTube, gstatic,
+Gmail). The panel warns when you enable `goog` without `cloud`.
+
+**Subtraction happens over addresses, not strings.** `cloud.json`'s prefixes are
+subnets *inside* `goog.json`'s, so a textual set-difference would remove almost
+nothing (7 of 99 entries on the real data) and silently leave every GCP range
+routed. The merge uses `ipaddress.address_exclude`, which means it also
+**fragments**: measured on 2026-08-06, `goog − cloud` turns 99 prefixes into
+**262**, and `collapse` cannot put them back because the holes are real. The panel
+shows the before/after counts, and `WARP_SPLIT_MAX_PREFIXES` refuses the whole
+update if the result is too large — the rejection names the subtraction that caused
+it and offers the two ways out (raise the cap, or drop the subtraction and take the
+base source whole).
+
+Order of evaluation:
+
+```
+result = collapse( union(add sources, manual) - subtract sources - exclusions )
+```
+
+A subtract source with a **scope** applies only to that one source's contribution;
+without a scope it applies to the whole merged set. Manual exclusions are the same
+mechanism at the same step. A source may not subtract from itself, and chains of
+subtraction deeper than one level are rejected when the source is added.
+
+Note the consequence of a scope: if the same prefixes also exist as *manual*
+entries — which is the case on a host whose list was originally seeded by hand from
+`goog.json` — the scoped subtraction is inert, because the manual copies
+re-introduce exactly the ranges being carved out. The panel offers **«Перенести
+manual → feed»**, which drops the manual prefixes an enabled add-source already
+covers. It is a manual action with a delta preview and a confirmation; nothing is
+migrated automatically.
+
+Failure behaviour, in one line: **a feed failure never shortens the list.** Network
+error, HTTP 500, oversized body, malformed document and empty response are all
+treated identically — the error is recorded on the source row, an alert goes to the
+admins, and the merge uses that source's last good contribution from
+`WARP_SPLIT_FEED_CACHE_DIR`. A source that is enabled but has *never* succeeded
+aborts the merge entirely rather than contributing nothing, because "base fresh,
+subtrahend empty" is precisely how all of GCP would end up in the tunnel.
+
+Deleting a feed-supplied prefix with 🗑 records an **exclusion** instead of deleting
+it — a plain delete would be undone by the next refresh. Exclusions survive
+refreshes.
+
+#### Feed environment variables
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `WARP_SPLIT_FEEDS_INTERVAL_SEC` | `0` | Unattended refresh interval; `0` disables the scheduler. Manual refresh from the panel always works. |
+| `WARP_SPLIT_FEED_TIMEOUT_SEC` | `20` | Per-fetch total timeout. |
+| `WARP_SPLIT_FEED_MAX_BYTES` | `2000000` | Response ceiling; a larger body is a failed fetch. `cloud.json` is ~112 KB. |
+| `WARP_SPLIT_FEED_CACHE_DIR` | `/var/lib/vpn-bot/warp-feeds` | Last good copy of each feed (files `0600`, directory `0700`). |
+| `WARP_SPLIT_FEED_ALERT_DELTA_PCT` | `30` | Notify admins when an **automatic** refresh changes the list by more than this. |
+| `WARP_SPLIT_MAX_PREFIXES` | `1500` | Hard ceiling; exceeding it refuses the whole update, never part of it. |
+| `WARP_SPLIT_MIN_PREFIXLEN` | `8` | Shortest accepted mask. |
+
+The scheduler defaults to **off**. Enabling it lets a background job rewrite the
+routing policy for every client, which should be a decision rather than something
+inherited from an upgrade. With no scheduler and no feed enabled, deploying this
+subsystem leaves `/etc/vpn-bot/warp-split.list` byte-for-byte unchanged and makes no
+helper call at all — the manager renders the candidate list, compares it against the
+file, and skips the apply when they match. The scheduler's first run is also delayed
+rather than immediate, so a restart loop cannot become a policy loop.
+
+Conditional GET is used where the feed supports it, and the two real feeds disagree:
+`core.telegram.org` serves an `ETag` *and* a `Last-Modified`, `gstatic.com` serves
+`Last-Modified` only. Whichever validators are held get sent, and a 304 from either
+means "no change".
+
+#### Adding your own source
+
+**Источники → Добавить URL**, then supply a slug, a title, the URL and the format
+(`cidr_text` for one CIDR per line with `#`/`;` comments, `google_json` for the
+gstatic `prefixes[].ipv4Prefix` shape). New sources start disabled; enable one and
+use Refresh now to see the delta before it is applied. IPv6 entries are dropped
+silently — this host has no IPv6.

@@ -29,6 +29,7 @@ from services.traffic_stats import TrafficStatsService
 from services.trial_access import TrialAccessService
 from services.users import UserService
 from services.vpn_keys import VpnKeyQueryService
+from services.warp_split_feeds import WarpSplitFeedService
 from services.xray import XrayService
 from repositories.server_status_settings import ServerStatusSettingsRepository
 from warp.manager import WarpManager
@@ -59,6 +60,10 @@ class Services:
     anomaly_detection: AnomalyDetectionService
     warp: WarpManager
     warp_split: WarpSplitManager
+    # Prefix feeds for the split list. Wired unconditionally so the panel can
+    # always manage sources; WARP_SPLIT_FEEDS_INTERVAL_SEC gates only the
+    # unattended refresh loop, never the manual one.
+    warp_split_feeds: WarpSplitFeedService
     modules: ProtocolModulesService
     dashboard: DashboardService
     server_status: ServerStatusService

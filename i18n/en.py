@@ -898,6 +898,92 @@ STRINGS: dict[str, str] = {
     "warp_split_report_unchanged": "List unchanged.",
     "warp_split_report_applied_add": "Applied: +{count} prefixes, WARP split routing restarted.",
     "warp_split_report_applied_del": "Applied: -{count} prefixes, WARP split routing restarted.",
+    "warp_split_report_unchanged_identical": (
+        "Nothing changed — the file already holds exactly these prefixes, so apply was not called."
+    ),
+    # ── split: prefix sources ─────────────────────────────────────────────────
+    "btn_warp_split_sources": "📡 Sources",
+    "btn_warp_split_source_refresh": "🔄 Refresh now",
+    "btn_warp_split_source_refresh_all": "🔄 Refresh all",
+    "btn_warp_split_source_on": "✅ On",
+    "btn_warp_split_source_off": "⛔ Off",
+    "btn_warp_split_source_add": "➕ Add URL",
+    "btn_warp_split_source_del": "🗑 Delete",
+    "btn_warp_split_migrate": "📥 Move manual → feed",
+    "warp_split_sources_title": "<b>Prefix sources</b> — total: {count}",
+    "warp_split_sources_empty": "No sources yet. Use «➕ Add URL» to connect the first one.",
+    "warp_split_source_line": (
+        "{state} <b>{title}</b> (<code>{slug}</code>)\n"
+        "  {mode} · prefixes: {count} · refreshed: {updated}"
+    ),
+    "warp_split_source_mode_add": "added",
+    "warp_split_source_mode_subtract_all": "subtracted from the whole list",
+    "warp_split_source_mode_subtract_scope": "subtracted from {scope}",
+    "warp_split_source_never": "never",
+    "warp_split_source_error_line": "  ⚠️ error: {error}",
+    "warp_split_source_goog_warning": (
+        "⚠️ <b>Careful.</b> <code>google-goog</code> is EVERY prefix Google announces, "
+        "including the GCP customer ranges — other people's cloud servers would be routed "
+        "through your tunnel. To avoid that, enable <code>google-cloud</code> as well; it "
+        "subtracts exactly those GCP ranges."
+    ),
+    "warp_split_source_scope_inert": (
+        "ℹ️ The scoped subtraction currently changes nothing: the same prefixes also exist "
+        "as manual entries, and the manual copies re-introduce exactly what is being carved "
+        "out. Use «📥 Move manual → feed»."
+    ),
+    "warp_split_preview_title": "<b>Preview of the change</b>",
+    "warp_split_preview_counts": "Was: {before} · will be: {after} ({delta})",
+    "warp_split_preview_subtract": (
+        "Subtraction effect: −{addresses} addresses / {prefixes} prefixes "
+        "(before subtraction {before}, after {after}, after collapse {collapsed})"
+    ),
+    "warp_split_preview_added": "Added ({count}): {sample}",
+    "warp_split_preview_removed": "Removed ({count}): {sample}",
+    "warp_split_preview_identical": "No change — the list stays as it is.",
+    "warp_split_preview_confirm": "Apply these changes?",
+    "warp_split_refresh_done": "✅ Refreshed. {delta}, now {count} prefixes.",
+    "warp_split_refresh_sources": "Sources: {summary}",
+    "warp_split_refresh_blocked": "⛔ Update not applied: {reason}",
+    "warp_split_source_deleted": "Source {slug} deleted.",
+    "warp_split_source_delete_confirm": (
+        "Delete source <code>{slug}</code>? Its prefixes will leave the list on the "
+        "next apply."
+    ),
+    "warp_split_source_enabled": "Source {slug} enabled.",
+    "warp_split_source_disabled": "Source {slug} disabled.",
+    "warp_split_source_add_prompt": (
+        "Send the source description on four lines:\n"
+        "<code>slug</code>\n<code>title</code>\n<code>URL</code>\n"
+        "<code>format</code> — <code>cidr_text</code> or <code>google_json</code>\n\n"
+        "An optional fifth line, <code>subtract</code> or <code>subtract:slug</code>, "
+        "makes the source subtract instead of add."
+    ),
+    "warp_split_source_add_usage": (
+        "At least four lines are needed: slug, title, URL, format. Try again or press "
+        "«Cancel»."
+    ),
+    "warp_split_source_added": (
+        "Source <code>{slug}</code> added, disabled for now. Enable it and press "
+        "«🔄 Refresh now» to see the delta."
+    ),
+    "warp_split_source_add_error": "Source not added: {error}",
+    "warp_split_exclude_confirm": (
+        "Prefix {cidr} came from source <code>{origin}</code>.\n\n"
+        "Deleting it would achieve nothing — the next refresh brings it straight back. "
+        "Instead it is recorded as an exclusion and subtracted on every refresh. "
+        "Continue?"
+    ),
+    "warp_split_excluded": "Prefix {cidr} added to the exclusions.",
+    "warp_split_origin_manual": "manual",
+    "warp_split_migrate_confirm": (
+        "The manual prefixes already covered by an enabled source ({count} of them) will "
+        "be dropped. This is what makes a scoped subtraction take effect. Continue?"
+    ),
+    "warp_split_migrate_none": (
+        "Nothing to move: no manual prefix is covered by an enabled source."
+    ),
+    "warp_split_migrated": "Moved from manual into feeds: {count} prefix(es).",
     "protocol_unavailable": "This protocol is currently unavailable. Go back to the menu and pick another.",
     # ── note input validation ─────────────────────────────────────────────────
     "note_no_newlines": "The note must not contain line breaks. Enter it on a single line.",

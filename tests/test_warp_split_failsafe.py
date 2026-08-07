@@ -125,10 +125,22 @@ fi
 
     # ip: handles route/rule subcommands; for "ip route show default dev eth0"
     # returns a fake default line so GW discovery works; "ip route get 1.1.1.1"
-    # simulates egress on the configured device.
+    # simulates egress on the configured device. Batch mode is expanded back into
+    # single commands (see below) so route assertions stay readable.
     _write_stub(bin_dir / "ip", f"""\
 #!/bin/sh
 {guard("ip")}echo "ip $@" >> {log_file}
+# `ip [-force] -batch -` takes its commands on stdin, one per line, with the
+# leading "ip" omitted. Log each one back in single-command form, so the
+# assertions stay written the way an operator reads them
+# ("ip route replace X dev out-warp table T") instead of against a batch blob.
+if [ "$1" = "-batch" ] || [ "$2" = "-batch" ]; then
+    while IFS= read -r __line; do
+        [ -n "$__line" ] || continue
+        echo "ip $__line" >> {log_file}
+    done
+    exit 0
+fi
 # route show default dev eth0 → provide gateway for GW discovery
 if [ "$1" = "route" ] && [ "$2" = "show" ] && [ "$3" = "default" ]; then
     echo "default via {WAN_GW} dev {WAN_DEV}"
@@ -775,8 +787,25 @@ class TestScriptMetadata:
         assert 'ip route show table "$T"' in text
         # Select only script-managed per-prefix routes (`<prefix> dev $IFACE`).
         assert "$3==dev" in text
-        # Delete the unwanted ones from table T (reconcile).
-        assert 'ip route del "$old" dev "$IFACE" table "$T"' in text
+        # Emit a delete for every table entry the list no longer wants. The routes
+        # are emitted as `ip -batch` lines rather than one `ip` process per prefix
+        # (see test_warp_split_batches_route_changes), so the assertion is on the
+        # generated command, not on a shell loop.
+        assert '"route del " $0 " dev " dev " table " t' in text
+
+    def test_warp_split_batches_route_changes(self):
+        """Route changes go through `ip -batch`, not one process per prefix.
+
+        Measured on the deploy host: 1500 prefixes cost 4.275s as separate `ip`
+        processes and 0.096s as a batch. The two invocations differ on purpose —
+        deletes keep `-force` so a route that raced away does not abort the rest
+        (they were `|| true` per command before), adds do not, so a genuine failure
+        still stops the run exactly as `set -e` did around the old loop.
+        """
+        text = SPLIT_SCRIPT.read_text(encoding="utf-8")
+        assert "ip -force -batch -" in text, "the reconcile phase must batch its deletes"
+        assert "ip -batch -" in text, "the add phase must batch its route replaces"
+        assert "for pfx in $WANT" not in text, "the per-prefix process loop must be gone"
 
     def test_warp_split_uses_env_vars_not_hardcoded_defaults(self):
         text = SPLIT_SCRIPT.read_text(encoding="utf-8")
