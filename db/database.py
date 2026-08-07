@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 33
+CURRENT_SCHEMA_VERSION = 34
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -379,6 +379,10 @@ class Database:
             await self._migrate_v33()
             await self._set_schema_version(33)
             version = 33
+        if version < 34:
+            await self._migrate_v34()
+            await self._set_schema_version(34)
+            version = 34
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -721,6 +725,8 @@ class Database:
             ),
             ("announcement_batches", "status", ("pending", "sending", "completed", "failed", "cancelled", "scheduled")),
             ("announcement_deliveries", "status", ("pending", "sent", "failed", "skipped")),
+            ("warp_split_sources", "kind", ("cidr_text", "google_json")),
+            ("warp_split_sources", "mode", ("add", "subtract")),
         )
         for table, column, allowed_values in enum_checks:
             placeholders = ",".join("?" for _ in allowed_values)
@@ -1439,6 +1445,108 @@ class Database:
         await self.conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_key_bundles_display_no ON key_bundles(display_no)"
         )
+
+    async def _migrate_v34(self) -> None:
+        # WARP selective-split prefix feeds: three new tables and three seed rows.
+        # Mirrors schema.sql; every statement is idempotent (IF NOT EXISTS /
+        # INSERT OR IGNORE) so a re-run is a no-op.
+        #
+        # Nothing is backfilled here, and that is the whole backward-compatibility
+        # story. The manual prefixes that exist today live in
+        # /etc/vpn-bot/warp-split.list, which this layer must not read (the DB
+        # layer has no business touching /etc, and on a dev box the file is not
+        # even there). They are adopted lazily by WarpSplitFeedService the first
+        # time it runs, so a deploy that never enables a feed leaves both the file
+        # and this table exactly as they were.
+        #
+        # No index is created on purpose: warp_split_sources.slug is UNIQUE (SQLite
+        # indexes it implicitly) and warp_split_prefixes has a composite PRIMARY KEY
+        # on (origin, prefix), whose leftmost column already serves every
+        # "rows for this origin" query. An extra index here would be dead weight.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warp_split_sources (
+              id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+              slug                 TEXT    NOT NULL UNIQUE,
+              title                TEXT    NOT NULL,
+              url                  TEXT    NOT NULL,
+              kind                 TEXT    NOT NULL CHECK(kind IN ('cidr_text','google_json')),
+              mode                 TEXT    NOT NULL DEFAULT 'add' CHECK(mode IN ('add','subtract')),
+              scope_slug           TEXT,
+              enabled              INTEGER NOT NULL DEFAULT 0,
+              include_in_list      INTEGER NOT NULL DEFAULT 1,
+              refresh_interval_sec INTEGER NOT NULL DEFAULT 21600,
+              last_attempt_ts      INTEGER NOT NULL DEFAULT 0,
+              last_success_ts      INTEGER NOT NULL DEFAULT 0,
+              last_etag            TEXT,
+              last_modified        TEXT,
+              last_status          TEXT,
+              prefix_count         INTEGER NOT NULL DEFAULT 0,
+              last_error           TEXT,
+              CHECK (mode = 'subtract' OR scope_slug IS NULL),
+              CHECK (scope_slug IS NULL OR scope_slug <> slug)
+            )
+            """
+        )
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warp_split_prefixes (
+              origin   TEXT    NOT NULL,
+              prefix   TEXT    NOT NULL,
+              added_at INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY (origin, prefix)
+            )
+            """
+        )
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS warp_split_exclusions (
+              prefix     TEXT PRIMARY KEY,
+              created_at INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        seeds = (
+            (
+                "telegram-cidr",
+                "Telegram",
+                "https://core.telegram.org/resources/cidr.txt",
+                "cidr_text",
+                "add",
+                None,
+                1,
+                1,
+            ),
+            (
+                "google-goog",
+                "Google (all announced ranges)",
+                "https://www.gstatic.com/ipranges/goog.json",
+                "google_json",
+                "add",
+                None,
+                0,
+                1,
+            ),
+            (
+                "google-cloud",
+                "Google Cloud (GCP customer ranges)",
+                "https://www.gstatic.com/ipranges/cloud.json",
+                "google_json",
+                "subtract",
+                "google-goog",
+                0,
+                0,
+            ),
+        )
+        for seed in seeds:
+            await self.conn.execute(
+                """
+                INSERT OR IGNORE INTO warp_split_sources
+                  (slug, title, url, kind, mode, scope_slug, enabled, include_in_list)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                seed,
+            )
 
     async def _ensure_spider_x_backfill(self) -> None:
         # Idempotent per-key spiderX backfill, run on EVERY bootstrap (not gated by

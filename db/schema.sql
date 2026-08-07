@@ -271,6 +271,79 @@ CREATE TABLE IF NOT EXISTS warp_settings (
 );
 INSERT OR IGNORE INTO warp_settings (id) VALUES (1);
 
+-- WARP selective-split prefix feeds. Mirrors _migrate_v34.
+--
+-- The routed list itself lives in /etc/vpn-bot/warp-split.list (root-owned,
+-- written only by vpn-bot-warp-split-apply). These tables are the INPUT side:
+-- where prefixes come from and which ones the operator has vetoed. The file
+-- remains the single source of truth for what is actually routed.
+CREATE TABLE IF NOT EXISTS warp_split_sources (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug                 TEXT    NOT NULL UNIQUE,
+  title                TEXT    NOT NULL,
+  url                  TEXT    NOT NULL,
+  kind                 TEXT    NOT NULL CHECK(kind IN ('cidr_text','google_json')),
+  -- 'add' contributes prefixes to the union; 'subtract' removes them. A subtract
+  -- source with scope_slug set applies to that one source's contribution only;
+  -- with scope_slug NULL it applies to the whole merged set.
+  mode                 TEXT    NOT NULL DEFAULT 'add' CHECK(mode IN ('add','subtract')),
+  scope_slug           TEXT,
+  -- enabled = "fetch it and use it in the computation"; include_in_list = "its
+  -- prefixes may reach the routed list". They are separate because a subtract
+  -- operand must be downloaded without ever being routed. include_in_list is
+  -- meaningless for mode='subtract' and is ignored there.
+  enabled              INTEGER NOT NULL DEFAULT 0,
+  include_in_list      INTEGER NOT NULL DEFAULT 1,
+  refresh_interval_sec INTEGER NOT NULL DEFAULT 21600,
+  last_attempt_ts      INTEGER NOT NULL DEFAULT 0,
+  last_success_ts      INTEGER NOT NULL DEFAULT 0,
+  last_etag            TEXT,
+  last_modified        TEXT,
+  last_status          TEXT,
+  prefix_count         INTEGER NOT NULL DEFAULT 0,
+  last_error           TEXT,
+  -- Defence in depth for two of the three recursion rules the service also
+  -- enforces with a readable message (warp.split_merge.validate_source_relations):
+  -- a scope only means something for a subtract source, and no source may
+  -- subtract from itself. The third rule (no chains) needs a lookup, so it lives
+  -- in the service alone.
+  CHECK (mode = 'subtract' OR scope_slug IS NULL),
+  CHECK (scope_slug IS NULL OR scope_slug <> slug)
+);
+
+-- What each origin currently contributes. origin is 'manual' for hand-typed
+-- prefixes, or a warp_split_sources.slug for feed-derived ones. Feed rows are
+-- rewritten wholesale after each successful refresh, so this table always
+-- describes the last known contribution of every origin — which is what lets the
+-- panel label a routed prefix without re-parsing a 112 KB feed document.
+CREATE TABLE IF NOT EXISTS warp_split_prefixes (
+  origin   TEXT    NOT NULL,
+  prefix   TEXT    NOT NULL,
+  added_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (origin, prefix)
+);
+
+-- Prefixes the operator subtracted from a feed by hand. Deleting a feed prefix
+-- outright would be pointless — the next refresh brings it straight back — so the
+-- panel's trash button records an exclusion instead. Applied at the same step as
+-- a global subtract source.
+CREATE TABLE IF NOT EXISTS warp_split_exclusions (
+  prefix     TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+
+-- Seed sources. Telegram is enabled because it is small, stable, and exactly the
+-- set a split tunnel wants. Both Google rows ship DISABLED: goog.json on its own
+-- routes every GCP customer range through the tunnel, and cloud.json only means
+-- anything once goog.json is on — so turning them on is a deliberate two-step act
+-- that the panel walks the operator through.
+INSERT OR IGNORE INTO warp_split_sources (slug, title, url, kind, mode, scope_slug, enabled, include_in_list)
+VALUES ('telegram-cidr', 'Telegram', 'https://core.telegram.org/resources/cidr.txt', 'cidr_text', 'add', NULL, 1, 1);
+INSERT OR IGNORE INTO warp_split_sources (slug, title, url, kind, mode, scope_slug, enabled, include_in_list)
+VALUES ('google-goog', 'Google (all announced ranges)', 'https://www.gstatic.com/ipranges/goog.json', 'google_json', 'add', NULL, 0, 1);
+INSERT OR IGNORE INTO warp_split_sources (slug, title, url, kind, mode, scope_slug, enabled, include_in_list)
+VALUES ('google-cloud', 'Google Cloud (GCP customer ranges)', 'https://www.gstatic.com/ipranges/cloud.json', 'google_json', 'subtract', 'google-goog', 0, 0);
+
 CREATE TABLE IF NOT EXISTS server_status_settings (
   id               INTEGER PRIMARY KEY DEFAULT 1,
   detailed_enabled INTEGER NOT NULL DEFAULT 0,

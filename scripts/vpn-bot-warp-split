@@ -92,32 +92,56 @@ apply)
   else
     log "WARNING: no WARP endpoint resolved — skipping anti-loop /32 pin"
   fi
-  # Build the wanted prefix set from the list (comments/blanks/default-routes dropped).
-  WANT=" "
-  while read -r pfx; do
-    pfx="${pfx%%#*}"; pfx="${pfx//[[:space:]]/}"
-    [ -n "$pfx" ] || continue
-    case "$pfx" in 0.0.0.0/0|::/0) continue;; esac
-    case "$WANT" in *" $pfx "*) ;; *) WANT="$WANT$pfx ";; esac
-  done < "$LIST"
+  # Build the wanted prefix set from the list (comments/blanks/default-routes
+  # dropped, deduplicated). awk rather than a bash read-loop: the loop's
+  # membership test scanned one growing WANT string per line, which is O(n^2) and
+  # the other half of the cost the batching below removes.
+  want_list() {
+    awk '{ sub(/#.*/, ""); gsub(/[[:space:]]/, "") }
+         $0 != "" && $0 != "0.0.0.0/0" && $0 != "::/0" && !seen[$0]++ { print }' "$LIST"
+  }
+  n_want="$(want_list | wc -l | tr -d ' ')"
+
+  # Both route phases go through `ip -force -batch -` / `ip -batch -` instead of
+  # one `ip` process per prefix. Measured on this host: installing 1500 prefixes
+  # takes 4.275s as separate processes and 0.096s as a batch (108 prefixes:
+  # 0.284s -> 0.008s). At the WARP_SPLIT_MAX_PREFIXES ceiling the per-process form
+  # spends longer forking than the whole apply is allowed to take.
+  #
+  # The two phases use different flags on purpose, preserving the exact semantics
+  # they had as loops:
+  #   * deletes were `|| true` per command (a route that raced away is not an
+  #     error), so they keep `-force`, which continues past a failing line —
+  #     the non-zero exit that -force still returns is swallowed, as before;
+  #   * adds ran under `set -e`, aborting at the first failure with the earlier
+  #     ones applied, which is exactly what plain `-batch` does.
+  #
   # Reconcile: drop script-managed per-prefix routes (`<prefix> dev $IFACE`) in
   # table T that are no longer listed, so a removed prefix stops using WARP after
   # restart instead of lingering until reboot. Only `dev $IFACE` routes are touched
   # — the anti-loop (`$ENDPOINT_IP/32 via $GW dev $WAN_DEV`) is `dev $WAN_DEV`, never
   # matched; the table default was already removed above.
-  ip route show table "$T" 2>/dev/null \
-    | awk -v dev="$IFACE" '$1!="default" && $2=="dev" && $3==dev {print $1}' \
-    | while read -r old; do
-        case "$WANT" in
-          *" $old "*) : ;;                                       # still wanted — keep
-          *) ip route del "$old" dev "$IFACE" table "$T" 2>/dev/null || true ;;
-        esac
-      done || true
+  #
+  # Collected into a variable first rather than piped straight into `ip`: the
+  # reading and the writing `ip` would otherwise be concurrent processes in one
+  # pipeline, and — more usefully — a steady-state re-apply has nothing stale to
+  # drop, so this skips the `ip` invocation entirely instead of handing it an
+  # empty batch.
+  stale="$(
+    ip route show table "$T" 2>/dev/null \
+      | awk -v dev="$IFACE" '$1!="default" && $2=="dev" && $3==dev {print $1}' \
+      | awk -v dev="$IFACE" -v t="$T" '
+          NR==FNR { want[$0]; next }
+          !($0 in want) { print "route del " $0 " dev " dev " table " t }' <(want_list) -
+  )" || true
+  if [ -n "$stale" ]; then
+    printf '%s\n' "$stale" | ip -force -batch - 2>/dev/null || true
+  fi
   # Add/refresh the wanted prefixes (`replace` is idempotent — no dups on re-apply).
-  for pfx in $WANT; do
-    ip route replace "$pfx" dev "$IFACE" table "$T"
-  done
-  log "table T is now selective ($(grep -cvE '^\s*(#|$)' "$LIST") prefixes)"
+  want_list \
+    | awk -v dev="$IFACE" -v t="$T" '{ print "route replace " $0 " dev " dev " table " t }' \
+    | ip -batch -
+  log "table T is now selective ($n_want prefixes)"
   for SRC in "$CLIENT_NET" "$PROXY_SRC"; do
     iptables -t nat -C POSTROUTING -s "$SRC" -o "$WAN_DEV" -j MASQUERADE 2>/dev/null \
       || iptables -t nat -A POSTROUTING -s "$SRC" -o "$WAN_DEV" -j MASQUERADE

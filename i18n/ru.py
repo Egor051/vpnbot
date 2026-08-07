@@ -903,6 +903,92 @@ STRINGS: dict[str, str] = {
     "warp_split_report_unchanged": "Список не изменён.",
     "warp_split_report_applied_add": "Применено: +{count} префиксов, маршрутизация WARP-split перезапущена.",
     "warp_split_report_applied_del": "Применено: -{count} префиксов, маршрутизация WARP-split перезапущена.",
+    "warp_split_report_unchanged_identical": (
+        "Список не изменился — файл уже содержит ровно эти префиксы, apply не вызывался."
+    ),
+    # ── split: источники префиксов ────────────────────────────────────────────
+    "btn_warp_split_sources": "📡 Источники",
+    "btn_warp_split_source_refresh": "🔄 Обновить сейчас",
+    "btn_warp_split_source_refresh_all": "🔄 Обновить все",
+    "btn_warp_split_source_on": "✅ Вкл",
+    "btn_warp_split_source_off": "⛔ Выкл",
+    "btn_warp_split_source_add": "➕ Добавить URL",
+    "btn_warp_split_source_del": "🗑 Удалить",
+    "btn_warp_split_migrate": "📥 Перенести manual → feed",
+    "warp_split_sources_title": "<b>Источники префиксов</b> — всего: {count}",
+    "warp_split_sources_empty": "Источников нет. «➕ Добавить URL» — чтобы подключить первый.",
+    "warp_split_source_line": (
+        "{state} <b>{title}</b> (<code>{slug}</code>)\n"
+        "  {mode} · префиксов: {count} · обновлён: {updated}"
+    ),
+    "warp_split_source_mode_add": "добавляется",
+    "warp_split_source_mode_subtract_all": "вычитается из всего списка",
+    "warp_split_source_mode_subtract_scope": "вычитается из {scope}",
+    "warp_split_source_never": "никогда",
+    "warp_split_source_error_line": "  ⚠️ ошибка: {error}",
+    "warp_split_source_goog_warning": (
+        "⚠️ <b>Внимание.</b> <code>google-goog</code> — это ВСЕ анонсируемые Google "
+        "префиксы, включая диапазоны клиентов GCP: в маршруты уедут чужие облачные "
+        "серверы. Чтобы этого избежать, включите ещё и <code>google-cloud</code> — "
+        "он вычитает именно GCP-диапазоны."
+    ),
+    "warp_split_source_scope_inert": (
+        "ℹ️ Вычитание со scope сейчас ни на что не влияет: те же префиксы лежат ещё и "
+        "в manual, а manual-копии возвращают ровно то, что вычитается. "
+        "Используйте «📥 Перенести manual → feed»."
+    ),
+    "warp_split_preview_title": "<b>Предпросмотр изменений</b>",
+    "warp_split_preview_counts": "Было: {before} · станет: {after} ({delta})",
+    "warp_split_preview_subtract": (
+        "Эффект вычитания: −{addresses} адресов / {prefixes} префиксов "
+        "(до вычитания {before}, после {after}, после collapse {collapsed})"
+    ),
+    "warp_split_preview_added": "Добавятся ({count}): {sample}",
+    "warp_split_preview_removed": "Уберутся ({count}): {sample}",
+    "warp_split_preview_identical": "Изменений нет — список останется прежним.",
+    "warp_split_preview_confirm": "Применить эти изменения?",
+    "warp_split_refresh_done": "✅ Обновлено. {delta}, сейчас префиксов: {count}.",
+    "warp_split_refresh_sources": "Источники: {summary}",
+    "warp_split_refresh_blocked": "⛔ Обновление не применено: {reason}",
+    "warp_split_source_deleted": "Источник {slug} удалён.",
+    "warp_split_source_delete_confirm": (
+        "Удалить источник <code>{slug}</code>? Его префиксы уйдут из списка "
+        "при следующем применении."
+    ),
+    "warp_split_source_enabled": "Источник {slug} включён.",
+    "warp_split_source_disabled": "Источник {slug} выключен.",
+    "warp_split_source_add_prompt": (
+        "Пришлите описание источника четырьмя строками:\n"
+        "<code>slug</code>\n<code>название</code>\n<code>URL</code>\n"
+        "<code>формат</code> — <code>cidr_text</code> или <code>google_json</code>\n\n"
+        "Пятой строкой можно указать <code>subtract</code> или "
+        "<code>subtract:slug</code>, чтобы источник вычитался, а не добавлялся."
+    ),
+    "warp_split_source_add_usage": (
+        "Нужно минимум четыре строки: slug, название, URL, формат. Попробуйте ещё раз "
+        "или нажмите «Отмена»."
+    ),
+    "warp_split_source_added": (
+        "Источник <code>{slug}</code> добавлен и пока выключен. Включите его и нажмите "
+        "«🔄 Обновить сейчас», чтобы увидеть дельту."
+    ),
+    "warp_split_source_add_error": "Источник не добавлен: {error}",
+    "warp_split_exclude_confirm": (
+        "Префикс {cidr} пришёл из источника <code>{origin}</code>.\n\n"
+        "Простое удаление ничего не даст — следующее обновление вернёт его обратно. "
+        "Вместо этого он попадёт в список исключений и будет вычитаться при каждом "
+        "обновлении. Продолжить?"
+    ),
+    "warp_split_excluded": "Префикс {cidr} добавлен в исключения.",
+    "warp_split_origin_manual": "вручную",
+    "warp_split_migrate_confirm": (
+        "Из manual будут убраны префиксы, которые уже покрыты включёнными источниками "
+        "({count} шт.). Это нужно, чтобы заработало вычитание со scope. Продолжить?"
+    ),
+    "warp_split_migrate_none": (
+        "Нечего переносить: ни один manual-префикс не покрыт включёнными источниками."
+    ),
+    "warp_split_migrated": "Перенесено из manual в feed: {count} префикс(ов).",
     "protocol_unavailable": "Этот протокол сейчас недоступен. Вернитесь в меню и выберите другой.",
     # ── note input validation ─────────────────────────────────────────────────
     "note_no_newlines": "Заметка не должна содержать переводы строк. Введите заметку одной строкой.",

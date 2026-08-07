@@ -15,7 +15,6 @@ never relies on a button being hidden.
 """
 from __future__ import annotations
 
-import ipaddress
 import logging
 
 from aiogram import F, Router
@@ -29,6 +28,7 @@ from bot.handlers.admin_warp_split import _format_add_report, _format_del_report
 from bot.handlers.common import answer_callback_error, answer_message_error
 from bot.keyboards.warp_split_keyboard import (
     split_clamp_page,
+    split_page_slice,
     warp_split_add_keyboard,
     warp_split_del_confirm_keyboard,
     warp_split_panel_keyboard,
@@ -39,6 +39,7 @@ from i18n import t
 from services.errors import InvalidOperation
 from utils.formatting import code, h
 from warp.split_manager import parse_cidr_tokens
+from warp.split_merge import resolve_origins
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -59,23 +60,41 @@ def _with_prefix(text: str, prefix: str) -> str:
     return f"{prefix}\n\n{text}" if prefix else text
 
 
+async def _page_origins(services: Services, entries: list[str], page: int) -> dict[str, tuple[str, ...]]:
+    """Resolve origins for the prefixes on *page* only.
+
+    Per page rather than per list because the lookup is O(prefixes x stored
+    contributions) and a single subtract source contributes ~1000 networks —
+    resolving all 269 prefixes on every redraw would cost a quarter-million
+    overlap tests to render eight buttons.
+    """
+    try:
+        contributions = await services.warp_split_feeds.contributions()
+    except Exception:
+        logger.debug("warp-split: origin lookup unavailable", exc_info=True)
+        return {}
+    return resolve_origins(split_page_slice(entries, page), contributions)
+
+
 async def _render_panel(callback: CallbackQuery, services: Services, page: int, *, prefix: str = "") -> None:
     """Re-read the list from the manager and (re)draw the panel by editing in place."""
     entries = services.warp_split.read_list()
     page = split_clamp_page(page, len(entries))
+    origins = await _page_origins(services, entries, page)
     await safe_edit_message_text(
         callback.message,
         _with_prefix(_panel_text(entries), prefix),
-        reply_markup=warp_split_panel_keyboard(entries, page),
+        reply_markup=warp_split_panel_keyboard(entries, page, origins),
     )
 
 
 async def _answer_panel(message: Message, services: Services, *, prefix: str = "") -> None:
     """Send the panel as a new message (used after FSM text input)."""
     entries = services.warp_split.read_list()
+    origins = await _page_origins(services, entries, 0)
     await message.answer(
         _with_prefix(_panel_text(entries), prefix),
-        reply_markup=warp_split_panel_keyboard(entries, 0),
+        reply_markup=warp_split_panel_keyboard(entries, 0, origins),
     )
 
 
@@ -148,13 +167,14 @@ async def warp_split_add_receive(message: Message, state: FSMContext, services: 
             )
             return
 
-        mgr = services.warp_split
-        current_set = set(mgr.read_list())
-        results, accepted = mgr.process_add_tokens(tokens, current_set)
-        changed = bool(accepted)
-        if changed:
-            new_list = sorted(current_set | set(accepted), key=ipaddress.IPv4Network)
-            await mgr.apply_list(new_list)
+        # Through the feed service, not the manager: a hand-typed prefix has to be
+        # recorded as origin='manual' in the database, or the next merge — which
+        # builds the list from stored origins — would drop it again. The service
+        # validates via the same manager and applies under the same lock.
+        results, outcome = await services.warp_split_feeds.add_manual(
+            tokens, actor_user_id=message.from_user.id
+        )
+        changed = outcome is not None and outcome.changed
 
         await state.clear()
         await _answer_panel(message, services, prefix=_format_add_report(results, changed=changed))
@@ -182,10 +202,16 @@ async def warp_split_del_execute(callback: CallbackQuery, services: Services) ->
         cidr = _cidr_from_data(callback.data)
         mgr = services.warp_split
         # process_del_tokens raises (del-to-empty) before returning — surfaced below.
-        results, remaining = mgr.process_del_tokens([cidr], mgr.read_list())
+        results, _remaining = mgr.process_del_tokens([cidr], mgr.read_list())
         changed = any(r.status == "removed" for r in results)
         if changed:
-            await mgr.apply_list(remaining)
+            # Drop the manual row and re-merge, rather than writing the remaining
+            # list directly: a prefix also supplied by a feed must come back on
+            # the next refresh, and only the merge knows that. Feed-only prefixes
+            # never reach this handler — the panel routes them to 🚫 (exclude).
+            await services.warp_split_feeds.remove_manual(
+                cidr, actor_user_id=callback.from_user.id
+            )
         await _render_panel(callback, services, 0, prefix=_format_del_report(results, changed=changed))
     except InvalidOperation as exc:
         # guard-reject / del-to-empty / helper failure — show it, don't crash.
@@ -232,7 +258,11 @@ async def warp_split_apply(callback: CallbackQuery, services: Services) -> None:
         if not current:
             await _render_panel(callback, services, 0, prefix=t("warp_split_apply_empty"))
             return
-        await mgr.apply_list(current)
+        # reapply() forces the helper call even when the file is unchanged: this
+        # button exists precisely to re-run it after a manual edit or a restart
+        # and let it reconcile table T, so the byte-identity short-circuit that
+        # protects the automatic paths must not apply here.
+        await mgr.reapply()
         await _render_panel(callback, services, 0, prefix=t("warp_split_applied", count=len(current)))
     except InvalidOperation as exc:
         await _render_panel(callback, services, 0, prefix=t("warp_split_apply_error", error=h(exc)))

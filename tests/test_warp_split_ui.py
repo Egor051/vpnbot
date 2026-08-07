@@ -65,6 +65,53 @@ class FakeSplit:
     async def apply_list(self, cidr_list: list[str]) -> None:
         self.apply_calls.append(list(cidr_list))
 
+    async def reapply(self) -> object:
+        """Force a helper re-run on the unchanged file (the 🔄 Apply button)."""
+        self.apply_calls.append(list(self._entries))
+        return SimpleNamespace(count=len(self._entries), unchanged=False, changed=True)
+
+
+class FakeFeeds:
+    """Stands in for WarpSplitFeedService.
+
+    The GUI routes hand-typed prefixes through the service — so they are stored as
+    origin='manual' and survive the next merge — instead of writing the file
+    directly, so the fake has to model that hop. It delegates validation to the
+    fake manager exactly as the real service delegates to the real one.
+    """
+
+    def __init__(self, split: FakeSplit) -> None:
+        self._split = split
+        self.manual_added: list[list[str]] = []
+        self.manual_removed: list[str] = []
+        self.excluded: list[str] = []
+
+    async def contributions(self) -> dict[str, list[str]]:
+        return {"manual": list(self._split.read_list())}
+
+    async def add_manual(self, tokens, *, actor_user_id=None):  # type: ignore[no-untyped-def]
+        current = set(self._split.read_list())
+        results, accepted = self._split.process_add_tokens(list(tokens), current)
+        if not accepted:
+            return results, None
+        self.manual_added.append(list(accepted))
+        await self._split.apply_list(sorted(current | set(accepted)))
+        return results, SimpleNamespace(
+            count=len(current) + len(accepted), unchanged=False, changed=True
+        )
+
+    async def remove_manual(self, prefix: str, *, actor_user_id=None):  # type: ignore[no-untyped-def]
+        self.manual_removed.append(prefix)
+        remaining = [c for c in self._split.read_list() if c != prefix]
+        await self._split.apply_list(remaining)
+        return SimpleNamespace(count=len(remaining), unchanged=False, changed=True)
+
+    async def exclude_prefix(self, prefix: str, *, actor_user_id=None):  # type: ignore[no-untyped-def]
+        self.excluded.append(prefix)
+        remaining = [c for c in self._split.read_list() if c != prefix]
+        await self._split.apply_list(remaining)
+        return SimpleNamespace(count=len(remaining), unchanged=False, changed=True)
+
 
 class _Message:
     def __init__(self, text: str | None = None) -> None:
@@ -128,7 +175,7 @@ def _services(split: FakeSplit, *, superadmin: bool = True) -> SimpleNamespace:
                 raise AccessDenied("Нет доступа")
             return SimpleNamespace(id=user_id)
 
-    return SimpleNamespace(users=Users(), warp_split=split)
+    return SimpleNamespace(users=Users(), warp_split=split, warp_split_feeds=FakeFeeds(split))
 
 
 def _buttons(markup: object) -> list[tuple[str, str | None]]:

@@ -55,6 +55,7 @@ async def main() -> None:
     from services.key_expiry import key_expiry_loop
     from services.offsite_backup import offsite_backup_loop
     from services.scheduled_announcements import scheduled_announcements_loop
+    from services.warp_split_feeds import warp_split_feeds_loop
 
     with SingleInstanceLock(settings.bot_lock_path):
         bot, dp, db, backend_health, services = await create_app(settings)
@@ -69,6 +70,7 @@ async def main() -> None:
         scheduled_announcements_task: asyncio.Task[None] | None = None
         fsm_cleanup_task: asyncio.Task[None] | None = None
         server_status_task: asyncio.Task[None] | None = None
+        warp_split_feeds_task: asyncio.Task[None] | None = None
         try:
             if isinstance(dp.storage, TTLMemoryStorage):
                 fsm_cleanup_task = asyncio.create_task(
@@ -146,6 +148,17 @@ async def main() -> None:
                     "Scheduled announcements checker started (interval=%ds)",
                     settings.scheduled_announcements_interval,
                 )
+            if settings.warp_split_feeds_interval_sec > 0:
+                warp_split_feeds_task = asyncio.create_task(
+                    warp_split_feeds_loop(
+                        services.warp_split_feeds, settings.warp_split_feeds_interval_sec
+                    ),
+                    name="warp-split-feeds",
+                )
+                logger.info(
+                    "WARP split feed refresher started (interval=%ds)",
+                    settings.warp_split_feeds_interval_sec,
+                )
             server_status_task = asyncio.create_task(
                 services.server_status.run(),
                 name="server-status-sampler",
@@ -203,6 +216,9 @@ async def main() -> None:
             if scheduled_announcements_task is not None:
                 scheduled_announcements_task.cancel()
                 await asyncio.gather(scheduled_announcements_task, return_exceptions=True)
+            if warp_split_feeds_task is not None:
+                warp_split_feeds_task.cancel()
+                await asyncio.gather(warp_split_feeds_task, return_exceptions=True)
             if server_status_task is not None:
                 server_status_task.cancel()
                 await asyncio.gather(server_status_task, return_exceptions=True)

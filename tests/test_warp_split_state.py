@@ -192,6 +192,16 @@ def _make_split_stubs(bin_dir: Path, log_file: Path, *, fwmark: str = FWMARK_HEX
     _write_stub(bin_dir / "ip", f"""\
     #!/bin/sh
     echo "ip $@" >> {log_file}
+    # `ip [-force] -batch -` reads its commands from stdin, one per line, with the
+    # leading "ip" omitted. Expand each back into single-command form so the
+    # transcript assertions stay written the way an operator reads them.
+    if [ "$1" = "-batch" ] || [ "$2" = "-batch" ]; then
+        while IFS= read -r __line; do
+            [ -n "$__line" ] || continue
+            echo "ip $__line" >> {log_file}
+        done
+        exit 0
+    fi
     if [ "$1" = "route" ] && [ "$2" = "show" ] && [ "$3" = "default" ]; then
         echo "default via {WAN_GW} dev {WAN_DEV}"
         exit 0
@@ -408,6 +418,16 @@ def _make_stateful_split_stubs(bin_dir: Path, log_file: Path, *, fwmark: str = F
     #!/bin/sh
     echo "ip $@" >> {log_file}
     __tbl="${{WARP_TABLE_STATE:-}}"
+    # `ip [-force] -batch -` reads commands from stdin, one per line, "ip" omitted.
+    # Re-enter this stub per line so the state mutation below really runs and the
+    # transcript records the expanded single-command form.
+    if [ "$1" = "-batch" ] || [ "$2" = "-batch" ]; then
+        while IFS= read -r __line; do
+            [ -n "$__line" ] || continue
+            "$0" $__line || exit $?
+        done
+        exit 0
+    fi
     if [ "$1" = "route" ] && [ "$2" = "show" ] && [ "$3" = "default" ]; then
         echo "default via {WAN_GW} dev {WAN_DEV}"
         exit 0
@@ -683,7 +703,13 @@ class TestSplitApplyEnabledBranchPinned:
             f"ip route del default dev {WARP_IFACE} table {FWMARK_DEC}",
             f"ip route replace {ENDPOINT_IP}/32 via {WAN_GW} dev {WAN_DEV} table {FWMARK_DEC}",
             f"ip route show table {FWMARK_DEC}",
+            # Both route phases are batched now (one `ip` process instead of one per
+            # prefix — 4.275s → 0.096s at the 1500-prefix cap). The stub expands each
+            # batch back into the single commands that follow it, so what is pinned
+            # below is still the exact privileged operations, in order.
+            "ip -force -batch -",
             f"ip route del 198.51.100.0/24 dev {WARP_IFACE} table {FWMARK_DEC}",
+            "ip -batch -",
             f"ip route replace 10.10.0.0/16 dev {WARP_IFACE} table {FWMARK_DEC}",
             f"iptables -t nat -C POSTROUTING -s {CLIENT_NET} -o {WAN_DEV} -j MASQUERADE",
             f"iptables -t nat -A POSTROUTING -s {CLIENT_NET} -o {WAN_DEV} -j MASQUERADE",

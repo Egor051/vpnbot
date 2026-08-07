@@ -66,3 +66,5 @@ class WarpConfigStates(StatesGroup):
 
 class WarpSplitStates(StatesGroup):
     waiting_cidrs = State()
+    # New prefix source: slug / title / URL / format, one per line.
+    waiting_source = State()
