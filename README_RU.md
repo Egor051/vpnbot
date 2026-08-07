@@ -230,7 +230,7 @@ python -m pip install -r requirements.txt -c constraints.txt
 python -m pip install -r requirements-dev.txt
 
 make audit                 # pip-audit по requirements + constraints
-python -m ruff check .
+make lint                  # ruff из закреплённого .venv-lint/ (не из PATH)
 python -m compileall .
 python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ warp/ main.py init_db.py
 python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=62

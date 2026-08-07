@@ -40,23 +40,38 @@ All gates below match what CI runs. Pass them locally before pushing.
 
 ### Lint (CI gate)
 
-CI runs the full ruff check (style, security, and bugbear rules):
+CI runs the full ruff check (style, security, and bugbear rules) through the
+Makefile, and so should you:
 
 ```bash
-python -m ruff check .
+make lint
 ```
+
+`make lint` builds a dedicated `.venv-lint/` from the `ruff==` pin in
+`requirements-dev.txt` and runs ruff out of it. Use it instead of a bare
+`python -m ruff` — that lints with whatever ruff your PATH resolves (on the
+deploy host, an orphaned copy in `/opt/vpn-service/.venv`), which checks the same
+tree against different rules than CI does. The venv is rebuilt only when its ruff
+does not match the pin, so repeat runs cost nothing.
+
+For the same reason, do not reach for `ruff --isolated` to dodge a version
+mismatch: it ignores `pyproject.toml`, which drops `preview = true` and silently
+disables the preview-only `RUF` rules that CI still enforces.
 
 For a fast pre-commit subset of the most critical rules:
 
 ```bash
-python -m ruff check . --select=E9,F63,F7,F82
+make lint-venv && .venv-lint/bin/ruff check . --select=E9,F63,F7,F82
 ```
 
 ### Format
 
+Ruff's formatter is not a CI gate, but run it from the same pinned venv:
+
 ```bash
-python -m ruff format --check .   # check only
-python -m ruff format .            # apply
+make lint-venv
+.venv-lint/bin/ruff format --check .   # check only
+.venv-lint/bin/ruff format .           # apply
 ```
 
 ### Compile check
@@ -108,7 +123,7 @@ feature area, e.g. `test_<area>.py`.
 ## All Local Gates at Once
 
 ```bash
-python -m ruff check .
+make lint
 python -m compileall .
 python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ warp/ main.py init_db.py
 python -m pytest --cov=. --cov-fail-under=62

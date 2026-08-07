@@ -1575,6 +1575,16 @@ else
 fi
 
 log "running ruff / compileall / pytest against origin/main"
+# This is the one ruff call site that does NOT go through `make lint`/.venv-lint,
+# and deliberately so. The rule `make lint` exists to enforce is "never lint with
+# an ambient or prod-venv ruff"; TEST_VENV already satisfies it more strictly —
+# it is built above from constraints-dev-hashed.txt with --require-hashes, so its
+# ruff is the same pinned version verified by hash, and the stamp covers the
+# constraints files, so a ruff bump forces a rebuild here. Routing this through
+# `make lint` would build a second venv inside the throwaway worktree on every
+# deploy, turning a PyPI reachability blip into a failed deploy gate for no gain
+# in isolation. If this line ever stops using TEST_VENV, it must move to
+# `make lint` rather than back to a bare `ruff`.
 ( cd "$WT" && "${TEST_VENV}/bin/python" -m ruff check . )
 ( cd "$WT" && "${TEST_VENV}/bin/python" -m compileall -q . )
 # INVARIANT: this test phase is DETERMINISTIC and reproduces CI 1:1, so Phase 1

@@ -74,7 +74,12 @@ jobs:
           python -m pip install --require-hashes -r constraints-dev-hashed.txt
 
       - name: Run static checks (ruff — style, security, bugbear)
-        run: python -m ruff check .
+        # `make lint` bootstraps .venv-lint/ from the ruff pin in
+        # requirements-dev.txt and runs ruff out of that venv. Going through the
+        # Makefile rather than calling ruff directly means CI and a developer's
+        # machine lint with the same binary on the same code path, so a change to
+        # the lint target is exercised here before it reaches anyone locally.
+        run: make lint
 
       - name: Compile Python files
         run: python -m compileall .

@@ -2,6 +2,10 @@ pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
 pytest-timeout==2.4.0
+# Single source of truth for the ruff version: `make lint` parses this line to
+# build .venv-lint/, and CI lints through `make lint`. Do not restate it in the
+# Makefile or a workflow — bump it here and everything follows (then re-run
+# `make update-hashes` to carry it into the hashed constraints).
 ruff==0.16.1
 pip-audit==2.10.1
 mypy==2.3.0
