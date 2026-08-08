@@ -309,6 +309,13 @@ is already held by Xray REALITY.
 - `GET /healthz` runs a probe read: **200** `{"ok": true}` when the database is
   readable, **503** `{"ok": false}` when it is not — usable by a watchdog or a
   manual `curl http://127.0.0.1:8444/healthz`.
+- `scripts/deploy.sh` Phase 2 **restarts this unit** on every deploy when it was active
+  beforehand (the unit name is read from `HYSTERIA2_AUTH_SERVICE_NAME`, so a renamed unit is
+  still covered), so a change under `hy2_auth/` actually reaches the running process — no
+  hand-restart afterwards. Because the endpoint is fail-closed, the few seconds it is down
+  **reject every new Hysteria2 handshake**; established sessions are unaffected and clients
+  retry, but this is one more reason to deploy in a low-traffic window. Full policy: [the
+  runbook](operations.md#the-deploy-restarts-the-sidecar-units-too).
 
 See [Configuration → Hysteria2](configuration.md#hysteria2) for the `.env`
 variables, including `HYSTERIA2_INSECURE` (defaults to `false` — the server's

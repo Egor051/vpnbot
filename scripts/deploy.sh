@@ -180,6 +180,12 @@ SUBSCRIPTION_UNIT="${SUBSCRIPTION_UNIT:-vpn-bot-subscription.service}"
 # print a false "NOT listening" for a perfectly healthy service. Only ever costs
 # wall-clock on the path that was about to warn; the check stays never-fatal.
 SUBSCRIPTION_BIND_WAIT="${SUBSCRIPTION_BIND_WAIT:-30}"
+# How long Phase 2 waits for a sidecar unit it just restarted to read back as
+# `active` before calling it a regression. NOT a port/bind wait — the ~20s
+# start-to-bind window has exactly one implementation (subscription_endpoint_status)
+# and this is not it. This only absorbs the moment a just-restarted Type=simple unit
+# spends in `activating`, so a healthy restart is never misread as a failure.
+SIDECAR_ACTIVE_WAIT="${SIDECAR_ACTIVE_WAIT:-20}"
 
 # Out-of-repo privileged helpers: tracked SOURCE lives in the checkout, the
 # INSTALLED copy lives under /usr/local/sbin. `git reset --hard origin/main`
@@ -303,6 +309,13 @@ declare -a DEPLOY_SELF_UNITS=(
   "vpn-bot-deploy.service"   # redeploy.sh default: systemd-run --unit=vpn-bot-deploy
 )
 declare -A U_CLASS=() U_TARGET=() U_PRE_ACTIVE=() U_PRE_ENABLED=()
+# Sidecar units — the other long-lived processes running THIS repo's code from
+# their own systemd units (see the sidecar block further down). The list, each
+# unit's pre-deploy ActiveState, and one report line per unit. Declared here so
+# both reports stay set -u safe even if a run ends before the snapshot.
+declare -a SIDECAR_UNITS=()
+declare -A SIDECAR_PRE_ACTIVE=()
+declare -a SIDECAR_REPORT=()
 # .env-derived facts, resolved once .env is readable (source of truth for backend
 # unit names + modular-protocol gates). Declared here so the report is set -u safe.
 LOG_DIR=""
@@ -962,6 +975,170 @@ subscription_endpoint_status() {
   fi
   echo "${SUBSCRIPTION_UNIT} ${states}, listening on ${bind_host}:${bind_port}$([[ "$public_port" != "0" ]] && printf ' and :%s' "$public_port")$( ((waited)) && printf ' (bound while waiting out the ~20s start-to-bind delay)')"
   return 0
+}
+
+# --------------------------------------------------------------------------- #
+# Sidecar units — the other processes running the SAME deployed code
+# --------------------------------------------------------------------------- #
+# vpn-bot.service is not the only consumer of this checkout. Two more units run
+# the same tree from their own systemd units, each holding its own long-lived
+# Python process with the code loaded in memory:
+#
+#   ${SUBSCRIPTION_UNIT}                    subscription_server/  (GET /sub/{token})
+#   ${HYSTERIA2_AUTH_SERVICE_NAME}.service  hy2_auth/             (Hysteria2 HTTP auth)
+#
+# Phase 2 used to restart vpn-bot ONLY, so every PR touching subscription_server/,
+# hy2_auth/, services/key_bundles.py or the shared link formatters went out
+# HALF-DEPLOYED: the bot served the new code while a sidecar kept serving the old
+# one out of memory, and the deploy report was fully green about it. That is not a
+# hypothetical — PR #281 landed at 13:56 on 2026-08-08 and the subscription
+# endpoint kept returning the previous link order, with no preference marks, until
+# an unrelated host reboot at 15:20 happened to restart it.
+#
+# The names come from the variables that ALREADY carry them ($SUBSCRIPTION_UNIT and
+# the .env-derived $HY2_AUTH_SERVICE_NAME_V), never from a literal, so a host that
+# renamed either unit in .env stays covered. An ABSENT unit is a normal host, not a
+# fault: protocols are modular and BOTH units are drift-installed by hand — deploy.sh
+# still does not install, enable or start either of them.
+sidecar_units() {
+  local hy2_auth="${HY2_AUTH_SERVICE_NAME_V:-}"
+  # Phase 1 resolves this from .env (resolve_backend_units) long before the
+  # snapshot runs; the fallback only keeps the function callable on its own from
+  # the DEPLOY_SELFTEST seam, and reads the same .env key rather than a literal.
+  [[ -n "$hy2_auth" ]] || hy2_auth="$(env_or HYSTERIA2_AUTH_SERVICE_NAME vpn-bot-hy2-auth)"
+  printf '%s\n' "$SUBSCRIPTION_UNIT" "${hy2_auth}.service" | awk 'NF && !seen[$0]++'
+}
+
+# Pre-deploy ActiveState of every sidecar. Taken in Phase 1 alongside the rest of
+# the pre-states (assemble_unit_set) and therefore BEFORE any mutation — that is
+# the whole point: the restart decision below must be made against the host as it
+# was, not as the deploy has already left it. "absent" is a first-class value here.
+snapshot_sidecar_units() {
+  local u st
+  SIDECAR_UNITS=(); SIDECAR_PRE_ACTIVE=(); SIDECAR_REPORT=()
+  readarray -t SIDECAR_UNITS < <(sidecar_units)
+  for u in "${SIDECAR_UNITS[@]}"; do
+    if ! unit_exists "$u"; then SIDECAR_PRE_ACTIVE[$u]="absent"; continue; fi
+    st="$(systemctl is-active "$u" 2>/dev/null || true)"
+    SIDECAR_PRE_ACTIVE[$u]="${st:-unknown}"
+  done
+}
+
+# Post-restart liveness for the hy2-auth sidecar: is the loopback auth port
+# actually held? Deliberately thinner than the subscription check — hy2_auth binds
+# straight away (it does not import bot.formatters), so there is no start-to-bind
+# window to wait out. Informational exactly like subscription_endpoint_status:
+# echoes one phrase, returns 0 (fine) / 1 (worth an operator's eye), never fatal.
+hy2_auth_listen_status() {
+  local listen host port listening
+  listen="$(env_or HYSTERIA2_AUTH_LISTEN 127.0.0.1:8444)"
+  [[ "$listen" == *:* ]] || listen="127.0.0.1:${listen}"
+  port="${listen##*:}"
+  host="${listen%:*}"; host="${host#[}"; host="${host%]}"   # tolerate [::1]:8444
+  [[ -n "$host" ]] || host="127.0.0.1"
+  [[ -n "$port" ]] || port="8444"
+  if ! command -v ss >/dev/null 2>&1; then
+    echo "listening state UNKNOWN (ss not found)"; return 0
+  fi
+  # grep reads to EOF (output discarded) so an early hit cannot SIGPIPE `ss`
+  # under pipefail and make a held port look absent.
+  listening="$(ss -tln 2>/dev/null || true)"
+  if printf '%s\n' "$listening" | grep -E "[^0-9]${port}[[:space:]]" >/dev/null; then
+    echo "listening on ${host}:${port}"; return 0
+  fi
+  echo "NOT listening on ${host}:${port}"; return 1
+}
+
+# Poll ActiveState until it reads `active`, for up to $2 seconds. Echoes the final
+# state and returns 0 iff it went active. See SIDECAR_ACTIVE_WAIT for why this is
+# not, and must not become, a second start-to-bind wait.
+wait_unit_active() {
+  local u="$1" timeout="$2" deadline state
+  deadline=$(( SECONDS + timeout ))
+  while :; do
+    state="$(systemctl is-active "$u" 2>/dev/null || true)"
+    if [[ "$state" == "active" ]]; then printf 'active'; return 0; fi
+    (( SECONDS < deadline )) || { printf '%s' "${state:-unknown}"; return 1; }
+    sleep 2
+  done
+}
+
+# Restart every sidecar that was ACTIVE before the deploy, so the new code reaches
+# them too. Phase 2 calls this once vpn-bot is confirmed active AND after the
+# shared-WAL ownership gate — the sidecars open the same vpn.db, so a restart on
+# top of a wrong-owner DB is precisely the restart that turns a latent permission
+# fault into "unable to open database file".
+#
+# Policy, deliberately narrow — driven off the PRE-deploy state only:
+#   absent      -> skip. Neither unit is installed by deploy.sh (drift policy,
+#                  unchanged here), and a modular host that runs neither is normal.
+#   not active  -> skip. A unit the operator left stopped stays stopped; the deploy
+#                  never starts or enables anything that was not already running.
+#   active      -> restart, then require it back to active. Not coming back is a
+#                  regression THIS deploy caused, so it leaves through rollback_now
+#                  on the common path — the same rule the rest of UNIT_SET lives
+#                  under.
+# Everything else stays informational: a port that does not answer while the unit
+# itself is active is a warn line, never a rollback.
+restart_sidecar_units() {
+  local u pre post post_rc rc msg mrc
+  local -a restarted=()
+  for u in "${SIDECAR_UNITS[@]}"; do
+    pre="${SIDECAR_PRE_ACTIVE[$u]:-absent}"
+    case "$pre" in
+      active) ;;
+      absent)
+        log "  ${u}: skipped (absent — not installed on this host)"
+        SIDECAR_REPORT+=("${u}: skipped (absent)")
+        continue ;;
+      *)
+        log "  ${u}: skipped (was ${pre} before the deploy — left as it was)"
+        SIDECAR_REPORT+=("${u}: skipped (was inactive)")
+        continue ;;
+    esac
+
+    log "  restarting ${u} (was active before the deploy — it runs the deployed code)"
+    # rc is reported but never trusted on its own; the state read below is what
+    # decides. Kept off the ERR trap so a failure is described, not just trapped.
+    systemctl restart "$u" && rc=0 || rc=$?
+    post="$(wait_unit_active "$u" "$SIDECAR_ACTIVE_WAIT")" && post_rc=0 || post_rc=$?
+    if (( post_rc != 0 )); then
+      SIDECAR_REPORT+=("${u}: FAILED (was active before, ${post} after the restart)")
+      if (( ${#restarted[@]} > 0 )); then
+        warn "already restarted onto the new code, and the rollback does not revert them: ${restarted[*]} — restart them by hand once the tree is back on ${PREV_SHA}"
+      fi
+      rollback_now "${u} did not come back from the deploy restart: active before, ${post} after ${SIDECAR_ACTIVE_WAIT}s (systemctl restart rc=${rc}). It runs the same code as vpn-bot, so this is a regression caused by this deploy"
+      return 1
+    fi
+    restarted+=("$u")
+
+    if [[ "$u" == "$SUBSCRIPTION_UNIT" ]]; then
+      # Reuse the Phase 1 check verbatim, start-to-bind retry included — there is
+      # exactly one implementation of that ~20s wait and this call is it.
+      msg="$(subscription_endpoint_status)" && mrc=0 || mrc=$?
+    else
+      msg="$(hy2_auth_listen_status)" && mrc=0 || mrc=$?
+    fi
+    if (( mrc == 0 )); then
+      log "  ${u}: restarted — ${msg}"
+    else
+      warn "${u}: restarted, but ${msg} — informational, not a deploy failure"
+    fi
+    SIDECAR_REPORT+=("${u}: restarted")
+  done
+}
+
+# One line per sidecar for the end-of-deploy report. A half-deployed host was
+# invisible precisely because the report said nothing about these units; it now
+# says restarted / skipped (was inactive) / skipped (absent) for each of them.
+sidecar_report_block() {
+  local line
+  if (( ${#SIDECAR_REPORT[@]} == 0 )); then
+    printf '  sidecar units    : none\n'
+    return 0
+  fi
+  printf '  sidecar units    :\n'
+  for line in "${SIDECAR_REPORT[@]}"; do printf '    %s\n' "$line"; done
 }
 
 # --------------------------------------------------------------------------- #
@@ -1786,6 +1963,15 @@ if [[ ${#skipped[@]} -gt 0 ]]; then
   log "units not installed (skipped from the health check): ${skipped[*]}"
 fi
 
+# Sidecar pre-states, taken HERE with the rest of the pre-states and before any
+# mutation: Phase 2 restarts a sidecar only if it was active on the host as the
+# deploy found it (see restart_sidecar_units).
+snapshot_sidecar_units
+for _sc in "${SIDECAR_UNITS[@]}"; do
+  log "sidecar ${_sc}: ${SIDECAR_PRE_ACTIVE[$_sc]} before deploy"
+done
+unset _sc
+
 # --------------------------------------------------------------------------- #
 # PHASE1_ONLY report — consolidate every Phase 1 fact an operator must vet on a
 # new host before any mutation is permitted. Reads only globals populated above.
@@ -1887,6 +2073,21 @@ phase1_report() {
     printf '      install -m0644 deploy/%s /etc/systemd/system/ && systemctl daemon-reload\n' "$SUBSCRIPTION_UNIT"
     printf '      systemctl enable --now %s   # plus deploy/ufw-subscription.sh for the public port\n' "${SUBSCRIPTION_UNIT%.service}"
   fi
+
+  # --- Sidecars: units running the same code, restarted by Phase 2 ---
+  # Pre-state is what decides; a deploy restarts only what it found active, and
+  # never installs, enables or starts either unit (drift policy unchanged).
+  printf '\n  --- Sidecar units (same code, own units — Phase 2 restarts them) ---\n'
+  local sc pre act
+  for sc in "${SIDECAR_UNITS[@]}"; do
+    pre="${SIDECAR_PRE_ACTIVE[$sc]:-absent}"
+    case "$pre" in
+      active) act="would be restarted by Phase 2" ;;
+      absent) act="skipped (absent — install by hand or leave it off)" ;;
+      *)      act="skipped (not active — left as it is)" ;;
+    esac
+    printf '    %-40s %-12s %s\n' "$sc" "$pre" "$act"
+  done
 
   # --- Modular protocols (backend units derived from .env) ---
   # A disabled protocol whose unit is absent is a NORMAL, expected state — INFO,
@@ -2200,6 +2401,18 @@ else
   rollback_now "shared-WAL DB ownership is wrong after deploy (see the lines above): the vpn-bot readers would fail with 'unable to open database file'. Expected ${DB_OWNER_USER}:${DB_OWNER_USER} on $(dirname "$DB_PATH"), ${DB_PATH} and its -wal/-shm sidecars"
 fi
 
+# Sidecar restart -----------------------------------------------------------
+# The other units running this same checkout (subscription endpoint, hy2-auth)
+# hold the deployed code in memory, so without this a PR touching their packages
+# ships to vpn-bot only and the report stays green about the half that did not
+# move. Runs HERE, deliberately: vpn-bot is confirmed active above (a deploy that
+# cannot even start the bot must not go on to bounce the sidecars), and the
+# shared-WAL ownership gate immediately above has just passed — these processes
+# open the same vpn.db, and a restart on a wrong-owner DB is exactly the restart
+# that turns that latent fault into "unable to open database file".
+log "restarting sidecar units that were active before the deploy"
+restart_sidecar_units
+
 # Log scan for this run only (content-based, allowlist-filtered) ------------
 # PRIMARY source: bot.log tail (the bot logs to a file, not journald), read by
 # byte offset with rotation handling. SECONDARY source: the journal, which still
@@ -2240,5 +2453,9 @@ cat <<EOF
   schema_version   : ${SCHEMA_BEFORE} -> ${SCHEMA_AFTER} (target ${SCHEMA_EXPECT})
   backup           : ${ARCHIVE}
   units skipped    : ${skipped[*]:-none}
-=====================
 EOF
+# One line per sidecar (restarted / skipped), so a half-deployed host is visible
+# in the same report that says DEPLOY OK. Not foldable into the heredoc above:
+# the list is per-host and variable-length.
+sidecar_report_block
+printf '=====================\n\n'
