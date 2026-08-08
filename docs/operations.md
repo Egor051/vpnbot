@@ -32,6 +32,52 @@ Run mutating deploys in a low-traffic window — see [Rollback after a bad
 deploy](#rollback-after-a-bad-deploy) for why. Details in the [README Deploy
 section](../README.md).
 
+### The deploy restarts the sidecar units too
+
+`vpn-bot.service` is not the only process running the deployed checkout. Two more units run
+the same tree from their own systemd units, each holding the code in memory:
+
+| Unit (name resolved from) | Package it runs |
+|---|---|
+| `vpn-bot-subscription.service` (`SUBSCRIPTION_UNIT`) | `subscription_server/` — `GET /sub/{token}` |
+| `vpnbot-hy2-auth.service` (`HYSTERIA2_AUTH_SERVICE_NAME` in `.env`) | `hy2_auth/` — Hysteria2 HTTP auth |
+
+Phase 2 used to restart the bot only, so a PR touching `subscription_server/`, `hy2_auth/`,
+`services/key_bundles.py` or the shared link formatters shipped **half-deployed**: the bot
+served the new code, a sidecar kept serving the old one out of memory, and the deploy report
+was green about it. Not hypothetical — PR #281 landed at 13:56 on 2026-08-08 and the
+subscription endpoint kept returning the previous link order, without preference marks, until
+an unrelated host reboot at 15:20 happened to restart it.
+
+**There is no manual restart step after a deploy any more.** Phase 2 restarts these units
+itself, right after `vpn-bot` is confirmed active and the shared-WAL [DB ownership
+gate](#shared-wal-db-ownership-vpn-bot-db-perms) has passed — they open the same `vpn.db`, and
+a restart on a wrong-owner DB is exactly the restart that turns that latent fault into
+`unable to open database file`.
+
+The rules, deliberately narrow:
+
+- **Pre-state decides.** The state each unit was in is snapshotted in Phase 1, before any
+  mutation. Only a unit that was **active** as the deploy found it is restarted.
+- **Not installed → skipped, never an error.** Both units are drift-installed by hand and the
+  deploy still does **not** install, enable or start either of them. A host running neither is
+  a normal host — the protocols are modular.
+- **Inactive → left inactive.** The deploy never starts something the operator had stopped.
+- **Fatal in exactly one case:** active before the deploy, and not back to `active` after the
+  restart. That is a regression this deploy caused, so it leaves through the normal rollback
+  path. Everything else stays informational — including a port that does not answer while the
+  unit itself is active.
+- **Every unit gets a report line** — `restarted` / `skipped (was inactive)` /
+  `skipped (absent)` — in both the `PHASE1_ONLY` report and the final `DEPLOY OK` block, so a
+  half-deployed host is visible instead of silent.
+
+> ⏱️ **Restarting `vpnbot-hy2-auth` rejects new Hysteria2 handshakes for a few seconds.** The
+> endpoint is deliberately **fail-closed** (`hysteria-server` gets `ok: false`, never a 5xx,
+> when the answer cannot be produced), so every handshake arriving while it restarts is
+> refused and the client retries. Established sessions are unaffected; only new connections in
+> that window are. One more reason to run mutating deploys in a low-traffic window — the
+> bigger one is the [rollback data window](#rollback-after-a-bad-deploy).
+
 ## General bot health check
 
 ```bash
@@ -635,6 +681,11 @@ not affect handshake auth or the health entry.
 > `ALLOW_MODEL_SWITCH=1` and a prior host migration — see the Deploy section in the
 > [README](../README.md)). The manual steps below are for a hand-rollback when you are not
 > using the script.
+>
+> **Sidecars are not rolled back.** A rollback restores the tree to `PREV_SHA` and restarts
+> `vpn-bot`, but a [sidecar unit](#the-deploy-restarts-the-sidecar-units-too) the deploy had
+> already restarted keeps running the new code. The rollback output names those units — restart
+> them by hand once the tree is back.
 
 > ⏱️ **Rollback loses the health-poll data window — deploy mutating changes at low traffic.**
 > Rollback restores the DB from the backup snapshot taken *before* the mutation. But the new
@@ -707,8 +758,16 @@ sudo git pull --ff-only
 sudo /opt/vpn-service/.venv/bin/pip install -r requirements.txt -c constraints.txt
 python deploy/check-nonroot-helper-mode.py
 sudo systemctl restart vpn-bot
+# The sidecars run the same tree from their own units and hold the code in memory.
+# `scripts/redeploy.sh` restarts them for you; this hand path does not, so do it here —
+# skip it and the endpoints keep serving the code you just replaced.
+sudo systemctl restart vpn-bot-subscription vpnbot-hy2-auth   # only the ones this host runs
 python deploy/check-nonroot-helper-mode.py
 ```
+
+**Prefer `scripts/redeploy.sh` to this hand path.** It gates, backs up, rolls back on a failed
+assertion, and restarts every [sidecar unit](#the-deploy-restarts-the-sidecar-units-too) that
+was active — the hand path above does none of that.
 
 **Managed MTProto: refresh the wrapper after every update.** The pull above updates
 the tracked source `deploy/run-mtproxy-managed`, but the wrapper that systemd actually

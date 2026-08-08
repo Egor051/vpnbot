@@ -152,6 +152,14 @@ ports are listening — it is never fatal, since a host that has not deployed th
 normal state, and it tolerates a unit that is up but has not finished binding yet (see
 [Start-to-bind delay](#start-to-bind-delay)).
 
+**Installing is by hand; restarting is not — the deploy does it.** Once the unit exists and is
+active, `scripts/deploy.sh` Phase 2 **restarts it on every deploy**, so a change to
+`subscription_server/`, `services/key_bundles.py` or the shared link formatters actually reaches
+the running endpoint. There is no hand-restart step after a deploy. A unit that is absent, or
+that was inactive when the deploy started, is skipped and left exactly as it was — the deploy
+never installs, enables or starts it. Details and the failure policy: [the
+runbook](operations.md#the-deploy-restarts-the-sidecar-units-too).
+
 **The order below is the order.** The TLS material must exist before the `.env` names it, and the
 firewall rule before the port answers; a public port whose TLS pair is missing does not start at
 all (next section), so putting the `.env` first would only buy a failed restart.
@@ -184,7 +192,9 @@ sudo install -m0644 deploy/vpn-bot-subscription.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable vpn-bot-subscription
 
-# 5. Restart BOTH processes — each reads .env once, at startup
+# 5. Restart BOTH processes — each reads .env once, at startup.
+#    This is the one-time go-live restart; from here on `scripts/deploy.sh`
+#    restarts the endpoint on every deploy (see the paragraph above).
 sudo systemctl restart vpn-bot-subscription vpn-bot
 
 # 6. Wait ~20s. The endpoint imports the link renderers before it binds, so the
@@ -233,10 +243,12 @@ Practical consequences:
 - After a restart, `ss` shows nothing on `8445`/`2096` for ~20s. Wait it out before concluding
   anything is wrong — `journalctl -u vpn-bot-subscription` prints one `listening on ...` line per
   socket the moment each bind succeeds.
-- `scripts/deploy.sh` Phase 1 re-checks the ports for up to `SUBSCRIPTION_BIND_WAIT` seconds
-  (default `30`) while the unit is active, so a deploy that lands during a slow start does not
-  report a false "NOT listening". The check is informational either way and **never** fails a
-  deploy.
+- `scripts/deploy.sh` re-checks the ports for up to `SUBSCRIPTION_BIND_WAIT` seconds (default
+  `30`) while the unit is active, so a deploy that lands during a slow start does not report a
+  false "NOT listening". It runs twice — in Phase 1, and again after the Phase 2 restart —
+  through the same single implementation of that wait. The port check is informational either
+  way and **never** fails a deploy; the only fatal case is the unit itself not coming back to
+  `active` after a restart it was active before.
 - The delay is startup-only. It costs nothing per request: `GET /sub/{token}` is served by an
   already-warm process.
 
