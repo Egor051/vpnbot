@@ -269,7 +269,11 @@ downtime**, backs up the DB and control-plane configs, and on any failed asserti
 back code, venv, DB, configs, and the unit — leaving the bot running. It also reinstalls any
 out-of-repo `/usr/local/sbin` helper (e.g. `vpn-bot-warp-routes`) whose installed copy has
 drifted from the checkout, and restarts `warp-routes.service` when that helper changed — so a
-fixed helper can no longer keep running stale after a deploy. A unit-model change requires
+fixed helper can no longer keep running stale after a deploy. For the same reason it restarts
+the **sidecar units that run the same code from their own units** — the subscription endpoint
+and the Hysteria2 auth endpoint — whenever they were active before the deploy, so a change to
+`subscription_server/` or `hy2_auth/` can no longer ship to the bot alone
+([runbook](docs/operations.md#the-deploy-restarts-the-sidecar-units-too)). A unit-model change requires
 `ALLOW_MODEL_SWITCH=1` (after the host has been migrated); pending changes to other
 `deploy/*.service` units surface as a drift check (`ALLOW_UNIT_DRIFT=1` to override). Day-2
 operations remain in [docs/operations.md](docs/operations.md).

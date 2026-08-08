@@ -318,6 +318,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A deploy restarted `vpn-bot` only, so half of it never shipped.** Two more units run the
+  same checkout from their own systemd units and hold the code in memory — the subscription
+  endpoint (`subscription_server/`) and the Hysteria2 auth endpoint (`hy2_auth/`) — and
+  `scripts/deploy.sh` Phase 2 never touched them. Every PR under those packages, or under
+  `services/key_bundles.py` or the shared link formatters, therefore went out **half-deployed**
+  behind a fully green report. Observed live on 2026-08-08: PR #281 reached the bot at 13:56
+  while the subscription endpoint kept serving the previous link order, without preference
+  marks, until an unrelated host reboot at 15:20 restarted it by accident. Phase 2 now restarts
+  each of these sidecars — after `vpn-bot` is confirmed active and after the shared-WAL DB
+  ownership gate, since they open the same `vpn.db`. The unit names come from the variables that
+  already carry them (`SUBSCRIPTION_UNIT`, and `HYSTERIA2_AUTH_SERVICE_NAME` from the live
+  `.env`), never from a literal. The decision is made from the pre-deploy state snapshotted in
+  Phase 1: only a unit that was **active** is restarted; an absent or inactive one is skipped and
+  left as it was, so the hand-install (drift) policy for both units is unchanged — the deploy
+  still installs, enables and starts nothing. A unit that was active and does not come back is
+  the one fatal case and goes through the normal rollback; a port that does not answer while the
+  unit itself is active stays informational. Both the `PHASE1_ONLY` report and the `DEPLOY OK`
+  block now carry one line per unit (`restarted` / `skipped (was inactive)` /
+  `skipped (absent)`), so a half-deployed host can no longer be invisible. Restarting the
+  Hysteria2 auth endpoint rejects new handshakes for the few seconds it is down (the service is
+  fail-closed by design), so mutating deploys still belong in a low-traffic window.
+
 - **The deploy's helper-drift gate was blind to the WARP split helpers and reported
   green anyway.** `OUT_OF_REPO_HELPERS` in `scripts/deploy.sh` lists the helpers whose
   tracked `scripts/` source is kept in sync with the installed `/usr/local/sbin` copy;
