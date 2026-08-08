@@ -22,6 +22,8 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from adapters.clock import ClockProvider
+from bot import rate_limit as rate_limit_module
+from bot.rate_limit import RateLimitExceeded, RateLimiter
 from config.settings import Settings, SettingsError, load_settings
 from db.database import Database
 from models.dto import TelegramUserProfile, User, VpnKey
@@ -783,10 +785,37 @@ def test_expire_uses_the_earliest_child_expiry() -> None:
 # ── rate limiting ─────────────────────────────────────────────────────────────
 
 
+class _FakeClock:
+    """Stand-in for ``bot.rate_limit``'s clock, so a window can be expired
+    without the test sleeping through it."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def limiter_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+    """Replace the limiter's ``time`` module (it only ever calls ``monotonic``).
+
+    Scoped to ``bot.rate_limit`` on purpose: patching ``time.monotonic`` globally
+    would also move the event loop's and aiohttp's idea of time.
+    """
+    clock = _FakeClock()
+    monkeypatch.setattr(rate_limit_module, "time", clock)
+    return clock
+
+
 async def test_rate_limit_throttles_a_hot_client(tmp_path: Path) -> None:
-    """The second request inside the cooldown is refused with 429 + Retry-After,
-    and the refusal happens before the database is read."""
-    harness = await _seed(tmp_path, subscription_rate_limit_seconds=30)
+    """Regression pin for ``burst=1`` — the shape the limiter had before bursts
+    existed: the second request inside the cooldown is refused with 429 +
+    Retry-After, and the refusal happens before the database is read."""
+    harness = await _seed(tmp_path, subscription_rate_limit_seconds=30, subscription_rate_limit_burst=1)
     client, store = await _client(harness)
     try:
         first = await client.get(f"/sub/{harness.token}")
@@ -798,6 +827,188 @@ async def test_rate_limit_throttles_a_hot_client(tmp_path: Path) -> None:
         # An unknown token is throttled the same way — the limiter is keyed by
         # client, so it cannot be used to probe which tokens exist.
         assert (await client.get("/sub/" + "z" * 43)).status == 429
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+def test_burst_of_one_is_byte_for_byte_the_old_cooldown(limiter_clock: _FakeClock) -> None:
+    """The bot's call sites pass no burst at all, so the default must behave
+    exactly like an explicit ``burst=1``: one call per window, a refusal that does
+    not extend the window, and the same retry_after."""
+    default = RateLimiter()
+    explicit = RateLimiter()
+
+    def outcome(limiter: RateLimiter, **kwargs: int) -> str:
+        try:
+            limiter.check(7, "act", 30, **kwargs)
+        except RateLimitExceeded as exc:
+            return f"429/{exc.retry_after}"
+        return "ok"
+
+    trace_default: list[str] = []
+    trace_explicit: list[str] = []
+    for step in (0, 1, 10, 10, 9, 1, 5):
+        limiter_clock.advance(step)
+        trace_default.append(outcome(default))
+        trace_explicit.append(outcome(explicit, burst=1))
+
+    assert trace_default == trace_explicit
+    # ... and that shared trace is the documented cooldown: accept, refuse while
+    # the window runs (counting down, never restarting), accept again after it.
+    assert trace_default == ["ok", "429/29", "429/19", "429/9", "ok", "429/29", "429/24"]
+
+
+async def test_burst_lets_a_shared_nat_through_before_throttling(tmp_path: Path) -> None:
+    """The whole point of the burst: several requests from one address (two
+    devices behind one NAT, or a client that opens the URL twice on launch) are
+    served, and only what exceeds the allowance is refused."""
+    harness = await _seed(tmp_path, subscription_rate_limit_seconds=30, subscription_rate_limit_burst=3)
+    client, store = await _client(harness)
+    try:
+        for attempt in range(3):
+            assert (await client.get(f"/sub/{harness.token}")).status == 200, attempt
+        refused = await client.get(f"/sub/{harness.token}")
+        assert refused.status == 429
+        assert await refused.text() == ""
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_expired_window_allows_the_full_burst_again(tmp_path: Path, limiter_clock: _FakeClock) -> None:
+    """The counter resets with the window: a client that waited out its refusal
+    gets the whole allowance back, not a single request."""
+    harness = await _seed(tmp_path, subscription_rate_limit_seconds=30, subscription_rate_limit_burst=3)
+    client, store = await _client(harness)
+    try:
+        for _ in range(3):
+            assert (await client.get(f"/sub/{harness.token}")).status == 200
+        assert (await client.get(f"/sub/{harness.token}")).status == 429
+
+        limiter_clock.advance(31)
+
+        for attempt in range(3):
+            assert (await client.get(f"/sub/{harness.token}")).status == 200, attempt
+        assert (await client.get(f"/sub/{harness.token}")).status == 429
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_retry_after_carries_what_is_left_of_the_window(
+    tmp_path: Path, limiter_clock: _FakeClock
+) -> None:
+    """Retry-After is the remainder of the current window, not a constant: a
+    client that obeys it comes back exactly when it will be served."""
+    harness = await _seed(tmp_path, subscription_rate_limit_seconds=30, subscription_rate_limit_burst=2)
+    client, store = await _client(harness)
+    try:
+        for _ in range(2):
+            assert (await client.get(f"/sub/{harness.token}")).status == 200
+
+        immediately = await client.get(f"/sub/{harness.token}")
+        assert immediately.status == 429
+        assert int(immediately.headers["Retry-After"]) == 30
+
+        limiter_clock.advance(25)
+        later = await client.get(f"/sub/{harness.token}")
+        assert later.status == 429
+        # The refusals themselves did not push the window out.
+        assert int(later.headers["Retry-After"]) == 5
+
+        limiter_clock.advance(5)
+        assert (await client.get(f"/sub/{harness.token}")).status == 200
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_refusal_is_logged_with_the_bucket_and_never_the_token(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A 429 must be visible in journalctl — otherwise a client that cannot
+    refresh is undiagnosable — but the limit is decided before the token is even
+    looked at, so the line carries the bucket and nothing token-shaped."""
+    from subscription_server.server import _bucket_tag, _client_key
+
+    harness = await _seed(tmp_path, subscription_rate_limit_seconds=30, subscription_rate_limit_burst=1)
+    client, store = await _client(harness)
+    try:
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            assert (await client.get(f"/sub/{harness.token}")).status == 200
+            assert (await client.get(f"/sub/{harness.token}")).status == 429
+
+        refusals = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "subscription_server.server" and record.levelno == logging.WARNING
+        ]
+        assert len(refusals) == 1, "a throttled request must leave exactly one WARNING"
+        line = refusals[0]
+
+        assert "429" in line
+        # The bucket the limiter actually used, so two lines about one client
+        # correlate — 127.0.0.1 is the peer of every test request.
+        assert _bucket_tag(_client_key(SimpleNamespace(remote="127.0.0.1"))) in line  # type: ignore[arg-type]
+
+        assert harness.token not in line
+        # Not the fingerprint the success path prints either, nor any prefix of
+        # the token long enough to be worth brute-forcing.
+        assert token_fingerprint(harness.token) not in line
+        for length in (8, 12, 16):
+            assert harness.token[:length] not in line
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+def test_client_key_is_derived_from_the_peer_address_alone() -> None:
+    """The bucket is the peer address and nothing else — not the path, so it
+    cannot be steered by the caller, and not a header, so it cannot be spoofed."""
+    from subscription_server.server import _client_key
+
+    def key(remote: str | None) -> int:
+        return _client_key(SimpleNamespace(remote=remote))  # type: ignore[arg-type]
+
+    assert key("203.0.113.7") == key("203.0.113.7")
+    assert key("203.0.113.7") != key("203.0.113.8")
+    # A connection with no peer address still buckets somewhere rather than
+    # raising — one shared bucket for the unknown.
+    assert key(None) == key(None)
+
+
+async def test_one_peer_cannot_throttle_another(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Buckets are per address: a client that burns its allowance must not cost
+    an unrelated address a single request."""
+    from subscription_server import server as server_module
+
+    real_client_key = server_module._client_key
+    # Every TestClient request really does come from 127.0.0.1, so the peer is
+    # taken from a header here; the production derivation is pinned above.
+    monkeypatch.setattr(
+        server_module,
+        "_client_key",
+        lambda request: real_client_key(SimpleNamespace(remote=request.headers.get("X-Test-Peer"))),
+    )
+
+    harness = await _seed(tmp_path, subscription_rate_limit_seconds=30, subscription_rate_limit_burst=2)
+    client, store = await _client(harness)
+    try:
+        noisy = {"X-Test-Peer": "203.0.113.7"}
+        quiet = {"X-Test-Peer": "198.51.100.9"}
+        for _ in range(2):
+            assert (await client.get(f"/sub/{harness.token}", headers=noisy)).status == 200
+        assert (await client.get(f"/sub/{harness.token}", headers=noisy)).status == 429
+
+        for attempt in range(2):
+            assert (await client.get(f"/sub/{harness.token}", headers=quiet)).status == 200, attempt
     finally:
         await client.close()
         await store.close()

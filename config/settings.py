@@ -584,6 +584,11 @@ class Settings:
     subscription_update_interval_hours: int = 12
     # Per-client cooldown (seconds) on GET /sub/{token}; 0 disables throttling.
     subscription_rate_limit_seconds: int = 5
+    # How many requests one client may make inside that window before it is
+    # refused. The key is the peer address, so a household behind one NAT is a
+    # single client: with a burst of 1 two devices refreshing at once throttle
+    # each other, which is what this exists to prevent.
+    subscription_rate_limit_burst: int = 5
     # Single-instance lock of the endpoint process (mirrors BOT_LOCK_PATH). Its
     # own file, never the bot's: the two are independent processes and either
     # must be able to run while the other is down.
@@ -1045,6 +1050,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         subscription_tls_key=_optional_path("SUBSCRIPTION_TLS_KEY"),
         subscription_update_interval_hours=_int_range("SUBSCRIPTION_UPDATE_INTERVAL_HOURS", 12, 1, 168),
         subscription_rate_limit_seconds=_int_range("SUBSCRIPTION_RATE_LIMIT_SECONDS", 5, 0, 3600),
+        subscription_rate_limit_burst=_int_range("SUBSCRIPTION_RATE_LIMIT_BURST", 5, 1, 100),
         subscription_lock_path=Path(
             _optional("SUBSCRIPTION_LOCK_PATH", "/run/vpn-bot-subscription/subscription.lock")
         ),
