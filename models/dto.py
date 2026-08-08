@@ -182,7 +182,7 @@ class VpnKey:
     # VLESS transport selector: "tcp" (vless-in, flow=xtls-rprx-vision) or "http"
     # (vless-xhttp-reality, no flow). Always "tcp" for AWG keys and legacy rows.
     transport: str = "tcp"
-    # XHTTP client transport profile: "base" | "antisib" | "multi". Meaningful only
+    # XHTTP client transport profile: "base" | "multi" | "antisib". Meaningful only
     # for http keys; always "base" for tcp/AWG keys and legacy rows. Immutable per
     # key (changing it means creating a new key) and encoded in the email label.
     xhttp_profile: str = "base"

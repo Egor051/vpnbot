@@ -97,11 +97,17 @@ def test_regular_key_actions_live_on_the_key_menu_not_in_the_list() -> None:
     for action in ("show", "stats", "note", "revoke", "delete"):
         assert f"key:{action}:10" not in callbacks
 
-    assert "key:show:10" in detail_callbacks
-    assert "key:stats:10" in detail_callbacks
-    assert "key:note:10" in detail_callbacks
-    assert "key:revoke:10" in detail_callbacks
-    assert "key:delete:10" in detail_callbacks
+    # config · note · fingerprint · revoke · delete, in that order and no other —
+    # the one standard every manageable entity's menu follows.
+    assert [c for c in detail_callbacks if c.startswith("key:") and not c.startswith("key:open:")] == [
+        "key:show:10",
+        "key:note:10",
+        "key:fp:10",
+        "key:revoke:10",
+        "key:delete:10",
+    ]
+    # Traffic is printed on the key screen itself, so there is no stats button.
+    assert "key:stats:10" not in detail_callbacks
 
 
 def test_admin_key_actions_live_on_the_key_menu_not_in_the_list() -> None:

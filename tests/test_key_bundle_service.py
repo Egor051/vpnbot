@@ -334,10 +334,10 @@ def test_bundle_composition_is_pinned_to_the_current_set() -> None:
     """
     assert bundle_composition() == (
         BundleMember(VpnKeyType.XRAY, transport="tcp", xhttp_profile="base"),
-        BundleMember(VpnKeyType.XRAY, transport="http", xhttp_profile="base"),
-        BundleMember(VpnKeyType.XRAY, transport="http", xhttp_profile="antisib"),
-        BundleMember(VpnKeyType.XRAY, transport="http", xhttp_profile="multi"),
         BundleMember(VpnKeyType.HYSTERIA2, transport="tcp", xhttp_profile="base"),
+        BundleMember(VpnKeyType.XRAY, transport="http", xhttp_profile="base"),
+        BundleMember(VpnKeyType.XRAY, transport="http", xhttp_profile="multi"),
+        BundleMember(VpnKeyType.XRAY, transport="http", xhttp_profile="antisib"),
     )
     assert all(member.key_type is not VpnKeyType.AWG for member in bundle_composition())
 
@@ -387,10 +387,10 @@ def test_create_bundle_provisions_every_enabled_protocol(tmp_path: Path) -> None
             details = h.audit.details_for("key_bundle_created")
             assert details["included"] == [
                 "xray_tcp",
-                "xray_http_base",
-                "xray_http_antisib",
-                "xray_http_multi",
                 "hysteria2",
+                "xray_http_base",
+                "xray_http_multi",
+                "xray_http_antisib",
             ]
             assert details["skipped"] == []
         finally:
@@ -430,6 +430,90 @@ def test_one_fingerprint_choice_reaches_every_vless_child(tmp_path: Path) -> Non
     asyncio.run(run())
 
 
+# ── changing the fingerprint of an existing bundle ────────────────────
+
+
+def test_fingerprint_of_an_existing_bundle_is_restamped_on_every_vless_child(tmp_path: Path) -> None:
+    """The gap this closes: a single key could always be re-stamped, a subscription
+    was stuck with whatever it was created with. Hysteria2 has no such setting and
+    must come out untouched."""
+
+    async def run() -> None:
+        h = await _build(tmp_path)
+        try:
+            result = await h.service.create_bundle(
+                ADMIN, h.owner, "note", expires_at=EXPIRES_AT, fingerprint="safari"
+            )
+
+            bundle, changed = await h.service.change_fingerprint(ADMIN, result.bundle.id, "edge")
+
+            assert changed == 4
+            assert bundle.id == result.bundle.id
+            children = await h.bundles.list_keys_of_bundle(result.bundle.id)
+            xray = [key for key in children if key.key_type is VpnKeyType.XRAY]
+            hy2 = [key for key in children if key.key_type is VpnKeyType.HYSTERIA2]
+            assert {key.payload.get("fingerprint") for key in xray} == {"edge"}
+            # The stored client link is rebuilt, not just the payload field.
+            assert all("fp=edge" in str(key.public_payload.get("link", "")) for key in xray)
+            assert hy2[0].payload.get("fingerprint") is None
+
+            details = h.audit.details_for("key_bundle_fingerprint_changed")
+            assert details["fingerprint"] == "edge"
+            assert details["key_ids"] == [key.id for key in xray]
+        finally:
+            await h.db.close()
+
+    asyncio.run(run())
+
+
+def test_fingerprint_change_is_refused_on_a_revoked_bundle(tmp_path: Path) -> None:
+    async def run() -> None:
+        h = await _build(tmp_path)
+        try:
+            result = await h.service.create_bundle(ADMIN, h.owner, None, expires_at=EXPIRES_AT)
+            await h.service.revoke_bundle(ADMIN, result.bundle.id)
+
+            with pytest.raises(InvalidOperation) as excinfo:
+                await h.service.change_fingerprint(ADMIN, result.bundle.id, "edge")
+            assert excinfo.value.key == "err_bundle_fp_active_only"
+        finally:
+            await h.db.close()
+
+    asyncio.run(run())
+
+
+def test_fingerprint_change_is_refused_on_a_bundle_without_a_vless_child(tmp_path: Path) -> None:
+    """With the Xray module off the bundle is hy2-only — there is nothing to stamp,
+    and the service says so rather than reporting a silent zero-key success."""
+
+    async def run() -> None:
+        h = await _build(tmp_path, modules=_Modules(xray=False))
+        try:
+            result = await h.service.create_bundle(ADMIN, h.owner, None, expires_at=EXPIRES_AT)
+
+            with pytest.raises(InvalidOperation) as excinfo:
+                await h.service.change_fingerprint(ADMIN, result.bundle.id, "edge")
+            assert excinfo.value.key == "err_bundle_no_vless"
+        finally:
+            await h.db.close()
+
+    asyncio.run(run())
+
+
+def test_fingerprint_change_is_refused_for_a_foreign_bundle(tmp_path: Path) -> None:
+    async def run() -> None:
+        h = await _build(tmp_path)
+        try:
+            result = await h.service.create_bundle(ADMIN, h.owner, None, expires_at=EXPIRES_AT)
+
+            with pytest.raises(AccessDenied):
+                await h.service.change_fingerprint(OWNER + 1, result.bundle.id, "edge")
+        finally:
+            await h.db.close()
+
+    asyncio.run(run())
+
+
 def test_no_fingerprint_choice_leaves_children_on_the_global_default(tmp_path: Path) -> None:
     """Omitting the choice keeps the pre-existing behaviour: the .env default wins."""
 
@@ -460,14 +544,14 @@ def test_create_bundle_skips_backend_disabled_in_env(tmp_path: Path) -> None:
             result = await h.service.create_bundle(ADMIN, h.owner, None)
 
             assert len(result.keys) == 2
-            assert [member.xhttp_profile for member in result.skipped] == ["base", "antisib", "multi"]
+            assert [member.xhttp_profile for member in result.skipped] == ["base", "multi", "antisib"]
             assert all(member.transport == "http" for member in result.skipped)
             assert h.http.add_calls == []
             assert {key.key_type for key in result.keys} == {VpnKeyType.XRAY, VpnKeyType.HYSTERIA2}
             # The composition that actually went in is recorded, not inferred later.
             details = h.audit.details_for("key_bundle_created")
             assert details["included"] == ["xray_tcp", "hysteria2"]
-            assert details["skipped"] == ["xray_http_base", "xray_http_antisib", "xray_http_multi"]
+            assert details["skipped"] == ["xray_http_base", "xray_http_multi", "xray_http_antisib"]
         finally:
             await h.db.close()
 

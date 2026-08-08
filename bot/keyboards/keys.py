@@ -34,15 +34,18 @@ def create_key_keyboard(
 
     ``back_data`` controls where the «back» button returns to so the flow can
     honour its entry point (the main menu vs. the «My keys» list).
+
+    Order is VLESS · Hysteria2 · AmneziaWG · All-in-One: the two protocols that ride
+    a subscription first, then the one that cannot, then the bundle of them all.
     """
     rows: list[list[InlineKeyboardButton]] = []
     if xray_enabled:
         vless_data = "keys:proto:vless" if xhttp_enabled else "keys:create:xray"
         rows.append([InlineKeyboardButton(text="VLESS", callback_data=vless_data)])
-    if awg_enabled:
-        rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="keys:create:awg")])
     if hysteria2_enabled:
         rows.append([InlineKeyboardButton(text="Hysteria2", callback_data="keys:create:hy2")])
+    if awg_enabled:
+        rows.append([InlineKeyboardButton(text="AmneziaWG 2.0", callback_data="keys:create:awg")])
     if bundle_enabled:
         rows.append([InlineKeyboardButton(text=t("btn_all_in_one"), callback_data="keys:create:bundle")])
     rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data=back_data)])
@@ -68,8 +71,8 @@ def xhttp_profile_keyboard() -> InlineKeyboardMarkup:
     """
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text=t("xhttp_profile_base_name"), callback_data="keys:xhttp:profile:base")],
-        [InlineKeyboardButton(text=t("xhttp_profile_antisib_name"), callback_data="keys:xhttp:profile:antisib")],
         [InlineKeyboardButton(text=t("xhttp_profile_multi_name"), callback_data="keys:xhttp:profile:multi")],
+        [InlineKeyboardButton(text=t("xhttp_profile_antisib_name"), callback_data="keys:xhttp:profile:antisib")],
         [InlineKeyboardButton(text=t("btn_back"), callback_data="keys:proto:vless")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -88,12 +91,12 @@ def keys_list_keyboard(
     ``items`` is the page as the text above it renders it — keys and all-in-one
     subscriptions already interleaved in date order — so the buttons and the cards
     are guaranteed to line up. Each entry gets exactly one button, which opens that
-    entry's own screen; every action (config, stats, revoke, note, delete) lives
-    there, in :func:`key_actions_keyboard` / :func:`bundle_actions_keyboard`.
+    entry's own screen; every action (config, note, fingerprint, revoke, delete)
+    lives there, in :func:`key_actions_keyboard` / :func:`bundle_actions_keyboard`.
 
-    The list used to repeat those five actions under every entry, which is where
-    most of a page's keyboard rows went — three rows per key, so a page of five
-    keys was fifteen rows of buttons duplicating a menu one tap away.
+    The list used to repeat those actions under every entry, which is where most of
+    a page's keyboard rows went — three rows per key, so a full page was a dozen-odd
+    rows of buttons duplicating a menu one tap away.
     """
     rows: list[list[InlineKeyboardButton]] = []
     for item in items:
@@ -131,18 +134,29 @@ def keys_list_keyboard(
 
 
 def key_actions_keyboard(key: VpnKey, owner_user_id: int | None = None, page: int = 0) -> InlineKeyboardMarkup:
-    """Build the actions keyboard for a single key based on its status."""
+    """Build the actions keyboard for a single key based on its status.
+
+    ONE order for every manageable entity — config · note · fingerprint · revoke ·
+    delete — shared verbatim with :func:`bot.keyboards.key_bundles.bundle_actions_keyboard`,
+    so muscle memory carries from a key to a subscription and back. Rows that do not
+    apply (a revoked key has no config, a non-Xray key has no fingerprint) drop out
+    without the survivors moving relative to each other.
+
+    There is no «Статистика» row: traffic is printed on the screen itself, so a
+    button that only re-rendered the same numbers under a different heading was one
+    tap between the user and something they were already looking at.
+    """
     rows: list[list[InlineKeyboardButton]] = []
     if key.status == VpnKeyStatus.ACTIVE:
-        rows.append([InlineKeyboardButton(text=t("btn_show_config"), callback_data=f"key:show:{key.id}")])
+        rows.append([InlineKeyboardButton(text=t("btn_config"), callback_data=f"key:show:{key.id}")])
+    if key.status != VpnKeyStatus.DELETED and owner_user_id is None:
+        rows.append([InlineKeyboardButton(text=t("btn_edit_note_key"), callback_data=f"key:note:{key.id}")])
+    if key.status == VpnKeyStatus.ACTIVE and key.key_type == VpnKeyType.XRAY and owner_user_id is None:
+        rows.append([InlineKeyboardButton(text=t("btn_change_fp"), callback_data=f"key:fp:{key.id}")])
+    if key.status == VpnKeyStatus.ACTIVE:
         revoke_data = f"key:revoke:{key.id}" if owner_user_id is None else f"key:revoke:{key.id}:{owner_user_id}:{page}"
         rows.append([InlineKeyboardButton(text=t("btn_revoke"), callback_data=revoke_data)])
-        if key.key_type == VpnKeyType.XRAY and owner_user_id is None:
-            rows.append([InlineKeyboardButton(text=t("btn_change_fp"), callback_data=f"key:fp:{key.id}")])
-    rows.append([InlineKeyboardButton(text=t("btn_stats"), callback_data=f"key:stats:{key.id}")])
     if key.status != VpnKeyStatus.DELETED:
-        if owner_user_id is None:
-            rows.append([InlineKeyboardButton(text=t("btn_edit_note_key"), callback_data=f"key:note:{key.id}")])
         delete_data = f"key:delete:{key.id}" if owner_user_id is None else f"key:delete:{key.id}:{owner_user_id}:{page}"
         rows.append([InlineKeyboardButton(text=t("btn_delete"), callback_data=delete_data)])
     back_data = f"admin:ukeys:{owner_user_id}:{page}" if owner_user_id is not None else "keys:list"

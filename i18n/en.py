@@ -96,7 +96,7 @@ STRINGS: dict[str, str] = {
     "awg_config_hint": "Add the link to an AmneziaVPN client or use the configuration file.",
     "hy2_config_hint": "Add the link to a Hysteria2-capable client (e.g. NekoBox or Hiddify).",
     # ── traffic stats ─────────────────────────────────────────────────────────
-    "stats_title": "<b>Stats for {key_title}</b>",
+    "stats_block_title": "<b>Statistics</b>",
     "stats_unavailable_now": "Stats are currently unavailable. Last successful snapshot:",
     "stats_not_available_yet": "Stats are not available yet.",
     "stats_keys_title": "<b>Key statistics</b>",
@@ -422,12 +422,20 @@ STRINGS: dict[str, str] = {
     "vless_http_unavailable": "VLESS (HTTP) is temporarily unavailable.",
     "choose_xhttp_profile": "Choose the XHTTP transport profile:",
     "xhttp_profile_invalid": "Unknown transport profile.",
-    "xhttp_profile_base_name": "🟢 Basic (recommended)",
+    "xhttp_profile_base_name": "📄 Basic (recommended)",
     "xhttp_profile_base_desc": "Universal mode. The best balance of speed and stability, suitable for most users.",
-    "xhttp_profile_antisib_name": "🛡 Anti-blocking",
-    "xhttp_profile_antisib_desc": "Use if the connection drops at connect time because of TLS-handshake-count blocking. Single channel — may be slower on a weak network.",
     "xhttp_profile_multi_name": "🔀 Multi-connection",
-    "xhttp_profile_multi_desc": "For resilient long sessions: splits traffic into short connections, helping against speed throttling on long-lived connections.",
+    "xhttp_profile_multi_desc": (
+        "Use it if the connection slows down or drops over time. Rotates background "
+        "sessions automatically without tearing down the VPN. Slower than Basic.\n"
+        "(Not to be confused with the system killing the app to save battery)."
+    ),
+    "xhttp_profile_antisib_name": "🛡 Anti-blocking",
+    "xhttp_profile_antisib_desc": (
+        "The \"last resort\" mode. Helps when the VPN is dropped in the very first "
+        "second of the connection. Turn it on only if no other preset works — "
+        "it is the slowest mode."
+    ),
     "creating_key": "Creating key...",
     "key_unknown_type": "Unknown key type.",
     "admin_delivered_awg": "Admin has issued you AWG key #{id}.\n\n{config_text}",
@@ -472,10 +480,17 @@ STRINGS: dict[str, str] = {
     "bundle_type_label": "All-in-One",
     "bundle_composition": "Contents",
     "bundle_awg_separate": (
-        "ℹ️ AmneziaWG is not part of the subscription and is issued as a separate key: "
+        "ℹ️ AmneziaWG is not part of the set and is issued as a separate key: "
         "a WireGuard config cannot be delivered over a subscription link."
     ),
+    "bundle_marks_legend": (
+        "⚠️ <b>The circle at the end of a key's name is its average speed and latency:</b> "
+        "🟢 is the best, then 🟡, 🟠 and 🔴 get worse. "
+        "Try switching the keys on in exactly that order."
+    ),
     "bundle_fp_prompt": "Choose a fingerprint — it applies to every VLESS key in the subscription:",
+    "bundle_fp_change_prompt": "Choose a new fingerprint — it applies to every VLESS key in the subscription:",
+    "bundle_fp_updated": "Fingerprint updated on {count} subscription keys.",
     "bundle_create_confirm_title": "<b>Confirm subscription creation</b>",
     "creating_bundle": "Creating the subscription...",
     "bundle_created_title": "<b>Subscription created.</b>",
@@ -707,11 +722,8 @@ STRINGS: dict[str, str] = {
     # ── keyboard buttons (keys) ───────────────────────────────────────────────
     "btn_back": "Back",
     "btn_config": "Config",
-    "btn_stats": "Statistics",
     "btn_revoke": "Revoke",
     "btn_delete": "Delete",
-    "btn_note": "Note",
-    "btn_show_config": "Show config",
     "btn_edit_note_key": "Edit note",
     "btn_to_list": "Back to list",
     "btn_mtu_recommended": "1280 (recommended)",
@@ -728,6 +740,7 @@ STRINGS: dict[str, str] = {
     "btn_get_config": "Get config",
     "btn_request_trial": "Request trial access (7 days)",
     "btn_all_in_one": "All-in-One (one link for every protocol)",
+    "btn_understood": "✅ Got it",
     # ── keyboard buttons (proxy) ──────────────────────────────────────────────
     "btn_get_socks5": "Get SOCKS5",
     "btn_get_mtproto": "Get MTProto",
@@ -1094,6 +1107,9 @@ STRINGS: dict[str, str] = {
     "err_foreign_bundle_manage": "You cannot manage another user's subscription",
     "err_bundle_revoke_active_only": "Only an active subscription can be revoked",
     "err_bundle_revoke_partial": "Some subscription keys could not be revoked",
+    "err_bundle_fp_active_only": "The fingerprint can be changed only for an active subscription",
+    "err_bundle_no_vless": "The subscription has no active VLESS keys",
+    "err_bundle_fp_partial": "The fingerprint was not changed on every subscription key",
     "err_bundle_delete_forbidden": "This subscription cannot be deleted",
     "err_bundle_has_keys": "Cannot delete the subscription: keys are still attached to it",
     "err_foreign_bundle_view": "You cannot view someone else's subscription",

@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Key and subscription screens brought to one standard.** Every manageable entity — a
+  single key and an all-in-one subscription alike — now offers the same actions in the
+  same order: **Конфиг · Редактировать заметку · Fingerprint (where it applies) · Отозвать
+  · Удалить**. The «Статистика» button is gone from both: the traffic it used to hide is
+  printed on the screen itself, sampled live on open with a short per-viewer cooldown that
+  falls back to the cached counters instead of refusing to open the screen. An admin
+  reading another user's traffic is still recorded in the audit trail; an owner reading
+  their own counters no longer writes a row per navigation tap.
+  - «Мои ключи» shows **three entries per page** (the cards grew a traffic block) and puts
+    each entry's status **behind a dot in its heading**, matching its own button, instead
+    of spending a line on it.
+  - The create menu is ordered **VLESS · Hysteria2 · AmneziaWG 2.0 · All-in-One**.
+
+- **All-in-one subscription: ordering, preference marks and a fingerprint you can change.**
+  - The subscription is served **best-connection-first** — VLESS (TCP), Hysteria2, then the
+    VLESS (HTTP) profiles from fastest to slowest — and every entry's display name carries a
+    **preference mark** (`🟢` / `🟡` / `🟠` / `🔴`) after an underscore, so the profile list a
+    client imports reads as the order to try them in. The mark rides the link's `#fragment`
+    only: stored labels, standalone-key links, stats and reconciliation are untouched. The
+    order comes from the composition seam rather than child `id`, so subscriptions created
+    earlier are served in the current order too, and «Состав» lists the same sequence.
+  - The bundle screens explain the colours above the AmneziaWG notice, whose first word is
+    now «набор».
+  - **The fingerprint of an existing subscription can be changed**, through the same wizard
+    and the same per-key service call a standalone key uses; it re-stamps every active VLESS
+    child at once. The row is absent when the bundle holds no VLESS child.
+  - Choosing «All-in-One» now shows the AmneziaWG notice **before** the wizard starts,
+    behind a single «✅ Понятно» button, rather than at the end.
+
+- **XHTTP transport profiles reordered and reworded.** «Мультиподключение» is offered before
+  «Антисибирский» everywhere (creation menus, admin issue flow, subscription composition,
+  docs). The base profile's button icon is now 📄, and the multi/anti-blocking descriptions
+  shown above the preset menu were rewritten to say what each one is actually for.
+
 ### Added
 
 - **All-in-one subscription — bot UI (`SUBSCRIPTION_ENABLED`, still `false` by
@@ -112,9 +148,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **XHTTP client transport profiles for VLESS (HTTP) keys.** Creating a VLESS (HTTP)
   key now has a third step — a client-side transport profile: **base** (universal,
-  byte-for-byte the previous link), **antisib** (anti-blocking: single-channel xmux to
-  survive TLS-handshake-count blocking) and **multi** (multi-connection: `packet-up`
-  with split-post + rotating xmux for throttling-resistant long sessions). All three
+  byte-for-byte the previous link), **multi** (multi-connection: `packet-up` with
+  split-post + rotating xmux for throttling-resistant long sessions) and **antisib**
+  (anti-blocking: single-channel xmux to survive TLS-handshake-count blocking). All three
   are clients on the same loopback XHTTP inbound (`mode: auto`), so nothing changes
   server-side — the profile only tunes `mode` / `xhttpSettings.extra` in the generated
   link and is immutable per key. `multi` needs Xray-core v25.3.6+ on the client

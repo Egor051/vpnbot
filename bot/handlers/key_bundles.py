@@ -24,15 +24,20 @@ from aiogram.types import CallbackQuery
 from bot.bundles import (
     bundle_config_text,
     bundle_detail_text,
-    bundle_stats_text,
+    bundle_has_vless,
     require_subscription_ui,
 )
 from bot.container import Services
-from bot.fsm.states import EditNoteStates
-from bot.handlers.common import InvalidCallbackData, answer_callback_error, parse_int_callback
+from bot.fsm.states import EditFpStates, EditNoteStates
+from bot.handlers.common import (
+    InvalidCallbackData,
+    answer_callback_error,
+    parse_int_callback,
+    stats_views_for_screen,
+)
 from bot.keyboards.common import cancel_keyboard
 from bot.keyboards.key_bundles import bundle_actions_keyboard, bundle_confirm_keyboard
-from bot.keyboards.keys import after_key_deleted_keyboard
+from bot.keyboards.keys import after_key_deleted_keyboard, fp_choice_keyboard
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
 from bot.rate_limit import RateLimiter
@@ -43,8 +48,13 @@ logger = logging.getLogger(__name__)
 
 
 @router.callback_query(F.data.startswith("bundle:open:"))
-async def open_bundle(callback: CallbackQuery, services: Services) -> None:
-    """Show the card of a single all-in-one bundle."""
+async def open_bundle(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
+    """Show the card of a single all-in-one bundle, traffic included.
+
+    The traffic used to sit behind a «Статистика» button; it is part of the card
+    now, so this screen samples it (softly rate-limited, cached fallback) rather
+    than making the user ask for it.
+    """
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -55,10 +65,11 @@ async def open_bundle(callback: CallbackQuery, services: Services) -> None:
         await safe_callback_answer(callback)
         bundle = await services.key_bundle_views.get_for_actor(callback.from_user.id, bundle_id)
         keys = await services.key_bundle_views.list_keys_for_actor(callback.from_user.id, bundle_id)
+        views = await stats_views_for_screen(services, rate_limiter, callback.from_user.id, keys)
         await safe_edit_message_text(
             callback.message,
-            bundle_detail_text(bundle, keys, viewer_user_id=callback.from_user.id),
-            reply_markup=bundle_actions_keyboard(bundle),
+            bundle_detail_text(bundle, keys, viewer_user_id=callback.from_user.id, views=views),
+            reply_markup=bundle_actions_keyboard(bundle, has_vless=bundle_has_vless(keys)),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -81,19 +92,25 @@ async def show_bundle_config(callback: CallbackQuery, services: Services, rate_l
         bundle_id = _bundle_id(callback.data)
         rate_limiter.check(callback.from_user.id, "bundle_show", 5)
         bundle = await services.key_bundle_views.get_for_actor(callback.from_user.id, bundle_id)
+        keys = await services.key_bundle_views.list_keys_for_actor(callback.from_user.id, bundle_id)
         await safe_callback_answer(callback)
         await safe_edit_message_text(
             callback.message,
             bundle_config_text(bundle, services.settings),
-            reply_markup=bundle_actions_keyboard(bundle),
+            reply_markup=bundle_actions_keyboard(bundle, has_vless=bundle_has_vless(keys)),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(F.data.startswith("bundle:stats:"))
-async def show_bundle_stats(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
-    """Show the bundle's traffic: one total plus a per-protocol split."""
+@router.callback_query(F.data.startswith("bundle:fp:"))
+async def change_bundle_fp_prompt(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Start the fingerprint wizard for every VLESS child of a bundle.
+
+    Reuses ``EditFpStates`` — the states the per-key fingerprint flow uses — and
+    marks the target with ``bundle_id`` in the FSM data, exactly as the note wizard
+    does; the shared selection step in :mod:`bot.handlers.keys` branches on it.
+    """
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -101,15 +118,14 @@ async def show_bundle_stats(callback: CallbackQuery, services: Services, rate_li
     try:
         require_subscription_ui(services)
         bundle_id = _bundle_id(callback.data)
-        rate_limiter.check(callback.from_user.id, "bundle_stats", 5)
-        await safe_callback_answer(callback, t("updating_stats"))
+        await safe_callback_answer(callback)
         bundle = await services.key_bundle_views.get_for_actor(callback.from_user.id, bundle_id)
-        keys = await services.key_bundle_views.list_keys_for_actor(callback.from_user.id, bundle_id)
-        views = await services.traffic_stats.refresh_views(keys)
+        await state.set_state(EditFpStates.waiting_fp)
+        await state.update_data(bundle_id=bundle.id, key_id=None)
         await safe_edit_message_text(
             callback.message,
-            bundle_stats_text(bundle, views),
-            reply_markup=bundle_actions_keyboard(bundle),
+            t("bundle_fp_change_prompt"),
+            reply_markup=fp_choice_keyboard(),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)

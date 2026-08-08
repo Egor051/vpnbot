@@ -93,7 +93,9 @@ class BundleView:
     """One active bundle plus everything the response is built from.
 
     ``keys`` holds only ACTIVE children, in creation order, so a child revoked on
-    its own simply disappears from the subscription on the next fetch.
+    its own simply disappears from the subscription on the next fetch. The response
+    is served in the composition seam's order, which ``render_links`` sorts into —
+    creation order is only how they come out of the database.
     """
 
     bundle: KeyBundle

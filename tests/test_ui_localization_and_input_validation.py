@@ -15,11 +15,11 @@ from aiogram.types import Chat, Message, User as TgUser
 
 import i18n
 from bot.fsm.ttl_storage import TTLMemoryStorage
-from bot.formatters import traffic_stats_text
+from bot.formatters import key_screen_text
 from bot.handlers.common import service_error_text
 from bot.handlers.keys import _note_input_error, _protocol_enabled
 from bot.middlewares.access import BlockedUserMiddleware
-from models.dto import KeyTrafficStatsView, User, VpnKey
+from models.dto import User, VpnKey
 from models.enums import UserRole, VpnKeyStatus, VpnKeyType
 from services.errors import AccessDenied
 from services.notes import MAX_NOTE_LENGTH
@@ -83,12 +83,12 @@ def _key(key_type: VpnKeyType) -> VpnKey:
     )
 
 
-def test_traffic_stats_uses_friendly_key_type_labels() -> None:
-    xray = traffic_stats_text(KeyTrafficStatsView(key=_key(VpnKeyType.XRAY), owner=None, stats=None), viewer_user_id=100)
+def test_key_screen_uses_friendly_key_type_labels() -> None:
+    xray = key_screen_text(_key(VpnKeyType.XRAY), viewer_user_id=100, stats=None)
     assert "VLESS (TCP)" in xray
     assert "XRAY" not in xray  # the raw enum value must not leak into the UI
 
-    awg = traffic_stats_text(KeyTrafficStatsView(key=_key(VpnKeyType.AWG), owner=None, stats=None), viewer_user_id=100)
+    awg = key_screen_text(_key(VpnKeyType.AWG), viewer_user_id=100, stats=None)
     assert "AmneziaWG" in awg
     assert "AWG ·" not in awg
 

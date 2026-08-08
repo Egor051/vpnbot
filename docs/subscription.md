@@ -23,6 +23,24 @@ Canonical references live where every other feature's do:
    `bot.formatters.format_hysteria2_link` for Hysteria2), joined by newlines and base64-encoded.
    Nothing else can ride the subscription: AWG and the SOCKS5/MTProto proxies are excluded from
    the bundle composition, so a row of any other type fails the render rather than being skipped.
+4. The links are ordered and named by **how good a connection the member usually gives**. The
+   order comes from `services.key_bundles.subscription_member_order()` (derived from the
+   composition seam, *not* from the children's `id`, so a bundle created before the seam's order
+   last changed is still served in the current one), and each entry's display name gets a
+   preference mark appended after an underscore:
+
+   | Order | Member | Mark |
+   |---|---|---|
+   | 1 | VLESS (TCP) | 🟢 |
+   | 2 | Hysteria2 | 🟢 |
+   | 3 | VLESS (HTTP) `base` | 🟡 |
+   | 4 | VLESS (HTTP) `multi` | 🟠 |
+   | 5 | VLESS (HTTP) `antisib` | 🔴 |
+
+   The mark rides the link's `#fragment` **only** — the stored `email_label` (Xray's client
+   email, the hy2 auth id) is untouched, so reconciliation, traffic stats and anomaly detection
+   keep matching on it, and a standalone key's link is unchanged. The bot explains the colours
+   on the subscription's own screens; the same ranking is what «Состав» lists.
 
 ### Fail-closed behaviour
 

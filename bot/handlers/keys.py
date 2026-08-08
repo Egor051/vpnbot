@@ -14,10 +14,9 @@ from bot.formatters import (
     awg_config_text,
     create_confirm_text,
     hysteria2_config_text,
-    key_detail_text,
+    key_screen_text,
     keys_page_text,
     note_confirm_text,
-    traffic_stats_text,
     xhttp_profile_prompt,
     xray_config_text,
 )
@@ -25,15 +24,24 @@ from bot.bundles import (
     BUNDLE_KEY_TYPE,
     bundle_create_confirm_text,
     bundle_created_text,
+    bundle_detail_text,
+    bundle_has_vless,
     bundle_note_confirm_text,
     require_subscription_ui,
     subscription_ui_enabled,
 )
 from bot.container import Services
 from bot.fsm.states import CreateKeyStates, EditFpStates, EditNoteStates, TrialRequestStates
-from bot.handlers.common import InvalidCallbackData, answer_callback_error, answer_message_error, parse_int_callback, profile_from_tg
+from bot.handlers.common import (
+    InvalidCallbackData,
+    answer_callback_error,
+    answer_message_error,
+    parse_int_callback,
+    profile_from_tg,
+    stats_views_for_screen,
+)
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
-from bot.keyboards.key_bundles import bundle_actions_keyboard
+from bot.keyboards.key_bundles import bundle_actions_keyboard, bundle_awg_ack_keyboard
 from bot.keyboards.keys import (
     VALID_FINGERPRINTS,
     after_key_deleted_keyboard,
@@ -62,7 +70,7 @@ from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
 from i18n import t
 from models.access import is_blocked_user
-from models.dto import KeyBundle, TelegramUserProfile, VpnKey
+from models.dto import KeyBundle, TelegramUserProfile, TrafficStats, VpnKey
 from models.enums import AuditEntityType, VpnKeyType
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.key_bundles import KeyBundleCreateResult
@@ -70,7 +78,17 @@ from services.notes import MAX_NOTE_LENGTH
 
 logger = logging.getLogger(__name__)
 router = Router()
-KEYS_PAGE_SIZE = 5
+# Entries per «My keys» page. Each entry is a multi-line card plus its button, and
+# the cards grew a traffic block, so three is what still fits on a phone screen
+# without the list turning into a scroll.
+KEYS_PAGE_SIZE = 3
+# Entries per page in the ADMIN view of one user's keys. A different list with a
+# different reader: an admin is auditing an account, not managing their own keys,
+# and their cards carry no owner-private note, so more of them fit. It lives here,
+# beside ``load_list_page``, because the delete handler below re-renders that very
+# list — the page size has to be one value shared by both, or a delete would
+# repaginate the admin's list to a different size than the list itself uses.
+ADMIN_KEYS_PAGE_SIZE = 5
 # How deep ``load_list_page`` reads into each source before merging them. Matches
 # the repositories' own ``_clamp_limit`` ceiling, so asking for more would silently
 # return less.
@@ -146,12 +164,38 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
 
 
 @router.callback_query(F.data == "keys:create:bundle")
-async def create_key_choose_bundle(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+async def create_key_choose_bundle(callback: CallbackQuery, services: Services) -> None:
+    """Show the AmneziaWG notice before the all-in-one wizard starts.
+
+    The set cannot carry AmneziaWG, and a user who picked «All-in-One» precisely to
+    stop juggling keys will otherwise discover that at the end. The same notice the
+    subscription's own screens carry is therefore shown up front, and continuing is
+    the acknowledgement — see :func:`create_key_bundle_ack`.
+    """
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        require_subscription_ui(services)
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("bundle_awg_separate"),
+            reply_markup=bundle_awg_ack_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "keys:create:bundle:ack")
+async def create_key_bundle_ack(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Enter the shared create wizard for an all-in-one subscription bundle.
 
     No separate flow: the bundle rides the very same note → expiry → confirm steps
-    a single key uses (it skips MTU/fingerprint, which are per-protocol client
-    settings the children get from their own defaults).
+    a single key uses (it skips MTU, a per-protocol client setting the children get
+    from their own defaults, and asks for the fingerprint once for all of them).
     """
     if not await ensure_private_callback(callback):
         return
@@ -540,7 +584,9 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
                     viewer_user_id=callback.from_user.id,
                     settings=services.settings,
                 ),
-                reply_markup=bundle_actions_keyboard(bundle_result.bundle),
+                reply_markup=bundle_actions_keyboard(
+                    bundle_result.bundle, has_vless=bundle_has_vless(list(bundle_result.keys))
+                ),
             )
             return
         await state.clear()
@@ -570,8 +616,13 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
 
 
 @router.callback_query(F.data.startswith("key:open:"))
-async def open_key(callback: CallbackQuery, services: Services) -> None:
-    """Show the detail view for the selected key."""
+async def open_key(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
+    """Show the detail view for the selected key, its traffic included.
+
+    The traffic used to live behind a «Статистика» button; it is part of the card
+    now, so this screen samples it (softly rate-limited, cached fallback) instead
+    of making the user ask for it.
+    """
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -583,9 +634,16 @@ async def open_key(callback: CallbackQuery, services: Services) -> None:
         owner_context = owner_context or _admin_owner_context(key, callback.from_user.id)
         if owner_context is not None and owner_context != key.owner_user_id:
             raise AccessDenied(t("invalid_callback_btn"))
+        # Before the render, never after: the figures must not reach the screen
+        # unless the record of who read them was written first.
+        await _audit_foreign_stats_view(services, callback.from_user.id, key)
         await safe_edit_message_text(
             callback.message,
-            key_detail_text(key, viewer_user_id=callback.from_user.id),
+            key_screen_text(
+                key,
+                viewer_user_id=callback.from_user.id,
+                stats=await _key_stats(services, rate_limiter, callback.from_user.id, key),
+            ),
             reply_markup=key_actions_keyboard(
                 key,
                 owner_user_id=owner_context,
@@ -594,6 +652,38 @@ async def open_key(callback: CallbackQuery, services: Services) -> None:
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
+
+
+async def _key_stats(
+    services: Services, rate_limiter: RateLimiter, actor_user_id: int, key: VpnKey
+) -> TrafficStats | None:
+    """Traffic for one key's screen, or None when nothing could be read."""
+    views = await stats_views_for_screen(services, rate_limiter, actor_user_id, [key])
+    return views[0].stats if views else None
+
+
+async def _audit_foreign_stats_view(services: Services, actor_user_id: int, key: VpnKey) -> None:
+    """Record an admin reading someone else's traffic — and only that.
+
+    The traffic figures moved onto the key screen, so auditing every render would
+    write a row per navigation tap and bury the log. What the trail is actually for
+    is accountability across users: an owner looking at their own counters is not
+    an event, an admin looking at another user's is.
+    """
+    if key.owner_user_id == actor_user_id:
+        return
+    await services.audit.write(
+        actor_user_id=actor_user_id,
+        action="stats_viewed",
+        entity_type=AuditEntityType.VPN_KEY,
+        entity_id=key.id,
+        details={
+            "target_user_id": key.owner_user_id,
+            "target_username": key.username,
+            "key_type": key.key_type.value,
+            "label": key.email_label,
+        },
+    )
 
 
 @router.callback_query(F.data.startswith("key:show:"))
@@ -635,43 +725,6 @@ async def show_key_config(callback: CallbackQuery, state: FSMContext, services: 
             BufferedInputFile(plain.encode("utf-8"), filename=awg_config_filename(key))
         )
         await remember_config_document(state, key_id=key_id, message_id=sent.message_id)
-    except Exception as exc:
-        await answer_callback_error(callback, exc)
-
-
-@router.callback_query(F.data.startswith("key:stats:"))
-async def show_key_stats(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter) -> None:
-    """Refresh and show traffic statistics for the selected key."""
-    if not await ensure_private_callback(callback):
-        return
-    if callback.from_user is None or callback.message is None or callback.data is None:
-        return
-    try:
-        key_id = parse_int_callback(callback.data.rsplit(":", 1)[-1])
-        if key_id is None:
-            await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
-            return
-        rate_limiter.check(callback.from_user.id, "key_stats", 5)
-        await safe_callback_answer(callback, t("updating_stats"))
-        view = await services.traffic_stats.refresh_for_actor(callback.from_user.id, key_id)
-        owner = view.owner
-        await services.audit.write(
-            actor_user_id=callback.from_user.id,
-            action="stats_viewed",
-            entity_type=AuditEntityType.VPN_KEY,
-            entity_id=key_id,
-            details={
-                "target_user_id": view.key.owner_user_id,
-                "target_username": owner.username if owner else view.key.username,
-                "key_type": view.key.key_type.value,
-                "label": view.key.email_label,
-            },
-        )
-        await safe_edit_message_text(
-            callback.message,
-            traffic_stats_text(view, viewer_user_id=callback.from_user.id),
-            reply_markup=key_actions_keyboard(view.key, owner_user_id=_admin_owner_context(view.key, callback.from_user.id)),
-        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -764,7 +817,7 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
                     callback.from_user.id,
                     owner_user_id=owner_context,
                     page=page_context,
-                    page_size=KEYS_PAGE_SIZE,
+                    page_size=ADMIN_KEYS_PAGE_SIZE,
                 )
                 await safe_edit_message_text(
                     callback.message,
@@ -805,7 +858,7 @@ async def edit_note_prompt(callback: CallbackQuery, state: FSMContext, services:
             return
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await state.set_state(EditNoteStates.waiting_note)
-        await state.update_data(key_id=key_id, cancel_target=f"key:open:{key_id}", note_prompt_msg_id=callback.message.message_id)
+        await state.update_data(key_id=key_id, bundle_id=None, cancel_target=f"key:open:{key_id}", note_prompt_msg_id=callback.message.message_id)
         await safe_edit_message_text(
             callback.message,
             t("edit_note_prompt", type=key.key_type.value.upper(), id=key.id),
@@ -871,10 +924,11 @@ async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services
             require_subscription_ui(services)
             await services.key_bundle_views.update_note(callback.from_user.id, int(bundle_id), note)
             bundle = await services.key_bundle_views.get_for_actor(callback.from_user.id, int(bundle_id))
+            keys = await services.key_bundle_views.list_keys_for_actor(callback.from_user.id, bundle.id)
             await safe_edit_message_text(
                 callback.message,
                 t("note_updated"),
-                reply_markup=bundle_actions_keyboard(bundle),
+                reply_markup=bundle_actions_keyboard(bundle, has_vless=bundle_has_vless(keys)),
             )
             return
         key_id = int(data["key_id"])
@@ -904,7 +958,9 @@ async def edit_fp_prompt(callback: CallbackQuery, state: FSMContext, services: S
             return
         await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await state.set_state(EditFpStates.waiting_fp)
-        await state.update_data(key_id=key_id)
+        # bundle_id is cleared explicitly: the same states serve both entities and
+        # update_data merges, so a leftover id would re-target a whole subscription.
+        await state.update_data(key_id=key_id, bundle_id=None)
         await safe_edit_message_text(
             callback.message,
             t("fp_change_prompt"),
@@ -915,8 +971,16 @@ async def edit_fp_prompt(callback: CallbackQuery, state: FSMContext, services: S
 
 
 @router.callback_query(EditFpStates.waiting_fp, F.data.regexp(r"^fp:[\w]+$"))
-async def edit_fp_select(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """Apply the selected fingerprint to the existing Xray key."""
+async def edit_fp_select(
+    callback: CallbackQuery, state: FSMContext, services: Services, rate_limiter: RateLimiter
+) -> None:
+    """Apply the selected fingerprint to the existing Xray key — or to a whole bundle.
+
+    One wizard for both, told apart by ``bundle_id`` in the FSM data exactly like
+    the note wizard: a subscription's VLESS children are re-stamped through the
+    same per-key service call this handler already made, so neither entity gets a
+    fingerprint path of its own to drift.
+    """
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -925,13 +989,37 @@ async def edit_fp_select(callback: CallbackQuery, state: FSMContext, services: S
     data = await state.get_data()
     await state.clear()
     try:
+        bundle_id = data.get("bundle_id")
+        if bundle_id is not None:
+            require_subscription_ui(services)
+            await safe_callback_answer(callback, t("saving"))
+            bundle, changed = await services.key_bundles.change_fingerprint(
+                callback.from_user.id, int(bundle_id), fp
+            )
+            keys = await services.key_bundle_views.list_keys_for_actor(
+                callback.from_user.id, bundle.id
+            )
+            views = await stats_views_for_screen(services, rate_limiter, callback.from_user.id, keys)
+            await safe_edit_message_text(
+                callback.message,
+                f"{t('bundle_fp_updated', count=changed)}\n\n"
+                + bundle_detail_text(
+                    bundle, keys, viewer_user_id=callback.from_user.id, views=views
+                ),
+                reply_markup=bundle_actions_keyboard(bundle, has_vless=bundle_has_vless(keys)),
+            )
+            return
         key_id = int(data["key_id"])
         await safe_callback_answer(callback, t("saving"))
         await services.xray.change_fingerprint(callback.from_user.id, key_id, fp)
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         await safe_edit_message_text(
             callback.message,
-            key_detail_text(key, viewer_user_id=callback.from_user.id),
+            key_screen_text(
+                key,
+                viewer_user_id=callback.from_user.id,
+                stats=await _key_stats(services, rate_limiter, callback.from_user.id, key),
+            ),
             reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
         )
     except Exception as exc:

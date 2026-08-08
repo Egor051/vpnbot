@@ -163,8 +163,10 @@ def key_list_card(key: VpnKey, *, viewer_user_id: int) -> str:
     note = key_note_for_viewer(key, viewer_user_id)
     label = key_display_label(key, viewer_user_id=viewer_user_id)
     parts = [
-        f"<b>{key_title(key)}</b>",
-        f"{t('field_status')}: {h(status_text(key.status))}",
+        # Status rides the heading behind a dot, exactly as the entry's button
+        # below spells it — the card and the button then read as one line each
+        # instead of the card spending a whole row on a word the button repeats.
+        f"<b>{key_title(key)} · {h(status_text(key.status))}</b>",
         f"{t('field_label')}: {code(label)}",
         f"{t('field_created')}: {h(format_msk_datetime(key.created_at))}",
     ]
@@ -222,8 +224,9 @@ def bundle_card_text(bundle: KeyBundle, *, viewer_user_id: int) -> str:
     note = bundle_note_for_viewer(bundle, viewer_user_id)
     return "\n".join(
         [
-            f"<b>{h(bundle_title(bundle))}</b>",
-            f"{t('field_status')}: {h(bundle_status_text(bundle.status))}",
+            # Status behind a dot in the heading, like key_list_card and like the
+            # entry's own button — the two entities keep reading identically.
+            f"<b>{h(bundle_title(bundle))} · {h(bundle_status_text(bundle.status))}</b>",
             f"{t('field_label')}: {code(bundle.label)}",
             f"{t('field_created')}: {h(format_msk_datetime(bundle.created_at))}",
             f"{t('field_note')}: {h(short_note(note))}",
@@ -261,7 +264,26 @@ def keys_page_text(
     return "\n\n".join([t("keys_page_title", title=title, page=page + 1), t("one_key_one_device"), *cards])
 
 
+def key_screen_text(key: VpnKey, *, viewer_user_id: int, stats: TrafficStats | None) -> str:
+    """The key's own screen: its fields, then its traffic.
+
+    The traffic is printed here instead of behind a «Статистика» button — a key's
+    counters are something you look at *while* looking at the key. Separate from
+    :func:`key_detail_text` because that card is also quoted where traffic makes no
+    sense (the trial-key offer in ``/start``), and a stats heading with nothing
+    under it would be worse there than no heading at all.
+    """
+    return "\n".join(
+        [
+            key_detail_text(key, viewer_user_id=viewer_user_id),
+            "",
+            *traffic_stats_block(stats),
+        ]
+    )
+
+
 def key_detail_text(key: VpnKey, *, viewer_user_id: int) -> str:
+    """The key's fields, without its traffic — see :func:`key_screen_text`."""
     note = key_note_for_viewer(key, viewer_user_id)
     label = key_display_label(key, viewer_user_id=viewer_user_id)
     lines = [
@@ -290,37 +312,30 @@ def key_detail_text(key: VpnKey, *, viewer_user_id: int) -> str:
     return "\n".join(lines)
 
 
-def traffic_stats_text(view: KeyTrafficStatsView, *, viewer_user_id: int) -> str:
-    key = view.key
-    owner = view.owner
-    owner_text = (
-        format_user_display(owner.telegram_user_id, owner.username)
-        if owner is not None
-        else format_user_display(key.owner_user_id, key.username)
-    )
-    label = key_display_label(key, viewer_user_id=viewer_user_id)
-    lines = [
-        t("stats_title", key_title=key_title(key)),
-        f"{t('field_type')}: {h(key_type_label(key))}",
-        f"{t('field_label')}: {code(label)}",
-        f"{t('field_owner')}: {owner_text}",
-    ]
-    note = key_note_for_viewer(key, viewer_user_id)
-    if note and label != note:
-        lines.append(f"{t('field_note')}: {h(note)}")
-    stats = view.stats
-    if stats is None or not stats.available:
-        lines.append("")
-        if stats and stats.last_success_at:
+def traffic_stats_block(stats: TrafficStats | None) -> list[str]:
+    """The traffic section of a key screen: a heading plus what is actually known.
+
+    Three distinct states, never collapsed into one: measured (the counters), stale
+    (the backend is unreachable *now* but earlier figures exist — shown with the
+    time they were last confirmed) and never measured. Printing a stale number
+    without saying it is stale is how a user reads a frozen counter as "the key is
+    idle".
+    """
+    lines = [t("stats_block_title")]
+    if stats is None:
+        lines.append(t("stats_not_available_yet"))
+        return lines
+    if not stats.available:
+        if stats.last_success_at:
             lines.append(t("stats_unavailable_now"))
             lines.append(f"{t('field_downloaded')}: {h(format_bytes(stats.downloaded_bytes))}")
             lines.append(f"{t('field_uploaded')}: {h(format_bytes(stats.uploaded_bytes))}")
             lines.append(f"{t('field_updated_at')}: {h(format_msk_datetime(stats.last_success_at))}")
         else:
             lines.append(t("stats_not_available_yet"))
-        if stats and stats.unavailable_reason:
+        if stats.unavailable_reason:
             lines.append(f"{t('field_reason')}: {h(stats.unavailable_reason)}")
-        return "\n".join(lines)
+        return lines
     lines.extend(
         [
             f"{t('field_downloaded')}: {h(format_bytes(stats.downloaded_bytes))}",
@@ -328,7 +343,7 @@ def traffic_stats_text(view: KeyTrafficStatsView, *, viewer_user_id: int) -> str
             f"{t('field_updated_at')}: {h(format_msk_datetime(stats.last_success_at))}",
         ]
     )
-    return "\n".join(lines)
+    return lines
 
 
 def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer_user_id: int) -> str:
@@ -368,7 +383,7 @@ def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer
 
 
 # XHTTP transport profiles offered for VLESS (HTTP) keys (callback suffixes).
-XHTTP_PROFILE_CHOICES: tuple[str, ...] = ("base", "antisib", "multi")
+XHTTP_PROFILE_CHOICES: tuple[str, ...] = ("base", "multi", "antisib")
 
 
 def xhttp_profile_prompt() -> str:
@@ -392,7 +407,7 @@ def create_type_label(key_type: str, transport: str | None = None, profile: str 
         prof = str(profile or "base").lower()
         # base stays plain "VLESS (HTTP)" (regression-identical); the tuned
         # profiles append their short name so the user can tell them apart.
-        if prof in ("antisib", "multi"):
+        if prof in ("multi", "antisib"):
             return f"VLESS (HTTP) · {t(f'xhttp_profile_{prof}_name')}"
         return "VLESS (HTTP)"
     return key_type.upper()

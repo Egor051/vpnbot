@@ -96,7 +96,7 @@ STRINGS: dict[str, str] = {
     "awg_config_hint": "Добавьте ссылку в клиент AmneziaVPN или используйте файл конфигурации.",
     "hy2_config_hint": "Добавьте ссылку в клиент с поддержкой Hysteria2 (например, NekoBox или Hiddify).",
     # ── traffic stats ─────────────────────────────────────────────────────────
-    "stats_title": "<b>Статистика {key_title}</b>",
+    "stats_block_title": "<b>Статистика</b>",
     "stats_unavailable_now": "Статистика сейчас недоступна. Последний успешный снимок:",
     "stats_not_available_yet": "Статистика пока недоступна.",
     "stats_keys_title": "<b>Статистика ключей</b>",
@@ -426,12 +426,20 @@ STRINGS: dict[str, str] = {
     "vless_http_unavailable": "VLESS (HTTP) временно недоступен.",
     "choose_xhttp_profile": "Выберите профиль транспорта XHTTP:",
     "xhttp_profile_invalid": "Неизвестный профиль транспорта.",
-    "xhttp_profile_base_name": "🟢 Базовый (рекомендуется)",
+    "xhttp_profile_base_name": "📄 Базовый (рекомендуется)",
     "xhttp_profile_base_desc": "Универсальный режим. Лучший баланс скорости и стабильности, подходит большинству.",
-    "xhttp_profile_antisib_name": "🛡 Антисибирский",
-    "xhttp_profile_antisib_desc": "Если соединение рвётся в момент подключения из-за блокировки по числу TLS-рукопожатий. Один канал — на слабой сети может быть медленнее.",
     "xhttp_profile_multi_name": "🔀 Мультиподключение",
-    "xhttp_profile_multi_desc": "Для устойчивости долгих сессий: дробит трафик на короткие соединения, помогает против ограничения скорости на длинных подключениях.",
+    "xhttp_profile_multi_desc": (
+        "Нужен, если связь со временем замедляется или рвётся. Автоматически ротирует "
+        "фоновые сессии, не разрывая VPN. Скорость ниже базовой.\n"
+        "(Не путайте с закрытием приложения системой из-за экономии батареи)."
+    ),
+    "xhttp_profile_antisib_name": "🛡 Антисибирский",
+    "xhttp_profile_antisib_desc": (
+        "Режим \"последней надежды\". Помогает, если VPN сбрасывается в самую первую "
+        "секунду подключения. Включайте только если другие пресеты не работают — "
+        "это самый медленный режим."
+    ),
     "creating_key": "Создаю ключ...",
     "key_unknown_type": "Неизвестный тип ключа.",
     "admin_delivered_awg": "Администратор выдал вам AWG-ключ #{id}.\n\n{config_text}",
@@ -476,10 +484,17 @@ STRINGS: dict[str, str] = {
     "bundle_type_label": "All-in-One",
     "bundle_composition": "Состав",
     "bundle_awg_separate": (
-        "ℹ️ AmneziaWG в подписку не входит и выдаётся отдельным ключом: "
+        "ℹ️ AmneziaWG в набор не входит и выдаётся отдельным ключом: "
         "конфиг WireGuard нельзя передать ссылкой-подпиской."
     ),
+    "bundle_marks_legend": (
+        "⚠️ <b>Кружок в конце названия ключа — его средние скорость и отклик:</b> "
+        "🟢 лучше всего, дальше 🟡, 🟠 и 🔴 — хуже. "
+        "Пробуйте включать ключи именно в этом порядке."
+    ),
     "bundle_fp_prompt": "Выберите fingerprint — он применится ко всем VLESS-ключам подписки:",
+    "bundle_fp_change_prompt": "Выберите новый fingerprint — он применится ко всем VLESS-ключам подписки:",
+    "bundle_fp_updated": "Fingerprint обновлён у {count} ключей подписки.",
     "bundle_create_confirm_title": "<b>Подтверждение создания подписки</b>",
     "creating_bundle": "Создаю подписку...",
     "bundle_created_title": "<b>Подписка создана.</b>",
@@ -711,11 +726,8 @@ STRINGS: dict[str, str] = {
     # ── keyboard buttons (keys) ───────────────────────────────────────────────
     "btn_back": "Назад",
     "btn_config": "Конфиг",
-    "btn_stats": "Статистика",
     "btn_revoke": "Отозвать",
     "btn_delete": "Удалить",
-    "btn_note": "Заметка",
-    "btn_show_config": "Показать конфиг",
     "btn_edit_note_key": "Редактировать заметку",
     "btn_to_list": "К списку",
     "btn_mtu_recommended": "1280 (рекомендуемый)",
@@ -732,6 +744,7 @@ STRINGS: dict[str, str] = {
     "btn_get_config": "Получить конфиг",
     "btn_request_trial": "Запросить пробный доступ (7 дней)",
     "btn_all_in_one": "All-in-One (одна ссылка на все протоколы)",
+    "btn_understood": "✅ Понятно",
     # ── keyboard buttons (proxy) ──────────────────────────────────────────────
     "btn_get_socks5": "Получить SOCKS5",
     "btn_get_mtproto": "Получить MTProto",
@@ -1103,6 +1116,9 @@ STRINGS: dict[str, str] = {
     "err_foreign_bundle_manage": "Нельзя управлять чужой подпиской",
     "err_bundle_revoke_active_only": "Отозвать можно только активную подписку",
     "err_bundle_revoke_partial": "Не удалось отозвать все ключи подписки",
+    "err_bundle_fp_active_only": "Fingerprint можно изменить только у активной подписки",
+    "err_bundle_no_vless": "В подписке нет активных VLESS-ключей",
+    "err_bundle_fp_partial": "Fingerprint изменён не у всех ключей подписки",
     "err_bundle_delete_forbidden": "Эту подписку нельзя удалить",
     "err_bundle_has_keys": "Нельзя удалить подписку: к ней всё ещё привязаны ключи",
     "err_foreign_bundle_view": "Нельзя смотреть чужую подписку",

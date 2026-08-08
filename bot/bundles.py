@@ -31,7 +31,7 @@ from i18n import t
 from models.dto import KeyBundle, KeyTrafficStatsView, VpnKey
 from models.enums import VpnKeyType
 from services.errors import InvalidOperation
-from services.key_bundles import BundleMember, KeyBundleCreateResult
+from services.key_bundles import BundleMember, KeyBundleCreateResult, subscription_member_order
 from utils.formatting import code, format_bytes, format_expiry_date, format_msk_datetime, h
 
 # The pseudo key-type the create wizard carries in its FSM data for an all-in-one
@@ -113,11 +113,48 @@ def bundle_key_label(key: VpnKey) -> str:
     return create_type_label(key.key_type.value, key.transport, key.xhttp_profile)
 
 
+def bundle_has_vless(keys: list[VpnKey]) -> bool:
+    """Whether a fingerprint can be applied to this bundle at all.
+
+    The fingerprint is a VLESS/REALITY client setting; Hysteria2 has no such knob.
+    A bundle provisioned while the Xray module was off therefore has nothing to
+    apply one to, and its screen must not offer the row.
+    """
+    return any(key.key_type is VpnKeyType.XRAY for key in keys)
+
+
 # ── cards ─────────────────────────────────────────────────────────────────────
 
 
-def bundle_detail_text(bundle: KeyBundle, keys: list[VpnKey], *, viewer_user_id: int) -> str:
-    """The full bundle screen: card, what is inside it, and when it expires."""
+def bundle_notices(*, with_marks_legend: bool = True) -> list[str]:
+    """The notices every subscription screen ends with, in reading order.
+
+    The preference-mark legend comes FIRST and is the louder of the two: it is what
+    a user needs before touching the profiles the client just imported, whereas the
+    AmneziaWG note explains an absence. ``with_marks_legend`` drops it on screens
+    shown before the subscription exists, where there are no marked keys yet to
+    rank.
+    """
+    notices = [t("bundle_awg_separate")]
+    if with_marks_legend:
+        return [t("bundle_marks_legend"), "", *notices]
+    return notices
+
+
+def bundle_detail_text(
+    bundle: KeyBundle,
+    keys: list[VpnKey],
+    *,
+    viewer_user_id: int,
+    views: list[KeyTrafficStatsView] | None = None,
+) -> str:
+    """The full bundle screen: card, what is inside it, its traffic, its notices.
+
+    ``views`` carries the children's traffic, rendered here rather than behind a
+    «Статистика» button — the same move the per-key screen makes. ``None`` means the
+    figures could not be sampled at all, and the block says so instead of showing
+    zeroes.
+    """
     note = bundle_note_for_viewer(bundle, viewer_user_id)
     lines = [
         f"<b>{h(bundle_title(bundle))}</b>",
@@ -133,15 +170,46 @@ def bundle_detail_text(bundle: KeyBundle, keys: list[VpnKey], *, viewer_user_id:
     lines.append("")
     lines.append(_composition_block(keys))
     lines.append("")
-    lines.append(t("bundle_awg_separate"))
+    lines.extend(bundle_stats_block(views))
+    lines.append("")
+    lines.extend(bundle_notices())
     return "\n".join(lines)
 
 
 def _composition_block(keys: list[VpnKey]) -> str:
     if not keys:
         return f"{t('bundle_composition')}: {h(t('none'))}"
-    entries = "\n".join(f"• {h(bundle_key_label(key))} #{key.id}" for key in keys)
+    entries = "\n".join(f"• {h(bundle_key_label(key))} #{key.id}" for key in _in_subscription_order(keys))
     return f"{t('bundle_composition')}:\n{entries}"
+
+
+def _in_subscription_order(keys: list[VpnKey]) -> list[VpnKey]:
+    """Order the children the way the subscription serves them.
+
+    «Состав» is a preview of the profile list the client is about to import, so it
+    has to agree with it: the same order, from the member giving the best
+    connection to the worst. Sorted from the composition seam rather than left in
+    row order, which for a bundle provisioned before the seam's order last changed
+    would show something the client never displays. Unknown members keep their
+    relative position at the end instead of disappearing.
+    """
+    order = subscription_member_order()
+    fallback = len(order)
+
+    def rank(key: VpnKey) -> tuple[int, int]:
+        name = _member_name(key)
+        return (order.index(name) if name in order else fallback, key.id)
+
+    return sorted(keys, key=rank)
+
+
+def _member_name(key: VpnKey) -> str:
+    """This child's name in the composition seam's vocabulary."""
+    if key.key_type is not VpnKeyType.XRAY:
+        return key.key_type.value
+    if str(key.transport or "tcp").lower() == "http":
+        return f"xray_http_{str(key.xhttp_profile or 'base').lower()}"
+    return "xray_tcp"
 
 
 # ── create ────────────────────────────────────────────────────────────────────
@@ -167,7 +235,9 @@ def bundle_create_confirm_text(
         [
             f"{t('field_expires_at')}: {h(format_expiry_date(expires_at))}",
             "",
-            t("bundle_awg_separate"),
+            # No mark legend here: nothing has been provisioned yet, so there are
+            # no marked keys on screen for it to explain.
+            *bundle_notices(with_marks_legend=False),
         ]
     )
     return "\n".join(lines)
@@ -201,7 +271,7 @@ def bundle_created_text(result: KeyBundleCreateResult, *, viewer_user_id: int, s
     lines.append("")
     lines.extend(_subscription_block(result.bundle, settings))
     lines.append("")
-    lines.append(t("bundle_awg_separate"))
+    lines.extend(bundle_notices())
     return "\n".join(lines)
 
 
@@ -231,7 +301,8 @@ def bundle_config_text(bundle: KeyBundle, settings: Settings) -> str:
             f"<b>{h(bundle_title(bundle))}</b>",
             "",
             *_subscription_block(bundle, settings),
-            t("bundle_awg_separate"),
+            "",
+            *bundle_notices(),
         ]
     )
 
@@ -247,19 +318,18 @@ _STATS_BUCKETS: tuple[tuple[VpnKeyType, str], ...] = (
 )
 
 
-def bundle_stats_text(bundle: KeyBundle, views: list[KeyTrafficStatsView]) -> str:
-    """Bundle totals WITH a per-protocol split.
+def bundle_stats_block(views: list[KeyTrafficStatsView] | None) -> list[str]:
+    """Bundle totals WITH a per-protocol split, as lines of the bundle screen.
 
     The split is not decoration: the two numbers come from different sources
     (Xray's stats API vs. the Hysteria2 trafficStats endpoint) and one of them can
     be unavailable while the other is fine. A single summed figure would hide both
     that gap and which protocol a traffic spike came from.
     """
-    lines = [t("bundle_stats_title", title=bundle_title(bundle))]
+    lines = [t("stats_block_title")]
     if not views:
-        lines.append("")
-        lines.append(t("bundle_stats_empty"))
-        return "\n".join(lines)
+        lines.append(t("bundle_stats_empty") if views is not None else t("stats_not_available_yet"))
+        return lines
 
     total_down = 0
     total_up = 0
@@ -282,7 +352,6 @@ def bundle_stats_text(bundle: KeyBundle, views: list[KeyTrafficStatsView]) -> st
 
     lines.extend(
         [
-            "",
             t("bundle_stats_total"),
             f"{t('field_downloaded')}: {h(format_bytes(total_down))}",
             f"{t('field_uploaded')}: {h(format_bytes(total_up))}",
@@ -291,7 +360,7 @@ def bundle_stats_text(bundle: KeyBundle, views: list[KeyTrafficStatsView]) -> st
             *breakdown,
         ]
     )
-    return "\n".join(lines)
+    return lines
 
 
 # ── note ──────────────────────────────────────────────────────────────────────

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
 # one of these prefixes is left untouched, making the relabel idempotent.
-_V28_NEW_PREFIXES = ("xray_tcp_", "xray_http_base_", "xray_http_antisib_", "xray_http_multi_")
+_V28_NEW_PREFIXES = ("xray_tcp_", "xray_http_base_", "xray_http_multi_", "xray_http_antisib_")
 _V28_SUFFIX_RE = re.compile(r"^[A-Za-z0-9]{5}$")
 # Mirrors adapters.id_generator.KEY_NAME_ALPHABET (kept local to avoid a db->adapters import).
 _V28_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"

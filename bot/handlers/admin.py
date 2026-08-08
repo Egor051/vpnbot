@@ -57,7 +57,7 @@ from bot.keyboards.admin import (
     user_actions_keyboard,
     users_keyboard,
 )
-from bot.handlers.keys import load_list_page
+from bot.handlers.keys import ADMIN_KEYS_PAGE_SIZE, load_list_page
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import VALID_FINGERPRINTS, expiry_choice_keyboard, fp_choice_keyboard, key_actions_keyboard, keys_list_keyboard, mtu_choice_keyboard
 from bot.messages import awg_config_filename, remember_config_document, safe_callback_answer, safe_edit_message_text
@@ -80,7 +80,9 @@ _announcement_confirm_locks = UserLockManager()
 _key_issue_locks = UserLockManager()
 
 ADMIN_PAGE_SIZE = 8
-ADMIN_KEYS_PAGE_SIZE = 5
+# Rows per page of the admin traffic monitor. Its own value: that list is one
+# line per key, not a card, and it is not the per-user key list re-rendered.
+ADMIN_STATS_PAGE_SIZE = 5
 AUDIT_PAGE_SIZE = 12
 ADMIN_PROXY_USER_LIMIT = 10
 
@@ -1156,13 +1158,13 @@ async def admin_stats(callback: CallbackQuery, services: Services) -> None:
     try:
         await require_superadmin(services, callback.from_user.id)
         total = await services.traffic_stats.count_for_superadmin(callback.from_user.id)
-        total_pages = max(1, (total + ADMIN_KEYS_PAGE_SIZE - 1) // ADMIN_KEYS_PAGE_SIZE)
+        total_pages = max(1, (total + ADMIN_STATS_PAGE_SIZE - 1) // ADMIN_STATS_PAGE_SIZE)
         items = await services.traffic_stats.list_for_superadmin(
             callback.from_user.id,
-            limit=ADMIN_KEYS_PAGE_SIZE + 1,
-            offset=page_offset(page, ADMIN_KEYS_PAGE_SIZE),
+            limit=ADMIN_STATS_PAGE_SIZE + 1,
+            offset=page_offset(page, ADMIN_STATS_PAGE_SIZE),
         )
-        views, has_next = split_page(items, ADMIN_KEYS_PAGE_SIZE)
+        views, has_next = split_page(items, ADMIN_STATS_PAGE_SIZE)
         rows = []
         if page > 0:
             rows.append((t("btn_prev"), f"admin:stats:{page - 1}"))
@@ -1435,7 +1437,7 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(AdminCreateKeyStates.waiting_xhttp_profile, F.data.regexp(r"^admin:cxprof:(base|antisib|multi):\d+$"))
+@router.callback_query(AdminCreateKeyStates.waiting_xhttp_profile, F.data.regexp(r"^admin:cxprof:(base|multi|antisib):\d+$"))
 async def admin_issue_xhttp_profile(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Record the chosen XHTTP profile for the issued key and prompt for a note."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
