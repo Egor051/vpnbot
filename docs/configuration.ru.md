@@ -266,7 +266,8 @@ TLS-сертификата; это не ослабляет секрет авто
 | `SUBSCRIPTION_TLS_CERT` | Нет | *(пусто)* | PEM-цепочка сертификата для `SUBSCRIPTION_PUBLIC_PORT`. Групп-читаемая копия уже выпущенного Let's Encrypt-сертификата, владелец `root:vpn-bot`. |
 | `SUBSCRIPTION_TLS_KEY` | Нет | *(пусто)* | PEM-ключ к этому сертификату, права `0640`, группа `vpn-bot` — процесс читает его непривилегированным пользователем `vpn-bot`. |
 | `SUBSCRIPTION_UPDATE_INTERVAL_HOURS` | Нет | `12` | Значение заголовка `Profile-Update-Interval` в часах (1–168). |
-| `SUBSCRIPTION_RATE_LIMIT_SECONDS` | Нет | `5` | Кулдаун на клиента для `GET /sub/{token}`; `0` отключает throttling (0–3600). |
+| `SUBSCRIPTION_RATE_LIMIT_SECONDS` | Нет | `5` | Окно throttling для `GET /sub/{token}` в секундах; `0` отключает throttling (0–3600). |
+| `SUBSCRIPTION_RATE_LIMIT_BURST` | Нет | `5` | Сколько запросов один клиент может сделать внутри этого окна, прежде чем эндпоинт ответит `429` + `Retry-After` (1–100). Клиент — это **адрес** пира, поэтому все устройства за одним NAT делят бакет: при burst `1` два телефона, обновляющие подписку одновременно, глушат друг друга. |
 | `SUBSCRIPTION_LOCK_PATH` | Нет | `/run/vpn-bot-subscription/subscription.lock` | Файл single-instance-локи процесса подписки (свой, не ботовский). |
 
 Сам эндпоинт — **отдельный процесс** (`python -m subscription_server`, юнит

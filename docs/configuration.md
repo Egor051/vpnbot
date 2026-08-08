@@ -267,7 +267,8 @@ authenticate without a valid per-key secret.
 | `SUBSCRIPTION_TLS_CERT` | No | *(unset)* | PEM certificate chain served on `SUBSCRIPTION_PUBLIC_PORT`. A group-readable copy of the existing Let's Encrypt material, owned `root:vpn-bot`. | `/etc/vpn-bot/tls/fullchain.pem` |
 | `SUBSCRIPTION_TLS_KEY` | No | *(unset)* | PEM private key for that certificate, mode `0640`, group `vpn-bot` — the endpoint reads it as the unprivileged `vpn-bot` user. | `/etc/vpn-bot/tls/privkey.pem` |
 | `SUBSCRIPTION_UPDATE_INTERVAL_HOURS` | No | `12` | Value of the `Profile-Update-Interval` response header, in hours (1–168). | `12` |
-| `SUBSCRIPTION_RATE_LIMIT_SECONDS` | No | `5` | Per-client cooldown on `GET /sub/{token}`; `0` disables throttling (0–3600). | `5` |
+| `SUBSCRIPTION_RATE_LIMIT_SECONDS` | No | `5` | Throttling window on `GET /sub/{token}`, in seconds; `0` disables throttling (0–3600). | `5` |
+| `SUBSCRIPTION_RATE_LIMIT_BURST` | No | `5` | Requests one client may make inside that window before the endpoint answers `429` + `Retry-After` (1–100). The client is the peer **address**, so all devices behind one NAT share a bucket — a burst of `1` makes two phones refreshing at once throttle each other. | `5` |
 | `SUBSCRIPTION_LOCK_PATH` | No | `/run/vpn-bot-subscription/subscription.lock` | Single-instance lock file of the endpoint process (its own, not the bot's). | `/run/vpn-bot-subscription/subscription.lock` |
 
 The endpoint itself is a **separate process** (`python -m subscription_server`,

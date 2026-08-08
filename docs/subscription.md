@@ -49,8 +49,12 @@ bundle with no active children, a malformed child row, an unreadable database, a
 flag being off. A caller therefore cannot tell a token that never existed from one that was
 revoked, and never receives a partial configuration. The endpoint **never** emits a `5xx`: an
 unexpected fault is caught and answered with the same `404`, so no traceback reaches the
-internet. The one other status is `429` (with `Retry-After`) from the per-client rate limit,
-which is applied before the database is touched.
+internet. The one other status is `429` (with `Retry-After`, the seconds left in the current
+window) from the per-client rate limit, which is applied **before the token is looked at** — so a
+throttled request cannot reveal whether the token exists either. The limit is a fixed window:
+`SUBSCRIPTION_RATE_LIMIT_BURST` requests per `SUBSCRIPTION_RATE_LIMIT_SECONDS` per client, where
+the client is the peer address (a whole NAT shares one bucket, which is why the burst is not 1).
+A refusal never extends the window, and it is logged at `WARNING` with the bucket only.
 
 ### Response headers
 
@@ -68,7 +72,10 @@ there would be invented, and clients read a fabricated quota as a hard limit.
 
 The token is a working credential, so it is never logged: aiohttp's access log (which prints the
 request line, token included) is switched off in the runner, and every log line refers to a
-bundle by `bundle_id` plus a 12-hex-character SHA-256 fingerprint of the token.
+bundle by `bundle_id` plus a 12-hex-character SHA-256 fingerprint of the token. A throttled
+request carries neither: the `429` is decided before the token is read, and its `WARNING` line
+names only the limiter bucket (16 hex characters of a SHA-256 of the peer address) and the limit
+that was hit — enough to see the refusal in `journalctl` and nothing that identifies a token.
 
 ## Bot UI
 

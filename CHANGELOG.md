@@ -318,6 +318,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **One household could not refresh its subscription, and the refusal was invisible.**
+  The endpoint's rate limit is keyed by the **peer address** and allowed exactly one
+  request per `SUBSCRIPTION_RATE_LIMIT_SECONDS` (default 5). Everything behind one home
+  NAT is therefore a single client: two phones updating the subscription in the same
+  second throttled each other, and a client that opens the sub-URL twice on launch — some
+  do — threw away its own second request. Measured live on 2026-08-08: three requests
+  inside the window answered `429/429/429`, one request per 20s answered `200`.
+  - **Burst.** `bot.rate_limit.RateLimiter` is now a fixed-window counter taking an
+    optional `burst` (default `1`), so it accepts `burst` calls per window instead of
+    one. The default keeps every existing call site — all of them in the bot — behaving
+    exactly as before: one call, then wait, with a refusal that never extends the window.
+    The endpoint passes the new **`SUBSCRIPTION_RATE_LIMIT_BURST`** (default `5`,
+    1–100), i.e. 5 requests per 5s per address out of the box.
+  - **A refused request is now logged** at `WARNING` with the limiter bucket, the limit
+    it hit and the `Retry-After` it was given, so a throttled client is diagnosable from
+    `journalctl` — previously only the success path logged, and a `429` left no trace at
+    all. The line carries **no token and no fingerprint of one**: the limit is still
+    decided *before* the token is looked at, so neither the response nor the log can be
+    used to tell a token that exists from one that does not.
+  - `Retry-After` carries the remainder of the current window rather than a constant,
+    and the counter admits the full burst again once the window ends.
+
 - **The deploy's helper-drift gate was blind to the WARP split helpers and reported
   green anyway.** `OUT_OF_REPO_HELPERS` in `scripts/deploy.sh` lists the helpers whose
   tracked `scripts/` source is kept in sync with the installed `/usr/local/sbin` copy;

@@ -88,6 +88,16 @@ def _client_key(request: web.Request) -> int:
     return int.from_bytes(hashlib.sha256(remote.encode("utf-8")).digest()[:8], "big")
 
 
+def _bucket_tag(bucket: int) -> str:
+    """The limiter bucket as a short, stable tag for logs.
+
+    Hex rather than the raw integer so two lines about the same client are easy
+    to grep together; it is a hash of the peer address, so it identifies the
+    bucket without printing the address itself.
+    """
+    return f"{bucket:016x}"
+
+
 def _not_found() -> web.Response:
     """The single negative answer: empty 404, identical in every rejection case.
 
@@ -112,9 +122,26 @@ async def _subscription_handler(request: web.Request) -> web.Response:
     try:
         cooldown = config.settings.subscription_rate_limit_seconds
         if cooldown > 0:
+            burst = config.settings.subscription_rate_limit_burst
+            bucket = _client_key(request)
             try:
-                limiter.check(_client_key(request), "subscription", cooldown)
+                # Deliberately BEFORE the token is looked at: a 429 must not
+                # depend on whether the token exists, or the refusal itself would
+                # answer the one question this endpoint keeps behind its 404.
+                limiter.check(bucket, "subscription", cooldown, burst=burst)
             except RateLimitExceeded as exc:
+                # The only visible trace of a throttled client. No token and no
+                # fingerprint of one: the limit is keyed by peer, so the bucket
+                # is all a diagnosis needs, and a rejected request must not put
+                # anything token-shaped in the log.
+                logger.warning(
+                    "subscription: rate limit hit for client %s — %d requests per %ds exhausted, "
+                    "answering 429 (Retry-After: %ds)",
+                    _bucket_tag(bucket),
+                    burst,
+                    cooldown,
+                    exc.retry_after,
+                )
                 return web.Response(
                     status=429,
                     text="",
