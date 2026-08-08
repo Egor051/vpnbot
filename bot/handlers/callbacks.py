@@ -3,22 +3,34 @@ from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
-from bot.bundles import bundle_detail_text, require_subscription_ui, subscription_ui_enabled
+from bot.bundles import (
+    bundle_detail_text,
+    bundle_has_vless,
+    require_subscription_ui,
+    subscription_ui_enabled,
+)
 from bot.container import Services
-from bot.formatters import key_detail_text
+from bot.formatters import key_screen_text
+from bot.handlers.common import stats_views_for_screen
 from bot.keyboards.admin import admin_panel_keyboard
 from bot.keyboards.common import back_to_menu
 from bot.keyboards.key_bundles import bundle_actions_keyboard
 from bot.keyboards.keys import create_key_keyboard, key_actions_keyboard
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
+from bot.rate_limit import RateLimiter
 from i18n import t
 
 router = Router()
 
 
 @router.callback_query(lambda callback: callback.data == "cancel")
-async def cancel_callback(callback: CallbackQuery, state: FSMContext, services: Services | None = None) -> None:
+async def cancel_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+    rate_limiter: RateLimiter,
+    services: Services | None = None,
+) -> None:
     """Cancel the current FSM flow and return the user to the relevant screen."""
     if not await ensure_private_callback(callback):
         return
@@ -55,10 +67,11 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext, services: 
             require_subscription_ui(services)
             bundle = await services.key_bundle_views.get_for_actor(user_id, bundle_id)
             keys = await services.key_bundle_views.list_keys_for_actor(user_id, bundle_id)
+            views = await stats_views_for_screen(services, rate_limiter, user_id, keys)
             await safe_edit_message_text(
                 callback.message,
-                bundle_detail_text(bundle, keys, viewer_user_id=user_id),
-                reply_markup=bundle_actions_keyboard(bundle),
+                bundle_detail_text(bundle, keys, viewer_user_id=user_id, views=views),
+                reply_markup=bundle_actions_keyboard(bundle, has_vless=bundle_has_vless(keys)),
             )
         except Exception:
             await safe_edit_message_text(callback.message, t("cancel_done"), reply_markup=back_to_menu())
@@ -69,9 +82,10 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext, services: 
             if user_id is None or services is None:
                 raise ValueError
             key = await services.vpn_keys.get_for_actor(user_id, key_id)
+            views = await stats_views_for_screen(services, rate_limiter, user_id, [key])
             await safe_edit_message_text(
                 callback.message,
-                key_detail_text(key, viewer_user_id=user_id),
+                key_screen_text(key, viewer_user_id=user_id, stats=views[0].stats if views else None),
                 reply_markup=key_actions_keyboard(key),
             )
         except Exception:

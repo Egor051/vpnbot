@@ -11,10 +11,10 @@ from bot.formatters import main_menu_text
 from bot.keyboards.common import FAQ_PER_PAGE, FAQ_TOPICS, back_to_menu, faq_answer_keyboard, faq_keyboard, main_menu
 from bot.messages import is_stale_callback_query_error, safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
-from bot.rate_limit import RateLimitExceeded
+from bot.rate_limit import RateLimiter, RateLimitExceeded
 from config.settings import SettingsError
 from i18n import t
-from models.dto import TelegramUserProfile
+from models.dto import KeyTrafficStatsView, TelegramUserProfile, VpnKey
 from models.enums import UserRole
 from services.errors import AccessDenied, InvalidOperation, NotFound, ServiceError
 
@@ -42,6 +42,48 @@ async def is_admin(services: Services, user_id: int) -> bool:
 
 class InvalidCallbackData(ValueError):
     """Raised when a callback payload cannot be parsed; shown to the user verbatim."""
+
+
+# Cooldown between two live backend samples for the same viewer. Traffic is now
+# printed on the key/subscription screen itself instead of behind a button, so this
+# runs on plain navigation: within the cooldown the screen falls back to the cached
+# counters (at most one background-loop interval old) rather than refusing to open.
+STATS_REFRESH_COOLDOWN_SECONDS = 5
+
+
+async def stats_views_for_screen(
+    services: Services,
+    rate_limiter: RateLimiter,
+    actor_user_id: int,
+    keys: list[VpnKey],
+) -> list[KeyTrafficStatsView] | None:
+    """Traffic for the keys of one screen — live when allowed, cached otherwise.
+
+    Returns ``None`` only when nothing at all could be read, which the callers
+    render as "no figures yet" instead of as zeroes. A screen must never fail to
+    open because a backend is down: this swallows the sampling error (already
+    logged by the stats service) and degrades to whatever the database holds.
+    """
+    if not keys:
+        return []
+    try:
+        rate_limiter.check(actor_user_id, "stats_refresh", STATS_REFRESH_COOLDOWN_SECONDS)
+    except RateLimitExceeded:
+        return await _cached_stats_views(services, keys)
+    try:
+        return await services.traffic_stats.refresh_views(keys)
+    except Exception:
+        logger.warning("Live traffic sample failed; falling back to cached figures", exc_info=True)
+        return await _cached_stats_views(services, keys)
+
+
+async def _cached_stats_views(services: Services, keys: list[VpnKey]) -> list[KeyTrafficStatsView] | None:
+    try:
+        cached = await services.traffic_stats.cached_for_keys(keys)
+    except Exception:
+        logger.warning("Cached traffic read failed", exc_info=True)
+        return None
+    return [KeyTrafficStatsView(key=key, owner=None, stats=cached.get(key.id)) for key in keys]
 
 
 def parse_int_callback(value: str) -> int | None:

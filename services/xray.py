@@ -47,11 +47,11 @@ XRAY_ACTIVE_STATUSES: set[VpnKeyStatus] = {VpnKeyStatus.ACTIVE}
 XRAY_ALL_STATUSES: set[VpnKeyStatus] = set(VpnKeyStatus)
 # Recognises bot-managed email labels — both the legacy scheme (``xray_<rnd>``)
 # and the transport/profile scheme (``xray_tcp_<rnd>`` /
-# ``xray_http_{base,antisib,multi}_<rnd>``). Used by startup orphan cleanup to
+# ``xray_http_{base,multi,antisib}_<rnd>``). Used by startup orphan cleanup to
 # tell "a client we issued" from an ambiguous hand-added one, so it must keep
 # matching every scheme the bot has ever written.
 XRAY_MANAGED_LABEL_RE = re.compile(
-    r"^xray_(?:tcp_|http_(?:base|antisib|multi)_)?[A-Za-z0-9]{5}$"
+    r"^xray_(?:tcp_|http_(?:base|multi|antisib)_)?[A-Za-z0-9]{5}$"
 )
 
 # XHTTP client transport profiles. All three are clients on the SAME server
@@ -67,14 +67,14 @@ XRAY_MANAGED_LABEL_RE = re.compile(
 # misnamed fields the key would silently drop the rotation tuning. No profile may
 # carry ``maxConcurrency`` — it is mutually exclusive with maxConnections and
 # makes Xray refuse to start.
-XHTTP_PROFILES: tuple[str, ...] = ("base", "antisib", "multi")
+XHTTP_PROFILES: tuple[str, ...] = ("base", "multi", "antisib")
 XHTTP_DEFAULT_PROFILE = "base"
 # Per-profile client ``mode``. None => use settings.xray_xhttp_mode, keeping the
 # ``base`` link byte-for-byte identical to the pre-profile output.
 _XHTTP_PROFILE_MODE: dict[str, str | None] = {
     "base": None,
-    "antisib": "stream-one",
     "multi": "packet-up",
+    "antisib": "stream-one",
 }
 # Per-profile ``extra`` block. None => no ``extra=`` in the link.
 #
@@ -89,13 +89,13 @@ _XHTTP_PROFILE_MODE: dict[str, str | None] = {
 # a statistical fingerprint, so we rotate as rarely as the shaping window allows.
 _XHTTP_PROFILE_EXTRA: dict[str, dict[str, object] | None] = {
     "base": None,
-    "antisib": {
-        "xmux": {"maxConnections": 1, "cMaxReuseTimes": "64-128"},
-    },
     "multi": {
         "scMaxEachPostBytes": "800000-1000000",
         "scMinPostsIntervalMs": "30-50",
         "xmux": {"maxConnections": 2, "cMaxReuseTimes": "64-128", "hMaxReusableSecs": "180-300"},
+    },
+    "antisib": {
+        "xmux": {"maxConnections": 1, "cMaxReuseTimes": "64-128"},
     },
 }
 # Mirrors xhttpSettings.extra.scMaxEachPostBytes of the server inbound
@@ -1260,7 +1260,7 @@ class XrayService:
             # parameter comes from vless-in / settings, never from that inbound.
             # No flow (XHTTP clients must never carry xtls-rprx-vision).
             #
-            # The transport profile (base/antisib/multi) sets the client `mode`
+            # The transport profile (base/multi/antisib) sets the client `mode`
             # and the optional `extra` block. `extra` is carried as a single
             # percent-encoded JSON value via `extra=`; urlencode() encodes the
             # whole JSON string for us, and the compact JSON (no spaces) avoids

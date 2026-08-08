@@ -204,7 +204,7 @@ def test_common_group_messages_do_not_mutate_state_or_call_services() -> None:
         await menu_command(menu_message, SimpleNamespace(users=Users()))  # type: ignore[arg-type]
 
         cancel_message = MessageStub("/cancel")
-        await cancel_callback(SimpleNamespace(message=cancel_message, answer=cancel_message.answer), State())  # type: ignore[arg-type]
+        await cancel_callback(SimpleNamespace(message=cancel_message, answer=cancel_message.answer), State(), _RateLimiter())  # type: ignore[arg-type]
 
         assert help_message.answers and "личном чате" in help_message.answers[0]
         assert menu_message.answers and "личном чате" in menu_message.answers[0]

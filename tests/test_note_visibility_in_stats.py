@@ -1,13 +1,15 @@
 
 from types import SimpleNamespace
 
+import i18n
+
 from bot.formatters import (
     admin_stats_page_text,
     key_detail_text,
     key_display_label,
+    key_screen_text,
     key_note_for_viewer,
     keys_page_text,
-    traffic_stats_text,
     user_card_text,
 )
 from models.dto import KeyTrafficStatsView, VpnKey
@@ -116,31 +118,17 @@ def test_admin_user_card_hides_foreign_note_fallback_label() -> None:
     assert "<code>AmneziaWG #10</code>" in text
 
 
-def test_owner_sees_own_key_note_in_stats() -> None:
-    text = traffic_stats_text(_view(_key(email_label="key-label")), viewer_user_id=100)
-
-    assert "owner private note" in text
-    assert "Заметка: owner private note" in text
+# The per-key traffic screen is gone — its figures are printed on the key's own
+# screen — so the note-privacy properties it used to be checked for are asserted
+# against key_detail_text above, which is now where the traffic is rendered.
 
 
-def test_foreign_viewer_does_not_see_note_or_note_fallback_label_in_stats() -> None:
-    text = traffic_stats_text(_view(_key()), viewer_user_id=1)
+def test_foreign_viewer_sees_no_note_next_to_the_traffic_of_a_key() -> None:
+    text = key_screen_text(_key(), viewer_user_id=1, stats=None)
 
     assert "owner private note" not in text
     assert "<code>AmneziaWG #10</code>" in text
-
-
-def test_owner_note_used_as_fallback_label_is_not_duplicated_in_stats() -> None:
-    text = traffic_stats_text(_view(_key()), viewer_user_id=100)
-
-    assert text.count("owner private note") == 1
-    assert "Заметка: owner private note" not in text
-
-
-def test_empty_note_is_not_rendered_in_stats() -> None:
-    text = traffic_stats_text(_view(_key(note=None, email_label="key-label")), viewer_user_id=100)
-
-    assert "Заметка:" not in text
+    assert i18n.t("stats_block_title") in text
 
 
 def test_explicit_note_owner_id_takes_precedence_over_key_owner_id() -> None:

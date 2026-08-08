@@ -88,7 +88,7 @@ _Legacy aliases accepted: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SE
 
 > **Per-key transport profiles.** `XRAY_XHTTP_MODE` sets the client `mode` for the
 > **base** profile only. The VLESS (HTTP) key-creation flow offers three client-side
-> profiles — **base** / **antisib** (anti-blocking) / **multi** (multi-connection) —
+> profiles — **base** / **multi** (multi-connection) / **antisib** (anti-blocking) —
 > that override the mode and add `xhttpSettings.extra` tuning in the generated link
 > (no server-side change; the profile is stored per key). See
 > [`xray-xhttp-inbound.md`](xray-xhttp-inbound.md#client-transport-profiles-vless-http).
@@ -275,7 +275,7 @@ shipped as `deploy/vpn-bot-subscription.service`) that opens `vpn.db` read-only
 and keeps serving while the bot is down — see [docs/subscription.md](subscription.md).
 
 A bundle provisions **one child key per enabled protocol** — VLESS (TCP), each
-VLESS (HTTP) profile (`base`, `antisib`, `multi`) and Hysteria2 — through the
+VLESS (HTTP) profile (`base`, `multi`, `antisib`) and Hysteria2 — through the
 same per-protocol create path a standalone key uses, so children keep the usual
 `xray_tcp_*` / `xray_http_*` / `hy2_*` email labels and stay visible to
 reconciliation and anomaly detection. AWG is excluded (WireGuard configs do not

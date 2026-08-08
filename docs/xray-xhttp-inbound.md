@@ -168,8 +168,8 @@ profiles means issuing a new key).
 | Profile | Link label | `mode` | Client tuning | When to use |
 |---|---|---|---|---|
 | **Basic** (`base`, default) | `VLESS (HTTP)` | `XRAY_XHTTP_MODE` (default `stream-one`) | none | Universal — best balance of speed and stability; the link is byte-for-byte the pre-profile output. |
-| **Anti-blocking** (`antisib`) | `VLESS (HTTP) · 🛡 Anti-blocking` | `stream-one` | single-channel xmux (`maxConnections:1`, `cMaxReuseTimes:64-128`) | The connection drops at connect time because of TLS-handshake-count blocking. One channel — may be slower on a weak network. |
 | **Multi-connection** (`multi`) | `VLESS (HTTP) · 🔀 Multi-connection` | `packet-up` | split-post + rotating xmux (`scMaxEachPostBytes`, `scMinPostsIntervalMs`, `maxConnections:2`, `cMaxReuseTimes:8-16`, `hMaxReusableSecs:30-60`) | Resilient long sessions: splits traffic into short connections to resist speed-throttling on long-lived connections. |
+| **Anti-blocking** (`antisib`) | `VLESS (HTTP) · 🛡 Anti-blocking` | `stream-one` | single-channel xmux (`maxConnections:1`, `cMaxReuseTimes:64-128`) | The connection drops at connect time because of TLS-handshake-count blocking. One channel — may be slower on a weak network. |
 
 > ⚠️ **Client version.** The `multi` profile uses `hMaxReusableSecs` (seconds-based
 > xmux rotation), which requires **Xray-core v25.3.6+** on the client; on older cores
@@ -177,9 +177,9 @@ profiles means issuing a new key).
 
 The `base` profile is the default and reproduces the exact pre-profile link, so
 existing deployments and already-issued keys are unaffected. `XRAY_XHTTP_MODE` sets the
-`mode` for the `base` profile only; `antisib`/`multi` carry their own mode. The chosen
+`mode` for the `base` profile only; `multi`/`antisib` carry their own mode. The chosen
 profile is stored per key (the `xhttp_profile` column, migration v28) and encoded into
-the key's Xray email label (`xray_http_{base,antisib,multi}_<rnd>`).
+the key's Xray email label (`xray_http_{base,multi,antisib}_<rnd>`).
 
 ## Rollback
 

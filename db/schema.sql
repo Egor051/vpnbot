@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   -- VLESS transport: 'tcp' (vless-in) or 'http' (vless-xhttp-reality). Always
   -- 'tcp' for AWG keys and pre-XHTTP legacy rows. Mirrors _migrate_v23.
   transport TEXT NOT NULL DEFAULT 'tcp',
-  -- XHTTP client transport profile: 'base' | 'antisib' | 'multi'. Meaningful only
+  -- XHTTP client transport profile: 'base' | 'multi' | 'antisib'. Meaningful only
   -- for http keys; 'base' for tcp/AWG keys and legacy rows. Mirrors _migrate_v28.
   xhttp_profile TEXT NOT NULL DEFAULT 'base',
   -- Per-key REALITY spiderX (spx) emitted into the VLESS client link. NULL means

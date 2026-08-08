@@ -8,7 +8,7 @@ never written to the server inbound. Covered here:
                         (path separators become %2F);
   (c) the value is deterministic for a given UUID (stable across calls);
   (d) both link families — raw+Vision (tcp) and every xhttp profile (base /
-      antisib / multi) — honour (a) and (b);
+      multi / antisib) — honour (a) and (b);
   plus the v31 migration: column add, deterministic pool backfill, idempotency,
   and NULL-when-pool-empty.
 """
@@ -189,7 +189,7 @@ def test_link_omits_spx_when_spider_x_is_none(tmp_path: Path) -> None:
     service = _link_service(tmp_path)
     tcp = service._build_vless_link("u", "abcd", "xray_tcp_A0001", transport="tcp", spider_x=None)
     assert "spx" not in tcp
-    for profile in ("base", "antisib", "multi"):
+    for profile in ("base", "multi", "antisib"):
         link = service._build_vless_link(
             "u", "abcd", f"xray_http_{profile}_A0001", transport="http", profile=profile, spider_x=None,
         )
@@ -206,7 +206,7 @@ def test_link_emits_urlencoded_spx_for_all_families(tmp_path: Path) -> None:
     assert tcp.endswith("#xray_tcp_A0001")
     # No raw slash leaked into the encoded value.
     assert "spx=/api" not in tcp
-    for profile in ("base", "antisib", "multi"):
+    for profile in ("base", "multi", "antisib"):
         link = service._build_vless_link(
             "u", "abcd", f"xray_http_{profile}_A0001", transport="http", profile=profile, spider_x=value,
         )
@@ -245,7 +245,7 @@ def test_create_with_pool_persists_deterministic_spider_x_and_emits_spx(tmp_path
         pool = ("/", "/api", "/blog/")
         service, repo, db = await _make_service(tmp_path, pool=pool)
         try:
-            for transport, profile in (("tcp", "base"), ("http", "base"), ("http", "antisib"), ("http", "multi")):
+            for transport, profile in (("tcp", "base"), ("http", "base"), ("http", "multi"), ("http", "antisib")):
                 result = await service.create_xray_key(
                     100, TelegramUserProfile(100, "user", "User"), None,
                     transport=transport, xhttp_profile=profile,

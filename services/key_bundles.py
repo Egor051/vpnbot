@@ -25,7 +25,7 @@ from adapters.clock import ClockProvider
 from adapters.id_generator import IdGenerator
 from config.settings import Settings
 from models.dto import KeyBundle, TelegramUserProfile, VpnKey
-from models.enums import AuditEntityType, KeyBundleStatus, UserRole, VpnKeyType
+from models.enums import AuditEntityType, KeyBundleStatus, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.key_bundles import KeyBundleRepository
 from services.audit import AuditService
 from services.backend_health import BackendHealth
@@ -75,12 +75,14 @@ class BundleMember:
 
 
 def bundle_composition() -> tuple[BundleMember, ...]:
-    """THE seam: every child key an all-in-one bundle may contain.
+    """THE seam: every child key an all-in-one bundle may contain, in order.
 
-    This is the single point where the bundle's composition is decided. Today it
-    returns the full permissible set — VLESS (TCP) plus every VLESS (HTTP)
-    profile, plus Hysteria2 — and availability (a backend switched off in ``.env``
-    or via the protocol-module toggle) is filtered on top of it by
+    This is the single point where the bundle's composition — and the order the
+    subscription presents it in — is decided. Today it returns the full permissible
+    set, sorted by how good a connection the member usually gives: VLESS (TCP) and
+    Hysteria2 first, then the VLESS (HTTP) profiles from the fastest (``base``) to
+    the slowest (``antisib``). Availability (a backend switched off in ``.env`` or
+    via the protocol-module toggle) is filtered on top of it by
     :meth:`KeyBundleService._resolve_composition`. Any future divergence (e.g. a
     client that cannot parse one of the XHTTP profiles, so its bundle carries a
     smaller set) belongs HERE and nowhere else — never as scattered ``if``s along
@@ -94,12 +96,37 @@ def bundle_composition() -> tuple[BundleMember, ...]:
     """
     return (
         BundleMember(VpnKeyType.XRAY, transport="tcp", xhttp_profile="base"),
+        BundleMember(VpnKeyType.HYSTERIA2),
         *(
             BundleMember(VpnKeyType.XRAY, transport="http", xhttp_profile=profile)
             for profile in XHTTP_PROFILES
         ),
-        BundleMember(VpnKeyType.HYSTERIA2),
     )
+
+
+def member_name(member: BundleMember) -> str:
+    """Stable, human-readable identifier of one composition member.
+
+    The same vocabulary the audit trail records (``xray_tcp`` / ``xray_http_base``
+    / ``hysteria2``), and the join key between the composition seam above and the
+    per-member presentation the subscription renderer applies.
+    """
+    if member.key_type is VpnKeyType.XRAY:
+        if member.transport == "http":
+            return f"xray_http_{member.xhttp_profile}"
+        return "xray_tcp"
+    return member.key_type.value
+
+
+def subscription_member_order() -> tuple[str, ...]:
+    """Member names in the order a subscription must list them.
+
+    Derived from :func:`bundle_composition` rather than restated, so the order a
+    bundle is *provisioned* in and the order its subscription is *served* in cannot
+    drift apart. The renderer sorts by this instead of trusting child ``id`` order,
+    which would leave bundles created before an order change stuck on the old one.
+    """
+    return tuple(member_name(member) for member in bundle_composition())
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,8 +260,8 @@ class KeyBundleService:
                     "expires_at": expires_at,
                     "fingerprint": fingerprint,
                     "key_ids": [key.id for key in created],
-                    "included": [_member_name(member) for member in included],
-                    "skipped": [_member_name(member) for member in skipped],
+                    "included": [member_name(member) for member in included],
+                    "skipped": [member_name(member) for member in skipped],
                 },
             )
             return KeyBundleCreateResult(
@@ -310,6 +337,79 @@ class KeyBundleService:
                 details={"revoked_key_ids": revoked_ids, "token_rotated": rotated},
             )
             return await self._get_bundle(bundle_id)
+
+    # ── fingerprint ───────────────────────────────────────────────────
+
+    async def change_fingerprint(
+        self, actor_user_id: int, bundle_id: int, fingerprint: str
+    ) -> tuple[KeyBundle, int]:
+        """Re-stamp every VLESS child of a bundle with one TLS fingerprint.
+
+        The single-key screen has been able to change a fingerprint since the
+        setting existed; a subscription could only choose one at creation time and
+        was then stuck with it. This closes that gap through the very same
+        per-key path (:meth:`services.xray.XrayService.change_fingerprint`), so a
+        child re-stamped here is indistinguishable from one re-stamped on its own
+        screen — including the per-key audit entry each one writes.
+
+        Hysteria2 has no TLS fingerprint knob and is skipped, exactly as it is on
+        the create path. Returns the refreshed bundle and how many children were
+        actually re-stamped.
+
+        Not atomic, and deliberately so: the change is a pure payload/link rewrite
+        with nothing applied to a backend, so a failure part-way leaves some
+        children on the new fingerprint and the rest on the old — every one of them
+        still a working key. Rolling the successful ones back would mean a second
+        write that can fail in exactly the same way. The error names how many were
+        changed instead, and a retry is idempotent.
+        """
+        self._require_enabled()
+        async with self._lock:
+            bundle = await self._get_bundle_for_manage(actor_user_id, bundle_id)
+            if bundle.status is not KeyBundleStatus.ACTIVE:
+                raise InvalidOperation(
+                    "Fingerprint можно изменить только у активной подписки",
+                    key="err_bundle_fp_active_only",
+                )
+            targets = [
+                key
+                for key in await self.bundles.list_keys_of_bundle(bundle_id)
+                if key.key_type is VpnKeyType.XRAY and key.status is VpnKeyStatus.ACTIVE
+            ]
+            if not targets:
+                raise InvalidOperation(
+                    "В подписке нет активных VLESS-ключей", key="err_bundle_no_vless"
+                )
+
+            changed: list[int] = []
+            for key in targets:
+                try:
+                    await self.xray.change_fingerprint(actor_user_id, key.id, fingerprint)
+                except Exception as exc:
+                    await self._write_audit_best_effort(
+                        actor_user_id=actor_user_id,
+                        action="key_bundle_fingerprint_failed",
+                        entity_id=bundle_id,
+                        details={
+                            "fingerprint": fingerprint,
+                            "changed_key_ids": changed,
+                            "failed_key_id": key.id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    raise InvalidOperation(
+                        f"Fingerprint изменён только у {len(changed)} из {len(targets)} ключей подписки",
+                        key="err_bundle_fp_partial",
+                    ) from exc
+                changed.append(key.id)
+
+            await self._write_audit_best_effort(
+                actor_user_id=actor_user_id,
+                action="key_bundle_fingerprint_changed",
+                entity_id=bundle_id,
+                details={"fingerprint": fingerprint, "key_ids": changed},
+            )
+            return await self._get_bundle(bundle_id), len(changed)
 
     # ── deletion ──────────────────────────────────────────────────────
 
@@ -628,12 +728,3 @@ class KeyBundleService:
                 entity_id,
                 exc_info=True,
             )
-
-
-def _member_name(member: BundleMember) -> str:
-    """Stable, human-readable member identifier for audit details."""
-    if member.key_type is VpnKeyType.XRAY:
-        if member.transport == "http":
-            return f"xray_http_{member.xhttp_profile}"
-        return "xray_tcp"
-    return member.key_type.value

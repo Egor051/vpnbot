@@ -659,10 +659,10 @@ def test_create_confirm_text_renders_transport_label() -> None:
 
 
 def test_build_vless_link_http_profiles_roundtrip(tmp_path: Path) -> None:
-    """Round-trip guardrail: extra= must survive for antisib/multi and be absent for base.
+    """Round-trip guardrail: extra= must survive for multi/antisib and be absent for base.
 
     This is the test the task calls out as mandatory — it fails loudly if the
-    generator silently drops/empties extra= (which would degrade antisib/multi to
+    generator silently drops/empties extra= (which would degrade multi/antisib to
     base with no import error).
     """
 
@@ -670,22 +670,14 @@ def test_build_vless_link_http_profiles_roundtrip(tmp_path: Path) -> None:
         service, _repo, _tcp, _http, db = await _make_service(tmp_path)
         try:
             base = service._build_vless_link("u", "abcd", "xray_http_base_A0001", transport="http", profile="base")
-            antisib = service._build_vless_link("u", "abcd", "xray_http_antisib_A0001", transport="http", profile="antisib")
             multi = service._build_vless_link("u", "abcd", "xray_http_multi_A0001", transport="http", profile="multi")
+            antisib = service._build_vless_link("u", "abcd", "xray_http_antisib_A0001", transport="http", profile="antisib")
 
             # base: mode stream-one and NO extra= at all (parse_qs drops blank
             # values too, so an empty extra= would also fail this assertion).
             base_q = parse_qs(urlsplit(base).query)
             assert base_q["mode"] == ["stream-one"]
             assert "extra" not in base_q
-
-            # antisib: stream-one + xmux.maxConnections == 1, cMaxReuseTimes range.
-            antisib_q = parse_qs(urlsplit(antisib).query)
-            assert antisib_q["mode"] == ["stream-one"]
-            assert "extra" in antisib_q
-            antisib_extra = json.loads(antisib_q["extra"][0])
-            assert antisib_extra["xmux"]["maxConnections"] == 1
-            assert antisib_extra["xmux"]["cMaxReuseTimes"] == "64-128"
 
             # multi: packet-up + xmux.maxConnections == 2, hMaxReusableSecs (SECONDS,
             # NOT the removed cMaxLifetimeMs in ms) + sc* tuning present.
@@ -698,11 +690,19 @@ def test_build_vless_link_http_profiles_roundtrip(tmp_path: Path) -> None:
             assert "scMaxEachPostBytes" in multi_extra
             assert "scMinPostsIntervalMs" in multi_extra
 
+            # antisib: stream-one + xmux.maxConnections == 1, cMaxReuseTimes range.
+            antisib_q = parse_qs(urlsplit(antisib).query)
+            assert antisib_q["mode"] == ["stream-one"]
+            assert "extra" in antisib_q
+            antisib_extra = json.loads(antisib_q["extra"][0])
+            assert antisib_extra["xmux"]["maxConnections"] == 1
+            assert antisib_extra["xmux"]["cMaxReuseTimes"] == "64-128"
+
             # Guard-asserts that must fail loudly on a regression: no profile may
             # carry maxConcurrency (mutually exclusive with maxConnections — Xray
             # refuses to start), and the removed cMaxLifetimeMs (renamed to
             # hMaxReusableSecs in Xray-core v25.3.6) must appear nowhere.
-            for link, q in ((base, base_q), (antisib, antisib_q), (multi, multi_q)):
+            for link, q in ((base, base_q), (multi, multi_q), (antisib, antisib_q)):
                 assert "maxConcurrency" not in link
                 assert "cMaxLifetimeMs" not in link
                 extra = q.get("extra")
@@ -742,8 +742,8 @@ def test_email_prefix_encodes_transport_and_profile(tmp_path: Path) -> None:
         try:
             assert service._email_prefix("tcp", "base") == "xray_tcp"
             assert service._email_prefix("http", "base") == "xray_http_base"
-            assert service._email_prefix("http", "antisib") == "xray_http_antisib"
             assert service._email_prefix("http", "multi") == "xray_http_multi"
+            assert service._email_prefix("http", "antisib") == "xray_http_antisib"
             # tcp ignores the profile; unknown profile falls back to base.
             assert service._email_prefix("tcp", "multi") == "xray_tcp"
             assert service._email_prefix("http", "bogus") == "xray_http_base"
@@ -757,7 +757,7 @@ def test_create_http_profiles_persist_profile_and_emit_extra(tmp_path: Path) -> 
     async def run() -> None:
         service, repo, _tcp, _http, db = await _make_service(tmp_path)
         try:
-            for profile, expected_mc in (("antisib", 1), ("multi", 2)):
+            for profile, expected_mc in (("multi", 2), ("antisib", 1)):
                 result = await service.create_xray_key(
                     100, TelegramUserProfile(100, "user", "User"), None,
                     transport="http", xhttp_profile=profile,

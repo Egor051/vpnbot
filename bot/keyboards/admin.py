@@ -370,8 +370,8 @@ def admin_xhttp_profile_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Build the XHTTP transport-profile selection keyboard for issuing a key (step 3)."""
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text=t("xhttp_profile_base_name"), callback_data=f"admin:cxprof:base:{user_id}")],
-        [InlineKeyboardButton(text=t("xhttp_profile_antisib_name"), callback_data=f"admin:cxprof:antisib:{user_id}")],
         [InlineKeyboardButton(text=t("xhttp_profile_multi_name"), callback_data=f"admin:cxprof:multi:{user_id}")],
+        [InlineKeyboardButton(text=t("xhttp_profile_antisib_name"), callback_data=f"admin:cxprof:antisib:{user_id}")],
         [InlineKeyboardButton(text=t("btn_back"), callback_data=f"admin:proto:vless:{user_id}")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)

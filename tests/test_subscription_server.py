@@ -16,6 +16,7 @@ import ssl
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -274,7 +275,7 @@ async def test_active_token_serves_exactly_the_bundle_children(tmp_path: Path) -
         # One VLESS (TCP) plus one link per XHTTP profile, identified by the
         # email label the create path assigned (labels ride the #fragment).
         assert sum(1 for link in links if "%23xray_tcp_" in link or "#xray_tcp_" in link) == 1
-        for profile in ("base", "antisib", "multi"):
+        for profile in ("base", "multi", "antisib"):
             assert sum(1 for link in links if f"xray_http_{profile}_" in link) == 1, profile
         # Nothing that cannot ride a v2ray subscription.
         for forbidden in ("awg", "wireguard", "socks", "mtproto", "PrivateKey"):
@@ -304,14 +305,22 @@ async def test_body_is_standard_base64_of_newline_joined_links(tmp_path: Path) -
 
 
 async def test_subscription_links_match_the_single_key_view(tmp_path: Path) -> None:
-    """Drift guard: the endpoint must render byte-identical links to the per-key
-    config view. A subscription link that differs by one REALITY/xhttp parameter
-    is a key that works from the bot's message and fails from the sub-URL."""
+    """Drift guard: every connection parameter the endpoint renders must be
+    byte-identical to the per-key config view. A subscription link that differs by
+    one REALITY/xhttp parameter is a key that works from the bot's message and
+    fails from the sub-URL.
+
+    The one deliberate difference is the ``#fragment``: inside a subscription each
+    entry's display name carries its preference mark, which is meaningless for a
+    key shown on its own. Pinned below rather than waived, so the marks cannot
+    quietly spread into the per-key link or vanish from the subscription.
+    """
     harness = await _seed(tmp_path)
     client, store = await _client(harness)
     try:
         resp = await client.get(f"/sub/{harness.token}")
         links = _decode(await resp.text())
+        by_prefix = {link.split("#")[0]: link.split("#", 1)[1] for link in links}
 
         reference = XrayService(
             vpn_keys=harness.vpn_keys,
@@ -323,6 +332,7 @@ async def test_subscription_links_match_the_single_key_view(tmp_path: Path) -> N
             audit=_Audit(),  # type: ignore[arg-type]
             xhttp_adapter=_RecordingAdapter(),  # type: ignore[arg-type]
         )
+        marks = {"xray_tcp": "🟢", "xray_http_base": "🟡", "xray_http_multi": "🟠", "xray_http_antisib": "🔴"}
         for key in await harness.bundles.list_keys_of_bundle(harness.bundle_id):
             if key.key_type is not VpnKeyType.XRAY:
                 continue
@@ -330,7 +340,64 @@ async def test_subscription_links_match_the_single_key_view(tmp_path: Path) -> N
             # Telegram; unwrap and unescape it to compare the link itself.
             rendered = reference._format_config(key)
             expected = html.unescape(rendered.split("<code>")[1].split("</code>")[0])
-            assert expected in links, f"key {key.id}: endpoint link differs from the single-key view"
+            expected_prefix, expected_fragment = expected.split("#", 1)
+            assert expected_prefix in by_prefix, f"key {key.id}: endpoint link differs from the single-key view"
+            member = (key.email_label or "").rsplit("_", 1)[0]
+            assert by_prefix[expected_prefix] == expected_fragment + quote(f"_{marks[member]}")
+            # …and the per-key view itself stays unmarked.
+            assert "%F0%9F" not in expected
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_links_are_served_in_the_composition_order(tmp_path: Path) -> None:
+    """The order IS the recommendation: best-connection members first, so a client
+    that imports the set and works down the list tries them from fastest to
+    slowest. Pinned end to end, because the endpoint reads its children ``ORDER BY
+    id`` and has to re-sort them itself."""
+    harness = await _seed(tmp_path)
+    client, store = await _client(harness)
+    try:
+        links = _decode(await (await client.get(f"/sub/{harness.token}")).text())
+
+        def member(link: str) -> str:
+            if link.startswith("hysteria2://"):
+                return "hysteria2"
+            name = link.split("#", 1)[1]
+            return name.rsplit("_", 2)[0] if "xray_http" in name else "xray_tcp"
+
+        assert [member(link) for link in links] == [
+            "xray_tcp",
+            "hysteria2",
+            "xray_http_base",
+            "xray_http_multi",
+            "xray_http_antisib",
+        ]
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_every_entry_is_named_with_its_preference_mark(tmp_path: Path) -> None:
+    """Each entry's display name ends in ``_<colour>``, ranking the average speed
+    and latency the member gives. The mark rides the ``#fragment`` only — the label
+    the backends match on (Xray's email, the hy2 auth id) must stay untouched, or
+    stats and reconciliation would stop recognising the key."""
+    harness = await _seed(tmp_path)
+    client, store = await _client(harness)
+    try:
+        links = _decode(await (await client.get(f"/sub/{harness.token}")).text())
+        names = [link.split("#", 1)[1] for link in links]
+
+        assert [name.rsplit("_", 1)[1] for name in names] == [
+            quote("🟢"), quote("🟢"), quote("🟡"), quote("🟠"), quote("🔴"),
+        ]
+        # The stored labels themselves carry no mark.
+        for key in await harness.bundles.list_keys_of_bundle(harness.bundle_id):
+            assert (key.email_label or "").isascii()
     finally:
         await client.close()
         await store.close()
