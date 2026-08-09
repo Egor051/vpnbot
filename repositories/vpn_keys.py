@@ -7,7 +7,7 @@ from aiosqlite import Row
 
 from db.database import Database
 from db.exceptions import ConcurrentModificationError
-from models.dto import VpnKey
+from models.dto import TrafficScopeTotals, VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 from repositories._helpers import _clamp_limit, _clamp_offset, enum_value, json_loads_dict
 from repositories.traffic_scope import CURRENT_KEYS, TrafficScope, traffic_rows_query
@@ -355,28 +355,38 @@ class VpnKeyRepository:
 
     async def sum_traffic_for_owner(
         self, owner_user_id: int, scope: TrafficScope = CURRENT_KEYS
-    ) -> tuple[int, int]:
-        """Return total (downloaded, uploaded) bytes for an owner within *scope*.
+    ) -> TrafficScopeTotals:
+        """Return an owner's ↓/↑ totals within *scope*, plus how many rows fed them.
 
         The scope is explicit because the answer depends on it and the caller is
         the only one who knows which question it is asking — see
-        :mod:`repositories.traffic_scope`. The dashboard's per-user totals run the
-        very same query with a different scope.
+        :mod:`repositories.traffic_scope`. The dashboard's per-user totals and the
+        subscription endpoint's ``Subscription-Userinfo`` header run this very
+        query with a scope of their own, so the same account cannot read as three
+        different figures again.
+
+        ``measured_keys`` is what lets a caller tell a real zero from an absence:
+        the subscription header claims a counter only when one exists.
         """
         rows_sql, params = traffic_rows_query(scope, owner_user_id=owner_user_id)
         cursor = await self.db.conn.execute(
             f"""
             SELECT
               COALESCE(SUM(downloaded_bytes), 0) AS down,
-              COALESCE(SUM(uploaded_bytes), 0) AS up
+              COALESCE(SUM(uploaded_bytes), 0) AS up,
+              COUNT(*) AS rows_counted
             FROM {rows_sql}
             """,
             params,
         )
         row = await cursor.fetchone()
         if row is None:
-            return 0, 0
-        return int(row["down"]), int(row["up"])
+            return TrafficScopeTotals(downloaded_bytes=0, uploaded_bytes=0, measured_keys=0)
+        return TrafficScopeTotals(
+            downloaded_bytes=int(row["down"]),
+            uploaded_bytes=int(row["up"]),
+            measured_keys=int(row["rows_counted"]),
+        )
 
     async def list_recent_by_owner(self, owner_user_id: int, limit: int = 10) -> list[VpnKey]:
         """Return an owner's most recent non-deleted VPN keys."""

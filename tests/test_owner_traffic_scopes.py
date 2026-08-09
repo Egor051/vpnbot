@@ -111,8 +111,11 @@ def test_current_keys_scope_excludes_the_archive_and_deleted_keys(tmp_path: Path
     async def run() -> None:
         db, repo = await _fixture(tmp_path)
         try:
-            down, up = await repo.sum_traffic_for_owner(100, CURRENT_KEYS)
-            assert (down, up) == (1000, 400)
+            totals = await repo.sum_traffic_for_owner(100, CURRENT_KEYS)
+            assert (totals.downloaded_bytes, totals.uploaded_bytes) == (1000, 400)
+            # One row fed it — the active key. That count is what lets the
+            # subscription header tell a real zero from an absence.
+            assert totals.measured_keys == 1
         finally:
             await db.close()
 
@@ -123,13 +126,14 @@ def test_all_time_scope_is_current_keys_plus_the_archive(tmp_path: Path) -> None
     async def run() -> None:
         db, repo = await _fixture(tmp_path)
         try:
-            current_down, current_up = await repo.sum_traffic_for_owner(100, CURRENT_KEYS)
-            all_down, all_up = await repo.sum_traffic_for_owner(100, ALL_TIME)
+            current = await repo.sum_traffic_for_owner(100, CURRENT_KEYS)
+            all_time = await repo.sum_traffic_for_owner(100, ALL_TIME)
             # Archive holds 500/100 on top of the current keys.
-            assert (all_down, all_up) == (current_down + 500, current_up + 100)
+            assert all_time.downloaded_bytes == current.downloaded_bytes + 500
+            assert all_time.uploaded_bytes == current.uploaded_bytes + 100
             # And the soft-deleted key (70/30) is in neither: counting it in the
             # all-time scope would double it against the archive.
-            assert all_down == 1500 and all_up == 500
+            assert (all_time.downloaded_bytes, all_time.uploaded_bytes) == (1500, 500)
         finally:
             await db.close()
 
@@ -145,14 +149,8 @@ def test_the_personal_cabinet_agrees_with_the_shared_query(tmp_path: Path) -> No
             service = VpnKeyQueryService(vpn_keys=repo, users=_Users())  # type: ignore[arg-type]
             _x, _a, _h, traffic = await service.personal_summary_for_actor(100)
 
-            assert (
-                traffic.current_keys.downloaded_bytes,
-                traffic.current_keys.uploaded_bytes,
-            ) == await repo.sum_traffic_for_owner(100, CURRENT_KEYS)
-            assert (
-                traffic.all_time.downloaded_bytes,
-                traffic.all_time.uploaded_bytes,
-            ) == await repo.sum_traffic_for_owner(100, ALL_TIME)
+            assert traffic.current_keys == await repo.sum_traffic_for_owner(100, CURRENT_KEYS)
+            assert traffic.all_time == await repo.sum_traffic_for_owner(100, ALL_TIME)
             # The sum shown next to each scope is exactly ↓ + ↑.
             assert traffic.current_keys.total_bytes == 1400
             assert traffic.all_time.total_bytes == 2000
@@ -206,7 +204,7 @@ def test_dashboard_totals_and_top_run_the_same_query_as_the_cabinet(tmp_path: Pa
             top = await dash.top_users_by_traffic(limit=5)
             owner_all_time = await repo.sum_traffic_for_owner(100, ALL_TIME)
             assert [(entry.user_id, entry.total_bytes) for entry in top] == [
-                (100, sum(owner_all_time))
+                (100, owner_all_time.total_bytes)
             ]
 
             totals = await dash.traffic_totals()

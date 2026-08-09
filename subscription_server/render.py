@@ -216,16 +216,19 @@ def _profile_title(label: str) -> str:
 def _subscription_userinfo(view: BundleView) -> str:
     """Build ``Subscription-Userinfo`` from values that actually exist.
 
-    Emitted only when measured: ``upload``/``download`` come from the traffic
-    counters the bot collected for the children (omitted entirely when no child
-    has ever been measured), ``expire`` from their shared expiry. ``total`` is
-    NEVER emitted — this deployment has no traffic quota, so any number there
-    would be invented, and clients read a fabricated quota as a hard limit.
+    Emitted only when measured: ``upload``/``download`` are the owner's «current
+    keys» totals — the same scope, from the same query, that the personal cabinet
+    prints, so the figure a VPN client shows and the figure the bot shows are one
+    number (see :mod:`repositories.traffic_scope`). Omitted entirely when nothing
+    has ever been measured for that owner. ``expire`` comes from the children's
+    shared expiry. ``total`` is NEVER emitted — this deployment has no traffic
+    quota, so any number there would be invented, and clients read a fabricated
+    quota as a hard limit.
     """
     parts: list[str] = []
-    if view.traffic:
-        parts.append(f"upload={sum(stats.uploaded_bytes for stats in view.traffic)}")
-        parts.append(f"download={sum(stats.downloaded_bytes for stats in view.traffic)}")
+    if view.traffic is not None:
+        parts.append(f"upload={view.traffic.uploaded_bytes}")
+        parts.append(f"download={view.traffic.downloaded_bytes}")
     expire = _expire_timestamp(view.expires_at)
     if expire is not None:
         parts.append(f"expire={expire}")

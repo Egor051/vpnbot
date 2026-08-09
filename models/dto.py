@@ -258,10 +258,18 @@ class TrafficScopeTotals:
 
     downloaded_bytes: int
     uploaded_bytes: int
+    # How many keys contributed a row. Separates "measured, and the answer is
+    # zero" from "nothing has ever been measured" — a zero is worth printing,
+    # an absence is not something to claim a counter for.
+    measured_keys: int = 0
 
     @property
     def total_bytes(self) -> int:
         return self.downloaded_bytes + self.uploaded_bytes
+
+    @property
+    def measured(self) -> bool:
+        return self.measured_keys > 0
 
 
 @dataclass(frozen=True, slots=True)

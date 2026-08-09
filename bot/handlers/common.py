@@ -51,6 +51,23 @@ class InvalidCallbackData(ValueError):
 STATS_REFRESH_COOLDOWN_SECONDS = 5
 
 
+def admin_owner_context(key: VpnKey, actor_user_id: int) -> int | None:
+    """The ``owner_user_id`` a key screen must be rendered under, or None.
+
+    Not None means "an admin is looking at somebody else's key", and every key
+    screen has to know it: the keyboard then drops the owner-only actions (note,
+    fingerprint) and its «to list» button goes back to that user's key list
+    rather than the admin's own.
+
+    It lives here, next to :func:`stats_views_for_screen`, because it is the same
+    question asked by two modules. ``bot/handlers/callbacks.py`` used to skip it
+    when re-rendering a key card after a cancel, so an admin who cancelled out of
+    a wizard got the owner's keyboard on a foreign key — the same screen, reached
+    two ways, offering two different sets of buttons.
+    """
+    return key.owner_user_id if key.owner_user_id != actor_user_id else None
+
+
 async def stats_views_for_screen(
     services: Services,
     rate_limiter: RateLimiter,
