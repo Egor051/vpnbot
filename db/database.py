@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 35
+CURRENT_SCHEMA_VERSION = 36
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -387,6 +387,10 @@ class Database:
             await self._migrate_v35()
             await self._set_schema_version(35)
             version = 35
+        if version < 36:
+            await self._migrate_v36()
+            await self._set_schema_version(36)
+            version = 36
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1607,6 +1611,93 @@ class Database:
             await self.conn.execute(
                 "ALTER TABLE warp_split_sources ADD COLUMN fail_streak INTEGER NOT NULL DEFAULT 0"
             )
+
+    async def _migrate_v36(self) -> None:
+        # Allow 'hysteria2' as a trial_key_requests.key_type.
+        #
+        # The trial wizard draws a Hysteria2 button whenever the protocol is
+        # enabled, and services/trial_access.py has always branched on
+        # VpnKeyType.HYSTERIA2 to provision one — but the CHECK dating back to
+        # _migrate_v13 still listed only ('xray','awg'), so the INSERT that records
+        # the request died with IntegrityError before any of that ran. The button
+        # was unusable for the whole life of the Hysteria2 integration.
+        #
+        # SQLite cannot ALTER a CHECK constraint, so the table is rebuilt. Unlike
+        # the vpn_keys rebuild in _migrate_v29 this one runs with foreign-key
+        # enforcement left ON: nothing in the schema REFERENCES trial_key_requests
+        # (verified — its FKs all point outward, to users and vpn_keys), so
+        # dropping it cascades into nothing, and keeping enforcement on means a row
+        # that violates those outward FKs surfaces here instead of being copied
+        # forward silently.
+        await self._migrate_v36_trial_key_type_check()
+
+    async def _migrate_v36_trial_key_type_check(self) -> None:
+        table = await self.conn.execute_fetchone(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'trial_key_requests'"
+        )
+        if table is None:
+            return
+        if "hysteria2" in str(table["sql"] or ""):
+            # CHECK already lists hysteria2 (fresh DB / re-run) — nothing to rebuild.
+            return
+        # Crash safety, as in _migrate_v29: the whole rebuild runs inside one
+        # explicit BEGIN…COMMIT, because the leading CREATE TABLE would otherwise
+        # autocommit under sqlite3's legacy isolation mode (an implicit transaction
+        # only opens before the first DML) and a crash before the final rename
+        # would strand trial_key_requests_new. The DROP … IF EXISTS makes a re-run
+        # self-healing even for a database orphaned by an older build.
+        await self.commit()
+        raw = self._raw_conn()
+        try:
+            await raw.execute("BEGIN")
+            await raw.execute("DROP TABLE IF EXISTS trial_key_requests_new")
+            await raw.execute(
+                """
+                CREATE TABLE trial_key_requests_new (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  telegram_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+                  key_type TEXT NOT NULL CHECK(key_type IN ('xray','awg','hysteria2')),
+                  status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+                  key_id INTEGER REFERENCES vpn_keys(id) ON DELETE SET NULL,
+                  requested_at TEXT NOT NULL,
+                  decided_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+                  decided_at TEXT
+                )
+                """
+            )
+            # Explicit column list (not SELECT *) so a future column-order
+            # divergence between schema.sql and this rebuild cannot misalign data.
+            await raw.execute(
+                """
+                INSERT INTO trial_key_requests_new (
+                  id, telegram_user_id, key_type, status, key_id,
+                  requested_at, decided_by, decided_at
+                )
+                SELECT
+                  id, telegram_user_id, key_type, status, key_id,
+                  requested_at, decided_by, decided_at
+                FROM trial_key_requests
+                """
+            )
+            await raw.execute("DROP TABLE trial_key_requests")
+            await raw.execute("ALTER TABLE trial_key_requests_new RENAME TO trial_key_requests")
+            # DROP TABLE took both indexes with it. indexes.sql re-creates them in
+            # phase 3 of bootstrap, but they are restored here too so the table is
+            # never left un-indexed mid-chain — in particular
+            # idx_trial_requests_one_pending, which is the DB-level guard against a
+            # double-granted trial.
+            await raw.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trial_requests_user "
+                "ON trial_key_requests(telegram_user_id, status)"
+            )
+            await raw.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_trial_requests_one_pending "
+                "ON trial_key_requests(telegram_user_id) WHERE status = 'pending'"
+            )
+            await raw.commit()
+        except Exception:
+            await raw.rollback()
+            raise
 
     async def _ensure_spider_x_backfill(self) -> None:
         # Idempotent per-key spiderX backfill, run on EVERY bootstrap (not gated by

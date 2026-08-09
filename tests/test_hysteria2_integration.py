@@ -268,13 +268,13 @@ def test_personal_summary_counts_active_hysteria2(tmp_path: Path) -> None:
         try:
             await service.issue(100, TelegramUserProfile(100, "user100", "User"), note=None)
             query = VpnKeyQueryService(vpn_keys=VpnKeyRepository(db), users=_Users())  # type: ignore[arg-type]
-            active_xray, active_awg, active_hy2, _down, _up = await query.personal_summary_for_actor(100)
+            active_xray, active_awg, active_hy2, _traffic = await query.personal_summary_for_actor(100)
             assert active_hy2 == 1
             assert active_xray == 0 and active_awg == 0
             # A revoked key drops out of the active count.
             keys = await service.list_user_keys(100)
             await service.revoke(100, keys[0].id)
-            _, _, active_hy2_after, _d, _u = await query.personal_summary_for_actor(100)
+            _, _, active_hy2_after, _traffic_after = await query.personal_summary_for_actor(100)
             assert active_hy2_after == 0
         finally:
             await db.close()

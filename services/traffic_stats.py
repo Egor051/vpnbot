@@ -306,12 +306,12 @@ class TrafficStatsService:
         raw_downloaded = raw_stats.get(f"user>>>{key.email_label}>>>traffic>>>downlink")
         raw_uploaded = raw_stats.get(f"user>>>{key.email_label}>>>traffic>>>uplink")
         if raw_downloaded is None and raw_uploaded is None:
-            return await self.stats.upsert_unavailable(
-                key_id=key.id,
-                reason="Xray stats API не вернул счётчики для label ключа",
-                now=now,
-                source="xray statsquery",
-            )
+            # The API answered — it simply has no counter for this label yet. Xray
+            # creates per-user counters lazily, on the first packet, so a key that
+            # has not been used (or has not been used since the last xray restart)
+            # legitimately has none. That is "no traffic yet", not "backend down":
+            # only the attempt timestamp moves, the accumulated totals stay.
+            return await self.stats.touch_attempt(key_id=key.id, now=now, source="xray statsquery")
         return await self._store_success(
             key=key,
             previous=previous,
@@ -344,12 +344,7 @@ class TrafficStatsService:
             # /traffic only lists ids that have moved data since the server started
             # (or since the last ?clear). A missing id means "no traffic yet", not
             # an error; preserve accumulated totals and resume when it reappears.
-            return await self.stats.upsert_unavailable(
-                key_id=key.id,
-                reason="Hysteria2 trafficStats не вернул счётчики для label ключа",
-                now=now,
-                source=source,
-            )
+            return await self.stats.touch_attempt(key_id=key.id, now=now, source=source)
         uploaded_bytes, downloaded_bytes = raw
         return await self._store_success(
             key=key,

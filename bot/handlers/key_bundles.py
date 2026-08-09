@@ -121,7 +121,7 @@ async def change_bundle_fp_prompt(callback: CallbackQuery, state: FSMContext, se
         await safe_callback_answer(callback)
         bundle = await services.key_bundle_views.get_for_actor(callback.from_user.id, bundle_id)
         await state.set_state(EditFpStates.waiting_fp)
-        await state.update_data(bundle_id=bundle.id, key_id=None)
+        await state.update_data(bundle_id=bundle.id, key_id=None, cancel_target=f"bundle:open:{bundle.id}")
         await safe_edit_message_text(
             callback.message,
             t("bundle_fp_change_prompt"),

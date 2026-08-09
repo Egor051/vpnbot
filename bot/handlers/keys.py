@@ -960,7 +960,7 @@ async def edit_fp_prompt(callback: CallbackQuery, state: FSMContext, services: S
         await state.set_state(EditFpStates.waiting_fp)
         # bundle_id is cleared explicitly: the same states serve both entities and
         # update_data merges, so a leftover id would re-target a whole subscription.
-        await state.update_data(key_id=key_id, bundle_id=None)
+        await state.update_data(key_id=key_id, bundle_id=None, cancel_target=f"key:open:{key_id}")
         await safe_edit_message_text(
             callback.message,
             t("fp_change_prompt"),

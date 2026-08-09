@@ -130,7 +130,11 @@ CREATE TABLE IF NOT EXISTS key_bundles (
 CREATE TABLE IF NOT EXISTS trial_key_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
-  key_type TEXT NOT NULL CHECK(key_type IN ('xray','awg')),
+  -- hysteria2 joined the list in _migrate_v36. The trial wizard has offered a
+  -- Hysteria2 button since the protocol shipped, and the approval path in
+  -- services/trial_access.py has always known how to provision one — only this
+  -- CHECK did not, so tapping the button raised IntegrityError on INSERT.
+  key_type TEXT NOT NULL CHECK(key_type IN ('xray','awg','hysteria2')),
   status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
   key_id INTEGER REFERENCES vpn_keys(id) ON DELETE SET NULL,
   requested_at TEXT NOT NULL,

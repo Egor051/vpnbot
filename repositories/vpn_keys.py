@@ -10,6 +10,7 @@ from db.exceptions import ConcurrentModificationError
 from models.dto import VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 from repositories._helpers import _clamp_limit, _clamp_offset, enum_value, json_loads_dict
+from repositories.traffic_scope import CURRENT_KEYS, TrafficScope, traffic_rows_query
 from services.errors import InvalidTransition
 
 logger = logging.getLogger(__name__)
@@ -352,18 +353,25 @@ class VpnKeyRepository:
         row = await cursor.fetchone()
         return int(row["cnt"]) if row is not None else 0
 
-    async def sum_traffic_for_owner(self, owner_user_id: int) -> tuple[int, int]:
-        """Return total (downloaded, uploaded) bytes across an owner's non-deleted keys."""
+    async def sum_traffic_for_owner(
+        self, owner_user_id: int, scope: TrafficScope = CURRENT_KEYS
+    ) -> tuple[int, int]:
+        """Return total (downloaded, uploaded) bytes for an owner within *scope*.
+
+        The scope is explicit because the answer depends on it and the caller is
+        the only one who knows which question it is asking — see
+        :mod:`repositories.traffic_scope`. The dashboard's per-user totals run the
+        very same query with a different scope.
+        """
+        rows_sql, params = traffic_rows_query(scope, owner_user_id=owner_user_id)
         cursor = await self.db.conn.execute(
-            """
+            f"""
             SELECT
-              COALESCE(SUM(s.downloaded_bytes), 0) AS down,
-              COALESCE(SUM(s.uploaded_bytes), 0) AS up
-            FROM vpn_keys k
-            JOIN vpn_key_traffic_stats s ON s.key_id = k.id
-            WHERE k.owner_user_id = ? AND k.status != ?
+              COALESCE(SUM(downloaded_bytes), 0) AS down,
+              COALESCE(SUM(uploaded_bytes), 0) AS up
+            FROM {rows_sql}
             """,
-            (owner_user_id, VpnKeyStatus.DELETED.value),
+            params,
         )
         row = await cursor.fetchone()
         if row is None:

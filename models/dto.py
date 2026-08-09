@@ -253,6 +253,32 @@ class TrafficStats:
 
 
 @dataclass(frozen=True, slots=True)
+class TrafficScopeTotals:
+    """An owner's ↓/↑ bytes under one traffic scope."""
+
+    downloaded_bytes: int
+    uploaded_bytes: int
+
+    @property
+    def total_bytes(self) -> int:
+        return self.downloaded_bytes + self.uploaded_bytes
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerTrafficSummary:
+    """Both traffic scopes for one owner, so a screen can show them side by side.
+
+    Two figures, not one: "current keys" is what the user can verify right now by
+    adding up the keys they still have, "all time" also counts the keys they have
+    deleted. Showing one of them unlabelled is what made the personal cabinet and
+    the admin dashboard look like they disagreed.
+    """
+
+    current_keys: TrafficScopeTotals
+    all_time: TrafficScopeTotals
+
+
+@dataclass(frozen=True, slots=True)
 class KeyTrafficStatsView:
     key: VpnKey
     owner: User | None

@@ -318,6 +318,78 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Cancelling the fingerprint wizard threw you out to the main menu.** The wizard shares
+  one cancel handler with every other FSM flow, and that handler reads its destination from
+  `cancel_target` in the FSM data. The two fingerprint entry points — a key's and a
+  bundle's — were the only ones that never wrote it, so cancel fell through to the default
+  `menu:main`. Both now store the card they were opened from, exactly as the note wizard
+  already did, and «Отмена» returns to that card.
+
+- **`/warp_split_list` failed outright once the feeds filled the list.** The command
+  rendered every prefix into one message; Telegram caps a message at 4096 characters and
+  269 prefixes render to 8115, so the call came back as `TelegramBadRequest("message is
+  too long")` and the admin got an error instead of a list. The data was never at fault —
+  the list file and the `warp_split_prefixes`/`warp_split_sources` tables agree byte for
+  byte. Above a named threshold (`WARP_SPLIT_LIST_MESSAGE_LIMIT`, 3500 characters, with
+  margin for the header and the per-line markup) the list is now delivered as
+  `warp-split-list.txt` — plain text, one prefix per line, greppable and pasteable back
+  into `/warp_split_add` — with the count in the caption. Shorter lists are unchanged.
+  `/warp_split_add` and `/warp_split_del` print only the tokens they were given, never the
+  whole list, so neither carries the same mine.
+
+- **A key with no backend counter yet reported as "stats unavailable".** xray creates its
+  per-user counters **lazily**, on a key's first packet: straight after an xray restart
+  `xray api statsquery` lists none at all, and one real connection makes exactly the
+  counters that connection touched appear. hysteria2's `/traffic` behaves the same way —
+  it lists only ids that have moved data since the server started. The collector treated a
+  missing counter as a backend failure and wrote `available = 0`. Absent counter and dead
+  backend are now two outcomes: a failed query still marks the key unavailable, while an
+  answer that simply has no counter for the label only moves `last_attempt_at` and leaves
+  the accumulated totals, the raw counters and `available` untouched.
+
+- **The same key showed different traffic on different screens.** Four renderers read
+  `TrafficStats.available` and each drew its own conclusion — the key card printed the
+  accumulated totals and marked them stale, the bundle card **hid** them and summed a `0`
+  into the subscription total, the admin list and the user card had two more variants. So
+  a subscription read «0 B» while the key listed one tap below it read the real figure.
+  All four now go through one helper (`bot.formatters.traffic_figures`): the numbers always
+  come from the accumulated totals, `available` decides only whether they carry a staleness
+  mark, and a zero appears only when the total really is zero.
+
+- **The personal cabinet and the dashboard answered different questions about the same
+  account.** The cabinet summed `↓` over an owner's non-deleted keys; the dashboard summed
+  `↓ + ↑` over every key plus the deleted-key archive. Neither was wrong and neither said
+  what it was counting. There is now **one** parameterised query behind both
+  (`repositories.traffic_scope`), and every screen names the scope it shows:
+  - **«По текущим ключам»** — keys with `status != 'deleted'`, no archive.
+  - **«За всё время»** — the above plus `deleted_key_traffic_archive`.
+  - The personal cabinet and the admin user card show **both**, each split into `↓ / ↑ /
+    сумма`. The dashboard's top-5 stays one sorted number per user (a split makes the row
+    unreadable) and is now labelled «за всё время» in the heading.
+  - The live branch of every all-time aggregate gained `AND k.status <> 'deleted'`. It does
+    not fire today — deletion archives the totals and drops the stats row, so the two sets
+    do not overlap — but nothing enforced that, and `TrafficScope` now refuses the
+    double-counting combination at construction time.
+  - `traffic_totals` (Итого / Xray / AWG / Hy2 / Среднее на ключ) keeps computing its sum
+    and its average over **one** dataset, so the average stays the average of the total
+    printed beside it.
+  - The admin user card aggregated the same `limit=10` page it renders, so a user with an
+    eleventh key silently under-reported. The aggregate now counts every key; the limit
+    bounds the displayed list only.
+
+- **A Hysteria2 trial request was impossible (schema v36).** The trial wizard has drawn a
+  Hysteria2 button ever since the protocol shipped, and the approval path in
+  `services/trial_access.py` has always known how to provision one — only the CHECK on
+  `trial_key_requests.key_type`, written back in `_migrate_v13`, still listed
+  `('xray','awg')`, so tapping the button died with `IntegrityError` on the INSERT that
+  records the request. `_migrate_v36` rebuilds the table with `('xray','awg','hysteria2')`,
+  carrying every row and both indexes across (including the partial unique index that
+  guards against a double-granted trial). Nothing in the schema REFERENCES
+  `trial_key_requests`, so the rebuild runs with foreign-key enforcement left **on**.
+  The schema-equivalence guard now compares **CHECK constraints** too — no PRAGMA exposes
+  them, and a widened enum that forgets its rebuild is otherwise invisible to every
+  column, foreign-key and index check.
+
 - **One household could not refresh its subscription, and the refusal was invisible.**
   The endpoint's rate limit is keyed by the **peer address** and allowed exactly one
   request per `SUBSCRIPTION_RATE_LIMIT_SECONDS` (default 5). Everything behind one home
