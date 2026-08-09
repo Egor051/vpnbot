@@ -101,8 +101,11 @@ STRINGS: dict[str, str] = {
     "stats_not_available_yet": "Stats are not available yet.",
     "stats_keys_title": "<b>Key statistics</b>",
     "stats_keys_empty": "<b>Key statistics</b>\n\nNo keys on this page.",
-    "stats_last_prefix": "last",
     "stats_unavailable_short": "stats not available yet",
+    # Appended to figures that ARE printed: the totals are real, the backend just
+    # did not confirm them on the last poll.
+    "stats_stale_mark": "data is stale (last successful snapshot {at})",
+    "stats_stale_mark_no_time": "data is stale",
     "stats_updated_fmt": " · updated {at}",
     "stats_attempt_fmt": " · attempt {at}",
     "stats_note": "Note",
@@ -117,7 +120,6 @@ STRINGS: dict[str, str] = {
     "user_card_title": "<b>User</b>",
     "user_keys_title": "<b>Keys</b>",
     "user_no_keys": "No keys.",
-    "user_stats_unavailable": "stats not available yet",
     # ── users page ────────────────────────────────────────────────────────────
     "users_title": "<b>Users</b>",
     "users_empty": "No users on this page.",
@@ -613,7 +615,10 @@ STRINGS: dict[str, str] = {
     "cabinet_title": "<b>👤 Personal cabinet</b>",
     "field_registered": "Registered",
     "cabinet_active_keys": "Active keys: {total} (Xray: {xray}, AWG: {awg}, Hysteria2: {hysteria2})",
-    "cabinet_traffic": "Traffic: ↓ {down} · ↑ {up}",
+    # Two scopes, always both, always labelled — see bot.formatters.owner_traffic_lines.
+    "traffic_scopes_title": "<b>Traffic</b>",
+    "traffic_scope_current": "  Current keys: ↓ {down} · ↑ {up} · total {total}",
+    "traffic_scope_all_time": "  All time (including deleted keys): ↓ {down} · ↑ {up} · total {total}",
     "cabinet_proxy_count": "Proxy accesses: {count}",
     "settings_language_changed": "Language changed",
     "settings_notifications_on": "Expiry notifications enabled",
@@ -883,6 +888,7 @@ STRINGS: dict[str, str] = {
     "warp_split_apply_error": "Apply error: {error}",
     "warp_split_list_empty": "The split routes list is empty or the file does not exist.",
     "warp_split_list_header": "<b>Split routes list</b> — prefixes: {count}",
+    "warp_split_list_file_caption": "<b>Split routes list</b> — prefixes: {count}. The list is long, so it is sent as a file.",
     "warp_split_add_usage": (
         "Usage: /warp_split_add &lt;cidr&gt; [&lt;cidr&gt; ...]\n"
         "Example: /warp_split_add 91.108.4.0/22 142.250.0.0/15\n"

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from db.database import Database
 from repositories._helpers import _clamp_limit
+from repositories.traffic_scope import ALL_TIME, TrafficScope, traffic_rows_query
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,34 +116,32 @@ class DashboardRepository:
             avg_per_user=avg,
         )
 
-    async def traffic_totals(self) -> TrafficTotals:
+    async def traffic_totals(self, scope: TrafficScope = ALL_TIME) -> TrafficTotals:
         """Return aggregate traffic bytes grouped by VPN key protocol.
 
         Both the per-protocol totals and the per-key average are computed over
-        the SAME dataset — live traffic stats UNION the deleted-key archive — so
-        ``avg_per_key_bytes`` tracks ``total_bytes`` (deleted keys count toward
-        both) instead of drifting because they counted toward the total but not
-        the average. Note ``avg_per_key_bytes`` is truncated to a whole number
+        the SAME dataset — one :func:`~repositories.traffic_scope.traffic_rows_query`
+        under one scope — so ``avg_per_key_bytes`` tracks ``total_bytes`` (deleted
+        keys count toward both) instead of drifting because they counted toward
+        the total but not the average. Narrowing the scope narrows both together,
+        which is the only way the average stays the average OF the total shown
+        beside it. Note ``avg_per_key_bytes`` is truncated to a whole number
         (``int(AVG(...))``), so ``avg * key_count`` only approximates ``total``.
         """
+        rows_sql, params = traffic_rows_query(scope)
         row = await self.db.conn.execute_fetchone(
-            """
+            f"""
             SELECT
               COALESCE(SUM(CASE WHEN key_type = 'xray' THEN total_bytes END), 0) AS xray_bytes,
               COALESCE(SUM(CASE WHEN key_type = 'awg' THEN total_bytes END), 0) AS awg_bytes,
               COALESCE(SUM(CASE WHEN key_type = 'hysteria2' THEN total_bytes END), 0) AS hysteria2_bytes,
               AVG(total_bytes) AS avg_bytes
             FROM (
-                SELECT k.key_type AS key_type,
-                       (t.downloaded_bytes + t.uploaded_bytes) AS total_bytes
-                FROM vpn_key_traffic_stats t
-                JOIN vpn_keys k ON k.id = t.key_id
-                UNION ALL
-                SELECT key_type,
-                       (downloaded_bytes + uploaded_bytes) AS total_bytes
-                FROM deleted_key_traffic_archive
+                SELECT key_type, (downloaded_bytes + uploaded_bytes) AS total_bytes
+                FROM {rows_sql}
             )
-            """
+            """,
+            params,
         )
         xray_bytes = int(row["xray_bytes"] or 0) if row else 0
         awg_bytes = int(row["awg_bytes"] or 0) if row else 0
@@ -156,30 +155,30 @@ class DashboardRepository:
             avg_per_key_bytes=avg,
         )
 
-    async def top_users_by_traffic(self, limit: int = 5) -> list[TopUserTraffic]:
-        """Return top N users sorted by total traffic bytes descending."""
+    async def top_users_by_traffic(
+        self, limit: int = 5, scope: TrafficScope = ALL_TIME
+    ) -> list[TopUserTraffic]:
+        """Return top N users sorted by total traffic bytes descending.
+
+        One sorted number per user — a ↓/↑ split would make the row unreadable —
+        so the scope has to be named where it is rendered. It is the all-time
+        scope: a top that dropped deleted keys would hide exactly the accounts
+        that churn through them.
+        """
+        rows_sql, params = traffic_rows_query(scope)
         cursor = await self.db.conn.execute(
-            """
+            f"""
             SELECT owner_user_id, MAX(username) AS username, SUM(total_bytes) AS total_bytes
             FROM (
-                SELECT k.owner_user_id AS owner_user_id,
-                       COALESCE(u.username, k.username) AS username,
-                       (t.downloaded_bytes + t.uploaded_bytes) AS total_bytes
-                FROM vpn_key_traffic_stats t
-                JOIN vpn_keys k ON k.id = t.key_id
-                LEFT JOIN users u ON u.telegram_user_id = k.owner_user_id
-                UNION ALL
-                SELECT a.owner_user_id,
-                       COALESCE(u.username, CAST(a.owner_user_id AS TEXT)) AS username,
-                       (a.downloaded_bytes + a.uploaded_bytes) AS total_bytes
-                FROM deleted_key_traffic_archive a
-                LEFT JOIN users u ON u.telegram_user_id = a.owner_user_id
+                SELECT owner_user_id, username,
+                       (downloaded_bytes + uploaded_bytes) AS total_bytes
+                FROM {rows_sql}
             )
             GROUP BY owner_user_id
             ORDER BY total_bytes DESC
             LIMIT ?
             """,
-            (_clamp_limit(limit),),
+            (*params, _clamp_limit(limit)),
         )
         rows = await cursor.fetchall()
         return [

@@ -864,10 +864,16 @@ async def admin_user_detail(callback: CallbackQuery, services: Services) -> None
         except AccessDenied:
             keys = []
         stats_by_key_id = await services.traffic_stats.cached_for_keys(keys)
+        # Aggregated over ALL of the user's keys, not just the ten listed above —
+        # the limit bounds the list, never the total.
+        try:
+            traffic = await services.vpn_keys.traffic_summary_for_actor(callback.from_user.id, user_id)
+        except AccessDenied:
+            traffic = None
         has_used_trial = not await services.trial_access.can_request_trial(user_id)
         await safe_edit_message_text(
             callback.message,
-            user_card_text(user, keys, stats_by_key_id, viewer_user_id=callback.from_user.id),
+            user_card_text(user, keys, stats_by_key_id, viewer_user_id=callback.from_user.id, traffic=traffic),
             reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role),
         )
     except Exception as exc:

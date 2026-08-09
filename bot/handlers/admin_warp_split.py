@@ -16,7 +16,7 @@ import logging
 
 from aiogram import Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 
 from bot.container import Services
 from bot.guards import require_superadmin
@@ -29,6 +29,18 @@ from warp.split_manager import WarpSplitError, parse_cidr_tokens
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+# Above this rendered length /warp_split_list ships the prefixes as a document
+# instead of a message. Telegram's own cap is 4096 characters, and the list grew
+# past it the moment the feeds went on: 269 prefixes render to 8115 characters,
+# so `message.answer` came back as TelegramBadRequest("message is too long") and
+# the admin got no list at all. The margin below the cap absorbs the header and
+# the per-line HTML the message form adds around each prefix.
+WARP_SPLIT_LIST_MESSAGE_LIMIT = 3500
+
+# Filename of the document form. Plain text, one prefix per line, no markup — it
+# is meant to be greppable and to paste straight back into /warp_split_add.
+WARP_SPLIT_LIST_FILENAME = "warp-split-list.txt"
 
 
 # ── /warp_split_list ───────────────────────────────────────────────────────────
@@ -50,7 +62,17 @@ async def warp_split_list_cmd(message: Message, services: Services) -> None:
             return
         lines = [t("warp_split_list_header", count=len(entries))]
         lines.extend(f"  {code(e)}" for e in entries)
-        await message.answer("\n".join(lines))
+        text = "\n".join(lines)
+        if len(text) > WARP_SPLIT_LIST_MESSAGE_LIMIT:
+            await message.answer_document(
+                BufferedInputFile(
+                    ("\n".join(entries) + "\n").encode("utf-8"),
+                    filename=WARP_SPLIT_LIST_FILENAME,
+                ),
+                caption=t("warp_split_list_file_caption", count=len(entries)),
+            )
+            return
+        await message.answer(text)
     except Exception as exc:
         await answer_message_error(message, exc)
 

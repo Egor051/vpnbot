@@ -248,6 +248,22 @@ class _StatsRepo:
         )
         return self.last
 
+    async def touch_attempt(self, *, key_id, now, source):  # type: ignore[no-untyped-def]
+        previous = self.last
+        self.last = TrafficStats(
+            key_id=key_id,
+            downloaded_bytes=previous.downloaded_bytes if previous else 0,
+            uploaded_bytes=previous.uploaded_bytes if previous else 0,
+            last_raw_downloaded_bytes=previous.last_raw_downloaded_bytes if previous else None,
+            last_raw_uploaded_bytes=previous.last_raw_uploaded_bytes if previous else None,
+            last_success_at=previous.last_success_at if previous else None,
+            last_attempt_at=now,
+            available=previous.available if previous else True,
+            unavailable_reason=previous.unavailable_reason if previous else None,
+            source=previous.source if previous else source,
+        )
+        return self.last
+
 
 def _traffic_service(repo: _StatsRepo, hysteria: object | None) -> TrafficStatsService:
     return TrafficStatsService(
@@ -276,12 +292,21 @@ def test_refresh_hysteria_key_accumulates_tx_rx() -> None:
     asyncio.run(run())
 
 
-def test_refresh_hysteria_key_missing_label_is_unavailable() -> None:
+def test_refresh_hysteria_key_missing_label_is_not_a_backend_failure() -> None:
+    """A label absent from /traffic means "no traffic yet", not "backend down".
+
+    hysteria2's /traffic only lists ids that have moved data since the server
+    started, so a key nobody has connected with yet is simply not in the answer.
+    Recording that as unavailable is what blanked the figures on a working key.
+    """
+
     async def run() -> None:
         repo = _StatsRepo()
         service = _traffic_service(repo, hysteria=SimpleNamespace())
         result = await service._refresh_hysteria_key(_hy2_key(), None, {}, None)  # noqa: SLF001
-        assert result.available is False
+        assert result.available is True
+        assert result.unavailable_reason is None
+        assert result.last_attempt_at == "now"
 
     asyncio.run(run())
 

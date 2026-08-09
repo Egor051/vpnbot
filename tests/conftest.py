@@ -7,6 +7,7 @@ import importlib.machinery
 import importlib.util
 import io
 import os
+import re
 import sys
 from collections.abc import Callable, Generator
 from pathlib import Path
@@ -216,12 +217,20 @@ class SchemaShape(NamedTuple):
              different statements on different paths (a table-rebuild migration
              re-creates it with its own formatting), and the whitespace difference
              is not drift.
+    checks:  table -> {normalised CHECK expression}. No PRAGMA exposes CHECK
+             constraints, so these come out of the sqlite_master DDL — and they
+             have to be compared, because a CHECK is the one part of a table that
+             ONLY a full rebuild can change. A migration that widens an enum in
+             schema.sql but forgets the rebuild leaves every column, foreign key
+             and index identical and still rejects the new value at INSERT time,
+             which is exactly how the Hysteria2 trial button stayed broken.
     """
 
     tables: frozenset[str]
     columns: dict[str, dict[str, tuple[str, int, object, int]]]
     fks: dict[str, set[tuple[str, str, str, str, str]]]
     indexes: dict[str, tuple[int, int, tuple[str, ...]]]
+    checks: dict[str, frozenset[str]]
 
 
 async def table_names(conn: aiosqlite.Connection) -> frozenset[str]:
@@ -275,6 +284,52 @@ async def index_details(
     return details
 
 
+_SQL_COMMENT = re.compile(r"--[^\n]*")
+_SQL_WHITESPACE = re.compile(r"\s+")
+
+
+def _normalise_check(body: str) -> str:
+    """Strip formatting from a CHECK body so only its meaning is compared.
+
+    The same constraint is written differently on the two construction paths —
+    schema.sql indents it, a rebuild migration inlines it — and that difference
+    is not drift.
+    """
+    body = _SQL_WHITESPACE.sub(" ", body).strip()
+    return re.sub(r"\s*([(),])\s*", r"\1", body)
+
+
+def _table_checks(create_sql: str) -> frozenset[str]:
+    """Every CHECK expression in a CREATE TABLE statement, normalised.
+
+    Parses the parentheses rather than regexing the body, so a nested one
+    (``CHECK(x IN ('a','b'))``) is captured whole instead of cut at its first
+    closing bracket.
+    """
+    sql = _SQL_COMMENT.sub(" ", create_sql or "")
+    checks: list[str] = []
+    for match in re.finditer(r"\bCHECK\s*\(", sql, re.IGNORECASE):
+        start = match.end() - 1
+        depth = 0
+        for pos in range(start, len(sql)):
+            if sql[pos] == "(":
+                depth += 1
+            elif sql[pos] == ")":
+                depth -= 1
+                if depth == 0:
+                    checks.append(_normalise_check(sql[start + 1 : pos]))
+                    break
+    return frozenset(checks)
+
+
+async def table_checks(conn: aiosqlite.Connection, tables: frozenset[str]) -> dict[str, frozenset[str]]:
+    cursor = await conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    )
+    found = {str(row[0]): _table_checks(str(row[1] or "")) for row in await cursor.fetchall()}
+    return {table: found.get(table, frozenset()) for table in tables}
+
+
 async def schema_shape(conn: aiosqlite.Connection) -> SchemaShape:
     tables = await table_names(conn)
     return SchemaShape(
@@ -282,6 +337,7 @@ async def schema_shape(conn: aiosqlite.Connection) -> SchemaShape:
         columns={table: await column_details(conn, table) for table in tables},
         fks={table: await foreign_keys(conn, table) for table in tables},
         indexes=await index_details(conn, tables),
+        checks=await table_checks(conn, tables),
     )
 
 
@@ -292,6 +348,7 @@ def assert_same_shape(actual: SchemaShape, expected: SchemaShape, context: str) 
     for table in sorted(expected.tables):
         assert actual.columns[table] == expected.columns[table], f"{context}: column drift in {table}"
         assert actual.fks[table] == expected.fks[table], f"{context}: foreign-key drift in {table}"
+        assert actual.checks[table] == expected.checks[table], f"{context}: CHECK drift in {table}"
     assert set(actual.indexes) == set(expected.indexes), f"{context}: index set differs"
     for name in sorted(expected.indexes):
         assert actual.indexes[name] == expected.indexes[name], f"{context}: index {name} differs"

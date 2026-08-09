@@ -101,8 +101,11 @@ STRINGS: dict[str, str] = {
     "stats_not_available_yet": "Статистика пока недоступна.",
     "stats_keys_title": "<b>Статистика ключей</b>",
     "stats_keys_empty": "<b>Статистика ключей</b>\n\nНа этой странице ключей нет.",
-    "stats_last_prefix": "последнее",
     "stats_unavailable_short": "статистика пока недоступна",
+    # Appended to figures that ARE printed: the totals are real, the backend just
+    # did not confirm them on the last poll.
+    "stats_stale_mark": "данные устарели (последний успешный снимок {at})",
+    "stats_stale_mark_no_time": "данные устарели",
     "stats_updated_fmt": " · обновлено {at}",
     "stats_attempt_fmt": " · попытка {at}",
     "stats_note": "Заметка",
@@ -117,7 +120,6 @@ STRINGS: dict[str, str] = {
     "user_card_title": "<b>Пользователь</b>",
     "user_keys_title": "<b>Ключи</b>",
     "user_no_keys": "Ключей нет.",
-    "user_stats_unavailable": "статистика пока недоступна",
     # ── users page ────────────────────────────────────────────────────────────
     "users_title": "<b>Пользователи</b>",
     "users_empty": "На этой странице пользователей нет.",
@@ -617,7 +619,10 @@ STRINGS: dict[str, str] = {
     "cabinet_title": "<b>👤 Личный кабинет</b>",
     "field_registered": "Дата регистрации",
     "cabinet_active_keys": "Активные ключи: {total} (Xray: {xray}, AWG: {awg}, Hysteria2: {hysteria2})",
-    "cabinet_traffic": "Трафик: ↓ {down} · ↑ {up}",
+    # Two scopes, always both, always labelled — see bot.formatters.owner_traffic_lines.
+    "traffic_scopes_title": "<b>Трафик</b>",
+    "traffic_scope_current": "  По текущим ключам: ↓ {down} · ↑ {up} · всего {total}",
+    "traffic_scope_all_time": "  За всё время (с учётом удалённых ключей): ↓ {down} · ↑ {up} · всего {total}",
     "cabinet_proxy_count": "Прокси-доступы: {count}",
     "settings_language_changed": "Язык изменён",
     "settings_notifications_on": "Уведомления об истечении включены",
@@ -888,6 +893,7 @@ STRINGS: dict[str, str] = {
     "warp_split_apply_error": "Ошибка применения: {error}",
     "warp_split_list_empty": "Список split-маршрутов пуст или файл не существует.",
     "warp_split_list_header": "<b>Список split-маршрутов</b> — префиксов: {count}",
+    "warp_split_list_file_caption": "<b>Список split-маршрутов</b> — префиксов: {count}. Список длинный, поэтому отправлен файлом.",
     "warp_split_add_usage": (
         "Использование: /warp_split_add &lt;cidr&gt; [&lt;cidr&gt; ...]\n"
         "Пример: /warp_split_add 91.108.4.0/22 142.250.0.0/15\n"

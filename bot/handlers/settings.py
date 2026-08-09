@@ -30,8 +30,7 @@ async def _build_cabinet_text(services: Services, user: User) -> str:
         active_xray,
         active_awg,
         active_hysteria2,
-        downloaded,
-        uploaded,
+        traffic,
     ) = await services.vpn_keys.personal_summary_for_actor(user.telegram_user_id)
     proxy_stats = await services.proxy.get_user_proxy_stats(user.telegram_user_id)
     proxy_count = sum(1 for access in proxy_stats.accesses if access.status == ProxyAccessStatus.ACTIVE)
@@ -40,8 +39,7 @@ async def _build_cabinet_text(services: Services, user: User) -> str:
         active_xray=active_xray,
         active_awg=active_awg,
         active_hysteria2=active_hysteria2,
-        downloaded_bytes=downloaded,
-        uploaded_bytes=uploaded,
+        traffic=traffic,
         proxy_count=proxy_count,
     )
 

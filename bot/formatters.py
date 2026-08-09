@@ -1,4 +1,6 @@
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -9,6 +11,7 @@ from models.dto import (
     AccessRequest,
     KeyBundle,
     KeyTrafficStatsView,
+    OwnerTrafficSummary,
     ProxyAccessStatsItem,
     ProxyAdminStats,
     ProxyAccess,
@@ -126,14 +129,41 @@ def settings_intro_text() -> str:
     return f"{t('settings_title')}\n\n{t('settings_intro')}"
 
 
+def owner_traffic_lines(traffic: OwnerTrafficSummary) -> list[str]:
+    """An owner's traffic as BOTH scopes, each split into ↓ / ↑ / sum.
+
+    One number could not be right for both readers. The personal cabinet counted
+    only downloads over the keys a user still has; the dashboard counted ↓ + ↑
+    over every key plus the deleted-key archive. Both were correct answers to
+    different questions, and neither said which question it answered — so the
+    same account read as two different figures depending on the screen. The fix
+    is to print both, each labelled, from one query
+    (:mod:`repositories.traffic_scope`).
+    """
+    return [
+        t("traffic_scopes_title"),
+        t(
+            "traffic_scope_current",
+            down=format_bytes(traffic.current_keys.downloaded_bytes),
+            up=format_bytes(traffic.current_keys.uploaded_bytes),
+            total=format_bytes(traffic.current_keys.total_bytes),
+        ),
+        t(
+            "traffic_scope_all_time",
+            down=format_bytes(traffic.all_time.downloaded_bytes),
+            up=format_bytes(traffic.all_time.uploaded_bytes),
+            total=format_bytes(traffic.all_time.total_bytes),
+        ),
+    ]
+
+
 def personal_cabinet_text(
     user: User,
     *,
     active_xray: int,
     active_awg: int,
     active_hysteria2: int,
-    downloaded_bytes: int,
-    uploaded_bytes: int,
+    traffic: OwnerTrafficSummary,
     proxy_count: int,
 ) -> str:
     """Build the personal cabinet card: profile fields plus a personal summary."""
@@ -153,7 +183,7 @@ def personal_cabinet_text(
             awg=active_awg,
             hysteria2=active_hysteria2,
         ),
-        t("cabinet_traffic", down=format_bytes(downloaded_bytes), up=format_bytes(uploaded_bytes)),
+        *owner_traffic_lines(traffic),
         t("cabinet_proxy_count", count=proxy_count),
     ]
     return "\n".join(lines)
@@ -312,6 +342,127 @@ def key_detail_text(key: VpnKey, *, viewer_user_id: int) -> str:
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class TrafficFigures:
+    """What a screen may print about one key's — or one group of keys' — traffic.
+
+    The single decision point behind every traffic figure the bot shows. Four
+    screens used to read ``TrafficStats.available`` on their own and disagreed:
+    the key card printed the last known counters and marked them stale, while the
+    bundle card *hid* them and summed a 0 into the subscription total. So a
+    subscription read «0 B» the moment one poll missed a counter, and the key
+    inside it, one tap away, read the real figure.
+
+    The rule, now in one place: the numbers ALWAYS come from the accumulated
+    totals, which are never lost (``services/traffic_stats.py`` carries them
+    across counter resets and missed polls). ``available`` decides exactly one
+    thing — whether those numbers carry a "stale, last confirmed at ..." mark. A
+    zero is printed only when the accumulated total really is zero.
+    """
+
+    downloaded_bytes: int
+    uploaded_bytes: int
+    # False only when nothing has ever been measured — no stats row at all, or a
+    # row whose every poll so far has failed. Then there is no number to print
+    # and the screen says so instead of printing a meaningless zero.
+    known: bool
+    # The latest poll did not confirm these figures (backend unreachable).
+    stale: bool
+    last_success_at: str | None
+    unavailable_reason: str | None
+
+    @property
+    def total_bytes(self) -> int:
+        return self.downloaded_bytes + self.uploaded_bytes
+
+
+def traffic_figures(stats: TrafficStats | None) -> TrafficFigures:
+    """Reduce a stored stats row to what the screens are allowed to print."""
+    if stats is None:
+        return TrafficFigures(
+            downloaded_bytes=0,
+            uploaded_bytes=0,
+            known=False,
+            stale=False,
+            last_success_at=None,
+            unavailable_reason=None,
+        )
+    # Never measured *and* currently unavailable: the totals are zero because
+    # nothing was ever read, not because the key is idle. Say "no data" rather
+    # than print a zero the backend never confirmed.
+    known = stats.available or stats.last_success_at is not None
+    return TrafficFigures(
+        downloaded_bytes=stats.downloaded_bytes,
+        uploaded_bytes=stats.uploaded_bytes,
+        known=known,
+        stale=not stats.available,
+        last_success_at=stats.last_success_at,
+        unavailable_reason=stats.unavailable_reason,
+    )
+
+
+def sum_traffic_figures(items: Iterable[TrafficStats | None]) -> TrafficFigures:
+    """Combine several keys' figures into one, for a bundle row or a bundle total.
+
+    Sums the accumulated totals of every key that has any — the group figure is
+    the sum of what the parts show, so a subscription total can never disagree
+    with the keys listed under it. The group is stale if any part is, and the
+    mark then names the OLDEST confirmation among the stale parts: that is the
+    point past which the sum stopped being complete.
+    """
+    figures = [traffic_figures(stats) for stats in items]
+    known = [figure for figure in figures if figure.known]
+    stale_times = [figure.last_success_at for figure in known if figure.stale and figure.last_success_at]
+    return TrafficFigures(
+        downloaded_bytes=sum(figure.downloaded_bytes for figure in known),
+        uploaded_bytes=sum(figure.uploaded_bytes for figure in known),
+        known=bool(known),
+        stale=any(figure.stale for figure in known),
+        last_success_at=min(stale_times) if stale_times else None,
+        unavailable_reason=next(
+            (figure.unavailable_reason for figure in known if figure.stale and figure.unavailable_reason),
+            None,
+        ),
+    )
+
+
+def traffic_stale_mark(figures: TrafficFigures) -> str:
+    """The "these numbers are stale" note, or an empty string when they are fresh."""
+    if not figures.stale:
+        return ""
+    if figures.last_success_at:
+        return t("stats_stale_mark", at=format_msk_datetime(figures.last_success_at))
+    return t("stats_stale_mark_no_time")
+
+
+def traffic_figures_inline(figures: TrafficFigures) -> str:
+    """One-line form: `↓ X · ↑ Y` plus the staleness note. For lists and rows."""
+    if not figures.known:
+        return t("stats_unavailable_short")
+    body = f"↓ {format_bytes(figures.downloaded_bytes)} · ↑ {format_bytes(figures.uploaded_bytes)}"
+    mark = traffic_stale_mark(figures)
+    return f"{body} · {mark}" if mark else body
+
+
+def traffic_figures_lines(figures: TrafficFigures) -> list[str]:
+    """Block form: a labelled line per direction, then the confirmation time."""
+    if not figures.known:
+        lines = [t("stats_not_available_yet")]
+        if figures.unavailable_reason:
+            lines.append(f"{t('field_reason')}: {h(figures.unavailable_reason)}")
+        return lines
+    lines = []
+    if figures.stale:
+        lines.append(t("stats_unavailable_now"))
+    lines.append(f"{t('field_downloaded')}: {h(format_bytes(figures.downloaded_bytes))}")
+    lines.append(f"{t('field_uploaded')}: {h(format_bytes(figures.uploaded_bytes))}")
+    if figures.last_success_at:
+        lines.append(f"{t('field_updated_at')}: {h(format_msk_datetime(figures.last_success_at))}")
+    if figures.stale and figures.unavailable_reason:
+        lines.append(f"{t('field_reason')}: {h(figures.unavailable_reason)}")
+    return lines
+
+
 def traffic_stats_block(stats: TrafficStats | None) -> list[str]:
     """The traffic section of a key screen: a heading plus what is actually known.
 
@@ -321,29 +472,7 @@ def traffic_stats_block(stats: TrafficStats | None) -> list[str]:
     without saying it is stale is how a user reads a frozen counter as "the key is
     idle".
     """
-    lines = [t("stats_block_title")]
-    if stats is None:
-        lines.append(t("stats_not_available_yet"))
-        return lines
-    if not stats.available:
-        if stats.last_success_at:
-            lines.append(t("stats_unavailable_now"))
-            lines.append(f"{t('field_downloaded')}: {h(format_bytes(stats.downloaded_bytes))}")
-            lines.append(f"{t('field_uploaded')}: {h(format_bytes(stats.uploaded_bytes))}")
-            lines.append(f"{t('field_updated_at')}: {h(format_msk_datetime(stats.last_success_at))}")
-        else:
-            lines.append(t("stats_not_available_yet"))
-        if stats.unavailable_reason:
-            lines.append(f"{t('field_reason')}: {h(stats.unavailable_reason)}")
-        return lines
-    lines.extend(
-        [
-            f"{t('field_downloaded')}: {h(format_bytes(stats.downloaded_bytes))}",
-            f"{t('field_uploaded')}: {h(format_bytes(stats.uploaded_bytes))}",
-            f"{t('field_updated_at')}: {h(format_msk_datetime(stats.last_success_at))}",
-        ]
-    )
-    return lines
+    return [t("stats_block_title"), *traffic_figures_lines(traffic_figures(stats))]
 
 
 def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer_user_id: int) -> str:
@@ -358,13 +487,7 @@ def admin_stats_page_text(views: list[KeyTrafficStatsView], page: int, *, viewer
             if owner is not None
             else format_user_display(view.key.owner_user_id, view.key.username)
         )
-        if stats is None or not stats.available:
-            if stats and stats.last_success_at:
-                traffic = f"{t('stats_last_prefix')}: ↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
-            else:
-                traffic = t("stats_unavailable_short")
-        else:
-            traffic = f"↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
+        traffic = traffic_figures_inline(traffic_figures(stats))
         updated = ""
         if stats and stats.last_success_at:
             updated = t("stats_updated_fmt", at=format_msk_datetime(stats.last_success_at))
@@ -1085,6 +1208,7 @@ def user_card_text(
     stats_by_key_id: dict[int, TrafficStats] | None = None,
     *,
     viewer_user_id: int | None = None,
+    traffic: OwnerTrafficSummary | None = None,
 ) -> str:
     username = f"@{user.username}" if user.username else t("not_specified")
     lines = [
@@ -1096,6 +1220,11 @@ def user_card_text(
     ]
     if user.note:
         lines.append(f"{t('field_note')}: {h(user.note)}")
+    if traffic is not None:
+        # Both scopes, over ALL of the owner's keys — the per-key list below is
+        # paginated and its figures do not add up to these on purpose.
+        lines.append("")
+        lines.extend(owner_traffic_lines(traffic))
     if keys is not None:
         lines.append("")
         lines.append(t("user_keys_title"))
@@ -1105,12 +1234,13 @@ def user_card_text(
             stats_by_key_id = stats_by_key_id or {}
             for key in keys:
                 stats = stats_by_key_id.get(key.id)
-                traffic = ""
-                if stats and stats.available:
-                    traffic = f" · ↓ {format_bytes(stats.downloaded_bytes)} · ↑ {format_bytes(stats.uploaded_bytes)}"
-                elif stats:
-                    traffic = f" · {t('user_stats_unavailable')}"
-                lines.append(f"{h(key_type_label(key))} · {code(key_display_label(key, viewer_user_id=viewer_user_id))}{traffic}")
+                key_traffic = ""
+                if stats is not None:
+                    key_traffic = f" · {traffic_figures_inline(traffic_figures(stats))}"
+                lines.append(
+                    f"{h(key_type_label(key))} · "
+                    f"{code(key_display_label(key, viewer_user_id=viewer_user_id))}{key_traffic}"
+                )
     return "\n".join(lines)
 
 
@@ -1283,13 +1413,19 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
     for entry in snap.top_users:
         name = f"@{entry.username}" if entry.username else f"id{entry.user_id}"
         top_parts.append(f"{h(name)} {h(format_bytes(entry.total_bytes))}")
+    # Every figure in this block — the totals, the average and the top — is the
+    # "all time" scope (↓ + ↑, including the deleted-key archive). The top is one
+    # sorted number per user because a ↓/↑ split makes the row unreadable, so the
+    # scope is named in the heading instead: the personal cabinet shows the same
+    # account under two scopes, and an unlabelled number here is exactly what made
+    # the two screens look like they disagreed.
     lines += [
-        "<b>📊 Трафик</b>",
+        "<b>📊 Трафик</b> (за всё время, с учётом удалённых ключей)",
         f"  Итого: <b>{h(format_bytes(t_.total_bytes))}</b>  (Xray: {h(format_bytes(t_.xray_bytes))} | AWG: {h(format_bytes(t_.awg_bytes))} | Hy2: {h(format_bytes(t_.hysteria2_bytes))})",
         f"  Среднее на ключ: {h(format_bytes(t_.avg_per_key_bytes))}",
     ]
     if top_parts:
-        lines.append("  Топ-5:")
+        lines.append("  Топ-5 за всё время:")
         for part in top_parts:
             lines.append(f"    {part}")
     lines.append("")

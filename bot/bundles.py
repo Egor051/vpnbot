@@ -25,6 +25,9 @@ from bot.formatters import (
     bundle_status_text,
     bundle_title,
     create_type_label,
+    sum_traffic_figures,
+    traffic_figures_inline,
+    traffic_stale_mark,
 )
 from config.settings import Settings
 from i18n import t
@@ -325,36 +328,37 @@ def bundle_stats_block(views: list[KeyTrafficStatsView] | None) -> list[str]:
     (Xray's stats API vs. the Hysteria2 trafficStats endpoint) and one of them can
     be unavailable while the other is fine. A single summed figure would hide both
     that gap and which protocol a traffic spike came from.
+
+    Every figure — the per-protocol rows and the total alike — goes through
+    :func:`bot.formatters.sum_traffic_figures`, the one place that decides what a
+    traffic number means. This screen used to decide for itself: it dropped any
+    key whose latest poll had not confirmed its counters and summed a 0 into the
+    total, so a subscription showed «недоступно» and 0 B while the very keys
+    listed under it showed their real figures.
     """
     lines = [t("stats_block_title")]
     if not views:
         lines.append(t("bundle_stats_empty") if views is not None else t("stats_not_available_yet"))
         return lines
 
-    total_down = 0
-    total_up = 0
     breakdown: list[str] = []
     for key_type, label in _STATS_BUCKETS:
         bucket = [view for view in views if view.key.key_type == key_type]
         if not bucket:
             continue
-        measured = [view.stats for view in bucket if view.stats is not None and view.stats.available]
-        if not measured:
+        figures = sum_traffic_figures(view.stats for view in bucket)
+        if not figures.known:
             breakdown.append(f"• {h(label)}: {h(t('bundle_stats_unavailable'))}")
             continue
-        down = sum(stats.downloaded_bytes for stats in measured)
-        up = sum(stats.uploaded_bytes for stats in measured)
-        total_down += down
-        total_up += up
-        breakdown.append(
-            f"• {h(label)}: ↓ {h(format_bytes(down))} · ↑ {h(format_bytes(up))}"
-        )
+        breakdown.append(f"• {h(label)}: {h(traffic_figures_inline(figures))}")
 
+    total = sum_traffic_figures(view.stats for view in views)
     lines.extend(
         [
             t("bundle_stats_total"),
-            f"{t('field_downloaded')}: {h(format_bytes(total_down))}",
-            f"{t('field_uploaded')}: {h(format_bytes(total_up))}",
+            f"{t('field_downloaded')}: {h(format_bytes(total.downloaded_bytes))}",
+            f"{t('field_uploaded')}: {h(format_bytes(total.uploaded_bytes))}",
+            *([h(traffic_stale_mark(total))] if total.stale else []),
             "",
             t("bundle_stats_by_protocol"),
             *breakdown,

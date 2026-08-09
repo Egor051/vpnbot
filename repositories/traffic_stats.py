@@ -104,6 +104,38 @@ class TrafficStatsRepository:
             source=source,
         )
 
+    async def touch_attempt(self, *, key_id: int, now: str, source: str) -> TrafficStats:
+        """Record a poll that reached the backend but found no counter for this key.
+
+        Updates ``last_attempt_at`` and nothing else — the accumulated totals, the
+        raw counters, ``available`` and ``last_success_at`` all survive untouched.
+        A missing counter is not a backend failure: xray creates its per-user
+        counters lazily, on the key's first traffic (right after a restart
+        ``statsquery`` lists none at all), and hysteria2's ``/traffic`` only lists
+        ids that have moved data. Recording that as "unavailable" is what blanked
+        the figures on keys that had simply not been used yet.
+
+        A key polled before it ever had a counter gets a fresh zero row that is
+        ``available`` — the backend answered, and its answer was "no traffic".
+        """
+        await self.db.conn.execute(
+            """
+            INSERT INTO vpn_key_traffic_stats (
+              key_id, downloaded_bytes, uploaded_bytes,
+              last_attempt_at, available, unavailable_reason, source
+            )
+            VALUES (?, 0, 0, ?, 1, NULL, ?)
+            ON CONFLICT(key_id) DO UPDATE SET
+              last_attempt_at = excluded.last_attempt_at
+            """,
+            (key_id, now, source),
+        )
+        await self.db.commit()
+        stats = await self.get_by_key_id(key_id)
+        if stats is None:
+            raise RuntimeError("Traffic stats attempt touch failed")
+        return stats
+
     async def upsert_unavailable(
         self,
         *,
