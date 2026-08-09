@@ -34,6 +34,7 @@ from bot.container import Services
 from bot.fsm.states import CreateKeyStates, EditFpStates, EditNoteStates, TrialRequestStates
 from bot.handlers.common import (
     InvalidCallbackData,
+    admin_owner_context,
     answer_callback_error,
     answer_message_error,
     parse_int_callback,
@@ -600,7 +601,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         else:
             await safe_edit_message_text(callback.message, t("key_unknown_type"))
             return
-        owner_ctx = _admin_owner_context(result.key, callback.from_user.id)
+        owner_ctx = admin_owner_context(result.key, callback.from_user.id)
         await safe_edit_message_text(
             callback.message,
             result.config_text,
@@ -631,7 +632,7 @@ async def open_key(callback: CallbackQuery, services: Services, rate_limiter: Ra
     try:
         key_id, owner_context, page_context = _parse_key_context(callback.data, "key:open")
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
-        owner_context = owner_context or _admin_owner_context(key, callback.from_user.id)
+        owner_context = owner_context or admin_owner_context(key, callback.from_user.id)
         if owner_context is not None and owner_context != key.owner_user_id:
             raise AccessDenied(t("invalid_callback_btn"))
         # Before the render, never after: the figures must not reach the screen
@@ -700,7 +701,7 @@ async def show_key_config(callback: CallbackQuery, state: FSMContext, services: 
             return
         rate_limiter.check(callback.from_user.id, "key_show", 5)
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
-        keyboard = key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id))
+        keyboard = key_actions_keyboard(key, owner_user_id=admin_owner_context(key, callback.from_user.id))
         if key.key_type == VpnKeyType.XRAY:
             await safe_callback_answer(callback)
             text = xray_config_text(await services.xray.get_xray_key_config(callback.from_user.id, key_id))
@@ -740,7 +741,7 @@ async def revoke_key_prompt(callback: CallbackQuery, services: Services) -> None
     try:
         key_id, owner_context, page_context = _parse_key_context(callback.data, "key:revoke")
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
-        owner_context = owner_context or _admin_owner_context(key, callback.from_user.id)
+        owner_context = owner_context or admin_owner_context(key, callback.from_user.id)
         if owner_context is not None and owner_context != key.owner_user_id:
             raise AccessDenied(t("revoke_context_stale"))
         await safe_edit_message_text(
@@ -763,7 +764,7 @@ async def delete_key_prompt(callback: CallbackQuery, services: Services) -> None
     try:
         key_id, owner_context, page_context = _parse_key_context(callback.data, "key:delete")
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
-        owner_context = owner_context or _admin_owner_context(key, callback.from_user.id)
+        owner_context = owner_context or admin_owner_context(key, callback.from_user.id)
         if owner_context is not None and owner_context != key.owner_user_id:
             raise AccessDenied(t("delete_context_stale"))
         await safe_edit_message_text(
@@ -797,12 +798,12 @@ async def confirm_key_action(callback: CallbackQuery, services: Services, rate_l
             await safe_edit_message_text(
                 callback.message,
                 t("key_revoked"),
-                reply_markup=key_actions_keyboard(updated, owner_user_id=_admin_owner_context(updated, callback.from_user.id)),
+                reply_markup=key_actions_keyboard(updated, owner_user_id=admin_owner_context(updated, callback.from_user.id)),
             )
         elif action == "delete":
             rate_limiter.check(callback.from_user.id, "key_delete", 10)
             await safe_callback_answer(callback, t("executing"))
-            owner_context = owner_context_from_callback or _admin_owner_context(key, callback.from_user.id)
+            owner_context = owner_context_from_callback or admin_owner_context(key, callback.from_user.id)
             if owner_context is not None and owner_context != key.owner_user_id:
                 raise AccessDenied(t("delete_context_stale"))
             if key.key_type == VpnKeyType.XRAY:
@@ -937,7 +938,7 @@ async def edit_note_confirm(callback: CallbackQuery, state: FSMContext, services
         await safe_edit_message_text(
             callback.message,
             t("note_updated"),
-            reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
+            reply_markup=key_actions_keyboard(key, owner_user_id=admin_owner_context(key, callback.from_user.id)),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1020,7 +1021,7 @@ async def edit_fp_select(
                 viewer_user_id=callback.from_user.id,
                 stats=await _key_stats(services, rate_limiter, callback.from_user.id, key),
             ),
-            reply_markup=key_actions_keyboard(key, owner_user_id=_admin_owner_context(key, callback.from_user.id)),
+            reply_markup=key_actions_keyboard(key, owner_user_id=admin_owner_context(key, callback.from_user.id)),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1229,10 +1230,6 @@ def _note_input_error(note: str | None) -> str | None:
     if len(note) > MAX_NOTE_LENGTH:
         return t("note_too_long", max=MAX_NOTE_LENGTH)
     return None
-
-
-def _admin_owner_context(key: Any, actor_user_id: int) -> int | None:
-    return key.owner_user_id if key.owner_user_id != actor_user_id else None
 
 
 async def _ensure_can_enter_create(actor_user_id: int, services: Services) -> None:

@@ -11,7 +11,7 @@ from bot.bundles import (
 )
 from bot.container import Services
 from bot.formatters import key_screen_text
-from bot.handlers.common import stats_views_for_screen
+from bot.handlers.common import admin_owner_context, stats_views_for_screen
 from bot.keyboards.admin import admin_panel_keyboard
 from bot.keyboards.common import back_to_menu
 from bot.keyboards.key_bundles import bundle_actions_keyboard
@@ -86,7 +86,10 @@ async def cancel_callback(
             await safe_edit_message_text(
                 callback.message,
                 key_screen_text(key, viewer_user_id=user_id, stats=views[0].stats if views else None),
-                reply_markup=key_actions_keyboard(key),
+                # Same owner context the direct entry point computes: a key card
+                # reached by cancelling out of a wizard is the same screen as one
+                # reached by tapping it, and must not offer a different keyboard.
+                reply_markup=key_actions_keyboard(key, owner_user_id=admin_owner_context(key, user_id)),
             )
         except Exception:
             await safe_edit_message_text(callback.message, t("cancel_done"), reply_markup=back_to_menu())

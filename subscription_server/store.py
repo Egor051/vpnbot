@@ -9,10 +9,11 @@ from pathlib import Path
 import aiosqlite
 
 from db.database import Database
-from models.dto import KeyBundle, TrafficStats, VpnKey
+from models.dto import KeyBundle, TrafficScopeTotals, VpnKey
 from models.enums import KeyBundleStatus, VpnKeyStatus
 from repositories.key_bundles import KeyBundleRepository
-from repositories.traffic_stats import TrafficStatsRepository
+from repositories.traffic_scope import CURRENT_KEYS
+from repositories.vpn_keys import VpnKeyRepository
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,14 @@ class BundleView:
 
     bundle: KeyBundle
     keys: tuple[VpnKey, ...]
-    traffic: tuple[TrafficStats, ...]
+    # The OWNER's «current keys» totals, not this bundle's children — the same
+    # scope and the same query the personal cabinet prints (repositories/
+    # traffic_scope.py). This used to be a third, independent definition: the
+    # children of this bundle, and only those a poll had confirmed. So one
+    # account had three different traffic figures — cabinet, dashboard, and
+    # whatever a VPN client showed from this header. None when nothing has ever
+    # been measured for the owner: the header claims no counter it does not have.
+    traffic: TrafficScopeTotals | None
 
     @property
     def expires_at(self) -> str | None:
@@ -126,7 +134,7 @@ class ReadOnlyBundleStore:
     def __init__(self, db_path: str | Path) -> None:
         self._db = ReadOnlyDatabase(Path(db_path))
         self._bundles = KeyBundleRepository(self._db)
-        self._traffic = TrafficStatsRepository(self._db)
+        self._vpn_keys = VpnKeyRepository(self._db)
         self._lock = asyncio.Lock()
         self._infra_failures = 0
 
@@ -162,7 +170,7 @@ class ReadOnlyBundleStore:
                     return None
                 children = await self._bundles.list_keys_of_bundle(bundle.id)
                 active = tuple(key for key in children if key.status is VpnKeyStatus.ACTIVE)
-                stats = await self._traffic.list_by_key_ids([key.id for key in active])
+                totals = await self._vpn_keys.sum_traffic_for_owner(bundle.user_id, CURRENT_KEYS)
             except (aiosqlite.Error, OSError, ValueError) as exc:
                 self._infra_failures += 1
                 logger.error(
@@ -171,12 +179,12 @@ class ReadOnlyBundleStore:
                     exc,
                 )
                 raise BundleStoreUnavailable(str(exc)) from exc
-        # Only counters we actually measured: a key with no stats row contributes
-        # nothing rather than a fabricated zero.
-        measured = tuple(
-            stats[key.id] for key in active if key.id in stats and stats[key.id].last_success_at
+        # A measured zero is a real answer and is reported as one; an owner with
+        # no traffic rows at all still yields no counter rather than a fabricated
+        # zero, which is the property the header had before and keeps.
+        return BundleView(
+            bundle=bundle, keys=active, traffic=totals if totals.measured else None
         )
-        return BundleView(bundle=bundle, keys=active, traffic=measured)
 
     async def healthcheck(self) -> bool:
         """Probe the DB with a trivial live read; False when it cannot be read."""

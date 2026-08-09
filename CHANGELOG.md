@@ -318,6 +318,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A foreign key's card offered different buttons depending on how you reached it.**
+  Every key screen is rendered under an *owner context*: non-`None` means "an admin is
+  looking at somebody else's key", and the keyboard then drops the owner-only actions
+  (note, fingerprint) and sends «к списку» back to that user's key list. `bot/handlers/
+  callbacks.py` re-renders the same card when a wizard is cancelled and did it *without*
+  that context, so an admin who cancelled out of a wizard on a foreign key got the owner's
+  keyboard on it. The rule now lives once, as `bot.handlers.common.admin_owner_context`,
+  and both paths call it.
+
+- **The subscription header was a third, independent traffic figure.** `Subscription-
+  Userinfo` summed this bundle's ACTIVE children, and only those whose counters a poll had
+  confirmed — so revoking a child silently dropped bytes it had already moved, a key
+  outside the bundle never counted at all, and one account could read three different
+  numbers: the cabinet's, the dashboard's, and whatever a VPN client showed. The header now
+  comes off the same scoped query as everything else (`repositories.traffic_scope`) under
+  the **«по текущим ключам»** scope — the one a user can verify from the keys they still
+  have. A measured zero is reported as `upload=0; download=0`; an owner with no traffic
+  rows at all still yields no counter rather than a fabricated zero, and `total=` is still
+  never emitted. `subscription_server` is a separate process — `deploy.sh` restarts it as a
+  sidecar (#282).
+
 - **Cancelling the fingerprint wizard threw you out to the main menu.** The wizard shares
   one cancel handler with every other FSM flow, and that handler reads its destination from
   `cancel_target` in the FSM data. The two fingerprint entry points — a key's and a

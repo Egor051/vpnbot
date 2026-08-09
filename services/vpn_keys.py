@@ -1,5 +1,5 @@
 
-from models.dto import OwnerTrafficSummary, TrafficScopeTotals, VpnKey
+from models.dto import OwnerTrafficSummary, VpnKey
 from models.enums import UserRole, VpnKeyStatus, VpnKeyType
 from repositories.traffic_scope import ALL_TIME, CURRENT_KEYS
 from repositories.vpn_keys import VpnKeyRepository
@@ -84,11 +84,9 @@ class VpnKeyQueryService:
 
     async def _owner_traffic_summary(self, owner_user_id: int) -> OwnerTrafficSummary:
         """Both scopes for one owner, from the one scoped query — no access check."""
-        current_down, current_up = await self.vpn_keys.sum_traffic_for_owner(owner_user_id, CURRENT_KEYS)
-        all_down, all_up = await self.vpn_keys.sum_traffic_for_owner(owner_user_id, ALL_TIME)
         return OwnerTrafficSummary(
-            current_keys=TrafficScopeTotals(downloaded_bytes=current_down, uploaded_bytes=current_up),
-            all_time=TrafficScopeTotals(downloaded_bytes=all_down, uploaded_bytes=all_up),
+            current_keys=await self.vpn_keys.sum_traffic_for_owner(owner_user_id, CURRENT_KEYS),
+            all_time=await self.vpn_keys.sum_traffic_for_owner(owner_user_id, ALL_TIME),
         )
 
     async def list_active_trial_by_owner(self, owner_user_id: int) -> list[VpnKey]:

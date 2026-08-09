@@ -29,6 +29,7 @@ from db.database import Database
 from models.dto import TelegramUserProfile, User, VpnKey
 from models.enums import KeyBundleStatus, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.key_bundles import KeyBundleRepository
+from repositories.traffic_scope import CURRENT_KEYS
 from repositories.traffic_stats import TrafficStatsRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
@@ -705,7 +706,7 @@ async def test_subscription_headers_are_present_and_truthful(tmp_path: Path) -> 
         await harness.db.close()
 
 
-async def test_measured_traffic_is_summed_across_children(tmp_path: Path) -> None:
+async def test_measured_traffic_is_summed_across_the_owners_current_keys(tmp_path: Path) -> None:
     harness = await _seed(tmp_path)
     client, store = await _client(harness)
     try:
@@ -723,6 +724,136 @@ async def test_measured_traffic_is_summed_across_children(tmp_path: Path) -> Non
         userinfo = (await client.get(f"/sub/{harness.token}")).headers["Subscription-Userinfo"]
         assert "upload=30" in userinfo
         assert "download=3000" in userinfo
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_the_header_reports_the_same_figure_the_personal_cabinet_shows(tmp_path: Path) -> None:
+    """The endpoint is a third process reading a third copy of the same question.
+
+    It used to answer it its own way — this bundle's children, and only those a
+    poll had confirmed — so one account could read three different traffic
+    figures: the cabinet's, the dashboard's, and whatever a VPN client showed
+    from this header. All three now come off one scoped query; the header is the
+    «current keys» scope, which is the one a user can verify from the keys they
+    still have.
+    """
+    harness = await _seed(tmp_path)
+    client, store = await _client(harness)
+    try:
+        keys = await harness.bundles.list_keys_of_bundle(harness.bundle_id)
+        for index, key in enumerate(keys):
+            await harness.traffic.upsert_success(
+                key_id=key.id,
+                downloaded_bytes=1_000_000 * (index + 1),
+                uploaded_bytes=7 * (index + 1),
+                raw_downloaded_bytes=None,
+                raw_uploaded_bytes=None,
+                now="2026-01-01T00:00:00+00:00",
+                source="test",
+            )
+        # The owner also holds a key OUTSIDE this bundle. It counts toward what
+        # the cabinet shows them, so it has to count toward the header too —
+        # this is the figure the endpoint used to answer its own way.
+        standalone = await harness.vpn_keys.create_pending(
+            owner_user_id=OWNER,
+            username=f"user{OWNER}",
+            key_type=VpnKeyType.XRAY,
+            note=None,
+            payload={},
+            public_payload={},
+            created_by=ADMIN,
+            now="2026-01-01T00:00:00+00:00",
+            uuid="00000000-0000-4000-8000-0000000000ff",
+            email_label="xray_tcp_standalone",
+        )
+        await harness.traffic.upsert_success(
+            key_id=standalone.id,
+            downloaded_bytes=500_000_000,
+            uploaded_bytes=4242,
+            raw_downloaded_bytes=None,
+            raw_uploaded_bytes=None,
+            now="2026-01-01T00:00:00+00:00",
+            source="test",
+        )
+
+        cabinet = await harness.vpn_keys.sum_traffic_for_owner(OWNER, CURRENT_KEYS)
+        userinfo = (await client.get(f"/sub/{harness.token}")).headers["Subscription-Userinfo"]
+
+        assert f"upload={cabinet.uploaded_bytes}" in userinfo
+        assert f"download={cabinet.downloaded_bytes}" in userinfo
+        # Every current key of the owner, children and standalone alike.
+        assert cabinet.downloaded_bytes == sum(1_000_000 * (i + 1) for i in range(len(keys))) + 500_000_000
+        assert cabinet.uploaded_bytes == sum(7 * (i + 1) for i in range(len(keys))) + 4242
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_a_revoked_key_still_counts_toward_the_header(tmp_path: Path) -> None:
+    """«Current keys» is status != 'deleted', not "active".
+
+    The endpoint used to sum only ACTIVE children, so revoking one silently
+    dropped the bytes it had already moved out of the header while the cabinet
+    went on counting them. Traffic that happened does not un-happen.
+    """
+    harness = await _seed(tmp_path)
+    client, store = await _client(harness)
+    try:
+        keys = await harness.bundles.list_keys_of_bundle(harness.bundle_id)
+        await harness.traffic.upsert_success(
+            key_id=keys[0].id,
+            downloaded_bytes=900,
+            uploaded_bytes=90,
+            raw_downloaded_bytes=None,
+            raw_uploaded_bytes=None,
+            now="2026-01-01T00:00:00+00:00",
+            source="test",
+        )
+        await harness.db.conn.execute(
+            "UPDATE vpn_keys SET status = ? WHERE id = ?",
+            (VpnKeyStatus.REVOKED.value, keys[0].id),
+        )
+        await harness.db.commit()
+
+        cabinet = await harness.vpn_keys.sum_traffic_for_owner(OWNER, CURRENT_KEYS)
+        assert (cabinet.downloaded_bytes, cabinet.uploaded_bytes) == (900, 90)
+
+        userinfo = (await client.get(f"/sub/{harness.token}")).headers["Subscription-Userinfo"]
+        assert "upload=90" in userinfo
+        assert "download=900" in userinfo
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_a_measured_zero_is_reported_but_an_absence_is_not(tmp_path: Path) -> None:
+    """`total=` is never invented, and neither is a counter nobody ever measured."""
+    harness = await _seed(tmp_path)
+    client, store = await _client(harness)
+    try:
+        # Nothing measured at all: the header claims no counter.
+        first = (await client.get(f"/sub/{harness.token}")).headers["Subscription-Userinfo"]
+        assert "upload=" not in first and "download=" not in first
+
+        # Measured, and the answer happens to be zero: that IS a figure.
+        keys = await harness.bundles.list_keys_of_bundle(harness.bundle_id)
+        await harness.traffic.upsert_success(
+            key_id=keys[0].id,
+            downloaded_bytes=0,
+            uploaded_bytes=0,
+            raw_downloaded_bytes=0,
+            raw_uploaded_bytes=0,
+            now="2026-01-01T00:00:00+00:00",
+            source="test",
+        )
+        second = (await client.get(f"/sub/{harness.token}")).headers["Subscription-Userinfo"]
+        assert "upload=0" in second and "download=0" in second
+        assert "total=" not in second
     finally:
         await client.close()
         await store.close()
