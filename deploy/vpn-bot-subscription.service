@@ -49,6 +49,13 @@ User=vpn-bot
 Group=vpn-bot
 UMask=0077
 
+# File-descriptor ceiling. This is a network service — it binds the public HTTPS
+# port as well as loopback — and with no LimitNOFILE it inherits systemd's default
+# soft limit of 1024 (measured on the host 2026-08-11). Literal, not infinity: the
+# host hard limit is 524288 and this process does not work with hundreds of
+# thousands of descriptors.
+LimitNOFILE=65536
+
 # Single-instance lock lives here (SUBSCRIPTION_LOCK_PATH); systemd creates and
 # cleans up the directory, so nothing under /run needs to pre-exist.
 RuntimeDirectory=vpn-bot-subscription
