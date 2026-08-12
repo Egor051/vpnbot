@@ -59,6 +59,45 @@ host, the same way as `tls.cert`/`tls.key`; `install-config.sh` does not manage 
 `:80`/`:443` listeners and TCP/443 is already held by Xray REALITY on this host — the decoy is
 served over the existing UDP/443 path instead.
 
+### Per-client bandwidth ceiling (Brutal)
+
+`deploy/hysteria/config.yaml` declares a rate ceiling:
+
+```yaml
+bandwidth:
+  up: 95 mbps
+  down: 95 mbps
+```
+
+Server-side values are a limit **per client**, not a total shaper for the host — each client is
+held to this rate, they do not share it. The server's `up` is the client's **download** ceiling
+and its `down` is the client's **upload** ceiling; the effective rate in each direction is
+`min(client value, server value)`. Zero or an omitted value on either side means *no limit* for
+that direction, so this block's absence would not be a conservative default — it would be no
+ceiling at all. `ignoreClientBandwidth` is deliberately **not** set: it is the mutually
+exclusive alternative, discarding the client's declared bandwidth outright and forcing the
+non-Brutal controller, which makes the values above dead weight. As with every other key in the
+file, a change takes effect only on the next `systemctl restart hysteria-server` — and that
+restart drops live QUIC sessions, so do it in a quiet window.
+
+**Turning on Brutal, client-side.** The `hysteria2://` links the bot issues carry no bandwidth
+parameters, so out of the box every client runs the loss-responsive **BBR** controller. A user
+who wants the **Brutal** sender instead adds a `bandwidth` section to their own client profile
+(v2rayN / NekoBox / Happ all expose these fields) with **their own real line speed** — not the
+server ceiling above:
+
+```yaml
+bandwidth:
+  up: 20 mbps     # your real upload
+  down: 100 mbps  # your real download
+```
+
+Per the official Hysteria 2 docs, higher is **not** better: Brutal does not measure the path, it
+sends at the rate it was told and holds that rate through loss. A figure above what the
+connection actually carries therefore backfires — congestion and an unstable connection, not
+more speed. The server clamps anything above `95 mbps`, but it cannot correct an overstated
+value below that.
+
 ### WARP egress marking (`vpnbot-hy2-warp-mark`)
 
 When WARP split-tunnel is deployed, `vpnbot-hy2-warp-mark` fwmarks locally-generated
