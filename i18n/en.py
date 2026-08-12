@@ -36,7 +36,7 @@ STRINGS: dict[str, str] = {
     "key_status_deleted": "deleted",
     "key_status_failed": "failed",
     # ── warnings / banners ────────────────────────────────────────────────────
-    "one_key_one_device": "<b>⚠️ 1 KEY = 1 DEVICE</b>",
+    "one_key_one_device": "<b>⚠️ 1 KEY ➜ 1 DEVICE</b>",
     "note_create_warning": "<b>We recommend filling in this field to avoid confusing your keys.</b>",
     "server_restart_warning": (
         "<b>⚠️ The server restarts on dates that are multiples of five at 04:00 MSK. "
@@ -215,11 +215,14 @@ STRINGS: dict[str, str] = {
         "(profile) or via a config file: Xray and Hysteria2 keys are issued as a link, AWG as a link or "
         "a file. After importing, enable the connection in your app.\n\n"
         "<b>Recommended apps:</b> for AWG — the official AmneziaVPN client; "
-        "for Xray — v2RayTun or Happ (or alternatives such as v2RayNG or NekoBox); "
-        "for Hysteria2 — NekoBox or Happ.\n\n"
+        "for Xray and Hysteria2 — v2RayTun or Happ (or alternatives such as v2RayNG or NekoBox).\n\n"
         "<b>Tip:</b> keep several different keys — with different protocols and/or transports "
         "(e.g. AWG, Xray TCP/XHTTP and Hysteria2). If one of them starts to degrade due to blocking, "
-        "you can switch to another and won't be left without a connection."
+        "you can switch to another and won't be left without a connection. The most convenient way to do "
+        "this is an All-in-One key: one subscription link covering both Xray and Hysteria2 — the client "
+        "fetches both, and you can switch between them right in the app without creating new keys. AWG "
+        "isn't part of the subscription (a WireGuard config can't be delivered as a link), so you'll "
+        "still need a separate key for it."
     ),
     "faq_trouble": (
         "Check your internet, the imported profile, the access expiry date, and whether the same key "
@@ -227,10 +230,11 @@ STRINGS: dict[str, str] = {
         "try enabling and disabling airplane mode or restarting the device.\n\n"
         "<b>AWG:</b> if the connection is unstable or won't connect, try creating a new AWG key "
         "and choosing a lower MTU — 1280 — during creation.\n\n"
-        "<b>Xray:</b> if the connection won't establish, try changing the fingerprint "
-        "(use the \"Change Fingerprint\" button in the key settings). Good starting options: Firefox or Edge. "
-        "If that doesn't help, try creating a new Xray key with a different transport (TCP / XHTTP) — "
-        "the transport choice is offered during key creation.\n\n"
+        "<b>Xray:</b> if the connection won't establish, update your VPN app to the latest version "
+        "and try creating a new Xray key with a different transport (TCP / XHTTP) — the transport choice "
+        "is offered during key creation. When creating new Xray keys, pick the Firefox or Edge fingerprint "
+        "right away — those are the most stable options. Changing the fingerprint on an already-created "
+        "key is not recommended: it won't fix a connection problem and can even make things worse.\n\n"
         "<b>Hysteria2:</b> make sure your client supports Hysteria2 (e.g. NekoBox or Hiddify). "
         "The protocol runs over UDP — if your network throttles or blocks it, try a different network "
         "(e.g. mobile instead of Wi-Fi) or switch to an Xray/AWG key. MTU and fingerprint settings "
@@ -255,9 +259,11 @@ STRINGS: dict[str, str] = {
         "Extending an existing key is not possible."
     ),
     "faq_device": (
-        "Yes. One key is meant strictly for one device. Using the same key on multiple devices "
-        "will inevitably cause problems: connections become unstable (devices keep dropping each "
-        "other), and statistics and access management get mixed up. Create a separate key for each device."
+        "Yes: 1 key ➜ 1 device. One key is meant strictly for one device. Using the same key on multiple "
+        "devices will inevitably cause problems: connections become unstable (devices keep dropping each "
+        "other), and statistics and access management get mixed up. Create a separate key for each device.\n\n"
+        "The reverse, however, is fine: one device can have several keys installed at once (for example, "
+        "for different protocols, or as a backup), and you can enable whichever one you like."
     ),
     "faq_stats": (
         "Open \"My keys\", select the key, and tap \"Statistics\". "
@@ -581,7 +587,7 @@ STRINGS: dict[str, str] = {
     "btn_faq_key_statuses": "What do key statuses mean?",
     "btn_faq_revoke_delete": "Revoke vs delete a key?",
     "btn_faq_expired": "What if my key has expired?",
-    "btn_faq_device": "1 key = 1 device?",
+    "btn_faq_device": "1 key ➜ 1 device?",
     "btn_faq_stats": "How to check key statistics?",
     "btn_faq_choice": "Which protocol to choose?",
     "btn_faq_fingerprint": "What is a fingerprint?",
