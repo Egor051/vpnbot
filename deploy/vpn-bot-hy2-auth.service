@@ -31,6 +31,12 @@ User=vpn-bot
 Group=vpn-bot
 UMask=0077
 
+# File-descriptor ceiling. Without LimitNOFILE the unit inherits systemd's default
+# soft limit of 1024; this endpoint serves one HTTP request per Hysteria2 handshake,
+# so it wants the same headroom as the other Python units. Literal, not infinity —
+# the host hard limit is 524288 and the working profile is nowhere near it.
+LimitNOFILE=65536
+
 # Hardening. Unlike vpn-bot.service this unit runs no sudo helpers, so it can lock
 # down fully — including NoNewPrivileges.
 NoNewPrivileges=yes

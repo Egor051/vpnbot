@@ -22,6 +22,12 @@ RestartSec=5
 User=root
 Group=root
 UMask=0077
+# File-descriptor ceiling. With no LimitNOFILE the unit inherits systemd's default
+# soft limit of 1024 (measured on the host 2026-08-11: PID of main.py at 1024 soft
+# / 524288 hard) while the backends next to it set theirs explicitly. A literal is
+# used rather than infinity on purpose — the hard limit here is 524288 and this
+# process does not work with hundreds of thousands of descriptors.
+LimitNOFILE=65536
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=false

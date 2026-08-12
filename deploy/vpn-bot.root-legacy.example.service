@@ -14,6 +14,9 @@ RestartSec=5
 User=root
 Group=root
 UMask=0077
+# Same file-descriptor ceiling as the shipped deploy/vpn-bot.service, so falling back
+# to this legacy unit does not drop the bot back to the default soft limit of 1024.
+LimitNOFILE=65536
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true

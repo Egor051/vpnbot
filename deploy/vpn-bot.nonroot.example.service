@@ -24,6 +24,10 @@ RestartSec=5
 User=vpn-bot
 Group=vpn-bot
 UMask=0077
+# Same file-descriptor ceiling as the shipped deploy/vpn-bot.service, so installing
+# this reference unit instead does not drop the bot back to the default soft limit
+# of 1024. Literal, not infinity — see deploy/vpn-bot.service.
+LimitNOFILE=65536
 # NoNewPrivileges must stay disabled/omitted: sudo helper entrypoints need sudo's
 # setuid privilege transition while the bot itself remains unprivileged.
 PrivateTmp=true

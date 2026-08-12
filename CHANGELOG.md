@@ -318,6 +318,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The Python services ran with a 1024 open-file ceiling.** Neither `vpn-bot.service` nor
+  `vpn-bot-subscription.service` set `LimitNOFILE`, so both inherited systemd's default soft
+  limit of 1024 (measured on the host 2026-08-11) while the backends beside them set theirs
+  explicitly — xray 1000000, hysteria 524287. The subscription endpoint is the one that
+  matters: it terminates TLS on the public port itself, so 1024 is a low ceiling for it.
+  Every unit that starts the project interpreter now sets `LimitNOFILE=65536` — a literal
+  rather than `infinity`, since the host hard limit is 524288 and none of these processes
+  work with hundreds of thousands of descriptors. `deploy.sh` installs only
+  `vpn-bot.service`; `vpn-bot-subscription.service` and `vpn-bot-hy2-auth.service` (running
+  on the host as `vpnbot-hy2-auth`) are reported as drift and applied by hand.
+  `tests/test_deploy_unit_nofile_limits.py` guards the floor by parsing the unit files in
+  the repo — never the live host.
+
 - **A foreign key's card offered different buttons depending on how you reached it.**
   Every key screen is rendered under an *owner context*: non-`None` means "an admin is
   looking at somebody else's key", and the keyboard then drops the owner-only actions
