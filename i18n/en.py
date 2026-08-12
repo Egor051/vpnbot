@@ -219,8 +219,10 @@ STRINGS: dict[str, str] = {
         "<b>Tip:</b> keep several different keys — with different protocols and/or transports "
         "(e.g. AWG, Xray TCP/XHTTP and Hysteria2). If one of them starts to degrade due to blocking, "
         "you can switch to another and won't be left without a connection. The most convenient way to do "
-        "this is an All-in-One key: one subscription link for all protocols — the client fetches all of "
-        "them, and you can switch between them right in the app without creating new keys."
+        "this is an All-in-One key: one subscription link covering both Xray and Hysteria2 — the client "
+        "fetches both, and you can switch between them right in the app without creating new keys. AWG "
+        "isn't part of the subscription (a WireGuard config can't be delivered as a link), so you'll "
+        "still need a separate key for it."
     ),
     "faq_trouble": (
         "Check your internet, the imported profile, the access expiry date, and whether the same key "
