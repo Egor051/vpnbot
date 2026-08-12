@@ -26,6 +26,37 @@
 
 listen: :443
 
+# Per-client rate ceiling for Hysteria2's Brutal congestion controller.
+#
+# Brutal only engages when a bandwidth value is in play; with no value on either
+# side the connection falls back to the BBR controller, which backs off on loss.
+# Brutal does NOT measure the path — it sends at the rate it was told and holds
+# that rate through loss — so without a ceiling a client that declares a fantasy
+# figure (v2rayN / NekoBox / Happ all expose these fields) makes this 1-vCPU box
+# try to sustain it, at every other client's expense. That is what these values
+# cap. They do not stop anyone from using Brutal; they bound it.
+#
+# Semantics, per the Hysteria 2 docs (Full Server Config / Full Client Config):
+#   - Server-side values are a limit PER CLIENT, not a total shaper for the host:
+#     each client is held to this rate, they do not share it.
+#   - The server's `up` is the client's DOWNLOAD ceiling; the server's `down` is
+#     the client's UPLOAD ceiling (the server's upload is the client's download).
+#   - The effective rate in each direction is min(client value, server value).
+#   - Zero, or the value omitted, means "no limit" for that direction — on either
+#     side. This block existing is the whole point: an absent one is not a
+#     conservative default, it is no ceiling at all.
+#   - `ignoreClientBandwidth: true` is the mutually exclusive alternative: it
+#     discards the client's declared bandwidth outright and forces the non-Brutal
+#     controller, which makes the values below dead weight. It is deliberately
+#     NOT set here — the goal is to cap Brutal, not to disable it.
+#
+# Format is the docs' own literal (`bps`/`kbps`/`mbps`/`gbps`/`tbps`).
+# Like every other key in this file, a change here only takes effect on the next
+# `systemctl restart hysteria-server`.
+bandwidth:
+  up: 95 mbps
+  down: 95 mbps
+
 tls:
   # Paths are host-local; the cert/key files themselves are never committed to
   # git. Populated/refreshed by acme.sh --install-cert (see header above).

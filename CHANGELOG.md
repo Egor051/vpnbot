@@ -44,6 +44,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Hysteria2: a per-client bandwidth ceiling in the tracked server config.** `deploy/hysteria/config.yaml`
+  now declares `bandwidth: {up: 95 mbps, down: 95 mbps}`. Hysteria2's Brutal congestion controller only
+  engages when a bandwidth value is in play, and it does not measure the path — it sends at the rate it was
+  told and holds that rate through loss — so a client that declares its own inflated figure (the field is
+  exposed by v2rayN / NekoBox / Happ) would otherwise make this 1-vCPU box try to sustain it at every other
+  client's expense. Server-side values are a limit **per client**, not a total shaper for the host, and the
+  effective rate is `min(client value, server value)`; an omitted block is not a conservative default but no
+  ceiling at all, which is why this belongs in the tracked template rather than in a hand edit on the host —
+  the next `install-config.sh` run would drop it, exactly as `ignoreClientBandwidth` was lost when Hysteria2
+  moved to UDP/443. `ignoreClientBandwidth` is deliberately **not** added: it is the mutually exclusive
+  alternative (discard the client's request, force the non-Brutal controller). Takes effect only on the next
+  `systemctl restart hysteria-server`. A regression test parses the tracked template and pins both values;
+  `docs/hysteria.md` / `docs/hysteria.ru.md` document how a client opts into Brutal with its **own** real
+  line speed, and why overstating it backfires.
+
 - **All-in-one subscription — bot UI (`SUBSCRIPTION_ENABLED`, still `false` by
   default).** The last PR of the subscription series and the first one users can see —
   but only once the flag is on. With it off the bot behaves exactly as before: «Create
