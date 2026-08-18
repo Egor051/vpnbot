@@ -62,7 +62,7 @@ A refusal never extends the window, and it is logged at `WARNING` with the bucke
 |---|---|
 | `Profile-Title` | The bundle's own label (`bundle_XXXXX`); `base64:`-wrapped only if a hand-edited label is not ASCII. |
 | `Profile-Update-Interval` | `SUBSCRIPTION_UPDATE_INTERVAL_HOURS` (hours). |
-| `Subscription-Userinfo` | `upload=`/`download=` summed from the traffic counters the bot actually collected for the children (omitted when nothing was ever measured), and `expire=` from the children's shared `expires_at` as unix seconds (omitted when the bundle has no expiry). The header itself is omitted when neither is available. |
+| `Subscription-Userinfo` | `upload=`/`download=` are the subscription owner's traffic under the **«за всё время» (all time, deleted keys included)** scope — the same second line the personal cabinet and the admin user card print, off the same query (`repositories/traffic_scope.py`, `ALL_TIME`). Deleted keys count because a client app's counter reads as "what this account has used", and deleting a key must not walk it backwards. Omitted when nothing was ever measured for that owner (a measured zero IS reported). `expire=` comes from the children's shared `expires_at` as unix seconds (omitted when the bundle has no expiry). The header itself is omitted when neither is available. |
 | `Cache-Control` | `no-store` — the body is a live credential set. |
 
 `total=` is deliberately **never** emitted: this deployment has no traffic quota, so any value

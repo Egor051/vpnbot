@@ -216,10 +216,13 @@ def _profile_title(label: str) -> str:
 def _subscription_userinfo(view: BundleView) -> str:
     """Build ``Subscription-Userinfo`` from values that actually exist.
 
-    Emitted only when measured: ``upload``/``download`` are the owner's «current
-    keys» totals — the same scope, from the same query, that the personal cabinet
-    prints, so the figure a VPN client shows and the figure the bot shows are one
-    number (see :mod:`repositories.traffic_scope`). Omitted entirely when nothing
+    Emitted only when measured: ``upload``/``download`` are the owner's «за всё
+    время» totals — the same scope (:data:`~repositories.traffic_scope.ALL_TIME`),
+    from the same query, that the personal cabinet and the admin card print on
+    their all-time line, so the figure a VPN client shows and the figure the bot
+    shows are one number. Deleted keys are included: a counter in a client app is
+    read as "what this account has used", and under the «current keys» scope
+    deleting a key made that counter go backwards. Omitted entirely when nothing
     has ever been measured for that owner. ``expire`` comes from the children's
     shared expiry. ``total`` is NEVER emitted — this deployment has no traffic
     quota, so any number there would be invented, and clients read a fabricated

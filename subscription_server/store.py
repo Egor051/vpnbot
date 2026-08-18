@@ -12,7 +12,7 @@ from db.database import Database
 from models.dto import KeyBundle, TrafficScopeTotals, VpnKey
 from models.enums import KeyBundleStatus, VpnKeyStatus
 from repositories.key_bundles import KeyBundleRepository
-from repositories.traffic_scope import CURRENT_KEYS
+from repositories.traffic_scope import ALL_TIME
 from repositories.vpn_keys import VpnKeyRepository
 
 logger = logging.getLogger(__name__)
@@ -101,13 +101,25 @@ class BundleView:
 
     bundle: KeyBundle
     keys: tuple[VpnKey, ...]
-    # The OWNER's «current keys» totals, not this bundle's children — the same
-    # scope and the same query the personal cabinet prints (repositories/
-    # traffic_scope.py). This used to be a third, independent definition: the
-    # children of this bundle, and only those a poll had confirmed. So one
-    # account had three different traffic figures — cabinet, dashboard, and
-    # whatever a VPN client showed from this header. None when nothing has ever
-    # been measured for the owner: the header claims no counter it does not have.
+    # The OWNER's «за всё время» totals, not this bundle's children — the same
+    # scope and the same query the personal cabinet and the admin card print on
+    # their all-time line (repositories/traffic_scope.py, ALL_TIME). This used to
+    # be a third, independent definition: the children of this bundle, and only
+    # those a poll had confirmed. So one account had three different traffic
+    # figures — cabinet, dashboard, and whatever a VPN client showed from this
+    # header.
+    #
+    # Why ALL_TIME and not CURRENT_KEYS (which is what #285 chose): the number a
+    # client app prints is read as "what this account has used", and the only
+    # figure that keeps growing monotonically is the all-time one. Under
+    # «current keys» a deleted key made the client's counter go DOWN — traffic
+    # that happened does not un-happen — and the user comparing the app against
+    # the cabinet's all-time line saw two different numbers again, which is the
+    # exact confusion traffic_scope.py exists to end. The archive-vs-deleted-row
+    # double-count guard lives in that scope, not here.
+    #
+    # None when nothing has ever been measured for the owner: the header claims
+    # no counter it does not have.
     traffic: TrafficScopeTotals | None
 
     @property
@@ -170,7 +182,7 @@ class ReadOnlyBundleStore:
                     return None
                 children = await self._bundles.list_keys_of_bundle(bundle.id)
                 active = tuple(key for key in children if key.status is VpnKeyStatus.ACTIVE)
-                totals = await self._vpn_keys.sum_traffic_for_owner(bundle.user_id, CURRENT_KEYS)
+                totals = await self._vpn_keys.sum_traffic_for_owner(bundle.user_id, ALL_TIME)
             except (aiosqlite.Error, OSError, ValueError) as exc:
                 self._infra_failures += 1
                 logger.error(
