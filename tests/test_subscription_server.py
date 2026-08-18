@@ -29,7 +29,7 @@ from db.database import Database
 from models.dto import TelegramUserProfile, User, VpnKey
 from models.enums import KeyBundleStatus, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.key_bundles import KeyBundleRepository
-from repositories.traffic_scope import CURRENT_KEYS
+from repositories.traffic_scope import ALL_TIME, CURRENT_KEYS
 from repositories.traffic_stats import TrafficStatsRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
@@ -736,9 +736,17 @@ async def test_the_header_reports_the_same_figure_the_personal_cabinet_shows(tmp
     It used to answer it its own way — this bundle's children, and only those a
     poll had confirmed — so one account could read three different traffic
     figures: the cabinet's, the dashboard's, and whatever a VPN client showed
-    from this header. All three now come off one scoped query; the header is the
-    «current keys» scope, which is the one a user can verify from the keys they
-    still have.
+    from this header. All three now come off one scoped query.
+
+    The scope this test pins CHANGED. #285 wired the header to «по текущим
+    ключам» — verifiable from the keys the user still holds — and that turned out
+    to be the wrong question for a client app: the app's counter is read as "what
+    this account has used", so a deleted key made it go DOWN. The header is now
+    the «за всё время» scope (ALL_TIME), i.e. the second line of the cabinet and
+    of the admin card, deleted keys included. With no deleted key in play the two
+    scopes coincide, which is why the arithmetic below is unchanged — the
+    divergence is pinned by
+    ``test_the_header_counts_a_deleted_key_the_cabinets_all_time_line_counts``.
     """
     harness = await _seed(tmp_path)
     client, store = await _client(harness)
@@ -794,11 +802,13 @@ async def test_the_header_reports_the_same_figure_the_personal_cabinet_shows(tmp
 
 
 async def test_a_revoked_key_still_counts_toward_the_header(tmp_path: Path) -> None:
-    """«Current keys» is status != 'deleted', not "active".
+    """A revoked key is not a deleted key: its bytes stay in every scope.
 
     The endpoint used to sum only ACTIVE children, so revoking one silently
     dropped the bytes it had already moved out of the header while the cabinet
-    went on counting them. Traffic that happened does not un-happen.
+    went on counting them. Traffic that happened does not un-happen. Nothing is
+    archived by a revoke, so «по текущим ключам» and «за всё время» agree here and
+    the figure is the same under either scope.
     """
     harness = await _seed(tmp_path)
     client, store = await _client(harness)
@@ -825,6 +835,107 @@ async def test_a_revoked_key_still_counts_toward_the_header(tmp_path: Path) -> N
         userinfo = (await client.get(f"/sub/{harness.token}")).headers["Subscription-Userinfo"]
         assert "upload=90" in userinfo
         assert "download=900" in userinfo
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_the_header_counts_a_deleted_key_the_cabinets_all_time_line_counts(tmp_path: Path) -> None:
+    """A DELETED child's bytes must stay in the header — the whole reason the
+    scope moved from «по текущим ключам» to «за всё время».
+
+    Deleting a key hard-deletes the row and archives its counters
+    (``hard_delete_with_stats`` → ``deleted_key_traffic_archive``), so under the
+    old scope the number a client app displayed dropped the moment a key was
+    revoked-and-deleted: the app said 900 one refresh and 400 the next, while the
+    cabinet's all-time line still said 900. A counter that goes backwards reads as
+    data loss, not as a smaller scope.
+
+    Driven end to end: real deletion path → live read by the endpoint → the header
+    on the wire, compared against BOTH scopes so the assertion states which
+    question the header now answers rather than just quoting a number.
+    """
+    harness = await _seed(tmp_path)
+    client, store = await _client(harness)
+    try:
+        keys = await harness.bundles.list_keys_of_bundle(harness.bundle_id)
+        survivor, doomed = keys[0], keys[1]
+        for key, (down, up) in ((survivor, (400, 40)), (doomed, (500, 50))):
+            await harness.traffic.upsert_success(
+                key_id=key.id,
+                downloaded_bytes=down,
+                uploaded_bytes=up,
+                raw_downloaded_bytes=None,
+                raw_uploaded_bytes=None,
+                now="2026-01-01T00:00:00+00:00",
+                source="test",
+            )
+
+        before = (await client.get(f"/sub/{harness.token}")).headers["Subscription-Userinfo"]
+        assert "download=900" in before and "upload=90" in before
+
+        # Revoke, then really delete — the same repository call every delete flow
+        # (xray/hysteria/awg services) ends in, so the archive row is written by
+        # production code and not by the test.
+        await harness.vpn_keys.mark_revoked(doomed.id, ADMIN, "now")
+        await harness.vpn_keys.hard_delete_with_stats(doomed.id, "2026-01-02T00:00:00+00:00")
+
+        current = await harness.vpn_keys.sum_traffic_for_owner(OWNER, CURRENT_KEYS)
+        all_time = await harness.vpn_keys.sum_traffic_for_owner(OWNER, ALL_TIME)
+        # The two scopes really do disagree now: that is what this test is about.
+        assert (current.downloaded_bytes, current.uploaded_bytes) == (400, 40)
+        assert (all_time.downloaded_bytes, all_time.uploaded_bytes) == (900, 90)
+
+        after = (await client.get(f"/sub/{harness.token}")).headers["Subscription-Userinfo"]
+        assert f"download={all_time.downloaded_bytes}" in after
+        assert f"upload={all_time.uploaded_bytes}" in after
+        # The deleted key's 500/50 did NOT vanish, and the counter did not shrink.
+        assert "download=400" not in after and "upload=40" not in after
+        # …and the archive is counted ONCE: the vpn_keys row is gone, so the
+        # ALL_TIME guard has nothing to double up, and the header proves it.
+        assert "download=1400" not in after
+        assert "total=" not in after
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_an_account_with_no_deleted_key_reads_exactly_as_before(tmp_path: Path) -> None:
+    """Regression pin for the scope change: with nothing ever deleted, the two
+    scopes are the same set of rows, so the header's number is byte-for-byte what
+    #285 shipped. Only accounts that have deleted a key see any difference.
+    """
+    harness = await _seed(tmp_path)
+    client, store = await _client(harness)
+    try:
+        keys = await harness.bundles.list_keys_of_bundle(harness.bundle_id)
+        for index, key in enumerate(keys):
+            await harness.traffic.upsert_success(
+                key_id=key.id,
+                downloaded_bytes=1_500 * (index + 1),
+                uploaded_bytes=15 * (index + 1),
+                raw_downloaded_bytes=None,
+                raw_uploaded_bytes=None,
+                now="2026-01-01T00:00:00+00:00",
+                source="test",
+            )
+        # One child revoked as well: a revoke archives nothing, so it must not
+        # split the scopes either.
+        await harness.vpn_keys.mark_revoked(keys[-1].id, ADMIN, "now")
+
+        current = await harness.vpn_keys.sum_traffic_for_owner(OWNER, CURRENT_KEYS)
+        all_time = await harness.vpn_keys.sum_traffic_for_owner(OWNER, ALL_TIME)
+        assert current == all_time, "with no deleted key the scopes must not diverge"
+
+        userinfo = (await client.get(f"/sub/{harness.token}")).headers["Subscription-Userinfo"]
+        # The pre-change expectation, unchanged: 1500+3000+4500+6000+7500 ↓.
+        assert "download=22500" in userinfo
+        assert "upload=225" in userinfo
+        assert f"download={current.downloaded_bytes}" in userinfo
+        assert f"upload={current.uploaded_bytes}" in userinfo
+        assert "total=" not in userinfo
     finally:
         await client.close()
         await store.close()
