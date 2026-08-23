@@ -1,0 +1,54 @@
+# Hysteria2 egress -> WARP policy table.
+#
+# Marks the hysteria-server process's outbound packets so the policy rule
+# installed by vpn-bot-warp-routes diverts them into the out-warp tunnel, while
+# the QUIC/UDP listener itself keeps answering on the direct WAN path — the
+# helper re-derives that listener's --sport exemption from /opt/vpn-service/.env
+# on every apply, so the exemption follows HYSTERIA2_PORT without an edit here.
+# `clear` on stop removes the mark and the table entry; both directions are
+# idempotent, so the unit can be (re)started freely.
+#
+# WHY THE NAME IS NOT vpn-bot-hy2-warp-mark: `vpnbot-hy2-warp-mark` is a
+# deliberately retained legacy name, not tech debt. The unit, the helper it
+# executes and the OUT_OF_REPO_HELPERS entry that refreshes that helper are all
+# spelled the old way, deploy/managed-units.list watches it under that name, and
+# deploy.sh re-applies it as "$HY2_MARK_UNIT" after a helper refresh. Renaming it
+# is a coordinated migration, not a rename — do not "fix" it here.
+#
+# ORDERING NOTE — this file differs from the copy currently installed on the
+# deployed host by one line, on purpose. The host copy still carries the
+# pre-rename `After=... vpnbot-warp-split.service ...`; that unit no longer
+# exists (deploy/setup-nonroot-helper-mode.sh REMOVES it as part of the
+# vpnbot-* -> vpn-bot-* migration), so on the host that ordering dependency is
+# silently dead — systemd orders against a unit that will never load. This
+# tracked copy names the current `vpn-bot-warp-split.service` instead. Installing
+# it is therefore a real (small) behaviour change: the mark step will start
+# ordering itself after the split layer again. That is the intended ordering —
+# the split rules and this mark both write policy routing, and the split layer
+# should settle first.
+#
+# deploy.sh does NOT auto-install this unit (it only auto-installs
+# vpn-bot.service); it reports drift against it. Operator install:
+#   sudo install -o root -g root -m 0644 deploy/vpnbot-hy2-warp-mark.service \
+#       /etc/systemd/system/vpnbot-hy2-warp-mark.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vpnbot-hy2-warp-mark
+# The helper it runs is installed/refreshed by deploy.sh from the
+# OUT_OF_REPO_HELPERS registry (scripts/vpnbot-hy2-warp-mark).
+# Background: docs/warp.md, docs/hysteria.md.
+[Unit]
+# Kept byte-identical to the copy running on the host (legacy "vpnbot:" prefix and
+# the table id included) so that installing this file closes the unit drift down
+# to the single intended line above, and no further.
+Description=vpnbot: hysteria egress -> WARP policy table 51820
+After=network-online.target vpn-bot-warp-split.service warp-routes.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vpnbot-hy2-warp-mark apply
+ExecStop=/usr/local/sbin/vpnbot-hy2-warp-mark clear
+
+[Install]
+WantedBy=multi-user.target

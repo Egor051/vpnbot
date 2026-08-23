@@ -26,7 +26,10 @@ Three moving parts, only one of which is the bot:
    obfuscation — on the public **UDP** port `HYSTERIA2_PORT` (default `443`; coexists with Xray
    REALITY on TCP/443), presenting a valid Let's Encrypt cert for the server's domain
    (issued/renewed by `acme.sh` outside this repo). Run `deploy/hysteria/preflight-udp443.sh`
-   before restarting the service.
+   before restarting the service. The renewal **fan-out** — copying the new chain into
+   `/etc/hysteria/cert.pem`/`key.pem` with the `hysteria` owner and restarting the service — is
+   the tracked `deploy/vpn-bot-acme-reload.sh` hook, wired as acme.sh's `--reloadcmd`
+   ([Subscription → TLS termination](subscription.md#tls-termination)).
 2. **`hy2_auth` endpoint** (`python -m hy2_auth`, `deploy/vpn-bot-hy2-auth.service`) — a small,
    **separate** process the `hysteria` server calls over loopback for every handshake. It opens
    `vpn.db` **read-only** and validates the per-key token in constant time
@@ -48,16 +51,96 @@ The bot itself never binds any of these ports; it only reads the stats/health AP
 `adapters/hysteria_stats.py` / `adapters/hysteria_auth_health.py`) and writes `vpn_keys` rows
 (`key_type='hysteria2'`, per-key secret in `payload_json`, stats label `hy2_<rnd>`).
 
+### Auth-unit name: repo vs host (a recorded, deliberate divergence)
+
+The tracked unit file is `deploy/vpn-bot-hy2-auth.service`, but on a host provisioned before the
+`vpnbot-*` → `vpn-bot-*` rename the **installed** unit is `vpnbot-hy2-auth.service`. That legacy
+name is **kept on purpose** — like `vpnbot-hy2-warp-mark`, it is not tech debt and must not be
+"fixed" by a rename; the two are the only survivors of the old spelling.
+
+What bridges the two is `.env`: `HYSTERIA2_AUTH_SERVICE_NAME` is what the bot's admin diagnostics
+actually call `systemctl is-active` on, so they follow whichever name the host uses. `.env.example`
+ships the **`vpn-bot-hy2-auth`** default, so a host running the legacy unit **must** set the legacy
+name in its own `.env` — otherwise diagnostics report the auth sidecar as inactive while handshakes
+keep succeeding.
+
+Two consequences in `scripts/deploy.sh` Phase 1 that are **expected output, not faults**:
+
+- `UNIT_SET` collects the basename of every shipped `deploy/*.service`, so it contains
+  `vpn-bot-hy2-auth.service`. On a legacy-named host that unit is `load=not-found`, and Phase 1
+  reports it as *not installed / skipped*.
+- The unit that really is serving handshakes, `vpnbot-hy2-auth.service`, enters `UNIT_SET` only
+  through the `.env`-derived branch — i.e. **only because `HYSTERIA2_AUTH_SERVICE_NAME` names it**.
+  Clear that key and the live sidecar silently stops being watched.
+
+Read your host's actual state (read-only):
+
+```bash
+systemctl list-units --all 'vpn*hy2-auth*'
+grep -n '^HYSTERIA2_AUTH_SERVICE_NAME' /opt/vpn-service/.env
+```
+
 ### Masquerade decoy (static file)
 
 `deploy/hysteria/config.yaml` enables Hysteria2's file-based masquerade
 (`masquerade.type: file`, `masquerade.file.dir: /etc/hysteria/masq`): a probe that doesn't
 complete the Hysteria2 handshake is served whatever static site sits in that directory instead
-of a reset. `/etc/hysteria/masq` is **not** tracked in this repo — populated by hand on the
-host, the same way as `tls.cert`/`tls.key`; `install-config.sh` does not manage it. No
-`listenHTTP`/`listenHTTPS` are configured, since those would open separate plaintext TCP
+of a reset. The *content* of `/etc/hysteria/masq` is **not** tracked in this repo and cannot be
+— see [Keeping the decoy in step](#keeping-the-decoy-in-step-vpn-bot-decoy-freshensh) below for
+what does populate it, and why the site itself stays out; `install-config.sh` does not manage it.
+No `listenHTTP`/`listenHTTPS` are configured, since those would open separate plaintext TCP
 `:80`/`:443` listeners and TCP/443 is already held by Xray REALITY on this host — the decoy is
 served over the existing UDP/443 path instead.
+
+### Keeping the decoy in step (`vpn-bot-decoy-freshen.sh`)
+
+Two data planes on this host answer a probe with a website rather than a reset, and they must
+answer with the **same** one:
+
+| Plane | Port | Serves the decoy from |
+|---|---|---|
+| Xray REALITY (self-steal `target`) | TCP/443 → loopback vhost | the nginx docroot, `DECOY_ROOT` |
+| Hysteria2 (`masquerade.type: file`) | UDP/443 QUIC | `MASQ_DIR` = `/etc/hysteria/masq` |
+
+Nothing keeps those two trees in step on its own, and Hysteria2 reads its copy as an
+unprivileged user that has no business reading the nginx docroot. `deploy/vpn-bot-decoy-freshen.sh`
+is the tracked, parameterised form of that mirroring — `rsync -a --delete` from `DECOY_ROOT` into
+`MASQ_DIR`, then `chown` to `MASQ_OWNER:MASQ_GROUP`. **This is the answer to "who populates
+`/etc/hysteria/masq`" — it is not placed there by hand.**
+
+It also drives a freshness pass. A static decoy whose "last updated" date is months old is a tell
+on its own, so the site carries rolling timestamps and something has to advance them. That
+rewriter is **deliberately not tracked here and cannot be**: it necessarily encodes the decoy's
+own markup — which files, which patterns, which fake incident history — and that content is
+unique per deployment and is the whole point of a decoy. It stays a deployment-local script that
+this hook merely *calls*, via `DECOY_FRESHEN_HOOK`. Unset, the freshness pass is skipped and the
+mirroring still runs.
+
+Install — no copy step, run it out of the checkout like `deploy/vpn-bot-acme-reload.sh`.
+Deliberately **cron, not a systemd unit**: every `deploy/*.service` basename is enrolled into
+deploy.sh's `UNIT_SET` ([`deploy/managed-units.list`](../deploy/managed-units.list)), so shipping
+a unit for a job the host runs from cron would make Phase 1 report it not-installed on every
+deploy — opening a new repo/host divergence instead of closing one.
+
+```bash
+sudo chmod 0755 /opt/vpn-service/deploy/vpn-bot-decoy-freshen.sh
+# verify first, read-only, without waiting for the cron window
+sudo DECOY_ROOT=/var/www/<DECOY_SITE> /opt/vpn-service/deploy/vpn-bot-decoy-freshen.sh --dry-run
+sudo crontab -e
+# pick an off-peak minute; nothing depends on the exact time
+7 3 * * * DECOY_ROOT=/var/www/<DECOY_SITE> /opt/vpn-service/deploy/vpn-bot-decoy-freshen.sh >/dev/null 2>&1
+```
+
+`DECOY_ROOT` has **no default on purpose**. `rsync --delete` is destructive by design: pointed at
+a missing or empty source it would faithfully empty `MASQ_DIR`, leaving Hysteria2 answering probes
+with a bare 404 while nginx still answers with a site. A mismatch between the two planes is
+exactly the tell this mechanism exists to avoid, so the script fail-loudly refuses before touching
+anything if `DECOY_ROOT` is unset, absent, or has no `INDEX_NAME` in it.
+
+nginx needs no reload here — it serves `DECOY_ROOT` from disk per request (`try_files`), so a
+rewritten file is live immediately. It *does* need a reload after a **certificate** renewal, which
+is [`deploy/vpn-bot-acme-reload.sh`](../deploy/vpn-bot-acme-reload.sh)'s job, not this one's.
+
 
 ### Per-client bandwidth ceiling (Brutal)
 

@@ -91,6 +91,26 @@ sudo systemctl restart xray
 sudo systemctl status xray --no-pager
 ```
 
+> **Prerequisite, который вы не устанавливали и который этот репозиторий не трекает: drop-in на
+> одиночный конфиг.** Всё описанное выше — и весь путь применения конфига Xray ботом — исходит из
+> того, что демон грузит *один файл*, `XRAY_CONFIG_PATH` (дефолт `/usr/local/etc/xray/config.json`).
+> Это **не** дефолт upstream-Xray: штатный юнит запускается с `xray run -confdir …`, то есть
+> сливает каталог. Привязку к одиночному файлу делает systemd-drop-in, который пишет upstream'овский
+> `install-release.sh`:
+>
+> ```bash
+> # проверка только на чтение — ожидаем: ExecStart= (пустой, сброс), затем `xray run -config <path>`
+> systemctl cat xray | sed -n '/donot_touch/,$p'
+> ls -l /etc/systemd/system/xray.service.d/
+> ```
+>
+> Если этот drop-in отсутствует или заменён вариантом с `-confdir`, бот продолжит корректно
+> перезаписывать `config.json`, а демон продолжит его игнорировать — отзывы будут выглядеть
+> успешными и ничего не менять. Файл **намеренно не трекается здесь**: им владеет
+> upstream-установщик, который называет его `10-donot_touch_single_conf.conf` и прямо внутри
+> предупреждает, что любые ваши правки в нём теряются на следующем обновлении Xray. Проверяйте
+> его, а не вендорите.
+
 4. Установите service-файл и запустите бота:
 
 ```bash
@@ -283,10 +303,14 @@ masquerade:
 ```
 
 Пробе, которая не завершает Hysteria2-handshake, отдаётся статический сайт из
-`/etc/hysteria/masq` — по существующему UDP/443 QUIC-пути. Этот каталог **не** трекается в
-репозитории — кладётся на хост вручную, так же как `tls.cert`/`tls.key`; `install-config.sh`
-его не трогает. `listenHTTP`/`listenHTTPS` намеренно **не** настроены: они открыли бы отдельные
-plaintext TCP-листенеры `:80`/`:443`, а TCP/443 на этом хосте уже занят Xray REALITY.
+`/etc/hysteria/masq` — по существующему UDP/443 QUIC-пути. *Контент* сайта **не** трекается в
+репозитории, но и **руками его туда не кладут**: он зеркалируется из docroot'а nginx, который Xray
+REALITY использует как self-steal-цель, — чтобы обе плоскости отвечали пробе одним и тем же сайтом.
+Это зеркалирование — [`deploy/vpn-bot-decoy-freshen.sh`](../deploy/vpn-bot-decoy-freshen.sh),
+запускаемый из cron; см. [Hysteria2 → Как decoy держится в синхроне](hysteria.ru.md#как-decoy-держится-в-синхроне-vpn-bot-decoy-freshensh).
+Сам каталог `install-config.sh` не трогает. `listenHTTP`/`listenHTTPS` намеренно **не** настроены:
+они открыли бы отдельные plaintext TCP-листенеры `:80`/`:443`, а TCP/443 на этом хосте уже занят
+Xray REALITY.
 
 ### 3. Поведение fail-closed и health
 

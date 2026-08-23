@@ -102,6 +102,24 @@ sudo systemctl restart xray
 sudo systemctl status xray --no-pager
 ```
 
+> **Prerequisite you did not install and this repo does not track: the single-config drop-in.**
+> Everything above — and the bot's whole Xray apply path — assumes the running daemon loads *one
+> file*, `XRAY_CONFIG_PATH` (default `/usr/local/etc/xray/config.json`). That is **not** upstream
+> Xray's default: the stock unit runs `xray run -confdir …`, which merges a directory. What pins it
+> to the single file is a systemd drop-in the upstream `install-release.sh` writes:
+>
+> ```bash
+> # read-only check — expect: ExecStart= (empty, to reset) then `xray run -config <path>`
+> systemctl cat xray | sed -n '/donot_touch/,$p'
+> ls -l /etc/systemd/system/xray.service.d/
+> ```
+>
+> If that drop-in is missing or was replaced by a `-confdir` variant, the bot will keep rewriting
+> `config.json` correctly and the daemon will keep ignoring it — revokes appear to succeed and
+> change nothing. The file is **deliberately not tracked here**: it is owned by the upstream
+> installer, which stamps it `10-donot_touch_single_conf.conf` and warns in the file itself that
+> anything you change in it is lost on the next Xray update. Verify it, don't vendor it.
+
 4. Install the service file and start the bot:
 
 ```bash
@@ -292,11 +310,14 @@ masquerade:
 ```
 
 A probe that doesn't complete the Hysteria2 handshake is served whatever static site sits in
-`/etc/hysteria/masq`, over the existing UDP/443 QUIC path. That directory is **not** tracked in
-this repo — populate it by hand on the host, the same way as `tls.cert`/`tls.key`;
-`install-config.sh` does not manage it. `listenHTTP`/`listenHTTPS` are deliberately **not**
-configured: those open separate plaintext TCP `:80`/`:443` listeners, and TCP/443 on this host
-is already held by Xray REALITY.
+`/etc/hysteria/masq`, over the existing UDP/443 QUIC path. The site *content* is **not** tracked
+in this repo, but it is **not placed there by hand** either: it is mirrored from the nginx docroot
+that Xray REALITY uses as its self-steal target, so both data planes answer a probe with the same
+site. That mirroring is [`deploy/vpn-bot-decoy-freshen.sh`](../deploy/vpn-bot-decoy-freshen.sh),
+run from cron — see [Hysteria2 → Keeping the decoy in step](hysteria.md#keeping-the-decoy-in-step-vpn-bot-decoy-freshensh).
+`install-config.sh` does not manage the directory. `listenHTTP`/`listenHTTPS` are deliberately
+**not** configured: those open separate plaintext TCP `:80`/`:443` listeners, and TCP/443 on this
+host is already held by Xray REALITY.
 
 ### 3. Fail-closed behaviour and health
 
