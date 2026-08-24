@@ -207,7 +207,10 @@ def compare(expected: Any, actual: Any, path: str, findings: list[str]) -> None:
                 f"DIFFERS           {path}: skeleton has {len(expected)} item(s), host has {len(actual)}"
             )
             return
-        for index, (exp_item, act_item) in enumerate(zip(expected, actual)):
+        # strict=True can never raise here — the length check above returned already.
+        # It is the point: if that guard is ever removed, zip() fails loudly instead of
+        # silently comparing a prefix and calling the missing items "no drift".
+        for index, (exp_item, act_item) in enumerate(zip(expected, actual, strict=True)):
             compare(exp_item, act_item, f"{path}[{index}]", findings)
         return
 
