@@ -1,13 +1,13 @@
-# Backend config sync — the two co-owned data-plane configs
+# Backend config sync — the three data-plane configs
 
 Hysteria2 ships a tracked, installable config (`deploy/hysteria/config.yaml` +
 `deploy/hysteria/install-config.sh`). Xray and AmneziaWG do not — and for a long time
 that looked like an oversight. It is not: it follows directly from **who writes the
 file at runtime**.
 
-This document covers the resulting mechanism: what is tracked for those two backends,
-how the host is compared against it, and the one case where the repo can be pushed
-back onto the host.
+This document covers the resulting mechanism: what is tracked for each backend, how the
+host is compared against all three, and the cases where the repo can be pushed back
+onto the host.
 
 ## Why the three backends are not treated the same
 
@@ -25,6 +25,11 @@ and now does — is **their structure**, with every bot-owned region left empty:
 
 Both ship placeholders (`<REALITY_PRIVATE_KEY>`, `<AWG_SERVER_PRIVATE_KEY>`, …) rather
 than values, so they are safe to commit and safe to read on a shared host.
+
+Hysteria2 needs no skeleton — being operator-owned end to end, the tracked
+`deploy/hysteria/config.yaml` *is* the config. That difference runs all the way through:
+it is compared in full (no region is excluded, because none is runtime state), and its
+repair route is a whole-file install rather than a merge.
 
 ## The ownership split, exactly
 
@@ -62,36 +67,50 @@ carries it through verbatim on every rewrite.
 
 ## Checking the host: `check`
 
-Read-only. Compares the live files against the tracked skeletons with every bot-owned
-region excluded, so runtime state can never be reported as drift.
+Read-only. Compares the live files against their tracked counterparts. For Xray and AWG
+every bot-owned region is excluded, so runtime state can never be reported as drift; for
+Hysteria2 nothing is excluded, because nothing there is runtime state.
 
 ```bash
 python3 deploy/backend-config-sync.py check
 python3 deploy/backend-config-sync.py --selftest      # exercises the comparison logic
 ```
 
-Defaults come from the same paths deploy.sh uses; `--repo-root`, `--xray-config` and
-`--awg-config` override them.
+Defaults come from the same paths deploy.sh uses; `--repo-root`, `--xray-config`,
+`--awg-config` and `--hysteria-config` override them.
 
 What the comparison does:
 
 - **Placeholders are wildcards.** `<REALITY_PRIVATE_KEY>` matches any value, so secrets
-  never need to be in the repo for the check to work. For partly-literal values such as
-  `PostUp`, the text *around* the placeholders is still asserted — a `MASQUERADE` → `SNAT`
-  change is caught even though the subnet and interface are placeholders.
+  never need to be in the repo for the check to work. Both repo spellings count —
+  `<UPPER_SNAKE>` and the hysteria config's `<random-secret>`. For partly-literal values
+  such as `PostUp`, the text *around* the placeholders is still asserted — a
+  `MASQUERADE` → `SNAT` change is caught even though the subnet and interface are
+  placeholders.
 - **Inbounds are matched by `tag`, not position.** Xray does not care about inbound
   order, so neither does the checker.
+- **YAML and JSON are compared as parsed data, not text.** Key order, indentation,
+  quoting and comments are invisible to the check; only values matter. This is what lets
+  the tracked hysteria config carry a long rationale in comments while the host carries
+  none, with no false drift.
 - **Comparison is type-strict.** JSON `true` and `1` are different values; a config that
   drifted from one to the other is reported.
 - **An absent backend is not drift.** A host running only Hysteria2 has no
   `config.json` — the checker reports it as INFO and exits 0. Same `absent-ok` policy as
   deploy.sh's out-of-repo helpers.
 - **Bot state is reported, never compared.** The output carries a census (clients per
-  inbound tag, peers total / bot-managed / hand-added) so the operator can see runtime
-  state without it affecting the verdict.
+  inbound tag, peers total / bot-managed / hand-added, the live `masquerade.type`) so the
+  operator can see runtime state without it affecting the verdict.
 - **A hand-added peer surfaces as INFO.** It is not a config error, but a `[Peer]` block
   with no `vpn-bot` marker is invisible to the bot while still holding an address out of
   `AWG_NETWORK`, so it never passes silently.
+- **The Hysteria2 half needs PyYAML, and says so when it is missing.** PyYAML is not a
+  dependency of this project — the bot never parses YAML, and Phase 1 runs this script
+  under the *system* `python3`, not the venv. Without it that one backend reports
+  `SKIPPED` in the report and the other two are still checked. It is deliberately not
+  fatal: this file had no gate at all before the check existed, so turning a missing
+  optional module into a failed deploy would be a regression. `apt install python3-yaml`
+  arms it.
 
 Exit codes — this is the contract with deploy.sh:
 

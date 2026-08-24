@@ -165,19 +165,20 @@ def test_hysteria_config_yaml_has_no_obfs_and_listens_on_udp_443() -> None:
     assert "self-signed" not in text.lower()
 
 
-def test_hysteria_config_yaml_has_file_masquerade_no_http_listeners() -> None:
-    # File-based masquerade decoys Hysteria2 probes that never complete the
-    # handshake, served over the existing UDP/443 QUIC path. listenHTTP/
-    # listenHTTPS must stay absent: those bind separate plaintext TCP :80/:443
-    # listeners, and TCP/443 on this host is already held by Xray REALITY.
-    text = _read("deploy/hysteria/config.yaml")
-
-    assert re.search(r"^\s*type:\s*file\s*$", text, re.MULTILINE), "masquerade.type must be file"
-    assert re.search(r"^\s*dir:\s*/etc/hysteria/masq\s*$", text, re.MULTILINE), (
-        "masquerade.file.dir must be /etc/hysteria/masq"
+def test_hysteria_config_yaml_masquerade_is_pinned_elsewhere() -> None:
+    # The masquerade layout used to be pinned here with a bare
+    # `re.search(r"^\s*type:\s*file\s*$")`, which cannot tell WHICH block it
+    # matched — `auth.type` and `masquerade.type` are both `type:` at the same
+    # indent — and so said nothing about the key it claimed to guard.
+    #
+    # That contract now lives in tests/test_decoy_freshen_layout.py, which parses
+    # the block structurally and then drives deploy/vpn-bot-decoy-freshen.sh to
+    # prove the mirror step follows the declared layout. Deliberately NOT also
+    # asserted here: two pins on one key are two places to update, and the loose
+    # one is the one that goes stale silently.
+    assert (ROOT / "tests" / "test_decoy_freshen_layout.py").exists(), (
+        "the masquerade/listenHTTP pins moved to this suite — restore it, do not re-add a regex here"
     )
-    assert not re.search(r"^\s*listenHTTP\s*:", text, re.MULTILINE), "listenHTTP must not be configured"
-    assert not re.search(r"^\s*listenHTTPS\s*:", text, re.MULTILINE), "listenHTTPS must not be configured"
 
 
 def test_hysteria_preflight_script_is_present_and_fail_closed() -> None:

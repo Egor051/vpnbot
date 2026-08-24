@@ -9,25 +9,35 @@
 #
 #   * Xray REALITY forwards an unauthenticated TLS probe to its `target`, a
 #     loopback vhost served by nginx out of DECOY_ROOT (docs/deployment.md);
-#   * Hysteria2 serves `masquerade.type: file` out of MASQ_DIR over the existing
+#   * Hysteria2 answers a failed handshake with its masquerade over the existing
 #     UDP/443 QUIC path (docs/hysteria.md).
 #
-# Nothing keeps those two trees in step on its own, and MASQ_DIR is read by an
-# unprivileged daemon that cannot read the nginx docroot. That mirroring was
-# living only on the host as an untracked cron script, so a rebuilt or migrated
-# host had nothing to restore it from and would have silently ended up with the
-# two data planes presenting DIFFERENT sites — or, if MASQ_DIR were left empty,
-# with Hysteria2 answering probes with 404 while nginx answered with a site.
-# This is that mirroring, tracked and parameterised.
+# HOW Hysteria2 gets that site decides how much this hook has to do, and the two
+# layouts are not equivalent:
 #
-# It also drives the freshness pass. A static decoy whose "last updated" date is
-# months old is a tell on its own, so the site carries rolling timestamps and
-# something has to advance them. That rewriter is NOT tracked here and cannot be:
-# it necessarily encodes the decoy's own markup — which files, which patterns,
-# which fake incident history — and that content is unique per deployment and is
-# the whole point of a decoy. So it stays a deployment-local script that this
-# hook merely CALLS, via DECOY_FRESHEN_HOOK. Unset or absent, the freshness pass
-# is skipped and the mirroring still runs.
+#   * `masquerade.type: proxy` — what deploy/hysteria/config.yaml ships. Hysteria2
+#     reverse-proxies the SAME loopback listener REALITY targets, so both planes
+#     read one docroot. Nothing can drift apart because there is only one tree, and
+#     step 2 below deliberately does nothing.
+#   * `masquerade.type: file` — Hysteria2 reads MASQ_DIR itself, as an unprivileged
+#     daemon that cannot read the nginx docroot. Now there ARE two trees and
+#     nothing keeps them in step on its own: left alone they end up presenting
+#     DIFFERENT sites, or MASQ_DIR stays empty and Hysteria2 answers probes with a
+#     404 while nginx answers with a site. Step 2 is that mirroring, and it runs.
+#
+# The mirroring was living only on the host as an untracked cron script, so a
+# rebuilt or migrated host had nothing to restore it from. This is it, tracked and
+# parameterised — with the layout check that keeps it from writing a stale second
+# copy on hosts that no longer read one.
+#
+# It also drives the freshness pass, and THAT part runs on every layout. A static
+# decoy whose "last updated" date is months old is a tell on its own, so the site
+# carries rolling timestamps and something has to advance them. That rewriter is
+# NOT tracked here and cannot be: it necessarily encodes the decoy's own markup —
+# which files, which patterns, which fake incident history — and that content is
+# unique per deployment and is the whole point of a decoy. So it stays a
+# deployment-local script that this hook merely CALLS, via DECOY_FRESHEN_HOOK.
+# Unset or absent, the freshness pass is skipped.
 #
 # nginx needs no reload: it serves DECOY_ROOT from disk per request (`try_files`),
 # so a rewritten file is live immediately.
@@ -60,7 +70,10 @@ set -euo pipefail
 # from emptying MASQ_DIR, so it is required explicitly.
 DECOY_ROOT="${DECOY_ROOT:-}"
 
-# Hysteria2 `masquerade.file.dir`. Mirrored FROM DECOY_ROOT, never the other way.
+# Hysteria2 `masquerade.file.dir`. Mirrored FROM DECOY_ROOT, never the other way —
+# and only when the live config actually declares `masquerade.type: file`. Under
+# the shipped `type: proxy` layout this directory is not read at all and is left
+# untouched; see step 2.
 MASQ_DIR="${MASQ_DIR:-/etc/hysteria/masq}"
 MASQ_OWNER="${MASQ_OWNER:-hysteria}"
 MASQ_GROUP="${MASQ_GROUP:-hysteria}"
@@ -121,22 +134,49 @@ if [[ -n "$DECOY_FRESHEN_HOOK" ]]; then
 		exit 1
 	fi
 else
-	log "no DECOY_FRESHEN_HOOK set — skipping the freshness pass, mirroring as-is"
+	log "no DECOY_FRESHEN_HOOK set — skipping the freshness pass"
 fi
 
-# 2. Mirror into the Hysteria2 masquerade directory. Skipped entirely when
-#    Hysteria2 is not deployed here, the same way vpn-bot-acme-reload.sh skips
-#    its Hysteria2 copy — the same hook serves a host running only Xray.
+# 2. Mirror into the Hysteria2 masquerade directory — but ONLY when Hysteria2 is
+#    actually configured to serve that directory.
+#
+#    This guard is the whole reason step 2 is conditional rather than unconditional.
+#    With `masquerade.type: proxy` (the layout deploy/hysteria/config.yaml ships)
+#    Hysteria2 reverse-proxies the decoy from the same local HTTPS listener nginx
+#    serves DECOY_ROOT on, so MASQ_DIR is never opened: mirroring into it would burn
+#    IO to populate a directory nothing reads, and — worse — would leave a stale
+#    second copy on disk that looks authoritative to whoever finds it next.
+#    With `masquerade.type: file` the mirror IS the mechanism, so it still runs.
+#    Absent config (Xray-only host) or no parser: skip, and say which.
+HYSTERIA_CONF="${HYSTERIA_CONF:-/etc/hysteria/config.yaml}"
 masq_parent="$(dirname -- "$MASQ_DIR")"
-if [[ -d "$masq_parent" ]]; then
+masq_type=""
+if [[ -r "$HYSTERIA_CONF" ]]; then
+	# Deliberately not a YAML parse: this is a shell hook that may run from cron on a
+	# host with no PyYAML. `masquerade:` is top-level and its `type:` is the first
+	# indented key under it, so a two-line window is enough and cannot match the
+	# unrelated `auth.type` or `trafficStats` keys.
+	masq_type="$(awk '
+		/^masquerade:/ { inblock = 1; next }
+		inblock && /^[^[:space:]]/ { inblock = 0 }
+		inblock && $1 == "type:" { print $2; exit }
+	' "$HYSTERIA_CONF" 2>/dev/null || true)"
+fi
+if [[ ! -d "$masq_parent" ]]; then
+	log "skipping the Hysteria2 mirror (no $masq_parent on this host)"
+elif [[ "$masq_type" == "proxy" ]]; then
+	log "skipping the Hysteria2 mirror: $HYSTERIA_CONF serves masquerade.type: proxy,"
+	log "  so $MASQ_DIR is not read — DECOY_ROOT is the single source of truth"
+elif [[ -z "$masq_type" ]]; then
+	log "skipping the Hysteria2 mirror: could not read masquerade.type from $HYSTERIA_CONF"
+	log "  (set MASQ_DIR= to silence this, or check the file exists and is readable)"
+else
 	[[ -d "$MASQ_DIR" ]] || run install -o "$MASQ_OWNER" -g "$MASQ_GROUP" -m 0755 -d "$MASQ_DIR"
 	run rsync -a --delete "$DECOY_ROOT/" "$MASQ_DIR/"
 	# The daemon reads this tree as an unprivileged user, and rsync preserves the
 	# nginx-side ownership, so re-assert it every pass rather than once at install.
 	run chown -R "$MASQ_OWNER:$MASQ_GROUP" "$MASQ_DIR"
-	log "mirrored $DECOY_ROOT -> $MASQ_DIR (owner $MASQ_OWNER:$MASQ_GROUP)"
-else
-	log "skipping the Hysteria2 mirror (no $masq_parent on this host)"
+	log "mirrored $DECOY_ROOT -> $MASQ_DIR (masquerade.type: $masq_type, owner $MASQ_OWNER:$MASQ_GROUP)"
 fi
 
 log "done"

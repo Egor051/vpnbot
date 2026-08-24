@@ -65,6 +65,17 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+# PyYAML is NOT a dependency of this project — the bot never parses YAML, and Phase 1
+# runs this script under the SYSTEM python3, not the venv. So the hysteria check is
+# the one part of this tool that can be unavailable. It degrades to a loud SKIPPED
+# line rather than an error: /etc/hysteria/config.yaml had no gate at all before this
+# check existed, and turning a missing optional module into a failed deploy would be
+# a regression. Install `python3-yaml` to arm it.
+try:
+    import yaml as _yaml
+except ImportError:  # pragma: no cover - exercised by test monkeypatching, not by CI
+    _yaml = None  # type: ignore[assignment]
+
 ME = "backend-config-sync"
 
 # --- the bot-owned region definitions (pinned by tests against adapters/) ---------
@@ -77,9 +88,16 @@ XRAY_BOT_OWNED_INBOUND_PATHS = (
 )
 XRAY_BOT_OWNED_OUTBOUND_KEYS = ("sendThrough",)
 
-# A placeholder standing in for a whole value.
-PLACEHOLDER_RE = re.compile(r"^<[A-Z0-9_]+>$")
+# A placeholder standing in for a whole value. Both repo conventions are accepted:
+# `<UPPER_SNAKE>` (xray/awg skeletons) and `<lower-kebab>` (the hysteria config's
+# `secret: "<random-secret>"`, whose spelling is pinned by install-config.sh and its
+# tests). A live config can never hold a bare `<...>` token as a real value, so
+# widening this cannot mask drift — it only stops a second convention from being
+# compared as a literal and reported as drift on every host.
+PLACEHOLDER_RE = re.compile(r"^<[A-Za-z0-9_-]+>$")
 # Any placeholder, for values that only partly consist of one (AWG PostUp lines).
+# Deliberately NOT widened: this one matches substrings, so a looser character class
+# would start swallowing literal text that must stay asserted.
 ANY_PLACEHOLDER_RE = re.compile(r"<[A-Z0-9_]+>")
 
 # install-xray only: where a placeholder's real value comes from. Anything not
@@ -93,6 +111,7 @@ PLACEHOLDER_ENV = {
 
 DEFAULT_XRAY_CONF = "/usr/local/etc/xray/config.json"
 DEFAULT_AWG_CONF = "/etc/amnezia/amneziawg/awg0.conf"
+DEFAULT_HYSTERIA_CONF = "/etc/hysteria/config.yaml"
 
 
 def warn(msg: str) -> None:
@@ -384,6 +403,55 @@ def check_awg(example_path: Path, live_path: Path) -> tuple[int, list[str]]:
     return len(findings), lines
 
 
+def check_hysteria(repo_path: Path, live_path: Path) -> tuple[int, list[str]]:
+    """Compare the live hysteria config against the tracked one.
+
+    Unlike xray and awg this file is operator-owned END TO END: the bot manages
+    Hysteria2 users over the HTTP auth service, never by editing this file. So there
+    is no bot-owned region to exclude and nothing here is allowed to be "runtime
+    state" — every key is compared, and the tracked file is a full config rather than
+    a skeleton. That is also why the repair route is `install-config.sh` (a whole-file
+    install) instead of a merge like install-xray.
+    """
+    lines: list[str] = []
+    if not live_path.is_file():
+        lines.append(f"  hy2:   {live_path} absent — backend not deployed here, not drift")
+        return 0, lines
+    if not repo_path.is_file():
+        die(f"repo config missing: {repo_path}")
+    if _yaml is None:
+        lines.append(
+            "  hy2:   SKIPPED — PyYAML is not importable by this python3, so the live "
+            "config cannot be parsed. Install python3-yaml to arm this check."
+        )
+        return 0, lines
+
+    try:
+        live_text = live_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        die(f"cannot read live hysteria config {live_path}: {exc}")
+    try:
+        actual = _yaml.safe_load(live_text)
+        expected = _yaml.safe_load(repo_path.read_text(encoding="utf-8"))
+    except _yaml.YAMLError as exc:
+        # Fail closed, exactly like unparseable JSON: an unreadable data-plane config
+        # is not drift to be waived, and hysteria-server will reject it too.
+        die(f"cannot parse hysteria YAML: {exc}")
+    if not isinstance(expected, dict):
+        die(f"repo config {repo_path} did not parse as a YAML mapping")
+    if not isinstance(actual, dict):
+        die(f"live config {live_path} did not parse as a YAML mapping")
+
+    findings: list[str] = []
+    compare(expected, actual, "hy2", findings)
+
+    masq = actual.get("masquerade")
+    masq_type = masq.get("type") if isinstance(masq, dict) else None
+    lines.append(f"  hy2:   {len(findings)} structural finding(s); masquerade type: {masq_type!r}")
+    lines.extend(f"    {f}" for f in findings)
+    return len(findings), lines
+
+
 # --- install-xray -----------------------------------------------------------------
 def extract_bot_state(live: dict[str, Any]) -> dict[str, Any]:
     """Pull the bot-owned region out of the live config so it can be put back."""
@@ -653,6 +721,7 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument("--repo-root", type=Path, default=repo_default)
     p_check.add_argument("--xray-config", type=Path, default=Path(DEFAULT_XRAY_CONF))
     p_check.add_argument("--awg-config", type=Path, default=Path(DEFAULT_AWG_CONF))
+    p_check.add_argument("--hysteria-config", type=Path, default=Path(DEFAULT_HYSTERIA_CONF))
 
     p_inst = sub.add_parser("install-xray", help="merge the repo structure into the live config")
     p_inst.add_argument("--repo-root", type=Path, default=repo_default)
@@ -672,12 +741,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "check":
         example = root / "deploy" / "awg" / "awg0.conf.example"
+        hy2_repo = root / "deploy" / "hysteria" / "config.yaml"
         print(f"[{ME}] structural drift, live host vs {root}")
         x_count, x_lines = check_xray(skeleton, args.xray_config)
         a_count, a_lines = check_awg(example, args.awg_config)
-        for line in x_lines + a_lines:
+        h_count, h_lines = check_hysteria(hy2_repo, args.hysteria_config)
+        for line in x_lines + a_lines + h_lines:
             print(line)
-        total = x_count + a_count
+        total = x_count + a_count + h_count
         if total:
             print(
                 f"[{ME}] {total} structural finding(s). The bot-owned regions (xray clients/"
