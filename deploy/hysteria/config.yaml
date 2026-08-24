@@ -81,12 +81,23 @@ trafficStats:
 # doesn't complete the Hysteria2 handshake gets served this decoy instead of a
 # reset). This is NOT listenHTTP/listenHTTPS — those open separate plaintext
 # TCP :80/:443 listeners, and TCP/443 on this host is already held by Xray
-# REALITY; adding them would collide. Only the file dir below is needed for a
-# static-site decoy on the existing UDP/443 path.
+# REALITY; adding them would collide. The decoy rides the existing UDP/443 path.
 #
-# /etc/hysteria/masq is populated by hand on the host (outside this repo),
-# same as tls.cert/tls.key above — install-config.sh does not manage it.
+# `type: proxy`, not `type: file`, and that choice is the whole point. The local
+# HTTPS listener below is the SAME one Xray REALITY falls back to on TCP/443, so
+# both planes serve one docroot with byte-identical content and no mirror step:
+# there is a single source of truth, and nothing can drift out of sync or go
+# stale. A file-based masquerade would need that docroot copied into a second
+# directory and re-copied on every edit — two copies to keep identical, which is
+# exactly the fingerprint the decoy exists to avoid.
+#
+# insecure: true is correct and not a weakening: the peer is 127.0.0.1, so the
+# certificate name can never match an address literal, and intercepting loopback
+# already requires root on this host. rewriteHost: false keeps the client's Host
+# header intact so the local server picks the same vhost it would over TCP.
 masquerade:
-  type: file
-  file:
-    dir: /etc/hysteria/masq
+  type: proxy
+  proxy:
+    url: https://127.0.0.1:8443
+    rewriteHost: false
+    insecure: true

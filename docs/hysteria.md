@@ -80,14 +80,26 @@ systemctl list-units --all 'vpn*hy2-auth*'
 grep -n '^HYSTERIA2_AUTH_SERVICE_NAME' /opt/vpn-service/.env
 ```
 
-### Masquerade decoy (static file)
+### Masquerade decoy (reverse proxy)
 
-`deploy/hysteria/config.yaml` enables Hysteria2's file-based masquerade
-(`masquerade.type: file`, `masquerade.file.dir: /etc/hysteria/masq`): a probe that doesn't
-complete the Hysteria2 handshake is served whatever static site sits in that directory instead
-of a reset. The *content* of `/etc/hysteria/masq` is **not** tracked in this repo and cannot be
-— see [Keeping the decoy in step](#keeping-the-decoy-in-step-vpn-bot-decoy-freshensh) below for
-what does populate it, and why the site itself stays out; `install-config.sh` does not manage it.
+`deploy/hysteria/config.yaml` enables Hysteria2's **proxy** masquerade
+(`masquerade.type: proxy`, `masquerade.proxy.url: https://127.0.0.1:8443`): a probe that doesn't
+complete the Hysteria2 handshake is reverse-proxied to a real local HTTPS listener and served a
+real website instead of a reset. That listener is the *same* loopback vhost Xray REALITY uses as
+its self-steal `target`, so both data planes serve one docroot with byte-identical content.
+
+`rewriteHost: false` keeps the client's `Host` header, so the local server picks the same vhost it
+would over TCP. `insecure: true` is correct rather than a weakening: the peer is `127.0.0.1`, a
+certificate name can never match an address literal, and intercepting loopback already requires
+root here.
+
+The alternative layout, `masquerade.type: file` out of `/etc/hysteria/masq`, is what this host used
+to run and is still supported by the tooling — see
+[Keeping the decoy in step](#keeping-the-decoy-in-step-vpn-bot-decoy-freshensh) below. It is *not*
+the shipped default, because it needs the docroot copied into a second directory and re-copied on
+every edit: two trees to keep identical, and a stale one is exactly the fingerprint a decoy exists
+to avoid. `install-config.sh` installs whichever layout the tracked config declares.
+
 No `listenHTTP`/`listenHTTPS` are configured, since those would open separate plaintext TCP
 `:80`/`:443` listeners and TCP/443 is already held by Xray REALITY on this host — the decoy is
 served over the existing UDP/443 path instead.
@@ -100,21 +112,26 @@ answer with the **same** one:
 | Plane | Port | Serves the decoy from |
 |---|---|---|
 | Xray REALITY (self-steal `target`) | TCP/443 → loopback vhost | the nginx docroot, `DECOY_ROOT` |
-| Hysteria2 (`masquerade.type: file`) | UDP/443 QUIC | `MASQ_DIR` = `/etc/hysteria/masq` |
+| Hysteria2 (`masquerade.type: proxy`, shipped) | UDP/443 QUIC | the same loopback vhost — one tree, nothing to mirror |
+| Hysteria2 (`masquerade.type: file`, legacy) | UDP/443 QUIC | `MASQ_DIR` = `/etc/hysteria/masq` — a second tree |
 
-Nothing keeps those two trees in step on its own, and Hysteria2 reads its copy as an
-unprivileged user that has no business reading the nginx docroot. `deploy/vpn-bot-decoy-freshen.sh`
-is the tracked, parameterised form of that mirroring — `rsync -a --delete` from `DECOY_ROOT` into
-`MASQ_DIR`, then `chown` to `MASQ_OWNER:MASQ_GROUP`. **This is the answer to "who populates
-`/etc/hysteria/masq`" — it is not placed there by hand.**
+Under the shipped proxy layout there is only one tree, so nothing can drift apart and
+`deploy/vpn-bot-decoy-freshen.sh` does no mirroring at all: it reads `masquerade.type` out of
+`HYSTERIA_CONF` and logs that it is skipping the step. Under the legacy `file` layout the two trees
+are real and nothing keeps them in step on its own — Hysteria2 reads its copy as an unprivileged
+user that has no business reading the nginx docroot — so the hook does the mirroring:
+`rsync -a --delete` from `DECOY_ROOT` into `MASQ_DIR`, then `chown` to `MASQ_OWNER:MASQ_GROUP`.
+**That is the answer to "who populates `/etc/hysteria/masq`" on a `type: file` host — it is not
+placed there by hand.** The layout check is what stops the hook from leaving a stale second copy on
+a host that no longer reads one.
 
 It also drives a freshness pass. A static decoy whose "last updated" date is months old is a tell
 on its own, so the site carries rolling timestamps and something has to advance them. That
 rewriter is **deliberately not tracked here and cannot be**: it necessarily encodes the decoy's
 own markup — which files, which patterns, which fake incident history — and that content is
 unique per deployment and is the whole point of a decoy. It stays a deployment-local script that
-this hook merely *calls*, via `DECOY_FRESHEN_HOOK`. Unset, the freshness pass is skipped and the
-mirroring still runs.
+this hook merely *calls*, via `DECOY_FRESHEN_HOOK`. Unset, the freshness pass is skipped; whether
+anything is mirrored afterwards is decided by the layout above, not by this variable.
 
 Install — no copy step, run it out of the checkout like `deploy/vpn-bot-acme-reload.sh`.
 Deliberately **cron, not a systemd unit**: every `deploy/*.service` basename is enrolled into
@@ -130,6 +147,28 @@ sudo crontab -e
 # pick an off-peak minute; nothing depends on the exact time
 7 3 * * * DECOY_ROOT=/var/www/<DECOY_SITE> /opt/vpn-service/deploy/vpn-bot-decoy-freshen.sh >/dev/null 2>&1
 ```
+
+> **Known host divergence — check yours.** On a host provisioned before this hook was tracked, both
+> halves may already run from cron as an untracked local script (e.g.
+> `/usr/local/sbin/site-freshen.sh`) that calls the rewriter and then rsyncs into `MASQ_DIR` itself.
+> Adding the line above without removing that one leaves **two** jobs writing the same tree on
+> their own schedules — and under the shipped `masquerade.type: proxy` layout the predecessor's
+> mirror is not merely duplicated work, it is *dead* work that nothing reads, keeping alive exactly
+> the stale second copy the proxy layout removed. Read your crontab before changing anything:
+>
+> ```bash
+> sudo crontab -l
+> ```
+>
+> Migrate in this order, so the freshness pass is never the thing that lapses:
+>
+> 1. Point `DECOY_FRESHEN_HOOK` at the **rewriter alone** (e.g. the `.py`), never at the wrapper —
+>    a wrapper that also mirrors would redo step 2 unconditionally and defeat the layout check.
+> 2. `chmod 0755` that rewriter. A script only ever invoked as `python3 rewriter.py` is typically
+>    mode 0644, and this hook fails closed on a non-executable `DECOY_FRESHEN_HOOK` rather than
+>    guessing an interpreter.
+> 3. `--dry-run` this hook and confirm the log shows the rewriter running and the mirror skipped.
+> 4. Only then replace the predecessor's crontab line with the one above.
 
 `DECOY_ROOT` has **no default on purpose**. `rsync --delete` is destructive by design: pointed at
 a missing or empty source it would faithfully empty `MASQ_DIR`, leaving Hysteria2 answering probes

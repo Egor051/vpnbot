@@ -300,22 +300,30 @@ hy2-ключи не показывают трафик/онлайн, а отзы�
 
 ### 2c. (Опционально) Маскарад-decoy
 
-`deploy/hysteria/config.yaml` также объявляет файловый masquerade:
+`deploy/hysteria/config.yaml` также объявляет masquerade — реверс-прокси, а не статический каталог:
 
 ```yaml
 masquerade:
-  type: file
-  file:
-    dir: /etc/hysteria/masq
+  type: proxy
+  proxy:
+    url: https://127.0.0.1:8443
+    rewriteHost: false
+    insecure: true
 ```
 
-Пробе, которая не завершает Hysteria2-handshake, отдаётся статический сайт из
-`/etc/hysteria/masq` — по существующему UDP/443 QUIC-пути. *Контент* сайта **не** трекается в
-репозитории, но и **руками его туда не кладут**: он зеркалируется из docroot'а nginx, который Xray
-REALITY использует как self-steal-цель, — чтобы обе плоскости отвечали пробе одним и тем же сайтом.
-Это зеркалирование — [`deploy/vpn-bot-decoy-freshen.sh`](../deploy/vpn-bot-decoy-freshen.sh),
-запускаемый из cron; см. [Hysteria2 → Как decoy держится в синхроне](hysteria.ru.md#как-decoy-держится-в-синхроне-vpn-bot-decoy-freshensh).
-Сам каталог `install-config.sh` не трогает. `listenHTTP`/`listenHTTPS` намеренно **не** настроены:
+Проба, которая не завершает Hysteria2-handshake, реверс-проксируется на этот локальный
+HTTPS-листенер по существующему UDP/443 QUIC-пути и получает настоящий сайт вместо разрыва. Листенер
+— *тот же* loopback-vhost, который Xray REALITY использует как self-steal-цель, поэтому обе
+плоскости отвечают пробе одним docroot'ом и второй копии, которую надо держать в синхроне, просто
+нет. *Контент* сайта **не** трекается в репозитории.
+
+Прежняя раскладка `masquerade.type: file` (отдача из `/etc/hysteria/masq`) инструментарием
+по-прежнему поддерживается, но по умолчанию не ставится: ей нужно зеркалировать docroot во второй
+каталог. На таком хосте зеркалирование — это
+[`deploy/vpn-bot-decoy-freshen.sh`](../deploy/vpn-bot-decoy-freshen.sh), запускаемый из cron; при
+прокси-раскладке тот же скрипт видит `masquerade.type: proxy` и шаг пропускает. См.
+[Hysteria2 → Как decoy держится в синхроне](hysteria.ru.md#как-decoy-держится-в-синхроне-vpn-bot-decoy-freshensh).
+`listenHTTP`/`listenHTTPS` намеренно **не** настроены:
 они открыли бы отдельные plaintext TCP-листенеры `:80`/`:443`, а TCP/443 на этом хосте уже занят
 Xray REALITY.
 

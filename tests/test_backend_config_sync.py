@@ -1,11 +1,11 @@
-"""Guards on deploy/backend-config-sync.py — the reconciler for the two CO-OWNED
-backend configs (Xray's config.json and AmneziaWG's awg0.conf).
+"""Guards on deploy/backend-config-sync.py — the reconciler for the three data-plane
+backend configs (Xray's config.json, AmneziaWG's awg0.conf, Hysteria2's config.yaml).
 
 WHY THIS SUITE MATTERS MORE THAN A USUAL SCRIPT TEST
 
-The whole design rests on ONE definition — which regions of those two files belong
-to the bot and must therefore be excluded from a structural comparison. Get that
-definition wrong in either direction and the tool is worse than nothing:
+For the two CO-OWNED files the whole design rests on ONE definition — which regions
+belong to the bot and must therefore be excluded from a structural comparison. Get
+that definition wrong in either direction and the tool is worse than nothing:
 
   * too NARROW — the checker calls the bot's own runtime state "drift", so every
     issued key turns Phase 1 red and the operator learns to pass the bypass knob;
@@ -16,6 +16,11 @@ So the pins below are not string comparisons against a copy of the definition. T
 drive the REAL writers (adapters/xray_config.py, adapters/awg_config.py), then assert
 the checker classifies what those writers produced. If a writer ever moves a client
 list, renames a peer marker or binds egress somewhere new, these fail.
+
+Hysteria2's config has no such split — it is operator-owned end to end, so section 2b
+asserts the opposite property: that nothing is excluded, and that the differences the
+comparison must still ignore (comments, key order, the placeholder secret) do not
+become findings on every host.
 
 Everything here works on tmp_path copies and injected paths: no live host config is
 read, no service is touched, and the `xray -test` validation is exercised through
@@ -32,6 +37,7 @@ import importlib.util
 import json
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -42,11 +48,17 @@ from adapters.xray_config import (
     apply_warp_send_through,
 )
 
+# The YAML subset the tracked hysteria config is written in, already parsed and
+# pinned by that suite. Reused rather than re-implemented so there is exactly one
+# definition of what this repo considers a parseable hysteria config.
+from tests.test_hysteria_config_bandwidth import parse_block_mapping
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "backend-config-sync.py"
 SKELETON = ROOT / "deploy" / "xray" / "config.skeleton.json"
 AWG_EXAMPLE = ROOT / "deploy" / "awg" / "awg0.conf.example"
+HY2_CONFIG = ROOT / "deploy" / "hysteria" / "config.yaml"
 DEPLOY_SH = ROOT / "scripts" / "deploy.sh"
 
 # Per-test ceiling (pytest-timeout). Everything here is small file I/O in tmp_path.
@@ -110,6 +122,23 @@ def _live_awg() -> str:
         "-s 10.0.0.0/24 -o eth0 -j MASQUERADE\n"
         "PostDown = iptables -t nat -D POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE\n"
     )
+
+
+def _dump_block_mapping(mapping: dict[str, Any], indent: int = 0) -> list[str]:
+    """Re-emit a parsed block mapping as YAML — no comments, whatever key order it
+    was handed. The inverse of parse_block_mapping over the same subset, used to
+    build a live-config fixture that differs from the tracked file in every way the
+    comparison must ignore.
+    """
+    out: list[str] = []
+    pad = " " * indent
+    for key, value in mapping.items():
+        if isinstance(value, dict):
+            out.append(f"{pad}{key}:")
+            out.extend(_dump_block_mapping(value, indent + 2))
+        else:
+            out.append(f"{pad}{key}: {value}")
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -366,6 +395,195 @@ def test_unmarked_peer_is_reported_as_info_but_not_drift(sync, tmp_path: Path) -
 
 
 # --------------------------------------------------------------------------- #
+# 2b. check_hysteria: the one config that is operator-owned END TO END
+#
+# No region is excluded here, because none of it is runtime state — the bot
+# manages Hysteria2 users over the HTTP auth service and never edits this file.
+# So the comparison is the whole document, and the interesting cases are the ones
+# that must NOT be drift: comments, key order, and the placeholder secret.
+#
+# PyYAML is not a project dependency (see the guarded import in the script), so
+# these drive the checker through a stub parser built on the YAML subset the
+# tracked config is written in. That keeps them running in CI, where PyYAML is
+# absent; test_hysteria_parses_the_same_under_real_pyyaml cross-checks against the
+# real library wherever one is installed.
+# --------------------------------------------------------------------------- #
+class _StubYAMLError(Exception):
+    pass
+
+
+class _StubYAML:
+    """The `_yaml` surface check_hysteria uses: safe_load + YAMLError."""
+
+    YAMLError = _StubYAMLError
+
+    @staticmethod
+    def safe_load(text: str) -> Any:
+        try:
+            return parse_block_mapping(text)
+        except ValueError as exc:  # what a real parser raises on malformed input
+            raise _StubYAMLError(str(exc)) from exc
+
+
+@pytest.fixture
+def hy2(sync, monkeypatch) -> ModuleType:
+    """`sync` with YAML parsing forced through the subset stub."""
+    monkeypatch.setattr(sync, "_yaml", _StubYAML)
+    return sync
+
+
+def _live_hy2() -> str:
+    """A plausible live config: the tracked one with the placeholder secret filled
+    in, exactly as install-config.sh leaves it on disk."""
+    return HY2_CONFIG.read_text(encoding="utf-8").replace(
+        '"<random-secret>"', "d34dbe3fd34dbe3fd34dbe3fd34dbe3f"
+    )
+
+
+def test_clean_hysteria_reports_no_drift(hy2, tmp_path: Path) -> None:
+    live = tmp_path / "config.yaml"
+    live.write_text(_live_hy2(), encoding="utf-8")
+    count, lines = hy2.check_hysteria(HY2_CONFIG, live)
+    assert count == 0, lines
+    # The census reports the live layout without it affecting the verdict — that is
+    # how an operator sees a `file` host is still a `file` host.
+    assert "masquerade type: 'proxy'" in "\n".join(lines), lines
+
+
+def test_hysteria_placeholder_secret_matches_any_live_value(hy2, tmp_path: Path) -> None:
+    """`secret: "<random-secret>"` is the one placeholder in this file, and its
+    lowercase-hyphen spelling is pinned by install-config.sh and its tests. If the
+    checker's placeholder pattern stopped covering it, every host with a real stats
+    secret — i.e. every host — would report drift on this key forever."""
+    live = tmp_path / "config.yaml"
+    live.write_text(
+        HY2_CONFIG.read_text(encoding="utf-8").replace('"<random-secret>"', "zzz"),
+        encoding="utf-8",
+    )
+    count, lines = hy2.check_hysteria(HY2_CONFIG, live)
+    assert count == 0, lines
+
+
+def test_hysteria_comments_and_key_order_are_invisible(hy2, tmp_path: Path) -> None:
+    """The tracked file carries a long rationale in comments that the host does not,
+    and install-config.sh does not preserve key order. Comparing parsed data rather
+    than text is what keeps both from being reported on every host."""
+    parsed = parse_block_mapping(_live_hy2())
+    reordered = "\n".join(_dump_block_mapping(dict(reversed(list(parsed.items())))))
+    live = tmp_path / "config.yaml"
+    live.write_text(reordered + "\n", encoding="utf-8")
+    assert "#" not in reordered, "the reshuffled fixture must carry no comments at all"
+
+    count, lines = hy2.check_hysteria(HY2_CONFIG, live)
+    assert count == 0, lines
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        pytest.param(
+            lambda t: t.replace("type: proxy", "type: file"),
+            "hy2.masquerade.type",
+            id="masquerade-layout-reverted-to-file",
+        ),
+        pytest.param(
+            lambda t: t.replace("up: 95 mbps", "up: 500 mbps"),
+            "hy2.bandwidth.up",
+            id="brutal-ceiling-raised-on-the-host",
+        ),
+        pytest.param(
+            lambda t: t.replace("url: http://127.0.0.1:8444/auth", "url: http://127.0.0.1:9444/auth"),
+            "hy2.auth.http.url",
+            id="auth-endpoint-moved-away-from-hy2_auth",
+        ),
+        pytest.param(
+            lambda t: t.replace("listen: 127.0.0.1:9999", "listen: 0.0.0.0:9999"),
+            "hy2.trafficStats.listen",
+            id="stats-api-exposed-off-loopback",
+        ),
+        pytest.param(
+            lambda t: t.replace("    insecure: true\n", "    insecure: true\n    something: else\n"),
+            "EXTRA on host",
+            id="undocumented-key-added",
+        ),
+        pytest.param(
+            lambda t: t.replace("    rewriteHost: false\n", ""),
+            "MISSING on host",
+            id="key-dropped-on-the-host",
+        ),
+    ],
+)
+def test_hysteria_operator_drift_is_reported(hy2, tmp_path: Path, mutate, expected: str) -> None:
+    """Every key in this file is operator structure, so any difference is a finding.
+    That is the point: /etc/hysteria/config.yaml had no gate at all before, and
+    install-config.sh will happily install over whatever the host had."""
+    live = tmp_path / "config.yaml"
+    live.write_text(mutate(_live_hy2()), encoding="utf-8")
+    count, lines = hy2.check_hysteria(HY2_CONFIG, live)
+    assert count >= 1, lines
+    assert expected in "\n".join(lines), lines
+
+
+def test_absent_hysteria_is_not_drift(sync, tmp_path: Path) -> None:
+    """An Xray-only host has no /etc/hysteria/config.yaml. Checked without the stub
+    on purpose: absent-ok must resolve before anything needs a YAML parser."""
+    count, lines = sync.check_hysteria(HY2_CONFIG, tmp_path / "nope.yaml")
+    assert count == 0
+    assert "absent" in lines[0] and "not drift" in lines[0]
+
+
+def test_missing_pyyaml_skips_loudly_instead_of_failing_the_deploy(sync, monkeypatch, tmp_path: Path) -> None:
+    """PyYAML is not a project dependency and Phase 1 runs this script under the
+    system python3. Without it this one backend must degrade to a visible SKIPPED
+    line and exit 0 — turning a missing optional module into a failed deploy would
+    be a regression on a file that had no gate at all before."""
+    monkeypatch.setattr(sync, "_yaml", None)
+    live = tmp_path / "config.yaml"
+    live.write_text(_live_hy2(), encoding="utf-8")
+
+    count, lines = sync.check_hysteria(HY2_CONFIG, live)
+    assert count == 0
+    joined = "\n".join(lines)
+    assert "SKIPPED" in joined, joined
+    assert "python3-yaml" in joined, "the skip must name the fix, not just the symptom"
+
+
+def test_unparseable_hysteria_config_fails_closed(hy2, tmp_path: Path) -> None:
+    """Same policy as unparseable JSON: no verdict was reachable, so exit 1 — which
+    ALLOW_BACKEND_CONFIG_DRIFT deliberately does not waive."""
+    live = tmp_path / "config.yaml"
+    live.write_text("masquerade:\n\t\ttype: proxy\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        hy2.check_hysteria(HY2_CONFIG, live)
+    assert excinfo.value.code == EXIT_FAIL_CLOSED
+
+
+def test_missing_tracked_hysteria_config_fails_closed(hy2, tmp_path: Path) -> None:
+    live = tmp_path / "config.yaml"
+    live.write_text(_live_hy2(), encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        hy2.check_hysteria(tmp_path / "nope.yaml", live)
+    assert excinfo.value.code == EXIT_FAIL_CLOSED
+
+
+def test_hysteria_parses_the_same_under_real_pyyaml(sync, tmp_path: Path) -> None:
+    """Cross-check the stub above against a real YAML implementation wherever one is
+    installed — the deploy host has python3-yaml, CI does not. Confidence only: it
+    can never gate."""
+    pytest.importorskip("yaml")
+    assert sync._yaml is not None, "PyYAML is importable, so the script must have it too"
+
+    live = tmp_path / "config.yaml"
+    live.write_text(_live_hy2(), encoding="utf-8")
+    assert sync.check_hysteria(HY2_CONFIG, live)[0] == 0
+
+    live.write_text(_live_hy2().replace("type: proxy", "type: file"), encoding="utf-8")
+    count, lines = sync.check_hysteria(HY2_CONFIG, live)
+    assert count >= 1
+    assert "hy2.masquerade.type" in "\n".join(lines), lines
+
+
+# --------------------------------------------------------------------------- #
 # 3. install-xray: every path that must refuse before touching anything
 # --------------------------------------------------------------------------- #
 def test_install_refuses_when_live_config_is_absent(sync, tmp_path: Path) -> None:
@@ -534,29 +752,54 @@ def test_selftest_passes(sync) -> None:
     assert sync.selftest() == EXIT_OK
 
 
-def test_check_exits_3_on_drift_and_0_when_clean(sync, tmp_path: Path) -> None:
+def test_check_exits_3_on_drift_and_0_when_clean(hy2, tmp_path: Path) -> None:
     """The exit codes are the gate's contract with deploy.sh: 3 means drift, and
-    nothing else may."""
+    nothing else may.
+
+    Every live path is injected into tmp_path, including the hysteria one. Left at
+    its default this would read /etc/hysteria/config.yaml — and this suite runs on
+    the production host as a Phase 1 gate. YAML goes through the subset stub so the
+    verdict is the same in CI, where PyYAML is absent, as on the host.
+    """
     repo = tmp_path / "repo"
     (repo / "deploy" / "xray").mkdir(parents=True)
     (repo / "deploy" / "awg").mkdir(parents=True)
+    (repo / "deploy" / "hysteria").mkdir(parents=True)
     (repo / "deploy" / "xray" / "config.skeleton.json").write_text(
         SKELETON.read_text(encoding="utf-8"), encoding="utf-8"
     )
     (repo / "deploy" / "awg" / "awg0.conf.example").write_text(
         AWG_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8"
     )
+    (repo / "deploy" / "hysteria" / "config.yaml").write_text(
+        HY2_CONFIG.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     live = _write(tmp_path / "config.json", _live_from_skeleton())
     awg = tmp_path / "awg0.conf"
     awg.write_text(_live_awg(), encoding="utf-8")
-    argv = ["check", "--repo-root", str(repo), "--xray-config", str(live), "--awg-config", str(awg)]
+    hy2_live = tmp_path / "hysteria.yaml"
+    hy2_live.write_text(_live_hy2(), encoding="utf-8")
+    argv = [
+        "check",
+        "--repo-root", str(repo),
+        "--xray-config", str(live),
+        "--awg-config", str(awg),
+        "--hysteria-config", str(hy2_live),
+    ]
 
-    assert sync.main(argv) == EXIT_OK
+    assert hy2.main(argv) == EXIT_OK
 
     drifted = _live_from_skeleton()
     drifted["log"]["loglevel"] = "warning"
     _write(live, drifted)
-    assert sync.main(argv) == EXIT_DRIFT
+    assert hy2.main(argv) == EXIT_DRIFT
+
+    # ...and a hysteria-only difference reaches the same exit code, so the third
+    # backend is really summed into the verdict rather than only reported.
+    _write(live, _live_from_skeleton())
+    assert hy2.main(argv) == EXIT_OK
+    hy2_live.write_text(_live_hy2().replace("type: proxy", "type: file"), encoding="utf-8")
+    assert hy2.main(argv) == EXIT_DRIFT
 
 
 def test_no_subcommand_is_a_usage_error(sync) -> None:
@@ -598,6 +841,21 @@ def test_deploy_sh_runs_the_checker_against_the_origin_main_worktree() -> None:
     assert '--repo-root "$WT"' in text, "must compare against origin/main, not the live checkout"
     assert '--xray-config "$XRAY_CONF"' in text
     assert '--awg-config "$AWG_CONF"' in text
+    # The live path is overridable like the other two, and defaults to where the
+    # hysteria package puts it — a host that moved the file overrides the variable
+    # instead of the gate reporting a phantom absent backend.
+    assert '--hysteria-config "$HYSTERIA_CONF"' in text
+    assert 'HYSTERIA_CONF="${HYSTERIA_CONF:-/etc/hysteria/config.yaml}"' in text
+
+
+def test_deploy_sh_prints_the_hysteria_repair_route_too() -> None:
+    """The checker cannot know which side is wrong, so the drift report names the
+    repair route for each backend. Hysteria2's is a whole-file install, not a merge
+    — an operator handed only `install-xray` would reach for a tool that cannot
+    touch this file."""
+    text = DEPLOY_SH.read_text(encoding="utf-8")
+    assert "deploy/hysteria/install-config.sh" in text, "no hy2 repair route in the report"
+    assert "deploy/hysteria/config.yaml" in text, "no route for when the REPO is the wrong side"
 
 
 def test_deploy_sh_gate_is_documented_and_defaults_to_enforcing() -> None:

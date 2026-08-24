@@ -308,22 +308,30 @@ for all `HYSTERIA2_STATS_*` variables and `ANOMALY_HYSTERIA2_MAX_CONN`.
 
 ### 2c. (Optional) Masquerade decoy
 
-`deploy/hysteria/config.yaml` also declares a file-based masquerade:
+`deploy/hysteria/config.yaml` also declares a masquerade — a reverse proxy, not a static dir:
 
 ```yaml
 masquerade:
-  type: file
-  file:
-    dir: /etc/hysteria/masq
+  type: proxy
+  proxy:
+    url: https://127.0.0.1:8443
+    rewriteHost: false
+    insecure: true
 ```
 
-A probe that doesn't complete the Hysteria2 handshake is served whatever static site sits in
-`/etc/hysteria/masq`, over the existing UDP/443 QUIC path. The site *content* is **not** tracked
-in this repo, but it is **not placed there by hand** either: it is mirrored from the nginx docroot
-that Xray REALITY uses as its self-steal target, so both data planes answer a probe with the same
-site. That mirroring is [`deploy/vpn-bot-decoy-freshen.sh`](../deploy/vpn-bot-decoy-freshen.sh),
-run from cron — see [Hysteria2 → Keeping the decoy in step](hysteria.md#keeping-the-decoy-in-step-vpn-bot-decoy-freshensh).
-`install-config.sh` does not manage the directory. `listenHTTP`/`listenHTTPS` are deliberately
+A probe that doesn't complete the Hysteria2 handshake is reverse-proxied to that local HTTPS
+listener over the existing UDP/443 QUIC path, and served a real site instead of a reset. The
+listener is the *same* loopback vhost Xray REALITY uses as its self-steal target, so both data
+planes answer a probe with one docroot and there is no second copy to keep in step. The site
+*content* is **not** tracked in this repo.
+
+The older `masquerade.type: file` layout (serving `/etc/hysteria/masq`) is still supported by the
+tooling but is no longer shipped, because it needs the docroot mirrored into a second directory.
+On such a host that mirroring is
+[`deploy/vpn-bot-decoy-freshen.sh`](../deploy/vpn-bot-decoy-freshen.sh), run from cron; under the
+shipped proxy layout the same script detects `masquerade.type: proxy` and skips the mirror. See
+[Hysteria2 → Keeping the decoy in step](hysteria.md#keeping-the-decoy-in-step-vpn-bot-decoy-freshensh).
+`listenHTTP`/`listenHTTPS` are deliberately
 **not** configured: those open separate plaintext TCP `:80`/`:443` listeners, and TCP/443 on this
 host is already held by Xray REALITY.
 

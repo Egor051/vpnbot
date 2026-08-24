@@ -90,11 +90,16 @@
 #   ALLOW_BACKEND_CONFIG_DRIFT=1
 #     What:   BYPASSES THE BACKEND-CONFIG-DRIFT GATE. Phase 1 runs
 #             deploy/backend-config-sync.py check, which compares the STRUCTURE of
-#             the live Xray and AmneziaWG configs against the tracked skeletons
-#             (deploy/xray/config.skeleton.json, deploy/awg/awg0.conf.example).
-#             Unlike the units, deploy.sh never installs these two files — the bot
-#             itself rewrites them at runtime — so divergence is reported and the
-#             deploy stops. This knob continues past it anyway.
+#             the live Xray, AmneziaWG and Hysteria2 configs against their tracked
+#             counterparts (deploy/xray/config.skeleton.json,
+#             deploy/awg/awg0.conf.example, deploy/hysteria/config.yaml).
+#             Unlike the units, deploy.sh never installs any of these files — the
+#             bot itself rewrites the first two at runtime, and the third is
+#             installed by deploy/hysteria/install-config.sh by hand — so
+#             divergence is reported and the deploy stops. This knob continues
+#             past it anyway. (The Hysteria2 half needs PyYAML in the system
+#             python3; without it that one backend reports SKIPPED and the other
+#             two are still checked.)
 #     When:   Apply ONLY consciously: the drift is already known and safe, or you
 #             are deploying the very commit that will make the skeleton match and
 #             will run `install-xray` by hand right after (the report prints the
@@ -167,6 +172,7 @@ PHASE1_ONLY="${PHASE1_ONLY:-0}"   # 1 = run all of Phase 1, print report, exit 0
 ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
 XRAY_CONF="${XRAY_CONF:-/usr/local/etc/xray/config.json}"
 AWG_CONF="${AWG_CONF:-/etc/amnezia/amneziawg/awg0.conf}"
+HYSTERIA_CONF="${HYSTERIA_CONF:-/etc/hysteria/config.yaml}"
 MTPROXY_DIR="${MTPROXY_DIR:-/etc/mtproxy}"
 # MTProxy managed drop-in: the directory is derived from ${MTPROTO_SERVICE_NAME}
 # and BOTH filename spellings (vpn-bot-managed.conf, legacy vpnbot-managed.conf)
@@ -1954,7 +1960,8 @@ BACKEND_CONFIG_OUT=""
 if [[ -f "$WT/deploy/backend-config-sync.py" ]]; then
   log "backend config drift (deploy/backend-config-sync.py check)"
   BACKEND_CONFIG_OUT="$(python3 "$WT/deploy/backend-config-sync.py" check \
-    --repo-root "$WT" --xray-config "$XRAY_CONF" --awg-config "$AWG_CONF" 2>&1)" \
+    --repo-root "$WT" --xray-config "$XRAY_CONF" --awg-config "$AWG_CONF" \
+    --hysteria-config "$HYSTERIA_CONF" 2>&1)" \
     || BACKEND_CONFIG_RC=$?
   printf '%s\n' "$BACKEND_CONFIG_OUT" >&2
   case "$BACKEND_CONFIG_RC" in
@@ -1966,8 +1973,10 @@ if [[ -f "$WT/deploy/backend-config-sync.py" ]]; then
       warn "      python3 deploy/backend-config-sync.py install-xray --dry-run   # review, then drop --dry-run"
       warn "      systemctl restart ${XRAY_UNIT}                                 # pick the window yourself"
       warn "      # AWG has no installer: [Interface] is operator-owned, edit awg0.conf by hand"
+      warn "      bash deploy/hysteria/install-config.sh                          # hy2: whole-file install"
       warn "    repo is wrong (host is the intent):"
       warn "      update deploy/xray/config.skeleton.json / deploy/awg/awg0.conf.example"
+      warn "      or deploy/hysteria/config.yaml (that one is a full config, not a skeleton)"
       warn "  see docs/backend-config-sync.md for the ownership table."
       if [[ "$ALLOW_BACKEND_CONFIG_DRIFT" == "1" ]]; then
         warn "ALLOW_BACKEND_CONFIG_DRIFT=1: continuing despite the drift above"
@@ -2102,13 +2111,15 @@ phase1_report() {
     printf '    none (shipped deploy/*.service units match the host, or are not installed there)\n'
   fi
 
-  # --- Backend config drift: co-owned configs deploy.sh never installs ---
-  printf '\n  --- Backend config drift (live Xray/AWG structure vs tracked skeletons) ---\n'
+  # --- Backend config drift: configs deploy.sh never installs ---
+  printf '\n  --- Backend config drift (live Xray/AWG/Hysteria2 structure vs tracked files) ---\n'
   if [[ -n "$BACKEND_CONFIG_OUT" ]]; then
     printf '%s\n' "$BACKEND_CONFIG_OUT" | sed 's/^/    /'
     if [[ "$BACKEND_CONFIG_RC" == "3" ]]; then
       printf '    host is wrong -> python3 deploy/backend-config-sync.py install-xray --dry-run  (then without)\n'
-      printf '    repo is wrong -> update deploy/xray/config.skeleton.json or deploy/awg/awg0.conf.example\n'
+      printf '                     bash deploy/hysteria/install-config.sh                        (hy2, whole file)\n'
+      printf '    repo is wrong -> update deploy/xray/config.skeleton.json, deploy/awg/awg0.conf.example\n'
+      printf '                     or deploy/hysteria/config.yaml (a full config, not a skeleton)\n'
       printf '    AWG has no installer on purpose: [Interface] is operator-owned, edit awg0.conf by hand\n'
       [[ "$ALLOW_BACKEND_CONFIG_DRIFT" == "1" ]] && printf '    (ALLOW_BACKEND_CONFIG_DRIFT=1 set — a real deploy would continue past this)\n'
     fi
