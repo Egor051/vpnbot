@@ -87,6 +87,28 @@
 #             helpers itself — see install_out_of_repo_helpers — so it needs no
 #             override knob.)
 #
+#   ALLOW_BACKEND_CONFIG_DRIFT=1
+#     What:   BYPASSES THE BACKEND-CONFIG-DRIFT GATE. Phase 1 runs
+#             deploy/backend-config-sync.py check, which compares the STRUCTURE of
+#             the live Xray and AmneziaWG configs against the tracked skeletons
+#             (deploy/xray/config.skeleton.json, deploy/awg/awg0.conf.example).
+#             Unlike the units, deploy.sh never installs these two files — the bot
+#             itself rewrites them at runtime — so divergence is reported and the
+#             deploy stops. This knob continues past it anyway.
+#     When:   Apply ONLY consciously: the drift is already known and safe, or you
+#             are deploying the very commit that will make the skeleton match and
+#             will run `install-xray` by hand right after (the report prints the
+#             command). Never as a reflex to silence the gate — and never as a
+#             substitute for updating the skeleton when the HOST is the correct
+#             side of the diff.
+#     Risk:   You ship bot code that assumes one data-plane shape against a host
+#             running another. The failure mode is silent: a REALITY inbound whose
+#             tag or fallback moved still starts, still accepts the operator's own
+#             test client, and only the keys the bot issues stop working.
+#             Bot-owned regions (xray clients/shortIds/sendThrough, awg [Peer]
+#             blocks) are excluded from the comparison and can never trip this
+#             gate, so a finding here is always operator-owned structure.
+#
 #   ALLOW_SCHEMA_DOWNGRADE=1
 #     What:   BYPASSES THE SCHEMA-DOWNGRADE GATE. After start, deploy.sh waits for
 #             the live schema_version to reach the value the deployed code targets
@@ -137,6 +159,7 @@ LOCK="${LOCK:-/run/vpn-bot-deploy.lock}"
 BACKUP_KEEP="${BACKUP_KEEP:-10}"
 ALLOW_MODEL_SWITCH="${ALLOW_MODEL_SWITCH:-0}"
 ALLOW_UNIT_DRIFT="${ALLOW_UNIT_DRIFT:-0}"
+ALLOW_BACKEND_CONFIG_DRIFT="${ALLOW_BACKEND_CONFIG_DRIFT:-0}"
 ALLOW_SCHEMA_DOWNGRADE="${ALLOW_SCHEMA_DOWNGRADE:-0}"
 FORCE="${FORCE:-0}"
 PHASE1_ONLY="${PHASE1_ONLY:-0}"   # 1 = run all of Phase 1, print report, exit 0 (no mutations)
@@ -1911,6 +1934,61 @@ if [[ ${#drift[@]} -gt 0 ]]; then
   fi
 fi
 
+# Backend config drift (R3c): live Xray/AmneziaWG configs vs the tracked skeletons.
+# Why this is a separate gate from unit drift: deploy.sh installs neither of these
+# two files and never will, because the BOT rewrites them at runtime — Xray's
+# config.json on every key issue/revoke (adapters/xray_config.py) and awg0.conf on
+# every peer insert/remove (adapters/awg_config.py). A `cp` from the repo would
+# delete live clients and peers. So the repo tracks their STRUCTURE only, and this
+# check asserts that structure while excluding every bot-owned region
+# (xray inbounds[*].settings.clients / realitySettings.shortIds / outbound
+# sendThrough, awg marker-delimited [Peer] blocks). A finding is therefore always
+# operator-owned structure, never runtime state.
+#
+# Read-only, and scanned against $WT (origin/main) like the unit drift above, so a
+# PR that legitimately reshapes the data plane is caught here rather than after the
+# restart. A backend that is not deployed on this host is NOT drift (absent-ok, same
+# policy as the helpers) and the checker reports it as INFO.
+BACKEND_CONFIG_RC=0
+BACKEND_CONFIG_OUT=""
+if [[ -f "$WT/deploy/backend-config-sync.py" ]]; then
+  log "backend config drift (deploy/backend-config-sync.py check)"
+  BACKEND_CONFIG_OUT="$(python3 "$WT/deploy/backend-config-sync.py" check \
+    --repo-root "$WT" --xray-config "$XRAY_CONF" --awg-config "$AWG_CONF" 2>&1)" \
+    || BACKEND_CONFIG_RC=$?
+  printf '%s\n' "$BACKEND_CONFIG_OUT" >&2
+  case "$BACKEND_CONFIG_RC" in
+    0) ;;
+    3)
+      warn "the live backend configs diverge STRUCTURALLY from the skeletons in this PR."
+      warn "  decide which side is wrong — the checker cannot know — then:"
+      warn "    host is wrong (repo is the intent):"
+      warn "      python3 deploy/backend-config-sync.py install-xray --dry-run   # review, then drop --dry-run"
+      warn "      systemctl restart ${XRAY_UNIT}                                 # pick the window yourself"
+      warn "      # AWG has no installer: [Interface] is operator-owned, edit awg0.conf by hand"
+      warn "    repo is wrong (host is the intent):"
+      warn "      update deploy/xray/config.skeleton.json / deploy/awg/awg0.conf.example"
+      warn "  see docs/backend-config-sync.md for the ownership table."
+      if [[ "$ALLOW_BACKEND_CONFIG_DRIFT" == "1" ]]; then
+        warn "ALLOW_BACKEND_CONFIG_DRIFT=1: continuing despite the drift above"
+      elif [[ "$PHASE1_ONLY" == "1" ]]; then
+        warn "PHASE1_ONLY=1: drift reported (above and in the report) but not fatal in inspection mode"
+      else
+        die "backend config drift detected (set ALLOW_BACKEND_CONFIG_DRIFT=1 to deploy anyway)"
+      fi
+      ;;
+    *)
+      # NOT bypassable by ALLOW_BACKEND_CONFIG_DRIFT: exit 1 means the checker could
+      # not reach a verdict (unparseable live config, missing skeleton). That is not
+      # drift to be waived — an unreadable config.json is a broken data plane, and
+      # the bot's own writer would fail on it too.
+      die "backend-config-sync.py check could not run (exit ${BACKEND_CONFIG_RC}) — see its output above"
+      ;;
+  esac
+else
+  log "backend config drift: origin/main has no deploy/backend-config-sync.py (skipped)"
+fi
+
 # Out-of-repo helper drift (R3b): read-only scan against origin/main ($WT). Unlike
 # unit drift this is NOT a gate — Phase 2 closes it automatically
 # (install_out_of_repo_helpers), so here we only record + report it. Helpers that
@@ -2022,6 +2100,20 @@ phase1_report() {
     [[ "$ALLOW_UNIT_DRIFT" == "1" ]] && printf '    (ALLOW_UNIT_DRIFT=1 set — a real deploy would continue past this)\n'
   else
     printf '    none (shipped deploy/*.service units match the host, or are not installed there)\n'
+  fi
+
+  # --- Backend config drift: co-owned configs deploy.sh never installs ---
+  printf '\n  --- Backend config drift (live Xray/AWG structure vs tracked skeletons) ---\n'
+  if [[ -n "$BACKEND_CONFIG_OUT" ]]; then
+    printf '%s\n' "$BACKEND_CONFIG_OUT" | sed 's/^/    /'
+    if [[ "$BACKEND_CONFIG_RC" == "3" ]]; then
+      printf '    host is wrong -> python3 deploy/backend-config-sync.py install-xray --dry-run  (then without)\n'
+      printf '    repo is wrong -> update deploy/xray/config.skeleton.json or deploy/awg/awg0.conf.example\n'
+      printf '    AWG has no installer on purpose: [Interface] is operator-owned, edit awg0.conf by hand\n'
+      [[ "$ALLOW_BACKEND_CONFIG_DRIFT" == "1" ]] && printf '    (ALLOW_BACKEND_CONFIG_DRIFT=1 set — a real deploy would continue past this)\n'
+    fi
+  else
+    printf '    not checked (origin/main ships no deploy/backend-config-sync.py)\n'
   fi
 
   # --- Out-of-repo helper drift: closed automatically by Phase 2 (no gate) ---

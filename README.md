@@ -356,6 +356,7 @@ schema version internally).
 | [docs/proxy.md](docs/proxy.md) | SOCKS5/Dante and MTProto (static + managed) deployment and recovery. |
 | [docs/warp.md](docs/warp.md) | WARP outbound-IP masking: config format, install, proxy egress, selective-split. |
 | [docs/xray-xhttp-inbound.md](docs/xray-xhttp-inbound.md) | One-time server-side setup for the VLESS (HTTP) / XHTTP transport. |
+| [docs/backend-config-sync.md](docs/backend-config-sync.md) | The co-owned Xray/AmneziaWG configs: ownership split, tracked skeletons, drift gate, merge installer, bootstrap. |
 | [docs/security/privilege-separation-plan.md](docs/security/privilege-separation-plan.md) | Non-root privilege-separation architecture and helper contracts. |
 
 Russian mirrors are available as `*.ru.md` next to each document.

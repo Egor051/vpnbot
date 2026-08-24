@@ -1,0 +1,84 @@
+# awg0.conf.example — the shape of /etc/amnezia/amneziawg/awg0.conf.
+#
+# WHY THIS FILE IS AN EXAMPLE AND NOT AN INSTALLABLE CONFIG
+#
+# This file is co-owned, and the two owners never touch the same lines:
+#
+#   [Interface]  — the OPERATOR owns it. Server key, address, listen port and the
+#                  whole AmneziaWG obfuscation fingerprint. The bot reads these
+#                  (adapters/awg_config.py: read_server_config) and never writes
+#                  them; a peer insert/remove rewrites the file but carries the
+#                  [Interface] section through verbatim.
+#   [Peer]       — the BOT owns every block it wrote, delimited by
+#                  `# vpn-bot peer start key_id=<N> owner=<UID>` ...
+#                  `# vpn-bot peer end key_id=<N>`. It adds one per issued AWG key
+#                  and deletes it on revoke.
+#
+# So this file must NEVER be copied over the live config: `cp` would delete every
+# issued peer. It ships ZERO [Peer] blocks on purpose — peers are runtime state,
+# not configuration, and a peer written by hand here would be invisible to the
+# bot (no marker) yet still occupy an address from AWG_NETWORK.
+#
+# Use it for two things only:
+#   1. Bootstrap — building awg0.conf on a fresh or migrated host.
+#   2. Structural drift — `python deploy/backend-config-sync.py check` compares the
+#      live [Interface] against this file and reports divergence. Placeholders
+#      match any value, so secrets never need to be in the repo for the check to
+#      work. Peers are counted, never compared.
+#
+# INSTALL (bootstrap only — never over a config that already has peers):
+#   umask 077
+#   install -o root -g root -m 0600 deploy/awg/awg0.conf.example \
+#       /etc/amnezia/amneziawg/awg0.conf
+#   # then replace every <PLACEHOLDER> below, and verify before bringing it up:
+#   awg-quick strip awg0 >/dev/null && systemctl start awg-quick@awg0
+#
+# The obfuscation parameters are NOT cosmetic and NOT free to change: Jc/Jmin/Jmax,
+# S1-S4, H1-H4 and I1-I5 must match on the server and on every client, byte for
+# byte, or the handshake never completes. The bot copies them into client configs
+# from here (_CLIENT_INTERFACE_KEYS in adapters/awg_config.py), so changing one on
+# the server silently invalidates every key already issued. Treat them as part of
+# the deployment's identity, like the server key itself.
+
+[Interface]
+PrivateKey = <AWG_SERVER_PRIVATE_KEY>
+# Must be a host address inside AWG_NETWORK, matching AWG_SERVER_ADDRESS in .env.
+Address = <AWG_SERVER_ADDRESS>/<AWG_NETWORK_PREFIX>
+# Must match AWG_ENDPOINT_PORT in .env — that is what client configs advertise.
+ListenPort = <AWG_LISTEN_PORT>
+
+# Packet-header magic values. Must be four distinct integers, identical on every
+# client. Changing any of them invalidates every issued key.
+H1 = <AWG_H1>
+H2 = <AWG_H2>
+H3 = <AWG_H3>
+H4 = <AWG_H4>
+
+# Per-packet junk sizes for the four handshake message types.
+S1 = <AWG_S1>
+S2 = <AWG_S2>
+S3 = <AWG_S3>
+S4 = <AWG_S4>
+
+# Junk-packet count and size bounds sent before the handshake.
+Jc = <AWG_JC>
+Jmin = <AWG_JMIN>
+Jmax = <AWG_JMAX>
+
+# Custom init packets. Deployment-unique payloads — leave them out entirely if
+# this deployment does not use them, but then leave them out on the clients too.
+I1 = <AWG_I1>
+I2 = <AWG_I2>
+I3 = <AWG_I3>
+I4 = <AWG_I4>
+I5 = <AWG_I5>
+
+# NAT for the client subnet. <AWG_NETWORK_CIDR> is AWG_NETWORK from .env;
+# <WAN_INTERFACE> is the host's egress interface (same placeholder as
+# deploy/danted.conf.example). When WARP split-tunnelling is deployed, the
+# vpn-bot-warp-routes helper adds the policy routing on top of this — it does not
+# replace it, so these two lines stay as they are.
+PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -t nat -A POSTROUTING -s <AWG_NETWORK_CIDR> -o <WAN_INTERFACE> -j MASQUERADE
+PostDown = iptables -t nat -D POSTROUTING -s <AWG_NETWORK_CIDR> -o <WAN_INTERFACE> -j MASQUERADE
+
+# No [Peer] blocks. The bot writes them; see the header.

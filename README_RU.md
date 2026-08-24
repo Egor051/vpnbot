@@ -263,6 +263,7 @@ SQLite — локальный backend хранилища; путь по умол
 | [docs/proxy.ru.md](docs/proxy.ru.md) | SOCKS5/Dante и MTProto (static + managed): развёртывание и восстановление. |
 | [docs/warp.ru.md](docs/warp.ru.md) | WARP-сокрытие исходящего IP: формат конфига, установка, proxy egress, selective-split. |
 | [docs/xray-xhttp-inbound.ru.md](docs/xray-xhttp-inbound.ru.md) | Разовая серверная настройка транспорта VLESS (HTTP) / XHTTP. |
+| [docs/backend-config-sync.ru.md](docs/backend-config-sync.ru.md) | Конфиги Xray/AmneziaWG с совладением: границы владения, трекнутые скелеты, гейт расхождений, установщик-слияние, bootstrap. |
 | [docs/security/privilege-separation-plan.ru.md](docs/security/privilege-separation-plan.ru.md) | Архитектура non-root privilege separation и контракты хелперов. |
 
 Английские оригиналы — рядом, без суффикса `.ru`.
