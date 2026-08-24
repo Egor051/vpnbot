@@ -197,6 +197,28 @@ whenever it was active pre-deploy** — not only when the file changed — so th
 exemption always follows the current `HYSTERIA2_PORT`. The oneshot is idempotent,
 so on an unchanged port this re-apply is a no-op.
 
+**The unit file itself is tracked too** — `deploy/vpnbot-hy2-warp-mark.service`. It
+used to exist only on the host: the helper was registered and refreshed, the unit
+was listed in `deploy/managed-units.list` and re-applied by Phase 2, but there was
+no file in `deploy/` to compare it against, so the unit-drift scan had nothing to
+report and a rebuilt host had nothing to restore. `deploy.sh` does **not** auto-install
+it (only `vpn-bot.service` is auto-installed); install by hand, as with every other
+unit in `deploy/`:
+
+```bash
+sudo install -o root -g root -m 0644 deploy/vpnbot-hy2-warp-mark.service \
+    /etc/systemd/system/vpnbot-hy2-warp-mark.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now vpnbot-hy2-warp-mark
+```
+
+One intended difference from the copy that may already be installed: the tracked
+file orders itself after **`vpn-bot-warp-split.service`**, while a host provisioned
+before the rename still says `vpnbot-warp-split.service` — a unit
+`deploy/setup-nonroot-helper-mode.sh` *removes*, so that ordering edge is silently
+dead there. The unit's own header explains it. The legacy **`vpnbot-`** prefix in the
+unit and helper names is deliberate and stays.
+
 ### Ownership model: systemd owns the interface and routes; the bot only observes
 
 The `out-warp` interface and its policy routes have **one** owner: **systemd**.

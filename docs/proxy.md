@@ -9,6 +9,14 @@ relevant env flags (see [Configuration](configuration.md)).
 - Authentication is Linux username/password.
 - The bot process does not call account-management tools directly in production. It uses `sudo -n /usr/local/sbin/vpn-bot-socks5-user ...`; the helper is the only code allowed to call `getent`, `useradd`, `chpasswd`, `passwd -l`, and `userdel`.
 - The bot refuses to manage Linux users whose login does not start with `SOCKS5_LOGIN_PREFIX`.
+- **The daemon config is yours, but there is now a template.** `/etc/danted.conf` is
+  hand-maintained and deliberately outside auto-deploy — the bot owns SOCKS5 *users*, never the
+  daemon config. `deploy/danted.conf.example` tracks its shape with placeholders (listener port,
+  egress `external:`, the `socksmethod: username` the user-provisioning path depends on). Fill the
+  placeholders into a copy; do **not** `cp` it. The `internal:` port must match `SOCKS5_PORT` in
+  `.env`, and `external:` is the WARP proxy-egress switch — see
+  [WARP → WARP proxy egress](warp.md#warp-proxy-egress-masking-the-proxies-outbound-ip) and
+  `deploy/danted-warp.conf` before changing it.
 
 ## MTProto static mode
 

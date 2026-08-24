@@ -129,19 +129,43 @@ one endpoint.
 ```bash
 sudo install -d -o root -g vpn-bot -m 0750 /etc/vpn-bot/tls
 # Add a SECOND install target to the existing acme.sh --install-cert invocation
-# (keep the hysteria one as-is) so renewals land here too and restart the unit:
-sudo acme.sh --install-cert -d anycastedge.duckdns.org \
+# (keep the hysteria one as-is) so renewals land here too, and point --reloadcmd
+# at the tracked fan-out hook so BOTH readers pick the new chain up:
+sudo chmod 0755 /opt/vpn-service/deploy/vpn-bot-acme-reload.sh
+sudo acme.sh --install-cert -d <DOMAIN> \
   --fullchain-file /etc/vpn-bot/tls/fullchain.pem \
   --key-file       /etc/vpn-bot/tls/privkey.pem \
-  --reloadcmd      "chown root:vpn-bot /etc/vpn-bot/tls/fullchain.pem /etc/vpn-bot/tls/privkey.pem && \
-                    chmod 0640 /etc/vpn-bot/tls/privkey.pem && \
-                    chmod 0644 /etc/vpn-bot/tls/fullchain.pem && \
-                    systemctl restart vpn-bot-subscription"
+  --reloadcmd      "/opt/vpn-service/deploy/vpn-bot-acme-reload.sh"
 ```
 
 The key is read **once at startup**, so a renewal is picked up by that restart. The unit needs no
 `ReadOnlyPaths` for it: `ProtectSystem=strict` makes `/etc` read-only, not invisible, and the
 file mode is what actually gates access.
+
+`deploy/vpn-bot-acme-reload.sh` is the tracked form of that reload step: it re-asserts
+`root:vpn-bot` / `0640` on the renewed key, hands Hysteria2 its own copy, and restarts **both**
+`hysteria-server` and `vpn-bot-subscription`. It is run straight out of the checkout (like
+`deploy/update-ip2asn.sh`), so a deploy refreshes it; nothing installs it into `/usr/local/sbin`.
+Dry-run it any time without waiting for a renewal:
+
+```bash
+sudo /opt/vpn-service/deploy/vpn-bot-acme-reload.sh --dry-run
+```
+
+> **Known host divergence — check yours.** On a host provisioned before this hook was tracked,
+> `--reloadcmd` may still point at a hand-written script (e.g. `/usr/local/sbin/acme-reload.sh`)
+> that copies the certificate to Hysteria2 and restarts `hysteria-server` but **never restarts
+> `vpn-bot-subscription`**. That endpoint then keeps serving the **previous** certificate after
+> every renewal until something else restarts it — a deploy, or a reboot — which is easy to miss
+> because both of those happen often enough to mask it. Read the live value before changing
+> anything:
+>
+> ```bash
+> sudo grep -r Le_ReloadCmd /root/.acme.sh/*/ ; sudo cat /usr/local/sbin/acme-reload.sh
+> ```
+>
+> Switching `--reloadcmd` to the tracked hook (re-run the `--install-cert` command above; it
+> rewrites the stored value) closes it. Do it *before* the next renewal, not after.
 
 ## Go-live (drift install, by hand)
 
@@ -171,7 +195,7 @@ sudo install -d -o root -g vpn-bot -m 0750 /etc/vpn-bot/tls
 sudo acme.sh --install-cert -d <domain> \
   --fullchain-file /etc/vpn-bot/tls/fullchain.pem \
   --key-file       /etc/vpn-bot/tls/privkey.pem \
-  --reloadcmd      "... && systemctl restart vpn-bot-subscription"
+  --reloadcmd      "/opt/vpn-service/deploy/vpn-bot-acme-reload.sh"
 ls -l /etc/vpn-bot/tls          # expect root:vpn-bot, privkey.pem 0640
 
 # 2. .env — the flag, the ports and the TLS pair, in one edit

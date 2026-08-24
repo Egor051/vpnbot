@@ -1,0 +1,73 @@
+# Dante SOCKS5 server config — TEMPLATE, NOT A DROP-IN COPY.
+#
+# !!! DO NOT `cp` THIS FILE TO /etc/danted.conf DIRECTLY !!!
+# Every <PLACEHOLDER> below must be replaced with a real value first; danted
+# refuses to start on an unresolved one, and `external:` in particular decides
+# which source address the proxy's traffic leaves with.
+#
+# WHY THIS TEMPLATE EXISTS
+# -----------------------
+# /etc/danted.conf is deliberately OUTSIDE auto-deploy and stays hand-maintained
+# on the host, exactly like the Xray core config.json and the hysteria-server
+# config.yaml: the bot has no apply path for the SOCKS5 *daemon* config. What the
+# bot does own is the SOCKS5 *users* — it creates and deletes them through the
+# `vpn-bot-socks5-user` helper (see deploy/helpers/, deploy/sudoers.d/vpn-bot.example),
+# which is why `socksmethod: username` below is not optional: it is the method the
+# whole user-provisioning path assumes.
+#
+# Until now the daemon config existed only on the host, so a rebuilt host had
+# nothing to reconstruct it from and the only tracked trace of it was the single
+# `external:` line quoted in deploy/danted-warp.conf and docs/warp.md. This file
+# is the whole shape, parameterised; it is NOT installed or verified by deploy.sh.
+#
+# INSTALL / VERIFY (read-only check first):
+#   sudo danted -V -f deploy/danted.conf.example   # will FAIL until placeholders are filled
+#   sudo install -m 0644 <your filled copy> /etc/danted.conf
+#   sudo systemctl restart danted
+#   sudo ss -tlnp | grep <SOCKS5_PORT>
+#
+# Related: docs/proxy.md (backend runbook), docs/warp.md ("WARP proxy egress"),
+# deploy/danted-warp.conf (the systemd drop-in that orders danted after the
+# tunnel so `external:` can bind the tunnel IP at start-up).
+
+logoutput: syslog
+
+# Listener. The port MUST match SOCKS5_PORT in .env — the bot hands that value out
+# in the connection details it shows users, so a mismatch produces links that
+# cannot connect. 0.0.0.0 binds every interface; UFW is what actually restricts
+# reachability (docs/proxy.md).
+internal: 0.0.0.0 port = <SOCKS5_PORT>
+
+# Egress source. TWO valid values, and the choice is the WARP proxy-egress switch:
+#
+#   * <WAN_INTERFACE>   (e.g. eth0) — default. Proxy traffic leaves with the
+#     server's own public IP.
+#   * <WARP_TUNNEL_IP>  — the WARP config's [Interface] Address. Dante then leaves
+#     with src == tunnel IP, which the single `from <tunnel-ip>` policy rule
+#     installed by vpn-bot-warp-routes diverts into the tunnel; no NAT needed.
+#     Requires the deploy/danted-warp.conf drop-in (ordering) and pairs with
+#     WARP_PROXY_EGRESS_ENABLED=true in .env for the Xray side. Activate only via
+#     the manual runbook in docs/warp.md — do not flip it in isolation.
+external: <WAN_INTERFACE>
+
+# Authentication. Keep `username`: the bot provisions SOCKS5 credentials as system
+# users through the vpn-bot-socks5-user helper, and any other method silently
+# disconnects that whole path from the daemon.
+socksmethod: username
+user.privileged: root
+user.unprivileged: nobody
+user.libwrap: nobody
+
+# Access rules. Open by address on purpose — authentication is the gate here, not
+# the source prefix, and the public port is fronted by UFW. Narrow `from:` only if
+# every client of this proxy is known to come from a fixed range.
+client pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    log: connect disconnect
+}
+
+socks pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    socksmethod: username
+    log: connect disconnect
+}
