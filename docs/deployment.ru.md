@@ -42,6 +42,13 @@ api-режима.
 Перед запуском бота в api-режиме настройте Xray API inbound и задайте тег VLESS inbound в
 `/usr/local/etc/xray/config.json`:
 
+> На **чистом хосте** начинайте с `deploy/xray/config.skeleton.json` — это трекнутая форма
+> этого файла: всё описанное ниже в ней уже есть, а на месте секретов стоят плейсхолдеры.
+> Деплой её не устанавливает (бот перезаписывает `config.json` в рантайме, поэтому
+> копировать поверх нельзя) — шаги bootstrap и read-only проверку расхождений, которую
+> Phase 1 гоняет против этого скелета на каждом деплое, см. в
+> [backend-config-sync.ru.md](backend-config-sync.ru.md#bootstrap-на-чистом-или-переехавшем-хосте).
+
 1. Добавьте `"tag": "vless-in"` к объекту VLESS inbound (тег должен совпадать с `XRAY_INBOUND_TAG`):
 
 ```json

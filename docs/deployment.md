@@ -52,6 +52,14 @@ Also set `PRIVILEGE_HELPERS_ENABLED=false` (or omit it) when using api mode.
 Before starting the bot in api mode, configure the Xray API inbound and tag the VLESS
 inbound in `/usr/local/etc/xray/config.json`:
 
+> On a **fresh host**, start from `deploy/xray/config.skeleton.json` — the tracked shape
+> of this file, with everything below already in place and every secret left as a
+> placeholder. It is not installed by a deploy (the bot rewrites `config.json` at
+> runtime, so nothing may copy over it); see
+> [backend-config-sync.md](backend-config-sync.md#bootstrap-on-a-fresh-or-migrated-host)
+> for the bootstrap steps, and for the read-only drift check that Phase 1 runs against
+> that skeleton on every deploy.
+
 1. Add `"tag": "vless-in"` to your VLESS inbound object (use whatever tag you set as
    `XRAY_INBOUND_TAG`):
 
