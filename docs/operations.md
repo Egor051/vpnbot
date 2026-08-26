@@ -507,11 +507,41 @@ loads via `EnvironmentFile=`); otherwise the helper's path guard refuses to run.
 
 ## Off-site backup coverage and recovery bundle
 
-The scheduled off-site backup (`OFFSITE_BACKUP_ENCRYPTION_KEY`) delivers two encrypted
+The scheduled off-site backup (`OFFSITE_BACKUP_ENCRYPTION_KEY`) delivers three encrypted
 documents to admins via Telegram:
 
 - `vpnbot_backup_*.db.enc` — full SQLite snapshot (users, keys, proxy accesses, traffic stats, settings). Per-client data is re-applied into the live configs on startup.
 - `vpnbot_recovery_*.tar.gz.enc` — the **recovery bundle** (when `OFFSITE_BACKUP_INCLUDE_CONFIGS=true`): `.env`, Xray `config.json` (REALITY private key + shortIds), AWG `.conf` (interface private key), managed MTProto secrets, the WARP config, and (when Hysteria2 is enabled) the hysteria-server `config.yaml`. These are the irreplaceable server-side secrets that are **not** in the DB — without them a rebuilt server issues new keypairs and breaks every already-issued client. Unreadable/missing files are skipped and recorded in the bundle's `MANIFEST.json`.
+- `vpnbot_system_*.tar.gz.enc` — the **system bundle** (when `OFFSITE_BACKUP_INCLUDE_SYSTEM=true`): host-level state that neither artifact above ever carried. The path list is `OFFSITE_BACKUP_SYSTEM_PATHS` (default: `DEFAULT_OFFSITE_SYSTEM_PATHS` in `config/settings.py`), plus `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS` for host-specific paths. Directories are walked recursively.
+
+All three are encrypted with the **same** `OFFSITE_BACKUP_ENCRYPTION_KEY` and share the same
+30-day decrypt TTL (`BACKUP_MAX_AGE_DAYS`). Delivery is independent: one artifact failing does
+not suppress the others, and only the DB snapshot moves the scheduling anchor
+(`schema_meta.last_offsite_backup`).
+
+### What the system bundle covers
+
+| What | Why a rebuild fails without it |
+|---|---|
+| `/root/.acme.sh` | `account.conf` holds the DNS-API token. Without it the certificate can **never** be reissued: in 90 days TLS dies for Hysteria2 and for the nginx decoy REALITY points at. |
+| `/etc/vpn-bot`, `/etc/hysteria` | Live cert/key, `warp-split.list` and its kill flag, the `masq/` mirror of the decoy. |
+| `/etc/nginx/conf.d`, `nginx.conf` | The repo ships no nginx template at all — both loopback blocks exist only on the host. |
+| `/etc/danted.conf` | `external:` is what puts SOCKS5 inside the tunnel; the `deploy/` templates are examples, not the live file. |
+| `/etc/sysctl.d`, `/etc/sysctl.conf` | `rp_filter=2`, without which source-based routing into the WARP table does not work. Plus forwarding, BBR, buffers. |
+| `/etc/ufw/*`, `/etc/fail2ban/jail.local` | User rules and the forwarded-traffic policy. |
+| `/etc/ssh` | `sshd_config`, `sshd_config.d/`, public host keys. **Private host keys are excluded on purpose** and flagged in the manifest as `excluded_by_policy`. |
+| `/etc/systemd/system` | Units **and the enablement symlinks** in `*.wants` — some units exist in no other copy. |
+| `/var/spool/cron/crontabs/root` | acme.sh renewal and the decoy refresh. |
+| `/etc/passwd`, `/etc/group` | Firewall rules match traffic by **numeric** uid (`--uid-owner`). A host with different UIDs silently routes traffic to the wrong place. `/etc/shadow` is not included. |
+| `/etc/amnezia`, `/usr/local/sbin`, `/etc/apt/sources.list.d` | `out-warp-routes.list`, live copies of the helper scripts (some have drifted from the templates) and the PPA the DKMS module is built from. |
+
+Deliberately **not** covered: binaries (`/usr/local/bin/{xray,hysteria,wgcf}` — reinstallable),
+the amneziawg DKMS build, private SSH host keys, and host identity (MAC/IP in `/etc/netplan` are
+bundled for reference, not for restoring onto different hardware).
+
+> `ProtectHome=` in the unit must be `read-only`, not `true`. With `true` systemd masks `/root`
+> with an empty tmpfs, and `/root/.acme.sh` plus `/root/.ssh/authorized_keys` land in
+> `MANIFEST.json` as skipped — while the bundle still looks healthy. See `deploy/vpn-bot.service`.
 
 To restore from the bundle on a clean server:
 
@@ -519,12 +549,21 @@ To restore from the bundle on a clean server:
 # Decrypt (KEY = OFFSITE_BACKUP_ENCRYPTION_KEY, stored OUTSIDE the bundle):
 python -c "from cryptography.fernet import Fernet; open('recovery.tar.gz','wb').write(Fernet(b'KEY').decrypt(open('vpnbot_recovery_*.tar.gz.enc','rb').read()))"
 tar xzf recovery.tar.gz            # MANIFEST.json lists each file's original absolute path
+# Same key, same procedure for vpnbot_system_*.tar.gz.enc.
 # Place each file back at its MANIFEST path, restore the .db.enc snapshot, validate
 # configs (see Restore above), then start vpn-bot so startup reconciliation runs.
 ```
 
+**Check `summary` in `MANIFEST.json` after every backup.** An unreadable source is merely
+skipped and logged as a warning — delivery still reports success, and a bundle with degraded
+coverage looks exactly like a complete one. The system bundle's `summary` block
+(`files_included` / `files_skipped` / `symlinks` / `bytes_included` / `truncated`) exists to make
+that a one-glance check. `truncated: true` means a size limit fired and some files were left out.
+
 Because the bundle contains `.env` (which itself holds `OFFSITE_BACKUP_ENCRYPTION_KEY`), keep
-the key in a separate secret store — otherwise the bundle cannot be decrypted.
+the key in a separate secret store — otherwise the bundle cannot be decrypted. For the same
+reason the system bundle is a first-class secret: it carries TLS private keys and the DNS-API
+token.
 
 ## Firewall and exposed ports
 

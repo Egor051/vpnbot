@@ -139,6 +139,30 @@ def _socks5_login_prefix(value: str) -> str:
     return value
 
 
+def _path_list(name: str, default: tuple[Path, ...] = ()) -> tuple[Path, ...]:
+    """Parse a comma-separated list of absolute filesystem paths.
+
+    An unset variable yields *default*; an explicitly blank one (``VAR=``) yields an
+    empty tuple, which is how the system bundle's path set is emptied without also
+    switching the bundle off. Relative paths are rejected — these name locations on
+    the host, and a relative one would silently resolve against the bot's working
+    directory instead.
+    """
+    if os.getenv(name) is None:
+        return default
+    raw = _no_control_chars(name, _optional(name))
+    result: list[Path] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        path = Path(item)
+        if not path.is_absolute():
+            raise SettingsError(f"Переменная {name}: путь {item} должен быть абсолютным")
+        result.append(path)
+    return tuple(result)
+
+
 def _int_list_positive(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
     raw = _optional(name)
     if not raw:
@@ -476,6 +500,16 @@ class Settings:
     # Path to the .env file included in the recovery bundle. None disables only the
     # .env entry (configs are still bundled). Resolved at load time.
     offsite_backup_env_path: Path | None = None
+    # When enabled, each offsite backup run also sends a THIRD encrypted archive
+    # (the "system bundle") with the host-level state in offsite_backup_system_paths:
+    # ACME account + certs, the REALITY decoy site, nginx/sysctl/ufw/fail2ban, the
+    # systemd units and their enablement symlinks, and the passwd/group UID map.
+    # Same Fernet key and same 30-day decrypt TTL as the other two artifacts; the DB
+    # backup and the recovery bundle are unchanged by it.
+    offsite_backup_include_system: bool = True
+    # Files and directories bundled into the system archive. Directories are walked;
+    # missing entries are skipped best-effort. Resolved at load time.
+    offsite_backup_system_paths: tuple[Path, ...] = ()
     anomaly_check_interval: int = 300
     anomaly_window_seconds: int = 3600
     # DEPRECATED: retained only as the default for anomaly_unique_nets. The
@@ -714,6 +748,74 @@ class Settings:
             raise SettingsError("Для создания AWG-ключа AWG_ENDPOINT_PORT должен быть в диапазоне 1–65535")
 
 
+# Host-level state bundled into the third offsite artifact (the "system bundle").
+# Every entry here is something the DB snapshot and the recovery bundle never
+# covered, so before this list existed a rebuilt server had no off-box copy of it.
+# Entries may be files or directories; directories are walked. Missing entries are
+# skipped best-effort, so the same list is safe on a host that runs only some of
+# these services. Override with OFFSITE_BACKUP_SYSTEM_PATHS, or append host-specific
+# paths (e.g. the decoy site's DECOY_ROOT) with OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS.
+DEFAULT_OFFSITE_SYSTEM_PATHS: tuple[Path, ...] = (
+    # ACME account + issued certificates. account.conf carries the DNS-API token —
+    # lose it and no certificate on this host can ever be renewed again.
+    Path("/root/.acme.sh"),
+    # TLS material the services actually read, plus warp-split.list / its kill flag.
+    Path("/etc/vpn-bot"),
+    # cert.pem/key.pem and masq/ — the latter is the Hysteria2 mirror of the REALITY
+    # decoy site, so it doubles as a copy of the decoy content on a host where
+    # masquerade.type is file.
+    Path("/etc/hysteria"),
+    # This repo ships no nginx template at all: the loopback server blocks that
+    # serve REALITY's selfsteal target exist only on the host.
+    Path("/etc/nginx/conf.d"),
+    Path("/etc/nginx/nginx.conf"),
+    # Dante's egress binding (external:) is what puts SOCKS5 traffic in the tunnel;
+    # the repo's two danted templates are examples, not the live file.
+    Path("/etc/danted.conf"),
+    # rp_filter=2 lives here, and source-based policy routing into the WARP table
+    # does not work without it. Forwarding, BBR and the socket buffers too.
+    Path("/etc/sysctl.d"),
+    # sysctl.d/99-sysctl.conf is a symlink to this file on Debian/Ubuntu, and a
+    # symlink is stored as its target, not its content — without this entry the
+    # base sysctl set would be named in the manifest but never captured.
+    Path("/etc/sysctl.conf"),
+    # ufw's user-added rules and the routed-traffic policy.
+    Path("/etc/ufw/user.rules"),
+    Path("/etc/ufw/user6.rules"),
+    Path("/etc/default/ufw"),
+    Path("/etc/fail2ban/jail.local"),
+    # The whole directory is walked so sshd_config, sshd_config.d/, moduli and the
+    # host PUBLIC keys are covered — and so the host PRIVATE keys show up in
+    # MANIFEST.json as excluded_by_policy rather than never being mentioned. See
+    # _SYSTEM_EXCLUDE_GLOBS in services.offsite_backup for why they stay out.
+    Path("/etc/ssh"),
+    Path("/root/.ssh/authorized_keys"),
+    # Unit files AND the enablement symlinks in */.wants, which are what record
+    # "this unit starts at boot". Several units here exist on no other host copy.
+    Path("/etc/systemd/system"),
+    Path("/etc/systemd/journald.conf"),
+    # acme.sh renewal and the decoy-site freshen job.
+    Path("/var/spool/cron/crontabs/root"),
+    # The UID/GID map. Firewall rules match service traffic by NUMERIC uid
+    # (--uid-owner), so a rebuilt host that hands out different UIDs silently routes
+    # that traffic the wrong way. /etc/shadow is deliberately NOT included: these
+    # are system accounts with no usable password, and password hashes do not
+    # belong in a chat message.
+    Path("/etc/passwd"),
+    Path("/etc/group"),
+    # Interface naming/addressing, kept as a reference for the rebuild rather than
+    # something to restore verbatim onto different hardware.
+    Path("/etc/netplan"),
+    # out-warp-routes.list (the split-tunnel prefix set) next to the AWG/WARP confs.
+    Path("/etc/amnezia"),
+    # The privileged helpers. Most are tracked in scripts/, but the live copies are
+    # what actually run and some have drifted from their repo templates.
+    Path("/usr/local/sbin"),
+    # Third-party apt sources — the amneziawg PPA the DKMS module is built from.
+    Path("/etc/apt/sources.list.d"),
+)
+
+
 def _offsite_env_path(env_path: str | Path | None) -> Path | None:
     """Resolve which .env file to bundle into the offsite recovery archive.
 
@@ -733,6 +835,12 @@ def _offsite_env_path(env_path: str | Path | None) -> Path | None:
 def load_settings(env_path: str | Path | None = None) -> Settings:
     load_dotenv(env_path)
     helper_staging_root = Path(_optional("HELPER_STAGING_ROOT", "/run/vpn-bot"))
+    # OFFSITE_BACKUP_SYSTEM_PATHS replaces the shipped default set; _EXTRA_PATHS
+    # appends to whichever of the two is in effect, which is where host-specific
+    # locations go (the decoy site's DECOY_ROOT has no fixed path across hosts).
+    offsite_backup_system_paths = _path_list(
+        "OFFSITE_BACKUP_SYSTEM_PATHS", DEFAULT_OFFSITE_SYSTEM_PATHS
+    ) + _path_list("OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS")
     awg_dns = _optional("AWG_DNS") or _optional("AWG_CLIENT_DNS", "1.1.1.1")
     xray_manage_short_ids = _bool("XRAY_MANAGE_SHORT_IDS", False)
     xray_short_id = _xray_short_id(_optional("XRAY_SHORT_ID"), required=False)
@@ -953,6 +1061,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         offsite_backup_interval=_int_range("OFFSITE_BACKUP_INTERVAL", 604800, 0, 365 * 24 * 3600),
         offsite_backup_include_configs=_bool("OFFSITE_BACKUP_INCLUDE_CONFIGS", True),
         offsite_backup_env_path=_offsite_env_path(env_path),
+        offsite_backup_include_system=_bool("OFFSITE_BACKUP_INCLUDE_SYSTEM", True),
+        offsite_backup_system_paths=offsite_backup_system_paths,
         anomaly_check_interval=_int_range("ANOMALY_CHECK_INTERVAL", 300, 0, 86400),
         anomaly_window_seconds=_int_range("ANOMALY_WINDOW_SECONDS", 3600, 60, 86400),
         anomaly_min_unique_ips=anomaly_min_unique_ips,

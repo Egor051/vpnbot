@@ -1994,6 +1994,7 @@ async def admin_backup_now(callback: CallbackQuery, services: Services, bot: Bot
         await safe_callback_answer(callback, t("backup_creating"))
         result = await services.offsite_backup.send_to_admins(bot, services.settings.admin_ids)
         recovery = await services.offsite_backup.send_recovery_to_admins(bot, services.settings.admin_ids)
+        system = await services.offsite_backup.send_system_to_admins(bot, services.settings.admin_ids)
         if recovery is None:
             text = t("backup_sent", success=result["success"], failed=result["failed"])
         else:
@@ -2003,6 +2004,14 @@ async def admin_backup_now(callback: CallbackQuery, services: Services, bot: Bot
                 failed=result["failed"],
                 recovery_success=recovery["success"],
                 recovery_failed=recovery["failed"],
+            )
+        # Appended rather than folded into the strings above so the existing two
+        # outcomes keep their exact wording when the system bundle is off or empty.
+        if system is not None:
+            text += "\n" + t(
+                "backup_sent_system_suffix",
+                system_success=system["success"],
+                system_failed=system["failed"],
             )
         await safe_edit_message_text(callback.message, text, reply_markup=admin_panel_keyboard())
     except Exception as exc:

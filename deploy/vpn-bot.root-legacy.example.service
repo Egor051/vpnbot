@@ -19,6 +19,10 @@ UMask=0077
 LimitNOFILE=65536
 NoNewPrivileges=true
 PrivateTmp=true
+# Set this to read-only if you want the offsite system bundle to cover
+# /root/.acme.sh and /root/.ssh/authorized_keys — ProtectHome=true masks /root, so
+# those sources are recorded in MANIFEST.json as skipped and the bundle ships
+# without them. See deploy/vpn-bot.service.
 ProtectHome=true
 ProtectSystem=full
 RuntimeDirectory=vpn-bot

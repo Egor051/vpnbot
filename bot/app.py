@@ -514,6 +514,13 @@ async def _build_app(
         clock=clock,
         recovery_sources=recovery_sources,
         include_recovery=settings.offsite_backup_include_configs,
+        # Host-level state the recovery bundle above never covered: ACME account and
+        # issued certs, the REALITY decoy site, nginx/sysctl/ufw/fail2ban, the systemd
+        # units plus their enablement symlinks, and the passwd/group UID map that the
+        # firewall's --uid-owner rules match on. The list is settings-driven so a host
+        # can add its own paths; directories in it are walked at backup time.
+        system_sources=settings.offsite_backup_system_paths,
+        include_system=settings.offsite_backup_include_system,
     )
 
     anomaly_detection_service = AnomalyDetectionService(

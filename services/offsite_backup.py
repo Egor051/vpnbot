@@ -1,12 +1,14 @@
 
 import asyncio
+import fnmatch
 import hashlib
 import io
 import json
 import logging
+import os
 import sqlite3
 import tarfile
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +19,29 @@ from adapters.clock import ClockProvider
 from db.database import Database
 
 logger = logging.getLogger(__name__)
+
+# Directory names that never carry recoverable state. Pruned during a directory
+# walk so the system bundle's manifest stays short enough for a human to actually
+# review after each backup.
+_SKIP_DIR_NAMES = frozenset(
+    {"__pycache__", ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", "node_modules", "lost+found"}
+)
+
+# Filename globs deliberately kept OUT of the system bundle. An SSH host private
+# key would let anyone holding one decrypted bundle impersonate this host, and a
+# rebuilt server should generate fresh host keys anyway — what actually prevents a
+# lockout is the public side (sshd_config, sshd_config.d/, authorized_keys), which
+# IS bundled. Matches are still listed in MANIFEST.json with reason
+# "excluded_by_policy", so the gap is visible rather than silent.
+_SYSTEM_EXCLUDE_GLOBS = ("ssh_host_*_key",)
+
+# Guardrails so one unexpected large file (a log, a core dump, a binary dropped
+# into a watched directory) cannot inflate the bundle past what Telegram accepts.
+# Fernet base64-expands its output by ~33% on top of gzip, so the raw ceiling sits
+# well below the 50 MB bot upload limit. Both limits are recorded in the manifest
+# when they bite, so a truncated bundle never looks complete.
+_SYSTEM_MAX_FILE_BYTES = 8 * 1024 * 1024
+_SYSTEM_MAX_TOTAL_BYTES = 32 * 1024 * 1024
 
 
 class OffsiteBackupService:
@@ -47,6 +72,8 @@ class OffsiteBackupService:
         clock: ClockProvider,
         recovery_sources: Sequence[Path] = (),
         include_recovery: bool = False,
+        system_sources: Sequence[Path] = (),
+        include_system: bool = False,
     ) -> None:
         self.db_path = db_path
         self.clock = clock
@@ -54,14 +81,24 @@ class OffsiteBackupService:
         self._db = db
         # De-duplicated, order-preserving list of files bundled into the recovery
         # archive (.env + service configs). Read best-effort at backup time.
-        seen: set[Path] = set()
-        sources: list[Path] = []
-        for source in recovery_sources:
-            if source not in seen:
-                seen.add(source)
-                sources.append(source)
-        self._recovery_sources = tuple(sources)
+        self._recovery_sources = self._dedupe_paths(recovery_sources)
         self._include_recovery = include_recovery
+        # Same, for the third artifact: OS-level state (certs, decoy site, nginx /
+        # sysctl / ufw / systemd, UID map) that the recovery bundle never covered.
+        # Entries may be directories — those are walked at backup time.
+        self._system_sources = self._dedupe_paths(system_sources)
+        self._include_system = include_system
+
+    @staticmethod
+    def _dedupe_paths(paths: Iterable[Path]) -> tuple[Path, ...]:
+        """Drop duplicates while preserving the caller's order."""
+        seen: set[Path] = set()
+        result: list[Path] = []
+        for path in paths:
+            if path not in seen:
+                seen.add(path)
+                result.append(path)
+        return tuple(result)
 
     async def get_last_backup_time(self) -> datetime | None:
         value = await self._db.get_meta(self._META_KEY)
@@ -80,6 +117,11 @@ class OffsiteBackupService:
     def recovery_enabled(self) -> bool:
         """Whether a recovery bundle (.env + configs) can be produced and sent."""
         return self.enabled and self._include_recovery and bool(self._recovery_sources)
+
+    @property
+    def system_enabled(self) -> bool:
+        """Whether a system bundle (OS-level state) can be produced and sent."""
+        return self.enabled and self._include_system and bool(self._system_sources)
 
     async def create_encrypted_backup(self) -> tuple[bytes, str]:
         """Create an encrypted snapshot of the database and return it with a filename."""
@@ -156,6 +198,35 @@ class OffsiteBackupService:
         filename = f"vpnbot_recovery_{self._filename_stamp()}.tar.gz.enc"
         return encrypted, filename
 
+    async def create_system_bundle(self) -> tuple[bytes, str] | None:
+        """Create an encrypted tar.gz of OS-level state and a filename.
+
+        Third artifact alongside the DB backup and the recovery bundle, built and
+        shipped by exactly the same path: same in-memory assembly, same Fernet key,
+        same 30-day TTL enforced by :meth:`decrypt_backup`, same Telegram delivery.
+        It exists because the recovery bundle only ever covered .env + the four
+        service configs, leaving the host's own state (ACME account + issued certs,
+        the REALITY decoy site, nginx/sysctl/ufw/fail2ban, systemd units and their
+        enablement symlinks, and the passwd/group UID map that firewall rules
+        reference by number) with no off-box copy at all.
+
+        Sources may be directories, which are walked. Returns None when nothing
+        could be read, mirroring :meth:`create_recovery_bundle`.
+        """
+        if not self._encryption_key:
+            raise RuntimeError("OFFSITE_BACKUP_ENCRYPTION_KEY не настроен")
+
+        tar_bytes = await asyncio.to_thread(self._build_system_tar)
+        if tar_bytes is None:
+            return None
+
+        from cryptography.fernet import Fernet
+        fernet = Fernet(self._encryption_key.encode())
+        encrypted = fernet.encrypt(tar_bytes)
+
+        filename = f"vpnbot_system_{self._filename_stamp()}.tar.gz.enc"
+        return encrypted, filename
+
     def _filename_stamp(self) -> str:
         """Compact UTC ``YYYYMMDDThhmmss`` stamp for the (human-facing) filename.
 
@@ -207,6 +278,132 @@ class OffsiteBackupService:
         buffer = io.BytesIO()
         # mtime=0 (no embedded gzip timestamp) keeps the archive reproducible for
         # a given input set, which makes the round-trip tests deterministic.
+        with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+            self._add_tar_bytes(tar, "MANIFEST.json", manifest_bytes)
+            for member, data in blobs:
+                self._add_tar_bytes(tar, member, data)
+        return buffer.getvalue()
+
+    @classmethod
+    def _walk_source(cls, source: Path) -> list[Path]:
+        """Expand one system source into a deterministic list of paths.
+
+        A file (or a symlink, which is never followed) yields itself. A directory is
+        walked with both its subdirectory and file names sorted, so the same tree
+        always produces the same archive. ``followlinks=False`` means a symlinked
+        subdirectory is recorded but not descended into, which both preserves
+        systemd's ``*.wants/`` enablement links and makes a symlink loop impossible.
+        ``os.walk`` swallows permission errors, matching the best-effort contract of
+        the bundle.
+        """
+        if source.is_symlink() or not source.is_dir():
+            return [source]
+        found: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
+            dirnames[:] = sorted(name for name in dirnames if name not in _SKIP_DIR_NAMES)
+            base = Path(dirpath)
+            found.extend(base / name for name in sorted(filenames))
+            found.extend(base / name for name in dirnames if (base / name).is_symlink())
+        return found
+
+    def _build_system_tar(self) -> bytes | None:
+        """Build an in-memory tar.gz of the system sources plus MANIFEST.json.
+
+        Same best-effort contract as :meth:`_build_recovery_tar` — an unreadable
+        entry is skipped and recorded with a reason instead of failing the bundle —
+        with three additions the OS-level set needs: directory sources are walked,
+        symlinks are captured as their target rather than their content (so unit
+        enablement survives without duplicating every unit file), and the size
+        guardrails above are enforced.
+
+        The manifest carries a ``summary`` block on top of the per-file list. The
+        per-file list can run to hundreds of entries here, and a bundle whose
+        coverage quietly degraded looks identical to a complete one; the summary is
+        what makes "did this actually capture everything" a one-glance check.
+        """
+        created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        manifest_files: list[dict[str, object]] = []
+        blobs: list[tuple[str, bytes]] = []
+        seen: set[Path] = set()
+        total_bytes = 0
+        truncated = False
+
+        for source in self._system_sources:
+            for path in self._walk_source(source):
+                # Sources are allowed to overlap (a directory plus a file inside it);
+                # dedupe the expanded paths so no member name is written twice.
+                if path in seen:
+                    continue
+                seen.add(path)
+                entry: dict[str, object] = {"path": str(path)}
+
+                if path.is_symlink():
+                    try:
+                        target = os.readlink(path)
+                    except OSError as exc:
+                        entry.update(kind="symlink", included=False, reason=exc.__class__.__name__)
+                        manifest_files.append(entry)
+                        continue
+                    entry.update(kind="symlink", included=True, target=target)
+                    manifest_files.append(entry)
+                    continue
+
+                entry["kind"] = "file"
+                if any(fnmatch.fnmatch(path.name, pattern) for pattern in _SYSTEM_EXCLUDE_GLOBS):
+                    entry.update(included=False, reason="excluded_by_policy")
+                    manifest_files.append(entry)
+                    continue
+
+                try:
+                    size = path.stat().st_size
+                except OSError as exc:
+                    entry.update(included=False, reason=exc.__class__.__name__)
+                    manifest_files.append(entry)
+                    logger.warning("System bundle: пропускаю недоступный файл %s: %s", path, exc)
+                    continue
+
+                if size > _SYSTEM_MAX_FILE_BYTES:
+                    entry.update(included=False, reason="too_large", size=size)
+                    manifest_files.append(entry)
+                    truncated = True
+                    logger.warning("System bundle: файл %s больше лимита (%d Б), пропускаю", path, size)
+                    continue
+                if total_bytes + size > _SYSTEM_MAX_TOTAL_BYTES:
+                    entry.update(included=False, reason="bundle_size_limit", size=size)
+                    manifest_files.append(entry)
+                    truncated = True
+                    logger.warning("System bundle: достигнут общий лимит, пропускаю %s", path)
+                    continue
+
+                try:
+                    data = path.read_bytes()
+                except OSError as exc:
+                    entry.update(included=False, reason=exc.__class__.__name__)
+                    manifest_files.append(entry)
+                    logger.warning("System bundle: пропускаю недоступный файл %s: %s", path, exc)
+                    continue
+
+                member = "files/" + self._safe_arcname(path)
+                entry.update(included=True, member=member, size=len(data), sha256=hashlib.sha256(data).hexdigest())
+                manifest_files.append(entry)
+                blobs.append((member, data))
+                total_bytes += len(data)
+
+        if not blobs:
+            return None
+
+        summary = {
+            "sources": [str(source) for source in self._system_sources],
+            "files_included": sum(1 for e in manifest_files if e["kind"] == "file" and e["included"]),
+            "files_skipped": sum(1 for e in manifest_files if e["kind"] == "file" and not e["included"]),
+            "symlinks": sum(1 for e in manifest_files if e["kind"] == "symlink"),
+            "bytes_included": total_bytes,
+            "truncated": truncated,
+        }
+        manifest = {"created_at": created_at, "summary": summary, "files": manifest_files}
+        manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+
+        buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
             self._add_tar_bytes(tar, "MANIFEST.json", manifest_bytes)
             for member, data in blobs:
@@ -308,6 +505,40 @@ class OffsiteBackupService:
                 failed += 1
         return {"success": success, "failed": failed, "total": len(admin_ids)}
 
+    async def send_system_to_admins(self, bot: Bot, admin_ids: frozenset[int]) -> dict[str, int] | None:
+        """Send the encrypted system bundle to all admins and return delivery counts.
+
+        Returns None when the bundle is disabled or no source could be read, so
+        callers can distinguish "not sent" from a zero-success delivery — same
+        contract as :meth:`send_recovery_to_admins`.
+        """
+        if not self.system_enabled:
+            return None
+        built = await self.create_system_bundle()
+        if built is None:
+            return None
+        encrypted, filename = built
+        success = 0
+        failed = 0
+        for admin_id in admin_ids:
+            try:
+                await bot.send_document(
+                    admin_id,
+                    document=BufferedInputFile(encrypted, filename=filename),
+                    caption=(
+                        f"Зашифрованный системный бандл (сертификаты, сайт-заглушка, nginx/sysctl/ufw, "
+                        f"юниты, карта UID): <code>{filename}</code>\n"
+                        "Расшифруйте тем же ключом <code>OFFSITE_BACKUP_ENCRYPTION_KEY</code>, "
+                        "затем распакуйте: <code>tar xzf</code>. Проверьте <code>summary</code> "
+                        "в <code>MANIFEST.json</code>. Хранить ключ нужно отдельно от бандла."
+                    ),
+                )
+                success += 1
+            except Exception:
+                logger.warning("Не удалось отправить системный бандл администратору %s", admin_id, exc_info=True)
+                failed += 1
+        return {"success": success, "failed": failed, "total": len(admin_ids)}
+
 
 async def offsite_backup_loop(
     service: OffsiteBackupService,
@@ -361,4 +592,22 @@ async def offsite_backup_loop(
                     )
             except Exception:
                 logger.warning("Offsite recovery bundle job упал с ошибкой", exc_info=True)
+
+        # The system bundle is sent on the same independent-failure terms as the
+        # recovery bundle above, and likewise does not touch last_offsite_backup —
+        # the DB backup stays the single scheduling anchor.
+        if service.system_enabled:
+            try:
+                system = await service.send_system_to_admins(bot, admin_ids)
+                if system is None:
+                    logger.info("Offsite system bundle: нет доступных файлов, пропуск")
+                else:
+                    logger.info(
+                        "Offsite system bundle sent: success=%d failed=%d total=%d",
+                        system["success"],
+                        system["failed"],
+                        system["total"],
+                    )
+            except Exception:
+                logger.warning("Offsite system bundle job упал с ошибкой", exc_info=True)
         await asyncio.sleep(interval)

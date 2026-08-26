@@ -223,10 +223,12 @@ async def test_dedupes_recovery_sources(tmp_path: Path) -> None:
 class _FakeService:
     """Minimal stand-in for OffsiteBackupService to drive offsite_backup_loop."""
 
-    def __init__(self, recovery_enabled: bool) -> None:
+    def __init__(self, recovery_enabled: bool, system_enabled: bool = False) -> None:
         self.recovery_enabled = recovery_enabled
+        self.system_enabled = system_enabled
         self.backup_sent = 0
         self.recovery_sent = 0
+        self.system_sent = 0
         self.recorded = 0
 
     async def get_last_backup_time(self):
@@ -241,6 +243,10 @@ class _FakeService:
 
     async def send_recovery_to_admins(self, bot, admin_ids):  # noqa: ANN001
         self.recovery_sent += 1
+        return {"success": 1, "failed": 0, "total": len(admin_ids)}
+
+    async def send_system_to_admins(self, bot, admin_ids):  # noqa: ANN001
+        self.system_sent += 1
         return {"success": 1, "failed": 0, "total": len(admin_ids)}
 
 
@@ -264,6 +270,9 @@ async def test_loop_sends_both_artifacts(monkeypatch: pytest.MonkeyPatch) -> Non
     assert service.backup_sent == 1
     assert service.recorded == 1
     assert service.recovery_sent == 1
+    # system_enabled defaults off here: the third artifact must not be produced
+    # unless it is switched on, so the pre-existing two-artifact run is unchanged.
+    assert service.system_sent == 0
 
 
 @pytest.mark.asyncio

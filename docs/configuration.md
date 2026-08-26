@@ -326,6 +326,9 @@ link. Both processes read `.env` at startup, so flipping the flag needs
 | `OFFSITE_BACKUP_INTERVAL` | No | `604800` | Interval (seconds) between off-site backup uploads (0 = disabled). Default is 7 days. | `604800` |
 | `OFFSITE_BACKUP_INCLUDE_CONFIGS` | No | `true` | Also send a second encrypted **recovery bundle** (`.env` + Xray/AWG/Hysteria2/MTProto/WARP configs) alongside the DB backup so the service can be rebuilt on a clean server. Encrypted with the same key; delivered as `vpnbot_recovery_*.tar.gz.enc`. | `true` |
 | `OFFSITE_BACKUP_ENV_PATH` | No | _(auto)_ | 🔒 Path to the `.env` placed in the recovery bundle. Empty = auto-detect the `.env` loaded at startup. | `/opt/vpn-service/.env` |
+| `OFFSITE_BACKUP_INCLUDE_SYSTEM` | No | `true` | Also send a third encrypted **system bundle** — the host-level state that neither the DB nor the recovery bundle holds: `/root/.acme.sh` (TLS certs + the DNS-API token), systemd units *and their `*.wants/` enablement symlinks*, nginx/dante/sysctl/ufw/fail2ban configs, `/etc/ssh` (public material only), crontabs, netplan. Encrypted with the same key; delivered as `vpnbot_system_*.tar.gz.enc`. Treat it as a first-class secret. | `true` |
+| `OFFSITE_BACKUP_SYSTEM_PATHS` | No | _(built-in list)_ | Comma-separated absolute paths forming the system bundle. Setting this **replaces** the built-in list — use `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS` to add instead. Directories are walked (symlinks recorded as targets, never followed). | `/etc/nginx,/etc/hysteria` |
+| `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS` | No | _(empty)_ | Comma-separated absolute paths **appended** to the system bundle. This is where host-specific state goes — most importantly the REALITY decoy site root (`DECOY_ROOT`), since a byte-different decoy breaks selfsteal. | `/var/www/mysite` |
 
 ## Anomaly Detection
 

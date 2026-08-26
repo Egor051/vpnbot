@@ -29,7 +29,13 @@ UMask=0077
 # process does not work with hundreds of thousands of descriptors.
 LimitNOFILE=65536
 PrivateTmp=true
-ProtectHome=true
+# read-only, not true: the offsite system bundle reads /root/.acme.sh (the ACME
+# account key and the DNS-API token, without which no certificate on this host can
+# ever be renewed) and /root/.ssh/authorized_keys. ProtectHome=true masks /root as
+# an empty tmpfs, so those sources silently landed in MANIFEST.json as skipped —
+# the bundle looked healthy while covering none of them. read-only still denies
+# every write into /root and /home.
+ProtectHome=read-only
 ProtectSystem=false
 RuntimeDirectory=vpn-bot
 RuntimeDirectoryMode=0700
