@@ -30,7 +30,7 @@ pillow==12.3.0
 propcache==0.5.2
 pycparser==3.0
 pydantic==2.13.4
-pydantic-core==2.46.4
+pydantic-core==2.48.0
 python-dotenv==1.2.2
 qrcode==8.2
 typing-extensions==4.16.0
