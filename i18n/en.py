@@ -466,6 +466,7 @@ STRINGS: dict[str, str] = {
         "Backup sent.\nSuccessful: {success}\nFailed: {failed}\n"
         "Recovery bundle: {recovery_success} succeeded, {recovery_failed} failed"
     ),
+    "backup_sent_system_suffix": "System bundle: {system_success} succeeded, {system_failed} failed",
     "moderator_role_removed": "Moderator role removed. User is now a regular approved user.",
     "moderator_role_assigned": "User set as moderator.",
     "admin_unote_current": " Current: <code>{note}</code>",

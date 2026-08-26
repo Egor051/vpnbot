@@ -35,7 +35,7 @@ def _docs_corpus() -> str:
 # Helper calls in settings.py whose first string argument is an env var name.
 _ENV_CALL = re.compile(
     r"(?:os\.getenv|_required|_optional|_optional_path|_int|_int_range|_optional_int_range"
-    r"|_int_list_positive|_bool|_choice|_fernet_key)\(\s*\"([A-Z][A-Z0-9_]*)\""
+    r"|_int_list_positive|_path_list|_bool|_choice|_fernet_key)\(\s*\"([A-Z][A-Z0-9_]*)\""
 )
 
 # Legacy aliases: accepted for backwards compatibility, documented as aliases in

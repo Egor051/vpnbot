@@ -470,6 +470,7 @@ STRINGS: dict[str, str] = {
         "Бэкап отправлен.\nУспешно: {success}\nОшибок: {failed}\n"
         "Бандл восстановления: успешно {recovery_success}, ошибок {recovery_failed}"
     ),
+    "backup_sent_system_suffix": "Системный бандл: успешно {system_success}, ошибок {system_failed}",
     "moderator_role_removed": "Роль модератора снята. Пользователь стал обычным одобренным пользователем.",
     "moderator_role_assigned": "Пользователь назначен модератором.",
     "admin_unote_current": " Текущая: <code>{note}</code>",

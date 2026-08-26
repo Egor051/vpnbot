@@ -382,11 +382,41 @@ sudo systemctl start vpn-bot vpnbot-hy2-auth vpn-bot-subscription
 
 ## Офсайтовый бэкап: покрытие и бандл восстановления
 
-Плановый офсайтовый бэкап (`OFFSITE_BACKUP_ENCRYPTION_KEY`) отправляет админам в Telegram два
+Плановый офсайтовый бэкап (`OFFSITE_BACKUP_ENCRYPTION_KEY`) отправляет админам в Telegram три
 зашифрованных документа:
 
 - `vpnbot_backup_*.db.enc` — полный снимок SQLite (пользователи, ключи, proxy-доступы, статистика, настройки). Per-client данные пере-применяются в конфиги при старте.
 - `vpnbot_recovery_*.tar.gz.enc` — **бандл восстановления** (при `OFFSITE_BACKUP_INCLUDE_CONFIGS=true`): `.env`, Xray `config.json` (REALITY private key + shortIds), AWG `.conf` (interface private key), managed-секреты MTProto, конфиг WARP и (когда включён Hysteria2) `config.yaml` hysteria-server. Это незаменимые серверные секреты, которых **нет** в БД — без них пересозданный сервер выдаст новые пары ключей и сломает все ранее выданные конфиги. Недоступные/отсутствующие файлы пропускаются и фиксируются в `MANIFEST.json`.
+- `vpnbot_system_*.tar.gz.enc` — **системный бандл** (при `OFFSITE_BACKUP_INCLUDE_SYSTEM=true`): состояние самого хоста, которого не было ни в одном из двух артефактов выше. Список путей — `OFFSITE_BACKUP_SYSTEM_PATHS` (по умолчанию `DEFAULT_OFFSITE_SYSTEM_PATHS` в `config/settings.py`), плюс `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS` для путей, специфичных для хоста. Каталоги обходятся рекурсивно.
+
+Все три шифруются **одним** `OFFSITE_BACKUP_ENCRYPTION_KEY` и подчиняются одному и тому же
+30-дневному TTL расшифровки (`BACKUP_MAX_AGE_DAYS`). Отправка независимая: сбой одного артефакта
+не подавляет остальные, а якорь расписания (`schema_meta.last_offsite_backup`) двигает только
+снимок БД.
+
+### Что именно закрывает системный бандл
+
+| Что | Почему без него не восстановиться |
+|---|---|
+| `/root/.acme.sh` | `account.conf` хранит токен DNS-API. Без него сертификат **никогда** больше не перевыпустить: через 90 дней умирает TLS у Hysteria2 и у nginx-заглушки, на которую смотрит REALITY. |
+| `/etc/vpn-bot`, `/etc/hysteria` | Живые cert/key, `warp-split.list` и его kill-флаг, зеркало `masq/` заглушки. |
+| `/etc/nginx/conf.d`, `nginx.conf` | В репозитории нет ни одного шаблона nginx — оба loopback-блока существуют только на хосте. |
+| `/etc/danted.conf` | `external:` — то, что заводит SOCKS5 в тоннель; шаблоны в `deploy/` это примеры, а не живой файл. |
+| `/etc/sysctl.d`, `/etc/sysctl.conf` | `rp_filter=2`, без которого source-based routing в таблицу WARP не работает. Плюс forwarding, BBR, буферы. |
+| `/etc/ufw/*`, `/etc/fail2ban/jail.local` | Пользовательские правила и политика для forwarded-трафика. |
+| `/etc/ssh` | `sshd_config`, `sshd_config.d/`, публичные host-ключи. **Приватные host-ключи исключены намеренно** и помечены в манифесте как `excluded_by_policy`. |
+| `/etc/systemd/system` | Юниты **и симлинки включения** в `*.wants` — часть юнитов не существует ни в одной другой копии. |
+| `/var/spool/cron/crontabs/root` | Renew acme.sh и обновление заглушки. |
+| `/etc/passwd`, `/etc/group` | Правила firewall матчат трафик по **числовому** uid (`--uid-owner`). Хост с другими UID молча погонит трафик не туда. `/etc/shadow` не включается. |
+| `/etc/amnezia`, `/usr/local/sbin`, `/etc/apt/sources.list.d` | `out-warp-routes.list`, живые копии helper-скриптов (часть разошлась с шаблонами) и PPA, из которого собирается DKMS-модуль. |
+
+Что бандл **не** закрывает по замыслу: бинарники (`/usr/local/bin/{xray,hysteria,wgcf}` — переустанавливаются),
+DKMS-сборка модуля amneziawg, приватные SSH host-ключи и идентичность хоста (MAC/IP в `/etc/netplan`
+кладутся как справка, а не для восстановления на другое железо).
+
+> `ProtectHome=` в юните должен быть `read-only`, а не `true`. При `true` systemd маскирует `/root`
+> пустым tmpfs, и `/root/.acme.sh` с `/root/.ssh/authorized_keys` попадают в `MANIFEST.json` как
+> пропущенные — бандл при этом выглядит здоровым. См. `deploy/vpn-bot.service`.
 
 Восстановление из бандла на чистом сервере:
 
@@ -394,12 +424,21 @@ sudo systemctl start vpn-bot vpnbot-hy2-auth vpn-bot-subscription
 # Расшифровка (KEY = OFFSITE_BACKUP_ENCRYPTION_KEY, хранится ОТДЕЛЬНО от бандла):
 python -c "from cryptography.fernet import Fernet; open('recovery.tar.gz','wb').write(Fernet(b'KEY').decrypt(open('vpnbot_recovery_*.tar.gz.enc','rb').read()))"
 tar xzf recovery.tar.gz            # MANIFEST.json содержит исходный абсолютный путь каждого файла
+# Тот же ключ и та же процедура для vpnbot_system_*.tar.gz.enc.
 # Разложите файлы по путям из MANIFEST, восстановите снимок .db.enc, проверьте
 # конфиги (см. «Restore» выше) и запустите vpn-bot — отработает реконсиляция.
 ```
 
+**Проверяйте `summary` в `MANIFEST.json` после каждого бэкапа.** Недоступный источник только
+пропускается и пишется в лог как warning — доставка при этом успешна, и бандл с деградировавшим
+покрытием выглядит точно так же, как полный. Блок `summary` системного бандла
+(`files_included` / `files_skipped` / `symlinks` / `bytes_included` / `truncated`) существует
+именно для того, чтобы это была проверка в один взгляд. `truncated: true` означает, что сработал
+лимит размера и часть файлов не попала внутрь.
+
 Так как бандл содержит `.env` (а в нём — сам `OFFSITE_BACKUP_ENCRYPTION_KEY`), храните ключ в
-отдельном секрет-хранилище, иначе бандл нечем будет расшифровать.
+отдельном секрет-хранилище, иначе бандл нечем будет расшифровать. По той же причине системный
+бандл нужно считать секретом первого класса: в нём лежат приватные ключи TLS и токен DNS-API.
 
 ## Firewall и открытые порты
 
