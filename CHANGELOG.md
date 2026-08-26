@@ -4,6 +4,185 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **A QR code of the config — for every key type and for the All-in-One subscription.**
+  «Конфиг» used to hand out a file only for AmneziaWG; VLESS, Hysteria2 and the
+  subscription gave you a link to copy by hand off a phone screen, which is the one place
+  a mistyped credential is silent — it fails later as "no connection", never as an error.
+  Every type now also gets a scannable QR, with no caption and no accompanying text, image
+  only. What it encodes is verbatim what a client needs: the AmneziaWG `.conf` body, the
+  `vless://` / `hysteria2://` URI, the subscription URL. **No link format and no `.conf`
+  byte changed** — the QR is added alongside what was already sent.
+  - It lives exactly as long as the AWG config file always did, through the *same*
+    mechanism rather than a parallel one: `remember_config_document` /
+    `config_document_present` / `discard_config_document`, keyed on the same FSM entries,
+    removed by the same `ConfigDocumentCleanupMiddleware` trigger — your next tap on
+    anything that is not a «Конфиг» button. No timer and no TTL is involved, and none was
+    introduced. For AmneziaWG the file and the QR are now remembered as one unit and
+    vanish together; a QR outliving the config it encodes is the split-brain that tracking
+    exists to prevent.
+  - The tracked state gained a `kind` discriminator (`key` / `bundle`). Keys and bundles
+    number out of independent id spaces, so key #10 and bundle #10 both exist, and without
+    it a tracked key config would make the subscription screen's «Конфиг» believe its own
+    config was already on screen and silently send nothing.
+  - Overflow **raises instead of truncating**: a QR that scans into half a config is worse
+    than no QR at all. At the error-correction level used here the ceiling is 2330 bytes,
+    and the real payloads sit far below it — an AWG `.conf` around 460 bytes (version 17 of
+    40), a VLESS XHTTP URI ~250, Hysteria2 ~90, a subscription URL ~75. The subscription QR
+    is the URL and never the aggregated body behind it, so a bundle with twenty children
+    encodes the same short string as one with a single child. Rendering happens in memory;
+    no temp file ever holds a credential, and no payload is ever logged.
+  - All five paths that hand you a config now behave identically — «Конфиг», the
+    subscription's «Конфиг», the trial reveal, the create wizard and the admin issue flow —
+    so a protocol cannot end up with a QR on one screen and none on another.
+
+- **A third off-site backup artifact: host-level state (#298).** The database snapshot and
+  the recovery bundle together still left the host itself uncovered, so a rebuild on new
+  hosting would have come up without the pieces that cannot be reissued: `/root/.acme.sh`
+  (whose `account.conf` holds the DNS-API token — without it the certificate can never be
+  renewed and in 90 days TLS dies for both Hysteria2 and the nginx decoy REALITY points
+  at), `/etc/nginx/*` (the repo ships no template; both loopback server blocks exist only
+  on the live host), `/etc/systemd/system` including the `*.wants` enablement symlinks —
+  the only record of what is switched on — plus `/etc/danted.conf`, `/etc/sysctl.d`, the
+  ufw user rules, the fail2ban jail, crontabs, and `/etc/passwd` + `/etc/group` (firewall
+  rules match traffic by numeric uid, so drifted UIDs silently misroute). It is a wrapper
+  around the existing chat delivery, not a second one: same loop, same Fernet key, same
+  30-day decrypt TTL, same send path, and the two existing artifacts are pinned unchanged
+  by a regression test. Symlinks are stored as their target rather than duplicating content
+  per `*.wants` entry; SSH host private keys are excluded by policy but still **named** in
+  the manifest, because an omission nobody can see is the failure this bundle exists to
+  prevent; per-file and total ceilings set `truncated=true` rather than quietly producing a
+  short bundle. `ProtectHome` also flips from `true` to read-only in the unit — under
+  `true` systemd masks `/root` with an empty tmpfs, so the single most critical path would
+  have been recorded as skipped while the bundle still reported success.
+
+- **`/etc/hysteria/config.yaml` is gated like the other two data-plane configs (#297).**
+  It had no gate at all, which is why the tracked file could sit on a masquerade layout the
+  host stopped using without anything noticing. It is compared **in full** — unlike
+  `config.json` and `awg0.conf` nothing in it is bot-written runtime state, so every key is
+  operator structure and any difference is a finding — and Phase 1 prints the repair route
+  that can actually touch it (`install-config.sh`, a whole-file install, not the merge that
+  fixes Xray). YAML is compared as parsed data, so key order, indentation, quoting and
+  comments are invisible and the tracked file can carry its rationale in comments with no
+  false drift. PyYAML is not a project dependency and Phase 1 runs under the system
+  `python3`, so if it is missing this one backend reports a loud SKIPPED naming
+  `python3-yaml` as the fix and the other two are still checked — deliberately not fatal,
+  since turning a missing optional module into a failed deploy would be a regression for a
+  file that had no gate before. Unparseable YAML still fails closed, same as broken JSON.
+
+- **Structural sync for the co-owned Xray and AmneziaWG configs (#296).** Hysteria2 had a
+  tracked, installable config; Xray and AmneziaWG did not — not an oversight but a
+  consequence of who writes the file at runtime. `config.json` and `awg0.conf` are
+  **co-owned**: the bot rewrites them on every key issue/revoke and peer insert/remove, so
+  a `cp` from the repo would delete every live client and peer. What the repo can track is
+  their *structure*, with every bot-owned region left empty —
+  `deploy/xray/config.skeleton.json` and `deploy/awg/awg0.conf.example`, placeholders
+  instead of values — and `deploy/backend-config-sync.py` works despite the co-ownership
+  because both bot-owned regions are precisely delimited. `check` is a read-only structural
+  comparison that excludes them (placeholders match any value, inbounds match by tag rather
+  than position, an undeployed backend is not drift); `install-xray` is a **merge, not a
+  copy** — the skeleton supplies structure while the live file supplies clients, shortIds,
+  `sendThrough` and every operator secret — and it refuses before touching anything if the
+  live config is absent or has no clients list, if a placeholder resolves from neither
+  `.env` nor the live value, if the merged client count changed, or if `xray run -test`
+  rejects the result. It never restarts xray. AmneziaWG gets no installer on purpose:
+  `[Interface]` is entirely operator-owned and every value in it is a secret or part of the
+  obfuscation fingerprint, so there is nothing to merge. Drift stops the deploy;
+  `ALLOW_BACKEND_CONFIG_DRIFT=1` continues past it, but an *unparseable* config is
+  deliberately not waivable — that is a broken data plane, not drift. The tests drive the
+  real adapters, so a writer that moves a client list or renames a peer marker fails the
+  suite instead of production.
+
+- **The units, hooks and configs that only existed on the deployed host are now tracked
+  (#295).** A read-only audit of the host against this checkout found things the bot
+  depends on with no representation here at all — not a file, not an `.example`, not a
+  documented step — so a rebuilt or migrated host had nothing to restore them from.
+  - `deploy/vpnbot-hy2-warp-mark.service`: active on the host and listed in
+    `deploy/managed-units.list`, yet the unit file itself was untracked, so the manifest
+    watched a unit nobody could reinstall.
+  - `deploy/vpn-bot-acme-reload.sh`: the tracked, parameterised form of acme.sh's
+    `--reloadcmd` fan-out, which existed only as a hand-written `/usr/local/sbin` script —
+    and that script restarted `hysteria-server` but never `vpn-bot-subscription`, which
+    terminates TLS itself and reads the key **once** at start-up, so after every renewal it
+    kept serving the previous certificate until something unrelated restarted it. Every
+    path and unit name is an env var with a default, and `--dry-run` makes it verifiable
+    without waiting for a renewal.
+  - `deploy/danted.conf.example`: the shape of the hand-maintained `/etc/danted.conf`, with
+    placeholders. It stays outside auto-deploy on purpose — the bot owns SOCKS5 *users*,
+    never the daemon config.
+  - `deploy/vpn-bot-decoy-freshen.sh`: the tracked form of the cron job that keeps both
+    data planes answering a probe with the same static site. This also corrects the docs —
+    the masquerade directory is not "populated by hand" as they claimed, it is mirrored
+    from the nginx docroot.
+  - Three repo/host divergences that must **not** be auto-fixed are now recorded rather
+    than merely known: the legacy `vpnbot-hy2-auth.service` spelling, a pre-existing
+    host's `--reloadcmd` possibly still pointing at the untracked script, and Xray's
+    `10-donot_touch_single_conf.conf` drop-in — without which the bot rewrites
+    `config.json` correctly and the daemon ignores it, so revokes look successful and
+    change nothing.
+
+### Changed
+
+- **Hysteria2's masquerade is `type: proxy`, not `type: file` (#297).** The host had been
+  serving `proxy` for a while and the host is right: it reverse-proxies the same loopback
+  HTTPS listener Xray REALITY falls back to on TCP/443, so both data planes answer a probe
+  out of **one** docroot. `type: file` needs that docroot mirrored into a second directory
+  and re-mirrored on every edit, and a stale second copy is exactly the fingerprint a decoy
+  exists to remove. The decoy-freshen job became layout-aware to match: it reads the
+  declared layout and skips the mirror under `proxy`, still mirrors under legacy `file`,
+  and skips *with a reason* when the config is absent or unreadable — mirroring on a guess
+  is what writes the stale copy. Takes effect on the next `systemctl restart
+  hysteria-server`.
+
+- **FAQ wording (#293).** "1 key = 1 device" reads "1 key → 1 device" everywhere (banner,
+  button and answer), and the answer now says outright that one device may hold several
+  keys at once — that is expected, not a violation. The recommendation to change the
+  fingerprint of an existing Xray key while troubleshooting is **gone**: it can make things
+  worse, so the advice is now to update the app, switch transport or protocol, and pick the
+  Firefox/Edge fingerprint when creating new keys. The Xray and Hysteria2 recommended-app
+  lines are merged into one, and the All-in-One key is named as the most convenient option
+  wherever the FAQ suggests keeping several keys for diversification — while stating that
+  All-in-One covers Xray and Hysteria2 only, since a WireGuard config cannot ride a v2ray
+  subscription link.
+
+- **`show_key_config` answers each callback query exactly once.** It used to answer in
+  three places depending on the protocol branch, which meant the "config already sent"
+  notice could only ever reach you for AmneziaWG — a query is answerable once, so that
+  notice has to *be* the acknowledgement rather than follow it. Two intended consequences:
+  the duplicate-press notice now works for every type, and AmneziaWG's acknowledgement goes
+  out before its config read, which is the ordering the URI protocols always had.
+
+- **New runtime dependencies: `qrcode` 8.2 and `pillow` 12.3.0**, both hash-pinned in the
+  constraints set. Pillow is held at the newest release deliberately: it decodes untrusted
+  image formats in C and ships advisories at a steady clip — 11.3.0 carries 25 that
+  `make audit` fails on — so an older pin breaks the dependency-audit job even though this
+  bot only ever *writes* PNGs. The QR round-trip tests add **no** dependency: they decode
+  the rendered PNG with a from-the-spec decoder kept in `tests/`, because `pyzbar` would
+  need `libzbar0` and therefore a new apt step in a workflow that runs only
+  `pip install --require-hashes`, and `opencv-python-headless` is a 61 MB wheel to check
+  one image.
+
+### Fixed
+
+- **`Subscription-Userinfo` reports all-time traffic, so a client's counter cannot go
+  backwards (#294).** The header a client (happ, v2rayTun) receives counted traffic under
+  the «по текущим ключам» scope — a deliberate choice, on the grounds that it is the figure
+  a user can verify from the keys they still hold. Inside a client app that answers the
+  wrong question: the number reads as "what this account has used", and deleting a key made
+  it go **down**. Deletion archives the key's bytes into `deleted_key_traffic_archive`,
+  which the current-keys scope does not count, so the app said 900 on one refresh and 400
+  on the next while the cabinet's all-time line still said 900 — a counter that moves
+  backwards reads as data loss, not as a narrower scope. The header now uses the same
+  all-time scope, from the same query, that the personal cabinet and the admin user card
+  print on their second line; one line at the single point where the number is produced, so
+  no summing logic is copied and the archive-vs-deleted-row double-count guard stays inside
+  the scope. Unchanged on purpose: the cabinet and admin panel still show both scopes
+  separately, `total=` is still never emitted, a measured zero is still reported while an
+  absence is not, and no migration is involved.
+
 ## [3.0.0](https://github.com/Egor051/vpnbot/releases/tag/v3.0.0) — 2026-08-12
 
 ### Changed
