@@ -1313,16 +1313,29 @@ class XrayService:
             return f"[{host}]"
         return host
 
-    def _format_config(self, key: VpnKey, *, viewer_user_id: int | None = None) -> str:
+    def connection_link(self, key: VpnKey) -> str:
+        """Return the ``vless://`` URI for ``key`` — the string the user connects with.
+
+        The single place that derives a key's link, shared by the config screen
+        (which wraps it in ``<code>``) and the QR renderer, so the code a user scans
+        and the text they can copy are the same string by construction rather than
+        by two call sites agreeing. Rebuilt from the key's payload and the current
+        server settings on every call, exactly as the config screen has always done
+        — the ``link`` cached in ``public_payload`` can predate a settings change.
+        """
         uuid_value = str(key.payload.get("uuid") or key.uuid or "")
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "")
         email_label = str(key.payload.get("email_label") or key.email_label or "")
         fingerprint = str(key.payload.get("fingerprint")) if key.payload.get("fingerprint") else None
-        link = self._build_vless_link(
+        return self._build_vless_link(
             uuid_value, short_id, email_label,
             fingerprint=fingerprint, transport=self._key_transport(key), profile=self._key_profile(key),
             spider_x=self._key_spider_x(key),
         )
+
+    def _format_config(self, key: VpnKey, *, viewer_user_id: int | None = None) -> str:
+        email_label = str(key.payload.get("email_label") or key.email_label or "")
+        link = self.connection_link(key)
         visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
         note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
         label = f"\nМетка: {h(email_label)}" if email_label else ""

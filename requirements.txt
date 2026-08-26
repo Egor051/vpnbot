@@ -2,5 +2,11 @@ aiogram==3.30.0
 aiohttp==3.14.3
 aiosqlite==0.22.1
 cryptography==50.0.0  # pin must match constraints.txt
+pillow==12.3.0  # QR rendering backend for qrcode; pinned explicitly, not pulled in as an extra.
+                # Keep this at the newest release: pillow decodes untrusted image
+                # formats in C and ships advisories at a steady clip (11.3.0 carries
+                # 25 that `make audit` fails on), so an older pin breaks the
+                # dependency-audit job even though this bot only ever *writes* PNGs.
 python-dotenv==1.2.2
+qrcode==8.2
 tzdata==2026.3

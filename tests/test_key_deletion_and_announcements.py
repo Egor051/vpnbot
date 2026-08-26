@@ -970,6 +970,11 @@ def test_create_key_confirm_keeps_fsm_data_when_rate_limited(monkeypatch: pytest
         async def get_data(self) -> dict[str, object]:
             return dict(self.data)
 
+        async def update_data(self, data: dict[str, object] | None = None, **kwargs: object) -> dict[str, object]:
+            self.data.update(data or {})
+            self.data.update(kwargs)
+            return dict(self.data)
+
         async def clear(self) -> None:
             self.current_state = None
             self.data.clear()
@@ -977,9 +982,14 @@ def test_create_key_confirm_keeps_fsm_data_when_rate_limited(monkeypatch: pytest
     class Callback:
         def __init__(self) -> None:
             self.from_user = SimpleNamespace(id=100, username="user", first_name="User")
-            self.message = SimpleNamespace()
+            self.photos: list[object] = []
+            self.message = SimpleNamespace(answer_photo=self._answer_photo)
             self.data = "create:confirm"
             self.answers: list[tuple[str, bool | None]] = []
+
+        async def _answer_photo(self, photo: object, **kwargs: object) -> SimpleNamespace:
+            self.photos.append(photo)
+            return SimpleNamespace(message_id=900 + len(self.photos))
 
         async def answer(self, text: str | None = None, show_alert: bool | None = None, **kwargs: object) -> None:
             self.answers.append((text or "", show_alert))
@@ -1000,6 +1010,9 @@ def test_create_key_confirm_keeps_fsm_data_when_rate_limited(monkeypatch: pytest
         async def create_xray_key(self, user_id: int, profile: TelegramUserProfile, note: str | None, **kwargs: object) -> SimpleNamespace:
             self.created_notes.append(note)
             return SimpleNamespace(key=_key(VpnKeyType.XRAY), config_text="xray config")
+
+        def connection_link(self, key: VpnKey) -> str:
+            return "vless://created@example.com:443#label"
 
     class Users:
         async def require_approved_or_admin(self, user_id: int) -> User:
@@ -1031,10 +1044,15 @@ def test_create_key_confirm_keeps_fsm_data_when_rate_limited(monkeypatch: pytest
         await create_key_confirm(callback, state, services, rate_limiter)  # type: ignore[arg-type]
 
         assert state.current_state is None
-        assert state.data == {}
+        # The wizard's own data is cleared. What is left behind is the tracking for
+        # the QR this tap just sent — the cleanup middleware needs it on the next tap,
+        # exactly as the AWG .conf file has always been tracked here.
+        assert "key_type" not in state.data
+        assert "note" not in state.data
         assert callback.answers[-1] == ("Создаю ключ...", None)
         assert xray.created_notes == ["work laptop"]
         assert edits and edits[-1][0] == "xray config"
+        assert len(callback.photos) == 1
 
     asyncio.run(run())
 

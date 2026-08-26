@@ -13,13 +13,17 @@ from aiogram.types import CallbackQuery, InaccessibleMessage, TelegramObject
 
 from bot.messages import discard_config_document
 
-# Tapping the "show config" button must not delete the file it (re)sends, so that
-# callback is the single exception to the cleanup below.
-_SHOW_CONFIG_PREFIX = "key:show:"
+# Tapping a "show config" button must not delete the messages it (re)sends, so
+# those callbacks are the single exception to the cleanup below. Both «Конфиг»
+# buttons are listed: the per-key one and the bundle/subscription one, which now
+# delivers a QR under the same tracking. They stay distinguishable in the tracked
+# state via its ``kind`` discriminator, so an exempted bundle tap cannot mistake a
+# tracked key config for its own.
+_SHOW_CONFIG_PREFIXES = ("key:show:", "bundle:show:")
 
 
 class ConfigDocumentCleanupMiddleware(BaseMiddleware):
-    """Delete a previously sent config file when the user taps another button."""
+    """Delete previously sent config messages when the user taps another button."""
 
     @override
     async def __call__(
@@ -34,7 +38,7 @@ class ConfigDocumentCleanupMiddleware(BaseMiddleware):
 
     @staticmethod
     async def _maybe_cleanup(callback: CallbackQuery, data: dict[str, Any]) -> None:
-        if (callback.data or "").startswith(_SHOW_CONFIG_PREFIX):
+        if (callback.data or "").startswith(_SHOW_CONFIG_PREFIXES):
             return
         message = callback.message
         if message is None or isinstance(message, InaccessibleMessage):
