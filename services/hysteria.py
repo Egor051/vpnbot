@@ -330,17 +330,26 @@ class HysteriaService:
                 return label
         raise InvalidOperation("Не удалось сгенерировать уникальную метку для Hysteria2-ключа")
 
-    def _format_config(self, key: VpnKey, *, viewer_user_id: int | None = None) -> str:
-        label = key.email_label or ""
-        secret = str(key.payload.get("secret") or "")
-        link = format_hysteria2_link(
-            label,
-            secret,
+    def connection_link(self, key: VpnKey) -> str:
+        """Return the ``hysteria2://`` URI for ``key`` — the string the user connects with.
+
+        The single place that derives a key's link, shared by the config screen
+        (which wraps it in ``<code>``) and the QR renderer, so the code a user scans
+        and the text they can copy are the same string by construction rather than
+        by two call sites agreeing.
+        """
+        return format_hysteria2_link(
+            key.email_label or "",
+            str(key.payload.get("secret") or ""),
             host=self.settings.hysteria2_host,
             port=self.settings.hysteria2_port,
             sni=self.settings.hysteria2_sni,
             insecure=self.settings.hysteria2_insecure,
         )
+
+    def _format_config(self, key: VpnKey, *, viewer_user_id: int | None = None) -> str:
+        label = key.email_label or ""
+        link = self.connection_link(key)
         visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
         note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
         label_line = f"\nМетка: {h(label)}" if label else ""

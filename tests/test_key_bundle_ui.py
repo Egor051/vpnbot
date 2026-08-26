@@ -153,13 +153,19 @@ def _stats(key_id: int, downloaded: int, uploaded: int, *, available: bool = Tru
 class _Message:
     def __init__(self) -> None:
         self.message_id = 1
+        self.chat = SimpleNamespace(id=OWNER)
         self.edits: list[tuple[str, object]] = []
+        self.photos: list[object] = []
 
     async def edit_text(self, text: str, reply_markup: object = None) -> None:
         self.edits.append((text, reply_markup))
 
     async def answer(self, text: str, reply_markup: object = None) -> None:
         self.edits.append((text, reply_markup))
+
+    async def answer_photo(self, photo: object, **kwargs: object) -> SimpleNamespace:
+        self.photos.append(photo)
+        return SimpleNamespace(message_id=900 + len(self.photos))
 
     @property
     def last_text(self) -> str:
@@ -197,7 +203,8 @@ class _State:
     async def set_state(self, state: object) -> None:
         self.state = state
 
-    async def update_data(self, **kwargs: object) -> None:
+    async def update_data(self, data: dict[str, object] | None = None, **kwargs: object) -> None:
+        self.data.update(data or {})
         self.data.update(kwargs)
 
     async def clear(self) -> None:
@@ -537,7 +544,7 @@ def test_direct_bundle_config_callback_is_refused_while_flag_is_off() -> None:
     async def run() -> None:
         services = _services(settings=_settings(subscription_enabled=False), views=views, traffic_stats=traffic)
         callback = _Callback("bundle:show:7")
-        await show_bundle_config(callback, services, RateLimiter())  # type: ignore[arg-type]
+        await show_bundle_config(callback, _State(), services, RateLimiter(), None)  # type: ignore[arg-type]
         assert callback.alerts == [t("err_subscription_disabled")]
         assert callback.message.edits == []
         assert views.calls == []
@@ -919,9 +926,12 @@ def test_config_screen_shows_the_url_and_keeps_the_token_out_of_the_log(
     async def run() -> None:
         callback = _Callback("bundle:show:7")
         with caplog.at_level(logging.DEBUG):
-            await show_bundle_config(callback, _services(views=views), RateLimiter())  # type: ignore[arg-type]
+            await show_bundle_config(callback, _State(), _services(views=views), RateLimiter(), None)  # type: ignore[arg-type]
 
         assert f"https://anycastedge.duckdns.org:2096/sub/{TOKEN}" in callback.message.last_text
+        # The QR encodes the same token-bearing URL, so rendering it must not leak
+        # the token into a log line either.
+        assert len(callback.message.photos) == 1
         assert all(TOKEN not in record.getMessage() for record in caplog.records)
 
     asyncio.run(run())

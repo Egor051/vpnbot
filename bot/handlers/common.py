@@ -4,18 +4,23 @@ import logging
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, User as TgUser
+from aiogram.types import BufferedInputFile, CallbackQuery, Message, User as TgUser
 
 from bot.container import Services
 from bot.formatters import main_menu_text
 from bot.keyboards.common import FAQ_PER_PAGE, FAQ_TOPICS, back_to_menu, faq_answer_keyboard, faq_keyboard, main_menu
-from bot.messages import is_stale_callback_query_error, safe_callback_answer, safe_edit_message_text
+from bot.messages import (
+    awg_config_filename,
+    is_stale_callback_query_error,
+    safe_callback_answer,
+    safe_edit_message_text,
+)
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter, RateLimitExceeded
 from config.settings import SettingsError
 from i18n import t
 from models.dto import KeyTrafficStatsView, TelegramUserProfile, VpnKey
-from models.enums import UserRole
+from models.enums import UserRole, VpnKeyType
 from services.errors import AccessDenied, InvalidOperation, NotFound, ServiceError
 
 router = Router()
@@ -29,6 +34,29 @@ def profile_from_tg(user: TgUser) -> TelegramUserProfile:
         username=user.username,
         first_name=user.first_name,
     )
+
+
+async def config_delivery(
+    services: Services, actor_user_id: int, key: VpnKey, *, audit: bool = True
+) -> tuple[str, BufferedInputFile | None]:
+    """Resolve what a key's config delivery consists of, per protocol.
+
+    Returns ``(payload, document)`` where ``payload`` is verbatim what a client
+    needs — a ``vless://``/``hysteria2://`` URI, or the AmneziaWG ``.conf`` body —
+    and ``document`` is the ``.conf`` upload for AWG (``None`` for the URI-based
+    protocols, whose config fits in the card and its QR).
+
+    One resolver for every delivery path (the «Конфиг» button, the create wizard,
+    the trial reveal) so a protocol cannot end up with a QR on one screen and no QR
+    on another. AWG's config is read once and reused for both the file and the QR,
+    which also keeps it to a single trip through the service lock.
+    """
+    if key.key_type == VpnKeyType.XRAY:
+        return services.xray.connection_link(key), None
+    if key.key_type == VpnKeyType.HYSTERIA2:
+        return services.hysteria.connection_link(key), None
+    plain = await services.awg.get_awg_client_config_plain(actor_user_id, key.id, audit=audit)
+    return plain, BufferedInputFile(plain.encode("utf-8"), filename=awg_config_filename(key))
 
 
 async def is_admin(services: Services, user_id: int) -> bool:

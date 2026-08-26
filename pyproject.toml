@@ -49,6 +49,9 @@ module = [
     "aiosqlite.*",
     "aiohttp.*",
     "magic_filter.*",
+    # qrcode ships no py.typed / stubs (Pillow does). Only utils/qr.py touches it,
+    # and its own surface is fully annotated.
+    "qrcode.*",
 ]
 ignore_missing_imports = true
 

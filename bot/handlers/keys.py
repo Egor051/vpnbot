@@ -37,6 +37,7 @@ from bot.handlers.common import (
     admin_owner_context,
     answer_callback_error,
     answer_message_error,
+    config_delivery,
     parse_int_callback,
     profile_from_tg,
     stats_views_for_screen,
@@ -62,9 +63,9 @@ from bot.messages import (
     awg_config_filename,
     config_document_present,
     discard_config_document,
-    remember_config_document,
     safe_callback_answer,
     safe_edit_message_text,
+    send_config_with_qr,
 )
 from bot.pagination import MAX_PAGE, page_offset
 from bot.private_chat import ensure_private_callback, ensure_private_message
@@ -607,11 +608,16 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
             result.config_text,
             reply_markup=key_actions_keyboard(result.key, owner_user_id=owner_ctx),
         )
-        if result.key.key_type == VpnKeyType.AWG:
-            plain = await services.awg.get_awg_client_config_plain(callback.from_user.id, result.key.id, audit=False)
-            filename = awg_config_filename(result.key)
-            sent = await callback.message.answer_document(BufferedInputFile(plain.encode("utf-8"), filename=filename))
-            await remember_config_document(state, key_id=result.key.id, message_id=sent.message_id)
+        # The freshly issued key is delivered exactly as «Конфиг» would deliver it:
+        # a QR of the connection payload for every type, plus the .conf file for AWG.
+        qr_content, document = await config_delivery(services, callback.from_user.id, result.key, audit=False)
+        await send_config_with_qr(
+            callback.message,
+            state,
+            entity_id=result.key.id,
+            qr_content=qr_content,
+            document=document,
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -689,7 +695,14 @@ async def _audit_foreign_stats_view(services: Services, actor_user_id: int, key:
 
 @router.callback_query(F.data.startswith("key:show:"))
 async def show_key_config(callback: CallbackQuery, state: FSMContext, services: Services, rate_limiter: RateLimiter, bot: Bot) -> None:
-    """Show the connection configuration for the selected key."""
+    """Show the connection configuration for the selected key.
+
+    Every key type takes the same shape now: the card is edited in place with the
+    config text, and the connection payload also goes out as a QR photo — plus the
+    ``.conf`` file for AWG, whose config is not a single URI. The QR is tracked by
+    the same ``remember_config_document`` bookkeeping the AWG file has always used,
+    so one tap elsewhere clears whatever this tap put on screen.
+    """
     if not await ensure_private_callback(callback):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -702,30 +715,38 @@ async def show_key_config(callback: CallbackQuery, state: FSMContext, services: 
         rate_limiter.check(callback.from_user.id, "key_show", 5)
         key = await services.vpn_keys.get_for_actor(callback.from_user.id, key_id)
         keyboard = key_actions_keyboard(key, owner_user_id=admin_owner_context(key, callback.from_user.id))
+        # One ack per tap, and it carries the duplicate-press notice when there is
+        # one: a callback query can be answered only once, so that notice has to *be*
+        # the ack rather than follow it — otherwise Telegram drops it. Either way the
+        # ack goes out before the config read below, which is the slow part; that is
+        # the behaviour the URI protocols have always had, and AWG gains it here.
+        duplicate = await config_document_present(state, key_id)
+        await safe_callback_answer(callback, t("config_already_sent") if duplicate else None)
+        # The service call behind each text is what enforces access and "active key
+        # only", so it stays ahead of anything user-visible.
         if key.key_type == VpnKeyType.XRAY:
-            await safe_callback_answer(callback)
             text = xray_config_text(await services.xray.get_xray_key_config(callback.from_user.id, key_id))
-            await safe_edit_message_text(callback.message, text, reply_markup=keyboard)
-            return
-        if key.key_type == VpnKeyType.HYSTERIA2:
-            await safe_callback_answer(callback)
+        elif key.key_type == VpnKeyType.HYSTERIA2:
             text = hysteria2_config_text(await services.hysteria.get_config(callback.from_user.id, key_id))
-            await safe_edit_message_text(callback.message, text, reply_markup=keyboard)
-            return
-        text = awg_config_text(await services.awg.get_awg_client_config(callback.from_user.id, key_id))
+        else:
+            text = awg_config_text(await services.awg.get_awg_client_config(callback.from_user.id, key_id))
         await safe_edit_message_text(callback.message, text, reply_markup=keyboard)
-        # The config file is still on screen — don't send a duplicate.
-        if await config_document_present(state, key_id):
-            await safe_callback_answer(callback, t("config_already_sent"))
+        # The config messages this tap would send are still on screen — the card is
+        # refreshed above either way, but don't duplicate the file/QR.
+        if duplicate:
             return
-        # A leftover file for a different key may linger; drop it before sending.
+        # Leftovers for a different key may linger; drop them before sending.
         await discard_config_document(state, bot, callback.message.chat.id)
-        plain = await services.awg.get_awg_client_config_plain(callback.from_user.id, key_id)
-        await safe_callback_answer(callback)
-        sent = await callback.message.answer_document(
-            BufferedInputFile(plain.encode("utf-8"), filename=awg_config_filename(key))
+        # Resolved only once we know we are really sending: for AWG this is the read
+        # that writes the "config file shown" audit entry.
+        qr_content, document = await config_delivery(services, callback.from_user.id, key)
+        await send_config_with_qr(
+            callback.message,
+            state,
+            entity_id=key_id,
+            qr_content=qr_content,
+            document=document,
         )
-        await remember_config_document(state, key_id=key_id, message_id=sent.message_id)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -1136,17 +1157,22 @@ async def trial_key_show(callback: CallbackQuery, state: FSMContext, services: S
         await safe_callback_answer(callback)
         if key.key_type == VpnKeyType.XRAY:
             text = xray_config_text(await services.xray.get_xray_key_config_for_owner(callback.from_user.id, key_id))
-            await safe_edit_message_text(callback.message, text)
+            qr_content = services.xray.connection_link(key)
+            document = None
         else:
             text = awg_config_text(await services.awg.get_awg_formatted_config_for_owner(callback.from_user.id, key_id))
-            plain = await services.awg.get_awg_client_config_for_owner(callback.from_user.id, key_id)
-            await safe_edit_message_text(callback.message, text)
-            sent = await callback.message.answer_document(
-                BufferedInputFile(plain.encode("utf-8"), filename=awg_config_filename(key))
-            )
-            # Track the sent AWG config file so the config-cleanup middleware
-            # removes it when the user navigates away, like the main key flow.
-            await remember_config_document(state, key_id=key_id, message_id=sent.message_id)
+            qr_content = await services.awg.get_awg_client_config_for_owner(callback.from_user.id, key_id)
+            document = BufferedInputFile(qr_content.encode("utf-8"), filename=awg_config_filename(key))
+        await safe_edit_message_text(callback.message, text)
+        # Track the sent config messages so the config-cleanup middleware removes
+        # them when the user navigates away, like the main key flow.
+        await send_config_with_qr(
+            callback.message,
+            state,
+            entity_id=key_id,
+            qr_content=qr_content,
+            document=document,
+        )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

@@ -2,8 +2,9 @@
 import asyncio
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
+from typing import Any
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
@@ -12,6 +13,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, InaccessibleMessage,
 
 from models.dto import VpnKey
 from utils.formatting import h, pre
+from utils.qr import QrPayloadTooLarge, render_config_qr
 
 logger = logging.getLogger(__name__)
 
@@ -38,33 +40,142 @@ _MAX_REFRESH_RETRY_AFTER = 5.0
 # out; the loop's own cadence (``DEFAULT_INTERVAL_SECONDS``) keeps the panel alive.
 _MAX_LIVE_REFRESH_RETRY_AFTER = 30.0
 
-# FSM data keys used to track the config file most recently delivered to the
-# user. The message id lets us delete that file when the user taps another
-# button, and the key id lets the "show config" button avoid sending it twice.
+# FSM data keys used to track the config messages most recently delivered to the
+# user. The message ids let us delete them when the user taps another button, and
+# the entity id/kind let the "show config" button avoid sending them twice.
+#
+# ``_CONFIG_DOC_MSG_KEY`` holds a LIST of ids, not one: a single tap on «Конфиг»
+# now delivers a config *and* its QR code, and the two have to disappear together
+# — a QR outliving the config it encodes (or vice versa) is exactly the split-brain
+# this tracking exists to prevent. Everything downstream (the cleanup middleware,
+# the duplicate-send guard) is unchanged and still drives off these same keys.
+#
+# ``_CONFIG_DOC_KIND_KEY`` namespaces the tracked id. Keys and bundles number out
+# of two independent id spaces, so key #10 and bundle #10 both exist; without the
+# kind, a tracked key config would make the bundle screen's «Конфиг» believe its
+# own config was already on screen and silently skip it. The two «Конфиг» buttons
+# are the cleanup middleware's exemptions, so that stale-state window is reachable
+# by scrolling back to an older bundle card and tapping it.
 _CONFIG_DOC_MSG_KEY = "config_doc_msg_id"
 _CONFIG_DOC_KEY_KEY = "config_doc_key_id"
+_CONFIG_DOC_KIND_KEY = "config_doc_kind"
+
+# Values for the ``kind`` discriminator above.
+CONFIG_DOC_KIND_KEY = "key"
+CONFIG_DOC_KIND_BUNDLE = "bundle"
 
 
-async def remember_config_document(state: FSMContext, *, key_id: int, message_id: int) -> None:
-    """Record the just-sent config file so it can be reused/cleaned up later."""
-    await state.update_data({_CONFIG_DOC_MSG_KEY: message_id, _CONFIG_DOC_KEY_KEY: key_id})
+async def remember_config_document(
+    state: FSMContext,
+    *,
+    key_id: int,
+    message_ids: Sequence[int],
+    kind: str = CONFIG_DOC_KIND_KEY,
+) -> None:
+    """Record the just-sent config message(s) so they can be reused/cleaned up later.
+
+    ``message_ids`` is every message that tap put on screen for this config — the
+    ``.conf`` document and/or the QR photo — in send order. They are tracked as one
+    unit and :func:`discard_config_document` removes them as one unit.
+    """
+    await state.update_data(
+        {
+            _CONFIG_DOC_MSG_KEY: list(message_ids),
+            _CONFIG_DOC_KEY_KEY: key_id,
+            _CONFIG_DOC_KIND_KEY: kind,
+        }
+    )
 
 
-async def config_document_present(state: FSMContext, key_id: int) -> bool:
-    """Return whether a config file for ``key_id`` is currently on screen."""
+async def config_document_present(state: FSMContext, key_id: int, kind: str = CONFIG_DOC_KIND_KEY) -> bool:
+    """Return whether config messages for ``key_id`` of ``kind`` are currently on screen."""
     data = await state.get_data()
-    return data.get(_CONFIG_DOC_KEY_KEY) == key_id and data.get(_CONFIG_DOC_MSG_KEY) is not None
+    if data.get(_CONFIG_DOC_KEY_KEY) != key_id:
+        return False
+    if data.get(_CONFIG_DOC_KIND_KEY, CONFIG_DOC_KIND_KEY) != kind:
+        return False
+    return bool(_tracked_message_ids(data))
 
 
 async def discard_config_document(state: FSMContext, bot: Bot, chat_id: int) -> None:
-    """Delete the tracked config file (if any) and forget it."""
+    """Delete every tracked config message (if any) and forget them."""
     data = await state.get_data()
-    msg_id = data.get(_CONFIG_DOC_MSG_KEY)
-    if msg_id is None:
+    msg_ids = _tracked_message_ids(data)
+    if not msg_ids:
         return
-    with suppress(Exception):
-        await bot.delete_message(chat_id=chat_id, message_id=int(msg_id))
-    await state.update_data({_CONFIG_DOC_MSG_KEY: None, _CONFIG_DOC_KEY_KEY: None})
+    for msg_id in msg_ids:
+        # One failed delete (already gone, too old to delete) must not orphan the
+        # rest of the group — the whole point is that they vanish together.
+        with suppress(Exception):
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+    await state.update_data(
+        {_CONFIG_DOC_MSG_KEY: None, _CONFIG_DOC_KEY_KEY: None, _CONFIG_DOC_KIND_KEY: None}
+    )
+
+
+def _tracked_message_ids(data: Mapping[str, Any]) -> list[int]:
+    """Normalise the tracked ids out of FSM data, tolerating a bare int."""
+    raw = data.get(_CONFIG_DOC_MSG_KEY)
+    if raw is None:
+        return []
+    if isinstance(raw, int):
+        return [raw]
+    if isinstance(raw, (list, tuple)):
+        return [int(item) for item in raw if item is not None]
+    return []
+
+
+# Filename on the QR photo upload. Telegram never shows it for a photo, so this is
+# not a caption by another name — the QR is delivered with no caption and no
+# accompanying text, identically for every key type.
+_QR_FILENAME = "config-qr.png"
+
+
+async def send_config_with_qr(
+    message: Message | InaccessibleMessage | None,
+    state: FSMContext,
+    *,
+    entity_id: int,
+    qr_content: str,
+    document: BufferedInputFile | None = None,
+    kind: str = CONFIG_DOC_KIND_KEY,
+) -> list[int]:
+    """Deliver a config's own message(s) plus its QR code, tracked as one unit.
+
+    ``qr_content`` must be verbatim what the user pastes into a client — the AWG
+    ``.conf`` body, a ``vless://``/``hysteria2://`` URI, a bundle sub-URL. Passing
+    the same string that is rendered/attached elsewhere is what keeps the QR and
+    the text from ever drifting apart.
+
+    ``document`` is the optional config file (AWG only today); protocols whose
+    config is a single URI pass ``None`` and get the QR alone. Whatever is sent is
+    registered with :func:`remember_config_document`, so the cleanup middleware
+    removes it on the user's next tap — one trigger, one delete path, every type.
+
+    A QR that cannot be rendered is logged and skipped, never truncated: the user
+    still gets the config itself, which is the part they cannot connect without.
+    """
+    if message is None or isinstance(message, InaccessibleMessage):
+        return []
+    sent_ids: list[int] = []
+    if document is not None:
+        sent = await message.answer_document(document)
+        sent_ids.append(sent.message_id)
+    try:
+        png = render_config_qr(qr_content)
+    except (QrPayloadTooLarge, ValueError):
+        # Never log ``qr_content`` — every payload here is a live credential.
+        logger.warning(
+            "Skipping config QR: payload of %d bytes could not be encoded",
+            len(qr_content.encode("utf-8")),
+            exc_info=True,
+        )
+    else:
+        qr_message = await message.answer_photo(BufferedInputFile(png, filename=_QR_FILENAME))
+        sent_ids.append(qr_message.message_id)
+    if sent_ids:
+        await remember_config_document(state, key_id=entity_id, message_ids=sent_ids, kind=kind)
+    return sent_ids
 
 
 async def safe_edit_message_text(
