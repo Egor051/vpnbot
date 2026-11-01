@@ -583,7 +583,10 @@ def test_old_key_config_callback_after_revoke_is_safely_rejected(monkeypatch: py
             return _active_key(key_id, status=VpnKeyStatus.REVOKED)
 
     class Xray:
-        async def get_xray_key_config(self, actor_user_id: int, key_id: int) -> str:
+        def link_instant(self) -> int:
+            return 1_700_000_000
+
+        async def get_xray_key_config(self, actor_user_id: int, key_id: int, *, now_unix: int | None = None) -> str:
             raise InvalidOperation("Конфигурация доступна только для активного ключа")
 
     async def run() -> None:

@@ -30,7 +30,11 @@ logger = logging.getLogger(__name__)
 # database, so it is always present by the time a repository call runs. Kept as a
 # constant (interpolated, never parameterised) so the two paginated queries below
 # cannot drift apart; the values themselves stay bound.
-_BUNDLED_FILTER = " AND NOT EXISTS (SELECT 1 FROM key_bundles b WHERE b.id = vpn_keys.bundle_id)"
+#
+# ``_BUNDLE_OWNED`` is that question on its own; ``is_bundle_member`` asks it in the
+# positive, so the list filter and the per-key answer are one predicate.
+_BUNDLE_OWNED = "EXISTS (SELECT 1 FROM key_bundles b WHERE b.id = vpn_keys.bundle_id)"
+_BUNDLED_FILTER = f" AND NOT {_BUNDLE_OWNED}"
 
 
 def _json_loads(value: str) -> dict[str, object]:
@@ -306,6 +310,21 @@ class VpnKeyRepository:
         )
         row = await cursor.fetchone()
         return int(row["cnt"]) if row is not None else 0
+
+    async def is_bundle_member(self, key_id: int) -> bool:
+        """Whether an all-in-one bundle owns this key row.
+
+        The positive form of the list filter above (``_BUNDLE_OWNED``), so it gives
+        the same answer the key list does — and is not ``bundle_id IS NOT NULL``
+        either: a child whose apply died before it was attached has a NULL
+        bundle_id and answers False here, i.e. it is treated as the standalone key
+        the subscription (which lists children BY bundle_id) also does not serve.
+        """
+        cursor = await self.db.conn.execute(
+            f"SELECT 1 FROM vpn_keys WHERE id = ? AND {_BUNDLE_OWNED} LIMIT 1",
+            (key_id,),
+        )
+        return await cursor.fetchone() is not None
 
     async def count_by_owner_and_type(self, owner_user_id: int, key_type: VpnKeyType) -> int:
         """Return the number of non-deleted keys owned by a user of the given type."""

@@ -8,6 +8,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Opt-in rotation of REALITY spiderX (`spx`) for the VLESS children of an All-in-One
+  subscription — `XRAY_SPIDER_X_ROTATION_HOURS`.** Default `0` is off and **byte-for-byte
+  the current output**: every link carries its stored `vpn_keys.spider_x`, and the bot does
+  not even run the one extra query this adds. With e.g. `24` and a non-empty
+  `XRAY_SPIDER_X_POOL`, each bundle child's `spx` walks the pool one entry per day. The walk
+  is a pure function (`utils.spider_x.rotating_spider_x`) of the key UUID, the pool, the
+  period and the unix time, built from SHA-256 only — never `hash()` (salted per process)
+  and never `random` — because the subscription endpoint and the bot are separate processes
+  and must agree to the second. Each key has its own order through the pool, its own start
+  and its own switch second (`phase`), so a subscription's keys do not all flip at midnight;
+  two adjacent periods never repeat a value, and any `len(pool)` consecutive periods cover
+  the whole pool.
+  - **Who rotates is decided by what is being rendered, not by a key field.** The
+    subscription renderer knows every key it serves is a bundle child and says so to the
+    link builder explicitly. A bundle child can also be shown on its own — the admin's view
+    of a user's keys lists children (and a hand-made `key:show` / `trial:show` callback can
+    reach one) — so that «Config» screen asks the database whether a bundle owns the row
+    (`VpnKeyRepository.is_bundle_member`, the positive form of the same anti-join the key
+    list hides children with — **not** `bundle_id IS NOT NULL`, which cannot tell a
+    standalone key from a child whose attach never ran) and goes through the same seam, so
+    its text and its QR match the subscription at the same second. Both are rendered at one
+    pinned instant, so they cannot land on opposite sides of a switch. The duplicate-send
+    guard now remembers a SHA-256 of what the QR encodes (never the link itself), so
+    reopening «Config» after the child's `spx` switched replaces the old QR instead of
+    leaving it under the new text; reopening within the same period still sends nothing
+    twice.
+  - **Nothing is stored and nothing runs in the background**: no DB write, no schema change,
+    no task. `vpn_keys.spider_x` keeps both of its jobs — the value with rotation off, and
+    the only value a standalone key ever carries. Standalone keys, Hysteria2, AmneziaWG,
+    `pick_spider_x`, the xray `config.json` and the subscription headers are untouched.
+  - The time comes from an injectable clock (`time.time` by default) on `XrayService`, on
+    `render_subscription` and on the endpoint app, so tests freeze it. The value range is
+    `0`–`720`; anything else, or a non-integer, refuses to start.
+
 - **A QR code of the config — for every key type and for the All-in-One subscription.**
   «Конфиг» used to hand out a file only for AmneziaWG; VLESS, Hysteria2 and the
   subscription gave you a link to copy by hand off a phone screen, which is the one place

@@ -37,7 +37,12 @@ def profile_from_tg(user: TgUser) -> TelegramUserProfile:
 
 
 async def config_delivery(
-    services: Services, actor_user_id: int, key: VpnKey, *, audit: bool = True
+    services: Services,
+    actor_user_id: int,
+    key: VpnKey,
+    *,
+    audit: bool = True,
+    now_unix: int | None = None,
 ) -> tuple[str, BufferedInputFile | None]:
     """Resolve what a key's config delivery consists of, per protocol.
 
@@ -50,9 +55,14 @@ async def config_delivery(
     the trial reveal) so a protocol cannot end up with a QR on one screen and no QR
     on another. AWG's config is read once and reused for both the file and the QR,
     which also keeps it to a single trip through the service lock.
+
+    For VLESS the link goes through :meth:`services.xray.XrayService.delivery_link`,
+    which resolves bundle membership, so a bundle child's QR carries the same
+    rotating spiderX the subscription serves. *now_unix* is the instant the screen's
+    text was rendered at; passing it keeps the QR and the text one string.
     """
     if key.key_type == VpnKeyType.XRAY:
-        return services.xray.connection_link(key), None
+        return await services.xray.delivery_link(key, now_unix=now_unix), None
     if key.key_type == VpnKeyType.HYSTERIA2:
         return services.hysteria.connection_link(key), None
     plain = await services.awg.get_awg_client_config_plain(actor_user_id, key.id, audit=audit)

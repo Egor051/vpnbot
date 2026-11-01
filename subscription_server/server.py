@@ -2,6 +2,8 @@
 import hashlib
 import logging
 import re
+import time
+from collections.abc import Callable
 
 from aiohttp import web
 
@@ -15,6 +17,9 @@ logger = logging.getLogger(__name__)
 _STORE_KEY: web.AppKey[ReadOnlyBundleStore] = web.AppKey("subscription_store", ReadOnlyBundleStore)
 _CONFIG_KEY: web.AppKey[SubscriptionConfig] = web.AppKey("subscription_config", SubscriptionConfig)
 _LIMITER_KEY: web.AppKey[RateLimiter] = web.AppKey("subscription_limiter", RateLimiter)
+# Wall clock (unix seconds) the renderer reads once per response — only the
+# rotating spiderX of bundle children depends on it. Injectable for tests.
+_CLOCK_KEY: web.AppKey[Callable[[], float]] = web.AppKey("subscription_clock")
 
 # Tokens are ``secrets.token_urlsafe(32)`` — 43 URL-safe characters. Anything
 # outside this shape cannot be a token we issued, so it is rejected before the
@@ -172,7 +177,7 @@ async def _subscription_handler(request: web.Request) -> web.Response:
             return _not_found()
 
         try:
-            rendered = render_subscription(view, config.settings)
+            rendered = render_subscription(view, config.settings, clock=request.app[_CLOCK_KEY])
         except SubscriptionRenderError as exc:
             # A malformed/incomplete child: serve nothing rather than a
             # subscription that is quietly missing a protocol.
@@ -202,7 +207,12 @@ async def _subscription_handler(request: web.Request) -> web.Response:
         return _not_found()
 
 
-def build_app(store: ReadOnlyBundleStore, config: SubscriptionConfig) -> web.Application:
+def build_app(
+    store: ReadOnlyBundleStore,
+    config: SubscriptionConfig,
+    *,
+    clock: Callable[[], float] = time.time,
+) -> web.Application:
     """Build the aiohttp app with its ONE route, ``GET /sub/{token}``.
 
     No health route and no listing route on purpose: anything else on this
@@ -214,5 +224,6 @@ def build_app(store: ReadOnlyBundleStore, config: SubscriptionConfig) -> web.App
     app[_STORE_KEY] = store
     app[_CONFIG_KEY] = config
     app[_LIMITER_KEY] = RateLimiter()
+    app[_CLOCK_KEY] = clock
     app.router.add_get("/sub/{token}", _subscription_handler)
     return app

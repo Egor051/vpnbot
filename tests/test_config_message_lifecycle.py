@@ -12,9 +12,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BufferedInputFile, CallbackQuery, Chat, Message, User as TgUser
 from qrcode.constants import ERROR_CORRECT_M
 
+from bot.handlers.common import config_delivery
 from bot.handlers.key_bundles import show_bundle_config
-from bot.handlers.keys import show_key_config
+from bot.handlers.keys import show_key_config, trial_key_show
 from bot.messages import (
+    config_document_matches,
     CONFIG_DOC_KIND_BUNDLE,
     config_document_present,
     discard_config_document,
@@ -359,10 +361,13 @@ class _Awg:
 
 
 class _Xray:
-    async def get_xray_key_config(self, actor_user_id: int, key_id: int) -> str:
+    def link_instant(self) -> int:
+        return 1_700_000_000
+
+    async def get_xray_key_config(self, actor_user_id: int, key_id: int, *, now_unix: int | None = None) -> str:
         return "formatted"
 
-    def connection_link(self, key: VpnKey) -> str:
+    async def delivery_link(self, key: VpnKey, *, now_unix: int | None = None) -> str:
         return _VLESS_LINK
 
 
@@ -438,6 +443,141 @@ def test_config_button_sends_a_qr_of_the_real_payload_for_every_key_type(
         assert len(callback.message.documents) == expected_documents
         assert _sent_qr_payload(callback.message) == expected_payload
         assert await config_document_present(state, 10) is True
+
+    asyncio.run(run())
+
+
+class _TickingXray:
+    """A VLESS service whose clock lands in a new spiderX epoch on EVERY read,
+    recording the instant the handler hands to the text and to the QR."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+        self.text_at: list[int | None] = []
+        self.qr_at: list[int | None] = []
+
+    def link_instant(self) -> int:
+        self.reads += 1
+        return 1_800_000_000 + 86_400 * self.reads
+
+    async def get_xray_key_config(self, actor_user_id: int, key_id: int, *, now_unix: int | None = None) -> str:
+        self.text_at.append(now_unix)
+        return "formatted"
+
+    async def get_xray_key_config_for_owner(
+        self, owner_user_id: int, key_id: int, *, now_unix: int | None = None
+    ) -> str:
+        self.text_at.append(now_unix)
+        return "formatted"
+
+    async def delivery_link(self, key: VpnKey, *, now_unix: int | None = None) -> str:
+        self.qr_at.append(now_unix)
+        return _VLESS_LINK
+
+
+@pytest.mark.parametrize("entry", ["key:show:10", "trial:show:10"])
+def test_vless_text_and_qr_are_rendered_at_one_pinned_instant(monkeypatch: pytest.MonkeyPatch, entry: str) -> None:
+    """A bundle child's spiderX can rotate; the text and the QR of one tap must not
+    straddle a switch. The handler reads the clock ONCE and gives both renders that
+    instant — here the clock would hand out a different epoch on a second read."""
+    _patch_keys_handler(monkeypatch)
+
+    async def run() -> None:
+        xray = _TickingXray()
+        services = _services_for(VpnKeyType.XRAY)
+        services.xray = xray
+        state = _make_state()
+        callback = _Callback(entry)
+        if entry.startswith("trial:"):
+            await trial_key_show(callback, state, services)  # type: ignore[arg-type]
+        else:
+            await show_key_config(callback, state, services, _RateLimiter(), _Bot())  # type: ignore[arg-type]
+        assert xray.reads == 1
+        assert xray.text_at == xray.qr_at == [1_800_000_000 + 86_400]
+        assert _sent_qr_payload(callback.message) == _VLESS_LINK
+
+    asyncio.run(run())
+
+
+def test_tracked_digest_tells_a_qr_of_this_link_from_an_older_one() -> None:
+    async def run() -> None:
+        state = _make_state()
+        bot = _Bot()
+        await remember_config_document(state, key_id=10, message_ids=[777], payload=_VLESS_LINK)
+        assert await config_document_matches(state, _VLESS_LINK) is True
+        assert await config_document_matches(state, _VLESS_LINK.replace("spx=%2F", "spx=%2Fapi")) is False
+        # The payload itself is never stored — only its digest.
+        assert _VLESS_LINK not in str(await state.get_data())
+        await discard_config_document(state, bot, chat_id=100)  # type: ignore[arg-type]
+        # State recorded without a digest keeps answering "present".
+        await remember_config_document(state, key_id=10, message_ids=[778])
+        assert await config_document_matches(state, "anything") is True
+
+    asyncio.run(run())
+
+
+class _RotatingXray(_TickingXray):
+    """A bundle child whose spiderX switches once a day; the clock is set by the test."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.now = 1_800_000_000
+
+    def link_instant(self) -> int:
+        return self.now
+
+    async def delivery_link(self, key: VpnKey, *, now_unix: int | None = None) -> str:
+        assert now_unix is not None
+        return _VLESS_LINK.replace("spx=%2F", f"spx=%2Fp{now_unix // 86_400}")
+
+
+def test_a_qr_of_an_older_rotated_link_is_replaced_not_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reopening «Конфиг» after the child's spiderX switched must not leave the old QR
+    under the new text; reopening within the same period still sends nothing twice."""
+    _patch_keys_handler(monkeypatch)
+
+    async def run() -> None:
+        xray = _RotatingXray()
+        services = _services_for(VpnKeyType.XRAY)
+        services.xray = xray
+        state = _make_state()
+        bot = _Bot()
+
+        first = _Callback("key:show:10")
+        await show_key_config(first, state, services, _RateLimiter(), bot)  # type: ignore[arg-type]
+        day_one = _sent_qr_payload(first.message)
+        assert "spx=%2Fp20833" in day_one
+
+        same_period = _Callback("key:show:10")
+        xray.now += 3600
+        await show_key_config(same_period, state, services, _RateLimiter(), bot)  # type: ignore[arg-type]
+        assert same_period.message.photos == []
+        assert same_period.answers[-1][0] == "Файл конфигурации уже отправлен."
+        assert bot.deleted == []
+
+        next_period = _Callback("key:show:10")
+        xray.now += 86_400
+        await show_key_config(next_period, state, services, _RateLimiter(), bot)  # type: ignore[arg-type]
+        assert next_period.answers[-1][0] == ""
+        assert len(bot.deleted) == 1  # the day-one QR is gone…
+        day_two = _sent_qr_payload(next_period.message)  # …and the new one is this link
+        assert day_two != day_one
+        assert await config_document_matches(state, day_two) is True
+
+    asyncio.run(run())
+
+
+def test_hysteria2_and_awg_delivery_never_reach_the_vless_seam() -> None:
+    """The spiderX seam is VLESS-only: delivering a Hysteria2 link or an AWG config
+    must not touch the Xray service at all (it is absent here)."""
+
+    async def run() -> None:
+        services = SimpleNamespace(awg=_Awg(), hysteria=_Hysteria())
+        hy2, hy2_doc = await config_delivery(services, 100, _key(key_type=VpnKeyType.HYSTERIA2))  # type: ignore[arg-type]
+        assert (hy2, hy2_doc) == (_HY2_LINK, None)
+        awg, awg_doc = await config_delivery(services, 100, _awg_key())  # type: ignore[arg-type]
+        assert awg == _AWG_CONF
+        assert awg_doc is not None
 
     asyncio.run(run())
 

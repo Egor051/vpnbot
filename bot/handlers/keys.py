@@ -61,6 +61,7 @@ from bot.keyboards.keys import (
 from aiogram.types import BufferedInputFile
 from bot.messages import (
     awg_config_filename,
+    config_document_matches,
     config_document_present,
     discard_config_document,
     safe_callback_answer,
@@ -720,12 +721,25 @@ async def show_key_config(callback: CallbackQuery, state: FSMContext, services: 
         # the ack rather than follow it — otherwise Telegram drops it. Either way the
         # ack goes out before the config read below, which is the slow part; that is
         # the behaviour the URI protocols have always had, and AWG gains it here.
+        # One instant for the VLESS text and its QR: a bundle child's spiderX can
+        # rotate (XRAY_SPIDER_X_ROTATION_HOURS), and the two renders must not land
+        # on either side of an epoch boundary.
+        link_at = services.xray.link_instant() if key.key_type == VpnKeyType.XRAY else None
         duplicate = await config_document_present(state, key_id)
+        if duplicate and link_at is not None:
+            # …and for the same reason the QR still on screen may encode the
+            # previous period's link: it is a duplicate only if it is a QR of the
+            # link this tap renders, otherwise it is replaced below.
+            duplicate = await config_document_matches(
+                state, await services.xray.delivery_link(key, now_unix=link_at)
+            )
         await safe_callback_answer(callback, t("config_already_sent") if duplicate else None)
         # The service call behind each text is what enforces access and "active key
         # only", so it stays ahead of anything user-visible.
         if key.key_type == VpnKeyType.XRAY:
-            text = xray_config_text(await services.xray.get_xray_key_config(callback.from_user.id, key_id))
+            text = xray_config_text(
+                await services.xray.get_xray_key_config(callback.from_user.id, key_id, now_unix=link_at)
+            )
         elif key.key_type == VpnKeyType.HYSTERIA2:
             text = hysteria2_config_text(await services.hysteria.get_config(callback.from_user.id, key_id))
         else:
@@ -739,7 +753,7 @@ async def show_key_config(callback: CallbackQuery, state: FSMContext, services: 
         await discard_config_document(state, bot, callback.message.chat.id)
         # Resolved only once we know we are really sending: for AWG this is the read
         # that writes the "config file shown" audit entry.
-        qr_content, document = await config_delivery(services, callback.from_user.id, key)
+        qr_content, document = await config_delivery(services, callback.from_user.id, key, now_unix=link_at)
         await send_config_with_qr(
             callback.message,
             state,
@@ -1156,8 +1170,14 @@ async def trial_key_show(callback: CallbackQuery, state: FSMContext, services: S
             return
         await safe_callback_answer(callback)
         if key.key_type == VpnKeyType.XRAY:
-            text = xray_config_text(await services.xray.get_xray_key_config_for_owner(callback.from_user.id, key_id))
-            qr_content = services.xray.connection_link(key)
+            # Same seam and same single instant as the «Конфиг» screen: this
+            # callback does not check the key is a trial, so it can show a bundle
+            # child too, and must then match the subscription.
+            link_at = services.xray.link_instant()
+            text = xray_config_text(
+                await services.xray.get_xray_key_config_for_owner(callback.from_user.id, key_id, now_unix=link_at)
+            )
+            qr_content = await services.xray.delivery_link(key, now_unix=link_at)
             document = None
         else:
             text = awg_config_text(await services.awg.get_awg_formatted_config_for_owner(callback.from_user.id, key_id))

@@ -1011,7 +1011,7 @@ def test_create_key_confirm_keeps_fsm_data_when_rate_limited(monkeypatch: pytest
             self.created_notes.append(note)
             return SimpleNamespace(key=_key(VpnKeyType.XRAY), config_text="xray config")
 
-        def connection_link(self, key: VpnKey) -> str:
+        async def delivery_link(self, key: VpnKey, *, now_unix: int | None = None) -> str:
             return "vless://created@example.com:443#label"
 
     class Users:

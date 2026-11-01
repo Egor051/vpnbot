@@ -1,5 +1,6 @@
 
 import asyncio
+import hashlib
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -56,9 +57,16 @@ _MAX_LIVE_REFRESH_RETRY_AFTER = 30.0
 # own config was already on screen and silently skip it. The two «Конфиг» buttons
 # are the cleanup middleware's exemptions, so that stale-state window is reachable
 # by scrolling back to an older bundle card and tapping it.
+#
+# ``_CONFIG_DOC_DIGEST_KEY`` is a SHA-256 of the payload the QR encodes (never the
+# payload itself — it is a credential). The id says "a QR for this key is on
+# screen"; the digest says "a QR of THIS link", which is what the duplicate-send
+# guard has to know once a link can change over time (a bundle child's rotating
+# spiderX, XRAY_SPIDER_X_ROTATION_HOURS).
 _CONFIG_DOC_MSG_KEY = "config_doc_msg_id"
 _CONFIG_DOC_KEY_KEY = "config_doc_key_id"
 _CONFIG_DOC_KIND_KEY = "config_doc_kind"
+_CONFIG_DOC_DIGEST_KEY = "config_doc_digest"
 
 # Values for the ``kind`` discriminator above.
 CONFIG_DOC_KIND_KEY = "key"
@@ -71,20 +79,41 @@ async def remember_config_document(
     key_id: int,
     message_ids: Sequence[int],
     kind: str = CONFIG_DOC_KIND_KEY,
+    payload: str | None = None,
 ) -> None:
     """Record the just-sent config message(s) so they can be reused/cleaned up later.
 
     ``message_ids`` is every message that tap put on screen for this config — the
     ``.conf`` document and/or the QR photo — in send order. They are tracked as one
-    unit and :func:`discard_config_document` removes them as one unit.
+    unit and :func:`discard_config_document` removes them as one unit. ``payload``
+    (what the QR encodes) is kept only as a digest, for
+    :func:`config_document_matches`.
     """
     await state.update_data(
         {
             _CONFIG_DOC_MSG_KEY: list(message_ids),
             _CONFIG_DOC_KEY_KEY: key_id,
             _CONFIG_DOC_KIND_KEY: kind,
+            _CONFIG_DOC_DIGEST_KEY: _payload_digest(payload) if payload is not None else None,
         }
     )
+
+
+def _payload_digest(payload: str) -> str:
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+async def config_document_matches(state: FSMContext, payload: str) -> bool:
+    """Whether the tracked config messages encode exactly *payload*.
+
+    Meant to refine a positive :func:`config_document_present`: a link that
+    changed since it was sent (a rotating spiderX crossed its switch) is not a
+    duplicate, and the caller replaces the old QR. State recorded without a digest
+    keeps the old answer — "present" — rather than resending on every tap.
+    """
+    data = await state.get_data()
+    stored = data.get(_CONFIG_DOC_DIGEST_KEY)
+    return stored is None or stored == _payload_digest(payload)
 
 
 async def config_document_present(state: FSMContext, key_id: int, kind: str = CONFIG_DOC_KIND_KEY) -> bool:
@@ -109,7 +138,12 @@ async def discard_config_document(state: FSMContext, bot: Bot, chat_id: int) -> 
         with suppress(Exception):
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
     await state.update_data(
-        {_CONFIG_DOC_MSG_KEY: None, _CONFIG_DOC_KEY_KEY: None, _CONFIG_DOC_KIND_KEY: None}
+        {
+            _CONFIG_DOC_MSG_KEY: None,
+            _CONFIG_DOC_KEY_KEY: None,
+            _CONFIG_DOC_KIND_KEY: None,
+            _CONFIG_DOC_DIGEST_KEY: None,
+        }
     )
 
 
@@ -174,7 +208,9 @@ async def send_config_with_qr(
         qr_message = await message.answer_photo(BufferedInputFile(png, filename=_QR_FILENAME))
         sent_ids.append(qr_message.message_id)
     if sent_ids:
-        await remember_config_document(state, key_id=entity_id, message_ids=sent_ids, kind=kind)
+        await remember_config_document(
+            state, key_id=entity_id, message_ids=sent_ids, kind=kind, payload=qr_content
+        )
     return sent_ids
 
 
