@@ -29,7 +29,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     list hides children with — **not** `bundle_id IS NOT NULL`, which cannot tell a
     standalone key from a child whose attach never ran) and goes through the same seam, so
     its text and its QR match the subscription at the same second. Both are rendered at one
-    pinned instant, so they cannot land on opposite sides of a switch.
+    pinned instant, so they cannot land on opposite sides of a switch. The duplicate-send
+    guard now remembers a SHA-256 of what the QR encodes (never the link itself), so
+    reopening «Config» after the child's `spx` switched replaces the old QR instead of
+    leaving it under the new text; reopening within the same period still sends nothing
+    twice.
   - **Nothing is stored and nothing runs in the background**: no DB write, no schema change,
     no task. `vpn_keys.spider_x` keeps both of its jobs — the value with rotation off, and
     the only value a standalone key ever carries. Standalone keys, Hysteria2, AmneziaWG,

@@ -61,6 +61,7 @@ from bot.keyboards.keys import (
 from aiogram.types import BufferedInputFile
 from bot.messages import (
     awg_config_filename,
+    config_document_matches,
     config_document_present,
     discard_config_document,
     safe_callback_answer,
@@ -720,16 +721,22 @@ async def show_key_config(callback: CallbackQuery, state: FSMContext, services: 
         # the ack rather than follow it — otherwise Telegram drops it. Either way the
         # ack goes out before the config read below, which is the slow part; that is
         # the behaviour the URI protocols have always had, and AWG gains it here.
-        duplicate = await config_document_present(state, key_id)
-        await safe_callback_answer(callback, t("config_already_sent") if duplicate else None)
-        # The service call behind each text is what enforces access and "active key
-        # only", so it stays ahead of anything user-visible.
         # One instant for the VLESS text and its QR: a bundle child's spiderX can
         # rotate (XRAY_SPIDER_X_ROTATION_HOURS), and the two renders must not land
         # on either side of an epoch boundary.
-        link_at: int | None = None
+        link_at = services.xray.link_instant() if key.key_type == VpnKeyType.XRAY else None
+        duplicate = await config_document_present(state, key_id)
+        if duplicate and link_at is not None:
+            # …and for the same reason the QR still on screen may encode the
+            # previous period's link: it is a duplicate only if it is a QR of the
+            # link this tap renders, otherwise it is replaced below.
+            duplicate = await config_document_matches(
+                state, await services.xray.delivery_link(key, now_unix=link_at)
+            )
+        await safe_callback_answer(callback, t("config_already_sent") if duplicate else None)
+        # The service call behind each text is what enforces access and "active key
+        # only", so it stays ahead of anything user-visible.
         if key.key_type == VpnKeyType.XRAY:
-            link_at = services.xray.link_instant()
             text = xray_config_text(
                 await services.xray.get_xray_key_config(callback.from_user.id, key_id, now_unix=link_at)
             )
