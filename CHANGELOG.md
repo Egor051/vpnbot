@@ -183,6 +183,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   separately, `total=` is still never emitted, a measured zero is still reported while an
   absence is not, and no migration is involved.
 
+### Security
+
+- **Four runtime dependencies bumped to clear 49 new `pip-audit` advisories.** Advisories
+  published after the last green `main` run turned the `Dependency Audit` job red on the
+  pinned set — and with it every PR, since both test jobs wait on that job:
+  - `pillow` 12.3.0 → 13.0.0 (39 advisories). Held at the newest release, as
+    `requirements.txt` says it must be: it decodes untrusted formats in C even though this
+    bot only ever *writes* the config-QR PNGs. A major bump, so the QR path was checked
+    under it: the round-trip tests decode the rendered PNGs and pass, with
+    `DeprecationWarning` turned into an error.
+  - `aiohttp` 3.14.3 → 3.14.5 (8 advisories, fixed from 3.14.4), the newest patch of the
+    same 3.14 line. It pulls `yarl` 1.24.5 → 1.25.1.
+  - `multidict` 6.7.1 → 6.9.1 (1 advisory), transitive via `aiohttp`/`yarl`; deliberately
+    kept below 7.0 rather than taking the new major line.
+  - `certifi` 2026.7.22 → 2026.10.23 (1 advisory, fixed from 2026.10.18), the CA bundle
+    behind `aiogram`'s HTTPS.
+
+  Nothing else moved: both hashed sets were regenerated with `pip-compile` upgrading only
+  these packages, `constraints.txt` was re-synced from them, and no code changed.
+
 ## [3.0.0](https://github.com/Egor051/vpnbot/releases/tag/v3.0.0) — 2026-08-12
 
 ### Changed
