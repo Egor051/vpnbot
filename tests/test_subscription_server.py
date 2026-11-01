@@ -14,15 +14,18 @@ import re
 import socket
 import ssl
 import subprocess
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from adapters.clock import ClockProvider
 from bot import rate_limit as rate_limit_module
+from bot.handlers.common import config_delivery
 from bot.rate_limit import RateLimitExceeded, RateLimiter
 from config.settings import Settings, SettingsError, load_settings
 from db.database import Database
@@ -38,9 +41,10 @@ from services.key_bundles import KeyBundleService
 from services.xray import XrayService
 from subscription_server import render as render_module
 from subscription_server.config import SubscriptionConfig, SubscriptionConfigError, build_ssl_context, load_config
-from subscription_server.render import SubscriptionRenderError, render_subscription
+from subscription_server.render import SubscriptionRenderError, render_links, render_subscription
 from subscription_server.server import build_app, token_fingerprint
 from subscription_server.store import BundleStoreUnavailable, ReadOnlyBundleStore
+from utils.spider_x import rotating_spider_x
 
 ROOT = Path(__file__).resolve().parents[1]
 UNIT_PATH = ROOT / "deploy" / "vpn-bot-subscription.service"
@@ -1707,6 +1711,229 @@ async def test_render_refuses_a_protocol_that_cannot_ride_a_subscription(tmp_pat
             render_subscription(view, harness.settings)
     finally:
         await store.close()
+        await harness.db.close()
+
+
+# ── spiderX rotation of bundle children (XRAY_SPIDER_X_ROTATION_HOURS) ─────────
+
+_SPX_POOL = ("/", "/api", "/blog/", "/static/app.js", "/v2/feed")
+_DAY = 86_400
+# 2027-01-15T08:00:00Z — an arbitrary fixed second the clocks below are frozen at.
+_FROZEN = 1_800_000_000
+
+
+def _frozen(at: int) -> Callable[[], float]:
+    return lambda: float(at)
+
+
+def _spx_value(link: str) -> str | None:
+    """Decoded ``spx`` of a ``vless://`` link, or None when it carries none."""
+    query = link.split("?", 1)[1].split("#", 1)[0]
+    for part in query.split("&"):
+        if part.startswith("spx="):
+            return unquote(part.removeprefix("spx="))
+    return None
+
+
+def _link_of(config_text: str) -> str:
+    """The ``vless://`` link inside the HTML config screen ``_format_config`` renders."""
+    return html.unescape(config_text.split("<code>")[1].split("</code>")[0])
+
+
+def _bot_xray(harness: _Harness, now: Callable[[], float]) -> XrayService:
+    """The bot's XrayService over the harness DB, with its rotation clock injected."""
+    ids = _Ids()
+    ids._n = 10_000  # clear of every uuid/label the bundle's children already took
+    return XrayService(
+        vpn_keys=harness.vpn_keys,
+        users=_Users(),  # type: ignore[arg-type]
+        adapter=_RecordingAdapter(),  # type: ignore[arg-type]
+        settings=harness.settings,
+        clock=ClockProvider(),
+        ids=ids,  # type: ignore[arg-type]
+        audit=_Audit(),  # type: ignore[arg-type]
+        xhttp_adapter=_RecordingAdapter(),  # type: ignore[arg-type]
+        unix_clock=now,
+    )
+
+
+async def _endpoint_links(harness: _Harness, at: int) -> list[str]:
+    store = ReadOnlyBundleStore(harness.db.path)
+    await store.connect()
+    client = TestClient(TestServer(build_app(store, load_config(harness.settings), clock=_frozen(at))))
+    await client.start_server()
+    try:
+        resp = await client.get(f"/sub/{harness.token}")
+        assert resp.status == 200
+        return _decode(await resp.text())
+    finally:
+        await client.close()
+        await store.close()
+
+
+async def test_rotation_off_serves_the_stored_spx_byte_for_byte_whatever_the_time(tmp_path: Path) -> None:
+    """XRAY_SPIDER_X_ROTATION_HOURS=0 with a pool: every child carries its STORED
+    spx, the body does not depend on the clock at all, and each link is the per-key
+    view's link (plus the subscription's preference mark)."""
+    harness = await _seed(tmp_path, xray_spider_x_pool=_SPX_POOL, xray_spider_x_rotation_hours=0)
+    try:
+        now_links = await _endpoint_links(harness, _FROZEN)
+        assert await _endpoint_links(harness, _FROZEN + 400 * _DAY) == now_links
+        by_prefix = {link.split("#")[0] for link in now_links}
+        reference = _bot_xray(harness, _frozen(_FROZEN))
+        children = await harness.bundles.list_keys_of_bundle(harness.bundle_id)
+        xray_children = [key for key in children if key.key_type is VpnKeyType.XRAY]
+        assert len(xray_children) == 4
+        for key in xray_children:
+            assert key.spider_x in _SPX_POOL
+            expected = _link_of(reference._format_config(key))
+            assert expected.split("#")[0] in by_prefix
+            assert _spx_value(expected) == key.spider_x
+    finally:
+        await harness.db.close()
+
+
+async def test_rotation_walks_every_vless_child_and_leaves_hysteria2_alone(tmp_path: Path) -> None:
+    harness = await _seed(tmp_path, xray_spider_x_pool=_SPX_POOL, xray_spider_x_rotation_hours=24)
+    store = ReadOnlyBundleStore(harness.db.path)
+    await store.connect()
+    try:
+        view = await store.load_active_bundle(harness.token)
+        assert view is not None
+        off = replace(harness.settings, xray_spider_x_rotation_hours=0)
+        hy2_off = [link for link in render_links(view, off) if link.startswith("hysteria2://")]
+        assert len(hy2_off) == 1
+        by_uuid = {str(key.payload["uuid"]): key for key in view.keys if key.key_type is VpnKeyType.XRAY}
+        changed = 0
+        previous: dict[str, str | None] = {}
+        for day in range(10):
+            at = _FROZEN + day * _DAY
+            links = render_links(view, harness.settings, clock=_frozen(at))
+            # Hysteria2 is byte-for-byte the rotation-off link, at every instant.
+            assert [link for link in links if link.startswith("hysteria2://")] == hy2_off
+            vless = [link for link in links if link.startswith("vless://")]
+            assert len(vless) == 4
+            for link in vless:
+                uuid_value = link.removeprefix("vless://").split("@", 1)[0]
+                spx = _spx_value(link)
+                assert spx == rotating_spider_x(uuid_value, _SPX_POOL, _DAY, at)
+                if uuid_value in previous:
+                    # A day apart is always the adjacent epoch: never the same value.
+                    assert spx != previous[uuid_value]
+                    changed += 1
+                previous[uuid_value] = spx
+        assert changed == 9 * len(by_uuid)
+        # Nothing was written back: the stored values are what they were.
+        for key in await harness.bundles.list_keys_of_bundle(harness.bundle_id):
+            if key.key_type is VpnKeyType.XRAY:
+                assert key.spider_x == by_uuid[str(key.payload["uuid"])].spider_x
+    finally:
+        await store.close()
+        await harness.db.close()
+
+
+async def test_a_child_is_stable_within_its_epoch_and_switches_at_its_boundary(tmp_path: Path) -> None:
+    harness = await _seed(tmp_path, xray_spider_x_pool=_SPX_POOL, xray_spider_x_rotation_hours=1)
+    store = ReadOnlyBundleStore(harness.db.path)
+    await store.connect()
+    try:
+        view = await store.load_active_bundle(harness.token)
+        assert view is not None
+        period = 3600
+        boundaries: set[int] = set()
+        for key in view.keys:
+            if key.key_type is not VpnKeyType.XRAY:
+                continue
+            uuid_value = str(key.payload["uuid"])
+            # This key's first switch after _FROZEN, found from the pure walk.
+            boundary = next(
+                t
+                for t in range(_FROZEN + 1, _FROZEN + period + 1)
+                if rotating_spider_x(uuid_value, _SPX_POOL, period, t)
+                != rotating_spider_x(uuid_value, _SPX_POOL, period, t - 1)
+            )
+            boundaries.add(boundary)
+
+            def served(at: int, uuid_value: str = uuid_value) -> str | None:
+                links = render_links(view, harness.settings, clock=_frozen(at))
+                return _spx_value(next(link for link in links if f"vless://{uuid_value}@" in link))
+
+            inside = served(boundary)
+            assert served(boundary - 1) != inside
+            for at in (boundary + 1, boundary + period // 2, boundary + period - 1):
+                assert served(at) == inside
+            assert served(boundary + period) != inside
+        # The four children switch at four different seconds, not all together.
+        assert len(boundaries) == 4
+    finally:
+        await store.close()
+        await harness.db.close()
+
+
+async def test_endpoint_and_the_bots_config_screen_agree_at_the_same_frozen_second(tmp_path: Path) -> None:
+    """A bundle child opened on its own in the bot (the admin's view of a user's keys
+    lists children; «Конфиг» renders text + QR) must carry the very spx the
+    subscription serves at that second — and a standalone key keeps its stored one."""
+    harness = await _seed(tmp_path, xray_spider_x_pool=_SPX_POOL, xray_spider_x_rotation_hours=24)
+    try:
+        now = [float(_FROZEN)]
+        bot_xray = _bot_xray(harness, lambda: now[0])
+        services = SimpleNamespace(xray=bot_xray)
+        standalone = (
+            await bot_xray.create_xray_key(ADMIN, TelegramUserProfile(OWNER, f"user{OWNER}", "User"), None)
+        ).key
+        stored_standalone_link: str | None = None
+        children = [
+            key
+            for key in await harness.bundles.list_keys_of_bundle(harness.bundle_id)
+            if key.key_type is VpnKeyType.XRAY
+        ]
+        seen: dict[int, list[str | None]] = {key.id: [] for key in children}
+        for day in (0, 1, 2):
+            at = _FROZEN + day * _DAY
+            now[0] = float(at)
+            endpoint = {link.split("#")[0] for link in await _endpoint_links(harness, at)}
+            for key in children:
+                text_link = _link_of(await bot_xray.get_xray_key_config(ADMIN, key.id))
+                qr_link, document = await config_delivery(services, ADMIN, key)  # type: ignore[arg-type]
+                assert document is None
+                # The QR and the text are one string, and it is the endpoint's.
+                assert qr_link == text_link
+                assert text_link.split("#")[0] in endpoint
+                spx = _spx_value(text_link)
+                assert spx == rotating_spider_x(str(key.payload["uuid"]), _SPX_POOL, _DAY, at)
+                seen[key.id].append(spx)
+            standalone_link = _link_of(await bot_xray.get_xray_key_config(ADMIN, standalone.id))
+            assert (await config_delivery(services, ADMIN, standalone))[0] == standalone_link  # type: ignore[arg-type]
+            assert _spx_value(standalone_link) == standalone.spider_x
+            if stored_standalone_link is None:
+                stored_standalone_link = standalone_link
+            assert standalone_link == stored_standalone_link
+        # Not vacuous: every child really did move from one day to the next.
+        for values in seen.values():
+            assert values[0] != values[1] != values[2]
+    finally:
+        await harness.db.close()
+
+
+async def test_bundle_membership_is_the_same_predicate_the_key_list_uses(tmp_path: Path) -> None:
+    harness = await _seed(tmp_path)
+    try:
+        standalone = (
+            await _bot_xray(harness, _frozen(_FROZEN)).create_xray_key(
+                ADMIN, TelegramUserProfile(OWNER, f"user{OWNER}", "User"), None
+            )
+        ).key
+        children = {key.id for key in await harness.bundles.list_keys_of_bundle(harness.bundle_id)}
+        everything = await harness.vpn_keys.list_by_owner(OWNER, limit=100)
+        visible = {key.id for key in await harness.vpn_keys.list_by_owner(OWNER, limit=100, exclude_bundled=True)}
+        assert standalone.id in visible
+        for key in everything:
+            member = await harness.vpn_keys.is_bundle_member(key.id)
+            assert member == (key.id in children)
+            assert member == (key.id not in visible)
+        assert await harness.vpn_keys.is_bundle_member(999_999) is False
+    finally:
         await harness.db.close()
 
 

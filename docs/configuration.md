@@ -75,6 +75,7 @@ optional with the shown default.
 | `XRAY_XHTTP_PATH` | No | `/v1/messages/stream` | XHTTP path used in VLESS (HTTP) links; must match the inbound's `xhttpSettings.path` (validated on the inbound, not in the fallback). | `/v1/messages/stream` |
 | `XRAY_XHTTP_MODE` | No | `stream-one` | Client-side XHTTP mode in VLESS (HTTP) links: `auto`, `packet-up`, `stream-up`, `stream-one`. Default `stream-one` (single full-duplex h2 session, cleanest for direct REALITY); `packet-up` is switchable for throttling on long sessions or CDN passthrough. | `stream-one` |
 | `XRAY_SPIDER_X_POOL` | No | _(empty)_ | Per-key REALITY spiderX (`spx`) pool: comma-separated paths, each starting with `/`. Empty = `spx` not emitted (default). See the note below. | `/,/api,/blog/` |
+| `XRAY_SPIDER_X_ROTATION_HOURS` | No | `0` | Rotation period (hours, `0`–`720`) of `spx` for the VLESS children of an all-in-one subscription. `0` = off: every link carries the stored per-key value. Inert while `XRAY_SPIDER_X_POOL` is empty. Standalone keys are never rotated. See the note below. | `24` |
 | `XRAY_ACCESS_LOG_PATH` | No | _(empty)_ | Path to the Xray access log for anomaly detection. Leave empty to disable. | `/var/log/xray/access.log` |
 
 _Legacy aliases accepted: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SERVER_PORT` (= `XRAY_PUBLIC_PORT`), `XRAY_PUBLIC_KEY` (= `XRAY_REALITY_PUBLIC_KEY`), `XRAY_SERVER_NAME` (= `XRAY_SNI`)._
@@ -105,6 +106,34 @@ _Legacy aliases accepted: `XRAY_SERVER_ADDRESS` (= `XRAY_PUBLIC_HOST`), `XRAY_SE
 > the next startup (idempotent; already-assigned values are never overwritten), so it
 > can be enabled at any time — not only at the initial v31 upgrade. Every entry must
 > start with `/` (validated at startup).
+
+> **spiderX rotation for subscription children (`XRAY_SPIDER_X_ROTATION_HOURS`).** With
+> the default `0` nothing changes: every VLESS link — standalone or inside a subscription —
+> carries the stored `vpn_keys.spider_x`, byte-for-byte. With a value `> 0` (and a non-empty
+> pool), the VLESS children of an all-in-one bundle instead carry a value that **walks the
+> pool over time**, one entry per period (`24` = daily):
+>
+> - each key walks the pool in its own order, `sorted(pool, key=sha256(f"{uuid}|{path}"))`,
+>   from its own offset `start = sha256(f"{uuid}|start") % len(pool)`;
+> - each key switches at its own second of the period,
+>   `phase = sha256(f"{uuid}|phase") % period`, so a subscription's keys never flip together;
+> - at unix time `now` the value is `order[(start + (now + phase) // period) % len(pool)]` —
+>   two adjacent periods never repeat a value, and any `len(pool)` consecutive periods visit
+>   the whole pool. A one-entry pool is a constant; duplicate pool entries are ignored.
+>
+> Every input is a SHA-256 of the key UUID (never Python's per-process `hash()`, never
+> `random`), so the subscription endpoint and the bot — two separate processes — render the
+> **same value for the same key at the same second**. The value is computed when the link is
+> rendered and is **never stored**: no DB write, no background task, no schema change, and
+> `vpn_keys.spider_x` keeps its role (the value with rotation off, and the only value a
+> standalone key ever uses). Which keys rotate is decided by what is being rendered, not by
+> a key field: the subscription renderer knows every key it serves is a bundle child; the
+> bot's «Config» screen for a single key asks the database whether a bundle owns that row
+> (the same predicate the key list hides bundle children with), and only while rotation is
+> on. Hysteria2, AmneziaWG and the subscription headers are untouched. A client picks a new
+> value up on its next subscription refresh (`SUBSCRIPTION_UPDATE_INTERVAL_HOURS`). The
+> setting is read once at startup — restart **both** `vpn-bot` and `vpn-bot-subscription`
+> after changing it.
 
 ## AmneziaWG
 

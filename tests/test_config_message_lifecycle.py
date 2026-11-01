@@ -12,8 +12,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BufferedInputFile, CallbackQuery, Chat, Message, User as TgUser
 from qrcode.constants import ERROR_CORRECT_M
 
+from bot.handlers.common import config_delivery
 from bot.handlers.key_bundles import show_bundle_config
-from bot.handlers.keys import show_key_config
+from bot.handlers.keys import show_key_config, trial_key_show
 from bot.messages import (
     CONFIG_DOC_KIND_BUNDLE,
     config_document_present,
@@ -359,10 +360,13 @@ class _Awg:
 
 
 class _Xray:
-    async def get_xray_key_config(self, actor_user_id: int, key_id: int) -> str:
+    def link_instant(self) -> int:
+        return 1_700_000_000
+
+    async def get_xray_key_config(self, actor_user_id: int, key_id: int, *, now_unix: int | None = None) -> str:
         return "formatted"
 
-    def connection_link(self, key: VpnKey) -> str:
+    async def delivery_link(self, key: VpnKey, *, now_unix: int | None = None) -> str:
         return _VLESS_LINK
 
 
@@ -438,6 +442,73 @@ def test_config_button_sends_a_qr_of_the_real_payload_for_every_key_type(
         assert len(callback.message.documents) == expected_documents
         assert _sent_qr_payload(callback.message) == expected_payload
         assert await config_document_present(state, 10) is True
+
+    asyncio.run(run())
+
+
+class _TickingXray:
+    """A VLESS service whose clock lands in a new spiderX epoch on EVERY read,
+    recording the instant the handler hands to the text and to the QR."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+        self.text_at: list[int | None] = []
+        self.qr_at: list[int | None] = []
+
+    def link_instant(self) -> int:
+        self.reads += 1
+        return 1_800_000_000 + 86_400 * self.reads
+
+    async def get_xray_key_config(self, actor_user_id: int, key_id: int, *, now_unix: int | None = None) -> str:
+        self.text_at.append(now_unix)
+        return "formatted"
+
+    async def get_xray_key_config_for_owner(
+        self, owner_user_id: int, key_id: int, *, now_unix: int | None = None
+    ) -> str:
+        self.text_at.append(now_unix)
+        return "formatted"
+
+    async def delivery_link(self, key: VpnKey, *, now_unix: int | None = None) -> str:
+        self.qr_at.append(now_unix)
+        return _VLESS_LINK
+
+
+@pytest.mark.parametrize("entry", ["key:show:10", "trial:show:10"])
+def test_vless_text_and_qr_are_rendered_at_one_pinned_instant(monkeypatch: pytest.MonkeyPatch, entry: str) -> None:
+    """A bundle child's spiderX can rotate; the text and the QR of one tap must not
+    straddle a switch. The handler reads the clock ONCE and gives both renders that
+    instant — here the clock would hand out a different epoch on a second read."""
+    _patch_keys_handler(monkeypatch)
+
+    async def run() -> None:
+        xray = _TickingXray()
+        services = _services_for(VpnKeyType.XRAY)
+        services.xray = xray
+        state = _make_state()
+        callback = _Callback(entry)
+        if entry.startswith("trial:"):
+            await trial_key_show(callback, state, services)  # type: ignore[arg-type]
+        else:
+            await show_key_config(callback, state, services, _RateLimiter(), _Bot())  # type: ignore[arg-type]
+        assert xray.reads == 1
+        assert xray.text_at == xray.qr_at == [1_800_000_000 + 86_400]
+        assert _sent_qr_payload(callback.message) == _VLESS_LINK
+
+    asyncio.run(run())
+
+
+def test_hysteria2_and_awg_delivery_never_reach_the_vless_seam() -> None:
+    """The spiderX seam is VLESS-only: delivering a Hysteria2 link or an AWG config
+    must not touch the Xray service at all (it is absent here)."""
+
+    async def run() -> None:
+        services = SimpleNamespace(awg=_Awg(), hysteria=_Hysteria())
+        hy2, hy2_doc = await config_delivery(services, 100, _key(key_type=VpnKeyType.HYSTERIA2))  # type: ignore[arg-type]
+        assert (hy2, hy2_doc) == (_HY2_LINK, None)
+        awg, awg_doc = await config_delivery(services, 100, _awg_key())  # type: ignore[arg-type]
+        assert awg == _AWG_CONF
+        assert awg_doc is not None
 
     asyncio.run(run())
 

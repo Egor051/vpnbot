@@ -553,6 +553,13 @@ class Settings:
     # picked deterministically from this pool by hashing the key UUID. Purely
     # client-side: the server inbound / xray config are never touched.
     xray_spider_x_pool: tuple[str, ...] = ()
+    # Rotation period (hours, 0-720) of spiderX for the VLESS children of an
+    # all-in-one bundle. 0 = off: every link carries the key's stored spider_x,
+    # byte-for-byte as before. >0 = a bundle child's link walks the pool, one entry
+    # per period, computed at render time (utils.spider_x.rotating_spider_x) and
+    # never written back. Inert while the pool is empty; standalone keys always
+    # keep their stored value.
+    xray_spider_x_rotation_hours: int = 0
     # Hysteria2 (apernet v2) integration. The data plane (a standalone hysteria
     # server + the hy2_auth endpoint) runs independently of the bot; these settings
     # only let the bot build client links and gate issuance. HOST/PORT/SNI are
@@ -989,6 +996,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
             {"auto", "packet-up", "stream-up", "stream-one"},
         ),
         xray_spider_x_pool=xray_spider_x_pool,
+        xray_spider_x_rotation_hours=_int_range("XRAY_SPIDER_X_ROTATION_HOURS", 0, 0, 720),
         awg_config_path=Path(_optional("AWG_CONFIG_PATH", "/etc/amnezia/amneziawg/awg0.conf")),
         awg_interface=_optional("AWG_INTERFACE", "awg0"),
         awg_network=awg_network,

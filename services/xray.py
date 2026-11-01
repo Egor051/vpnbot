@@ -4,6 +4,8 @@ import hashlib
 import json
 import logging
 import re
+import time
+from collections.abc import Callable
 from urllib.parse import quote, urlencode
 
 from adapters.clock import ClockProvider
@@ -22,7 +24,7 @@ from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
 from utils.redact import redact_value
-from utils.spider_x import pick_spider_x
+from utils.spider_x import pick_spider_x, rotating_spider_x
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +122,13 @@ class XrayService:
         user_locks: UserLockManager | None = None,
         backend_health: BackendHealth | None = None,
         xhttp_adapter: XrayConfigAdapter | None = None,
+        unix_clock: Callable[[], float] = time.time,
     ) -> None:
         self.vpn_keys = vpn_keys
+        # Wall clock (unix seconds) for the spiderX rotation of bundle children —
+        # the only link parameter that depends on time. Injectable so a test can
+        # freeze it; ``clock`` above yields ISO strings for the DB, not this.
+        self.unix_clock = unix_clock
         self.users = users
         # `adapter` is the primary VLESS (TCP) inbound (vless-in). The optional
         # xhttp_adapter targets the separate VLESS (HTTP) inbound. Both wrap the
@@ -181,6 +188,65 @@ class XrayService:
         value = getattr(key, "spider_x", None) or key.payload.get("spider_x")
         text = str(value).strip() if value else ""
         return text or None
+
+    def _spider_x_rotation_seconds(self) -> int:
+        """Rotation period for bundle children in seconds; 0 while rotation is off.
+
+        Off when XRAY_SPIDER_X_ROTATION_HOURS is 0 OR the pool is empty — there is
+        nothing to rotate through, so the stored value (None, i.e. no spx) stands.
+        """
+        hours = self.settings.xray_spider_x_rotation_hours
+        if hours <= 0 or not self.settings.xray_spider_x_pool:
+            return 0
+        return hours * 3600
+
+    def link_instant(self) -> int:
+        """The current unix second, as every link render that rotates reads it."""
+        return int(self.unix_clock())
+
+    def link_spider_x(self, key: VpnKey, *, bundle_member: bool, now_unix: int | None = None) -> str | None:
+        """The spiderX a link for *key* carries — the one place rotation is decided.
+
+        *bundle_member* is the CALLER's statement of what it is rendering: the
+        subscription renderer passes True for every child it serves; the bot asks
+        the repository (:meth:`is_rotating_bundle_member`). It is never inferred
+        here from the key's own fields — a NULL bundle_id cannot tell a standalone
+        key from a child whose attach never ran.
+
+        Anything but a bundle member with rotation on gets the stored per-key
+        value, so with XRAY_SPIDER_X_ROTATION_HOURS=0 every link is byte-for-byte
+        what it was. *now_unix* pins the instant (one per rendered screen or
+        response); when omitted the injected clock is read, and only if the value
+        actually rotates.
+        """
+        stored = self._key_spider_x(key)
+        period = self._spider_x_rotation_seconds()
+        if not bundle_member or period == 0:
+            return stored
+        uuid_value = str(key.payload.get("uuid") or key.uuid or "")
+        if not uuid_value:
+            return stored
+        instant = self.link_instant() if now_unix is None else now_unix
+        return rotating_spider_x(uuid_value, self.settings.xray_spider_x_pool, period, instant)
+
+    async def is_rotating_bundle_member(self, key: VpnKey) -> bool:
+        """Whether the bot must render *key* with the rotating spiderX.
+
+        True only for a key an all-in-one bundle owns, asked of the database (the
+        same predicate the key list filters bundle children with) — and only while
+        rotation is on: with it off this returns False without a query, so the
+        default configuration costs nothing and renders exactly as before.
+        """
+        if self._spider_x_rotation_seconds() == 0:
+            return False
+        return await self.vpn_keys.is_bundle_member(key.id)
+
+    async def delivery_link(self, key: VpnKey, *, now_unix: int | None = None) -> str:
+        """The bot's link for *key*: :meth:`connection_link` with bundle membership
+        resolved, so a bundle child shown on its own matches the subscription."""
+        return self.connection_link(
+            key, bundle_member=await self.is_rotating_bundle_member(key), now_unix=now_unix
+        )
 
     def _flow_for_transport(self, transport: str) -> str:
         """XHTTP clients must never carry a flow; TCP keeps xtls-rprx-vision."""
@@ -551,8 +617,12 @@ class XrayService:
         """Return the connection config text for an Xray key."""
         return await self.get_xray_key_config(actor_user_id, key_id)
 
-    async def get_xray_key_config(self, actor_user_id: int, key_id: int) -> str:
-        """Return the connection config for an active Xray key the actor manages."""
+    async def get_xray_key_config(self, actor_user_id: int, key_id: int, *, now_unix: int | None = None) -> str:
+        """Return the connection config for an active Xray key the actor manages.
+
+        *now_unix* pins the instant a rotating bundle-child spiderX is rendered at,
+        so the caller can hand the same instant to the QR (:meth:`delivery_link`).
+        """
         async with self._lock:  # Prevents returning config for a key being concurrently deleted
             key = await self._get_xray_key_for_manage(actor_user_id, key_id, allow_read=True)
             if key.status != VpnKeyStatus.ACTIVE:
@@ -564,9 +634,16 @@ class XrayService:
                 entity_id=key_id,
                 details={},
             )
-            return self._format_config(key, viewer_user_id=actor_user_id)
+            return self._format_config(
+                key,
+                viewer_user_id=actor_user_id,
+                bundle_member=await self.is_rotating_bundle_member(key),
+                now_unix=now_unix,
+            )
 
-    async def get_xray_key_config_for_owner(self, owner_user_id: int, key_id: int) -> str:
+    async def get_xray_key_config_for_owner(
+        self, owner_user_id: int, key_id: int, *, now_unix: int | None = None
+    ) -> str:
         """Return the connection config for an active Xray key owned by the user."""
         async with self._lock:  # Prevents returning config for a key being concurrently deleted
             key = await self._get_key(key_id)
@@ -576,7 +653,12 @@ class XrayService:
                 raise AccessDenied("Нельзя смотреть чужой ключ", key="err_foreign_key_view")
             if key.status != VpnKeyStatus.ACTIVE:
                 raise InvalidOperation("Конфигурация доступна только для активного ключа", key="err_config_active_only")
-            return self._format_config(key, viewer_user_id=owner_user_id)
+            return self._format_config(
+                key,
+                viewer_user_id=owner_user_id,
+                bundle_member=await self.is_rotating_bundle_member(key),
+                now_unix=now_unix,
+            )
 
     async def change_fingerprint(self, actor_user_id: int, key_id: int, fingerprint: str) -> VpnKey:
         """Update the per-key fingerprint and rebuild the stored VLESS link."""
@@ -1313,7 +1395,7 @@ class XrayService:
             return f"[{host}]"
         return host
 
-    def connection_link(self, key: VpnKey) -> str:
+    def connection_link(self, key: VpnKey, *, bundle_member: bool = False, now_unix: int | None = None) -> str:
         """Return the ``vless://`` URI for ``key`` — the string the user connects with.
 
         The single place that derives a key's link, shared by the config screen
@@ -1322,6 +1404,10 @@ class XrayService:
         by two call sites agreeing. Rebuilt from the key's payload and the current
         server settings on every call, exactly as the config screen has always done
         — the ``link`` cached in ``public_payload`` can predate a settings change.
+
+        *bundle_member* and *now_unix* go to :meth:`link_spider_x` unchanged; with
+        the defaults (or rotation off) the link is the stored-spx link as before.
+        A caller rendering the same key twice (text + QR) passes one *now_unix*.
         """
         uuid_value = str(key.payload.get("uuid") or key.uuid or "")
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "")
@@ -1330,12 +1416,19 @@ class XrayService:
         return self._build_vless_link(
             uuid_value, short_id, email_label,
             fingerprint=fingerprint, transport=self._key_transport(key), profile=self._key_profile(key),
-            spider_x=self._key_spider_x(key),
+            spider_x=self.link_spider_x(key, bundle_member=bundle_member, now_unix=now_unix),
         )
 
-    def _format_config(self, key: VpnKey, *, viewer_user_id: int | None = None) -> str:
+    def _format_config(
+        self,
+        key: VpnKey,
+        *,
+        viewer_user_id: int | None = None,
+        bundle_member: bool = False,
+        now_unix: int | None = None,
+    ) -> str:
         email_label = str(key.payload.get("email_label") or key.email_label or "")
-        link = self.connection_link(key)
+        link = self.connection_link(key, bundle_member=bundle_member, now_unix=now_unix)
         visible_note = key_note_for_viewer(key, viewer_user_id) if viewer_user_id is not None else None
         note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
         label = f"\nМетка: {h(email_label)}" if email_label else ""

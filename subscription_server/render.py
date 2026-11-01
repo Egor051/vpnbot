@@ -1,6 +1,8 @@
 
 import base64
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -50,16 +52,18 @@ class _VlessLinkRenderer(XrayService):
     than restating the format.
 
     It deliberately initialises ONLY ``settings`` (all ``_build_vless_link``
-    reads): the mutation-capable half of the service — repositories, config
-    adapters, the audit writer — is left unset, so this object physically cannot
-    apply anything to a backend. Any future dependency added to the link builder
+    reads) and the wall clock the spiderX rotation of bundle children reads: the
+    mutation-capable half of the service — repositories, config adapters, the
+    audit writer — is left unset, so this object physically cannot apply
+    anything to a backend. Any future dependency added to the link builder
     surfaces as an AttributeError, which the endpoint turns into a fail-closed
     404, and is pinned by the drift test that compares this output against a
     fully-constructed XrayService.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, unix_clock: Callable[[], float] = time.time) -> None:
         self.settings = settings
+        self.unix_clock = unix_clock
 
     def member_name(self, key: VpnKey) -> str:
         """The composition seam's name for a provisioned Xray child.
@@ -72,8 +76,14 @@ class _VlessLinkRenderer(XrayService):
             return f"xray_http_{self._key_profile(key)}"
         return "xray_tcp"
 
-    def vless_link(self, key: VpnKey) -> str:
-        """Render one Xray child exactly as the single-key config view does."""
+    def vless_link(self, key: VpnKey, *, now_unix: int) -> str:
+        """Render one Xray child exactly as the single-key config view does.
+
+        This path is where "this key is a bundle member" is KNOWN rather than
+        guessed — every key reaching it is a child of the bundle being served — so
+        it states that to the spiderX seam explicitly. With rotation off the seam
+        returns the stored value and the link is the per-key link, byte for byte.
+        """
         uuid_value = str(key.payload.get("uuid") or key.uuid or "")
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "")
         email_label = str(key.payload.get("email_label") or key.email_label or "")
@@ -87,7 +97,7 @@ class _VlessLinkRenderer(XrayService):
             fingerprint=fingerprint,
             transport=self._key_transport(key),
             profile=self._key_profile(key),
-            spider_x=self._key_spider_x(key),
+            spider_x=self.link_spider_x(key, bundle_member=True, now_unix=now_unix),
         )
 
 
@@ -99,7 +109,9 @@ class RenderedSubscription:
     headers: dict[str, str]
 
 
-def render_links(view: BundleView, settings: Settings) -> tuple[str, ...]:
+def render_links(
+    view: BundleView, settings: Settings, *, clock: Callable[[], float] = time.time
+) -> tuple[str, ...]:
     """Render every active child of the bundle into its client link.
 
     Order comes from the composition seam (:func:`subscription_member_order`), NOT
@@ -111,12 +123,16 @@ def render_links(view: BundleView, settings: Settings) -> tuple[str, ...]:
     A protocol that cannot ride a v2ray subscription never reaches here (AWG and
     the proxies are excluded from ``bundle_composition``), so anything else is a
     corrupt row and fails the whole render rather than being skipped.
+
+    *clock* is read ONCE per response: every child is rendered at the same instant,
+    which only matters to the rotating spiderX (XRAY_SPIDER_X_ROTATION_HOURS).
     """
-    renderer = _VlessLinkRenderer(settings)
+    renderer = _VlessLinkRenderer(settings, clock)
+    now_unix = renderer.link_instant()
     links: list[str] = []
     for key in _ordered_children(view.keys, renderer):
         if key.key_type is VpnKeyType.XRAY:
-            links.append(renderer.vless_link(key))
+            links.append(renderer.vless_link(key, now_unix=now_unix))
         elif key.key_type is VpnKeyType.HYSTERIA2:
             links.append(_hysteria2_link(key, settings))
         else:
@@ -176,14 +192,16 @@ def _hysteria2_link(key: VpnKey, settings: Settings) -> str:
     )
 
 
-def render_subscription(view: BundleView, settings: Settings) -> RenderedSubscription:
+def render_subscription(
+    view: BundleView, settings: Settings, *, clock: Callable[[], float] = time.time
+) -> RenderedSubscription:
     """Build the full base64 subscription body and its headers.
 
     Raises :class:`SubscriptionRenderError` when the bundle has nothing to serve
     or any child fails to render — the caller must translate that into a 404 with
     an empty body, never a partial config and never a 500.
     """
-    links = render_links(view, settings)
+    links = render_links(view, settings, clock=clock)
     if not links:
         raise SubscriptionRenderError(f"bundle {view.bundle.id} has no active children")
     body = base64.b64encode("\n".join(links).encode("utf-8")).decode("ascii")

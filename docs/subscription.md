@@ -41,6 +41,15 @@ Canonical references live where every other feature's do:
    email, the hy2 auth id) is untouched, so reconciliation, traffic stats and anomaly detection
    keep matching on it, and a standalone key's link is unchanged. The bot explains the colours
    on the subscription's own screens; the same ranking is what «Состав» lists.
+5. **spiderX (`spx`) of the VLESS children can rotate.** With `XRAY_SPIDER_X_ROTATION_HOURS=0`
+   (the default) each child carries its stored per-key `spx`, exactly as its single-key link
+   does. With a value `> 0` and a non-empty `XRAY_SPIDER_X_POOL`, each child's `spx` walks the
+   pool, one entry per period, switching at a per-key second; the renderer reads the clock
+   **once per response**. Nothing is written back — the value is a pure function of the key
+   UUID, the pool, the period and the time, so the bot's «Config» screen for the same child
+   (reachable from the admin's view of a user's keys) shows the same value at the same
+   second. Hysteria2 links and the response headers are unchanged. Algorithm and rules:
+   [Configuration → spiderX rotation](configuration.md#xray-vless-reality).
 
 ### Fail-closed behaviour
 
