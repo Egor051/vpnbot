@@ -4,6 +4,10 @@ from aiogram.fsm.state import State, StatesGroup
 
 class CreateKeyStates(StatesGroup):
     waiting_xhttp_profile = State()
+    # «Подключение: напрямую / через relay» — only while RELAY_ENABLED.
+    waiting_route = State()
+    # All-in-one: basic or extended.
+    waiting_bundle_kind = State()
     waiting_note = State()
     waiting_fp = State()
     waiting_mtu = State()
@@ -29,6 +33,8 @@ class ProxyStates(StatesGroup):
 class AdminCreateKeyStates(StatesGroup):
     choosing_type = State()
     waiting_xhttp_profile = State()
+    # «Подключение: напрямую / через relay» — only while RELAY_ENABLED.
+    waiting_route = State()
     waiting_note = State()
     waiting_fp = State()
     waiting_mtu = State()

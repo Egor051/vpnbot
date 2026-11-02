@@ -26,6 +26,7 @@ from bot.bundles import (
     bundle_created_text,
     bundle_detail_text,
     bundle_has_vless,
+    bundle_kind_prompt,
     bundle_note_confirm_text,
     require_subscription_ui,
     subscription_ui_enabled,
@@ -37,13 +38,15 @@ from bot.handlers.common import (
     admin_owner_context,
     answer_callback_error,
     answer_message_error,
+    RELAY_PROTOCOLS,
     config_delivery,
     parse_int_callback,
     profile_from_tg,
+    relay_offered,
     stats_views_for_screen,
 )
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
-from bot.keyboards.key_bundles import bundle_actions_keyboard, bundle_awg_ack_keyboard
+from bot.keyboards.key_bundles import bundle_actions_keyboard, bundle_awg_ack_keyboard, bundle_kind_keyboard
 from bot.keyboards.keys import (
     VALID_FINGERPRINTS,
     after_key_deleted_keyboard,
@@ -54,6 +57,7 @@ from bot.keyboards.keys import (
     key_actions_keyboard,
     keys_list_keyboard,
     mtu_choice_keyboard,
+    relay_route_keyboard,
     trial_protocol_keyboard,
     vless_transport_keyboard,
     xhttp_profile_keyboard,
@@ -74,7 +78,7 @@ from bot.rate_limit import RateLimiter
 from i18n import t
 from models.access import is_blocked_user
 from models.dto import KeyBundle, TelegramUserProfile, TrafficStats, VpnKey
-from models.enums import AuditEntityType, VpnKeyType
+from models.enums import AuditEntityType, KeyBundleKind, VpnKeyType
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.key_bundles import KeyBundleCreateResult
 from services.notes import MAX_NOTE_LENGTH
@@ -196,9 +200,10 @@ async def create_key_choose_bundle(callback: CallbackQuery, services: Services) 
 async def create_key_bundle_ack(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Enter the shared create wizard for an all-in-one subscription bundle.
 
-    No separate flow: the bundle rides the very same note → expiry → confirm steps
-    a single key uses (it skips MTU, a per-protocol client setting the children get
-    from their own defaults, and asks for the fingerprint once for all of them).
+    No separate flow: after choosing the kind (basic / extended) the bundle rides
+    the very same note → expiry → confirm steps a single key uses (it skips MTU, a
+    per-protocol client setting the children get from their own defaults, and asks
+    for the fingerprint once for all of them).
     """
     if not await ensure_private_callback(callback):
         return
@@ -208,10 +213,40 @@ async def create_key_bundle_ack(callback: CallbackQuery, state: FSMContext, serv
         require_subscription_ui(services)
         await _ensure_can_enter_create(callback.from_user.id, services)
         await safe_callback_answer(callback)
+        await state.set_state(CreateKeyStates.waiting_bundle_kind)
+        await state.update_data(
+            key_type=BUNDLE_KEY_TYPE,
+            transport="tcp",
+            cancel_target="keys:create",
+        )
+        await safe_edit_message_text(
+            callback.message,
+            bundle_kind_prompt(relay_enabled=relay_offered(services)),
+            reply_markup=bundle_kind_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(
+    CreateKeyStates.waiting_bundle_kind, F.data.regexp(r"^keys:create:bundle:kind:(basic|extended)$")
+)
+async def create_key_bundle_kind(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Record the chosen all-in-one kind and prompt for a note."""
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        require_subscription_ui(services)
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        kind = KeyBundleKind(callback.data.rsplit(":", 1)[-1])
+        await safe_callback_answer(callback)
         await state.set_state(CreateKeyStates.waiting_note)
         await state.update_data(
             key_type=BUNDLE_KEY_TYPE,
             transport="tcp",
+            bundle_kind=kind.value,
             cancel_target="keys:create",
             note_prompt_msg_id=callback.message.message_id,
         )
@@ -267,18 +302,7 @@ async def create_key_choose(callback: CallbackQuery, state: FSMContext, services
             await safe_callback_answer(callback, t("protocol_unavailable"), show_alert=True)
             return
         await safe_callback_answer(callback)
-        await state.set_state(CreateKeyStates.waiting_note)
-        await state.update_data(
-            key_type=key_type,
-            transport=transport,
-            cancel_target="keys:create",
-            note_prompt_msg_id=callback.message.message_id,
-        )
-        await safe_edit_message_text(
-            callback.message,
-            f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
-            reply_markup=cancel_keyboard(),
-        )
+        await _prompt_route_or_note(callback, state, services, key_type=key_type, transport=transport)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -323,14 +347,76 @@ async def create_key_choose_xhttp_profile(callback: CallbackQuery, state: FSMCon
             await safe_callback_answer(callback, t("xhttp_profile_invalid"), show_alert=True)
             return
         await safe_callback_answer(callback)
-        await state.set_state(CreateKeyStates.waiting_note)
-        await state.update_data(
+        await _prompt_route_or_note(
+            callback,
+            state,
+            services,
             key_type=VpnKeyType.XRAY.value,
             transport="http",
             xhttp_profile=profile,
-            cancel_target="keys:create",
-            note_prompt_msg_id=callback.message.message_id,
         )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+async def _prompt_route_or_note(
+    callback: CallbackQuery,
+    state: FSMContext,
+    services: Services,
+    *,
+    key_type: str,
+    transport: str,
+    xhttp_profile: str | None = None,
+) -> None:
+    """After the protocol (and XHTTP profile) step: the relay step or the note.
+
+    The «Подключение» step exists only while ``RELAY_ENABLED`` and only for the
+    protocols the relay carries; otherwise the wizard goes straight to the note,
+    exactly as before relays existed. ``relay`` is reset either way so a value
+    left over from an abandoned wizard can never leak into this one.
+    """
+    assert callback.message is not None
+    await state.update_data(key_type=key_type, transport=transport, cancel_target="keys:create", relay=None)
+    if xhttp_profile is not None:
+        await state.update_data(xhttp_profile=xhttp_profile)
+    if key_type in RELAY_PROTOCOLS and relay_offered(services):
+        await state.set_state(CreateKeyStates.waiting_route)
+        await safe_edit_message_text(
+            callback.message, t("choose_relay_route"), reply_markup=relay_route_keyboard()
+        )
+        return
+    await state.set_state(CreateKeyStates.waiting_note)
+    await state.update_data(note_prompt_msg_id=callback.message.message_id)
+    await safe_edit_message_text(
+        callback.message,
+        f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.callback_query(CreateKeyStates.waiting_route, F.data.in_({"keys:route:direct", "keys:route:relay"}))
+async def create_key_choose_route(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Record «напрямую / через relay» and prompt for a note.
+
+    A relay choice is re-checked here (the _protocol_enabled pattern): a callback
+    replayed after RELAY_ENABLED was switched off is refused up front instead of
+    walking the rest of the wizard only to fail at the service layer.
+    """
+    if not await ensure_private_callback(callback):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await _ensure_can_enter_create(callback.from_user.id, services)
+        relay: str | None = None
+        if callback.data == "keys:route:relay":
+            if not relay_offered(services):
+                await safe_callback_answer(callback, t("relay_unavailable"), show_alert=True)
+                return
+            relay = services.settings.relay_name
+        await safe_callback_answer(callback)
+        await state.set_state(CreateKeyStates.waiting_note)
+        await state.update_data(relay=relay, note_prompt_msg_id=callback.message.message_id)
         await safe_edit_message_text(
             callback.message,
             f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
@@ -569,6 +655,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
     mtu = int(data["mtu"]) if data.get("mtu") is not None else None
     fingerprint: str | None = data.get("fingerprint")
     xhttp_profile = str(data.get("xhttp_profile") or "base")
+    relay: str | None = str(data.get("relay") or "") or None
     try:
         await _ensure_can_enter_create(callback.from_user.id, services)
         profile = profile_from_tg(callback.from_user)
@@ -578,7 +665,13 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
             await state.clear()
             await safe_callback_answer(callback, t("creating_bundle"))
             bundle_result = await _create_bundle(
-                services, callback.from_user.id, profile, note, expires_at, fingerprint
+                services,
+                callback.from_user.id,
+                profile,
+                note,
+                expires_at,
+                fingerprint,
+                kind=_bundle_kind(data),
             )
             await safe_edit_message_text(
                 callback.message,
@@ -595,11 +688,11 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
         await state.clear()
         await safe_callback_answer(callback, t("creating_key"))
         if key_type == VpnKeyType.XRAY.value:
-            result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at, fingerprint=fingerprint, transport=transport, xhttp_profile=xhttp_profile)
+            result = await services.xray.create_xray_key(callback.from_user.id, profile, note, expires_at=expires_at, fingerprint=fingerprint, transport=transport, xhttp_profile=xhttp_profile, relay=relay)
         elif key_type == VpnKeyType.AWG.value:
             result = await services.awg.create_awg_key(callback.from_user.id, profile, note, expires_at=expires_at, mtu=mtu)
         elif key_type == VpnKeyType.HYSTERIA2.value:
-            result = await services.hysteria.issue(callback.from_user.id, profile, note, expires_at=expires_at)
+            result = await services.hysteria.issue(callback.from_user.id, profile, note, expires_at=expires_at, relay=relay)
         else:
             await safe_edit_message_text(callback.message, t("key_unknown_type"))
             return
@@ -1202,7 +1295,9 @@ def _create_confirm_screen(data: dict[str, Any], expires_at: str | None) -> str:
     key_type = str(data.get("key_type") or "")
     note = data.get("note")
     if key_type == BUNDLE_KEY_TYPE:
-        return bundle_create_confirm_text(note, expires_at=expires_at, fingerprint=data.get("fingerprint"))
+        return bundle_create_confirm_text(
+            note, expires_at=expires_at, fingerprint=data.get("fingerprint"), kind=_bundle_kind(data)
+        )
     return create_confirm_text(
         key_type,
         note,
@@ -1211,7 +1306,20 @@ def _create_confirm_screen(data: dict[str, Any], expires_at: str | None) -> str:
         fingerprint=data.get("fingerprint"),
         transport=str(data.get("transport") or "tcp"),
         profile=str(data.get("xhttp_profile") or "base"),
+        relay=str(data.get("relay") or "") or None,
     )
+
+
+def _bundle_kind(data: dict[str, Any]) -> KeyBundleKind:
+    """The all-in-one kind the wizard chose; a wizard without one is extended.
+
+    A session started before the kind step existed (or a hand-crafted FSM blob)
+    falls back to the kind every bundle had until now instead of failing.
+    """
+    try:
+        return KeyBundleKind(str(data.get("bundle_kind") or KeyBundleKind.EXTENDED.value))
+    except ValueError:
+        return KeyBundleKind.EXTENDED
 
 
 async def _create_bundle(
@@ -1221,6 +1329,8 @@ async def _create_bundle(
     note: str | None,
     expires_at: str | None,
     fingerprint: str | None = None,
+    *,
+    kind: KeyBundleKind = KeyBundleKind.EXTENDED,
 ) -> KeyBundleCreateResult:
     """Create an all-in-one bundle, turning a backend fault into a retry message.
 
@@ -1235,7 +1345,7 @@ async def _create_bundle(
     """
     try:
         return await services.key_bundles.create_bundle(
-            actor_user_id, owner, note, expires_at=expires_at, fingerprint=fingerprint
+            actor_user_id, owner, note, expires_at=expires_at, fingerprint=fingerprint, kind=kind
         )
     except InvalidOperation as exc:
         if getattr(exc, "key", None):

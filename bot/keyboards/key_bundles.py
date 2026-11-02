@@ -12,7 +12,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from bot.formatters import bundle_status_text, bundle_title
 from i18n import t
 from models.dto import KeyBundle
-from models.enums import KeyBundleStatus
+from models.enums import KeyBundleKind, KeyBundleStatus
 
 # The bundle is usable (and revocable) only while it is active; a revoked one
 # keeps stats/note/delete exactly like a revoked key does.
@@ -73,6 +73,22 @@ def bundle_awg_ack_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_understood"), callback_data="keys:create:bundle:ack")]
         ]
+    )
+
+
+def bundle_kind_keyboard() -> InlineKeyboardMarkup:
+    """The kind choice of the all-in-one wizard: basic, extended, cancel."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=t(f"bundle_kind_{kind.value}"),
+                    callback_data=f"keys:create:bundle:kind:{kind.value}",
+                )
+            ]
+            for kind in (KeyBundleKind.BASIC, KeyBundleKind.EXTENDED)
+        ]
+        + [[InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")]]
     )
 
 

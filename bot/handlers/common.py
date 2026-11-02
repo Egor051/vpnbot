@@ -22,6 +22,7 @@ from i18n import t
 from models.dto import KeyTrafficStatsView, TelegramUserProfile, VpnKey
 from models.enums import UserRole, VpnKeyType
 from services.errors import AccessDenied, InvalidOperation, NotFound, ServiceError
+from services.relay import relay_available
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -67,6 +68,22 @@ async def config_delivery(
         return services.hysteria.connection_link(key), None
     plain = await services.awg.get_awg_client_config_plain(actor_user_id, key.id, audit=audit)
     return plain, BufferedInputFile(plain.encode("utf-8"), filename=awg_config_filename(key))
+
+
+# Protocols a key can be issued «через relay» for: the relay forwards TCP+UDP/443,
+# which is where VLESS (every transport) and Hysteria2 live. AmneziaWG does not.
+RELAY_PROTOCOLS: frozenset[str] = frozenset({VpnKeyType.XRAY.value, VpnKeyType.HYSTERIA2.value})
+
+
+def relay_offered(services: Services) -> bool:
+    """Whether the «Подключение» step (and relay copies in bundles) is offered.
+
+    One predicate for the user and the admin wizard — and the same one the link
+    renderer uses — so a wizard never offers a relay whose links could not then
+    be rendered.
+    """
+    settings = services.settings
+    return relay_available(settings, settings.relay_name)
 
 
 async def is_admin(services: Services, user_id: int) -> bool:

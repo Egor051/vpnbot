@@ -61,6 +61,20 @@ class KeyBundleStatus(StrEnum):
     DELETED = "deleted"
 
 
+class KeyBundleKind(StrEnum):
+    """Which composition an all-in-one bundle provisions.
+
+    ``basic`` carries VLESS (TCP) and Hysteria2 only — the two members a plain
+    user needs, named like standalone keys (no preference marks). ``extended`` is
+    the full set (VLESS TCP, the three XHTTP profiles, Hysteria2) with the
+    preference-mark naming. Every bundle created before the kind existed is
+    ``extended``, which is exactly what it was.
+    """
+
+    BASIC = "basic"
+    EXTENDED = "extended"
+
+
 class ProxyAccessType(StrEnum):
     SOCKS5 = "socks5"
     MTPROTO = "mtproto"

@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 from aiogram.types import User as TgUser
 
+from config.settings import Settings
 from i18n import t
 from models.dto import (
     AccessRequest,
@@ -37,7 +38,9 @@ from repositories.announcements import AnnouncementBatch
 from services.backend_health import BackendHealthStatus
 from services.dashboard import DashboardSnapshot
 from services.health import HealthCheckResult
+from services.key_naming import NameStyle, key_display_name
 from services.online_clients import OnlineClients
+from services.relay import relay_link_host
 from services.server_status import ServerStatus
 from utils.formatting import (
     code,
@@ -92,9 +95,20 @@ def key_type_label(key: VpnKey) -> str:
     if key.key_type == VpnKeyType.AWG:
         return "AmneziaWG"
     if key.key_type == VpnKeyType.HYSTERIA2:
-        return "Hysteria2"
+        return relay_label("Hysteria2", key.relay)
     transport = str(getattr(key, "transport", "tcp") or "tcp").lower()
-    return "VLESS (HTTP)" if transport == "http" else "VLESS (TCP)"
+    return relay_label("VLESS (HTTP)" if transport == "http" else "VLESS (TCP)", key.relay)
+
+
+def relay_label(label: str, relay: str | None) -> str:
+    """Append the relay marker to a protocol label for a key issued via a relay.
+
+    A direct key (``relay is None``) keeps its label byte-for-byte, so every
+    screen that showed it before reads exactly the same.
+    """
+    if not relay:
+        return label
+    return f"{label} · {t('relay_marker')}"
 
 
 def key_title(key: VpnKey) -> str:
@@ -518,21 +532,27 @@ def xhttp_profile_prompt() -> str:
     return f"{t('choose_xhttp_profile')}\n\n{blocks}"
 
 
-def create_type_label(key_type: str, transport: str | None = None, profile: str | None = None) -> str:
-    """Human label for a key type + transport (+ xhttp profile) for the confirm screen."""
+def create_type_label(
+    key_type: str,
+    transport: str | None = None,
+    profile: str | None = None,
+    *,
+    relay: str | None = None,
+) -> str:
+    """Human label for a key type + transport (+ xhttp profile, + relay marker)."""
     if key_type == VpnKeyType.AWG.value:
         return "AmneziaWG"
     if key_type == VpnKeyType.HYSTERIA2.value:
-        return "Hysteria2"
+        return relay_label("Hysteria2", relay)
     if key_type == VpnKeyType.XRAY.value:
         if str(transport or "tcp").lower() != "http":
-            return "VLESS (TCP)"
+            return relay_label("VLESS (TCP)", relay)
         prof = str(profile or "base").lower()
         # base stays plain "VLESS (HTTP)" (regression-identical); the tuned
         # profiles append their short name so the user can tell them apart.
         if prof in ("multi", "antisib"):
-            return f"VLESS (HTTP) · {t(f'xhttp_profile_{prof}_name')}"
-        return "VLESS (HTTP)"
+            return relay_label(f"VLESS (HTTP) · {t(f'xhttp_profile_{prof}_name')}", relay)
+        return relay_label("VLESS (HTTP)", relay)
     return key_type.upper()
 
 
@@ -545,10 +565,11 @@ def create_confirm_text(
     fingerprint: str | None = None,
     transport: str | None = None,
     profile: str | None = None,
+    relay: str | None = None,
 ) -> str:
     lines = [
         t("create_confirm_title"),
-        f"{t('field_type')}: {h(create_type_label(key_type, transport, profile))}",
+        f"{t('field_type')}: {h(create_type_label(key_type, transport, profile, relay=relay))}",
         f"{t('field_note')}: {h(note or t('none'))}",
         f"{t('field_expires_at')}: {h(format_expiry_date(expires_at))}",
     ]
@@ -607,6 +628,27 @@ def format_hysteria2_link(
     if insecure:
         query += "&insecure=1"
     return f"hysteria2://{user}@{host}:{port}/?{query}#{label_q}"
+
+
+def hysteria2_key_link(key: VpnKey, settings: Settings, *, style: NameStyle = NameStyle.SINGLE) -> str:
+    """THE ``hysteria2://`` link of a key — what every hy2 entry point renders.
+
+    :func:`format_hysteria2_link` above is the pure URI encoder and takes the host
+    as given; this is where the host is chosen BY THE KEY: a direct key keeps
+    ``HYSTERIA2_HOST``, a relay key gets ``RELAY_HOST`` (or
+    :class:`services.relay.RelayUnavailable`, never a silent fallback). Port, SNI
+    and ``insecure`` are the server's own values either way — the relay forwards
+    UDP/443 1:1, so ``sni`` stays ``HYSTERIA2_SNI`` and the certificate matches.
+    The ``#fragment`` comes from :func:`services.key_naming.key_display_name`.
+    """
+    return format_hysteria2_link(
+        key_display_name(key, style, settings),
+        str(key.payload.get("secret") or ""),
+        host=relay_link_host(settings, key.relay, direct_host=settings.hysteria2_host),
+        port=settings.hysteria2_port,
+        sni=settings.hysteria2_sni,
+        insecure=settings.hysteria2_insecure,
+    )
 
 
 def proxy_section_separator() -> str:

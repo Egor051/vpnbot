@@ -8,6 +8,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Relay mode — keys «через relay» (`RELAY_*`, docs/relay.md).** An L4 relay (a RU VPS
+  that DNATs TCP+UDP/443 to the main server) is a second entry point. Relay is an
+  **attribute of a key** (`vpn_keys.relay`, schema v37), not a new key type or transport: a
+  relay key is an ordinary key on the same inbounds with its own uuid/secret/label and the
+  usual `xray_tcp_*` / `xray_http_*` / `hy2_*` prefix, so `hy2_auth`, Xray reconciliation and
+  traffic stats are untouched. Its link differs from a direct key's only by the host
+  (`RELAY_HOST`) and `_relay` in the name. While `RELAY_ENABLED=true` the create wizard
+  (user and admin) asks «Подключение: напрямую / через relay» for VLESS and Hysteria2. A key
+  whose relay is not the enabled `RELAY_NAME` is refused with a clear error
+  (`RelayUnavailable`) — never silently pointed at the main host. Anomaly detection ignores
+  `RELAY_SOURCE_IPS` (relayed traffic is IP-blind by design), and a background monitor
+  (`RELAY_HEALTH_INTERVAL`, TCP + verified TLS handshake to `RELAY_HOST:XRAY_PUBLIC_PORT`)
+  alerts admins once when the relay goes down and once when it is back.
+- **Two kinds of All-in-One — basic and extended (`key_bundles.kind`, schema v37).**
+  *Basic*: VLESS (TCP) + Hysteria2, named like standalone keys (`<label>[_relay]_🇫🇮`), no
+  circles and no circles hint. *Extended*: the current five members with the
+  `<label>[_relay]_<circle>` names and the hint. With the relay enabled each kind also gets a
+  relay copy of every member (4 / 10 keys), served after all direct members; a relay member
+  carries its direct twin's circle. The kind is chosen in the create wizard and cannot be
+  changed later. Every existing bundle is `extended` and renders exactly as before. Existing
+  bundles do **not** gain relay members (there is no top-up mechanism for existing bundles).
+- `SERVER_FLAG_EMOJI` — the flag used in standalone and basic-subscription names.
+
+
 - **Opt-in rotation of REALITY spiderX (`spx`) for the VLESS children of an All-in-One
   subscription — `XRAY_SPIDER_X_ROTATION_HOURS`.** Default `0` is off and **byte-for-byte
   the current output**: every link carries its stored `vpn_keys.spider_x`, and the bot does
@@ -159,6 +183,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     change nothing.
 
 ### Changed
+
+- **The display name (remark, the link's `#fragment`) of EVERY standalone key changes:**
+  it now ends with the server flag, `<label>_<SERVER_FLAG_EMOJI>` (default `🇫🇮`) —
+  `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_🇫🇮`. Nothing else in a direct key's link changes (host,
+  port, REALITY/XHTTP parameters, `spx`, Hysteria2 `sni` are byte-for-byte the same) and
+  the stored `email_label` is untouched, so existing links keep connecting. **Users see the
+  new name only after re-importing the link** (the bot's «Config» screen / QR). The names
+  inside existing (extended) subscriptions are unchanged: `<label>_<circle>`.
 
 - **Hysteria2's masquerade is `type: proxy`, not `type: file` (#297).** The host had been
   serving `proxy` for a while and the host is right: it reverse-proxies the same loopback

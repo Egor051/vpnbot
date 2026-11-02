@@ -78,6 +78,17 @@ def xhttp_profile_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def relay_route_keyboard() -> InlineKeyboardMarkup:
+    """The «Подключение» step (only shown while RELAY_ENABLED): direct or via relay."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_route_direct"), callback_data="keys:route:direct")],
+            [InlineKeyboardButton(text=t("btn_route_relay"), callback_data="keys:route:relay")],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
+        ]
+    )
+
+
 def keys_list_keyboard(
     items: list[VpnKey | KeyBundle],
     page: int = 0,

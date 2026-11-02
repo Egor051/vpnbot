@@ -489,6 +489,45 @@ STRINGS: dict[str, str] = {
     "key_deleted": "Ключ полностью удалён.",
     "key_deleted_with_list": "Ключ полностью удалён.\n\n{list}",
     # ── all-in-one subscription (bundles) ─────────────────────────────────────
+    # ── relay ("через relay" keys) ───────────────────────────────────────────
+    "relay_marker": "через relay",
+    "choose_relay_route": (
+        "<b>Как подключаться?</b>\n\n"
+        "<b>Напрямую</b> — ключ подключается к серверу сам. Обычный вариант.\n\n"
+        "<b>Через relay</b> — ключ подключается через промежуточный сервер. "
+        "Выбирайте, если напрямую не работает или работает плохо."
+    ),
+    "btn_route_direct": "Напрямую",
+    "btn_route_relay": "Через relay",
+    "relay_unavailable": "Подключение через relay сейчас недоступно. Выберите «Напрямую».",
+    "err_relay_unavailable": (
+        "Relay «{relay}» сейчас недоступен, поэтому ссылку для этого ключа показать нельзя. "
+        "Обратитесь к администратору."
+    ),
+    "relay_alert_down": (
+        "🔴 <b>Relay «{relay}» недоступен</b>\n"
+        "Проверка {host}:{port} не проходит. Ключи «через relay» сейчас не работают; "
+        "прямые ключи не затронуты."
+    ),
+    "relay_alert_recovered": (
+        "🟢 <b>Relay «{relay}» снова доступен</b>\n"
+        "Проверка {host}:{port} снова проходит."
+    ),
+    # ── all-in-one kinds ──────────────────────────────────────────────────────
+    "field_bundle_kind": "Вид",
+    "bundle_kind_prompt": "<b>Выберите вид подписки:</b>",
+    "bundle_kind_basic": "Базовая",
+    "bundle_kind_basic_desc": (
+        "VLESS (TCP) и Hysteria2 — два основных протокола. Подходит большинству."
+    ),
+    "bundle_kind_extended": "Расширенная",
+    "bundle_kind_extended_desc": (
+        "VLESS (TCP), Hysteria2 и три профиля VLESS (HTTP). Названия ключей помечены "
+        "кружками — от самого быстрого к самому медленному."
+    ),
+    "bundle_kind_relay_note": (
+        "ℹ️ К каждому ключу подписки добавляется его копия «через relay»."
+    ),
     "bundle_title": "All-in-One #{id}",
     "bundle_type_label": "All-in-One",
     "bundle_composition": "Состав",

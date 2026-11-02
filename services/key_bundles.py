@@ -25,16 +25,18 @@ from adapters.clock import ClockProvider
 from adapters.id_generator import IdGenerator
 from config.settings import Settings
 from models.dto import KeyBundle, TelegramUserProfile, VpnKey
-from models.enums import AuditEntityType, KeyBundleStatus, UserRole, VpnKeyStatus, VpnKeyType
+from models.enums import AuditEntityType, KeyBundleKind, KeyBundleStatus, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.key_bundles import KeyBundleRepository
 from services.audit import AuditService
 from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.hysteria import HysteriaService
+from services.key_naming import XHTTP_PROFILES, key_member_name
 from services.notes import normalize_note
 from services.protocol_modules import ProtocolModulesService
+from services.relay import relay_available
 from services.users import UserService
-from services.xray import XHTTP_PROFILES, XrayService
+from services.xray import XrayService
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +64,17 @@ class BundleMember:
     ``transport``/``xhttp_profile`` are meaningful only for :attr:`VpnKeyType.XRAY`
     and are passed straight through to the existing Xray create path, which
     derives the email-label prefix from them.
+
+    ``relay`` names the L4 relay a member's link points at (``None`` = direct).
+    A relay member is the same protocol member as its direct twin — same create
+    path, same label prefix, same preference circle — provisioned with the
+    relay attribute set.
     """
 
     key_type: VpnKeyType
     transport: str = "tcp"
     xhttp_profile: str = "base"
+    relay: str | None = None
 
     @property
     def protocol_module(self) -> str:
@@ -74,19 +82,43 @@ class BundleMember:
         return self.key_type.value
 
 
-def bundle_composition() -> tuple[BundleMember, ...]:
+def _direct_members(kind: KeyBundleKind) -> tuple[BundleMember, ...]:
+    """The direct members of a bundle of *kind*, in serving order."""
+    if kind is KeyBundleKind.BASIC:
+        return (
+            BundleMember(VpnKeyType.XRAY, transport="tcp", xhttp_profile="base"),
+            BundleMember(VpnKeyType.HYSTERIA2),
+        )
+    return (
+        BundleMember(VpnKeyType.XRAY, transport="tcp", xhttp_profile="base"),
+        BundleMember(VpnKeyType.HYSTERIA2),
+        *(
+            BundleMember(VpnKeyType.XRAY, transport="http", xhttp_profile=profile)
+            for profile in XHTTP_PROFILES
+        ),
+    )
+
+
+def bundle_composition(
+    kind: KeyBundleKind = KeyBundleKind.EXTENDED, *, relay: str | None = None
+) -> tuple[BundleMember, ...]:
     """THE seam: every child key an all-in-one bundle may contain, in order.
 
     This is the single point where the bundle's composition — and the order the
-    subscription presents it in — is decided. Today it returns the full permissible
-    set, sorted by how good a connection the member usually gives: VLESS (TCP) and
-    Hysteria2 first, then the VLESS (HTTP) profiles from the fastest (``base``) to
-    the slowest (``antisib``). Availability (a backend switched off in ``.env`` or
-    via the protocol-module toggle) is filtered on top of it by
-    :meth:`KeyBundleService._resolve_composition`. Any future divergence (e.g. a
-    client that cannot parse one of the XHTTP profiles, so its bundle carries a
-    smaller set) belongs HERE and nowhere else — never as scattered ``if``s along
-    the provisioning path.
+    subscription presents it in — is decided:
+
+    * **extended** — VLESS (TCP) and Hysteria2 first, then the VLESS (HTTP)
+      profiles from the fastest (``base``) to the slowest (``antisib``): sorted by
+      how good a connection the member usually gives;
+    * **basic** — VLESS (TCP), then Hysteria2.
+
+    With *relay* (the caller passes ``RELAY_NAME`` only while ``RELAY_ENABLED``)
+    the same members follow once more as relay members: all direct members first,
+    then all relay members, each group in the order above — 2 → 4 for basic,
+    5 → 10 for extended. Availability (a backend switched off in ``.env`` or via
+    the protocol-module toggle) is filtered on top of it by
+    :meth:`KeyBundleService._resolve_composition`. Any future divergence belongs
+    HERE and nowhere else — never as scattered ``if``s along the provisioning path.
 
     Deliberately excluded:
 
@@ -94,12 +126,14 @@ def bundle_composition() -> tuple[BundleMember, ...]:
     * **SOCKS5 / MTProto** — a different entity (``ProxyAccess``), and MTProto is
       not even a v2ray link format.
     """
+    direct = _direct_members(kind)
+    if relay is None:
+        return direct
     return (
-        BundleMember(VpnKeyType.XRAY, transport="tcp", xhttp_profile="base"),
-        BundleMember(VpnKeyType.HYSTERIA2),
+        *direct,
         *(
-            BundleMember(VpnKeyType.XRAY, transport="http", xhttp_profile=profile)
-            for profile in XHTTP_PROFILES
+            BundleMember(member.key_type, member.transport, member.xhttp_profile, relay=relay)
+            for member in direct
         ),
     )
 
@@ -118,15 +152,43 @@ def member_name(member: BundleMember) -> str:
     return member.key_type.value
 
 
+def member_audit_name(member: BundleMember) -> str:
+    """:func:`member_name` plus a ``_relay`` suffix for a relay member.
+
+    What the audit trail records in ``included``/``skipped``: with relay members a
+    bare member name would list ``xray_tcp`` twice and lose which one was which.
+    """
+    name = member_name(member)
+    return f"{name}_relay" if member.relay is not None else name
+
+
 def subscription_member_order() -> tuple[str, ...]:
-    """Member names in the order a subscription must list them.
+    """Member names in the order a subscription must list them (within a group).
 
     Derived from :func:`bundle_composition` rather than restated, so the order a
     bundle is *provisioned* in and the order its subscription is *served* in cannot
     drift apart. The renderer sorts by this instead of trusting child ``id`` order,
     which would leave bundles created before an order change stuck on the old one.
+    The basic composition is a prefix-ordered subset of the extended one, so this
+    one list ranks both kinds.
     """
-    return tuple(member_name(member) for member in bundle_composition())
+    return tuple(member_name(member) for member in bundle_composition(KeyBundleKind.EXTENDED))
+
+
+def subscription_sort_key(key: VpnKey) -> tuple[int, int, int]:
+    """Sort key placing a provisioned child where the subscription serves it.
+
+    Direct children first, relay children after them; inside each group the
+    composition order (:func:`subscription_member_order`), ties broken by id. An
+    unknown member (a protocol a future migration added before this list learned
+    about it) sorts to the end of its group instead of being dropped. Shared by
+    the subscription renderer and the bot's «Состав» preview, so the two cannot
+    disagree.
+    """
+    order = subscription_member_order()
+    name = key_member_name(key)
+    rank = order.index(name) if name in order else len(order)
+    return (1 if key.relay is not None else 0, rank, key.id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,8 +259,13 @@ class KeyBundleService:
         expires_at: str | None = None,
         allow_pending_owner: bool = False,
         fingerprint: str | None = None,
+        kind: KeyBundleKind = KeyBundleKind.EXTENDED,
     ) -> KeyBundleCreateResult:
         """Provision one child key per available protocol under a single bundle.
+
+        *kind* picks the composition (:func:`bundle_composition`) and is stored on
+        the bundle row, where the subscription renderer reads it to choose the
+        naming rule. It cannot be changed later.
 
         Atomic from the caller's point of view: either every included child is
         live and attached, or nothing is left behind on the backends or in the DB.
@@ -213,9 +280,10 @@ class KeyBundleService:
         create path uses.
         """
         self._require_enabled()
+        kind = KeyBundleKind(kind)
         clean_note = normalize_note(note)
         async with self._lock:
-            included, skipped = await self._resolve_composition()
+            included, skipped = await self._resolve_composition(kind)
             if not included:
                 raise InvalidOperation(
                     "Нет включённых протоколов для all-in-one подписки",
@@ -231,7 +299,7 @@ class KeyBundleService:
                 actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner
             )
 
-            bundle = await self._create_bundle_row(owner.telegram_user_id, clean_note)
+            bundle = await self._create_bundle_row(owner.telegram_user_id, clean_note, kind)
             created: list[VpnKey] = []
             try:
                 for member in included:
@@ -257,11 +325,12 @@ class KeyBundleService:
                 details={
                     "owner_user_id": owner.telegram_user_id,
                     "label": bundle.label,
+                    "kind": kind.value,
                     "expires_at": expires_at,
                     "fingerprint": fingerprint,
                     "key_ids": [key.id for key in created],
-                    "included": [member_name(member) for member in included],
-                    "skipped": [member_name(member) for member in skipped],
+                    "included": [member_audit_name(member) for member in included],
+                    "skipped": [member_audit_name(member) for member in skipped],
                 },
             )
             return KeyBundleCreateResult(
@@ -480,11 +549,19 @@ class KeyBundleService:
 
     # ── composition / availability ────────────────────────────────────
 
-    async def _resolve_composition(self) -> tuple[tuple[BundleMember, ...], tuple[BundleMember, ...]]:
-        """Split the composition seam into (included, skipped-because-disabled)."""
+    async def _resolve_composition(
+        self, kind: KeyBundleKind = KeyBundleKind.EXTENDED
+    ) -> tuple[tuple[BundleMember, ...], tuple[BundleMember, ...]]:
+        """Split the composition seam into (included, skipped-because-disabled).
+
+        Relay members are asked for only while ``RELAY_ENABLED`` is on: with it
+        off they are not part of the composition at all (rather than "skipped"),
+        so a deployment without a relay never sees them named anywhere.
+        """
+        relay = self.settings.relay_name if self.settings.relay_enabled else None
         included: list[BundleMember] = []
         skipped: list[BundleMember] = []
-        for member in bundle_composition():
+        for member in bundle_composition(kind, relay=relay):
             if await self._member_enabled(member):
                 included.append(member)
             else:
@@ -496,8 +573,11 @@ class KeyBundleService:
 
         Mirrors exactly what gates the single-key create path for that protocol:
         the protocol-module toggle plus the protocol's own ``.env`` flags. A
-        disabled backend is a normal state, never an error.
+        disabled backend is a normal state, never an error. A relay member
+        additionally needs its relay to be the configured, enabled one.
         """
+        if member.relay is not None and not relay_available(self.settings, member.relay):
+            return False
         if not await self.modules.is_enabled(member.protocol_module):
             return False
         if member.key_type is VpnKeyType.XRAY:
@@ -532,6 +612,7 @@ class KeyBundleService:
                 fingerprint=fingerprint,
                 transport=member.transport,
                 xhttp_profile=member.xhttp_profile,
+                relay=member.relay,
             )
             return result.key
         # Hysteria2 has no TLS fingerprint knob, so *fingerprint* is ignored here
@@ -543,6 +624,7 @@ class KeyBundleService:
                 note,
                 expires_at,
                 allow_pending_owner,
+                relay=member.relay,
             )
             return result.key
         raise InvalidOperation(f"Протокол {member.key_type.value} не входит в all-in-one подписку")
@@ -632,7 +714,9 @@ class KeyBundleService:
         if not self.settings.subscription_enabled:
             raise InvalidOperation("All-in-one подписка сейчас отключена", key="err_subscription_disabled")
 
-    async def _create_bundle_row(self, user_id: int, note: str | None) -> KeyBundle:
+    async def _create_bundle_row(
+        self, user_id: int, note: str | None, kind: KeyBundleKind = KeyBundleKind.EXTENDED
+    ) -> KeyBundle:
         """Insert the parent row with a unique ``bundle_*`` display label.
 
         The label is UNIQUE, so uniqueness is settled by the database rather than
@@ -644,7 +728,7 @@ class KeyBundleService:
             label = self.ids.generated_key_name("bundle")
             try:
                 return await self.bundles.create(
-                    user_id=user_id, label=label, now=self.clock.now(), note=note
+                    user_id=user_id, label=label, now=self.clock.now(), note=note, kind=kind
                 )
             except sqlite3.IntegrityError:
                 logger.warning("Коллизия метки бандла %s, повтор", label)

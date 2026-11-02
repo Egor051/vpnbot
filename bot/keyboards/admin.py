@@ -377,6 +377,17 @@ def admin_xhttp_profile_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def admin_relay_route_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """The «Подключение» step of issuing a key (only shown while RELAY_ENABLED)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_route_direct"), callback_data=f"admin:croute:direct:{user_id}")],
+            [InlineKeyboardButton(text=t("btn_route_relay"), callback_data=f"admin:croute:relay:{user_id}")],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
+        ]
+    )
+
+
 def trial_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
     """Build the approve/reject keyboard for a trial access request."""
     return InlineKeyboardMarkup(

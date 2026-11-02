@@ -1,5 +1,6 @@
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import logging
@@ -19,7 +20,18 @@ from repositories.vpn_keys import VpnKeyRepository
 from services.audit import AuditService
 from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation, NotFound
+from services.key_naming import XHTTP_DEFAULT_PROFILE as XHTTP_DEFAULT_PROFILE
+from services.key_naming import XHTTP_PROFILES as XHTTP_PROFILES
+from services.key_naming import (
+    NameStyle,
+    key_display_name,
+    key_profile,
+    key_transport,
+    normalize_profile,
+    normalize_transport,
+)
 from services.notes import normalize_note
+from services.relay import relay_link_host, require_relay_for_issue
 from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
@@ -68,9 +80,9 @@ XRAY_MANAGED_LABEL_RE = re.compile(
 # v25.3.6 (March 2025), so VLESS (HTTP) clients must be v25.3.6+ — on older or
 # misnamed fields the key would silently drop the rotation tuning. No profile may
 # carry ``maxConcurrency`` — it is mutually exclusive with maxConnections and
-# makes Xray refuse to start.
-XHTTP_PROFILES: tuple[str, ...] = ("base", "multi", "antisib")
-XHTTP_DEFAULT_PROFILE = "base"
+# makes Xray refuse to start. XHTTP_PROFILES / XHTTP_DEFAULT_PROFILE are defined
+# in services.key_naming (which the display-name rules need too) and re-exported
+# from here.
 # Per-profile client ``mode``. None => use settings.xray_xhttp_mode, keeping the
 # ``base`` link byte-for-byte identical to the pre-profile output.
 _XHTTP_PROFILE_MODE: dict[str, str | None] = {
@@ -150,17 +162,16 @@ class XrayService:
     @staticmethod
     def _normalize_transport(value: object) -> str:
         """Map any stored/requested transport to the canonical 'tcp' or 'http'."""
-        return "http" if str(value or "").strip().lower() == "http" else "tcp"
+        return normalize_transport(value)
 
     def _key_transport(self, key: VpnKey) -> str:
         """Resolve a key's transport from the DB column, falling back to payload."""
-        return self._normalize_transport(getattr(key, "transport", None) or key.payload.get("transport"))
+        return key_transport(key)
 
     @staticmethod
     def _normalize_profile(value: object) -> str:
         """Map any stored/requested XHTTP profile to a known one (default base)."""
-        profile = str(value or "").strip().lower()
-        return profile if profile in XHTTP_PROFILES else XHTTP_DEFAULT_PROFILE
+        return normalize_profile(value)
 
     def _email_prefix(self, transport: str, profile: str) -> str:
         """Email prefix encoding transport+profile: the naming scheme's source of truth."""
@@ -170,14 +181,7 @@ class XrayService:
 
     def _key_profile(self, key: VpnKey) -> str:
         """Resolve a key's XHTTP profile from the column, payload, then email prefix."""
-        raw = getattr(key, "xhttp_profile", None) or key.payload.get("xhttp_profile")
-        if raw:
-            return self._normalize_profile(raw)
-        label = str(getattr(key, "email_label", None) or key.payload.get("email_label") or "")
-        for profile in XHTTP_PROFILES:
-            if label.startswith(f"xray_http_{profile}_"):
-                return profile
-        return XHTTP_DEFAULT_PROFILE
+        return key_profile(key)
 
     @staticmethod
     def _key_spider_x(key: VpnKey) -> str | None:
@@ -279,10 +283,20 @@ class XrayService:
         fingerprint: str | None = None,
         transport: str = "tcp",
         xhttp_profile: str = XHTTP_DEFAULT_PROFILE,
+        relay: str | None = None,
     ) -> VpnKeyCreateResult:
-        """Provision a new Xray client, persist the key, and return its config."""
+        """Provision a new Xray client, persist the key, and return its config.
+
+        *relay* names the L4 relay the key's link points at (``None`` = direct
+        key). It is an attribute of the key only: the client is added to the very
+        same inbound with the very same ``xray_tcp_*`` / ``xray_http_*`` email
+        prefix, so reconciliation and XRAY_MANAGED_LABEL_RE are unaffected.
+        """
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
         self.settings.validate_xray_ready()
+        # Before any DB write or apply: a relay switched off mid-wizard must not
+        # leave behind a key whose link can never be rendered.
+        relay = require_relay_for_issue(self.settings, relay)
         transport = self._normalize_transport(transport)
         # Profile is meaningful only for http; tcp keys are always "base". The
         # profile is immutable for a key (changing it means creating a new key),
@@ -319,10 +333,6 @@ class XrayService:
                 # Per-key spiderX: deterministic pick from the configured pool by
                 # UUID hash. None when the pool is empty (spx never emitted).
                 spider_x = pick_spider_x(uuid_value, self.settings.xray_spider_x_pool)
-                link = self._build_vless_link(
-                    uuid_value, short_id, email_label, fingerprint=fingerprint,
-                    transport=transport, profile=profile, spider_x=spider_x,
-                )
                 payload = {
                     "uuid": uuid_value,
                     "email_label": email_label,
@@ -334,11 +344,12 @@ class XrayService:
                     "xhttp_profile": profile,
                     "spider_x": spider_x,
                 }
-                public_payload = {
+                public_payload: dict[str, object] = {
                     "email_label": email_label,
                     "short_id": short_id,
-                    "display_name": f"{create_type_label(VpnKeyType.XRAY.value, transport, profile)} #{email_label}",
-                    "link": link,
+                    "display_name": (
+                        f"{create_type_label(VpnKeyType.XRAY.value, transport, profile, relay=relay)} #{email_label}"
+                    ),
                 }
                 key = await self.vpn_keys.create_pending(
                     owner_user_id=owner.telegram_user_id,
@@ -355,7 +366,12 @@ class XrayService:
                     transport=transport,
                     xhttp_profile=profile,
                     spider_x=spider_x,
+                    relay=relay,
                 )
+                # The cached link comes from connection_link — the one place a
+                # key's link is derived — rendered off the row just written, so it
+                # carries the same host and display name the config screen shows.
+                public_payload["link"] = self.connection_link(key)
                 xray_apply_result = None
                 try:
                     await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
@@ -672,14 +688,9 @@ class XrayService:
             if key.status != VpnKeyStatus.ACTIVE:
                 raise InvalidOperation("Fingerprint можно изменить только у активного ключа", key="err_fp_active_only")
             new_payload = {**key.payload, "fingerprint": fingerprint}
-            uuid_value = str(new_payload.get("uuid") or key.uuid or "")
-            short_id = str(new_payload.get("short_id") or key.public_payload.get("short_id") or "")
-            email_label = str(new_payload.get("email_label") or key.email_label or "")
-            link = self._build_vless_link(
-                uuid_value, short_id, email_label,
-                fingerprint=fingerprint, transport=self._key_transport(key), profile=self._key_profile(key),
-                spider_x=self._key_spider_x(key),
-            )
+            # Same derivation as the config screen (stored spiderX, the key's own
+            # host and display name), just with the new fingerprint applied.
+            link = self.connection_link(dataclasses.replace(key, payload=new_payload))
             new_public_payload = {**key.public_payload, "link": link}
             await self.vpn_keys.update_payload(key_id, new_payload, new_public_payload, self.clock.now())
             await self._write_audit_best_effort(
@@ -1325,14 +1336,26 @@ class XrayService:
         self,
         uuid_value: str,
         short_id: str,
-        email_label: str,
+        name: str,
         fingerprint: str | None = None,
         transport: str = "tcp",
         profile: str = XHTTP_DEFAULT_PROFILE,
         spider_x: str | None = None,
+        relay: str | None = None,
     ) -> str:
-        host = self._format_host(self.settings.xray_public_host)
-        fragment = quote(email_label or "xray")
+        """Render a ``vless://`` link. *name* becomes the ``#fragment`` verbatim
+        (callers pass :func:`services.key_naming.key_display_name`).
+
+        *relay* selects the host and nothing else: ``None`` keeps
+        ``XRAY_PUBLIC_HOST``; the configured relay gives ``RELAY_HOST``; any other
+        relay raises :class:`services.relay.RelayUnavailable`. Port, REALITY
+        parameters, flow and the XHTTP path/mode/extra are identical either way —
+        the relay forwards :443 1:1 into the same inbound.
+        """
+        host = self._format_host(
+            relay_link_host(self.settings, relay, direct_host=self.settings.xray_public_host)
+        )
+        fragment = quote(name or "xray")
         if self._normalize_transport(transport) == "http":
             # VLESS (HTTP) is a *hybrid* of the TCP link: it shares vless-in's
             # REALITY (pbk/sni/sid/fp) and rides the same public :443, differing
@@ -1411,12 +1434,12 @@ class XrayService:
         """
         uuid_value = str(key.payload.get("uuid") or key.uuid or "")
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "")
-        email_label = str(key.payload.get("email_label") or key.email_label or "")
         fingerprint = str(key.payload.get("fingerprint")) if key.payload.get("fingerprint") else None
         return self._build_vless_link(
-            uuid_value, short_id, email_label,
+            uuid_value, short_id, key_display_name(key, NameStyle.SINGLE, self.settings),
             fingerprint=fingerprint, transport=self._key_transport(key), profile=self._key_profile(key),
             spider_x=self.link_spider_x(key, bundle_member=bundle_member, now_unix=now_unix),
+            relay=key.relay,
         )
 
     def _format_config(

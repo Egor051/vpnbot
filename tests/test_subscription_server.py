@@ -317,10 +317,11 @@ async def test_subscription_links_match_the_single_key_view(tmp_path: Path) -> N
     one REALITY/xhttp parameter is a key that works from the bot's message and
     fails from the sub-URL.
 
-    The one deliberate difference is the ``#fragment``: inside a subscription each
-    entry's display name carries its preference mark, which is meaningless for a
-    key shown on its own. Pinned below rather than waived, so the marks cannot
-    quietly spread into the per-key link or vanish from the subscription.
+    The one deliberate difference is the ``#fragment``: inside an extended
+    subscription each entry's display name carries its preference mark, while a key
+    shown on its own carries the server flag instead. Pinned below rather than
+    waived, so the marks cannot quietly spread into the per-key link (or the flag
+    into the extended subscription), nor vanish from where they belong.
     """
     harness = await _seed(tmp_path)
     client, store = await _client(harness)
@@ -349,10 +350,12 @@ async def test_subscription_links_match_the_single_key_view(tmp_path: Path) -> N
             expected = html.unescape(rendered.split("<code>")[1].split("</code>")[0])
             expected_prefix, expected_fragment = expected.split("#", 1)
             assert expected_prefix in by_prefix, f"key {key.id}: endpoint link differs from the single-key view"
-            member = (key.email_label or "").rsplit("_", 1)[0]
-            assert by_prefix[expected_prefix] == expected_fragment + quote(f"_{marks[member]}")
-            # …and the per-key view itself stays unmarked.
-            assert "%F0%9F" not in expected
+            label = key.email_label or ""
+            member = label.rsplit("_", 1)[0]
+            assert by_prefix[expected_prefix] == quote(f"{label}_{marks[member]}")
+            # …and the per-key view carries the flag, never a circle.
+            assert expected_fragment == quote(f"{label}_{harness.settings.server_flag_emoji}")
+            assert not any(quote(mark) in expected for mark in marks.values())
     finally:
         await client.close()
         await store.close()
@@ -603,19 +606,19 @@ async def test_render_failure_is_404_not_500_and_never_partial(
     500 with a traceback, never the subset of links that did render."""
     harness = await _seed(tmp_path)
     client, store = await _client(harness)
-    real = render_module.format_hysteria2_link
+    real = render_module.hysteria2_key_link
 
     def _boom(*args: object, **kwargs: object) -> str:
         raise RuntimeError("link renderer exploded")
 
-    monkeypatch.setattr(render_module, "format_hysteria2_link", _boom)
+    monkeypatch.setattr(render_module, "hysteria2_key_link", _boom)
     try:
         resp = await client.get(f"/sub/{harness.token}")
         assert resp.status == 404
         assert await resp.text() == ""
         assert "Traceback" not in await resp.text()
         # ... and the endpoint recovers once the fault clears (no poisoned state).
-        monkeypatch.setattr(render_module, "format_hysteria2_link", real)
+        monkeypatch.setattr(render_module, "hysteria2_key_link", real)
         assert (await client.get(f"/sub/{harness.token}")).status == 200
     finally:
         await client.close()

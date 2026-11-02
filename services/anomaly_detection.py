@@ -1,6 +1,7 @@
 
 import asyncio
 import collections
+import ipaddress
 import logging
 import re
 import time as time_module
@@ -132,8 +133,16 @@ class AnomalyDetectionService:
         bot: Bot | None = None,
         backend_health: object | None = None,
         bundles: KeyBundleRepository | None = None,
+        relay_source_ips: tuple[ipaddress.IPv4Network, ...] = (),
     ) -> None:
         self._vpn_keys = vpn_keys
+        # Egress addresses of the L4 relay (RELAY_SOURCE_IPS). Every connection
+        # arriving through the relay carries one of these as its source IP (L4
+        # DNAT, no PROXY protocol), so it says nothing about who is behind it and
+        # is never recorded — neither the IP nor, therefore, its network/ASN.
+        # Because the inbound is shared, this removes the IP signal from ANY key
+        # used through the relay; documented in docs/relay.md. Empty = no-op.
+        self._relay_source_ips = relay_source_ips
         # Read-only, alert-shaping only: used to name the parent an admin actually
         # recognises instead of a child label the user has never seen, and to roll
         # several children of one bundle into a single alert. DETECTION does not go
@@ -733,9 +742,30 @@ class AnomalyDetectionService:
     # ------------------------------------------------------------------ Helpers
 
     def _record_ip(self, key_id: int, now: float, ip: str) -> None:
+        if self._is_relay_source(ip):
+            return
         if key_id not in self._observations:
             self._observations[key_id] = collections.deque()
         self._observations[key_id].append((now, ip))
+
+    def _is_relay_source(self, ip: str) -> bool:
+        """Whether *ip* is one of the relay's egress addresses (RELAY_SOURCE_IPS).
+
+        An IPv4-mapped IPv6 form (``::ffff:a.b.c.d``, which a dual-stack listener
+        may log) is matched by its IPv4 address. An unparseable value is not a
+        relay address and is recorded exactly as before.
+        """
+        if not self._relay_source_ips:
+            return False
+        try:
+            address = ipaddress.ip_address(ip.strip("[]"))
+        except ValueError:
+            return False
+        if isinstance(address, ipaddress.IPv6Address):
+            if address.ipv4_mapped is None:
+                return False
+            address = address.ipv4_mapped
+        return any(address in network for network in self._relay_source_ips)
 
     def _unique_ips_in_window(self, key_id: int, now: float) -> frozenset[str]:
         obs = self._observations.get(key_id)
