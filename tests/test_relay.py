@@ -1115,3 +1115,30 @@ async def test_built_monitor_alerts_every_admin_once_per_transition(
         await monitor.check_once()
     assert sent[-1] == (ADMIN, t("relay_alert_recovered", relay="ru1", host=RELAY_HOST, port=443))
     assert len(sent) == 2
+
+
+async def test_bundle_fingerprint_change_completes_while_the_relay_is_off(tmp_path: Path) -> None:
+    """The fingerprint is a property of the key, not of its link: switching the
+    relay off must not make a bundle's fingerprint change fail half-way on its
+    first relay child (and fail the same way on every retry)."""
+    world = await _world(tmp_path)
+    try:
+        result = await world.bundles.create_bundle(ADMIN, _owner(), None, kind=KeyBundleKind.BASIC)
+        relay_child = next(k for k in result.keys if k.relay and k.key_type is VpnKeyType.XRAY)
+        off = _settings(tmp_path, relay_enabled=False)
+        world.xray.settings = off
+        world.bundles.settings = off
+
+        _, changed = await world.bundles.change_fingerprint(OWNER, result.bundle.id, "safari")
+        assert changed == 2
+
+        stored = await world.vpn_keys.get_by_id(relay_child.id)
+        assert stored is not None
+        assert stored.payload["fingerprint"] == "safari"
+        # The relay link cannot be rendered now, so no stale one is kept cached…
+        assert "link" not in stored.public_payload
+        # …and once the relay is back the link carries the new fingerprint.
+        world.xray.settings = world.settings
+        assert "fp=safari" in world.xray.connection_link(stored)
+    finally:
+        await world.db.close()

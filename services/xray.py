@@ -31,7 +31,7 @@ from services.key_naming import (
     normalize_transport,
 )
 from services.notes import normalize_note
-from services.relay import relay_link_host, require_relay_for_issue
+from services.relay import RelayUnavailable, relay_link_host, require_relay_for_issue
 from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
@@ -690,8 +690,17 @@ class XrayService:
             new_payload = {**key.payload, "fingerprint": fingerprint}
             # Same derivation as the config screen (stored spiderX, the key's own
             # host and display name), just with the new fingerprint applied.
-            link = self.connection_link(dataclasses.replace(key, payload=new_payload))
-            new_public_payload = {**key.public_payload, "link": link}
+            new_public_payload = dict(key.public_payload)
+            try:
+                new_public_payload["link"] = self.connection_link(dataclasses.replace(key, payload=new_payload))
+            except RelayUnavailable:
+                # The fingerprint belongs to the key, not to its link: a relay key
+                # must still take it while its relay is switched off, or a bundle's
+                # fingerprint change would stop on its first relay child on every
+                # retry. Only the cached link is affected — it cannot be rendered
+                # now, so the stale one is dropped rather than kept with the old
+                # fingerprint; links are always rebuilt from the payload anyway.
+                new_public_payload.pop("link", None)
             await self.vpn_keys.update_payload(key_id, new_payload, new_public_payload, self.clock.now())
             await self._write_audit_best_effort(
                 actor_user_id=actor_user_id,
