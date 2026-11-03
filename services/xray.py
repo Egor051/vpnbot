@@ -12,7 +12,13 @@ from urllib.parse import quote, urlencode
 from adapters.clock import ClockProvider
 from adapters.id_generator import IdGenerator
 from adapters.xray_config import XrayConfigAdapter
-from bot.formatters import create_type_label, key_note_for_viewer, key_type_label, status_text
+from bot.formatters import (
+    create_type_label,
+    key_note_for_viewer,
+    key_type_label,
+    relay_unavailable_config_text,
+    status_text,
+)
 from config.settings import Settings
 from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
@@ -434,7 +440,21 @@ class XrayService:
                     },
                 )
                 active_key = await self._get_key(key.id)
-                return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key, viewer_user_id=actor_user_id))
+                return VpnKeyCreateResult(key=active_key, config_text=self._created_config_text(active_key, actor_user_id))
+
+    def _created_config_text(self, key: VpnKey, viewer_user_id: int) -> str:
+        """The config shown right after a key was created and activated.
+
+        The key is live by now. A relay switched off in the admin panel in the
+        meantime makes its link unrenderable, and that must not turn a finished
+        creation into an error: the caller has to get the key back — a bundle
+        owns it (or rolls it back with the rest), the wizard shows it. The text
+        says why there is no link instead.
+        """
+        try:
+            return self._format_config(key, viewer_user_id=viewer_user_id)
+        except RelayUnavailable as exc:
+            return relay_unavailable_config_text(f"{key_type_label(key)} #{key.id}", exc)
 
     async def revoke_key(self, actor_user_id: int, key_id: int) -> VpnKey:
         """Revoke an Xray key."""

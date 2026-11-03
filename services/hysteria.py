@@ -6,7 +6,13 @@ import secrets
 from adapters.clock import ClockProvider
 from adapters.hysteria_stats import HysteriaStatsAdapter
 from adapters.id_generator import IdGenerator
-from bot.formatters import hysteria2_key_link, key_note_for_viewer, relay_label, status_text
+from bot.formatters import (
+    hysteria2_key_link,
+    key_note_for_viewer,
+    relay_label,
+    relay_unavailable_config_text,
+    status_text,
+)
 from config.settings import Settings
 from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
@@ -15,7 +21,7 @@ from services.audit import AuditService
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.notes import normalize_note
 from services.protocol_modules import ProtocolModulesService
-from services.relay import RelayCatalog, require_relay_for_issue
+from services.relay import RelayCatalog, RelayUnavailable, require_relay_for_issue
 from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
@@ -169,9 +175,16 @@ class HysteriaService:
                     },
                 )
                 active_key = await self._get_key(key.id)
-                return VpnKeyCreateResult(
-                    key=active_key, config_text=self._format_config(active_key, viewer_user_id=actor_user_id)
-                )
+                # The key is live: a relay switched off since the row was written
+                # must not turn this into an error, or a bundle would never get the
+                # child back to own or roll back (see XrayService._created_config_text).
+                try:
+                    config_text = self._format_config(active_key, viewer_user_id=actor_user_id)
+                except RelayUnavailable as exc:
+                    config_text = relay_unavailable_config_text(
+                        relay_label(f"Hysteria2-ключ #{active_key.id}", active_key.relay), exc
+                    )
+                return VpnKeyCreateResult(key=active_key, config_text=config_text)
 
     async def revoke(self, actor_user_id: int, key_id: int) -> VpnKey:
         """Revoke a Hysteria2 key by id, enforcing ownership (IDOR-safe).

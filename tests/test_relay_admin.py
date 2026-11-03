@@ -748,28 +748,57 @@ async def test_a_key_inserted_first_blocks_the_relay_delete(world: _World) -> No
     assert not report.deleted and report.remaining_keys == 1
 
 
-async def test_a_relay_switched_off_mid_issue_does_not_strand_a_pending_key(
-    world: _World, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Switched off right after the row was written: the key is still a valid key
-    of that relay — it is applied and activated, it just cannot show a link now —
-    instead of being left PENDING_APPLY with no Xray client."""
-    relay = await world.add_relay()
+def _switch_off_after_insert(world: _World, monkeypatch: pytest.MonkeyPatch, relay_id: int) -> None:
+    """The admin switches the relay off right after the next relay key's row is written."""
     real_create = world.vpn_keys.create_pending
+    fired = {"done": False}
 
     async def create_then_switch_off(**kwargs: Any) -> Any:
         key = await real_create(**kwargs)
-        await world.relays.update(ADMIN, relay.id, enabled=False)
+        if kwargs.get("relay") and not fired["done"]:
+            fired["done"] = True
+            await world.relays.update(ADMIN, relay_id, enabled=False)
         return key
 
     monkeypatch.setattr(world.vpn_keys, "create_pending", create_then_switch_off)
+
+
+@pytest.mark.parametrize("protocol", ["xray", "hysteria2"])
+async def test_a_relay_switched_off_mid_issue_still_returns_the_live_key(
+    world: _World, monkeypatch: pytest.MonkeyPatch, protocol: str
+) -> None:
+    """Switched off right after the row was written: the key is still a valid key
+    of that relay — applied, activated and handed back to the caller — and the
+    config text says why there is no link, instead of creation failing after the
+    key went live (or leaving it PENDING_APPLY with no Xray client)."""
+    relay = await world.add_relay()
+    _switch_off_after_insert(world, monkeypatch, relay.id)
+    if protocol == "xray":
+        result = await world.xray.create_xray_key(ADMIN, _owner(), None, relay="ru1")
+        assert len(world.adapter.clients) == 1
+        assert "link" not in result.key.public_payload
+    else:
+        result = await world.hysteria.issue(ADMIN, _owner(), None, relay="ru1")
+    assert result.key.status is VpnKeyStatus.ACTIVE and result.key.relay == "ru1"
+    assert t("err_relay_unavailable", relay="ru1") in result.config_text
+    assert [(status, name) for _, status, name in await _key_rows(world)] == [("active", "ru1")]
+
+
+async def test_a_relay_switched_off_mid_bundle_rolls_the_whole_bundle_back(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The relay goes off after the bundle's first relay child went live: that
+    child is handed back like the others, so when the next relay child is refused
+    the rollback removes it too — no key, no Xray client, no bundle is left."""
+    relay = await world.add_relay()
+    _switch_off_after_insert(world, monkeypatch, relay.id)
     with pytest.raises(RelayUnavailable):
-        await world.xray.create_xray_key(ADMIN, _owner(), None, relay="ru1")
-    rows = await _key_rows(world)
-    assert [(status, name) for _, status, name in rows] == [("active", "ru1")]
-    assert len(world.adapter.clients) == 1
-    stored = await world.vpn_keys.get_by_id(rows[0][0])
-    assert stored is not None and "link" not in stored.public_payload
+        await world.bundles.create_bundle(ADMIN, _owner(), None, kind=KeyBundleKind.BASIC)
+    assert await _key_rows(world) == []
+    assert sorted(world.adapter.removed) == sorted(world.adapter.clients)
+    assert len(world.adapter.clients) == 2  # the direct and the relay VLESS child, both removed again
+    rows = await world.db.conn.execute_fetchall("SELECT id FROM key_bundles")
+    assert rows == []
 
 
 # ── edits take effect at once, in both processes ──────────────────────────────

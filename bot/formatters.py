@@ -40,7 +40,7 @@ from services.dashboard import DashboardSnapshot
 from services.health import HealthCheckResult
 from services.key_naming import NameStyle, key_display_name
 from services.online_clients import OnlineClients
-from services.relay import RelaySnapshot, relay_link_host
+from services.relay import RelaySnapshot, RelayUnavailable, relay_link_host
 from services.server_status import ServerStatus
 from utils.formatting import (
     code,
@@ -109,6 +109,17 @@ def relay_label(label: str, relay: str | None) -> str:
     if not relay:
         return label
     return f"{label} · {t('relay_marker')}"
+
+
+def relay_unavailable_config_text(title: str, exc: RelayUnavailable) -> str:
+    """The config text of a key whose relay cannot render a link right now.
+
+    Used right after a key was created when its relay was switched off in the
+    admin panel in between: the key is live, so creation must still succeed and
+    hand the key back (a bundle has to own it, or roll it back) — the screen just
+    says why there is no link instead of showing one.
+    """
+    return f"<b>{h(title)}</b>\n\n{h(t(exc.key or 'err_relay_unavailable', **(exc.params or {})))}"
 
 
 def key_title(key: VpnKey) -> str:
