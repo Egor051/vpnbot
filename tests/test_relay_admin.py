@@ -1193,6 +1193,20 @@ async def test_bot_startup_seeds_once_and_then_warns(
     # The routers are module-level and attach to one Dispatcher per process; this
     # test is about startup state, not routing, so it does not attach them.
     monkeypatch.setattr(app_module.Dispatcher, "include_router", lambda self, router: router)
+    # deploy.sh Phase 1 runs this suite ON the production host: startup
+    # reconciliation (which talks to the live Xray/AWG/Dante) is not this test's
+    # business, and nothing else in create_app may shell out either — a stray
+    # command would fail the test here instead of touching the host.
+    from adapters.shell_runner import ShellRunner
+
+    async def no_reconcile(_services: object) -> None:
+        return None
+
+    async def no_shell(self: object, *args: object, **kwargs: object) -> object:
+        raise AssertionError(f"create_app ran a host command in a test: {args!r}")
+
+    monkeypatch.setattr(app_module, "_startup_reconcile_keys", no_reconcile)
+    monkeypatch.setattr(ShellRunner, "run", no_shell)
 
     async def start() -> Any:
         bot, _dp, db, _health, services = await app_module.create_app(settings)
