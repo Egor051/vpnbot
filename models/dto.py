@@ -5,6 +5,7 @@ from dataclasses import dataclass, fields
 
 from models.enums import (
     AccessRequestStatus,
+    KeyBundleKind,
     KeyBundleStatus,
     ProxyAccessStatus,
     ProxyAccessType,
@@ -190,6 +191,11 @@ class VpnKey:
     # (the default, and every pre-v31 / non-xray row) means spx is not emitted.
     # Purely client-side: never written to the server inbound.
     spider_x: str | None = None
+    # Relay the key's client link points at: None = direct key (the default and
+    # every pre-v37 row), otherwise the relay name (RELAY_NAME). Changes only the
+    # host in the link and the display name; the key uses the same inbounds and
+    # email-label prefix as a direct key.
+    relay: str | None = None
 
     def __repr__(self) -> str:
         # payload carries AWG private_key/preshared_key — never expose it in repr.
@@ -220,6 +226,9 @@ class KeyBundle:
     # what makes the two lists share a single running count. Callback data still
     # addresses a bundle by ``id`` — only the displayed number comes from here.
     display_no: int
+    # basic | extended (see KeyBundleKind). Defaulted so a bundle row read before
+    # the v37 column existed — and every pre-v37 bundle — is the extended one.
+    kind: KeyBundleKind = KeyBundleKind.EXTENDED
 
     def __repr__(self) -> str:
         # token is the secret sub-URL credential — never expose it in repr.

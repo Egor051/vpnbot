@@ -210,3 +210,66 @@ def test_v33_renumbers_bundles_out_of_the_key_id_space(tmp_path: Path) -> None:
         assert [r[1] for r in rows] == [177, 178], rows
 
     asyncio.run(run())
+
+
+def test_v37_existing_keys_become_direct_and_bundles_extended(tmp_path: Path) -> None:
+    """Per-migration data assertion for v37 on the populated v36 seed.
+
+    Every pre-existing key must come out as a DIRECT key (relay IS NULL) and every
+    pre-existing bundle as an EXTENDED one — the two facts that keep their links
+    and subscriptions byte-for-byte what they were before the upgrade.
+    """
+
+    async def run() -> None:
+        db_path = tmp_path / "upgraded.db"
+        await _materialise(db_path, 36)
+        version, _ = await _bootstrap_and_read(db_path)
+        assert version == CURRENT_SCHEMA_VERSION
+
+        async with aiosqlite.connect(db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            keys = await (await conn.execute("SELECT id, relay FROM vpn_keys ORDER BY id")).fetchall()
+            bundles = await (await conn.execute("SELECT id, kind FROM key_bundles ORDER BY id")).fetchall()
+
+        assert [(int(r["id"]), r["relay"]) for r in keys] == [(10, None), (11, None), (14, None), (15, None)]
+        assert [(int(r["id"]), r["kind"]) for r in bundles] == [(1, "extended")]
+
+    asyncio.run(run())
+
+
+def test_v37_fresh_database_has_relay_and_kind(tmp_path: Path) -> None:
+    """A fresh bootstrap declares both columns with the right shape: relay is a
+    nullable TEXT without a default, kind a NOT NULL TEXT defaulting to extended."""
+
+    async def run() -> None:
+        db = Database(tmp_path / "fresh.db")
+        await db.connect()
+        try:
+            await db.bootstrap()
+            raw = db._raw_conn()
+            vpn_cols = {row[1]: row for row in await (await raw.execute("PRAGMA table_info(vpn_keys)")).fetchall()}
+            bundle_cols = {row[1]: row for row in await (await raw.execute("PRAGMA table_info(key_bundles)")).fetchall()}
+        finally:
+            await db.close()
+        # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
+        assert tuple(vpn_cols["relay"])[2:5] == ("TEXT", 0, None)
+        assert tuple(bundle_cols["kind"])[2:5] == ("TEXT", 1, "'extended'")
+
+    asyncio.run(run())
+
+
+def test_v37_rejects_an_unknown_bundle_kind_at_boot(tmp_path: Path) -> None:
+    """kind has no CHECK in the DDL (like transport), so the boot-time enum guard is
+    what keeps a hand-edited value from reaching the renderer."""
+
+    async def run() -> None:
+        db_path = tmp_path / "upgraded.db"
+        await _materialise(db_path, 36)
+        await _bootstrap_and_read(db_path)
+        async with aiosqlite.connect(db_path) as conn:
+            await conn.execute("UPDATE key_bundles SET kind = 'mega'")
+            await conn.commit()
+        with pytest.raises(RuntimeError, match="kind"):
+            await _bootstrap_and_read(db_path)
+
+    asyncio.run(run())

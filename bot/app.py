@@ -543,6 +543,8 @@ async def _build_app(
         # the user actually holds, and roll several children of one bundle into a
         # single alert. Detection is untouched and still runs per child key.
         bundles=key_bundles_repo,
+        # Relay egress IPs are not a client signal (L4 DNAT): never recorded.
+        relay_source_ips=settings.relay_source_ips,
     )
 
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)

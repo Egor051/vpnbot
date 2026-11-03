@@ -6,7 +6,7 @@ import secrets
 from adapters.clock import ClockProvider
 from adapters.hysteria_stats import HysteriaStatsAdapter
 from adapters.id_generator import IdGenerator
-from bot.formatters import format_hysteria2_link, key_note_for_viewer, status_text
+from bot.formatters import hysteria2_key_link, key_note_for_viewer, relay_label, status_text
 from config.settings import Settings
 from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
@@ -15,6 +15,7 @@ from services.audit import AuditService
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.notes import normalize_note
 from services.protocol_modules import ProtocolModulesService
+from services.relay import require_relay_for_issue
 from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
@@ -81,14 +82,20 @@ class HysteriaService:
         note: str | None,
         expires_at: str | None = None,
         allow_pending_owner: bool = False,
+        relay: str | None = None,
     ) -> VpnKeyCreateResult:
         """Generate a label + secret, persist the key as ACTIVE, and return its link.
 
         There is no apply phase: the hy2_auth endpoint reads the live DB, so a row
         flipped to ACTIVE is authenticatable on the very next handshake.
+
+        *relay* (``None`` = direct key) only changes the host in the key's link.
+        The row keeps key_type ``hysteria2`` and the ``hy2_*`` label, so hy2_auth
+        authenticates it with exactly the same query as any other key.
         """
         await self._ensure_module_enabled()
         self.settings.validate_hysteria2_ready()
+        relay = require_relay_for_issue(self.settings, relay)
         clean_note = normalize_note(note)
 
         async with self.user_locks.lock(owner.telegram_user_id):
@@ -116,6 +123,7 @@ class HysteriaService:
                     now=self.clock.now(),
                     email_label=label,
                     expires_at=expires_at,
+                    relay=relay,
                 )
                 # Flip straight to ACTIVE: mark_active transitions PENDING_APPLY ->
                 # ACTIVE, so the status guard stays intact even though there is no
@@ -338,14 +346,7 @@ class HysteriaService:
         and the text they can copy are the same string by construction rather than
         by two call sites agreeing.
         """
-        return format_hysteria2_link(
-            key.email_label or "",
-            str(key.payload.get("secret") or ""),
-            host=self.settings.hysteria2_host,
-            port=self.settings.hysteria2_port,
-            sni=self.settings.hysteria2_sni,
-            insecure=self.settings.hysteria2_insecure,
-        )
+        return hysteria2_key_link(key, self.settings)
 
     def _format_config(self, key: VpnKey, *, viewer_user_id: int | None = None) -> str:
         label = key.email_label or ""
@@ -354,7 +355,7 @@ class HysteriaService:
         note = f"\nЗаметка: {h(visible_note)}" if visible_note else ""
         label_line = f"\nМетка: {h(label)}" if label else ""
         return (
-            f"<b>Hysteria2-ключ #{key.id}</b>\n"
+            f"<b>{relay_label(f'Hysteria2-ключ #{key.id}', key.relay)}</b>\n"
             f"Статус: {status_text(key.status)}{label_line}{note}\n\n"
             f"{code(link)}"
         )

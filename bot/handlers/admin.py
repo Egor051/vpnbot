@@ -34,13 +34,21 @@ from services.health import run_bot_health
 from bot.fsm.states import AdminCreateKeyStates, AdminAnnouncementStates, AdminEditUserNoteStates
 from bot.guards import require_superadmin, require_moderator_or_admin
 from bot.handlers.admin_dashboard import stop_server_status_auto_refresh
-from bot.handlers.common import answer_callback_error, answer_message_error, config_delivery, parse_int_callback
+from bot.handlers.common import (
+    RELAY_PROTOCOLS,
+    answer_callback_error,
+    answer_message_error,
+    config_delivery,
+    parse_int_callback,
+    relay_offered,
+)
 from bot.keyboards.admin import (
     ANNOUNCEMENT_PROTOCOL_OPTIONS,
     ANNOUNCEMENT_ROLE_OPTIONS,
     ANNOUNCEMENT_TRANSPORT_OPTIONS,
     admin_issue_users_keyboard,
     admin_key_type_keyboard,
+    admin_relay_route_keyboard,
     admin_vless_transport_keyboard,
     admin_xhttp_profile_keyboard,
     admin_panel_keyboard,
@@ -1427,13 +1435,82 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
                 reply_markup=admin_xhttp_profile_keyboard(owner_user_id),
             )
             return
-        await state.set_state(AdminCreateKeyStates.waiting_note)
-        await state.update_data(
-            owner_user_id=owner_user_id,
-            key_type=key_type,
-            transport=transport,
-            note_prompt_msg_id=callback.message.message_id,
+        await _admin_prompt_route_or_note(
+            callback, state, services, owner_user_id, key_type=key_type, transport=transport
         )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+async def _admin_prompt_route_or_note(
+    callback: CallbackQuery,
+    state: FSMContext,
+    services: Services,
+    owner_user_id: int,
+    *,
+    key_type: str,
+    transport: str,
+    xhttp_profile: str | None = None,
+) -> None:
+    """The admin twin of the user wizard's step: «Подключение» or straight to the note.
+
+    Same predicate as the user flow (``bot.handlers.common.relay_offered``), so the
+    two wizards can never disagree on whether a relay is offered.
+    """
+    assert callback.message is not None
+    await state.update_data(owner_user_id=owner_user_id, key_type=key_type, transport=transport, relay=None)
+    if xhttp_profile is not None:
+        await state.update_data(xhttp_profile=xhttp_profile)
+    if key_type in RELAY_PROTOCOLS and relay_offered(services):
+        await state.set_state(AdminCreateKeyStates.waiting_route)
+        await safe_edit_message_text(
+            callback.message,
+            t("choose_relay_route"),
+            reply_markup=admin_relay_route_keyboard(owner_user_id),
+        )
+        return
+    await state.set_state(AdminCreateKeyStates.waiting_note)
+    await state.update_data(note_prompt_msg_id=callback.message.message_id)
+    await safe_edit_message_text(
+        callback.message,
+        f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.callback_query(AdminCreateKeyStates.waiting_route, F.data.regexp(r"^admin:croute:(direct|relay):\d+$"))
+async def admin_issue_route(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Record «напрямую / через relay» for the issued key and prompt for a note."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        _, _, route, raw_user_id = callback.data.split(":", 3)
+        owner_user_id = int(raw_user_id)
+        data = await state.get_data()
+        expected_owner_id = data.get("owner_user_id")
+        if expected_owner_id is None or int(expected_owner_id) != owner_user_id:
+            await state.clear()
+            await safe_callback_answer(callback, t("action_stale"), show_alert=True)
+            await safe_edit_message_text(
+                callback.message,
+                t("action_stale_msg"),
+                reply_markup=admin_panel_keyboard(),
+            )
+            return
+        relay: str | None = None
+        if route == "relay":
+            # Stale-callback guard, as in the user wizard: a relay switched off
+            # while this screen was open is refused here, not at the service.
+            if not relay_offered(services):
+                await safe_callback_answer(callback, t("relay_unavailable"), show_alert=True)
+                return
+            relay = services.settings.relay_name
+        await safe_callback_answer(callback)
+        await state.set_state(AdminCreateKeyStates.waiting_note)
+        await state.update_data(relay=relay, note_prompt_msg_id=callback.message.message_id)
         await safe_edit_message_text(
             callback.message,
             f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
@@ -1472,18 +1549,14 @@ async def admin_issue_xhttp_profile(callback: CallbackQuery, state: FSMContext, 
             await safe_callback_answer(callback, t("xhttp_profile_invalid"), show_alert=True)
             return
         await safe_callback_answer(callback)
-        await state.set_state(AdminCreateKeyStates.waiting_note)
-        await state.update_data(
-            owner_user_id=owner_user_id,
+        await _admin_prompt_route_or_note(
+            callback,
+            state,
+            services,
+            owner_user_id,
             key_type=VpnKeyType.XRAY.value,
             transport="http",
             xhttp_profile=profile,
-            note_prompt_msg_id=callback.message.message_id,
-        )
-        await safe_edit_message_text(
-            callback.message,
-            f"{t('note_create_warning')}\n\n{t('key_note_prompt')}",
-            reply_markup=cancel_keyboard(),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1638,11 +1711,12 @@ async def admin_issue_expiry(callback: CallbackQuery, state: FSMContext, service
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         fingerprint = data.get("fingerprint")
         xhttp_profile = str(data.get("xhttp_profile") or "base")
+        relay = str(data.get("relay") or "") or None
         await state.set_state(AdminCreateKeyStates.confirming)
         await safe_callback_answer(callback)
         await safe_edit_message_text(
             callback.message,
-            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport, profile=xhttp_profile),
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport, profile=xhttp_profile, relay=relay),
             reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
         )
     except Exception as exc:
@@ -1695,9 +1769,10 @@ async def admin_issue_custom_days(message: Message, state: FSMContext, services:
         mtu = int(data["mtu"]) if data.get("mtu") is not None else None
         fingerprint = data.get("fingerprint")
         xhttp_profile = str(data.get("xhttp_profile") or "base")
+        relay = str(data.get("relay") or "") or None
         await state.set_state(AdminCreateKeyStates.confirming)
         await message.answer(
-            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport, profile=xhttp_profile),
+            create_confirm_text(key_type, note, owner=owner, expires_at=expires_at, mtu=mtu, fingerprint=fingerprint, transport=transport, profile=xhttp_profile, relay=relay),
             reply_markup=confirm_cancel_keyboard("admin:cconfirm"),
         )
     except Exception as exc:
@@ -1728,6 +1803,7 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
             mtu = int(data["mtu"]) if data.get("mtu") is not None else None
             fingerprint: str | None = data.get("fingerprint")
             xhttp_profile = str(data.get("xhttp_profile") or "base")
+            relay: str | None = str(data.get("relay") or "") or None
             owner_is_pending = bool(data.get("owner_is_pending", False))
             owner = await services.users.get_user(owner_user_id)
             await require_superadmin(services, callback.from_user.id)
@@ -1745,6 +1821,7 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
                     fingerprint=fingerprint,
                     transport=transport,
                     xhttp_profile=xhttp_profile,
+                    relay=relay,
                 )
             elif key_type == VpnKeyType.AWG.value:
                 result = await services.awg.create_awg_key(
@@ -1758,6 +1835,7 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
                     callback.from_user.id, profile, note,
                     expires_at=expires_at,
                     allow_pending_owner=owner_is_pending,
+                    relay=relay,
                 )
             else:
                 await safe_edit_message_text(callback.message, t("key_unknown_type"))

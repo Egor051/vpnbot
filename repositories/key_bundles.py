@@ -7,7 +7,7 @@ from aiosqlite import Row
 from db.database import Database
 from db.exceptions import ConcurrentModificationError
 from models.dto import KeyBundle, VpnKey
-from models.enums import KeyBundleStatus
+from models.enums import KeyBundleKind, KeyBundleStatus
 from repositories._helpers import _clamp_limit, _clamp_offset, enum_value
 from repositories.vpn_keys import _row_to_vpn_key, reserve_key_number
 
@@ -37,6 +37,11 @@ def _row_to_key_bundle(row: Row | None) -> KeyBundle | None:
         # backfill, which no bootstrapped database has: the migration fills every
         # existing row and create() always writes the column.
         display_no=int(row["display_no"]) if row["display_no"] is not None else int(row["id"]),
+        # The column is added by v37 with DEFAULT 'extended', so every bundle that
+        # predates it reads as the extended kind it has always been.
+        kind=enum_value(KeyBundleKind, row["kind"], "key_bundles.kind")
+        if "kind" in row.keys() and row["kind"]
+        else KeyBundleKind.EXTENDED,
     )
 
 
@@ -52,6 +57,7 @@ class KeyBundleRepository:
         now: str,
         note: str | None = None,
         status: KeyBundleStatus = KeyBundleStatus.ACTIVE,
+        kind: KeyBundleKind = KeyBundleKind.EXTENDED,
     ) -> KeyBundle:
         """Insert a new bundle with a freshly generated secret token and return it.
 
@@ -60,14 +66,17 @@ class KeyBundleRepository:
         count the user's ordinary keys are numbered from — see
         :meth:`repositories.vpn_keys.VpnKeyRepository.reserve_display_number`.
         """
+        # The column carries no CHECK (like vpn_keys.transport), so the vocabulary
+        # is enforced on this, the only write path.
+        kind = KeyBundleKind(kind)
         token = _generate_token()
         display_no = await reserve_key_number(self.db)
         cursor = await self.db.conn.execute(
             """
-            INSERT INTO key_bundles (user_id, label, note, status, token, created_at, updated_at, display_no)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO key_bundles (user_id, label, note, status, token, created_at, updated_at, display_no, kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, label, note, status.value, token, now, now, display_no),
+            (user_id, label, note, status.value, token, now, now, display_no, kind.value),
         )
         await self.db.commit()
         assert cursor.lastrowid is not None

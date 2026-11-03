@@ -304,9 +304,21 @@ The endpoint itself is a **separate process** (`python -m subscription_server`,
 shipped as `deploy/vpn-bot-subscription.service`) that opens `vpn.db` read-only
 and keeps serving while the bot is down — see [docs/subscription.md](subscription.md).
 
-A bundle provisions **one child key per enabled protocol** — VLESS (TCP), each
-VLESS (HTTP) profile (`base`, `multi`, `antisib`) and Hysteria2 — through the
-same per-protocol create path a standalone key uses, so children keep the usual
+A bundle comes in one of **two kinds**, chosen when it is created and stored in
+`key_bundles.kind` (it cannot be changed later):
+
+- **basic** — VLESS (TCP) and Hysteria2;
+- **extended** — VLESS (TCP), each VLESS (HTTP) profile (`base`, `multi`,
+  `antisib`) and Hysteria2. Every bundle created before the kind existed is
+  `extended`, which is exactly what it was.
+
+With `RELAY_ENABLED=true` each kind also gets a **relay copy** of every member
+(basic 2 → 4 keys, extended 5 → 10), see [Relay](#relay). The kind also picks how
+the subscription names its entries — see
+[docs/subscription.md](subscription.md#two-kinds-of-all-in-one).
+
+A bundle provisions **one child key per enabled member** through the same
+per-protocol create path a standalone key uses, so children keep the usual
 `xray_tcp_*` / `xray_http_*` / `hy2_*` email labels and stay visible to
 reconciliation and anomaly detection. AWG is excluded (WireGuard configs do not
 ride a base64 v2ray subscription) and so are the SOCKS5/MTProto proxies (a
@@ -341,6 +353,38 @@ loopback-only and the config screen says so instead of showing an unreachable
 link. Both processes read `.env` at startup, so flipping the flag needs
 `systemctl restart vpn-bot-subscription vpn-bot`.
 
+## Relay
+
+An L4 relay (a VPS that DNATs TCP+UDP/443 to this server) gives users a second
+way in. A relay key is an ordinary key on the very same inbounds — its own
+uuid/secret/label, the usual `xray_tcp_*` / `xray_http_*` / `hy2_*` prefix — whose
+link points at `RELAY_HOST` instead of the main host. Topology, DNS and the
+limitations are in [docs/relay.md](relay.md).
+
+| Variable | Required | Default | Description | Example |
+|---|---|---|---|---|
+| `RELAY_ENABLED` | No | `false` | Offer the «Подключение: напрямую / через relay» step when creating a VLESS or Hysteria2 key, and add relay copies to new all-in-one bundles. While `false` a relay key's link is **refused** (`RelayUnavailable`), never silently pointed at the main host, and a relay member of a subscription is skipped with a warning. | `true` |
+| `RELAY_NAME` | No | `ru1` | Name stored in `vpn_keys.relay` for keys issued through this relay (`^[a-z0-9][a-z0-9-]{0,31}$`). Renaming it later makes the existing relay keys unrenderable. | `ru1` |
+| `RELAY_HOST` | When `RELAY_ENABLED=true` | *(empty)* | Public DNS name or IPv4 of the relay — what relay links point at. Use a DNS-only name so moving the relay to a new IP is an A-record change with no key re-issue. IPv6 is rejected. | `relay.anycastedge.net` |
+| `RELAY_SOURCE_IPS` | When `RELAY_ENABLED=true` | *(empty)* | Comma-separated IPv4 addresses / CIDR networks the relay's traffic arrives **from**, as this server sees it. Excluded from anomaly-detection IP accounting. Parsed strictly (`ipaddress`, host bits in a CIDR rejected); spaces and empty items are ignored, anything else fails startup — even with the relay off. | `198.51.100.7, 203.0.113.0/28` |
+| `RELAY_HEALTH_INTERVAL` | No | `300` | Seconds between relay health probes (TCP connect + verified TLS handshake to `RELAY_HOST:XRAY_PUBLIC_PORT` with SNI `XRAY_SNI`); `0` disables the monitor (0–86400). Admins are alerted once when the relay goes down and once when it comes back. | `300` |
+| `SERVER_FLAG_EMOJI` | No | `🇫🇮` | Appended to the display name (`#fragment`) of every standalone key and of basic-subscription members: `<label>[_relay]_<flag>`. Display only — the email label never changes. Non-empty, no control characters, at most 16 characters. | `🇫🇮` |
+
+**There is no relay port setting.** The relay forwards 1:1, so the port in a relay
+link is the protocol's own public port: `XRAY_PUBLIC_PORT` for VLESS (TCP and
+every XHTTP profile — they share vless-in's :443), `HYSTERIA2_PORT` for Hysteria2.
+Everything else in the link — REALITY `sni`/`pbk`/`sid`/`spx`/`fp`, `flow`, the
+XHTTP `path`/`mode`/`extra`, Hysteria2's `sni` — is identical to the direct key's.
+
+**Key names.** Every link's display name is built by one function
+(`services.key_naming.key_display_name`):
+
+| Where | Name |
+|---|---|
+| Standalone key (config screen, QR, create wizard) | `<label>[_relay]_<SERVER_FLAG_EMOJI>` — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay_🇫🇮` |
+| Basic subscription | the same as a standalone key |
+| Extended subscription | `<label>[_relay]_<circle>` — `xray_http_multi_ab12c_relay_🟠` (no flag) |
+
 ## Announcements
 
 | Variable | Required | Default | Description | Example |
@@ -371,6 +415,13 @@ link. Both processes read `.env` at startup, so flipping the flag needs
 | `ANOMALY_COOLDOWN_SECONDS` | No | `7200` | Cooldown before re-flagging the same key (0–86400). | `7200` |
 | `ANOMALY_CONCURRENT_WINDOW_SECONDS` | No | `600` | Window for concurrent-connection anomaly detection (0–86400). | `600` |
 | `ANOMALY_HYSTERIA2_MAX_CONN` | No | `0` | Flag a Hysteria2 key with >= this many concurrent connections (via the Traffic Stats API `/online`). `0` disables the hy2 check; requires `HYSTERIA2_STATS_SECRET`. | `5` |
+
+> **Relay traffic is IP-blind.** Connections that come in through the relay carry
+> the relay's egress address (L4 DNAT, no PROXY protocol), so addresses listed in
+> `RELAY_SOURCE_IPS` are never recorded — neither the IP nor its network/ASN. The
+> inbound is shared, so this takes the IP signal away from **any** key used
+> through the relay, direct keys included. Hysteria2's `/online` connection count
+> is unaffected. Details: [docs/relay.md](relay.md#limitations).
 
 > **Auto-revoke gating.** Over the full observation window a single roaming/mobile
 > user legitimately accumulates many IPs, so revoking on that signal alone would

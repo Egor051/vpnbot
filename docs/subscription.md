@@ -23,11 +23,13 @@ Canonical references live where every other feature's do:
    `bot.formatters.format_hysteria2_link` for Hysteria2), joined by newlines and base64-encoded.
    Nothing else can ride the subscription: AWG and the SOCKS5/MTProto proxies are excluded from
    the bundle composition, so a row of any other type fails the render rather than being skipped.
-4. The links are ordered and named by **how good a connection the member usually gives**. The
-   order comes from `services.key_bundles.subscription_member_order()` (derived from the
-   composition seam, *not* from the children's `id`, so a bundle created before the seam's order
-   last changed is still served in the current one), and each entry's display name gets a
-   preference mark appended after an underscore:
+4. The links are ordered and named by the bundle's **kind** — see
+   [Two kinds of all-in-one](#two-kinds-of-all-in-one) below. The order comes from
+   `services.key_bundles.subscription_sort_key()` (derived from the composition seam, *not*
+   from the children's `id`, so a bundle created before the seam's order last changed is still
+   served in the current one): **every direct child first, then every relay child**, each group
+   in the composition order. An **extended** bundle appends a preference mark to each entry's
+   display name after an underscore:
 
    | Order | Member | Mark |
    |---|---|---|
@@ -37,10 +39,11 @@ Canonical references live where every other feature's do:
    | 4 | VLESS (HTTP) `multi` | 🟠 |
    | 5 | VLESS (HTTP) `antisib` | 🔴 |
 
-   The mark rides the link's `#fragment` **only** — the stored `email_label` (Xray's client
-   email, the hy2 auth id) is untouched, so reconciliation, traffic stats and anomaly detection
-   keep matching on it, and a standalone key's link is unchanged. The bot explains the colours
-   on the subscription's own screens; the same ranking is what «Состав» lists.
+   A **basic** bundle has no marks: its members are named like standalone keys, with the
+   server flag. The name rides the link's `#fragment` **only** — the stored `email_label`
+   (Xray's client email, the hy2 auth id) is untouched, so reconciliation, traffic stats and
+   anomaly detection keep matching on it. The bot explains the colours on an extended
+   subscription's own screens (and only there); the same order is what «Состав» lists.
 5. **spiderX (`spx`) of the VLESS children can rotate.** With `XRAY_SPIDER_X_ROTATION_HOURS=0`
    (the default) each child carries its stored per-key `spx`, exactly as its single-key link
    does. With a value `> 0` and a non-empty `XRAY_SPIDER_X_POOL`, each child's `spx` walks the
@@ -51,11 +54,42 @@ Canonical references live where every other feature's do:
    second. Hysteria2 links and the response headers are unchanged. Algorithm and rules:
    [Configuration → spiderX rotation](configuration.md#xray-vless-reality).
 
+### Two kinds of all-in-one
+
+The kind is chosen in the create wizard (a screen after the AmneziaWG notice that explains
+both), stored in `key_bundles.kind` and never changed afterwards. Switching an existing
+bundle to the other kind is not supported.
+
+| | basic | extended |
+|---|---|---|
+| Members | VLESS (TCP), Hysteria2 | VLESS (TCP), Hysteria2, VLESS (HTTP) `base` / `multi` / `antisib` |
+| With `RELAY_ENABLED=true` | + the same 2 via relay → **4** | + the same 5 via relay → **10** |
+| Entry name | `<label>[_relay]_<SERVER_FLAG_EMOJI>` | `<label>[_relay]_<mark>` |
+| Mark legend («⚠️ Кружок в конце названия…») | never shown | on the bundle's screens |
+
+- Every bundle that existed before the kind was introduced (schema v37) is **extended** and is
+  served exactly as before: same members, same `<label>_<mark>` names, main host.
+- A **relay member** ([docs/relay.md](relay.md)) is the same protocol member as its direct
+  twin — same create path, same label prefix — so in an extended bundle it carries the
+  **twin's mark**: `xray_http_multi_ab12c_relay_🟠`.
+- Relay members are provisioned only while `RELAY_ENABLED=true`. A bundle created with the
+  relay off has none, and an existing bundle is **not** topped up when the relay is switched on
+  later — composition is decided once, at creation (the same is true of a protocol switched on
+  after a bundle was made). Create a new bundle to get relay members.
+- A relay member whose relay is no longer enabled (`RELAY_ENABLED=false`, or a different
+  `RELAY_NAME`) is **skipped** with a `WARNING` in the log and the rest of the subscription is
+  served (`200`). This is the one deliberate exception to "a child that cannot render fails the
+  whole response": switching the relay off is an operator decision, not a corrupt row. A bundle
+  left with nothing to serve is still the usual `404`.
+
+A standalone key's link is named `<label>[_relay]_<SERVER_FLAG_EMOJI>` everywhere the bot
+shows it (config screen, QR, create wizard) — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay_🇫🇮`.
+
 ### Fail-closed behaviour
 
 Every rejection is the **same empty `404`** — unknown token, revoked bundle, deleted bundle, a
 bundle with no active children, a malformed child row, an unreadable database, and the feature
-flag being off. A caller therefore cannot tell a token that never existed from one that was
+flag being off. (A relay member whose relay is off is skipped, not fatal — see above.) A caller therefore cannot tell a token that never existed from one that was
 revoked, and never receives a partial configuration. The endpoint **never** emits a `5xx`: an
 unexpected fault is caught and answered with the same `404`, so no traceback reaches the
 internet. The one other status is `429` (with `Retry-After`, the seconds left in the current
@@ -95,7 +129,7 @@ guard before any service is reached. There is **no new button in the main menu**
 
 | Where | What |
 |---|---|
-| **Create key** | An «All-in-One» option next to VLESS / AmneziaWG / Hysteria2. It reuses the ordinary create wizard (note → expiry → confirm). The result screen lists what the bundle actually contains and names any protocol left out because its backend is off. |
+| **Create key** | An «All-in-One» option next to VLESS / AmneziaWG / Hysteria2. After the AmneziaWG notice it asks for the **kind** (basic / extended, both explained), then reuses the ordinary create wizard (note → expiry → confirm). The result screen lists what the bundle actually contains and names any protocol left out because its backend is off. Admins create a bundle through this same wizard; the admin «issue a key to a user» flow has no all-in-one option. |
 | **My keys** | An ordinary entry in the list, sorted by creation date among the keys and numbered from the same running count as them. |
 | **Bundle card** | The same five actions a key card has — Config · Stats · Revoke · Note · Delete — plus a line saying AmneziaWG is issued as a **separate key**. |
 

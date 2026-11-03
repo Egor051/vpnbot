@@ -54,6 +54,7 @@ async def main() -> None:
     from services.anomaly_detection import anomaly_detection_loop
     from services.key_expiry import key_expiry_loop
     from services.offsite_backup import offsite_backup_loop
+    from services.relay_health import build_relay_health_monitor, relay_health_loop
     from services.scheduled_announcements import scheduled_announcements_loop
     from services.warp_split_feeds import warp_split_feeds_loop
 
@@ -71,6 +72,7 @@ async def main() -> None:
         fsm_cleanup_task: asyncio.Task[None] | None = None
         server_status_task: asyncio.Task[None] | None = None
         warp_split_feeds_task: asyncio.Task[None] | None = None
+        relay_health_task: asyncio.Task[None] | None = None
         try:
             if isinstance(dp.storage, TTLMemoryStorage):
                 fsm_cleanup_task = asyncio.create_task(
@@ -165,6 +167,24 @@ async def main() -> None:
                 )
             elif settings.warp_split_feeds_interval_sec > 0:
                 logger.info("WARP split feed refresher not started: WARP_SPLIT_FEEDS_MODE=off")
+            # Relay health: only meaningful with a relay configured, and the probe's
+            # TLS handshake needs the REALITY SNI to verify against.
+            if settings.relay_enabled and settings.relay_health_interval > 0:
+                if settings.xray_sni:
+                    relay_health_task = asyncio.create_task(
+                        relay_health_loop(
+                            build_relay_health_monitor(settings, bot), settings.relay_health_interval
+                        ),
+                        name="relay-health",
+                    )
+                    logger.info(
+                        "Relay health monitor started (relay=%s, host=%s, interval=%ds)",
+                        settings.relay_name,
+                        settings.relay_host,
+                        settings.relay_health_interval,
+                    )
+                else:
+                    logger.warning("Relay health monitor not started: XRAY_SNI is empty")
             server_status_task = asyncio.create_task(
                 services.server_status.run(),
                 name="server-status-sampler",
@@ -225,6 +245,9 @@ async def main() -> None:
             if warp_split_feeds_task is not None:
                 warp_split_feeds_task.cancel()
                 await asyncio.gather(warp_split_feeds_task, return_exceptions=True)
+            if relay_health_task is not None:
+                relay_health_task.cancel()
+                await asyncio.gather(relay_health_task, return_exceptions=True)
             if server_status_task is not None:
                 server_status_task.cancel()
                 await asyncio.gather(server_status_task, return_exceptions=True)

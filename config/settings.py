@@ -19,6 +19,20 @@ class SettingsError(RuntimeError):
     pass
 
 
+# Name of an L4 relay (RELAY_NAME and the value stored in vpn_keys.relay). The
+# single source of the format: the settings loader, the key repository (on
+# write) and the relay services all match against THIS pattern.
+RELAY_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+
+# RFC 1123 hostname: dot-separated labels of 1-63 [A-Za-z0-9-], no leading or
+# trailing hyphen, 253 characters in total. A trailing root dot is tolerated.
+_HOSTNAME_LABEL = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)$")
+
+# SERVER_FLAG_EMOJI is a display decoration, not data: a short cap keeps a typo
+# (a whole sentence pasted into it) from bloating every link name.
+SERVER_FLAG_EMOJI_MAX_CHARS = 16
+
+
 def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
@@ -284,6 +298,79 @@ def _xray_short_id(value: str, *, required: bool) -> str:
     if len(value) > 16 or len(value) % 2 != 0 or re.fullmatch(r"[0-9a-fA-F]+", value) is None:
         raise SettingsError("XRAY_SHORT_ID должен быть hex-строкой чётной длины до 16 символов")
     return value.lower()
+
+
+def _relay_name(name: str, value: str) -> str:
+    """Validate a relay name against :data:`RELAY_NAME_PATTERN`."""
+    if RELAY_NAME_PATTERN.fullmatch(value) is None:
+        raise SettingsError(
+            f"{name} должен соответствовать ^[a-z0-9][a-z0-9-]{{0,31}}$ (строчные латинские буквы, цифры, дефис)"
+        )
+    return value
+
+
+def _dns_name_or_ipv4(name: str, value: str) -> str:
+    """Accept an IPv4 address or an RFC 1123 DNS name; reject everything else.
+
+    IPv6 literals are refused on purpose: the relay forwards IPv4 only, and a
+    bracket-less IPv6 host would also need special casing in every link.
+    """
+    value = _no_control_chars(name, value).strip()
+    if not value:
+        return value
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        address = None
+    if address is not None:
+        if address.version != 4:
+            raise SettingsError(f"{name} должен быть DNS-именем или IPv4-адресом (IPv6 не поддерживается)")
+        return value
+    if value.replace(".", "").isdigit():
+        # Looks numeric but is not a valid IPv4 address (e.g. 1.2.3.256): a
+        # DNS name cannot be all digits, so this is a typo, not a hostname.
+        raise SettingsError(f"{name}: {value!r} не является корректным IPv4-адресом")
+    hostname = value[:-1] if value.endswith(".") else value
+    if len(hostname) > 253 or not all(_HOSTNAME_LABEL.match(label) for label in hostname.split(".")):
+        raise SettingsError(f"{name} должен быть DNS-именем или IPv4-адресом, получено {value!r}")
+    return value
+
+
+def parse_ipv4_networks(name: str, raw: str) -> tuple[ipaddress.IPv4Network, ...]:
+    """Strictly parse a comma-separated list of IPv4 addresses / CIDR networks.
+
+    Whitespace around an item is ignored and empty items (a trailing comma, two
+    commas in a row) are skipped — the same tolerance ADMIN_IDS has. Anything
+    else that is not an IPv4 address or a strict IPv4 network (host bits set in
+    a CIDR, an IPv6 value, a hostname, stray characters) is a SettingsError: a
+    silently dropped entry here would quietly re-enable IP accounting for a
+    relay the operator believes is excluded. Duplicates are collapsed, order is
+    kept.
+    """
+    networks: list[ipaddress.IPv4Network] = []
+    for item in _no_control_chars(name, raw).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            network = ipaddress.ip_network(item, strict=True)
+        except ValueError as exc:
+            raise SettingsError(f"{name}: {item!r} не является IPv4-адресом или CIDR-сетью") from exc
+        if not isinstance(network, ipaddress.IPv4Network):
+            raise SettingsError(f"{name}: {item!r} — поддерживается только IPv4")
+        if network not in networks:
+            networks.append(network)
+    return tuple(networks)
+
+
+def _server_flag_emoji(name: str, value: str) -> str:
+    """The flag appended to standalone / basic-subscription link names."""
+    value = _no_control_chars(name, value).strip()
+    if not value:
+        raise SettingsError(f"{name} не должен быть пустым")
+    if len(value) > SERVER_FLAG_EMOJI_MAX_CHARS:
+        raise SettingsError(f"{name} должен быть не длиннее {SERVER_FLAG_EMOJI_MAX_CHARS} символов")
+    return value
 
 
 def _ipv4_network(name: str, value: str) -> str:
@@ -634,6 +721,24 @@ class Settings:
     # own file, never the bot's: the two are independent processes and either
     # must be able to run while the other is down.
     subscription_lock_path: Path = Path("/run/vpn-bot-subscription/subscription.lock")
+    # L4 relay (see docs/relay.md). The relay DNATs TCP+UDP/443 1:1 to this
+    # server, so a relay key differs from a direct one ONLY by the host in its
+    # link: the port is the protocol's own public port (XRAY_PUBLIC_PORT /
+    # HYSTERIA2_PORT), there is no relay port setting. Off by default: with it
+    # off the relay step is never offered and no relay link can be rendered.
+    relay_enabled: bool = False
+    # Name stored in vpn_keys.relay for keys issued through this relay.
+    relay_name: str = "ru1"
+    # Public DNS name or IPv4 of the relay — what relay links point at.
+    relay_host: str = ""
+    # Egress addresses/networks of the relay as the main server sees them.
+    # Excluded from anomaly-detection IP accounting (see docs/relay.md).
+    relay_source_ips: tuple[ipaddress.IPv4Network, ...] = ()
+    # Seconds between relay health probes; 0 disables the monitor.
+    relay_health_interval: int = 300
+    # Appended to the display name of standalone keys and basic-subscription
+    # members (``<label>_🇫🇮``). Display only — never part of email_label.
+    server_flag_emoji: str = "🇫🇮"
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -953,6 +1058,19 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
             "ANOMALY_HYSTERIA2_MAX_CONN>0 требует HYSTERIA2_STATS_SECRET "
             "(проверка одновременных подключений Hysteria2 использует Traffic Stats API)"
         )
+    relay_enabled = _bool("RELAY_ENABLED", False)
+    relay_name = _relay_name("RELAY_NAME", _optional("RELAY_NAME", "ru1") or "ru1")
+    relay_host = _dns_name_or_ipv4("RELAY_HOST", _optional("RELAY_HOST"))
+    relay_source_ips = parse_ipv4_networks("RELAY_SOURCE_IPS", _optional("RELAY_SOURCE_IPS"))
+    server_flag_emoji = _server_flag_emoji("SERVER_FLAG_EMOJI", _optional("SERVER_FLAG_EMOJI", "🇫🇮"))
+    if relay_enabled:
+        # Both are needed for the feature to be coherent: without a host there is
+        # nothing to put in a relay link, and without the source IPs every relay
+        # connection would be counted by anomaly detection as one more network.
+        if not relay_host:
+            raise SettingsError("RELAY_ENABLED=true требует RELAY_HOST (DNS-имя или IPv4 relay)")
+        if not relay_source_ips:
+            raise SettingsError("RELAY_ENABLED=true требует RELAY_SOURCE_IPS (egress IP/CIDR relay)")
     return Settings(
         bot_token=_required("BOT_TOKEN"),
         admin_ids=_admin_ids(_required("ADMIN_IDS")),
@@ -1172,4 +1290,10 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         subscription_lock_path=Path(
             _optional("SUBSCRIPTION_LOCK_PATH", "/run/vpn-bot-subscription/subscription.lock")
         ),
+        relay_enabled=relay_enabled,
+        relay_name=relay_name,
+        relay_host=relay_host,
+        relay_source_ips=relay_source_ips,
+        relay_health_interval=_int_range("RELAY_HEALTH_INTERVAL", 300, 0, 86400),
+        server_flag_emoji=server_flag_emoji,
     )

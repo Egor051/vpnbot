@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 36
+CURRENT_SCHEMA_VERSION = 37
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -391,6 +391,10 @@ class Database:
             await self._migrate_v36()
             await self._set_schema_version(36)
             version = 36
+        if version < 37:
+            await self._migrate_v37()
+            await self._set_schema_version(37)
+            version = 37
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -685,6 +689,9 @@ class Database:
                 ("xray", "awg", "hysteria2"),
             ),
             ("vpn_keys", "transport", ("tcp", "http")),
+            # 'basic' | 'extended' — the all-in-one variant. No CHECK in the DDL
+            # (same as transport): validated in code on write and here at boot.
+            ("key_bundles", "kind", ("basic", "extended")),
             (
                 "vpn_keys",
                 "status",
@@ -1698,6 +1705,31 @@ class Database:
         except Exception:
             await raw.rollback()
             raise
+
+    async def _migrate_v37(self) -> None:
+        # Relay mode + two kinds of all-in-one bundle. Two idempotent ADD COLUMNs,
+        # both mirrored in schema.sql for fresh DBs:
+        #
+        #  1) vpn_keys.relay — NULL means a DIRECT key (every pre-v37 row), any
+        #     other value names the L4 relay the key's link points at. Relay is an
+        #     ATTRIBUTE of a key, not a new key_type or transport: the key rides
+        #     the very same inbounds with the same email-label prefix, so
+        #     hy2_auth, reconcile_email_labels and XRAY_MANAGED_LABEL_RE are
+        #     untouched. Nullable with no CHECK (like transport/xhttp_profile);
+        #     the ^[a-z0-9][a-z0-9-]{0,31}$ format is validated in code on write.
+        #  2) key_bundles.kind — 'basic' | 'extended'. NOT NULL DEFAULT
+        #     'extended', so every existing bundle keeps exactly the composition
+        #     and the subscription rendering it had before. No CHECK (SQLite
+        #     cannot add one without a table rebuild); _validate_enum_values
+        #     guards the vocabulary at boot.
+        vpn_cols = await self._table_columns("vpn_keys")
+        if "relay" not in vpn_cols:
+            await self.conn.execute("ALTER TABLE vpn_keys ADD COLUMN relay TEXT")
+        bundle_cols = await self._table_columns("key_bundles")
+        if "kind" not in bundle_cols:
+            await self.conn.execute(
+                "ALTER TABLE key_bundles ADD COLUMN kind TEXT NOT NULL DEFAULT 'extended'"
+            )
 
     async def _ensure_spider_x_backfill(self) -> None:
         # Idempotent per-key spiderX backfill, run on EVERY bootstrap (not gated by

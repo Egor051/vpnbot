@@ -32,9 +32,9 @@ from bot.formatters import (
 from config.settings import Settings
 from i18n import t
 from models.dto import KeyBundle, KeyTrafficStatsView, VpnKey
-from models.enums import VpnKeyType
+from models.enums import KeyBundleKind, VpnKeyType
 from services.errors import InvalidOperation
-from services.key_bundles import BundleMember, KeyBundleCreateResult, subscription_member_order
+from services.key_bundles import BundleMember, KeyBundleCreateResult, subscription_sort_key
 from utils.formatting import code, format_bytes, format_expiry_date, format_msk_datetime, h
 
 # The pseudo key-type the create wizard carries in its FSM data for an all-in-one
@@ -108,12 +108,35 @@ def subscription_url(settings: Settings, token: str) -> str | None:
 
 def bundle_member_label(member: BundleMember) -> str:
     """Human label for one member of the composition seam."""
-    return create_type_label(member.key_type.value, member.transport, member.xhttp_profile)
+    return create_type_label(
+        member.key_type.value, member.transport, member.xhttp_profile, relay=member.relay
+    )
 
 
 def bundle_key_label(key: VpnKey) -> str:
     """Human label for one provisioned child key."""
-    return create_type_label(key.key_type.value, key.transport, key.xhttp_profile)
+    return create_type_label(key.key_type.value, key.transport, key.xhttp_profile, relay=key.relay)
+
+
+def bundle_kind_label(kind: KeyBundleKind) -> str:
+    """«Базовая» / «Расширенная» — the name of a bundle kind."""
+    return t(f"bundle_kind_{kind.value}")
+
+
+def bundle_kind_prompt(*, relay_enabled: bool = False) -> str:
+    """The kind-choice screen of the create wizard: both kinds, each explained.
+
+    With a relay configured each kind also carries relay copies of its members,
+    which is said once below the two descriptions.
+    """
+    blocks = "\n\n".join(
+        f"<b>{t(f'bundle_kind_{kind.value}')}</b>\n{t(f'bundle_kind_{kind.value}_desc')}"
+        for kind in (KeyBundleKind.BASIC, KeyBundleKind.EXTENDED)
+    )
+    text = f"{t('bundle_kind_prompt')}\n\n{blocks}"
+    if relay_enabled:
+        text += f"\n\n{t('bundle_kind_relay_note')}"
+    return text
 
 
 def bundle_has_vless(keys: list[VpnKey]) -> bool:
@@ -136,12 +159,23 @@ def bundle_notices(*, with_marks_legend: bool = True) -> list[str]:
     a user needs before touching the profiles the client just imported, whereas the
     AmneziaWG note explains an absence. ``with_marks_legend`` drops it on screens
     shown before the subscription exists, where there are no marked keys yet to
-    rank.
+    rank, and for a basic subscription, whose names carry no circles at all (see
+    :func:`marks_legend_for`).
     """
     notices = [t("bundle_awg_separate")]
     if with_marks_legend:
         return [t("bundle_marks_legend"), "", *notices]
     return notices
+
+
+def marks_legend_for(bundle: KeyBundle) -> bool:
+    """Whether this bundle's screens explain the preference circles.
+
+    Only an EXTENDED subscription names its members with circles; a basic one
+    names them like standalone keys (with the server flag), so the legend would
+    explain something the user never sees.
+    """
+    return bundle.kind is KeyBundleKind.EXTENDED
 
 
 def bundle_detail_text(
@@ -162,6 +196,7 @@ def bundle_detail_text(
     lines = [
         f"<b>{h(bundle_title(bundle))}</b>",
         f"{t('field_status')}: {h(bundle_status_text(bundle.status))}",
+        f"{t('field_bundle_kind')}: {h(bundle_kind_label(bundle.kind))}",
         f"{t('field_label')}: {code(bundle.label)}",
         f"{t('field_created')}: {h(format_msk_datetime(bundle.created_at))}",
         f"{t('field_updated')}: {h(format_msk_datetime(bundle.updated_at))}",
@@ -175,7 +210,7 @@ def bundle_detail_text(
     lines.append("")
     lines.extend(bundle_stats_block(views))
     lines.append("")
-    lines.extend(bundle_notices())
+    lines.extend(bundle_notices(with_marks_legend=marks_legend_for(bundle)))
     return "\n".join(lines)
 
 
@@ -190,36 +225,25 @@ def _in_subscription_order(keys: list[VpnKey]) -> list[VpnKey]:
     """Order the children the way the subscription serves them.
 
     «Состав» is a preview of the profile list the client is about to import, so it
-    has to agree with it: the same order, from the member giving the best
-    connection to the worst. Sorted from the composition seam rather than left in
-    row order, which for a bundle provisioned before the seam's order last changed
-    would show something the client never displays. Unknown members keep their
-    relative position at the end instead of disappearing.
+    has to agree with it: the same order — direct children first, then relay
+    children, each group from the member giving the best connection to the worst.
+    Sorted with the renderer's own sort key rather than left in row order, which
+    for a bundle provisioned before the seam's order last changed would show
+    something the client never displays. Unknown members keep their relative
+    position at the end of their group instead of disappearing.
     """
-    order = subscription_member_order()
-    fallback = len(order)
-
-    def rank(key: VpnKey) -> tuple[int, int]:
-        name = _member_name(key)
-        return (order.index(name) if name in order else fallback, key.id)
-
-    return sorted(keys, key=rank)
-
-
-def _member_name(key: VpnKey) -> str:
-    """This child's name in the composition seam's vocabulary."""
-    if key.key_type is not VpnKeyType.XRAY:
-        return key.key_type.value
-    if str(key.transport or "tcp").lower() == "http":
-        return f"xray_http_{str(key.xhttp_profile or 'base').lower()}"
-    return "xray_tcp"
+    return sorted(keys, key=subscription_sort_key)
 
 
 # ── create ────────────────────────────────────────────────────────────────────
 
 
 def bundle_create_confirm_text(
-    note: str | None, *, expires_at: str | None, fingerprint: str | None = None
+    note: str | None,
+    *,
+    expires_at: str | None,
+    fingerprint: str | None = None,
+    kind: KeyBundleKind = KeyBundleKind.EXTENDED,
 ) -> str:
     """Confirmation screen of the create wizard for an all-in-one bundle.
 
@@ -230,6 +254,7 @@ def bundle_create_confirm_text(
     lines = [
         t("bundle_create_confirm_title"),
         f"{t('field_type')}: {h(t('bundle_type_label'))}",
+        f"{t('field_bundle_kind')}: {h(bundle_kind_label(kind))}",
         f"{t('field_note')}: {h(note or t('none'))}",
     ]
     if fingerprint:
@@ -274,7 +299,7 @@ def bundle_created_text(result: KeyBundleCreateResult, *, viewer_user_id: int, s
     lines.append("")
     lines.extend(_subscription_block(result.bundle, settings))
     lines.append("")
-    lines.extend(bundle_notices())
+    lines.extend(bundle_notices(with_marks_legend=marks_legend_for(result.bundle)))
     return "\n".join(lines)
 
 
@@ -305,7 +330,7 @@ def bundle_config_text(bundle: KeyBundle, settings: Settings) -> str:
             "",
             *_subscription_block(bundle, settings),
             "",
-            *bundle_notices(),
+            *bundle_notices(with_marks_legend=marks_legend_for(bundle)),
         ]
     )
 

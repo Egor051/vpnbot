@@ -36,7 +36,10 @@ from bot.handlers.key_bundles import (
 )
 from bot.handlers.keys import (
     KEYS_PAGE_SIZE,
+    _bundle_kind,
+    _create_confirm_screen,
     create_key_bundle_ack,
+    create_key_bundle_kind,
     create_key_choose_bundle,
     create_key_confirm,
     create_key_menu,
@@ -48,7 +51,7 @@ from bot.keyboards.key_bundles import bundle_actions_keyboard
 from bot.rate_limit import RateLimiter
 from i18n import t, use_locale
 from models.dto import KeyBundle, KeyTrafficStatsView, TrafficStats, User, VpnKey
-from models.enums import KeyBundleStatus, UserRole, VpnKeyStatus, VpnKeyType
+from models.enums import KeyBundleKind, KeyBundleStatus, UserRole, VpnKeyStatus, VpnKeyType
 from services.errors import InvalidOperation
 from services.key_bundles import BundleMember, KeyBundleCreateResult
 
@@ -68,6 +71,10 @@ def _settings(**overrides: object) -> SimpleNamespace:
         hysteria2_enabled=True,
         xray_xhttp_enabled=True,
         key_max_trial_days=30,
+        relay_enabled=False,
+        relay_name="ru1",
+        relay_host="",
+        server_flag_emoji="🇫🇮",
     )
     values.update(overrides)
     settings = SimpleNamespace(**values)
@@ -258,6 +265,7 @@ class _BundleLifecycle:
 
     def __init__(self, create_result: object | None = None, create_error: Exception | None = None) -> None:
         self.calls: list[tuple[str, object]] = []
+        self.kinds: list[KeyBundleKind] = []
         self._create_result = create_result
         self._create_error = create_error
 
@@ -269,8 +277,10 @@ class _BundleLifecycle:
         *,
         expires_at: str | None = None,
         fingerprint: str | None = None,
+        kind: KeyBundleKind = KeyBundleKind.EXTENDED,
     ) -> object:
         self.calls.append(("create", (actor_user_id, note, expires_at, fingerprint)))
+        self.kinds.append(kind)
         if self._create_error is not None:
             raise self._create_error
         return self._create_result
@@ -1236,17 +1246,74 @@ def test_all_in_one_choice_shows_the_awg_notice_before_the_wizard() -> None:
     asyncio.run(run())
 
 
-def test_acknowledging_the_notice_starts_the_note_step() -> None:
+def test_acknowledging_the_notice_offers_the_kind_choice() -> None:
+    """After the AmneziaWG notice the wizard asks basic vs extended — both
+    explained on screen — before the note."""
+
     async def run() -> None:
         callback = _Callback("keys:create:bundle:ack")
         state = _State()
         await create_key_bundle_ack(callback, state, _services())  # type: ignore[arg-type]
 
-        assert state.state == CreateKeyStates.waiting_note
+        assert state.state == CreateKeyStates.waiting_bundle_kind
         assert state.data["key_type"] == "bundle"
-        assert t("key_note_prompt") in callback.message.last_text
+        text = callback.message.last_text
+        assert t("bundle_kind_basic_desc") in text and t("bundle_kind_extended_desc") in text
+        # No relay configured → no mention of relay copies.
+        assert t("bundle_kind_relay_note") not in text
+        assert _callbacks(callback.message.last_markup) == [
+            "keys:create:bundle:kind:basic",
+            "keys:create:bundle:kind:extended",
+            "cancel",
+        ]
 
     asyncio.run(run())
+
+
+def test_kind_prompt_mentions_relay_copies_while_relay_is_enabled() -> None:
+    async def run() -> None:
+        services = _services(
+            settings=_settings(relay_enabled=True, relay_host="relay.example.net")
+        )
+        callback = _Callback("keys:create:bundle:ack")
+        await create_key_bundle_ack(callback, _State(), services)  # type: ignore[arg-type]
+        assert t("bundle_kind_relay_note") in callback.message.last_text
+
+    asyncio.run(run())
+
+
+def test_choosing_a_kind_starts_the_note_step_and_reaches_the_service() -> None:
+    """The chosen kind is carried in the FSM, shown on the confirm screen and
+    handed to the service on confirm."""
+    result = _create_result((_key(1), _key(2, VpnKeyType.HYSTERIA2)))
+    lifecycle = _BundleLifecycle(create_result=result)
+
+    async def run() -> None:
+        services = _services(lifecycle=lifecycle)
+        callback = _Callback("keys:create:bundle:kind:basic")
+        state = _State({"key_type": "bundle", "transport": "tcp", "cancel_target": "keys:create"})
+        state.state = CreateKeyStates.waiting_bundle_kind
+        await create_key_bundle_kind(callback, state, services)  # type: ignore[arg-type]
+
+        assert state.state == CreateKeyStates.waiting_note
+        assert state.data["bundle_kind"] == "basic"
+        assert t("key_note_prompt") in callback.message.last_text
+
+        confirm_text = _create_confirm_screen(state.data, None)
+        assert f"{t('field_bundle_kind')}: {t('bundle_kind_basic')}" in confirm_text
+
+        confirm = _Callback("create:confirm")
+        state.data.update({"note": None, "expires_at": None})
+        await create_key_confirm(confirm, state, services, RateLimiter())  # type: ignore[arg-type]
+        assert lifecycle.kinds == [KeyBundleKind.BASIC]
+
+    asyncio.run(run())
+
+
+def test_a_wizard_without_a_kind_creates_an_extended_bundle() -> None:
+    """A session started before the kind step existed keeps today's behaviour."""
+    assert _bundle_kind({}) is KeyBundleKind.EXTENDED
+    assert _bundle_kind({"bundle_kind": "nonsense"}) is KeyBundleKind.EXTENDED
 
 
 def test_the_awg_notice_step_is_refused_while_the_flag_is_off() -> None:

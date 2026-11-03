@@ -6,30 +6,24 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from bot.formatters import format_hysteria2_link
+from bot.formatters import hysteria2_key_link
 from config.settings import Settings
 from models.dto import VpnKey
 from models.enums import VpnKeyType
-from services.key_bundles import subscription_member_order
+from services.key_bundles import subscription_sort_key
+from services.key_naming import NameStyle, bundle_name_style, key_display_name, key_member_name
+from services.relay import relay_available
 from services.xray import XrayService
 from subscription_server.store import BundleView
 
 logger = logging.getLogger(__name__)
 
-# Preference mark appended to each child's display name inside the subscription,
-# so the profile list a client shows is self-explanatory: the colour ranks the
-# average speed and latency the member gives, best (green) to worst (red), and
-# that is the order the user should try them in. Deliberately confined to the
-# subscription — a standalone key is shown one at a time, with nothing to rank it
-# against, and its link must stay byte-for-byte what the per-key screen renders.
-# Keyed by the composition seam's member names (services.key_bundles.member_name).
-_PREFERENCE_MARKS: dict[str, str] = {
-    "xray_tcp": "🟢",
-    "hysteria2": "🟢",
-    "xray_http_base": "🟡",
-    "xray_http_multi": "🟠",
-    "xray_http_antisib": "🔴",
-}
+# The display name of each child is built by services.key_naming.key_display_name
+# — the same function the bot's per-key screen uses — with the bundle's naming
+# rule: an EXTENDED bundle appends the preference circle (🟢 🟡 🟠 🔴, the order to
+# try the profiles in), a BASIC bundle names its members like standalone keys
+# (``<label>[_relay]_<SERVER_FLAG_EMOJI>``). The circles are confined to extended
+# subscriptions, where there is something to rank against.
 
 
 class SubscriptionRenderError(RuntimeError):
@@ -68,21 +62,21 @@ class _VlessLinkRenderer(XrayService):
     def member_name(self, key: VpnKey) -> str:
         """The composition seam's name for a provisioned Xray child.
 
-        Resolved through the service's own transport/profile lookups (column →
-        payload → email label), so a legacy row without the columns still lands on
-        the right member instead of silently ranking as ``base``.
+        Resolved through the shared transport/profile lookups (column → payload →
+        email label), so a legacy row without the columns still lands on the right
+        member instead of silently ranking as ``base``.
         """
-        if self._key_transport(key) == "http":
-            return f"xray_http_{self._key_profile(key)}"
-        return "xray_tcp"
+        return key_member_name(key)
 
-    def vless_link(self, key: VpnKey, *, now_unix: int) -> str:
+    def vless_link(self, key: VpnKey, *, now_unix: int, style: NameStyle = NameStyle.EXTENDED) -> str:
         """Render one Xray child exactly as the single-key config view does.
 
         This path is where "this key is a bundle member" is KNOWN rather than
         guessed — every key reaching it is a child of the bundle being served — so
         it states that to the spiderX seam explicitly. With rotation off the seam
-        returns the stored value and the link is the per-key link, byte for byte.
+        returns the stored value and the link is the per-key link, byte for byte,
+        apart from the display name, which follows the bundle's naming *style*.
+        The host follows the child's relay (``RELAY_HOST`` for a relay child).
         """
         uuid_value = str(key.payload.get("uuid") or key.uuid or "")
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "")
@@ -93,11 +87,12 @@ class _VlessLinkRenderer(XrayService):
         return self._build_vless_link(
             uuid_value,
             short_id,
-            _marked_name(email_label, self.member_name(key)),
+            key_display_name(key, style, self.settings),
             fingerprint=fingerprint,
             transport=self._key_transport(key),
             profile=self._key_profile(key),
             spider_x=self.link_spider_x(key, bundle_member=True, now_unix=now_unix),
+            relay=key.relay,
         )
 
 
@@ -114,11 +109,22 @@ def render_links(
 ) -> tuple[str, ...]:
     """Render every active child of the bundle into its client link.
 
-    Order comes from the composition seam (:func:`subscription_member_order`), NOT
-    from the children's ``id`` order: a bundle provisioned before the seam's order
-    last changed would otherwise keep serving the old one forever, and the
-    preference marks below only read as a ranking when the list is actually sorted
-    by it. Anything the seam does not know keeps its relative position at the end.
+    Order comes from the composition seam (:func:`services.key_bundles.subscription_sort_key`),
+    NOT from the children's ``id`` order: every direct child first, then every
+    relay child, each group in the composition order. A bundle provisioned before
+    the seam's order last changed would otherwise keep serving the old one, and
+    the preference marks only read as a ranking when the list is actually sorted
+    by it. Anything the seam does not know keeps its relative position at the end
+    of its group.
+
+    The bundle's kind picks the naming rule (:func:`services.key_naming.bundle_name_style`).
+
+    A child whose relay is not the configured, enabled one is SKIPPED with a
+    warning — the rest of the subscription is still served. That is the one
+    deliberate exception to "a child that cannot render fails the whole
+    response": switching the relay off is an operator decision, not a corrupt
+    row, and must not take the direct links of every relay-carrying bundle down
+    with it. Rendering such a child would need a host the bot refuses to invent.
 
     A protocol that cannot ride a v2ray subscription never reaches here (AWG and
     the proxies are excluded from ``bundle_composition``), so anything else is a
@@ -129,12 +135,21 @@ def render_links(
     """
     renderer = _VlessLinkRenderer(settings, clock)
     now_unix = renderer.link_instant()
+    style = bundle_name_style(view.bundle.kind)
     links: list[str] = []
-    for key in _ordered_children(view.keys, renderer):
+    for key in _ordered_children(view.keys):
+        if key.relay is not None and not relay_available(settings, key.relay):
+            logger.warning(
+                "subscription: bundle_id=%s skipping child key_id=%s — relay %r is not enabled/configured",
+                view.bundle.id,
+                key.id,
+                key.relay,
+            )
+            continue
         if key.key_type is VpnKeyType.XRAY:
-            links.append(renderer.vless_link(key, now_unix=now_unix))
+            links.append(renderer.vless_link(key, now_unix=now_unix, style=style))
         elif key.key_type is VpnKeyType.HYSTERIA2:
-            links.append(_hysteria2_link(key, settings))
+            links.append(_hysteria2_link(key, settings, style))
         else:
             raise SubscriptionRenderError(
                 f"key {key.id} of type {key.key_type.value} cannot ride a subscription"
@@ -142,54 +157,17 @@ def render_links(
     return tuple(links)
 
 
-def _ordered_children(keys: tuple[VpnKey, ...] | list[VpnKey], renderer: _VlessLinkRenderer) -> list[VpnKey]:
-    """Sort a bundle's children into the composition order, ties broken by id.
-
-    ``sorted`` is stable and the fallback rank is past the end of the seam, so an
-    unknown member (a protocol added to a bundle by a future migration before this
-    table learns about it) is appended rather than dropped or crashing the render.
-    """
-    order = subscription_member_order()
-    fallback = len(order)
-
-    def rank(key: VpnKey) -> tuple[int, int]:
-        name = _member_name(key, renderer)
-        return (order.index(name) if name in order else fallback, key.id)
-
-    return sorted(keys, key=rank)
+def _ordered_children(keys: tuple[VpnKey, ...] | list[VpnKey]) -> list[VpnKey]:
+    """Sort a bundle's children into the serving order (``sorted`` is stable)."""
+    return sorted(keys, key=subscription_sort_key)
 
 
-def _member_name(key: VpnKey, renderer: _VlessLinkRenderer) -> str:
-    """Composition-seam name of one provisioned child, whatever its protocol."""
-    if key.key_type is VpnKeyType.XRAY:
-        return renderer.member_name(key)
-    return key.key_type.value
-
-
-def _marked_name(label: str, member: str) -> str:
-    """``<label>_<mark>`` — the display name a subscription client shows.
-
-    Appended to the *name* only (the link's ``#fragment``); the label the backends
-    know is untouched, so reconciliation, stats and anomaly detection keep matching
-    on it. A member with no mark keeps its bare label.
-    """
-    mark = _PREFERENCE_MARKS.get(member)
-    return f"{label}_{mark}" if mark else label
-
-
-def _hysteria2_link(key: VpnKey, settings: Settings) -> str:
+def _hysteria2_link(key: VpnKey, settings: Settings, style: NameStyle) -> str:
     secret = str(key.payload.get("secret") or "")
     label = key.email_label or ""
     if not secret or not label:
         raise SubscriptionRenderError(f"Hysteria2 key {key.id} has no secret/label")
-    return format_hysteria2_link(
-        _marked_name(label, key.key_type.value),
-        secret,
-        host=settings.hysteria2_host,
-        port=settings.hysteria2_port,
-        sni=settings.hysteria2_sni,
-        insecure=settings.hysteria2_insecure,
-    )
+    return hysteria2_key_link(key, settings, style=style)
 
 
 def render_subscription(

@@ -5,6 +5,7 @@ from typing import Any
 
 from aiosqlite import Row
 
+from config.settings import RELAY_NAME_PATTERN
 from db.database import Database
 from db.exceptions import ConcurrentModificationError
 from models.dto import TrafficScopeTotals, VpnKey
@@ -69,7 +70,23 @@ def _row_to_vpn_key(row: Row | None) -> VpnKey | None:
         transport=str(row["transport"]) if "transport" in keys and row["transport"] else "tcp",
         xhttp_profile=str(row["xhttp_profile"]) if "xhttp_profile" in keys and row["xhttp_profile"] else "base",
         spider_x=str(row["spider_x"]) if "spider_x" in keys and row["spider_x"] else None,
+        relay=str(row["relay"]) if "relay" in keys and row["relay"] else None,
     )
+
+
+def _checked_relay(relay: str | None) -> str | None:
+    """The relay value to store: None (direct key) or a well-formed relay name.
+
+    The column has no CHECK (like transport), so the format is enforced here, on
+    the one write path every key goes through. Whether the relay is actually
+    configured is a service-level question (services.relay); this only keeps a
+    malformed value out of the database.
+    """
+    if relay is None:
+        return None
+    if RELAY_NAME_PATTERN.fullmatch(relay) is None:
+        raise ValueError(f"invalid relay name for vpn_keys.relay: {relay!r}")
+    return relay
 
 
 async def reserve_key_number(db: Database) -> int:
@@ -137,17 +154,20 @@ class VpnKeyRepository:
         transport: str = "tcp",
         xhttp_profile: str = "base",
         spider_x: str | None = None,
+        relay: str | None = None,
     ) -> VpnKey:
         """Insert a new VPN key in pending-apply status and return it."""
+        relay = _checked_relay(relay)
         cursor = await self.db.conn.execute(
             """
             INSERT INTO vpn_keys (
               owner_user_id, username, key_type, status, note,
               uuid, email_label, public_key, client_ip,
               payload_json, public_payload_json,
-              created_at, updated_at, created_by, expires_at, transport, xhttp_profile, spider_x
+              created_at, updated_at, created_by, expires_at, transport, xhttp_profile, spider_x,
+              relay
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 owner_user_id,
@@ -168,6 +188,7 @@ class VpnKeyRepository:
                 transport,
                 xhttp_profile,
                 spider_x,
+                relay,
             ),
         )
         await self.db.commit()
@@ -196,6 +217,7 @@ class VpnKeyRepository:
         transport: str = "tcp",
         xhttp_profile: str = "base",
         spider_x: str | None = None,
+        relay: str | None = None,
     ) -> VpnKey:
         """Create a new VPN key and return it."""
         return await self.create_pending(
@@ -215,6 +237,7 @@ class VpnKeyRepository:
             transport=transport,
             xhttp_profile=xhttp_profile,
             spider_x=spider_x,
+            relay=relay,
         )
 
     async def get_by_id(self, key_id: int) -> VpnKey | None:

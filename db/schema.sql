@@ -99,7 +99,14 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   -- children, and only then the bundle row. CASCADE would silently drop the
   -- children and leave orphaned Xray/hysteria credentials behind. Mirrors
   -- _migrate_v32.
-  bundle_id INTEGER REFERENCES key_bundles(id) ON DELETE RESTRICT
+  bundle_id INTEGER REFERENCES key_bundles(id) ON DELETE RESTRICT,
+  -- Relay the key's client link points at. NULL = direct key (the default and
+  -- every pre-v37 row); otherwise the relay name (RELAY_NAME). An attribute of
+  -- the key, NOT a key_type/transport: the key uses the same inbounds and the
+  -- same email-label prefix as a direct one. No CHECK (like transport); the
+  -- ^[a-z0-9][a-z0-9-]{0,31}$ format is validated in code on write. Mirrors
+  -- _migrate_v37.
+  relay TEXT
 );
 
 CREATE TABLE IF NOT EXISTS key_bundles (
@@ -124,7 +131,12 @@ CREATE TABLE IF NOT EXISTS key_bundles (
   -- Nullable only because ADD COLUMN cannot add a NOT NULL column without a
   -- constant default; _migrate_v33 backfills every existing row and the
   -- repository always writes it, so NULL never survives a bootstrap.
-  display_no INTEGER
+  display_no INTEGER,
+  -- All-in-one variant: 'basic' (VLESS TCP + Hysteria2) or 'extended' (VLESS
+  -- TCP, the three XHTTP profiles and Hysteria2). Every pre-v37 bundle is
+  -- 'extended', which is exactly what it was. No CHECK (like transport):
+  -- validated in code and by _validate_enum_values. Mirrors _migrate_v37.
+  kind TEXT NOT NULL DEFAULT 'extended'
 );
 
 CREATE TABLE IF NOT EXISTS trial_key_requests (
