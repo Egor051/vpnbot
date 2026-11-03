@@ -25,8 +25,9 @@ relay**) и хранятся в таблице `relays` в `vpn.db`. Пока в
 - Клиент через relay попадает в **те же inbound'ы**, что и прямой: VLESS (TCP) и все
   профили VLESS (HTTP) на vless-in :443, Hysteria2 на UDP/443. На основном сервере
   про relay не знает ничего.
-- Сама relay-инфраструктура (правила nftables, sysctl, VPS) **вне этого
-  репозитория**. Её трекинг в `deploy/relay/` — отдельной PR.
+- Сам relay-хост (таблица nftables, `ip_forward`, его systemd-unit) разворачивается **из
+  этого репозитория** тем же `scripts/redeploy.sh` в роли хоста `NODE_ROLE=relay` — см.
+  [Relay-хост](#relay-хост-node_rolerelay).
 
 ### DNS — указывайте имя, а не адрес
 
@@ -40,6 +41,185 @@ REALITY, ни QUIC. Это имя и указывайте как **host** relay.
 рендерятся на каждый запрос), но каждый **одиночный relay-ключ**, импортированный
 пользователем ссылкой, хранит старый адрес и требует переимпорта — при смене host
 панель показывает, сколько таких ключей.
+
+## Relay-хост (`NODE_ROLE=relay`)
+
+На relay-хосте работает **одно**: `vpn-relay.service` — oneshot-unit, который выполняет
+`/usr/local/sbin/vpn-relay-apply apply`. Хелпер рендерит таблицу nftables `ip vpnrelay` из
+`.env` relay, применяет её **одной атомарной транзакцией `nft -f`** (`table ip vpnrelay` +
+`delete table ip vpnrelay` + новая таблица — nft применяет всё целиком или оставляет прежнюю
+таблицу как была) и затем ставит `net.ipv4.ip_forward = 1` (в рантайме и в
+`/etc/sysctl.d/90-vpn-relay.conf`).
+
+Больше ничего из репозитория там не работает: ни `vpn-bot`, ни `vpn-bot-subscription`, ни
+`hy2_auth`, ни БД, ни Xray, AmneziaWG, WARP, и **никакого Telegram** — тот же `BOT_TOKEN` на
+втором хосте конфликтовал бы с основным ботом за `getUpdates`. `config/settings.py` не
+загружается, у relay свой минимальный `.env`. Собственные INPUT/OUTPUT relay (SSH на :22) не
+трогаются никогда: в ruleset нет hook `input`/`output` (закреплено тестами), а drop-in sshd
+вроде `/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf` деплоя не касается.
+
+Для портов по умолчанию отрендеренный ruleset ровно тот, что работал на relay, собранном
+вручную:
+
+```
+table ip vpnrelay
+delete table ip vpnrelay
+table ip vpnrelay {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    iifname "eth0" tcp dport 443 counter dnat to <upstream>:443
+    iifname "eth0" udp dport 443 counter dnat to <upstream>:443
+  }
+  chain post {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "eth0" ip daddr <upstream> ct status dnat counter masquerade
+  }
+  chain relayfwd {
+    type filter hook forward priority filter; policy drop;
+    tcp flags syn tcp option maxseg size set rt mtu
+    ct state established,related accept
+    ct status dnat ip daddr <upstream> accept
+    counter
+  }
+}
+```
+
+Каждый пробрасываемый порт получает одно правило DNAT на **тот же** порт upstream; masquerade,
+MSS clamp и forward-цепочка (policy drop, проходят только DNAT'нутые потоки и ответы на них)
+от портов не зависят. Flowtable и прочий тюнинг не нужны: на relay с 1 vCPU 107 Мбит/с
+форварда оставляли CPU простаивающим на 96–98 %.
+
+### `.env` relay
+
+`/opt/vpn-service/.env` из [`deploy/relay/relay.env.example`](../deploy/relay/relay.env.example).
+Читается тем же sed-парсером, которым `deploy.sh` читает `NODE_ROLE` (а fwmark-хелпер
+Hysteria2 — `HYSTERIA2_PORT`): необязательный `export`, пробелы вокруг `=`, кавычки,
+комментарии `# …` в конце строки, побеждает **последнее** присваивание, пустое значение
+равно отсутствующему.
+
+| Переменная | По умолчанию | Смысл |
+|---|---|---|
+| `NODE_ROLE` | `main` | `relay` на relay-хосте. Любое другое значение отвергается до каких-либо изменений. |
+| `RELAY_UPSTREAM_IPV4` | — (обязательна) | IPv4 основного сервера. |
+| `RELAY_FORWARD_TCP_PORTS` | `443` | Через запятую, 1..65535; каждый пробрасывается 1:1. |
+| `RELAY_FORWARD_UDP_PORTS` | `443` | То же для UDP (Hysteria2). |
+| `RELAY_WAN_IFACE` | интерфейс IPv4 default route | WAN-интерфейс правил DNAT/masquerade. Без неё хелпер отказывает, если default route нет или он уходит через несколько интерфейсов. |
+| `RELAY_CHECK_SNI` | — | Если задана (и 443 пробрасывается), `vpn-relay-apply check` дополнительно делает TLS-handshake к upstream с этим SNI и **проверяет сертификат**. Укажите `XRAY_SNI` основного сервера: REALITY отдаёт незнакомого клиента своему decoy, чей сертификат валиден для этого имени. |
+
+### `vpn-relay-apply`
+
+| Команда | Что делает |
+|---|---|
+| `apply` | Рендер + атомарное применение таблицы, затем `ip_forward=1`. Это запускает unit. |
+| `check` | Только чтение: живая таблица совпадает с рендером (счётчики не сравниваются; при расхождении печатается diff), `ip_forward=1`, TCP-connect к upstream на **каждый** пробрасываемый TCP-порт и TLS-handshake, если задан `RELAY_CHECK_SNI`. Им заканчивается каждый деплой. |
+| `check --dry-run` | Проверить `.env` и отрендерить; под root ещё `nft -c` (проверка синтаксиса, ничего не применяется). Это запускает Phase 1 деплоя из checkout. |
+| `show` | Напечатать отрендеренный ruleset. |
+
+Коды выхода: `0` ok · `2` использование · `3` неверное/отсутствующее значение в `.env` · `4`
+не определён WAN-интерфейс · `5` не root / нет утилиты · `6` nft отверг ruleset (живая таблица
+не изменилась) · `7` не удалось выставить ip_forward / записать sysctl-файл · `10` таблицы нет ·
+`11` живая таблица отличается от рендера · `12` ip_forward не равен 1 · `13` upstream не
+отвечает на пробрасываемом TCP-порту · `14` TLS-handshake не прошёл. `check` сообщает обо всех
+сбоях и выходит с кодом первого.
+
+### Что делает `scripts/redeploy.sh` на relay
+
+Те же команды, что на основном сервере; `deploy.sh` читает `NODE_ROLE` и отказывает хосту,
+сервисы которого противоречат роли (роль `relay`, а активен `vpn-bot` или `xray`; роль `main`,
+а активен `vpn-relay` и unit'а `vpn-bot` нет вовсе).
+
+- **Phase 1** (только чтение; `CHECK=1` на ней останавливается и печатает отчёт): fetch
+  `origin/main`, тот же гейт ruff / compileall / pytest на checkout, что и на основном
+  сервере (тестовый venv собирается в `/var/lib/vpn-bot-deploy/`, поэтому relay нужен
+  `python3-venv` и ~1 ГиБ свободного места), `vpn-relay-apply check --dry-run` из checkout,
+  исходное состояние relay, сравнение установленного unit'а с
+  `deploy/relay/vpn-relay.service` и `check` из checkout против живого relay — на relay, где
+  ещё работает ruleset, собранный вручную, **PASS** здесь доказывает, что репозиторий
+  воспроизводит его 1:1.
+- **Phase 2**: бэкап живого `nft list table ip vpnrelay`, установленного хелпера, unit'а и
+  sysctl-файла (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; ради бэкапа ничего не
+  останавливается); `git reset --hard origin/main`; установка `vpn-relay-apply` через
+  `OUT_OF_REPO_HELPERS` (роль `relay`) и `deploy/relay/vpn-relay.service` как есть;
+  `daemon-reload`, `enable`, `restart vpn-relay` (установленные потоки сохраняют NAT в
+  conntrack на миллисекундный разрыв); проверка `vpn-relay-apply check`.
+- **Любой сбой** откатывает: прежний checkout, хелпер, unit и sysctl-файл (или их отсутствие),
+  сохранённая таблица применяется заново одной транзакцией, восстанавливаются enabled/active
+  unit'а и прежний `ip_forward`. Деплой выходит с ненулевым кодом и отчётом об откате.
+- Unit, установленный вручную и загружающий `/etc/vpn-relay.nft`, — **ожидаемый первый
+  переход**, а не drift. После первого успешного деплоя `/etc/vpn-relay.nft` переименовывается
+  в `/etc/vpn-relay.nft.pre-repo.<ts>` (не удаляется) и больше никем не читается.
+
+### Новый relay с нуля
+
+На relay (Ubuntu 24.04, root по SSH-ключу):
+
+```bash
+apt-get update && apt-get install -y git python3-venv nftables
+```
+
+```bash
+git clone https://github.com/Egor051/vpnbot.git /opt/vpn-service
+```
+
+```bash
+install -m 0600 -o root -g root /opt/vpn-service/deploy/relay/relay.env.example /opt/vpn-service/.env
+```
+
+Отредактируйте `/opt/vpn-service/.env`: `RELAY_UPSTREAM_IPV4` = IPv4 основного сервера и
+желательно `RELAY_CHECK_SNI` = `XRAY_SNI` основного сервера. Затем проверка и деплой:
+
+```bash
+cd /opt/vpn-service && sudo CHECK=1 bash scripts/redeploy.sh
+```
+
+```bash
+cd /opt/vpn-service && sudo FORCE=1 bash scripts/redeploy.sh
+```
+
+`FORCE=1` — только в этот первый раз: свежий clone уже стоит на `origin/main`, и обычный
+запуск ответит «nothing to deploy» — ровно как на основном сервере. Дальше обновления
+обычные: `sudo CHECK=1 bash scripts/redeploy.sh`, затем `sudo bash scripts/redeploy.sh`.
+
+Проверка: `systemctl status vpn-relay`, `nft list table ip vpnrelay`,
+`/usr/local/sbin/vpn-relay-apply check`.
+
+Затем на **основном сервере**:
+
+1. A-запись DNS для relay — например, `relay2.anycastedge.net` → IPv4 relay — в Cloudflare
+   **без проксирования** (см. [DNS](#dns--указывайте-имя-а-не-адрес)).
+2. **🛡 Админ-панель → 🛰 Управлять relay → Добавить relay**: host = это имя, source IPs =
+   egress-IPv4 relay (у DNAT-relay обычно тот адрес, по которому к нему приходят), name и
+   label — как в [Управлении relay](#управление-relay-в-админ-панели). (`RELAY_HOST` /
+   `RELAY_SOURCE_IPS` в `.env` основного сервера с переездом relay в панель — legacy: они лишь
+   один раз заполняют пустую таблицу `relays`.)
+3. **«Проверить сейчас»** в карточке relay: health-проба проходит через DNAT relay до
+   основного inbound'а и обратно.
+
+Изменение `RELAY_FORWARD_*` (или любого значения в `.env` relay) не двигает `HEAD`, поэтому
+применяйте его через `sudo FORCE=1 bash scripts/redeploy.sh` — с бэкапом, рестартом,
+проверкой и откатом, — а не голым `systemctl restart vpn-relay`.
+
+### Проброс порта подписки (2096) через relay
+
+В этом релизе не сделано; что для этого нужно:
+
+- **На relay** — простая половина: `RELAY_FORWARD_TCP_PORTS=443,2096` и
+  `sudo FORCE=1 bash scripts/redeploy.sh`. TCP/2096 тогда доходит до subscription-endpoint
+  основного сервера, а `check` проверяет ещё и `<upstream>:2096`.
+- **На основном сервере** — часть, требующая кода:
+  - URL подписки, который получает пользователь, строится на основном домене
+    (`https://<HYSTERIA2_SNI>:<SUBSCRIPTION_PUBLIC_PORT>/sub/<token>`); чтобы скачивать
+    подписку через relay, нужен URL с host relay, то есть отдельный URL подписки на relay в
+    боте;
+  - TLS терминируется на основном сервере сертификатом основного домена, значит имя relay
+    должно быть в этом сертификате (SAN; раз relay пробрасывает 443 на основной сервер,
+    практичнее выпускать через DNS-01);
+  - rate limit endpoint'а считается по адресу пира, а каждый запрос через relay приходит с
+    egress-IP relay — все пользователи relay делили бы один bucket
+    (`SUBSCRIPTION_RATE_LIMIT_BURST` за `SUBSCRIPTION_RATE_LIMIT_SECONDS`), если source IPs
+    relay не получат отдельной обработки;
+  - правило firewall из `deploy/ufw-subscription.sh` relay уже пропускает (оно не ограничено
+    по источнику), а монитор доступности по-прежнему проверял бы только `XRAY_PUBLIC_PORT`.
 
 ## Управление relay в админ-панели
 
@@ -224,7 +404,8 @@ inbound целиком» (проверено вручную: HTTP 200, `verify=0
   виден только в ссылке, которую держит пользователь.
 - **URL подписки остаётся на основном домене.** Sub-URL (`:2096` в живом деплое)
   запрашивается с домена основного сервера, а не через relay; на relay указывают
-  только ссылки внутри.
+  только ссылки внутри. Что нужно, чтобы перенести его за relay:
+  [Проброс порта подписки](#проброс-порта-подписки-2096-через-relay).
 - **Существующие подписки получают relay-участников только через админское
   приведение.** Добавление или включение relay существующие подписки само по себе не
   трогает. Админ-панель → «🔗 All-in-One» → «Дополнить все подписки по текущим настройкам»
