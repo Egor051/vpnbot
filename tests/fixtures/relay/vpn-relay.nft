@@ -1,0 +1,20 @@
+table ip vpnrelay
+delete table ip vpnrelay
+table ip vpnrelay {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    iifname "eth0" tcp dport 443 counter dnat to 150.251.152.243:443
+    iifname "eth0" udp dport 443 counter dnat to 150.251.152.243:443
+  }
+  chain post {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "eth0" ip daddr 150.251.152.243 ct status dnat counter masquerade
+  }
+  chain relayfwd {
+    type filter hook forward priority filter; policy drop;
+    tcp flags syn tcp option maxseg size set rt mtu
+    ct state established,related accept
+    ct status dnat ip daddr 150.251.152.243 accept
+    counter
+  }
+}

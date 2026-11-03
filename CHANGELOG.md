@@ -8,6 +8,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Host role `NODE_ROLE=relay`: the L4 relay is deployed from this repository with the same
+  `scripts/redeploy.sh` (docs/relay.md#the-relay-host-node_rolerelay).** `NODE_ROLE` in
+  `/opt/vpn-service/.env` is `main` (default — also when absent; the main deploy is unchanged
+  in every step) or `relay`; any other value is refused before anything changes, and so is a
+  host whose services contradict its role (`relay` with `vpn-bot`/`xray` active, `main` with
+  `vpn-relay` active and no `vpn-bot` unit). A relay runs no bot, DB, Xray, AmneziaWG, WARP or
+  Telegram; its `.env` is `deploy/relay/relay.env.example` (`RELAY_UPSTREAM_IPV4`,
+  `RELAY_FORWARD_TCP_PORTS`/`_UDP_PORTS` default `443`, optional `RELAY_WAN_IFACE` — default:
+  the IPv4 default-route interface — and `RELAY_CHECK_SNI`). The new helper
+  `scripts/vpn-relay-apply` (`apply | check [--dry-run] | show`, distinct exit codes) renders
+  table `ip vpnrelay` — DNAT tcp/udp per port 1:1 to the upstream, masquerade, MSS clamp,
+  forward policy drop except DNAT'ed flows, never an input/output hook — and applies it in one
+  atomic `nft -f`, then `net.ipv4.ip_forward=1`; for 443/443 the render is byte-identical to the
+  hand-made relay's `/etc/vpn-relay.nft`. `deploy/relay/vpn-relay.service` runs it. On a relay
+  `deploy.sh` runs the same test gate, renders from `.env` in Phase 1, then backs up the live
+  table + helper + unit + sysctl file, installs the helper (`OUT_OF_REPO_HELPERS` entries now
+  carry an optional role field, default `main`) and the unit verbatim, enables and restarts it
+  and verifies with `vpn-relay-apply check`; any failure restores the files, the saved table,
+  the unit's enabled/active state and `ip_forward`. The hand-installed unit is the expected
+  first transition, not drift; `/etc/vpn-relay.nft` is renamed to `.pre-repo.<ts>` after the
+  first successful deploy. Forwarding the subscription port (2096) through a relay is described,
+  not implemented.
+
 - **Relays are managed from the admin panel instead of `.env` (`relays` table, schema
   v38, docs/relay.md).** SUPERADMIN → «🛰 Управлять relay»: a list (label, name, host,
   on/off, «в подписках», active keys, latest health probe), a card per relay (edit host /

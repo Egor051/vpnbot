@@ -15,6 +15,10 @@
 #   sudo CHECK=1 bash scripts/redeploy.sh   # inspection only: Phase 1, no mutations (PHASE1_ONLY=1)
 #   sudo FORCE=1 bash scripts/redeploy.sh   # redeploy even when HEAD already == origin/main
 #
+# The same commands deploy an L4 relay host: deploy.sh reads NODE_ROLE from the
+# host's .env (main | relay) and runs the matching flow, so this wrapper has no
+# role of its own (docs/relay.md, "A new relay from scratch").
+#
 # CHECK and FORCE are independent. CHECK maps to deploy.sh's PHASE1_ONLY=1 and is
 # the recommended first step on any host you have not just deployed. Recommended
 # flow: `sudo CHECK=1 bash scripts/redeploy.sh` (read the report), then

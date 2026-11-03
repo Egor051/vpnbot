@@ -1,0 +1,28 @@
+# vpnbot L4 relay — the data plane of a NODE_ROLE=relay host (docs/relay.md).
+#
+# Renders nftables table `ip vpnrelay` from /opt/vpn-service/.env (RELAY_* keys,
+# template deploy/relay/relay.env.example) and applies it atomically, then sets
+# net.ipv4.ip_forward=1 — see scripts/vpn-relay-apply. `stop` removes the table;
+# the leading "-" keeps a stop clean when the table is already gone.
+#
+# Installed VERBATIM by scripts/deploy.sh in the relay role (the same way
+# deploy/vpn-bot.service is installed on the main server), enabled, restarted,
+# then verified with `vpn-relay-apply check`; any failure rolls back. The helper
+# it runs is installed/refreshed from OUT_OF_REPO_HELPERS (role relay).
+#
+# Replaces the hand-installed unit of the same name that loaded
+# /etc/vpn-relay.nft; that file is renamed to /etc/vpn-relay.nft.pre-repo.<ts>
+# after the first successful deploy and is not read any more.
+[Unit]
+Description=vpnbot L4 relay (nftables table ip vpnrelay from /opt/vpn-service/.env)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vpn-relay-apply apply
+ExecStop=-/usr/sbin/nft delete table ip vpnrelay
+
+[Install]
+WantedBy=multi-user.target

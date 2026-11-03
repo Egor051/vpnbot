@@ -1,0 +1,11 @@
+[Unit]
+Description=vpnbot L4 relay (tcp+udp 443 -> 150.251.152.243)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/vpn-relay.nft
+ExecStop=/usr/sbin/nft delete table ip vpnrelay
+[Install]
+WantedBy=multi-user.target

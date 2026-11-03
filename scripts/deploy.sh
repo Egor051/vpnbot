@@ -28,6 +28,29 @@
 # switched by editing that repo file (guarded by ALLOW_MODEL_SWITCH).
 #
 # --------------------------------------------------------------------------- #
+# HOST ROLE — NODE_ROLE in ${APP_DIR}/.env
+# --------------------------------------------------------------------------- #
+#   main   (default; also when NODE_ROLE is absent or empty) — the bot server.
+#          Everything below this block. Its behaviour does not depend on the role
+#          code in any step: the role is resolved and checked before the first
+#          mutation, and the main path continues exactly as it always has.
+#   relay  an L4 relay (docs/relay.md). Runs NO bot, DB, Xray, AmneziaWG, WARP or
+#          Telegram; its .env is the minimal deploy/relay/relay.env.example.
+#          Phase 1: fetch, the same ruff/compileall/pytest gate on the checkout,
+#          `vpn-relay-apply check --dry-run` from the checkout (the ruleset renders
+#          from .env) — no main-only check. Phase 2: backup (live table ip
+#          vpnrelay, helper, unit, sysctl file), reset, install the helper
+#          (OUT_OF_REPO_HELPERS, role relay) and deploy/relay/vpn-relay.service
+#          verbatim, daemon-reload, enable, restart, verify = `vpn-relay-apply
+#          check`; any failure rolls back to the backup (files + saved table).
+#          See relay_deploy() below.
+# Read with env_sed_val (the sed parser of scripts/vpnbot-hy2-warp-mark: quotes,
+# spaces, inline comments, `export`, last assignment wins). Any other value is
+# refused before anything changes. A role mismatch is refused too: role relay on a
+# host where vpn-bot.service or xray.service is active, role main on a host where
+# vpn-relay.service is active and vpn-bot.service does not exist.
+#
+# --------------------------------------------------------------------------- #
 # ENVIRONMENT KNOBS
 # --------------------------------------------------------------------------- #
 # Every knob defaults to the safe value; you opt into risk explicitly. The four
@@ -216,6 +239,32 @@ SUBSCRIPTION_BIND_WAIT="${SUBSCRIPTION_BIND_WAIT:-30}"
 # spends in `activating`, so a healthy restart is never misread as a failure.
 SIDECAR_ACTIVE_WAIT="${SIDECAR_ACTIVE_WAIT:-20}"
 
+# Relay role (NODE_ROLE=relay, see the HOST ROLE block in the header). None of
+# these is read on a main server.
+NODE_ROLE=""                                   # resolved by resolve_node_role: main | relay
+RELAY_UNIT="vpn-relay.service"
+RELAY_UNIT_SRC="deploy/relay/vpn-relay.service"   # checkout-relative; installed verbatim
+RELAY_SYSTEM_UNIT="${RELAY_SYSTEM_UNIT:-/etc/systemd/system/vpn-relay.service}"
+RELAY_HELPER="/usr/local/sbin/vpn-relay-apply"     # == its OUT_OF_REPO_HELPERS destination
+RELAY_SYSCTL_FILE="${RELAY_SYSCTL_FILE:-/etc/sysctl.d/90-vpn-relay.conf}"
+# The hand-installed relay loaded this file; after the first successful deploy it
+# is renamed to ${RELAY_LEGACY_NFT}.pre-repo.<ts> (never deleted) and not read again.
+RELAY_LEGACY_NFT="${RELAY_LEGACY_NFT:-/etc/vpn-relay.nft}"
+RELAY_TABLE="vpnrelay"
+# Where the pre-deploy `nft list table ip vpnrelay` dump sits INSIDE the backup
+# stage/archive (the relay rollback restores from the stage, never by extracting
+# an archive into /).
+RELAY_TABLE_DUMP="/var/lib/vpn-bot-deploy/relay-table.pre-deploy.nft"
+# Phase 1 pre-state of the relay, the rollback's reference.
+RELAY_PRE_ACTIVE=""
+RELAY_PRE_ENABLED=""
+RELAY_PRE_FORWARD=""
+RELAY_PRE_TABLE=""
+RELAY_UNIT_STATE=""      # absent | synced | legacy | differs (relay_unit_state)
+RELAY_RENDER_OUT=""
+RELAY_LIVE_OUT=""
+RELAY_LIVE_RC=""
+
 # Out-of-repo privileged helpers: tracked SOURCE lives in the checkout, the
 # INSTALLED copy lives under /usr/local/sbin. `git reset --hard origin/main`
 # advances the source but NEVER the installed copy, so a fixed helper would keep
@@ -245,7 +294,7 @@ SIDECAR_ACTIVE_WAIT="${SIDECAR_ACTIVE_WAIT:-20}"
 # (Exec*=), or a deploy/sudoers.d/* fragment grants one, that has no entry here.
 # That second scan is anchored at the install site, so it still fires for a helper
 # whose source is not (or is no longer) a scripts/ file.
-# Format per entry: "<checkout-relative-source>|<installed-absolute-path>[|<policy>]"
+# Format per entry: "<checkout-relative-source>|<installed-absolute-path>[|<policy>[|<role>]]"
 # policy (default absent-ok when the field is omitted):
 #   absent-ok  an ABSENT installed copy means the subsystem is not deployed on this
 #              host (WARP), so installing the helper alone would be pointless —
@@ -253,6 +302,11 @@ SIDECAR_ACTIVE_WAIT="${SIDECAR_ACTIVE_WAIT:-20}"
 #   required   the helper MUST exist on every host because a systemd unit names it
 #              in Exec*=; absent is installed, not tolerated. Without this,
 #              vpn-bot.service's ExecStartPre would fail 203/EXEC on a clean host.
+# role (default main when the field is omitted): the host role (NODE_ROLE) the
+# entry belongs to. scan_out_of_repo_helpers only ever sees the entries of the
+# host's own role, so a main server never scans, installs or reports a relay
+# helper and a relay never touches the WARP/DB helpers. `required` means
+# "required on every host OF THAT ROLE".
 OUT_OF_REPO_HELPERS=(
   "scripts/vpn-bot-warp-install|/usr/local/sbin/vpn-bot-warp-install|absent-ok"
   "scripts/vpn-bot-warp-iface|/usr/local/sbin/vpn-bot-warp-iface|absent-ok"
@@ -267,6 +321,9 @@ OUT_OF_REPO_HELPERS=(
   "scripts/warp-failsafe|/usr/local/sbin/warp-failsafe|absent-ok"
   "scripts/vpnbot-hy2-warp-mark|/usr/local/sbin/vpnbot-hy2-warp-mark|absent-ok"
   "scripts/vpn-bot-db-perms|/usr/local/sbin/vpn-bot-db-perms|required"
+  # L4 relay data plane: executed by deploy/relay/vpn-relay.service (ExecStart=),
+  # so `required` on every relay host; invisible on a main server.
+  "scripts/vpn-relay-apply|/usr/local/sbin/vpn-relay-apply|required|relay"
 )
 # The one helper that is EXECUTED by a systemd unit (warp-routes.service runs it),
 # so a fresh binary only takes effect on restart. Refreshing it triggers a
@@ -389,7 +446,12 @@ arm_interim()  { PHASE="interim"; trap 'on_interim' ERR INT TERM HUP; }
 arm_rollback() { PHASE="armed";   trap 'rollback'   ERR INT TERM HUP; }
 disarm()       { PHASE="done";    trap - ERR INT TERM HUP; }
 # Explicit assertion failure while armed -> route through rollback with a message.
-rollback_now() { warn "$1"; rollback; }
+# The relay role has its own rollback (relay_rollback: no bot, no DB); shared code
+# such as install_out_of_repo_helpers reaches the right one through here.
+rollback_now() {
+  warn "$1"
+  if [[ "${NODE_ROLE:-main}" == "relay" ]]; then relay_rollback; else rollback; fi
+}
 
 # --------------------------------------------------------------------------- #
 # Small utilities
@@ -432,12 +494,14 @@ unit_states() {
 # helper absent IS actionable (a unit's Exec*= names it). Only a present-but-
 # different copy is drift, under either policy.
 scan_out_of_repo_helpers() {
-  local root="${1%/}" entry src_rel dst policy base src
+  local root="${1%/}" entry src_rel dst policy role base src
   for entry in "${OUT_OF_REPO_HELPERS[@]}"; do
     # Read the fields positionally: the policy field is OPTIONAL and defaults to
-    # absent-ok, so a two-field entry stays valid.
-    IFS='|' read -r src_rel dst policy <<< "$entry"
+    # absent-ok, so a two-field entry stays valid; the role field is OPTIONAL too
+    # and defaults to main. Entries of another role are not this host's helpers.
+    IFS='|' read -r src_rel dst policy role <<< "$entry"
     policy="${policy:-absent-ok}"
+    [[ "${role:-main}" == "${NODE_ROLE:-main}" ]] || continue
     base="$(basename "$dst")"
     src="${root}/${src_rel}"
     if   [[ ! -e "$dst" ]];    then printf '%s|%s|%s|absent|%s\n' "$base" "$src" "$dst" "$policy"
@@ -513,8 +577,12 @@ install_out_of_repo_helpers() {
   # unchanged port this is a no-op (first exercised live in PR-A at 15650). Skip
   # when it was not active pre-deploy, mirroring the warp-routes operator-intent
   # policy. No daemon-reload: the unit file is unchanged; only ExecStart re-runs.
+  # Main role only: a relay host has no Hysteria2 and no fwmark unit, and its scan
+  # above only ever saw its own role's helpers.
   local hy2_pre="${U_PRE_ACTIVE[$HY2_MARK_UNIT]:-}"
-  if [[ "$hy2_pre" == "active" ]]; then
+  if [[ "${NODE_ROLE:-main}" != "main" ]]; then
+    :
+  elif [[ "$hy2_pre" == "active" ]]; then
     log "  ${HY2_MARK_UNIT} was active pre-deploy — re-applying to sync the --sport exemption with the current HYSTERIA2_PORT"
     systemctl restart "$HY2_MARK_UNIT" \
       || rollback_now "${HY2_MARK_UNIT} re-apply failed (fwmark --sport exemption may be stale for the current HYSTERIA2_PORT)"
@@ -655,6 +723,65 @@ env_val() {
   printf '%s' "$val"
 }
 is_true() { case "${1,,}" in true|1|yes|on) return 0;; *) return 1;; esac; }
+
+# The stricter .env reader for NODE_ROLE (and nothing on the main path): the sed
+# pipeline of scripts/vpnbot-hy2-warp-mark (HYSTERIA2_PORT), which on top of
+# env_val's quotes/whitespace/last-wins also takes an `export ` prefix, spaces
+# around `=` and an inline `# comment`. scripts/vpn-relay-apply carries the SAME
+# pipeline for the RELAY_* keys; tests/test_relay_deploy.py runs one fixture matrix
+# through all three and requires identical results — change them together.
+# env_val is deliberately NOT switched over: every main-role read would change.
+env_sed_val() {
+  local key="$1" file="${2:-$ENV_FILE}"
+  [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
+  [[ -r "$file" ]] || return 0
+  sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?${key}[[:space:]]*=[[:space:]]*//p" "$file" \
+    | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/" -e 's/[[:space:]]*$//'
+}
+
+# --------------------------------------------------------------------------- #
+# Host role (see the HOST ROLE block in the header)
+# --------------------------------------------------------------------------- #
+# Sets NODE_ROLE to main | relay. Absent or empty = main (every host deployed
+# before roles existed). Anything else is refused HERE, before the first mutation
+# of either role — a typo must never fall through to "main" on a relay or the
+# other way round.
+resolve_node_role() {
+  local raw
+  raw="$(env_sed_val NODE_ROLE)"
+  case "$raw" in
+    ""|main) NODE_ROLE="main" ;;
+    relay)   NODE_ROLE="relay" ;;
+    *) die "NODE_ROLE='${raw}' in ${ENV_FILE} is not a known host role (main | relay) — refusing to deploy; nothing was changed" ;;
+  esac
+}
+
+# Refuse a host whose running services contradict its declared role, before the
+# first mutation. Two directions:
+#   relay declared, but this is a bot server (vpn-bot or xray active): a relay
+#     deploy would leave the bot unmanaged, and the bot's own deploy would be
+#     skipped — the .env is almost certainly the wrong one.
+#   main declared (or NODE_ROLE missing), but this is a relay (vpn-relay active, no
+#     vpn-bot unit at all): the main deploy would fail half-way on the missing
+#     prod venv/DB at best; the most likely cause is a relay .env that lost its
+#     NODE_ROLE line.
+role_guard() {
+  local u
+  case "$NODE_ROLE" in
+    relay)
+      for u in "$BOT_UNIT" "xray.service"; do
+        if [[ "$(systemctl is-active "$u" 2>/dev/null || true)" == "active" ]]; then
+          die "NODE_ROLE=relay in ${ENV_FILE}, but ${u} is active on this host — this looks like the main server. Refusing to deploy a relay over it; nothing was changed"
+        fi
+      done
+      ;;
+    main)
+      if [[ "$(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true)" == "active" ]] && ! unit_exists "$BOT_UNIT"; then
+        die "${RELAY_UNIT} is active and ${BOT_UNIT} does not exist — this looks like a relay, but ${ENV_FILE} has no NODE_ROLE=relay (role resolved: main). Add NODE_ROLE=relay (deploy/relay/relay.env.example) and re-run; nothing was changed"
+      fi
+      ;;
+  esac
+}
 
 # Read schema_meta.schema_version from the live DB. Prints the bare integer on a
 # clean read, or NOTHING (empty) when the value cannot be read — a missing DB, a
@@ -1698,6 +1825,455 @@ constraints_stamp() {
   cat "$wt/constraints-hashed.txt" "$wt/constraints-dev-hashed.txt" | sha256sum | awk '{print $1}'
 }
 
+# Fetch origin/main, set TAG, apply the up-to-date gate (exit 0 unless FORCE /
+# PHASE1_ONLY) and refuse a dirty working tree. Shared by both host roles; the
+# main path calls it exactly where this code used to stand inline.
+fetch_origin_main() {
+  log "fetching origin/main"
+  git fetch origin main
+  TAG="$(git rev-parse --short origin/main)"
+
+  if [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]]; then
+    if [[ "$PHASE1_ONLY" == "1" ]]; then
+      log "HEAD already at origin/main (${TAG}); PHASE1_ONLY=1: running Phase 1 checks anyway (no deploy)."
+    elif [[ "$FORCE" != "1" ]]; then
+      log "HEAD already at origin/main (${TAG}); nothing to deploy. Set FORCE=1 to redeploy anyway."
+      exit 0
+    else
+      warn "FORCE=1: redeploying although HEAD already equals origin/main"
+    fi
+  fi
+
+  # Preconditions -------------------------------------------------------------
+  local dirty
+  dirty="$(git status --porcelain)"
+  if [[ -n "$dirty" ]]; then
+    warn "working tree is not clean:"; printf '%s\n' "$dirty" >&2
+    die "commit, stash, or clean the working tree before deploying"
+  fi
+}
+
+# Tests in an isolated worktree + a separate test venv (never the prod venv).
+# Sets WT (global: the EXIT trap removes it). Shared by both host roles: a relay
+# runs the SAME gate on the checkout it is about to deploy.
+run_checkout_tests() {
+  local want_stamp have_stamp
+  WT="$(mktemp -d)"
+  git worktree add --detach "$WT" origin/main >/dev/null
+  log "worktree at ${WT} (origin/main ${TAG})"
+
+  want_stamp="$(constraints_stamp "$WT")"
+  have_stamp="$(cat "${TEST_VENV}/.constraints-stamp" 2>/dev/null || true)"
+  if [[ ! -x "${TEST_VENV}/bin/python" || "$have_stamp" != "$want_stamp" ]]; then
+    log "building test venv ${TEST_VENV} (constraints changed or venv absent)"
+    rm -rf "$TEST_VENV"
+    install -d "$(dirname "$TEST_VENV")"
+    python3 -m venv "$TEST_VENV"
+    "${TEST_VENV}/bin/pip" install --quiet --upgrade pip
+    "${TEST_VENV}/bin/pip" install --require-hashes -r "$WT/constraints-hashed.txt"
+    "${TEST_VENV}/bin/pip" install --require-hashes -r "$WT/constraints-dev-hashed.txt"
+    printf '%s' "$want_stamp" > "${TEST_VENV}/.constraints-stamp"
+  else
+    log "reusing test venv ${TEST_VENV}"
+  fi
+
+  log "running ruff / compileall / pytest against origin/main"
+  # This is the one ruff call site that does NOT go through `make lint`/.venv-lint,
+  # and deliberately so. The rule `make lint` exists to enforce is "never lint with
+  # an ambient or prod-venv ruff"; TEST_VENV already satisfies it more strictly —
+  # it is built above from constraints-dev-hashed.txt with --require-hashes, so its
+  # ruff is the same pinned version verified by hash, and the stamp covers the
+  # constraints files, so a ruff bump forces a rebuild here. Routing this through
+  # `make lint` would build a second venv inside the throwaway worktree on every
+  # deploy, turning a PyPI reachability blip into a failed deploy gate for no gain
+  # in isolation. If this line ever stops using TEST_VENV, it must move to
+  # `make lint` rather than back to a bare `ruff`.
+  ( cd "$WT" && "${TEST_VENV}/bin/python" -m ruff check . )
+  ( cd "$WT" && "${TEST_VENV}/bin/python" -m compileall -q . )
+  # INVARIANT: this test phase is DETERMINISTIC and reproduces CI 1:1, so Phase 1
+  # is a real gate — a flaky pass here would silently green-light a broken deploy.
+  #   * `-p no:cacheprovider`: never read/write a .pytest_cache. From this detached
+  #     worktree pytest's rootdir/cache could resolve under $APP_DIR (/opt/vpn-service),
+  #     which is not writable from the worktree; a cold first run would then diverge
+  #     from warm reruns (the historical warp-split flake). Disabling the cache makes
+  #     the FIRST run in a fresh worktree identical to every later run.
+  #   * Collection order matches CI by construction: same rootdir-relative paths
+  #     (testpaths=["tests"] in pyproject.toml), no pytest-xdist (no parallelism) and
+  #     no pytest-randomly (no shuffle) in constraints-dev-hashed.txt. If either
+  #     plugin is ever added it MUST go to BOTH this phase and .github/workflows/ci.yml
+  #     with a pinned seed, or the two stop reproducing each other.
+  #   * pytest-timeout IS in constraints-dev-hashed.txt (per-test ceilings, see
+  #     pyproject.toml). It neither reorders nor parallelises collection, so the
+  #     invariant above holds; what it buys HERE is that a hung test fails this gate
+  #     with a traceback instead of holding the deploy open indefinitely — which is
+  #     precisely how an unbounded `journalctl` read once blocked a production run.
+  ( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider )
+}
+
+# =========================================================================== #
+# RELAY ROLE (NODE_ROLE=relay) — see the HOST ROLE block in the header
+# =========================================================================== #
+# Everything a relay deploy does lives in the functions below; the main path never
+# calls any of them. They sit above the DEPLOY_SELFTEST seam so
+# tests/test_relay_deploy.py can drive them with stubbed systemctl/nft/sysctl/git.
+#
+# ERR is NOT inherited by functions (no errtrace), so inside relay_phase2 every
+# mutating step routes its own failure through `|| rollback_now ...` — the same
+# discipline install_out_of_repo_helpers already follows. The armed trap still
+# catches INT/TERM/HUP.
+
+# Pre-deploy facts the relay rollback restores to. Read-only.
+relay_snapshot_prestate() {
+  RELAY_PRE_ACTIVE="$(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true)"
+  RELAY_PRE_ENABLED="$(systemctl is-enabled "$RELAY_UNIT" 2>/dev/null || true)"
+  RELAY_PRE_FORWARD="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || true)"
+  if nft list table ip "$RELAY_TABLE" >/dev/null 2>&1; then
+    RELAY_PRE_TABLE="present"
+  else
+    RELAY_PRE_TABLE="absent"
+  fi
+}
+
+# The installed vpn-relay.service vs the checkout's copy ($1 = checkout root):
+#   absent   not installed (a fresh relay)
+#   synced   byte-identical
+#   legacy   the hand-installed unit: its ExecStart loads a ruleset file straight
+#            into nft (`nft -f /etc/vpn-relay.nft`) — the expected FIRST
+#            transition to the repo, not drift
+#   differs  an older repo copy (or a hand edit) — replaced like vpn-bot.service is
+# In the relay role the unit is INSTALLED, never drift-reported, so no state here
+# is an error. (The main role never looks at deploy/relay/ at all.)
+relay_unit_state() {
+  local src="${1%/}/${RELAY_UNIT_SRC}"
+  if [[ ! -f "$RELAY_SYSTEM_UNIT" ]]; then echo "absent"
+  elif cmp -s "$src" "$RELAY_SYSTEM_UNIT"; then echo "synced"
+  elif grep -E '^[[:space:]]*ExecStart=.*nft[[:space:]]+-f[[:space:]]' "$RELAY_SYSTEM_UNIT" >/dev/null 2>&1; then echo "legacy"
+  else echo "differs"; fi
+}
+
+relay_unit_state_text() {
+  case "$1" in
+    absent)  echo "not installed — Phase 2 installs ${RELAY_UNIT_SRC} and enables it (fresh relay)" ;;
+    synced)  echo "matches ${RELAY_UNIT_SRC}" ;;
+    legacy)  echo "the hand-installed unit (loads ${RELAY_LEGACY_NFT}) — the expected first transition, NOT drift: Phase 2 replaces it with ${RELAY_UNIT_SRC} and, after a successful deploy, renames ${RELAY_LEGACY_NFT} to ${RELAY_LEGACY_NFT}.pre-repo.<ts>" ;;
+    differs) echo "differs from ${RELAY_UNIT_SRC} — Phase 2 installs the repo copy verbatim (relay role: installed, not drift-reported)" ;;
+    *)       echo "unknown (${1})" ;;
+  esac
+}
+
+relay_live_rc_text() {
+  case "$1" in
+    0)  echo "PASS — the live relay already equals the render from .env (first transition: the repo reproduces the hand-made ruleset 1:1)" ;;
+    10) echo "table ip ${RELAY_TABLE} absent — Phase 2 creates it" ;;
+    11) echo "live table differs from the render (diff above) — Phase 2 replaces it atomically" ;;
+    12) echo "net.ipv4.ip_forward is off — Phase 2 turns it on" ;;
+    13) echo "the upstream does not answer on a forwarded TCP port — Phase 2's verify runs the same probe and would ROLL BACK; fix that first" ;;
+    14) echo "TLS handshake to the upstream failed — Phase 2's verify would ROLL BACK; fix that (or RELAY_CHECK_SNI) first" ;;
+    5)  echo "could not run the live check here (exit 5: not root / tool missing)" ;;
+    *)  echo "exit ${1}" ;;
+  esac
+}
+
+# Phase 1, relay part. Read-only; die()s only on what Phase 2 could not survive.
+relay_phase1() {
+  local rc hd hd_base hd_src hd_dst hd_state hd_policy
+  log "relay: rendering the ruleset from ${ENV_FILE} with the checkout's helper (vpn-relay-apply check --dry-run)"
+  RELAY_RENDER_OUT="$(RELAY_ENV="$ENV_FILE" bash "$WT/scripts/vpn-relay-apply" check --dry-run 2>&1)" && rc=0 || rc=$?
+  printf '%s\n' "$RELAY_RENDER_OUT" | sed 's/^/    /'
+  (( rc == 0 )) || die "relay: the ruleset does not render from ${ENV_FILE} (vpn-relay-apply exit ${rc}, see above) — fix .env (template: deploy/relay/relay.env.example); nothing was changed"
+
+  relay_snapshot_prestate
+  log "relay pre-state: ${RELAY_UNIT} active=${RELAY_PRE_ACTIVE:-unknown} enabled=${RELAY_PRE_ENABLED:-<not installed>}; table ip ${RELAY_TABLE} ${RELAY_PRE_TABLE}; net.ipv4.ip_forward=${RELAY_PRE_FORWARD:-unknown}"
+
+  RELAY_UNIT_STATE="$(relay_unit_state "$WT")"
+  log "relay unit ${RELAY_SYSTEM_UNIT}: $(relay_unit_state_text "$RELAY_UNIT_STATE")"
+
+  # The same registry scan as the main role, filtered to this role's entries.
+  helper_drift=()
+  while IFS='|' read -r hd_base hd_src hd_dst hd_state hd_policy; do
+    hd_policy="${hd_policy:-absent-ok}"
+    if [[ "$hd_state" == "drift" ]] || [[ "$hd_state" == "absent" && "$hd_policy" == "required" ]]; then
+      helper_drift+=("${hd_base}|${hd_src}|${hd_dst}|${hd_state}")
+    fi
+  done < <(scan_out_of_repo_helpers "$WT")
+  if [[ ${#helper_drift[@]} -gt 0 ]]; then
+    log "relay helpers Phase 2 will install/refresh:"
+    for hd in "${helper_drift[@]}"; do
+      IFS='|' read -r hd_base _ hd_dst hd_state <<< "$hd"
+      log "    ${hd_base} -> ${hd_dst} (${hd_state})"
+    done
+  fi
+
+  # The live relay through the checkout's own `check` — informational, never a
+  # gate: absent/different/forwarding-off is exactly what Phase 2 fixes. It is the
+  # strongest pre-check of a first transition, though: PASS here means the repo
+  # renders the very ruleset the hand-made relay is running.
+  RELAY_LIVE_OUT="$(RELAY_ENV="$ENV_FILE" bash "$WT/scripts/vpn-relay-apply" check 2>&1)" && RELAY_LIVE_RC=0 || RELAY_LIVE_RC=$?
+  if [[ "$RELAY_LIVE_RC" == "0" ]]; then
+    log "relay live check (checkout's helper): $(relay_live_rc_text 0)"
+  else
+    printf '%s\n' "$RELAY_LIVE_OUT" | sed 's/^/    /' >&2
+    warn "relay live check (checkout's helper): $(relay_live_rc_text "$RELAY_LIVE_RC")"
+    # check exits with its FIRST failure; an unreachable upstream behind an absent
+    # table must still be called out, because no apply fixes it.
+    if printf '%s\n' "$RELAY_LIVE_OUT" | grep -E 'FAIL: (TCP connect|TLS handshake)' >/dev/null; then
+      warn "  the upstream probe failed — Phase 2's verify would roll back the deploy"
+    fi
+  fi
+}
+
+relay_phase1_report() {
+  local head_sha uptodate=""
+  head_sha="$(git rev-parse --short HEAD)"
+  [[ "$head_sha" == "$TAG" ]] && uptodate=" (already up to date)"
+  printf '\n===== PHASE 1 REPORT — RELAY (PHASE1_ONLY=1 — no mutations performed) =====\n'
+  printf '  checkout          : %s -> origin/main %s%s\n' "$head_sha" "$TAG" "$uptodate"
+  printf '  host role         : relay (NODE_ROLE=relay in %s)\n' "$ENV_FILE"
+  printf '  not on this host  : vpn-bot, vpn-bot-subscription, hy2_auth, the DB, Xray, AmneziaWG,\n'
+  printf '                      WARP, Telegram — main-only checks skipped, none of it is touched\n'
+
+  printf '\n  --- .env -> ruleset (checkout: vpn-relay-apply check --dry-run) ---\n'
+  printf '%s\n' "$RELAY_RENDER_OUT" | sed 's/^/    /'
+  printf '\n  --- Ruleset Phase 2 applies (checkout: vpn-relay-apply show) ---\n'
+  RELAY_ENV="$ENV_FILE" bash "$WT/scripts/vpn-relay-apply" show 2>&1 | sed 's/^/    /' || true
+
+  printf '\n  --- Pre-state (the rollback restores exactly this) ---\n'
+  printf '    %-24s : active=%s enabled=%s\n' "$RELAY_UNIT" "${RELAY_PRE_ACTIVE:-unknown}" "${RELAY_PRE_ENABLED:-<not installed>}"
+  printf '    %-24s : %s\n' "table ip ${RELAY_TABLE}" "$RELAY_PRE_TABLE"
+  printf '    %-24s : %s\n' "net.ipv4.ip_forward" "${RELAY_PRE_FORWARD:-unknown}"
+  if [[ -e "$RELAY_LEGACY_NFT" ]]; then
+    printf '    %-24s : present (hand-installed; renamed to .pre-repo.<ts> after a successful deploy)\n' "$RELAY_LEGACY_NFT"
+  else
+    printf '    %-24s : absent\n' "$RELAY_LEGACY_NFT"
+  fi
+
+  printf '\n  --- Unit %s ---\n' "$RELAY_SYSTEM_UNIT"
+  printf '    %s\n' "$(relay_unit_state_text "$RELAY_UNIT_STATE")"
+
+  printf '\n  --- Helper (OUT_OF_REPO_HELPERS, role relay) ---\n'
+  if [[ ${#helper_drift[@]} -gt 0 ]]; then
+    local hrow hbase hsrc hdst hstate
+    for hrow in "${helper_drift[@]}"; do
+      IFS='|' read -r hbase hsrc hdst hstate <<< "$hrow"
+      printf '    %s -> %s (%s) — Phase 2 installs it\n' "$hbase" "$hdst" "$hstate"
+    done
+  else
+    printf '    %s matches the checkout\n' "$RELAY_HELPER"
+  fi
+
+  printf '\n  --- Live relay vs the render (checkout: vpn-relay-apply check) ---\n'
+  printf '%s\n' "$RELAY_LIVE_OUT" | sed 's/^/    /'
+  printf '    => %s\n' "$(relay_live_rc_text "$RELAY_LIVE_RC")"
+
+  printf '\n  --- Phase 2 (sudo bash scripts/redeploy.sh) would ---\n'
+  printf '    back up the live table + %s, %s, %s\n' "$RELAY_HELPER" "$RELAY_SYSTEM_UNIT" "$RELAY_SYSCTL_FILE"
+  printf '    git reset --hard origin/main; install the helper; install %s verbatim\n' "$RELAY_UNIT_SRC"
+  printf '    daemon-reload; enable + restart %s; verify with vpn-relay-apply check\n' "$RELAY_UNIT"
+  printf '    any failure -> rollback (files + saved table + enable/active state + ip_forward)\n'
+  printf '\n===================================================================\n'
+}
+
+arm_relay_rollback() { PHASE="armed"; trap 'relay_rollback' ERR INT TERM HUP; }
+
+# The relay's rollback: no bot, no DB, no archive extraction into / — the files
+# come back from the backup stage, the table from its `nft list` dump. Mirrors
+# rollback()'s contract: fault-tolerant (set +e), always reports, exits 1.
+relay_rollback() {
+  trap - ERR INT TERM HUP
+  set +e
+  local -a report=()
+  local p state rc
+  warn "ROLLBACK (relay): restoring PREV_SHA=${PREV_SHA:-<unknown>} and the backed-up relay state"
+
+  git reset --hard "$PREV_SHA" >/dev/null 2>&1; report+=("git reset --hard ${PREV_SHA}: rc=$?")
+
+  # A unit that was not running before is stopped again (this run may have started
+  # it; its ExecStop removes the table — the saved one, if any, comes back below).
+  if [[ "$RELAY_PRE_ACTIVE" != "active" ]]; then
+    systemctl stop "$RELAY_UNIT" >/dev/null 2>&1
+    report+=("stop ${RELAY_UNIT} (was ${RELAY_PRE_ACTIVE:-not active} before): rc=$?")
+  fi
+  # Undo the enable while the deploy's unit file is still in place, so no dangling
+  # multi-user.target.wants link survives a unit file that is removed below.
+  if [[ "$RELAY_PRE_ENABLED" != "enabled" ]]; then
+    systemctl disable --quiet "$RELAY_UNIT" >/dev/null 2>&1
+    report+=("disable ${RELAY_UNIT} (was ${RELAY_PRE_ENABLED:-not installed} before): rc=$?")
+  fi
+
+  if [[ -n "$STAGE" && -d "$STAGE" ]]; then
+    for p in "$RELAY_HELPER" "$RELAY_SYSTEM_UNIT" "$RELAY_SYSCTL_FILE"; do
+      if [[ -e "${STAGE}${p}" ]]; then
+        cp -a "${STAGE}${p}" "$p"; report+=("restore ${p}: rc=$?")
+      else
+        rm -f "$p"; report+=("remove ${p} (absent before the deploy): rc=$?")
+      fi
+    done
+  else
+    report+=("backup stage MISSING — helper/unit/sysctl file NOT restored — MANUAL ACTION REQUIRED (archive: ${ARCHIVE:-<none>})")
+  fi
+  systemctl daemon-reload; report+=("daemon-reload: rc=$?")
+
+  if [[ "$RELAY_PRE_ENABLED" == "enabled" ]]; then
+    systemctl enable --quiet "$RELAY_UNIT" >/dev/null 2>&1; report+=("enable ${RELAY_UNIT} (was enabled before): rc=$?")
+  fi
+  if [[ "$RELAY_PRE_ACTIVE" == "active" ]]; then
+    state="$(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true)"
+    if [[ "$state" != "active" ]]; then
+      systemctl reset-failed "$RELAY_UNIT" >/dev/null 2>&1
+      systemctl start "$RELAY_UNIT"; report+=("start ${RELAY_UNIT} with the restored unit (was active before, ${state:-unknown} now): rc=$?")
+    else
+      report+=("${RELAY_UNIT} still active (the restored unit file applies from its next start)")
+    fi
+  fi
+
+  # The table exactly as it was — applied LAST so it is what stays live, in one
+  # transaction (create-if-missing + delete + the dump).
+  if [[ -n "$STAGE" && -s "${STAGE}${RELAY_TABLE_DUMP}" ]]; then
+    { printf 'table ip %s\ndelete table ip %s\n' "$RELAY_TABLE" "$RELAY_TABLE"; cat "${STAGE}${RELAY_TABLE_DUMP}"; } | nft -f -
+    rc=$?
+    if (( rc == 0 )); then report+=("re-apply the saved table ip ${RELAY_TABLE}: rc=0")
+    else report+=("re-apply the saved table ip ${RELAY_TABLE}: rc=${rc} — MANUAL ACTION REQUIRED (dump in ${ARCHIVE:-<no archive>}: .${RELAY_TABLE_DUMP})"); fi
+  elif nft list table ip "$RELAY_TABLE" >/dev/null 2>&1; then
+    nft delete table ip "$RELAY_TABLE"; report+=("delete table ip ${RELAY_TABLE} (absent before the deploy): rc=$?")
+  else
+    report+=("table ip ${RELAY_TABLE} absent, as before the deploy")
+  fi
+
+  if [[ "$RELAY_PRE_FORWARD" =~ ^[01]$ ]]; then
+    sysctl -q -w "net.ipv4.ip_forward=${RELAY_PRE_FORWARD}" >/dev/null; report+=("net.ipv4.ip_forward=${RELAY_PRE_FORWARD} (pre-deploy value): rc=$?")
+  else
+    report+=("net.ipv4.ip_forward pre-deploy value unknown — left as it is")
+  fi
+
+  report+=("${RELAY_UNIT} is-active: $(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true) (before the deploy: ${RELAY_PRE_ACTIVE:-unknown})")
+  printf '\n===== ROLLBACK REPORT (relay) =====\n' >&2
+  printf '  - %s\n' "${report[@]}" >&2
+  printf '===================================\n' >&2
+  exit 1
+}
+
+# After a successful deploy only: the hand-installed ruleset file is no longer read
+# by anything (the unit now runs vpn-relay-apply). Renamed, never deleted, so the
+# operator can still compare or go back by hand. Not part of the rollback scope.
+relay_retire_legacy_nft() {
+  local dst
+  [[ -e "$RELAY_LEGACY_NFT" ]] || return 0
+  dst="${RELAY_LEGACY_NFT}.pre-repo.$(date +%Y%m%dT%H%M%S)"
+  if mv -n "$RELAY_LEGACY_NFT" "$dst"; then
+    log "renamed the hand-installed ${RELAY_LEGACY_NFT} -> ${dst} (no longer read; kept for reference)"
+  else
+    warn "could not rename ${RELAY_LEGACY_NFT} to ${dst} — harmless (nothing reads it any more), rename it by hand"
+  fi
+}
+
+# Phase 2, relay. Nothing is stopped for the backup: the relay keeps forwarding
+# until the restart, and the restart's gap (ExecStop deletes the table, ExecStart
+# applies the new one) is milliseconds; established flows keep their conntrack NAT.
+relay_phase2() {
+  local out rc entry listing legacy_before
+  PREV_SHA="$(git rev-parse HEAD)"
+  log "PREV_SHA=${PREV_SHA} (relay)"
+
+  STAGE="$(make_stage_dir)" || die "cannot create the backup stage"
+  manifest=()
+  log "backing up the relay state (nothing is stopped for it)"
+  stage_path "$RELAY_HELPER"
+  stage_path "$RELAY_SYSTEM_UNIT"
+  stage_path "$RELAY_SYSCTL_FILE"
+  install -d -m0755 "${STAGE}$(dirname "$RELAY_TABLE_DUMP")"
+  if nft list table ip "$RELAY_TABLE" > "${STAGE}${RELAY_TABLE_DUMP}" 2>/dev/null; then
+    manifest+=("${RELAY_TABLE_DUMP#/}")
+    log "  backed up the live table ip ${RELAY_TABLE} (nft list) as ${RELAY_TABLE_DUMP}"
+  else
+    rm -f "${STAGE}${RELAY_TABLE_DUMP}"
+    [[ "$RELAY_PRE_TABLE" != "present" ]] \
+      || die "table ip ${RELAY_TABLE} was present in Phase 1 but cannot be listed now — refusing to go on without its backup; nothing was changed"
+    log "  (absent, skipped) table ip ${RELAY_TABLE}"
+  fi
+  ARCHIVE="${BACKUP_DIR}/backup-relay-${TAG}-$(date +%Y%m%dT%H%M%S).tar.gz"
+  create_backup_archive "$ARCHIVE" || die "cannot write the backup archive ${ARCHIVE}; nothing was changed"
+  [[ -s "$ARCHIVE" ]] || die "backup archive ${ARCHIVE} is empty; nothing was changed"
+  listing="$(tar -tzf "$ARCHIVE")" || die "cannot list the backup archive ${ARCHIVE}; nothing was changed"
+  for entry in "${manifest[@]}"; do
+    # grep reads to EOF (output discarded): no SIGPIPE on the printf under pipefail.
+    printf '%s\n' "$listing" | grep -F "$entry" >/dev/null \
+      || die "backup archive is missing ${entry}; nothing was changed"
+  done
+  log "backup ${ARCHIVE} verified (${#manifest[@]} entries)"
+
+  arm_relay_rollback          # from here every failure restores the backup
+
+  log "advancing working tree to origin/main (${TAG})"
+  git reset --hard origin/main || rollback_now "git reset --hard origin/main failed"
+
+  # The registry mechanism, role-filtered: installs/refreshes vpn-relay-apply
+  # (required on a relay) and nothing else; its failures reach relay_rollback.
+  install_out_of_repo_helpers
+
+  log "installing ${RELAY_UNIT} from ${RELAY_UNIT_SRC} (verbatim)"
+  install -m0644 "$RELAY_UNIT_SRC" "$RELAY_SYSTEM_UNIT" \
+    || rollback_now "failed to install ${RELAY_UNIT_SRC} to ${RELAY_SYSTEM_UNIT}"
+  systemctl daemon-reload || rollback_now "systemctl daemon-reload failed"
+  systemctl enable --quiet "$RELAY_UNIT" || rollback_now "systemctl enable ${RELAY_UNIT} failed"
+  log "restarting ${RELAY_UNIT} (vpn-relay-apply apply: table ip ${RELAY_TABLE} from .env, ip_forward=1)"
+  systemctl restart "$RELAY_UNIT" \
+    || rollback_now "${RELAY_UNIT} restart failed — vpn-relay-apply apply exited non-zero (see: journalctl -u ${RELAY_UNIT} -n 50 --no-pager)"
+  [[ "$(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true)" == "active" ]] \
+    || rollback_now "${RELAY_UNIT} is not active after the restart"
+
+  log "verifying the relay: vpn-relay-apply check"
+  out="$(RELAY_ENV="$ENV_FILE" "$RELAY_HELPER" check 2>&1)" && rc=0 || rc=$?
+  printf '%s\n' "$out" | sed 's/^/    /'
+  (( rc == 0 )) || rollback_now "vpn-relay-apply check failed after the restart (exit ${rc}: $(relay_live_rc_text "$rc"))"
+
+  disarm
+  legacy_before="absent"
+  [[ -e "$RELAY_LEGACY_NFT" ]] && legacy_before="present"
+  relay_retire_legacy_nft
+  rotate_backups
+
+  cat <<EOF
+
+===== DEPLOY OK (relay) =====
+  role             : relay
+  deployed         : ${PREV_SHA} -> ${TAG}
+  backup           : ${ARCHIVE}
+  unit             : ${RELAY_UNIT} active, enabled (before: active=${RELAY_PRE_ACTIVE:-unknown}, installed copy ${RELAY_UNIT_STATE:-unknown})
+  verify           : vpn-relay-apply check OK
+  ${RELAY_LEGACY_NFT} : ${legacy_before}$( [[ "$legacy_before" == "present" ]] && printf ' -> renamed to .pre-repo.<ts>')
+=============================
+
+EOF
+}
+
+# The whole relay deploy: Phase 1 (read-only), then Phase 2 unless PHASE1_ONLY.
+relay_deploy() {
+  local avail
+  require_tools git flock systemctl tar python3 sha256sum awk df date stat nft sysctl install cmp sed mktemp
+  cd "$APP_DIR" || die "APP_DIR ${APP_DIR} not found"
+  git worktree prune >/dev/null 2>&1 || true
+  install -d -m700 "$BACKUP_DIR"
+  rotate_backups
+
+  exec {LOCK_FD}>"$LOCK" || die "cannot open lock ${LOCK}"
+  flock -n "$LOCK_FD" || die "another deploy already holds ${LOCK}"
+  log "host role: relay (NODE_ROLE=relay in ${ENV_FILE}) — vpn-bot, its sidecars, the DB, Xray, AmneziaWG and WARP are not part of this deploy"
+
+  fetch_origin_main
+  avail="$(fs_avail_bytes "$APP_DIR")"
+  (( avail > 1073741824 )) || die "insufficient space on ${APP_DIR} FS for the test venv: need >1024MiB, have $((avail/1024/1024))MiB"
+
+  run_checkout_tests
+  relay_phase1
+
+  if [[ "$PHASE1_ONLY" == "1" ]]; then
+    relay_phase1_report
+    log "PHASE1_ONLY=1: Phase 1 complete; NOT entering Phase 2 (nothing installed, restarted or applied)."
+    return 0
+  fi
+  relay_phase2
+}
+
 # =========================================================================== #
 # PHASE 1 — validate with the bot still running (zero-downtime, no rollback)
 # =========================================================================== #
@@ -1706,6 +2282,17 @@ constraints_stamp() {
 if [[ "${DEPLOY_SELFTEST:-0}" == "1" ]]; then return 0 2>/dev/null || exit 0; fi
 
 [[ "${EUID}" -eq 0 ]] || die "run as root (recommended entry point: sudo bash scripts/redeploy.sh)"
+
+# Host role — resolved and checked before ANY mutation of either role (HOST ROLE
+# block in the header). A relay leaves here for good; the main path below is the
+# same code it always was and consults the role nowhere else.
+resolve_node_role
+role_guard
+if [[ "$NODE_ROLE" == "relay" ]]; then
+  relay_deploy
+  exit 0
+fi
+
 require_tools git sqlite3 flock systemd-analyze systemctl tar visudo python3 sha256sum \
               awk df du date journalctl stat tail
 
@@ -1718,27 +2305,7 @@ rotate_backups   # also rotate at start so a series of failures does not pile up
 exec {LOCK_FD}>"$LOCK" || die "cannot open lock ${LOCK}"
 flock -n "$LOCK_FD" || die "another deploy already holds ${LOCK}"
 
-log "fetching origin/main"
-git fetch origin main
-TAG="$(git rev-parse --short origin/main)"
-
-if [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]]; then
-  if [[ "$PHASE1_ONLY" == "1" ]]; then
-    log "HEAD already at origin/main (${TAG}); PHASE1_ONLY=1: running Phase 1 checks anyway (no deploy)."
-  elif [[ "$FORCE" != "1" ]]; then
-    log "HEAD already at origin/main (${TAG}); nothing to deploy. Set FORCE=1 to redeploy anyway."
-    exit 0
-  else
-    warn "FORCE=1: redeploying although HEAD already equals origin/main"
-  fi
-fi
-
-# Preconditions -------------------------------------------------------------
-dirty="$(git status --porcelain)"
-if [[ -n "$dirty" ]]; then
-  warn "working tree is not clean:"; printf '%s\n' "$dirty" >&2
-  die "commit, stash, or clean the working tree before deploying"
-fi
+fetch_origin_main
 
 [[ -x "${VENV}/bin/python" ]] || die "prod venv missing at ${VENV}"
 
@@ -1761,56 +2328,7 @@ LOG_DIR="$(env_val LOG_DIR)"; [[ -n "$LOG_DIR" ]] || LOG_DIR="/opt/vpn-service/l
 BOT_LOG="${LOG_DIR}/bot.log"
 
 # Tests in an isolated worktree + a separate test venv (never the prod venv) ---
-WT="$(mktemp -d)"
-git worktree add --detach "$WT" origin/main >/dev/null
-log "worktree at ${WT} (origin/main ${TAG})"
-
-want_stamp="$(constraints_stamp "$WT")"
-have_stamp="$(cat "${TEST_VENV}/.constraints-stamp" 2>/dev/null || true)"
-if [[ ! -x "${TEST_VENV}/bin/python" || "$have_stamp" != "$want_stamp" ]]; then
-  log "building test venv ${TEST_VENV} (constraints changed or venv absent)"
-  rm -rf "$TEST_VENV"
-  install -d "$(dirname "$TEST_VENV")"
-  python3 -m venv "$TEST_VENV"
-  "${TEST_VENV}/bin/pip" install --quiet --upgrade pip
-  "${TEST_VENV}/bin/pip" install --require-hashes -r "$WT/constraints-hashed.txt"
-  "${TEST_VENV}/bin/pip" install --require-hashes -r "$WT/constraints-dev-hashed.txt"
-  printf '%s' "$want_stamp" > "${TEST_VENV}/.constraints-stamp"
-else
-  log "reusing test venv ${TEST_VENV}"
-fi
-
-log "running ruff / compileall / pytest against origin/main"
-# This is the one ruff call site that does NOT go through `make lint`/.venv-lint,
-# and deliberately so. The rule `make lint` exists to enforce is "never lint with
-# an ambient or prod-venv ruff"; TEST_VENV already satisfies it more strictly —
-# it is built above from constraints-dev-hashed.txt with --require-hashes, so its
-# ruff is the same pinned version verified by hash, and the stamp covers the
-# constraints files, so a ruff bump forces a rebuild here. Routing this through
-# `make lint` would build a second venv inside the throwaway worktree on every
-# deploy, turning a PyPI reachability blip into a failed deploy gate for no gain
-# in isolation. If this line ever stops using TEST_VENV, it must move to
-# `make lint` rather than back to a bare `ruff`.
-( cd "$WT" && "${TEST_VENV}/bin/python" -m ruff check . )
-( cd "$WT" && "${TEST_VENV}/bin/python" -m compileall -q . )
-# INVARIANT: this test phase is DETERMINISTIC and reproduces CI 1:1, so Phase 1
-# is a real gate — a flaky pass here would silently green-light a broken deploy.
-#   * `-p no:cacheprovider`: never read/write a .pytest_cache. From this detached
-#     worktree pytest's rootdir/cache could resolve under $APP_DIR (/opt/vpn-service),
-#     which is not writable from the worktree; a cold first run would then diverge
-#     from warm reruns (the historical warp-split flake). Disabling the cache makes
-#     the FIRST run in a fresh worktree identical to every later run.
-#   * Collection order matches CI by construction: same rootdir-relative paths
-#     (testpaths=["tests"] in pyproject.toml), no pytest-xdist (no parallelism) and
-#     no pytest-randomly (no shuffle) in constraints-dev-hashed.txt. If either
-#     plugin is ever added it MUST go to BOTH this phase and .github/workflows/ci.yml
-#     with a pinned seed, or the two stop reproducing each other.
-#   * pytest-timeout IS in constraints-dev-hashed.txt (per-test ceilings, see
-#     pyproject.toml). It neither reorders nor parallelises collection, so the
-#     invariant above holds; what it buys HERE is that a hung test fails this gate
-#     with a traceback instead of holding the deploy open indefinitely — which is
-#     precisely how an unbounded `journalctl` read once blocked a production run.
-( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider )
+run_checkout_tests
 
 # Model detection -----------------------------------------------------------
 INCOMING_USER="$(unit_val "$WT/deploy/vpn-bot.service" User)"; [[ -n "$INCOMING_USER" ]] || INCOMING_USER="root"

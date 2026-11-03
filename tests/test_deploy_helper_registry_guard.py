@@ -148,10 +148,13 @@ SBIN_COMMAND_RE = re.compile(r"^/usr/local/sbin/([A-Za-z0-9][A-Za-z0-9._-]*)$")
 # what a shell function actually re-applies instead of grepping for unit names —
 # `systemctl restart "$SOME_NEW_UNIT"` must be as visible as a literal.
 SYSTEMCTL_CALL_RE = re.compile(r"\bsystemctl\s+([a-z][a-z-]*)(?:\s+(\S+))?")
-# One OUT_OF_REPO_HELPERS entry: "<src>|<dst>[|<policy>]", the policy field optional.
-REGISTRY_ENTRY_RE = re.compile(r'^\s*"([^"|]+)\|([^"|]+?)(?:\|([^"|]+))?"\s*$')
+# One OUT_OF_REPO_HELPERS entry: "<src>|<dst>[|<policy>[|<role>]]" — policy and role
+# optional (absent-ok / main when omitted, exactly as scan_out_of_repo_helpers reads it).
+REGISTRY_ENTRY_RE = re.compile(r'^\s*"([^"|]+)\|([^"|]+?)(?:\|([^"|]+)(?:\|([^"|]+))?)?"\s*$')
 
 VALID_POLICIES = frozenset({"absent-ok", "required"})
+# Host roles (NODE_ROLE). An entry is scanned/installed only on a host of its role.
+VALID_ROLES = frozenset({"main", "relay"})
 
 # The failure text the main guard carries: it must name the bug CLASS and the FIX,
 # not just report an unregistered name.
@@ -175,16 +178,19 @@ def _read(path: Path) -> str:
 # --------------------------------------------------------------------------- #
 # Pure helpers (unit-tested on synthetic input further down)
 # --------------------------------------------------------------------------- #
-def parse_registry(deploy_text: str) -> dict[str, tuple[str, str, str]]:
+def parse_registry(deploy_text: str) -> dict[str, tuple[str, str, str, str]]:
     """Parse the OUT_OF_REPO_HELPERS array.
 
-    Returns {installed basename: (checkout-relative source, installed path, policy)}.
+    Returns {installed basename: (checkout-relative source, installed path, policy, role)}.
     Comment lines inside the array are ignored; a two-field entry defaults to the
-    `absent-ok` policy, exactly like scan_out_of_repo_helpers does in bash.
+    `absent-ok` policy and a policy-only entry to the `main` role, exactly like
+    scan_out_of_repo_helpers does in bash. Every role counts as "registered": the
+    guards below ask whether the drift gate knows a helper at all, and a relay
+    helper is gated on every relay host just as a main helper is on every main one.
     """
     start = deploy_text.index("OUT_OF_REPO_HELPERS=(")
     body = deploy_text[start:].splitlines()[1:]
-    out: dict[str, tuple[str, str, str]] = {}
+    out: dict[str, tuple[str, str, str, str]] = {}
     for line in body:
         if line.rstrip() == ")":
             break
@@ -193,8 +199,9 @@ def parse_registry(deploy_text: str) -> dict[str, tuple[str, str, str]]:
         m = REGISTRY_ENTRY_RE.match(line)
         if m is None:
             raise AssertionError(f"unparseable OUT_OF_REPO_HELPERS entry: {line!r}")
-        src, dst, policy = m.group(1), m.group(2), m.group(3) or "absent-ok"
-        out[dst.rsplit("/", 1)[-1]] = (src, dst, policy)
+        src, dst = m.group(1), m.group(2)
+        policy, role = m.group(3) or "absent-ok", m.group(4) or "main"
+        out[dst.rsplit("/", 1)[-1]] = (src, dst, policy, role)
     return out
 
 
@@ -421,7 +428,8 @@ def test_split_helpers_are_registered() -> None:
     registry = parse_registry(_read(DEPLOY_SH))
     for name in ("vpn-bot-warp-split", "vpn-bot-warp-split-state", "vpn-bot-warp-split-apply"):
         assert name in registry, f"{name} must be in OUT_OF_REPO_HELPERS"
-        src, dst, policy = registry[name]
+        src, dst, policy, role = registry[name]
+        assert role == "main", "the split layer belongs to the main server"
         assert src == f"scripts/{name}"
         assert dst == f"/usr/local/sbin/{name}"
         assert policy == "absent-ok", "the split layer is not deployed on every host"
@@ -438,19 +446,37 @@ def test_warp_failsafe_is_registered() -> None:
 def test_registry_sources_exist_in_the_checkout() -> None:
     """A typo'd source path would scan as permanent drift, then fail the `install`
     in Phase 2 and roll the whole deploy back."""
-    for name, (src, _dst, _policy) in parse_registry(_read(DEPLOY_SH)).items():
+    for name, (src, _dst, _policy, _role) in parse_registry(_read(DEPLOY_SH)).items():
         assert (ROOT / src).is_file(), f"{name}: OUT_OF_REPO_HELPERS source {src} does not exist"
 
 
 def test_registry_entries_are_well_formed() -> None:
     registry = parse_registry(_read(DEPLOY_SH))
-    for name, (src, dst, policy) in registry.items():
+    for name, (src, dst, policy, role) in registry.items():
         assert dst.startswith("/usr/local/sbin/"), f"{name}: unexpected install dir {dst}"
         assert src.rsplit("/", 1)[-1] == name, (
             f"{name}: source basename {src} differs from the installed name — "
             "scan_out_of_repo_helpers keys drift reports on the installed basename"
         )
         assert policy in VALID_POLICIES, f"{name}: unknown policy {policy!r}"
+        # An unknown role would match no NODE_ROLE at all: the entry would be scanned
+        # on no host, i.e. silently unmanaged — the exact failure this module guards.
+        assert role in VALID_ROLES, f"{name}: unknown role {role!r}"
+
+
+def test_relay_helper_is_registered_for_the_relay_role_only() -> None:
+    """deploy/relay/vpn-relay.service executes /usr/local/sbin/vpn-relay-apply, so on a
+    relay host it is `required`; on a main server it must not exist for the drift
+    gate at all (a main deploy may not install, report or restart relay pieces)."""
+    registry = parse_registry(_read(DEPLOY_SH))
+    assert registry["vpn-relay-apply"] == (
+        "scripts/vpn-relay-apply",
+        "/usr/local/sbin/vpn-relay-apply",
+        "required",
+        "relay",
+    )
+    others = {name: entry[3] for name, entry in registry.items() if name != "vpn-relay-apply"}
+    assert set(others.values()) == {"main"}, f"only the relay helper may carry a non-main role: {others}"
 
 
 def test_registry_has_no_duplicate_entries() -> None:
@@ -915,25 +941,37 @@ def test_reference_regex_does_not_swallow_a_deeper_path() -> None:
     assert collect_sbin_evidence([("x", "/usr/local/sbin/sub/dir\n")], ["sub/dir"]) == {}
 
 
-def test_registry_parser_defaults_the_optional_policy_field() -> None:
+def test_registry_parser_defaults_the_optional_policy_and_role_fields() -> None:
     parsed = parse_registry(
         'OUT_OF_REPO_HELPERS=(\n'
         '  # a comment inside the array\n'
         '  "scripts/two-field|/usr/local/sbin/two-field"\n'
         '  "scripts/three-field|/usr/local/sbin/three-field|required"\n'
+        '  "scripts/four-field|/usr/local/sbin/four-field|required|relay"\n'
         ')\n'
     )
-    assert parsed["two-field"] == ("scripts/two-field", "/usr/local/sbin/two-field", "absent-ok")
+    assert parsed["two-field"] == (
+        "scripts/two-field", "/usr/local/sbin/two-field", "absent-ok", "main"
+    )
     assert parsed["three-field"] == (
         "scripts/three-field",
         "/usr/local/sbin/three-field",
         "required",
+        "main",
+    )
+    assert parsed["four-field"] == (
+        "scripts/four-field",
+        "/usr/local/sbin/four-field",
+        "required",
+        "relay",
     )
 
 
 def test_registry_parser_rejects_a_malformed_entry() -> None:
     with pytest.raises(AssertionError):
         parse_registry('OUT_OF_REPO_HELPERS=(\n  "scripts/no-destination"\n)\n')
+    with pytest.raises(AssertionError):
+        parse_registry('OUT_OF_REPO_HELPERS=(\n  "scripts/x|/usr/local/sbin/x|required|relay|extra"\n)\n')
 
 
 def test_registry_parser_reads_the_real_array_whole() -> None:

@@ -25,8 +25,9 @@ client ──TCP+UDP/443──▶ relay (RU VPS)
 - A relayed client lands in the **same inbounds** as a direct one: VLESS (TCP) and
   every VLESS (HTTP) profile on vless-in :443, Hysteria2 on UDP/443. Nothing on the
   main server is relay-aware.
-- The relay infrastructure itself (nftables rules, sysctl, the VPS) is **out of this
-  repository**. Tracking it under `deploy/relay/` is a separate PR.
+- The relay host itself (nftables table, `ip_forward`, its systemd unit) is deployed **from
+  this repository** with the same `scripts/redeploy.sh`, in the host role
+  `NODE_ROLE=relay` — see [The relay host](#the-relay-host-node_rolerelay).
 
 ### DNS — use a name, not an address
 
@@ -40,6 +41,181 @@ re-imported. If the host is an IPv4 address, changing it in the panel immediatel
 re-points **subscriptions** (they are rendered on every fetch), but every **single
 relay key** a user imported as a link still holds the old address and has to be
 re-imported — the panel says how many there are when the host changes.
+
+## The relay host (`NODE_ROLE=relay`)
+
+A relay host runs **one thing**: `vpn-relay.service`, a oneshot that executes
+`/usr/local/sbin/vpn-relay-apply apply`. That helper renders the nftables table
+`ip vpnrelay` from the relay's `.env`, applies it in **one atomic `nft -f` transaction**
+(`table ip vpnrelay` + `delete table ip vpnrelay` + the new table — nft commits all of it or
+leaves the previous table as it was) and then sets `net.ipv4.ip_forward = 1` (runtime and
+`/etc/sysctl.d/90-vpn-relay.conf`).
+
+Nothing else from this repository runs there: no `vpn-bot`, no `vpn-bot-subscription`, no
+`hy2_auth`, no database, no Xray, AmneziaWG or WARP, and **no Telegram at all** — the bot's
+`BOT_TOKEN` on a second host would fight the main bot for `getUpdates`. `config/settings.py`
+is never loaded; the relay has its own minimal `.env`. The relay's own INPUT/OUTPUT (SSH on
+:22) is never touched: the ruleset has no `input`/`output` hook (pinned by tests), and an
+sshd drop-in such as `/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf` is not the deploy's
+business.
+
+For the default ports the rendered ruleset is exactly what the hand-made relay ran:
+
+```
+table ip vpnrelay
+delete table ip vpnrelay
+table ip vpnrelay {
+  chain pre {
+    type nat hook prerouting priority dstnat; policy accept;
+    iifname "eth0" tcp dport 443 counter dnat to <upstream>:443
+    iifname "eth0" udp dport 443 counter dnat to <upstream>:443
+  }
+  chain post {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "eth0" ip daddr <upstream> ct status dnat counter masquerade
+  }
+  chain relayfwd {
+    type filter hook forward priority filter; policy drop;
+    tcp flags syn tcp option maxseg size set rt mtu
+    ct state established,related accept
+    ct status dnat ip daddr <upstream> accept
+    counter
+  }
+}
+```
+
+Every forwarded port gets one DNAT rule to the **same** port on the upstream; masquerade,
+the MSS clamp and the forward chain (policy drop, only DNAT'ed flows and their replies pass)
+do not depend on the ports. No flowtable or other tuning: on the 1-vCPU relay 107 Mbit/s of
+forwarding left the CPU 96–98 % idle.
+
+### The relay's `.env`
+
+`/opt/vpn-service/.env`, from [`deploy/relay/relay.env.example`](../deploy/relay/relay.env.example).
+Read with the same sed parser as `deploy.sh` uses for `NODE_ROLE` (and the Hysteria2 fwmark
+helper for `HYSTERIA2_PORT`): optional `export`, spaces around `=`, quotes, trailing
+`# comments`, the **last** assignment wins, an empty value counts as unset.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NODE_ROLE` | `main` | `relay` on a relay host. Any other value is refused before the deploy changes anything. |
+| `RELAY_UPSTREAM_IPV4` | — (required) | IPv4 of the main server. |
+| `RELAY_FORWARD_TCP_PORTS` | `443` | Comma-separated, 1..65535; each forwarded 1:1. |
+| `RELAY_FORWARD_UDP_PORTS` | `443` | Same for UDP (Hysteria2). |
+| `RELAY_WAN_IFACE` | the IPv4 default-route interface | WAN interface of the DNAT/masquerade rules. Without it the helper refuses a host with no default route or with default routes through several interfaces. |
+| `RELAY_CHECK_SNI` | — | When set (and 443 is forwarded), `vpn-relay-apply check` also does a TLS handshake to the upstream with this SNI and **verifies the certificate**. Use the main server's `XRAY_SNI`: REALITY hands an unknown client to its decoy, whose certificate is valid for that name. |
+
+### `vpn-relay-apply`
+
+| Command | Does |
+|---|---|
+| `apply` | Render + apply the table atomically, then `ip_forward=1`. What the unit runs. |
+| `check` | Read-only: the live table equals the render (counters ignored; a diff is printed), `ip_forward=1`, a TCP connect to the upstream on **every** forwarded TCP port, and the TLS handshake when `RELAY_CHECK_SNI` is set. Every deploy ends with it. |
+| `check --dry-run` | Validate `.env` and render; as root also `nft -c` (syntax check, nothing applied). Deploy Phase 1 runs it from the checkout. |
+| `show` | Print the rendered ruleset. |
+
+Exit codes: `0` ok · `2` usage · `3` bad/missing `.env` value · `4` WAN interface unresolved ·
+`5` not root / tool missing · `6` nft rejected the ruleset (live table unchanged) · `7`
+ip_forward/sysctl file not set · `10` table absent · `11` live table differs from the render ·
+`12` ip_forward is not 1 · `13` the upstream does not answer on a forwarded TCP port · `14` TLS
+handshake failed. `check` reports every failure and exits with the first one.
+
+### What `scripts/redeploy.sh` does on a relay
+
+The same commands as on the main server; `deploy.sh` reads `NODE_ROLE` and refuses a host
+whose services contradict it (role `relay` while `vpn-bot` or `xray` is active; role `main`
+while `vpn-relay` is active and there is no `vpn-bot` unit at all).
+
+- **Phase 1** (read-only; `CHECK=1` stops here and prints a report): fetch `origin/main`, the
+  same ruff / compileall / pytest gate on the checkout as on the main server (a test venv is
+  built under `/var/lib/vpn-bot-deploy/`, so the relay needs `python3-venv` and ~1 GiB free),
+  `vpn-relay-apply check --dry-run` from the checkout, the relay's pre-state, the installed
+  unit compared with `deploy/relay/vpn-relay.service`, and the checkout's `check` against the
+  live relay — on a relay that still runs the hand-made ruleset a **PASS** there proves the
+  repo reproduces it 1:1.
+- **Phase 2**: back up the live `nft list table ip vpnrelay`, the installed helper, the unit
+  and the sysctl file (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; nothing is
+  stopped for it); `git reset --hard origin/main`; install `vpn-relay-apply` through
+  `OUT_OF_REPO_HELPERS` (role `relay`) and `deploy/relay/vpn-relay.service` verbatim;
+  `daemon-reload`, `enable`, `restart vpn-relay` (established flows keep their conntrack NAT
+  across the millisecond gap); verify with `vpn-relay-apply check`.
+- **Any failure** rolls back: the previous checkout, helper, unit and sysctl file (or their
+  absence), the saved table re-applied in one transaction, the unit's enabled/active state and
+  the previous `ip_forward`. The deploy exits non-zero with a rollback report.
+- A unit installed by hand that loads `/etc/vpn-relay.nft` is the **expected first
+  transition**, not drift. After the first successful deploy `/etc/vpn-relay.nft` is renamed to
+  `/etc/vpn-relay.nft.pre-repo.<ts>` (never deleted) and nothing reads it any more.
+
+### A new relay from scratch
+
+On the relay (Ubuntu 24.04, root SSH with a key):
+
+```bash
+apt-get update && apt-get install -y git python3-venv nftables
+```
+
+```bash
+git clone https://github.com/Egor051/vpnbot.git /opt/vpn-service
+```
+
+```bash
+install -m 0600 -o root -g root /opt/vpn-service/deploy/relay/relay.env.example /opt/vpn-service/.env
+```
+
+Edit `/opt/vpn-service/.env`: `RELAY_UPSTREAM_IPV4` = the main server's IPv4, and preferably
+`RELAY_CHECK_SNI` = the main server's `XRAY_SNI`. Then inspect, and deploy:
+
+```bash
+cd /opt/vpn-service && sudo CHECK=1 bash scripts/redeploy.sh
+```
+
+```bash
+cd /opt/vpn-service && sudo FORCE=1 bash scripts/redeploy.sh
+```
+
+`FORCE=1` only on this first run: a fresh clone is already at `origin/main`, and a plain run
+would say "nothing to deploy" — exactly as on the main server. Every later update is the usual
+`sudo CHECK=1 bash scripts/redeploy.sh`, then `sudo bash scripts/redeploy.sh`.
+
+Check it: `systemctl status vpn-relay`, `nft list table ip vpnrelay`,
+`/usr/local/sbin/vpn-relay-apply check`.
+
+Then on the **main server**:
+
+1. A DNS A record for the relay — e.g. `relay2.anycastedge.net` → the relay's IPv4 — with
+   Cloudflare proxying **off** (see [DNS](#dns--use-a-name-not-an-address)).
+2. **🛡 Админ-панель → 🛰 Управлять relay → Добавить relay**: host = that name, source IPs = the
+   relay's egress IPv4 (for a DNAT relay usually the address it is reached at), name and label
+   as in [Managing relays](#managing-relays-in-the-admin-panel). (`RELAY_HOST` /
+   `RELAY_SOURCE_IPS` in the main `.env` are legacy since relays moved to the panel: they only
+   seed an empty `relays` table once.)
+3. **«Проверить сейчас»** on the relay's card: the health probe goes through the relay's DNAT
+   to the main inbound and back.
+
+Changing `RELAY_FORWARD_*` (or any relay `.env` value) does not move `HEAD`, so apply it with
+`sudo FORCE=1 bash scripts/redeploy.sh` — backup, restart, check and rollback included — rather
+than a bare `systemctl restart vpn-relay`.
+
+### Forwarding the subscription port (2096) through a relay
+
+Not done in this release; what it would take:
+
+- **On the relay** — the easy half: `RELAY_FORWARD_TCP_PORTS=443,2096` and
+  `sudo FORCE=1 bash scripts/redeploy.sh`. TCP/2096 then reaches the main server's
+  subscription endpoint, and `check` also probes `<upstream>:2096`.
+- **On the main server** — the part that needs code:
+  - the subscription URL a user gets is built on the main domain
+    (`https://<HYSTERIA2_SNI>:<SUBSCRIPTION_PUBLIC_PORT>/sub/<token>`); fetching through a
+    relay needs a URL with the relay's host, i.e. a per-relay subscription URL in the bot;
+  - TLS terminates on the main server with the main domain's certificate, so the relay's name
+    must be in that certificate (a SAN; with the relay forwarding 443 to the main server, a
+    DNS-01 issuance is the practical way);
+  - the endpoint's rate limit is per peer address, and every fetch through the relay arrives
+    from the relay's egress IP — the relay's users would share one bucket
+    (`SUBSCRIPTION_RATE_LIMIT_BURST` per `SUBSCRIPTION_RATE_LIMIT_SECONDS`) unless the relay's
+    source IPs get their own treatment;
+  - the firewall rule from `deploy/ufw-subscription.sh` already admits the relay (it is not
+    source-restricted), and the health monitor would still only probe `XRAY_PUBLIC_PORT`.
 
 ## Managing relays in the admin panel
 
@@ -225,7 +401,8 @@ TLS ≈ 0.29 s).
   relay is visible only in the link the user holds.
 - **The subscription URL stays on the main domain.** The sub-URL (`:2096` in the live
   deployment) is fetched from the main server's domain, not through a relay; only the
-  links inside it point at relays.
+  links inside it point at relays. What moving it behind a relay would take:
+  [Forwarding the subscription port](#forwarding-the-subscription-port-2096-through-a-relay).
 - **Existing bundles gain relay members only through the admin reconcile.** Adding a relay
   or switching one on does not touch existing bundles by itself. Admin panel →
   «🔗 All-in-One» → «Дополнить все подписки по текущим настройкам» adds the members through
