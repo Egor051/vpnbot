@@ -832,6 +832,75 @@ STRINGS: dict[str, str] = {
     "module_enabling": "Enabling protocol...",
     "module_disabled_ok": "✅ Protocol <b>{label}</b> disabled. Records deleted: {deleted}.",
     "module_enabled_ok": "✅ Protocol <b>{label}</b> enabled.",
+    # ── admin «All-in-One» section: bulk composition reconcile ─────────────────
+    "btn_admin_bundles": "🔗 All-in-One",
+    "btn_aio_to_basic": "Switch every subscription to basic",
+    "btn_aio_top_up": "Top every subscription up to current settings",
+    "btn_aio_run": "✅ Run",
+    "btn_aio_back": "← Back to All-in-One",
+    "aio_panel_title": (
+        "<b>🔗 All-in-One</b>\n\n"
+        "<b>Switch every subscription to basic</b> — each active subscription gets the basic "
+        "set: VLESS (TCP) and Hysteria2, plus their relay copies while <code>RELAY_ENABLED</code>. "
+        "VLESS (HTTP) keys are deleted, missing keys are created.\n\n"
+        "<b>Top every subscription up to current settings</b> — the same without changing the "
+        "kind: e.g. to add the relay members after <code>RELAY_ENABLED</code> was switched on.\n\n"
+        "Users keep their subscription link. A plan is shown first; nothing changes until you "
+        "confirm."
+    ),
+    "aio_mode_basic": "Switch to basic",
+    "aio_mode_top": "Top up to current settings",
+    "aio_planning": "Working out the plan…",
+    "aio_started": "Started",
+    "aio_already_running": "A subscription reconcile is already running — wait for it to finish.",
+    "aio_plan_header": (
+        "<b>{title}: plan</b>\n\n"
+        "Active subscriptions: {total}\n"
+        "To be changed: {planned}\n"
+        "• keys to create: {create}\n"
+        "• keys to delete: {delete}\n"
+        "• kind changes: {kinds}\n"
+        "Already in shape: {noop}\n"
+        "To be skipped: {skipped}"
+    ),
+    "aio_plan_note_basic": (
+        "VLESS (HTTP) keys will be deleted, missing members created, the kind becomes basic. "
+        "The subscription link does not change. Every VLESS key created or deleted applies the "
+        "Xray config."
+    ),
+    "aio_plan_note_top": (
+        "Missing members will be created for the current settings, and keys the current set "
+        "does not include will be deleted. The kind and the subscription link do not change. "
+        "Every VLESS key created or deleted applies the Xray config."
+    ),
+    "aio_plan_nothing": "Nothing to change.",
+    "aio_run_started": "<b>{title}</b>\n\nRunning…",
+    "aio_run_progress": "<b>{title}</b>\n\nRunning… subscriptions processed: {done} of {total}",
+    "aio_report_header": (
+        "<b>{title}: done</b>\n\n"
+        "Subscriptions processed: {total}\n"
+        "✅ Changed: {applied} (keys created: {created}, deleted: {deleted})\n"
+        "➖ Unchanged: {noop}\n"
+        "⏭ Skipped: {skipped}\n"
+        "❌ Errors: {failed}"
+    ),
+    "aio_report_retry_hint": "Running it again finishes what failed and leaves subscriptions already in shape alone.",
+    "aio_failed": "<b>{title}</b>\n\n❌ Could not run: {error}",
+    "aio_skipped_title": "<b>Skipped:</b>",
+    "aio_failed_title": "<b>Errors:</b>",
+    "aio_list_more": "… and {count} more",
+    "aio_state_failed": "creating a key failed, changes rolled back",
+    "aio_state_partial": "stopped while deleting ({done} of {total} deleted)",
+    "aio_state_rollback_failed": "creating failed, the rollback could not remove keys {ids}",
+    "aio_reason_not_active": "subscription is not active",
+    "aio_reason_no_members": "no protocol is enabled",
+    "aio_reason_unsupported_child": "a key of a protocol a subscription cannot hold",
+    "aio_reason_no_active_children": "no active keys",
+    "aio_reason_duplicate_member": "duplicate member",
+    "aio_reason_mixed_expiry": "keys have different expiry dates",
+    "aio_reason_expired": "expired",
+    "aio_reason_inactive_child": "a member key is not active",
+    "aio_reason_backend_degraded": "backend is degraded",
     # ── WARP routing module ───────────────────────────────────────────────────
     "btn_warp": "📡 WARP tunnel",
     "btn_warp_upload": "📤 Upload config",

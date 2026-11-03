@@ -117,10 +117,12 @@ the relay reaches the main inbound end to end" (checked by hand: HTTP 200,
 - **The subscription URL stays on the main domain.** The sub-URL (`:2096` in the live
   deployment) is fetched from the main server's domain, not through the relay; only
   the links inside it point at the relay.
-- **Existing bundles do not gain relay members.** A bundle's composition is decided
-  once, when it is created (there is no mechanism that tops up an existing bundle
-  when a protocol is switched on later). Bundles created before `RELAY_ENABLED=true`
-  keep their direct members only; to get relay members, create a new bundle.
+- **Existing bundles gain relay members only through the admin reconcile.** Switching
+  `RELAY_ENABLED=true` on does not touch existing bundles by itself. Admin panel →
+  «🔗 All-in-One» → «Дополнить все подписки по текущим настройкам» adds the relay members
+  to every active bundle (or «Перевести все подписки в базовый вид», which also drops the
+  XHTTP members) — see
+  [docs/subscription.md](subscription.md#bringing-existing-bundles-in-line).
 - **Turning the relay off** makes relay keys' links unavailable (the bot shows an
   error instead of a link) and drops relay members from subscriptions (logged at
   WARNING); direct keys and direct members are unaffected. Turning it back on brings

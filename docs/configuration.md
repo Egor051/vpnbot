@@ -305,7 +305,8 @@ shipped as `deploy/vpn-bot-subscription.service`) that opens `vpn.db` read-only
 and keeps serving while the bot is down — see [docs/subscription.md](subscription.md).
 
 A bundle comes in one of **two kinds**, chosen when it is created and stored in
-`key_bundles.kind` (it cannot be changed later):
+`key_bundles.kind`. The user cannot change it later; only the superadmin's bulk
+reconcile can (see [docs/subscription.md](subscription.md#bringing-existing-bundles-in-line)):
 
 - **basic** — VLESS (TCP) and Hysteria2;
 - **extended** — VLESS (TCP), each VLESS (HTTP) profile (`base`, `multi`,

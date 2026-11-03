@@ -104,7 +104,7 @@ async def admin_command(message: Message, services: Services) -> None:
         return
     try:
         await require_superadmin(services, message.from_user.id)
-        await message.answer(t("admin_panel_title"), reply_markup=admin_panel_keyboard())
+        await message.answer(t("admin_panel_title"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -118,7 +118,7 @@ async def admin_menu_message(message: Message, services: Services) -> None:
         return
     try:
         await require_superadmin(services, message.from_user.id)
-        await message.answer(t("admin_panel_title"), reply_markup=admin_panel_keyboard())
+        await message.answer(t("admin_panel_title"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -164,7 +164,7 @@ async def admin_panel(callback: CallbackQuery, state: FSMContext, services: Serv
     stop_server_status_auto_refresh(callback.message, services)
     try:
         await require_superadmin(services, callback.from_user.id)
-        await safe_edit_message_text(callback.message, t("admin_panel_title"), reply_markup=admin_panel_keyboard())
+        await safe_edit_message_text(callback.message, t("admin_panel_title"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -549,7 +549,7 @@ async def admin_announcement_send(
         await safe_edit_message_text(
             callback.message,
             t("announce_sent", total=result.total, success=result.success, failed=result.failed),
-            reply_markup=admin_panel_keyboard(),
+            reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled),
         )
     except RateLimitExceeded as exc:
         await answer_callback_error(callback, exc)
@@ -594,7 +594,7 @@ async def admin_announcement_schedule_time(message: Message, state: FSMContext, 
         data = await state.get_data()
         if "from_chat_id" not in data or "message_id" not in data:
             await state.clear()
-            await message.answer(t("announce_session_expired"), reply_markup=admin_panel_keyboard())
+            await message.answer(t("announce_session_expired"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
             return
         from_chat_id = int(data["from_chat_id"])
         message_id = int(data["message_id"])
@@ -612,7 +612,7 @@ async def admin_announcement_schedule_time(message: Message, state: FSMContext, 
         msk_str = (dt + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
         await message.answer(
             t("announce_scheduled", batch_id=batch.id, total=batch.total_count, time=msk_str),
-            reply_markup=admin_panel_keyboard(),
+            reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled),
         )
     except Exception as exc:
         await state.clear()
@@ -630,7 +630,7 @@ async def admin_announcement_cancel(callback: CallbackQuery, state: FSMContext, 
         return
     try:
         await require_superadmin(services, callback.from_user.id)
-        await safe_edit_message_text(callback.message, t("admin_panel_title"), reply_markup=admin_panel_keyboard())
+        await safe_edit_message_text(callback.message, t("admin_panel_title"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -1376,7 +1376,7 @@ async def admin_issue_proto_vless(callback: CallbackQuery, state: FSMContext, se
         if expected_owner_id is None or int(expected_owner_id) != owner_user_id:
             await state.clear()
             await safe_callback_answer(callback, t("action_stale"), show_alert=True)
-            await safe_edit_message_text(callback.message, t("action_stale_msg"), reply_markup=admin_panel_keyboard())
+            await safe_edit_message_text(callback.message, t("action_stale_msg"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
             return
         await safe_callback_answer(callback)
         await safe_edit_message_text(
@@ -1418,7 +1418,7 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
             await safe_edit_message_text(
                 callback.message,
                 t("action_stale_msg"),
-                reply_markup=admin_panel_keyboard(),
+                reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled),
             )
             return
         if transport == "http" and not services.settings.xray_xhttp_enabled:
@@ -1497,7 +1497,7 @@ async def admin_issue_route(callback: CallbackQuery, state: FSMContext, services
             await safe_edit_message_text(
                 callback.message,
                 t("action_stale_msg"),
-                reply_markup=admin_panel_keyboard(),
+                reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled),
             )
             return
         relay: str | None = None
@@ -1539,7 +1539,7 @@ async def admin_issue_xhttp_profile(callback: CallbackQuery, state: FSMContext, 
             await safe_edit_message_text(
                 callback.message,
                 t("action_stale_msg"),
-                reply_markup=admin_panel_keyboard(),
+                reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled),
             )
             return
         if not services.settings.xray_xhttp_enabled:
@@ -2097,7 +2097,7 @@ async def admin_backup_now(callback: CallbackQuery, services: Services, bot: Bot
                 system_success=system["success"],
                 system_failed=system["failed"],
             )
-        await safe_edit_message_text(callback.message, text, reply_markup=admin_panel_keyboard())
+        await safe_edit_message_text(callback.message, text, reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

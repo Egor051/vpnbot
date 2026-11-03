@@ -188,7 +188,7 @@ def test_admin_issue_type_stale_owner_mismatch_clears_state(monkeypatch) -> None
     async def run() -> None:
         state = _State({"owner_user_id": 200})
         callback = _Callback("admin:ctype:xray:201")
-        await admin_issue_type_selected(callback, state, SimpleNamespace(users=Users()))  # type: ignore[arg-type]
+        await admin_issue_type_selected(callback, state, SimpleNamespace(users=Users(), settings=SimpleNamespace(subscription_enabled=False)))  # type: ignore[arg-type]
 
         assert state.cleared is True
         assert callback.answers == [("Действие устарело, начните выдачу заново", True)]

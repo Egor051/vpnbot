@@ -92,8 +92,17 @@ def maintenance_enable_skip_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def admin_panel_keyboard() -> InlineKeyboardMarkup:
-    """Build the full admin panel inline keyboard."""
+def admin_panel_keyboard(*, subscription_enabled: bool = False) -> InlineKeyboardMarkup:
+    """Build the full admin panel inline keyboard.
+
+    The «All-in-One» row exists only while ``SUBSCRIPTION_ENABLED`` is on, like
+    every other all-in-one button; its handlers refuse on their own as well.
+    """
+    bundles_row = (
+        [[InlineKeyboardButton(text=t("btn_admin_bundles"), callback_data="admin:aio")]]
+        if subscription_enabled
+        else []
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_server_status"), callback_data="admin:server_status")],
@@ -107,6 +116,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t("btn_announcement"), callback_data="admin:announce")],
             [InlineKeyboardButton(text=t("btn_warp"), callback_data="admin:warp")],
             [InlineKeyboardButton(text=t("btn_modules"), callback_data="admin:modules")],
+            *bundles_row,
             [InlineKeyboardButton(text=t("btn_maintenance"), callback_data="admin:maintenance")],
             [InlineKeyboardButton(text=t("btn_backend_diagnostics"), callback_data="admin:diagnostics")],
             [InlineKeyboardButton(text=t("btn_action_logs"), callback_data="admin:audit")],
