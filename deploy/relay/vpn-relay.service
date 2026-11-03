@@ -2,8 +2,10 @@
 #
 # Renders nftables table `ip vpnrelay` from /opt/vpn-service/.env (RELAY_* keys,
 # template deploy/relay/relay.env.example) and applies it atomically, then sets
-# net.ipv4.ip_forward=1 — see scripts/vpn-relay-apply. `stop` removes the table;
-# the leading "-" keeps a stop clean when the table is already gone.
+# the sysctls (conntrack from .env, net.ipv4.ip_forward=1) — see
+# scripts/vpn-relay-apply. The conntrack values are set here on every start:
+# systemd-sysctl runs before nf_conntrack is loaded and cannot set them. `stop`
+# removes the table; the leading "-" keeps a stop clean when the table is already gone.
 #
 # Installed VERBATIM by scripts/deploy.sh in the relay role (the same way
 # deploy/vpn-bot.service is installed on the main server), enabled, restarted,

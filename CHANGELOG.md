@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Relay: conntrack limits from the relay's `.env` (docs/relay.md#conntrack).** Two new keys —
+  `RELAY_CONNTRACK_MAX` (`net.netfilter.nf_conntrack_max`, default `65536`, 8192..1048576) and
+  `RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT` (`net.netfilter.nf_conntrack_tcp_timeout_established`,
+  default `86400` s, 300..432000), validated like the ports (exit `3`). `vpn-relay-apply apply`
+  now renders `/etc/sysctl.d/90-vpn-relay.conf` whole (`ip_forward` + both values, atomic) and
+  sets all three with `sysctl -w` after `nft -f`, reading each back (procps can exit 0 on a write
+  that did not take); with `nf_conntrack_max` absent it runs `modprobe nf_conntrack` once and
+  retries, otherwise exits `7`. `systemd-sysctl` applies the file at boot before nf_conntrack is
+  loaded and skips those keys, so `apply` sets them on every start. `check` compares both values
+  with `.env` (new exit code `15`) and warns — without failing — when
+  `net.netfilter.nf_conntrack_count` is above 80 % of the max (`/proc/net/stat/nf_conntrack` is
+  not used: the relay's 6.8 kernel does not have it). On a relay `deploy.sh` snapshots the
+  runtime conntrack values in Phase 1 and the rollback restores them (read back, like
+  `ip_forward` now). The first deploy of this on an existing relay shows `15` in Phase 1's live
+  check instead of PASS (the relay still runs the kernel's values); Phase 2 sets them.
+
 - **Host role `NODE_ROLE=relay`: the L4 relay is deployed from this repository with the same
   `scripts/redeploy.sh` (docs/relay.md#the-relay-host-node_rolerelay).** `NODE_ROLE` in
   `/opt/vpn-service/.env` is `main` (default — also when absent; the main deploy is unchanged

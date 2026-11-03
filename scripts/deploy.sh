@@ -42,7 +42,8 @@
 #          vpnrelay, helper, unit, sysctl file), reset, install the helper
 #          (OUT_OF_REPO_HELPERS, role relay) and deploy/relay/vpn-relay.service
 #          verbatim, daemon-reload, enable, restart, verify = `vpn-relay-apply
-#          check`; any failure rolls back to the backup (files + saved table).
+#          check`; any failure rolls back to the backup (files + saved table)
+#          and to the pre-deploy runtime sysctls (ip_forward, conntrack).
 #          See relay_deploy() below.
 # Read with env_sed_val (the sed parser of scripts/vpnbot-hy2-warp-mark: quotes,
 # spaces, inline comments, `export`, last assignment wins). Any other value is
@@ -260,6 +261,12 @@ RELAY_PRE_ACTIVE=""
 RELAY_PRE_ENABLED=""
 RELAY_PRE_FORWARD=""
 RELAY_PRE_TABLE=""
+# vpn-relay-apply apply sets these from the relay's .env (RELAY_CONNTRACK_*); the
+# rollback puts back the runtime values they had before the deploy.
+RELAY_CT_MAX_KEY="net.netfilter.nf_conntrack_max"
+RELAY_CT_EST_KEY="net.netfilter.nf_conntrack_tcp_timeout_established"
+RELAY_PRE_CT_MAX=""      # empty = unreadable before the deploy (nf_conntrack not loaded)
+RELAY_PRE_CT_EST=""
 RELAY_UNIT_STATE=""      # absent | synced | legacy | differs (relay_unit_state)
 RELAY_RENDER_OUT=""
 RELAY_LIVE_OUT=""
@@ -1927,6 +1934,8 @@ relay_snapshot_prestate() {
   RELAY_PRE_ACTIVE="$(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true)"
   RELAY_PRE_ENABLED="$(systemctl is-enabled "$RELAY_UNIT" 2>/dev/null || true)"
   RELAY_PRE_FORWARD="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || true)"
+  RELAY_PRE_CT_MAX="$(sysctl -n "$RELAY_CT_MAX_KEY" 2>/dev/null || true)"
+  RELAY_PRE_CT_EST="$(sysctl -n "$RELAY_CT_EST_KEY" 2>/dev/null || true)"
   if nft list table ip "$RELAY_TABLE" >/dev/null 2>&1; then
     RELAY_PRE_TABLE="present"
   else
@@ -1969,6 +1978,7 @@ relay_live_rc_text() {
     12) echo "net.ipv4.ip_forward is off — Phase 2 turns it on" ;;
     13) echo "the upstream does not answer on a forwarded TCP port — Phase 2's verify runs the same probe and would ROLL BACK; fix that first" ;;
     14) echo "TLS handshake to the upstream failed — Phase 2's verify would ROLL BACK; fix that (or RELAY_CHECK_SNI) first" ;;
+    15) echo "the table and ip_forward match; the conntrack sysctls differ from .env (RELAY_CONNTRACK_*) — Phase 2 sets them" ;;
     5)  echo "could not run the live check here (exit 5: not root / tool missing)" ;;
     *)  echo "exit ${1}" ;;
   esac
@@ -1983,7 +1993,7 @@ relay_phase1() {
   (( rc == 0 )) || die "relay: the ruleset does not render from ${ENV_FILE} (vpn-relay-apply exit ${rc}, see above) — fix .env (template: deploy/relay/relay.env.example); nothing was changed"
 
   relay_snapshot_prestate
-  log "relay pre-state: ${RELAY_UNIT} active=${RELAY_PRE_ACTIVE:-unknown} enabled=${RELAY_PRE_ENABLED:-<not installed>}; table ip ${RELAY_TABLE} ${RELAY_PRE_TABLE}; net.ipv4.ip_forward=${RELAY_PRE_FORWARD:-unknown}"
+  log "relay pre-state: ${RELAY_UNIT} active=${RELAY_PRE_ACTIVE:-unknown} enabled=${RELAY_PRE_ENABLED:-<not installed>}; table ip ${RELAY_TABLE} ${RELAY_PRE_TABLE}; net.ipv4.ip_forward=${RELAY_PRE_FORWARD:-unknown}; ${RELAY_CT_MAX_KEY}=${RELAY_PRE_CT_MAX:-unknown}; ${RELAY_CT_EST_KEY}=${RELAY_PRE_CT_EST:-unknown}"
 
   RELAY_UNIT_STATE="$(relay_unit_state "$WT")"
   log "relay unit ${RELAY_SYSTEM_UNIT}: $(relay_unit_state_text "$RELAY_UNIT_STATE")"
@@ -2041,6 +2051,8 @@ relay_phase1_report() {
   printf '    %-24s : active=%s enabled=%s\n' "$RELAY_UNIT" "${RELAY_PRE_ACTIVE:-unknown}" "${RELAY_PRE_ENABLED:-<not installed>}"
   printf '    %-24s : %s\n' "table ip ${RELAY_TABLE}" "$RELAY_PRE_TABLE"
   printf '    %-24s : %s\n' "net.ipv4.ip_forward" "${RELAY_PRE_FORWARD:-unknown}"
+  printf '    %-24s : nf_conntrack_max=%s nf_conntrack_tcp_timeout_established=%s\n' "net.netfilter conntrack" \
+    "${RELAY_PRE_CT_MAX:-unknown}" "${RELAY_PRE_CT_EST:-unknown}"
   if [[ -e "$RELAY_LEGACY_NFT" ]]; then
     printf '    %-24s : present (hand-installed; renamed to .pre-repo.<ts> after a successful deploy)\n' "$RELAY_LEGACY_NFT"
   else
@@ -2069,11 +2081,24 @@ relay_phase1_report() {
   printf '    back up the live table + %s, %s, %s\n' "$RELAY_HELPER" "$RELAY_SYSTEM_UNIT" "$RELAY_SYSCTL_FILE"
   printf '    git reset --hard origin/main; install the helper; install %s verbatim\n' "$RELAY_UNIT_SRC"
   printf '    daemon-reload; enable + restart %s; verify with vpn-relay-apply check\n' "$RELAY_UNIT"
-  printf '    any failure -> rollback (files + saved table + enable/active state + ip_forward)\n'
+  printf '    any failure -> rollback (files + saved table + enable/active state + ip_forward + conntrack sysctls)\n'
   printf '\n===================================================================\n'
 }
 
 arm_relay_rollback() { PHASE="armed"; trap 'relay_rollback' ERR INT TERM HUP; }
+
+# One pre-deploy sysctl back, as a rollback report line. The value is read back:
+# procps `sysctl -w` can exit 0 on a write that did not take.
+relay_restore_sysctl() {
+  local key="$1" val="$2" rc now
+  sysctl -q -w "${key}=${val}" >/dev/null; rc=$?
+  now="$(sysctl -n "$key" 2>/dev/null || true)"
+  if (( rc == 0 )) && [[ "$now" == "$val" ]]; then
+    echo "${key}=${val} (pre-deploy value): rc=0"
+  else
+    echo "${key}=${val} (pre-deploy value): rc=${rc}, now ${now:-<unreadable>} — MANUAL ACTION REQUIRED"
+  fi
+}
 
 # The relay's rollback: no bot, no DB, no archive extraction into / — the files
 # come back from the backup stage, the table from its `nft list` dump. Mirrors
@@ -2140,9 +2165,23 @@ relay_rollback() {
   fi
 
   if [[ "$RELAY_PRE_FORWARD" =~ ^[01]$ ]]; then
-    sysctl -q -w "net.ipv4.ip_forward=${RELAY_PRE_FORWARD}" >/dev/null; report+=("net.ipv4.ip_forward=${RELAY_PRE_FORWARD} (pre-deploy value): rc=$?")
+    report+=("$(relay_restore_sysctl net.ipv4.ip_forward "$RELAY_PRE_FORWARD")")
   else
     report+=("net.ipv4.ip_forward pre-deploy value unknown — left as it is")
+  fi
+
+  # The conntrack sysctls as they were before apply set them from .env. Unreadable
+  # before the deploy = nf_conntrack was not loaded then: there is no value to go
+  # back to, so what apply set stays (the deploy never unloads modules).
+  if [[ "$RELAY_PRE_CT_MAX" =~ ^[0-9]+$ ]]; then
+    report+=("$(relay_restore_sysctl "$RELAY_CT_MAX_KEY" "$RELAY_PRE_CT_MAX")")
+  else
+    report+=("${RELAY_CT_MAX_KEY} unreadable before the deploy (nf_conntrack not loaded) — left as it is")
+  fi
+  if [[ "$RELAY_PRE_CT_EST" =~ ^[0-9]+$ ]]; then
+    report+=("$(relay_restore_sysctl "$RELAY_CT_EST_KEY" "$RELAY_PRE_CT_EST")")
+  else
+    report+=("${RELAY_CT_EST_KEY} unreadable before the deploy (nf_conntrack not loaded) — left as it is")
   fi
 
   report+=("${RELAY_UNIT} is-active: $(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true) (before the deploy: ${RELAY_PRE_ACTIVE:-unknown})")
@@ -2215,7 +2254,7 @@ relay_phase2() {
     || rollback_now "failed to install ${RELAY_UNIT_SRC} to ${RELAY_SYSTEM_UNIT}"
   systemctl daemon-reload || rollback_now "systemctl daemon-reload failed"
   systemctl enable --quiet "$RELAY_UNIT" || rollback_now "systemctl enable ${RELAY_UNIT} failed"
-  log "restarting ${RELAY_UNIT} (vpn-relay-apply apply: table ip ${RELAY_TABLE} from .env, ip_forward=1)"
+  log "restarting ${RELAY_UNIT} (vpn-relay-apply apply: table ip ${RELAY_TABLE} from .env, conntrack sysctls, ip_forward=1)"
   systemctl restart "$RELAY_UNIT" \
     || rollback_now "${RELAY_UNIT} restart failed — vpn-relay-apply apply exited non-zero (see: journalctl -u ${RELAY_UNIT} -n 50 --no-pager)"
   [[ "$(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true)" == "active" ]] \
