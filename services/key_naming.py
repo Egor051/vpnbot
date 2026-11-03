@@ -11,14 +11,17 @@ The name is display-only. ``email_label`` — Xray's client email, the hy2 auth
 id, the key the traffic stats and anomaly detection match on — is never
 changed; the name is derived from it at render time.
 
-Rules (``[_relay]`` is present only for a relay key):
+Rules (``[_<relay label>]`` is present only for a relay key, and is the
+``label`` of its relay as the admin panel set it — ``relay`` by default):
 
 * standalone key (link / QR / delivery outside a subscription):
-  ``<label>[_relay]_<SERVER_FLAG_EMOJI>`` — e.g. ``xray_tcp_ab12c_🇫🇮``;
+  ``<label>[_<relay label>]_<SERVER_FLAG_EMOJI>`` — e.g. ``xray_tcp_ab12c_🇫🇮``
+  or ``xray_tcp_ab12c_relay_🇫🇮``;
 * member of a **basic** subscription: the same as a standalone key;
-* member of an **extended** subscription: ``<label>[_relay]_<mark>``, where the
-  mark is the preference circle of the member (no flag). A relay member gets the
-  circle of its direct twin, because the circle is keyed by transport/profile.
+* member of an **extended** subscription: ``<label>[_<relay label>]_<mark>``,
+  where the mark is the preference circle of the member (no flag). A relay member
+  gets the circle of its direct twin, because the circle is keyed by
+  transport/profile.
 
 This module deliberately imports nothing from ``bot`` or the per-protocol
 services, so all of them — and the standalone subscription process — can use it
@@ -34,15 +37,13 @@ from enum import StrEnum
 from config.settings import Settings
 from models.dto import VpnKey
 from models.enums import KeyBundleKind, VpnKeyType
+from services.relay import RelaySnapshot, relay_marker
 
 # XHTTP client transport profiles (see services.xray for what each one tunes).
 # Defined here, re-exported by services.xray, so the naming code and the link
 # builder share one list.
 XHTTP_PROFILES: tuple[str, ...] = ("base", "multi", "antisib")
 XHTTP_DEFAULT_PROFILE = "base"
-
-# Inserted right after the label of a relay key, before the flag / circle.
-RELAY_NAME_MARKER = "relay"
 
 # Preference circle per composition member, used only by the EXTENDED style: the
 # colour ranks the average speed and latency the member gives, best (green) to
@@ -127,8 +128,12 @@ def key_label(key: VpnKey) -> str:
     return str(key.email_label or key.payload.get("email_label") or "")
 
 
-def key_display_name(key: VpnKey, style: NameStyle, settings: Settings) -> str:
+def key_display_name(key: VpnKey, style: NameStyle, settings: Settings, relays: RelaySnapshot) -> str:
     """THE display name of *key* in a link rendered with *style*.
+
+    The relay marker is the ``label`` of the key's relay in *relays*; a key whose
+    relay is deleted or unknown raises :class:`services.relay.RelayUnavailable`,
+    exactly as rendering its host would a moment later.
 
     Returns ``""`` for a key with no label at all, so each link builder keeps
     its own historical fallback for that corrupt case.
@@ -136,7 +141,7 @@ def key_display_name(key: VpnKey, style: NameStyle, settings: Settings) -> str:
     label = key_label(key)
     if not label:
         return ""
-    base = f"{label}_{RELAY_NAME_MARKER}" if key.relay else label
+    base = f"{label}_{relay_marker(relays, key.relay)}" if key.relay else label
     if style is NameStyle.EXTENDED:
         mark = PREFERENCE_MARKS.get(key_member_name(key))
         return f"{base}_{mark}" if mark else base

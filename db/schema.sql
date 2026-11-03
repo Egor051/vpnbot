@@ -101,11 +101,13 @@ CREATE TABLE IF NOT EXISTS vpn_keys (
   -- _migrate_v32.
   bundle_id INTEGER REFERENCES key_bundles(id) ON DELETE RESTRICT,
   -- Relay the key's client link points at. NULL = direct key (the default and
-  -- every pre-v37 row); otherwise the relay name (RELAY_NAME). An attribute of
+  -- every pre-v37 row); otherwise relays.name of that relay. An attribute of
   -- the key, NOT a key_type/transport: the key uses the same inbounds and the
   -- same email-label prefix as a direct one. No CHECK (like transport); the
   -- ^[a-z0-9][a-z0-9-]{0,31}$ format is validated in code on write. Mirrors
-  -- _migrate_v37.
+  -- _migrate_v37. Deliberately NOT a foreign key to relays(name): legacy rows
+  -- with status 'deleted' keep the name forever, and a RESTRICT would make a
+  -- relay undeletable because of them; integrity is the relay service's job.
   relay TEXT
 );
 
@@ -137,6 +139,33 @@ CREATE TABLE IF NOT EXISTS key_bundles (
   -- 'extended', which is exactly what it was. No CHECK (like transport):
   -- validated in code and by _validate_enum_values. Mirrors _migrate_v37.
   kind TEXT NOT NULL DEFAULT 'extended'
+);
+
+-- L4 relays, managed from the admin panel (they used to be RELAY_* in .env).
+-- Mirrors _migrate_v38.
+--   name    — immutable slug, the value keys carry in vpn_keys.relay (no FK, see
+--             vpn_keys.relay above). Never reused for a different relay while any
+--             key row still names it — enforced by services.relay_management.
+--   label   — the relay's marker in a key's display name; editable.
+--   host    — DNS name or IPv4 the relay's links point at; editable, takes effect
+--             on the next rendered link (links are built on the fly).
+--   source_ips — normalized comma-separated IPv4/CIDR list, never empty: the
+--             relay's egress addresses, excluded from anomaly-detection IPs.
+--   enabled — 0: links of its keys are refused, it is not offered anywhere.
+--   in_subscriptions — 0: new all-in-one bundles get no members through it.
+CREATE TABLE IF NOT EXISTS relays (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  label TEXT NOT NULL UNIQUE DEFAULT 'relay',
+  host TEXT NOT NULL,
+  source_ips TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  in_subscriptions INTEGER NOT NULL DEFAULT 1,
+  note TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+  updated_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS trial_key_requests (

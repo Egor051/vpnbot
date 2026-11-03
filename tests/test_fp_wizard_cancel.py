@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from conftest import relay_services
+
 import bot.handlers.callbacks as callbacks_mod
 import bot.handlers.key_bundles as bundles_mod
 import bot.handlers.keys as keys_mod
@@ -75,6 +77,7 @@ def _services(*, key_id: int = 42, bundle_id: int = 5) -> SimpleNamespace:
             list_keys_for_actor=lambda actor, bid: _awaitable([]),
         ),
         settings=SimpleNamespace(subscription_enabled=True, xray_xhttp_enabled=False, hysteria2_enabled=False),
+        relays=relay_services(),
     )
 
 
@@ -165,7 +168,7 @@ def test_cancel_with_a_bundle_target_returns_to_the_bundle_card(monkeypatch) -> 
         monkeypatch.setattr(
             callbacks_mod,
             "bundle_detail_text",
-            lambda bundle, keys, viewer_user_id, views=None: f"BUNDLE-CARD-{bundle.id}",
+            lambda bundle, keys, viewer_user_id, views=None, relays=None: f"BUNDLE-CARD-{bundle.id}",
             raising=False,
         )
         monkeypatch.setattr(callbacks_mod, "bundle_actions_keyboard", lambda bundle, has_vless: "KB", raising=False)

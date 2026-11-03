@@ -16,6 +16,7 @@ before any service is touched.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from urllib.parse import quote
 
 from bot.container import Services
@@ -35,6 +36,7 @@ from models.dto import KeyBundle, KeyTrafficStatsView, VpnKey
 from models.enums import KeyBundleKind, VpnKeyType
 from services.errors import InvalidOperation
 from services.key_bundles import BundleMember, KeyBundleCreateResult, subscription_sort_key
+from services.relay import EMPTY_RELAYS, RelaySnapshot
 from utils.formatting import code, format_bytes, format_expiry_date, format_msk_datetime, h
 
 # The pseudo key-type the create wizard carries in its FSM data for an all-in-one
@@ -123,19 +125,20 @@ def bundle_kind_label(kind: KeyBundleKind) -> str:
     return t(f"bundle_kind_{kind.value}")
 
 
-def bundle_kind_prompt(*, relay_enabled: bool = False) -> str:
+def bundle_kind_prompt(*, relay_labels: Sequence[str] = ()) -> str:
     """The kind-choice screen of the create wizard: both kinds, each explained.
 
-    With a relay configured each kind also carries relay copies of its members,
-    which is said once below the two descriptions.
+    *relay_labels* are the relays new bundles get members through (enabled and
+    «в подписках», in relay order); each kind then also carries a copy of its
+    members through each of them, which is said once below the two descriptions.
     """
     blocks = "\n\n".join(
         f"<b>{t(f'bundle_kind_{kind.value}')}</b>\n{t(f'bundle_kind_{kind.value}_desc')}"
         for kind in (KeyBundleKind.BASIC, KeyBundleKind.EXTENDED)
     )
     text = f"{t('bundle_kind_prompt')}\n\n{blocks}"
-    if relay_enabled:
-        text += f"\n\n{t('bundle_kind_relay_note')}"
+    if relay_labels:
+        text += f"\n\n{t('bundle_kind_relay_note', relays=h(', '.join(relay_labels)))}"
     return text
 
 
@@ -184,8 +187,12 @@ def bundle_detail_text(
     *,
     viewer_user_id: int,
     views: list[KeyTrafficStatsView] | None = None,
+    relays: RelaySnapshot = EMPTY_RELAYS,
 ) -> str:
     """The full bundle screen: card, what is inside it, its traffic, its notices.
+
+    *relays* only orders the «Состав» preview the way the subscription serves it
+    (relay children grouped by relay, in relay order).
 
     ``views`` carries the children's traffic, rendered here rather than behind a
     «Статистика» button — the same move the per-key screen makes. ``None`` means the
@@ -206,7 +213,7 @@ def bundle_detail_text(
         lines.append(f"{t('field_expires')}: {h(format_expiry_date(expires_at))}")
     lines.append(f"{t('field_note')}: {h(note or t('none'))}")
     lines.append("")
-    lines.append(_composition_block(keys))
+    lines.append(_composition_block(keys, relays))
     lines.append("")
     lines.extend(bundle_stats_block(views))
     lines.append("")
@@ -214,25 +221,28 @@ def bundle_detail_text(
     return "\n".join(lines)
 
 
-def _composition_block(keys: list[VpnKey]) -> str:
+def _composition_block(keys: list[VpnKey], relays: RelaySnapshot) -> str:
     if not keys:
         return f"{t('bundle_composition')}: {h(t('none'))}"
-    entries = "\n".join(f"• {h(bundle_key_label(key))} #{key.id}" for key in _in_subscription_order(keys))
+    entries = "\n".join(
+        f"• {h(bundle_key_label(key))} #{key.id}" for key in _in_subscription_order(keys, relays)
+    )
     return f"{t('bundle_composition')}:\n{entries}"
 
 
-def _in_subscription_order(keys: list[VpnKey]) -> list[VpnKey]:
+def _in_subscription_order(keys: list[VpnKey], relays: RelaySnapshot) -> list[VpnKey]:
     """Order the children the way the subscription serves them.
 
     «Состав» is a preview of the profile list the client is about to import, so it
-    has to agree with it: the same order — direct children first, then relay
-    children, each group from the member giving the best connection to the worst.
+    has to agree with it: the same order — direct children first, then the
+    children of each relay in relay order, each group from the member giving the
+    best connection to the worst.
     Sorted with the renderer's own sort key rather than left in row order, which
     for a bundle provisioned before the seam's order last changed would show
     something the client never displays. Unknown members keep their relative
     position at the end of their group instead of disappearing.
     """
-    return sorted(keys, key=subscription_sort_key)
+    return sorted(keys, key=lambda key: subscription_sort_key(key, relays))
 
 
 # ── create ────────────────────────────────────────────────────────────────────
@@ -271,7 +281,13 @@ def bundle_create_confirm_text(
     return "\n".join(lines)
 
 
-def bundle_created_text(result: KeyBundleCreateResult, *, viewer_user_id: int, settings: Settings) -> str:
+def bundle_created_text(
+    result: KeyBundleCreateResult,
+    *,
+    viewer_user_id: int,
+    settings: Settings,
+    relays: RelaySnapshot = EMPTY_RELAYS,
+) -> str:
     """What the user gets after a successful create — including a partial one.
 
     A bundle may legitimately come out smaller than the full composition when a
@@ -290,7 +306,7 @@ def bundle_created_text(result: KeyBundleCreateResult, *, viewer_user_id: int, s
         "",
         bundle_card_text(result.bundle, viewer_user_id=viewer_user_id),
         "",
-        _composition_block(list(result.keys)),
+        _composition_block(list(result.keys), relays),
     ]
     if result.skipped:
         skipped = ", ".join(bundle_member_label(member) for member in result.skipped)

@@ -4,7 +4,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from bot.formatters import key_type_label, status_text
 from bot.keyboards.key_bundles import bundle_list_row
 from i18n import t
-from models.dto import KeyBundle, VpnKey
+from models.dto import KeyBundle, Relay, VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 
 VALID_FINGERPRINTS = [
@@ -78,15 +78,20 @@ def xhttp_profile_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def relay_route_keyboard() -> InlineKeyboardMarkup:
-    """The «Подключение» step (only shown while RELAY_ENABLED): direct or via relay."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=t("btn_route_direct"), callback_data="keys:route:direct")],
-            [InlineKeyboardButton(text=t("btn_route_relay"), callback_data="keys:route:relay")],
-            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
-        ]
+def relay_route_keyboard(relays: list[Relay]) -> InlineKeyboardMarkup:
+    """The «Подключение» step: «Напрямую» plus one «Через <label>» per enabled relay.
+
+    Shown only while at least one relay is enabled. A relay button carries the
+    relay's id (``keys:route:<id>``); the handler resolves it against the live
+    snapshot, so a relay switched off or deleted meanwhile is refused there.
+    """
+    rows = [[InlineKeyboardButton(text=t("btn_route_direct"), callback_data="keys:route:direct")]]
+    rows.extend(
+        [InlineKeyboardButton(text=t("btn_route_via", label=relay.label), callback_data=f"keys:route:{relay.id}")]
+        for relay in relays
     )
+    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def keys_list_keyboard(

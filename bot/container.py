@@ -23,6 +23,8 @@ from services.offsite_backup import OffsiteBackupService
 from services.online_clients import OnlineClientsService
 from services.protocol_modules import ProtocolModulesService
 from services.proxy import ProxyService
+from services.relay_health import RelayHealthSupervisor
+from services.relay_management import RelayService
 from services.server_status import ServerStatusService
 from services.socks5 import Socks5Service
 from services.traffic_stats import TrafficStatsService
@@ -76,6 +78,11 @@ class Services:
     # every method on both, so with the flag off neither is reachable.
     key_bundles: KeyBundleService
     key_bundle_views: KeyBundleViewService
+    # L4 relays (the admin panel's «🛰 Управлять relay»): the service owns the
+    # in-process snapshot every link builder reads (``relays.snapshot``); the
+    # supervisor runs the health loop and keeps each relay's latest probe.
+    relays: RelayService
+    relay_health: RelayHealthSupervisor
     # Loopback /healthz probe for the hy2_auth data plane; None when Hysteria2 is
     # disabled. Drives the background health loop that marks the Hysteria2 backend
     # degraded/healthy in BackendHealth.

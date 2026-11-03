@@ -17,7 +17,9 @@ from i18n import t
 from models.dto import KeyBundle, VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
 from repositories.key_bundles import KeyBundleRepository
+from repositories.relays import RelayRepository
 from repositories.vpn_keys import VpnKeyRepository
+from services.relay import RelaySnapshot
 from utils.redact import redact_value
 
 logger = logging.getLogger(__name__)
@@ -133,16 +135,21 @@ class AnomalyDetectionService:
         bot: Bot | None = None,
         backend_health: object | None = None,
         bundles: KeyBundleRepository | None = None,
-        relay_source_ips: tuple[ipaddress.IPv4Network, ...] = (),
+        relays: RelayRepository | None = None,
     ) -> None:
         self._vpn_keys = vpn_keys
-        # Egress addresses of the L4 relay (RELAY_SOURCE_IPS). Every connection
-        # arriving through the relay carries one of these as its source IP (L4
-        # DNAT, no PROXY protocol), so it says nothing about who is behind it and
-        # is never recorded — neither the IP nor, therefore, its network/ASN.
-        # Because the inbound is shared, this removes the IP signal from ANY key
-        # used through the relay; documented in docs/relay.md. Empty = no-op.
-        self._relay_source_ips = relay_source_ips
+        # Egress addresses of the L4 relays (each relay's source IPs, managed in
+        # the admin panel). Every connection arriving through a relay carries one
+        # of these as its source IP (L4 DNAT, no PROXY protocol), so it says
+        # nothing about who is behind it and is never recorded — neither the IP
+        # nor, therefore, its network/ASN. Because the inbound is shared, this
+        # removes the IP signal from ANY key used through a relay; documented in
+        # docs/relay.md. Re-read from the database at the start of every cycle
+        # (:meth:`_refresh_relay_source_ips`), the union over ALL relays —
+        # switched-off ones included, their clients may still be connected.
+        # Empty = no-op.
+        self._relays = relays
+        self._relay_source_ips: tuple[ipaddress.IPv4Network, ...] = ()
         # Read-only, alert-shaping only: used to name the parent an admin actually
         # recognises instead of a child label the user has never seen, and to roll
         # several children of one bundle into a single alert. DETECTION does not go
@@ -202,11 +209,29 @@ class AnomalyDetectionService:
     async def check_all(self) -> None:
         """Sample all backends for connection IPs and fire alerts when thresholds are exceeded."""
         now = time_module.time()
+        await self._refresh_relay_source_ips()
         self._evict_stale_last_alerted(now)
         await self._sample_awg_endpoints(now)
         await self._sample_xray_log(now)
         await self._check_thresholds(now)
         await self._check_hysteria_online(now)
+
+    async def _refresh_relay_source_ips(self) -> None:
+        """Pick up the relays' source IPs as the database holds them now.
+
+        Runs at the start of every cycle, so a relay added or edited in the panel
+        is excluded from the next cycle on. A failed read keeps the previous set:
+        a transient database error must not suddenly start counting relay
+        addresses as client networks.
+        """
+        if self._relays is None:
+            return
+        try:
+            relays = await self._relays.list_all()
+        except Exception:
+            logger.warning("Failed to read relays for anomaly detection; keeping the previous set", exc_info=True)
+            return
+        self._relay_source_ips = RelaySnapshot.of(relays).source_networks
 
     def _evict_stale_last_alerted(self, now: float) -> None:
         """Drop cooldown timestamps once their cooldown has fully elapsed.
@@ -749,7 +774,7 @@ class AnomalyDetectionService:
         self._observations[key_id].append((now, ip))
 
     def _is_relay_source(self, ip: str) -> bool:
-        """Whether *ip* is one of the relay's egress addresses (RELAY_SOURCE_IPS).
+        """Whether *ip* is one of the relays' egress addresses (their source IPs).
 
         An IPv4-mapped IPv6 form (``::ffff:a.b.c.d``, which a dual-stack listener
         may log) is matched by its IPv4 address. An unparseable value is not a

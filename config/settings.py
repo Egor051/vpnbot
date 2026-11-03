@@ -10,6 +10,8 @@ from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
+from config import validators
+from config.validators import RELAY_NAME_PATTERN as RELAY_NAME_PATTERN
 from utils.spider_x import parse_spider_x_pool
 
 logger = logging.getLogger(__name__)
@@ -19,14 +21,27 @@ class SettingsError(RuntimeError):
     pass
 
 
-# Name of an L4 relay (RELAY_NAME and the value stored in vpn_keys.relay). The
-# single source of the format: the settings loader, the key repository (on
-# write) and the relay services all match against THIS pattern.
-RELAY_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+# The legacy relay variables. They are no longer a source of truth — relays live
+# in the ``relays`` table and are managed from the admin panel — but they are
+# still parsed (strictly, as before) so a deployment that had them can be seeded
+# once into that table, and so the bot can warn that they are now ignored.
+# RELAY_HEALTH_INTERVAL is NOT one of them: it stays an ordinary setting.
+LEGACY_RELAY_ENV_VARS: tuple[str, ...] = ("RELAY_ENABLED", "RELAY_NAME", "RELAY_HOST", "RELAY_SOURCE_IPS")
 
-# RFC 1123 hostname: dot-separated labels of 1-63 [A-Za-z0-9-], no leading or
-# trailing hyphen, 253 characters in total. A trailing root dot is tolerated.
-_HOSTNAME_LABEL = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)$")
+
+@dataclass(frozen=True, slots=True)
+class RelaySeed:
+    """The relay the legacy ``RELAY_*`` variables describe, already validated.
+
+    Present only while ``RELAY_ENABLED=true`` (which still requires RELAY_HOST and
+    RELAY_SOURCE_IPS). Used exactly once: at bot startup, when the ``relays``
+    table is empty, it becomes the first row (see services.relay_management).
+    """
+
+    name: str
+    host: str
+    source_ips: tuple[ipaddress.IPv4Network, ...]
+
 
 # SERVER_FLAG_EMOJI is a display decoration, not data: a short cap keeps a typo
 # (a whole sentence pasted into it) from bloating every link name.
@@ -302,65 +317,35 @@ def _xray_short_id(value: str, *, required: bool) -> str:
 
 def _relay_name(name: str, value: str) -> str:
     """Validate a relay name against :data:`RELAY_NAME_PATTERN`."""
-    if RELAY_NAME_PATTERN.fullmatch(value) is None:
-        raise SettingsError(
-            f"{name} должен соответствовать ^[a-z0-9][a-z0-9-]{{0,31}}$ (строчные латинские буквы, цифры, дефис)"
-        )
-    return value
+    try:
+        return validators.relay_name(name, value)
+    except validators.InvalidValue as exc:
+        raise SettingsError(str(exc)) from exc
 
 
 def _dns_name_or_ipv4(name: str, value: str) -> str:
     """Accept an IPv4 address or an RFC 1123 DNS name; reject everything else.
 
-    IPv6 literals are refused on purpose: the relay forwards IPv4 only, and a
-    bracket-less IPv6 host would also need special casing in every link.
+    The check itself is :func:`config.validators.dns_name_or_ipv4`, shared with
+    the admin panel so both accept exactly the same hosts.
     """
-    value = _no_control_chars(name, value).strip()
-    if not value:
-        return value
     try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
-        address = None
-    if address is not None:
-        if address.version != 4:
-            raise SettingsError(f"{name} должен быть DNS-именем или IPv4-адресом (IPv6 не поддерживается)")
-        return value
-    if value.replace(".", "").isdigit():
-        # Looks numeric but is not a valid IPv4 address (e.g. 1.2.3.256): a
-        # DNS name cannot be all digits, so this is a typo, not a hostname.
-        raise SettingsError(f"{name}: {value!r} не является корректным IPv4-адресом")
-    hostname = value[:-1] if value.endswith(".") else value
-    if len(hostname) > 253 or not all(_HOSTNAME_LABEL.match(label) for label in hostname.split(".")):
-        raise SettingsError(f"{name} должен быть DNS-именем или IPv4-адресом, получено {value!r}")
-    return value
+        return validators.dns_name_or_ipv4(name, value)
+    except validators.InvalidValue as exc:
+        raise SettingsError(str(exc)) from exc
 
 
 def parse_ipv4_networks(name: str, raw: str) -> tuple[ipaddress.IPv4Network, ...]:
     """Strictly parse a comma-separated list of IPv4 addresses / CIDR networks.
 
-    Whitespace around an item is ignored and empty items (a trailing comma, two
-    commas in a row) are skipped — the same tolerance ADMIN_IDS has. Anything
-    else that is not an IPv4 address or a strict IPv4 network (host bits set in
-    a CIDR, an IPv6 value, a hostname, stray characters) is a SettingsError: a
-    silently dropped entry here would quietly re-enable IP accounting for a
-    relay the operator believes is excluded. Duplicates are collapsed, order is
-    kept.
+    :func:`config.validators.parse_ipv4_networks` with the error raised as a
+    ``SettingsError`` — the admin panel parses source IPs with the very same
+    function, so a value accepted in one place is accepted in the other.
     """
-    networks: list[ipaddress.IPv4Network] = []
-    for item in _no_control_chars(name, raw).split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            network = ipaddress.ip_network(item, strict=True)
-        except ValueError as exc:
-            raise SettingsError(f"{name}: {item!r} не является IPv4-адресом или CIDR-сетью") from exc
-        if not isinstance(network, ipaddress.IPv4Network):
-            raise SettingsError(f"{name}: {item!r} — поддерживается только IPv4")
-        if network not in networks:
-            networks.append(network)
-    return tuple(networks)
+    try:
+        return validators.parse_ipv4_networks(name, raw)
+    except validators.InvalidValue as exc:
+        raise SettingsError(str(exc)) from exc
 
 
 def _server_flag_emoji(name: str, value: str) -> str:
@@ -721,19 +706,16 @@ class Settings:
     # own file, never the bot's: the two are independent processes and either
     # must be able to run while the other is down.
     subscription_lock_path: Path = Path("/run/vpn-bot-subscription/subscription.lock")
-    # L4 relay (see docs/relay.md). The relay DNATs TCP+UDP/443 1:1 to this
-    # server, so a relay key differs from a direct one ONLY by the host in its
-    # link: the port is the protocol's own public port (XRAY_PUBLIC_PORT /
-    # HYSTERIA2_PORT), there is no relay port setting. Off by default: with it
-    # off the relay step is never offered and no relay link can be rendered.
-    relay_enabled: bool = False
-    # Name stored in vpn_keys.relay for keys issued through this relay.
-    relay_name: str = "ru1"
-    # Public DNS name or IPv4 of the relay — what relay links point at.
-    relay_host: str = ""
-    # Egress addresses/networks of the relay as the main server sees them.
-    # Excluded from anomaly-detection IP accounting (see docs/relay.md).
-    relay_source_ips: tuple[ipaddress.IPv4Network, ...] = ()
+    # L4 relays (see docs/relay.md) are managed from the admin panel and stored
+    # in the ``relays`` table — NOT here. What remains of the old RELAY_* block:
+    #
+    # * relay_seed — the relay RELAY_ENABLED/RELAY_NAME/RELAY_HOST/RELAY_SOURCE_IPS
+    #   describe (None unless RELAY_ENABLED=true), used once to seed an empty
+    #   ``relays`` table at bot startup;
+    # * relay_env_vars — which of those variables are set at all, so the bot can
+    #   warn that they are ignored from now on.
+    relay_seed: RelaySeed | None = None
+    relay_env_vars: tuple[str, ...] = ()
     # Seconds between relay health probes; 0 disables the monitor.
     relay_health_interval: int = 300
     # Appended to the display name of standalone keys and basic-subscription
@@ -1058,19 +1040,25 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
             "ANOMALY_HYSTERIA2_MAX_CONN>0 требует HYSTERIA2_STATS_SECRET "
             "(проверка одновременных подключений Hysteria2 использует Traffic Stats API)"
         )
+    # Legacy RELAY_* — parsed exactly as strictly as when they were the source of
+    # truth (garbage still fails startup), but only to seed an empty ``relays``
+    # table once; see RelaySeed and services.relay_management.
     relay_enabled = _bool("RELAY_ENABLED", False)
     relay_name = _relay_name("RELAY_NAME", _optional("RELAY_NAME", "ru1") or "ru1")
     relay_host = _dns_name_or_ipv4("RELAY_HOST", _optional("RELAY_HOST"))
     relay_source_ips = parse_ipv4_networks("RELAY_SOURCE_IPS", _optional("RELAY_SOURCE_IPS"))
     server_flag_emoji = _server_flag_emoji("SERVER_FLAG_EMOJI", _optional("SERVER_FLAG_EMOJI", "🇫🇮"))
+    relay_seed: RelaySeed | None = None
     if relay_enabled:
-        # Both are needed for the feature to be coherent: without a host there is
+        # Both are needed for the seed to be coherent: without a host there is
         # nothing to put in a relay link, and without the source IPs every relay
         # connection would be counted by anomaly detection as one more network.
         if not relay_host:
             raise SettingsError("RELAY_ENABLED=true требует RELAY_HOST (DNS-имя или IPv4 relay)")
         if not relay_source_ips:
             raise SettingsError("RELAY_ENABLED=true требует RELAY_SOURCE_IPS (egress IP/CIDR relay)")
+        relay_seed = RelaySeed(name=relay_name, host=relay_host, source_ips=relay_source_ips)
+    relay_env_vars = tuple(name for name in LEGACY_RELAY_ENV_VARS if name in os.environ)
     return Settings(
         bot_token=_required("BOT_TOKEN"),
         admin_ids=_admin_ids(_required("ADMIN_IDS")),
@@ -1290,10 +1278,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         subscription_lock_path=Path(
             _optional("SUBSCRIPTION_LOCK_PATH", "/run/vpn-bot-subscription/subscription.lock")
         ),
-        relay_enabled=relay_enabled,
-        relay_name=relay_name,
-        relay_host=relay_host,
-        relay_source_ips=relay_source_ips,
+        relay_seed=relay_seed,
+        relay_env_vars=relay_env_vars,
         relay_health_interval=_int_range("RELAY_HEALTH_INTERVAL", 300, 0, 86400),
         server_flag_emoji=server_flag_emoji,
     )

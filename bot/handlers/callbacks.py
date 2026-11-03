@@ -70,7 +70,9 @@ async def cancel_callback(
             views = await stats_views_for_screen(services, rate_limiter, user_id, keys)
             await safe_edit_message_text(
                 callback.message,
-                bundle_detail_text(bundle, keys, viewer_user_id=user_id, views=views),
+                bundle_detail_text(
+                    bundle, keys, viewer_user_id=user_id, views=views, relays=services.relays.snapshot
+                ),
                 reply_markup=bundle_actions_keyboard(bundle, has_vless=bundle_has_vless(keys)),
             )
         except Exception:

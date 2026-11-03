@@ -31,7 +31,7 @@ from services.key_naming import (
     normalize_transport,
 )
 from services.notes import normalize_note
-from services.relay import RelayUnavailable, relay_link_host, require_relay_for_issue
+from services.relay import RelayCatalog, RelayUnavailable, relay_link_host, require_relay_for_issue
 from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
@@ -135,8 +135,12 @@ class XrayService:
         backend_health: BackendHealth | None = None,
         xhttp_adapter: XrayConfigAdapter | None = None,
         unix_clock: Callable[[], float] = time.time,
+        relays: RelayCatalog | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
+        # The relays a key's link may point at (see services.relay). Empty by
+        # default, which refuses every relay key and leaves direct keys unchanged.
+        self.relays = relays if relays is not None else RelayCatalog()
         # Wall clock (unix seconds) for the spiderX rotation of bundle children —
         # the only link parameter that depends on time. Injectable so a test can
         # freeze it; ``clock`` above yields ISO strings for the DB, not this.
@@ -296,7 +300,7 @@ class XrayService:
         self.settings.validate_xray_ready()
         # Before any DB write or apply: a relay switched off mid-wizard must not
         # leave behind a key whose link can never be rendered.
-        relay = require_relay_for_issue(self.settings, relay)
+        relay = require_relay_for_issue(self.relays.snapshot, relay)
         transport = self._normalize_transport(transport)
         # Profile is meaningful only for http; tcp keys are always "base". The
         # profile is immutable for a key (changing it means creating a new key),
@@ -1356,13 +1360,14 @@ class XrayService:
         (callers pass :func:`services.key_naming.key_display_name`).
 
         *relay* selects the host and nothing else: ``None`` keeps
-        ``XRAY_PUBLIC_HOST``; the configured relay gives ``RELAY_HOST``; any other
+        ``XRAY_PUBLIC_HOST``; an enabled relay gives its ``host`` (from the
+        relays snapshot, i.e. the admin panel); a switched-off, deleted or unknown
         relay raises :class:`services.relay.RelayUnavailable`. Port, REALITY
         parameters, flow and the XHTTP path/mode/extra are identical either way —
         the relay forwards :443 1:1 into the same inbound.
         """
         host = self._format_host(
-            relay_link_host(self.settings, relay, direct_host=self.settings.xray_public_host)
+            relay_link_host(self.relays.snapshot, relay, direct_host=self.settings.xray_public_host)
         )
         fragment = quote(name or "xray")
         if self._normalize_transport(transport) == "http":
@@ -1445,7 +1450,7 @@ class XrayService:
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "")
         fingerprint = str(key.payload.get("fingerprint")) if key.payload.get("fingerprint") else None
         return self._build_vless_link(
-            uuid_value, short_id, key_display_name(key, NameStyle.SINGLE, self.settings),
+            uuid_value, short_id, key_display_name(key, NameStyle.SINGLE, self.settings, self.relays.snapshot),
             fingerprint=fingerprint, transport=self._key_transport(key), profile=self._key_profile(key),
             spider_x=self.link_spider_x(key, bundle_member=bundle_member, now_unix=now_unix),
             relay=key.relay,

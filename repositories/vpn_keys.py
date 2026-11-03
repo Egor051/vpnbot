@@ -5,7 +5,7 @@ from typing import Any
 
 from aiosqlite import Row
 
-from config.settings import RELAY_NAME_PATTERN
+from config.validators import RELAY_NAME_PATTERN
 from db.database import Database
 from db.exceptions import ConcurrentModificationError
 from models.dto import TrafficScopeTotals, VpnKey

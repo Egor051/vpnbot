@@ -15,7 +15,7 @@ from services.audit import AuditService
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.notes import normalize_note
 from services.protocol_modules import ProtocolModulesService
-from services.relay import require_relay_for_issue
+from services.relay import RelayCatalog, require_relay_for_issue
 from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
@@ -54,8 +54,12 @@ class HysteriaService:
         modules: ProtocolModulesService,
         user_locks: UserLockManager | None = None,
         stats: HysteriaStatsAdapter | None = None,
+        relays: RelayCatalog | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
+        # The relays a key's link may point at (see services.relay); empty by
+        # default, which refuses every relay key and leaves direct keys unchanged.
+        self.relays = relays if relays is not None else RelayCatalog()
         self.users = users
         self.settings = settings
         self.clock = clock
@@ -95,7 +99,7 @@ class HysteriaService:
         """
         await self._ensure_module_enabled()
         self.settings.validate_hysteria2_ready()
-        relay = require_relay_for_issue(self.settings, relay)
+        relay = require_relay_for_issue(self.relays.snapshot, relay)
         clean_note = normalize_note(note)
 
         async with self.user_locks.lock(owner.telegram_user_id):
@@ -346,7 +350,7 @@ class HysteriaService:
         and the text they can copy are the same string by construction rather than
         by two call sites agreeing.
         """
-        return hysteria2_key_link(key, self.settings)
+        return hysteria2_key_link(key, self.settings, self.relays.snapshot)
 
     def _format_config(self, key: VpnKey, *, viewer_user_id: int | None = None) -> str:
         label = key.email_label or ""

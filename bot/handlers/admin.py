@@ -38,9 +38,10 @@ from bot.handlers.common import (
     RELAY_PROTOCOLS,
     answer_callback_error,
     answer_message_error,
+    chosen_relay,
     config_delivery,
+    offered_relays,
     parse_int_callback,
-    relay_offered,
 )
 from bot.keyboards.admin import (
     ANNOUNCEMENT_PROTOCOL_OPTIONS,
@@ -77,6 +78,7 @@ from models.dto import RecipientFilter, TelegramUserProfile
 from models.access import is_blocked_user
 from models.enums import AccessRequestStatus, UserRole, VpnKeyType
 from services.errors import AccessDenied
+from services.relay import require_relay_for_issue
 from services.user_locks import UserLockManager
 from utils.formatting import h
 
@@ -1454,19 +1456,20 @@ async def _admin_prompt_route_or_note(
 ) -> None:
     """The admin twin of the user wizard's step: «Подключение» or straight to the note.
 
-    Same predicate as the user flow (``bot.handlers.common.relay_offered``), so the
-    two wizards can never disagree on whether a relay is offered.
+    Same source as the user flow (``bot.handlers.common.offered_relays``), so the
+    two wizards can never disagree on which relays are offered.
     """
     assert callback.message is not None
     await state.update_data(owner_user_id=owner_user_id, key_type=key_type, transport=transport, relay=None)
     if xhttp_profile is not None:
         await state.update_data(xhttp_profile=xhttp_profile)
-    if key_type in RELAY_PROTOCOLS and relay_offered(services):
+    relays = offered_relays(services) if key_type in RELAY_PROTOCOLS else []
+    if relays:
         await state.set_state(AdminCreateKeyStates.waiting_route)
         await safe_edit_message_text(
             callback.message,
             t("choose_relay_route"),
-            reply_markup=admin_relay_route_keyboard(owner_user_id),
+            reply_markup=admin_relay_route_keyboard(owner_user_id, relays),
         )
         return
     await state.set_state(AdminCreateKeyStates.waiting_note)
@@ -1478,9 +1481,9 @@ async def _admin_prompt_route_or_note(
     )
 
 
-@router.callback_query(AdminCreateKeyStates.waiting_route, F.data.regexp(r"^admin:croute:(direct|relay):\d+$"))
+@router.callback_query(AdminCreateKeyStates.waiting_route, F.data.regexp(r"^admin:croute:(direct|\d+):\d+$"))
 async def admin_issue_route(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """Record «напрямую / через relay» for the issued key and prompt for a note."""
+    """Record «Напрямую / Через <label>» for the issued key and prompt for a note."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -1501,13 +1504,15 @@ async def admin_issue_route(callback: CallbackQuery, state: FSMContext, services
             )
             return
         relay: str | None = None
-        if route == "relay":
-            # Stale-callback guard, as in the user wizard: a relay switched off
-            # while this screen was open is refused here, not at the service.
-            if not relay_offered(services):
+        if route != "direct":
+            # Stale-callback guard, as in the user wizard: a relay switched off or
+            # deleted while this screen was open is refused here, not at the
+            # service. The FSM keeps the relay's name, what the key will carry.
+            chosen = chosen_relay(services, route)
+            if chosen is None:
                 await safe_callback_answer(callback, t("relay_unavailable"), show_alert=True)
                 return
-            relay = services.settings.relay_name
+            relay = chosen.name
         await safe_callback_answer(callback)
         await state.set_state(AdminCreateKeyStates.waiting_note)
         await state.update_data(relay=relay, note_prompt_msg_id=callback.message.message_id)
@@ -1811,6 +1816,10 @@ async def admin_issue_confirm(callback: CallbackQuery, state: FSMContext, servic
                 raise AccessDenied(t("cannot_issue_to_blocked"))
             profile = TelegramUserProfile(owner.telegram_user_id, owner.username, owner.first_name)
             rate_limiter.check(callback.from_user.id, "key_create", 20)
+            # A relay switched off or deleted while the confirm screen was open is
+            # refused before the wizard is cleared, so the admin sees why.
+            if relay:
+                require_relay_for_issue(services.relays.snapshot, relay)
             await state.clear()
             await safe_callback_answer(callback, t("creating_key"))
             if key_type == VpnKeyType.XRAY.value:

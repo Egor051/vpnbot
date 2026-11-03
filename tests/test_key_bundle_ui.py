@@ -15,6 +15,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+from conftest import make_relay, relay_services
 
 from bot.bundles import (
     bundle_config_text,
@@ -71,9 +72,6 @@ def _settings(**overrides: object) -> SimpleNamespace:
         hysteria2_enabled=True,
         xray_xhttp_enabled=True,
         key_max_trial_days=30,
-        relay_enabled=False,
-        relay_name="ru1",
-        relay_host="",
         server_flag_emoji="🇫🇮",
     )
     values.update(overrides)
@@ -363,6 +361,7 @@ def _services(
     vpn_keys: _VpnKeys | None = None,
     traffic_stats: _TrafficStats | None = None,
     modules: SimpleNamespace | None = None,
+    relays: tuple[object, ...] = (),
 ) -> SimpleNamespace:
     return SimpleNamespace(
         settings=settings or _settings(),
@@ -372,6 +371,7 @@ def _services(
         key_bundles=lifecycle or _BundleLifecycle(),
         vpn_keys=vpn_keys or _VpnKeys(),
         traffic_stats=traffic_stats or _TrafficStats([]),
+        relays=relay_services(*relays),
     )
 
 
@@ -1271,13 +1271,26 @@ def test_acknowledging_the_notice_offers_the_kind_choice() -> None:
 
 
 def test_kind_prompt_mentions_relay_copies_while_relay_is_enabled() -> None:
+    """The note names every relay new bundles get members through — enabled and
+    «в подписках» — and none that is switched off or kept out of subscriptions."""
+
     async def run() -> None:
         services = _services(
-            settings=_settings(relay_enabled=True, relay_host="relay.example.net")
+            relays=(
+                make_relay(1, "ru1", label="relay"),
+                make_relay(2, "ru2", label="msk", source_ips="198.51.100.8"),
+                make_relay(3, "ru3", label="off", source_ips="198.51.100.9", enabled=False),
+                make_relay(4, "ru4", label="nosub", source_ips="198.51.100.10", in_subscriptions=False),
+            )
         )
         callback = _Callback("keys:create:bundle:ack")
         await create_key_bundle_ack(callback, _State(), services)  # type: ignore[arg-type]
-        assert t("bundle_kind_relay_note") in callback.message.last_text
+        assert t("bundle_kind_relay_note", relays="relay, msk") in callback.message.last_text
+
+        without = _services()
+        callback = _Callback("keys:create:bundle:ack")
+        await create_key_bundle_ack(callback, _State(), without)  # type: ignore[arg-type]
+        assert "ℹ️" not in callback.message.last_text
 
     asyncio.run(run())
 

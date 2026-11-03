@@ -39,6 +39,10 @@ _ISOLATED_ENV_PREFIXES: tuple[str, ...] = (
     # bind/TLS values, and a test asserting the documented defaults would read the
     # host's ports instead (green in CI, red on the box).
     "SUBSCRIPTION_",
+    # RELAY_* for the same reason: they seed the relays table and make the bot
+    # warn that they are ignored, so a host's live RELAY_* would change what a
+    # test of that behaviour observes.
+    "RELAY_",
 )
 
 
@@ -352,3 +356,53 @@ def assert_same_shape(actual: SchemaShape, expected: SchemaShape, context: str) 
     assert set(actual.indexes) == set(expected.indexes), f"{context}: index set differs"
     for name in sorted(expected.indexes):
         assert actual.indexes[name] == expected.indexes[name], f"{context}: index {name} differs"
+
+
+# ── relays ────────────────────────────────────────────────────────────────────
+
+
+def make_relay(
+    relay_id: int = 1,
+    name: str = "ru1",
+    *,
+    label: str = "relay",
+    host: str = "relay.anycastedge.net",
+    source_ips: str = "198.51.100.7",
+    enabled: bool = True,
+    in_subscriptions: bool = True,
+    note: str | None = None,
+) -> Any:
+    """A :class:`models.dto.Relay` as the relays table would hold it."""
+    from config.validators import parse_ipv4_networks
+    from models.dto import Relay
+
+    return Relay(
+        id=relay_id,
+        name=name,
+        label=label,
+        host=host,
+        source_ips=parse_ipv4_networks("source_ips", source_ips),
+        enabled=enabled,
+        in_subscriptions=in_subscriptions,
+        note=note,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        created_by=None,
+        updated_by=None,
+    )
+
+
+def relay_snapshot(*relays: Any) -> Any:
+    """A :class:`services.relay.RelaySnapshot` of *relays* (default: one ``ru1``)."""
+    from services.relay import RelaySnapshot
+
+    return RelaySnapshot.of(relays if relays else (make_relay(),))
+
+
+def relay_services(*relays: Any) -> Any:
+    """The ``services.relays`` stand-in a handler test needs: just ``.snapshot``."""
+    from types import SimpleNamespace
+
+    from services.relay import RelaySnapshot
+
+    return SimpleNamespace(snapshot=RelaySnapshot.of(relays))
