@@ -10,8 +10,23 @@
 #     table ip vpnrelay { ... }    (the new ruleset)
 #
 # so the relay never runs half a ruleset: nft either commits the whole file or
-# leaves the previous table exactly as it was. Then it makes sure
-# net.ipv4.ip_forward=1, at runtime and in /etc/sysctl.d/90-vpn-relay.conf.
+# leaves the previous table exactly as it was. Then the sysctls: it renders
+# /etc/sysctl.d/90-vpn-relay.conf whole (written atomically, only when it differs)
+#
+#     net.ipv4.ip_forward = 1
+#     net.netfilter.nf_conntrack_max = <RELAY_CONNTRACK_MAX>
+#     net.netfilter.nf_conntrack_tcp_timeout_established = <RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT>
+#
+# and sets the same three values at runtime with `sysctl -w`, AFTER `nft -f`.
+#
+# Why apply sets them itself on every start: at boot systemd-sysctl applies the
+# file early, before nf_conntrack is loaded — the module is loaded by the table's
+# ct/nat expressions, i.e. by `nft -f` here — so the net.netfilter.* keys do not
+# exist yet and systemd-sysctl skips them (a "Couldn't write ... ignoring" line
+# for them in its journal is expected and harmless). The file still carries them,
+# so a later `sysctl --system` agrees with the runtime. If net.netfilter.nf_conntrack_max
+# is still absent after `nft -f`, apply runs `modprobe nf_conntrack` and retries;
+# if that does not help it exits 7.
 #
 # The ruleset is the one the hand-installed relay ran before this helper existed
 # (captured from the live host 2026-11-03): DNAT tcp/udp <port> -> <upstream>:<port>
@@ -30,7 +45,7 @@
 # and executed by deploy/relay/vpn-relay.service (ExecStart=... apply).
 #
 # Usage (root, except `show` and a non-root `check --dry-run`):
-#   vpn-relay-apply apply             render + apply the table, enable forwarding
+#   vpn-relay-apply apply             render + apply the table, then the sysctls
 #   vpn-relay-apply check             verify the live state (exit codes below)
 #   vpn-relay-apply check --dry-run   parse/validate .env and render; as root also
 #                                     `nft -c` (syntax check, applies nothing).
@@ -54,6 +69,13 @@
 #                            this SNI and verifies the certificate (use XRAY_SNI of
 #                            the main server: REALITY hands an unknown client to its
 #                            decoy, whose certificate is valid for that name).
+#   RELAY_CONNTRACK_MAX      default 65536, 8192..1048576 -> net.netfilter.nf_conntrack_max.
+#                            Every relayed flow is one conntrack entry; once the table
+#                            is full the kernel drops NEW flows.
+#   RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT
+#                            default 86400 (s), 300..432000 ->
+#                            net.netfilter.nf_conntrack_tcp_timeout_established (the
+#                            kernel default is 432000 = 5 days).
 #
 # Exit codes (distinct on purpose — deploy.sh and the operator read them):
 #    0  ok
@@ -63,13 +85,20 @@
 #    5  not root, or a required tool (nft, sysctl, ip, python3) is missing
 #    6  nft rejected the ruleset (apply, or the dry-run syntax check) — the live
 #       table is unchanged
-#    7  net.ipv4.ip_forward / the sysctl file could not be set
+#    7  the sysctl file or a sysctl (ip_forward, conntrack) could not be set,
+#       incl. net.netfilter.nf_conntrack_max still absent after modprobe nf_conntrack
 #   10  check: table ip vpnrelay is absent
 #   11  check: the live table differs from the one rendered from .env
 #   12  check: net.ipv4.ip_forward != 1
 #   13  check: TCP connect to the upstream failed (on any forwarded TCP port)
 #   14  check: TLS handshake to the upstream failed
-# `check` runs every step it can and exits with the code of the FIRST failure.
+#   15  check: a conntrack sysctl differs from .env (nf_conntrack_max,
+#       nf_conntrack_tcp_timeout_established) or cannot be read
+# `check` runs every step it can, in this order — table (10/11), ip_forward (12),
+# conntrack (15), TCP (13), TLS (14) — and exits with the code of the FIRST failure.
+# A conntrack table more than 80% full (nf_conntrack_count vs nf_conntrack_max,
+# both read with sysctl — not /proc/net/stat, which the relay's 6.8 kernel does
+# not have) is a WARNING on stderr, not a failure.
 
 set -euo pipefail
 
@@ -77,14 +106,21 @@ RELAY_ENV="${RELAY_ENV:-/opt/vpn-service/.env}"
 RELAY_SYSCTL_FILE="${RELAY_SYSCTL_FILE:-/etc/sysctl.d/90-vpn-relay.conf}"
 RELAY_PROBE_TIMEOUT="${RELAY_PROBE_TIMEOUT:-5}"
 TABLE="vpnrelay"
-SYSCTL_LINE="net.ipv4.ip_forward = 1"
+
+readonly SYSCTL_FORWARD="net.ipv4.ip_forward"
+readonly SYSCTL_CT_MAX="net.netfilter.nf_conntrack_max"
+readonly SYSCTL_CT_EST="net.netfilter.nf_conntrack_tcp_timeout_established"
+readonly SYSCTL_CT_COUNT="net.netfilter.nf_conntrack_count"
+readonly CT_MAX_DEFAULT=65536 CT_MAX_MIN=8192 CT_MAX_MAX=1048576
+readonly CT_EST_DEFAULT=86400 CT_EST_MIN=300 CT_EST_MAX=432000
 
 readonly E_USAGE=2 E_CONFIG=3 E_IFACE=4 E_TOOL=5 E_NFT=6 E_SYSCTL=7
-readonly E_ABSENT=10 E_DIFF=11 E_FORWARD=12 E_TCP=13 E_TLS=14
+readonly E_ABSENT=10 E_DIFF=11 E_FORWARD=12 E_TCP=13 E_TLS=14 E_CONNTRACK=15
 
 ME="vpn-relay-apply"
 log()  { printf '%s: %s\n' "$ME" "$*"; }
 err()  { printf '%s: %s\n' "$ME" "$*" >&2; }
+warn() { printf '%s: WARNING: %s\n' "$ME" "$*" >&2; }
 fail() { local rc="$1"; shift; err "$*"; exit "$rc"; }
 
 usage() {
@@ -144,6 +180,13 @@ parse_ports() {
 
 valid_ifname() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,14}$ ]]; }
 
+# A decimal integer in min..max: digits only, no leading zeros, no sign or unit.
+# The length test comes first so a 30-digit value never reaches bash arithmetic.
+valid_uint_range() {
+  local v="$1" min="$2" max="$3"
+  [[ "$v" =~ ^[1-9][0-9]*$ ]] && (( ${#v} <= ${#max} )) && (( v >= min && v <= max ))
+}
+
 valid_hostname() {
   local h="$1" label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
   (( ${#h} <= 253 )) && [[ "$h" =~ ^${label}(\.${label})*$ ]]
@@ -156,6 +199,8 @@ UPSTREAM=""
 IFACE=""
 IFACE_SOURCE=""
 CHECK_SNI=""
+CT_MAX=""
+CT_EST=""
 declare -a TCP_PORTS=() UDP_PORTS=()
 
 resolve_iface() {
@@ -198,6 +243,13 @@ load_config() {
   if [[ -n "$CHECK_SNI" ]] && ! valid_hostname "$CHECK_SNI"; then
     fail "$E_CONFIG" "RELAY_CHECK_SNI='${CHECK_SNI}' is not a DNS name"
   fi
+
+  raw="$(env_sed_val RELAY_CONNTRACK_MAX)"; CT_MAX="${raw:-$CT_MAX_DEFAULT}"
+  valid_uint_range "$CT_MAX" "$CT_MAX_MIN" "$CT_MAX_MAX" \
+    || fail "$E_CONFIG" "RELAY_CONNTRACK_MAX='${CT_MAX}' is not an integer in ${CT_MAX_MIN}..${CT_MAX_MAX}"
+  raw="$(env_sed_val RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT)"; CT_EST="${raw:-$CT_EST_DEFAULT}"
+  valid_uint_range "$CT_EST" "$CT_EST_MIN" "$CT_EST_MAX" \
+    || fail "$E_CONFIG" "RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT='${CT_EST}' is not an integer (seconds) in ${CT_EST_MIN}..${CT_EST_MAX}"
 
   resolve_iface
 }
@@ -244,9 +296,18 @@ normalize_table() {
 
 rendered_table_block() { render | sed -n "/^table ip ${TABLE} {\$/,\$p"; }
 
+# The whole of ${RELAY_SYSCTL_FILE}.
+render_sysctl() {
+  printf '%s = %s\n' \
+    "$SYSCTL_FORWARD" 1 \
+    "$SYSCTL_CT_MAX" "$CT_MAX" \
+    "$SYSCTL_CT_EST" "$CT_EST"
+}
+
 summary() {
   log "upstream ${UPSTREAM}; WAN interface ${IFACE} (${IFACE_SOURCE})"
   log "forward tcp: ${TCP_PORTS[*]}; udp: ${UDP_PORTS[*]}"
+  log "conntrack: max ${CT_MAX}; tcp established timeout ${CT_EST}s"
   if [[ -n "$CHECK_SNI" ]]; then log "check TLS SNI: ${CHECK_SNI}"; else log "check TLS SNI: not set (handshake skipped)"; fi
 }
 
@@ -276,13 +337,27 @@ probe() { python3 -I -c "$PROBE_PY" "$@"; }
 require_root() { [[ "$(id -u)" == "0" ]] || fail "$E_TOOL" "$1 must run as root"; }
 require_tool() { command -v "$1" >/dev/null 2>&1 || fail "$E_TOOL" "$1 not found"; }
 
+# Read back after the write: procps `sysctl -w` reports a write that fails at
+# close(2) (e.g. EPERM on nf_conntrack_max outside the initial netns) and still
+# exits 0, so its exit code alone is not proof.
+set_sysctl() {
+  local now
+  sysctl -q -w "$1=$2" >/dev/null || fail "$E_SYSCTL" "sysctl -w $1=$2 failed"
+  now="$(sysctl -n "$1" 2>/dev/null || true)"
+  [[ "$now" == "$2" ]] || fail "$E_SYSCTL" "sysctl -w $1=$2 did not take: $1 = ${now:-<unreadable>}"
+  log "$1 = $2"
+}
+
+# The net.netfilter.nf_conntrack_* keys exist only while nf_conntrack is loaded.
+conntrack_keys_present() { sysctl -n "$SYSCTL_CT_MAX" >/dev/null 2>&1; }
+
 cmd_show() {
   load_config
   render
 }
 
 cmd_apply() {
-  local tmp cur
+  local tmp cur want out
   require_root apply
   require_tool nft
   require_tool sysctl
@@ -296,20 +371,33 @@ cmd_apply() {
   nft -f "$tmp" || fail "$E_NFT" "nft rejected the ruleset — the previous table ip ${TABLE} (if any) is unchanged"
   log "table ip ${TABLE} applied (one atomic nft transaction)"
 
-  # Forwarding goes on AFTER the table, so the forward chain's policy drop is
-  # already in place by the time the kernel starts routing.
+  # The sysctl file, rendered whole; replaced atomically and only when it differs.
+  want="$(render_sysctl)"
   cur="$(cat "$RELAY_SYSCTL_FILE" 2>/dev/null || true)"
-  if [[ "$cur" != "$SYSCTL_LINE" ]]; then
+  if [[ "$cur" != "$want" ]]; then
     local stmp
     stmp="$(mktemp "${RELAY_SYSCTL_FILE}.XXXXXX")" || fail "$E_SYSCTL" "cannot create a temp file next to ${RELAY_SYSCTL_FILE}"
-    if ! { printf '%s\n' "$SYSCTL_LINE" > "$stmp" && chmod 0644 "$stmp" && mv -f "$stmp" "$RELAY_SYSCTL_FILE"; }; then
+    if ! { printf '%s\n' "$want" > "$stmp" && chmod 0644 "$stmp" && mv -f "$stmp" "$RELAY_SYSCTL_FILE"; }; then
       rm -f "$stmp"
       fail "$E_SYSCTL" "cannot write ${RELAY_SYSCTL_FILE}"
     fi
-    log "wrote ${RELAY_SYSCTL_FILE} (${SYSCTL_LINE})"
+    log "wrote ${RELAY_SYSCTL_FILE}"
   fi
-  sysctl -q -w net.ipv4.ip_forward=1 >/dev/null || fail "$E_SYSCTL" "sysctl -w net.ipv4.ip_forward=1 failed"
-  log "net.ipv4.ip_forward = 1"
+
+  # The runtime values, all AFTER the table. The conntrack keys appear once the
+  # table's ct/nat expressions have loaded nf_conntrack; systemd-sysctl ran before
+  # that at boot and could not set them, so they are set here on every start.
+  if ! conntrack_keys_present; then
+    log "${SYSCTL_CT_MAX} is absent (nf_conntrack not loaded) — modprobe nf_conntrack"
+    out="$(modprobe nf_conntrack 2>&1)" || true
+    conntrack_keys_present \
+      || fail "$E_SYSCTL" "${SYSCTL_CT_MAX} is still absent after modprobe nf_conntrack${out:+ (modprobe: ${out})}"
+  fi
+  set_sysctl "$SYSCTL_CT_MAX" "$CT_MAX"
+  set_sysctl "$SYSCTL_CT_EST" "$CT_EST"
+  # Forwarding last: the forward chain's policy drop and the conntrack limits are
+  # in place by the time the kernel starts routing.
+  set_sysctl "$SYSCTL_FORWARD" 1
 }
 
 cmd_check_dry_run() {
@@ -330,7 +418,7 @@ cmd_check_dry_run() {
 }
 
 cmd_check() {
-  local first=0 live diff_out fwd p out
+  local first=0 live diff_out fwd p out ct_max ct_est ct_count
   require_root check
   require_tool nft
   require_tool sysctl
@@ -356,14 +444,37 @@ cmd_check() {
   fi
 
   # 2. forwarding
-  fwd="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || true)"
+  fwd="$(sysctl -n "$SYSCTL_FORWARD" 2>/dev/null || true)"
   if [[ "$fwd" == "1" ]]; then
-    log "ok: net.ipv4.ip_forward = 1"
+    log "ok: ${SYSCTL_FORWARD} = 1"
   else
-    note_fail "$E_FORWARD" "net.ipv4.ip_forward = ${fwd:-<unreadable>}, expected 1"
+    note_fail "$E_FORWARD" "${SYSCTL_FORWARD} = ${fwd:-<unreadable>}, expected 1"
   fi
 
-  # 3. the upstream answers on every forwarded TCP port
+  # 3. the conntrack sysctls equal .env (runtime values: apply sets them, the file
+  #    alone cannot — see the header), and how full the table is
+  ct_max="$(sysctl -n "$SYSCTL_CT_MAX" 2>/dev/null || true)"
+  ct_est="$(sysctl -n "$SYSCTL_CT_EST" 2>/dev/null || true)"
+  if [[ "$ct_max" == "$CT_MAX" ]]; then
+    log "ok: ${SYSCTL_CT_MAX} = ${ct_max}"
+  else
+    note_fail "$E_CONNTRACK" "${SYSCTL_CT_MAX} = ${ct_max:-<unreadable>}, expected ${CT_MAX} (RELAY_CONNTRACK_MAX)"
+  fi
+  if [[ "$ct_est" == "$CT_EST" ]]; then
+    log "ok: ${SYSCTL_CT_EST} = ${ct_est}"
+  else
+    note_fail "$E_CONNTRACK" "${SYSCTL_CT_EST} = ${ct_est:-<unreadable>}, expected ${CT_EST} (RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT)"
+  fi
+  ct_count="$(sysctl -n "$SYSCTL_CT_COUNT" 2>/dev/null || true)"
+  if [[ "$ct_count" =~ ^[0-9]{1,10}$ && "$ct_max" =~ ^[1-9][0-9]{0,9}$ ]]; then
+    if (( ct_count * 5 > ct_max * 4 )); then
+      warn "conntrack table ${ct_count} of ${ct_max} (over 80%) — once it is full the kernel drops new flows; raise RELAY_CONNTRACK_MAX"
+    else
+      log "conntrack in use: ${ct_count} of ${ct_max} ($(( ct_count * 100 / ct_max ))%)"
+    fi
+  fi
+
+  # 4. the upstream answers on every forwarded TCP port
   for p in "${TCP_PORTS[@]}"; do
     if out="$(probe tcp "$UPSTREAM" "$p" "$RELAY_PROBE_TIMEOUT" 2>&1)"; then
       log "ok: TCP connect ${UPSTREAM}:${p}"
@@ -372,7 +483,7 @@ cmd_check() {
     fi
   done
 
-  # 4. TLS on 443 with the configured SNI (certificate verified)
+  # 5. TLS on 443 with the configured SNI (certificate verified)
   if [[ " ${TCP_PORTS[*]} " == *" 443 "* ]]; then
     if [[ -n "$CHECK_SNI" ]]; then
       if out="$(probe tls "$UPSTREAM" 443 "$RELAY_PROBE_TIMEOUT" "$CHECK_SNI" 2>&1)"; then

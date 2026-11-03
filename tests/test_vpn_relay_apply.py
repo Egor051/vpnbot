@@ -12,15 +12,23 @@ What is pinned here, all by running the real shipped script:
    interface) before anything is rendered, let alone applied.
 4. **INPUT/OUTPUT are never touched**: no `hook input` / `hook output` in any
    rendered ruleset or anywhere in the script.
-5. **apply** is one `nft -f` of the rendered file and only then forwarding; a
-   rejected ruleset leaves forwarding alone.
+5. **apply** is one `nft -f` of the rendered file and only then the sysctls: the
+   file /etc/sysctl.d/90-vpn-relay.conf rendered whole (ip_forward + the two
+   conntrack values, atomic, only when it differs), then `sysctl -w` of the
+   conntrack values and ip_forward last. A missing nf_conntrack_max key gets one
+   `modprobe nf_conntrack` and a retry, then exit 7. A rejected ruleset leaves
+   every sysctl alone.
 6. **check** compares the live table with the render (counters ignored), checks
-   ip_forward, TCP-connects every forwarded TCP port and, when RELAY_CHECK_SNI is
-   set, does a verified TLS handshake on 443 — each failure with its own exit code.
+   ip_forward and the conntrack values (15), TCP-connects every forwarded TCP port
+   and, when RELAY_CHECK_SNI is set, does a verified TLS handshake on 443 — each
+   failure with its own exit code. A conntrack table over 80% full is a warning.
 7. The Python probe itself, against real local TCP and TLS listeners.
 
-External commands (`nft`, `sysctl`, `id`, `ip`, `python3` for the probes) are stubs
-on PATH, except in the probe tests, which run the embedded probe for real.
+External commands (`nft`, `sysctl`, `modprobe`, `id`, `ip`, `python3` for the
+probes) are stubs on PATH, except in the probe tests, which run the embedded probe
+for real. The sysctl stub keeps one file per key, so a key can be absent (as the
+net.netfilter.* keys are while nf_conntrack is not loaded) and a test can read back
+what apply set.
 """
 
 from __future__ import annotations
@@ -51,6 +59,45 @@ UPSTREAM = "150.251.152.243"
 # `ip -4 route show default` on the live relay (one interface, eth0).
 DEFAULT_ROUTE = "default via 191.223.140.1 dev eth0 proto static\n"
 
+FORWARD = "net.ipv4.ip_forward"
+CT_MAX = "net.netfilter.nf_conntrack_max"
+CT_EST = "net.netfilter.nf_conntrack_tcp_timeout_established"
+CT_COUNT = "net.netfilter.nf_conntrack_count"
+# The rendered /etc/sysctl.d/90-vpn-relay.conf with the .env defaults.
+DEFAULT_SYSCTL_FILE = (
+    "net.ipv4.ip_forward = 1\n"
+    "net.netfilter.nf_conntrack_max = 65536\n"
+    "net.netfilter.nf_conntrack_tcp_timeout_established = 86400\n"
+)
+# What `modprobe nf_conntrack` brings up in the stub: kernel defaults, not .env's.
+KERNEL_CT = {CT_MAX: "262144", CT_EST: "432000", CT_COUNT: "0"}
+
+SYSCTL_STUB = r"""
+echo "sysctl $*" >> "@LOG@"
+d="@PROC@"
+nokey() { echo "sysctl: cannot stat /proc/sys/${1//.//}: No such file or directory" >&2; exit 255; }
+if [[ "$1" == "-n" ]]; then
+  [[ -f "$d/$2" ]] || nokey "$2"
+  cat "$d/$2"; exit 0
+fi
+kv="${!#}"; k="${kv%%=*}"
+[[ -f "$d/$k" ]] || nokey "$k"
+[[ -f "$d/$k.ro" ]] && { echo "sysctl: permission denied on key \"$k\"" >&2; exit 255; }
+# procps when the write fails at close(2): an error line, the value unchanged, exit 0.
+[[ -f "$d/$k.eperm" ]] && { echo "sysctl: setting key \"$k\": Operation not permitted" >&2; exit 0; }
+echo "${kv#*=}" > "$d/$k"
+"""
+
+MODPROBE_STUB = r"""
+echo "modprobe $*" >> "@LOG@"
+if [[ "@LOADS@" == "1" && "$*" == "nf_conntrack" ]]; then
+  @CREATE@
+  exit 0
+fi
+echo "modprobe: FATAL: Module $* not found in directory /lib/modules/6.8.0-generic" >&2
+exit 1
+"""
+
 pytestmark = pytest.mark.timeout(60)
 
 
@@ -73,13 +120,33 @@ class Relay:
         self.uid = "0"
         self.default_route = DEFAULT_ROUTE
         self.live_listing: str | None = LIVE_LISTING.read_text(encoding="utf-8")
-        self.forward = "1"
+        self.proc = tmp_path / "proc-sys"
+        # Runtime sysctls before the run; None = the key does not exist.
+        self.sysctls: dict[str, str | None] = {
+            FORWARD: "1", CT_MAX: "65536", CT_EST: "86400", CT_COUNT: "1200",
+        }
+        self.read_only: set[str] = set()   # keys whose `sysctl -w` fails
+        self.silent_eperm: set[str] = set()  # keys whose `sysctl -w` exits 0 but sets nothing
+        self.modprobe_loads = True         # `modprobe nf_conntrack` creates the keys
         self.nft_rc = 0
         self.tcp_rc = 0
         self.tls_rc = 0
 
+    @property
+    def forward(self) -> str | None:
+        return self.sysctls[FORWARD]
+
+    @forward.setter
+    def forward(self, value: str) -> None:
+        self.sysctls[FORWARD] = value
+
     def write_env(self, text: str) -> None:
         self.env_file.write_text(text, encoding="utf-8")
+
+    def now(self, key: str) -> str | None:
+        """A runtime sysctl after the run (None = the key does not exist)."""
+        path = self.proc / key
+        return path.read_text(encoding="utf-8").strip() if path.exists() else None
 
     def _install_stubs(self) -> None:
         log = self.log
@@ -99,10 +166,25 @@ class Relay:
             f'  list) [[ -f "{listing}" ]] && cat "{listing}" && exit 0; exit 1 ;;\n'
             "esac\n",
         )
+        self.proc.mkdir(exist_ok=True)
+        for key, value in self.sysctls.items():
+            path = self.proc / key
+            if value is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_text(value + "\n", encoding="utf-8")
+            if key in self.read_only:
+                (self.proc / f"{key}.ro").touch()
+            if key in self.silent_eperm:
+                (self.proc / f"{key}.eperm").touch()
+        _stub(self.bin / "sysctl", SYSCTL_STUB.replace("@LOG@", str(log)).replace("@PROC@", str(self.proc)))
+        create = "; ".join(
+            f'[[ -f "{self.proc / k}" ]] || echo {v} > "{self.proc / k}"' for k, v in KERNEL_CT.items()
+        )
         _stub(
-            self.bin / "sysctl",
-            f'echo "sysctl $*" >> "{log}"\n'
-            f'if [[ "$1" == "-n" ]]; then echo {self.forward}; fi\n',
+            self.bin / "modprobe",
+            MODPROBE_STUB.replace("@LOG@", str(log)).replace("@LOADS@", "1" if self.modprobe_loads else "0")
+            .replace("@CREATE@", create),
         )
         # The probes run as `python3 -I -c <code> <mode> <host> <port> <timeout> [sni]`.
         _stub(
@@ -333,6 +415,19 @@ def test_an_empty_port_value_means_the_default(relay: Relay) -> None:
         f'RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_WAN_IFACE=eth0"\n',
         f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CHECK_SNI=bad_host\n",
         f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CHECK_SNI=-x.example.com\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_MAX=8191\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_MAX=1048577\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_MAX=065536\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_MAX=64k\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_MAX=-65536\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_MAX=65536.0\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_MAX=65 536\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_MAX=99999999999999999999999\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT=299\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT=432001\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT=0\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT=1d\n",
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT=86400s\n",
     ],
 )
 def test_invalid_values_are_refused_before_anything_renders(relay: Relay, env: str) -> None:
@@ -342,7 +437,29 @@ def test_invalid_values_are_refused_before_anything_renders(relay: Relay, env: s
         assert proc.returncode == 3, (args, proc.stdout, proc.stderr)
         assert "table ip" not in proc.stdout
     assert not any(c.startswith("nft") for c in relay.calls()), "nothing may reach nft"
-    assert not any(c.startswith("sysctl") for c in relay.calls()), "forwarding untouched"
+    assert not any(c.startswith(("sysctl", "modprobe")) for c in relay.calls()), "sysctls untouched"
+    assert not relay.sysctl_file.exists()
+
+
+@pytest.mark.parametrize(
+    ("env", "ct_max", "ct_est"),
+    [
+        ("", "65536", "86400"),  # defaults
+        ("RELAY_CONNTRACK_MAX=\nRELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT= # default\n", "65536", "86400"),
+        ("RELAY_CONNTRACK_MAX=8192\nRELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT=300\n", "8192", "300"),
+        ("RELAY_CONNTRACK_MAX=1048576\nRELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT=432000\n", "1048576", "432000"),
+        ('export RELAY_CONNTRACK_MAX = "262144"  # 4x\nRELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT=\'7200\'\n',
+         "262144", "7200"),
+    ],
+)
+def test_conntrack_values_in_range_are_accepted(relay: Relay, env: str, ct_max: str, ct_est: str) -> None:
+    relay.write_env(f"RELAY_UPSTREAM_IPV4={UPSTREAM}\n{env}")
+    proc = relay.run("check", "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    assert f"conntrack: max {ct_max}; tcp established timeout {ct_est}s" in proc.stdout
+    assert relay.run("show").stdout == CAPTURED_RULESET.read_text(encoding="utf-8"), (
+        "the conntrack values never change the nft ruleset"
+    )
 
 
 def test_a_missing_env_file_is_refused(relay: Relay) -> None:
@@ -355,36 +472,136 @@ def test_a_missing_env_file_is_refused(relay: Relay) -> None:
 # --------------------------------------------------------------------------- #
 # apply
 # --------------------------------------------------------------------------- #
-def test_apply_is_one_nft_transaction_then_forwarding(relay: Relay) -> None:
+def _relay_kernel_defaults(relay: Relay) -> None:
+    """The relay before the first apply of this version: kernel conntrack values."""
+    relay.sysctls.update({FORWARD: "0", CT_MAX: KERNEL_CT[CT_MAX], CT_EST: KERNEL_CT[CT_EST]})
+
+
+def test_apply_is_one_nft_transaction_then_the_sysctls(relay: Relay) -> None:
+    _relay_kernel_defaults(relay)
     proc = relay.run("apply")
     assert proc.returncode == 0, proc.stderr
     calls = relay.calls()
     nft_calls = [c for c in calls if c.startswith("nft")]
     assert len(nft_calls) == 1 and nft_calls[0].startswith("nft -f ")
     assert relay.nft_input.read_text(encoding="utf-8") == CAPTURED_RULESET.read_text(encoding="utf-8")
-    sysctl_calls = [c for c in calls if c.startswith("sysctl")]
-    assert sysctl_calls == ["sysctl -q -w net.ipv4.ip_forward=1"]
-    assert calls.index(nft_calls[0]) < calls.index(sysctl_calls[0]), (
-        "forwarding goes on only after the forward chain (policy drop) is in place"
+    writes = [c for c in calls if c.startswith("sysctl -q -w")]
+    assert writes == [
+        "sysctl -q -w net.netfilter.nf_conntrack_max=65536",
+        "sysctl -q -w net.netfilter.nf_conntrack_tcp_timeout_established=86400",
+        "sysctl -q -w net.ipv4.ip_forward=1",
+    ], "all three at runtime, forwarding last"
+    first_sysctl = next(i for i, c in enumerate(calls) if c.startswith("sysctl"))
+    assert calls.index(nft_calls[0]) < first_sysctl, (
+        "every sysctl comes after the table: the forward chain (policy drop) is in place and "
+        "the table has loaded nf_conntrack"
     )
-    assert relay.sysctl_file.read_text(encoding="utf-8") == "net.ipv4.ip_forward = 1\n"
+    assert not any(c.startswith("modprobe") for c in calls), "the key is there: no modprobe"
+    assert (relay.now(FORWARD), relay.now(CT_MAX), relay.now(CT_EST)) == ("1", "65536", "86400")
+
+
+def test_apply_renders_the_whole_sysctl_file(relay: Relay) -> None:
+    assert relay.run("apply").returncode == 0
+    assert relay.sysctl_file.read_text(encoding="utf-8") == DEFAULT_SYSCTL_FILE
     assert oct(relay.sysctl_file.stat().st_mode & 0o777) == "0o644"
 
 
-def test_apply_leaves_an_identical_sysctl_file_alone(relay: Relay) -> None:
+def test_apply_renders_the_sysctl_file_from_env(relay: Relay) -> None:
+    relay.write_env(
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\n"
+        "RELAY_CONNTRACK_MAX=262144\nRELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT=7200\n"
+    )
+    proc = relay.run("apply")
+    assert proc.returncode == 0, proc.stderr
+    assert relay.sysctl_file.read_text(encoding="utf-8") == (
+        "net.ipv4.ip_forward = 1\n"
+        "net.netfilter.nf_conntrack_max = 262144\n"
+        "net.netfilter.nf_conntrack_tcp_timeout_established = 7200\n"
+    )
+    assert (relay.now(CT_MAX), relay.now(CT_EST)) == ("262144", "7200")
+
+
+def test_apply_replaces_the_hand_made_one_line_file_atomically(relay: Relay) -> None:
+    """The captured host file (ip_forward only) is rewritten whole, by rename: a new
+    inode, no temp file left next to it, no partial content ever visible."""
     relay.sysctl_file.write_text("net.ipv4.ip_forward = 1\n", encoding="utf-8")
     inode = relay.sysctl_file.stat().st_ino
     assert relay.run("apply").returncode == 0
-    assert relay.sysctl_file.stat().st_ino == inode, "the captured host file must stay as it is"
+    assert relay.sysctl_file.read_text(encoding="utf-8") == DEFAULT_SYSCTL_FILE
+    assert relay.sysctl_file.stat().st_ino != inode, "replaced with mv, not rewritten in place"
+    assert [p.name for p in relay.tmp.glob("90-vpn-relay.conf*")] == ["90-vpn-relay.conf"]
 
 
-def test_a_rejected_ruleset_leaves_forwarding_alone(relay: Relay) -> None:
+def test_apply_leaves_an_identical_sysctl_file_alone(relay: Relay) -> None:
+    relay.sysctl_file.write_text(DEFAULT_SYSCTL_FILE, encoding="utf-8")
+    inode = relay.sysctl_file.stat().st_ino
+    assert relay.run("apply").returncode == 0
+    assert relay.sysctl_file.stat().st_ino == inode, "an up-to-date file is not rewritten"
+
+
+def test_apply_loads_nf_conntrack_when_its_keys_are_absent(relay: Relay) -> None:
+    for key in (CT_MAX, CT_EST, CT_COUNT):
+        relay.sysctls[key] = None
+    proc = relay.run("apply")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    calls = relay.calls()
+    assert [c for c in calls if c.startswith("modprobe")] == ["modprobe nf_conntrack"]
+    assert calls.index("modprobe nf_conntrack") < calls.index("sysctl -q -w net.netfilter.nf_conntrack_max=65536")
+    assert calls.count("sysctl -n net.netfilter.nf_conntrack_max") == 3, "probed, retried, read back"
+    assert (relay.now(CT_MAX), relay.now(CT_EST), relay.now(FORWARD)) == ("65536", "86400", "1")
+
+
+def test_apply_exits_7_when_modprobe_does_not_bring_the_keys(relay: Relay) -> None:
+    _relay_kernel_defaults(relay)
+    for key in (CT_MAX, CT_EST, CT_COUNT):
+        relay.sysctls[key] = None
+    relay.modprobe_loads = False
+    proc = relay.run("apply")
+    assert proc.returncode == 7, proc.stdout + proc.stderr
+    assert "still absent after modprobe nf_conntrack" in proc.stderr
+    assert "Module nf_conntrack not found" in proc.stderr, "modprobe's own reason is shown"
+    assert not any(c.startswith("sysctl -q -w") for c in relay.calls())
+    assert relay.now(FORWARD) == "0", "forwarding is not switched on by a failed apply"
+
+
+@pytest.mark.parametrize("key", [CT_MAX, CT_EST, FORWARD])
+def test_apply_exits_7_when_a_sysctl_cannot_be_set(relay: Relay, key: str) -> None:
+    relay.read_only.add(key)
+    proc = relay.run("apply")
+    assert proc.returncode == 7, proc.stdout + proc.stderr
+    assert f"sysctl -w {key}=" in proc.stderr
+
+
+def test_apply_reads_every_value_back(relay: Relay) -> None:
+    proc = relay.run("apply")
+    assert proc.returncode == 0, proc.stderr
+    calls = [c for c in relay.calls() if c.startswith("sysctl")]
+    for key, value in ((CT_MAX, "65536"), (CT_EST, "86400"), (FORWARD, "1")):
+        i = calls.index(f"sysctl -q -w {key}={value}")
+        assert calls[i + 1] == f"sysctl -n {key}", f"{key} is read back right after the write"
+
+
+def test_apply_exits_7_when_sysctl_w_exits_0_without_setting_the_value(relay: Relay) -> None:
+    """Seen for real with procps 4.0.4 in a network namespace: `sysctl -w
+    net.netfilter.nf_conntrack_max=...` prints "Operation not permitted", leaves the
+    value as it was and exits 0."""
+    _relay_kernel_defaults(relay)
+    relay.silent_eperm.add(CT_MAX)
+    proc = relay.run("apply")
+    assert proc.returncode == 7, proc.stdout + proc.stderr
+    assert f"sysctl -w {CT_MAX}=65536 did not take: {CT_MAX} = 262144" in proc.stderr
+    assert relay.now(FORWARD) == "0", "forwarding stays off"
+
+
+def test_a_rejected_ruleset_leaves_every_sysctl_alone(relay: Relay) -> None:
+    _relay_kernel_defaults(relay)
     relay.nft_rc = 1
     proc = relay.run("apply")
     assert proc.returncode == 6, proc.stderr
     assert "unchanged" in proc.stderr
-    assert not any(c.startswith("sysctl") for c in relay.calls())
+    assert not any(c.startswith(("sysctl", "modprobe")) for c in relay.calls())
     assert not relay.sysctl_file.exists()
+    assert (relay.now(FORWARD), relay.now(CT_MAX), relay.now(CT_EST)) == ("0", "262144", "432000")
 
 
 def test_apply_requires_root(relay: Relay) -> None:
@@ -435,7 +652,13 @@ def test_check_passes_on_the_live_relay(relay: Relay) -> None:
 def test_check_is_read_only(relay: Relay) -> None:
     relay.run("check")
     assert [c for c in relay.calls() if c.startswith("nft")] == ["nft list table ip vpnrelay"]
-    assert [c for c in relay.calls() if c.startswith("sysctl")] == ["sysctl -n net.ipv4.ip_forward"]
+    assert [c for c in relay.calls() if c.startswith("sysctl")] == [
+        "sysctl -n net.ipv4.ip_forward",
+        "sysctl -n net.netfilter.nf_conntrack_max",
+        "sysctl -n net.netfilter.nf_conntrack_tcp_timeout_established",
+        "sysctl -n net.netfilter.nf_conntrack_count",
+    ]
+    assert not any(c.startswith("modprobe") for c in relay.calls())
     assert not relay.sysctl_file.exists()
 
 
@@ -456,6 +679,87 @@ def test_check_different_table_is_11_with_a_diff(relay: Relay) -> None:
 def test_check_forwarding_off_is_12(relay: Relay) -> None:
     relay.forward = "0"
     assert relay.run("check").returncode == 12
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "fragment"),
+    [
+        (CT_MAX, "262144", "nf_conntrack_max = 262144, expected 65536 (RELAY_CONNTRACK_MAX)"),
+        (CT_EST, "432000", "nf_conntrack_tcp_timeout_established = 432000, expected 86400"),
+        (CT_MAX, None, "nf_conntrack_max = <unreadable>, expected 65536"),
+    ],
+)
+def test_check_conntrack_sysctl_differs_is_15(relay: Relay, key: str, value: str | None, fragment: str) -> None:
+    relay.sysctls[key] = value
+    proc = relay.run("check")
+    assert proc.returncode == 15, proc.stdout + proc.stderr
+    assert f"FAIL: net.netfilter.{fragment}" in proc.stderr
+    assert "ok: table ip vpnrelay matches" in proc.stdout, "the table step still reports"
+
+
+def test_check_compares_conntrack_with_the_env_values(relay: Relay) -> None:
+    relay.write_env(
+        f"RELAY_UPSTREAM_IPV4={UPSTREAM}\n"
+        "RELAY_CONNTRACK_MAX=262144\nRELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT=7200\n"
+    )
+    assert relay.run("check").returncode == 15, "the live 65536/86400 are not what .env asks for"
+    relay.sysctls.update({CT_MAX: "262144", CT_EST: "7200"})
+    proc = relay.run("check")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "ok: net.netfilter.nf_conntrack_max = 262144" in proc.stdout
+    assert "ok: net.netfilter.nf_conntrack_tcp_timeout_established = 7200" in proc.stdout
+
+
+def test_check_exit_order_is_forwarding_then_conntrack_then_the_probes(relay: Relay) -> None:
+    relay.sysctls[CT_MAX] = "262144"
+    relay.tcp_rc = 1
+    proc = relay.run("check")
+    assert proc.returncode == 15, "conntrack (local state) comes before the upstream probe"
+    assert "FAIL: TCP connect" in proc.stderr, "the probe still runs and reports"
+    relay.forward = "0"
+    assert relay.run("check").returncode == 12
+
+
+@pytest.mark.parametrize(
+    ("count", "warned"),
+    [("52429", True), ("52428", False), ("0", False), ("65536", True)],
+)
+def test_check_warns_over_80_percent_conntrack_without_failing(relay: Relay, count: str, warned: bool) -> None:
+    relay.sysctls[CT_COUNT] = count  # 80% of 65536 = 52428.8
+    proc = relay.run("check")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "check OK" in proc.stdout
+    assert ("WARNING: conntrack table" in proc.stderr) is warned
+    if warned:
+        assert f"{count} of 65536 (over 80%)" in proc.stderr and "RELAY_CONNTRACK_MAX" in proc.stderr
+    else:
+        assert f"conntrack in use: {count} of 65536" in proc.stdout
+
+
+def test_check_measures_fill_against_the_live_max(relay: Relay) -> None:
+    """The kernel drops at ITS limit: with a live max that differs from .env the
+    warning still compares against the live value (and the check fails with 15)."""
+    relay.sysctls.update({CT_MAX: "10000", CT_COUNT: "9000"})
+    proc = relay.run("check")
+    assert proc.returncode == 15
+    assert "WARNING: conntrack table 9000 of 10000 (over 80%)" in proc.stderr
+
+
+def test_check_without_a_readable_count_does_not_warn(relay: Relay) -> None:
+    relay.sysctls[CT_COUNT] = None
+    proc = relay.run("check")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "WARNING" not in proc.stderr and "conntrack in use" not in proc.stdout
+
+
+def test_helper_never_reads_proc_net_stat() -> None:
+    """/proc/net/stat/nf_conntrack does not exist on the relay's 6.8 kernel: the fill
+    level comes from the nf_conntrack_count sysctl. Code only (the header says why)."""
+    code = "\n".join(
+        ln for ln in HELPER.read_text(encoding="utf-8").splitlines() if not ln.lstrip().startswith("#")
+    )
+    assert "net.netfilter.nf_conntrack_count" in code
+    assert "/proc/net/stat" not in code
 
 
 def test_check_unreachable_upstream_is_13(relay: Relay) -> None:

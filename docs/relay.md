@@ -48,8 +48,9 @@ A relay host runs **one thing**: `vpn-relay.service`, a oneshot that executes
 `/usr/local/sbin/vpn-relay-apply apply`. That helper renders the nftables table
 `ip vpnrelay` from the relay's `.env`, applies it in **one atomic `nft -f` transaction**
 (`table ip vpnrelay` + `delete table ip vpnrelay` + the new table — nft commits all of it or
-leaves the previous table as it was) and then sets `net.ipv4.ip_forward = 1` (runtime and
-`/etc/sysctl.d/90-vpn-relay.conf`).
+leaves the previous table as it was) and then sets the sysctls — `net.ipv4.ip_forward = 1` and
+the two conntrack values from `.env` (see [conntrack](#conntrack)) — at runtime and in
+`/etc/sysctl.d/90-vpn-relay.conf`.
 
 Nothing else from this repository runs there: no `vpn-bot`, no `vpn-bot-subscription`, no
 `hy2_auth`, no database, no Xray, AmneziaWG or WARP, and **no Telegram at all** — the bot's
@@ -104,21 +105,61 @@ helper for `HYSTERIA2_PORT`): optional `export`, spaces around `=`, quotes, trai
 | `RELAY_FORWARD_UDP_PORTS` | `443` | Same for UDP (Hysteria2). |
 | `RELAY_WAN_IFACE` | the IPv4 default-route interface | WAN interface of the DNAT/masquerade rules. Without it the helper refuses a host with no default route or with default routes through several interfaces. |
 | `RELAY_CHECK_SNI` | — | When set (and 443 is forwarded), `vpn-relay-apply check` also does a TLS handshake to the upstream with this SNI and **verifies the certificate**. Use the main server's `XRAY_SNI`: REALITY hands an unknown client to its decoy, whose certificate is valid for that name. |
+| `RELAY_CONNTRACK_MAX` | `65536` | `net.netfilter.nf_conntrack_max`, an integer in 8192..1048576. Every relayed flow is one conntrack entry; when the table is full the kernel drops new flows. |
+| `RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT` | `86400` | `net.netfilter.nf_conntrack_tcp_timeout_established`, seconds, 300..432000 (the kernel default is 432000 = 5 days). |
+
+A value outside its range, with a sign, a unit or a leading zero is refused with exit `3`
+before anything is applied, like a bad port.
 
 ### `vpn-relay-apply`
 
 | Command | Does |
 |---|---|
-| `apply` | Render + apply the table atomically, then `ip_forward=1`. What the unit runs. |
-| `check` | Read-only: the live table equals the render (counters ignored; a diff is printed), `ip_forward=1`, a TCP connect to the upstream on **every** forwarded TCP port, and the TLS handshake when `RELAY_CHECK_SNI` is set. Every deploy ends with it. |
+| `apply` | Render + apply the table atomically, then the sysctl file and the three runtime values (conntrack first, `ip_forward=1` last). What the unit runs. |
+| `check` | Read-only: the live table equals the render (counters ignored; a diff is printed), `ip_forward=1`, both conntrack values equal `.env`, a TCP connect to the upstream on **every** forwarded TCP port, and the TLS handshake when `RELAY_CHECK_SNI` is set. A conntrack table more than 80 % full is a warning, not a failure. Every deploy ends with it. |
 | `check --dry-run` | Validate `.env` and render; as root also `nft -c` (syntax check, nothing applied). Deploy Phase 1 runs it from the checkout. |
 | `show` | Print the rendered ruleset. |
 
 Exit codes: `0` ok · `2` usage · `3` bad/missing `.env` value · `4` WAN interface unresolved ·
-`5` not root / tool missing · `6` nft rejected the ruleset (live table unchanged) · `7`
-ip_forward/sysctl file not set · `10` table absent · `11` live table differs from the render ·
-`12` ip_forward is not 1 · `13` the upstream does not answer on a forwarded TCP port · `14` TLS
-handshake failed. `check` reports every failure and exits with the first one.
+`5` not root / tool missing · `6` nft rejected the ruleset (live table unchanged) · `7` the
+sysctl file or a sysctl could not be set (incl. `nf_conntrack_max` still absent after `modprobe
+nf_conntrack`) · `10` table absent · `11` live table differs from the render · `12` ip_forward
+is not 1 · `13` the upstream does not answer on a forwarded TCP port · `14` TLS handshake failed ·
+`15` a conntrack sysctl differs from `.env`. `check` runs table → ip_forward → conntrack → TCP →
+TLS, reports every failure and exits with the first one.
+
+### conntrack
+
+Every relayed flow (each VLESS connection, each Hysteria2 UDP flow) is an entry in the kernel's
+conntrack table: DNAT and masquerade live there. When the table is full the kernel drops **new**
+flows (`nf_conntrack: table full, dropping packet` in `dmesg`), so the relay sets the limit
+itself instead of relying on the kernel default, and shortens the 5-day timeout of established
+TCP entries, which otherwise keeps entries of clients that vanished without a FIN.
+
+`apply` renders `/etc/sysctl.d/90-vpn-relay.conf` whole:
+
+```
+net.ipv4.ip_forward = 1
+net.netfilter.nf_conntrack_max = <RELAY_CONNTRACK_MAX>
+net.netfilter.nf_conntrack_tcp_timeout_established = <RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT>
+```
+
+and sets the same values with `sysctl -w` **after** `nft -f`, reading each one back. The file
+alone is not enough: at boot `systemd-sysctl` applies it early, **before nf_conntrack is
+loaded** — the module is loaded by the table's ct/nat expressions, i.e. by `nft -f` in `apply` —
+so the `net.netfilter.*` keys do not exist yet and it skips them (a `Couldn't write … ignoring`
+line for them in its journal is expected). That is why `apply` sets them on every start of
+`vpn-relay.service`. If `net.netfilter.nf_conntrack_max` is still absent after `nft -f`, `apply`
+runs `modprobe nf_conntrack` and retries; if that does not help it exits `7`.
+
+`check` reads the fill level from the `net.netfilter.nf_conntrack_count` sysctl (not
+`/proc/net/stat/nf_conntrack`, which the relay's 6.8 kernel does not have) and prints a
+`WARNING` above 80 % of `nf_conntrack_max` — raise `RELAY_CONNTRACK_MAX` then.
+
+A relay deployed before these keys existed runs with the kernel's values, so the first deploy
+that brings them shows exit `15` in Phase 1's live check ("the table and ip_forward match; the
+conntrack sysctls differ") instead of PASS; Phase 2 sets them. The rollback puts back the
+runtime values from before the deploy.
 
 ### What `scripts/redeploy.sh` does on a relay
 
@@ -129,10 +170,12 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
 - **Phase 1** (read-only; `CHECK=1` stops here and prints a report): fetch `origin/main`, the
   same ruff / compileall / pytest gate on the checkout as on the main server (a test venv is
   built under `/var/lib/vpn-bot-deploy/`, so the relay needs `python3-venv` and ~1 GiB free),
-  `vpn-relay-apply check --dry-run` from the checkout, the relay's pre-state, the installed
-  unit compared with `deploy/relay/vpn-relay.service`, and the checkout's `check` against the
-  live relay — on a relay that still runs the hand-made ruleset a **PASS** there proves the
-  repo reproduces it 1:1.
+  `vpn-relay-apply check --dry-run` from the checkout, the relay's pre-state (including the
+  runtime `nf_conntrack_max` and `nf_conntrack_tcp_timeout_established`), the installed unit
+  compared with `deploy/relay/vpn-relay.service`, and the checkout's `check` against the live
+  relay — on a relay that still runs the hand-made ruleset a **PASS** there (or `15`, see
+  [conntrack](#conntrack), with `ok: table ip vpnrelay matches`) proves the repo reproduces it
+  1:1.
 - **Phase 2**: back up the live `nft list table ip vpnrelay`, the installed helper, the unit
   and the sysctl file (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; nothing is
   stopped for it); `git reset --hard origin/main`; install `vpn-relay-apply` through
@@ -140,8 +183,10 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   `daemon-reload`, `enable`, `restart vpn-relay` (established flows keep their conntrack NAT
   across the millisecond gap); verify with `vpn-relay-apply check`.
 - **Any failure** rolls back: the previous checkout, helper, unit and sysctl file (or their
-  absence), the saved table re-applied in one transaction, the unit's enabled/active state and
-  the previous `ip_forward`. The deploy exits non-zero with a rollback report.
+  absence), the saved table re-applied in one transaction, the unit's enabled/active state, the
+  previous `ip_forward` and the previous runtime conntrack values (each read back; a value that
+  was unreadable before the deploy — nf_conntrack not loaded — is left as `apply` set it). The
+  deploy exits non-zero with a rollback report.
 - A unit installed by hand that loads `/etc/vpn-relay.nft` is the **expected first
   transition**, not drift. After the first successful deploy `/etc/vpn-relay.nft` is renamed to
   `/etc/vpn-relay.nft.pre-repo.<ts>` (never deleted) and nothing reads it any more.

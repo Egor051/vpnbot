@@ -15,8 +15,10 @@ git / install, like the rest of the deploy suites. Pinned here:
    output with NODE_ROLE absent and NODE_ROLE=main, and never show a relay piece.
 5. **The relay role touches no main unit and no DB**, installs its helper through
    OUT_OF_REPO_HELPERS (role-filtered) and its unit verbatim, and **rolls back** —
-   files, saved table, enable/active state, ip_forward — when the restart or the
-   final `vpn-relay-apply check` fails.
+   files, saved table, enable/active state, ip_forward and the conntrack sysctls
+   (nf_conntrack_max, nf_conntrack_tcp_timeout_established) snapshotted in
+   relay_snapshot_prestate — when the restart or the final `vpn-relay-apply check`
+   fails.
 """
 
 from __future__ import annotations
@@ -386,6 +388,12 @@ case "$1" in
   restart)
     rc="$(cat "$SD/restart_rc" 2>/dev/null || echo 0)"
     rm -f "$SD/table"
+    # ExecStart = vpn-relay-apply apply, which sets the sysctls from .env (here its
+    # defaults). A failed restart has set them too: the worst case for the rollback
+    # (apply exiting 7 after its first sysctl writes).
+    echo 65536 > "$SD/net.netfilter.nf_conntrack_max"
+    echo 86400 > "$SD/net.netfilter.nf_conntrack_tcp_timeout_established"
+    echo 1 > "$SD/forward"
     if [[ "$rc" == "0" ]]; then echo active > "$SD/$unit.active"; touch "$SD/table"
     else echo failed > "$SD/$unit.active"; fi
     exit "$rc" ;;
@@ -409,10 +417,25 @@ exit 0
 
 RELAY_SYSCTL = r"""
 echo "sysctl $*" >> "$LOGS/sysctl.log"
-if [[ "$1" == "-n" ]]; then cat "$SD/forward"; exit 0; fi
-for a in "$@"; do [[ "$a" == net.ipv4.ip_forward=* ]] && echo "${a#*=}" > "$SD/forward"; done
+# One file per key under $SD (ip_forward is $SD/forward); no file = no such key, as
+# for net.netfilter.* while nf_conntrack is not loaded.
+f() { if [[ "$1" == net.ipv4.ip_forward ]]; then echo "$SD/forward"; else echo "$SD/$1"; fi; }
+if [[ "$1" == "-n" ]]; then p="$(f "$2")"; [[ -f "$p" ]] || exit 255; cat "$p"; exit 0; fi
+for a in "$@"; do
+  case "$a" in
+    *=*) p="$(f "${a%%=*}")"; [[ -f "$p" ]] || exit 255
+         # procps when the write fails at close(2): an error line, nothing set, exit 0
+         if [[ -f "$p.eperm" ]]; then echo "sysctl: setting key \"${a%%=*}\": Operation not permitted" >&2
+         else echo "${a#*=}" > "$p"; fi ;;
+  esac
+done
 exit 0
 """
+
+CT_MAX = "net.netfilter.nf_conntrack_max"
+CT_EST = "net.netfilter.nf_conntrack_tcp_timeout_established"
+# The hand-made relay never set them: kernel defaults, not the .env defaults.
+KERNEL_CT = ("262144", "432000")
 
 RELAY_GIT = r"""
 echo "git $*" >> "$LOGS/git.log"
@@ -474,9 +497,17 @@ class RelayHost:
         (self.sd / "vpn-relay.service.enabled").write_text("enabled", encoding="utf-8")
         (self.sd / "table").touch()
         self.set_forward("1")
+        self.set_conntrack(*KERNEL_CT)
 
     def set_forward(self, value: str) -> None:
         (self.sd / "forward").write_text(value, encoding="utf-8")
+
+    def set_conntrack(self, ct_max: str, ct_est: str) -> None:
+        (self.sd / CT_MAX).write_text(ct_max, encoding="utf-8")
+        (self.sd / CT_EST).write_text(ct_est, encoding="utf-8")
+
+    def conntrack(self) -> tuple[str, str]:
+        return self.state(CT_MAX), self.state(CT_EST)
 
     def fail_check(self, rc: int) -> None:
         (self.sd / "check_rc").write_text(str(rc), encoding="utf-8")
@@ -583,6 +614,10 @@ def test_failed_check_rolls_the_hand_installed_relay_back(tmp_path: Path) -> Non
     restored = _read(host.logs / "nft-restore.nft")
     assert restored == "table ip vpnrelay\ndelete table ip vpnrelay\n" + _read(LIVE_LISTING)
     assert host.state("forward") == "1"
+    assert host.conntrack() == KERNEL_CT, "the pre-deploy conntrack values are back"
+    assert f"sysctl -q -w {CT_MAX}=262144" in host.log("sysctl")
+    assert f"sysctl -q -w {CT_EST}=432000" in host.log("sysctl")
+    assert f"{CT_MAX}=262144 (pre-deploy value): rc=0" in proc.stderr
     assert host.state("vpn-relay.service.active") == "active"
     assert host.state("vpn-relay.service.enabled") == "enabled"
     resets = [c for c in host.log("git") if c.startswith("git reset")]
@@ -609,6 +644,7 @@ def test_failed_restart_rolls_the_hand_installed_relay_back_and_restarts_it(tmp_
     )
     assert host.state("table") == "", "the saved table is live again"
     assert host.state("vpn-relay.service.active") == "active"
+    assert host.conntrack() == KERNEL_CT, "what the failed apply set is undone"
 
 
 def test_failed_check_on_a_fresh_relay_removes_everything_it_added(tmp_path: Path) -> None:
@@ -619,7 +655,10 @@ def test_failed_check_on_a_fresh_relay_removes_everything_it_added(tmp_path: Pat
     for path in (host.unit, host.helper, host.sysctl_file):
         assert not path.exists(), f"{path} was not there before the deploy"
     assert host.state("table") == "<absent>"
-    assert host.state("forward") == "0"
+    assert host.state("forward") == "0", "the restart switched it on; the rollback switches it off"
+    # nf_conntrack was not loaded before the deploy: nothing to go back to.
+    assert not [c for c in host.log("sysctl") if "-w" in c and "nf_conntrack" in c]
+    assert f"{CT_MAX} unreadable before the deploy (nf_conntrack not loaded) — left as it is" in proc.stderr
     assert host.state("vpn-relay.service.enabled") == "<absent>"
     assert host.state("vpn-relay.service.active") == "inactive"
     sc = [ln.removeprefix("systemctl ") for ln in host.log("systemctl")]
@@ -629,6 +668,42 @@ def test_failed_check_on_a_fresh_relay_removes_everything_it_added(tmp_path: Pat
     )
     assert not (host.logs / "nft-restore.nft").exists(), "no table to restore"
     _assert_no_main_piece_touched(host)
+
+
+def test_rollback_reports_a_sysctl_that_did_not_take(tmp_path: Path) -> None:
+    """procps `sysctl -w` can exit 0 without setting the value: the report reads it
+    back instead of trusting rc."""
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    host.fail_check(11)
+    (host.sd / f"{CT_MAX}.eperm").touch()
+    proc = host.phase2()
+    assert proc.returncode == 1
+    assert (
+        f"{CT_MAX}=262144 (pre-deploy value): rc=0, now 65536 — MANUAL ACTION REQUIRED" in proc.stderr
+    )
+    assert f"{CT_EST}=432000 (pre-deploy value): rc=0\n" in proc.stderr
+
+
+def test_prestate_snapshots_the_conntrack_sysctls(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    proc = host.run('relay_snapshot_prestate\necho "CT=[$RELAY_PRE_CT_MAX][$RELAY_PRE_CT_EST]"\n')
+    assert proc.returncode == 0, proc.stderr
+    assert "CT=[262144][432000]" in proc.stdout
+    assert [c for c in host.log("sysctl") if " -w " in c] == [], "the snapshot only reads"
+    fresh = RelayHost(tmp_path / "fresh")
+    proc = fresh.run('relay_snapshot_prestate\necho "CT=[$RELAY_PRE_CT_MAX][$RELAY_PRE_CT_EST]"\n')
+    assert "CT=[][]" in proc.stdout, "no nf_conntrack yet: unreadable, not an error"
+
+
+def test_a_successful_deploy_keeps_the_conntrack_values_apply_set(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    proc = host.phase2()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert host.conntrack() == ("65536", "86400")
+    assert [c for c in host.log("sysctl") if "-w" in c] == [], "only the rollback writes sysctls itself"
 
 
 def test_a_successful_fresh_relay_is_enabled_and_has_no_legacy_file(tmp_path: Path) -> None:
@@ -677,9 +752,13 @@ def test_relay_phase1_refuses_an_env_that_does_not_render(tmp_path: Path) -> Non
     assert host.log("systemctl") == [] and host.log("nft") == [] and host.log("sysctl") == []
 
 
-def test_relay_phase1_reports_the_first_transition_without_mutating(tmp_path: Path) -> None:
+@pytest.mark.parametrize("conntrack", [KERNEL_CT, ("65536", "86400")])
+def test_relay_phase1_reports_the_first_transition_without_mutating(
+    tmp_path: Path, conntrack: tuple[str, str]
+) -> None:
     host = RelayHost(tmp_path)
     host.hand_installed()
+    host.set_conntrack(*conntrack)
     wt = tmp_path / "wt"
     (wt / "scripts").mkdir(parents=True)
     (wt / "deploy" / "relay").mkdir(parents=True)
@@ -702,7 +781,16 @@ def test_relay_phase1_reports_the_first_transition_without_mutating(tmp_path: Pa
     assert all(c.split()[1] in {"is-active", "is-enabled"} for c in host.log("systemctl"))
     assert not any("reset" in c for c in host.log("git"))
     assert _read(host.unit) == _read(MANUAL_UNIT) and host.legacy.exists()
-    assert "PASS" in out, "the repo renders the hand-made ruleset 1:1"
+    assert "ok: table ip vpnrelay matches" in out, "the repo renders the hand-made ruleset 1:1"
+    assert f"{CT_MAX}={conntrack[0]}; {CT_EST}={conntrack[1]}" in out, "pre-state log line"
+    assert f"nf_conntrack_max={conntrack[0]} nf_conntrack_tcp_timeout_established={conntrack[1]}" in out
+    if conntrack == KERNEL_CT:
+        # The hand-made relay never set them: the first deploy of this version does.
+        assert "the table and ip_forward match; the conntrack sysctls differ from .env" in out
+        assert "PASS" not in out
+    else:
+        assert "PASS" in out
+    assert not [c for c in host.log("sysctl") if "-w" in c], "Phase 1 writes no sysctl"
     assert host.log("probe") == ["probe tcp 150.251.152.243 443"]
 
 
@@ -743,6 +831,7 @@ def test_relay_env_example_covers_the_keys_the_helper_reads() -> None:
     assert keys == {
         "RELAY_UPSTREAM_IPV4", "RELAY_FORWARD_TCP_PORTS", "RELAY_FORWARD_UDP_PORTS",
         "RELAY_WAN_IFACE", "RELAY_CHECK_SNI",
+        "RELAY_CONNTRACK_MAX", "RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT",
     }
     for key in [*keys, "NODE_ROLE"]:
         assert re.search(rf"^#? ?{key}=", example, re.M), key

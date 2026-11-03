@@ -48,8 +48,9 @@ REALITY, ни QUIC. Это имя и указывайте как **host** relay.
 `/usr/local/sbin/vpn-relay-apply apply`. Хелпер рендерит таблицу nftables `ip vpnrelay` из
 `.env` relay, применяет её **одной атомарной транзакцией `nft -f`** (`table ip vpnrelay` +
 `delete table ip vpnrelay` + новая таблица — nft применяет всё целиком или оставляет прежнюю
-таблицу как была) и затем ставит `net.ipv4.ip_forward = 1` (в рантайме и в
-`/etc/sysctl.d/90-vpn-relay.conf`).
+таблицу как была) и затем выставляет sysctl — `net.ipv4.ip_forward = 1` и два значения
+conntrack из `.env` (см. [conntrack](#conntrack)) — в рантайме и в
+`/etc/sysctl.d/90-vpn-relay.conf`.
 
 Больше ничего из репозитория там не работает: ни `vpn-bot`, ни `vpn-bot-subscription`, ни
 `hy2_auth`, ни БД, ни Xray, AmneziaWG, WARP, и **никакого Telegram** — тот же `BOT_TOKEN` на
@@ -105,22 +106,63 @@ Hysteria2 — `HYSTERIA2_PORT`): необязательный `export`, проб
 | `RELAY_FORWARD_UDP_PORTS` | `443` | То же для UDP (Hysteria2). |
 | `RELAY_WAN_IFACE` | интерфейс IPv4 default route | WAN-интерфейс правил DNAT/masquerade. Без неё хелпер отказывает, если default route нет или он уходит через несколько интерфейсов. |
 | `RELAY_CHECK_SNI` | — | Если задана (и 443 пробрасывается), `vpn-relay-apply check` дополнительно делает TLS-handshake к upstream с этим SNI и **проверяет сертификат**. Укажите `XRAY_SNI` основного сервера: REALITY отдаёт незнакомого клиента своему decoy, чей сертификат валиден для этого имени. |
+| `RELAY_CONNTRACK_MAX` | `65536` | `net.netfilter.nf_conntrack_max`, целое 8192..1048576. Каждый проходящий через relay поток — одна запись conntrack; когда таблица заполнена, ядро отбрасывает новые потоки. |
+| `RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT` | `86400` | `net.netfilter.nf_conntrack_tcp_timeout_established`, секунды, 300..432000 (по умолчанию в ядре 432000 = 5 суток). |
+
+Значение вне диапазона, со знаком, единицей измерения или ведущим нулём отвергается с кодом
+`3` до каких-либо изменений — так же, как неверный порт.
 
 ### `vpn-relay-apply`
 
 | Команда | Что делает |
 |---|---|
-| `apply` | Рендер + атомарное применение таблицы, затем `ip_forward=1`. Это запускает unit. |
-| `check` | Только чтение: живая таблица совпадает с рендером (счётчики не сравниваются; при расхождении печатается diff), `ip_forward=1`, TCP-connect к upstream на **каждый** пробрасываемый TCP-порт и TLS-handshake, если задан `RELAY_CHECK_SNI`. Им заканчивается каждый деплой. |
+| `apply` | Рендер + атомарное применение таблицы, затем sysctl-файл и три значения в рантайме (сначала conntrack, `ip_forward=1` последним). Это запускает unit. |
+| `check` | Только чтение: живая таблица совпадает с рендером (счётчики не сравниваются; при расхождении печатается diff), `ip_forward=1`, оба значения conntrack равны `.env`, TCP-connect к upstream на **каждый** пробрасываемый TCP-порт и TLS-handshake, если задан `RELAY_CHECK_SNI`. Таблица conntrack, заполненная больше чем на 80 %, — предупреждение, а не ошибка. Им заканчивается каждый деплой. |
 | `check --dry-run` | Проверить `.env` и отрендерить; под root ещё `nft -c` (проверка синтаксиса, ничего не применяется). Это запускает Phase 1 деплоя из checkout. |
 | `show` | Напечатать отрендеренный ruleset. |
 
 Коды выхода: `0` ok · `2` использование · `3` неверное/отсутствующее значение в `.env` · `4`
 не определён WAN-интерфейс · `5` не root / нет утилиты · `6` nft отверг ruleset (живая таблица
-не изменилась) · `7` не удалось выставить ip_forward / записать sysctl-файл · `10` таблицы нет ·
-`11` живая таблица отличается от рендера · `12` ip_forward не равен 1 · `13` upstream не
-отвечает на пробрасываемом TCP-порту · `14` TLS-handshake не прошёл. `check` сообщает обо всех
-сбоях и выходит с кодом первого.
+не изменилась) · `7` не удалось записать sysctl-файл или выставить sysctl (в том числе
+`nf_conntrack_max` так и нет после `modprobe nf_conntrack`) · `10` таблицы нет · `11` живая
+таблица отличается от рендера · `12` ip_forward не равен 1 · `13` upstream не отвечает на
+пробрасываемом TCP-порту · `14` TLS-handshake не прошёл · `15` значение conntrack отличается от
+`.env`. `check` проверяет по порядку таблицу → ip_forward → conntrack → TCP → TLS, сообщает обо
+всех сбоях и выходит с кодом первого.
+
+### conntrack
+
+Каждый поток через relay (каждое VLESS-соединение, каждый UDP-поток Hysteria2) — запись в
+таблице conntrack ядра: в ней живут DNAT и masquerade. Когда таблица заполнена, ядро
+отбрасывает **новые** потоки (`nf_conntrack: table full, dropping packet` в `dmesg`), поэтому
+relay сам выставляет лимит, а не полагается на значение ядра по умолчанию, и сокращает
+5-суточный таймаут установленных TCP-записей, из-за которого иначе висят записи клиентов,
+пропавших без FIN.
+
+`apply` рендерит `/etc/sysctl.d/90-vpn-relay.conf` целиком:
+
+```
+net.ipv4.ip_forward = 1
+net.netfilter.nf_conntrack_max = <RELAY_CONNTRACK_MAX>
+net.netfilter.nf_conntrack_tcp_timeout_established = <RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT>
+```
+
+и выставляет те же значения через `sysctl -w` **после** `nft -f`, перечитывая каждое. Одного
+файла недостаточно: при загрузке `systemd-sysctl` применяет его рано, **до загрузки модуля
+nf_conntrack** — модуль загружают ct/nat-выражения таблицы, то есть `nft -f` в `apply`, — поэтому
+ключей `net.netfilter.*` ещё нет, и он их пропускает (строка `Couldn't write … ignoring` про них в
+его журнале ожидаема). Поэтому `apply` выставляет их при каждом старте `vpn-relay.service`. Если
+после `nft -f` ключа `net.netfilter.nf_conntrack_max` всё ещё нет, `apply` выполняет `modprobe
+nf_conntrack` и пробует снова; если не помогло — выходит с кодом `7`.
+
+`check` берёт заполненность из sysctl `net.netfilter.nf_conntrack_count` (не из
+`/proc/net/stat/nf_conntrack` — на ядре 6.8 relay его нет) и печатает `WARNING`, если она выше
+80 % от `nf_conntrack_max`; тогда увеличьте `RELAY_CONNTRACK_MAX`.
+
+Relay, развёрнутый до появления этих ключей, работает со значениями ядра, поэтому первый деплой,
+который их приносит, показывает в live check Phase 1 код `15` («the table and ip_forward match;
+the conntrack sysctls differ») вместо PASS; Phase 2 их выставляет. Откат возвращает значения,
+которые были в рантайме до деплоя.
 
 ### Что делает `scripts/redeploy.sh` на relay
 
@@ -132,10 +174,12 @@ Hysteria2 — `HYSTERIA2_PORT`): необязательный `export`, проб
   `origin/main`, тот же гейт ruff / compileall / pytest на checkout, что и на основном
   сервере (тестовый venv собирается в `/var/lib/vpn-bot-deploy/`, поэтому relay нужен
   `python3-venv` и ~1 ГиБ свободного места), `vpn-relay-apply check --dry-run` из checkout,
-  исходное состояние relay, сравнение установленного unit'а с
+  исходное состояние relay (включая `nf_conntrack_max` и
+  `nf_conntrack_tcp_timeout_established` в рантайме), сравнение установленного unit'а с
   `deploy/relay/vpn-relay.service` и `check` из checkout против живого relay — на relay, где
-  ещё работает ruleset, собранный вручную, **PASS** здесь доказывает, что репозиторий
-  воспроизводит его 1:1.
+  ещё работает ruleset, собранный вручную, **PASS** здесь (или `15`, см.
+  [conntrack](#conntrack), вместе с `ok: table ip vpnrelay matches`) доказывает, что
+  репозиторий воспроизводит его 1:1.
 - **Phase 2**: бэкап живого `nft list table ip vpnrelay`, установленного хелпера, unit'а и
   sysctl-файла (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; ради бэкапа ничего не
   останавливается); `git reset --hard origin/main`; установка `vpn-relay-apply` через
@@ -144,7 +188,9 @@ Hysteria2 — `HYSTERIA2_PORT`): необязательный `export`, проб
   conntrack на миллисекундный разрыв); проверка `vpn-relay-apply check`.
 - **Любой сбой** откатывает: прежний checkout, хелпер, unit и sysctl-файл (или их отсутствие),
   сохранённая таблица применяется заново одной транзакцией, восстанавливаются enabled/active
-  unit'а и прежний `ip_forward`. Деплой выходит с ненулевым кодом и отчётом об откате.
+  unit'а, прежний `ip_forward` и прежние значения conntrack в рантайме (каждое перечитывается;
+  значение, которое до деплоя не читалось — nf_conntrack не был загружен, — остаётся таким, как
+  его выставил `apply`). Деплой выходит с ненулевым кодом и отчётом об откате.
 - Unit, установленный вручную и загружающий `/etc/vpn-relay.nft`, — **ожидаемый первый
   переход**, а не drift. После первого успешного деплоя `/etc/vpn-relay.nft` переименовывается
   в `/etc/vpn-relay.nft.pre-repo.<ts>` (не удаляется) и больше никем не читается.
