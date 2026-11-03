@@ -375,7 +375,15 @@ class XrayService:
                 # The cached link comes from connection_link — the one place a
                 # key's link is derived — rendered off the row just written, so it
                 # carries the same host and display name the config screen shows.
-                public_payload["link"] = self.connection_link(key)
+                # A relay switched off in the panel since the row was written makes
+                # it unrenderable: the key is still a valid key of that relay, so
+                # creation carries on without a cached link (links are always
+                # rebuilt from the payload) rather than leaving a pending row with
+                # no Xray client behind.
+                try:
+                    public_payload["link"] = self.connection_link(key)
+                except RelayUnavailable:
+                    public_payload.pop("link", None)
                 xray_apply_result = None
                 try:
                     await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)

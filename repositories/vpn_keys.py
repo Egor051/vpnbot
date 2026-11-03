@@ -13,6 +13,7 @@ from models.enums import VpnKeyStatus, VpnKeyType
 from repositories._helpers import _clamp_limit, _clamp_offset, enum_value, json_loads_dict
 from repositories.traffic_scope import CURRENT_KEYS, TrafficScope, traffic_rows_query
 from services.errors import InvalidTransition
+from services.relay import RelayUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -156,8 +157,25 @@ class VpnKeyRepository:
         spider_x: str | None = None,
         relay: str | None = None,
     ) -> VpnKey:
-        """Insert a new VPN key in pending-apply status and return it."""
+        """Insert a new VPN key in pending-apply status and return it.
+
+        A key through a relay is inserted only if that relay exists and is
+        enabled AT THE MOMENT OF THE INSERT — checked by the INSERT itself, so the
+        check and the write are one statement. The services check the relay
+        before they start (``require_relay_for_issue``), but several awaits
+        follow; a relay deleted in the admin panel meanwhile would otherwise get
+        a key that names a relay that no longer exists. Paired with the relay
+        delete, which removes the row only while no key names it (also one
+        statement), exactly one of the two wins. Raises
+        :class:`services.relay.RelayUnavailable` (nothing written) when the
+        relay is gone or switched off.
+        """
         relay = _checked_relay(relay)
+        guard = ""
+        guard_params: tuple[object, ...] = ()
+        if relay is not None:
+            guard = " WHERE EXISTS (SELECT 1 FROM relays WHERE name = ? AND enabled = 1)"
+            guard_params = (relay,)
         cursor = await self.db.conn.execute(
             """
             INSERT INTO vpn_keys (
@@ -167,8 +185,9 @@ class VpnKeyRepository:
               created_at, updated_at, created_by, expires_at, transport, xhttp_profile, spider_x,
               relay
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            """
+            + guard,
             (
                 owner_user_id,
                 username,
@@ -189,9 +208,12 @@ class VpnKeyRepository:
                 xhttp_profile,
                 spider_x,
                 relay,
+                *guard_params,
             ),
         )
         await self.db.commit()
+        if relay is not None and cursor.rowcount != 1:
+            raise RelayUnavailable(relay)
         assert cursor.lastrowid is not None
         key = await self.get_by_id(int(cursor.lastrowid))
         if key is None:

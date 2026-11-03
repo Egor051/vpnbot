@@ -495,11 +495,16 @@ async def test_the_name_is_immutable(world: _World) -> None:
 async def test_a_name_still_carried_by_keys_cannot_be_reused(world: _World, status: str) -> None:
     """Keys — even deleted ones — keep the name forever; a new relay under it would
     silently re-point them."""
+    # A relay "old1" once existed; its row is gone, one of its keys is left behind.
+    await world.relay_repo.create(
+        name="old1", label="old", host=RELAY_HOST, source_ips=(ipaddress.IPv4Network("198.51.100.7/32"),), now="now"
+    )
     key = await world.vpn_keys.create_pending(
         owner_user_id=OWNER, username="u", key_type=VpnKeyType.XRAY, note=None, payload={}, public_payload={},
         created_by=OWNER, now="now", relay="old1",
     )
     await world.db.conn.execute("UPDATE vpn_keys SET status = ? WHERE id = ?", (status, key.id))
+    await world.db.conn.execute("DELETE FROM relays WHERE name = 'old1'")
     await world.db.commit()
     with pytest.raises(InvalidOperation) as excinfo:
         await world.add_relay("old1")
@@ -681,6 +686,90 @@ async def test_disable_instead_of_delete_keeps_the_keys(world: _World) -> None:
     # …and it is no longer offered for new keys.
     with pytest.raises(RelayUnavailable):
         await world.xray.create_xray_key(ADMIN, _owner(), None, relay="ru1")
+
+
+# ── issuing a key races a relay being deleted or switched off ─────────────────
+
+
+async def _key_rows(world: _World) -> list[tuple[int, str, str | None]]:
+    rows = await world.db.conn.execute_fetchall("SELECT id, status, relay FROM vpn_keys ORDER BY id")
+    return [(int(r["id"]), str(r["status"]), r["relay"]) for r in rows]
+
+
+@pytest.mark.parametrize("gone", ["deleted", "disabled"])
+async def test_the_key_insert_itself_requires_an_enabled_relay(world: _World, gone: str) -> None:
+    """The relay check and the key write are one statement, so a relay deleted (or
+    switched off) after the service's up-front check can never get a new key."""
+    relay = await world.add_relay()
+    if gone == "deleted":
+        await world.db.conn.execute("DELETE FROM relays WHERE id = ?", (relay.id,))
+    else:
+        await world.db.conn.execute("UPDATE relays SET enabled = 0 WHERE id = ?", (relay.id,))
+    await world.db.commit()
+    with pytest.raises(RelayUnavailable):
+        await world.vpn_keys.create_pending(
+            owner_user_id=OWNER, username="u", key_type=VpnKeyType.XRAY, note=None, payload={},
+            public_payload={}, created_by=OWNER, now="now", relay="ru1",
+        )
+    assert await _key_rows(world) == []
+    # A direct key is unaffected.
+    await world.vpn_keys.create_pending(
+        owner_user_id=OWNER, username="u", key_type=VpnKeyType.XRAY, note=None, payload={},
+        public_payload={}, created_by=OWNER, now="now",
+    )
+    assert len(await _key_rows(world)) == 1
+
+
+async def test_a_relay_deleted_while_a_key_is_being_issued_leaves_nothing_behind(world: _World) -> None:
+    """The bot's snapshot still offers the relay (the service's check passes), but
+    the admin deleted it during the awaits that follow: no row, no Xray client."""
+    await world.add_relay()
+    snapshot = world.catalog.snapshot
+    relay = await world.relay_repo.get_by_name("ru1")
+    assert relay is not None
+    assert (await world.relays.delete(ADMIN, relay.id, with_keys=False)).deleted
+    world.catalog.replace(snapshot)  # the issuing coroutine checked before the delete
+    with pytest.raises(RelayUnavailable):
+        await world.xray.create_xray_key(ADMIN, _owner(), None, relay="ru1")
+    with pytest.raises(RelayUnavailable):
+        await world.hysteria.issue(ADMIN, _owner(), None, relay="ru1")
+    assert await _key_rows(world) == []
+    assert world.adapter.clients == []
+
+
+async def test_a_key_inserted_first_blocks_the_relay_delete(world: _World) -> None:
+    """The other order: the key's row is written first — the plain delete refuses."""
+    relay = await world.add_relay()
+    await world.vpn_keys.create_pending(
+        owner_user_id=OWNER, username="u", key_type=VpnKeyType.XRAY, note=None, payload={},
+        public_payload={}, created_by=OWNER, now="now", relay="ru1",
+    )
+    report = await world.relays.delete(ADMIN, relay.id, with_keys=False)
+    assert not report.deleted and report.remaining_keys == 1
+
+
+async def test_a_relay_switched_off_mid_issue_does_not_strand_a_pending_key(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Switched off right after the row was written: the key is still a valid key
+    of that relay — it is applied and activated, it just cannot show a link now —
+    instead of being left PENDING_APPLY with no Xray client."""
+    relay = await world.add_relay()
+    real_create = world.vpn_keys.create_pending
+
+    async def create_then_switch_off(**kwargs: Any) -> Any:
+        key = await real_create(**kwargs)
+        await world.relays.update(ADMIN, relay.id, enabled=False)
+        return key
+
+    monkeypatch.setattr(world.vpn_keys, "create_pending", create_then_switch_off)
+    with pytest.raises(RelayUnavailable):
+        await world.xray.create_xray_key(ADMIN, _owner(), None, relay="ru1")
+    rows = await _key_rows(world)
+    assert [(status, name) for _, status, name in rows] == [("active", "ru1")]
+    assert len(world.adapter.clients) == 1
+    stored = await world.vpn_keys.get_by_id(rows[0][0])
+    assert stored is not None and "link" not in stored.public_payload
 
 
 # ── edits take effect at once, in both processes ──────────────────────────────
