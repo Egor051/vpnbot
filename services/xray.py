@@ -12,7 +12,13 @@ from urllib.parse import quote, urlencode
 from adapters.clock import ClockProvider
 from adapters.id_generator import IdGenerator
 from adapters.xray_config import XrayConfigAdapter
-from bot.formatters import create_type_label, key_note_for_viewer, key_type_label, status_text
+from bot.formatters import (
+    create_type_label,
+    key_note_for_viewer,
+    key_type_label,
+    relay_unavailable_config_text,
+    status_text,
+)
 from config.settings import Settings
 from models.dto import TelegramUserProfile, VpnKey, VpnKeyCreateResult
 from models.enums import AuditEntityType, UserRole, VpnKeyStatus, VpnKeyType
@@ -31,7 +37,7 @@ from services.key_naming import (
     normalize_transport,
 )
 from services.notes import normalize_note
-from services.relay import RelayUnavailable, relay_link_host, require_relay_for_issue
+from services.relay import RelayCatalog, RelayUnavailable, relay_link_host, require_relay_for_issue
 from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
@@ -135,8 +141,12 @@ class XrayService:
         backend_health: BackendHealth | None = None,
         xhttp_adapter: XrayConfigAdapter | None = None,
         unix_clock: Callable[[], float] = time.time,
+        relays: RelayCatalog | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
+        # The relays a key's link may point at (see services.relay). Empty by
+        # default, which refuses every relay key and leaves direct keys unchanged.
+        self.relays = relays if relays is not None else RelayCatalog()
         # Wall clock (unix seconds) for the spiderX rotation of bundle children —
         # the only link parameter that depends on time. Injectable so a test can
         # freeze it; ``clock`` above yields ISO strings for the DB, not this.
@@ -296,7 +306,7 @@ class XrayService:
         self.settings.validate_xray_ready()
         # Before any DB write or apply: a relay switched off mid-wizard must not
         # leave behind a key whose link can never be rendered.
-        relay = require_relay_for_issue(self.settings, relay)
+        relay = require_relay_for_issue(self.relays.snapshot, relay)
         transport = self._normalize_transport(transport)
         # Profile is meaningful only for http; tcp keys are always "base". The
         # profile is immutable for a key (changing it means creating a new key),
@@ -371,7 +381,15 @@ class XrayService:
                 # The cached link comes from connection_link — the one place a
                 # key's link is derived — rendered off the row just written, so it
                 # carries the same host and display name the config screen shows.
-                public_payload["link"] = self.connection_link(key)
+                # A relay switched off in the panel since the row was written makes
+                # it unrenderable: the key is still a valid key of that relay, so
+                # creation carries on without a cached link (links are always
+                # rebuilt from the payload) rather than leaving a pending row with
+                # no Xray client behind.
+                try:
+                    public_payload["link"] = self.connection_link(key)
+                except RelayUnavailable:
+                    public_payload.pop("link", None)
                 xray_apply_result = None
                 try:
                     await self._ensure_can_create(actor_user_id, owner.telegram_user_id, allow_pending_owner=allow_pending_owner)
@@ -422,7 +440,21 @@ class XrayService:
                     },
                 )
                 active_key = await self._get_key(key.id)
-                return VpnKeyCreateResult(key=active_key, config_text=self._format_config(active_key, viewer_user_id=actor_user_id))
+                return VpnKeyCreateResult(key=active_key, config_text=self._created_config_text(active_key, actor_user_id))
+
+    def _created_config_text(self, key: VpnKey, viewer_user_id: int) -> str:
+        """The config shown right after a key was created and activated.
+
+        The key is live by now. A relay switched off in the admin panel in the
+        meantime makes its link unrenderable, and that must not turn a finished
+        creation into an error: the caller has to get the key back — a bundle
+        owns it (or rolls it back with the rest), the wizard shows it. The text
+        says why there is no link instead.
+        """
+        try:
+            return self._format_config(key, viewer_user_id=viewer_user_id)
+        except RelayUnavailable as exc:
+            return relay_unavailable_config_text(f"{key_type_label(key)} #{key.id}", exc)
 
     async def revoke_key(self, actor_user_id: int, key_id: int) -> VpnKey:
         """Revoke an Xray key."""
@@ -1356,13 +1388,14 @@ class XrayService:
         (callers pass :func:`services.key_naming.key_display_name`).
 
         *relay* selects the host and nothing else: ``None`` keeps
-        ``XRAY_PUBLIC_HOST``; the configured relay gives ``RELAY_HOST``; any other
+        ``XRAY_PUBLIC_HOST``; an enabled relay gives its ``host`` (from the
+        relays snapshot, i.e. the admin panel); a switched-off, deleted or unknown
         relay raises :class:`services.relay.RelayUnavailable`. Port, REALITY
         parameters, flow and the XHTTP path/mode/extra are identical either way —
         the relay forwards :443 1:1 into the same inbound.
         """
         host = self._format_host(
-            relay_link_host(self.settings, relay, direct_host=self.settings.xray_public_host)
+            relay_link_host(self.relays.snapshot, relay, direct_host=self.settings.xray_public_host)
         )
         fragment = quote(name or "xray")
         if self._normalize_transport(transport) == "http":
@@ -1445,7 +1478,7 @@ class XrayService:
         short_id = str(key.payload.get("short_id") or key.public_payload.get("short_id") or "")
         fingerprint = str(key.payload.get("fingerprint")) if key.payload.get("fingerprint") else None
         return self._build_vless_link(
-            uuid_value, short_id, key_display_name(key, NameStyle.SINGLE, self.settings),
+            uuid_value, short_id, key_display_name(key, NameStyle.SINGLE, self.settings, self.relays.snapshot),
             fingerprint=fingerprint, transport=self._key_transport(key), profile=self._key_profile(key),
             spider_x=self.link_spider_x(key, bundle_member=bundle_member, now_unix=now_unix),
             relay=key.relay,

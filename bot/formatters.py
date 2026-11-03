@@ -40,7 +40,7 @@ from services.dashboard import DashboardSnapshot
 from services.health import HealthCheckResult
 from services.key_naming import NameStyle, key_display_name
 from services.online_clients import OnlineClients
-from services.relay import relay_link_host
+from services.relay import RelaySnapshot, RelayUnavailable, relay_link_host
 from services.server_status import ServerStatus
 from utils.formatting import (
     code,
@@ -109,6 +109,17 @@ def relay_label(label: str, relay: str | None) -> str:
     if not relay:
         return label
     return f"{label} · {t('relay_marker')}"
+
+
+def relay_unavailable_config_text(title: str, exc: RelayUnavailable) -> str:
+    """The config text of a key whose relay cannot render a link right now.
+
+    Used right after a key was created when its relay was switched off in the
+    admin panel in between: the key is live, so creation must still succeed and
+    hand the key back (a bundle has to own it, or roll it back) — the screen just
+    says why there is no link instead of showing one.
+    """
+    return f"<b>{h(title)}</b>\n\n{h(t(exc.key or 'err_relay_unavailable', **(exc.params or {})))}"
 
 
 def key_title(key: VpnKey) -> str:
@@ -630,21 +641,24 @@ def format_hysteria2_link(
     return f"hysteria2://{user}@{host}:{port}/?{query}#{label_q}"
 
 
-def hysteria2_key_link(key: VpnKey, settings: Settings, *, style: NameStyle = NameStyle.SINGLE) -> str:
+def hysteria2_key_link(
+    key: VpnKey, settings: Settings, relays: RelaySnapshot, *, style: NameStyle = NameStyle.SINGLE
+) -> str:
     """THE ``hysteria2://`` link of a key — what every hy2 entry point renders.
 
     :func:`format_hysteria2_link` above is the pure URI encoder and takes the host
     as given; this is where the host is chosen BY THE KEY: a direct key keeps
-    ``HYSTERIA2_HOST``, a relay key gets ``RELAY_HOST`` (or
-    :class:`services.relay.RelayUnavailable`, never a silent fallback). Port, SNI
-    and ``insecure`` are the server's own values either way — the relay forwards
-    UDP/443 1:1, so ``sni`` stays ``HYSTERIA2_SNI`` and the certificate matches.
-    The ``#fragment`` comes from :func:`services.key_naming.key_display_name`.
+    ``HYSTERIA2_HOST``, a relay key gets its relay's ``host`` from *relays* (or
+    :class:`services.relay.RelayUnavailable` when that relay is switched off or
+    gone — never a silent fallback). Port, SNI and ``insecure`` are the server's
+    own values either way — the relay forwards UDP/443 1:1, so ``sni`` stays
+    ``HYSTERIA2_SNI`` and the certificate matches. The ``#fragment`` comes from
+    :func:`services.key_naming.key_display_name`.
     """
     return format_hysteria2_link(
-        key_display_name(key, style, settings),
+        key_display_name(key, style, settings, relays),
         str(key.payload.get("secret") or ""),
-        host=relay_link_host(settings, key.relay, direct_host=settings.hysteria2_host),
+        host=relay_link_host(relays, key.relay, direct_host=settings.hysteria2_host),
         port=settings.hysteria2_port,
         sni=settings.hysteria2_sni,
         insecure=settings.hysteria2_insecure,

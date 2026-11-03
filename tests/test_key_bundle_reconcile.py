@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 from urllib.parse import unquote, urlsplit
 
 import pytest
+from conftest import make_relay, relay_snapshot
 
 from adapters.clock import ClockProvider
 from bot.handlers import admin_bundles
@@ -30,6 +31,7 @@ from i18n import t
 from models.dto import KeyBundle, TelegramUserProfile, User, VpnKey
 from models.enums import KeyBundleKind, KeyBundleStatus, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.key_bundles import KeyBundleRepository
+from repositories.relays import RelayRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.backend_health import BackendHealth
@@ -41,8 +43,10 @@ from services.key_bundles import (
     ReconcileResult,
     ReconcileSkipReason,
     ReconcileSummary,
+    child_audit_name,
 )
 from services.key_naming import key_member_name
+from services.relay import EMPTY_RELAYS, RelayCatalog
 from services.xray import XrayService
 from subscription_server.render import render_links
 from subscription_server.store import BundleView
@@ -112,10 +116,6 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         hysteria2_sni="anycastedge.duckdns.org",
         hysteria2_insecure=False,
         subscription_enabled=True,
-        relay_enabled=False,
-        relay_name="ru1",
-        relay_host=RELAY_HOST,
-        relay_source_ips=(ipaddress.IPv4Network("198.51.100.7/32"),),
     )
     values.update(overrides)
     return Settings(**values)  # type: ignore[arg-type]
@@ -233,8 +233,9 @@ class _Adapter:
 class _World:
     """One DB and one pair of adapters; services are (re)built per settings.
 
-    Rebuilding over the same DB is how a test changes ``.env`` between creating a
-    bundle and reconciling it — e.g. bundles made before RELAY_ENABLED was on.
+    Rebuilding over the same DB is how a test changes ``.env`` or the relays
+    between creating a bundle and reconciling it — e.g. bundles made before the
+    relay ``ru1`` was added («в подписках») in the admin panel.
     """
 
     def __init__(self, tmp_path: Path, db: Database) -> None:
@@ -249,8 +250,11 @@ class _World:
         self.vpn_keys = VpnKeyRepository(db)
         self.configure()
 
-    def configure(self, **overrides: object) -> None:
+    def configure(self, *, relay_enabled: bool = False, **overrides: object) -> None:
         self.settings = _settings(self.tmp_path, **overrides)
+        self.catalog = RelayCatalog(
+            relay_snapshot(make_relay(1, "ru1", host=RELAY_HOST)) if relay_enabled else EMPTY_RELAYS
+        )
         clock = ClockProvider()
         self.xray = XrayService(
             vpn_keys=self.vpn_keys,
@@ -262,6 +266,7 @@ class _World:
             audit=self.audit,  # type: ignore[arg-type]
             backend_health=self.health,
             xhttp_adapter=self.http,  # type: ignore[arg-type]
+            relays=self.catalog,
         )
         self.hysteria = HysteriaService(
             vpn_keys=self.vpn_keys,
@@ -271,6 +276,7 @@ class _World:
             ids=self.ids,  # type: ignore[arg-type]
             audit=self.audit,  # type: ignore[arg-type]
             modules=_Modules(),  # type: ignore[arg-type]
+            relays=self.catalog,
         )
         self.service = KeyBundleService(
             bundles=self.repo,
@@ -283,6 +289,7 @@ class _World:
             ids=self.ids,  # type: ignore[arg-type]
             audit=self.audit,  # type: ignore[arg-type]
             backend_health=self.health,
+            relays=self.catalog,
         )
 
     async def create(
@@ -313,16 +320,15 @@ class _World:
         return await self.repo.list_keys_of_bundle(bundle_id)
 
     async def members(self, bundle_id: int) -> list[str]:
-        return sorted(
-            f"{key_member_name(key)}{'_relay' if key.relay else ''}" for key in await self.children(bundle_id)
-        )
+        return sorted(child_audit_name(key) for key in await self.children(bundle_id))
 
     async def reconcile(self, bundle_id: int, **kwargs: Any) -> ReconcileResult:
         return await self.service.reconcile_composition(bundle_id, actor_user_id=ADMIN, **kwargs)
 
     async def links(self, bundle_id: int) -> tuple[str, ...]:
         keys = tuple(key for key in await self.children(bundle_id) if key.status is VpnKeyStatus.ACTIVE)
-        return render_links(BundleView(bundle=await self.bundle(bundle_id), keys=keys, traffic=None), self.settings)
+        view = BundleView(bundle=await self.bundle(bundle_id), keys=keys, traffic=None, relays=self.catalog.snapshot)
+        return render_links(view, self.settings)
 
     def live_clients(self) -> int:
         return len(self.tcp.clients) + len(self.http.clients)
@@ -341,6 +347,15 @@ async def world(tmp_path: Path) -> Any:
     users = UserRepository(db)
     for uid in (ADMIN, OWNER, OTHER, GUEST):
         await users.upsert_profile(TelegramUserProfile(uid, f"user{uid}", "User"), UserRole.APPROVED_USER, "now")
+    # The relay row a relay key must reference; whether new bundles get members
+    # through it is the services' catalog, switched by _World.configure.
+    await RelayRepository(db).create(
+        name="ru1",
+        label="relay",
+        host=RELAY_HOST,
+        source_ips=(ipaddress.IPv4Network("198.51.100.7/32"),),
+        now="2026-01-01T00:00:00+00:00",
+    )
     try:
         yield _World(tmp_path, db)
     finally:
@@ -396,13 +411,13 @@ async def test_extended_to_basic_with_relay_creates_relay_members_and_deletes_xh
     result = await world.reconcile(bundle.id, target_kind=KeyBundleKind.BASIC)
 
     assert result.outcome is ReconcileOutcome.APPLIED
-    assert result.to_create == ("xray_tcp_relay", "hysteria2_relay")
+    assert result.to_create == ("xray_tcp_relay_ru1", "hysteria2_relay_ru1")
     assert len(result.created_key_ids) == 2
     assert len(result.deleted_key_ids) == 3
     after = await world.bundle(bundle.id)
     assert after.kind is KeyBundleKind.BASIC
     assert after.token == bundle.token
-    assert await world.members(bundle.id) == ["hysteria2", "hysteria2_relay", "xray_tcp", "xray_tcp_relay"]
+    assert await world.members(bundle.id) == ["hysteria2", "hysteria2_relay_ru1", "xray_tcp", "xray_tcp_relay_ru1"]
     # The new children carry the bundle's owner, note and expiry.
     for key in await world.children(bundle.id):
         assert key.owner_user_id == OWNER
@@ -422,7 +437,7 @@ async def test_top_up_of_a_basic_bundle_only_adds_the_relay_members(world: _Worl
     result = await world.reconcile(bundle.id)
 
     assert result.outcome is ReconcileOutcome.APPLIED
-    assert result.to_create == ("xray_tcp_relay", "hysteria2_relay")
+    assert result.to_create == ("xray_tcp_relay_ru1", "hysteria2_relay_ru1")
     assert result.deleted_key_ids == ()
     assert before <= {key.id for key in await world.children(bundle.id)}
     assert (await world.bundle(bundle.id)).kind is KeyBundleKind.BASIC
@@ -465,7 +480,7 @@ async def test_dry_run_returns_the_plan_and_writes_nothing(world: _World) -> Non
     plan = await world.reconcile(bundle.id, target_kind=KeyBundleKind.BASIC, dry_run=True)
 
     assert plan.outcome is ReconcileOutcome.PLANNED
-    assert plan.to_create == ("xray_tcp_relay", "hysteria2_relay")
+    assert plan.to_create == ("xray_tcp_relay_ru1", "hysteria2_relay_ru1")
     assert sorted(plan.to_delete) == sorted(XHTTP)
     assert plan.kind_before is KeyBundleKind.EXTENDED and plan.kind_after is KeyBundleKind.BASIC
     assert plan.created_key_ids == () and plan.deleted_key_ids == ()
@@ -544,15 +559,15 @@ async def test_a_failed_rollback_does_not_block_the_retry(world: _World) -> None
     world.configure(relay_enabled=True)  # both backends healthy again
     plan = await world.reconcile(bundle.id, dry_run=True)
     assert plan.outcome is ReconcileOutcome.PLANNED
-    assert plan.to_create == ("xray_tcp_relay", "hysteria2_relay")
-    assert plan.to_delete == ("xray_tcp_relay",)
+    assert plan.to_create == ("xray_tcp_relay_ru1", "hysteria2_relay_ru1")
+    assert plan.to_delete == ("xray_tcp_relay_ru1",)
 
     retry = await world.reconcile(bundle.id)
 
     assert retry.outcome is ReconcileOutcome.APPLIED
     assert retry.deleted_key_ids == (stuck_id,)
     assert await world.vpn_keys.get_by_id(stuck_id) is None
-    assert await world.members(bundle.id) == ["hysteria2", "hysteria2_relay", "xray_tcp", "xray_tcp_relay"]
+    assert await world.members(bundle.id) == ["hysteria2", "hysteria2_relay_ru1", "xray_tcp", "xray_tcp_relay_ru1"]
     assert all(key.status is VpnKeyStatus.ACTIVE for key in await world.children(bundle.id))
     assert len(world.tcp.clients) == 2  # direct + the new relay one; the stuck client is gone
     assert (await world.reconcile(bundle.id)).outcome is ReconcileOutcome.NOOP
@@ -799,7 +814,7 @@ async def test_plan_then_run_switches_every_bundle_to_basic(world: _World) -> No
     assert "admin:aio" in _callbacks(final_markup)
     for bundle in (first, second):
         assert (await world.bundle(bundle.id)).kind is KeyBundleKind.BASIC
-        assert await world.members(bundle.id) == ["hysteria2", "hysteria2_relay", "xray_tcp", "xray_tcp_relay"]
+        assert await world.members(bundle.id) == ["hysteria2", "hysteria2_relay_ru1", "xray_tcp", "xray_tcp_relay_ru1"]
 
 
 async def test_plan_with_nothing_to_do_offers_no_run_button(world: _World) -> None:

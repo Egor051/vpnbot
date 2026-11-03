@@ -498,21 +498,166 @@ STRINGS: dict[str, str] = {
         "Выбирайте, если напрямую не работает или работает плохо."
     ),
     "btn_route_direct": "Напрямую",
-    "btn_route_relay": "Через relay",
-    "relay_unavailable": "Подключение через relay сейчас недоступно. Выберите «Напрямую».",
+    "btn_route_via": "Через {label}",
+    "relay_unavailable": "Этот relay сейчас недоступен. Выберите другой вариант подключения.",
     "err_relay_unavailable": (
         "Relay «{relay}» сейчас недоступен, поэтому ссылку для этого ключа показать нельзя. "
         "Обратитесь к администратору."
     ),
     "relay_alert_down": (
-        "🔴 <b>Relay «{relay}» недоступен</b>\n"
-        "Проверка {host}:{port} не проходит. Ключи «через relay» сейчас не работают; "
+        "🔴 <b>Relay «{label}» ({name}) недоступен</b>\n"
+        "Проверка {host}:{port} не проходит. Ключи через этот relay сейчас не работают; "
         "прямые ключи не затронуты."
     ),
     "relay_alert_recovered": (
-        "🟢 <b>Relay «{relay}» снова доступен</b>\n"
+        "🟢 <b>Relay «{label}» ({name}) снова доступен</b>\n"
         "Проверка {host}:{port} снова проходит."
     ),
+    # ── relay panel (admin → «🛰 Управлять relay») ───────────────────────────
+    "btn_relays": "🛰 Управлять relay",
+    "relays_title": "<b>🛰 Relay</b>",
+    "relays_intro": (
+        "Relay — промежуточный сервер, который пересылает трафик на этот сервер. "
+        "Ключ «через relay» отличается от прямого только адресом в ссылке и меткой в названии."
+    ),
+    "relays_empty": "Relay пока нет. Добавьте первый — после этого его можно будет выбрать при создании ключа.",
+    "relays_list_line": (
+        "{icon} <b>{label}</b> · {name} → {host}\n"
+        "{state} · {subs} · активных ключей: {keys}\n"
+        "Проверка: {health}"
+    ),
+    "relay_state_on": "включён",
+    "relay_state_off": "выключен",
+    "relay_subs_on": "в подписках",
+    "relay_subs_off": "не в подписках",
+    "relay_health_ok": "🟢 проходит ({time})",
+    "relay_health_fail": "🔴 не проходит ({time})",
+    "relay_health_none": "ещё не было",
+    "relay_card_title": "<b>🛰 Relay «{label}»</b>",
+    "relay_field_name": "Имя",
+    "relay_name_immutable": "(не меняется)",
+    "relay_field_label": "Метка в названии ключа",
+    "relay_field_host": "Host",
+    "relay_field_source_ips": "Source IPs",
+    "relay_field_state": "Состояние",
+    "relay_field_subs": "Подписки",
+    "relay_field_keys": "Активных ключей",
+    "relay_field_health": "Последняя проверка",
+    "relay_field_note": "Заметка",
+    "btn_relay_add": "➕ Добавить relay",
+    "btn_relays_back": "⬅️ К списку relay",
+    "btn_relay_edit_host": "✏️ Host",
+    "btn_relay_edit_src": "✏️ Source IPs",
+    "btn_relay_edit_label": "✏️ Метка",
+    "btn_relay_edit_note": "✏️ Заметка",
+    "btn_relay_disable": "⏸ Выключить",
+    "btn_relay_enable": "▶️ Включить",
+    "btn_relay_subs_off": "Убрать из подписок",
+    "btn_relay_subs_on": "Вернуть в подписки",
+    "btn_relay_check": "🔍 Проверить сейчас",
+    "btn_relay_delete": "🗑 Удалить",
+    "btn_relay_add_source_ip": "➕ Добавить {ip} в source IPs",
+    "btn_relay_src_as_host": "Как host ({host})",
+    "btn_relay_label_default": "relay",
+    "btn_relay_create": "✅ Создать",
+    "btn_relay_delete_confirm": "🗑 Удалить relay",
+    "btn_relay_delete_with_keys": "🗑 Удалить ключи и relay",
+    "btn_relay_disable_instead": "⏸ Отключить вместо удаления",
+    "relay_add_name_prompt": (
+        "<b>Новый relay — шаг 1 из 4: имя</b>\n\n"
+        "Имя записывается в каждый ключ этого relay и потом не меняется. "
+        "Строчные латинские буквы, цифры и дефис, до 32 символов — например <code>ru1</code> или <code>msk-2</code>."
+    ),
+    "relay_add_host_prompt": (
+        "<b>Шаг 2 из 4: host</b>\n\n"
+        "DNS-имя или IPv4-адрес relay — на него будут указывать ссылки ключей. "
+        "Лучше DNS-имя (например <code>relay.example.net</code>, запись без проксирования): "
+        "тогда переезд relay на другой IP не потребует переимпорта ключей."
+    ),
+    "relay_add_src_prompt": (
+        "<b>Шаг 3 из 4: source IPs</b>\n\n"
+        "С каких адресов трафик relay приходит на этот сервер — IPv4 или CIDR через запятую, "
+        "например <code>203.0.113.7</code> или <code>203.0.113.0/28</code>. "
+        "Эти адреса не учитываются детектором аномалий."
+    ),
+    "relay_add_label_prompt": (
+        "<b>Шаг 4 из 4: метка</b>\n\n"
+        "Метка добавляется в название ключа: <code>xray_tcp_ab12c_&lt;метка&gt;_🇫🇮</code>. "
+        "Строчные латинские буквы, цифры и дефис, до 16 символов. У каждого relay своя метка."
+    ),
+    "relay_add_confirm_title": "<b>Проверьте новый relay</b>",
+    "relay_add_confirm_question": "Создать?",
+    "relay_try_again": "Попробуйте ещё раз.",
+    "relay_created": "✅ Relay «{label}» добавлен.",
+    "relay_saved": "✅ Сохранено.",
+    "relay_saved_short": "Сохранено",
+    "relay_unchanged": "Ничего не изменилось.",
+    "relay_host_changed": (
+        "✅ Host изменён на {host}.\n\n"
+        "Подписки уже указывают на новый адрес. Одиночные relay-ключи ({count} шт.) нужно "
+        "переимпортировать — в их ссылках остался старый адрес. Чтобы этого избегать, используйте DNS-имя."
+    ),
+    "relay_suggest_source_ip": (
+        "ℹ️ Host — IPv4-адрес {ip}, которого нет в source IPs. Обычно relay отправляет трафик "
+        "с того же адреса — его можно добавить кнопкой ниже."
+    ),
+    "relay_edit_host_prompt": "Новый host для «{label}» (сейчас {value}): DNS-имя или IPv4-адрес.",
+    "relay_edit_src_prompt": (
+        "Новые source IPs для «{label}» (сейчас {value}): IPv4 или CIDR через запятую. "
+        "Список заменяется целиком."
+    ),
+    "relay_edit_label_prompt": (
+        "Новая метка для «{label}» (сейчас {value}): строчные латинские буквы, цифры и дефис, до 16 символов."
+    ),
+    "relay_edit_note_prompt": (
+        "Заметка для «{label}» (сейчас {value}), одной строкой. Отправьте <code>-</code>, чтобы очистить."
+    ),
+    "relay_check_running": "Проверяю…",
+    "relay_check_ok": "🟢 Проверка {host} прошла.",
+    "relay_check_fail": "🔴 Проверка {host} не прошла.",
+    "relay_delete_confirm": "Удалить relay «{label}» ({name})? Ключей через него нет.",
+    "relay_delete_impact": (
+        "<b>Через relay «{label}» ({name}) выдано ключей: {keys}</b>, из них {bundle_keys} — "
+        "в подписках ({bundles} шт.).\n\n"
+        "<b>Удалить ключи и relay</b> — каждый ключ удаляется так же, как с экрана ключа; "
+        "подписки остаются с остальными ключами.\n"
+        "<b>Отключить вместо удаления</b> — ключи сохранятся, но не будут работать, пока relay не включат."
+    ),
+    "relay_deleting": "Удаляю…",
+    "relay_deleted": "🗑 Relay «{label}» удалён. Удалено ключей: {count}.",
+    "relay_delete_failed": (
+        "⚠️ Relay «{label}» не удалён.\n"
+        "Удалено ключей: {deleted}, осталось: {remaining}.\n"
+        "Ключ #{key_id} удалить не удалось: {error}\n\n"
+        "Повторите удаление, чтобы продолжить."
+    ),
+    "relay_delete_blocked": (
+        "⚠️ Relay «{label}» не удалён: через него ещё {remaining} ключей. Повторите удаление."
+    ),
+    "relay_disabled_instead": "⏸ Relay «{label}» выключен, ключи сохранены.",
+    "err_relay_not_found": "Relay не найден — возможно, его уже удалили.",
+    "err_relay_name_invalid": (
+        "«{value}» не подходит как имя: строчные латинские буквы, цифры и дефис, "
+        "первый символ — буква или цифра, до 32 символов."
+    ),
+    "err_relay_name_taken": "Relay с именем «{value}» уже есть.",
+    "err_relay_name_used_by_keys": (
+        "Имя «{value}» уже записано в ключах (в том числе удалённых). Выберите другое — "
+        "иначе старые ключи начнут указывать на новый relay."
+    ),
+    "err_relay_label_invalid": (
+        "«{value}» не подходит как метка: строчные латинские буквы, цифры и дефис, до 16 символов."
+    ),
+    "err_relay_label_taken": "Метка «{value}» уже занята другим relay.",
+    "err_relay_host_invalid": "«{value}» — не DNS-имя и не IPv4-адрес (IPv6 не поддерживается).",
+    "err_relay_host_required": "Укажите host relay.",
+    "err_relay_source_ips_invalid": (
+        "«{value}» — не IPv4-адрес и не CIDR-сеть. Пример: 203.0.113.7 или 203.0.113.0/28 "
+        "(IPv6 не поддерживается)."
+    ),
+    "err_relay_source_ips_required": "Укажите хотя бы один адрес.",
+    "err_relay_note_invalid": "Заметка должна быть одной строкой не длиннее {max} символов.",
+    "err_relay_key_type_undeletable": "Этот ключ нельзя удалить вместе с relay.",
     # ── all-in-one kinds ──────────────────────────────────────────────────────
     "field_bundle_kind": "Вид",
     "bundle_kind_prompt": "<b>Выберите вид подписки:</b>",
@@ -526,7 +671,7 @@ STRINGS: dict[str, str] = {
         "кружками — от самого быстрого к самому медленному."
     ),
     "bundle_kind_relay_note": (
-        "ℹ️ К каждому ключу подписки добавляется его копия «через relay»."
+        "ℹ️ К каждому ключу подписки добавляется его копия через каждый relay: {relays}."
     ),
     "bundle_title": "All-in-One #{id}",
     "bundle_type_label": "All-in-One",
@@ -846,10 +991,10 @@ STRINGS: dict[str, str] = {
     "aio_panel_title": (
         "<b>🔗 All-in-One</b>\n\n"
         "<b>Перевести все подписки в базовый вид</b> — каждая активная подписка получает "
-        "состав базовой: VLESS (TCP) и Hysteria2, а при <code>RELAY_ENABLED</code> — ещё их "
-        "копии через relay. Ключи VLESS (HTTP) удаляются, недостающие ключи создаются.\n\n"
+        "состав базовой: VLESS (TCP) и Hysteria2, а для каждого включённого relay «в подписках» — "
+        "ещё их копии через него. Ключи VLESS (HTTP) удаляются, недостающие ключи создаются.\n\n"
         "<b>Дополнить все подписки по текущим настройкам</b> — то же без смены вида: например, "
-        "добавить relay-участников после включения <code>RELAY_ENABLED</code>.\n\n"
+        "добавить relay-участников после того, как relay добавлен в «Управлять relay».\n\n"
         "Ссылка подписки у пользователей не меняется. Сначала показывается план, "
         "изменения — только после подтверждения."
     ),

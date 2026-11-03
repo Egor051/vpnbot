@@ -494,21 +494,166 @@ STRINGS: dict[str, str] = {
         "Pick it if the direct connection does not work or works poorly."
     ),
     "btn_route_direct": "Direct",
-    "btn_route_relay": "Via relay",
-    "relay_unavailable": "Connecting via relay is currently unavailable. Choose «Direct».",
+    "btn_route_via": "Via {label}",
+    "relay_unavailable": "This relay is currently unavailable. Choose another way to connect.",
     "err_relay_unavailable": (
         "Relay «{relay}» is currently unavailable, so this key's link cannot be shown. "
         "Contact the administrator."
     ),
     "relay_alert_down": (
-        "🔴 <b>Relay «{relay}» is down</b>\n"
-        "The check of {host}:{port} is failing. Keys «via relay» do not work right now; "
+        "🔴 <b>Relay «{label}» ({name}) is down</b>\n"
+        "The check of {host}:{port} is failing. Keys through this relay do not work right now; "
         "direct keys are not affected."
     ),
     "relay_alert_recovered": (
-        "🟢 <b>Relay «{relay}» is back</b>\n"
+        "🟢 <b>Relay «{label}» ({name}) is back</b>\n"
         "The check of {host}:{port} passes again."
     ),
+    # ── relay panel (admin → «🛰 Manage relays») ─────────────────────────────
+    "btn_relays": "🛰 Manage relays",
+    "relays_title": "<b>🛰 Relays</b>",
+    "relays_intro": (
+        "A relay is an intermediate server that forwards traffic to this server. "
+        "A key «via relay» differs from a direct one only by the address in its link and a marker in its name."
+    ),
+    "relays_empty": "No relays yet. Add the first one — it can then be chosen when a key is created.",
+    "relays_list_line": (
+        "{icon} <b>{label}</b> · {name} → {host}\n"
+        "{state} · {subs} · active keys: {keys}\n"
+        "Check: {health}"
+    ),
+    "relay_state_on": "enabled",
+    "relay_state_off": "disabled",
+    "relay_subs_on": "in subscriptions",
+    "relay_subs_off": "not in subscriptions",
+    "relay_health_ok": "🟢 passing ({time})",
+    "relay_health_fail": "🔴 failing ({time})",
+    "relay_health_none": "not yet",
+    "relay_card_title": "<b>🛰 Relay «{label}»</b>",
+    "relay_field_name": "Name",
+    "relay_name_immutable": "(cannot be changed)",
+    "relay_field_label": "Marker in key names",
+    "relay_field_host": "Host",
+    "relay_field_source_ips": "Source IPs",
+    "relay_field_state": "State",
+    "relay_field_subs": "Subscriptions",
+    "relay_field_keys": "Active keys",
+    "relay_field_health": "Last check",
+    "relay_field_note": "Note",
+    "btn_relay_add": "➕ Add a relay",
+    "btn_relays_back": "⬅️ Back to relays",
+    "btn_relay_edit_host": "✏️ Host",
+    "btn_relay_edit_src": "✏️ Source IPs",
+    "btn_relay_edit_label": "✏️ Marker",
+    "btn_relay_edit_note": "✏️ Note",
+    "btn_relay_disable": "⏸ Disable",
+    "btn_relay_enable": "▶️ Enable",
+    "btn_relay_subs_off": "Remove from subscriptions",
+    "btn_relay_subs_on": "Return to subscriptions",
+    "btn_relay_check": "🔍 Check now",
+    "btn_relay_delete": "🗑 Delete",
+    "btn_relay_add_source_ip": "➕ Add {ip} to source IPs",
+    "btn_relay_src_as_host": "Same as host ({host})",
+    "btn_relay_label_default": "relay",
+    "btn_relay_create": "✅ Create",
+    "btn_relay_delete_confirm": "🗑 Delete the relay",
+    "btn_relay_delete_with_keys": "🗑 Delete the keys and the relay",
+    "btn_relay_disable_instead": "⏸ Disable instead of deleting",
+    "relay_add_name_prompt": (
+        "<b>New relay — step 1 of 4: name</b>\n\n"
+        "The name is written into every key of this relay and never changes afterwards. "
+        "Lowercase Latin letters, digits and hyphens, up to 32 characters — e.g. <code>ru1</code> or <code>msk-2</code>."
+    ),
+    "relay_add_host_prompt": (
+        "<b>Step 2 of 4: host</b>\n\n"
+        "The DNS name or IPv4 address of the relay — what the keys' links will point at. "
+        "A DNS name is better (e.g. <code>relay.example.net</code>, a record without proxying): "
+        "moving the relay to another IP then needs no key re-import."
+    ),
+    "relay_add_src_prompt": (
+        "<b>Step 3 of 4: source IPs</b>\n\n"
+        "The addresses the relay's traffic arrives at this server from — IPv4 or CIDR, comma-separated, "
+        "e.g. <code>203.0.113.7</code> or <code>203.0.113.0/28</code>. "
+        "Anomaly detection ignores these addresses."
+    ),
+    "relay_add_label_prompt": (
+        "<b>Step 4 of 4: marker</b>\n\n"
+        "The marker goes into the key name: <code>xray_tcp_ab12c_&lt;marker&gt;_🇫🇮</code>. "
+        "Lowercase Latin letters, digits and hyphens, up to 16 characters. Each relay has its own marker."
+    ),
+    "relay_add_confirm_title": "<b>Check the new relay</b>",
+    "relay_add_confirm_question": "Create it?",
+    "relay_try_again": "Please try again.",
+    "relay_created": "✅ Relay «{label}» added.",
+    "relay_saved": "✅ Saved.",
+    "relay_saved_short": "Saved",
+    "relay_unchanged": "Nothing changed.",
+    "relay_host_changed": (
+        "✅ Host changed to {host}.\n\n"
+        "Subscriptions already point at the new address. Single relay keys ({count}) have to be "
+        "re-imported — their links still hold the old address. Use a DNS name to avoid this."
+    ),
+    "relay_suggest_source_ip": (
+        "ℹ️ The host is the IPv4 address {ip}, which is not among the source IPs. A relay usually "
+        "sends its traffic from that same address — you can add it with the button below."
+    ),
+    "relay_edit_host_prompt": "New host for «{label}» (now {value}): a DNS name or an IPv4 address.",
+    "relay_edit_src_prompt": (
+        "New source IPs for «{label}» (now {value}): IPv4 or CIDR, comma-separated. "
+        "The whole list is replaced."
+    ),
+    "relay_edit_label_prompt": (
+        "New marker for «{label}» (now {value}): lowercase Latin letters, digits and hyphens, up to 16 characters."
+    ),
+    "relay_edit_note_prompt": (
+        "Note for «{label}» (now {value}), on one line. Send <code>-</code> to clear it."
+    ),
+    "relay_check_running": "Checking…",
+    "relay_check_ok": "🟢 The check of {host} passed.",
+    "relay_check_fail": "🔴 The check of {host} failed.",
+    "relay_delete_confirm": "Delete relay «{label}» ({name})? No keys go through it.",
+    "relay_delete_impact": (
+        "<b>Keys issued through relay «{label}» ({name}): {keys}</b>, of them {bundle_keys} "
+        "in subscriptions ({bundles}).\n\n"
+        "<b>Delete the keys and the relay</b> — each key is deleted exactly as from its own screen; "
+        "subscriptions keep their other keys.\n"
+        "<b>Disable instead of deleting</b> — the keys are kept but do not work until the relay is enabled again."
+    ),
+    "relay_deleting": "Deleting…",
+    "relay_deleted": "🗑 Relay «{label}» deleted. Keys deleted: {count}.",
+    "relay_delete_failed": (
+        "⚠️ Relay «{label}» was not deleted.\n"
+        "Keys deleted: {deleted}, left: {remaining}.\n"
+        "Key #{key_id} could not be deleted: {error}\n\n"
+        "Repeat the deletion to continue."
+    ),
+    "relay_delete_blocked": (
+        "⚠️ Relay «{label}» was not deleted: {remaining} keys still go through it. Repeat the deletion."
+    ),
+    "relay_disabled_instead": "⏸ Relay «{label}» disabled, the keys are kept.",
+    "err_relay_not_found": "Relay not found — it may have been deleted already.",
+    "err_relay_name_invalid": (
+        "«{value}» is not a valid name: lowercase Latin letters, digits and hyphens, "
+        "starting with a letter or digit, up to 32 characters."
+    ),
+    "err_relay_name_taken": "A relay named «{value}» already exists.",
+    "err_relay_name_used_by_keys": (
+        "The name «{value}» is already written into keys (deleted ones included). Pick another one — "
+        "otherwise those old keys would start pointing at the new relay."
+    ),
+    "err_relay_label_invalid": (
+        "«{value}» is not a valid marker: lowercase Latin letters, digits and hyphens, up to 16 characters."
+    ),
+    "err_relay_label_taken": "The marker «{value}» is already used by another relay.",
+    "err_relay_host_invalid": "«{value}» is neither a DNS name nor an IPv4 address (IPv6 is not supported).",
+    "err_relay_host_required": "Enter the relay's host.",
+    "err_relay_source_ips_invalid": (
+        "«{value}» is neither an IPv4 address nor a CIDR network. Example: 203.0.113.7 or 203.0.113.0/28 "
+        "(IPv6 is not supported)."
+    ),
+    "err_relay_source_ips_required": "Enter at least one address.",
+    "err_relay_note_invalid": "The note must be a single line of at most {max} characters.",
+    "err_relay_key_type_undeletable": "This key cannot be deleted together with the relay.",
     # ── all-in-one kinds ──────────────────────────────────────────────────────
     "field_bundle_kind": "Kind",
     "bundle_kind_prompt": "<b>Choose the subscription kind:</b>",
@@ -522,7 +667,7 @@ STRINGS: dict[str, str] = {
         "circles — from the fastest to the slowest."
     ),
     "bundle_kind_relay_note": (
-        "ℹ️ Every key of the subscription also gets a copy «via relay»."
+        "ℹ️ Every key of the subscription also gets a copy through each relay: {relays}."
     ),
     "bundle_title": "All-in-One #{id}",
     "bundle_type_label": "All-in-One",
@@ -841,10 +986,10 @@ STRINGS: dict[str, str] = {
     "aio_panel_title": (
         "<b>🔗 All-in-One</b>\n\n"
         "<b>Switch every subscription to basic</b> — each active subscription gets the basic "
-        "set: VLESS (TCP) and Hysteria2, plus their relay copies while <code>RELAY_ENABLED</code>. "
-        "VLESS (HTTP) keys are deleted, missing keys are created.\n\n"
+        "set: VLESS (TCP) and Hysteria2, plus their copies through every enabled relay that is "
+        "«in subscriptions». VLESS (HTTP) keys are deleted, missing keys are created.\n\n"
         "<b>Top every subscription up to current settings</b> — the same without changing the "
-        "kind: e.g. to add the relay members after <code>RELAY_ENABLED</code> was switched on.\n\n"
+        "kind: e.g. to add the relay members after a relay was added in «Manage relays».\n\n"
         "Users keep their subscription link. A plan is shown first; nothing changes until you "
         "confirm."
     ),

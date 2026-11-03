@@ -64,8 +64,8 @@ change it is the superadmin's bulk reconcile, see
 | | basic | extended |
 |---|---|---|
 | Members | VLESS (TCP), Hysteria2 | VLESS (TCP), Hysteria2, VLESS (HTTP) `base` / `multi` / `antisib` |
-| With `RELAY_ENABLED=true` | + the same 2 via relay → **4** | + the same 5 via relay → **10** |
-| Entry name | `<label>[_relay]_<SERVER_FLAG_EMOJI>` | `<label>[_relay]_<mark>` |
+| Per relay (enabled and «в подписках») | + the same 2 → **4** with one relay, **6** with two | + the same 5 → **10** with one relay, **15** with two |
+| Entry name | `<label>[_<relay label>]_<SERVER_FLAG_EMOJI>` | `<label>[_<relay label>]_<mark>` |
 | Mark legend («⚠️ Кружок в конце названия…») | never shown | on the bundle's screens |
 
 - Every bundle that existed before the kind was introduced (schema v37) is **extended** and is
@@ -73,32 +73,36 @@ change it is the superadmin's bulk reconcile, see
 - A **relay member** ([docs/relay.md](relay.md)) is the same protocol member as its direct
   twin — same create path, same label prefix — so in an extended bundle it carries the
   **twin's mark**: `xray_http_multi_ab12c_relay_🟠`.
-- Relay members are provisioned only while `RELAY_ENABLED=true`. A bundle created with the
-  relay off has none, and switching the relay on does not top it up by itself — the
-  superadmin's bulk reconcile does
+- Relay members are provisioned for every relay that is **enabled and «в подписках»** in the
+  admin panel when the bundle is created, in groups ordered by the relay's `id`: all direct
+  members, then those through relay #1, then relay #2, … A bundle created with no such relay has
+  none, and adding or switching on a relay later does not top an existing bundle up by itself —
+  the superadmin's bulk reconcile does
   ([Bringing existing bundles in line](#bringing-existing-bundles-in-line)).
-- A relay member whose relay is no longer enabled (`RELAY_ENABLED=false`, or a different
-  `RELAY_NAME`) is **skipped** with a `WARNING` in the log and the rest of the subscription is
-  served (`200`). This is the one deliberate exception to "a child that cannot render fails the
-  whole response": switching the relay off is an operator decision, not a corrupt row. A bundle
-  left with nothing to serve is still the usual `404`.
+- The endpoint reads the `relays` table on every request, so a relay's host or label changed in
+  the panel is served on the next fetch with no restart.
+- A relay member whose relay is switched off or deleted is **skipped** with a `WARNING` in the
+  log and the rest of the subscription is served (`200`). This is the one deliberate exception to
+  "a child that cannot render fails the whole response": switching a relay off is an operator
+  decision, not a corrupt row. A bundle left with nothing to serve is still the usual `404`.
 
-A standalone key's link is named `<label>[_relay]_<SERVER_FLAG_EMOJI>` everywhere the bot
-shows it (config screen, QR, create wizard) — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay_🇫🇮`.
+A standalone key's link is named `<label>[_<relay label>]_<SERVER_FLAG_EMOJI>` everywhere the
+bot shows it (config screen, QR, create wizard) — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay_🇫🇮`
+(`relay` is the default relay label; it is set per relay in the admin panel).
 
 ### Bringing existing bundles in line
 
-A bundle keeps the composition it was created with: switching the relay on, or turning a
-protocol on or off, does not change existing bundles by itself. The superadmin brings them in
+A bundle keeps the composition it was created with: adding or switching on a relay, or turning
+a protocol on or off, does not change existing bundles by itself. The superadmin brings them in
 line from the admin panel → **«🔗 All-in-One»** (shown only while `SUBSCRIPTION_ENABLED=true`):
 
 - **«Перевести все подписки в базовый вид»** — every active bundle gets the composition a
-  **new basic** bundle would get right now: VLESS (TCP) and Hysteria2, plus their relay copies
-  while `RELAY_ENABLED=true`. The **VLESS (HTTP) children are deleted** (backend client, DB row,
+  **new basic** bundle would get right now: VLESS (TCP) and Hysteria2, plus their copies through
+  every relay that is enabled and «в подписках» («🛰 Управлять relay»). The **VLESS (HTTP) children are deleted** (backend client, DB row,
   traffic archived to the deleted-key totals, audit — the same path as deleting a key), the
   missing members are created, and the kind becomes `basic`.
 - **«Дополнить все подписки по текущим настройкам»** — the same without changing the kind:
-  e.g. adds the relay members after `RELAY_ENABLED` was switched on.
+  e.g. adds the members through a relay after it was added or put «в подписки».
 
 Both start with a **dry run** over every active bundle — «bundles N, keys to create X, to
 delete Y», plus the bundles that will be skipped and why — and change nothing until confirmed.
@@ -113,7 +117,9 @@ Rules for each bundle:
 - The target is exactly what bundle creation would provision now (the same composition seam and
   the same «backend switched off → member not included» filter). Missing members are created for
   the bundle's owner with its note, the children's shared `expires_at` and the existing VLESS
-  fingerprint; children outside the target are deleted.
+  fingerprint; children outside the target are deleted. That includes the members of a relay
+  that is **switched off or not «в подписках»** at the time of the run — check the plan before
+  confirming if a relay is only paused.
 - Creates go first; if one fails, what was created in this run is rolled back and the bundle is
   left unchanged. Deletes go next; if one fails the bundle is left part-way and **running the
   operation again finishes it** — including a child a failed rollback left `delete_failed`. The kind is changed last. A bundle already in shape is left

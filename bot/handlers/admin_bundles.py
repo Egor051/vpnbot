@@ -3,10 +3,10 @@
 Two bulk operations, both :meth:`services.key_bundles.KeyBundleService.reconcile_all`:
 
 * «switch every subscription to basic» — ``target_kind=basic``: the XHTTP
-  children go, the missing members (relay ones too, while ``RELAY_ENABLED``) are
-  created, the kind becomes basic;
+  children go, the missing members (relay ones too, for every relay that is
+  enabled and «в подписках») are created, the kind becomes basic;
 * «top every subscription up» — ``target_kind=None``: the same without a kind
-  change, e.g. to add the relay members after ``RELAY_ENABLED`` was switched on.
+  change, e.g. to add the relay members after a relay was added in «Управлять relay».
 
 Each starts with a dry run over every active bundle and a plan screen; nothing
 is written before the confirmation. The run itself takes one Xray apply per

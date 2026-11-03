@@ -1,4 +1,5 @@
 
+import ipaddress
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
@@ -192,7 +193,7 @@ class VpnKey:
     # Purely client-side: never written to the server inbound.
     spider_x: str | None = None
     # Relay the key's client link points at: None = direct key (the default and
-    # every pre-v37 row), otherwise the relay name (RELAY_NAME). Changes only the
+    # every pre-v37 row), otherwise ``relays.name`` of that relay. Changes only the
     # host in the link and the display name; the key uses the same inbounds and
     # email-label prefix as a direct key.
     relay: str | None = None
@@ -200,6 +201,38 @@ class VpnKey:
     def __repr__(self) -> str:
         # payload carries AWG private_key/preshared_key — never expose it in repr.
         return _redacted_repr(self, frozenset({"payload"}))
+
+
+@dataclass(frozen=True, slots=True)
+class Relay:
+    """One L4 relay, as stored in the ``relays`` table (managed from the admin panel).
+
+    ``name`` is the value keys carry in ``vpn_keys.relay`` and never changes once
+    the row exists; everything else is editable and takes effect on the very next
+    rendered link, because links are built from this row on the fly.
+    """
+
+    id: int
+    # Immutable slug (^[a-z0-9][a-z0-9-]{0,31}$) — the join key with vpn_keys.relay.
+    name: str
+    # The relay's marker in a key's display name: <label>_<relay label>_<flag>.
+    label: str
+    # Public DNS name or IPv4 the relay's links point at.
+    host: str
+    # Egress addresses/networks of the relay as the main server sees them —
+    # excluded from anomaly-detection IP accounting. Never empty.
+    source_ips: tuple[ipaddress.IPv4Network, ...]
+    # Off: links of its keys are refused (RelayUnavailable), it is not offered in
+    # the create wizard and new bundles get no members through it.
+    enabled: bool
+    # Off: new all-in-one bundles get no members through this relay (single keys
+    # are still offered while ``enabled``).
+    in_subscriptions: bool
+    note: str | None
+    created_at: str
+    updated_at: str
+    created_by: int | None
+    updated_by: int | None
 
 
 @dataclass(frozen=True, slots=True)

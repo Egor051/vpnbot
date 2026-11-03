@@ -103,5 +103,6 @@ class AuditEntityType(StrEnum):
     ACCESS_REQUEST = "access_request"
     VPN_KEY = "vpn_key"
     KEY_BUNDLE = "key_bundle"
+    RELAY = "relay"
     PROXY = "proxy"
     SYSTEM = "system"

@@ -18,7 +18,7 @@ from the moment it exists.
 import asyncio
 import logging
 import sqlite3
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
@@ -35,7 +35,7 @@ from services.hysteria import HysteriaService
 from services.key_naming import XHTTP_PROFILES, key_member_name
 from services.notes import normalize_note
 from services.protocol_modules import ProtocolModulesService
-from services.relay import relay_available
+from services.relay import RelayCatalog, RelaySnapshot, relay_available
 from services.users import UserService
 from services.xray import XrayService
 
@@ -101,7 +101,7 @@ def _direct_members(kind: KeyBundleKind) -> tuple[BundleMember, ...]:
 
 
 def bundle_composition(
-    kind: KeyBundleKind = KeyBundleKind.EXTENDED, *, relay: str | None = None
+    kind: KeyBundleKind = KeyBundleKind.EXTENDED, *, relays: Sequence[str] = ()
 ) -> tuple[BundleMember, ...]:
     """THE seam: every child key an all-in-one bundle may contain, in order.
 
@@ -113,11 +113,13 @@ def bundle_composition(
       how good a connection the member usually gives;
     * **basic** — VLESS (TCP), then Hysteria2.
 
-    With *relay* (the caller passes ``RELAY_NAME`` only while ``RELAY_ENABLED``)
-    the same members follow once more as relay members: all direct members first,
-    then all relay members, each group in the order above — 2 → 4 for basic,
-    5 → 10 for extended. Availability (a backend switched off in ``.env`` or via
-    the protocol-module toggle) is filtered on top of it by
+    *relays* names the relays new bundles get members through, in relay order
+    (``relays.id``) — the caller passes the relays that are enabled AND marked
+    «в подписках». For each of them the same members follow once more as relay
+    members, in groups: every direct member first, then every member through
+    relay #1, then through relay #2, and so on, each group in the order above
+    (basic: 2 per group, extended: 5). Availability (a backend switched off in
+    ``.env`` or via the protocol-module toggle) is filtered on top of it by
     :meth:`KeyBundleService._resolve_composition`. Any future divergence belongs
     HERE and nowhere else — never as scattered ``if``s along the provisioning path.
 
@@ -128,12 +130,11 @@ def bundle_composition(
       not even a v2ray link format.
     """
     direct = _direct_members(kind)
-    if relay is None:
-        return direct
     return (
         *direct,
         *(
             BundleMember(member.key_type, member.transport, member.xhttp_profile, relay=relay)
+            for relay in relays
             for member in direct
         ),
     )
@@ -154,13 +155,14 @@ def member_name(member: BundleMember) -> str:
 
 
 def member_audit_name(member: BundleMember) -> str:
-    """:func:`member_name` plus a ``_relay`` suffix for a relay member.
+    """:func:`member_name` plus ``_relay`` (and the relay's name) for a relay member.
 
     What the audit trail records in ``included``/``skipped``: with relay members a
-    bare member name would list ``xray_tcp`` twice and lose which one was which.
+    bare member name would list ``xray_tcp`` several times and lose which one was
+    which — and with several relays, through which relay.
     """
     name = member_name(member)
-    return f"{name}_relay" if member.relay is not None else name
+    return f"{name}_relay_{member.relay}" if member.relay is not None else name
 
 
 def subscription_member_order() -> tuple[str, ...]:
@@ -176,31 +178,33 @@ def subscription_member_order() -> tuple[str, ...]:
     return tuple(member_name(member) for member in bundle_composition(KeyBundleKind.EXTENDED))
 
 
-def subscription_sort_key(key: VpnKey) -> tuple[int, int, int]:
+def subscription_sort_key(key: VpnKey, relays: RelaySnapshot) -> tuple[int, int, int]:
     """Sort key placing a provisioned child where the subscription serves it.
 
-    Direct children first, relay children after them; inside each group the
-    composition order (:func:`subscription_member_order`), ties broken by id. An
-    unknown member (a protocol a future migration added before this list learned
-    about it) sorts to the end of its group instead of being dropped. Shared by
-    the subscription renderer and the bot's «Состав» preview, so the two cannot
-    disagree.
+    Direct children first, then the children of relay #1, relay #2, … in relay
+    order (``relays.id``, via :meth:`RelaySnapshot.group_of`); inside each group
+    the composition order (:func:`subscription_member_order`), ties broken by id.
+    An unknown member (a protocol a future migration added before this list
+    learned about it) sorts to the end of its group instead of being dropped, and
+    a child of a relay *relays* does not know sorts after every known relay.
+    Shared by the subscription renderer and the bot's «Состав» preview, so the two
+    cannot disagree.
     """
     order = subscription_member_order()
     name = key_member_name(key)
     rank = order.index(name) if name in order else len(order)
-    return (1 if key.relay is not None else 0, rank, key.id)
+    return (relays.group_of(key.relay), rank, key.id)
 
 
 def child_audit_name(key: VpnKey) -> str:
     """:func:`member_audit_name` of a provisioned child — the same vocabulary.
 
     Lets a reconcile plan name the children it removes exactly as it names the
-    members it adds, so «create xray_tcp_relay / delete xray_http_base» reads as
-    one list.
+    members it adds, so «create xray_tcp_relay_ru1 / delete xray_http_base» reads
+    as one list.
     """
     name = key_member_name(key)
-    return f"{name}_relay" if key.relay is not None else name
+    return f"{name}_relay_{key.relay}" if key.relay is not None else name
 
 
 def _member_slot(member: BundleMember) -> tuple[str, str | None]:
@@ -326,7 +330,7 @@ class ReconcileSummary:
         return sum(len(result.deleted_key_ids) for result in self.results)
 
 
-def _bundle_fingerprint(active: list[VpnKey]) -> str | None:
+def _bundle_fingerprint(active: list[VpnKey], relays: RelaySnapshot) -> str | None:
     """The TLS fingerprint a new VLESS child of this bundle should get.
 
     Taken from the existing VLESS children in serving order (the direct TCP one
@@ -334,7 +338,7 @@ def _bundle_fingerprint(active: list[VpnKey]) -> str | None:
     value, and creation does too. ``None`` — no VLESS child, or one that never
     had a fingerprint — keeps the global ``XRAY_FINGERPRINT`` default.
     """
-    for key in sorted(active, key=subscription_sort_key):
+    for key in sorted(active, key=lambda key: subscription_sort_key(key, relays)):
         if key.key_type is VpnKeyType.XRAY and key.payload.get("fingerprint"):
             return str(key.payload["fingerprint"])
     return None
@@ -390,8 +394,11 @@ class KeyBundleService:
         ids: IdGenerator,
         audit: AuditService,
         backend_health: BackendHealth | None = None,
+        relays: RelayCatalog | None = None,
     ) -> None:
         self.bundles = bundles
+        # Which relays new bundles get members through (enabled + «в подписках»).
+        self.relays = relays if relays is not None else RelayCatalog()
         self.users = users
         self.xray = xray
         self.hysteria = hysteria
@@ -719,9 +726,10 @@ class KeyBundleService:
         """Bring an existing bundle to the composition a new one would get now.
 
         The target is exactly what :meth:`create_bundle` would provision —
-        :meth:`_resolve_composition` of *target_kind* (or the bundle's own kind)
-        with the relay members while ``RELAY_ENABLED`` — so «switch to basic» and
-        «top up with relay members» are the same operation. Active children are
+        :meth:`_resolve_composition` of *target_kind* (or the bundle's own kind),
+        relay members included for every relay that is enabled and marked «в
+        подписках» — so «switch to basic» and «top up with relay members» are the
+        same operation. Active children are
         matched to it by (member name, relay):
 
         * a missing member is created through :meth:`_provision_child` for the
@@ -912,7 +920,7 @@ class KeyBundleService:
             create=create,
             delete=delete,
             expires_at=expires_at,
-            fingerprint=_bundle_fingerprint(active),
+            fingerprint=_bundle_fingerprint(active, self.relays.snapshot),
         )
 
     async def _apply_reconcile(
@@ -1083,14 +1091,15 @@ class KeyBundleService:
     ) -> tuple[tuple[BundleMember, ...], tuple[BundleMember, ...]]:
         """Split the composition seam into (included, skipped-because-disabled).
 
-        Relay members are asked for only while ``RELAY_ENABLED`` is on: with it
-        off they are not part of the composition at all (rather than "skipped"),
-        so a deployment without a relay never sees them named anywhere.
+        Relay members are asked for only for the relays that are enabled and
+        marked «в подписках»: any other relay is not part of the composition at
+        all (rather than "skipped"), so a deployment without a relay — or with one
+        kept out of subscriptions — never sees it named here.
         """
-        relay = self.settings.relay_name if self.settings.relay_enabled else None
+        relays = tuple(relay.name for relay in self.relays.snapshot.for_subscriptions)
         included: list[BundleMember] = []
         skipped: list[BundleMember] = []
-        for member in bundle_composition(kind, relay=relay):
+        for member in bundle_composition(kind, relays=relays):
             if await self._member_enabled(member):
                 included.append(member)
             else:
@@ -1103,9 +1112,9 @@ class KeyBundleService:
         Mirrors exactly what gates the single-key create path for that protocol:
         the protocol-module toggle plus the protocol's own ``.env`` flags. A
         disabled backend is a normal state, never an error. A relay member
-        additionally needs its relay to be the configured, enabled one.
+        additionally needs its relay to be enabled right now.
         """
-        if member.relay is not None and not relay_available(self.settings, member.relay):
+        if member.relay is not None and not relay_available(self.relays.snapshot, member.relay):
             return False
         if not await self.modules.is_enabled(member.protocol_module):
             return False
