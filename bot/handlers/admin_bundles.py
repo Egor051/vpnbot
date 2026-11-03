@@ -56,17 +56,23 @@ logger = logging.getLogger(__name__)
 PROGRESS_EDIT_INTERVAL_SECONDS = 3.0
 # Entries per skipped/failed list in a plan or report; the rest are counted.
 _LIST_LIMIT = 15
+# How long bot shutdown waits for a run to finish the bundle it is on. One bundle
+# is a handful of Xray applies; this stays under systemd's default 90 s stop
+# timeout so the wait ends before the unit is killed.
+SHUTDOWN_TIMEOUT_SECONDS = 60.0
 
 
 class ReconcileRunner:
     """Holds the one bulk run of this process.
 
     The strong reference also keeps the task from being garbage-collected
-    mid-run (asyncio keeps only weak references to tasks).
+    mid-run (asyncio keeps only weak references to tasks). :meth:`shutdown` is
+    called by ``main.py`` before the database and the bot session close.
     """
 
     def __init__(self) -> None:
         self._task: asyncio.Task[None] | None = None
+        self._stop = False
 
     @property
     def running(self) -> bool:
@@ -77,9 +83,34 @@ class ReconcileRunner:
         return self._task
 
     def start(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        self._stop = False
         task = asyncio.create_task(coro)
         self._task = task
         return task
+
+    def stop_requested(self) -> bool:
+        return self._stop
+
+    async def shutdown(self, timeout: float = SHUTDOWN_TIMEOUT_SECONDS) -> None:
+        """Let a running bulk run finish its current bundle, then stop it.
+
+        The run checks the stop flag only between bundles, so the bundle it is
+        on completes — or rolls back — against a still-open database and live
+        backends. Cancelling it instead could interrupt a create between the
+        backend apply and the attach. Only past *timeout* is the task cancelled,
+        as a last resort before the process is killed anyway.
+        """
+        task = self._task
+        if task is None or task.done():
+            return
+        self._stop = True
+        logger.info("Stopping the All-in-One bulk reconcile after its current bundle")
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout)
+        except TimeoutError:
+            logger.critical("All-in-One bulk reconcile did not stop within %.0f s; cancelling it", timeout)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 runner = ReconcileRunner()
@@ -164,7 +195,9 @@ async def admin_bundles_run(callback: CallbackQuery, services: Services) -> None
     if runner.running:
         await safe_callback_answer(callback, t("aio_already_running"), show_alert=True)
         return
-    runner.start(run_reconcile(services, callback.message, callback.from_user.id, mode))
+    runner.start(
+        run_reconcile(services, callback.message, callback.from_user.id, mode, should_stop=runner.stop_requested)
+    )
     await safe_callback_answer(callback, t("aio_started"))
 
 
@@ -215,6 +248,7 @@ async def run_reconcile(
     mode: str,
     *,
     clock: Callable[[], float] = time.monotonic,
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
     """The bulk run: progress while it goes, the report when it is done.
 
@@ -226,7 +260,10 @@ async def run_reconcile(
         progress = ProgressReporter(message, title, clock=clock)
         await progress.start()
         summary = await services.key_bundles.reconcile_all(
-            actor_user_id=actor_user_id, target_kind=_target_kind(mode), on_progress=progress
+            actor_user_id=actor_user_id,
+            target_kind=_target_kind(mode),
+            on_progress=progress,
+            should_stop=should_stop,
         )
         await safe_edit_message_text(
             message, aio_report_text(mode, summary), reply_markup=admin_bundles_back_keyboard()
@@ -294,6 +331,9 @@ def aio_report_text(mode: str, summary: ReconcileSummary) -> str:
         parts.append(_list_block("aio_skipped_title", [_skip_line(result) for result in skipped]))
     if failed:
         parts.append(_list_block("aio_failed_title", [_failure_line(result) for result in failed]))
+    if summary.remaining:
+        parts.append(t("aio_report_stopped", remaining=summary.remaining))
+    if failed or summary.remaining:
         parts.append(t("aio_report_retry_hint"))
     return "\n\n".join(parts)
 

@@ -215,6 +215,10 @@ def _child_slot(key: VpnKey) -> tuple[str, str | None]:
 
 # Key types a bundle may hold — the ones _provision_child/_delete_child handle.
 _BUNDLE_CHILD_TYPES = frozenset({VpnKeyType.XRAY, VpnKeyType.HYSTERIA2})
+# A child in one of these was being removed and the removal did not finish (a
+# failed delete, or a failed reconcile rollback): it was meant to go, so a
+# reconcile finishes the removal wherever it sits instead of skipping the bundle.
+_REMOVAL_STATUSES = frozenset({VpnKeyStatus.PENDING_DELETE, VpnKeyStatus.DELETE_FAILED})
 
 
 class ReconcileOutcome(StrEnum):
@@ -254,7 +258,8 @@ class ReconcileSkipReason(StrEnum):
     MIXED_EXPIRY = "mixed_expiry"
     # The shared expires_at has already passed.
     EXPIRED = "expired"
-    # A child of a target member is not active (revoked, failed, …).
+    # A child of a target member is not active and not being removed (revoked,
+    # failed to apply, …).
     INACTIVE_CHILD = "inactive_child"
     BACKEND_DEGRADED = "backend_degraded"
 
@@ -294,6 +299,8 @@ class ReconcileSummary:
     """Results of reconciling every active bundle, in bundle id order."""
 
     results: tuple[ReconcileResult, ...]
+    # Active bundles the run did not reach because it was asked to stop.
+    remaining: int = 0
 
     def with_outcome(self, *outcomes: ReconcileOutcome) -> tuple[ReconcileResult, ...]:
         return tuple(result for result in self.results if result.outcome in outcomes)
@@ -762,6 +769,7 @@ class KeyBundleService:
         target_kind: KeyBundleKind | None = None,
         dry_run: bool = False,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> ReconcileSummary:
         """:meth:`reconcile_composition` for every active bundle, one at a time.
 
@@ -769,12 +777,20 @@ class KeyBundleService:
         *on_progress* gets (done, total) after each bundle; its own errors are
         logged and ignored. The lock is taken per bundle, not for the whole run,
         so ordinary bundle operations keep working while it runs.
+
+        *should_stop* is asked before each bundle — never in the middle of one, so
+        a stop (bot shutdown) never leaves a bundle half-provisioned; the bundles
+        not reached are counted in ``remaining`` and a re-run picks them up.
         """
         self._require_enabled()
         await self.users.require_superadmin(actor_user_id)
         bundle_ids = await self.bundles.list_ids_by_status(KeyBundleStatus.ACTIVE)
         results: list[ReconcileResult] = []
         for done, bundle_id in enumerate(bundle_ids, start=1):
+            if should_stop is not None and should_stop():
+                remaining = len(bundle_ids) - done + 1
+                logger.warning("Приведение состава бандлов остановлено: не обработано %d", remaining)
+                return ReconcileSummary(tuple(results), remaining=remaining)
             try:
                 result = await self.reconcile_composition(
                     bundle_id, actor_user_id=actor_user_id, target_kind=target_kind, dry_run=dry_run
@@ -855,7 +871,9 @@ class KeyBundleService:
             return skip(ReconcileSkipReason.EXPIRED, (expires_at,))
 
         target_slots = {_member_slot(member) for member in included}
-        stale = [key for key in inactive if _child_slot(key) in target_slots]
+        stale = [
+            key for key in inactive if key.status not in _REMOVAL_STATUSES and _child_slot(key) in target_slots
+        ]
         if stale:
             return skip(
                 ReconcileSkipReason.INACTIVE_CHILD,
@@ -863,8 +881,10 @@ class KeyBundleService:
             )
 
         create = tuple(member for member in included if _member_slot(member) not in by_slot)
-        # Every inactive child is outside the target by now (checked above), so
-        # all of them go — that is what lets a re-run finish a failed delete.
+        # Every inactive child left is either outside the target or one whose
+        # removal did not finish (checked above), so all of them go — that is what
+        # lets a re-run finish a failed delete or a failed rollback. The slot of
+        # the latter counts as empty and is filled by a fresh create first.
         delete = tuple(
             sorted(
                 [key for key in active if _child_slot(key) not in target_slots] + inactive,
@@ -1019,8 +1039,9 @@ class KeyBundleService:
 
         Unlike :meth:`_rollback_partial_bundle` the bundle itself stays: it was a
         working subscription before this call and still is. A child the unwind
-        cannot remove stays attached — it is a target member, so a re-run counts
-        it as present instead of creating a second one.
+        cannot remove stays attached: still ``active`` (the delete never started —
+        a re-run counts it as present) or ``delete_failed`` (a re-run finishes its
+        removal and fills the slot afresh).
         """
         failed: list[int] = []
         for key in reversed(created):

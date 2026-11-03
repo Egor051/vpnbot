@@ -523,6 +523,65 @@ async def test_delete_failing_midway_returns_partial_and_a_rerun_finishes(world:
     assert world.http.clients == []
 
 
+async def test_a_failed_rollback_does_not_block_the_retry(world: _World) -> None:
+    """Create fails, then the rollback's delete fails too: the child is left
+    attached in delete_failed. A re-run finishes that removal and fills the slot
+    afresh instead of skipping the bundle forever."""
+    bundle = await world.create(KeyBundleKind.BASIC)
+    world.configure(relay_enabled=True)
+    world.hysteria.issue = AsyncMock(side_effect=RuntimeError("hy2 exploded"))  # type: ignore[method-assign]
+    world.tcp.fail_remove_on = world.tcp.remove_calls + 1
+
+    failed = await world.reconcile(bundle.id)
+
+    assert failed.outcome is ReconcileOutcome.FAILED
+    [stuck_id] = failed.rollback_failed_key_ids
+    stuck = await world.vpn_keys.get_by_id(stuck_id)
+    assert stuck is not None and stuck.status is VpnKeyStatus.DELETE_FAILED
+    assert stuck_id in [key.id for key in await world.children(bundle.id)]  # still attached
+    assert world.audit.bundle_records()[-1]["action"] == "key_bundle_reconcile_rollback_failed"
+
+    world.configure(relay_enabled=True)  # both backends healthy again
+    plan = await world.reconcile(bundle.id, dry_run=True)
+    assert plan.outcome is ReconcileOutcome.PLANNED
+    assert plan.to_create == ("xray_tcp_relay", "hysteria2_relay")
+    assert plan.to_delete == ("xray_tcp_relay",)
+
+    retry = await world.reconcile(bundle.id)
+
+    assert retry.outcome is ReconcileOutcome.APPLIED
+    assert retry.deleted_key_ids == (stuck_id,)
+    assert await world.vpn_keys.get_by_id(stuck_id) is None
+    assert await world.members(bundle.id) == ["hysteria2", "hysteria2_relay", "xray_tcp", "xray_tcp_relay"]
+    assert all(key.status is VpnKeyStatus.ACTIVE for key in await world.children(bundle.id))
+    assert len(world.tcp.clients) == 2  # direct + the new relay one; the stuck client is gone
+    assert (await world.reconcile(bundle.id)).outcome is ReconcileOutcome.NOOP
+
+
+async def test_reconcile_all_stops_between_bundles_when_asked(world: _World) -> None:
+    first = await world.create(KeyBundleKind.EXTENDED)
+    second = await world.create(KeyBundleKind.EXTENDED)
+    third = await world.create(KeyBundleKind.EXTENDED)
+    processed: list[int] = []
+
+    async def on_progress(done: int, total: int) -> None:
+        processed.append(done)
+
+    summary = await world.service.reconcile_all(
+        actor_user_id=ADMIN,
+        target_kind=KeyBundleKind.BASIC,
+        on_progress=on_progress,
+        should_stop=lambda: len(processed) >= 1,
+    )
+
+    assert [result.bundle_id for result in summary.results] == [first.id]
+    assert summary.remaining == 2
+    assert (await world.bundle(first.id)).kind is KeyBundleKind.BASIC
+    for untouched in (second, third):
+        assert (await world.bundle(untouched.id)).kind is KeyBundleKind.EXTENDED
+        assert len(await world.children(untouched.id)) == 5
+
+
 # ── skipped bundles ───────────────────────────────────────────────────────────
 
 
@@ -841,3 +900,46 @@ def test_dry_run_summary_counts_only_planned_results() -> None:
     skipped = replace(planned, outcome=ReconcileOutcome.SKIPPED)
     summary = ReconcileSummary((planned, skipped))
     assert (summary.keys_to_create, summary.keys_to_delete, summary.kind_changes) == (1, 2, 1)
+
+
+async def test_shutdown_lets_the_current_bundle_finish_then_stops(world: _World) -> None:
+    first = await world.create(KeyBundleKind.EXTENDED)
+    second = await world.create(KeyBundleKind.EXTENDED)
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+    original = world.service.reconcile_composition
+
+    async def gated(bundle_id: int, **kwargs: Any) -> ReconcileResult:
+        entered.set()
+        await gate.wait()
+        return await original(bundle_id, **kwargs)
+
+    world.service.reconcile_composition = gated  # type: ignore[method-assign]
+    run = _Callback("admin:aio:run:basic")
+    await admin_bundles.admin_bundles_run(run, _services(world))
+    await entered.wait()  # the run is inside the first bundle
+
+    shutdown = asyncio.create_task(admin_bundles.runner.shutdown(timeout=5))
+    await asyncio.sleep(0)
+    assert admin_bundles.runner.stop_requested()
+    gate.set()
+    await shutdown
+
+    assert not admin_bundles.runner.running
+    assert (await world.bundle(first.id)).kind is KeyBundleKind.BASIC  # finished, not cut off
+    assert (await world.bundle(second.id)).kind is KeyBundleKind.EXTENDED  # never started
+    final, _ = run.message.edits[-1]
+    assert t("aio_report_stopped", remaining=1) in final
+    assert t("aio_report_retry_hint") in final
+
+
+async def test_shutdown_cancels_a_run_that_does_not_stop_in_time() -> None:
+    never = asyncio.Event()
+
+    async def stuck() -> None:
+        await never.wait()
+
+    task = admin_bundles.runner.start(stuck())
+    await admin_bundles.runner.shutdown(timeout=0.01)
+    assert task.cancelled()
+    await admin_bundles.runner.shutdown()  # nothing running: a no-op

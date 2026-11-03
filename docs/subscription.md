@@ -116,7 +116,7 @@ Rules for each bundle:
   fingerprint; children outside the target are deleted.
 - Creates go first; if one fails, what was created in this run is rolled back and the bundle is
   left unchanged. Deletes go next; if one fails the bundle is left part-way and **running the
-  operation again finishes it**. The kind is changed last. A bundle already in shape is left
+  operation again finishes it** — including a child a failed rollback left `delete_failed`. The kind is changed last. A bundle already in shape is left
   alone, so a repeat run is a no-op.
 - A bundle is **skipped untouched** when anything is unusual: two active children in one member
   slot, children with different expiry dates, a member child that is not active (e.g. revoked on
@@ -124,6 +124,9 @@ Rules for each bundle:
   `active` bundles are processed.
 - Every VLESS key created or deleted is one Xray config apply (with `XRAY_APPLY_MODE=restart`,
   one Xray restart), exactly like creating or deleting a standalone key.
+- **Stopping the bot mid-run** (restart, deploy) lets the run finish the bundle it is on and
+  stops it before the database closes (up to 60 s); the report counts the bundles not reached —
+  run the operation again for them.
 
 ### Fail-closed behaviour
 

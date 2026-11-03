@@ -46,7 +46,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     archive, audit). Creates first — any failure rolls back what this call created and leaves
     the bundle unchanged; then deletes — a failure stops part-way and a re-run finishes it; then
     the kind (`KeyBundleRepository.set_kind`). **The subscription token does not change.** A
-    bundle already in shape is a no-op; one bundle-level audit record per changed bundle.
+    bundle already in shape is a no-op; one bundle-level audit record per changed bundle. A
+    child whose removal did not finish (`delete_failed` / `pending_delete`, e.g. after a failed
+    rollback) is always removed, so it never blocks the retry.
+  - Bot shutdown waits (up to 60 s) for a running bulk run to finish the bundle it is on before
+    the database and the bot session close; the bundles not reached are reported and a re-run
+    picks them up.
   - A bundle is skipped untouched, with the reason, when two active children share a member
     slot, the children's expiry dates differ, a member child is not active, no child is active,
     the expiry has passed, or a backend the change touches is degraded. Only `active` bundles

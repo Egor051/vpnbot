@@ -885,6 +885,7 @@ STRINGS: dict[str, str] = {
         "❌ Errors: {failed}"
     ),
     "aio_report_retry_hint": "Running it again finishes what failed and leaves subscriptions already in shape alone.",
+    "aio_report_stopped": "⏹ The run stopped with the bot. Subscriptions not processed: {remaining}.",
     "aio_failed": "<b>{title}</b>\n\n❌ Could not run: {error}",
     "aio_skipped_title": "<b>Skipped:</b>",
     "aio_failed_title": "<b>Errors:</b>",

@@ -51,6 +51,7 @@ async def main() -> None:
     )
     from bot.commands import setup_bot_commands
     from bot.fsm.ttl_storage import TTLMemoryStorage, fsm_cleanup_loop
+    from bot.handlers.admin_bundles import runner as bundle_reconcile_runner
     from services.anomaly_detection import anomaly_detection_loop
     from services.key_expiry import key_expiry_loop
     from services.offsite_backup import offsite_backup_loop
@@ -215,6 +216,13 @@ async def main() -> None:
             logger.info("VPN bot started")
             await dp.start_polling(bot)
         finally:
+            # First, while the DB, the backends and the bot session are all still
+            # open: a bulk All-in-One reconcile finishes the bundle it is on and
+            # stops, so no bundle is left half-provisioned.
+            try:
+                await bundle_reconcile_runner.shutdown()
+            except Exception:
+                logger.warning("All-in-One bulk reconcile shutdown failed", exc_info=True)
             if fsm_cleanup_task is not None:
                 fsm_cleanup_task.cancel()
                 await asyncio.gather(fsm_cleanup_task, return_exceptions=True)

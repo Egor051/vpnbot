@@ -889,6 +889,7 @@ STRINGS: dict[str, str] = {
         "❌ Ошибки: {failed}"
     ),
     "aio_report_retry_hint": "Повторный запуск доделает то, что не получилось, и не тронет уже приведённые подписки.",
+    "aio_report_stopped": "⏹ Прогон остановлен вместе с ботом. Не обработано подписок: {remaining}.",
     "aio_failed": "<b>{title}</b>\n\n❌ Не удалось выполнить: {error}",
     "aio_skipped_title": "<b>Пропущены:</b>",
     "aio_failed_title": "<b>Ошибки:</b>",
