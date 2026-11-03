@@ -1320,7 +1320,9 @@ def test_announcement_confirm_keeps_fsm_data_when_rate_limited(monkeypatch: pyte
         callback = Callback()
         announcements = Announcements()
         rate_limiter = RateLimiter()
-        services = SimpleNamespace(users=Users(), announcements=announcements)
+        services = SimpleNamespace(
+            users=Users(), announcements=announcements, settings=SimpleNamespace(subscription_enabled=False)
+        )
 
         await admin_announcement_send(callback, state, services, object(), rate_limiter)  # type: ignore[arg-type]
 

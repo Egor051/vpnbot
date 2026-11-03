@@ -116,6 +116,20 @@ class KeyBundleRepository:
         rows = await cursor.fetchall()
         return [bundle for row in rows if (bundle := _row_to_key_bundle(row)) is not None]
 
+    async def list_ids_by_status(self, status: KeyBundleStatus) -> list[int]:
+        """Return the ids of every bundle in *status*, oldest first.
+
+        Ids only, for a pass that re-reads each bundle under the service lock
+        anyway (the admin composition reconcile): a full row read here would go
+        stale by the time a long run reaches it.
+        """
+        cursor = await self.db.conn.execute(
+            "SELECT id FROM key_bundles WHERE status = ? ORDER BY id ASC",
+            (KeyBundleStatus(status).value,),
+        )
+        rows = await cursor.fetchall()
+        return [int(row["id"]) for row in rows]
+
     async def count_by_user(self, user_id: int) -> int:
         """Return how many bundles a user owns (drives the list-page overflow hint)."""
         cursor = await self.db.conn.execute(
@@ -131,6 +145,21 @@ class KeyBundleRepository:
             (note, now, bundle_id),
         )
         await self.db.commit()
+
+    async def set_kind(self, bundle_id: int, kind: KeyBundleKind | str, *, now: str) -> None:
+        """Change a bundle's kind — only the admin composition reconcile does this.
+
+        Validated here for the same reason as in :meth:`create`: the column has
+        no CHECK, so this and ``create`` are the only guards on its vocabulary.
+        """
+        kind = KeyBundleKind(kind)
+        cursor = await self.db.conn.execute(
+            "UPDATE key_bundles SET kind = ?, updated_at = ? WHERE id = ?",
+            (kind.value, now, bundle_id),
+        )
+        await self.db.commit()
+        if cursor.rowcount == 0:
+            raise RuntimeError(f"Key bundle {bundle_id} not found")
 
     async def attach_key_to_bundle(self, key_id: int, bundle_id: int, now: str) -> None:
         """Point a VPN key at a bundle. The FK (RESTRICT) guarantees the bundle exists."""

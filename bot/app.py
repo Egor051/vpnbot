@@ -26,7 +26,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, start
+from bot.handlers import admin, admin_bundles, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, start
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
@@ -800,6 +800,7 @@ async def _build_app(
     dp.include_router(admin_modules.router)
     dp.include_router(admin_relays.router)
     dp.include_router(admin_maintenance.router)
+    dp.include_router(admin_bundles.router)
     dp.include_router(keys.router)
     dp.include_router(key_bundles.router)
     dp.include_router(proxy.router)

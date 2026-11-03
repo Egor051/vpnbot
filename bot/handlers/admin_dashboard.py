@@ -103,7 +103,7 @@ def _start_server_status_auto_refresh(callback: CallbackQuery, services: Service
         await edit_message_for_refresh(
             message,
             t("admin_panel_title"),
-            reply_markup=admin_panel_keyboard(),
+            reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled),
         )
 
     services.auto_refresh.start(key, refresh=refresh, on_expire=on_expire)

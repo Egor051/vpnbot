@@ -41,7 +41,7 @@ async def cancel_callback(
     if callback.message is None:
         return
     if cancel_target == "admin:panel":
-        await safe_edit_message_text(callback.message, t("admin_panel_title"), reply_markup=admin_panel_keyboard())
+        await safe_edit_message_text(callback.message, t("admin_panel_title"), reply_markup=admin_panel_keyboard(subscription_enabled=bool(services and services.settings.subscription_enabled)))
     elif cancel_target == "keys:create":
         xhttp_on = bool(services and services.settings.xray_xhttp_enabled)
         hy2_on = bool(

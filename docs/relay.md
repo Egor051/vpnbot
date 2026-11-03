@@ -226,7 +226,9 @@ TLS ≈ 0.29 s).
 - **The subscription URL stays on the main domain.** The sub-URL (`:2096` in the live
   deployment) is fetched from the main server's domain, not through a relay; only the
   links inside it point at relays.
-- **Existing bundles do not gain relay members.** A bundle's composition is decided
-  once, when it is created (there is no mechanism that tops up an existing bundle when
-  a protocol or a relay is added later). To get members through a new relay, create a
-  new bundle.
+- **Existing bundles gain relay members only through the admin reconcile.** Adding a relay
+  or switching one on does not touch existing bundles by itself. Admin panel →
+  «🔗 All-in-One» → «Дополнить все подписки по текущим настройкам» adds the members through
+  every relay that is enabled and «в подписках» to every active bundle (or «Перевести все
+  подписки в базовый вид», which also drops the XHTTP members) — see
+  [docs/subscription.md](subscription.md#bringing-existing-bundles-in-line).

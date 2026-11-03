@@ -48,10 +48,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   circles and no circles hint. *Extended*: the current five members with the
   `<label>[_relay]_<circle>` names and the hint. With the relay enabled each kind also gets a
   relay copy of every member (4 / 10 keys), served after all direct members; a relay member
-  carries its direct twin's circle. The kind is chosen in the create wizard and cannot be
-  changed later. Every existing bundle is `extended` and renders exactly as before. Existing
-  bundles do **not** gain relay members (there is no top-up mechanism for existing bundles).
+  carries its direct twin's circle. The kind is chosen in the create wizard; only the admin
+  reconcile below can change it later. Every existing bundle is `extended` and renders exactly
+  as before until that reconcile is run.
 - `SERVER_FLAG_EMOJI` — the flag used in standalone and basic-subscription names.
+- **Bringing existing All-in-One bundles in line — admin panel → «🔗 All-in-One»
+  (superadmin only, shown while `SUBSCRIPTION_ENABLED=true`).** Two bulk operations over every
+  active bundle: «Перевести все подписки в базовый вид» (target kind `basic`) and «Дополнить все
+  подписки по текущим настройкам» (kind unchanged — e.g. adds the members through a relay
+  after it was added or put «в подписки»). The target is exactly what creating a bundle would give
+  now (`bundle_composition` + the same backend-enabled filter). Each starts with a dry run
+  («bundles N, keys to create X, to delete Y», skipped bundles with reasons) and changes nothing
+  until confirmed; the run goes bundle by bundle in a background task with a progress message
+  edited at most every 3 s, and one bundle's error does not stop the others.
+  - Per bundle (`KeyBundleService.reconcile_composition`): missing members are created through
+    the ordinary per-protocol create path for the owner, with the bundle's note, the children's
+    shared `expires_at` and the existing VLESS fingerprint, and attached; children outside the
+    target are deleted through the same path bundle deletion uses (backend client, traffic
+    archive, audit). Creates first — any failure rolls back what this call created and leaves
+    the bundle unchanged; then deletes — a failure stops part-way and a re-run finishes it; then
+    the kind (`KeyBundleRepository.set_kind`). **The subscription token does not change.** A
+    bundle already in shape is a no-op; one bundle-level audit record per changed bundle. A
+    child whose removal did not finish (`delete_failed` / `pending_delete`, e.g. after a failed
+    rollback) is always removed, so it never blocks the retry.
+  - Bot shutdown waits (up to 60 s) for a running bulk run to finish the bundle it is on before
+    the database and the bot session close; the bundles not reached are reported and a re-run
+    picks them up.
+  - A bundle is skipped untouched, with the reason, when two active children share a member
+    slot, the children's expiry dates differ, a member child is not active, no child is active,
+    the expiry has passed, or a backend the change touches is degraded. Only `active` bundles
+    are processed.
+  - **Switching to basic deletes the VLESS (HTTP) children** of every extended bundle. Every
+    VLESS key created or deleted is one Xray config apply (one restart with
+    `XRAY_APPLY_MODE=restart`).
 
 
 - **Opt-in rotation of REALITY spiderX (`spx`) for the VLESS children of an All-in-One

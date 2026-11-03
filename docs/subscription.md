@@ -57,8 +57,9 @@ Canonical references live where every other feature's do:
 ### Two kinds of all-in-one
 
 The kind is chosen in the create wizard (a screen after the AmneziaWG notice that explains
-both), stored in `key_bundles.kind` and never changed afterwards. Switching an existing
-bundle to the other kind is not supported.
+both) and stored in `key_bundles.kind`. A user cannot change it afterwards; the only way to
+change it is the superadmin's bulk reconcile, see
+[Bringing existing bundles in line](#bringing-existing-bundles-in-line).
 
 | | basic | extended |
 |---|---|---|
@@ -75,9 +76,9 @@ bundle to the other kind is not supported.
 - Relay members are provisioned for every relay that is **enabled and «в подписках»** in the
   admin panel when the bundle is created, in groups ordered by the relay's `id`: all direct
   members, then those through relay #1, then relay #2, … A bundle created with no such relay has
-  none, and an existing bundle is **not** topped up when a relay is added or switched on later —
-  composition is decided once, at creation (the same is true of a protocol switched on after a
-  bundle was made). Create a new bundle to get members through a new relay.
+  none, and adding or switching on a relay later does not top an existing bundle up by itself —
+  the superadmin's bulk reconcile does
+  ([Bringing existing bundles in line](#bringing-existing-bundles-in-line)).
 - The endpoint reads the `relays` table on every request, so a relay's host or label changed in
   the panel is served on the next fetch with no restart.
 - A relay member whose relay is switched off or deleted is **skipped** with a `WARNING` in the
@@ -88,6 +89,50 @@ bundle to the other kind is not supported.
 A standalone key's link is named `<label>[_<relay label>]_<SERVER_FLAG_EMOJI>` everywhere the
 bot shows it (config screen, QR, create wizard) — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay_🇫🇮`
 (`relay` is the default relay label; it is set per relay in the admin panel).
+
+### Bringing existing bundles in line
+
+A bundle keeps the composition it was created with: adding or switching on a relay, or turning
+a protocol on or off, does not change existing bundles by itself. The superadmin brings them in
+line from the admin panel → **«🔗 All-in-One»** (shown only while `SUBSCRIPTION_ENABLED=true`):
+
+- **«Перевести все подписки в базовый вид»** — every active bundle gets the composition a
+  **new basic** bundle would get right now: VLESS (TCP) and Hysteria2, plus their copies through
+  every relay that is enabled and «в подписках» («🛰 Управлять relay»). The **VLESS (HTTP) children are deleted** (backend client, DB row,
+  traffic archived to the deleted-key totals, audit — the same path as deleting a key), the
+  missing members are created, and the kind becomes `basic`.
+- **«Дополнить все подписки по текущим настройкам»** — the same without changing the kind:
+  e.g. adds the members through a relay after it was added or put «в подписки».
+
+Both start with a **dry run** over every active bundle — «bundles N, keys to create X, to
+delete Y», plus the bundles that will be skipped and why — and change nothing until confirmed.
+The run then goes bundle by bundle in the background, editing a progress message at most once
+every 3 s; one bundle's error does not stop the rest, and the final report lists what changed,
+what was skipped (with the reason) and what failed.
+
+Rules for each bundle:
+
+- **The subscription token never changes** — users keep their link; the client picks up the new
+  set on its next refresh.
+- The target is exactly what bundle creation would provision now (the same composition seam and
+  the same «backend switched off → member not included» filter). Missing members are created for
+  the bundle's owner with its note, the children's shared `expires_at` and the existing VLESS
+  fingerprint; children outside the target are deleted. That includes the members of a relay
+  that is **switched off or not «в подписках»** at the time of the run — check the plan before
+  confirming if a relay is only paused.
+- Creates go first; if one fails, what was created in this run is rolled back and the bundle is
+  left unchanged. Deletes go next; if one fails the bundle is left part-way and **running the
+  operation again finishes it** — including a child a failed rollback left `delete_failed`. The kind is changed last. A bundle already in shape is left
+  alone, so a repeat run is a no-op.
+- A bundle is **skipped untouched** when anything is unusual: two active children in one member
+  slot, children with different expiry dates, a member child that is not active (e.g. revoked on
+  its own), no active child at all (expired), or a degraded backend the change would touch. Only
+  `active` bundles are processed.
+- Every VLESS key created or deleted is one Xray config apply (with `XRAY_APPLY_MODE=restart`,
+  one Xray restart), exactly like creating or deleting a standalone key.
+- **Stopping the bot mid-run** (restart, deploy) lets the run finish the bundle it is on and
+  stops it before the database closes (up to 60 s); the report counts the bundles not reached —
+  run the operation again for them.
 
 ### Fail-closed behaviour
 
@@ -136,6 +181,7 @@ guard before any service is reached. There is **no new button in the main menu**
 | **Create key** | An «All-in-One» option next to VLESS / AmneziaWG / Hysteria2. After the AmneziaWG notice it asks for the **kind** (basic / extended, both explained), then reuses the ordinary create wizard (note → expiry → confirm). The result screen lists what the bundle actually contains and names any protocol left out because its backend is off. Admins create a bundle through this same wizard; the admin «issue a key to a user» flow has no all-in-one option. |
 | **My keys** | An ordinary entry in the list, sorted by creation date among the keys and numbered from the same running count as them. |
 | **Bundle card** | The same five actions a key card has — Config · Stats · Revoke · Note · Delete — plus a line saying AmneziaWG is issued as a **separate key**. |
+| **Admin panel → «🔗 All-in-One»** | Superadmin only: the two bulk operations of [Bringing existing bundles in line](#bringing-existing-bundles-in-line). |
 
 - **Config** shows `https://<host>[:<port>]/sub/<token>`. The host is **not a setting of its
   own**: it is `HYSTERIA2_SNI` (falling back to `HYSTERIA2_HOST`), because the endpoint
