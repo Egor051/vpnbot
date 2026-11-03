@@ -312,8 +312,9 @@ A bundle comes in one of **two kinds**, chosen when it is created and stored in
   `antisib`) and Hysteria2. Every bundle created before the kind existed is
   `extended`, which is exactly what it was.
 
-With `RELAY_ENABLED=true` each kind also gets a **relay copy** of every member
-(basic 2 → 4 keys, extended 5 → 10), see [Relay](#relay). The kind also picks how
+Each kind also gets a **copy of every member through each relay** that is enabled
+and «в подписках» (basic: +2 keys per relay, extended: +5), grouped by relay, see
+[Relay](#relay). The kind also picks how
 the subscription names its entries — see
 [docs/subscription.md](subscription.md#two-kinds-of-all-in-one).
 
@@ -358,17 +359,22 @@ link. Both processes read `.env` at startup, so flipping the flag needs
 An L4 relay (a VPS that DNATs TCP+UDP/443 to this server) gives users a second
 way in. A relay key is an ordinary key on the very same inbounds — its own
 uuid/secret/label, the usual `xray_tcp_*` / `xray_http_*` / `hy2_*` prefix — whose
-link points at `RELAY_HOST` instead of the main host. Topology, DNS and the
+link points at the relay's host instead of the main host. Topology, DNS and the
 limitations are in [docs/relay.md](relay.md).
+
+**Relays are managed in the admin panel, not here** (🛡 Админ-панель → 🛰 Управлять
+relay; stored in the `relays` table): name, host, source IPs, the marker in key names,
+on/off and «в подписках», several relays at once. See
+[docs/relay.md](relay.md#managing-relays-in-the-admin-panel).
 
 | Variable | Required | Default | Description | Example |
 |---|---|---|---|---|
-| `RELAY_ENABLED` | No | `false` | Offer the «Подключение: напрямую / через relay» step when creating a VLESS or Hysteria2 key, and add relay copies to new all-in-one bundles. While `false` a relay key's link is **refused** (`RelayUnavailable`), never silently pointed at the main host, and a relay member of a subscription is skipped with a warning. | `true` |
-| `RELAY_NAME` | No | `ru1` | Name stored in `vpn_keys.relay` for keys issued through this relay (`^[a-z0-9][a-z0-9-]{0,31}$`). Renaming it later makes the existing relay keys unrenderable. | `ru1` |
-| `RELAY_HOST` | When `RELAY_ENABLED=true` | *(empty)* | Public DNS name or IPv4 of the relay — what relay links point at. Use a DNS-only name so moving the relay to a new IP is an A-record change with no key re-issue. IPv6 is rejected. | `relay.anycastedge.net` |
-| `RELAY_SOURCE_IPS` | When `RELAY_ENABLED=true` | *(empty)* | Comma-separated IPv4 addresses / CIDR networks the relay's traffic arrives **from**, as this server sees it. Excluded from anomaly-detection IP accounting. Parsed strictly (`ipaddress`, host bits in a CIDR rejected); spaces and empty items are ignored, anything else fails startup — even with the relay off. | `198.51.100.7, 203.0.113.0/28` |
-| `RELAY_HEALTH_INTERVAL` | No | `300` | Seconds between relay health probes (TCP connect + verified TLS handshake to `RELAY_HOST:XRAY_PUBLIC_PORT` with SNI `XRAY_SNI`); `0` disables the monitor (0–86400). Admins are alerted once when the relay goes down and once when it comes back. | `300` |
-| `SERVER_FLAG_EMOJI` | No | `🇫🇮` | Appended to the display name (`#fragment`) of every standalone key and of basic-subscription members: `<label>[_relay]_<flag>`. Display only — the email label never changes. Non-empty, no control characters, at most 16 characters. | `🇫🇮` |
+| `RELAY_HEALTH_INTERVAL` | No | `300` | Seconds between relay health probes (TCP connect + verified TLS handshake to `<relay host>:XRAY_PUBLIC_PORT` with SNI `XRAY_SNI`, for every enabled relay); `0` disables the monitor (0–86400). Admins are alerted once when a relay goes down and once when it comes back. | `300` |
+| `SERVER_FLAG_EMOJI` | No | `🇫🇮` | Appended to the display name (`#fragment`) of every standalone key and of basic-subscription members: `<label>[_<relay label>]_<flag>`. Display only — the email label never changes. Non-empty, no control characters, at most 16 characters. | `🇫🇮` |
+| `RELAY_ENABLED` | No | `false` | **Legacy — seed only.** With `true` (plus `RELAY_HOST` and `RELAY_SOURCE_IPS`) and an empty `relays` table, the bot creates that relay once at startup; afterwards every `RELAY_*` below is ignored with a WARNING. | `true` |
+| `RELAY_NAME` | No | `ru1` | **Legacy — seed only.** Name of the seeded relay (`^[a-z0-9][a-z0-9-]{0,31}$`) — the value its keys carry in `vpn_keys.relay`. | `ru1` |
+| `RELAY_HOST` | When `RELAY_ENABLED=true` | *(empty)* | **Legacy — seed only.** Public DNS name (recommended) or IPv4 of the seeded relay. IPv6 is rejected. | `relay.anycastedge.net` |
+| `RELAY_SOURCE_IPS` | When `RELAY_ENABLED=true` | *(empty)* | **Legacy — seed only.** Comma-separated IPv4 addresses / CIDR networks the seeded relay's traffic arrives **from**. Still parsed strictly (`ipaddress`, host bits in a CIDR rejected): anything malformed fails startup — even with `RELAY_ENABLED=false`. | `198.51.100.7, 203.0.113.0/28` |
 
 **There is no relay port setting.** The relay forwards 1:1, so the port in a relay
 link is the protocol's own public port: `XRAY_PUBLIC_PORT` for VLESS (TCP and
@@ -417,8 +423,9 @@ XHTTP `path`/`mode`/`extra`, Hysteria2's `sni` — is identical to the direct ke
 | `ANOMALY_HYSTERIA2_MAX_CONN` | No | `0` | Flag a Hysteria2 key with >= this many concurrent connections (via the Traffic Stats API `/online`). `0` disables the hy2 check; requires `HYSTERIA2_STATS_SECRET`. | `5` |
 
 > **Relay traffic is IP-blind.** Connections that come in through the relay carry
-> the relay's egress address (L4 DNAT, no PROXY protocol), so addresses listed in
-> `RELAY_SOURCE_IPS` are never recorded — neither the IP nor its network/ASN. The
+> the relay's egress address (L4 DNAT, no PROXY protocol), so the source IPs of every
+> relay in the admin panel (switched-off ones included, re-read every detection cycle)
+> are never recorded — neither the IP nor its network/ASN. The
 > inbound is shared, so this takes the IP signal away from **any** key used
 > through the relay, direct keys included. Hysteria2's `/online` connection count
 > is unaffected. Details: [docs/relay.md](relay.md#limitations).

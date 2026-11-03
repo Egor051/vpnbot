@@ -39,10 +39,11 @@ from bot.handlers.common import (
     answer_callback_error,
     answer_message_error,
     RELAY_PROTOCOLS,
+    chosen_relay,
     config_delivery,
+    offered_relays,
     parse_int_callback,
     profile_from_tg,
-    relay_offered,
     stats_views_for_screen,
 )
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
@@ -63,6 +64,7 @@ from bot.keyboards.keys import (
     xhttp_profile_keyboard,
 )
 from aiogram.types import BufferedInputFile
+from services.relay import require_relay_for_issue
 from bot.messages import (
     awg_config_filename,
     config_document_matches,
@@ -221,7 +223,9 @@ async def create_key_bundle_ack(callback: CallbackQuery, state: FSMContext, serv
         )
         await safe_edit_message_text(
             callback.message,
-            bundle_kind_prompt(relay_enabled=relay_offered(services)),
+            bundle_kind_prompt(
+                relay_labels=[relay.label for relay in services.relays.snapshot.for_subscriptions]
+            ),
             reply_markup=bundle_kind_keyboard(),
         )
     except Exception as exc:
@@ -370,19 +374,21 @@ async def _prompt_route_or_note(
 ) -> None:
     """After the protocol (and XHTTP profile) step: the relay step or the note.
 
-    The «Подключение» step exists only while ``RELAY_ENABLED`` and only for the
-    protocols the relay carries; otherwise the wizard goes straight to the note,
-    exactly as before relays existed. ``relay`` is reset either way so a value
-    left over from an abandoned wizard can never leak into this one.
+    The «Подключение» step exists only while at least one relay is enabled and
+    only for the protocols a relay carries; it offers «Напрямую» plus one button
+    per enabled relay. Otherwise the wizard goes straight to the note, exactly as
+    before relays existed. ``relay`` is reset either way so a value left over
+    from an abandoned wizard can never leak into this one.
     """
     assert callback.message is not None
     await state.update_data(key_type=key_type, transport=transport, cancel_target="keys:create", relay=None)
     if xhttp_profile is not None:
         await state.update_data(xhttp_profile=xhttp_profile)
-    if key_type in RELAY_PROTOCOLS and relay_offered(services):
+    relays = offered_relays(services) if key_type in RELAY_PROTOCOLS else []
+    if relays:
         await state.set_state(CreateKeyStates.waiting_route)
         await safe_edit_message_text(
-            callback.message, t("choose_relay_route"), reply_markup=relay_route_keyboard()
+            callback.message, t("choose_relay_route"), reply_markup=relay_route_keyboard(relays)
         )
         return
     await state.set_state(CreateKeyStates.waiting_note)
@@ -394,13 +400,15 @@ async def _prompt_route_or_note(
     )
 
 
-@router.callback_query(CreateKeyStates.waiting_route, F.data.in_({"keys:route:direct", "keys:route:relay"}))
+@router.callback_query(CreateKeyStates.waiting_route, F.data.regexp(r"^keys:route:(direct|\d+)$"))
 async def create_key_choose_route(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """Record «напрямую / через relay» and prompt for a note.
+    """Record «Напрямую / Через <label>» and prompt for a note.
 
-    A relay choice is re-checked here (the _protocol_enabled pattern): a callback
-    replayed after RELAY_ENABLED was switched off is refused up front instead of
-    walking the rest of the wizard only to fail at the service layer.
+    The button names the relay by id; it is re-checked here against the live
+    snapshot (the _protocol_enabled pattern): a callback replayed after that
+    relay was switched off or deleted is refused up front instead of walking the
+    rest of the wizard only to fail at the service layer. The FSM keeps the
+    relay's ``name`` — what the key will carry.
     """
     if not await ensure_private_callback(callback):
         return
@@ -409,11 +417,13 @@ async def create_key_choose_route(callback: CallbackQuery, state: FSMContext, se
     try:
         await _ensure_can_enter_create(callback.from_user.id, services)
         relay: str | None = None
-        if callback.data == "keys:route:relay":
-            if not relay_offered(services):
+        route = callback.data.rsplit(":", 1)[-1]
+        if route != "direct":
+            chosen = chosen_relay(services, route)
+            if chosen is None:
                 await safe_callback_answer(callback, t("relay_unavailable"), show_alert=True)
                 return
-            relay = services.settings.relay_name
+            relay = chosen.name
         await safe_callback_answer(callback)
         await state.set_state(CreateKeyStates.waiting_note)
         await state.update_data(relay=relay, note_prompt_msg_id=callback.message.message_id)
@@ -679,12 +689,17 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
                     bundle_result,
                     viewer_user_id=callback.from_user.id,
                     settings=services.settings,
+                    relays=services.relays.snapshot,
                 ),
                 reply_markup=bundle_actions_keyboard(
                     bundle_result.bundle, has_vless=bundle_has_vless(list(bundle_result.keys))
                 ),
             )
             return
+        # The relay may have been switched off or deleted while the confirm screen
+        # was open: refuse before the wizard is cleared, so the user is told why.
+        if relay:
+            require_relay_for_issue(services.relays.snapshot, relay)
         await state.clear()
         await safe_callback_answer(callback, t("creating_key"))
         if key_type == VpnKeyType.XRAY.value:
@@ -1133,7 +1148,8 @@ async def edit_fp_select(
                 callback.message,
                 f"{t('bundle_fp_updated', count=changed)}\n\n"
                 + bundle_detail_text(
-                    bundle, keys, viewer_user_id=callback.from_user.id, views=views
+                    bundle, keys, viewer_user_id=callback.from_user.id, views=views,
+                    relays=services.relays.snapshot,
                 ),
                 reply_markup=bundle_actions_keyboard(bundle, has_vless=bundle_has_vless(keys)),
             )

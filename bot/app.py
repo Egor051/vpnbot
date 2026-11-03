@@ -26,7 +26,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_dashboard, admin_maintenance, admin_modules, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, start
+from bot.handlers import admin, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, start
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
@@ -44,6 +44,7 @@ from repositories.key_bundles import KeyBundleRepository
 from repositories.protocol_modules import ProtocolModulesRepository
 from repositories.proxy_entries import ProxyRepository
 from repositories.proxy_accesses import ProxyAccessRepository
+from repositories.relays import RelayRepository
 from repositories.traffic_stats import TrafficStatsRepository
 from repositories.trial_requests import TrialKeyRequestRepository
 from repositories.users import UserRepository
@@ -69,6 +70,9 @@ from services.notes import NotesService
 from services.online_clients import OnlineClientsService
 from services.protocol_modules import ProtocolModulesService
 from services.proxy import ProxyService
+from services.relay import RelayCatalog
+from services.relay_health import build_relay_health_supervisor
+from services.relay_management import RelayService
 from services.server_status import ServerStatusService
 from services.socks5 import Socks5Service
 from services.mtproto import MtProtoService
@@ -191,6 +195,22 @@ async def _build_app(
     audit_service = AuditService(audit_repo, clock, users_repo)
     user_service = UserService(users=users_repo, settings=settings, clock=clock, audit=audit_service, user_locks=user_locks)
     await user_service.bootstrap_admins()
+
+    # Relays live in the database and are managed from the admin panel. The
+    # catalog is the in-process snapshot every link builder reads; the relay
+    # service is its only writer and replaces it after each change. The legacy
+    # RELAY_* variables seed an empty table once (and are ignored afterwards).
+    relays_repo = RelayRepository(db)
+    relay_catalog = RelayCatalog()
+    relay_service = RelayService(
+        relays=relays_repo,
+        users=user_service,
+        audit=audit_service,
+        clock=clock,
+        catalog=relay_catalog,
+    )
+    await relay_service.seed_from_settings(settings)
+    await relay_service.refresh_catalog()
 
     access_service = AccessApprovalService(
         requests=access_repo,
@@ -333,6 +353,7 @@ async def _build_app(
         user_locks=user_locks,
         backend_health=backend_health,
         xhttp_adapter=xray_xhttp_adapter,
+        relays=relay_catalog,
     )
     awg_service = AwgService(
         vpn_keys=vpn_keys_repo,
@@ -356,6 +377,16 @@ async def _build_app(
         modules=protocol_modules_service,
         user_locks=user_locks,
         stats=hysteria_stats_adapter,
+        relays=relay_catalog,
+    )
+    # Deleting a relay together with its keys removes each key through the very
+    # path the key screen uses (backend, traffic archive, audit).
+    relay_service.attach_key_deleters(
+        {
+            VpnKeyType.XRAY: xray_service.delete_xray_key,
+            VpnKeyType.AWG: awg_service.delete_awg_key,
+            VpnKeyType.HYSTERIA2: hysteria_service.delete_hysteria2_key,
+        }
     )
     # block_user is reachable by moderators, who are neither superadmin nor the
     # key owner. Wire the *system* revokers (authorisation is already done by
@@ -469,6 +500,7 @@ async def _build_app(
         ids=ids,
         audit=audit_service,
         backend_health=backend_health,
+        relays=relay_catalog,
     )
     key_bundle_view_service = KeyBundleViewService(
         bundles=key_bundles_repo,
@@ -544,8 +576,10 @@ async def _build_app(
         # single alert. Detection is untouched and still runs per child key.
         bundles=key_bundles_repo,
         # Relay egress IPs are not a client signal (L4 DNAT): never recorded.
-        relay_source_ips=settings.relay_source_ips,
+        # Re-read from the relays table at the start of every cycle.
+        relays=relays_repo,
     )
+    relay_health_supervisor = build_relay_health_supervisor(settings, relays_repo.list_all)
 
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
 
@@ -703,6 +737,8 @@ async def _build_app(
         maintenance=maintenance_service,
         key_bundles=key_bundle_service,
         key_bundle_views=key_bundle_view_service,
+        relays=relay_service,
+        relay_health=relay_health_supervisor,
         hysteria_health_probe=hysteria_health_probe,
     )
 
@@ -712,6 +748,7 @@ async def _build_app(
     key_expiry_service.bot = bot
     trial_access_service.bot = bot
     anomaly_detection_service.bot = bot
+    relay_health_supervisor.bot = bot
     warp_manager.bot = bot
     # FSM state is in-memory only — bot restart clears in-progress wizards.
     # TTLMemoryStorage expires sessions idle for >30 min via the fsm_cleanup_loop
@@ -761,6 +798,7 @@ async def _build_app(
     # order of these two routers does not change behaviour.
     dp.include_router(admin_warp_split_sources.router)
     dp.include_router(admin_modules.router)
+    dp.include_router(admin_relays.router)
     dp.include_router(admin_maintenance.router)
     dp.include_router(keys.router)
     dp.include_router(key_bundles.router)

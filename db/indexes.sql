@@ -47,6 +47,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_vpn_keys_client_ip_reserved ON vpn_keys(cl
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_expires_at ON vpn_keys(expires_at) WHERE expires_at IS NOT NULL AND status = 'active';
 -- Depends on vpn_keys.bundle_id, added by migration v32.
 CREATE INDEX IF NOT EXISTS idx_vpn_keys_bundle_id ON vpn_keys(bundle_id) WHERE bundle_id IS NOT NULL;
+-- Depends on vpn_keys.relay, added by migration v37: the relay panel counts and
+-- deletes a relay's keys by name.
+CREATE INDEX IF NOT EXISTS idx_vpn_keys_relay ON vpn_keys(relay) WHERE relay IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_key_bundles_user_id ON key_bundles(user_id);
 CREATE INDEX IF NOT EXISTS idx_key_bundles_status ON key_bundles(status);

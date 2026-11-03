@@ -63,8 +63,8 @@ bundle to the other kind is not supported.
 | | basic | extended |
 |---|---|---|
 | Members | VLESS (TCP), Hysteria2 | VLESS (TCP), Hysteria2, VLESS (HTTP) `base` / `multi` / `antisib` |
-| With `RELAY_ENABLED=true` | + the same 2 via relay → **4** | + the same 5 via relay → **10** |
-| Entry name | `<label>[_relay]_<SERVER_FLAG_EMOJI>` | `<label>[_relay]_<mark>` |
+| Per relay (enabled and «в подписках») | + the same 2 → **4** with one relay, **6** with two | + the same 5 → **10** with one relay, **15** with two |
+| Entry name | `<label>[_<relay label>]_<SERVER_FLAG_EMOJI>` | `<label>[_<relay label>]_<mark>` |
 | Mark legend («⚠️ Кружок в конце названия…») | never shown | on the bundle's screens |
 
 - Every bundle that existed before the kind was introduced (schema v37) is **extended** and is
@@ -72,18 +72,22 @@ bundle to the other kind is not supported.
 - A **relay member** ([docs/relay.md](relay.md)) is the same protocol member as its direct
   twin — same create path, same label prefix — so in an extended bundle it carries the
   **twin's mark**: `xray_http_multi_ab12c_relay_🟠`.
-- Relay members are provisioned only while `RELAY_ENABLED=true`. A bundle created with the
-  relay off has none, and an existing bundle is **not** topped up when the relay is switched on
-  later — composition is decided once, at creation (the same is true of a protocol switched on
-  after a bundle was made). Create a new bundle to get relay members.
-- A relay member whose relay is no longer enabled (`RELAY_ENABLED=false`, or a different
-  `RELAY_NAME`) is **skipped** with a `WARNING` in the log and the rest of the subscription is
-  served (`200`). This is the one deliberate exception to "a child that cannot render fails the
-  whole response": switching the relay off is an operator decision, not a corrupt row. A bundle
-  left with nothing to serve is still the usual `404`.
+- Relay members are provisioned for every relay that is **enabled and «в подписках»** in the
+  admin panel when the bundle is created, in groups ordered by the relay's `id`: all direct
+  members, then those through relay #1, then relay #2, … A bundle created with no such relay has
+  none, and an existing bundle is **not** topped up when a relay is added or switched on later —
+  composition is decided once, at creation (the same is true of a protocol switched on after a
+  bundle was made). Create a new bundle to get members through a new relay.
+- The endpoint reads the `relays` table on every request, so a relay's host or label changed in
+  the panel is served on the next fetch with no restart.
+- A relay member whose relay is switched off or deleted is **skipped** with a `WARNING` in the
+  log and the rest of the subscription is served (`200`). This is the one deliberate exception to
+  "a child that cannot render fails the whole response": switching a relay off is an operator
+  decision, not a corrupt row. A bundle left with nothing to serve is still the usual `404`.
 
-A standalone key's link is named `<label>[_relay]_<SERVER_FLAG_EMOJI>` everywhere the bot
-shows it (config screen, QR, create wizard) — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay_🇫🇮`.
+A standalone key's link is named `<label>[_<relay label>]_<SERVER_FLAG_EMOJI>` everywhere the
+bot shows it (config screen, QR, create wizard) — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay_🇫🇮`
+(`relay` is the default relay label; it is set per relay in the admin panel).
 
 ### Fail-closed behaviour
 

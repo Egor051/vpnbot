@@ -3,7 +3,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from i18n import t
 from models.access import is_blocked_user
-from models.dto import AccessRequest, User
+from models.dto import AccessRequest, Relay, User
 from models.enums import UserRole
 from repositories.announcements import AnnouncementBatch
 from utils.formatting import format_user_display
@@ -107,6 +107,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t("btn_announcement"), callback_data="admin:announce")],
             [InlineKeyboardButton(text=t("btn_warp"), callback_data="admin:warp")],
             [InlineKeyboardButton(text=t("btn_modules"), callback_data="admin:modules")],
+            [InlineKeyboardButton(text=t("btn_relays"), callback_data="admin:relays")],
             [InlineKeyboardButton(text=t("btn_maintenance"), callback_data="admin:maintenance")],
             [InlineKeyboardButton(text=t("btn_backend_diagnostics"), callback_data="admin:diagnostics")],
             [InlineKeyboardButton(text=t("btn_action_logs"), callback_data="admin:audit")],
@@ -377,15 +378,22 @@ def admin_xhttp_profile_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def admin_relay_route_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    """The «Подключение» step of issuing a key (only shown while RELAY_ENABLED)."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=t("btn_route_direct"), callback_data=f"admin:croute:direct:{user_id}")],
-            [InlineKeyboardButton(text=t("btn_route_relay"), callback_data=f"admin:croute:relay:{user_id}")],
-            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")],
+def admin_relay_route_keyboard(user_id: int, relays: list[Relay]) -> InlineKeyboardMarkup:
+    """The «Подключение» step of issuing a key: direct plus one button per enabled relay.
+
+    ``admin:croute:direct:<user>`` / ``admin:croute:<relay id>:<user>``.
+    """
+    rows = [[InlineKeyboardButton(text=t("btn_route_direct"), callback_data=f"admin:croute:direct:{user_id}")]]
+    rows.extend(
+        [
+            InlineKeyboardButton(
+                text=t("btn_route_via", label=relay.label), callback_data=f"admin:croute:{relay.id}:{user_id}"
+            )
         ]
+        for relay in relays
     )
+    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def trial_request_keyboard(request_id: int) -> InlineKeyboardMarkup:

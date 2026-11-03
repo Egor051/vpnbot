@@ -2,10 +2,12 @@
 
 Covers, end to end where it matters:
 
-* settings — RELAY_* / SERVER_FLAG_EMOJI parsing and the cross-field checks;
+* settings — the legacy RELAY_* (now only a one-time seed) / SERVER_FLAG_EMOJI
+  parsing and the cross-field checks;
 * link rendering — a DIRECT key keeps every byte but the remark; a RELAY key
-  differs from its direct twin ONLY by host and the ``_relay`` marker; an unknown
-  or disabled relay is an error, never a silent fallback to the main host;
+  differs from its direct twin ONLY by host and the relay's marker; a relay that
+  is switched off, deleted or unknown is an error, never a silent fallback to the
+  main host;
 * creation through the real services with ``relay="ru1"`` — the label prefix and
   the hy2_auth lookup are exactly those of a direct key;
 * subscriptions — basic and extended, with and without the relay, ordering, the
@@ -13,6 +15,10 @@ Covers, end to end where it matters:
   exactly as before;
 * anomaly detection ignores relay egress IPs; the relay health latch alerts once
   per transition.
+
+The relay itself is a row of the ``relays`` table (see services.relay_management
+and tests/test_relay_admin.py for the panel side); the world below inserts it
+through the repository, exactly as the admin panel would.
 """
 
 from __future__ import annotations
@@ -33,21 +39,31 @@ import pytest
 
 from adapters.clock import ClockProvider
 from bot.bundles import bundle_config_text, bundle_created_text, bundle_detail_text
+from conftest import make_relay, relay_snapshot
+
 from bot.formatters import create_type_label, format_hysteria2_link, hysteria2_key_link, key_type_label
-from config.settings import Settings, SettingsError, load_settings, parse_ipv4_networks
+from config.settings import RelaySeed, Settings, SettingsError, load_settings, parse_ipv4_networks
 from db.database import Database
 from hy2_auth.store import ReadOnlyKeyStore
 from i18n import t
 from models.dto import KeyBundle, TelegramUserProfile, User, VpnKey
 from models.enums import KeyBundleKind, KeyBundleStatus, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.key_bundles import KeyBundleRepository
+from repositories.relays import RelayRepository
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.anomaly_detection import AnomalyDetectionService
 from services.hysteria import HysteriaService
 from services.key_bundles import KeyBundleService, bundle_composition, member_audit_name
 from services.key_naming import NameStyle, key_display_name
-from services.relay import RelayUnavailable, relay_link_host, require_relay_for_issue
+from services.relay import (
+    EMPTY_RELAYS,
+    RelayCatalog,
+    RelaySnapshot,
+    RelayUnavailable,
+    relay_link_host,
+    require_relay_for_issue,
+)
 from services.relay_health import RelayHealthMonitor, relay_health_loop, tls_probe
 from services.xray import XRAY_MANAGED_LABEL_RE, XrayService
 from subscription_server.render import SubscriptionRenderError, render_links, render_subscription
@@ -119,10 +135,6 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         hysteria2_insecure=False,
         subscription_enabled=True,
         subscription_rate_limit_seconds=0,
-        relay_enabled=True,
-        relay_name="ru1",
-        relay_host=RELAY_HOST,
-        relay_source_ips=(ipaddress.IPv4Network("198.51.100.7/32"),),
     )
     values.update(overrides)
     return Settings(**values)  # type: ignore[arg-type]
@@ -187,22 +199,51 @@ class _RecordingAdapter:
 
 class _World:
     def __init__(self, db: Database, settings: Settings, xray: XrayService, hysteria: HysteriaService,
-                 bundles: KeyBundleService, tcp_adapter: _RecordingAdapter) -> None:
+                 bundles: KeyBundleService, tcp_adapter: _RecordingAdapter, catalog: RelayCatalog) -> None:
         self.db = db
         self.settings = settings
         self.xray = xray
         self.hysteria = hysteria
         self.bundles = bundles
         self.tcp_adapter = tcp_adapter
+        self.catalog = catalog
         self.repo = KeyBundleRepository(db)
         self.vpn_keys = VpnKeyRepository(db)
+        self.relays = RelayRepository(db)
+
+    async def refresh(self) -> RelaySnapshot:
+        """Re-read the relays table into the services' catalog (what RelayService does)."""
+        snapshot = RelaySnapshot.of(await self.relays.list_all())
+        self.catalog.replace(snapshot)
+        return snapshot
+
+    async def set_relay(self, name: str = "ru1", **changes: object) -> None:
+        relay = await self.relays.get_by_name(name)
+        assert relay is not None
+        await self.relays.update(relay.id, changes, now="2026-01-02T00:00:00+00:00", updated_by=None)
+        await self.refresh()
 
 
-async def _world(tmp_path: Path, **overrides: object) -> _World:
+async def _world(tmp_path: Path, *, relay_enabled: bool | None = True, **overrides: object) -> _World:
+    """The real services over a real database holding one relay ``ru1``.
+
+    *relay_enabled* True/False inserts ``ru1`` (host RELAY_HOST) enabled/disabled;
+    None leaves the relays table empty.
+    """
     settings = _settings(tmp_path, **overrides)
     db = Database(tmp_path / "vpn.db")
     await db.connect()
     await db.bootstrap()
+    if relay_enabled is not None:
+        await RelayRepository(db).create(
+            name="ru1",
+            label="relay",
+            host=RELAY_HOST,
+            source_ips=(ipaddress.IPv4Network("198.51.100.7/32"),),
+            enabled=relay_enabled,
+            now="2026-01-01T00:00:00+00:00",
+        )
+    catalog = RelayCatalog(RelaySnapshot.of(await RelayRepository(db).list_all()))
     users = UserRepository(db)
     for uid in (ADMIN, OWNER):
         await users.upsert_profile(TelegramUserProfile(uid, f"user{uid}", "User"), UserRole.APPROVED_USER, "now")
@@ -219,6 +260,7 @@ async def _world(tmp_path: Path, **overrides: object) -> _World:
         ids=ids,  # type: ignore[arg-type]
         audit=_Audit(),  # type: ignore[arg-type]
         xhttp_adapter=_RecordingAdapter(),  # type: ignore[arg-type]
+        relays=catalog,
     )
     hysteria = HysteriaService(
         vpn_keys=vpn_keys,
@@ -228,6 +270,7 @@ async def _world(tmp_path: Path, **overrides: object) -> _World:
         ids=ids,  # type: ignore[arg-type]
         audit=_Audit(),  # type: ignore[arg-type]
         modules=_Modules(),  # type: ignore[arg-type]
+        relays=catalog,
     )
     bundles = KeyBundleService(
         bundles=KeyBundleRepository(db),
@@ -239,8 +282,9 @@ async def _world(tmp_path: Path, **overrides: object) -> _World:
         clock=clock,
         ids=ids,  # type: ignore[arg-type]
         audit=_Audit(),  # type: ignore[arg-type]
+        relays=catalog,
     )
-    return _World(db, settings, xray, hysteria, bundles, tcp_adapter)
+    return _World(db, settings, xray, hysteria, bundles, tcp_adapter, catalog)
 
 
 def _owner() -> TelegramUserProfile:
@@ -295,10 +339,15 @@ def _key(
     )
 
 
-def _renderer(settings: Settings) -> XrayService:
+# The relay the link tests render through: ru1 → RELAY_HOST, marker "relay".
+RU1 = relay_snapshot(make_relay(1, "ru1", host=RELAY_HOST))
+
+
+def _renderer(settings: Settings, relays: RelaySnapshot = RU1) -> XrayService:
     service = XrayService.__new__(XrayService)
     service.settings = settings
     service.unix_clock = time_module.time
+    service.relays = RelayCatalog(relays)
     return service
 
 
@@ -320,14 +369,16 @@ def _minimal_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 def test_relay_settings_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """With no RELAY_* at all there is nothing to seed and nothing to warn about."""
     _minimal_env(monkeypatch, tmp_path)
     settings = load_settings()
-    assert settings.relay_enabled is False
-    assert settings.relay_name == "ru1"
-    assert settings.relay_host == ""
-    assert settings.relay_source_ips == ()
+    assert settings.relay_seed is None
+    assert settings.relay_env_vars == ()
     assert settings.relay_health_interval == 300
     assert settings.server_flag_emoji == FLAG
+    # The legacy fields are gone from Settings: nothing can read them as truth.
+    for legacy in ("relay_enabled", "relay_name", "relay_host", "relay_source_ips"):
+        assert not hasattr(settings, legacy)
 
 
 @pytest.mark.parametrize("missing", ["RELAY_HOST", "RELAY_SOURCE_IPS"])
@@ -344,6 +395,7 @@ def test_relay_enabled_requires_host_and_source_ips(
 
 
 def test_relay_enabled_with_everything_loads(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """RELAY_ENABLED=true + host + source IPs is parsed into the one-time seed."""
     _minimal_env(monkeypatch, tmp_path)
     monkeypatch.setenv("RELAY_ENABLED", "true")
     monkeypatch.setenv("RELAY_NAME", "msk-2")
@@ -351,13 +403,22 @@ def test_relay_enabled_with_everything_loads(monkeypatch: pytest.MonkeyPatch, tm
     monkeypatch.setenv("RELAY_SOURCE_IPS", "198.51.100.7, 203.0.113.0/28")
     monkeypatch.setenv("RELAY_HEALTH_INTERVAL", "0")
     settings = load_settings()
-    assert settings.relay_enabled is True
-    assert settings.relay_name == "msk-2"
-    assert settings.relay_source_ips == (
-        ipaddress.IPv4Network("198.51.100.7/32"),
-        ipaddress.IPv4Network("203.0.113.0/28"),
+    assert settings.relay_seed == RelaySeed(
+        name="msk-2",
+        host=RELAY_HOST,
+        source_ips=(ipaddress.IPv4Network("198.51.100.7/32"), ipaddress.IPv4Network("203.0.113.0/28")),
     )
+    assert settings.relay_env_vars == ("RELAY_ENABLED", "RELAY_NAME", "RELAY_HOST", "RELAY_SOURCE_IPS")
     assert settings.relay_health_interval == 0
+
+
+def test_relay_disabled_in_env_seeds_nothing_but_is_noticed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _minimal_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("RELAY_ENABLED", "false")
+    monkeypatch.setenv("RELAY_HOST", RELAY_HOST)
+    settings = load_settings()
+    assert settings.relay_seed is None
+    assert settings.relay_env_vars == ("RELAY_ENABLED", "RELAY_HOST")
 
 
 @pytest.mark.parametrize(
@@ -433,8 +494,11 @@ def test_relay_host_accepts_dns_names_and_ipv4(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: str
 ) -> None:
     _minimal_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("RELAY_ENABLED", "true")
     monkeypatch.setenv("RELAY_HOST", host)
-    assert load_settings().relay_host == host
+    monkeypatch.setenv("RELAY_SOURCE_IPS", "198.51.100.7")
+    seed = load_settings().relay_seed
+    assert seed is not None and seed.host == host
 
 
 def test_server_flag_emoji_custom_value(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -456,29 +520,36 @@ def test_server_flag_emoji_is_validated(
 # ── relay host resolution ─────────────────────────────────────────────────────
 
 
-def test_relay_host_resolution(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    assert relay_link_host(settings, None, direct_host="main") == "main"
-    assert relay_link_host(settings, "ru1", direct_host="main") == RELAY_HOST
+def test_relay_host_resolution() -> None:
+    assert relay_link_host(RU1, None, direct_host="main") == "main"
+    assert relay_link_host(RU1, "ru1", direct_host="main") == RELAY_HOST
     with pytest.raises(RelayUnavailable):
-        relay_link_host(settings, "ru2", direct_host="main")
-    off = _settings(tmp_path, relay_enabled=False)
+        relay_link_host(RU1, "ru2", direct_host="main")
+    off = relay_snapshot(make_relay(1, "ru1", host=RELAY_HOST, enabled=False))
     assert relay_link_host(off, None, direct_host="main") == "main"
     with pytest.raises(RelayUnavailable) as excinfo:
         relay_link_host(off, "ru1", direct_host="main")
     assert excinfo.value.key == "err_relay_unavailable"
     assert excinfo.value.params == {"relay": "ru1"}
+    # Deleted (no row at all): refused the same way, never the main host.
+    with pytest.raises(RelayUnavailable):
+        relay_link_host(EMPTY_RELAYS, "ru1", direct_host="main")
+    # Two relays: each key goes to ITS relay's host.
+    two = relay_snapshot(make_relay(1, "ru1", host="a.example.net"), make_relay(2, "ru2", label="b", host="b.example.net"))
+    assert relay_link_host(two, "ru1", direct_host="main") == "a.example.net"
+    assert relay_link_host(two, "ru2", direct_host="main") == "b.example.net"
 
 
-def test_require_relay_for_issue(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    assert require_relay_for_issue(settings, None) is None
-    assert require_relay_for_issue(settings, "") is None
-    assert require_relay_for_issue(settings, "ru1") == "ru1"
+def test_require_relay_for_issue() -> None:
+    assert require_relay_for_issue(RU1, None) is None
+    assert require_relay_for_issue(RU1, "") is None
+    assert require_relay_for_issue(RU1, "ru1") == "ru1"
     with pytest.raises(RelayUnavailable):
-        require_relay_for_issue(settings, "ru2")
+        require_relay_for_issue(RU1, "ru2")
     with pytest.raises(RelayUnavailable):
-        require_relay_for_issue(_settings(tmp_path, relay_enabled=False), "ru1")
+        require_relay_for_issue(relay_snapshot(make_relay(1, "ru1", enabled=False)), "ru1")
+    with pytest.raises(RelayUnavailable):
+        require_relay_for_issue(EMPTY_RELAYS, "ru1")
 
 
 # ── single-key rendering ──────────────────────────────────────────────────────
@@ -552,8 +623,8 @@ def test_relay_vless_keeps_the_stored_spider_x(tmp_path: Path) -> None:
 
 def test_hysteria2_direct_and_relay_links(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    direct = hysteria2_key_link(_key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p"), settings)
-    relay = hysteria2_key_link(_key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p", relay="ru1"), settings)
+    direct = hysteria2_key_link(_key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p"), settings, RU1)
+    relay = hysteria2_key_link(_key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p", relay="ru1"), settings, RU1)
     # The direct link is the pre-change link, remark aside.
     assert _prefix(direct) == _prefix(
         format_hysteria2_link(
@@ -569,14 +640,22 @@ def test_hysteria2_direct_and_relay_links(tmp_path: Path) -> None:
     assert "sni=anycastedge.duckdns.org" in relay
 
 
-@pytest.mark.parametrize("overrides", [{"relay_enabled": False}, {"relay_name": "ru2"}])
-def test_unknown_or_disabled_relay_never_falls_back(tmp_path: Path, overrides: dict[str, Any]) -> None:
-    settings = _settings(tmp_path, **overrides)
-    service = _renderer(settings)
+@pytest.mark.parametrize(
+    "relays",
+    [
+        relay_snapshot(make_relay(1, "ru1", host=RELAY_HOST, enabled=False)),  # switched off
+        relay_snapshot(make_relay(1, "ru2", host=RELAY_HOST)),  # only another relay is known
+        EMPTY_RELAYS,  # deleted
+    ],
+    ids=["disabled", "unknown", "deleted"],
+)
+def test_unknown_or_disabled_relay_never_falls_back(tmp_path: Path, relays: RelaySnapshot) -> None:
+    settings = _settings(tmp_path)
+    service = _renderer(settings, relays)
     with pytest.raises(RelayUnavailable):
         service.connection_link(_key(relay="ru1"))
     with pytest.raises(RelayUnavailable):
-        hysteria2_key_link(_key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p", relay="ru1"), settings)
+        hysteria2_key_link(_key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p", relay="ru1"), settings, relays)
     # Direct keys are unaffected.
     assert DIRECT_HOST in service.connection_link(_key())
 
@@ -587,14 +666,32 @@ def test_display_name_rules(tmp_path: Path) -> None:
     tcp_relay = _key(label="xray_tcp_ab12c", relay="ru1")
     multi_relay = _key(label="xray_http_multi_ab12c", transport="http", profile="multi", relay="ru1")
     hy2 = _key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p", relay="ru1")
-    assert key_display_name(tcp, NameStyle.SINGLE, settings) == f"xray_tcp_ab12c_{FLAG}"
-    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings) == f"xray_tcp_ab12c_relay_{FLAG}"
-    assert key_display_name(hy2, NameStyle.BASIC, settings) == f"hy2_x7k2p_relay_{FLAG}"
-    assert key_display_name(tcp, NameStyle.EXTENDED, settings) == "xray_tcp_ab12c_🟢"
-    assert key_display_name(tcp_relay, NameStyle.EXTENDED, settings) == "xray_tcp_ab12c_relay_🟢"
-    assert key_display_name(multi_relay, NameStyle.EXTENDED, settings) == "xray_http_multi_ab12c_relay_🟠"
+    assert key_display_name(tcp, NameStyle.SINGLE, settings, RU1) == f"xray_tcp_ab12c_{FLAG}"
+    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, RU1) == f"xray_tcp_ab12c_relay_{FLAG}"
+    assert key_display_name(hy2, NameStyle.BASIC, settings, RU1) == f"hy2_x7k2p_relay_{FLAG}"
+    assert key_display_name(tcp, NameStyle.EXTENDED, settings, RU1) == "xray_tcp_ab12c_🟢"
+    assert key_display_name(tcp_relay, NameStyle.EXTENDED, settings, RU1) == "xray_tcp_ab12c_relay_🟢"
+    assert key_display_name(multi_relay, NameStyle.EXTENDED, settings, RU1) == "xray_http_multi_ab12c_relay_🟠"
     # A custom flag is used verbatim.
-    assert key_display_name(tcp, NameStyle.SINGLE, _settings(tmp_path, server_flag_emoji="🇩🇪")).endswith("_🇩🇪")
+    flagged = _settings(tmp_path, server_flag_emoji="🇩🇪")
+    assert key_display_name(tcp, NameStyle.SINGLE, flagged, RU1).endswith("_🇩🇪")
+
+
+def test_display_name_uses_the_relays_label(tmp_path: Path) -> None:
+    """The marker is the relay's label from the panel, not a constant."""
+    settings = _settings(tmp_path)
+    msk = relay_snapshot(make_relay(1, "ru1", label="msk"))
+    tcp_relay = _key(label="xray_tcp_ab12c", relay="ru1")
+    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, msk) == f"xray_tcp_ab12c_msk_{FLAG}"
+    assert key_display_name(tcp_relay, NameStyle.EXTENDED, settings, msk) == "xray_tcp_ab12c_msk_🟢"
+    # A switched-off relay still has its label (its link is refused by the host lookup).
+    off = relay_snapshot(make_relay(1, "ru1", label="msk", enabled=False))
+    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, off) == f"xray_tcp_ab12c_msk_{FLAG}"
+    # A deleted relay: refused, like rendering its host would be.
+    with pytest.raises(RelayUnavailable):
+        key_display_name(tcp_relay, NameStyle.SINGLE, settings, EMPTY_RELAYS)
+    # Direct keys never need a relay.
+    assert key_display_name(_key(), NameStyle.SINGLE, settings, EMPTY_RELAYS) == f"xray_tcp_ab12c_{FLAG}"
 
 
 def test_relay_marker_in_bot_labels() -> None:
@@ -667,8 +764,9 @@ async def test_hy2_relay_key_is_authenticated_by_hy2_auth_unchanged(tmp_path: Pa
         await world.db.close()
 
 
-async def test_issuing_through_a_disabled_relay_writes_nothing(tmp_path: Path) -> None:
-    world = await _world(tmp_path, relay_enabled=False)
+@pytest.mark.parametrize("relay_enabled", [False, None], ids=["disabled", "absent"])
+async def test_issuing_through_a_disabled_relay_writes_nothing(tmp_path: Path, relay_enabled: bool | None) -> None:
+    world = await _world(tmp_path, relay_enabled=relay_enabled)
     try:
         with pytest.raises(RelayUnavailable):
             await world.xray.create_xray_key(ADMIN, _owner(), None, relay="ru1")
@@ -697,21 +795,30 @@ async def test_repository_refuses_a_malformed_relay_name(tmp_path: Path) -> None
 
 def test_composition_sizes() -> None:
     assert len(bundle_composition(KeyBundleKind.BASIC)) == 2
-    assert len(bundle_composition(KeyBundleKind.BASIC, relay="ru1")) == 4
+    assert len(bundle_composition(KeyBundleKind.BASIC, relays=("ru1",))) == 4
     assert len(bundle_composition(KeyBundleKind.EXTENDED)) == 5
-    assert len(bundle_composition(KeyBundleKind.EXTENDED, relay="ru1")) == 10
-    members = bundle_composition(KeyBundleKind.BASIC, relay="ru1")
-    assert [member_audit_name(m) for m in members] == ["xray_tcp", "hysteria2", "xray_tcp_relay", "hysteria2_relay"]
+    assert len(bundle_composition(KeyBundleKind.EXTENDED, relays=("ru1",))) == 10
+    # One more group per relay, in the order the relays are given (relays.id).
+    assert len(bundle_composition(KeyBundleKind.BASIC, relays=("ru1", "ru2"))) == 6
+    assert len(bundle_composition(KeyBundleKind.EXTENDED, relays=("ru1", "ru2"))) == 15
+    members = bundle_composition(KeyBundleKind.BASIC, relays=("ru1", "ru2"))
+    assert [member_audit_name(m) for m in members] == [
+        "xray_tcp", "hysteria2",
+        "xray_tcp_relay_ru1", "hysteria2_relay_ru1",
+        "xray_tcp_relay_ru2", "hysteria2_relay_ru2",
+    ]
 
 
 # ── subscriptions ─────────────────────────────────────────────────────────────
 
 
 async def _view(world: _World, bundle_id: int) -> BundleView:
+    """What the subscription endpoint builds: the bundle, its children, the relays table."""
     bundle = await world.repo.get_by_id(bundle_id)
     assert bundle is not None
     keys = tuple(await world.repo.list_keys_of_bundle(bundle_id))
-    return BundleView(bundle=bundle, keys=keys, traffic=None)
+    relays = RelaySnapshot.of(await world.relays.list_all())
+    return BundleView(bundle=bundle, keys=keys, traffic=None, relays=relays)
 
 
 def _member_of(name: str) -> str:
@@ -793,14 +900,16 @@ async def test_member_with_a_disabled_relay_is_skipped_not_404(
     world = await _world(tmp_path)
     try:
         result = await world.bundles.create_bundle(ADMIN, _owner(), None, kind=KeyBundleKind.BASIC)
+        assert len(render_links(await _view(world, result.bundle.id), world.settings)) == 4
+        # Switched off in the panel (a write to the relays table)…
+        await world.set_relay("ru1", enabled=False)
         view = await _view(world, result.bundle.id)
-        off = _settings(tmp_path, relay_enabled=False)
         with caplog.at_level(logging.WARNING, logger="subscription_server.render"):
-            rendered = render_subscription(view, off)
-        assert len(render_links(view, off)) == 2
+            rendered = render_subscription(view, world.settings)
+        assert len(render_links(view, world.settings)) == 2
         assert rendered.body
         assert any("relay" in record.getMessage() for record in caplog.records)
-        # Through the real endpoint: still a 200.
+        # Through the real endpoint, which reads the table itself: still a 200.
         from aiohttp.test_utils import TestClient, TestServer
 
         from subscription_server.config import load_config
@@ -808,11 +917,15 @@ async def test_member_with_a_disabled_relay_is_skipped_not_404(
 
         store = ReadOnlyBundleStore(world.db.path)
         await store.connect()
-        client = TestClient(TestServer(build_app(store, load_config(off))))
+        client = TestClient(TestServer(build_app(store, load_config(world.settings))))
         await client.start_server()
         try:
             resp = await client.get(f"/sub/{result.bundle.token}")
             assert resp.status == 200
+            import base64
+
+            links = base64.b64decode(await resp.text()).decode().splitlines()
+            assert len(links) == 2 and all(RELAY_HOST not in link for link in links)
         finally:
             await client.close()
             await store.close()
@@ -827,10 +940,13 @@ async def test_a_bundle_with_only_unrenderable_members_is_still_fail_closed(tmp_
         result = await world.bundles.create_bundle(ADMIN, _owner(), None, kind=KeyBundleKind.BASIC)
         view = await _view(world, result.bundle.id)
         relay_only = BundleView(
-            bundle=view.bundle, keys=tuple(k for k in view.keys if k.relay), traffic=None
+            bundle=view.bundle,
+            keys=tuple(k for k in view.keys if k.relay),
+            traffic=None,
+            relays=relay_snapshot(make_relay(1, "ru1", host=RELAY_HOST, enabled=False)),
         )
         with pytest.raises(SubscriptionRenderError):
-            render_subscription(relay_only, _settings(tmp_path, relay_enabled=False))
+            render_subscription(relay_only, world.settings)
     finally:
         await world.db.close()
 
@@ -879,6 +995,19 @@ def test_bundle_screens_show_the_kind(tmp_path: Path) -> None:
 # ── anomaly detection ─────────────────────────────────────────────────────────
 
 
+class _RelayTable:
+    """The relays table as anomaly detection reads it (``list_all``), editable."""
+
+    def __init__(self, *relays: Any) -> None:
+        self.rows = list(relays)
+        self.fail = False
+
+    async def list_all(self) -> list[Any]:
+        if self.fail:
+            raise RuntimeError("database is locked")
+        return list(self.rows)
+
+
 def _anomaly(**kwargs: object) -> AnomalyDetectionService:
     defaults: dict[str, object] = dict(
         vpn_keys=AsyncMock(),
@@ -892,14 +1021,20 @@ def _anomaly(**kwargs: object) -> AnomalyDetectionService:
         cooldown_seconds=7200,
         xray_access_log_path="",
         concurrent_window_seconds=0,
-        relay_source_ips=(ipaddress.IPv4Network("198.51.100.0/29"), ipaddress.IPv4Network("203.0.113.9/32")),
+        relays=_RelayTable(
+            make_relay(1, "ru1", source_ips="198.51.100.0/29"),
+            # A switched-off relay's addresses are excluded too: its clients may
+            # still be connected.
+            make_relay(2, "ru2", label="b", source_ips="203.0.113.9", enabled=False),
+        ),
     )
     defaults.update(kwargs)
     return AnomalyDetectionService(**defaults)  # type: ignore[arg-type]
 
 
-def test_relay_source_ips_are_not_recorded() -> None:
+async def test_relay_source_ips_are_not_recorded() -> None:
     svc = _anomaly()
+    await svc._refresh_relay_source_ips()
     now = time_module.time()
     for ip in ("198.51.100.1", "198.51.100.7", "203.0.113.9", "[::ffff:203.0.113.9]", "::ffff:198.51.100.2"):
         svc._record_ip(1, now, ip)
@@ -910,8 +1045,9 @@ def test_relay_source_ips_are_not_recorded() -> None:
     assert svc._unique_ips_in_window(1, now) == frozenset({"198.51.100.8", "203.0.113.10", "2001:db8::1", "not-an-ip"})
 
 
-def test_without_relay_ips_nothing_changes() -> None:
-    svc = _anomaly(relay_source_ips=())
+async def test_without_relay_ips_nothing_changes() -> None:
+    svc = _anomaly(relays=_RelayTable())
+    await svc._refresh_relay_source_ips()
     now = time_module.time()
     svc._record_ip(1, now, "198.51.100.1")
     assert svc._unique_ips_in_window(1, now) == frozenset({"198.51.100.1"})
@@ -922,6 +1058,7 @@ async def test_relay_ip_does_not_push_a_key_over_the_threshold() -> None:
     key = _key()
     vpn_keys.get_by_id.return_value = key
     svc = _anomaly(vpn_keys=vpn_keys, unique_nets=2)
+    await svc._refresh_relay_source_ips()
     svc.bot = AsyncMock()
     now = time_module.time()
     svc._record_ip(1, now, "192.0.2.10")
@@ -1083,9 +1220,9 @@ async def test_fingerprint_change_keeps_relay_host_and_name(tmp_path: Path) -> N
 async def test_built_monitor_alerts_every_admin_once_per_transition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The wired monitor probes RELAY_HOST:XRAY_PUBLIC_PORT with SNI=XRAY_SNI and
-    tells every ADMIN_IDS chat; one admin who cannot be reached does not stop the
-    others."""
+    """The wired monitor probes <relay host>:XRAY_PUBLIC_PORT with SNI=XRAY_SNI and
+    tells every ADMIN_IDS chat — naming the relay's label, name and host; one admin
+    who cannot be reached does not stop the others."""
     from services import relay_health
 
     settings = _settings(tmp_path, relay_health_interval=0)
@@ -1105,15 +1242,18 @@ async def test_built_monitor_alerts_every_admin_once_per_transition(
                 raise RuntimeError("blocked the bot")
             sent.append((chat_id, text))
 
-    monitor = relay_health.build_relay_health_monitor(settings, _Bot())  # type: ignore[arg-type]
+    table = _RelayTable(make_relay(1, "ru1", host=RELAY_HOST))
+    monitor = relay_health.build_relay_health_supervisor(settings, table.list_all)
+    monitor.bot = _Bot()  # type: ignore[assignment]
     for _ in range(3):
         await monitor.check_once()
     assert probes[0] == (RELAY_HOST, 443, "example.com")
-    assert sent == [(ADMIN, t("relay_alert_down", relay="ru1", host=RELAY_HOST, port=443))]
+    params = {"label": "relay", "name": "ru1", "host": RELAY_HOST, "port": 443}
+    assert sent == [(ADMIN, t("relay_alert_down", **params))]
     outcome["ok"] = True
     for _ in range(3):
         await monitor.check_once()
-    assert sent[-1] == (ADMIN, t("relay_alert_recovered", relay="ru1", host=RELAY_HOST, port=443))
+    assert sent[-1] == (ADMIN, t("relay_alert_recovered", **params))
     assert len(sent) == 2
 
 
@@ -1125,9 +1265,7 @@ async def test_bundle_fingerprint_change_completes_while_the_relay_is_off(tmp_pa
     try:
         result = await world.bundles.create_bundle(ADMIN, _owner(), None, kind=KeyBundleKind.BASIC)
         relay_child = next(k for k in result.keys if k.relay and k.key_type is VpnKeyType.XRAY)
-        off = _settings(tmp_path, relay_enabled=False)
-        world.xray.settings = off
-        world.bundles.settings = off
+        await world.set_relay("ru1", enabled=False)
 
         _, changed = await world.bundles.change_fingerprint(OWNER, result.bundle.id, "safari")
         assert changed == 2
@@ -1138,7 +1276,7 @@ async def test_bundle_fingerprint_change_completes_while_the_relay_is_off(tmp_pa
         # The relay link cannot be rendered now, so no stale one is kept cached…
         assert "link" not in stored.public_payload
         # …and once the relay is back the link carries the new fingerprint.
-        world.xray.settings = world.settings
+        await world.set_relay("ru1", enabled=True)
         assert "fp=safari" in world.xray.connection_link(stored)
     finally:
         await world.db.close()

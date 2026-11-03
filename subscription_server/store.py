@@ -12,8 +12,10 @@ from db.database import Database
 from models.dto import KeyBundle, TrafficScopeTotals, VpnKey
 from models.enums import KeyBundleStatus, VpnKeyStatus
 from repositories.key_bundles import KeyBundleRepository
+from repositories.relays import RelayRepository
 from repositories.traffic_scope import ALL_TIME
 from repositories.vpn_keys import VpnKeyRepository
+from services.relay import EMPTY_RELAYS, RelaySnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,12 @@ class BundleView:
     # None when nothing has ever been measured for the owner: the header claims
     # no counter it does not have.
     traffic: TrafficScopeTotals | None
+    # The ``relays`` table as it stands at this request — read in the same locked
+    # pass as the bundle, so a relay the admin just switched off, re-pointed or
+    # deleted is served that way on the very next fetch, with no restart. Defaults
+    # to "no relays" (every relay child skipped) for callers that build a view by
+    # hand.
+    relays: RelaySnapshot = EMPTY_RELAYS
 
     @property
     def expires_at(self) -> str | None:
@@ -137,16 +145,18 @@ class BundleView:
 class ReadOnlyBundleStore:
     """Live, read-only view of subscription bundles, read through the repositories.
 
-    There is NO cache: every request re-reads the bundle row and its children, so
-    a revoke, a token rotation or a delete takes effect on the very next fetch
-    without restarting anything — the property the whole "endpoint reads the live
-    DB" design exists to guarantee.
+    There is NO cache: every request re-reads the bundle row, its children and the
+    (tiny) ``relays`` table, so a revoke, a token rotation, a delete or a relay
+    edited in the admin panel takes effect on the very next fetch without
+    restarting anything — the property the whole "endpoint reads the live DB"
+    design exists to guarantee.
     """
 
     def __init__(self, db_path: str | Path) -> None:
         self._db = ReadOnlyDatabase(Path(db_path))
         self._bundles = KeyBundleRepository(self._db)
         self._vpn_keys = VpnKeyRepository(self._db)
+        self._relays = RelayRepository(self._db)
         self._lock = asyncio.Lock()
         self._infra_failures = 0
 
@@ -183,6 +193,7 @@ class ReadOnlyBundleStore:
                 children = await self._bundles.list_keys_of_bundle(bundle.id)
                 active = tuple(key for key in children if key.status is VpnKeyStatus.ACTIVE)
                 totals = await self._vpn_keys.sum_traffic_for_owner(bundle.user_id, ALL_TIME)
+                relays = RelaySnapshot.of(await self._relays.list_all())
             except (aiosqlite.Error, OSError, ValueError) as exc:
                 self._infra_failures += 1
                 logger.error(
@@ -195,7 +206,7 @@ class ReadOnlyBundleStore:
         # no traffic rows at all still yields no counter rather than a fabricated
         # zero, which is the property the header had before and keeps.
         return BundleView(
-            bundle=bundle, keys=active, traffic=totals if totals.measured else None
+            bundle=bundle, keys=active, traffic=totals if totals.measured else None, relays=relays
         )
 
     async def healthcheck(self) -> bool:

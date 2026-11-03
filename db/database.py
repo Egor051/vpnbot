@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 37
+CURRENT_SCHEMA_VERSION = 38
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -395,6 +395,10 @@ class Database:
             await self._migrate_v37()
             await self._set_schema_version(37)
             version = 37
+        if version < 38:
+            await self._migrate_v38()
+            await self._set_schema_version(38)
+            version = 38
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1730,6 +1734,43 @@ class Database:
             await self.conn.execute(
                 "ALTER TABLE key_bundles ADD COLUMN kind TEXT NOT NULL DEFAULT 'extended'"
             )
+
+    async def _migrate_v38(self) -> None:
+        # Relays move from .env (RELAY_*) into the database, so the admin panel
+        # can add, edit, switch off and delete them — several of them. Mirrors
+        # schema.sql; idempotent. (schema.sql runs first and already creates the
+        # table on every path; it is restated here so the chain alone describes
+        # the schema, as _migrate_v35 does.)
+        #
+        # Nothing is backfilled from vpn_keys.relay: a migration cannot know a
+        # relay's host or egress IPs. The one existing relay of a deployment is
+        # seeded from the legacy RELAY_* variables at bot startup instead
+        # (services.relay_management.seed_relays_from_settings) — the only place
+        # that has them, already validated by config.settings. Until it is seeded
+        # (or added in the panel) its keys are refused, never pointed at the main
+        # host.
+        #
+        # vpn_keys.relay deliberately gets NO foreign key here: legacy rows with
+        # status 'deleted' keep the name forever and a RESTRICT would make the
+        # relay undeletable; the relay service guards integrity instead.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS relays (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL UNIQUE,
+              label TEXT NOT NULL UNIQUE DEFAULT 'relay',
+              host TEXT NOT NULL,
+              source_ips TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              in_subscriptions INTEGER NOT NULL DEFAULT 1,
+              note TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+              updated_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL
+            )
+            """
+        )
 
     async def _ensure_spider_x_backfill(self) -> None:
         # Idempotent per-key spiderX backfill, run on EVERY bootstrap (not gated by

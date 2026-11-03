@@ -19,10 +19,9 @@ from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter, RateLimitExceeded
 from config.settings import SettingsError
 from i18n import t
-from models.dto import KeyTrafficStatsView, TelegramUserProfile, VpnKey
+from models.dto import KeyTrafficStatsView, Relay, TelegramUserProfile, VpnKey
 from models.enums import UserRole, VpnKeyType
 from services.errors import AccessDenied, InvalidOperation, NotFound, ServiceError
-from services.relay import relay_available
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -75,15 +74,35 @@ async def config_delivery(
 RELAY_PROTOCOLS: frozenset[str] = frozenset({VpnKeyType.XRAY.value, VpnKeyType.HYSTERIA2.value})
 
 
-def relay_offered(services: Services) -> bool:
-    """Whether the «Подключение» step (and relay copies in bundles) is offered.
+def offered_relays(services: Services) -> list[Relay]:
+    """The relays the «Подключение» step offers: every enabled relay, in relay order.
 
-    One predicate for the user and the admin wizard — and the same one the link
-    renderer uses — so a wizard never offers a relay whose links could not then
+    One source for the user and the admin wizard — the same snapshot the link
+    renderer reads — so a wizard never offers a relay whose links could not then
     be rendered.
     """
-    settings = services.settings
-    return relay_available(settings, settings.relay_name)
+    return [relay for relay in services.relays.snapshot.enabled if relay.host]
+
+
+def relay_offered(services: Services) -> bool:
+    """Whether the «Подключение» step is shown at all (at least one enabled relay)."""
+    return bool(offered_relays(services))
+
+
+def chosen_relay(services: Services, raw_relay_id: str) -> Relay | None:
+    """The enabled relay a «Через <label>» button addresses, or None if it is gone.
+
+    Resolved against the live snapshot, so a callback replayed after the relay
+    was switched off or deleted is refused up front instead of walking the rest
+    of the wizard only to fail at the service layer.
+    """
+    relay_id = parse_int_callback(raw_relay_id)
+    if relay_id is None:
+        return None
+    relay = services.relays.snapshot.by_id(relay_id)
+    if relay is None or not relay.enabled or not relay.host:
+        return None
+    return relay
 
 
 async def is_admin(services: Services, user_id: int) -> bool:

@@ -8,6 +8,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Relays are managed from the admin panel instead of `.env` (`relays` table, schema
+  v38, docs/relay.md).** SUPERADMIN → «🛰 Управлять relay»: a list (label, name, host,
+  on/off, «в подписках», active keys, latest health probe), a card per relay (edit host /
+  source IPs / label / note, switch it or its subscription membership on/off, «Проверить
+  сейчас», delete) and an «Добавить relay» wizard (name → host → source IPs → label →
+  confirmation). Input is validated by the same functions the `.env` loader used, every
+  change is audited with before/after values, and it takes effect on the next rendered
+  link: the bot's in-memory snapshot is replaced on every write, and
+  `vpn-bot-subscription` reads the table on every request, so no restart is needed.
+  **Several relays** are supported: the create wizard offers «Напрямую» plus «Через
+  <label>» per enabled relay, new all-in-one bundles get a member group per relay that is
+  enabled and «в подписках» (direct members first, then relay #1, relay #2, … by
+  `relays.id`), and a relay key's name carries its relay's label
+  (`<label>_<relay label>_<flag|circle>`). A relay's `name` (the `vpn_keys.relay` value)
+  never changes and a name still carried by any key cannot be reused. Deleting a relay
+  with keys removes each key through the key's normal delete path (a bundle child goes,
+  its bundle stays), stops at the first failure with a report, and continues on retry; or
+  the relay can be switched off instead. The health monitor is one loop with an
+  independent latch per relay, alerts name the relay's label/name/host, and anomaly
+  detection re-reads the source IPs of every relay (switched-off ones included) at the
+  start of each cycle.
+
 - **Relay mode — keys «через relay» (`RELAY_*`, docs/relay.md).** An L4 relay (a RU VPS
   that DNATs TCP+UDP/443 to the main server) is a second entry point. Relay is an
   **attribute of a key** (`vpn_keys.relay`, schema v37), not a new key type or transport: a
@@ -183,6 +205,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     change nothing.
 
 ### Changed
+
+- **`RELAY_ENABLED` / `RELAY_NAME` / `RELAY_HOST` / `RELAY_SOURCE_IPS` are no longer a
+  source of truth.** On bot startup, if the `relays` table is empty and `.env` has
+  `RELAY_ENABLED=true` with a host and source IPs, that relay is seeded once (name
+  `RELAY_NAME`, default `ru1`; label `relay`) and an INFO line says so; in every other case
+  any of them being set logs `WARNING RELAY_* в .env игнорируются: relay управляется из
+  админки`. They are still parsed strictly (garbage fails startup with `SettingsError`).
+  `RELAY_HEALTH_INTERVAL` and `SERVER_FLAG_EMOJI` stay in `.env`.
 
 - **The display name (remark, the link's `#fragment`) of EVERY standalone key changes:**
   it now ends with the server flag, `<label>_<SERVER_FLAG_EMOJI>` (default `🇫🇮`) —

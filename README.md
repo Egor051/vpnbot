@@ -356,7 +356,7 @@ schema version internally).
 | [docs/proxy.md](docs/proxy.md) | SOCKS5/Dante and MTProto (static + managed) deployment and recovery. |
 | [docs/warp.md](docs/warp.md) | WARP outbound-IP masking: config format, install, proxy egress, selective-split. |
 | [docs/xray-xhttp-inbound.md](docs/xray-xhttp-inbound.md) | One-time server-side setup for the VLESS (HTTP) / XHTTP transport. |
-| [docs/relay.md](docs/relay.md) | L4 relay ("via relay" keys): topology, DNS, settings, health monitor, limitations. |
+| [docs/relay.md](docs/relay.md) | L4 relays ("via relay" keys): topology, DNS, managing relays in the admin panel, migrating from `RELAY_*`, health monitor, limitations. |
 | [docs/backend-config-sync.md](docs/backend-config-sync.md) | The co-owned Xray/AmneziaWG configs: ownership split, tracked skeletons, drift gate, merge installer, bootstrap. |
 | [docs/security/privilege-separation-plan.md](docs/security/privilege-separation-plan.md) | Non-root privilege-separation architecture and helper contracts. |
 

@@ -54,7 +54,7 @@ async def main() -> None:
     from services.anomaly_detection import anomaly_detection_loop
     from services.key_expiry import key_expiry_loop
     from services.offsite_backup import offsite_backup_loop
-    from services.relay_health import build_relay_health_monitor, relay_health_loop
+    from services.relay_health import relay_health_loop
     from services.scheduled_announcements import scheduled_announcements_loop
     from services.warp_split_feeds import warp_split_feeds_loop
 
@@ -167,20 +167,18 @@ async def main() -> None:
                 )
             elif settings.warp_split_feeds_interval_sec > 0:
                 logger.info("WARP split feed refresher not started: WARP_SPLIT_FEEDS_MODE=off")
-            # Relay health: only meaningful with a relay configured, and the probe's
-            # TLS handshake needs the REALITY SNI to verify against.
-            if settings.relay_enabled and settings.relay_health_interval > 0:
+            # Relay health: one loop for every relay. It reads the relays table
+            # on each pass, so relays added in the admin panel later are probed
+            # with no restart (and with none it simply has nothing to probe).
+            # The probe's TLS handshake needs the REALITY SNI to verify against.
+            if settings.relay_health_interval > 0:
                 if settings.xray_sni:
                     relay_health_task = asyncio.create_task(
-                        relay_health_loop(
-                            build_relay_health_monitor(settings, bot), settings.relay_health_interval
-                        ),
+                        relay_health_loop(services.relay_health, settings.relay_health_interval),
                         name="relay-health",
                     )
                     logger.info(
-                        "Relay health monitor started (relay=%s, host=%s, interval=%ds)",
-                        settings.relay_name,
-                        settings.relay_host,
+                        "Relay health monitor started (interval=%ds, relays from the admin panel)",
                         settings.relay_health_interval,
                     )
                 else:
