@@ -22,7 +22,8 @@ _VPN_KEY_TYPES = {"xray", "awg", "hysteria2"}
 _PROXY_TYPES = {"socks5", "mtproto"}
 
 # Purger contracts: each removes the backend artefact (Xray client / AWG peer /
-# Dante user / MTProto secret) AND hard-deletes the DB row. On backend failure
+# Dante user / MTProto secret) AND deletes the DB row (hard delete for VPN keys,
+# mark_deleted soft delete for proxy accesses). On backend failure
 # they raise and leave the row in a *_FAILED state, so disabling never silently
 # orphans live access.
 KeyPurger = Callable[[int, int], Awaitable[object]]
@@ -68,12 +69,14 @@ class ProtocolModulesService:
     async def is_enabled(self, name: str) -> bool:
         return await self._repo.is_enabled(name)
 
-    async def disable_protocol(self, name: str, actor_id: int) -> int:
-        """Disable a protocol: revoke all backend access, hard-delete the DB rows,
+    async def disable_protocol(self, name: str, actor_id: int) -> tuple[int, int]:
+        """Disable a protocol: revoke all backend access, delete the DB rows,
         then mark the module disabled.
 
-        Returns the number of records fully purged. Records whose backend removal
-        failed are left in a *_FAILED state (not orphaned) and reported via audit.
+        Returns ``(deleted, failed)``: records fully purged, and records whose
+        purge raised. Failed records stay in the DB (usually in a *_FAILED state,
+        so they are not orphaned) and may still have live access; they are
+        reported via audit and logged with a traceback.
         """
         await self._require_superadmin(actor_id)
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -93,7 +96,7 @@ class ProtocolModulesService:
             "Protocol %s disabled by user %d; %d records purged, %d failed",
             name, actor_id, deleted, failed,
         )
-        return deleted
+        return deleted, failed
 
     async def enable_protocol(self, name: str, actor_id: int) -> None:
         await self._require_superadmin(actor_id)

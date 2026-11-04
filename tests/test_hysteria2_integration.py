@@ -343,8 +343,9 @@ def test_disable_protocol_purges_hysteria2_keys(tmp_path: Path) -> None:
                 key_purgers={VpnKeyType.HYSTERIA2: service.delete_hysteria2_key},
                 proxy_purgers={},
             )
-            deleted = await modules.disable_protocol("hysteria2", actor_id=1)
+            deleted, failed = await modules.disable_protocol("hysteria2", actor_id=1)
             assert deleted == 1
+            assert failed == 0
             assert not await modules.is_enabled("hysteria2")
             # The key row is hard-deleted (cascade-purge mirrors MTProto disable).
             assert await VpnKeyRepository(db).get_by_id(result.key.id) is None

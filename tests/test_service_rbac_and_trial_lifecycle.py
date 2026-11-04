@@ -386,8 +386,9 @@ async def test_disable_protocol_revokes_backend_before_delete(tmp_path: Path) ->
         with pytest.raises(AccessDenied):
             await svc.disable_protocol("xray", 2)
 
-        deleted = await svc.disable_protocol("xray", 1)
+        deleted, failed = await svc.disable_protocol("xray", 1)
         assert deleted == 3
+        assert failed == 0
         assert sorted(purged) == [k for k in purged]  # every key went through the purger
         assert len(purged) == 3
         assert await svc.is_enabled("xray") is False

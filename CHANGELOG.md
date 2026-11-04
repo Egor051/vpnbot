@@ -368,6 +368,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   separately, `total=` is still never emitted, a measured zero is still reported while an
   absence is not, and no migration is involved.
 
+- **Protocol modules panel: the disable texts now match what disabling does.** The panel
+  title and the first disable confirmation said server-side accounts are not removed and
+  must be cleaned up by hand. That has not been true since disable started calling the
+  per-protocol purgers: each client's access is revoked on the backend (Xray client, AWG
+  peer, Dante user, MTProto secret), Xray/AWG/Hysteria2 keys are deleted from the DB with
+  their traffic archived, and SOCKS5/MTProto accesses are soft-deleted (no longer called a
+  hard delete). Services, interfaces, firewall/ports and shared server configs/certificates
+  are still left alone, and the texts now say so. The MTProto secret is revoked only in
+  managed mode: in static mode the record is soft-deleted but the shared `MTPROTO_SECRET`
+  keeps working, so both texts say to rotate it and restart the proxy. The final confirmation
+  no longer says all data is "permanently destroyed": it says keys are deleted, SOCKS5/MTProto
+  accesses are marked as deleted, and neither can be restored by re-enabling the protocol.
+  `ProtocolModulesService.disable_protocol`
+  returns `(deleted, failed)` instead of `deleted`, and when `failed > 0` the result message
+  carries a warning (`module_disabled_partial`): those records stay in the DB, usually in
+  `DELETE_FAILED` (`REVOKE_FAILED` for MTProto), access may persist, see `bot.log`. The
+  order of operations and the purgers themselves are unchanged.
+
 ### Security
 
 - **Four runtime dependencies bumped to clear 49 new `pip-audit` advisories.** Advisories
