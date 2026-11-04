@@ -233,11 +233,20 @@ SUBSCRIPTION_UNIT="${SUBSCRIPTION_UNIT:-vpn-bot-subscription.service}"
 # print a false "NOT listening" for a perfectly healthy service. Only ever costs
 # wall-clock on the path that was about to warn; the check stays never-fatal.
 SUBSCRIPTION_BIND_WAIT="${SUBSCRIPTION_BIND_WAIT:-30}"
+# How long Phase 2 keeps re-testing the hy2-auth loopback port (HYSTERIA2_AUTH_LISTEN)
+# after restarting that sidecar, once a second. The unit is Type=simple: it reads
+# `active` the moment the process is exec'd and binds ~2s later, so the single check
+# this replaced warned "NOT listening" on every deploy since PR #282 while `ss` showed
+# the port held two seconds on. Informational only, like SUBSCRIPTION_BIND_WAIT;
+# 0 = one check, no retry. A value that is not a whole number of seconds warns and
+# falls back to 20 (checked once the output helpers exist, below).
+HY2_AUTH_BIND_TIMEOUT="${HY2_AUTH_BIND_TIMEOUT:-20}"
 # How long Phase 2 waits for a sidecar unit it just restarted to read back as
-# `active` before calling it a regression. NOT a port/bind wait — the ~20s
-# start-to-bind window has exactly one implementation (subscription_endpoint_status)
-# and this is not it. This only absorbs the moment a just-restarted Type=simple unit
-# spends in `activating`, so a healthy restart is never misread as a failure.
+# `active` before calling it a regression. NOT a port/bind wait — the start-to-bind
+# window has exactly one implementation (wait_for_listen, used by both sidecar port
+# checks) and this is not it. This only absorbs the moment a just-restarted
+# Type=simple unit spends in `activating`, so a healthy restart is never misread as
+# a failure.
 SIDECAR_ACTIVE_WAIT="${SIDECAR_ACTIVE_WAIT:-20}"
 
 # Relay role (NODE_ROLE=relay, see the HOST ROLE block in the header). None of
@@ -368,6 +377,14 @@ log()  { printf '[deploy] %s\n' "$*"; }
 warn() { printf '[deploy][WARN] %s\n' "$*" >&2; }
 die()  { printf '[deploy][FAIL] %s\n' "$*" >&2; exit 1; }
 
+# HY2_AUTH_BIND_TIMEOUT feeds bash arithmetic, where a non-number is an error and a
+# leading zero means octal. It only tunes an informational check, so a bad value
+# must not stop the deploy: say so once, up front, and use the default.
+if ! [[ "$HY2_AUTH_BIND_TIMEOUT" =~ ^(0|[1-9][0-9]*)$ ]]; then
+  warn "HY2_AUTH_BIND_TIMEOUT='${HY2_AUTH_BIND_TIMEOUT}' is not a whole number of seconds — using the default 20"
+  HY2_AUTH_BIND_TIMEOUT=20
+fi
+
 # --------------------------------------------------------------------------- #
 # Mutable state used by traps / rollback
 # --------------------------------------------------------------------------- #
@@ -409,6 +426,10 @@ declare -A U_CLASS=() U_TARGET=() U_PRE_ACTIVE=() U_PRE_ENABLED=()
 declare -a SIDECAR_UNITS=()
 declare -A SIDECAR_PRE_ACTIVE=()
 declare -a SIDECAR_REPORT=()
+# wait_for_listen results; each caller reads them inside its own $(...).
+LISTEN_MISSING=""
+LISTEN_RETRIES=0
+LISTEN_ELAPSED=0
 # .env-derived facts, resolved once .env is readable (source of truth for backend
 # unit names + modular-protocol gates). Declared here so the report is set -u safe.
 LOG_DIR=""
@@ -1066,12 +1087,52 @@ networkd_foreign_rules_ok() {
 }
 
 # --------------------------------------------------------------------------- #
+# Start-to-bind wait — shared by the subscription and hy2-auth port checks
+# --------------------------------------------------------------------------- #
+# A Type=simple unit reads `active` the moment its process is exec'd; the process
+# holds its socket only later (~2s for hy2_auth, ~20s for the subscription
+# endpoint). This is the ONE implementation of waiting that window out — both port
+# checks call it instead of carrying a copy each.
+#
+#   wait_for_listen <timeout> <interval> <probe> [probe args...]
+#
+# <probe> prints one line per socket that is NOT listening yet (empty = all bound)
+# and returns 0. It runs once and then, only while something is still missing, again
+# after each `sleep <interval>`, at most ceil(timeout/interval) more times. The cap
+# is a retry COUNT rather than a wall-clock deadline: the longest wait on a host is
+# the same, and a test with a stubbed `sleep` ends at once instead of spinning
+# through real seconds. timeout 0 = a single probe.
+#
+# Results, read by the caller (which runs inside its own $(...)):
+#   LISTEN_MISSING  the last probe output (empty = everything bound)
+#   LISTEN_RETRIES  re-tests that ran (0 = settled on the first probe)
+#   LISTEN_ELAPSED  measured wall-clock seconds from the first probe to the last
+# Returns 0 iff everything is bound.
+wait_for_listen() {
+  local timeout="$1" interval="$2" start
+  shift 2
+  start=$SECONDS
+  LISTEN_RETRIES=0
+  LISTEN_MISSING="$("$@")"
+  # The cap is evaluated only once something is missing, so on the common
+  # already-bound path the timeout value is never even read (SUBSCRIPTION_BIND_WAIT
+  # is not validated; this keeps it exactly as exposed as before).
+  while [[ -n "$LISTEN_MISSING" ]] && (( LISTEN_RETRIES < (timeout + interval - 1) / interval )); do
+    sleep "$interval"
+    LISTEN_RETRIES=$(( LISTEN_RETRIES + 1 ))
+    LISTEN_MISSING="$("$@")"
+  done
+  LISTEN_ELAPSED=$(( SECONDS - start ))
+  [[ -z "$LISTEN_MISSING" ]]
+}
+
+# --------------------------------------------------------------------------- #
 # All-in-one subscription endpoint (informational Phase 1 check)
 # --------------------------------------------------------------------------- #
 # Which of the configured ports are NOT in the current listening set. Echoes one
-# description per missing port (empty output = everything is bound). Split out of
-# subscription_endpoint_status so the start-to-bind retry can re-run just this
-# part without re-reading .env or re-deriving the unit state.
+# description per missing port (empty output = everything is bound). The probe
+# subscription_endpoint_status hands to wait_for_listen, so the start-to-bind retry
+# re-runs just this part without re-reading .env or re-deriving the unit state.
 subscription_missing_ports() {
   local bind_host="$1" bind_port="$2" public_port="$3" listening missing=()
   # grep reads to EOF (output discarded) so an early hit cannot SIGPIPE `ss`
@@ -1096,7 +1157,7 @@ subscription_missing_ports() {
 # trap out of it under `set -e`. tests/test_deploy_subscription_bind_wait.py drives
 # that exact idiom and asserts execution continues past it.
 subscription_endpoint_status() {
-  local enabled bind_host bind_port public_port states active missing deadline waited=0
+  local enabled bind_host bind_port public_port states active wait_s=0
   enabled="$(env_val SUBSCRIPTION_ENABLED)"
   if ! is_true "$enabled"; then
     echo "SUBSCRIPTION_ENABLED is not true — endpoint intentionally inert (INFO)"; return 0
@@ -1112,31 +1173,23 @@ subscription_endpoint_status() {
   if ! command -v ss >/dev/null 2>&1; then
     echo "${SUBSCRIPTION_UNIT} ${states}; listening state UNKNOWN (ss not found)"; return 0
   fi
-  missing="$(subscription_missing_ports "$bind_host" "$bind_port" "$public_port")"
   # Start-to-bind tolerance: the process needs ~20s to import services.xray +
   # bot.formatters before it binds, so an ACTIVE unit with no socket yet is the
-  # normal look of a service that was just (re)started — not a fault. Re-test for
-  # up to SUBSCRIPTION_BIND_WAIT seconds before saying anything. Gated on the unit
-  # being active: a failed/inactive unit is never going to bind, so waiting on it
-  # would only make the report slower and no more truthful.
+  # normal look of a service that was just (re)started — not a fault. Re-test every
+  # 2s for up to SUBSCRIPTION_BIND_WAIT seconds before saying anything. Gated on the
+  # unit being active: a failed/inactive unit is never going to bind, so waiting on
+  # it would only make the report slower and no more truthful.
   active="$(systemctl show -p ActiveState --value "$SUBSCRIPTION_UNIT" 2>/dev/null || true)"
-  if [[ -n "$missing" && "$active" == "active" && "${SUBSCRIPTION_BIND_WAIT}" -gt 0 ]]; then
-    deadline=$(( SECONDS + SUBSCRIPTION_BIND_WAIT ))
-    while [[ -n "$missing" ]] && (( SECONDS < deadline )); do
-      sleep 2
-      waited=1
-      missing="$(subscription_missing_ports "$bind_host" "$bind_port" "$public_port")"
-    done
-  fi
-  if [[ -n "$missing" ]]; then
+  [[ "$active" == "active" ]] && wait_s="$SUBSCRIPTION_BIND_WAIT"
+  if ! wait_for_listen "$wait_s" 2 subscription_missing_ports "$bind_host" "$bind_port" "$public_port"; then
     # Entries contain spaces ("127.0.0.1:8445 (loopback)"), so join by line, never
     # by word-splitting the blob.
     local -a missing_list=()
-    mapfile -t missing_list <<< "$missing"
-    echo "${SUBSCRIPTION_UNIT} ${states}, but NOT listening on: ${missing_list[*]}$( ((waited)) && printf ' (still absent after %ss — the ~20s start-to-bind window has passed)' "$SUBSCRIPTION_BIND_WAIT")"
+    mapfile -t missing_list <<< "$LISTEN_MISSING"
+    echo "${SUBSCRIPTION_UNIT} ${states}, but NOT listening on: ${missing_list[*]}$( ((LISTEN_RETRIES)) && printf ' (still absent after %ss — the ~20s start-to-bind window has passed)' "$SUBSCRIPTION_BIND_WAIT")"
     return 1
   fi
-  echo "${SUBSCRIPTION_UNIT} ${states}, listening on ${bind_host}:${bind_port}$([[ "$public_port" != "0" ]] && printf ' and :%s' "$public_port")$( ((waited)) && printf ' (bound while waiting out the ~20s start-to-bind delay)')"
+  echo "${SUBSCRIPTION_UNIT} ${states}, listening on ${bind_host}:${bind_port}$([[ "$public_port" != "0" ]] && printf ' and :%s' "$public_port")$( ((LISTEN_RETRIES)) && printf ' (bound after %ss, ~20s start-to-bind delay)' "$LISTEN_ELAPSED")"
   return 0
 }
 
@@ -1187,13 +1240,27 @@ snapshot_sidecar_units() {
   done
 }
 
+# Probe for wait_for_listen: prints "<host>:<port>" while nothing listens on <port>.
+hy2_auth_missing_port() {
+  local host="$1" port="$2" listening
+  # grep reads to EOF (output discarded) so an early hit cannot SIGPIPE `ss`
+  # under pipefail and make a held port look absent.
+  listening="$(ss -tln 2>/dev/null || true)"
+  printf '%s\n' "$listening" | grep -E "[^0-9]${port}[[:space:]]" >/dev/null || printf '%s:%s\n' "$host" "$port"
+  return 0
+}
+
 # Post-restart liveness for the hy2-auth sidecar: is the loopback auth port
-# actually held? Deliberately thinner than the subscription check — hy2_auth binds
-# straight away (it does not import bot.formatters), so there is no start-to-bind
-# window to wait out. Informational exactly like subscription_endpoint_status:
-# echoes one phrase, returns 0 (fine) / 1 (worth an operator's eye), never fatal.
+# actually held? Called only once wait_unit_active has read the unit back as
+# `active` — which for this Type=simple unit means "exec'd", not "bound". hy2_auth
+# needs ~2s more to hold its socket (no bot.formatters import, so far less than the
+# subscription endpoint's ~20s, but not zero: the single check that used to sit
+# here warned on every deploy). So the port is re-tested once a second for up to
+# HY2_AUTH_BIND_TIMEOUT through the same wait_for_listen as the subscription check.
+# Informational exactly like subscription_endpoint_status: echoes one phrase,
+# returns 0 (fine) / 1 (worth an operator's eye), never fatal.
 hy2_auth_listen_status() {
-  local listen host port listening
+  local listen host port
   listen="$(env_or HYSTERIA2_AUTH_LISTEN 127.0.0.1:8444)"
   [[ "$listen" == *:* ]] || listen="127.0.0.1:${listen}"
   port="${listen##*:}"
@@ -1203,13 +1270,12 @@ hy2_auth_listen_status() {
   if ! command -v ss >/dev/null 2>&1; then
     echo "listening state UNKNOWN (ss not found)"; return 0
   fi
-  # grep reads to EOF (output discarded) so an early hit cannot SIGPIPE `ss`
-  # under pipefail and make a held port look absent.
-  listening="$(ss -tln 2>/dev/null || true)"
-  if printf '%s\n' "$listening" | grep -E "[^0-9]${port}[[:space:]]" >/dev/null; then
-    echo "listening on ${host}:${port}"; return 0
+  if wait_for_listen "$HY2_AUTH_BIND_TIMEOUT" 1 hy2_auth_missing_port "$host" "$port"; then
+    echo "listening on ${host}:${port}$( ((LISTEN_RETRIES)) && printf ' (bound after %ss)' "$LISTEN_ELAPSED")"
+    return 0
   fi
-  echo "NOT listening on ${host}:${port}"; return 1
+  echo "NOT listening on ${host}:${port}$( ((HY2_AUTH_BIND_TIMEOUT > 0)) && printf ' within %ss' "$HY2_AUTH_BIND_TIMEOUT")"
+  return 1
 }
 
 # Poll ActiveState until it reads `active`, for up to $2 seconds. Echoes the final
@@ -1276,10 +1342,11 @@ restart_sidecar_units() {
     restarted+=("$u")
 
     if [[ "$u" == "$SUBSCRIPTION_UNIT" ]]; then
-      # Reuse the Phase 1 check verbatim, start-to-bind retry included — there is
-      # exactly one implementation of that ~20s wait and this call is it.
+      # Reuse the Phase 1 check verbatim, start-to-bind retry included.
       msg="$(subscription_endpoint_status)" && mrc=0 || mrc=$?
     else
+      # Waits out hy2_auth's own (~2s) start-to-bind window, up to
+      # HY2_AUTH_BIND_TIMEOUT. Both checks share wait_for_listen.
       msg="$(hy2_auth_listen_status)" && mrc=0 || mrc=$?
     fi
     if (( mrc == 0 )); then

@@ -211,11 +211,24 @@ sudo bash scripts/redeploy.sh
 
 # FORCE=1 redeploys even when HEAD already equals origin/main:
 sudo FORCE=1 bash scripts/redeploy.sh
+
+# deploy.sh gate bypasses and tuning knobs go on the same command line, after sudo:
+sudo ALLOW_BACKEND_CONFIG_DRIFT=1 bash scripts/redeploy.sh
 ```
 
-`CHECK=1` maps to `deploy.sh`'s `PHASE1_ONLY=1`; `FORCE=1` is passed through. The wrapper
-does **not** touch the out-of-repo `/usr/local/sbin` helpers — `deploy.sh` refreshes those
-itself in Phase 2 (see below), so a plain redeploy keeps them in sync with the checkout.
+`CHECK=1` maps to `deploy.sh`'s `PHASE1_ONLY=1`; `FORCE=1` is passed through. `deploy.sh` runs
+under `systemd-run`, which does not inherit the caller's environment, so the wrapper forwards
+an explicit allowlist (`DEPLOY_ENV_PASSTHROUGH` in `scripts/redeploy.sh`): every `ALLOW_*` gate
+bypass `deploy.sh` reads (`ALLOW_MODEL_SWITCH`, `ALLOW_UNIT_DRIFT`, `ALLOW_BACKEND_CONFIG_DRIFT`,
+`ALLOW_SCHEMA_DOWNGRADE`) plus `SCHEMA_WAIT_TIMEOUT` and `HY2_AUTH_BIND_TIMEOUT`, each only when
+it is set and non-empty. An `ALLOW_*` the wrapper does not know — a typo, or a new flag missing
+from the list — stops it before it does anything, with the accepted names. The `deploy.sh env:`
+line of its output names every forwarded variable, so a `CHECK=1` run already shows whether a
+flag will reach the real deploy too. Put the variables after `sudo`: in `ALLOW_X=1 sudo bash …`
+sudo's environment reset drops them.
+
+The wrapper does **not** touch the out-of-repo `/usr/local/sbin` helpers — `deploy.sh` refreshes
+those itself in Phase 2 (see below), so a plain redeploy keeps them in sync with the checkout.
 
 <details><summary>Under the hood / no-wrapper fallback</summary>
 
@@ -229,7 +242,17 @@ sudo systemd-run --unit=vpn-bot-deploy --collect --pty \
   env bash -c "bash /tmp/deploy.sh 2>&1 | tee /root/deploy-$(date -u +%Y%m%dT%H%M%SZ).log"
 ```
 
-Pass `env PHASE1_ONLY=1` / `env FORCE=1` to `systemd-run` for the inspection/force variants.
+For the inspection/force variants and any `deploy.sh` knob, put the assignments right after
+`env` on the `systemd-run` line — `env PHASE1_ONLY=1`, `env FORCE=1`, `env ALLOW_X=1`:
+
+```bash
+sudo systemd-run --unit=vpn-bot-deploy --collect --pty \
+  env ALLOW_BACKEND_CONFIG_DRIFT=1 bash -c "bash /tmp/deploy.sh 2>&1 | tee /root/deploy-$(date -u +%Y%m%dT%H%M%SZ).log"
+```
+
+This is also the fallback when the wrapper cannot forward a flag. The `redeploy.sh` that runs is
+the one in the checkout, not the one on `origin/main`, so a host still on a commit from before
+the allowlist forwards `CHECK`/`FORCE` only.
 </details>
 
 > **Mandatory first step on a new host — `CHECK=1` (`PHASE1_ONLY=1`).** Before the
