@@ -11,14 +11,15 @@ The name is display-only. ``email_label`` — Xray's client email, the hy2 auth
 id, the key the traffic stats and anomaly detection match on — is never
 changed; the name is derived from it at render time.
 
-Rules (``[_<relay label>]`` is present only for a relay key, and is the
-``label`` of its relay as the admin panel set it — ``relay`` by default):
+Rules (``[<relay label>]`` is present only for a relay key, and is the
+``label`` of its relay as the admin panel set it — ``relay`` by default; it is
+followed by the flag/circle directly, with no ``_`` of its own):
 
 * standalone key (link / QR / delivery outside a subscription):
-  ``<label>[_<relay label>]_<SERVER_FLAG_EMOJI>`` — e.g. ``xray_tcp_ab12c_🇫🇮``
-  or ``xray_tcp_ab12c_relay_🇫🇮``;
+  ``<label>_[<relay label>]<SERVER_FLAG_EMOJI>`` — e.g. ``xray_tcp_ab12c_🇫🇮``
+  or, with the relay label ``🇷🇺➜``, ``xray_tcp_ab12c_🇷🇺➜🇫🇮``;
 * member of a **basic** subscription: the same as a standalone key;
-* member of an **extended** subscription: ``<label>[_<relay label>]_<mark>``,
+* member of an **extended** subscription: ``<label>_[<relay label>]<mark>``,
   where the mark is the preference circle of the member (no flag). A relay member
   gets the circle of its direct twin, because the circle is keyed by
   transport/profile.
@@ -141,8 +142,12 @@ def key_display_name(key: VpnKey, style: NameStyle, settings: Settings, relays: 
     label = key_label(key)
     if not label:
         return ""
-    base = f"{label}_{relay_marker(relays, key.relay)}" if key.relay else label
     if style is NameStyle.EXTENDED:
-        mark = PREFERENCE_MARKS.get(key_member_name(key))
-        return f"{base}_{mark}" if mark else base
-    return f"{base}_{settings.server_flag_emoji}"
+        tail = PREFERENCE_MARKS.get(key_member_name(key), "")
+    else:
+        tail = settings.server_flag_emoji
+    if key.relay:
+        # No "_" between the relay's marker and the flag/circle: the admin writes
+        # a separator into the marker when they want one (``🇷🇺➜``, ``ru_``).
+        return f"{label}_{relay_marker(relays, key.relay)}{tail}"
+    return f"{label}_{tail}" if tail else label

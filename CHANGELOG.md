@@ -274,6 +274,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **A relay's label (the marker in key names) takes emoji and any characters, and is glued to
+  the flag.** «✏️ Метка» and the «Добавить relay» wizard now accept 1–16 characters on one
+  line with no control characters — `🇷🇺➜`, `➜`, `ru_`, `Москва` — instead of
+  `^[a-z0-9-]{1,16}$`. The name no longer puts `_` between the relay's label and the
+  flag/circle: `<label>_<relay label><flag|circle>`, so the label `🇷🇺➜` gives
+  `xray_tcp_ab12c_🇷🇺➜🇫🇮` (extended subscription: `…_🇷🇺➜🟢`). A separator, if wanted, is part
+  of the label (`ru_` gives `…_ru_🇫🇮`). **Existing relay keys change their name**: with an
+  unchanged label `relay` the name reads `xray_tcp_ab12c_relay🇫🇮`; subscriptions pick it up on
+  the next fetch, standalone links after re-import. Direct keys are unchanged
+  (`<label>_<flag>`). The wizard's error replies now HTML-escape the value they echo back, so
+  a typed `<`/`&` no longer makes Telegram refuse the reply.
+
 - **`RELAY_ENABLED` / `RELAY_NAME` / `RELAY_HOST` / `RELAY_SOURCE_IPS` are no longer a
   source of truth.** On bot startup, if the `relays` table is empty and `.env` has
   `RELAY_ENABLED=true` with a host and source IPs, that relay is seeded once (name

@@ -296,7 +296,7 @@ async def test_v37_upgrade_keeps_relay_keys_and_the_seed_adopts_them(
         links = render_links(view, _settings(tmp_path))
         assert len(links) == 2
         assert DIRECT_HOST in links[0] and RELAY_HOST in links[1]
-        assert _fragment(links[1]) == f"xray_tcp_Ii999_relay_{FLAG}"
+        assert _fragment(links[1]) == f"xray_tcp_Ii999_relay{FLAG}"
     finally:
         await db.close()
 
@@ -432,9 +432,13 @@ async def test_create_normalizes_and_audits(world: _World) -> None:
         ("source_ips", "198.51.100.7/24", "err_relay_source_ips_invalid"),
         ("source_ips", "2001:db8::1", "err_relay_source_ips_invalid"),
         ("label", "", "err_relay_label_invalid"),
-        ("label", "Relay", "err_relay_label_invalid"),
+        ("label", "   ", "err_relay_label_invalid"),
         ("label", "r" * 17, "err_relay_label_invalid"),
-        ("label", "re lay", "err_relay_label_invalid"),
+        ("label", "🇷🇺" * 9, "err_relay_label_invalid"),  # 18 code points
+        ("label", "re\nlay", "err_relay_label_invalid"),
+        ("label", "re\tlay", "err_relay_label_invalid"),
+        ("label", "re\u2028lay", "err_relay_label_invalid"),
+        ("label", "re\x7flay", "err_relay_label_invalid"),
         ("note", "two\nlines", "err_relay_note_invalid"),
         ("note", "x" * 300, "err_relay_note_invalid"),
     ],
@@ -459,12 +463,39 @@ async def test_edits_are_validated_too(world: _World) -> None:
     for kwargs, key in (
         ({"host": "::1"}, "err_relay_host_invalid"),
         ({"source_ips": ""}, "err_relay_source_ips_required"),
-        ({"label": "BAD"}, "err_relay_label_invalid"),
+        ({"label": "r" * 17}, "err_relay_label_invalid"),
     ):
         with pytest.raises(InvalidOperation) as excinfo:
             await world.relays.update(ADMIN, relay.id, **kwargs)
         assert excinfo.value.key == key
     assert await world.relay_repo.get_by_id(relay.id) == relay
+
+
+@pytest.mark.parametrize(
+    ("typed", "stored"),
+    [
+        ("🇷🇺➜", "🇷🇺➜"),
+        ("➜", "➜"),
+        ("  🇷🇺 ➜  ", "🇷🇺 ➜"),  # surrounding whitespace is trimmed, inner kept
+        ("ru_", "ru_"),
+        ("Relay", "Relay"),
+        ("Москва", "Москва"),
+        ("a<b>&c", "a<b>&c"),
+        ("🏴\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f", "🏴\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"),
+        ("👨\u200d👩\u200d👧", "👨\u200d👩\u200d👧"),  # ZWJ sequence
+        ("r" * 16, "r" * 16),
+    ],
+)
+async def test_labels_take_emoji_and_any_symbols(world: _World, typed: str, stored: str) -> None:
+    relay = await world.add_relay(label=typed)
+    assert relay.label == stored
+    stored_row = await world.relay_repo.get_by_id(relay.id)
+    assert stored_row is not None and stored_row.label == stored
+    # The edit path takes the same values.
+    await world.relays.update(ADMIN, relay.id, label="tmp")
+    other = await world.add_relay("ru2", label="b", host="b.example.net", source_ips="198.51.100.8")
+    updated = await world.relays.update(ADMIN, other.id, label=typed)
+    assert updated.relay.label == stored
 
 
 async def test_names_and_labels_are_unique(world: _World) -> None:
@@ -841,9 +872,9 @@ async def test_label_change_renames_relay_keys_at_once(world: _World) -> None:
     await world.relays.update(ADMIN, relay.id, label="spb")
     vless = await world.vpn_keys.get_by_id(estate["vless"].id)
     assert vless is not None
-    assert _fragment(world.xray.connection_link(vless)) == f"{vless.email_label}_spb_{FLAG}"
+    assert _fragment(world.xray.connection_link(vless)) == f"{vless.email_label}_spb{FLAG}"
     names = [_fragment(link) for link in render_links(await world.view(estate["bundle"].bundle.id), world.settings)]
-    assert sum("_spb_" in name for name in names) == 2
+    assert sum(name.endswith(f"_spb{FLAG}") for name in names) == 2
 
 
 async def test_an_ipv4_host_outside_the_source_ips_is_suggested(world: _World) -> None:
@@ -875,9 +906,11 @@ async def test_two_relays_subscription_is_grouped_in_relay_order(world: _World) 
     assert all("a.example.net" in link for link in links[5:10])
     assert all("b.example.net" in link for link in links[10:])
     names = [_fragment(link) for link in links]
-    assert all("_a_" in name for name in names[5:10]) and all("_b_" in name for name in names[10:])
+    assert all(name[:-1].endswith("_a") for name in names[5:10])
+    assert all(name[:-1].endswith("_b") for name in names[10:])
     # Each group carries the direct twins' circles in the same order.
-    assert [n.rsplit("_", 1)[1] for n in names[5:10]] == [n.rsplit("_", 1)[1] for n in names[:5]]
+    assert [n[-1] for n in names[5:10]] == [n[-1] for n in names[:5]]
+    assert [n[-1] for n in names[10:]] == [n[-1] for n in names[:5]]
     # The bot's «Состав» preview sorts the same way.
     snapshot = world.catalog.snapshot
     ordered = sorted(result.keys, key=lambda key: subscription_sort_key(key, snapshot))
@@ -1198,6 +1231,48 @@ async def test_add_wizard_dns_host_and_typed_label(world: _World, panel_services
     await panel.relay_add_confirm(_Callback("admin:relay:add:confirm"), state, panel_services)  # type: ignore[arg-type]
     created = await world.relay_repo.get_by_name("ru2")
     assert created is not None and created.label == "msk"
+
+
+async def test_add_wizard_takes_an_emoji_label(world: _World, panel_services: Any) -> None:
+    state = _State()
+    await panel.relay_add_start(_Callback("admin:relay:add"), state, panel_services)  # type: ignore[arg-type]
+    await panel.relay_add_name(_Message("ru1"), state, panel_services)  # type: ignore[arg-type]
+    await panel.relay_add_host(_Message(NEW_HOST), state, panel_services)  # type: ignore[arg-type]
+    await panel.relay_add_source_ips(_Message("198.51.100.20"), state, panel_services)  # type: ignore[arg-type]
+    label = _Message("🇷🇺➜")
+    await panel.relay_add_label(label, state, panel_services)  # type: ignore[arg-type]
+    assert state.state == AdminRelayStates.add_confirm
+    assert "<code>🇷🇺➜</code>" in label.last_text
+    confirm = _Callback("admin:relay:add:confirm")
+    await panel.relay_add_confirm(confirm, state, panel_services)  # type: ignore[arg-type]
+    created = await world.relay_repo.get_by_name("ru1")
+    assert created is not None and created.label == "🇷🇺➜"
+    assert t("relay_created", label="🇷🇺➜") in confirm.message.last_text
+
+
+async def test_a_rejected_label_is_echoed_html_escaped(world: _World, panel_services: Any) -> None:
+    """The reply is HTML: a label holding < or & must not break it."""
+    relay = await world.add_relay(label="<ru>&")
+    second = await world.add_relay("ru2", label="b", host="b.example.net", source_ips="198.51.100.8")
+    state = _State()
+    start = _Callback(f"admin:relay:{second.id}:edit:label")
+    await panel.relay_edit_start(start, state, panel_services)  # type: ignore[arg-type]
+    taken = _Message("<ru>&")
+    await panel.relay_edit_label(taken, state, panel_services)  # type: ignore[arg-type]
+    assert state.state == AdminRelayStates.edit_label
+    assert t("err_relay_label_taken", value="&lt;ru&gt;&amp;") in taken.last_text
+    assert "<ru>" not in taken.last_text
+    bad = _Message("<b>" + "x" * 20)
+    await panel.relay_edit_label(bad, state, panel_services)  # type: ignore[arg-type]
+    assert t("err_relay_label_invalid", value="&lt;b&gt;" + "x" * 20) in bad.last_text
+    # A valid one goes through and the card shows it escaped.
+    ok = _Message("🇷🇺➜<")
+    await panel.relay_edit_label(ok, state, panel_services)  # type: ignore[arg-type]
+    assert state.state is None
+    assert "<code>🇷🇺➜&lt;</code>" in ok.last_text
+    stored = await world.relay_repo.get_by_id(second.id)
+    assert stored is not None and stored.label == "🇷🇺➜<"
+    assert (await world.relay_repo.get_by_id(relay.id)) == relay
 
 
 async def test_edit_host_shows_the_reimport_notice_and_the_source_ip_offer(

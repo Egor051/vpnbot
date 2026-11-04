@@ -426,7 +426,9 @@ async def test_extended_to_basic_with_relay_creates_relay_members_and_deletes_xh
     links = await world.links(bundle.id)
     assert len(links) == 4
     assert [_host(link) for link in links] == [DIRECT_HOST, DIRECT_HOST, RELAY_HOST, RELAY_HOST]
-    assert all(_fragment(link).endswith(f"_{FLAG}") for link in links)
+    assert all(_fragment(link).endswith(f"_{FLAG}") for link in links[:2])
+    # The relay's label (default "relay") is glued to the flag.
+    assert all(_fragment(link).endswith(f"_relay{FLAG}") for link in links[2:])
 
 
 async def test_top_up_of_a_basic_bundle_only_adds_the_relay_members(world: _World) -> None:
