@@ -24,6 +24,7 @@ from bot.bundles import (
     bundle_stats_block,
     subscription_url,
 )
+from bot.availability import FULL_AVAILABILITY
 from bot.formatters import bundle_card_text
 from bot.fsm.states import CreateKeyStates, EditFpStates, EditNoteStates
 from bot.handlers.key_bundles import (
@@ -49,6 +50,7 @@ from bot.handlers.keys import (
     list_keys,
 )
 from bot.keyboards.key_bundles import bundle_actions_keyboard
+from bot.protocol_texts import bundle_kind_description
 from bot.rate_limit import RateLimiter
 from i18n import t, use_locale
 from models.dto import KeyBundle, KeyTrafficStatsView, TrafficStats, User, VpnKey
@@ -71,6 +73,8 @@ def _settings(**overrides: object) -> SimpleNamespace:
         hysteria2_host="203.0.113.10",
         hysteria2_enabled=True,
         xray_xhttp_enabled=True,
+        socks5_enabled=False,
+        mtproto_enabled=False,
         key_max_trial_days=30,
         server_flag_emoji="🇫🇮",
     )
@@ -684,7 +688,9 @@ def test_create_confirm_calls_the_bundle_service_and_shows_the_card() -> None:
 def test_create_confirm_screen_names_the_bundle_and_its_expiry() -> None:
     from bot.bundles import bundle_create_confirm_text
 
-    text = bundle_create_confirm_text("phone", expires_at="2030-01-01T00:00:00+00:00")
+    text = bundle_create_confirm_text(
+        "phone", expires_at="2030-01-01T00:00:00+00:00", available=FULL_AVAILABILITY
+    )
 
     assert t("bundle_create_confirm_title") in text
     assert t("bundle_type_label") in text
@@ -733,6 +739,7 @@ def test_created_screen_says_so_when_no_public_endpoint_is_configured() -> None:
         _create_result((_key(1),)),
         viewer_user_id=OWNER,
         settings=_settings(subscription_public_port=0),
+        available=FULL_AVAILABILITY,
     )
 
     assert t("bundle_config_unavailable") in text
@@ -742,7 +749,7 @@ def test_created_screen_says_so_when_no_public_endpoint_is_configured() -> None:
 def test_created_screen_carries_the_same_secret_warning_as_the_config_screen() -> None:
     """The link is a credential wherever it is shown, so the warning travels with it."""
     text = bundle_created_text(  # type: ignore[arg-type]
-        _create_result((_key(1),)), viewer_user_id=OWNER, settings=_settings()
+        _create_result((_key(1),)), viewer_user_id=OWNER, settings=_settings(), available=FULL_AVAILABILITY
     )
 
     assert f"https://anycastedge.duckdns.org:2096/sub/{TOKEN}" in text
@@ -753,7 +760,9 @@ def test_created_screen_carries_the_same_secret_warning_as_the_config_screen() -
 def test_partial_provisioning_names_what_actually_went_in_and_what_did_not() -> None:
     result = _create_result((_key(1),), skipped=(BundleMember(VpnKeyType.HYSTERIA2),))
 
-    text = bundle_created_text(result, viewer_user_id=OWNER, settings=_settings())  # type: ignore[arg-type]
+    text = bundle_created_text(  # type: ignore[arg-type]
+        result, viewer_user_id=OWNER, settings=_settings(), available=FULL_AVAILABILITY
+    )
 
     assert "VLESS (TCP)" in text
     # The omission is spelled out rather than silently missing from the list.
@@ -840,7 +849,7 @@ def test_composition_is_listed_in_the_order_the_subscription_serves_it() -> None
         _key(5, transport="http", xhttp_profile="multi"),
     ]
 
-    text = bundle_detail_text(_bundle(), keys, viewer_user_id=OWNER)
+    text = bundle_detail_text(_bundle(), keys, viewer_user_id=OWNER, available=FULL_AVAILABILITY)
     listed = [line for line in text.splitlines() if line.startswith("• ")]
 
     assert listed == [
@@ -872,14 +881,14 @@ def test_bundle_card_shows_the_shared_expiry_of_its_children() -> None:
 
     expiring = dataclasses.replace(_key(1), expires_at="2030-01-01T00:00:00+00:00")
 
-    text = bundle_detail_text(_bundle(), [expiring], viewer_user_id=OWNER)
+    text = bundle_detail_text(_bundle(), [expiring], viewer_user_id=OWNER, available=FULL_AVAILABILITY)
 
     assert t("field_expires") in text
 
 
 def test_bundle_with_no_children_says_so_instead_of_showing_empty_stats() -> None:
     assert t("bundle_stats_empty") in "\n".join(bundle_stats_block([]))
-    assert t("none") in bundle_detail_text(_bundle(), [], viewer_user_id=OWNER)
+    assert t("none") in bundle_detail_text(_bundle(), [], viewer_user_id=OWNER, available=FULL_AVAILABILITY)
 
 
 def test_bundle_card_says_so_when_no_traffic_could_be_read_at_all() -> None:
@@ -948,7 +957,7 @@ def test_config_screen_shows_the_url_and_keeps_the_token_out_of_the_log(
 
 
 def test_config_screen_says_so_when_no_public_endpoint_is_configured() -> None:
-    text = bundle_config_text(_bundle(), _settings(subscription_public_port=0))  # type: ignore[arg-type]
+    text = bundle_config_text(_bundle(), _settings(subscription_public_port=0), FULL_AVAILABILITY)  # type: ignore[arg-type]
 
     assert t("bundle_config_unavailable") in text
     assert TOKEN not in text
@@ -1108,10 +1117,10 @@ def test_awg_is_explained_on_every_bundle_surface(locale: str) -> None:
         assert "AmneziaWG" in note
         assert note != "bundle_awg_separate"
 
-        assert note in bundle_detail_text(_bundle(), [_key(1)], viewer_user_id=OWNER)
-        assert note in bundle_config_text(_bundle(), _settings())  # type: ignore[arg-type]
+        assert note in bundle_detail_text(_bundle(), [_key(1)], viewer_user_id=OWNER, available=FULL_AVAILABILITY)
+        assert note in bundle_config_text(_bundle(), _settings(), FULL_AVAILABILITY)  # type: ignore[arg-type]
         assert note in bundle_created_text(  # type: ignore[arg-type]
-            _create_result((_key(1),)), viewer_user_id=OWNER, settings=_settings()
+            _create_result((_key(1),)), viewer_user_id=OWNER, settings=_settings(), available=FULL_AVAILABILITY
         )
 
         # …but NOT on the «My keys» card: there the question "why is there no
@@ -1126,8 +1135,8 @@ def test_awg_is_explained_on_every_bundle_surface(locale: str) -> None:
 def test_bundle_note_is_hidden_from_a_viewer_who_is_not_the_owner() -> None:
     bundle = _bundle(note="my phone")
 
-    assert "my phone" in bundle_detail_text(bundle, [], viewer_user_id=OWNER)
-    assert "my phone" not in bundle_detail_text(bundle, [], viewer_user_id=OWNER + 1)
+    assert "my phone" in bundle_detail_text(bundle, [], viewer_user_id=OWNER, available=FULL_AVAILABILITY)
+    assert "my phone" not in bundle_detail_text(bundle, [], viewer_user_id=OWNER + 1, available=FULL_AVAILABILITY)
 
 
 # ── 9. the note wizard is the SAME FSM the per-key flow uses ──────────────────
@@ -1238,7 +1247,7 @@ def test_all_in_one_choice_shows_the_awg_notice_before_the_wizard() -> None:
 
     async def run() -> None:
         callback = _Callback("keys:create:bundle")
-        await create_key_choose_bundle(callback, _services())  # type: ignore[arg-type]
+        await create_key_choose_bundle(callback, _State(), _services())  # type: ignore[arg-type]
 
         assert callback.message.last_text == t("bundle_awg_separate")
         assert _callbacks(callback.message.last_markup) == ["keys:create:bundle:ack"]
@@ -1258,7 +1267,8 @@ def test_acknowledging_the_notice_offers_the_kind_choice() -> None:
         assert state.state == CreateKeyStates.waiting_bundle_kind
         assert state.data["key_type"] == "bundle"
         text = callback.message.last_text
-        assert t("bundle_kind_basic_desc") in text and t("bundle_kind_extended_desc") in text
+        assert bundle_kind_description(KeyBundleKind.BASIC, FULL_AVAILABILITY) in text
+        assert bundle_kind_description(KeyBundleKind.EXTENDED, FULL_AVAILABILITY) in text
         # No relay configured → no mention of relay copies.
         assert t("bundle_kind_relay_note") not in text
         assert _callbacks(callback.message.last_markup) == [
@@ -1312,7 +1322,7 @@ def test_choosing_a_kind_starts_the_note_step_and_reaches_the_service() -> None:
         assert state.data["bundle_kind"] == "basic"
         assert t("key_note_prompt") in callback.message.last_text
 
-        confirm_text = _create_confirm_screen(state.data, None)
+        confirm_text = _create_confirm_screen(state.data, None, FULL_AVAILABILITY)
         assert f"{t('field_bundle_kind')}: {t('bundle_kind_basic')}" in confirm_text
 
         confirm = _Callback("create:confirm")
@@ -1333,7 +1343,7 @@ def test_the_awg_notice_step_is_refused_while_the_flag_is_off() -> None:
     async def run() -> None:
         services = _services(settings=_settings(subscription_enabled=False))
         callback = _Callback("keys:create:bundle")
-        await create_key_choose_bundle(callback, services)  # type: ignore[arg-type]
+        await create_key_choose_bundle(callback, _State(), services)  # type: ignore[arg-type]
         ack = _Callback("keys:create:bundle:ack")
         state = _State()
         await create_key_bundle_ack(ack, state, services)  # type: ignore[arg-type]

@@ -7,7 +7,7 @@ from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, InlineKeyboardMarkup, Message
 
 from bot.formatters import (
     XHTTP_PROFILE_CHOICES,
@@ -20,6 +20,7 @@ from bot.formatters import (
     xhttp_profile_prompt,
     xray_config_text,
 )
+from bot.availability import Availability, current_availability
 from bot.bundles import (
     BUNDLE_KEY_TYPE,
     bundle_create_confirm_text,
@@ -75,6 +76,7 @@ from bot.messages import (
     send_config_with_qr,
 )
 from bot.pagination import MAX_PAGE, page_offset
+from bot.protocol_texts import bundle_awg_notice, bundle_kinds
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimiter
 from i18n import t
@@ -84,6 +86,7 @@ from models.enums import AuditEntityType, KeyBundleKind, VpnKeyType
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.key_bundles import KeyBundleCreateResult
 from services.notes import MAX_NOTE_LENGTH
+from services.protocol_availability import Protocol
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -150,36 +153,44 @@ async def create_key_menu(callback: CallbackQuery, services: Services) -> None:
         await answer_callback_error(callback, exc)
         return
     if callback.message:
-        xray_on = await services.modules.is_enabled("xray")
-        awg_on = await services.modules.is_enabled("awg")
-        hy2_on = (
-            services.settings.hysteria2_enabled
-            and services.settings.is_hysteria2_ready()
-            and await services.modules.is_enabled("hysteria2")
-        )
         back_data = "menu:main" if callback.data == "keys:create:menu" else "keys:list"
-        await safe_edit_message_text(
-            callback.message,
-            f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
-            reply_markup=create_key_keyboard(
-                xray_enabled=xray_on,
-                awg_enabled=awg_on,
-                xhttp_enabled=services.settings.xray_xhttp_enabled,
-                hysteria2_enabled=hy2_on,
-                bundle_enabled=subscription_ui_enabled(services),
-                back_data=back_data,
-            ),
-        )
+        text, markup = await create_key_menu_view(services, back_data=back_data)
+        await safe_edit_message_text(callback.message, text, reply_markup=markup)
+
+
+async def create_key_menu_view(
+    services: Services, *, back_data: str = "keys:list"
+) -> tuple[str, InlineKeyboardMarkup]:
+    """The «Создать ключ» screen as it should look right now.
+
+    One builder for every way into the menu (the menu itself and «Отмена» out of
+    the wizard), so a protocol switched off in ``.env`` or by the module toggle is
+    missing from all of them alike. Availability is read at this instant.
+    """
+    available = await current_availability(services)
+    return (
+        f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
+        create_key_keyboard(
+            xray_enabled=Protocol.XRAY in available,
+            awg_enabled=Protocol.AWG in available,
+            xhttp_enabled=Protocol.XHTTP in available,
+            hysteria2_enabled=Protocol.HYSTERIA2 in available,
+            bundle_enabled=available.bundle_offered,
+            back_data=back_data,
+        ),
+    )
 
 
 @router.callback_query(F.data == "keys:create:bundle")
-async def create_key_choose_bundle(callback: CallbackQuery, services: Services) -> None:
-    """Show the AmneziaWG notice before the all-in-one wizard starts.
+async def create_key_choose_bundle(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Start the all-in-one wizard — behind the AmneziaWG notice while AWG is offered.
 
     The set cannot carry AmneziaWG, and a user who picked «All-in-One» precisely to
-    stop juggling keys will otherwise discover that at the end. The same notice the
-    subscription's own screens carry is therefore shown up front, and continuing is
-    the acknowledgement — see :func:`create_key_bundle_ack`.
+    stop juggling keys will otherwise discover that at the end. While AmneziaWG is
+    offered the same notice the subscription's own screens carry is therefore shown
+    up front, and continuing is the acknowledgement — see
+    :func:`create_key_bundle_ack`. While it is not, there is nothing to warn about
+    and the wizard starts straight away.
     """
     if not await ensure_private_callback(callback):
         return
@@ -188,12 +199,16 @@ async def create_key_choose_bundle(callback: CallbackQuery, services: Services) 
     try:
         require_subscription_ui(services)
         await _ensure_can_enter_create(callback.from_user.id, services)
+        available = await current_availability(services)
+        if not available.bundle_offered:
+            await safe_callback_answer(callback, t("err_bundle_no_backends"), show_alert=True)
+            return
         await safe_callback_answer(callback)
-        await safe_edit_message_text(
-            callback.message,
-            t("bundle_awg_separate"),
-            reply_markup=bundle_awg_ack_keyboard(),
-        )
+        notice = bundle_awg_notice(available)
+        if notice is None:
+            await _enter_bundle_wizard(callback.message, state, services, available)
+            return
+        await safe_edit_message_text(callback.message, notice, reply_markup=bundle_awg_ack_keyboard())
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -214,22 +229,37 @@ async def create_key_bundle_ack(callback: CallbackQuery, state: FSMContext, serv
     try:
         require_subscription_ui(services)
         await _ensure_can_enter_create(callback.from_user.id, services)
+        available = await current_availability(services)
+        if not available.bundle_offered:
+            await safe_callback_answer(callback, t("err_bundle_no_backends"), show_alert=True)
+            return
         await safe_callback_answer(callback)
-        await state.set_state(CreateKeyStates.waiting_bundle_kind)
-        await state.update_data(
-            key_type=BUNDLE_KEY_TYPE,
-            transport="tcp",
-            cancel_target="keys:create",
-        )
-        await safe_edit_message_text(
-            callback.message,
-            bundle_kind_prompt(
-                relay_labels=[relay.label for relay in services.relays.snapshot.for_subscriptions]
-            ),
-            reply_markup=bundle_kind_keyboard(),
-        )
+        await _enter_bundle_wizard(callback.message, state, services, available)
     except Exception as exc:
         await answer_callback_error(callback, exc)
+
+
+async def _enter_bundle_wizard(
+    message: Message | InaccessibleMessage | None,
+    state: FSMContext,
+    services: Services,
+    available: Availability,
+) -> None:
+    """Open the kind step of the all-in-one wizard (shared by both entry points)."""
+    await state.set_state(CreateKeyStates.waiting_bundle_kind)
+    await state.update_data(
+        key_type=BUNDLE_KEY_TYPE,
+        transport="tcp",
+        cancel_target="keys:create",
+    )
+    await safe_edit_message_text(
+        message,
+        bundle_kind_prompt(
+            available,
+            relay_labels=[relay.label for relay in services.relays.snapshot.for_subscriptions],
+        ),
+        reply_markup=bundle_kind_keyboard(bundle_kinds(available)),
+    )
 
 
 @router.callback_query(
@@ -272,11 +302,15 @@ async def create_key_proto_vless(callback: CallbackQuery, services: Services) ->
         return
     try:
         await _ensure_can_enter_create(callback.from_user.id, services)
+        available = await current_availability(services)
+        if Protocol.XRAY not in available:
+            await safe_callback_answer(callback, t("protocol_unavailable"), show_alert=True)
+            return
         await safe_callback_answer(callback)
         await safe_edit_message_text(
             callback.message,
             t("choose_vless_transport"),
-            reply_markup=vless_transport_keyboard(xhttp_enabled=services.settings.xray_xhttp_enabled),
+            reply_markup=vless_transport_keyboard(xhttp_enabled=Protocol.XHTTP in available),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -594,7 +628,7 @@ async def create_key_expiry(callback: CallbackQuery, state: FSMContext, services
         from bot.keyboards.common import confirm_cancel_keyboard
         await safe_edit_message_text(
             callback.message,
-            _create_confirm_screen(data, expires_at),
+            _create_confirm_screen(data, expires_at, await current_availability(services)),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -642,7 +676,7 @@ async def create_key_custom_days(message: Message, state: FSMContext, services: 
         data = await state.get_data()
         from bot.keyboards.common import confirm_cancel_keyboard
         await message.answer(
-            _create_confirm_screen(data, expires_at),
+            _create_confirm_screen(data, expires_at, await current_availability(services)),
             reply_markup=confirm_cancel_keyboard("create:confirm"),
         )
     except Exception as exc:
@@ -689,6 +723,7 @@ async def create_key_confirm(callback: CallbackQuery, state: FSMContext, service
                     bundle_result,
                     viewer_user_id=callback.from_user.id,
                     settings=services.settings,
+                    available=await current_availability(services),
                     relays=services.relays.snapshot,
                 ),
                 reply_markup=bundle_actions_keyboard(
@@ -1148,7 +1183,8 @@ async def edit_fp_select(
                 callback.message,
                 f"{t('bundle_fp_updated', count=changed)}\n\n"
                 + bundle_detail_text(
-                    bundle, keys, viewer_user_id=callback.from_user.id, views=views,
+                    bundle, keys, viewer_user_id=callback.from_user.id,
+                    available=await current_availability(services), views=views,
                     relays=services.relays.snapshot,
                 ),
                 reply_markup=bundle_actions_keyboard(bundle, has_vless=bundle_has_vless(keys)),
@@ -1189,17 +1225,15 @@ async def trial_request_start(callback: CallbackQuery, state: FSMContext, servic
             return
         await safe_callback_answer(callback)
         await state.set_state(TrialRequestStates.choosing_protocol)
-        xray_on = await services.modules.is_enabled("xray")
-        awg_on = await services.modules.is_enabled("awg")
-        hy2_on = (
-            services.settings.hysteria2_enabled
-            and services.settings.is_hysteria2_ready()
-            and await services.modules.is_enabled("hysteria2")
-        )
+        available = await current_availability(services)
         await safe_edit_message_text(
             callback.message,
             t("trial_choose_protocol"),
-            reply_markup=trial_protocol_keyboard(xray_enabled=xray_on, awg_enabled=awg_on, hysteria2_enabled=hy2_on),
+            reply_markup=trial_protocol_keyboard(
+                xray_enabled=Protocol.XRAY in available,
+                awg_enabled=Protocol.AWG in available,
+                hysteria2_enabled=Protocol.HYSTERIA2 in available,
+            ),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1306,13 +1340,17 @@ async def trial_key_show(callback: CallbackQuery, state: FSMContext, services: S
         await answer_callback_error(callback, exc)
 
 
-def _create_confirm_screen(data: dict[str, Any], expires_at: str | None) -> str:
+def _create_confirm_screen(data: dict[str, Any], expires_at: str | None, available: Availability) -> str:
     """Build the create-wizard confirmation for whichever entity is being created."""
     key_type = str(data.get("key_type") or "")
     note = data.get("note")
     if key_type == BUNDLE_KEY_TYPE:
         return bundle_create_confirm_text(
-            note, expires_at=expires_at, fingerprint=data.get("fingerprint"), kind=_bundle_kind(data)
+            note,
+            expires_at=expires_at,
+            available=available,
+            fingerprint=data.get("fingerprint"),
+            kind=_bundle_kind(data),
         )
     return create_confirm_text(
         key_type,

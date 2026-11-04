@@ -406,3 +406,23 @@ def relay_services(*relays: Any) -> Any:
     from services.relay import RelaySnapshot
 
     return SimpleNamespace(snapshot=RelaySnapshot.of(relays))
+
+
+def availability_settings(**overrides: Any) -> dict[str, Any]:
+    """The Settings fields ``services.protocol_availability`` reads, all switched off.
+
+    For handler tests whose ``settings`` stub is a SimpleNamespace: every screen
+    that names a protocol now reads availability at render time, so the stub has
+    to carry these fields. Spread it into the stub and override what the test
+    needs on.
+    """
+    values: dict[str, Any] = {
+        "xray_xhttp_enabled": False,
+        "hysteria2_enabled": False,
+        "is_hysteria2_ready": lambda: True,
+        "socks5_enabled": False,
+        "mtproto_enabled": False,
+        "subscription_enabled": False,
+    }
+    values.update(overrides)
+    return values

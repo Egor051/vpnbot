@@ -1,6 +1,7 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -41,7 +42,14 @@ from services.health import HealthCheckResult
 from services.key_naming import NameStyle, key_display_name
 from services.online_clients import OnlineClients
 from services.relay import RelaySnapshot, RelayUnavailable, relay_link_host
+from services.protocol_availability import Protocol
 from services.server_status import ServerStatus
+
+if TYPE_CHECKING:
+    # Type-only: services/{xray,awg,hysteria}.py import this module, and
+    # bot.availability / bot.protocol_texts reach those services through
+    # services.key_bundles — a runtime import here would close that cycle.
+    from bot.availability import Availability
 from utils.formatting import (
     code,
     format_bytes,
@@ -190,8 +198,16 @@ def personal_cabinet_text(
     active_hysteria2: int,
     traffic: OwnerTrafficSummary,
     proxy_count: int,
+    available: "Availability",
 ) -> str:
-    """Build the personal cabinet card: profile fields plus a personal summary."""
+    """Build the personal cabinet card: profile fields plus a personal summary.
+
+    The per-protocol breakdown of active keys names only the protocols that are
+    available (or that the user still holds a key of) — see
+    :func:`bot.protocol_texts.cabinet_active_keys_line`.
+    """
+    from bot.protocol_texts import cabinet_active_keys_line  # local import: see TYPE_CHECKING above
+
     username = f"@{user.username}" if user.username else t("not_specified")
     lines = [
         t("cabinet_title"),
@@ -201,12 +217,9 @@ def personal_cabinet_text(
         f"{t('field_role')}: {h(role_text(user.role))}",
         f"{t('field_registered')}: {h(format_msk_datetime(user.created_at))}",
         "",
-        t(
-            "cabinet_active_keys",
-            total=active_xray + active_awg + active_hysteria2,
-            xray=active_xray,
-            awg=active_awg,
-            hysteria2=active_hysteria2,
+        cabinet_active_keys_line(
+            {Protocol.XRAY: active_xray, Protocol.AWG: active_awg, Protocol.HYSTERIA2: active_hysteria2},
+            available,
         ),
         *owner_traffic_lines(traffic),
         t("cabinet_proxy_count", count=proxy_count),
@@ -721,7 +734,9 @@ def proxy_access_text(accesses: list[ProxyAccess]) -> str:
     return proxy_section_separator().join(parts)
 
 
-def user_proxy_stats_text(stats: ProxyUserStats) -> str:
+def user_proxy_stats_text(stats: ProxyUserStats, available: "Availability") -> str:
+    from bot.protocol_texts import proxy_traffic_note  # local import: see TYPE_CHECKING above
+
     lines = [t("proxy_user_stats_title")]
     if not stats.accesses:
         return "\n\n".join([lines[0], t("proxy_no_issued")])
@@ -750,14 +765,25 @@ def user_proxy_stats_text(stats: ProxyUserStats) -> str:
     if hidden_failed > 0:
         lines.append("")
         lines.append(t("proxy_hidden_old", n=hidden_failed))
+    shown_types = {
+        _PROXY_TYPE_PROTOCOL[access.access_type]
+        for access in (*active_accesses, *recent_failed)
+        if access.access_type in _PROXY_TYPE_PROTOCOL
+    }
     lines.extend(
         [
             "",
             t("proxy_traffic_header"),
-            t("proxy_traffic_unavailable"),
+            proxy_traffic_note(available, shown_types),
         ]
     )
     return "\n".join(lines)
+
+
+_PROXY_TYPE_PROTOCOL: dict[ProxyAccessType, Protocol] = {
+    ProxyAccessType.SOCKS5: Protocol.SOCKS5,
+    ProxyAccessType.MTPROTO: Protocol.MTPROTO,
+}
 
 
 def admin_proxy_stats_text(stats: ProxyAdminStats) -> str:

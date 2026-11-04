@@ -274,6 +274,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **User texts follow protocol availability, not only the backends.** A protocol switched off
+  in `.env` (`XRAY_XHTTP_ENABLED`, `HYSTERIA2_ENABLED`, `SOCKS5_ENABLED`, `MTPROTO_ENABLED`) or
+  with the module toggle in the admin panel is no longer described, compared with,
+  recommended or mentioned as "not included" anywhere a user looks: FAQ («Как подключиться?»,
+  «Какой протокол выбрать?», «Почему не работает?», fingerprint, proxy, security, support —
+  the MTU, fingerprint and proxy topics disappear with their protocol), the «Создать ключ»
+  menu and the «Отмена» back into it, the trial protocol menu, the All-in-One wizard (the
+  AmneziaWG notice with «✅ Понятно» is shown only while AmneziaWG is offered; without it the
+  wizard opens on the kind step; the kind descriptions are built from the composition
+  filtered by availability, and «Расширенная» is hidden while it would equal «Базовая»),
+  the bundle screens, the personal cabinet's key breakdown and the proxy stats note. All-in-One
+  is offered only while `SUBSCRIPTION_ENABLED` is on and the subscription would hold at least
+  one key. Availability is read at render time from one place
+  (`services/protocol_availability.py`), so a toggle takes effect on the next screen without a
+  restart. With every protocol on, every text is byte-identical to before. Admin screens are
+  unchanged on purpose. The «Отмена» path back into «Создать ключ» no longer shows Xray and
+  AmneziaWG while they are switched off.
+
 - **Basic subscription: the Hysteria2 entry's name ends with `(alt.)`.** It is glued on
   right after the server flag, with no space or underscore — `hy2_x7k2p_🇫🇮(alt.)`, and the
   same for a relay copy (`hy2_x7k2p_relay🇫🇮(alt.)` with the default relay label). VLESS (TCP)

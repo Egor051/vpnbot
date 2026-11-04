@@ -12,6 +12,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BufferedInputFile, CallbackQuery, Chat, Message, User as TgUser
 from qrcode.constants import ERROR_CORRECT_M
 
+from bot.availability import FULL_AVAILABILITY, Availability
 from bot.handlers.common import config_delivery
 from bot.handlers.key_bundles import show_bundle_config
 from bot.handlers.keys import show_key_config, trial_key_show
@@ -644,7 +645,12 @@ def _patch_bundle_handler(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr("bot.handlers.key_bundles.ensure_private_callback", allow_private)
     monkeypatch.setattr("bot.handlers.key_bundles.safe_edit_message_text", fake_edit)
     monkeypatch.setattr("bot.handlers.key_bundles.require_subscription_ui", lambda services: None)
-    monkeypatch.setattr("bot.handlers.key_bundles.bundle_config_text", lambda b, s: "bundle config text")
+    monkeypatch.setattr("bot.handlers.key_bundles.bundle_config_text", lambda b, s, available: "bundle config text")
+
+    async def full_availability(services: object) -> Availability:
+        return FULL_AVAILABILITY
+
+    monkeypatch.setattr("bot.handlers.key_bundles.current_availability", full_availability)
     monkeypatch.setattr("bot.handlers.key_bundles.bundle_actions_keyboard", lambda b, has_vless=False: None)
     monkeypatch.setattr("bot.handlers.key_bundles.bundle_has_vless", lambda keys: True)
     monkeypatch.setattr("bot.handlers.key_bundles.subscription_url", lambda settings, token: _SUB_URL)

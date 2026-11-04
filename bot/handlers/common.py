@@ -4,11 +4,12 @@ import logging
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile, CallbackQuery, Message, User as TgUser
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message, User as TgUser
 
+from bot.availability import current_availability
 from bot.container import Services
 from bot.formatters import main_menu_text
-from bot.keyboards.common import FAQ_PER_PAGE, FAQ_TOPICS, back_to_menu, faq_answer_keyboard, faq_keyboard, main_menu
+from bot.keyboards.common import back_to_menu, faq_answer_keyboard, faq_keyboard, faq_page_count, main_menu
 from bot.messages import (
     awg_config_filename,
     is_stale_callback_query_error,
@@ -16,6 +17,7 @@ from bot.messages import (
     safe_edit_message_text,
 )
 from bot.private_chat import ensure_private_callback, ensure_private_message
+from bot.protocol_texts import faq_answer, faq_topics
 from bot.rate_limit import RateLimiter, RateLimitExceeded
 from config.settings import SettingsError
 from i18n import t
@@ -230,9 +232,17 @@ async def answer_message_error(message: Message, exc: Exception) -> None:
     await message.answer(service_error_text(exc), reply_markup=back_to_menu())
 
 
-def _faq_page_title(page: int) -> str:
-    total = (len(FAQ_TOPICS) + FAQ_PER_PAGE - 1) // FAQ_PER_PAGE
-    return t("faq_page_title").format(page=page, total=total)
+async def faq_page_view(services: Services, page: int = 1) -> tuple[str, InlineKeyboardMarkup]:
+    """One page of the FAQ list: its title and its topic buttons.
+
+    The topic list is read from availability at this instant, so a topic about a
+    switched-off protocol (MTU without AWG, fingerprint without Xray, proxies
+    without either proxy) is neither listed nor counted in the page total.
+    """
+    topics = faq_topics(await current_availability(services))
+    total = faq_page_count(topics)
+    page = max(1, min(page, total))
+    return t("faq_page_title").format(page=page, total=total), faq_keyboard(page, topics)
 
 
 @router.message(Command("help"))
@@ -242,7 +252,8 @@ async def help_command(message: Message, services: Services) -> None:
         return
     if not await ensure_private_message(message):
         return
-    await message.answer(_faq_page_title(1), reply_markup=faq_keyboard(1))
+    text, markup = await faq_page_view(services)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.message(Command("faq"))
@@ -252,7 +263,8 @@ async def faq_command(message: Message, services: Services) -> None:
         return
     if not await ensure_private_message(message):
         return
-    await message.answer(_faq_page_title(1), reply_markup=faq_keyboard(1))
+    text, markup = await faq_page_view(services)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(F.data == "help")
@@ -262,7 +274,8 @@ async def help_callback(callback: CallbackQuery, services: Services) -> None:
         return
     await safe_callback_answer(callback)
     if callback.message and callback.from_user:
-        await safe_edit_message_text(callback.message, _faq_page_title(1), reply_markup=faq_keyboard(1))
+        text, markup = await faq_page_view(services)
+        await safe_edit_message_text(callback.message, text, reply_markup=markup)
 
 
 @router.callback_query(F.data == "noop")
@@ -272,7 +285,7 @@ async def noop_callback(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("faq_page:"))
-async def faq_page_callback(callback: CallbackQuery) -> None:
+async def faq_page_callback(callback: CallbackQuery, services: Services) -> None:
     """Show the requested page of the FAQ list."""
     if not await ensure_private_callback(callback):
         return
@@ -283,14 +296,17 @@ async def faq_page_callback(callback: CallbackQuery) -> None:
         page = int(callback.data.split(":", 1)[1])
     except (ValueError, IndexError):
         page = 1
-    total = (len(FAQ_TOPICS) + FAQ_PER_PAGE - 1) // FAQ_PER_PAGE
-    page = max(1, min(page, total))
-    await safe_edit_message_text(callback.message, _faq_page_title(page), reply_markup=faq_keyboard(page))
+    text, markup = await faq_page_view(services, page)
+    await safe_edit_message_text(callback.message, text, reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("faq:"))
-async def faq_answer_callback(callback: CallbackQuery) -> None:
-    """Show the answer for the selected FAQ topic."""
+async def faq_answer_callback(callback: CallbackQuery, services: Services) -> None:
+    """Show the answer for the selected FAQ topic, composed for what is on now.
+
+    A topic that is hidden right now (a stale button from before a protocol was
+    switched off) answers «not found», exactly like an unknown one.
+    """
     if not await ensure_private_callback(callback):
         return
     await safe_callback_answer(callback)
@@ -302,8 +318,7 @@ async def faq_answer_callback(callback: CallbackQuery) -> None:
         page = int(parts[2]) if len(parts) > 2 else 1
     except ValueError:
         page = 1
-    valid_topics = {key for key, _ in FAQ_TOPICS}
-    text = t(f"faq_{topic}") if topic in valid_topics else t("faq_not_found")
+    text = faq_answer(topic, await current_availability(services)) or t("faq_not_found")
     await safe_edit_message_text(callback.message, text, reply_markup=faq_answer_keyboard(page))
 
 

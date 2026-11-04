@@ -55,6 +55,8 @@ def _settings(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = dict(
         hysteria2_enabled=True,
         xray_xhttp_enabled=True,
+        socks5_enabled=False,
+        mtproto_enabled=False,
         key_max_trial_days=30,
         subscription_enabled=False,
     )

@@ -28,6 +28,7 @@ from bot.bundles import (
     require_subscription_ui,
     subscription_url,
 )
+from bot.availability import current_availability
 from bot.container import Services
 from bot.fsm.states import EditFpStates, EditNoteStates
 from bot.handlers.common import (
@@ -77,7 +78,12 @@ async def open_bundle(callback: CallbackQuery, services: Services, rate_limiter:
         await safe_edit_message_text(
             callback.message,
             bundle_detail_text(
-                bundle, keys, viewer_user_id=callback.from_user.id, views=views, relays=services.relays.snapshot
+                bundle,
+                keys,
+                viewer_user_id=callback.from_user.id,
+                available=await current_availability(services),
+                views=views,
+                relays=services.relays.snapshot,
             ),
             reply_markup=bundle_actions_keyboard(bundle, has_vless=bundle_has_vless(keys)),
         )
@@ -121,7 +127,7 @@ async def show_bundle_config(
         await safe_callback_answer(callback, t("config_already_sent") if duplicate else None)
         await safe_edit_message_text(
             callback.message,
-            bundle_config_text(bundle, services.settings),
+            bundle_config_text(bundle, services.settings, await current_availability(services)),
             reply_markup=bundle_actions_keyboard(bundle, has_vless=bundle_has_vless(keys)),
         )
         if url is None:

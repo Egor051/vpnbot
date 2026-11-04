@@ -2,6 +2,9 @@
 import asyncio
 from types import SimpleNamespace
 
+from conftest import availability_settings
+
+from bot.availability import FULL_AVAILABILITY
 from bot.formatters import (
     mtproto_proxy_text,
     proxy_access_text,
@@ -280,7 +283,7 @@ def test_proxy_admin_combined_shows_status_stats_and_traffic_note() -> None:
 
 
 def test_user_proxy_stats_empty_message() -> None:
-    text = user_proxy_stats_text(ProxyUserStats(owner_user_id=100, accesses=()))
+    text = user_proxy_stats_text(ProxyUserStats(owner_user_id=100, accesses=()), FULL_AVAILABILITY)
 
     assert "У вас пока нет выданных прокси" in text
 
@@ -307,7 +310,8 @@ def test_user_proxy_stats_socks5_omits_password() -> None:
                     login="vpn_socks_100_abcd",
                 ),
             ),
-        )
+        ),
+        FULL_AVAILABILITY,
     )
 
     assert "SOCKS5" in text
@@ -343,7 +347,8 @@ def test_user_proxy_stats_mtproto_omits_secret_and_links() -> None:
                     secret_fingerprint="f3bff43850e88441",
                 ),
             ),
-        )
+        ),
+        FULL_AVAILABILITY,
     )
 
     assert "MTProto" in text
@@ -370,7 +375,7 @@ def test_user_proxy_stats_shows_active_and_limits_apply_failed_history() -> None
         _stats_item(8, ProxyAccessType.MTPROTO, ProxyAccessStatus.APPLY_FAILED, updated_at="2026-05-06T18:18:00+00:00"),
     )
 
-    text = user_proxy_stats_text(ProxyUserStats(owner_user_id=100, accesses=accesses))
+    text = user_proxy_stats_text(ProxyUserStats(owner_user_id=100, accesses=accesses), FULL_AVAILABILITY)
 
     assert "Активные прокси" in text
     assert "SOCKS5 #10" in text
@@ -398,7 +403,7 @@ def test_user_proxy_stats_does_not_show_old_apply_failed_when_no_recent_slot() -
         for access_id in range(1, 7)
     )
 
-    text = user_proxy_stats_text(ProxyUserStats(owner_user_id=100, accesses=accesses))
+    text = user_proxy_stats_text(ProxyUserStats(owner_user_id=100, accesses=accesses), FULL_AVAILABILITY)
 
     assert text.count("apply_failed") == 3
     assert "Старые неудачные попытки скрыты: 3" in text
@@ -515,7 +520,7 @@ def test_proxy_confirm_issues_socks5_and_edits_same_message(monkeypatch) -> None
             proxy=proxy,
             socks5=socks5,
             mtproto=SimpleNamespace(),
-            settings=SimpleNamespace(socks5_enabled=True, mtproto_enabled=True),
+            settings=SimpleNamespace(**availability_settings(socks5_enabled=True, mtproto_enabled=True)),
             modules=_modules_enabled(),
         )
         state = _State({"proxy_type": "socks5", "nonce": "abc"})
@@ -540,7 +545,11 @@ def test_proxy_stats_callback_shows_current_user_stats(monkeypatch) -> None:
 
     async def run() -> None:
         callback = _Callback("proxy:stats")
-        services = SimpleNamespace(proxy=Proxy())
+        services = SimpleNamespace(
+            proxy=Proxy(),
+            settings=SimpleNamespace(**availability_settings(socks5_enabled=True, mtproto_enabled=True)),
+            modules=_modules_enabled(),
+        )
         await proxy_stats(callback, services)  # type: ignore[arg-type]
 
         assert callback.message.edits
@@ -580,7 +589,7 @@ def test_proxy_confirm_stale_without_existing_access_returns_to_proxy(monkeypatc
         callback = _Callback("proxy:confirm:socks5:old")
         services = SimpleNamespace(
             proxy=Proxy(),
-            settings=SimpleNamespace(socks5_enabled=True, mtproto_enabled=True),
+            settings=SimpleNamespace(**availability_settings(socks5_enabled=True, mtproto_enabled=True)),
             modules=_modules_enabled(),
         )
         await proxy_confirm(callback, state, services, RateLimiter())  # type: ignore[arg-type]
@@ -621,7 +630,7 @@ def test_proxy_confirm_stale_with_existing_access_shows_existing_without_reissue
             proxy=Proxy(),
             socks5=SimpleNamespace(),
             mtproto=mtproto,
-            settings=SimpleNamespace(socks5_enabled=True, mtproto_enabled=True),
+            settings=SimpleNamespace(**availability_settings(socks5_enabled=True, mtproto_enabled=True)),
             modules=_modules_enabled(),
         )
         await proxy_confirm(callback, state, services, RateLimiter())  # type: ignore[arg-type]

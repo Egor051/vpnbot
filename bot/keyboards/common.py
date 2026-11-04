@@ -1,9 +1,11 @@
 
+from collections.abc import Sequence
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from i18n import t
 
-FAQ_TOPICS: list[tuple[str, str]] = [
+FAQ_TOPICS: tuple[tuple[str, str], ...] = (
     ("connect",        "btn_faq_connect"),
     ("choice",         "btn_faq_choice"),
     ("trouble",        "btn_faq_trouble"),
@@ -20,7 +22,7 @@ FAQ_TOPICS: list[tuple[str, str]] = [
     ("server_restart", "btn_faq_server_restart"),
     ("security",       "btn_faq_security"),
     ("support",        "btn_faq_support"),
-]
+)
 FAQ_PER_PAGE = 5
 
 
@@ -45,12 +47,22 @@ def back_to_menu() -> InlineKeyboardMarkup:
     )
 
 
-def faq_keyboard(page: int = 1) -> InlineKeyboardMarkup:
-    """Build the paginated FAQ topics inline keyboard."""
-    total = (len(FAQ_TOPICS) + FAQ_PER_PAGE - 1) // FAQ_PER_PAGE
+def faq_page_count(topics: Sequence[tuple[str, str]] = FAQ_TOPICS) -> int:
+    """How many FAQ pages *topics* fill (at least one)."""
+    return max(1, (len(topics) + FAQ_PER_PAGE - 1) // FAQ_PER_PAGE)
+
+
+def faq_keyboard(page: int = 1, topics: Sequence[tuple[str, str]] = FAQ_TOPICS) -> InlineKeyboardMarkup:
+    """Build the paginated FAQ topics inline keyboard.
+
+    *topics* is the list to page through — the handlers pass
+    :func:`bot.protocol_texts.faq_topics`, which leaves out a topic about a
+    protocol that is switched off.
+    """
+    total = faq_page_count(topics)
     page = max(1, min(page, total))
     start = (page - 1) * FAQ_PER_PAGE
-    page_topics = FAQ_TOPICS[start : start + FAQ_PER_PAGE]
+    page_topics = topics[start : start + FAQ_PER_PAGE]
 
     rows: list[list[InlineKeyboardButton]] = []
     for topic_key, btn_key in page_topics:
