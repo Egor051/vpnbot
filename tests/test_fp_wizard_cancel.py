@@ -18,6 +18,7 @@ from conftest import relay_services
 import bot.handlers.callbacks as callbacks_mod
 import bot.handlers.key_bundles as bundles_mod
 import bot.handlers.keys as keys_mod
+from bot.availability import FULL_AVAILABILITY
 from bot.handlers.callbacks import cancel_callback
 from bot.handlers.key_bundles import change_bundle_fp_prompt
 from bot.handlers.keys import edit_fp_prompt
@@ -168,9 +169,14 @@ def test_cancel_with_a_bundle_target_returns_to_the_bundle_card(monkeypatch) -> 
         monkeypatch.setattr(
             callbacks_mod,
             "bundle_detail_text",
-            lambda bundle, keys, viewer_user_id, views=None, relays=None: f"BUNDLE-CARD-{bundle.id}",
+            lambda bundle, keys, viewer_user_id, available, views=None, relays=None: f"BUNDLE-CARD-{bundle.id}",
             raising=False,
         )
+
+        async def full_availability(services_):  # type: ignore[no-untyped-def]
+            return FULL_AVAILABILITY
+
+        monkeypatch.setattr(callbacks_mod, "current_availability", full_availability, raising=False)
         monkeypatch.setattr(callbacks_mod, "bundle_actions_keyboard", lambda bundle, has_vless: "KB", raising=False)
         monkeypatch.setattr(callbacks_mod, "bundle_has_vless", lambda keys: False, raising=False)
 

@@ -38,6 +38,7 @@ import aiosqlite
 import pytest
 
 from adapters.clock import ClockProvider
+from bot.availability import FULL_AVAILABILITY
 from bot.bundles import bundle_config_text, bundle_created_text, bundle_detail_text
 from conftest import make_relay, relay_snapshot
 
@@ -901,9 +902,9 @@ async def test_basic_subscription(tmp_path: Path, relay_on: bool, expected: int)
             assert all(RELAY_HOST in link for link in links[2:])
         # No circles hint on any of the subscription's screens.
         legend = t("bundle_marks_legend")
-        assert legend not in bundle_created_text(result, viewer_user_id=OWNER, settings=world.settings)
-        assert legend not in bundle_detail_text(result.bundle, list(result.keys), viewer_user_id=OWNER)
-        assert legend not in bundle_config_text(result.bundle, world.settings)
+        assert legend not in bundle_created_text(result, viewer_user_id=OWNER, settings=world.settings, available=FULL_AVAILABILITY)
+        assert legend not in bundle_detail_text(result.bundle, list(result.keys), viewer_user_id=OWNER, available=FULL_AVAILABILITY)
+        assert legend not in bundle_config_text(result.bundle, world.settings, FULL_AVAILABILITY)
     finally:
         await world.db.close()
 
@@ -930,9 +931,9 @@ async def test_extended_subscription(tmp_path: Path, relay_on: bool, expected: i
             assert [_member_of(name) for name in relayed] == [_member_of(name) for name in direct]
             assert all(RELAY_HOST in link for link in links[5:])
         legend = t("bundle_marks_legend")
-        assert legend in bundle_created_text(result, viewer_user_id=OWNER, settings=world.settings)
-        assert legend in bundle_detail_text(result.bundle, list(result.keys), viewer_user_id=OWNER)
-        assert legend in bundle_config_text(result.bundle, world.settings)
+        assert legend in bundle_created_text(result, viewer_user_id=OWNER, settings=world.settings, available=FULL_AVAILABILITY)
+        assert legend in bundle_detail_text(result.bundle, list(result.keys), viewer_user_id=OWNER, available=FULL_AVAILABILITY)
+        assert legend in bundle_config_text(result.bundle, world.settings, FULL_AVAILABILITY)
     finally:
         await world.db.close()
 
@@ -1031,7 +1032,7 @@ def test_bundle_screens_show_the_kind(tmp_path: Path) -> None:
         created_at="2026-01-01T00:00:00+00:00", updated_at="2026-01-01T00:00:00+00:00",
         revoked_at=None, deleted_at=None, display_no=5, kind=KeyBundleKind.BASIC,
     )
-    text = bundle_detail_text(bundle, [], viewer_user_id=OWNER)
+    text = bundle_detail_text(bundle, [], viewer_user_id=OWNER, available=FULL_AVAILABILITY)
     assert f"{t('field_bundle_kind')}: {t('bundle_kind_basic')}" in text
 
 

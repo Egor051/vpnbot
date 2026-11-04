@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from urllib.parse import quote
 
+from bot.availability import Availability
 from bot.container import Services
 from bot.formatters import (
     bundle_card_text,
@@ -30,12 +31,13 @@ from bot.formatters import (
     traffic_figures_inline,
     traffic_stale_mark,
 )
+from bot.protocol_texts import bundle_awg_notice, bundle_kind_description, bundle_kinds
 from config.settings import Settings
 from i18n import t
 from models.dto import KeyBundle, KeyTrafficStatsView, VpnKey
 from models.enums import KeyBundleKind, VpnKeyType
 from services.errors import InvalidOperation
-from services.key_bundles import BundleMember, KeyBundleCreateResult, subscription_sort_key
+from services.key_bundles import BundleMember, KeyBundleCreateResult, member_protocol, subscription_sort_key
 from services.relay import EMPTY_RELAYS, RelaySnapshot
 from utils.formatting import code, format_bytes, format_expiry_date, format_msk_datetime, h
 
@@ -125,16 +127,22 @@ def bundle_kind_label(kind: KeyBundleKind) -> str:
     return t(f"bundle_kind_{kind.value}")
 
 
-def bundle_kind_prompt(*, relay_labels: Sequence[str] = ()) -> str:
-    """The kind-choice screen of the create wizard: both kinds, each explained.
+def bundle_kind_prompt(available: Availability, *, relay_labels: Sequence[str] = ()) -> str:
+    """The kind-choice screen of the create wizard: every offered kind, explained.
+
+    Each description is built from the composition filtered by *available*
+    (:func:`bot.protocol_texts.bundle_kind_description`), so a switched-off
+    protocol is never promised; the kinds themselves come from
+    :func:`bot.protocol_texts.bundle_kinds` and match :func:`bundle_kind_keyboard`'s
+    buttons.
 
     *relay_labels* are the relays new bundles get members through (enabled and
     «в подписках», in relay order); each kind then also carries a copy of its
-    members through each of them, which is said once below the two descriptions.
+    members through each of them, which is said once below the descriptions.
     """
     blocks = "\n\n".join(
-        f"<b>{t(f'bundle_kind_{kind.value}')}</b>\n{t(f'bundle_kind_{kind.value}_desc')}"
-        for kind in (KeyBundleKind.BASIC, KeyBundleKind.EXTENDED)
+        f"<b>{t(f'bundle_kind_{kind.value}')}</b>\n{bundle_kind_description(kind, available)}"
+        for kind in bundle_kinds(available)
     )
     text = f"{t('bundle_kind_prompt')}\n\n{blocks}"
     if relay_labels:
@@ -155,7 +163,7 @@ def bundle_has_vless(keys: list[VpnKey]) -> bool:
 # ── cards ─────────────────────────────────────────────────────────────────────
 
 
-def bundle_notices(*, with_marks_legend: bool = True) -> list[str]:
+def bundle_notices(available: Availability, *, with_marks_legend: bool = True) -> list[str]:
     """The notices every subscription screen ends with, in reading order.
 
     The preference-mark legend comes FIRST and is the louder of the two: it is what
@@ -164,11 +172,25 @@ def bundle_notices(*, with_marks_legend: bool = True) -> list[str]:
     shown before the subscription exists, where there are no marked keys yet to
     rank, and for a basic subscription, whose names carry no circles at all (see
     :func:`marks_legend_for`).
+
+    The AmneziaWG note exists only while AmneziaWG is offered at all — explaining
+    the absence of a protocol the user cannot get anyway would be news about it.
+    May therefore be empty; append it with :func:`_with_notices`.
     """
-    notices = [t("bundle_awg_separate")]
+    notices: list[str] = []
+    awg_notice = bundle_awg_notice(available)
+    if awg_notice is not None:
+        notices.append(awg_notice)
     if with_marks_legend:
-        return [t("bundle_marks_legend"), "", *notices]
+        return [t("bundle_marks_legend"), *([""] if notices else []), *notices]
     return notices
+
+
+def _with_notices(lines: list[str], notices: list[str]) -> list[str]:
+    """Append *notices* after a blank line — or nothing at all when there are none."""
+    if notices:
+        lines.extend(["", *notices])
+    return lines
 
 
 def marks_legend_for(bundle: KeyBundle) -> bool:
@@ -186,6 +208,7 @@ def bundle_detail_text(
     keys: list[VpnKey],
     *,
     viewer_user_id: int,
+    available: Availability,
     views: list[KeyTrafficStatsView] | None = None,
     relays: RelaySnapshot = EMPTY_RELAYS,
 ) -> str:
@@ -216,8 +239,7 @@ def bundle_detail_text(
     lines.append(_composition_block(keys, relays))
     lines.append("")
     lines.extend(bundle_stats_block(views))
-    lines.append("")
-    lines.extend(bundle_notices(with_marks_legend=marks_legend_for(bundle)))
+    _with_notices(lines, bundle_notices(available, with_marks_legend=marks_legend_for(bundle)))
     return "\n".join(lines)
 
 
@@ -252,6 +274,7 @@ def bundle_create_confirm_text(
     note: str | None,
     *,
     expires_at: str | None,
+    available: Availability,
     fingerprint: str | None = None,
     kind: KeyBundleKind = KeyBundleKind.EXTENDED,
 ) -> str:
@@ -269,15 +292,10 @@ def bundle_create_confirm_text(
     ]
     if fingerprint:
         lines.append(f"Fingerprint: {h(fingerprint)}")
-    lines.extend(
-        [
-            f"{t('field_expires_at')}: {h(format_expiry_date(expires_at))}",
-            "",
-            # No mark legend here: nothing has been provisioned yet, so there are
-            # no marked keys on screen for it to explain.
-            *bundle_notices(with_marks_legend=False),
-        ]
-    )
+    lines.append(f"{t('field_expires_at')}: {h(format_expiry_date(expires_at))}")
+    # No mark legend here: nothing has been provisioned yet, so there are no
+    # marked keys on screen for it to explain.
+    _with_notices(lines, bundle_notices(available, with_marks_legend=False))
     return "\n".join(lines)
 
 
@@ -286,14 +304,17 @@ def bundle_created_text(
     *,
     viewer_user_id: int,
     settings: Settings,
+    available: Availability,
     relays: RelaySnapshot = EMPTY_RELAYS,
 ) -> str:
     """What the user gets after a successful create — including a partial one.
 
-    A bundle may legitimately come out smaller than the full composition when a
-    backend is switched off, so the actual contents are always spelled out and the
-    omissions named. Staying silent here is how a user ends up believing they have
-    a Hysteria2 link they never received.
+    A bundle may legitimately come out smaller than the full composition, so the
+    actual contents are always spelled out and the omissions named — but only
+    omissions of a protocol the user can still see (a member left out because its
+    relay is down). A member skipped because its protocol is switched off is not
+    named: the kind description never promised it, and naming it would tell the
+    user about a protocol they cannot get.
 
     Ends with the subscription URL itself, exactly as the single-key flow ends with
     the key's ``vless://``/``hy2://`` link: the deliverable of the wizard belongs on
@@ -308,14 +329,14 @@ def bundle_created_text(
         "",
         _composition_block(list(result.keys), relays),
     ]
-    if result.skipped:
-        skipped = ", ".join(bundle_member_label(member) for member in result.skipped)
+    visible_skipped = [member for member in result.skipped if member_protocol(member) in available]
+    if visible_skipped:
+        skipped = ", ".join(bundle_member_label(member) for member in visible_skipped)
         lines.append("")
         lines.append(t("bundle_created_skipped", skipped=h(skipped)))
     lines.append("")
     lines.extend(_subscription_block(result.bundle, settings))
-    lines.append("")
-    lines.extend(bundle_notices(with_marks_legend=marks_legend_for(result.bundle)))
+    _with_notices(lines, bundle_notices(available, with_marks_legend=marks_legend_for(result.bundle)))
     return "\n".join(lines)
 
 
@@ -338,17 +359,11 @@ def _subscription_block(bundle: KeyBundle, settings: Settings) -> list[str]:
     return [code(url), "", t("bundle_config_hint"), t("bundle_config_secret_warning")]
 
 
-def bundle_config_text(bundle: KeyBundle, settings: Settings) -> str:
+def bundle_config_text(bundle: KeyBundle, settings: Settings, available: Availability) -> str:
     """The sub-URL screen."""
-    return "\n".join(
-        [
-            f"<b>{h(bundle_title(bundle))}</b>",
-            "",
-            *_subscription_block(bundle, settings),
-            "",
-            *bundle_notices(with_marks_legend=marks_legend_for(bundle)),
-        ]
-    )
+    lines = [f"<b>{h(bundle_title(bundle))}</b>", "", *_subscription_block(bundle, settings)]
+    _with_notices(lines, bundle_notices(available, with_marks_legend=marks_legend_for(bundle)))
+    return "\n".join(lines)
 
 
 # ── stats ─────────────────────────────────────────────────────────────────────

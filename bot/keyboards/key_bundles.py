@@ -7,6 +7,8 @@ the whole point of the flag gate is that these rows simply do not exist while
 ``SUBSCRIPTION_ENABLED`` is false.
 """
 
+from collections.abc import Sequence
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.formatters import bundle_status_text, bundle_title
@@ -76,8 +78,14 @@ def bundle_awg_ack_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def bundle_kind_keyboard() -> InlineKeyboardMarkup:
-    """The kind choice of the all-in-one wizard: basic, extended, cancel."""
+def bundle_kind_keyboard(
+    kinds: Sequence[KeyBundleKind] = (KeyBundleKind.BASIC, KeyBundleKind.EXTENDED),
+) -> InlineKeyboardMarkup:
+    """The kind choice of the all-in-one wizard: one row per offered kind, cancel.
+
+    *kinds* is what :func:`bot.protocol_texts.bundle_kinds` offers right now, the
+    same list the prompt above it describes.
+    """
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -86,7 +94,7 @@ def bundle_kind_keyboard() -> InlineKeyboardMarkup:
                     callback_data=f"keys:create:bundle:kind:{kind.value}",
                 )
             ]
-            for kind in (KeyBundleKind.BASIC, KeyBundleKind.EXTENDED)
+            for kind in kinds
         ]
         + [[InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")]]
     )

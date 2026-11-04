@@ -7,6 +7,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
+from bot.availability import current_availability
 from bot.container import Services
 from bot.formatters import main_menu_text, proxy_access_text, user_proxy_stats_text
 from bot.fsm.states import ProxyStates
@@ -18,6 +19,7 @@ from bot.private_chat import ensure_private_callback
 from bot.rate_limit import RateLimiter
 from i18n import t
 from models.enums import ProxyAccessType
+from services.protocol_availability import Protocol
 from services.user_locks import UserLockManager
 
 router = Router()
@@ -91,7 +93,7 @@ async def proxy_stats(callback: CallbackQuery, services: Services) -> None:
         stats = await services.proxy.get_user_proxy_stats(callback.from_user.id)
         await safe_edit_message_text(
             callback.message,
-            user_proxy_stats_text(stats),
+            user_proxy_stats_text(stats, await current_availability(services)),
             reply_markup=proxy_back_keyboard(),
         )
     except Exception as exc:
@@ -186,8 +188,9 @@ async def proxy_back(callback: CallbackQuery, services: Services) -> None:
 async def _proxy_menu_view(services: Services, user_id: int, accesses: list[Any] | None = None) -> tuple[str, Any]:
     if accesses is None:
         accesses = await services.proxy.list_user_accesses(user_id)
-    socks5_on = services.settings.socks5_enabled and await services.modules.is_enabled("socks5")
-    mtproto_on = services.settings.mtproto_enabled and await services.modules.is_enabled("mtproto")
+    available = await current_availability(services)
+    socks5_on = Protocol.SOCKS5 in available
+    mtproto_on = Protocol.MTPROTO in available
     if not accesses and not socks5_on and not mtproto_on:
         text = t("proxy_unavailable")
     elif not accesses:

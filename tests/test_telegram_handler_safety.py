@@ -2,6 +2,8 @@
 import asyncio
 from types import SimpleNamespace
 
+from conftest import availability_settings
+
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
@@ -672,7 +674,7 @@ def test_create_key_menu_ignores_stale_callback_answer(monkeypatch) -> None:
         services = SimpleNamespace(
             users=Users(),
             modules=_modules_enabled(),
-            settings=SimpleNamespace(xray_xhttp_enabled=False, hysteria2_enabled=False, subscription_enabled=False),
+            settings=SimpleNamespace(**availability_settings()),
         )
         await create_key_menu(callback, services)  # type: ignore[arg-type]
 
@@ -704,7 +706,7 @@ def test_create_menu_back_button_returns_to_entry_point(monkeypatch) -> None:
         services = SimpleNamespace(
             users=Users(),
             modules=_modules_enabled(),
-            settings=SimpleNamespace(xray_xhttp_enabled=False, hysteria2_enabled=False, subscription_enabled=False),
+            settings=SimpleNamespace(**availability_settings()),
         )
 
         # Entered from the main menu -> back returns to the main menu.

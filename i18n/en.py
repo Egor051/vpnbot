@@ -186,7 +186,8 @@ STRINGS: dict[str, str] = {
     "proxy_recent_errors_header": "<b>Recent issuance errors:</b>",
     "proxy_hidden_old": "Older failed attempts hidden: {n}.",
     "proxy_traffic_header": "<b>Traffic:</b>",
-    "proxy_traffic_unavailable": "Per-user traffic accounting for SOCKS5/MTProto is unavailable; no estimated figures are shown.",
+    "proxy_traffic_unavailable": "Per-user traffic accounting for {proxies} is unavailable; no estimated figures are shown.",
+    "proxy_traffic_unavailable_generic": "Per-user traffic accounting for proxies is unavailable; no estimated figures are shown.",
     # ── proxy admin stats ─────────────────────────────────────────────────────
     "proxy_stats_no_users": "No users with proxy accesses.",
     "proxy_stats_hidden_users": "More users hidden: {n}.",
@@ -209,38 +210,103 @@ STRINGS: dict[str, str] = {
     "admin_private_only_text": "Admin panel is available in private chat with the bot only.",
     # ── FAQ ───────────────────────────────────────────────────────────────────
     "faq_page_title": "<b>Frequently Asked Questions</b> · page {page} of {total}",
-    "faq_connect": (
+    # FAQ texts that name protocols are split into per-protocol fragments; the
+    # variants and the order they are glued in live in bot/protocol_texts.py.
+    "faq_connect_intro_file": (
         "After creating a key, the bot will provide the configuration. Copy it into a suitable VPN app "
-        "or import the file if available. Depending on the client, a key is added either via a link "
-        "(profile) or via a config file: Xray and Hysteria2 keys are issued as a link, AWG as a link or "
-        "a file. After importing, enable the connection in your app.\n\n"
-        "<b>Recommended apps:</b> for AWG — the official AmneziaVPN client; "
-        "for Xray and Hysteria2 — v2RayTun or Happ (or alternatives such as v2RayNG or NekoBox).\n\n"
+        "or import the file if available."
+    ),
+    "faq_connect_intro": "After creating a key, the bot will provide the configuration. Copy it into a suitable VPN app.",
+    "faq_connect_delivery_xray_hy2_awg": (
+        "Depending on the client, a key is added either via a link (profile) or via a config file: "
+        "Xray and Hysteria2 keys are issued as a link, AWG as a link or a file."
+    ),
+    "faq_connect_delivery_xray_awg": (
+        "Depending on the client, a key is added either via a link (profile) or via a config file: "
+        "Xray keys are issued as a link, AWG as a link or a file."
+    ),
+    "faq_connect_delivery_hy2_awg": (
+        "Depending on the client, a key is added either via a link (profile) or via a config file: "
+        "Hysteria2 keys are issued as a link, AWG as a link or a file."
+    ),
+    "faq_connect_delivery_awg": (
+        "Depending on the client, an AWG key is added either via a link (profile) or via a config file."
+    ),
+    "faq_connect_delivery_link": "The key is added to the app via a link (profile).",
+    "faq_connect_enable": "After importing, enable the connection in your app.",
+    "faq_connect_apps": "<b>Recommended apps:</b> {apps}.",
+    "faq_connect_apps_awg": "for AWG — the official AmneziaVPN client",
+    "faq_connect_apps_links": "for {protocols} — v2RayTun or Happ (or alternatives such as v2RayNG or NekoBox)",
+    "faq_connect_tip_protocols_transports": (
         "<b>Tip:</b> keep several different keys — with different protocols and/or transports "
-        "(e.g. AWG, Xray TCP/XHTTP and Hysteria2). If one of them starts to degrade due to blocking, "
-        "you can switch to another and won't be left without a connection. The most convenient way to do "
+        "(e.g. {examples}). If one of them starts to degrade due to blocking, "
+        "you can switch to another and won't be left without a connection."
+    ),
+    "faq_connect_tip_protocols": (
+        "<b>Tip:</b> keep several different keys — with different protocols "
+        "(e.g. {examples}). If one of them starts to degrade due to blocking, "
+        "you can switch to another and won't be left without a connection."
+    ),
+    "faq_connect_tip_transports": (
+        "<b>Tip:</b> keep several different keys — with different transports "
+        "(e.g. {examples}). If one of them starts to degrade due to blocking, "
+        "you can switch to another and won't be left without a connection."
+    ),
+    "faq_connect_bundle_xray_hy2": (
+        "The most convenient way to do "
         "this is an All-in-One key: one subscription link covering both Xray and Hysteria2 — the client "
-        "fetches both, and you can switch between them right in the app without creating new keys. AWG "
-        "isn't part of the subscription (a WireGuard config can't be delivered as a link), so you'll "
+        "fetches both, and you can switch between them right in the app without creating new keys."
+    ),
+    "faq_connect_bundle_xray_transports": (
+        "The most convenient way to do "
+        "this is an All-in-One key: one subscription link covering every Xray transport — the client "
+        "fetches them all, and you can switch between them right in the app without creating new keys."
+    ),
+    "faq_connect_bundle_no_awg": (
+        "AWG isn't part of the subscription (a WireGuard config can't be delivered as a link), so you'll "
         "still need a separate key for it."
     ),
-    "faq_trouble": (
+    "faq_trouble_general": (
         "Check your internet, the imported profile, the access expiry date, and whether the same key "
         "is being used on another device. Also try toggling the VPN app off and on. If that doesn't help, "
-        "try enabling and disabling airplane mode or restarting the device.\n\n"
+        "try enabling and disabling airplane mode or restarting the device."
+    ),
+    "faq_trouble_awg": (
         "<b>AWG:</b> if the connection is unstable or won't connect, try creating a new AWG key "
-        "and choosing a lower MTU — 1280 — during creation.\n\n"
+        "and choosing a lower MTU — 1280 — during creation."
+    ),
+    "faq_trouble_xray_transport": (
         "<b>Xray:</b> if the connection won't establish, update your VPN app to the latest version "
         "and try creating a new Xray key with a different transport (TCP / XHTTP) — the transport choice "
-        "is offered during key creation. When creating new Xray keys, pick the Firefox or Edge fingerprint "
-        "right away — those are the most stable options. Changing the fingerprint on an already-created "
-        "key is not recommended: it won't fix a connection problem and can even make things worse.\n\n"
-        "<b>Hysteria2:</b> make sure your client supports Hysteria2 (e.g. NekoBox or Hiddify). "
-        "The protocol runs over UDP — if your network throttles or blocks it, try a different network "
-        "(e.g. mobile instead of Wi-Fi) or switch to an Xray/AWG key. MTU and fingerprint settings "
-        "don't apply to Hysteria2.\n\n"
-        "If the problem persists, contact support."
+        "is offered during key creation."
     ),
+    "faq_trouble_xray": "<b>Xray:</b> if the connection won't establish, update your VPN app to the latest version.",
+    "faq_trouble_xray_fingerprint": (
+        "When creating new Xray keys, pick the Firefox or Edge fingerprint "
+        "right away — those are the most stable options. Changing the fingerprint on an already-created "
+        "key is not recommended: it won't fix a connection problem and can even make things worse."
+    ),
+    "faq_trouble_hy2": "<b>Hysteria2:</b> make sure your client supports Hysteria2 (e.g. NekoBox or Hiddify).",
+    "faq_trouble_hy2_udp_switch_xray_awg": (
+        "The protocol runs over UDP — if your network throttles or blocks it, try a different network "
+        "(e.g. mobile instead of Wi-Fi) or switch to an Xray/AWG key."
+    ),
+    "faq_trouble_hy2_udp_switch_xray": (
+        "The protocol runs over UDP — if your network throttles or blocks it, try a different network "
+        "(e.g. mobile instead of Wi-Fi) or switch to an Xray key."
+    ),
+    "faq_trouble_hy2_udp_switch_awg": (
+        "The protocol runs over UDP — if your network throttles or blocks it, try a different network "
+        "(e.g. mobile instead of Wi-Fi) or switch to an AWG key."
+    ),
+    "faq_trouble_hy2_udp": (
+        "The protocol runs over UDP — if your network throttles or blocks it, try a different network "
+        "(e.g. mobile instead of Wi-Fi)."
+    ),
+    "faq_trouble_hy2_no_mtu_fp": "MTU and fingerprint settings don't apply to Hysteria2.",
+    "faq_trouble_hy2_no_fp": "The fingerprint setting doesn't apply to Hysteria2.",
+    "faq_trouble_hy2_no_mtu": "The MTU setting doesn't apply to Hysteria2.",
+    "faq_trouble_support": "If the problem persists, contact support.",
     "faq_key_statuses": (
         "<b>Active</b> — the key is working.\n"
         "<b>Applying / Revoking / Deleting</b> — an operation is in progress, please wait.\n"
@@ -269,32 +335,63 @@ STRINGS: dict[str, str] = {
         "Open \"My keys\", select the key, and tap \"Statistics\". "
         "You'll see incoming and outgoing traffic volumes. Data is updated automatically."
     ),
-    "faq_choice": (
+    "faq_choice_xray_best_transport": (
         "<b>Xray (VLESS + REALITY)</b> — the best at bypassing blocks and DPI, especially with "
         "the right config (transport and fingerprint) chosen. The trade-off is a connection that "
-        "can be slower and have higher latency. A solid choice for everyday use.\n\n"
+        "can be slower and have higher latency. A solid choice for everyday use."
+    ),
+    "faq_choice_xray_best": (
+        "<b>Xray (VLESS + REALITY)</b> — the best at bypassing blocks and DPI, especially with "
+        "the right config (fingerprint) chosen. The trade-off is a connection that "
+        "can be slower and have higher latency. A solid choice for everyday use."
+    ),
+    "faq_choice_xray_solo_transport": (
+        "<b>Xray (VLESS + REALITY)</b> — good at bypassing blocks and DPI, especially with "
+        "the right config (transport and fingerprint) chosen. The trade-off is a connection that "
+        "can be slower and have higher latency. A solid choice for everyday use."
+    ),
+    "faq_choice_xray_solo": (
+        "<b>Xray (VLESS + REALITY)</b> — good at bypassing blocks and DPI, especially with "
+        "the right config (fingerprint) chosen. The trade-off is a connection that "
+        "can be slower and have higher latency. A solid choice for everyday use."
+    ),
+    "faq_choice_awg": (
         "<b>AWG (AmneziaWG)</b> — based on WireGuard: gives minimal, stable latency. "
         "It's easy to block on some networks though, so it's best suited for gaming or calls "
-        "on a home connection with no blocking.\n\n"
+        "on a home connection with no blocking."
+    ),
+    "faq_choice_hy2_vs_awg": (
         "<b>Hysteria2</b> — runs on the same transport as AWG, so it delivers the same low "
         "latency, but disguises itself better as regular web traffic and holds up better on "
-        "unstable networks — which also means higher speed in those conditions. On some "
-        "networks it can still fall short of Xray.\n\n"
-        "If you're not sure what to choose, start with Xray — it's more reliable under blocking. "
-        "If minimal latency matters and there's no blocking, go with AWG. "
-        "On flaky mobile connections with packet loss, try Hysteria2."
+        "unstable networks — which also means higher speed in those conditions."
     ),
-    "faq_fingerprint": (
+    "faq_choice_hy2": (
+        "<b>Hysteria2</b> — runs over UDP (QUIC), so it delivers low latency, disguises itself "
+        "well as regular web traffic and holds up well on unstable networks — which also means "
+        "higher speed in those conditions."
+    ),
+    "faq_choice_hy2_vs_xray": "On some networks it can still fall short of Xray.",
+    "faq_choice_start_xray": "If you're not sure what to choose, start with Xray — it's more reliable under blocking.",
+    "faq_choice_start_hy2": (
+        "If you're not sure what to choose, start with Hysteria2 — it copes better with blocking "
+        "and unstable connections."
+    ),
+    "faq_choice_pick_awg": "If minimal latency matters and there's no blocking, go with AWG.",
+    "faq_choice_pick_hy2": "On flaky mobile connections with packet loss, try Hysteria2.",
+    "faq_fingerprint_intro": (
         "A fingerprint is an imitation of the TLS stack of a popular browser or device. "
         "Xray pretends to be a regular browser so its traffic looks like ordinary HTTPS. "
-        "This makes it harder to detect and block VPN traffic.\n\n"
+        "This makes it harder to detect and block VPN traffic."
+    ),
+    "faq_fingerprint_options": (
         "<b>Firefox</b> and <b>Randomized</b> — a good choice for most cases. "
         "Note: Randomized is less stable than real fingerprints.\n"
         "<b>Chrome / Safari / iOS / Android / Edge / 360 / QQ</b> — alternatives if Firefox doesn't work.\n"
         "<b>Random</b> — a random fingerprint from the list is picked each time.\n"
-        "<b>Randomized</b> — a random fingerprint with randomized TLS parameters; maximally obfuscates the pattern.\n\n"
-        "The fingerprint applies only to Xray keys and has no effect on AWG."
+        "<b>Randomized</b> — a random fingerprint with randomized TLS parameters; maximally obfuscates the pattern."
     ),
+    "faq_fingerprint_scope_awg": "The fingerprint applies only to Xray keys and has no effect on AWG.",
+    "faq_fingerprint_scope": "The fingerprint applies only to Xray keys.",
     "faq_mtu": (
         "MTU is the maximum network packet size. It applies only to AWG keys.\n\n"
         "The recommended value of 1280 works in most cases. "
@@ -304,12 +401,11 @@ STRINGS: dict[str, str] = {
         "A note helps you identify which device a key belongs to — for example, \"Laptop\" or \"Phone\". "
         "Without a note, it's easy to mix up multiple keys."
     ),
-    "faq_proxy": (
-        "The Proxy section offers two types:\n"
-        "<b>SOCKS5</b> — a universal proxy for browsers and apps that support manual proxy settings.\n"
-        "<b>MTProto</b> — a proxy specifically for Telegram when it's blocked without VPN.\n\n"
-        "Proxies work independently from VPN keys."
-    ),
+    "faq_proxy_intro_both": "The Proxy section offers two types:",
+    "faq_proxy_intro_one": "The Proxy section offers one type:",
+    "faq_proxy_socks5": "<b>SOCKS5</b> — a universal proxy for browsers and apps that support manual proxy settings.",
+    "faq_proxy_mtproto": "<b>MTProto</b> — a proxy specifically for Telegram when it's blocked without VPN.",
+    "faq_proxy_independent": "Proxies work independently from VPN keys.",
     "faq_settings": (
         "The Settings section holds your personal preferences:\n\n"
         "👤 <b>Personal cabinet</b> — your profile and stats: role, registration date, number of "
@@ -322,23 +418,35 @@ STRINGS: dict[str, str] = {
         "Yes, this is expected. The server restarts on dates that are multiples of five at 04:00 MSK. "
         "The restart takes a few tens of seconds — the connection briefly drops and reconnects automatically."
     ),
-    "faq_security": (
+    "faq_security_logs": (
         "<b>We don't log your activity.</b> We don't record which sites you open, and we don't "
-        "store the contents of your traffic — the tunnel is opaque to us.\n\n"
-        "<b>Encryption.</b> The connection is protected by modern protocols (AmneziaWG / "
-        "VLESS+REALITY / Hysteria2), and the traffic can't be read from the outside.\n\n"
+        "store the contents of your traffic — the tunnel is opaque to us."
+    ),
+    "faq_security_encryption_many": (
+        "<b>Encryption.</b> The connection is protected by modern protocols ({protocols}), "
+        "and the traffic can't be read from the outside."
+    ),
+    "faq_security_encryption_one": (
+        "<b>Encryption.</b> The connection is protected by a modern protocol ({protocols}), "
+        "and the traffic can't be read from the outside."
+    ),
+    "faq_security_notes": (
         "<b>Only you can see your key notes</b> — they just help you tell devices apart and are "
-        "not shown to anyone.\n\n"
-        "Still have privacy questions? Contact support."
+        "not shown to anyone."
     ),
-    "faq_support": (
-        "Support: @ktotakmoje\n\n"
-        "To help you faster, please include up front:\n"
-        "• the key type (AWG, Xray or Hysteria2) and its number;\n"
+    "faq_security_contact": "Still have privacy questions? Contact support.",
+    "faq_support_contact": "Support: @ktotakmoje",
+    "faq_support_include": "To help you faster, please include up front:",
+    "faq_support_key_type": "• the key type ({protocols}) and its number;",
+    "faq_support_key_number": "• the key number;",
+    "faq_support_device_tried": (
         "• your device and app;\n"
-        "• what you've already tried (see \"Why doesn't it work?\").\n\n"
-        "We usually reply within a day."
+        "• what you've already tried (see \"Why doesn't it work?\")."
     ),
+    "faq_support_reply": "We usually reply within a day.",
+    # Conjunctions for lists of protocol names built at render time.
+    "list_and": "and",
+    "list_or": "or",
     "faq_not_found": "Answer not found.",
     # ── errors ────────────────────────────────────────────────────────────────
     "internal_error": "An internal error occurred. Please try again later.",
@@ -661,14 +769,18 @@ STRINGS: dict[str, str] = {
     "field_bundle_kind": "Kind",
     "bundle_kind_prompt": "<b>Choose the subscription kind:</b>",
     "bundle_kind_basic": "Basic",
-    "bundle_kind_basic_desc": (
-        "VLESS (TCP) and Hysteria2 (as an alternative) — the two main protocols. Fits most people."
-    ),
+    "bundle_kind_basic_desc_pair": "{members} — the two main protocols. Fits most people.",
+    "bundle_kind_basic_desc_single": "{members} — the main protocol. Fits most people.",
     "bundle_kind_extended": "Extended",
     "bundle_kind_extended_desc": (
-        "VLESS (TCP), Hysteria2 and three special VLESS (HTTP) profiles. Key names carry "
+        "{members}. Key names carry "
         "circles — from the fastest to the slowest."
     ),
+    # Composition members as the kind descriptions name them ({members} above).
+    "bundle_part_vless_tcp": "VLESS (TCP)",
+    "bundle_part_hysteria2": "Hysteria2",
+    "bundle_part_hysteria2_alt": "Hysteria2 (as an alternative)",
+    "bundle_part_vless_http": "three special VLESS (HTTP) profiles",
     "bundle_kind_relay_note": (
         "ℹ️ Every key of the subscription also gets a copy through each relay: {relays}."
     ),
@@ -808,7 +920,8 @@ STRINGS: dict[str, str] = {
     ),
     "cabinet_title": "<b>👤 Personal cabinet</b>",
     "field_registered": "Registered",
-    "cabinet_active_keys": "Active keys: {total} (Xray: {xray}, AWG: {awg}, Hysteria2: {hysteria2})",
+    "cabinet_active_keys": "Active keys: {total}",
+    "cabinet_active_keys_by_protocol": "Active keys: {total} ({protocols})",
     # Two scopes, always both, always labelled — see bot.formatters.owner_traffic_lines.
     "traffic_scopes_title": "<b>Traffic</b>",
     "traffic_scope_current": "  Current keys: ↓ {down} · ↑ {up} · total {total}",

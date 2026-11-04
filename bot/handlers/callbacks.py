@@ -3,19 +3,20 @@ from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
+from bot.availability import current_availability
 from bot.bundles import (
     bundle_detail_text,
     bundle_has_vless,
     require_subscription_ui,
-    subscription_ui_enabled,
 )
 from bot.container import Services
 from bot.formatters import key_screen_text
 from bot.handlers.common import admin_owner_context, stats_views_for_screen
+from bot.handlers.keys import create_key_menu_view
 from bot.keyboards.admin import admin_panel_keyboard
 from bot.keyboards.common import back_to_menu
 from bot.keyboards.key_bundles import bundle_actions_keyboard
-from bot.keyboards.keys import create_key_keyboard, key_actions_keyboard
+from bot.keyboards.keys import key_actions_keyboard
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
 from bot.rate_limit import RateLimiter
@@ -42,22 +43,12 @@ async def cancel_callback(
         return
     if cancel_target == "admin:panel":
         await safe_edit_message_text(callback.message, t("admin_panel_title"), reply_markup=admin_panel_keyboard(subscription_enabled=bool(services and services.settings.subscription_enabled)))
-    elif cancel_target == "keys:create":
-        xhttp_on = bool(services and services.settings.xray_xhttp_enabled)
-        hy2_on = bool(
-            services
-            and services.settings.hysteria2_enabled
-            and services.settings.is_hysteria2_ready()
-            and await services.modules.is_enabled("hysteria2")
-        )
-        bundle_on = bool(services and subscription_ui_enabled(services))
-        await safe_edit_message_text(
-            callback.message,
-            f"{t('one_key_one_device')}\n\n{t('choose_key_type')}",
-            reply_markup=create_key_keyboard(
-                xhttp_enabled=xhttp_on, hysteria2_enabled=hy2_on, bundle_enabled=bundle_on
-            ),
-        )
+    elif cancel_target == "keys:create" and services is not None:
+        # The very same screen «Создать ключ» renders, built from availability read
+        # now — so cancelling out of the wizard never brings back a protocol that
+        # was switched off (this branch used to show Xray/AWG unconditionally).
+        text, markup = await create_key_menu_view(services)
+        await safe_edit_message_text(callback.message, text, reply_markup=markup)
     elif cancel_target and cancel_target.startswith("bundle:open:"):
         try:
             bundle_id = int(cancel_target.rsplit(":", 1)[-1])
@@ -71,7 +62,12 @@ async def cancel_callback(
             await safe_edit_message_text(
                 callback.message,
                 bundle_detail_text(
-                    bundle, keys, viewer_user_id=user_id, views=views, relays=services.relays.snapshot
+                    bundle,
+                    keys,
+                    viewer_user_id=user_id,
+                    available=await current_availability(services),
+                    views=views,
+                    relays=services.relays.snapshot,
                 ),
                 reply_markup=bundle_actions_keyboard(bundle, has_vless=bundle_has_vless(keys)),
             )

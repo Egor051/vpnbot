@@ -6,6 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 import i18n
+from bot.availability import current_availability
 from bot.container import Services
 from bot.formatters import personal_cabinet_text, settings_intro_text
 from bot.handlers.common import answer_callback_error, answer_message_error
@@ -41,6 +42,7 @@ async def _build_cabinet_text(services: Services, user: User) -> str:
         active_hysteria2=active_hysteria2,
         traffic=traffic,
         proxy_count=proxy_count,
+        available=await current_availability(services),
     )
 
 

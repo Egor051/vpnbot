@@ -18,7 +18,7 @@ from the moment it exists.
 import asyncio
 import logging
 import sqlite3
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
@@ -34,6 +34,7 @@ from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.hysteria import HysteriaService
 from services.key_naming import XHTTP_PROFILES, key_member_name
 from services.notes import normalize_note
+from services.protocol_availability import Protocol
 from services.protocol_modules import ProtocolModulesService
 from services.relay import RelayCatalog, RelaySnapshot, relay_available
 from services.users import UserService
@@ -138,6 +139,34 @@ def bundle_composition(
             for member in direct
         ),
     )
+
+
+def member_protocol(member: BundleMember) -> Protocol:
+    """The availability switch a composition member depends on.
+
+    The same mapping :meth:`KeyBundleService._member_enabled` applies on the
+    provisioning path (a VLESS (HTTP) member needs XHTTP on top of Xray), stated as
+    a :class:`~services.protocol_availability.Protocol` so the texts describing a
+    bundle can filter the composition exactly the way creating one does.
+    """
+    if member.key_type is VpnKeyType.XRAY:
+        return Protocol.XHTTP if member.transport == "http" else Protocol.XRAY
+    if member.key_type is VpnKeyType.HYSTERIA2:
+        return Protocol.HYSTERIA2
+    raise ValueError(f"not a bundle member type: {member.key_type}")
+
+
+def available_composition(
+    kind: KeyBundleKind, available: Collection[Protocol]
+) -> tuple[BundleMember, ...]:
+    """The direct members of a *kind* bundle whose protocol is available right now.
+
+    :func:`bundle_composition` filtered by availability — what describing a bundle
+    (the kind screen, the help text, whether to offer All-in-One at all) is built
+    from, so no text keeps a hard-coded member list of its own. Relay members are
+    left out: they repeat the direct ones and add no protocol.
+    """
+    return tuple(member for member in bundle_composition(kind) if member_protocol(member) in available)
 
 
 def member_name(member: BundleMember) -> str:
