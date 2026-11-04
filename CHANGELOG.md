@@ -377,7 +377,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   hard delete). Services, interfaces, firewall/ports and shared server configs/certificates
   are still left alone, and the texts now say so. The MTProto secret is revoked only in
   managed mode: in static mode the record is soft-deleted but the shared `MTPROTO_SECRET`
-  keeps working, so both texts say to rotate it and restart the proxy. `ProtocolModulesService.disable_protocol`
+  keeps working, so both texts say to rotate it and restart the proxy. The final confirmation
+  no longer says all data is "permanently destroyed": it says keys are deleted, SOCKS5/MTProto
+  accesses are marked as deleted, and neither can be restored by re-enabling the protocol.
+  `ProtocolModulesService.disable_protocol`
   returns `(deleted, failed)` instead of `deleted`, and when `failed > 0` the result message
   carries a warning (`module_disabled_partial`): those records stay in the DB, usually in
   `DELETE_FAILED` (`REVOKE_FAILED` for MTProto), access may persist, see `bot.log`. The

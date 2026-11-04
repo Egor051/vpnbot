@@ -978,7 +978,9 @@ STRINGS: dict[str, str] = {
     ),
     "module_disable_confirm2": (
         "<b>🛑 FINAL CONFIRMATION — {label}</b>\n\n"
-        "All data for this protocol will be <b>permanently destroyed</b>.\n"
+        "This protocol's keys / proxy accesses will be deleted from the bot database "
+        "(SOCKS5/MTProto ones are marked as deleted). <b>They cannot be restored</b>: "
+        "after re-enabling the protocol, access has to be issued again.\n"
         "Click the button below to confirm."
     ),
     "module_enable_confirm": (
