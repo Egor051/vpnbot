@@ -18,6 +18,35 @@ backup/restore, восстановление по бэкендам из degraded
 - Если включён managed MTProto, `vpn-bot.service` не имеет `ReadWritePaths=/etc/systemd/system`; MTProxy wrapper/drop-in установлены вручную и не содержат сырых секретов.
 - Если включён managed MTProto, `/etc/mtproxy/vpn-bot/managed-secrets.json`, `mtproxy.env` и `backups/*` доступны для чтения только root/операторам.
 
+**Точка входа деплоя.** `origin/main` выкатывается одной обёрткой — сначала проверка, потом деплой:
+
+```bash
+sudo CHECK=1 bash scripts/redeploy.sh    # read-only Phase 1 (PHASE1_ONLY=1) — прочитайте отчёт
+sudo bash scripts/redeploy.sh            # деплой
+```
+
+**Обход гейтов и тюнинг-таймауты.** `deploy.sh` запускается через `systemd-run`, а тот стартует
+его с чистым окружением. Поэтому переменные для `deploy.sh` пишутся в командной строке обёртки
+и обязательно после `sudo`: сброс окружения в `sudo` иначе их потеряет.
+
+```bash
+sudo ALLOW_BACKEND_CONFIG_DRIFT=1 bash scripts/redeploy.sh
+sudo CHECK=1 SCHEMA_WAIT_TIMEOUT=180 bash scripts/redeploy.sh
+```
+
+Обёртка пробрасывает явный allowlist (`DEPLOY_ENV_PASSTHROUGH` в `scripts/redeploy.sh`): все
+`ALLOW_*`, которые читает `deploy.sh`, плюс `SCHEMA_WAIT_TIMEOUT` и `HY2_AUTH_BIND_TIMEOUT`,
+каждую — только если она задана и не пуста. Окружение целиком не пробрасывается никогда. Строка
+`deploy.sh env:` в выводе перечисляет всё проброшенное (`deploy.sh env: PHASE1_ONLY=1
+ALLOW_BACKEND_CONFIG_DRIFT=1`), так что уже по отчёту `CHECK=1` видно, что флаг дойдёт и до
+Phase 2. `ALLOW_*` вне allowlist (опечатка или новый флаг `deploy.sh`, который забыли добавить)
+останавливает обёртку до fetch и запуска, со списком допустимых имён.
+
+Fallback, если обёртка флаг пробросить не может: запустить `deploy.sh` руками, указав флаг в
+строке `systemd-run … env ALLOW_X=1 bash -c "bash /tmp/deploy.sh …"` (README, блок «no-wrapper
+fallback»). Так бывает на хосте, чей чекаут ещё на коммите до allowlist: запускается копия
+`redeploy.sh` из чекаута, а она пробрасывает только `CHECK`/`FORCE`.
+
 ## Деплой перезапускает и sidecar-юниты
 
 `vpn-bot.service` — не единственный процесс, работающий на выкаченном чекауте. Тот же код
@@ -50,6 +79,13 @@ backup/restore, восстановление по бэкендам из degraded
 - **Фатален ровно один случай:** был active до деплоя и не вернулся в `active` после нашего
   рестарта. Это регрессия, вызванная именно этим деплоем, и она уходит в обычный rollback.
   Всё остальное — информационно, включая порт, который не отвечает при активном юните.
+- **Порту сначала дают время на bind.** Оба юнита — `Type=simple`: `active` сразу после старта
+  процесса, а сокет появляется позже. Поэтому проверка порта после рестарта сначала повторяет
+  попытки — каждые 2 с до `SUBSCRIPTION_BIND_WAIT` (по умолчанию 30 с; эндпоинту нужно ~20 с) и
+  каждую секунду до `HY2_AUTH_BIND_TIMEOUT` (по умолчанию 20 с; hy2-auth нужно ~2 с) — и пишет
+  фактическое время, например `listening on 127.0.0.1:8444 (bound after 2s)`. Порт, закрытый и
+  после этого окна, — строка WARN с указанием окна (`NOT listening on 127.0.0.1:8444 within
+  20s`), но никогда не rollback.
 - **По строке на юнит в отчёте** — `restarted` / `skipped (was inactive)` / `skipped (absent)` —
   и в отчёте `PHASE1_ONLY`, и в финальном блоке `DEPLOY OK`, чтобы половинчатая выкатка была
   видна, а не молчала.

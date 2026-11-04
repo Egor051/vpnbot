@@ -32,6 +32,29 @@ Run mutating deploys in a low-traffic window — see [Rollback after a bad
 deploy](#rollback-after-a-bad-deploy) for why. Details in the [README Deploy
 section](../README.md).
 
+**Gate bypasses and tuning knobs.** `deploy.sh` runs under `systemd-run`, which starts it with a
+fresh environment, so its knobs go on the wrapper's command line — after `sudo`, whose
+environment reset would otherwise drop them:
+
+```bash
+sudo ALLOW_BACKEND_CONFIG_DRIFT=1 bash scripts/redeploy.sh
+sudo CHECK=1 SCHEMA_WAIT_TIMEOUT=180 bash scripts/redeploy.sh
+```
+
+The wrapper forwards an explicit allowlist (`DEPLOY_ENV_PASSTHROUGH` in `scripts/redeploy.sh`):
+every `ALLOW_*` gate bypass `deploy.sh` reads, plus `SCHEMA_WAIT_TIMEOUT` and
+`HY2_AUTH_BIND_TIMEOUT`, each only when set and non-empty — never the whole environment. The
+`deploy.sh env:` line of the output lists what was forwarded (`deploy.sh env: PHASE1_ONLY=1
+ALLOW_BACKEND_CONFIG_DRIFT=1`), so the `CHECK=1` report already shows the flag will reach Phase 2
+as well. An `ALLOW_*` outside the allowlist — a typo, or a new `deploy.sh` flag nobody added —
+stops the wrapper before it fetches or launches anything and prints the accepted names.
+
+Fallback, when the wrapper cannot forward a flag: run `deploy.sh` by hand with the flag on the
+`systemd-run … env ALLOW_X=1 bash -c "bash /tmp/deploy.sh …"` line (README, "no-wrapper
+fallback"). That is the case on a host whose checkout is still on a commit from before the
+allowlist: the `redeploy.sh` that runs is the checkout's copy, which forwards `CHECK`/`FORCE`
+only.
+
 ### The deploy restarts the sidecar units too
 
 `vpn-bot.service` is not the only process running the deployed checkout. Two more units run
@@ -67,6 +90,13 @@ The rules, deliberately narrow:
   restart. That is a regression this deploy caused, so it leaves through the normal rollback
   path. Everything else stays informational — including a port that does not answer while the
   unit itself is active.
+- **The port gets its bind window first.** Both units are `Type=simple`: `active` as soon as
+  the process starts, the socket held only later. So the post-restart port check re-tests
+  before it says anything — every 2 s for up to `SUBSCRIPTION_BIND_WAIT` (default 30 s; the
+  endpoint needs ~20 s) and every second for up to `HY2_AUTH_BIND_TIMEOUT` (default 20 s;
+  hy2-auth needs ~2 s) — and reports the measured time, e.g. `listening on 127.0.0.1:8444
+  (bound after 2s)`. A port still closed after that is a warn line naming the window
+  (`NOT listening on 127.0.0.1:8444 within 20s`), never a rollback.
 - **Every unit gets a report line** — `restarted` / `skipped (was inactive)` /
   `skipped (absent)` — in both the `PHASE1_ONLY` report and the final `DEPLOY OK` block, so a
   half-deployed host is visible instead of silent.

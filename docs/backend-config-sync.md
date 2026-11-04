@@ -142,10 +142,13 @@ sudo systemctl restart xray                                    # pick the window
 #   update deploy/xray/config.skeleton.json or deploy/awg/awg0.conf.example
 ```
 
-`ALLOW_BACKEND_CONFIG_DRIFT=1` continues past the gate. Apply it consciously only — the
-drift is known and safe, or you are deploying the very commit that makes the skeleton
-match and will run `install-xray` immediately after. It is **never** a substitute for
-updating the skeleton when the host is the correct side of the diff.
+`ALLOW_BACKEND_CONFIG_DRIFT=1` continues past the gate. Set it on the wrapper's command line —
+`sudo ALLOW_BACKEND_CONFIG_DRIFT=1 bash scripts/redeploy.sh` — which forwards it to `deploy.sh`
+(the Deploy section of the [README](../README.md) has the list of forwarded knobs and the
+no-wrapper fallback). Apply it consciously only — the drift is known and safe, or you are
+deploying the very commit that makes the skeleton match and will run `install-xray`
+immediately after. It is **never** a substitute for updating the skeleton when the host is
+the correct side of the diff.
 
 Exit code `1` is deliberately **not** bypassable by that knob: an unparseable
 `config.json` is not drift to be waived, it is a broken data plane — the bot's own writer

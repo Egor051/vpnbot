@@ -24,6 +24,7 @@ No systemctl, no network, no host paths, no production .env: every external
 command is a stub on PATH and the .env is a fixture under tmp_path.
 """
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -33,11 +34,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_SH = ROOT / "scripts" / "deploy.sh"
 
-# Per-test wall-clock ceiling (pytest-timeout). The slowest test here deliberately
-# lets a short bind wait run out (a few seconds), so anything near this limit is a
-# hang, not slow work. Belt-and-braces on top of the real rule — these suites stub
-# every host command they can reach — because deploy.sh runs this suite as a Phase 1
-# gate on the production host, where a wedged test blocks the deploy it should guard.
+# Per-test wall-clock ceiling (pytest-timeout). The bind wait is a retry count
+# against a stubbed `sleep`, so even the tests that let it run out finish at once;
+# anything near this limit is a hang, not slow work. Belt-and-braces on top of the
+# real rule — these suites stub every host command they can reach — because
+# deploy.sh runs this suite as a Phase 1 gate on the production host, where a
+# wedged test blocks the deploy it should guard.
 pytestmark = pytest.mark.timeout(60)
 
 
@@ -79,9 +81,10 @@ def _run(
     """
     stub_dir = tmp_path / "stub"
     stub_dir.mkdir(parents=True, exist_ok=True)
-    # Instant sleep, and a tally so a test can assert whether waiting happened at
-    # all (a non-active unit must not be waited on).
-    _make_stub(stub_dir / "sleep", f'echo x >> "{tmp_path}/sleeps"\nexit 0\n')
+    # Instant sleep, and a tally of its arguments so a test can assert whether
+    # waiting happened at all (a non-active unit must not be waited on), how many
+    # re-tests ran and at which interval.
+    _make_stub(stub_dir / "sleep", f'printf "%s\\n" "$*" >> "{tmp_path}/sleeps"\nexit 0\n')
     _make_stub(
         stub_dir / "systemctl",
         "case \"$*\" in\n"
@@ -134,9 +137,14 @@ def _ss_bound_after(n_calls: int) -> str:
     )
 
 
-def _sleep_count(tmp_path: Path) -> int:
+def _sleeps(tmp_path: Path) -> list[str]:
+    """Arguments of every (stubbed) `sleep`, in order."""
     log = tmp_path / "sleeps"
-    return len(log.read_text(encoding="utf-8").splitlines()) if log.exists() else 0
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+def _sleep_count(tmp_path: Path) -> int:
+    return len(_sleeps(tmp_path))
 
 
 # --------------------------------------------------------------------------- #
@@ -194,8 +202,10 @@ def test_slow_bind_is_waited_out_and_reported_healthy(tmp_path: Path) -> None:
     assert "RC=[0]" in proc.stdout
     assert "listening on 127.0.0.1:8445 and :2096" in proc.stdout
     assert "NOT listening" not in proc.stdout
-    assert "start-to-bind" in proc.stdout
-    assert _sleep_count(tmp_path) >= 1
+    # The measured wait is reported, next to the reason for it.
+    assert re.search(r"\(bound after \d+s, ~20s start-to-bind delay\)", proc.stdout), proc.stdout
+    # Bound on the 4th probe: three re-tests, at the 2s poll interval.
+    assert _sleeps(tmp_path) == ["2", "2", "2"]
 
 
 def test_already_bound_endpoint_does_not_wait(tmp_path: Path) -> None:
@@ -227,6 +237,24 @@ def test_port_that_never_binds_is_still_reported(tmp_path: Path) -> None:
     assert "127.0.0.1:8445 (loopback)" in proc.stdout
     assert ":2096 (public HTTPS)" in proc.stdout
     assert "start-to-bind window has passed" in proc.stdout
+    # A 4s wait at a 2s interval is two re-tests — a count, not a wall-clock
+    # deadline, so this test spins through no real seconds.
+    assert _sleeps(tmp_path) == ["2", "2"]
+
+
+@pytest.mark.parametrize(("bind_wait", "retries"), [(1, 1), (2, 1), (5, 3), (30, 15)])
+def test_retry_count_covers_the_whole_wait(tmp_path: Path, bind_wait: int, retries: int) -> None:
+    """ceil(SUBSCRIPTION_BIND_WAIT / 2) re-tests: the old deadline's worth, no less."""
+    proc = _run(
+        tmp_path,
+        'MSG="$(subscription_endpoint_status)" && RC=0 || RC=$?\n'
+        'echo "RC=[$RC]"; echo "MSG=[$MSG]"\n',
+        ss_script=f"cat <<'EOF'\n{SS_NOTHING_BOUND}EOF\n",
+        bind_wait=bind_wait,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "RC=[1]" in proc.stdout
+    assert _sleeps(tmp_path) == ["2"] * retries
 
 
 def test_inactive_unit_is_not_waited_on(tmp_path: Path) -> None:

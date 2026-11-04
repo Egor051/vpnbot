@@ -30,6 +30,7 @@ No systemctl, no network, no host paths, no production `.env`: every external
 command is a stub on PATH and the `.env` is a fixture under tmp_path.
 """
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -131,18 +132,28 @@ def _run(
     *,
     units: dict[str, dict] | None = None,
     ss_output: str = SS_ALL_BOUND,
+    ss_script: str | None = None,
     env_fixture: str = ENV_FIXTURE,
     active_wait: int = 4,
+    hy2_bind_timeout: int | str = 20,
 ) -> subprocess.CompletedProcess[str]:
-    """Source deploy.sh (selftest seam) and run `body` with the externals stubbed."""
+    """Source deploy.sh (selftest seam) and run `body` with the externals stubbed.
+
+    ss_script:        body of the fake `ss`, replacing the static `ss_output`; it
+                      may count its calls in $SS_CALLS (see _ss_hy2_bound_after).
+    hy2_bind_timeout: always exported, so a value the operator exported for the
+                      real deploy can never leak into the suite it gates.
+    """
     stub_dir = tmp_path / "stub"
     stub_dir.mkdir(parents=True, exist_ok=True)
     state_dir = tmp_path / "units"
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    _make_stub(stub_dir / "sleep", f'echo x >> "{tmp_path}/sleeps"\nexit 0\n')
+    # Instant sleep that records its argument, so a test can assert how many
+    # re-tests ran and at which interval — without any real waiting.
+    _make_stub(stub_dir / "sleep", f'printf "%s\\n" "$*" >> "{tmp_path}/sleeps"\nexit 0\n')
     _make_stub(stub_dir / "systemctl", SYSTEMCTL_STUB)
-    _make_stub(stub_dir / "ss", f"cat <<'EOF'\n{ss_output}EOF\n")
+    _make_stub(stub_dir / "ss", ss_script if ss_script is not None else f"cat <<'EOF'\n{ss_output}EOF\n")
 
     for unit, spec in (units or {}).items():
         _unit_state(state_dir, unit, **spec)
@@ -160,6 +171,8 @@ def _run(
         f'export SYSTEMCTL_LOG="{tmp_path}/systemctl.log"\n'
         f"export SIDECAR_ACTIVE_WAIT={active_wait}\n"
         "export SUBSCRIPTION_BIND_WAIT=2\n"
+        f"export HY2_AUTH_BIND_TIMEOUT='{hy2_bind_timeout}'\n"
+        f'export SS_CALLS="{tmp_path}/ss_calls"\n'
         f'source "{DEPLOY_SH}"\n'
         # Neutralise the EXIT trap's venv/worktree logic for the test environment.
         'VENV=/nonexistent; VENV_PREV=/nonexistent; WT=""; STAGE=""\n'
@@ -175,6 +188,44 @@ def _run(
     )
     proc.stdout += "\n---STDERR---\n" + proc.stderr
     return proc
+
+
+def _sleeps(tmp_path: Path) -> list[str]:
+    """Arguments of every (stubbed) `sleep`, in order."""
+    log = tmp_path / "sleeps"
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+def _ss_calls(tmp_path: Path) -> int:
+    """How many times a counting `ss` stub (_ss_hy2_bound_after) was run."""
+    f = tmp_path / "ss_calls"
+    return int(f.read_text(encoding="utf-8")) if f.exists() else 0
+
+
+# `ss -tln` with the subscription ports held but NOT the hy2-auth one.
+SS_HY2_UNBOUND = (
+    "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port\n"
+    "LISTEN 0      128        127.0.0.1:8445       0.0.0.0:*\n"
+    "LISTEN 0      128                *:2096             *:*\n"
+)
+
+
+def _ss_hy2_bound_after(n_calls: int) -> str:
+    """Fake `ss` that shows 127.0.0.1:8444 only from call n_calls+1 on.
+
+    Models hy2_auth's start-to-bind window: the unit already reads `active`, the
+    socket appears a moment later. Every call is counted in $SS_CALLS.
+    """
+    return (
+        "c=0\n"
+        '[[ -f "$SS_CALLS" ]] && c="$(cat "$SS_CALLS")"\n'
+        'c=$((c + 1)); printf "%s" "$c" > "$SS_CALLS"\n'
+        f"if (( c > {n_calls} )); then\n"
+        f"  cat <<'EOF'\n{SS_ALL_BOUND}EOF\n"
+        "else\n"
+        f"  cat <<'EOF'\n{SS_HY2_UNBOUND}EOF\n"
+        "fi\n"
+    )
 
 
 def _restarted(tmp_path: Path) -> list[str]:
@@ -408,6 +459,125 @@ def test_subscription_bind_wait_is_reused_not_reimplemented(tmp_path: Path) -> N
     )
     assert proc.returncode == 0, proc.stdout
     assert "start-to-bind window has passed" in proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# hy2-auth start-to-bind wait (HY2_AUTH_BIND_TIMEOUT)
+# --------------------------------------------------------------------------- #
+# vpnbot-hy2-auth is Type=simple: `active` at exec, socket held ~2s later. The
+# single port check that used to follow the restart warned "NOT listening" on
+# every deploy since PR #282, while `ss` on the host showed the port held two
+# seconds on. Only hy2-auth is active in these runs, so every `ss` call and every
+# `sleep` below belongs to its port wait.
+HY2_ONLY = {
+    SUB_UNIT: {"load": "not-found", "state": "inactive"},
+    HY2_UNIT: {"load": "loaded", "state": "active"},
+}
+
+
+def test_hy2_port_bound_on_a_later_attempt_is_ok_without_warn(tmp_path: Path) -> None:
+    """Bound on the 4th probe: an OK line with the measured time, no WARN."""
+    proc = _run(tmp_path, SNAPSHOT_AND_RESTART, units=HY2_ONLY, ss_script=_ss_hy2_bound_after(3))
+    assert proc.returncode == 0, proc.stdout
+    assert re.search(
+        rf"{re.escape(HY2_UNIT)}: restarted — listening on 127\.0\.0\.1:8444 \(bound after \d+s\)",
+        proc.stdout,
+    ), proc.stdout
+    assert "[WARN]" not in proc.stdout
+    assert "NOT listening" not in proc.stdout
+    # One first probe + three re-tests, each after a 1s poll interval.
+    assert _ss_calls(tmp_path) == 4
+    assert _sleeps(tmp_path) == ["1", "1", "1"]
+    assert "ROLLBACK_NOW" not in proc.stdout
+    assert f"    {HY2_UNIT}: restarted" in proc.stdout
+    assert "CONTINUED" in proc.stdout
+
+
+def test_hy2_port_already_bound_is_not_waited_on(tmp_path: Path) -> None:
+    """The happy path stays instant and says nothing about a wait."""
+    proc = _run(tmp_path, SNAPSHOT_AND_RESTART, units=HY2_ONLY, ss_script=_ss_hy2_bound_after(0))
+    assert proc.returncode == 0, proc.stdout
+    assert f"{HY2_UNIT}: restarted — listening on 127.0.0.1:8444\n" in proc.stdout
+    assert "bound after" not in proc.stdout
+    assert _ss_calls(tmp_path) == 1
+    assert _sleeps(tmp_path) == []
+
+
+def test_hy2_port_that_never_binds_warns_within_timeout_and_is_not_fatal(tmp_path: Path) -> None:
+    """Past HY2_AUTH_BIND_TIMEOUT: the same informational WARN, plus "within Ns"."""
+    proc = _run(
+        tmp_path,
+        SNAPSHOT_AND_RESTART,
+        units=HY2_ONLY,
+        ss_output=SS_NOTHING_BOUND,
+        hy2_bind_timeout=5,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert (
+        f"[deploy][WARN] {HY2_UNIT}: restarted, but NOT listening on 127.0.0.1:8444 within 5s"
+        " — informational, not a deploy failure"
+    ) in proc.stdout
+    # Bounded: exactly timeout / 1s re-tests, then it gives up.
+    assert _sleeps(tmp_path) == ["1"] * 5
+    assert "ROLLBACK_NOW" not in proc.stdout
+    assert f"    {HY2_UNIT}: restarted" in proc.stdout
+    assert "CONTINUED" in proc.stdout
+
+
+def test_hy2_unit_not_active_after_restart_keeps_the_fatal_path(tmp_path: Path) -> None:
+    """active -> failed is still the one fatal case, and the port wait never starts."""
+    proc = _run(
+        tmp_path,
+        SNAPSHOT_AND_RESTART,
+        units={
+            SUB_UNIT: {"load": "not-found", "state": "inactive"},
+            HY2_UNIT: {"load": "loaded", "state": "active", "after": "failed"},
+        },
+        ss_script=_ss_hy2_bound_after(0),
+        # wait_unit_active gives up at once instead of polling a dead unit for 4s.
+        active_wait=0,
+    )
+    assert proc.returncode == 9, proc.stdout
+    assert "ROLLBACK_NOW" in proc.stdout
+    assert f"{HY2_UNIT} did not come back from the deploy restart: active before, failed after" in proc.stdout
+    assert _ss_calls(tmp_path) == 0
+    assert _sleeps(tmp_path) == []
+    assert "CONTINUED" not in proc.stdout
+
+
+def test_hy2_bind_timeout_zero_is_a_single_check(tmp_path: Path) -> None:
+    """HY2_AUTH_BIND_TIMEOUT=0 restores the old one-shot check (still never fatal)."""
+    proc = _run(
+        tmp_path,
+        SNAPSHOT_AND_RESTART,
+        units=HY2_ONLY,
+        ss_script=_ss_hy2_bound_after(3),
+        hy2_bind_timeout=0,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert f"{HY2_UNIT}: restarted, but NOT listening on 127.0.0.1:8444 — informational" in proc.stdout
+    assert _ss_calls(tmp_path) == 1
+    assert _sleeps(tmp_path) == []
+
+
+@pytest.mark.parametrize("bad", ["abc", "-1", "08", "1.5", "20s"])
+def test_bad_hy2_bind_timeout_warns_and_falls_back_to_default(tmp_path: Path, bad: str) -> None:
+    """Not a whole number of seconds: say so once and use the default 20."""
+    proc = _run(
+        tmp_path,
+        SNAPSHOT_AND_RESTART,
+        units=HY2_ONLY,
+        ss_output=SS_NOTHING_BOUND,
+        hy2_bind_timeout=bad,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert (
+        f"[deploy][WARN] HY2_AUTH_BIND_TIMEOUT='{bad}' is not a whole number of seconds"
+        " — using the default 20"
+    ) in proc.stdout
+    assert "NOT listening on 127.0.0.1:8444 within 20s" in proc.stdout
+    assert _sleeps(tmp_path) == ["1"] * 20
+    assert "ROLLBACK_NOW" not in proc.stdout
 
 
 # --------------------------------------------------------------------------- #
