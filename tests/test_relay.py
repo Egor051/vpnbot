@@ -609,7 +609,7 @@ def test_relay_vless_link_differs_only_by_host_and_marker(
     relay = service.connection_link(_key(label=label, transport=transport, profile=profile, relay="ru1"))
     assert _prefix(relay) == _prefix(direct).replace(f"@{DIRECT_HOST}:443", f"@{RELAY_HOST}:443")
     assert f"@{RELAY_HOST}:443?" in relay
-    assert _fragment(relay) == f"{label}_relay_{FLAG}"
+    assert _fragment(relay) == f"{label}_relay{FLAG}"
     # Everything in the query (sni, pbk, sid, fp, flow, path, mode, extra) is identical.
     assert parse_qs(urlsplit(relay).query) == parse_qs(urlsplit(direct).query)
 
@@ -635,7 +635,7 @@ def test_hysteria2_direct_and_relay_links(tmp_path: Path) -> None:
         f"hy2_x7k2p_{FLAG}", safe=""
     )
     assert relay == "hysteria2://00ff00ff@relay.anycastedge.net:443/?sni=anycastedge.duckdns.org#" + quote(
-        f"hy2_x7k2p_relay_{FLAG}", safe=""
+        f"hy2_x7k2p_relay{FLAG}", safe=""
     )
     assert "sni=anycastedge.duckdns.org" in relay
 
@@ -667,19 +667,19 @@ def test_display_name_rules(tmp_path: Path) -> None:
     multi_relay = _key(label="xray_http_multi_ab12c", transport="http", profile="multi", relay="ru1")
     hy2 = _key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p", relay="ru1")
     assert key_display_name(tcp, NameStyle.SINGLE, settings, RU1) == f"xray_tcp_ab12c_{FLAG}"
-    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, RU1) == f"xray_tcp_ab12c_relay_{FLAG}"
+    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, RU1) == f"xray_tcp_ab12c_relay{FLAG}"
     # In a basic subscription hy2 ends with "(alt.)" right after the flag — no separator;
     # the same key on its own, and VLESS in a basic subscription, do not.
     hy2_direct = _key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p")
-    assert key_display_name(hy2, NameStyle.BASIC, settings, RU1) == f"hy2_x7k2p_relay_{FLAG}(alt.)"
+    assert key_display_name(hy2, NameStyle.BASIC, settings, RU1) == f"hy2_x7k2p_relay{FLAG}(alt.)"
     assert key_display_name(hy2_direct, NameStyle.BASIC, settings, RU1) == f"hy2_x7k2p_{FLAG}(alt.)"
-    assert key_display_name(hy2, NameStyle.SINGLE, settings, RU1) == f"hy2_x7k2p_relay_{FLAG}"
+    assert key_display_name(hy2, NameStyle.SINGLE, settings, RU1) == f"hy2_x7k2p_relay{FLAG}"
     assert key_display_name(tcp, NameStyle.BASIC, settings, RU1) == f"xray_tcp_ab12c_{FLAG}"
-    assert key_display_name(tcp_relay, NameStyle.BASIC, settings, RU1) == f"xray_tcp_ab12c_relay_{FLAG}"
+    assert key_display_name(tcp_relay, NameStyle.BASIC, settings, RU1) == f"xray_tcp_ab12c_relay{FLAG}"
     assert "(alt.)" not in key_display_name(hy2, NameStyle.EXTENDED, settings, RU1)
     assert key_display_name(tcp, NameStyle.EXTENDED, settings, RU1) == "xray_tcp_ab12c_🟢"
-    assert key_display_name(tcp_relay, NameStyle.EXTENDED, settings, RU1) == "xray_tcp_ab12c_relay_🟢"
-    assert key_display_name(multi_relay, NameStyle.EXTENDED, settings, RU1) == "xray_http_multi_ab12c_relay_🟠"
+    assert key_display_name(tcp_relay, NameStyle.EXTENDED, settings, RU1) == "xray_tcp_ab12c_relay🟢"
+    assert key_display_name(multi_relay, NameStyle.EXTENDED, settings, RU1) == "xray_http_multi_ab12c_relay🟠"
     # A custom flag is used verbatim.
     flagged = _settings(tmp_path, server_flag_emoji="🇩🇪")
     assert key_display_name(tcp, NameStyle.SINGLE, flagged, RU1).endswith("_🇩🇪")
@@ -690,16 +690,45 @@ def test_display_name_uses_the_relays_label(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     msk = relay_snapshot(make_relay(1, "ru1", label="msk"))
     tcp_relay = _key(label="xray_tcp_ab12c", relay="ru1")
-    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, msk) == f"xray_tcp_ab12c_msk_{FLAG}"
-    assert key_display_name(tcp_relay, NameStyle.EXTENDED, settings, msk) == "xray_tcp_ab12c_msk_🟢"
+    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, msk) == f"xray_tcp_ab12c_msk{FLAG}"
+    assert key_display_name(tcp_relay, NameStyle.EXTENDED, settings, msk) == "xray_tcp_ab12c_msk🟢"
     # A switched-off relay still has its label (its link is refused by the host lookup).
     off = relay_snapshot(make_relay(1, "ru1", label="msk", enabled=False))
-    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, off) == f"xray_tcp_ab12c_msk_{FLAG}"
+    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, off) == f"xray_tcp_ab12c_msk{FLAG}"
     # A deleted relay: refused, like rendering its host would be.
     with pytest.raises(RelayUnavailable):
         key_display_name(tcp_relay, NameStyle.SINGLE, settings, EMPTY_RELAYS)
     # Direct keys never need a relay.
     assert key_display_name(_key(), NameStyle.SINGLE, settings, EMPTY_RELAYS) == f"xray_tcp_ab12c_{FLAG}"
+
+
+def test_display_name_glues_an_emoji_label_to_the_flag(tmp_path: Path) -> None:
+    """No "_" after the relay's label: ``🇷🇺➜`` reads ``…_🇷🇺➜🇫🇮``, not ``…_🇷🇺➜_🇫🇮``."""
+    settings = _settings(tmp_path)
+    arrow = relay_snapshot(make_relay(1, "ru1", label="🇷🇺➜"))
+    tcp_relay = _key(label="xray_tcp_ab12c", relay="ru1")
+    multi_relay = _key(label="xray_http_multi_ab12c", transport="http", profile="multi", relay="ru1")
+    hy2 = _key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p", relay="ru1")
+    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, arrow) == f"xray_tcp_ab12c_🇷🇺➜{FLAG}"
+    assert key_display_name(hy2, NameStyle.BASIC, settings, arrow) == f"hy2_x7k2p_🇷🇺➜{FLAG}(alt.)"
+    assert key_display_name(tcp_relay, NameStyle.EXTENDED, settings, arrow) == "xray_tcp_ab12c_🇷🇺➜🟢"
+    assert key_display_name(multi_relay, NameStyle.EXTENDED, settings, arrow) == "xray_http_multi_ab12c_🇷🇺➜🟠"
+    # A separator the admin wants is part of the label.
+    underscored = relay_snapshot(make_relay(1, "ru1", label="ru_"))
+    assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, underscored) == f"xray_tcp_ab12c_ru_{FLAG}"
+    # Direct keys keep their "_" before the flag.
+    assert key_display_name(_key(), NameStyle.SINGLE, settings, arrow) == f"xray_tcp_ab12c_{FLAG}"
+
+
+def test_emoji_label_is_percent_encoded_in_links(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    arrow = relay_snapshot(make_relay(1, "ru1", host=RELAY_HOST, label="🇷🇺➜ #?&%"))
+    vless = _renderer(settings, arrow).connection_link(_key(label="xray_tcp_ab12c", relay="ru1"))
+    assert vless.split("#", 1)[1] == quote(f"xray_tcp_ab12c_🇷🇺➜ #?&%{FLAG}")
+    assert _fragment(vless) == f"xray_tcp_ab12c_🇷🇺➜ #?&%{FLAG}"
+    hy2 = hysteria2_key_link(_key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p", relay="ru1"), settings, arrow)
+    assert hy2.count("#") == 1 and "?" not in hy2.split("#", 1)[1]
+    assert _fragment(hy2) == f"hy2_x7k2p_🇷🇺➜ #?&%{FLAG}"
 
 
 def test_relay_marker_in_bot_labels() -> None:
@@ -731,7 +760,7 @@ async def test_create_relay_xray_key_keeps_the_direct_label_scheme(tmp_path: Pat
             assert key.key_type is VpnKeyType.XRAY
             # The cached link and the config screen both point at the relay.
             assert f"@{RELAY_HOST}:443" in str(key.public_payload["link"])
-            assert _fragment(str(key.public_payload["link"])) == f"{key.email_label}_relay_{FLAG}"
+            assert _fragment(str(key.public_payload["link"])) == f"{key.email_label}_relay{FLAG}"
             assert world.xray.connection_link(key) == key.public_payload["link"]
             assert t("relay_marker") in result.config_text
         # The client went into the very same inbound, under its email label.
@@ -830,10 +859,15 @@ async def _view(world: _World, bundle_id: int) -> BundleView:
 
 
 def _member_of(name: str) -> str:
-    """``xray_http_multi`` out of ``xray_http_multi_A0004[_relay]_🟠``."""
-    if "_relay_" in name:
-        return name.split("_relay_")[0].rsplit("_", 1)[0]
+    """``xray_http_multi`` out of ``xray_http_multi_A0004_🟠`` / ``xray_http_multi_A0004_relay🟠``."""
+    if _is_relay_name(name):
+        return name[: -len("_relay") - 1].rsplit("_", 1)[0]
     return name.rsplit("_", 2)[0]
+
+
+def _is_relay_name(name: str) -> bool:
+    """A name ending in the default relay label glued to a one-character circle."""
+    return name[:-1].endswith("_relay")
 
 
 def _assert_no_circle(names: list[str]) -> None:
@@ -853,7 +887,7 @@ async def test_basic_subscription(tmp_path: Path, relay_on: bool, expected: int)
         names = [_fragment(link) for link in links]
         labels = [key.email_label for key in sorted(result.keys, key=lambda k: (k.relay is not None, k.id))]
         expected_names = [
-            f"{key.email_label}{'_relay' if key.relay else ''}_{FLAG}"
+            f"{key.email_label}_{'relay' if key.relay else ''}{FLAG}"
             f"{'(alt.)' if key.key_type is VpnKeyType.HYSTERIA2 else ''}"
             for key in sorted(result.keys, key=lambda k: (k.relay is not None, k.id))
         ]
@@ -885,13 +919,13 @@ async def test_extended_subscription(tmp_path: Path, relay_on: bool, expected: i
         names = [_fragment(link) for link in links]
         direct, relayed = names[:5], names[5:]
         assert [name.rsplit("_", 1)[1] for name in direct] == ["🟢", "🟢", "🟡", "🟠", "🔴"]
-        assert all("_relay_" not in name for name in direct)
+        assert not any(_is_relay_name(name) for name in direct)
         assert all(FLAG not in name for name in names)
         assert all(DIRECT_HOST in link for link in links[:5])
         if relay_on:
             # Each relay member carries its direct twin's circle, in the same order.
-            assert [name.rsplit("_", 1)[1] for name in relayed] == ["🟢", "🟢", "🟡", "🟠", "🔴"]
-            assert all("_relay_" in name for name in relayed)
+            assert [name[-1] for name in relayed] == ["🟢", "🟢", "🟡", "🟠", "🔴"]
+            assert all(_is_relay_name(name) for name in relayed)
             # …and is the same member (transport/profile) as the twin at its index.
             assert [_member_of(name) for name in relayed] == [_member_of(name) for name in direct]
             assert all(RELAY_HOST in link for link in links[5:])
@@ -1202,7 +1236,7 @@ async def test_qr_delivery_of_relay_keys_points_at_the_relay(tmp_path: Path) -> 
         vless_qr, document = await config_delivery(services, ADMIN, vless)  # type: ignore[arg-type]
         assert document is None
         assert vless_qr == world.xray.connection_link(vless)
-        assert f"@{RELAY_HOST}:443" in vless_qr and _fragment(vless_qr).endswith(f"_relay_{FLAG}")
+        assert f"@{RELAY_HOST}:443" in vless_qr and _fragment(vless_qr).endswith(f"_relay{FLAG}")
         hy2_qr, _ = await config_delivery(services, ADMIN, hy2)  # type: ignore[arg-type]
         assert hy2_qr == world.hysteria.connection_link(hy2)
         assert f"@{RELAY_HOST}:443/" in hy2_qr
@@ -1221,7 +1255,7 @@ async def test_fingerprint_change_keeps_relay_host_and_name(tmp_path: Path) -> N
         link = str(updated.public_payload["link"])
         assert "fp=safari" in link
         assert f"@{RELAY_HOST}:443" in link
-        assert _fragment(link) == f"{key.email_label}_relay_{FLAG}"
+        assert _fragment(link) == f"{key.email_label}_relay{FLAG}"
     finally:
         await world.db.close()
 

@@ -578,8 +578,10 @@ STRINGS: dict[str, str] = {
     ),
     "relay_add_label_prompt": (
         "<b>Step 4 of 4: marker</b>\n\n"
-        "The marker goes into the key name: <code>xray_tcp_ab12c_&lt;marker&gt;_🇫🇮</code>. "
-        "Lowercase Latin letters, digits and hyphens, up to 16 characters. Each relay has its own marker."
+        "The marker goes into the key name right before the flag: "
+        "<code>xray_tcp_ab12c_&lt;marker&gt;🇫🇮</code>. Emoji and any characters are fine, up to 16: "
+        "e.g. <code>🇷🇺➜</code> gives <code>xray_tcp_ab12c_🇷🇺➜🇫🇮</code>. No separator is added before "
+        "the flag — if you want one, put it into the marker (<code>ru_</code>). Each relay has its own marker."
     ),
     "relay_add_confirm_title": "<b>Check the new relay</b>",
     "relay_add_confirm_question": "Create it?",
@@ -603,7 +605,8 @@ STRINGS: dict[str, str] = {
         "The whole list is replaced."
     ),
     "relay_edit_label_prompt": (
-        "New marker for «{label}» (now {value}): lowercase Latin letters, digits and hyphens, up to 16 characters."
+        "New marker for «{label}» (now {value}): up to 16 characters, emoji are fine, e.g. "
+        "<code>🇷🇺➜</code>. The marker goes right before the flag, with no underscore."
     ),
     "relay_edit_note_prompt": (
         "Note for «{label}» (now {value}), on one line. Send <code>-</code> to clear it."
@@ -642,7 +645,7 @@ STRINGS: dict[str, str] = {
         "otherwise those old keys would start pointing at the new relay."
     ),
     "err_relay_label_invalid": (
-        "«{value}» is not a valid marker: lowercase Latin letters, digits and hyphens, up to 16 characters."
+        "«{value}» is not a valid marker: 1 to 16 characters on one line, no control characters."
     ),
     "err_relay_label_taken": "The marker «{value}» is already used by another relay.",
     "err_relay_host_invalid": "«{value}» is neither a DNS name nor an IPv4 address (IPv6 is not supported).",

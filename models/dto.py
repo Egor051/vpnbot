@@ -215,7 +215,8 @@ class Relay:
     id: int
     # Immutable slug (^[a-z0-9][a-z0-9-]{0,31}$) — the join key with vpn_keys.relay.
     name: str
-    # The relay's marker in a key's display name: <label>_<relay label>_<flag>.
+    # The relay's marker in a key's display name: <label>_<relay label><flag>
+    # (free text, emoji allowed — config.validators.relay_label).
     label: str
     # Public DNS name or IPv4 the relay's links point at.
     host: str

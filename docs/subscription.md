@@ -67,14 +67,14 @@ change it is the superadmin's bulk reconcile, see
 |---|---|---|
 | Members | VLESS (TCP), Hysteria2 | VLESS (TCP), Hysteria2, VLESS (HTTP) `base` / `multi` / `antisib` |
 | Per relay (enabled and «в подписках») | + the same 2 → **4** with one relay, **6** with two | + the same 5 → **10** with one relay, **15** with two |
-| Entry name | `<label>[_<relay label>]_<SERVER_FLAG_EMOJI>`, Hysteria2 + `(alt.)` | `<label>[_<relay label>]_<mark>` |
+| Entry name | `<label>_[<relay label>]<SERVER_FLAG_EMOJI>`, Hysteria2 + `(alt.)` | `<label>_[<relay label>]<mark>` |
 | Mark legend («⚠️ Кружок в конце названия…») | never shown | on the bundle's screens |
 
 - Every bundle that existed before the kind was introduced (schema v37) is **extended** and is
   served exactly as before: same members, same `<label>_<mark>` names, main host.
 - A **relay member** ([docs/relay.md](relay.md)) is the same protocol member as its direct
   twin — same create path, same label prefix — so in an extended bundle it carries the
-  **twin's mark**: `xray_http_multi_ab12c_relay_🟠`.
+  **twin's mark**: `xray_http_multi_ab12c_🇷🇺➜🟠` (relay label `🇷🇺➜`).
 - Relay members are provisioned for every relay that is **enabled and «в подписках»** in the
   admin panel when the bundle is created, in groups ordered by the relay's `id`: all direct
   members, then those through relay #1, then relay #2, … A bundle created with no such relay has
@@ -88,9 +88,11 @@ change it is the superadmin's bulk reconcile, see
   "a child that cannot render fails the whole response": switching a relay off is an operator
   decision, not a corrupt row. A bundle left with nothing to serve is still the usual `404`.
 
-A standalone key's link is named `<label>[_<relay label>]_<SERVER_FLAG_EMOJI>` everywhere the
-bot shows it (config screen, QR, create wizard) — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay_🇫🇮`
-(`relay` is the default relay label; it is set per relay in the admin panel).
+A standalone key's link is named `<label>_[<relay label>]<SERVER_FLAG_EMOJI>` everywhere the
+bot shows it (config screen, QR, create wizard) — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay🇫🇮`
+(`relay` is the default relay label; it is set per relay in the admin panel and may hold emoji,
+e.g. `🇷🇺➜` → `hy2_x7k2p_🇷🇺➜🇫🇮`). The relay label is followed by the flag/mark directly — no
+`_` is added after it, so a separator, if wanted, is part of the label (`relay_`).
 
 ### Bringing existing bundles in line
 

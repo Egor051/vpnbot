@@ -371,7 +371,7 @@ on/off and «в подписках», several relays at once. See
 | Variable | Required | Default | Description | Example |
 |---|---|---|---|---|
 | `RELAY_HEALTH_INTERVAL` | No | `300` | Seconds between relay health probes (TCP connect + verified TLS handshake to `<relay host>:XRAY_PUBLIC_PORT` with SNI `XRAY_SNI`, for every enabled relay); `0` disables the monitor (0–86400). Admins are alerted once when a relay goes down and once when it comes back. | `300` |
-| `SERVER_FLAG_EMOJI` | No | `🇫🇮` | Appended to the display name (`#fragment`) of every standalone key and of basic-subscription members: `<label>[_<relay label>]_<flag>`. Display only — the email label never changes. Non-empty, no control characters, at most 16 characters. | `🇫🇮` |
+| `SERVER_FLAG_EMOJI` | No | `🇫🇮` | Appended to the display name (`#fragment`) of every standalone key and of basic-subscription members: `<label>_[<relay label>]<flag>`. Display only — the email label never changes. Non-empty, no control characters, at most 16 characters. | `🇫🇮` |
 | `RELAY_ENABLED` | No | `false` | **Legacy — seed only.** With `true` (plus `RELAY_HOST` and `RELAY_SOURCE_IPS`) and an empty `relays` table, the bot creates that relay once at startup; afterwards every `RELAY_*` below is ignored with a WARNING. | `true` |
 | `RELAY_NAME` | No | `ru1` | **Legacy — seed only.** Name of the seeded relay (`^[a-z0-9][a-z0-9-]{0,31}$`) — the value its keys carry in `vpn_keys.relay`. | `ru1` |
 | `RELAY_HOST` | When `RELAY_ENABLED=true` | *(empty)* | **Legacy — seed only.** Public DNS name (recommended) or IPv4 of the seeded relay. IPv6 is rejected. | `relay.anycastedge.net` |
@@ -388,9 +388,9 @@ XHTTP `path`/`mode`/`extra`, Hysteria2's `sni` — is identical to the direct ke
 
 | Where | Name |
 |---|---|
-| Standalone key (config screen, QR, create wizard) | `<label>[_relay]_<SERVER_FLAG_EMOJI>` — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay_🇫🇮` |
-| Basic subscription | the same as a standalone key; Hysteria2 also ends with `(alt.)` — `hy2_x7k2p_🇫🇮(alt.)` |
-| Extended subscription | `<label>[_relay]_<circle>` — `xray_http_multi_ab12c_relay_🟠` (no flag) |
+| Standalone key (config screen, QR, create wizard) | `<label>_[<relay label>]<SERVER_FLAG_EMOJI>` — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_🇷🇺➜🇫🇮` (relay label `🇷🇺➜`) |
+| Basic subscription | the same as a standalone key; Hysteria2 also ends with `(alt.)` — `hy2_x7k2p_🇫🇮(alt.)`, `hy2_x7k2p_🇷🇺➜🇫🇮(alt.)` |
+| Extended subscription | `<label>_[<relay label>]<circle>` — `xray_http_multi_ab12c_🇷🇺➜🟠` (no flag) |
 
 ## Announcements
 

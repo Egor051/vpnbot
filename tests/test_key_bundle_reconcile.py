@@ -368,7 +368,7 @@ def _fragment(link: str) -> str:
 
 def _basic_tail(link: str) -> str:
     """How a basic-subscription entry's name ends: the flag, plus "(alt.)" for hy2."""
-    return f"_{FLAG}(alt.)" if link.startswith("hysteria2://") else f"_{FLAG}"
+    return f"{FLAG}(alt.)" if link.startswith("hysteria2://") else FLAG
 
 
 def _host(link: str) -> str:
@@ -399,7 +399,7 @@ async def test_extended_to_basic_without_relay_deletes_the_xhttp_children(world:
     # The subscription now serves two entries named like standalone keys, hy2 marked "(alt.)".
     links = await world.links(bundle.id)
     assert len(links) == 2
-    assert all(_fragment(link).endswith(_basic_tail(link)) for link in links)
+    assert all(_fragment(link).endswith(f"_{_basic_tail(link)}") for link in links)
     # One bundle-level audit record with the kinds and the key ids.
     [record] = world.audit.bundle_records()
     assert record["action"] == "key_bundle_composition_reconciled"
@@ -431,7 +431,9 @@ async def test_extended_to_basic_with_relay_creates_relay_members_and_deletes_xh
     links = await world.links(bundle.id)
     assert len(links) == 4
     assert [_host(link) for link in links] == [DIRECT_HOST, DIRECT_HOST, RELAY_HOST, RELAY_HOST]
-    assert all(_fragment(link).endswith(_basic_tail(link)) for link in links)
+    assert all(_fragment(link).endswith(f"_{_basic_tail(link)}") for link in links[:2])
+    # The relay's label (default "relay") is glued to the flag.
+    assert all(_fragment(link).endswith(f"_relay{_basic_tail(link)}") for link in links[2:])
 
 
 async def test_top_up_of_a_basic_bundle_only_adds_the_relay_members(world: _World) -> None:

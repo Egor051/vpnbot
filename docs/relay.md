@@ -279,8 +279,10 @@ old `.env` loader used (a bad value is explained and the step is asked again):
 3. **source IPs** — the relay's egress IPv4 addresses / CIDR networks as this server
    sees them, comma-separated, never empty. If the host is an IPv4 address the step
    offers «Как host».
-4. **label** — the marker in key names, `^[a-z0-9-]{1,16}$`, unique per relay; the
-   step offers `relay` while no other relay uses it.
+4. **label** — the marker in key names, unique per relay: 1–16 characters on one line, no
+   control characters; emoji and any symbols are fine (`🇷🇺➜`). It is followed by the flag
+   directly, with no `_`, so a separator, if wanted, goes into the label (`ru_`). The step
+   offers `relay` while no other relay uses it.
 
 A confirmation card shows everything before the relay is created.
 
@@ -363,8 +365,8 @@ the relay's `name`), not a new key type or transport:
   stats and the email-label scheme are untouched;
 - its link differs from a direct key's in exactly two places: the **host** (the
   relay's host instead of `XRAY_PUBLIC_HOST` / `HYSTERIA2_HOST`) and the **display
-  name** (the relay's label after the key's label:
-  `<label>_<relay label>_<flag|circle>`, e.g. `xray_tcp_ab12c_relay_🇫🇮`). Port,
+  name** (the relay's label after the key's label, glued to the flag/circle:
+  `<label>_<relay label><flag|circle>`, e.g. `xray_tcp_ab12c_🇷🇺➜🇫🇮` for the label `🇷🇺➜`). Port,
   REALITY `sni`/`pbk`/`sid`/`spx`/`fp`, `flow`, XHTTP `path`/`mode`/`extra`, and
   Hysteria2's `sni` are the same — the relay forwards 1:1, so TLS still terminates on
   the main server with its own certificate / REALITY keys;

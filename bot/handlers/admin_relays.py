@@ -380,12 +380,24 @@ async def _draft(state: FSMContext) -> dict[str, str]:
     return dict(draft) if isinstance(draft, dict) else {}
 
 
+def _retry_text(exc: InvalidOperation) -> str:
+    """The rejection with the rejected value HTML-escaped.
+
+    The reply is HTML and the value is whatever the admin typed — a relay label
+    may legitimately hold ``<`` or ``&`` — so an unescaped echo would make
+    Telegram refuse the whole message.
+    """
+    if exc.key:
+        return t(exc.key, **{name: h(value) for name, value in exc.params.items()})
+    return h(service_error_text(exc))
+
+
 async def _retry(message: Message, exc: Exception, cancel_callback: str) -> None:
     """A rejected value: explain it and ask for the same step again."""
     if not isinstance(exc, InvalidOperation):
         raise exc
     await message.answer(
-        f"{service_error_text(exc)}\n{t('relay_try_again')}", reply_markup=relay_cancel_keyboard(cancel_callback)
+        f"{_retry_text(exc)}\n{t('relay_try_again')}", reply_markup=relay_cancel_keyboard(cancel_callback)
     )
 
 
