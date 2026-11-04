@@ -101,11 +101,14 @@ async def admin_module_disable_exec(callback: CallbackQuery, services: Services)
         if name not in PROTOCOL_NAMES:
             return
         label = PROTOCOL_DISPLAY.get(name, name)
-        deleted = await services.modules.disable_protocol(name, callback.from_user.id)
+        deleted, failed = await services.modules.disable_protocol(name, callback.from_user.id)
         modules = await services.modules.get_all()
+        text = t("module_disabled_ok", label=label, deleted=deleted)
+        if failed > 0:
+            text += "\n\n" + t("module_disabled_partial", failed=failed)
         await safe_edit_message_text(
             callback.message,
-            t("module_disabled_ok", label=label, deleted=deleted),
+            text,
             reply_markup=modules_panel_keyboard(modules),
         )
     except Exception as exc:

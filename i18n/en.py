@@ -954,17 +954,21 @@ STRINGS: dict[str, str] = {
     "btn_modules_back": "← Back to modules",
     "modules_panel_title": (
         "<b>⚙️ Protocol modules</b>\n\n"
-        "Disabling a protocol <b>permanently deletes</b> all related bot-side data (keys, proxy accesses, database records).\n"
-        "Server-side accounts (AWG/Xray configs, Linux users, MTProto secrets) are NOT removed — clean them up manually.\n"
+        "Disabling a protocol revokes every client's access both on the server "
+        "(Xray client, AWG peer, Dante user, MTProto secret) and in the bot: keys are deleted "
+        "from the database (traffic is archived), SOCKS5/MTProto proxy accesses are marked as deleted.\n"
+        "Services, interfaces, firewall rules/ports and shared server configs/certificates are <b>not touched</b>.\n"
         "Once disabled, the protocol is completely hidden; only \"Backend diagnostics\" will show it was disabled.\n\n"
         "You can re-enable a protocol at any time."
     ),
     "module_disable_confirm1": (
         "<b>⚠️ Disable protocol {label}</b>\n\n"
         "This action will:\n"
-        "• permanently hard-delete all keys / proxy accesses for this protocol from the bot database\n"
+        "• revoke each client's access on the server (Xray client, AWG peer, Dante user, MTProto secret)\n"
+        "• permanently delete Xray/AWG/Hysteria2 keys from the bot database (traffic is archived) "
+        "and mark SOCKS5/MTProto proxy accesses as deleted\n"
         "• remove all buttons and mentions of the protocol\n"
-        "• NOT touch the server side (AWG/Xray configs etc.) — clean those up manually\n\n"
+        "• NOT touch services, interfaces, firewall rules/ports or shared server configs/certificates\n\n"
         "Continue?"
     ),
     "module_disable_confirm2": (
@@ -979,6 +983,11 @@ STRINGS: dict[str, str] = {
     "module_disabling": "Disabling protocol...",
     "module_enabling": "Enabling protocol...",
     "module_disabled_ok": "✅ Protocol <b>{label}</b> disabled. Records deleted: {deleted}.",
+    "module_disabled_partial": (
+        "⚠️ Records that could not be revoked on the server: <b>{failed}</b>. They remain in the database "
+        "(usually in DELETE_FAILED status, REVOKE_FAILED for MTProto) and access may persist; "
+        "see bot.log."
+    ),
     "module_enabled_ok": "✅ Protocol <b>{label}</b> enabled.",
     # ── admin «All-in-One» section: bulk composition reconcile ─────────────────
     "btn_admin_bundles": "🔗 All-in-One",
