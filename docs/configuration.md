@@ -389,7 +389,7 @@ XHTTP `path`/`mode`/`extra`, Hysteria2's `sni` — is identical to the direct ke
 | Where | Name |
 |---|---|
 | Standalone key (config screen, QR, create wizard) | `<label>[_relay]_<SERVER_FLAG_EMOJI>` — `xray_tcp_ab12c_🇫🇮`, `hy2_x7k2p_relay_🇫🇮` |
-| Basic subscription | the same as a standalone key |
+| Basic subscription | the same as a standalone key; Hysteria2 also ends with `(alt.)` — `hy2_x7k2p_🇫🇮(alt.)` |
 | Extended subscription | `<label>[_relay]_<circle>` — `xray_http_multi_ab12c_relay_🟠` (no flag) |
 
 ## Announcements

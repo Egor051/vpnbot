@@ -668,7 +668,15 @@ def test_display_name_rules(tmp_path: Path) -> None:
     hy2 = _key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p", relay="ru1")
     assert key_display_name(tcp, NameStyle.SINGLE, settings, RU1) == f"xray_tcp_ab12c_{FLAG}"
     assert key_display_name(tcp_relay, NameStyle.SINGLE, settings, RU1) == f"xray_tcp_ab12c_relay_{FLAG}"
-    assert key_display_name(hy2, NameStyle.BASIC, settings, RU1) == f"hy2_x7k2p_relay_{FLAG}"
+    # In a basic subscription hy2 ends with "(alt.)" right after the flag — no separator;
+    # the same key on its own, and VLESS in a basic subscription, do not.
+    hy2_direct = _key(VpnKeyType.HYSTERIA2, label="hy2_x7k2p")
+    assert key_display_name(hy2, NameStyle.BASIC, settings, RU1) == f"hy2_x7k2p_relay_{FLAG}(alt.)"
+    assert key_display_name(hy2_direct, NameStyle.BASIC, settings, RU1) == f"hy2_x7k2p_{FLAG}(alt.)"
+    assert key_display_name(hy2, NameStyle.SINGLE, settings, RU1) == f"hy2_x7k2p_relay_{FLAG}"
+    assert key_display_name(tcp, NameStyle.BASIC, settings, RU1) == f"xray_tcp_ab12c_{FLAG}"
+    assert key_display_name(tcp_relay, NameStyle.BASIC, settings, RU1) == f"xray_tcp_ab12c_relay_{FLAG}"
+    assert "(alt.)" not in key_display_name(hy2, NameStyle.EXTENDED, settings, RU1)
     assert key_display_name(tcp, NameStyle.EXTENDED, settings, RU1) == "xray_tcp_ab12c_🟢"
     assert key_display_name(tcp_relay, NameStyle.EXTENDED, settings, RU1) == "xray_tcp_ab12c_relay_🟢"
     assert key_display_name(multi_relay, NameStyle.EXTENDED, settings, RU1) == "xray_http_multi_ab12c_relay_🟠"
@@ -846,6 +854,7 @@ async def test_basic_subscription(tmp_path: Path, relay_on: bool, expected: int)
         labels = [key.email_label for key in sorted(result.keys, key=lambda k: (k.relay is not None, k.id))]
         expected_names = [
             f"{key.email_label}{'_relay' if key.relay else ''}_{FLAG}"
+            f"{'(alt.)' if key.key_type is VpnKeyType.HYSTERIA2 else ''}"
             for key in sorted(result.keys, key=lambda k: (k.relay is not None, k.id))
         ]
         assert names == expected_names, labels

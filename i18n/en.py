@@ -659,11 +659,11 @@ STRINGS: dict[str, str] = {
     "bundle_kind_prompt": "<b>Choose the subscription kind:</b>",
     "bundle_kind_basic": "Basic",
     "bundle_kind_basic_desc": (
-        "VLESS (TCP) and Hysteria2 — the two main protocols. Fits most people."
+        "VLESS (TCP) and Hysteria2 (as an alternative) — the two main protocols. Fits most people."
     ),
     "bundle_kind_extended": "Extended",
     "bundle_kind_extended_desc": (
-        "VLESS (TCP), Hysteria2 and three VLESS (HTTP) profiles. Key names carry "
+        "VLESS (TCP), Hysteria2 and three special VLESS (HTTP) profiles. Key names carry "
         "circles — from the fastest to the slowest."
     ),
     "bundle_kind_relay_note": (

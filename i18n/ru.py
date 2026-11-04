@@ -663,11 +663,11 @@ STRINGS: dict[str, str] = {
     "bundle_kind_prompt": "<b>Выберите вид подписки:</b>",
     "bundle_kind_basic": "Базовая",
     "bundle_kind_basic_desc": (
-        "VLESS (TCP) и Hysteria2 — два основных протокола. Подходит большинству."
+        "VLESS (TCP) и Hysteria2 (как альтернатива) — два основных протокола. Подходит большинству."
     ),
     "bundle_kind_extended": "Расширенная",
     "bundle_kind_extended_desc": (
-        "VLESS (TCP), Hysteria2 и три профиля VLESS (HTTP). Названия ключей помечены "
+        "VLESS (TCP), Hysteria2 и три специальных профиля VLESS (HTTP). Названия ключей помечены "
         "кружками — от самого быстрого к самому медленному."
     ),
     "bundle_kind_relay_note": (

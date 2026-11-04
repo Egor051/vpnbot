@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 # — the same function the bot's per-key screen uses — with the bundle's naming
 # rule: an EXTENDED bundle appends the preference circle (🟢 🟡 🟠 🔴, the order to
 # try the profiles in), a BASIC bundle names its members like standalone keys
-# (``<label>[_<relay label>]_<SERVER_FLAG_EMOJI>``). The circles are confined to
-# extended subscriptions, where there is something to rank against.
+# (``<label>[_<relay label>]_<SERVER_FLAG_EMOJI>``, with ``(alt.)`` glued onto the
+# Hysteria2 member's name). The circles are confined to extended subscriptions,
+# where there is something to rank against.
 
 
 class SubscriptionRenderError(RuntimeError):

@@ -274,6 +274,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Basic subscription: the Hysteria2 entry's name ends with `(alt.)`.** It is glued on
+  right after the server flag, with no space or underscore — `hy2_x7k2p_🇫🇮(alt.)`, and the
+  same for a relay copy (`hy2_x7k2p_relay_🇫🇮(alt.)`). VLESS (TCP) in a basic subscription,
+  every standalone key and every extended-subscription entry are named as before; the stored
+  `email_label` is untouched. Clients show the new name after the next subscription refresh.
+  The kind-choice screen now says «Hysteria2 (как альтернатива)» for the basic kind and
+  «три специальных профиля VLESS (HTTP)» for the extended one.
+
 - **`RELAY_ENABLED` / `RELAY_NAME` / `RELAY_HOST` / `RELAY_SOURCE_IPS` are no longer a
   source of truth.** On bot startup, if the `relays` table is empty and `.env` has
   `RELAY_ENABLED=true` with a host and source IPs, that relay is seeded once (name

@@ -17,7 +17,10 @@ Rules (``[_<relay label>]`` is present only for a relay key, and is the
 * standalone key (link / QR / delivery outside a subscription):
   ``<label>[_<relay label>]_<SERVER_FLAG_EMOJI>`` — e.g. ``xray_tcp_ab12c_🇫🇮``
   or ``xray_tcp_ab12c_relay_🇫🇮``;
-* member of a **basic** subscription: the same as a standalone key;
+* member of a **basic** subscription: the same as a standalone key, except that a
+  Hysteria2 member also ends with :data:`BASIC_ALT_SUFFIX` glued on with no
+  separator — e.g. ``hy2_x7k2p_🇫🇮(alt.)`` — marking it as the alternative
+  to VLESS (TCP);
 * member of an **extended** subscription: ``<label>[_<relay label>]_<mark>``,
   where the mark is the preference circle of the member (no flag). A relay member
   gets the circle of its direct twin, because the circle is keyed by
@@ -57,6 +60,12 @@ PREFERENCE_MARKS: dict[str, str] = {
     "xray_http_multi": "🟠",
     "xray_http_antisib": "🔴",
 }
+
+# Tail of a Hysteria2 member's name in a BASIC subscription. Both members of a
+# basic subscription carry the same flag, so without it nothing in the client
+# says which one to try first; hy2 is the alternative to VLESS (TCP). Appended
+# as is — no underscore, no space.
+BASIC_ALT_SUFFIX = "(alt.)"
 
 
 class NameStyle(StrEnum):
@@ -145,4 +154,7 @@ def key_display_name(key: VpnKey, style: NameStyle, settings: Settings, relays: 
     if style is NameStyle.EXTENDED:
         mark = PREFERENCE_MARKS.get(key_member_name(key))
         return f"{base}_{mark}" if mark else base
-    return f"{base}_{settings.server_flag_emoji}"
+    name = f"{base}_{settings.server_flag_emoji}"
+    if style is NameStyle.BASIC and key.key_type is VpnKeyType.HYSTERIA2:
+        return f"{name}{BASIC_ALT_SUFFIX}"
+    return name
