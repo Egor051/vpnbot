@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import unicodedata
 from collections.abc import Iterable
 
 # Name of an L4 relay — the value stored in ``vpn_keys.relay`` and in
@@ -24,8 +25,18 @@ from collections.abc import Iterable
 # against THIS pattern.
 RELAY_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
-# The relay's marker in a key's display name (``<label>_<relay label>_<flag>``).
-RELAY_LABEL_PATTERN = re.compile(r"^[a-z0-9-]{1,16}$")
+# The relay's marker in a key's display name (``<label>_<relay label><flag>``).
+# Free text: emoji, arrows, letters of any script, digits, punctuation — e.g.
+# ``🇷🇺➜`` or ``ru_``. It is glued to the flag with no separator, so whoever wants
+# one writes it into the label. Length is counted in code points (a flag emoji
+# is two).
+RELAY_LABEL_MAX_CHARS = 16
+
+# Unicode categories a relay marker may not contain: control characters (Cc),
+# lone surrogates (Cs, unencodable) and line/paragraph separators (Zl, Zp). Format
+# characters (Cf) stay allowed: the zero-width joiner and the tag characters
+# are parts of emoji sequences.
+_RELAY_LABEL_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cs", "Zl", "Zp"})
 
 # The marker a relay gets when nobody chose one (and the one the .env seed uses).
 DEFAULT_RELAY_LABEL = "relay"
@@ -61,11 +72,19 @@ def relay_name(name: str, value: str) -> str:
 
 
 def relay_label(name: str, value: str) -> str:
-    """A relay marker matching :data:`RELAY_LABEL_PATTERN`, returned unchanged."""
-    if RELAY_LABEL_PATTERN.fullmatch(value) is None:
-        raise InvalidValue(
-            f"{name} должен соответствовать ^[a-z0-9-]{{1,16}}$ (строчные латинские буквы, цифры, дефис)"
-        )
+    """A relay marker, returned unchanged.
+
+    1..:data:`RELAY_LABEL_MAX_CHARS` characters on one line, no surrounding
+    whitespace and none of :data:`_RELAY_LABEL_FORBIDDEN_CATEGORIES`. Anything
+    else — emoji included — is accepted: the marker only ever reaches a link's
+    ``#fragment`` (percent-encoded there) and chat text (HTML-escaped there).
+    """
+    if not value or len(value) > RELAY_LABEL_MAX_CHARS:
+        raise InvalidValue(f"{name} должен быть длиной от 1 до {RELAY_LABEL_MAX_CHARS} символов")
+    if value != value.strip():
+        raise InvalidValue(f"{name} не должен начинаться или заканчиваться пробелом")
+    if any(unicodedata.category(ch) in _RELAY_LABEL_FORBIDDEN_CATEGORIES for ch in value):
+        raise InvalidValue(f"{name} должен быть одной строкой без управляющих символов")
     return value
 
 
