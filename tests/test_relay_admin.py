@@ -874,7 +874,9 @@ async def test_label_change_renames_relay_keys_at_once(world: _World) -> None:
     assert vless is not None
     assert _fragment(world.xray.connection_link(vless)) == f"{vless.email_label}_spb{FLAG}"
     names = [_fragment(link) for link in render_links(await world.view(estate["bundle"].bundle.id), world.settings)]
-    assert sum(name.endswith(f"_spb{FLAG}") for name in names) == 2
+    # A basic bundle: the relay VLESS entry ends with the flag, the relay hy2 one with "(alt.)" after it.
+    assert sum(name.endswith(f"_spb{FLAG}") for name in names) == 1
+    assert sum(name.endswith(f"_spb{FLAG}(alt.)") for name in names) == 1
 
 
 async def test_an_ipv4_host_outside_the_source_ips_is_suggested(world: _World) -> None:

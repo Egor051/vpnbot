@@ -274,6 +274,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Basic subscription: the Hysteria2 entry's name ends with `(alt.)`.** It is glued on
+  right after the server flag, with no space or underscore — `hy2_x7k2p_🇫🇮(alt.)`, and the
+  same for a relay copy (`hy2_x7k2p_relay🇫🇮(alt.)` with the default relay label). VLESS (TCP)
+  in a basic subscription, every standalone key and every extended-subscription entry are
+  named as before; the stored `email_label` is untouched. Clients show the new name after the
+  next subscription refresh.
+  The kind-choice screen now says «Hysteria2 (как альтернатива)» for the basic kind and
+  «три специальных профиля VLESS (HTTP)» for the extended one.
+
 - **A relay's label (the marker in key names) takes emoji and any characters, and is glued to
   the flag.** «✏️ Метка» and the «Добавить relay» wizard now accept 1–16 characters on one
   line with no control characters — `🇷🇺➜`, `➜`, `ru_`, `Москва` — instead of

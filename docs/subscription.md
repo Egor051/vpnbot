@@ -40,10 +40,12 @@ Canonical references live where every other feature's do:
    | 5 | VLESS (HTTP) `antisib` | 🔴 |
 
    A **basic** bundle has no marks: its members are named like standalone keys, with the
-   server flag. The name rides the link's `#fragment` **only** — the stored `email_label`
-   (Xray's client email, the hy2 auth id) is untouched, so reconciliation, traffic stats and
-   anomaly detection keep matching on it. The bot explains the colours on an extended
-   subscription's own screens (and only there); the same order is what «Состав» lists.
+   server flag, and the Hysteria2 entry also ends with `(alt.)` right after the flag, no
+   separator (`hy2_x7k2p_🇫🇮(alt.)`). The name rides the link's `#fragment` **only** — the
+   stored `email_label` (Xray's client email, the hy2 auth id) is untouched, so
+   reconciliation, traffic stats and anomaly detection keep matching on it. The bot explains
+   the colours on an extended subscription's own screens (and only there); the same order is
+   what «Состав» lists.
 5. **spiderX (`spx`) of the VLESS children can rotate.** With `XRAY_SPIDER_X_ROTATION_HOURS=0`
    (the default) each child carries its stored per-key `spx`, exactly as its single-key link
    does. With a value `> 0` and a non-empty `XRAY_SPIDER_X_POOL`, each child's `spx` walks the
@@ -65,7 +67,7 @@ change it is the superadmin's bulk reconcile, see
 |---|---|---|
 | Members | VLESS (TCP), Hysteria2 | VLESS (TCP), Hysteria2, VLESS (HTTP) `base` / `multi` / `antisib` |
 | Per relay (enabled and «в подписках») | + the same 2 → **4** with one relay, **6** with two | + the same 5 → **10** with one relay, **15** with two |
-| Entry name | `<label>_[<relay label>]<SERVER_FLAG_EMOJI>` | `<label>_[<relay label>]<mark>` |
+| Entry name | `<label>_[<relay label>]<SERVER_FLAG_EMOJI>`, Hysteria2 + `(alt.)` | `<label>_[<relay label>]<mark>` |
 | Mark legend («⚠️ Кружок в конце названия…») | never shown | on the bundle's screens |
 
 - Every bundle that existed before the kind was introduced (schema v37) is **extended** and is
