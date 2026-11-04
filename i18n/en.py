@@ -955,20 +955,25 @@ STRINGS: dict[str, str] = {
     "modules_panel_title": (
         "<b>⚙️ Protocol modules</b>\n\n"
         "Disabling a protocol revokes every client's access both on the server "
-        "(Xray client, AWG peer, Dante user, MTProto secret) and in the bot: keys are deleted "
+        "(Xray client, AWG peer, Dante user, MTProto secret in managed mode) and in the bot: keys are deleted "
         "from the database (traffic is archived), SOCKS5/MTProto proxy accesses are marked as deleted.\n"
         "Services, interfaces, firewall rules/ports and shared server configs/certificates are <b>not touched</b>.\n"
+        "⚠️ MTProto in static mode: the shared secret keeps working — to revoke access, "
+        "rotate MTPROTO_SECRET and restart the proxy.\n"
         "Once disabled, the protocol is completely hidden; only \"Backend diagnostics\" will show it was disabled.\n\n"
         "You can re-enable a protocol at any time."
     ),
     "module_disable_confirm1": (
         "<b>⚠️ Disable protocol {label}</b>\n\n"
         "This action will:\n"
-        "• revoke each client's access on the server (Xray client, AWG peer, Dante user, MTProto secret)\n"
+        "• revoke each client's access on the server (Xray client, AWG peer, Dante user, "
+        "MTProto secret in managed mode)\n"
         "• permanently delete Xray/AWG/Hysteria2 keys from the bot database (traffic is archived) "
         "and mark SOCKS5/MTProto proxy accesses as deleted\n"
         "• remove all buttons and mentions of the protocol\n"
-        "• NOT touch services, interfaces, firewall rules/ports or shared server configs/certificates\n\n"
+        "• NOT touch services, interfaces, firewall rules/ports or shared server configs/certificates — "
+        "including the shared MTProto secret in static mode: it keeps working until you rotate "
+        "MTPROTO_SECRET and restart the proxy\n\n"
         "Continue?"
     ),
     "module_disable_confirm2": (

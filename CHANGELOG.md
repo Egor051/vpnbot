@@ -375,7 +375,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   peer, Dante user, MTProto secret), Xray/AWG/Hysteria2 keys are deleted from the DB with
   their traffic archived, and SOCKS5/MTProto accesses are soft-deleted (no longer called a
   hard delete). Services, interfaces, firewall/ports and shared server configs/certificates
-  are still left alone, and the texts now say so. `ProtocolModulesService.disable_protocol`
+  are still left alone, and the texts now say so. The MTProto secret is revoked only in
+  managed mode: in static mode the record is soft-deleted but the shared `MTPROTO_SECRET`
+  keeps working, so both texts say to rotate it and restart the proxy. `ProtocolModulesService.disable_protocol`
   returns `(deleted, failed)` instead of `deleted`, and when `failed > 0` the result message
   carries a warning (`module_disabled_partial`): those records stay in the DB, usually in
   `DELETE_FAILED` (`REVOKE_FAILED` for MTProto), access may persist, see `bot.log`. The
