@@ -44,7 +44,7 @@ design and cannot live in the repo).
 | `/etc/systemd/journald.conf.d/10-vpn-bot.conf` | repo-managed (`journald`) | deploy.sh | `SystemMaxUse=500M`; replaces a hand edit of `journald.conf` |
 | `/etc/systemd/journald.conf` | dpkg conffile | the `systemd` package | never written by the deploy; Phase 1 reports it **MODIFIED** while the old hand edit is still in it — restore the stock file by hand once the drop-in is live |
 | `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | keeps networkd from flushing WARP's `ip rule`s; effective at networkd's next start |
-| `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`) | deploy.sh, from `deploy/vpn-bot-acme-reload.sh` | acme.sh's `Le_ReloadCmd`; [subscription.md](subscription.md#tls-termination) |
+| `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, from `deploy/vpn-bot-acme-reload.sh` | acme.sh's `Le_ReloadCmd`; only where there is renewal material; [subscription.md](subscription.md#tls-termination) |
 | `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | key-only root login; see [ALLOW_SSH_CHANGE](#allow_ssh_change-and-the-lockout-risk) |
 | `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `ListenStream` on 54321 (IPv4 + IPv6) |
 | `/etc/systemd/system/danted.service.d/vpn-bot-warp.conf` | repo-managed (`unit`) | deploy.sh, from `deploy/danted-warp.conf` | ordering after the WARP interface |
@@ -88,8 +88,9 @@ The registry is `MANAGED_HOST_FILES` in `scripts/deploy.sh`, one entry per file:
 ```
 
 `role` is `main` or `relay`: a host only ever sees the entries of its own role. `opts` is
-optional: `gate=<PROTO>` makes the entry exist only while `<PROTO>_ENABLED` is on in `.env`, and
-`legacy=<path>` names an older name of the same file.
+optional: `gate=<PROTO>` makes the entry exist only while `<PROTO>_ENABLED` is on in `.env`,
+`when=<path>` only on a host where `<path>` exists, and `legacy=<path>` names an older name of the
+same file. A closed gate means the entry is neither installed nor checked.
 
 | class | Phase 1 validates the candidate with | Phase 2, after an actual change |
 |---|---|---|
@@ -173,13 +174,16 @@ Decide which side is right:
   sudo ALLOW_SSH_CHANGE=1 bash scripts/redeploy.sh
   ```
 
-With the knob, Phase 2 installs the file, runs `sshd -t`, does `daemon-reload` +
-`systemctl restart ssh.socket` for a `ListenStream` change or `systemctl reload ssh` for an
-sshd_config change, and then requires the listening unit (`ssh.socket` where it is active,
-otherwise `ssh.service`) to be active and every expected port to listen. If not, the deploy
-rolls back: the old file is restored, `sshd -t` is run on it, and ssh is reloaded / the socket
-restarted — **unless `sshd -t` fails on the restored config**, in which case ssh is left alone
-and the rollback report says so in capitals.
+With the knob, Phase 2 installs the file and runs `sshd -t`. For a `ListenStream` change it
+does `daemon-reload` + `systemctl restart ssh.socket` and, when sshd is running, also
+`systemctl restart ssh` — a running sshd keeps the sockets it was started with, so the socket
+alone would leave it on the old port (open sessions survive the restart). For an sshd_config
+change it does `systemctl reload ssh`. Then the listening unit (`ssh.socket` where it is
+active, otherwise `ssh.service`) must be active and every expected port must both listen and
+**answer with an SSH banner** — a listener alone proves nothing under socket activation. If not,
+the deploy rolls back: the old file is restored, `sshd -t` is run on it, and the socket / ssh is
+restarted or reloaded the same way — **unless `sshd -t` fails on the restored config**, in which
+case ssh is left alone and the rollback report says so in capitals.
 
 The port check catches a dead port, not a key you can no longer log in with. The second session
 is what saves you then: test a fresh login from it before closing anything.

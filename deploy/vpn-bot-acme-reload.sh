@@ -27,6 +27,10 @@
 # reason the OTHER consumers keep the old certificate. Each failure is recorded and
 # the hook exits 1 at the end, so it lands in the acme.sh cron log instead of being
 # swallowed. (The hand-written predecessor behaved the same way: `|| rc=1` per step.)
+# The one dependency that IS honoured: Hysteria2's cert and key are written to
+# temporary names and moved into place together, and hysteria-server is restarted
+# only when both landed. A half-copied pair (new cert, old key) would stop the
+# healthy daemon that still serves the previous pair, and fail it at the next boot.
 #
 # OWNERSHIP AND MODES — re-asserted on every run, because acme.sh writes the files
 # as root with its own umask, and vpn-bot-subscription reads them as the
@@ -76,6 +80,8 @@ HYSTERIA_CERT="${HYSTERIA_CERT:-/etc/hysteria/cert.pem}"
 HYSTERIA_KEY="${HYSTERIA_KEY:-/etc/hysteria/key.pem}"
 HYSTERIA_OWNER="${HYSTERIA_OWNER:-hysteria}"
 HYSTERIA_GROUP="${HYSTERIA_GROUP:-hysteria}"
+# The unit that reads that copy: never restarted when the copy failed.
+HYSTERIA_UNIT="${HYSTERIA_UNIT:-hysteria-server}"
 
 # Units merely reloaded (no connection drop). nginx is a reader of the renewed
 # material, not an optional extra: it serves REALITY's self-steal target. Skipping
@@ -83,7 +89,7 @@ HYSTERIA_GROUP="${HYSTERIA_GROUP:-hysteria}"
 # site that is supposed to make this host look ordinary.
 RELOAD_UNITS="${RELOAD_UNITS:-nginx}"
 # Units restarted because they read the material once at start-up.
-RESTART_UNITS="${RESTART_UNITS:-hysteria-server}"
+RESTART_UNITS="${RESTART_UNITS:-$HYSTERIA_UNIT}"
 # Restarted only when already running (systemctl try-restart): a renewal must not
 # bring back a unit an operator stopped.
 TRY_RESTART_UNITS="${TRY_RESTART_UNITS:-vpn-bot-subscription}"
@@ -95,8 +101,8 @@ DRY_RUN=0
 
 log() { printf '[%s] acme-reload: %s\n' "$(date -Is)" "$*"; }
 failed=()
-# Run one step; in --dry-run only print it. A failure is recorded under $1 and the
-# hook carries on with the next step.
+# Run one step; in --dry-run only print it. A failure is recorded under $1, the
+# step returns 1, and the hook carries on with the next step.
 step() {
 	local label="$1"
 	shift
@@ -104,7 +110,10 @@ step() {
 		log "DRY-RUN would run: $*"
 		return 0
 	fi
-	"$@" || { log "FAILED (${label}): $*"; failed+=("$label"); }
+	"$@" && return 0
+	log "FAILED (${label}): $*"
+	failed+=("$label")
+	return 1
 }
 unit_exists() { systemctl cat -- "$1" >/dev/null 2>&1; }
 
@@ -131,10 +140,21 @@ step "perms:$fullchain" chmod "$FULLCHAIN_MODE" "$fullchain"
 step "perms:$privkey" chown "$TLS_OWNER:$TLS_GROUP" "$privkey"
 step "perms:$privkey" chmod "$PRIVKEY_MODE" "$privkey"
 
-# 2. Hand Hysteria2 its own copy.
+# 2. Hand Hysteria2 its own copy — both files under temporary names first, then
+#    moved into place together, so a failure leaves the previous pair intact.
+hysteria_copy_ok=1
 if [[ -n "$HYSTERIA_CERT" && -d "$(dirname -- "$HYSTERIA_CERT")" ]]; then
-	step "copy:$HYSTERIA_CERT" install -o "$HYSTERIA_OWNER" -g "$HYSTERIA_GROUP" -m 0644 "$fullchain" "$HYSTERIA_CERT"
-	step "copy:$HYSTERIA_KEY" install -o "$HYSTERIA_OWNER" -g "$HYSTERIA_GROUP" -m 0600 "$privkey" "$HYSTERIA_KEY"
+	cert_new="${HYSTERIA_CERT}.acme-new"
+	key_new="${HYSTERIA_KEY}.acme-new"
+	step "copy:$HYSTERIA_CERT" install -o "$HYSTERIA_OWNER" -g "$HYSTERIA_GROUP" -m 0644 "$fullchain" "$cert_new" \
+		&& step "copy:$HYSTERIA_KEY" install -o "$HYSTERIA_OWNER" -g "$HYSTERIA_GROUP" -m 0600 "$privkey" "$key_new" \
+		&& step "copy:$HYSTERIA_CERT" mv -f -- "$cert_new" "$HYSTERIA_CERT" \
+		&& step "copy:$HYSTERIA_KEY" mv -f -- "$key_new" "$HYSTERIA_KEY" \
+		|| hysteria_copy_ok=0
+	if (( ! hysteria_copy_ok )); then
+		(( DRY_RUN )) || rm -f -- "$cert_new" "$key_new"
+		log "the Hysteria2 copy FAILED — the previous cert/key pair is left in place"
+	fi
 else
 	log "skipping the Hysteria2 copy (no $HYSTERIA_CERT target on this host)"
 fi
@@ -149,6 +169,12 @@ for unit in $RELOAD_UNITS; do
 	fi
 done
 for unit in $RESTART_UNITS; do
+	if [[ "$unit" == "$HYSTERIA_UNIT" ]] && (( ! hysteria_copy_ok )); then
+		# It still serves the previous pair from memory; a restart now would stop it.
+		log "NOT restarting $unit: its certificate copy failed (it keeps serving the previous pair)"
+		failed+=("restart:$unit (skipped)")
+		continue
+	fi
 	if unit_exists "$unit"; then
 		log "restarting $unit"
 		step "restart:$unit" systemctl restart -- "$unit"

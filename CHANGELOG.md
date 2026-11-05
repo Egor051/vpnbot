@@ -37,9 +37,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   orphan. Never fatal.
 - **`ALLOW_SSH_CHANGE=1`** (forwarded by `scripts/redeploy.sh`). An ssh file on the host that
   differs from the repo is never replaced on its own: Phase 1 shows the diff and stops before any
-  mutation. With the knob — and a second ssh session open — Phase 2 installs it, reloads ssh or
-  restarts `ssh.socket` for a `ListenStream` change, and rolls back unless ssh is active and
-  listening; a restored config that fails `sshd -t` is left unreloaded and reported.
+  mutation. With the knob — and a second ssh session open — Phase 2 installs it, reloads ssh or,
+  for a `ListenStream` change, restarts `ssh.socket` and a running `ssh.service` (which would
+  otherwise keep its old sockets), and rolls back unless ssh is active, listening and answering
+  with an SSH banner; a restored config that fails `sshd -t` is left unreloaded and reported.
 
 - **Relay: conntrack limits from the relay's `.env` (docs/relay.md#conntrack).** Two new keys —
   `RELAY_CONNTRACK_MAX` (`net.netfilter.nf_conntrack_max`, default `65536`, 8192..1048576) and
@@ -309,9 +310,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`deploy/vpn-bot-acme-reload.sh` matches the host it replaces.** Installed by the deploy as
   `/usr/local/sbin/acme-reload.sh` (the path acme.sh's `Le_ReloadCmd` already names) instead of
-  being run out of the checkout. No `set -e` any more: a failed step (a hysteria copy, an nginx
-  reload) no longer ends the hook before the other consumers are reloaded — every step runs and
-  the hook exits 1 at the end, as the hand-written predecessor did. `vpn-bot-subscription` is
+  being run out of the checkout — on hosts that have `/etc/vpn-bot/tls/fullchain.pem` only
+  (`when=`), so a host without subscription/Hysteria2 TLS is not blocked by its `--dry-run`.
+  No `set -e` any more: a failed step (an nginx reload) no longer ends the hook before the other
+  consumers are reloaded — every step runs and the hook exits 1 at the end, as the hand-written
+  predecessor did. Hysteria2's cert and key are staged under temporary names and moved into
+  place together; if either copy fails, the old pair stays and `hysteria-server` is NOT
+  restarted (a restart would stop the daemon still serving the old pair). `vpn-bot-subscription` is
   **try-restarted** (a stopped endpoint stays stopped). Ownership defaults now reproduce the main
   server instead of changing it: `/etc/vpn-bot/tls` `root:root 0755` (was `root:vpn-bot 0750`),
   `fullchain.pem` and `privkey.pem` `root:vpn-bot 0640` (fullchain was `0644`), `cert.pem`

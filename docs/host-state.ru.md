@@ -44,7 +44,7 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/systemd/journald.conf.d/10-vpn-bot.conf` | repo-managed (`journald`) | deploy.sh | `SystemMaxUse=500M`; заменяет ручную правку `journald.conf` |
 | `/etc/systemd/journald.conf` | conffile dpkg | пакет `systemd` | деплой его не пишет; Phase 1 сообщает **MODIFIED**, пока в нём осталась старая ручная правка — верните стоковый файл руками, когда drop-in уже действует |
 | `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | не даёт networkd сбрасывать `ip rule` WARP; действует со следующего старта networkd |
-| `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`) | deploy.sh, из `deploy/vpn-bot-acme-reload.sh` | `Le_ReloadCmd` у acme.sh; [subscription.ru.md](subscription.ru.md#tls-терминация) |
+| `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, из `deploy/vpn-bot-acme-reload.sh` | `Le_ReloadCmd` у acme.sh; только там, где есть сертификат; [subscription.ru.md](subscription.ru.md#tls-терминация) |
 | `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | вход root только по ключу; см. [ALLOW_SSH_CHANGE](#allow_ssh_change-и-риск-потери-доступа) |
 | `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `ListenStream` на 54321 (IPv4 + IPv6) |
 | `/etc/systemd/system/danted.service.d/vpn-bot-warp.conf` | repo-managed (`unit`) | deploy.sh, из `deploy/danted-warp.conf` | порядок запуска после интерфейса WARP |
@@ -88,8 +88,9 @@ drift, удаляет выведенные из оборота — а в Phase 1
 ```
 
 `role` — `main` или `relay`: хост видит только записи своей роли. `opts` необязателен:
-`gate=<PROTO>` делает запись существующей только при включённом `<PROTO>_ENABLED` в `.env`, а
-`legacy=<path>` называет старое имя того же файла.
+`gate=<PROTO>` делает запись существующей только при включённом `<PROTO>_ENABLED` в `.env`,
+`when=<path>` — только на хосте, где есть `<path>`, а `legacy=<path>` называет старое имя того же
+файла. Закрытый gate означает, что запись не ставится и не проверяется.
 
 | class | Phase 1 проверяет кандидата | Phase 2 после фактического изменения |
 |---|---|---|
@@ -171,13 +172,17 @@ Phase 1 перечисляет каждый файл в этих каталог�
   sudo ALLOW_SSH_CHANGE=1 bash scripts/redeploy.sh
   ```
 
-С этим флагом Phase 2 ставит файл, запускает `sshd -t`, делает `daemon-reload` +
-`systemctl restart ssh.socket` при изменении `ListenStream` или `systemctl reload ssh` при
-изменении sshd_config, а затем требует, чтобы слушающий юнит (`ssh.socket`, если он активен,
-иначе `ssh.service`) был active и каждый ожидаемый порт слушался. Если нет — деплой откатывается:
-старый файл восстанавливается, на нём запускается `sshd -t`, и ssh получает reload / сокет
-перезапускается — **кроме случая, когда `sshd -t` падает на восстановленном конфиге**: тогда ssh
-не трогается, а отчёт об откате говорит об этом заглавными буквами.
+С этим флагом Phase 2 ставит файл и запускает `sshd -t`. При изменении `ListenStream` — делает
+`daemon-reload` + `systemctl restart ssh.socket`, а если sshd запущен, ещё и
+`systemctl restart ssh`: работающий sshd держит сокеты, полученные при старте, и один перезапуск
+сокета оставил бы его на старом порту (открытые сессии рестарт переживают). При изменении
+sshd_config — `systemctl reload ssh`. Затем слушающий юнит (`ssh.socket`, если он активен, иначе
+`ssh.service`) должен быть active, а каждый ожидаемый порт — и слушаться, и **отвечать
+SSH-баннером**: при socket activation один listener ничего не доказывает. Если нет — деплой
+откатывается: старый файл восстанавливается, на нём запускается `sshd -t`, и сокет / ssh
+перезапускаются или получают reload так же — **кроме случая, когда `sshd -t` падает на
+восстановленном конфиге**: тогда ssh не трогается, а отчёт об откате говорит об этом заглавными
+буквами.
 
 Проверка порта ловит мёртвый порт, но не ключ, с которым больше нельзя войти. Тогда спасает вторая
 сессия: проверьте из неё новый вход, прежде чем что-либо закрывать.

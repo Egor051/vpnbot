@@ -271,6 +271,8 @@ class Lab:
             "ALLOW_SSH_CHANGE=0; ALLOW_UNIT_DRIFT=0; PHASE1_ONLY=0; NODE_ROLE=main\n"
             f"MANAGED_HOST_FILES=(\n{entries}\n)\n"
             f"OUT_OF_REPO_HELPERS=(\n{helpers}\n)\n"
+            # The real probe opens TCP connections; it has its own test below.
+            'ssh_banner_ok() { [[ ! -f "$SD/no_banner_$1" ]]; }\n'
             'rollback() { set +e; echo "ROLLBACK_CALLED"; host_files_rollback; exit 42; }\n'
             'relay_rollback() { set +e; echo "RELAY_ROLLBACK_CALLED"; host_files_rollback; exit 43; }\n'
             + knob_lines + body,
@@ -571,6 +573,82 @@ def test_a_listenstream_change_restarts_the_socket_and_checks_the_new_port(tmp_p
     assert _read(dst) == SOCKET.format(p="2222")
 
 
+def test_a_socket_change_also_restarts_a_running_sshd(tmp_path: Path) -> None:
+    """Accept=no: a running sshd keeps the sockets it was started with, so restarting
+    ssh.socket alone would leave it on the old port while systemd holds the new one."""
+    lab = Lab(tmp_path)
+    lab.add("ssh", "etc/systemd/system/ssh.socket.d/override.conf", SOCKET.format(p="2222"))
+    lab.put("etc/systemd/system/ssh.socket.d/override.conf", SOCKET.format(p="54321"))
+    lab.flag("ssh.socket.active", "active")
+    lab.flag("ssh.service.active", "active")
+    lab.flag("listen", "2222\n")
+    proc = lab.run(BOTH, ALLOW_SSH_CHANGE="1")
+    assert proc.returncode == 0, proc.stdout
+    assert lab.mutating_systemctl() == [
+        "systemctl daemon-reload", "systemctl restart ssh.socket", "systemctl restart ssh.service",
+    ]
+    assert "listening on :2222 and answering SSH" in proc.stdout
+
+
+def test_a_listener_that_does_not_answer_ssh_rolls_back(tmp_path: Path) -> None:
+    """systemd can hold the new port while no sshd ever accepts on it."""
+    lab = Lab(tmp_path)
+    dst = lab.add("ssh", "etc/systemd/system/ssh.socket.d/override.conf", SOCKET.format(p="2222"))
+    lab.put("etc/systemd/system/ssh.socket.d/override.conf", SOCKET.format(p="54321"))
+    lab.flag("ssh.socket.active", "active")
+    lab.flag("ssh.service.active", "active")
+    lab.flag("listen", "2222\n54321\n")
+    lab.flag("no_banner_2222")
+    proc = lab.run(BOTH, ALLOW_SSH_CHANGE="1")
+    assert proc.returncode == 42, proc.stdout
+    assert ":2222 (listening, but no SSH banner)" in proc.stdout
+    assert _read(dst) == SOCKET.format(p="54321")
+    assert lab.mutating_systemctl()[-2:] == ["systemctl restart ssh.socket", "systemctl restart ssh.service"]
+    assert "restart ssh.service (takes the restored sockets): rc=0" in proc.stdout
+
+
+def _banner_server(payload: bytes):
+    import socket
+    import threading
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    srv.settimeout(5)
+
+    def serve() -> None:
+        try:
+            while True:
+                conn, _ = srv.accept()
+                if payload:
+                    conn.sendall(payload)
+                threading.Timer(2.0, conn.close).start()
+        except OSError:
+            return
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv, srv.getsockname()[1]
+
+
+@pytest.mark.parametrize(("payload", "ok"), [(b"SSH-2.0-OpenSSH_9.6\r\n", True), (b"", False), (b"HTTP/1.1 400\r\n", False)])
+def test_the_real_banner_probe(tmp_path: Path, payload: bytes, ok: bool) -> None:
+    """The real ssh_banner_ok (not the Lab stub), against a loopback TCP server."""
+    srv, port = _banner_server(payload)
+    try:
+        listening = f"LISTEN 0 128 0.0.0.0:{port} 0.0.0.0:*"
+        driver = tmp_path / "probe.sh"
+        driver.write_text(
+            f'set -uo pipefail\nexport DEPLOY_SELFTEST=1\nsource "{DEPLOY_SH}"\n'
+            'VENV=/nonexistent; VENV_PREV=/nonexistent; WT=""; STAGE=""\nSSH_BANNER_TIMEOUT=1\n'
+            f'if ssh_banner_ok {port} "{listening}"; then echo PROBE=ok; else echo PROBE=no; fi\n',
+            encoding="utf-8",
+        )
+        proc = subprocess.run(["bash", str(driver)], capture_output=True, text=True, check=False)
+    finally:
+        srv.close()
+    assert ("PROBE=ok" if ok else "PROBE=no") in proc.stdout, proc.stdout + proc.stderr
+
+
 def test_a_dead_port_after_the_socket_change_rolls_back(tmp_path: Path) -> None:
     lab = Lab(tmp_path)
     dst = lab.add("ssh", "etc/systemd/system/ssh.socket.d/override.conf", SOCKET.format(p="2222"))
@@ -770,6 +848,23 @@ def test_a_gated_dropin_for_another_unit_name_stops_phase1(tmp_path: Path) -> No
     assert "drop-in for mtproxy.service, but .env runs MTPROTO as another unit" in proc.stdout
 
 
+def test_a_when_gate_skips_the_entry_where_its_path_is_absent(tmp_path: Path) -> None:
+    """The acme hook only belongs where there is renewal material: its --dry-run
+    validator fails by design without it, and must not block a host without TLS."""
+    lab = Lab(tmp_path)
+    tls = lab.h("etc/vpn-bot/tls/fullchain.pem")
+    dst = lab.add("hook", "usr/local/sbin/acme-reload.sh", HOOK_SCRIPT.format(v="v", rc=3), mode="0755",
+                  opts=f"when={tls}")
+    proc = lab.run(BOTH)
+    assert proc.returncode == 0, proc.stdout
+    assert re.search(r"hook\s+gated-off\s+", proc.stdout) and f"{tls} is absent on this host" in proc.stdout
+    assert not dst.exists() and "--dry-run" not in proc.stdout
+    lab.put("etc/vpn-bot/tls/fullchain.pem", "chain\n")
+    proc = lab.run(BOTH)
+    assert proc.returncode == 1, "with the material present the entry is live — and this candidate is refused"
+    assert "the validator refused the repo candidate" in proc.stdout
+
+
 # --------------------------------------------------------------------------- #
 # 5. Roles
 # --------------------------------------------------------------------------- #
@@ -832,9 +927,11 @@ def test_registry_entries_are_well_formed() -> None:
         if len(e) == 7:
             for kv in e[6].split(";"):
                 key, _, value = kv.partition("=")
-                assert key in {"gate", "legacy"}, e
+                assert key in {"gate", "legacy", "when"}, e
                 if key == "gate":
                     assert value in VALID_GATES, e
+                elif key == "when":
+                    assert value.startswith("/"), e
                 else:
                     assert value.startswith("/") and Path(value).parent == Path(dst).parent, e
 
@@ -847,8 +944,9 @@ def test_every_registry_source_exists() -> None:
 
 def test_hook_and_ssh_entries_point_where_the_host_expects() -> None:
     reg = {e[1]: e for e in _registry()}
-    assert reg["/usr/local/sbin/acme-reload.sh"][:6] == [
-        "deploy/vpn-bot-acme-reload.sh", "/usr/local/sbin/acme-reload.sh", "0755", "root:root", "hook", "main"]
+    assert reg["/usr/local/sbin/acme-reload.sh"] == [
+        "deploy/vpn-bot-acme-reload.sh", "/usr/local/sbin/acme-reload.sh", "0755", "root:root", "hook", "main",
+        "when=/etc/vpn-bot/tls/fullchain.pem"]
     assert reg["/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf"][5] == "relay"
     for dst in ("/etc/ssh/sshd_config.d/00-root-key-only.conf", "/etc/systemd/system/ssh.socket.d/override.conf"):
         assert reg[dst][4:6] == ["ssh", "main"]
@@ -1070,8 +1168,13 @@ def _hook(tmp_path: Path, *args: str, fail: tuple[str, ...] = ()) -> tuple[subpr
     (tls / "privkey.pem").write_text("key\n", encoding="utf-8")
     (tls / "cert.pem").write_text("leaf\n", encoding="utf-8")
     _stub(stub / "systemctl", HOOK_SYSTEMCTL)
-    for tool in ("chown", "chmod", "install"):
-        _stub(stub / tool, f'echo "{tool} $*" >> "$LOGS/hook.log"\n[[ -f "$SD/fail_{tool}" ]] && exit 1\nexit 0\n')
+    for tool in ("chown", "chmod", "install", "mv"):
+        _stub(stub / tool, (
+            f'echo "{tool} $*" >> "$LOGS/hook.log"\n'
+            f'[[ -f "$SD/fail_{tool}" ]] && exit 1\n'
+            # fail only the copy whose destination matches "$SD/fail_{tool}_dst" (e.g. key.pem)
+            f'[[ -f "$SD/fail_{tool}_dst" && "${{!#}}" == *"$(cat "$SD/fail_{tool}_dst")"* ]] && exit 1\n'
+            "exit 0\n"))
     for f in fail:
         (sd / f).write_text("", encoding="utf-8")
     env = {"PATH": f"{stub}:{os.environ.get('PATH', '/usr/bin:/bin')}", "SD": str(sd), "LOGS": str(logs),
@@ -1094,8 +1197,10 @@ def test_hook_dry_run_prints_exactly_the_hosts_tls_ownership(tmp_path: Path) -> 
         "chmod 0640 <T>/tls/fullchain.pem",
         "chown root:vpn-bot <T>/tls/privkey.pem",
         "chmod 0640 <T>/tls/privkey.pem",
-        "install -o hysteria -g hysteria -m 0644 <T>/tls/fullchain.pem <T>/hy/cert.pem",
-        "install -o hysteria -g hysteria -m 0600 <T>/tls/privkey.pem <T>/hy/key.pem",
+        "install -o hysteria -g hysteria -m 0644 <T>/tls/fullchain.pem <T>/hy/cert.pem.acme-new",
+        "install -o hysteria -g hysteria -m 0600 <T>/tls/privkey.pem <T>/hy/key.pem.acme-new",
+        "mv -f -- <T>/hy/cert.pem.acme-new <T>/hy/cert.pem",
+        "mv -f -- <T>/hy/key.pem.acme-new <T>/hy/key.pem",
         "systemctl reload -- nginx",
         "systemctl restart -- hysteria-server",
         "systemctl try-restart -- vpn-bot-subscription",
@@ -1105,9 +1210,9 @@ def test_hook_dry_run_prints_exactly_the_hosts_tls_ownership(tmp_path: Path) -> 
 
 
 def test_hook_keeps_going_when_one_step_fails(tmp_path: Path) -> None:
-    """The hand-written predecessor's `|| rc=1` per step: a failed hysteria copy must
-    not leave nginx or the subscription endpoint on the old certificate."""
-    proc, log = _hook(tmp_path, fail=("fail_install",))
+    """The hand-written predecessor's `|| rc=1` per step: a failed nginx reload must not
+    leave hysteria or the subscription endpoint on the old certificate."""
+    proc, log = _hook(tmp_path, fail=("fail_systemctl_reload",))
     assert proc.returncode == 1, proc.stdout + proc.stderr
     acted = [ln for ln in log if not ln.startswith("systemctl cat")]
     assert acted[-3:] == [
@@ -1115,12 +1220,36 @@ def test_hook_keeps_going_when_one_step_fails(tmp_path: Path) -> None:
         "systemctl restart -- hysteria-server",
         "systemctl try-restart -- vpn-bot-subscription",
     ]
-    assert "FAILED: copy:" in proc.stdout and "every other step was still attempted" in proc.stdout
+    assert "FAILED: reload:nginx" in proc.stdout and "every other step was still attempted" in proc.stdout
+
+
+@pytest.mark.parametrize("failing", ["cert.pem.acme-new", "key.pem.acme-new"])
+def test_a_failed_hysteria_copy_keeps_the_old_pair_and_skips_only_its_restart(tmp_path: Path, failing: str) -> None:
+    """A new cert next to the old key would stop the healthy daemon on restart (and at
+    the next boot): the pair is staged and moved together, and hysteria-server is not
+    restarted unless both landed. The other consumers are still refreshed."""
+    _hook(tmp_path)  # builds the stubs and the TLS/hysteria dirs; re-run with the failure armed
+    sd = tmp_path / "sd"
+    (sd / "fail_install_dst").write_text(failing, encoding="utf-8")
+    (tmp_path / "logs" / "hook.log").unlink()
+    env = {"PATH": f"{tmp_path / 'stub'}:{os.environ.get('PATH', '/usr/bin:/bin')}", "SD": str(sd),
+           "LOGS": str(tmp_path / "logs"), "TLS_DIR": str(tmp_path / "tls"),
+           "HYSTERIA_CERT": str(tmp_path / "hy" / "cert.pem"), "HYSTERIA_KEY": str(tmp_path / "hy" / "key.pem"),
+           "LANG": "C.UTF-8"}
+    proc = subprocess.run(["bash", str(HOOK)], env=env, capture_output=True, text=True, check=False)
+    log = (tmp_path / "logs" / "hook.log").read_text(encoding="utf-8").splitlines()
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert not any(ln.startswith("mv ") for ln in log), "nothing is moved into place"
+    assert "systemctl reload -- nginx" in log
+    assert "systemctl try-restart -- vpn-bot-subscription" in log
+    assert not any("restart -- hysteria-server" in ln and "try" not in ln for ln in log)
+    assert "NOT restarting hysteria-server: its certificate copy failed" in proc.stdout
 
 
 def test_hook_never_starts_a_stopped_subscription_endpoint(tmp_path: Path) -> None:
     proc, log = _hook(tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "systemctl restart -- hysteria-server" in log
     assert "systemctl try-restart -- vpn-bot-subscription" in log
     assert not any(ln.startswith("systemctl restart -- vpn-bot-subscription") for ln in log)
 

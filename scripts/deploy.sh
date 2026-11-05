@@ -416,6 +416,7 @@ HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"
 #   opts     optional, ";"-separated:
 #     gate=<PROTO>    the entry exists only while <PROTO>_ON=yes (resolve_backend_units,
 #                     i.e. <PROTO>_ENABLED in .env); closed = not installed, not checked
+#     when=<path>     the entry exists only on a host where <path> exists (same effect)
 #     legacy=<path>   an older name of the same file: a byte-identical legacy copy is
 #                     renamed to <dst> (no restart), a different one stops Phase 1
 #
@@ -439,8 +440,10 @@ MANAGED_HOST_FILES=(
   "deploy/host/journald/10-vpn-bot.conf|/etc/systemd/journald.conf.d/10-vpn-bot.conf|0644|root:root|journald|main"
   # == NETWORKD_DROPIN_SRC|NETWORKD_DROPIN_DST (pinned by the test suite).
   "deploy/networkd/10-keep-foreign-rules.conf|/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf|0644|root:root|networkd|main"
-  # acme.sh's Le_ReloadCmd names this path; acme.sh itself is not touched.
-  "deploy/vpn-bot-acme-reload.sh|/usr/local/sbin/acme-reload.sh|0755|root:root|hook|main"
+  # acme.sh's Le_ReloadCmd names this path; acme.sh itself is not touched. Only where
+  # there is renewal material to fan out: subscription and Hysteria2 are optional, and
+  # the hook's --dry-run (its validator) fails by design without the files.
+  "deploy/vpn-bot-acme-reload.sh|/usr/local/sbin/acme-reload.sh|0755|root:root|hook|main|when=/etc/vpn-bot/tls/fullchain.pem"
   "deploy/host/ssh/00-root-key-only.conf|/etc/ssh/sshd_config.d/00-root-key-only.conf|0644|root:root|ssh|main"
   "deploy/host/ssh/ssh.socket-override.conf|/etc/systemd/system/ssh.socket.d/override.conf|0644|root:root|ssh|main"
   "deploy/danted-warp.conf|/etc/systemd/system/danted.service.d/vpn-bot-warp.conf|0644|root:root|unit|main"
@@ -828,11 +831,14 @@ mh_opt() {
   return 0
 }
 
-# 0 when the entry's protocol gate (opts gate=<PROTO>) is open on this host, i.e.
-# <PROTO>_ON=yes as resolve_backend_units derived it from .env. No gate = open. An
-# unknown gate name reads as closed (and the test suite rejects it).
+# 0 when the entry's gates are open on this host: opts when=<path> needs <path> to
+# exist, opts gate=<PROTO> needs <PROTO>_ON=yes as resolve_backend_units derived it
+# from .env. No gate = open. An unknown gate name reads as closed (and the test
+# suite rejects it).
 mh_gate_open() {
-  local gate var
+  local gate var when
+  when="$(mh_opt "$1" when)"
+  if [[ -n "$when" && ! -e "$when" ]]; then return 1; fi
   gate="$(mh_opt "$1" gate)"
   [[ -n "$gate" ]] || return 0
   var="${gate}_ON"
@@ -897,7 +903,11 @@ mh_entry_state() {
   MH_SRCPATH="${root}/${MH_SRC}"
   if ! mh_gate_open "$MH_OPTS"; then
     MH_STATE="gated-off"
-    MH_DETAIL="$(mh_opt "$MH_OPTS" gate)_ENABLED is off on this host"
+    if [[ -n "$(mh_opt "$MH_OPTS" when)" && ! -e "$(mh_opt "$MH_OPTS" when)" ]]; then
+      MH_DETAIL="$(mh_opt "$MH_OPTS" when) is absent on this host"
+    else
+      MH_DETAIL="$(mh_opt "$MH_OPTS" gate)_ENABLED is off on this host"
+    fi
     return 0
   fi
   if ! mh_gate_unit_ok "$MH_OPTS" "$MH_DST"; then
@@ -1171,7 +1181,7 @@ mh_action_text() {   # $1 class, $2 state, $3 dst
   case "$2" in
     synced)             echo "in sync" ;;
     gone)               echo "retired — already gone" ;;
-    gated-off)          echo "not on this host (protocol gate closed) — not checked" ;;
+    gated-off)          echo "not on this host (gate closed) — not installed, not checked" ;;
     present)            echo "retired — Phase 2 removes it (backed up first$([[ "$3" =~ \.(service|timer|socket|path)$ ]] && printf ', disable --now first'))" ;;
     meta)               echo "content in sync, mode/owner differ — Phase 2 fixes mode/owner only" ;;
     rename)             echo "byte-identical legacy name — Phase 2 renames it (daemon-reload, no restart)" ;;
@@ -1518,13 +1528,39 @@ mh_note_unit() {
 
 mh_is_unit_file() { [[ "$1" == "${SYSTEMD_UNIT_DIR}/"* && "$1" =~ \.(service|timer|socket|path)$ ]]; }
 
-# Probe for wait_for_listen: prints ":<port>" for every port nothing listens on.
+# Does <port> answer with an SSH banner on one of the addresses `ss -tln` ($2) shows
+# it listening on? A listener alone proves nothing under socket activation: systemd
+# holds the socket, and an sshd that was started with the OLD sockets never accepts
+# on it. Wildcard addresses are probed on 127.0.0.1. No `timeout` = cannot probe.
+SSH_BANNER_TIMEOUT="${SSH_BANNER_TIMEOUT:-5}"
+ssh_banner_ok() {
+  local addr a banner
+  command -v timeout >/dev/null 2>&1 || return 0
+  while IFS= read -r addr; do
+    case "$addr" in
+      ""|"*"|0.0.0.0|"[::]") a="127.0.0.1" ;;
+      "["*"]")              a="${addr#[}"; a="${a%]}" ;;
+      *)                    a="$addr" ;;
+    esac
+    # shellcheck disable=SC2016  # expanded by the inner bash, from its own arguments
+    banner="$(timeout "$SSH_BANNER_TIMEOUT" bash -c 'exec 3<>"/dev/tcp/$0/$1" && head -c 4 <&3' "$a" "$1" 2>/dev/null || true)"
+    if [[ "$banner" == "SSH-" ]]; then return 0; fi
+  done < <(printf '%s\n' "$2" | awk -v p="$1" '{ n = split($4, f, ":"); if (f[n] == p) { a = $4; sub(":" p "$", "", a); print a } }')
+  return 1
+}
+
+# Probe for wait_for_listen: prints one line for every port that does not listen,
+# or listens without answering SSH.
 ssh_missing_ports() {
   local listening p
   listening="$(ss -tln 2>/dev/null || true)"
   for p in "$@"; do
     # grep reads to EOF (output discarded): no SIGPIPE on the printf under pipefail.
-    printf '%s\n' "$listening" | grep -E "[^0-9]${p}[[:space:]]" >/dev/null || printf ':%s\n' "$p"
+    if ! printf '%s\n' "$listening" | grep -E "[^0-9]${p}[[:space:]]" >/dev/null; then
+      printf ':%s\n' "$p"
+    elif ! ssh_banner_ok "$p" "$listening"; then
+      printf ':%s (listening, but no SSH banner)\n' "$p"
+    fi
   done
   return 0
 }
@@ -1550,7 +1586,7 @@ ssh_alive_status() {
   (( ${#ports[@]} > 0 )) || ports=(22)
   if ! command -v ss >/dev/null 2>&1; then echo "${holder} active; listening state UNKNOWN (ss not found)"; return 0; fi
   if wait_for_listen "$SSH_LISTEN_WAIT" 1 ssh_missing_ports "${ports[@]}"; then
-    echo "${holder} active, listening on :${ports[*]}"
+    echo "${holder} active, listening on :${ports[*]} and answering SSH"
     return 0
   fi
   echo "${holder} active, but NOT listening on ${LISTEN_MISSING//$'\n'/ } after ${SSH_LISTEN_WAIT}s"
@@ -1562,13 +1598,23 @@ ssh_alive_status() {
 # ListenStream change, reload ssh for an sshd_config change, then ssh_alive_status.
 # Any failure rolls the deploy back, which restores the files and re-applies them.
 mh_ssh_apply() {
-  local d sock=0 conf=0 out msg
+  local d sock=0 conf=0 out msg svc
   for d in "$@"; do if [[ "$d" == *.socket.d/* ]]; then sock=1; else conf=1; fi; done
   out="$(sshd -t -f "$SSHD_CONFIG" 2>&1)" || rollback_now "sshd -t fails on the installed ssh configuration: ${out}"
+  svc="$(systemctl is-active "$SSH_UNIT" 2>/dev/null || true)"
   if (( sock )); then
     systemctl daemon-reload || rollback_now "daemon-reload failed after the ssh.socket change"
     log "  restarting ${SSH_SOCKET_UNIT} (ListenStream changed)"
     systemctl restart "$SSH_SOCKET_UNIT" || rollback_now "systemctl restart ${SSH_SOCKET_UNIT} failed after the ListenStream change"
+    # A running sshd keeps the listening sockets it was handed when it started
+    # (Accept=no): a new socket alone would leave it on the OLD port. Restart it so
+    # it takes the new ones; it also reads any sshd_config change. Open sessions
+    # survive (Debian's ssh.service runs with KillMode=process).
+    if [[ "$svc" == "active" ]]; then
+      log "  restarting ${SSH_UNIT} so the running sshd takes the new sockets (open sessions are kept)"
+      systemctl restart "$SSH_UNIT" || rollback_now "systemctl restart ${SSH_UNIT} failed after the ListenStream change"
+      conf=0
+    fi
   fi
   if (( conf )); then
     if [[ "$(systemctl is-active "$SSH_UNIT" 2>/dev/null || true)" == "active" ]]; then
@@ -1779,7 +1825,14 @@ host_files_rollback() {
       echo "sshd -t on the RESTORED ssh config FAILED (rc=${rc}: ${out//$'\n'/; }) — ssh NOT reloaded or restarted — MANUAL ACTION REQUIRED, keep your session open"
     else
       echo "sshd -t on the restored ssh config: ok"
-      if (( sock )); then systemctl restart "$SSH_SOCKET_UNIT"; echo "restart ${SSH_SOCKET_UNIT} (ListenStream restored): rc=$?"; fi
+      if (( sock )); then
+        systemctl restart "$SSH_SOCKET_UNIT"; echo "restart ${SSH_SOCKET_UNIT} (ListenStream restored): rc=$?"
+        # The running sshd still holds the sockets of the failed change (see mh_ssh_apply).
+        if [[ "$(systemctl is-active "$SSH_UNIT" 2>/dev/null || true)" == "active" ]]; then
+          systemctl restart "$SSH_UNIT"; echo "restart ${SSH_UNIT} (takes the restored sockets): rc=$?"
+          conf=0
+        fi
+      fi
       if (( conf )); then
         if [[ "$(systemctl is-active "$SSH_UNIT" 2>/dev/null || true)" == "active" ]]; then
           systemctl reload "$SSH_UNIT"; echo "reload ${SSH_UNIT} (sshd_config.d restored): rc=$?"
