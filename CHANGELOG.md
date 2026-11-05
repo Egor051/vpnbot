@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Removing a protocol from the server (docs/protocol-uninstall.md).** Protocol modules offers
+  «Disable only» (as before) and «Disable and remove from the server»; a module switched off
+  earlier gets «🗑 Remove from the server». A new root helper,
+  `deploy/helpers/vpn-bot-protocol-uninstall` (`plan <proto>` → JSON, `apply <proto> <sha256>`),
+  removes strictly what its compiled-in manifest names — units, unit files and drop-ins, files and
+  directories (each re-checked with `realpath`), UFW rules, `apt-get purge` of `ii` packages,
+  `userdel` of users that own nothing left on `/`, one `.env` line, then a marker
+  `/etc/vpn-bot/uninstalled/<proto>` — after a verified backup in
+  `/var/backups/vpn-bot/uninstall/`, and rolls every step back on an error. The bot re-plans and
+  compares the sha256 before the per-client purge, and runs nothing on the host when the purge
+  left a record behind. Both privilege models (checkout copy as root; exact-path sudoers grant in
+  helper mode). The marker is the source of truth: startup reconcile, the stats collectors, the
+  Hysteria2 probe, BackendHealth (UNINSTALLED, never degraded), the anomaly detector, the
+  subscription composition and «Enable» all honour it; `deploy.sh` leaves the protocol out of
+  `UNIT_SET`, the drift scan, its `MANAGED_HOST_FILES` gate, `OUT_OF_REPO_HELPERS` and
+  `WARP_ONESHOTS`. Schema 38 → 39: `protocol_modules.uninstalled_at/_by`, `uninstall_backup`.
+
 - **Host state as code (docs/host-state.md).** `scripts/deploy.sh` now owns the host files that
   lived only on the servers: a new registry, `MANAGED_HOST_FILES`
   (`"<src>|<dst>|<mode>|<owner:group>|<class>|<role>[|gate=…;legacy=…]"`), with the sources under
@@ -422,6 +439,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The SOCKS5 and Hysteria2 buttons in Protocol modules did nothing.** Every handler matched
+  `admin:module:…:[a-z]+`, which no name with a digit (`socks5`, `hysteria2`) satisfies, so
+  «Disable»/«Enable» for those two never reached a handler. The patterns are `[a-z0-9]+` now,
+  pinned by a test that routes every module callback to exactly one handler.
+- **The Protocol modules texts promised what was no longer the whole story.** The panel and the
+  first disable confirmation now explain both choices — what «Disable only» leaves on the server
+  and what «Disable and remove from the server» removes — and say plainly that SOCKS5/MTProto
+  accesses are marked deleted (the rows stay) while keys are deleted.
 - **A rollback could fire after a successful deploy.** `disarm()` is a function, and bash gives a
   function's caller back the ERR trap it had on entry when the function leaves it unset, so
   neither the main path nor `relay_phase2` ever cleared the rollback trap: any failing command
