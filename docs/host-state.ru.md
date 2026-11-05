@@ -29,48 +29,60 @@ drift, удаляет выведенные из оборота — а в Phase 1
 
 ## Все файлы хоста
 
+Колонка **Offsite-бэкап** говорит, что уносит файл с хоста: элемент
+`DEFAULT_OFFSITE_SYSTEM_PATHS` (`config/settings.py`) — для system-бандла, *бандл
+восстановления* или `—`, если ничего (файл переустанавливается своим установщиком или выведен из
+оборота). Копии конфигов `*.bak*` рядом с перечисленными файлами намеренно не берутся — см.
+[Что системный бандл не берёт](operations.ru.md#что-системный-бандл-не-берёт). Бандл несёт и
+состояние, которое не является разворачиваемым файлом и потому здесь не перечислено: сайт-приманку
+(`/var/www`), `/root/.acme.sh`, `/etc/sudoers.d`, `/etc/passwd` и `/etc/group` и другое
+([полный список](operations.ru.md#что-именно-закрывает-системный-бандл)).
+
 ### main
 
-| Путь | Класс | Кто ставит | Заметки |
-|---|---|---|---|
-| `/etc/logrotate.d/xray` | repo-managed (`logrotate`) | deploy.sh | `copytruncate`: xray не умеет переоткрывать логи, а пишет их с `O_APPEND` |
-| `/etc/systemd/system/even-day-reboot.service` | repo-managed (`unit`) | deploy.sh | перезагружает хост — деплой его **никогда** не запускает |
-| `/etc/systemd/system/even-day-reboot.timer` | repo-managed (`unit`) | deploy.sh | дни 5,10,…,30 в 01:00 UTC (04:00 MSK); `enable --now` только если он был enabled или файла не было |
-| `/etc/sysctl.d/90-no-mptcp.conf` | repo-managed (`sysctl`) | deploy.sh | MPTCP выключен до ядра с исправлением CVE-2026-98432; файл побайтно равен копии хоста, поэтому причина записана здесь, а не в нём |
-| `/etc/sysctl.d/99-bbr.conf` | repo-managed (`sysctl`) | deploy.sh | `fq` + BBR |
-| `/etc/sysctl.d/99-network-buffers.conf` | repo-managed (`sysctl`) | deploy.sh | буферы сокетов, backlog, dirty ratios |
-| `/etc/sysctl.d/99-swap-tuning.conf` | repo-managed (`sysctl`) | deploy.sh | |
-| `/etc/sysctl.d/99-vpn-forwarding.conf` | repo-managed (`sysctl`) | deploy.sh | единственный `net.ipv4.ip_forward=1` |
-| `/etc/systemd/journald.conf.d/10-vpn-bot.conf` | repo-managed (`journald`) | deploy.sh | `SystemMaxUse=500M`; заменяет ручную правку `journald.conf` |
-| `/etc/systemd/journald.conf` | conffile dpkg | пакет `systemd` | деплой его не пишет; Phase 1 сообщает **MODIFIED**, пока в нём осталась старая ручная правка — верните стоковый файл руками, когда drop-in уже действует |
-| `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | не даёт networkd сбрасывать `ip rule` WARP; действует со следующего старта networkd |
-| `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, из `deploy/vpn-bot-acme-reload.sh` | `Le_ReloadCmd` у acme.sh; только там, где есть сертификат; [subscription.ru.md](subscription.ru.md#tls-терминация) |
-| `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | вход root только по ключу; см. [ALLOW_SSH_CHANGE](#allow_ssh_change-и-риск-потери-доступа) |
-| `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `ListenStream` на 54321 (IPv4 + IPv6) |
-| `/etc/systemd/system/danted.service.d/vpn-bot-warp.conf` | repo-managed (`unit`) | deploy.sh, из `deploy/danted-warp.conf` | порядок запуска после интерфейса WARP |
-| `/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf` | repo-managed (`unit`, `gate=MTPROTO`) | deploy.sh, из `deploy/mtproxy-vpn-bot-managed.conf` | только пока `MTPROTO_ENABLED=true`; побайтно равный файл со старым именем `vpnbot-managed.conf` переименовывается. При выключенном MTProxy оставшийся drop-in показывается как сирота |
-| `/etc/systemd/system/vpn-bot.service` | repo-managed | deploy.sh, как есть | действуют гейты модели привилегий |
-| `/etc/systemd/system/<deploy/*.service, *.timer>` | repo-managed | оператор, руками | drift-гейт юнитов в Phase 1 печатает команды установки |
-| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | из `scripts/` |
-| `/usr/local/sbin/vpn-bot-{xray,awg,mtproxy}-apply`, `vpn-bot-socks5-user` | backup-only (`installer`) | `deploy/setup-nonroot-helper-mode.sh` | исходники в `deploy/helpers/` |
-| `/usr/local/etc/xray/config.json` | шаблон + значения хоста | бот (клиенты) / оператор | структуру проверяет `deploy/backend-config-sync.py` |
-| `/etc/amnezia/amneziawg/awg0.conf` | шаблон + значения хоста | бот (peers) / оператор | тот же гейт |
-| `/etc/hysteria/config.yaml` | шаблон + значения хоста | `deploy/hysteria/install-config.sh` | тот же гейт |
-| `/opt/vpn-service/.env` | шаблон + значения хоста | оператор | `.env.example` |
-| `/etc/vpn-bot/tls/*` | значения хоста | acme.sh; права ставит хук | каталог `root:root 0755`, `fullchain.pem`/`privkey.pem` `root:vpn-bot 0640` |
-| `/etc/systemd/system/xray*.service` (+ `.d/`), `/usr/local/bin/xray` | backup-only (`installer`) | Xray-install | |
-| `/etc/systemd/system/hysteria-server*.service` (+ `.d/`), `/usr/local/bin/hysteria` | backup-only (`installer`) | get.hy2.sh | |
-| `/usr/local/bin/wgcf`, `/usr/local/bin/qr` | backup-only (`installer`) | их собственные установщики | |
-| `/etc/nginx/conf.d/*.conf` | backup-only | оператор | vhost decoy / self-steal с доменом хоста; шаблон в репо — отдельная задача |
-| `/etc/netplan/*` | backup-only (`provider`) | образ VPS | вне сканируемого набора; перечислен для полноты |
-| `/var/spool/cron/crontabs/root` | backup-only | acme.sh (строка `--cron`) | |
-| `/usr/local/sbin/site-freshen.py` | backup-only (`deployment-local`) | оператор | перезаписыватель decoy — [по замыслу](hysteria.ru.md) никогда не в репо; его защищает offsite system-бандл (`DEFAULT_OFFSITE_SYSTEM_PATHS` в `config/settings.py` — путь добавляет туда следующее изменение; до тех пор бэкапьте его руками) |
-| `/etc/sysctl.d/99-amneziawg.conf` | retired | — | дубль `ip_forward=1` |
-| `/etc/systemd/system/warp-sample.timer` | retired | — | `disable --now`, затем удаляется |
-| `/etc/systemd/system/warp-sample.service` | retired | — | `disable --now`, затем удаляется |
-| `/usr/local/sbin/site-freshen.sh` | retired | — | его работу теперь делает `deploy/vpn-bot-decoy-freshen.sh` |
+| Путь | Класс | Кто ставит | Offsite-бэкап | Заметки |
+|---|---|---|---|---|
+| `/etc/logrotate.d/xray` | repo-managed (`logrotate`) | deploy.sh | `/etc/logrotate.d` | `copytruncate`: xray не умеет переоткрывать логи, а пишет их с `O_APPEND` |
+| `/etc/systemd/system/even-day-reboot.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | перезагружает хост — деплой его **никогда** не запускает |
+| `/etc/systemd/system/even-day-reboot.timer` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | дни 5,10,…,30 в 01:00 UTC (04:00 MSK); `enable --now` только если он был enabled или файла не было |
+| `/etc/sysctl.d/90-no-mptcp.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | MPTCP выключен до ядра с исправлением CVE-2026-98432; файл побайтно равен копии хоста, поэтому причина записана здесь, а не в нём |
+| `/etc/sysctl.d/99-bbr.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | `fq` + BBR |
+| `/etc/sysctl.d/99-network-buffers.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | буферы сокетов, backlog, dirty ratios |
+| `/etc/sysctl.d/99-swap-tuning.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | |
+| `/etc/sysctl.d/99-vpn-forwarding.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | единственный `net.ipv4.ip_forward=1` |
+| `/etc/systemd/journald.conf.d/10-vpn-bot.conf` | repo-managed (`journald`) | deploy.sh | `/etc/systemd` | `SystemMaxUse=500M`; заменяет ручную правку `journald.conf` |
+| `/etc/systemd/journald.conf` | conffile dpkg | пакет `systemd` | `/etc/systemd` | деплой его не пишет; Phase 1 сообщает **MODIFIED**, пока в нём осталась старая ручная правка — верните стоковый файл руками, когда drop-in уже действует |
+| `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | `/etc/systemd` | не даёт networkd сбрасывать `ip rule` WARP; действует со следующего старта networkd |
+| `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, из `deploy/vpn-bot-acme-reload.sh` | `/usr/local/sbin` | `Le_ReloadCmd` у acme.sh; только там, где есть сертификат; [subscription.ru.md](subscription.ru.md#tls-терминация) |
+| `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/ssh` | вход root только по ключу; см. [ALLOW_SSH_CHANGE](#allow_ssh_change-и-риск-потери-доступа) |
+| `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/systemd` | `ListenStream` на 54321 (IPv4 + IPv6) |
+| `/etc/systemd/system/danted.service.d/vpn-bot-warp.conf` | repo-managed (`unit`) | deploy.sh, из `deploy/danted-warp.conf` | `/etc/systemd` | порядок запуска после интерфейса WARP |
+| `/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf` | repo-managed (`unit`, `gate=MTPROTO`) | deploy.sh, из `deploy/mtproxy-vpn-bot-managed.conf` | `/etc/systemd` | только пока `MTPROTO_ENABLED=true`; побайтно равный файл со старым именем `vpnbot-managed.conf` переименовывается. При выключенном MTProxy оставшийся drop-in показывается как сирота |
+| `/etc/systemd/system/vpn-bot.service` | repo-managed | deploy.sh, как есть | `/etc/systemd` | действуют гейты модели привилегий |
+| `/etc/systemd/system/<deploy/*.service, *.timer>` | repo-managed | оператор, руками | `/etc/systemd` | drift-гейт юнитов в Phase 1 печатает команды установки |
+| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | из `scripts/` |
+| `/usr/local/sbin/vpn-bot-{xray,awg,mtproxy}-apply`, `vpn-bot-socks5-user` | backup-only (`installer`) | `deploy/setup-nonroot-helper-mode.sh` | `/usr/local/sbin` | исходники в `deploy/helpers/` |
+| `/usr/local/etc/xray/config.json` | шаблон + значения хоста | бот (клиенты) / оператор | бандл восстановления | структуру проверяет `deploy/backend-config-sync.py` |
+| `/etc/amnezia/amneziawg/awg0.conf` | шаблон + значения хоста | бот (peers) / оператор | бандл восстановления; `/etc/amnezia` | тот же гейт |
+| `/etc/hysteria/config.yaml` | шаблон + значения хоста | `deploy/hysteria/install-config.sh` | бандл восстановления (при включённом Hysteria2); `/etc/hysteria` | тот же гейт |
+| `/opt/vpn-service/.env` | шаблон + значения хоста | оператор | бандл восстановления | `.env.example` |
+| `/etc/vpn-bot/tls/*` | значения хоста | acme.sh; права ставит хук | `/etc/vpn-bot` | каталог `root:root 0755`, `fullchain.pem`/`privkey.pem` `root:vpn-bot 0640` |
+| `/etc/systemd/system/xray*.service` (+ `.d/`), `/usr/local/bin/xray` | backup-only (`installer`) | Xray-install | юниты: `/etc/systemd`; бинарник: — (переустанавливается) | |
+| `/etc/systemd/system/hysteria-server*.service` (+ `.d/`), `/usr/local/bin/hysteria` | backup-only (`installer`) | get.hy2.sh | юниты: `/etc/systemd`; бинарник: — (переустанавливается) | |
+| `/usr/local/bin/wgcf`, `/usr/local/bin/qr` | backup-only (`installer`) | их собственные установщики | — (переустанавливаются) | |
+| `/etc/nginx/conf.d/*.conf` | backup-only | оператор | `/etc/nginx/conf.d` | vhost decoy / self-steal с доменом хоста; шаблон в репо — отдельная задача |
+| `/etc/netplan/*` | backup-only (`provider`) | образ VPS | `/etc/netplan` | вне сканируемого набора; перечислен для полноты |
+| `/var/spool/cron/crontabs/root` | backup-only | acme.sh (строка `--cron`) | `/var/spool/cron/crontabs` | |
+| `/usr/local/sbin/site-freshen.py` | backup-only (`deployment-local`) | оператор | `/usr/local/sbin` | перезаписыватель decoy — [по замыслу](hysteria.ru.md) никогда не в репо, поэтому offsite system-бандл — его единственная копия вне хоста |
+| `/etc/sysctl.d/99-amneziawg.conf` | retired | — | — | дубль `ip_forward=1` |
+| `/etc/systemd/system/warp-sample.timer` | retired | — | — | `disable --now`, затем удаляется |
+| `/etc/systemd/system/warp-sample.service` | retired | — | — | `disable --now`, затем удаляется |
+| `/usr/local/sbin/site-freshen.sh` | retired | — | — | его работу теперь делает `deploy/vpn-bot-decoy-freshen.sh` |
 
 ### relay
+
+На relay нет бота, поэтому offsite-бэкап он не отправляет: его файлы возвращаются из репо, а
+`90-vpn-relay.conf` заново рендерится из `.env` relay.
 
 | Путь | Класс | Кто ставит | Заметки |
 |---|---|---|---|

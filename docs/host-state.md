@@ -29,48 +29,60 @@ design and cannot live in the repo).
 
 ## Every host file
 
+The **Offsite backup** column names what carries the file off the box: an entry of
+`DEFAULT_OFFSITE_SYSTEM_PATHS` (`config/settings.py`) for the system bundle, the *recovery
+bundle*, or `—` for nothing (reinstalled by its installer, or retired). Config `*.bak*` copies
+next to a listed file are left out on purpose — see
+[What the system bundle leaves out](operations.md#what-the-system-bundle-leaves-out). The
+bundle also carries state that is not a deployed file and so is not listed here: the decoy site
+(`/var/www`), `/root/.acme.sh`, `/etc/sudoers.d`, `/etc/passwd` and `/etc/group` among others
+([the full list](operations.md#what-the-system-bundle-covers)).
+
 ### main
 
-| Path | Class | Installed by | Notes |
-|---|---|---|---|
-| `/etc/logrotate.d/xray` | repo-managed (`logrotate`) | deploy.sh | `copytruncate`: xray cannot reopen its logs, and writes them `O_APPEND` |
-| `/etc/systemd/system/even-day-reboot.service` | repo-managed (`unit`) | deploy.sh | reboots the host — the deploy **never** starts it |
-| `/etc/systemd/system/even-day-reboot.timer` | repo-managed (`unit`) | deploy.sh | days 5,10,…,30 at 01:00 UTC (04:00 MSK); `enable --now` only if it was enabled or did not exist |
-| `/etc/sysctl.d/90-no-mptcp.conf` | repo-managed (`sysctl`) | deploy.sh | MPTCP off until the kernel carries the fix for CVE-2026-98432; byte-identical to the host copy, so the reason lives here, not in the file |
-| `/etc/sysctl.d/99-bbr.conf` | repo-managed (`sysctl`) | deploy.sh | `fq` + BBR |
-| `/etc/sysctl.d/99-network-buffers.conf` | repo-managed (`sysctl`) | deploy.sh | socket buffers, backlog, dirty ratios |
-| `/etc/sysctl.d/99-swap-tuning.conf` | repo-managed (`sysctl`) | deploy.sh | |
-| `/etc/sysctl.d/99-vpn-forwarding.conf` | repo-managed (`sysctl`) | deploy.sh | the one `net.ipv4.ip_forward=1` |
-| `/etc/systemd/journald.conf.d/10-vpn-bot.conf` | repo-managed (`journald`) | deploy.sh | `SystemMaxUse=500M`; replaces a hand edit of `journald.conf` |
-| `/etc/systemd/journald.conf` | dpkg conffile | the `systemd` package | never written by the deploy; Phase 1 reports it **MODIFIED** while the old hand edit is still in it — restore the stock file by hand once the drop-in is live |
-| `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | keeps networkd from flushing WARP's `ip rule`s; effective at networkd's next start |
-| `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, from `deploy/vpn-bot-acme-reload.sh` | acme.sh's `Le_ReloadCmd`; only where there is renewal material; [subscription.md](subscription.md#tls-termination) |
-| `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | key-only root login; see [ALLOW_SSH_CHANGE](#allow_ssh_change-and-the-lockout-risk) |
-| `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `ListenStream` on 54321 (IPv4 + IPv6) |
-| `/etc/systemd/system/danted.service.d/vpn-bot-warp.conf` | repo-managed (`unit`) | deploy.sh, from `deploy/danted-warp.conf` | ordering after the WARP interface |
-| `/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf` | repo-managed (`unit`, `gate=MTPROTO`) | deploy.sh, from `deploy/mtproxy-vpn-bot-managed.conf` | only while `MTPROTO_ENABLED=true`; a byte-identical old name `vpnbot-managed.conf` is renamed. With MTProxy off, a leftover drop-in is reported as an orphan |
-| `/etc/systemd/system/vpn-bot.service` | repo-managed | deploy.sh, verbatim | the privilege-model gates apply |
-| `/etc/systemd/system/<deploy/*.service, *.timer>` | repo-managed | the operator, by hand | Phase 1's unit-drift gate prints the install commands |
-| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | from `scripts/` |
-| `/usr/local/sbin/vpn-bot-{xray,awg,mtproxy}-apply`, `vpn-bot-socks5-user` | backup-only (`installer`) | `deploy/setup-nonroot-helper-mode.sh` | source `deploy/helpers/` |
-| `/usr/local/etc/xray/config.json` | template + host values | the bot (clients) / operator | structure checked by `deploy/backend-config-sync.py` |
-| `/etc/amnezia/amneziawg/awg0.conf` | template + host values | the bot (peers) / operator | same gate |
-| `/etc/hysteria/config.yaml` | template + host values | `deploy/hysteria/install-config.sh` | same gate |
-| `/opt/vpn-service/.env` | template + host values | the operator | `.env.example` |
-| `/etc/vpn-bot/tls/*` | host values | acme.sh; modes by the hook | dir `root:root 0755`, `fullchain.pem`/`privkey.pem` `root:vpn-bot 0640` |
-| `/etc/systemd/system/xray*.service` (+ `.d/`), `/usr/local/bin/xray` | backup-only (`installer`) | Xray-install | |
-| `/etc/systemd/system/hysteria-server*.service` (+ `.d/`), `/usr/local/bin/hysteria` | backup-only (`installer`) | get.hy2.sh | |
-| `/usr/local/bin/wgcf`, `/usr/local/bin/qr` | backup-only (`installer`) | their own installers | |
-| `/etc/nginx/conf.d/*.conf` | backup-only | the operator | decoy / self-steal vhost with the host's domain; a repo template is separate work |
-| `/etc/netplan/*` | backup-only (`provider`) | the VPS image | not in the scanned set; listed for completeness |
-| `/var/spool/cron/crontabs/root` | backup-only | acme.sh (`--cron` line) | |
-| `/usr/local/sbin/site-freshen.py` | backup-only (`deployment-local`) | the operator | the decoy rewriter — by [design](hysteria.md#keeping-the-decoy-in-step-vpn-bot-decoy-freshensh) never in the repo; protected by the offsite system bundle (`DEFAULT_OFFSITE_SYSTEM_PATHS` in `config/settings.py` — the path is added there by the follow-up change; until then, back it up by hand) |
-| `/etc/sysctl.d/99-amneziawg.conf` | retired | — | a duplicate `ip_forward=1` |
-| `/etc/systemd/system/warp-sample.timer` | retired | — | `disable --now`, then removed |
-| `/etc/systemd/system/warp-sample.service` | retired | — | `disable --now`, then removed |
-| `/usr/local/sbin/site-freshen.sh` | retired | — | its job is `deploy/vpn-bot-decoy-freshen.sh` now |
+| Path | Class | Installed by | Offsite backup | Notes |
+|---|---|---|---|---|
+| `/etc/logrotate.d/xray` | repo-managed (`logrotate`) | deploy.sh | `/etc/logrotate.d` | `copytruncate`: xray cannot reopen its logs, and writes them `O_APPEND` |
+| `/etc/systemd/system/even-day-reboot.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | reboots the host — the deploy **never** starts it |
+| `/etc/systemd/system/even-day-reboot.timer` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | days 5,10,…,30 at 01:00 UTC (04:00 MSK); `enable --now` only if it was enabled or did not exist |
+| `/etc/sysctl.d/90-no-mptcp.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | MPTCP off until the kernel carries the fix for CVE-2026-98432; byte-identical to the host copy, so the reason lives here, not in the file |
+| `/etc/sysctl.d/99-bbr.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | `fq` + BBR |
+| `/etc/sysctl.d/99-network-buffers.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | socket buffers, backlog, dirty ratios |
+| `/etc/sysctl.d/99-swap-tuning.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | |
+| `/etc/sysctl.d/99-vpn-forwarding.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | the one `net.ipv4.ip_forward=1` |
+| `/etc/systemd/journald.conf.d/10-vpn-bot.conf` | repo-managed (`journald`) | deploy.sh | `/etc/systemd` | `SystemMaxUse=500M`; replaces a hand edit of `journald.conf` |
+| `/etc/systemd/journald.conf` | dpkg conffile | the `systemd` package | `/etc/systemd` | never written by the deploy; Phase 1 reports it **MODIFIED** while the old hand edit is still in it — restore the stock file by hand once the drop-in is live |
+| `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | `/etc/systemd` | keeps networkd from flushing WARP's `ip rule`s; effective at networkd's next start |
+| `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, from `deploy/vpn-bot-acme-reload.sh` | `/usr/local/sbin` | acme.sh's `Le_ReloadCmd`; only where there is renewal material; [subscription.md](subscription.md#tls-termination) |
+| `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/ssh` | key-only root login; see [ALLOW_SSH_CHANGE](#allow_ssh_change-and-the-lockout-risk) |
+| `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/systemd` | `ListenStream` on 54321 (IPv4 + IPv6) |
+| `/etc/systemd/system/danted.service.d/vpn-bot-warp.conf` | repo-managed (`unit`) | deploy.sh, from `deploy/danted-warp.conf` | `/etc/systemd` | ordering after the WARP interface |
+| `/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf` | repo-managed (`unit`, `gate=MTPROTO`) | deploy.sh, from `deploy/mtproxy-vpn-bot-managed.conf` | `/etc/systemd` | only while `MTPROTO_ENABLED=true`; a byte-identical old name `vpnbot-managed.conf` is renamed. With MTProxy off, a leftover drop-in is reported as an orphan |
+| `/etc/systemd/system/vpn-bot.service` | repo-managed | deploy.sh, verbatim | `/etc/systemd` | the privilege-model gates apply |
+| `/etc/systemd/system/<deploy/*.service, *.timer>` | repo-managed | the operator, by hand | `/etc/systemd` | Phase 1's unit-drift gate prints the install commands |
+| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | from `scripts/` |
+| `/usr/local/sbin/vpn-bot-{xray,awg,mtproxy}-apply`, `vpn-bot-socks5-user` | backup-only (`installer`) | `deploy/setup-nonroot-helper-mode.sh` | `/usr/local/sbin` | source `deploy/helpers/` |
+| `/usr/local/etc/xray/config.json` | template + host values | the bot (clients) / operator | recovery bundle | structure checked by `deploy/backend-config-sync.py` |
+| `/etc/amnezia/amneziawg/awg0.conf` | template + host values | the bot (peers) / operator | recovery bundle; `/etc/amnezia` | same gate |
+| `/etc/hysteria/config.yaml` | template + host values | `deploy/hysteria/install-config.sh` | recovery bundle (Hysteria2 on); `/etc/hysteria` | same gate |
+| `/opt/vpn-service/.env` | template + host values | the operator | recovery bundle | `.env.example` |
+| `/etc/vpn-bot/tls/*` | host values | acme.sh; modes by the hook | `/etc/vpn-bot` | dir `root:root 0755`, `fullchain.pem`/`privkey.pem` `root:vpn-bot 0640` |
+| `/etc/systemd/system/xray*.service` (+ `.d/`), `/usr/local/bin/xray` | backup-only (`installer`) | Xray-install | units: `/etc/systemd`; binary: — (reinstalled) | |
+| `/etc/systemd/system/hysteria-server*.service` (+ `.d/`), `/usr/local/bin/hysteria` | backup-only (`installer`) | get.hy2.sh | units: `/etc/systemd`; binary: — (reinstalled) | |
+| `/usr/local/bin/wgcf`, `/usr/local/bin/qr` | backup-only (`installer`) | their own installers | — (reinstalled) | |
+| `/etc/nginx/conf.d/*.conf` | backup-only | the operator | `/etc/nginx/conf.d` | decoy / self-steal vhost with the host's domain; a repo template is separate work |
+| `/etc/netplan/*` | backup-only (`provider`) | the VPS image | `/etc/netplan` | not in the scanned set; listed for completeness |
+| `/var/spool/cron/crontabs/root` | backup-only | acme.sh (`--cron` line) | `/var/spool/cron/crontabs` | |
+| `/usr/local/sbin/site-freshen.py` | backup-only (`deployment-local`) | the operator | `/usr/local/sbin` | the decoy rewriter — by [design](hysteria.md#keeping-the-decoy-in-step-vpn-bot-decoy-freshensh) never in the repo, so the offsite system bundle is its only off-box copy |
+| `/etc/sysctl.d/99-amneziawg.conf` | retired | — | — | a duplicate `ip_forward=1` |
+| `/etc/systemd/system/warp-sample.timer` | retired | — | — | `disable --now`, then removed |
+| `/etc/systemd/system/warp-sample.service` | retired | — | — | `disable --now`, then removed |
+| `/usr/local/sbin/site-freshen.sh` | retired | — | — | its job is `deploy/vpn-bot-decoy-freshen.sh` now |
 
 ### relay
+
+The relay runs no bot, so it sends no offsite backup: its files come back from the repo, and
+`90-vpn-relay.conf` is rendered again from the relay's `.env`.
 
 | Path | Class | Installed by | Notes |
 |---|---|---|---|

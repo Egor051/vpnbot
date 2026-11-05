@@ -18,6 +18,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   за период»), and until 365 days have been recorded the block says where the history starts
   («(данные с DD.MM.YYYY HH:MM UTC)»). Buckets older than 400 days are pruned by the same
   pollers, at most once an hour. The block is now localized (ru/en).
+- **System bundle: an exclusion policy you can see and tune (docs/operations.md#what-the-system-bundle-leaves-out).**
+  The walk now leaves out config copies — `*.bak`, `*.bak.*`, `*.bak-*`, `*.bak[0-9]*` (the
+  bot's own `config.json.<stamp>.<token>.bak`, `install-config.sh`'s `config.yaml.bak.<stamp>`,
+  hand-made `cert.pem.selfsigned.bak` / `config.yaml.bak443` / `config.json.bak-<date>`; the
+  live config is already bundled, and in `/etc/amnezia` each copy was one more copy of the AWG
+  private keys) — and acme.sh's own ~276 hook scripts under `/root/.acme.sh/{dnsapi,deploy,notify}`,
+  which a reinstall of acme.sh brings back. The set is `DEFAULT_OFFSITE_SYSTEM_EXCLUDE` in
+  `config/settings.py`: `OFFSITE_BACKUP_SYSTEM_EXCLUDE` replaces it (empty = the default),
+  `OFFSITE_BACKUP_SYSTEM_EXCLUDE_EXTRA` adds to it. Globs are `fnmatch`ed against the full path
+  (`*` crosses `/`), symlinks by the link's own path; a glob that is neither absolute nor starts
+  with `*` stops the bot at startup. Matches stay in `MANIFEST.json` as `excluded_by_policy`,
+  without content. The SSH host private key exclusion stays a separate hard policy that no
+  setting can switch off. The manifest `summary` gains `skipped_by_reason` — every left-out
+  entry counted by reason, so what the policy cut and what was lost to errors or size limits
+  are each one number; `symlinks` now counts only the links recorded.
+
 - **Host state as code (docs/host-state.md).** `scripts/deploy.sh` now owns the host files that
   lived only on the servers: a new registry, `MANAGED_HOST_FILES`
   (`"<src>|<dst>|<mode>|<owner:group>|<class>|<role>[|gate=…;legacy=…]"`), with the sources under
@@ -318,6 +334,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The system bundle covers the rest of the managed host state.** `DEFAULT_OFFSITE_SYSTEM_PATHS`
+  takes all of `/etc/systemd` instead of `/etc/systemd/system` + `journald.conf`, so the
+  `journald.conf.d/` and `networkd.conf.d/` drop-ins from host state as code (#313), `network/`
+  and any later `*.conf.d` are included; every crontab under `/var/spool/cron/crontabs` instead
+  of root's alone; and adds `/etc/cron.d`, `/etc/logrotate.d`, `/etc/sudoers.d` (the rules
+  non-root helper mode runs on) and `/var/www` — the REALITY decoy root, which used to depend on
+  `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS` being set (a byte-different decoy breaks selfsteal, and a
+  forgotten variable was a silent gap). `_EXTRA_PATHS` remains for a decoy outside `/var/www`.
+  docs/host-state.md gains an *Offsite backup* column naming what carries each host file.
+
 - **`deploy/vpn-bot-acme-reload.sh` matches the host it replaces.** Installed by the deploy as
   `/usr/local/sbin/acme-reload.sh` (the path acme.sh's `Le_ReloadCmd` already names) instead of
   being run out of the checkout — on hosts that have `/etc/vpn-bot/tls/fullchain.pem` only
@@ -431,6 +457,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one image.
 
 ### Fixed
+
+- **`.env.example` no longer switches the system bundle off.** It carried an uncommented
+  `OFFSITE_BACKUP_SYSTEM_PATHS=` under "leave empty to use the built-in set", but an explicitly
+  empty value empties the set — and with no paths the system bundle is not sent at all. A `.env`
+  copied from the template sent no system bundle (or, with `_EXTRA_PATHS` set, only those
+  paths). The line is commented out now, and the comment says what an empty value does; check an
+  existing `.env` for an uncommented `OFFSITE_BACKUP_SYSTEM_PATHS=`.
 
 - **A rollback could fire after a successful deploy.** `disarm()` is a function, and bash gives a
   function's caller back the ERR trap it had on entry when the function leaves it unset, so
