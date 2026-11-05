@@ -49,13 +49,34 @@ listen: :443
 #     discards the client's declared bandwidth outright and forces the non-Brutal
 #     controller, which makes the values below dead weight. It is deliberately
 #     NOT set here — the goal is to cap Brutal, not to disable it.
+#   - These values cap Brutal ONLY. They have no effect on BBR/Reno, so a client
+#     that declares no bandwidth (the default — the bot's links carry none) is
+#     not held to them; its download runs BBR with the `congestion` profile below.
 #
 # Format is the docs' own literal (`bps`/`kbps`/`mbps`/`gbps`/`tbps`).
 # Like every other key in this file, a change here only takes effect on the next
 # `systemctl restart hysteria-server`.
 bandwidth:
-  up: 95 mbps
-  down: 95 mbps
+  up: 75 mbps
+  down: 75 mbps
+
+# Congestion controller for the directions that are NOT on Brutal.
+#
+#   - Server-local: not negotiated in the protocol and not part of the
+#     hysteria2:// link, so clients need no change and never see it.
+#   - On this end it only shapes what the server sends, i.e. the client's
+#     DOWNLOAD, and only while that direction is not on Brutal — a client that
+#     declares its own download bandwidth gets Brutal (capped by `bandwidth.up`
+#     above) and this profile does not apply to it. Client upload is the
+#     client's own controller's business.
+#   - Requires hysteria >= v2.8.0. An unknown profile is a config parse error and
+#     hysteria-server refuses to start; install-config.sh refuses to install this
+#     file onto an older binary.
+#   - bbrProfile: standard | conservative | aggressive (upstream default:
+#     standard). Roll back by setting it to `standard`.
+congestion:
+  type: bbr
+  bbrProfile: conservative
 
 tls:
   # Paths are host-local; the cert/key files themselves are never committed to
