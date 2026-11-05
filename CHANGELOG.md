@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`deploy/hysteria/install-config.sh` checks the hysteria version before installing.** The
+  repo config now needs hysteria >= v2.8.0 (`congestion.bbrProfile`), so the script runs
+  `"$HYSTERIA_BIN" version` (default `/usr/local/bin/hysteria`), finds the `Version: vX.Y.Z` line
+  below the ASCII banner, and fails closed — before the backup, the temp file or the target are
+  touched — when the binary is missing, older than v2.8.0, or prints no parseable version.
+  `--selftest` covers it with mock binaries; secret injection, backup, `0600 hysteria:hysteria`
+  and the no-restart rule are unchanged.
 - **Host state as code (docs/host-state.md).** `scripts/deploy.sh` now owns the host files that
   lived only on the servers: a new registry, `MANAGED_HOST_FILES`
   (`"<src>|<dst>|<mode>|<owner:group>|<class>|<role>[|gate=…;legacy=…]"`), with the sources under
@@ -308,6 +315,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Hysteria2: BBR `conservative` profile.** `deploy/hysteria/config.yaml` gains a top-level
+  `congestion: {type: bbr, bbrProfile: conservative}`. It is server-local (not negotiated, not in
+  the `hysteria2://` link) and only shapes the client's download while that direction is not on
+  Brutal; a client that sets its own `bandwidth` is unaffected. Needs hysteria >= v2.8.0; roll
+  back with `bbrProfile: standard`. See docs/hysteria.md → Congestion control.
+- **Hysteria2: the per-client Brutal ceiling is 75/75 mbps (was 95/95).** `bandwidth.up` and
+  `bandwidth.down` in `deploy/hysteria/config.yaml`; `ignoreClientBandwidth` is still not set. The
+  ceiling applies only to clients on Brutal (those that declare their own `bandwidth`) — it has
+  no effect on BBR/Reno, so default clients are not capped at 75 mbps.
 - **`deploy/vpn-bot-acme-reload.sh` matches the host it replaces.** Installed by the deploy as
   `/usr/local/sbin/acme-reload.sh` (the path acme.sh's `Le_ReloadCmd` already names) instead of
   being run out of the checkout — on hosts that have `/etc/vpn-bot/tls/fullchain.pem` only
