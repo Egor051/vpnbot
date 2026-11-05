@@ -3,7 +3,8 @@
 The system bundle is a THIRD encrypted artifact sent alongside the ``*.db.enc`` DB
 backup and the ``vpnbot_recovery_*`` bundle, through the same loop and under the
 same Fernet key. These tests cover what it adds over the recovery bundle —
-directory walking, symlinks stored as targets, the policy exclusion, the size
+directory walking, symlinks stored as targets, the policy exclusions (the hard SSH
+host-key policy and the configurable OFFSITE_BACKUP_SYSTEM_EXCLUDE set), the size
 guardrails and the manifest summary — plus the delivery glue and the guarantee that
 the two pre-existing artifacts are untouched by it.
 """
@@ -21,6 +22,12 @@ import pytest
 from cryptography.fernet import Fernet
 
 from adapters.clock import ClockProvider
+from config.settings import (
+    DEFAULT_OFFSITE_SYSTEM_EXCLUDE,
+    DEFAULT_OFFSITE_SYSTEM_PATHS,
+    SettingsError,
+    load_settings,
+)
 from services.offsite_backup import OffsiteBackupService, offsite_backup_loop
 
 
@@ -31,6 +38,7 @@ def _make_service(
     include_system: bool = True,
     include_recovery: bool = False,
     encryption_key: str | None = None,
+    system_exclude: list[str] | tuple[str, ...] = (),
 ) -> OffsiteBackupService:
     key = encryption_key if encryption_key is not None else Fernet.generate_key().decode()
     return OffsiteBackupService(
@@ -42,6 +50,7 @@ def _make_service(
         include_recovery=include_recovery,
         system_sources=system_sources,
         include_system=include_system,
+        system_exclude=system_exclude,
     )
 
 
@@ -129,6 +138,7 @@ async def test_system_bundle_manifest_summary_counts(tmp_path: Path) -> None:
     assert summary["bytes_included"] == 3  # "a" + "bb"
     assert summary["truncated"] is False
     assert summary["sources"] == [str(root), str(missing)]
+    assert summary["skipped_by_reason"] == {"FileNotFoundError": 1}
 
 
 @pytest.mark.asyncio
@@ -478,3 +488,271 @@ async def test_loop_sends_system_even_when_recovery_fails(monkeypatch: pytest.Mo
     # A blown recovery bundle must not suppress the system bundle behind it.
     assert service.recovery_sent == 1
     assert service.system_sent == 1
+
+
+# --- Default path set ----------------------------------------------------------
+
+
+def test_default_system_paths_cover_the_new_locations() -> None:
+    defaults = set(DEFAULT_OFFSITE_SYSTEM_PATHS)
+    for added in (
+        "/etc/systemd",
+        "/var/www",
+        "/etc/logrotate.d",
+        "/etc/cron.d",
+        "/etc/sudoers.d",
+        "/var/spool/cron/crontabs",
+    ):
+        assert Path(added) in defaults, added
+    # Replaced by their parent directory, which covers them and their siblings.
+    for replaced in (
+        "/etc/systemd/system",
+        "/etc/systemd/journald.conf",
+        "/var/spool/cron/crontabs/root",
+    ):
+        assert Path(replaced) not in defaults, replaced
+
+
+def test_no_default_system_path_is_nested_in_another() -> None:
+    # A child of another default entry is walked twice for nothing — and is exactly
+    # what a stale /etc/systemd/system next to /etc/systemd would look like.
+    for path in DEFAULT_OFFSITE_SYSTEM_PATHS:
+        for other in DEFAULT_OFFSITE_SYSTEM_PATHS:
+            if other != path:
+                assert not path.is_relative_to(other), f"{path} is inside {other}"
+
+
+# --- Configurable exclusions ---------------------------------------------------
+
+_EXCLUDED_BY_DEFAULT = (
+    "/usr/local/etc/xray/config.json.20260731T095519Z.1785491719000000000.Zm9vYmFyYmF6cXV4.bak",
+    "/etc/amnezia/amneziawg/awg0.conf.20260731T095519Z.1785491719000000000.Zm9vYmFyYmF6cXV4.bak",
+    "/etc/hysteria/config.yaml.bak443",
+    "/etc/hysteria/config.yaml.bak.20260731T095519",
+    "/etc/vpn-bot/tls/cert.pem.selfsigned.bak",
+    "/usr/local/etc/xray/config.json.bak-20260731T095519Z",
+    "/root/.acme.sh/dnsapi/dns_cf.sh",
+    "/root/.acme.sh/deploy/haproxy.sh",
+    "/root/.acme.sh/notify/telegram.sh",
+)
+_KEPT_BY_DEFAULT = (
+    "/usr/local/etc/xray/config.json",
+    "/etc/amnezia/amneziawg/awg0.conf",
+    "/etc/nginx/conf.d/anycastedge.net.conf",
+    "/var/www/anycastedge/index.html",
+    "/etc/sudoers.d/vpn-bot",
+    "/etc/systemd/journald.conf.d/10-vpn-bot.conf",
+    "/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf",
+    "/root/.acme.sh/account.conf",
+    "/root/.acme.sh/acme.sh",
+    "/root/.acme.sh/anycastedge.net_ecc/fullchain.cer",
+    "/var/spool/cron/crontabs/root",
+)
+
+
+@pytest.mark.parametrize("path", _EXCLUDED_BY_DEFAULT)
+def test_default_exclude_matches_config_copies_and_acme_code(path: str) -> None:
+    service = _make_service(system_exclude=DEFAULT_OFFSITE_SYSTEM_EXCLUDE)
+    assert service._system_excluded(Path(path)) is True
+
+
+@pytest.mark.parametrize("path", _KEPT_BY_DEFAULT)
+def test_default_exclude_keeps_live_state(path: str) -> None:
+    service = _make_service(system_exclude=DEFAULT_OFFSITE_SYSTEM_EXCLUDE)
+    assert service._system_excluded(Path(path)) is False
+
+
+def _rebased(root: Path, patterns: tuple[str, ...]) -> tuple[str, ...]:
+    """Move absolute globs under a fixture root; leave ``*…`` globs as they are."""
+    return tuple(str(root) + pattern if pattern.startswith("/") else pattern for pattern in patterns)
+
+
+@pytest.mark.asyncio
+async def test_default_policy_on_a_fixture_host_tree(tmp_path: Path) -> None:
+    files = {
+        # left out by DEFAULT_OFFSITE_SYSTEM_EXCLUDE
+        "usr/local/etc/xray/config.json.20260731T095519Z.1785491719000000000.Zm9vYmFy.bak": "OLD-XRAY",
+        "etc/hysteria/config.yaml.bak443": "OLD-HY2",
+        "etc/vpn-bot/tls/cert.pem.selfsigned.bak": "OLD-CERT",
+        "usr/local/etc/xray/config.json.bak-20260731T095519Z": "OLD-XRAY-2",
+        "root/.acme.sh/dnsapi/dns_cf.sh": "ACME-HOOK",
+        # left out by the hard policy
+        "etc/ssh/ssh_host_ed25519_key": "PRIVATE",
+        # kept
+        "usr/local/etc/xray/config.json": "{}",
+        "etc/hysteria/config.yaml": "listen: :443",
+        "root/.acme.sh/account.conf": "SAVED_CF_Token=x",
+        "etc/nginx/conf.d/anycastedge.net.conf": "server {}",
+        "var/www/anycastedge/index.html": "<html></html>",
+        "etc/sudoers.d/vpn-bot": "vpn-bot ALL=(root) NOPASSWD: /usr/local/sbin/vpn-bot-xray-apply",
+        "etc/systemd/journald.conf.d/10-vpn-bot.conf": "[Journal]\nSystemMaxUse=500M\n",
+        "etc/ssh/sshd_config": "PermitRootLogin prohibit-password",
+    }
+    for rel, content in files.items():
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    sources = [tmp_path / "usr" / "local" / "etc" / "xray"]
+    sources += [tmp_path / str(path).lstrip("/") for path in DEFAULT_OFFSITE_SYSTEM_PATHS]
+    service = _make_service(
+        system_sources=sources,
+        system_exclude=_rebased(tmp_path, DEFAULT_OFFSITE_SYSTEM_EXCLUDE),
+    )
+    built = await service.create_system_bundle()
+    assert built is not None
+    manifest, members = _extract(service, built[0])
+    by_path = _by_path(manifest)
+
+    for rel in list(files)[:6]:
+        entry = by_path[str(tmp_path / rel)]
+        assert entry["included"] is False, rel
+        assert entry["reason"] == "excluded_by_policy", rel
+        assert "member" not in entry and "sha256" not in entry, rel
+    for rel in list(files)[6:]:
+        assert by_path[str(tmp_path / rel)]["included"] is True, rel
+
+    payload = b"".join(members.values())
+    for secret in (b"OLD-XRAY", b"OLD-HY2", b"OLD-CERT", b"ACME-HOOK", b"PRIVATE"):
+        assert secret not in payload
+    assert manifest["summary"]["skipped_by_reason"]["excluded_by_policy"] == 6
+
+
+@pytest.mark.asyncio
+async def test_ssh_host_key_policy_survives_a_replaced_exclude_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _minimal_required(monkeypatch, tmp_path)
+    monkeypatch.setenv("OFFSITE_BACKUP_SYSTEM_EXCLUDE", "/nonexistent/*")
+    settings = load_settings()
+    assert settings.offsite_backup_system_exclude == ("/nonexistent/*",)
+
+    ssh = tmp_path / "ssh"
+    ssh.mkdir()
+    (ssh / "ssh_host_ed25519_key").write_text("PRIVATE", encoding="utf-8")
+    (ssh / "ssh_host_ed25519_key.pub").write_text("ssh-ed25519 AAAA", encoding="utf-8")
+    (ssh / "sshd_config.bak").write_text("old", encoding="utf-8")
+
+    service = _make_service(system_sources=[ssh], system_exclude=settings.offsite_backup_system_exclude)
+    built = await service.create_system_bundle()
+    assert built is not None
+    manifest, members = _extract(service, built[0])
+    by_path = _by_path(manifest)
+
+    # Not part of the configurable set, so replacing that set cannot switch it off.
+    assert by_path[str(ssh / "ssh_host_ed25519_key")]["reason"] == "excluded_by_policy"
+    assert all(b"PRIVATE" not in data for data in members.values())
+    # The replaced set really did replace the default: *.bak is back in.
+    assert by_path[str(ssh / "sshd_config.bak")]["included"] is True
+
+
+@pytest.mark.asyncio
+async def test_exclusion_applies_to_a_symlink_by_its_own_path(tmp_path: Path) -> None:
+    root = tmp_path / "etc"
+    root.mkdir()
+    live = root / "awg0.conf"
+    live.write_text("[Interface]", encoding="utf-8")
+    (root / "awg0.conf.bak").symlink_to(live)  # excluded: the link's own name matches
+    (root / "current.conf").symlink_to(root / "awg0.conf.old.bak")  # kept: only its target matches
+
+    service = _make_service(system_sources=[root], system_exclude=("*.bak",))
+    built = await service.create_system_bundle()
+    assert built is not None
+    manifest, _ = _extract(service, built[0])
+    by_path = _by_path(manifest)
+
+    excluded = by_path[str(root / "awg0.conf.bak")]
+    assert excluded == {"path": str(root / "awg0.conf.bak"), "kind": "symlink", "included": False,
+                        "reason": "excluded_by_policy"}
+    kept = by_path[str(root / "current.conf")]
+    assert kept["kind"] == "symlink" and kept["included"] is True
+    # Only the recorded link counts as a symlink; the excluded one is a skip.
+    assert manifest["summary"]["symlinks"] == 1
+    assert manifest["summary"]["skipped_by_reason"] == {"excluded_by_policy": 1}
+
+
+@pytest.mark.asyncio
+async def test_summary_counts_skips_by_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("services.offsite_backup._SYSTEM_MAX_FILE_BYTES", 16)
+    root = tmp_path / "etc"
+    root.mkdir()
+    (root / "keep.conf").write_text("ok", encoding="utf-8")
+    (root / "a.conf.bak").write_text("a", encoding="utf-8")
+    (root / "b.conf.bak-1").write_text("b", encoding="utf-8")
+    (root / "ssh_host_rsa_key").write_text("k", encoding="utf-8")
+    (root / "big.bin").write_bytes(b"\0" * 17)
+
+    service = _make_service(
+        system_sources=[root, tmp_path / "gone.conf"],
+        system_exclude=DEFAULT_OFFSITE_SYSTEM_EXCLUDE,
+    )
+    built = await service.create_system_bundle()
+    assert built is not None
+    manifest, _ = _extract(service, built[0])
+    summary = manifest["summary"]
+
+    assert summary["skipped_by_reason"] == {
+        "FileNotFoundError": 1,
+        "excluded_by_policy": 3,
+        "too_large": 1,
+    }
+    assert summary["files_included"] == 1
+    assert summary["files_skipped"] == 5
+    assert sum(summary["skipped_by_reason"].values()) == summary["files_skipped"]
+
+
+# --- OFFSITE_BACKUP_SYSTEM_EXCLUDE / _EXCLUDE_EXTRA ----------------------------
+
+
+def _minimal_required(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("ADMIN_IDS", "1")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "vpn.db"))
+
+
+@pytest.mark.parametrize(
+    ("exclude", "extra", "expected"),
+    [
+        (None, None, DEFAULT_OFFSITE_SYSTEM_EXCLUDE),
+        # Blank keeps the default — unlike OFFSITE_BACKUP_SYSTEM_PATHS, where a blank
+        # value empties the set.
+        ("", None, DEFAULT_OFFSITE_SYSTEM_EXCLUDE),
+        ("   ", "", DEFAULT_OFFSITE_SYSTEM_EXCLUDE),
+        ("/srv/a/*, *.old", None, ("/srv/a/*", "*.old")),
+        (None, "*.orig", (*DEFAULT_OFFSITE_SYSTEM_EXCLUDE, "*.orig")),
+        ("/srv/a/*", "*.orig,/var/www/*/cache/*", ("/srv/a/*", "*.orig", "/var/www/*/cache/*")),
+    ],
+)
+def test_exclude_replaces_and_exclude_extra_appends(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    exclude: str | None,
+    extra: str | None,
+    expected: tuple[str, ...],
+) -> None:
+    _minimal_required(monkeypatch, tmp_path)
+    if exclude is not None:
+        monkeypatch.setenv("OFFSITE_BACKUP_SYSTEM_EXCLUDE", exclude)
+    if extra is not None:
+        monkeypatch.setenv("OFFSITE_BACKUP_SYSTEM_EXCLUDE_EXTRA", extra)
+    assert load_settings().offsite_backup_system_exclude == expected
+
+
+@pytest.mark.parametrize("name", ["OFFSITE_BACKUP_SYSTEM_EXCLUDE", "OFFSITE_BACKUP_SYSTEM_EXCLUDE_EXTRA"])
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("config.json.bak", r"config\.json\.bak .*начните шаблон с \*"),
+        ("*.bak,etc/ssh/*", r"etc/ssh/\* .*абсолютный путь"),
+        ("?.bak", r"\?\.bak"),
+        ("*.bak,,*.old", "пустой шаблон"),
+        ("*.bak,", "пустой шаблон"),
+    ],
+)
+def test_exclude_rejects_bad_globs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, value: str, message: str
+) -> None:
+    _minimal_required(monkeypatch, tmp_path)
+    monkeypatch.setenv(name, value)
+    with pytest.raises(SettingsError, match=message):
+        load_settings()
