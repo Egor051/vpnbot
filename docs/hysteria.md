@@ -28,7 +28,8 @@ Three moving parts, only one of which is the bot:
    (issued/renewed by `acme.sh` outside this repo). Run `deploy/hysteria/preflight-udp443.sh`
    before restarting the service. The renewal **fan-out** — copying the new chain into
    `/etc/hysteria/cert.pem`/`key.pem` with the `hysteria` owner and restarting the service — is
-   the tracked `deploy/vpn-bot-acme-reload.sh` hook, wired as acme.sh's `--reloadcmd`
+   the tracked `deploy/vpn-bot-acme-reload.sh` hook, which deploy.sh installs as
+   `/usr/local/sbin/acme-reload.sh` — acme.sh's `--reloadcmd`
    ([Subscription → TLS termination](subscription.md#tls-termination)).
 2. **`hy2_auth` endpoint** (`python -m hy2_auth`, `deploy/vpn-bot-hy2-auth.service`) — a small,
    **separate** process the `hysteria` server calls over loopback for every handshake. It opens
@@ -133,7 +134,7 @@ unique per deployment and is the whole point of a decoy. It stays a deployment-l
 this hook merely *calls*, via `DECOY_FRESHEN_HOOK`. Unset, the freshness pass is skipped; whether
 anything is mirrored afterwards is decided by the layout above, not by this variable.
 
-Install — no copy step, run it out of the checkout like `deploy/vpn-bot-acme-reload.sh`.
+Install — no copy step, run it out of the checkout (like `deploy/update-ip2asn.sh`).
 Deliberately **cron, not a systemd unit**: every `deploy/*.service` basename is enrolled into
 deploy.sh's `UNIT_SET` ([`deploy/managed-units.list`](../deploy/managed-units.list)), so shipping
 a unit for a job the host runs from cron would make Phase 1 report it not-installed on every
@@ -169,6 +170,11 @@ sudo crontab -e
 >    guessing an interpreter.
 > 3. `--dry-run` this hook and confirm the log shows the rewriter running and the mirror skipped.
 > 4. Only then replace the predecessor's crontab line with the one above.
+>
+> On the main server that migration is done: the cron line is gone, deploy.sh retires the
+> wrapper `/usr/local/sbin/site-freshen.sh` (a host file of class `absent`), and the rewriter
+> `/usr/local/sbin/site-freshen.py` stays — it is deployment-local by design and is kept by the
+> offsite system backup, not by the repo ([host-state.md](host-state.md)).
 
 `DECOY_ROOT` has **no default on purpose**. `rsync --delete` is destructive by design: pointed at
 a missing or empty source it would faithfully empty `MASQ_DIR`, leaving Hysteria2 answering probes

@@ -28,7 +28,7 @@
    сервиса запускайте `deploy/hysteria/preflight-udp443.sh`. **Раскладка** продлённого
    сертификата — копирование новой цепочки в `/etc/hysteria/cert.pem`/`key.pem` с владельцем
    `hysteria` и рестарт сервиса — делается трекнутым хуком `deploy/vpn-bot-acme-reload.sh`,
-   подключённым как `--reloadcmd` у acme.sh
+   который deploy.sh ставит как `/usr/local/sbin/acme-reload.sh` — `--reloadcmd` у acme.sh
    ([Подписка → TLS-терминация](subscription.ru.md#tls-терминация)).
 2. **Эндпоинт `hy2_auth`** (`python -m hy2_auth`, `deploy/vpn-bot-hy2-auth.service`) — небольшой
    **отдельный** процесс, к которому сервер `hysteria` обращается по loopback на каждый handshake.
@@ -135,7 +135,7 @@ UDP/443-пути.
 пропускается; будет ли после этого что-то зеркалироваться, решает раскладка выше, а не эта
 переменная.
 
-Установка — без шага копирования, запускается из чекаута, как `deploy/vpn-bot-acme-reload.sh`.
+Установка — без шага копирования, запускается из чекаута (как `deploy/update-ip2asn.sh`).
 Намеренно **cron, а не systemd-юнит**: basename каждого `deploy/*.service` попадает в `UNIT_SET`
 deploy.sh ([`deploy/managed-units.list`](../deploy/managed-units.list)), поэтому поставлять юнит
 для работы, которую хост крутит из cron, значило бы заставить Phase 1 сообщать о нём как о
@@ -175,6 +175,11 @@ sudo crontab -e
 > 3. Прогоните хук с `--dry-run` и убедитесь по логу, что перезаписыватель запускается, а
 >    зеркалирование пропущено.
 > 4. И только потом замените строку предшественника в crontab на строку выше.
+>
+> На main-сервере эта миграция уже сделана: строки в cron нет, deploy.sh выводит из оборота обёртку
+> `/usr/local/sbin/site-freshen.sh` (файл хоста класса `absent`), а перезаписыватель
+> `/usr/local/sbin/site-freshen.py` остаётся — он по замыслу локален для развёртывания и хранится
+> в offsite system-бэкапе, а не в репо ([host-state.ru.md](host-state.ru.md)).
 
 У `DECOY_ROOT` **намеренно нет дефолта**. `rsync --delete` деструктивен by design: направленный на
 отсутствующий или пустой источник, он добросовестно опустошит `MASQ_DIR`, и Hysteria2 начнёт

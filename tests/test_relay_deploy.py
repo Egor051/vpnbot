@@ -529,6 +529,11 @@ class RelayHost:
             f'  "scripts/vpn-bot-db-perms|{self.sbin}/vpn-bot-db-perms|required"\n'
             f'  "scripts/vpn-relay-apply|{self.helper}|required|relay"\n'
             ")\n"
+            # No host files here: the real registry names real /etc paths (the
+            # MANAGED_HOST_FILES behaviour of both roles is tests/test_deploy_host_state.py).
+            # The fence makes a forgotten override fail instead of writing /etc.
+            "MANAGED_HOST_FILES=()\nUNMANAGED_SCAN_DIRS=()\n"
+            f'MH_SELFTEST_ROOT="{self.tmp}"\n'
             'NODE_ROLE=relay; TAG=abc1234\n'
         )
         return _source_and_run(self.tmp, prelude + body, env_text="NODE_ROLE=relay\n", extra_path=self.stub)
@@ -836,3 +841,30 @@ def test_relay_env_example_covers_the_keys_the_helper_reads() -> None:
     for key in [*keys, "NODE_ROLE"]:
         assert re.search(rf"^#? ?{key}=", example, re.M), key
     assert "BOT_TOKEN" not in example, "no Telegram on a relay"
+
+
+def test_a_successful_relay_deploy_leaves_no_rollback_trap(tmp_path: Path) -> None:
+    """disarm() is a function, and bash hands a function's caller back the ERR trap it
+    had on entry when the function leaves it unset — so the disarm inside relay_phase2
+    never cleared the relay_rollback trap, and any failing command after DEPLOY OK
+    (relay) would have rolled a healthy relay back. relay_phase2 clears it itself."""
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    proc = host.run(
+        'relay_snapshot_prestate\nRELAY_UNIT_STATE="$(relay_unit_state "$APP_DIR")"\n'
+        "relay_phase2\necho TRAPS-BEGIN; trap -p ERR; echo TRAPS-END\n"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    traps = proc.stdout.split("TRAPS-BEGIN", 1)[1].split("TRAPS-END", 1)[0]
+    assert traps.strip() == "", traps
+    assert "ROLLBACK" not in proc.stderr
+
+
+def test_every_disarm_call_clears_the_err_trap_in_its_own_frame() -> None:
+    """The same bash rule on the main path: disarm() alone leaves the rollback trap
+    armed through the DEPLOY OK report, so every call site clears it inline."""
+    lines = _read(DEPLOY_SH).splitlines()
+    calls = [i for i, ln in enumerate(lines) if ln.strip() == "disarm"]
+    assert len(calls) == 2, calls  # main Phase 2 + relay_phase2
+    for i in calls:
+        assert any(ln.strip() == "trap - ERR INT TERM HUP" for ln in lines[i + 1 : i + 6]), lines[i : i + 6]

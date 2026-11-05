@@ -1,0 +1,10 @@
+[Unit]
+Description=Scheduled reboot timer: days 5,10,15,20,25,30 at 01:00 UTC (04:00 MSK)
+
+[Timer]
+OnCalendar=*-*-05,10,15,20,25,30 01:00:00
+Persistent=true
+Unit=even-day-reboot.service
+
+[Install]
+WantedBy=timers.target
