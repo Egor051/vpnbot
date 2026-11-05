@@ -13,6 +13,9 @@ class BackendHealthStatus:
     label: str
     degraded: bool
     reason: str | None
+    # Removed from the host (protocol uninstall): neither healthy nor degraded —
+    # there is no backend to be either. Never counted as a fault.
+    uninstalled: bool = False
 
 
 class BackendHealth:
@@ -27,11 +30,26 @@ class BackendHealth:
 
     def __init__(self) -> None:
         self._degraded: dict[BackendType, str] = {}
+        self._uninstalled: set[BackendType] = set()
         self._skipped_revocations: int = 0
 
     def mark_degraded(self, backend_type: BackendType, reason: str) -> None:
-        """Record a backend as degraded with a human-readable reason."""
+        """Record a backend as degraded with a human-readable reason.
+
+        A backend removed from the host is not degraded — it is gone — so a late
+        failure report about it (a probe that was already in flight) is ignored.
+        """
+        if backend_type in self._uninstalled:
+            return
         self._degraded[backend_type] = reason
+
+    def mark_uninstalled(self, backend_type: BackendType) -> None:
+        """The protocol was removed from the host: report it as such, not as degraded."""
+        self._uninstalled.add(backend_type)
+        self._degraded.pop(backend_type, None)
+
+    def is_uninstalled(self, backend_type: BackendType) -> bool:
+        return backend_type in self._uninstalled
 
     def mark_healthy(self, backend_type: BackendType) -> None:
         """Clear degraded status for a backend."""
@@ -45,6 +63,7 @@ class BackendHealth:
                 label=label,
                 degraded=backend_type in self._degraded,
                 reason=self._degraded.get(backend_type),
+                uninstalled=backend_type in self._uninstalled,
             )
             for backend_type, label in _BACKEND_LABELS.items()
         )
@@ -59,7 +78,14 @@ class BackendHealth:
         return self._skipped_revocations
 
     def require_mutation_allowed(self, backend_type: BackendType) -> None:
-        """Raise InvalidOperation if the backend is currently degraded."""
+        """Raise InvalidOperation if the backend is currently degraded or removed."""
+        if backend_type in self._uninstalled:
+            label = _BACKEND_LABELS.get(backend_type, str(backend_type))
+            raise InvalidOperation(
+                f"{label} удалён с сервера: операции невозможны до переустановки.",
+                key="backend_uninstalled_blocked",
+                params={"label": label},
+            )
         reason = self._degraded.get(backend_type)
         if reason is None:
             return

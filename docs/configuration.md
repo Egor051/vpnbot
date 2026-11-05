@@ -45,6 +45,7 @@ optional with the shown default.
 | `XRAY_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpn-bot-xray-apply` | Absolute path to the Xray config apply sudo helper. | `/usr/local/sbin/vpn-bot-xray-apply` |
 | `AWG_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpn-bot-awg-apply` | Absolute path to the AWG config apply sudo helper. | `/usr/local/sbin/vpn-bot-awg-apply` |
 | `MTPROTO_APPLY_HELPER_PATH` | No | `/usr/local/sbin/vpn-bot-mtproxy-apply` | Absolute path to the MTProto apply sudo helper. | `/usr/local/sbin/vpn-bot-mtproxy-apply` |
+| `PROTOCOL_UNINSTALL_HELPER_PATH` | No | root model: the checkout's `deploy/helpers/vpn-bot-protocol-uninstall`; helper mode: `/usr/local/sbin/vpn-bot-protocol-uninstall` | Absolute path to the root helper that removes a protocol from the host ("Disable and remove from the server" in Protocol modules, see [protocol-uninstall.md](protocol-uninstall.md)). Leave unset unless the helper lives elsewhere. | `/usr/local/sbin/vpn-bot-protocol-uninstall` |
 | `XRAY_HELPER_STAGING_DIR` | No | `$HELPER_STAGING_ROOT/xray` | Staging directory for Xray helper files. | `/run/vpn-bot/xray` |
 | `AWG_HELPER_STAGING_DIR` | No | `$HELPER_STAGING_ROOT/awg` | Staging directory for AWG helper files. | `/run/vpn-bot/awg` |
 | `MTPROTO_HELPER_STAGING_DIR` | No | `$HELPER_STAGING_ROOT/mtproxy` | Staging directory for MTProto helper files. | `/run/vpn-bot/mtproxy` |

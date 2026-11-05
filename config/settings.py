@@ -472,6 +472,15 @@ class Settings:
     xray_apply_helper_path: Path = Path("/usr/local/sbin/vpn-bot-xray-apply")
     awg_apply_helper_path: Path = Path("/usr/local/sbin/vpn-bot-awg-apply")
     mtproto_apply_helper_path: Path = Path("/usr/local/sbin/vpn-bot-mtproxy-apply")
+    # Cascade removal of a protocol from the host (deploy/helpers/vpn-bot-protocol-
+    # uninstall). None = the default of the privilege model: the checkout's own copy
+    # in the root model, the sudoers-granted /usr/local/sbin copy in helper mode.
+    protocol_uninstall_helper_path: Path | None = None
+    # Where that helper writes its markers (/etc/vpn-bot/uninstalled/<proto>); the
+    # helper has the path compiled in, the bot only reads it. None — the default of
+    # every Settings a test builds by hand — reads no marker at all; load_settings
+    # sets the real directory (PROTOCOL_UNINSTALL_MARKER_DIR below, not .env).
+    protocol_uninstall_marker_dir: Path | None = None
     xray_helper_staging_dir: Path = Path("/run/vpn-bot/xray")
     awg_helper_staging_dir: Path = Path("/run/vpn-bot/awg")
     mtproto_helper_staging_dir: Path = Path("/run/vpn-bot/mtproxy")
@@ -849,6 +858,12 @@ class Settings:
 # skipped best-effort, so the same list is safe on a host that runs only some of
 # these services. Override with OFFSITE_BACKUP_SYSTEM_PATHS, or append host-specific
 # paths (e.g. the decoy site's DECOY_ROOT) with OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS.
+# The uninstall helper's marker directory. Deliberately NOT a .env variable: the
+# root helper has it compiled in, and a bot reading another directory would think a
+# removed protocol is still there. tests/conftest.py points it at a temp dir, so
+# load_settings() in a test never reads the production host's markers.
+PROTOCOL_UNINSTALL_MARKER_DIR = Path("/etc/vpn-bot/uninstalled")
+
 DEFAULT_OFFSITE_SYSTEM_PATHS: tuple[Path, ...] = (
     # ACME account + issued certificates. account.conf carries the DNS-API token —
     # lose it and no certificate on this host can ever be renewed again.
@@ -1191,6 +1206,8 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         xray_apply_helper_path=Path(_optional("XRAY_APPLY_HELPER_PATH", "/usr/local/sbin/vpn-bot-xray-apply")),
         awg_apply_helper_path=Path(_optional("AWG_APPLY_HELPER_PATH", "/usr/local/sbin/vpn-bot-awg-apply")),
         mtproto_apply_helper_path=Path(_optional("MTPROTO_APPLY_HELPER_PATH", "/usr/local/sbin/vpn-bot-mtproxy-apply")),
+        protocol_uninstall_helper_path=_optional_path("PROTOCOL_UNINSTALL_HELPER_PATH"),
+        protocol_uninstall_marker_dir=PROTOCOL_UNINSTALL_MARKER_DIR,
         xray_helper_staging_dir=Path(_optional("XRAY_HELPER_STAGING_DIR", str(helper_staging_root / "xray"))),
         awg_helper_staging_dir=Path(_optional("AWG_HELPER_STAGING_DIR", str(helper_staging_root / "awg"))),
         mtproto_helper_staging_dir=Path(_optional("MTPROTO_HELPER_STAGING_DIR", str(helper_staging_root / "mtproxy"))),

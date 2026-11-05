@@ -3,7 +3,7 @@ import asyncio
 import logging
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -69,6 +69,7 @@ from services.offsite_backup import OffsiteBackupService
 from services.notes import NotesService
 from services.online_clients import OnlineClientsService
 from services.protocol_modules import ProtocolModulesService
+from services.protocol_uninstall import ProtocolUninstallService, UninstallRegistry
 from services.proxy import ProxyService
 from services.relay import RelayCatalog
 from services.relay_health import build_relay_health_supervisor
@@ -97,56 +98,87 @@ class StartupReconcileError(RuntimeError):
     instead of running with a silently broken data plane."""
 
 
-async def _awg_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> None:
+class _UninstalledView(Protocol):
+    def is_uninstalled(self, name: str) -> bool: ...
+
+
+def _removed(uninstalled: _UninstalledView | None, name: str) -> bool:
+    """True when *name* was removed from the host (protocol uninstall marker).
+
+    Asked on EVERY pass of a background loop, not once at start: a protocol can be
+    removed from the panel while the bot runs, and from then on nothing may keep
+    talking to its (gone) backend.
+    """
+    return uninstalled is not None and uninstalled.is_uninstalled(name)
+
+
+async def _awg_stats_loop(
+    traffic_stats: TrafficStatsService, interval: int, uninstalled: _UninstalledView | None = None
+) -> None:
     while True:
-        try:
-            await traffic_stats.refresh_all_awg()
-        except Exception:
-            logger.warning("AWG background stats collection failed", exc_info=True)
+        if not _removed(uninstalled, "awg"):
+            try:
+                await traffic_stats.refresh_all_awg()
+            except Exception:
+                logger.warning("AWG background stats collection failed", exc_info=True)
         await asyncio.sleep(interval)
 
 
-async def _xray_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> None:
+async def _xray_stats_loop(
+    traffic_stats: TrafficStatsService, interval: int, uninstalled: _UninstalledView | None = None
+) -> None:
     # statsquery is read without -reset (non-destructive), so manual stat views poll
     # it live; this loop only keeps the cache warm between them so the dashboard
     # stays fresh without user interaction (see TrafficStatsService.refresh_all_xray).
     while True:
-        try:
-            await traffic_stats.refresh_all_xray()
-        except Exception:
-            logger.warning("Xray background stats collection failed", exc_info=True)
+        if not _removed(uninstalled, "xray"):
+            try:
+                await traffic_stats.refresh_all_xray()
+            except Exception:
+                logger.warning("Xray background stats collection failed", exc_info=True)
         await asyncio.sleep(interval)
 
 
-async def _hysteria_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> None:
+async def _hysteria_stats_loop(
+    traffic_stats: TrafficStatsService, interval: int, uninstalled: _UninstalledView | None = None
+) -> None:
     # GET /traffic is read without ?clear (non-destructive), so manual per-key views
     # poll it live; this loop only keeps the cache warm between them, mirroring the
     # Xray loop (see TrafficStatsService.refresh_all_hysteria). A no-op when the
     # Traffic Stats API is not configured.
     while True:
-        try:
-            await traffic_stats.refresh_all_hysteria()
-        except Exception:
-            logger.warning("Hysteria2 background stats collection failed", exc_info=True)
+        if not _removed(uninstalled, "hysteria2"):
+            try:
+                await traffic_stats.refresh_all_hysteria()
+            except Exception:
+                logger.warning("Hysteria2 background stats collection failed", exc_info=True)
         await asyncio.sleep(interval)
 
 
 async def _hysteria_health_loop(
-    probe: Hysteria2AuthHealthProbe, backend_health: BackendHealth, interval: int
+    probe: Hysteria2AuthHealthProbe,
+    backend_health: BackendHealth,
+    interval: int,
+    uninstalled: _UninstalledView | None = None,
 ) -> None:
     # Poll hy2_auth /healthz and reflect it in backend_health so the dashboard and
     # health panel show "Hysteria2: OK/DEGRADED" like Xray/AWG. Hysteria2 has no
     # data-plane apply — its mutations are pure DB writes that never call
     # require_mutation_allowed — so a degraded mark here is purely informational
-    # (data-plane liveness) and never blocks issuance/revocation.
+    # (data-plane liveness) and never blocks issuance/revocation. Once Hysteria2 is
+    # removed from the host there is no hy2_auth to probe: it is reported as
+    # removed, never as degraded.
     while True:
-        try:
-            if await probe.healthy():
-                backend_health.mark_healthy(VpnKeyType.HYSTERIA2)
-            else:
-                backend_health.mark_degraded(VpnKeyType.HYSTERIA2, "hy2_auth /healthz недоступен")
-        except Exception:
-            logger.warning("Hysteria2 health probe failed", exc_info=True)
+        if _removed(uninstalled, "hysteria2"):
+            backend_health.mark_uninstalled(VpnKeyType.HYSTERIA2)
+        else:
+            try:
+                if await probe.healthy():
+                    backend_health.mark_healthy(VpnKeyType.HYSTERIA2)
+                else:
+                    backend_health.mark_degraded(VpnKeyType.HYSTERIA2, "hy2_auth /healthz недоступен")
+            except Exception:
+                logger.warning("Hysteria2 health probe failed", exc_info=True)
         await asyncio.sleep(interval)
 
 
@@ -190,6 +222,14 @@ async def _build_app(
 
     protocol_modules_repo = ProtocolModulesRepository(db)
     protocol_modules_service = ProtocolModulesService(protocol_modules_repo, db)
+    # Protocols removed from the HOST (their /etc/vpn-bot/uninstalled marker): read
+    # before anything below can ask a backend for anything. A removed protocol is
+    # off whatever protocol_modules says and cannot be switched back on.
+    uninstall_registry = UninstallRegistry(settings.protocol_uninstall_marker_dir)
+    removed_from_host = uninstall_registry.refresh()
+    if removed_from_host:
+        logger.info("Protocols removed from this host (uninstall markers): %s", ", ".join(sorted(removed_from_host)))
+    protocol_modules_service.attach_uninstall_registry(uninstall_registry)
     dashboard_repo = DashboardRepository(db)
 
     audit_service = AuditService(audit_repo, clock, users_repo)
@@ -211,6 +251,21 @@ async def _build_app(
     )
     await relay_service.seed_from_settings(settings)
     await relay_service.refresh_catalog()
+
+    protocol_uninstall_service = ProtocolUninstallService(
+        settings=settings,
+        shell=shell,
+        registry=uninstall_registry,
+        modules=protocol_modules_service,
+        modules_repo=protocol_modules_repo,
+        users=user_service,
+        audit=audit_service,
+        backend_health=backend_health,
+        relays=relays_repo,
+    )
+    # The marker is the truth; the protocol_modules.uninstalled_* columns follow it.
+    # A mismatch is logged as a warning and corrected, never a startup failure.
+    await protocol_uninstall_service.reconcile_markers()
 
     access_service = AccessApprovalService(
         requests=access_repo,
@@ -571,6 +626,7 @@ async def _build_app(
         hysteria_service=hysteria_service,
         hysteria2_max_conn=settings.anomaly_hysteria2_max_conn,
         backend_health=backend_health,
+        uninstalled=uninstall_registry,
         # Alert shaping only: lets an alert about a bundle child name the bundle
         # the user actually holds, and roll several children of one bundle into a
         # single alert. Detection is untouched and still runs per child key.
@@ -740,6 +796,7 @@ async def _build_app(
         relays=relay_service,
         relay_health=relay_health_supervisor,
         hysteria_health_probe=hysteria_health_probe,
+        protocol_uninstall=protocol_uninstall_service,
     )
 
     await _startup_reconcile_keys(services)
@@ -809,8 +866,29 @@ async def _build_app(
     return bot, dp, db, backend_health, services
 
 
+# The summary of a backend that was removed from the host: nothing was asked of it.
+_REMOVED_SUMMARY: dict[str, int] = {"checked": 0, "failed": 0, "uninstalled": 1}
+
+
 async def _startup_reconcile_keys(services: Services) -> None:
-    xray_summary = await _safe_startup_reconcile("Xray", services.xray.startup_reconcile)
+    # A protocol removed from the host (its /etc/vpn-bot/uninstalled marker) has no
+    # backend to reconcile against: Xray and AWG used to be asked unconditionally,
+    # and MTProto's reconcile is fatal on error — on a removed MTProto that would
+    # stop the bot from starting at all.
+    registry = getattr(getattr(services, "protocol_uninstall", None), "registry", None)
+
+    def removed(name: str) -> bool:
+        if _removed(registry, name):
+            logger.info("Startup reconciliation for %s skipped: removed from this host", name)
+            return True
+        return False
+
+    xray_removed = removed("xray")
+    xray_summary = (
+        dict(_REMOVED_SUMMARY)
+        if xray_removed
+        else await _safe_startup_reconcile("Xray", services.xray.startup_reconcile)
+    )
     # Sync the running config's client emails to the DB labels after the v28
     # relabel. Idempotent: a no-op (no restart) once they already match; a
     # failure leaves only label drift (connectivity is unaffected — UUIDs are
@@ -819,22 +897,28 @@ async def _startup_reconcile_keys(services: Services) -> None:
     xray_label_reconcile = getattr(services.xray, "reconcile_email_labels", None)
     xray_label_summary = (
         await _safe_startup_reconcile("Xray labels", xray_label_reconcile)
-        if xray_label_reconcile is not None
+        if xray_label_reconcile is not None and not xray_removed
         else {"checked": 0, "renamed": 0, "failed": 0}
     )
-    awg_summary = await _safe_startup_reconcile("AWG", services.awg.startup_reconcile)
+    awg_summary = (
+        dict(_REMOVED_SUMMARY)
+        if removed("awg")
+        else await _safe_startup_reconcile("AWG", services.awg.startup_reconcile)
+    )
     mtproto_reconcile = getattr(getattr(services, "mtproto", None), "reconcile_mtproto_state", None)
-    mtproto_summary = (
-        await _safe_startup_reconcile("MTProto", mtproto_reconcile, fatal_on_error=True)
-        if mtproto_reconcile is not None
-        else {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "failed": 0, "fatal": 0}
-    )
+    if removed("mtproto"):
+        mtproto_summary = {**_REMOVED_SUMMARY, "fatal": 0}
+    elif mtproto_reconcile is not None:
+        mtproto_summary = await _safe_startup_reconcile("MTProto", mtproto_reconcile, fatal_on_error=True)
+    else:
+        mtproto_summary = {"checked": 0, "missing": 0, "orphaned": 0, "pending": 0, "failed": 0, "fatal": 0}
     socks5_reconcile = getattr(getattr(services, "socks5", None), "reconcile_socks5_state", None)
-    socks5_summary = (
-        await _safe_startup_reconcile("SOCKS5", socks5_reconcile)
-        if socks5_reconcile is not None
-        else {"checked": 0, "recovered": 0, "failed": 0}
-    )
+    if removed("socks5"):
+        socks5_summary = dict(_REMOVED_SUMMARY)
+    elif socks5_reconcile is not None:
+        socks5_summary = await _safe_startup_reconcile("SOCKS5", socks5_reconcile)
+    else:
+        socks5_summary = {"checked": 0, "recovered": 0, "failed": 0}
     backend_health = getattr(services, "backend_health", None)
     if backend_health is not None:
         if xray_summary.get("failed", 0):

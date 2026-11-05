@@ -136,8 +136,13 @@ class AnomalyDetectionService:
         backend_health: object | None = None,
         bundles: KeyBundleRepository | None = None,
         relays: RelayRepository | None = None,
+        uninstalled: object | None = None,
     ) -> None:
         self._vpn_keys = vpn_keys
+        # services.protocol_uninstall.UninstallRegistry: a protocol removed from
+        # the host has no backend to sample (its Xray access log, AWG peer list or
+        # Hysteria2 /online endpoint is gone), so its pass is skipped outright.
+        self._uninstalled = uninstalled
         # Egress addresses of the L4 relays (each relay's source IPs, managed in
         # the admin panel). Every connection arriving through a relay carries one
         # of these as its source IP (L4 DNAT, no PROXY protocol), so it says
@@ -211,10 +216,17 @@ class AnomalyDetectionService:
         now = time_module.time()
         await self._refresh_relay_source_ips()
         self._evict_stale_last_alerted(now)
-        await self._sample_awg_endpoints(now)
-        await self._sample_xray_log(now)
+        if not self._removed("awg"):
+            await self._sample_awg_endpoints(now)
+        if not self._removed("xray"):
+            await self._sample_xray_log(now)
         await self._check_thresholds(now)
-        await self._check_hysteria_online(now)
+        if not self._removed("hysteria2"):
+            await self._check_hysteria_online(now)
+
+    def _removed(self, name: str) -> bool:
+        check = getattr(self._uninstalled, "is_uninstalled", None)
+        return bool(check(name)) if check is not None else False
 
     async def _refresh_relay_source_ips(self) -> None:
         """Pick up the relays' source IPs as the database holds them now.

@@ -1145,6 +1145,12 @@ class KeyBundleService:
         """
         if member.relay is not None and not relay_available(self.relays.snapshot, member.relay):
             return False
+        # Removed from the host (uninstall marker): off whatever the toggle says. The
+        # real modules service already folds this into is_enabled; asked here too so
+        # a modules double without it cannot put a removed backend in a bundle.
+        is_uninstalled = getattr(self.modules, "is_uninstalled", None)
+        if is_uninstalled is not None and is_uninstalled(member.protocol_module):
+            return False
         if not await self.modules.is_enabled(member.protocol_module):
             return False
         if member.key_type is VpnKeyType.XRAY:

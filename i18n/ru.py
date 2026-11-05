@@ -1078,33 +1078,43 @@ STRINGS: dict[str, str] = {
     "btn_modules_back": "← К модулям",
     "modules_panel_title": (
         "<b>⚙️ Модули протоколов</b>\n\n"
-        "Выключение снимает доступ каждого клиента протокола и на сервере "
-        "(Xray client, AWG peer, Dante user, MTProto secret в managed-режиме), и в боте: ключи удаляются "
-        "из базы данных (трафик архивируется), прокси-доступы SOCKS5/MTProto помечаются удалёнными.\n"
-        "Сервисы, интерфейсы, firewall/порты и общие серверные конфиги/сертификаты <b>не трогаются</b>.\n"
+        "<b>Выключить</b> — снимает доступ каждого клиента протокола на сервере (Xray client, AWG peer, "
+        "Dante user, MTProto secret в managed-режиме) и в боте: ключи Xray/AWG/Hysteria2 удаляются из базы "
+        "(трафик архивируется), прокси-доступы SOCKS5/MTProto остаются в базе помеченными удалёнными. "
+        "Сам сервис протокола, его конфиги, бинарники, юниты и правила firewall на сервере при этом остаются — "
+        "протокол можно включить обратно в любой момент.\n"
         "⚠️ MTProto в режиме static: общий секрет продолжает работать — чтобы лишить доступа, "
-        "смените MTPROTO_SECRET и перезапустите прокси.\n"
-        "После выключения протокол полностью скрыт; только «Диагностика backend» покажет, что он отключён.\n\n"
-        "Протокол можно включить обратно в любой момент."
+        "смените MTPROTO_SECRET и перезапустите прокси.\n\n"
+        "<b>Выключить и удалить с сервера</b> — после того же снятия доступа удаляет с сервера то, что "
+        "перечислено в манифесте протокола: юниты, файлы и каталоги, правила UFW, пакеты, служебных пользователей. "
+        "Сначала показывается план с размерами и путём бэкапа, при ошибке всё откатывается из бэкапа. "
+        "Общие части хоста (nginx, сертификаты, WARP, SSH) не трогаются. Вернуть удалённый протокол "
+        "можно только переустановкой.\n\n"
+        "✅ включён · ❌ выключен · 🗑 удалён с сервера"
     ),
     "module_disable_confirm1": (
         "<b>⚠️ Выключение протокола {label}</b>\n\n"
-        "Это действие:\n"
+        "<b>Только выключить</b>:\n"
         "• снимет доступ каждого клиента на сервере (Xray client, AWG peer, Dante user, "
         "MTProto secret в managed-режиме)\n"
-        "• безвозвратно удалит ключи Xray/AWG/Hysteria2 из базы данных бота (трафик архивируется), "
-        "а прокси-доступы SOCKS5/MTProto пометит удалёнными\n"
-        "• полностью уберёт все кнопки и упоминания протокола\n"
-        "• сервисы, интерфейсы, firewall/порты и общие серверные конфиги/сертификаты <b>не трогает</b> — "
-        "в том числе общий секрет MTProto в режиме static: он продолжает работать, пока вы не смените "
+        "• безвозвратно удалит ключи Xray/AWG/Hysteria2 из базы бота (трафик архивируется), "
+        "а прокси-доступы SOCKS5/MTProto пометит удалёнными (записи останутся в базе)\n"
+        "• уберёт все кнопки и упоминания протокола\n"
+        "• сервис, конфиги, бинарники, юниты и firewall на сервере оставит как есть — протокол можно "
+        "включить обратно; общий секрет MTProto в режиме static продолжит работать, пока вы не смените "
         "MTPROTO_SECRET и не перезапустите прокси\n\n"
-        "Продолжить?"
+        "<b>Выключить и удалить с сервера</b>:\n"
+        "• всё то же самое, а затем — удаление с сервера строго по манифесту протокола\n"
+        "• сначала план (что будет удалено, что пропущено как общее, путь бэкапа), потом отдельное подтверждение\n"
+        "• вернуть протокол можно только переустановкой\n\n"
+        "Что сделать?"
     ),
     "module_disable_confirm2": (
         "<b>🛑 ФИНАЛЬНОЕ ПОДТВЕРЖДЕНИЕ — {label}</b>\n\n"
-        "Ключи / прокси-доступы этого протокола будут удалены из базы бота "
-        "(у SOCKS5/MTProto — помечены удалёнными). <b>Восстановить их нельзя</b>: "
-        "после повторного включения протокола доступ придётся выдавать заново.\n"
+        "Ключи этого протокола будут удалены из базы бота, прокси-доступы SOCKS5/MTProto — помечены "
+        "удалёнными. <b>Вернуть выданный доступ нельзя</b>: после повторного включения протокола его "
+        "придётся выдавать заново.\n"
+        "На сервере сервис протокола и его файлы остаются — удаляется только доступ клиентов.\n"
         "Нажмите кнопку ниже, чтобы подтвердить."
     ),
     "module_enable_confirm": (
@@ -1120,6 +1130,96 @@ STRINGS: dict[str, str] = {
         "смотри bot.log."
     ),
     "module_enabled_ok": "✅ Протокол <b>{label}</b> включён.",
+    # ── Protocol uninstall (removal from the server) ─────────────────────────
+    "btn_module_disable_only": "Только выключить",
+    "btn_module_disable_uninstall": "🗑 Выключить и удалить с сервера",
+    "btn_module_uninstall": "🗑 Удалить с сервера: {label}",
+    "btn_module_enable_locked": "🔒 Включить",
+    "btn_module_uninstall_confirm": "⚠️ ПОДТВЕРДИТЬ УДАЛЕНИЕ С СЕРВЕРА",
+    "btn_module_uninstall_refresh": "🔄 Обновить план",
+    "module_uninstall_planning": "Собираю план удаления…",
+    "module_uninstall_running": "Удаляю протокол с сервера…",
+    "module_uninstall_plan_title": "<b>🗑 Удаление с сервера — {label}</b>",
+    "module_uninstall_plan_header": "На сервере: {state} · план <code>{sha}</code>",
+    "module_uninstall_state_installed": "установлен",
+    "module_uninstall_state_partial": "частично удалён",
+    "module_uninstall_state_uninstalled": "удалён",
+    "module_uninstall_section_units": "<b>Юниты</b>",
+    "module_uninstall_section_files": "<b>Файлы и каталоги</b>",
+    "module_uninstall_section_ufw": "<b>Правила UFW</b>",
+    "module_uninstall_section_packages": "<b>Пакеты (apt-get purge)</b>",
+    "module_uninstall_section_users": "<b>Пользователи (userdel, без -r)</b>",
+    "module_uninstall_section_env": "<b>.env</b>",
+    "module_uninstall_section_absent": "<b>Уже отсутствует</b>",
+    "module_uninstall_section_shared": "<b>Пропущено как общее</b>",
+    "module_uninstall_section_kept": "<b>Оставлено</b>",
+    "module_uninstall_section_blocking": "<b>⛔ Блокирует удаление</b>",
+    "module_uninstall_section_warnings": "<b>⚠️ Предупреждения</b>",
+    "module_uninstall_unit_template": "{unit} — шаблон, удаляется вместе со своим файлом",
+    "module_uninstall_dir_line": "{path}/ — каталог целиком: {entries} объектов, {size}",
+    "module_uninstall_awg_group": "{count} файлов по шаблону AWG в {dir} ({size}): {names}",
+    "module_uninstall_env_set_false": "{var}=false — заменяется ровно одна строка",
+    "module_uninstall_env_append": "{var}=false — дописывается одна строка",
+    "module_uninstall_env_already_false": "{var} уже false",
+    "module_uninstall_marker_line": "Маркер: <code>{path}</code>",
+    "module_uninstall_relays_warning": (
+        "В базе есть relay ({relays}): после удаления Xray их VLESS-ключи перестанут работать."
+    ),
+    "module_uninstall_backup_line": (
+        "Бэкап: <code>{dir}/&lt;протокол&gt;-&lt;UTC&gt;.tar.gz</code> (≈ {size} до сжатия), root 0600."
+    ),
+    "module_uninstall_purge_note": (
+        "Перед удалением бот снимет доступ всех клиентов протокола (как «Только выключить»). "
+        "Если хоть одна запись не снимется — удаление с сервера не запустится."
+    ),
+    "module_uninstall_nothing_to_do": "Протокол уже удалён с сервера — делать нечего.",
+    "module_uninstall_blocked_note": "Удаление невозможно, пока не устранены находки выше.",
+    "module_uninstall_more": "… и ещё {count}",
+    "module_uninstall_truncated": "… план сокращён; полный — в выводе хелпера на сервере.",
+    "module_uninstall_ok": "✅ Протокол <b>{label}</b> удалён с сервера. Снят доступ у записей: {purged}.",
+    "module_uninstall_nothing_done": "ℹ️ Протокол <b>{label}</b> уже удалён с сервера — ничего не менялось.",
+    "module_uninstall_failed_rolled_back": (
+        "❌ Удаление <b>{label}</b> не удалось на шаге «{step}». Изменения на сервере откачены из бэкапа."
+    ),
+    "module_uninstall_failed_rollback_incomplete": (
+        "🛑 Удаление <b>{label}</b> не удалось на шаге «{step}», и откат прошёл НЕ полностью — "
+        "нужна ручная проверка сервера."
+    ),
+    "module_uninstall_failed_nothing_changed": (
+        "❌ Удаление <b>{label}</b> не запустилось на шаге «{step}». На сервере ничего не изменилось."
+    ),
+    "module_uninstall_section_removed": "<b>Удалено</b> ({count})",
+    "module_uninstall_section_absent_count": "<b>Уже отсутствовало</b> ({count})",
+    "module_uninstall_section_skipped_count": "<b>Пропущено</b> ({count})",
+    "module_uninstall_section_errors": "<b>Ошибки</b>",
+    "module_uninstall_section_rollback_errors": "<b>Ошибки отката</b>",
+    "module_uninstall_report_backup": "Бэкап: <code>{path}</code>",
+    "module_uninstall_report_rollback": "Ручной откат: <code>{command}</code>",
+    "module_uninstall_plan_expired": "План устарел или не найден — откройте его заново.",
+    "module_uninstall_plan_changed": "План удаления устарел: сервер изменился. Ниже — новый план, подтвердите его заново.",
+    "module_uninstall_purge_failed": (
+        "Не удалось снять доступ у {failed} записей — удаление с сервера не запускалось. Подробности — в bot.log."
+    ),
+    "module_uninstall_busy": "Удаление протокола уже выполняется.",
+    "module_uninstall_blocked": "План содержит блокирующие находки — удаление невозможно.",
+    "module_uninstall_helper_timeout": (
+        "Хелпер удаления не ответил вовремя — проверьте /var/log/vpn-bot-uninstall.log на сервере."
+    ),
+    "module_uninstall_helper_missing": "Хелпер удаления не найден: {path}",
+    "module_uninstall_helper_failed": "Хелпер удаления завершился с кодом {code} без ответа: {detail}",
+    "module_uninstall_helper_refused": "Хелпер удаления отказал: {error} {detail}",
+    "module_enable_blocked_uninstalled": "Протокол удалён с сервера, нужна переустановка.",
+    "backend_uninstalled_blocked": "{label} удалён с сервера: операции невозможны до переустановки.",
+    "module_status_uninstalled_short": "удалён с сервера",
+    "module_uninstall_step_backup": "бэкап",
+    "module_uninstall_step_units": "юниты",
+    "module_uninstall_step_files": "файлы",
+    "module_uninstall_step_ufw": "UFW",
+    "module_uninstall_step_packages": "пакеты",
+    "module_uninstall_step_users": "пользователи",
+    "module_uninstall_step_env": ".env",
+    "module_uninstall_step_marker": "маркер",
+    "module_uninstall_step_signal": "прерывание",
     # ── admin «All-in-One» section: bulk composition reconcile ─────────────────
     "btn_admin_bundles": "🔗 All-in-One",
     "btn_aio_to_basic": "Перевести все подписки в базовый вид",

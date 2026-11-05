@@ -118,7 +118,16 @@ def check_backends(statuses: tuple[BackendHealthStatus, ...]) -> list[HealthChec
     """Convert backend health statuses into health check items."""
     items: list[HealthCheckItem] = []
     for s in statuses:
-        if s.degraded:
+        if s.uninstalled:
+            items.append(
+                HealthCheckItem(
+                    name=f"backend_{s.backend_type.value}",
+                    status="ok",
+                    severity="info",
+                    message=f"{s.label}: UNINSTALLED (удалён с сервера)",
+                )
+            )
+        elif s.degraded:
             items.append(
                 HealthCheckItem(
                     name=f"backend_{s.backend_type.value}",
