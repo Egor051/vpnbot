@@ -7,7 +7,12 @@ from adapters.hysteria_stats import HysteriaStatsAdapter
 from adapters.xray_stats import XrayStatsAdapter
 from models.dto import KeyTrafficStatsView, TrafficStats, VpnKey
 from models.enums import UserRole, VpnKeyStatus, VpnKeyType
-from repositories.traffic_stats import TrafficStatsRepository
+from repositories.traffic_stats import (
+    TRAFFIC_HOURLY_RETENTION_DAYS,
+    HourlyTrafficDelta,
+    TrafficStatsRepository,
+    hour_utc_from_iso,
+)
 from repositories.users import UserRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.errors import AccessDenied, NotFound
@@ -39,6 +44,8 @@ class TrafficStatsService:
         # then surface as "stats unavailable" instead of accumulating counters.
         self.hysteria = hysteria
         self._refresh_lock = asyncio.Lock()
+        # Hour of the last traffic_hourly retention pass; see prune_hourly_history.
+        self._pruned_hour_utc: int | None = None
 
     async def refresh_for_actor(self, actor_user_id: int, key_id: int) -> KeyTrafficStatsView:
         """Refresh and return traffic stats for a single key the actor may view."""
@@ -212,6 +219,30 @@ class TrafficStatsService:
         if keys:
             await self.refresh_views(keys)
 
+    async def prune_hourly_history(self) -> int:
+        """Drop ``traffic_hourly`` buckets older than the retention window.
+
+        Called by the background traffic pollers after each pass (bot.app), at
+        most once per clock hour: buckets are hourly, so pruning more often finds
+        nothing new. All three pollers call it, so retention keeps running as long
+        as any of them does. Returns the number of buckets removed.
+        """
+        current_hour = hour_utc_from_iso(self.users.clock.now())
+        if self._pruned_hour_utc == current_hour:
+            return 0
+        # Claimed before the await, so a second poller arriving meanwhile skips.
+        self._pruned_hour_utc = current_hour
+        try:
+            removed = await self.stats.prune_hourly(
+                current_hour_utc=current_hour, retention_days=TRAFFIC_HOURLY_RETENTION_DAYS
+            )
+        except Exception:
+            self._pruned_hour_utc = None
+            raise
+        if removed:
+            logger.info("traffic_hourly retention: removed %d buckets", removed)
+        return removed
+
     async def cached_for_keys(self, keys: list[VpnKey]) -> dict[int, TrafficStats]:
         """Return cached traffic stats for the given keys without refreshing."""
         return await self.stats.list_by_key_ids([key.id for key in keys])
@@ -365,16 +396,22 @@ class TrafficStatsService:
         source: str,
         now: str,
     ) -> TrafficStats:
+        previous_downloaded = previous.downloaded_bytes if previous else 0
+        previous_uploaded = previous.uploaded_bytes if previous else 0
         downloaded, stored_raw_downloaded = self._next_total_for_direction(
-            previous.downloaded_bytes if previous else 0,
+            previous_downloaded,
             previous.last_raw_downloaded_bytes if previous else None,
             raw_downloaded_bytes,
         )
         uploaded, stored_raw_uploaded = self._next_total_for_direction(
-            previous.uploaded_bytes if previous else 0,
+            previous_uploaded,
             previous.last_raw_uploaded_bytes if previous else None,
             raw_uploaded_bytes,
         )
+        # The hourly bucket gets exactly what this poll adds to the lifetime
+        # totals — new total minus the stored one — so a counter reset or a first
+        # sample is booked the same way in both places. upsert_success writes the
+        # two together.
         return await self.stats.upsert_success(
             key_id=key.id,
             downloaded_bytes=downloaded,
@@ -383,6 +420,11 @@ class TrafficStatsService:
             raw_uploaded_bytes=stored_raw_uploaded,
             now=now,
             source=source,
+            hourly=HourlyTrafficDelta(
+                protocol=key.key_type.value,
+                downloaded_bytes=downloaded - previous_downloaded,
+                uploaded_bytes=uploaded - previous_uploaded,
+            ),
         )
 
     def _next_total_for_direction(

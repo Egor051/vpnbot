@@ -75,6 +75,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity
 CREATE INDEX IF NOT EXISTS idx_vpn_key_traffic_stats_success ON vpn_key_traffic_stats(last_success_at);
 CREATE INDEX IF NOT EXISTS idx_deleted_key_traffic_archive_type ON deleted_key_traffic_archive(key_type, downloaded_bytes, uploaded_bytes);
 CREATE INDEX IF NOT EXISTS idx_deleted_key_traffic_archive_owner ON deleted_key_traffic_archive(owner_user_id, downloaded_bytes, uploaded_bytes);
+-- Table added by migration v39. Covering, like the archive indexes above: the
+-- dashboard window sums and the retention DELETE are range scans on hour_utc that
+-- never touch the table. (The primary key also leads with hour_utc, but reading
+-- the byte columns through it would need a lookup per row.)
+CREATE INDEX IF NOT EXISTS idx_traffic_hourly_hour ON traffic_hourly(hour_utc, downloaded_bytes, uploaded_bytes);
 
 CREATE INDEX IF NOT EXISTS idx_announcement_batches_status ON announcement_batches(status, updated_at);
 -- Depends on announcement_batches.scheduled_at, added by the v16 table rebuild.

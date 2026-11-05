@@ -16,6 +16,7 @@ from adapters.xray_stats import MACHINE_OUTPUT_LIMIT as XRAY_MACHINE_OUTPUT_LIMI
 from adapters.xray_stats import XrayStatsAdapter
 from models.dto import ShellResult, TrafficStats, VpnKey
 from models.enums import VpnKeyStatus, VpnKeyType
+from repositories.traffic_stats import HourlyTrafficDelta
 from services.traffic_stats import PUBLIC_BACKEND_STATS_ERROR, TrafficStatsService
 
 
@@ -102,6 +103,7 @@ class _StatsRepo:
         raw_uploaded_bytes: int | None,
         now: str,
         source: str,
+        hourly: HourlyTrafficDelta | None = None,
     ) -> TrafficStats:
         self.last = TrafficStats(
             key_id=key_id,
@@ -503,6 +505,7 @@ class _MultiStatsRepo:
         raw_uploaded_bytes: int | None,
         now: str,
         source: str,
+        hourly: HourlyTrafficDelta | None = None,
     ) -> TrafficStats:
         row = TrafficStats(
             key_id=key_id,
