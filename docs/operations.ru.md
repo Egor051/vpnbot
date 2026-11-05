@@ -423,7 +423,7 @@ sudo systemctl start vpn-bot vpnbot-hy2-auth vpn-bot-subscription
 
 - `vpnbot_backup_*.db.enc` — полный снимок SQLite (пользователи, ключи, proxy-доступы, статистика, настройки). Per-client данные пере-применяются в конфиги при старте.
 - `vpnbot_recovery_*.tar.gz.enc` — **бандл восстановления** (при `OFFSITE_BACKUP_INCLUDE_CONFIGS=true`): `.env`, Xray `config.json` (REALITY private key + shortIds), AWG `.conf` (interface private key), managed-секреты MTProto, конфиг WARP и (когда включён Hysteria2) `config.yaml` hysteria-server. Это незаменимые серверные секреты, которых **нет** в БД — без них пересозданный сервер выдаст новые пары ключей и сломает все ранее выданные конфиги. Недоступные/отсутствующие файлы пропускаются и фиксируются в `MANIFEST.json`.
-- `vpnbot_system_*.tar.gz.enc` — **системный бандл** (при `OFFSITE_BACKUP_INCLUDE_SYSTEM=true`): состояние самого хоста, которого не было ни в одном из двух артефактов выше. Список путей — `OFFSITE_BACKUP_SYSTEM_PATHS` (по умолчанию `DEFAULT_OFFSITE_SYSTEM_PATHS` в `config/settings.py`), плюс `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS` для путей, специфичных для хоста. Каталоги обходятся рекурсивно.
+- `vpnbot_system_*.tar.gz.enc` — **системный бандл** (при `OFFSITE_BACKUP_INCLUDE_SYSTEM=true`): состояние самого хоста, которого не было ни в одном из двух артефактов выше. Список путей — `OFFSITE_BACKUP_SYSTEM_PATHS` (по умолчанию `DEFAULT_OFFSITE_SYSTEM_PATHS` в `config/settings.py`), плюс `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS` для путей, специфичных для хоста. Каталоги обходятся рекурсивно; что обход не берёт — [ниже](#что-системный-бандл-не-берёт).
 
 Все три шифруются **одним** `OFFSITE_BACKUP_ENCRYPTION_KEY` и подчиняются одному и тому же
 30-дневному TTL расшифровки (`BACKUP_MAX_AGE_DAYS`). Отправка независимая: сбой одного артефакта
@@ -441,14 +441,39 @@ sudo systemctl start vpn-bot vpnbot-hy2-auth vpn-bot-subscription
 | `/etc/sysctl.d`, `/etc/sysctl.conf` | `rp_filter=2`, без которого source-based routing в таблицу WARP не работает. Плюс forwarding, BBR, буферы. |
 | `/etc/ufw/*`, `/etc/fail2ban/jail.local` | Пользовательские правила и политика для forwarded-трафика. |
 | `/etc/ssh` | `sshd_config`, `sshd_config.d/`, публичные host-ключи. **Приватные host-ключи исключены намеренно** и помечены в манифесте как `excluded_by_policy`. |
-| `/etc/systemd/system` | Юниты **и симлинки включения** в `*.wants` — часть юнитов не существует ни в одной другой копии. |
-| `/var/spool/cron/crontabs/root` | Renew acme.sh и обновление заглушки. |
+| `/etc/systemd` | Юниты **и симлинки включения** в `*.wants` — часть юнитов не существует ни в одной другой копии, — а также `journald.conf`, `network/` и все каталоги drop-in'ов `*.conf.d` (`journald.conf.d/`, `networkd.conf.d/`: managed host state, см. [host-state.ru.md](host-state.ru.md)). Каталог целиком, чтобы появившийся позже каталог drop-in'ов попадал в бандл без правки кода. |
+| `/var/spool/cron/crontabs`, `/etc/cron.d` | Crontab'ы всех пользователей и системные cron-задания. На эталонном хосте строка есть только в crontab root: renew acme.sh `--cron`. |
+| `/etc/logrotate.d` | Правила ротации логов, включая repo-managed правило `xray` (`copytruncate`). |
+| `/etc/sudoers.d` | Правила sudo, на которых работает non-root helper mode. Секретов нет: это набор правил, а не `/etc/shadow`. |
+| `/var/www` | Сайт-приманка REALITY (`DECOY_ROOT`, обычно `/var/www/<site>`). selfsteal отдаёт ровно эти байты, поэтому восстановленная приманка должна совпасть байт в байт. Она во встроенном списке, а не только в `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS`, где одна забытая переменная — тихая дыра; `_EXTRA_PATHS` остаётся для приманки вне `/var/www`. |
 | `/etc/passwd`, `/etc/group` | Правила firewall матчат трафик по **числовому** uid (`--uid-owner`). Хост с другими UID молча погонит трафик не туда. `/etc/shadow` не включается. |
 | `/etc/amnezia`, `/usr/local/sbin`, `/etc/apt/sources.list.d` | `out-warp-routes.list`, живые копии helper-скриптов (часть разошлась с шаблонами) и PPA, из которого собирается DKMS-модуль. |
 
 Что бандл **не** закрывает по замыслу: бинарники (`/usr/local/bin/{xray,hysteria,wgcf}` — переустанавливаются),
 DKMS-сборка модуля amneziawg, приватные SSH host-ключи и идентичность хоста (MAC/IP в `/etc/netplan`
 кладутся как справка, а не для восстановления на другое железо).
+
+### Что системный бандл не берёт
+
+Внутри обходимых путей часть записей исключается политикой:
+
+| Исключено | Почему | Настраивается |
+|---|---|---|
+| `ssh_host_*_key` (по имени файла) | Приватные host-ключи SSH: с одним расшифрованным бандлом кто угодно сможет выдать себя за хост, а пересобранный хост всё равно генерирует новые ключи. | **нет** — жёсткая политика, `OFFSITE_BACKUP_SYSTEM_EXCLUDE` её не отключает |
+| `*.bak`, `*.bak.*`, `*.bak-*`, `*.bak[0-9]*` | Копии конфигов: собственные `config.json.<stamp>.<token>.bak` бота (до `CONFIG_BACKUP_KEEP_LAST`, по 20 на файл), `config.yaml.bak.<stamp>` от `install-config.sh`, ручные `cert.pem.selfsigned.bak`, `config.yaml.bak443`, `config.json.bak-<дата>`. Живой конфиг уже есть в этом бандле или в бандле восстановления, а в `/etc/amnezia` каждая копия — ещё одна копия приватных ключей AWG. | да |
+| `/root/.acme.sh/dnsapi/*`, `deploy/*`, `notify/*` | Около 276 собственных hook-скриптов acme.sh; установка acme.sh возвращает их. `account.conf` (токен DNS-API) и выпущенные сертификаты остаются в бандле. | да |
+
+Настраиваемый список — `DEFAULT_OFFSITE_SYSTEM_EXCLUDE` в `config/settings.py`.
+`OFFSITE_BACKUP_SYSTEM_EXCLUDE` его заменяет (пусто — встроенный список; шаблон, который ничему
+не соответствует, например `/nonexistent/*`, его отключает), `OFFSITE_BACKUP_SYSTEM_EXCLUDE_EXTRA`
+дополняет — см. [configuration.ru.md](configuration.ru.md).
+
+- Каждый шаблон сравнивается через `fnmatch` с **полным путём** записи, и `*` захватывает `/`:
+  `*.bak-*` ловит и все файлы внутри каталога `nginx.bak-2026/`. Шаблон должен быть абсолютным
+  или начинаться с `*`, иначе бот не стартует.
+- Симлинк сравнивается по пути самой ссылки, а не цели.
+- Исключённая запись всё равно перечислена в `MANIFEST.json` — `included: false`,
+  `reason: "excluded_by_policy"`, без содержимого — и не учитывается в лимитах размера.
 
 > `ProtectHome=` в юните должен быть `read-only`, а не `true`. При `true` systemd маскирует `/root`
 > пустым tmpfs, и `/root/.acme.sh` с `/root/.ssh/authorized_keys` попадают в `MANIFEST.json` как
@@ -468,9 +493,12 @@ tar xzf recovery.tar.gz            # MANIFEST.json содержит исходн
 **Проверяйте `summary` в `MANIFEST.json` после каждого бэкапа.** Недоступный источник только
 пропускается и пишется в лог как warning — доставка при этом успешна, и бандл с деградировавшим
 покрытием выглядит точно так же, как полный. Блок `summary` системного бандла
-(`files_included` / `files_skipped` / `symlinks` / `bytes_included` / `truncated`) существует
-именно для того, чтобы это была проверка в один взгляд. `truncated: true` означает, что сработал
-лимит размера и часть файлов не попала внутрь.
+(`files_included` / `files_skipped` / `symlinks` / `skipped_by_reason` / `bytes_included` /
+`truncated`) существует именно для того, чтобы это была проверка в один взгляд.
+`skipped_by_reason` считает каждую невзятую запись по причине, например
+`{"FileNotFoundError": 2, "excluded_by_policy": 318}`: `excluded_by_policy` — то, что политика
+выше отрезала намеренно, а всё остальное там — потерянное покрытие. `symlinks` — число записанных
+ссылок. `truncated: true` означает, что сработал лимит размера и часть файлов не попала внутрь.
 
 Так как бандл содержит `.env` (а в нём — сам `OFFSITE_BACKUP_ENCRYPTION_KEY`), храните ключ в
 отдельном секрет-хранилище, иначе бандл нечем будет расшифровать. По той же причине системный

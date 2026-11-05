@@ -1111,6 +1111,8 @@ def test_user_texts_naming_several_protocols_are_composed_variants_only() -> Non
         "modules_panel_title",
         "module_disable_confirm1",
         "aio_panel_title",
+        # Superadmin dashboard: traffic per protocol, disabled ones included.
+        "dashboard_traffic_total",
     }
     offenders = {
         key

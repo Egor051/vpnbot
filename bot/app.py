@@ -112,6 +112,16 @@ def _removed(uninstalled: _UninstalledView | None, name: str) -> bool:
     return uninstalled is not None and uninstalled.is_uninstalled(name)
 
 
+async def _prune_traffic_history(traffic_stats: TrafficStatsService) -> None:
+    # traffic_hourly retention rides on the pollers that fill the table rather
+    # than on a task of its own. Throttled to once an hour inside the service, so
+    # three loops calling it cost one DELETE an hour.
+    try:
+        await traffic_stats.prune_hourly_history()
+    except Exception:
+        logger.warning("traffic_hourly retention failed", exc_info=True)
+
+
 async def _awg_stats_loop(
     traffic_stats: TrafficStatsService, interval: int, uninstalled: _UninstalledView | None = None
 ) -> None:
@@ -121,6 +131,8 @@ async def _awg_stats_loop(
                 await traffic_stats.refresh_all_awg()
             except Exception:
                 logger.warning("AWG background stats collection failed", exc_info=True)
+        # Retention is a database job, not a backend call: it runs either way.
+        await _prune_traffic_history(traffic_stats)
         await asyncio.sleep(interval)
 
 
@@ -136,6 +148,7 @@ async def _xray_stats_loop(
                 await traffic_stats.refresh_all_xray()
             except Exception:
                 logger.warning("Xray background stats collection failed", exc_info=True)
+        await _prune_traffic_history(traffic_stats)
         await asyncio.sleep(interval)
 
 
@@ -152,6 +165,7 @@ async def _hysteria_stats_loop(
                 await traffic_stats.refresh_all_hysteria()
             except Exception:
                 logger.warning("Hysteria2 background stats collection failed", exc_info=True)
+        await _prune_traffic_history(traffic_stats)
         await asyncio.sleep(interval)
 
 
@@ -608,6 +622,9 @@ async def _build_app(
         # can add its own paths; directories in it are walked at backup time.
         system_sources=settings.offsite_backup_system_paths,
         include_system=settings.offsite_backup_include_system,
+        # What the walk leaves out (config .bak copies, acme.sh's own code), on top
+        # of the hard SSH-host-private-key policy inside the service.
+        system_exclude=settings.offsite_backup_system_exclude,
     )
 
     anomaly_detection_service = AnomalyDetectionService(

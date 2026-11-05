@@ -37,7 +37,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 REPO_CONFIG = ROOT / "deploy" / "hysteria" / "config.yaml"
 
-EXPECTED_CEILING = "95 mbps"
+EXPECTED_CEILING = "75 mbps"
 
 # `key:` (nested mapping) or `key: value` (scalar), at any indentation.
 _ENTRY_RE = re.compile(r"^(?P<indent>[ ]*)(?P<key>[A-Za-z_][A-Za-z0-9_.-]*):(?:[ ]+(?P<value>.*))?$")
@@ -135,7 +135,7 @@ def test_repo_config_parses_and_keeps_its_top_level_blocks() -> None:
 
     # Every block the data plane depends on, so a mangled edit that happens to
     # leave `bandwidth` intact still fails here.
-    for key in ("listen", "tls", "auth", "trafficStats", "masquerade", "bandwidth"):
+    for key in ("listen", "tls", "auth", "trafficStats", "masquerade", "bandwidth", "congestion"):
         assert key in config, f"{key} missing from {REPO_CONFIG}"
 
 
@@ -148,13 +148,14 @@ def test_repo_config_parses_under_real_yaml_when_available() -> None:
     loaded = yaml.safe_load(REPO_CONFIG.read_text(encoding="utf-8"))
     assert isinstance(loaded, dict)
     assert loaded["bandwidth"] == {"up": EXPECTED_CEILING, "down": EXPECTED_CEILING}
+    assert loaded["congestion"] == {"type": "bbr", "bbrProfile": "conservative"}
     assert loaded.get("ignoreClientBandwidth") in (None, False)
 
 
 # --------------------------------------------------------------------------- #
 # the ceiling itself
 # --------------------------------------------------------------------------- #
-def test_bandwidth_block_caps_both_directions_at_95_mbps() -> None:
+def test_bandwidth_block_caps_both_directions_at_75_mbps() -> None:
     bandwidth = parse_config()["bandwidth"]
     assert isinstance(bandwidth, dict), "bandwidth must be a mapping with up/down"
 

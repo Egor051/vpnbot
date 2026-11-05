@@ -12,6 +12,10 @@ import os
 import re
 from pathlib import Path
 
+# The YAML subset the tracked hysteria config is written in; one parser for the
+# whole suite (see tests/test_hysteria_config_bandwidth.py).
+from tests.test_hysteria_config_bandwidth import parse_block_mapping
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -163,6 +167,27 @@ def test_hysteria_config_yaml_has_no_obfs_and_listens_on_udp_443() -> None:
     # Cert is a valid Let's Encrypt cert managed by acme.sh outside this repo —
     # no lingering "self-signed" language from before the domain/ACME switch.
     assert "self-signed" not in text.lower()
+
+
+# Upstream's accepted values for congestion.bbrProfile; anything else is a parse
+# error and hysteria-server refuses to start.
+_HY2_BBR_PROFILES = {"standard", "conservative", "aggressive"}
+
+
+def test_hysteria_config_yaml_pins_bbr_conservative_congestion() -> None:
+    # Parsed, not regexed: `type:` also appears under auth and masquerade, so a
+    # bare `^\s*type:\s*bbr` could not say which block it matched.
+    config = parse_block_mapping(_read("deploy/hysteria/config.yaml"))
+
+    congestion = config.get("congestion")
+    assert isinstance(congestion, dict), "congestion must be a top-level mapping"
+    assert congestion.get("type") == "bbr"
+    profile = congestion.get("bbrProfile")
+    assert profile in _HY2_BBR_PROFILES, f"bbrProfile {profile!r} would stop hysteria-server from starting"
+    assert profile == "conservative"
+    # ignoreClientBandwidth would push every client onto the non-Brutal
+    # controller — that is a separate decision, not part of enabling the profile.
+    assert "ignoreClientBandwidth" not in config
 
 
 def test_hysteria_config_yaml_masquerade_is_pinned_elsewhere() -> None:

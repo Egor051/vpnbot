@@ -23,7 +23,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Hysteria2 probe, BackendHealth (UNINSTALLED, never degraded), the anomaly detector, the
   subscription composition and «Enable» all honour it; `deploy.sh` leaves the protocol out of
   `UNIT_SET`, the drift scan, its `MANAGED_HOST_FILES` gate, `OUT_OF_REPO_HELPERS` and
-  `WARP_ONESHOTS`. Schema 38 → 39: `protocol_modules.uninstalled_at/_by`, `uninstall_backup`.
+  `WARP_ONESHOTS`. Schema 39 → 40: `protocol_modules.uninstalled_at/_by`, `uninstall_backup`.
+- **`deploy/hysteria/install-config.sh` checks the hysteria version before installing.** The
+  repo config now needs hysteria >= v2.8.0 (`congestion.bbrProfile`), so the script runs
+  `"$HYSTERIA_BIN" version` (default `/usr/local/bin/hysteria`), finds the `Version: vX.Y.Z` line
+  below the ASCII banner, and fails closed — before the backup, the temp file or the target are
+  touched — when the binary is missing, older than v2.8.0, or prints no parseable version.
+  `--selftest` covers it with mock binaries; secret injection, backup, `0600 hysteria:hysteria`
+  and the no-restart rule are unchanged.
+- **Dashboard traffic by period.** The «📊 Трафик» block now shows, under the lifetime total,
+  the last 1/7/30/90/180/365 days (rolling `N×24` hours, the current hour included), deleted
+  keys counted. Backed by a new table, `traffic_hourly` (schema **v39**): one row per
+  `(hour_utc, key_id, protocol)`, `hour_utc = unix_time // 3600`, filled by the xray/AWG/hysteria2
+  pollers with exactly the delta they add to `vpn_key_traffic_stats`, in the same transaction.
+  No foreign key to `vpn_keys`, so deleting a key keeps its buckets. Nothing is backfilled —
+  the lifetime totals carry no time — so the windows start empty after the upgrade («нет данных
+  за период»), and until 365 days have been recorded the block says where the history starts
+  («(данные с DD.MM.YYYY HH:MM UTC)»). Buckets older than 400 days are pruned by the same
+  pollers, at most once an hour. The block is now localized (ru/en).
+- **System bundle: an exclusion policy you can see and tune (docs/operations.md#what-the-system-bundle-leaves-out).**
+  The walk now leaves out config copies — `*.bak`, `*.bak.*`, `*.bak-*`, `*.bak[0-9]*` (the
+  bot's own `config.json.<stamp>.<token>.bak`, `install-config.sh`'s `config.yaml.bak.<stamp>`,
+  hand-made `cert.pem.selfsigned.bak` / `config.yaml.bak443` / `config.json.bak-<date>`; the
+  live config is already bundled, and in `/etc/amnezia` each copy was one more copy of the AWG
+  private keys) — and acme.sh's own ~276 hook scripts under `/root/.acme.sh/{dnsapi,deploy,notify}`,
+  which a reinstall of acme.sh brings back. The set is `DEFAULT_OFFSITE_SYSTEM_EXCLUDE` in
+  `config/settings.py`: `OFFSITE_BACKUP_SYSTEM_EXCLUDE` replaces it (empty = the default),
+  `OFFSITE_BACKUP_SYSTEM_EXCLUDE_EXTRA` adds to it. Globs are `fnmatch`ed against the full path
+  (`*` crosses `/`), symlinks by the link's own path; a glob that is neither absolute nor starts
+  with `*` stops the bot at startup. Matches stay in `MANIFEST.json` as `excluded_by_policy`,
+  without content. The SSH host private key exclusion stays a separate hard policy that no
+  setting can switch off. The manifest `summary` gains `skipped_by_reason` — every left-out
+  entry counted by reason, so what the policy cut and what was lost to errors or size limits
+  are each one number; `symlinks` now counts only the links recorded.
 
 - **Host state as code (docs/host-state.md).** `scripts/deploy.sh` now owns the host files that
   lived only on the servers: a new registry, `MANAGED_HOST_FILES`
@@ -325,6 +357,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Hysteria2: BBR `conservative` profile.** `deploy/hysteria/config.yaml` gains a top-level
+  `congestion: {type: bbr, bbrProfile: conservative}`. It is server-local (not negotiated, not in
+  the `hysteria2://` link) and only shapes the client's download while that direction is not on
+  Brutal; a client that sets its own `bandwidth` is unaffected. Needs hysteria >= v2.8.0; roll
+  back with `bbrProfile: standard`. See docs/hysteria.md → Congestion control.
+- **Hysteria2: the per-client Brutal ceiling is 75/75 mbps (was 95/95).** `bandwidth.up` and
+  `bandwidth.down` in `deploy/hysteria/config.yaml`; `ignoreClientBandwidth` is still not set. The
+  ceiling applies only to clients on Brutal (those that declare their own `bandwidth`) — it has
+  no effect on BBR/Reno, so default clients are not capped at 75 mbps.
+- **The system bundle covers the rest of the managed host state.** `DEFAULT_OFFSITE_SYSTEM_PATHS`
+  takes all of `/etc/systemd` instead of `/etc/systemd/system` + `journald.conf`, so the
+  `journald.conf.d/` and `networkd.conf.d/` drop-ins from host state as code (#313), `network/`
+  and any later `*.conf.d` are included; every crontab under `/var/spool/cron/crontabs` instead
+  of root's alone; and adds `/etc/cron.d`, `/etc/logrotate.d`, `/etc/sudoers.d` (the rules
+  non-root helper mode runs on) and `/var/www` — the REALITY decoy root, which used to depend on
+  `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS` being set (a byte-different decoy breaks selfsteal, and a
+  forgotten variable was a silent gap). `_EXTRA_PATHS` remains for a decoy outside `/var/www`.
+  docs/host-state.md gains an *Offsite backup* column naming what carries each host file.
+
 - **`deploy/vpn-bot-acme-reload.sh` matches the host it replaces.** Installed by the deploy as
   `/usr/local/sbin/acme-reload.sh` (the path acme.sh's `Le_ReloadCmd` already names) instead of
   being run out of the checkout — on hosts that have `/etc/vpn-bot/tls/fullchain.pem` only
@@ -447,6 +498,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   first disable confirmation now explain both choices — what «Disable only» leaves on the server
   and what «Disable and remove from the server» removes — and say plainly that SOCKS5/MTProto
   accesses are marked deleted (the rows stay) while keys are deleted.
+- **`.env.example` no longer switches the system bundle off.** It carried an uncommented
+  `OFFSITE_BACKUP_SYSTEM_PATHS=` under "leave empty to use the built-in set", but an explicitly
+  empty value empties the set — and with no paths the system bundle is not sent at all. A `.env`
+  copied from the template sent no system bundle (or, with `_EXTRA_PATHS` set, only those
+  paths). The line is commented out now, and the comment says what an empty value does; check an
+  existing `.env` for an uncommented `OFFSITE_BACKUP_SYSTEM_PATHS=`.
 - **A rollback could fire after a successful deploy.** `disarm()` is a function, and bash gives a
   function's caller back the ERR trap it had on entry when the function leaves it unset, so
   neither the main path nor `relay_phase2` ever cleared the rollback trap: any failing command

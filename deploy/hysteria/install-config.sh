@@ -12,8 +12,16 @@
 # the file: it copies the repo config AND injects the real secret from
 # HYSTERIA2_STATS_SECRET in .env, so the placeholder never reaches disk.
 #
+# Before anything is written it also checks the installed hysteria binary
+# ($HYSTERIA_BIN, default /usr/local/bin/hysteria): the repo config sets
+# `congestion.bbrProfile`, which needs hysteria >= v2.8.0, and an older server
+# would be handed a config it does not implement. A binary that is missing,
+# older than that, or whose `version` output carries no parseable
+# `Version: vX.Y.Z` line fails closed — the target is left untouched.
+#
 # Usage:
 #   sudo bash deploy/hysteria/install-config.sh [--env <path>] [--target <path>]
+#   sudo HYSTERIA_BIN=/path/to/hysteria bash deploy/hysteria/install-config.sh ...
 #   bash deploy/hysteria/install-config.sh --selftest
 #
 # Exit codes:
@@ -38,6 +46,15 @@ REQUIRE_ROOT="${INSTALL_CONFIG_REQUIRE_ROOT:-1}"
 OWNER="${INSTALL_CONFIG_OWNER:-hysteria}"
 GROUP="${INSTALL_CONFIG_GROUP:-hysteria}"
 
+# The hysteria-server binary whose version is checked before installing.
+# Public knob (unlike the seam above): a host with the binary elsewhere sets it.
+HYSTERIA_BIN="${HYSTERIA_BIN:-/usr/local/bin/hysteria}"
+# Oldest release that understands `congestion.bbrProfile` in the repo config.
+MIN_HYSTERIA_MAJOR=2
+MIN_HYSTERIA_MINOR=8
+MIN_HYSTERIA_PATCH=0
+MIN_HYSTERIA_VERSION="v${MIN_HYSTERIA_MAJOR}.${MIN_HYSTERIA_MINOR}.${MIN_HYSTERIA_PATCH}"
+
 die() {
   echo "$ME: $*" >&2
   exit 1
@@ -50,13 +67,58 @@ usage: $ME [--env <path>] [--target <path>]
 
   --env <path>     path to the bot's .env (default: /opt/vpn-service/.env)
   --target <path>  install destination (default: /etc/hysteria/config.yaml)
-  --selftest       run built-in checks against a canned repo config and a
-                    fake secret in a temp dir — no root, no real files touched
+  --selftest       run built-in checks against a canned repo config, a
+                    fake secret and mock hysteria binaries in a temp dir —
+                    no root, no real files touched
+
+  HYSTERIA_BIN     hysteria binary to version-check
+                    (default: /usr/local/bin/hysteria; must be >= $MIN_HYSTERIA_VERSION)
 
 Copies $REPO_CONFIG to <target>, replacing its trafficStats.secret
-placeholder with HYSTERIA2_STATS_SECRET read from <env>. Never restarts
-hysteria-server; see the printed next-steps on success.
+placeholder with HYSTERIA2_STATS_SECRET read from <env>. Refuses to
+install unless HYSTERIA_BIN reports $MIN_HYSTERIA_VERSION or newer. Never
+restarts hysteria-server; see the printed next-steps on success.
 EOF
+}
+
+# check_hysteria_version <bin>
+#
+# Succeeds only if `<bin> version` reports MIN_HYSTERIA_VERSION or newer.
+# Fails closed (message on stderr, non-zero) when the binary is missing or not
+# executable, when `version` exits non-zero, or when no `Version: vX.Y.Z` line
+# can be found. The real output starts with an ASCII-art banner (non-ASCII box
+# characters) before its `Key: value` lines, so the line is searched for
+# anywhere in the output, with grep -a so the banner never makes grep treat the
+# text as binary. Components are compared numerically (v2.10.0 > v2.8.0).
+check_hysteria_version() {
+  local bin="$1" out line major minor patch
+  if [[ ! -f "$bin" || ! -x "$bin" ]]; then
+    echo "$ME: hysteria binary not found or not executable: $bin" \
+      "-- install hysteria >= $MIN_HYSTERIA_VERSION or point HYSTERIA_BIN at it" >&2
+    return 1
+  fi
+  if ! out="$("$bin" version 2>&1)"; then
+    echo "$ME: '$bin version' failed -- cannot verify hysteria >= $MIN_HYSTERIA_VERSION" >&2
+    return 1
+  fi
+  line="$(grep -a -m1 -E '^Version:[[:space:]]*v?[0-9]+\.[0-9]+\.[0-9]+' <<<"$out" || true)"
+  if [[ ! "$line" =~ ^Version:[[:space:]]*v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+    echo "$ME: no 'Version: vX.Y.Z' line in '$bin version' output" \
+      "-- cannot verify hysteria >= $MIN_HYSTERIA_VERSION" >&2
+    return 1
+  fi
+  # 10# so a component like "08" is decimal, not an invalid octal literal.
+  major=$((10#${BASH_REMATCH[1]}))
+  minor=$((10#${BASH_REMATCH[2]}))
+  patch=$((10#${BASH_REMATCH[3]}))
+  if ((major > MIN_HYSTERIA_MAJOR ||
+    (major == MIN_HYSTERIA_MAJOR && minor > MIN_HYSTERIA_MINOR) ||
+    (major == MIN_HYSTERIA_MAJOR && minor == MIN_HYSTERIA_MINOR && patch >= MIN_HYSTERIA_PATCH))); then
+    return 0
+  fi
+  echo "$ME: $bin is v$major.$minor.$patch, the repo config needs >= $MIN_HYSTERIA_VERSION" \
+    "(congestion.bbrProfile) -- upgrade hysteria first; nothing was installed" >&2
+  return 1
 }
 
 # Reads repo_config and env_file, prints the transformed config (secret
@@ -156,6 +218,33 @@ sys.stdout.write(output)
 PYEOF
 }
 
+# write_mock_hysteria <path> <version-line>
+#
+# Selftest only: writes an executable stand-in for `hysteria` that, on
+# `version`, prints what the real one does — a banner of non-ASCII box
+# characters, then tab-separated `Key: value` lines. An empty <version-line>
+# leaves the Version: line out (banner only).
+write_mock_hysteria() {
+  local path="$1" version_line="$2"
+  {
+    printf '#!/bin/sh\n'
+    # shellcheck disable=SC2016  # literal $1: expanded by the mock, not here
+    printf '[ "$1" = version ] || exit 2\n'
+    printf "cat <<'BANNER'\n"
+    printf '░█░█░█░█░█▀▀░▀█▀░█▀▀░█▀▄░▀█▀░█▀█░░░▀▀▄\n'
+    printf '░█▀█░░█░░▀▀█░░█░░█▀▀░█▀▄░░█░░█▀█░░░▄▀░\n'
+    printf 'a powerful, lightning fast and censorship resistant proxy\n'
+    printf '\n'
+    if [[ -n "$version_line" ]]; then
+      printf '%s\n' "$version_line"
+    fi
+    printf 'BuildType:\trelease\n'
+    printf 'Platform:\tlinux\n'
+    printf 'BANNER\n'
+  } >"$path"
+  chmod 0755 "$path"
+}
+
 selftest() {
   local failures=0
   local workdir
@@ -240,6 +329,41 @@ PYEOF
     failures=$((failures + 1))
   fi
 
+  # Cases 5+: the hysteria version guard, against mock binaries shaped like the
+  # real `hysteria version` output. Never the host's binary: every case passes
+  # an explicit path under $workdir, and HYSTERIA_BIN is not consulted at all.
+  local mockdir="$workdir/bin" spec ver want got mock
+  mkdir -p "$mockdir"
+  for spec in 'v2.7.1|fail' 'v2.8.0|ok' 'v2.10.0|ok' '2.9.3|ok' 'v1.99.99|fail' 'v3.0.0|ok'; do
+    ver="${spec%%|*}"
+    want="${spec##*|}"
+    mock="$mockdir/hysteria-$ver"
+    write_mock_hysteria "$mock" "$(printf 'Version:\t%s' "$ver")"
+    if check_hysteria_version "$mock" 2>/dev/null; then got=ok; else got=fail; fi
+    if [[ "$got" == "$want" ]]; then
+      echo "$ME: selftest PASS: version guard: $ver -> $want" >&2
+    else
+      echo "$ME: selftest FAIL: version guard: $ver gave $got, expected $want" >&2
+      failures=$((failures + 1))
+    fi
+  done
+
+  # Fail-closed cases: banner with no Version: line, an unparseable one, and no
+  # binary at all.
+  write_mock_hysteria "$mockdir/hysteria-banner-only" ""
+  write_mock_hysteria "$mockdir/hysteria-garbage" "Version: banana"
+  for spec in 'hysteria-banner-only|banner without a Version: line' \
+    'hysteria-garbage|unparseable Version: line' \
+    'does-not-exist|missing binary'; do
+    mock="$mockdir/${spec%%|*}"
+    if check_hysteria_version "$mock" 2>/dev/null; then
+      echo "$ME: selftest FAIL: version guard: ${spec##*|} should have failed closed" >&2
+      failures=$((failures + 1))
+    else
+      echo "$ME: selftest PASS: version guard: ${spec##*|} fails closed" >&2
+    fi
+  done
+
   if [[ "$failures" -ne 0 ]]; then
     echo "$ME: selftest: $failures failure(s)" >&2
     return 1
@@ -286,6 +410,10 @@ main() {
 
   [[ -f "$REPO_CONFIG" ]] || die "repo config not found: $REPO_CONFIG"
   [[ -f "$env_file" ]] || die "env file not found: $env_file -- pass --env <path> or create it first"
+
+  # Before any write (temp file, backup, target): an old binary must never be
+  # handed a config it cannot run. check_hysteria_version prints the reason.
+  check_hysteria_version "$HYSTERIA_BIN" || exit 1
 
   # Not `local`: the EXIT trap below fires after main() returns to top-level
   # scope, where a local variable would already be unset (unbound under -u).

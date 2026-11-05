@@ -8,6 +8,7 @@ import logging
 import os
 import sqlite3
 import tarfile
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,11 @@ _SKIP_DIR_NAMES = frozenset(
 # lockout is the public side (sshd_config, sshd_config.d/, authorized_keys), which
 # IS bundled. Matches are still listed in MANIFEST.json with reason
 # "excluded_by_policy", so the gap is visible rather than silent.
+#
+# This is a hard policy, matched against the BASENAME, and deliberately separate
+# from the configurable full-path exclusions (OFFSITE_BACKUP_SYSTEM_EXCLUDE): an
+# operator who replaces those to tune out noise must not be able to switch this off
+# by accident.
 _SYSTEM_EXCLUDE_GLOBS = ("ssh_host_*_key",)
 
 # Guardrails so one unexpected large file (a log, a core dump, a binary dropped
@@ -74,6 +80,7 @@ class OffsiteBackupService:
         include_recovery: bool = False,
         system_sources: Sequence[Path] = (),
         include_system: bool = False,
+        system_exclude: Sequence[str] = (),
     ) -> None:
         self.db_path = db_path
         self.clock = clock
@@ -88,6 +95,10 @@ class OffsiteBackupService:
         # Entries may be directories — those are walked at backup time.
         self._system_sources = self._dedupe_paths(system_sources)
         self._include_system = include_system
+        # Configurable fnmatch globs matched against each walked entry's FULL path
+        # (``*`` crosses ``/``). Applied on top of _SYSTEM_EXCLUDE_GLOBS, never
+        # instead of it. Order-preserving de-dup, like the sources.
+        self._system_exclude = tuple(dict.fromkeys(system_exclude))
 
     @staticmethod
     def _dedupe_paths(paths: Iterable[Path]) -> tuple[Path, ...]:
@@ -306,6 +317,18 @@ class OffsiteBackupService:
             found.extend(base / name for name in dirnames if (base / name).is_symlink())
         return found
 
+    def _system_excluded(self, path: Path) -> bool:
+        """Whether *path* is kept out of the system bundle by policy.
+
+        Two independent checks: the hard basename policy (_SYSTEM_EXCLUDE_GLOBS,
+        not configurable) and the configured full-path globs. Case-sensitive on
+        every platform, like the host paths they describe.
+        """
+        if any(fnmatch.fnmatchcase(path.name, pattern) for pattern in _SYSTEM_EXCLUDE_GLOBS):
+            return True
+        full = str(path)
+        return any(fnmatch.fnmatchcase(full, pattern) for pattern in self._system_exclude)
+
     def _build_system_tar(self) -> bytes | None:
         """Build an in-memory tar.gz of the system sources plus MANIFEST.json.
 
@@ -316,10 +339,16 @@ class OffsiteBackupService:
         enablement survives without duplicating every unit file), and the size
         guardrails above are enforced.
 
+        Entries matched by the exclusion policy (:meth:`_system_excluded`) — files
+        and symlinks alike — are listed with reason ``excluded_by_policy`` and no
+        content, and never count towards the size limits.
+
         The manifest carries a ``summary`` block on top of the per-file list. The
         per-file list can run to hundreds of entries here, and a bundle whose
         coverage quietly degraded looks identical to a complete one; the summary is
-        what makes "did this actually capture everything" a one-glance check.
+        what makes "did this actually capture everything" a one-glance check, and
+        its ``skipped_by_reason`` counters say in one line how much the policy cut
+        versus how much was lost to errors or size limits.
         """
         created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         manifest_files: list[dict[str, object]] = []
@@ -335,22 +364,24 @@ class OffsiteBackupService:
                 if path in seen:
                     continue
                 seen.add(path)
-                entry: dict[str, object] = {"path": str(path)}
+                is_link = path.is_symlink()
+                entry: dict[str, object] = {"path": str(path), "kind": "symlink" if is_link else "file"}
 
-                if path.is_symlink():
-                    try:
-                        target = os.readlink(path)
-                    except OSError as exc:
-                        entry.update(kind="symlink", included=False, reason=exc.__class__.__name__)
-                        manifest_files.append(entry)
-                        continue
-                    entry.update(kind="symlink", included=True, target=target)
+                # Checked before anything is read, on the path of the entry itself —
+                # for a symlink that is the link, not its target.
+                if self._system_excluded(path):
+                    entry.update(included=False, reason="excluded_by_policy")
                     manifest_files.append(entry)
                     continue
 
-                entry["kind"] = "file"
-                if any(fnmatch.fnmatch(path.name, pattern) for pattern in _SYSTEM_EXCLUDE_GLOBS):
-                    entry.update(included=False, reason="excluded_by_policy")
+                if is_link:
+                    try:
+                        target = os.readlink(path)
+                    except OSError as exc:
+                        entry.update(included=False, reason=exc.__class__.__name__)
+                        manifest_files.append(entry)
+                        continue
+                    entry.update(included=True, target=target)
                     manifest_files.append(entry)
                     continue
 
@@ -392,11 +423,15 @@ class OffsiteBackupService:
         if not blobs:
             return None
 
+        # Every entry left out — file or symlink — counted by its reason, sorted so
+        # the block is stable across runs.
+        skipped_by_reason = Counter(str(e["reason"]) for e in manifest_files if not e["included"])
         summary = {
             "sources": [str(source) for source in self._system_sources],
             "files_included": sum(1 for e in manifest_files if e["kind"] == "file" and e["included"]),
             "files_skipped": sum(1 for e in manifest_files if e["kind"] == "file" and not e["included"]),
-            "symlinks": sum(1 for e in manifest_files if e["kind"] == "symlink"),
+            "symlinks": sum(1 for e in manifest_files if e["kind"] == "symlink" and e["included"]),
+            "skipped_by_reason": dict(sorted(skipped_by_reason.items())),
             "bytes_included": total_bytes,
             "truncated": truncated,
         }

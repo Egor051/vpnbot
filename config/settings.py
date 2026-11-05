@@ -192,6 +192,37 @@ def _path_list(name: str, default: tuple[Path, ...] = ()) -> tuple[Path, ...]:
     return tuple(result)
 
 
+def _glob_list(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """Parse a comma-separated list of fnmatch globs matched against a full path.
+
+    Unlike :func:`_path_list`, a blank value (unset or ``VAR=``) yields *default*: an
+    operator who copies an empty line from .env.example must not silently drop the
+    shipped exclusions. Each glob must be non-empty and either absolute (``/…``) or
+    start with ``*`` — the globs are matched against absolute paths, so a relative
+    one such as ``config.json.bak`` could never match anything, and that typo is
+    better refused at startup than discovered in a bundle that is larger than
+    expected.
+    """
+    raw = _no_control_chars(name, _optional(name))
+    if not raw:
+        return default
+    result: list[str] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            raise SettingsError(
+                f"Переменная {name}: пустой шаблон в списке — уберите лишнюю запятую"
+            )
+        if not item.startswith(("/", "*")):
+            raise SettingsError(
+                f"Переменная {name}: шаблон {item} сравнивается с полным абсолютным путём "
+                f"и потому ничего не исключит — укажите абсолютный путь (/…) или начните "
+                f"шаблон с * (например */{item})"
+            )
+        result.append(item)
+    return tuple(result)
+
+
 def _int_list_positive(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
     raw = _optional(name)
     if not raw:
@@ -591,6 +622,10 @@ class Settings:
     # Files and directories bundled into the system archive. Directories are walked;
     # missing entries are skipped best-effort. Resolved at load time.
     offsite_backup_system_paths: tuple[Path, ...] = ()
+    # fnmatch globs (matched against the full path) for walked entries left out of the
+    # system archive and listed in its manifest as excluded_by_policy. Resolved at
+    # load time from DEFAULT_OFFSITE_SYSTEM_EXCLUDE and the two EXCLUDE variables.
+    offsite_backup_system_exclude: tuple[str, ...] = ()
     anomaly_check_interval: int = 300
     anomaly_window_seconds: int = 3600
     # DEPRECATED: retained only as the default for anomaly_unique_nets. The
@@ -851,19 +886,21 @@ class Settings:
             raise SettingsError("Для создания AWG-ключа AWG_ENDPOINT_PORT должен быть в диапазоне 1–65535")
 
 
-# Host-level state bundled into the third offsite artifact (the "system bundle").
-# Every entry here is something the DB snapshot and the recovery bundle never
-# covered, so before this list existed a rebuilt server had no off-box copy of it.
-# Entries may be files or directories; directories are walked. Missing entries are
-# skipped best-effort, so the same list is safe on a host that runs only some of
-# these services. Override with OFFSITE_BACKUP_SYSTEM_PATHS, or append host-specific
-# paths (e.g. the decoy site's DECOY_ROOT) with OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS.
 # The uninstall helper's marker directory. Deliberately NOT a .env variable: the
 # root helper has it compiled in, and a bot reading another directory would think a
 # removed protocol is still there. tests/conftest.py points it at a temp dir, so
 # load_settings() in a test never reads the production host's markers.
 PROTOCOL_UNINSTALL_MARKER_DIR = Path("/etc/vpn-bot/uninstalled")
 
+# Host-level state bundled into the third offsite artifact (the "system bundle").
+# Every entry here is something the DB snapshot and the recovery bundle never
+# covered, so before this list existed a rebuilt server had no off-box copy of it.
+# Entries may be files or directories; directories are walked. Missing entries are
+# skipped best-effort, so the same list is safe on a host that runs only some of
+# these services. Override with OFFSITE_BACKUP_SYSTEM_PATHS, or append host-specific
+# paths with OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS — e.g. a decoy DECOY_ROOT that lives
+# outside /var/www (the usual /var/www/<site> is already covered below). What the walk
+# leaves out is DEFAULT_OFFSITE_SYSTEM_EXCLUDE further down.
 DEFAULT_OFFSITE_SYSTEM_PATHS: tuple[Path, ...] = (
     # ACME account + issued certificates. account.conf carries the DNS-API token —
     # lose it and no certificate on this host can ever be renewed again.
@@ -899,12 +936,24 @@ DEFAULT_OFFSITE_SYSTEM_PATHS: tuple[Path, ...] = (
     # _SYSTEM_EXCLUDE_GLOBS in services.offsite_backup for why they stay out.
     Path("/etc/ssh"),
     Path("/root/.ssh/authorized_keys"),
-    # Unit files AND the enablement symlinks in */.wants, which are what record
-    # "this unit starts at boot". Several units here exist on no other host copy.
-    Path("/etc/systemd/system"),
-    Path("/etc/systemd/journald.conf"),
-    # acme.sh renewal and the decoy-site freshen job.
-    Path("/var/spool/cron/crontabs/root"),
+    # The whole directory, not just system/: unit files AND the enablement symlinks
+    # in */.wants (what records "this unit starts at boot"; several units here exist
+    # on no other host copy), journald.conf, and every *.conf.d drop-in directory —
+    # journald.conf.d/, networkd.conf.d/ — plus network/. Those drop-ins are part of
+    # the managed host state (docs/host-state.md, PR #313), and naming the parent
+    # means a drop-in directory added later is covered without touching this list.
+    Path("/etc/systemd"),
+    # Every user's crontab, not only root's. On the reference host only root's holds
+    # a line today — acme.sh --cron (certificate renewal); the old decoy-freshen
+    # cron job has been removed there.
+    Path("/var/spool/cron/crontabs"),
+    # System cron jobs and log-rotation rules — the latter include the repo-managed
+    # /etc/logrotate.d/xray (copytruncate) next to whatever packages dropped there.
+    Path("/etc/cron.d"),
+    Path("/etc/logrotate.d"),
+    # The sudo rules non-root helper mode depends on (vpn-bot -> the privileged
+    # helpers). No secrets: this is the rule set, not /etc/shadow.
+    Path("/etc/sudoers.d"),
     # The UID/GID map. Firewall rules match service traffic by NUMERIC uid
     # (--uid-owner), so a rebuilt host that hands out different UIDs silently routes
     # that traffic the wrong way. /etc/shadow is deliberately NOT included: these
@@ -922,6 +971,35 @@ DEFAULT_OFFSITE_SYSTEM_PATHS: tuple[Path, ...] = (
     Path("/usr/local/sbin"),
     # Third-party apt sources — the amneziawg PPA the DKMS module is built from.
     Path("/etc/apt/sources.list.d"),
+    # The REALITY decoy site root (DECOY_ROOT, normally /var/www/<site>). A decoy
+    # rebuilt even one byte off breaks selfsteal, and a decoy kept only through
+    # OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS is one forgotten variable away from a silent
+    # gap. Hence the parent here by default; _EXTRA_PATHS stays for a decoy kept
+    # outside /var/www.
+    Path("/var/www"),
+)
+
+# fnmatch globs for entries the system-bundle walk leaves OUT. Each is matched
+# against the entry's FULL path (``*`` also crosses ``/``), files and symlinks alike;
+# a match is still listed in MANIFEST.json with reason "excluded_by_policy". Replace
+# the set with OFFSITE_BACKUP_SYSTEM_EXCLUDE, add to it with _EXCLUDE_EXTRA. The SSH
+# host private keys are NOT here: that exclusion is a hard policy in
+# services.offsite_backup that no setting can switch off.
+DEFAULT_OFFSITE_SYSTEM_EXCLUDE: tuple[str, ...] = (
+    # Hand-made and tool-made config copies: config.json.<token>.bak, config.yaml.bak443,
+    # cert.pem.selfsigned.bak, config.json.bak-20260731T095519Z. The live config they
+    # copy is already in the bundle (or in the recovery bundle), and in /etc/amnezia
+    # each copy is one more copy of the AWG private keys — twenty of them on the
+    # reference host.
+    "*.bak",
+    "*.bak.*",
+    "*.bak-*",
+    "*.bak[0-9]*",
+    # acme.sh's own code — ~276 hook scripts. A reinstall of acme.sh brings them
+    # back; what is not reinstallable (account.conf, the issued certs) stays in.
+    "/root/.acme.sh/dnsapi/*",
+    "/root/.acme.sh/deploy/*",
+    "/root/.acme.sh/notify/*",
 )
 
 
@@ -946,10 +1024,15 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
     helper_staging_root = Path(_optional("HELPER_STAGING_ROOT", "/run/vpn-bot"))
     # OFFSITE_BACKUP_SYSTEM_PATHS replaces the shipped default set; _EXTRA_PATHS
     # appends to whichever of the two is in effect, which is where host-specific
-    # locations go (the decoy site's DECOY_ROOT has no fixed path across hosts).
+    # locations go (a decoy DECOY_ROOT outside /var/www, for one).
     offsite_backup_system_paths = _path_list(
         "OFFSITE_BACKUP_SYSTEM_PATHS", DEFAULT_OFFSITE_SYSTEM_PATHS
     ) + _path_list("OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS")
+    # Same replace/append pair for what the walk leaves out — except that a blank
+    # OFFSITE_BACKUP_SYSTEM_EXCLUDE keeps the default rather than emptying it.
+    offsite_backup_system_exclude = _glob_list(
+        "OFFSITE_BACKUP_SYSTEM_EXCLUDE", DEFAULT_OFFSITE_SYSTEM_EXCLUDE
+    ) + _glob_list("OFFSITE_BACKUP_SYSTEM_EXCLUDE_EXTRA")
     awg_dns = _optional("AWG_DNS") or _optional("AWG_CLIENT_DNS", "1.1.1.1")
     xray_manage_short_ids = _bool("XRAY_MANAGE_SHORT_IDS", False)
     xray_short_id = _xray_short_id(_optional("XRAY_SHORT_ID"), required=False)
@@ -1192,6 +1275,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         offsite_backup_env_path=_offsite_env_path(env_path),
         offsite_backup_include_system=_bool("OFFSITE_BACKUP_INCLUDE_SYSTEM", True),
         offsite_backup_system_paths=offsite_backup_system_paths,
+        offsite_backup_system_exclude=offsite_backup_system_exclude,
         anomaly_check_interval=_int_range("ANOMALY_CHECK_INTERVAL", 300, 0, 86400),
         anomaly_window_seconds=_int_range("ANOMALY_WINDOW_SECONDS", 3600, 60, 86400),
         anomaly_min_unique_ips=anomaly_min_unique_ips,

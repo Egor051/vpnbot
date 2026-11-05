@@ -487,7 +487,7 @@ def test_hysteria_comments_and_key_order_are_invisible(hy2, tmp_path: Path) -> N
             id="masquerade-layout-reverted-to-file",
         ),
         pytest.param(
-            lambda t: t.replace("up: 95 mbps", "up: 500 mbps"),
+            lambda t: t.replace("up: 75 mbps", "up: 500 mbps"),
             "hy2.bandwidth.up",
             id="brutal-ceiling-raised-on-the-host",
         ),

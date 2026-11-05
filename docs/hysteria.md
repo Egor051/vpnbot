@@ -193,9 +193,14 @@ is [`deploy/vpn-bot-acme-reload.sh`](../deploy/vpn-bot-acme-reload.sh)'s job, no
 
 ```yaml
 bandwidth:
-  up: 95 mbps
-  down: 95 mbps
+  up: 75 mbps
+  down: 75 mbps
 ```
+
+This ceiling applies **only to Brutal directions** — a client that declared its own `bandwidth`.
+It has no effect on BBR or Reno, so clients that declare nothing (the default: the bot's links
+carry no bandwidth) are **not** held to 75 mbps; their download runs BBR with the `conservative`
+profile instead (see [Congestion control](#congestion-control) below).
 
 Server-side values are a limit **per client**, not a total shaper for the host — each client is
 held to this rate, they do not share it. The server's `up` is the client's **download** ceiling
@@ -209,7 +214,8 @@ file, a change takes effect only on the next `systemctl restart hysteria-server`
 restart drops live QUIC sessions, so do it in a quiet window.
 
 **Turning on Brutal, client-side.** The `hysteria2://` links the bot issues carry no bandwidth
-parameters, so out of the box every client runs the loss-responsive **BBR** controller. A user
+parameters, so out of the box every client runs the loss-responsive **BBR** controller (on its
+download, with the server's `conservative` profile). A user
 who wants the **Brutal** sender instead adds a `bandwidth` section to their own client profile
 (v2rayN / NekoBox / Happ all expose these fields) with **their own real line speed** — not the
 server ceiling above:
@@ -223,8 +229,54 @@ bandwidth:
 Per the official Hysteria 2 docs, higher is **not** better: Brutal does not measure the path, it
 sends at the rate it was told and holds that rate through loss. A figure above what the
 connection actually carries therefore backfires — congestion and an unstable connection, not
-more speed. The server clamps anything above `95 mbps`, but it cannot correct an overstated
-value below that.
+more speed. The server clamps anything above `75 mbps`, but it cannot correct an overstated
+value below that. Once a client is on Brutal, the BBR profile below no longer applies to it.
+
+### Congestion control
+
+`deploy/hysteria/config.yaml` selects the BBR profile for the directions that are **not** on
+Brutal:
+
+```yaml
+congestion:
+  type: bbr
+  bbrProfile: conservative
+```
+
+- **Download only.** The block is local to the server, so it shapes only what the server sends —
+  the client's **download** — and only while that direction is not on Brutal. Client upload runs
+  whatever controller the client picks.
+- **Not in the link.** The profile is not negotiated in the Hysteria2 protocol and is not part of
+  the `hysteria2://` link; clients need no change and cannot see it.
+- **Brutal overrides it.** A client that sets its own `bandwidth` gets Brutal on that direction,
+  capped by the [per-client ceiling](#per-client-bandwidth-ceiling-brutal) above (75 mbps), and
+  the profile does not apply. `ignoreClientBandwidth` would do the opposite — force every client
+  onto BBR — and is deliberately not set.
+
+| Client | Its download (server → client) |
+|---|---|
+| No `bandwidth` (default) | BBR, `conservative` profile; the 75 mbps ceiling does not apply |
+| Sets its own `bandwidth` | Brutal at `min(client value, 75 mbps)`; the profile does not apply |
+
+**Minimum version: hysteria v2.8.0.** An unknown profile is a config parse error and
+`hysteria-server` refuses to start. `install-config.sh` therefore checks the binary before it
+writes anything: it runs `"$HYSTERIA_BIN" version` (default `/usr/local/bin/hysteria`), looks
+for the `Version: vX.Y.Z` line below the banner, and fails closed — target untouched — when the
+binary is missing, older than v2.8.0, or its version cannot be parsed. Upgrade hysteria first,
+then install the config.
+
+Allowed values are `standard` (upstream default), `conservative` and `aggressive`. **To roll
+back**, set `bbrProfile: standard` in `deploy/hysteria/config.yaml` and reinstall:
+
+```bash
+sudo bash deploy/hysteria/install-config.sh
+bash deploy/hysteria/preflight-udp443.sh   # must exit 0
+sudo systemctl restart hysteria-server      # drops live QUIC sessions: pick a quiet window
+```
+
+Until the host runs the new file, `backend-config-sync.py check` in deploy Phase 1 reports the
+missing `hy2.congestion` (and a changed `hy2.bandwidth`) as drift and stops the deploy — install
+the config first, or deploy with `ALLOW_BACKEND_CONFIG_DRIFT=1`.
 
 ### WARP egress marking (`vpnbot-hy2-warp-mark`)
 

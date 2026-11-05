@@ -240,7 +240,7 @@ async def test_fresh_database_has_an_empty_relays_table(tmp_path: Path) -> None:
     try:
         await db.bootstrap()
         version = await db.conn.execute_fetchone("SELECT value FROM schema_meta WHERE key = 'schema_version'")
-        assert version is not None and int(version["value"]) == CURRENT_SCHEMA_VERSION == 39
+        assert version is not None and int(version["value"]) == CURRENT_SCHEMA_VERSION == 40
         assert await RelayRepository(db).count() == 0
         columns = {row["name"] for row in await db.conn.execute_fetchall("PRAGMA table_info(relays)")}
         assert columns == {

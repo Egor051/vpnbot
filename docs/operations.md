@@ -542,7 +542,7 @@ documents to admins via Telegram:
 
 - `vpnbot_backup_*.db.enc` — full SQLite snapshot (users, keys, proxy accesses, traffic stats, settings). Per-client data is re-applied into the live configs on startup.
 - `vpnbot_recovery_*.tar.gz.enc` — the **recovery bundle** (when `OFFSITE_BACKUP_INCLUDE_CONFIGS=true`): `.env`, Xray `config.json` (REALITY private key + shortIds), AWG `.conf` (interface private key), managed MTProto secrets, the WARP config, and (when Hysteria2 is enabled) the hysteria-server `config.yaml`. These are the irreplaceable server-side secrets that are **not** in the DB — without them a rebuilt server issues new keypairs and breaks every already-issued client. Unreadable/missing files are skipped and recorded in the bundle's `MANIFEST.json`.
-- `vpnbot_system_*.tar.gz.enc` — the **system bundle** (when `OFFSITE_BACKUP_INCLUDE_SYSTEM=true`): host-level state that neither artifact above ever carried. The path list is `OFFSITE_BACKUP_SYSTEM_PATHS` (default: `DEFAULT_OFFSITE_SYSTEM_PATHS` in `config/settings.py`), plus `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS` for host-specific paths. Directories are walked recursively.
+- `vpnbot_system_*.tar.gz.enc` — the **system bundle** (when `OFFSITE_BACKUP_INCLUDE_SYSTEM=true`): host-level state that neither artifact above ever carried. The path list is `OFFSITE_BACKUP_SYSTEM_PATHS` (default: `DEFAULT_OFFSITE_SYSTEM_PATHS` in `config/settings.py`), plus `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS` for host-specific paths. Directories are walked recursively; what the walk leaves out is [below](#what-the-system-bundle-leaves-out).
 
 All three are encrypted with the **same** `OFFSITE_BACKUP_ENCRYPTION_KEY` and share the same
 30-day decrypt TTL (`BACKUP_MAX_AGE_DAYS`). Delivery is independent: one artifact failing does
@@ -560,14 +560,39 @@ not suppress the others, and only the DB snapshot moves the scheduling anchor
 | `/etc/sysctl.d`, `/etc/sysctl.conf` | `rp_filter=2`, without which source-based routing into the WARP table does not work. Plus forwarding, BBR, buffers. |
 | `/etc/ufw/*`, `/etc/fail2ban/jail.local` | User rules and the forwarded-traffic policy. |
 | `/etc/ssh` | `sshd_config`, `sshd_config.d/`, public host keys. **Private host keys are excluded on purpose** and flagged in the manifest as `excluded_by_policy`. |
-| `/etc/systemd/system` | Units **and the enablement symlinks** in `*.wants` — some units exist in no other copy. |
-| `/var/spool/cron/crontabs/root` | acme.sh renewal and the decoy refresh. |
+| `/etc/systemd` | Units **and the enablement symlinks** in `*.wants` — some units exist in no other copy — plus `journald.conf`, `network/` and every `*.conf.d` drop-in directory (`journald.conf.d/`, `networkd.conf.d/`: managed host state, see [host-state.md](host-state.md)). The whole directory, so a drop-in directory added later is covered without a code change. |
+| `/var/spool/cron/crontabs`, `/etc/cron.d` | Every user's crontab and the system cron jobs. On the reference host only root's crontab has a line: the acme.sh `--cron` renewal. |
+| `/etc/logrotate.d` | Log-rotation rules, including the repo-managed `xray` rule (`copytruncate`). |
+| `/etc/sudoers.d` | The sudo rules non-root helper mode runs on. No secrets: this is the rule set, not `/etc/shadow`. |
+| `/var/www` | The REALITY decoy site (`DECOY_ROOT`, normally `/var/www/<site>`). selfsteal serves these exact bytes, so a rebuilt decoy must match byte for byte. It is in the built-in list rather than left to `OFFSITE_BACKUP_SYSTEM_EXTRA_PATHS`, where one forgotten variable is a silent gap; `_EXTRA_PATHS` remains for a decoy kept outside `/var/www`. |
 | `/etc/passwd`, `/etc/group` | Firewall rules match traffic by **numeric** uid (`--uid-owner`). A host with different UIDs silently routes traffic to the wrong place. `/etc/shadow` is not included. |
 | `/etc/amnezia`, `/usr/local/sbin`, `/etc/apt/sources.list.d` | `out-warp-routes.list`, live copies of the helper scripts (some have drifted from the templates) and the PPA the DKMS module is built from. |
 
 Deliberately **not** covered: binaries (`/usr/local/bin/{xray,hysteria,wgcf}` — reinstallable),
 the amneziawg DKMS build, private SSH host keys, and host identity (MAC/IP in `/etc/netplan` are
 bundled for reference, not for restoring onto different hardware).
+
+### What the system bundle leaves out
+
+Inside the walked paths, some entries are excluded by policy:
+
+| Excluded | Why | Configurable |
+|---|---|---|
+| `ssh_host_*_key` (matched on the file name) | SSH host private keys: one decrypted bundle would let anyone impersonate the host, and a rebuilt host generates fresh keys anyway. | **no** — a hard policy that `OFFSITE_BACKUP_SYSTEM_EXCLUDE` cannot switch off |
+| `*.bak`, `*.bak.*`, `*.bak-*`, `*.bak[0-9]*` | Config copies: the bot's own `config.json.<stamp>.<token>.bak` (up to `CONFIG_BACKUP_KEEP_LAST`, 20 per file), `install-config.sh`'s `config.yaml.bak.<stamp>`, hand-made `cert.pem.selfsigned.bak`, `config.yaml.bak443`, `config.json.bak-<date>`. The live config is already in this bundle or in the recovery bundle — and in `/etc/amnezia` every copy is one more copy of the AWG private keys. | yes |
+| `/root/.acme.sh/dnsapi/*`, `deploy/*`, `notify/*` | About 276 of acme.sh's own hook scripts; installing acme.sh brings them back. `account.conf` (the DNS-API token) and the issued certificates stay in. | yes |
+
+The configurable list is `DEFAULT_OFFSITE_SYSTEM_EXCLUDE` in `config/settings.py`.
+`OFFSITE_BACKUP_SYSTEM_EXCLUDE` replaces it (empty = the built-in list; a glob that matches
+nothing, such as `/nonexistent/*`, switches it off) and `OFFSITE_BACKUP_SYSTEM_EXCLUDE_EXTRA`
+adds to it — see [configuration.md](configuration.md#off-site-encrypted-backup).
+
+- Each glob is matched with `fnmatch` against the entry's **full path**, and `*` also matches
+  `/`: `*.bak-*` also catches every file under a directory named `nginx.bak-2026/`. A glob must
+  be absolute or start with `*`, otherwise the bot refuses to start.
+- A symlink is matched by the path of the link itself, not by its target.
+- An excluded entry is still listed in `MANIFEST.json` — `included: false`,
+  `reason: "excluded_by_policy"`, no content — and does not count towards the size limits.
 
 > `ProtectHome=` in the unit must be `read-only`, not `true`. With `true` systemd masks `/root`
 > with an empty tmpfs, and `/root/.acme.sh` plus `/root/.ssh/authorized_keys` land in
@@ -587,8 +612,12 @@ tar xzf recovery.tar.gz            # MANIFEST.json lists each file's original ab
 **Check `summary` in `MANIFEST.json` after every backup.** An unreadable source is merely
 skipped and logged as a warning — delivery still reports success, and a bundle with degraded
 coverage looks exactly like a complete one. The system bundle's `summary` block
-(`files_included` / `files_skipped` / `symlinks` / `bytes_included` / `truncated`) exists to make
-that a one-glance check. `truncated: true` means a size limit fired and some files were left out.
+(`files_included` / `files_skipped` / `symlinks` / `skipped_by_reason` / `bytes_included` /
+`truncated`) exists to make that a one-glance check. `skipped_by_reason` counts every entry left
+out by its reason, e.g. `{"FileNotFoundError": 2, "excluded_by_policy": 318}`: the
+`excluded_by_policy` count is what the policy above cut on purpose, and anything else in it is
+coverage lost. `symlinks` counts the links recorded. `truncated: true` means a size limit fired
+and some files were left out.
 
 Because the bundle contains `.env` (which itself holds `OFFSITE_BACKUP_ENCRYPTION_KEY`), keep
 the key in a separate secret store — otherwise the bundle cannot be decrypted. For the same

@@ -30,6 +30,46 @@ class TrafficTotals:
     avg_per_key_bytes: int
 
 
+#: Rolling windows of the dashboard traffic block, in days. An N-day window is the last
+#: N x 24 hourly buckets, the current (incomplete) hour included.
+TRAFFIC_WINDOW_DAYS: tuple[int, ...] = (1, 7, 30, 90, 180, 365)
+
+
+def window_start_hour(current_hour_utc: int, days: int) -> int:
+    """First ``hour_utc`` inside an N-day window ending with the current hour."""
+    return current_hour_utc - days * 24 + 1
+
+
+@dataclass(frozen=True, slots=True)
+class TrafficWindows:
+    """Traffic (↓ + ↑, every protocol, deleted keys included) per rolling window.
+
+    :param bytes_by_days: window length in days → bytes, for every entry of
+        :data:`TRAFFIC_WINDOW_DAYS`.
+    :param first_hour_utc: oldest bucket in ``traffic_hourly`` — where the history
+        starts — or ``None`` when the table is empty.
+    """
+
+    current_hour_utc: int
+    bytes_by_days: dict[int, int]
+    first_hour_utc: int | None
+
+    @property
+    def empty(self) -> bool:
+        return self.first_hour_utc is None
+
+    @property
+    def history_starts_inside(self) -> bool:
+        """True when the history is shorter than the longest window.
+
+        The figures of the windows that reach further back than the first bucket
+        then cover only the hours that were recorded, and the screen says so.
+        """
+        if self.first_hour_utc is None:
+            return False
+        return self.first_hour_utc > window_start_hour(self.current_hour_utc, max(TRAFFIC_WINDOW_DAYS))
+
+
 @dataclass(frozen=True, slots=True)
 class TopUserTraffic:
     user_id: int
@@ -153,6 +193,39 @@ class DashboardRepository:
             awg_bytes=awg_bytes,
             hysteria2_bytes=hysteria2_bytes,
             avg_per_key_bytes=avg,
+        )
+
+    async def traffic_windows(self, current_hour_utc: int) -> TrafficWindows:
+        """Return the bytes of every :data:`TRAFFIC_WINDOW_DAYS` window in one query.
+
+        Reads ``traffic_hourly`` only: its rows have no foreign key to
+        ``vpn_keys``, so the buckets of deleted keys are still here and counted.
+        The ``WHERE`` limits the scan to the longest window (a range on
+        ``idx_traffic_hourly_hour``); ``MIN(hour_utc)`` is a separate scalar
+        subquery so it reports the start of the whole history, not of that range.
+        """
+        starts = [window_start_hour(current_hour_utc, days) for days in TRAFFIC_WINDOW_DAYS]
+        sums = ",\n".join(
+            f"COALESCE(SUM(CASE WHEN hour_utc >= ? THEN downloaded_bytes + uploaded_bytes END), 0) AS d{days}"
+            for days in TRAFFIC_WINDOW_DAYS
+        )
+        row = await self.db.conn.execute_fetchone(
+            f"""
+            SELECT
+              (SELECT MIN(hour_utc) FROM traffic_hourly) AS first_hour,
+              {sums}
+            FROM traffic_hourly
+            WHERE hour_utc >= ?
+            """,
+            (*starts, min(starts)),
+        )
+        first_hour = row["first_hour"] if row is not None else None
+        return TrafficWindows(
+            current_hour_utc=current_hour_utc,
+            bytes_by_days={
+                days: int(row[f"d{days}"] or 0) if row is not None else 0 for days in TRAFFIC_WINDOW_DAYS
+            },
+            first_hour_utc=int(first_hour) if first_hour is not None else None,
         )
 
     async def top_users_by_traffic(

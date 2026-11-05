@@ -16,8 +16,10 @@ from repositories.dashboard import (
     KeysSummary,
     TopUserTraffic,
     TrafficTotals,
+    TrafficWindows,
 )
 from repositories.proxy_accesses import ProxyAccessRepository
+from repositories.traffic_stats import hour_utc_from_iso
 from repositories.trial_requests import TrialKeyRequestRepository
 from services.backend_health import BackendHealth, BackendHealthStatus
 from services.offsite_backup import OffsiteBackupService
@@ -43,6 +45,7 @@ class DashboardSnapshot:
 
     # Traffic
     traffic: TrafficTotals
+    traffic_windows: TrafficWindows
     top_users: list[TopUserTraffic]
 
     # Proxy
@@ -111,7 +114,7 @@ class DashboardService:
         (
             (users_by_role, new_7d, new_30d, users_active_keys, pending_access, pending_trial),
             (keys_summary, traffic, top_users, proxy_type_counts, audit_24h, audit_7d),
-            (recent_audit, ann_30d, all_modules, last_backup, warp_state),
+            (recent_audit, ann_30d, all_modules, last_backup, warp_state, traffic_windows),
         ) = await asyncio.gather(
             asyncio.gather(
                 self._repo.count_users_by_role(),
@@ -135,6 +138,9 @@ class DashboardService:
                 self._modules.get_all(),
                 self._offsite_backup.get_last_backup_time(),
                 self._warp.get_state(),
+                # Same clock as the poller that writes the buckets, so "the
+                # current hour" means the same bucket on both sides.
+                self._repo.traffic_windows(hour_utc_from_iso(now_str)),
             ),
         )
 
@@ -171,6 +177,7 @@ class DashboardService:
             pending_trial_requests=pending_trial,
             keys=keys_summary,
             traffic=traffic,
+            traffic_windows=traffic_windows,
             top_users=top_users,
             active_socks5=active_socks5,
             active_mtproto=active_mtproto,

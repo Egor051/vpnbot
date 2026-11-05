@@ -20,7 +20,7 @@ class ProtocolModule:
     enabled: bool
     disabled_at: str | None = None
     disabled_by: int | None = None
-    # Removed from the HOST, not just switched off (v39). A mirror of the marker
+    # Removed from the HOST, not just switched off (v40). A mirror of the marker
     # /etc/vpn-bot/uninstalled/<name> for the panel and the audit trail; the marker
     # is the truth (services.protocol_uninstall.UninstallRegistry).
     uninstalled_at: str | None = None

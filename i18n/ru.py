@@ -1367,6 +1367,15 @@ STRINGS: dict[str, str] = {
     "btn_dashboard": "📊 Дашборд",
     "btn_dashboard_refresh": "🔄 Обновить",
     "dashboard_refreshing": "Обновляю…",
+    # Блок «📊 Трафик»: все цифры — ↓ + ↑, включая удалённые ключи.
+    "dashboard_traffic_title": "<b>📊 Трафик</b> (с учётом удалённых ключей)",
+    "dashboard_traffic_total": "  Итого (всё время): <b>{total}</b>  (Xray: {xray} | AWG: {awg} | Hy2: {hy2})",
+    "dashboard_traffic_period": "  За период:",
+    "dashboard_traffic_window": "{days}д: {value}",
+    "dashboard_traffic_since": "    (данные с {since} UTC)",
+    "dashboard_traffic_no_data": "    нет данных за период",
+    "dashboard_traffic_avg": "  Среднее на ключ: {avg}",
+    "dashboard_traffic_top": "  Топ-5 за всё время:",
     # ── Пакеты рассылок ──────────────────────────────────────────────────────
     "btn_batch_continue": "▶️ Продолжить #{id}",
     "btn_batch_retry": "🔁 Повторить ошибки #{id}",

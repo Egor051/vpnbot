@@ -1357,6 +1357,15 @@ STRINGS: dict[str, str] = {
     "btn_dashboard": "📊 Dashboard",
     "btn_dashboard_refresh": "🔄 Refresh",
     "dashboard_refreshing": "Refreshing…",
+    # "📊 Traffic" block: every figure is ↓ + ↑ including deleted keys.
+    "dashboard_traffic_title": "<b>📊 Traffic</b> (including deleted keys)",
+    "dashboard_traffic_total": "  Total (all time): <b>{total}</b>  (Xray: {xray} | AWG: {awg} | Hy2: {hy2})",
+    "dashboard_traffic_period": "  By period:",
+    "dashboard_traffic_window": "{days}d: {value}",
+    "dashboard_traffic_since": "    (data since {since} UTC)",
+    "dashboard_traffic_no_data": "    no data for the period",
+    "dashboard_traffic_avg": "  Average per key: {avg}",
+    "dashboard_traffic_top": "  Top 5 all time:",
     # ── Announcement batches ─────────────────────────────────────────────────
     "btn_batch_continue": "▶️ Continue #{id}",
     "btn_batch_retry": "🔁 Retry errors #{id}",
