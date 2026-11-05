@@ -257,6 +257,23 @@ CREATE TABLE IF NOT EXISTS deleted_key_traffic_archive (
   deleted_at TEXT NOT NULL
 );
 
+-- Hourly traffic buckets for the dashboard's 1/7/30/90/180/365-day windows.
+-- Mirrors _migrate_v39.
+--   hour_utc — unix_time // 3600 of the poll that observed the traffic.
+--   key_id   — vpn_keys.id, deliberately WITHOUT a foreign key: deleting a key
+--              keeps its buckets, so the windows include deleted keys.
+--   downloaded_bytes / uploaded_bytes — the exact delta the poller added to
+--              vpn_key_traffic_stats during that hour, in the same transaction.
+-- Pruned after 400 days by the traffic pollers (TrafficStatsService).
+CREATE TABLE IF NOT EXISTS traffic_hourly (
+  hour_utc INTEGER NOT NULL,
+  key_id INTEGER NOT NULL,
+  protocol TEXT NOT NULL,
+  downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+  uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (hour_utc, key_id, protocol)
+);
+
 CREATE TABLE IF NOT EXISTS announcement_batches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   actor_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE RESTRICT,

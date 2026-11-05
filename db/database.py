@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 38
+CURRENT_SCHEMA_VERSION = 39
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -399,6 +399,10 @@ class Database:
             await self._migrate_v38()
             await self._set_schema_version(38)
             version = 38
+        if version < 39:
+            await self._migrate_v39()
+            await self._set_schema_version(39)
+            version = 39
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1768,6 +1772,37 @@ class Database:
               updated_at TEXT NOT NULL,
               created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
               updated_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL
+            )
+            """
+        )
+
+    async def _migrate_v39(self) -> None:
+        # Hourly traffic buckets, so the dashboard can show the last 1/7/30/90/180/
+        # 365 days and not only the lifetime totals. Mirrors schema.sql; the index
+        # on hour_utc lives in indexes.sql (phase 3 of bootstrap). Idempotent.
+        #
+        # One row per (hour, key, protocol): hour_utc = unix_time // 3600, and the
+        # poller adds to it exactly the delta it adds to vpn_key_traffic_stats, in
+        # the same transaction (TrafficStatsRepository.upsert_success).
+        #
+        # key_id deliberately has NO foreign key to vpn_keys: hard-deleting a key
+        # must not take its buckets with it, so the windows keep counting traffic
+        # of deleted keys the way deleted_key_traffic_archive does for the
+        # lifetime totals. Rows go away only through the 400-day retention.
+        #
+        # Nothing is backfilled. The only history there is — the lifetime totals
+        # and the archive's deleted_at — says how much, not when: spreading it over
+        # hours would invent the very numbers this table exists to report. The
+        # windows start empty and fill from the first poll after the upgrade.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS traffic_hourly (
+              hour_utc INTEGER NOT NULL,
+              key_id INTEGER NOT NULL,
+              protocol TEXT NOT NULL,
+              downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+              uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY (hour_utc, key_id, protocol)
             )
             """
         )
