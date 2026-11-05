@@ -97,12 +97,23 @@ class StartupReconcileError(RuntimeError):
     instead of running with a silently broken data plane."""
 
 
+async def _prune_traffic_history(traffic_stats: TrafficStatsService) -> None:
+    # traffic_hourly retention rides on the pollers that fill the table rather
+    # than on a task of its own. Throttled to once an hour inside the service, so
+    # three loops calling it cost one DELETE an hour.
+    try:
+        await traffic_stats.prune_hourly_history()
+    except Exception:
+        logger.warning("traffic_hourly retention failed", exc_info=True)
+
+
 async def _awg_stats_loop(traffic_stats: TrafficStatsService, interval: int) -> None:
     while True:
         try:
             await traffic_stats.refresh_all_awg()
         except Exception:
             logger.warning("AWG background stats collection failed", exc_info=True)
+        await _prune_traffic_history(traffic_stats)
         await asyncio.sleep(interval)
 
 
@@ -115,6 +126,7 @@ async def _xray_stats_loop(traffic_stats: TrafficStatsService, interval: int) ->
             await traffic_stats.refresh_all_xray()
         except Exception:
             logger.warning("Xray background stats collection failed", exc_info=True)
+        await _prune_traffic_history(traffic_stats)
         await asyncio.sleep(interval)
 
 
@@ -128,6 +140,7 @@ async def _hysteria_stats_loop(traffic_stats: TrafficStatsService, interval: int
             await traffic_stats.refresh_all_hysteria()
         except Exception:
             logger.warning("Hysteria2 background stats collection failed", exc_info=True)
+        await _prune_traffic_history(traffic_stats)
         await asyncio.sleep(interval)
 
 

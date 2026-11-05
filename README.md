@@ -363,7 +363,7 @@ SQLite is the local storage backend; the default path is `/opt/vpn-service/data/
 startup. Current tables:
 
 `users`, `access_requests`, `vpn_keys`, `trial_key_requests`, `proxy_entries`,
-`proxy_accesses`, `audit_log`, `vpn_key_traffic_stats`, `deleted_key_traffic_archive`,
+`proxy_accesses`, `audit_log`, `vpn_key_traffic_stats`, `deleted_key_traffic_archive`, `traffic_hourly`,
 `announcement_batches`, `announcement_deliveries`, `protocol_modules`, `warp_settings`,
 `server_status_settings`, `maintenance_settings` (`schema_meta` tracks the applied
 schema version internally).

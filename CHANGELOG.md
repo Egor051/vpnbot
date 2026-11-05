@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Dashboard traffic by period.** The «📊 Трафик» block now shows, under the lifetime total,
+  the last 1/7/30/90/180/365 days (rolling `N×24` hours, the current hour included), deleted
+  keys counted. Backed by a new table, `traffic_hourly` (schema **v39**): one row per
+  `(hour_utc, key_id, protocol)`, `hour_utc = unix_time // 3600`, filled by the xray/AWG/hysteria2
+  pollers with exactly the delta they add to `vpn_key_traffic_stats`, in the same transaction.
+  No foreign key to `vpn_keys`, so deleting a key keeps its buckets. Nothing is backfilled —
+  the lifetime totals carry no time — so the windows start empty after the upgrade («нет данных
+  за период»), and until 365 days have been recorded the block says where the history starts
+  («(данные с DD.MM.YYYY HH:MM UTC)»). Buckets older than 400 days are pruned by the same
+  pollers, at most once an hour. The block is now localized (ru/en).
 - **System bundle: an exclusion policy you can see and tune (docs/operations.md#what-the-system-bundle-leaves-out).**
   The walk now leaves out config copies — `*.bak`, `*.bak.*`, `*.bak-*`, `*.bak[0-9]*` (the
   bot's own `config.json.<stamp>.<token>.bak`, `install-config.sh`'s `config.yaml.bak.<stamp>`,

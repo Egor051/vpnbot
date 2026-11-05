@@ -232,7 +232,7 @@ class _StatsRepo:
         self.last: TrafficStats | None = None
 
     async def upsert_success(self, *, key_id, downloaded_bytes, uploaded_bytes, raw_downloaded_bytes,
-                             raw_uploaded_bytes, now, source):  # type: ignore[no-untyped-def]
+                             raw_uploaded_bytes, now, source, hourly=None):  # type: ignore[no-untyped-def]
         self.last = TrafficStats(
             key_id=key_id, downloaded_bytes=downloaded_bytes, uploaded_bytes=uploaded_bytes,
             last_raw_downloaded_bytes=raw_downloaded_bytes, last_raw_uploaded_bytes=raw_uploaded_bytes,

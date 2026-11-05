@@ -26,6 +26,7 @@ from models.dto import (
     User,
     VpnKey,
 )
+from repositories.dashboard import TRAFFIC_WINDOW_DAYS
 from repositories.protocol_modules import PROTOCOL_DISPLAY, ProtocolModule
 from models.enums import (
     KeyBundleStatus,
@@ -1452,6 +1453,54 @@ def _human_audit_line(item: dict[str, object], users: dict[int, User]) -> str:
     return f"{time_text} — {actor_text}{suffix}"
 
 
+def dashboard_traffic_lines(snap: DashboardSnapshot) -> list[str]:
+    """Render the dashboard's «📊 Трафик» block.
+
+    Every figure is ↓ + ↑ and includes deleted keys: the lifetime total, the
+    average and the top come from the totals plus deleted_key_traffic_archive,
+    the windows from traffic_hourly (whose buckets outlive their keys). Each
+    figure names its period — "all time" or "Nд" — because the personal cabinet
+    shows the same account under other scopes, and an unlabelled number is what
+    once made the two screens look like they disagreed. The top is one sorted
+    number per user (a ↓/↑ split would make the row unreadable).
+    """
+    t_ = snap.traffic
+    lines = [
+        t("dashboard_traffic_title"),
+        t(
+            "dashboard_traffic_total",
+            total=h(format_bytes(t_.total_bytes)),
+            xray=h(format_bytes(t_.xray_bytes)),
+            awg=h(format_bytes(t_.awg_bytes)),
+            hy2=h(format_bytes(t_.hysteria2_bytes)),
+        ),
+        t("dashboard_traffic_period"),
+    ]
+    windows = snap.traffic_windows
+    if windows.empty:
+        lines.append(t("dashboard_traffic_no_data"))
+    else:
+        days = list(TRAFFIC_WINDOW_DAYS)
+        for start in range(0, len(days), 3):
+            lines.append(
+                "    "
+                + " · ".join(
+                    t("dashboard_traffic_window", days=d, value=h(format_bytes(windows.bytes_by_days[d])))
+                    for d in days[start : start + 3]
+                )
+            )
+        if windows.history_starts_inside and windows.first_hour_utc is not None:
+            since = datetime.fromtimestamp(windows.first_hour_utc * 3600, tz=timezone.utc)
+            lines.append(t("dashboard_traffic_since", since=h(since.strftime("%d.%m.%Y %H:%M"))))
+    lines.append(t("dashboard_traffic_avg", avg=h(format_bytes(t_.avg_per_key_bytes))))
+    if snap.top_users:
+        lines.append(t("dashboard_traffic_top"))
+        for entry in snap.top_users:
+            name = f"@{entry.username}" if entry.username else f"id{entry.user_id}"
+            lines.append(f"    {h(name)} {h(format_bytes(entry.total_bytes))}")
+    return lines
+
+
 def dashboard_text(snap: DashboardSnapshot) -> str:
     lines: list[str] = [f"<b>📊 Дашборд</b>  <i>обновлено {h(snap.refreshed_at)}</i>", ""]
 
@@ -1490,26 +1539,7 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
     ]
 
     # Traffic
-    t_ = snap.traffic
-    top_parts = []
-    for entry in snap.top_users:
-        name = f"@{entry.username}" if entry.username else f"id{entry.user_id}"
-        top_parts.append(f"{h(name)} {h(format_bytes(entry.total_bytes))}")
-    # Every figure in this block — the totals, the average and the top — is the
-    # "all time" scope (↓ + ↑, including the deleted-key archive). The top is one
-    # sorted number per user because a ↓/↑ split makes the row unreadable, so the
-    # scope is named in the heading instead: the personal cabinet shows the same
-    # account under two scopes, and an unlabelled number here is exactly what made
-    # the two screens look like they disagreed.
-    lines += [
-        "<b>📊 Трафик</b> (за всё время, с учётом удалённых ключей)",
-        f"  Итого: <b>{h(format_bytes(t_.total_bytes))}</b>  (Xray: {h(format_bytes(t_.xray_bytes))} | AWG: {h(format_bytes(t_.awg_bytes))} | Hy2: {h(format_bytes(t_.hysteria2_bytes))})",
-        f"  Среднее на ключ: {h(format_bytes(t_.avg_per_key_bytes))}",
-    ]
-    if top_parts:
-        lines.append("  Топ-5 за всё время:")
-        for part in top_parts:
-            lines.append(f"    {part}")
+    lines += dashboard_traffic_lines(snap)
     lines.append("")
 
     # Proxy
