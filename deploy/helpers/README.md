@@ -11,6 +11,7 @@ install -o root -g root -m 0755 deploy/helpers/vpn-bot-socks5-user /usr/local/sb
 install -o root -g root -m 0755 deploy/helpers/vpn-bot-xray-apply /usr/local/sbin/vpn-bot-xray-apply
 install -o root -g root -m 0755 deploy/helpers/vpn-bot-awg-apply /usr/local/sbin/vpn-bot-awg-apply
 install -o root -g root -m 0755 deploy/helpers/vpn-bot-mtproxy-apply /usr/local/sbin/vpn-bot-mtproxy-apply
+install -o root -g root -m 0755 deploy/helpers/vpn-bot-protocol-uninstall /usr/local/sbin/vpn-bot-protocol-uninstall
 install -o root -g root -m 0440 deploy/sudoers.d/vpn-bot.example /etc/sudoers.d/vpn-bot
 visudo -cf /etc/sudoers.d/vpn-bot
 ```
@@ -43,6 +44,14 @@ The Python adapters call helpers through `sudo -n`, pass arguments as argv lists
 Helpers are not a generic root shell. Sudoers grants no raw account-management, service-manager, file-copy, Xray, AWG/WG, or MTProxy binaries. Each helper accepts only its fixed backend target and validates all actions, paths, prefixes, and staged file contents before touching root-owned state.
 
 ## Interfaces
+
+Protocol uninstall (both models — in the root model the bot runs the checkout copy
+directly; see [docs/protocol-uninstall.md](../../docs/protocol-uninstall.md)):
+
+- `vpn-bot-protocol-uninstall plan <xray|awg|socks5|mtproto|hysteria2>` — JSON plan, read-only
+- `vpn-bot-protocol-uninstall apply <proto> <sha256>` — backup, removal by the compiled-in manifest, rollback on error
+
+The bot passes no path: every unit, path, port, package and user comes from the manifest in the helper, and the names `.env` may override are read and validated by the helper itself.
 
 SOCKS5:
 

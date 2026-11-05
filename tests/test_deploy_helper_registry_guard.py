@@ -116,6 +116,7 @@ EXEC_SBIN_EXEMPTIONS: Mapping[str, str] = {
     "vpn-bot-xray-apply": _backend_helper_reason("vpn-bot-xray-apply"),
     "vpn-bot-awg-apply": _backend_helper_reason("vpn-bot-awg-apply"),
     "vpn-bot-mtproxy-apply": _backend_helper_reason("vpn-bot-mtproxy-apply"),
+    "vpn-bot-protocol-uninstall": _backend_helper_reason("vpn-bot-protocol-uninstall"),
 }
 
 # Shortest justification that can be a reason rather than a shrug ("n/a", "later",

@@ -8,6 +8,7 @@
 #   install -o root -g root -m 0755 deploy/helpers/vpn-bot-xray-apply /usr/local/sbin/vpn-bot-xray-apply
 #   install -o root -g root -m 0755 deploy/helpers/vpn-bot-awg-apply /usr/local/sbin/vpn-bot-awg-apply
 #   install -o root -g root -m 0755 deploy/helpers/vpn-bot-mtproxy-apply /usr/local/sbin/vpn-bot-mtproxy-apply
+#   install -o root -g root -m 0755 deploy/helpers/vpn-bot-protocol-uninstall /usr/local/sbin/vpn-bot-protocol-uninstall
 #   install -o root -g root -m 0755 scripts/vpn-bot-warp-install /usr/local/sbin/vpn-bot-warp-install
 #   install -o root -g root -m 0755 scripts/vpn-bot-warp-iface /usr/local/sbin/vpn-bot-warp-iface
 #   install -o root -g root -m 0755 scripts/vpn-bot-warp-routes /usr/local/sbin/vpn-bot-warp-routes
@@ -54,6 +55,23 @@ Cmnd_Alias VPN_BOT_MTPROTO = \
     /usr/local/sbin/vpn-bot-mtproxy-apply apply /run/vpn-bot/mtproxy/*, \
     /usr/local/sbin/vpn-bot-mtproxy-apply status
 
+# Cascade removal of a protocol from the host ("Disable and remove from the server",
+# docs/protocol-uninstall.md). The protocol is pinned per line; the bot passes NO
+# path — the manifest is compiled into the helper. The `apply` wildcard carries the
+# plan sha256 only: the helper refuses anything but exactly three arguments with a
+# 64-character lowercase hex hash, and a hash that is not the current plan's.
+Cmnd_Alias VPN_BOT_UNINSTALL = \
+    /usr/local/sbin/vpn-bot-protocol-uninstall plan xray, \
+    /usr/local/sbin/vpn-bot-protocol-uninstall plan awg, \
+    /usr/local/sbin/vpn-bot-protocol-uninstall plan socks5, \
+    /usr/local/sbin/vpn-bot-protocol-uninstall plan mtproto, \
+    /usr/local/sbin/vpn-bot-protocol-uninstall plan hysteria2, \
+    /usr/local/sbin/vpn-bot-protocol-uninstall apply xray *, \
+    /usr/local/sbin/vpn-bot-protocol-uninstall apply awg *, \
+    /usr/local/sbin/vpn-bot-protocol-uninstall apply socks5 *, \
+    /usr/local/sbin/vpn-bot-protocol-uninstall apply mtproto *, \
+    /usr/local/sbin/vpn-bot-protocol-uninstall apply hysteria2 *
+
 # WARP outbound-IP masking module. The install helper consumes a staged config
 # from the bot's private staging dir; iface/routes/status are pinned to the fixed
 # out-warp interface and /etc/amnezia/out-warp.conf config.
@@ -86,4 +104,4 @@ Cmnd_Alias VPN_BOT_WARP_SPLIT = \
     /usr/local/sbin/vpn-bot-warp-split-state restart, \
     /usr/local/sbin/vpn-bot-warp-split-state status
 
-vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT
+vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_UNINSTALL, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT

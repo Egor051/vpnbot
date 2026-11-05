@@ -34,6 +34,7 @@
 /usr/local/sbin/vpn-bot-awg-apply  # installer — ставит deploy/setup-nonroot-helper-mode.sh из deploy/helpers/, вне OUT_OF_REPO_HELPERS по замыслу
 /usr/local/sbin/vpn-bot-mtproxy-apply  # installer — ставит deploy/setup-nonroot-helper-mode.sh из deploy/helpers/, вне OUT_OF_REPO_HELPERS по замыслу
 /usr/local/sbin/vpn-bot-socks5-user  # installer — ставит deploy/setup-nonroot-helper-mode.sh из deploy/helpers/, вне OUT_OF_REPO_HELPERS по замыслу
+/usr/local/sbin/vpn-bot-protocol-uninstall  # installer — ставит deploy/setup-nonroot-helper-mode.sh из deploy/helpers/, вне OUT_OF_REPO_HELPERS по замыслу
 
 # --- Provider / backup-only / deployment-local ---------------------------------
 /etc/netplan/*  # provider — сетевая конфигурация образа VPS; /etc/netplan не сканируется, запись для таблицы docs/host-state.md

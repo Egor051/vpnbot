@@ -16,6 +16,10 @@ HELPERS = (
     Path("/usr/local/sbin/vpn-bot-awg-apply"),
     Path("/usr/local/sbin/vpn-bot-mtproxy-apply"),
 )
+# Cascade removal of a protocol from the host (Protocol modules → "Disable and remove
+# from the server"). Optional: without it the bot still runs, only that button fails,
+# so a host prepared before it existed warns until setup-nonroot-helper-mode.sh re-runs.
+UNINSTALL_HELPER = Path("/usr/local/sbin/vpn-bot-protocol-uninstall")
 # Optional WARP routing helpers (only used when the WARP module is enabled).
 WARP_HELPERS = (
     Path("/usr/local/sbin/vpn-bot-warp-install"),
@@ -208,6 +212,10 @@ def check_sudoers(path: Path, reporter: Reporter) -> None:
             reporter.fail(f"{path}: missing {helper}")
     # WARP helpers are optional (only when the WARP module is enabled); a partial
     # set is suspicious, so warn rather than fail when some-but-not-all are present.
+    if str(UNINSTALL_HELPER) in active:
+        reporter.ok(f"{path}: grants {UNINSTALL_HELPER}")
+    else:
+        reporter.warn(f"{path}: no grant for {UNINSTALL_HELPER} (protocol removal from the panel will fail)")
     warp_present = [h for h in WARP_HELPERS if str(h) in active]
     if warp_present and len(warp_present) != len(WARP_HELPERS):
         missing = [str(h) for h in WARP_HELPERS if str(h) not in active]
@@ -222,6 +230,14 @@ def check_sudoers(path: Path, reporter: Reporter) -> None:
 
 
 def check_helpers(reporter: Reporter) -> None:
+    if not UNINSTALL_HELPER.exists():
+        reporter.warn(f"{UNINSTALL_HELPER}: missing (re-run deploy/setup-nonroot-helper-mode.sh)")
+    elif os.name == "posix":
+        st = UNINSTALL_HELPER.stat()
+        if st.st_uid == 0 and st.st_gid == 0 and _mode(UNINSTALL_HELPER) == 0o755:
+            reporter.ok(f"{UNINSTALL_HELPER}: root:root 0755")
+        else:
+            reporter.fail(f"{UNINSTALL_HELPER}: expected root:root 0755")
     for helper in HELPERS:
         if not helper.exists():
             reporter.fail(f"{helper}: missing")
