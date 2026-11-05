@@ -230,7 +230,7 @@ def test_upgrade_from_populated_v38_creates_table_keeps_totals_and_poller_fills_
         db = await _open(db_path)
         try:
             version = await db.conn.execute_fetchone("SELECT value FROM schema_meta WHERE key = 'schema_version'")
-            assert version is not None and int(version["value"]) == CURRENT_SCHEMA_VERSION == 39
+            assert version is not None and int(version["value"]) == CURRENT_SCHEMA_VERSION == 40
             assert await _buckets(db) == [], "nothing may be backfilled: the totals carry no time"
             fks = await db.conn.execute_fetchall("PRAGMA foreign_key_list(traffic_hourly)")
             assert list(fks) == [], "traffic_hourly must not reference vpn_keys"

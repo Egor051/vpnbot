@@ -18,9 +18,15 @@ def create_health_app(backend_health: BackendHealth) -> web.Application:
         # backend reason so secret-like detail can never leak, matching the bot's own
         # check_backends() handling.
         backends = {
-            s.backend_type.value: {"degraded": s.degraded, "reason": redact(s.reason) if s.reason else None}
+            s.backend_type.value: {
+                "degraded": s.degraded,
+                "uninstalled": s.uninstalled,
+                "reason": redact(s.reason) if s.reason else None,
+            }
             for s in statuses
         }
+        # A backend removed from the host is not a fault: it does not turn the
+        # endpoint 503 (s.degraded is never set for it, BackendHealth.mark_uninstalled).
         all_healthy = all(not s.degraded for s in statuses)
         body = {
             "status": "healthy" if all_healthy else "degraded",

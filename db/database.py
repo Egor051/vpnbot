@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 39
+CURRENT_SCHEMA_VERSION = 40
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -403,6 +403,10 @@ class Database:
             await self._migrate_v39()
             await self._set_schema_version(39)
             version = 39
+        if version < 40:
+            await self._migrate_v40()
+            await self._set_schema_version(40)
+            version = 40
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1806,6 +1810,28 @@ class Database:
             )
             """
         )
+
+    async def _migrate_v40(self) -> None:
+        # Cascade removal of a protocol from the host ("uninstall"). Three
+        # idempotent ADD COLUMNs on protocol_modules, mirrored in schema.sql for
+        # fresh DBs (phase 1 creates the table with them; this phase adds them to an
+        # existing one; nothing here is indexed, so indexes.sql is untouched).
+        #
+        # The columns are for the panel and the audit trail ONLY. The source of
+        # truth is the marker /etc/vpn-bot/uninstalled/<name> the root helper
+        # writes as its very last step; bot startup reconciles these columns
+        # against it (services.protocol_uninstall). So nothing is backfilled: a
+        # migration cannot know which protocol was removed from the host.
+        cols = await self._table_columns("protocol_modules")
+        if "uninstalled_at" not in cols:
+            await self.conn.execute("ALTER TABLE protocol_modules ADD COLUMN uninstalled_at TEXT")
+        if "uninstalled_by" not in cols:
+            await self.conn.execute(
+                "ALTER TABLE protocol_modules ADD COLUMN uninstalled_by INTEGER "
+                "REFERENCES users(telegram_user_id) ON DELETE SET NULL"
+            )
+        if "uninstall_backup" not in cols:
+            await self.conn.execute("ALTER TABLE protocol_modules ADD COLUMN uninstall_backup TEXT")
 
     async def _ensure_spider_x_backfill(self) -> None:
         # Idempotent per-key spiderX backfill, run on EVERY bootstrap (not gated by

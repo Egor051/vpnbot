@@ -334,13 +334,20 @@ def build_relay_health_supervisor(
     )
 
 
-async def relay_health_loop(monitor: _Checkable, interval: int) -> None:
-    """Probe forever at *interval* seconds; an iteration that fails is logged."""
+async def relay_health_loop(monitor: _Checkable, interval: int, uninstalled: object | None = None) -> None:
+    """Probe forever at *interval* seconds; an iteration that fails is logged.
+
+    A relay forwards to THIS host's Xray, so once Xray is removed from the host
+    (protocol uninstall marker, *uninstalled*) every probe would fail and alert:
+    the passes are skipped instead, re-checked each time.
+    """
     while True:
-        try:
-            await monitor.check_once()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("Relay health check failed", exc_info=True)
+        check = getattr(uninstalled, "is_uninstalled", None)
+        if check is None or not check("xray"):
+            try:
+                await monitor.check_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Relay health check failed", exc_info=True)
         await asyncio.sleep(interval)

@@ -1067,33 +1067,43 @@ STRINGS: dict[str, str] = {
     "btn_modules_back": "← Back to modules",
     "modules_panel_title": (
         "<b>⚙️ Protocol modules</b>\n\n"
-        "Disabling a protocol revokes every client's access both on the server "
-        "(Xray client, AWG peer, Dante user, MTProto secret in managed mode) and in the bot: keys are deleted "
-        "from the database (traffic is archived), SOCKS5/MTProto proxy accesses are marked as deleted.\n"
-        "Services, interfaces, firewall rules/ports and shared server configs/certificates are <b>not touched</b>.\n"
+        "<b>Disable</b> revokes every client's access both on the server (Xray client, AWG peer, "
+        "Dante user, MTProto secret in managed mode) and in the bot: Xray/AWG/Hysteria2 keys are deleted "
+        "from the database (traffic is archived), SOCKS5/MTProto proxy accesses stay in the database "
+        "marked as deleted. The protocol's service, configs, binaries, units and firewall rules stay on "
+        "the server — you can re-enable the protocol at any time.\n"
         "⚠️ MTProto in static mode: the shared secret keeps working — to revoke access, "
-        "rotate MTPROTO_SECRET and restart the proxy.\n"
-        "Once disabled, the protocol is completely hidden; only \"Backend diagnostics\" will show it was disabled.\n\n"
-        "You can re-enable a protocol at any time."
+        "rotate MTPROTO_SECRET and restart the proxy.\n\n"
+        "<b>Disable and remove from the server</b> revokes access the same way, then removes from the "
+        "server what the protocol's manifest lists: units, files and directories, UFW rules, packages, "
+        "service users. A plan with sizes and the backup path comes first; any error rolls everything "
+        "back from the backup. Shared parts of the host (nginx, certificates, WARP, SSH) are not touched. "
+        "A removed protocol comes back only by reinstalling it.\n\n"
+        "✅ enabled · ❌ disabled · 🗑 removed from the server"
     ),
     "module_disable_confirm1": (
         "<b>⚠️ Disable protocol {label}</b>\n\n"
-        "This action will:\n"
-        "• revoke each client's access on the server (Xray client, AWG peer, Dante user, "
+        "<b>Disable only</b>:\n"
+        "• revokes each client's access on the server (Xray client, AWG peer, Dante user, "
         "MTProto secret in managed mode)\n"
-        "• permanently delete Xray/AWG/Hysteria2 keys from the bot database (traffic is archived) "
-        "and mark SOCKS5/MTProto proxy accesses as deleted\n"
-        "• remove all buttons and mentions of the protocol\n"
-        "• NOT touch services, interfaces, firewall rules/ports or shared server configs/certificates — "
-        "including the shared MTProto secret in static mode: it keeps working until you rotate "
-        "MTPROTO_SECRET and restart the proxy\n\n"
-        "Continue?"
+        "• permanently deletes Xray/AWG/Hysteria2 keys from the bot database (traffic is archived) "
+        "and marks SOCKS5/MTProto proxy accesses as deleted (the records stay in the database)\n"
+        "• removes all buttons and mentions of the protocol\n"
+        "• leaves the service, configs, binaries, units and firewall on the server as they are — the "
+        "protocol can be re-enabled; the shared MTProto secret in static mode keeps working until you "
+        "rotate MTPROTO_SECRET and restart the proxy\n\n"
+        "<b>Disable and remove from the server</b>:\n"
+        "• the same, then removal from the server strictly by the protocol's manifest\n"
+        "• a plan first (what is removed, what is kept as shared, the backup path), then a separate confirmation\n"
+        "• the protocol comes back only by reinstalling it\n\n"
+        "What should be done?"
     ),
     "module_disable_confirm2": (
         "<b>🛑 FINAL CONFIRMATION — {label}</b>\n\n"
-        "This protocol's keys / proxy accesses will be deleted from the bot database "
-        "(SOCKS5/MTProto ones are marked as deleted). <b>They cannot be restored</b>: "
-        "after re-enabling the protocol, access has to be issued again.\n"
+        "This protocol's keys will be deleted from the bot database, SOCKS5/MTProto proxy accesses "
+        "marked as deleted. <b>The access already issued cannot be restored</b>: after re-enabling the "
+        "protocol, access has to be issued again.\n"
+        "On the server the protocol's service and files stay — only the clients' access is removed.\n"
         "Click the button below to confirm."
     ),
     "module_enable_confirm": (
@@ -1109,6 +1119,96 @@ STRINGS: dict[str, str] = {
         "see bot.log."
     ),
     "module_enabled_ok": "✅ Protocol <b>{label}</b> enabled.",
+    # ── Protocol uninstall (removal from the server) ─────────────────────────
+    "btn_module_disable_only": "Disable only",
+    "btn_module_disable_uninstall": "🗑 Disable and remove from the server",
+    "btn_module_uninstall": "🗑 Remove from the server: {label}",
+    "btn_module_enable_locked": "🔒 Enable",
+    "btn_module_uninstall_confirm": "⚠️ CONFIRM REMOVAL FROM THE SERVER",
+    "btn_module_uninstall_refresh": "🔄 Refresh the plan",
+    "module_uninstall_planning": "Building the removal plan…",
+    "module_uninstall_running": "Removing the protocol from the server…",
+    "module_uninstall_plan_title": "<b>🗑 Removal from the server — {label}</b>",
+    "module_uninstall_plan_header": "On the server: {state} · plan <code>{sha}</code>",
+    "module_uninstall_state_installed": "installed",
+    "module_uninstall_state_partial": "partly removed",
+    "module_uninstall_state_uninstalled": "removed",
+    "module_uninstall_section_units": "<b>Units</b>",
+    "module_uninstall_section_files": "<b>Files and directories</b>",
+    "module_uninstall_section_ufw": "<b>UFW rules</b>",
+    "module_uninstall_section_packages": "<b>Packages (apt-get purge)</b>",
+    "module_uninstall_section_users": "<b>Users (userdel, no -r)</b>",
+    "module_uninstall_section_env": "<b>.env</b>",
+    "module_uninstall_section_absent": "<b>Already absent</b>",
+    "module_uninstall_section_shared": "<b>Skipped as shared</b>",
+    "module_uninstall_section_kept": "<b>Kept</b>",
+    "module_uninstall_section_blocking": "<b>⛔ Blocks the removal</b>",
+    "module_uninstall_section_warnings": "<b>⚠️ Warnings</b>",
+    "module_uninstall_unit_template": "{unit} — a template, removed together with its file",
+    "module_uninstall_dir_line": "{path}/ — the whole directory: {entries} entries, {size}",
+    "module_uninstall_awg_group": "{count} files matching the AWG pattern in {dir} ({size}): {names}",
+    "module_uninstall_env_set_false": "{var}=false — exactly one line is replaced",
+    "module_uninstall_env_append": "{var}=false — one line is appended",
+    "module_uninstall_env_already_false": "{var} is already false",
+    "module_uninstall_marker_line": "Marker: <code>{path}</code>",
+    "module_uninstall_relays_warning": (
+        "The database has relays ({relays}): once Xray is removed, their VLESS keys stop working."
+    ),
+    "module_uninstall_backup_line": (
+        "Backup: <code>{dir}/&lt;protocol&gt;-&lt;UTC&gt;.tar.gz</code> (≈ {size} uncompressed), root 0600."
+    ),
+    "module_uninstall_purge_note": (
+        "Before the removal the bot revokes every client of the protocol (as with «Disable only»). "
+        "If a single record cannot be revoked, the removal from the server does not start."
+    ),
+    "module_uninstall_nothing_to_do": "The protocol is already removed from the server — nothing to do.",
+    "module_uninstall_blocked_note": "The removal is impossible until the findings above are fixed.",
+    "module_uninstall_more": "… and {count} more",
+    "module_uninstall_truncated": "… the plan is shortened; the full one is in the helper output on the server.",
+    "module_uninstall_ok": "✅ Protocol <b>{label}</b> removed from the server. Records revoked: {purged}.",
+    "module_uninstall_nothing_done": "ℹ️ Protocol <b>{label}</b> was already removed from the server — nothing changed.",
+    "module_uninstall_failed_rolled_back": (
+        "❌ Removing <b>{label}</b> failed at step «{step}». The changes on the server were rolled back from the backup."
+    ),
+    "module_uninstall_failed_rollback_incomplete": (
+        "🛑 Removing <b>{label}</b> failed at step «{step}», and the rollback did NOT fully succeed — "
+        "check the server by hand."
+    ),
+    "module_uninstall_failed_nothing_changed": (
+        "❌ Removing <b>{label}</b> did not start (step «{step}»). Nothing changed on the server."
+    ),
+    "module_uninstall_section_removed": "<b>Removed</b> ({count})",
+    "module_uninstall_section_absent_count": "<b>Already absent</b> ({count})",
+    "module_uninstall_section_skipped_count": "<b>Skipped</b> ({count})",
+    "module_uninstall_section_errors": "<b>Errors</b>",
+    "module_uninstall_section_rollback_errors": "<b>Rollback errors</b>",
+    "module_uninstall_report_backup": "Backup: <code>{path}</code>",
+    "module_uninstall_report_rollback": "Manual rollback: <code>{command}</code>",
+    "module_uninstall_plan_expired": "The plan is out of date or gone — open it again.",
+    "module_uninstall_plan_changed": "The removal plan is out of date: the server changed. The new plan is below — confirm it again.",
+    "module_uninstall_purge_failed": (
+        "{failed} records could not be revoked — the removal from the server did not start. See bot.log."
+    ),
+    "module_uninstall_busy": "A protocol removal is already running.",
+    "module_uninstall_blocked": "The plan has blocking findings — the removal is impossible.",
+    "module_uninstall_helper_timeout": (
+        "The removal helper did not answer in time — check /var/log/vpn-bot-uninstall.log on the server."
+    ),
+    "module_uninstall_helper_missing": "The removal helper is missing: {path}",
+    "module_uninstall_helper_failed": "The removal helper exited with code {code} and no answer: {detail}",
+    "module_uninstall_helper_refused": "The removal helper refused: {error} {detail}",
+    "module_enable_blocked_uninstalled": "The protocol was removed from the server; it has to be reinstalled.",
+    "backend_uninstalled_blocked": "{label} was removed from the server: no operations until it is reinstalled.",
+    "module_status_uninstalled_short": "removed from the server",
+    "module_uninstall_step_backup": "backup",
+    "module_uninstall_step_units": "units",
+    "module_uninstall_step_files": "files",
+    "module_uninstall_step_ufw": "UFW",
+    "module_uninstall_step_packages": "packages",
+    "module_uninstall_step_users": "users",
+    "module_uninstall_step_env": ".env",
+    "module_uninstall_step_marker": "marker",
+    "module_uninstall_step_signal": "interruption",
     # ── admin «All-in-One» section: bulk composition reconcile ─────────────────
     "btn_admin_bundles": "🔗 All-in-One",
     "btn_aio_to_basic": "Switch every subscription to basic",

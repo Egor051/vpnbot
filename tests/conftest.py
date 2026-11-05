@@ -100,6 +100,12 @@ def _isolate_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(settings_module, "load_dotenv", _no_autodiscovery_load_dotenv)
     monkeypatch.setattr(hy2_auth_config_module, "load_dotenv", _no_autodiscovery_load_dotenv)
+    # The protocol-uninstall markers live in /etc/vpn-bot/uninstalled on the host
+    # this suite runs on (deploy.sh Phase 1): a load_settings() here must never see
+    # them, or an uninstalled protocol on the box would change what a test observes.
+    monkeypatch.setattr(
+        settings_module, "PROTOCOL_UNINSTALL_MARKER_DIR", Path("/nonexistent/vpn-bot-test/uninstalled")
+    )
 
 
 def _load_module(module_name: str, path: Path) -> ModuleType:

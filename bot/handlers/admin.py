@@ -1240,16 +1240,23 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Services)
     try:
         await require_superadmin(services, callback.from_user.id)
         settings = services.settings
-        service_names = [
-            "vpn-bot",
-            settings.xray_service_name,
-            f"awg-quick@{settings.awg_interface}",
-        ]
-        if settings.socks5_enabled:
+        uninstall = getattr(services, "protocol_uninstall", None)
+
+        def on_host(name: str) -> bool:
+            # A protocol removed from the host has no unit to check: the module
+            # list below reports it as removed instead of a failed service.
+            return uninstall is None or not uninstall.is_uninstalled(name)
+
+        service_names = ["vpn-bot"]
+        if on_host("xray"):
+            service_names.append(settings.xray_service_name)
+        if on_host("awg"):
+            service_names.append(f"awg-quick@{settings.awg_interface}")
+        if settings.socks5_enabled and on_host("socks5"):
             service_names.append(settings.socks5_service_name)
-        if settings.mtproto_enabled:
+        if settings.mtproto_enabled and on_host("mtproto"):
             service_names.append(settings.mtproto_service_name)
-        if settings.hysteria2_enabled:
+        if settings.hysteria2_enabled and on_host("hysteria2"):
             # The Hysteria2 data plane is two units: the auth endpoint the bot
             # feeds (vpn-bot-hy2-auth) and hysteria-server itself. Check both so a
             # down hy2 data plane surfaces here exactly like Xray/AWG.

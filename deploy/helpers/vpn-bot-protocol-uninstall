@@ -1,0 +1,1419 @@
+#!/usr/bin/env bash
+# vpn-bot-protocol-uninstall — remove ONE protocol from this host, strictly by the
+# manifest compiled into this file (the MANIFEST block below). Nothing that is not
+# named there is ever deleted. The bot passes a protocol name and a plan hash —
+# never a path: every path, unit, port, package and user comes from the manifest,
+# and the few names .env may override are read and validated HERE.
+#
+#   vpn-bot-protocol-uninstall plan     <proto>           JSON plan on stdout (read-only)
+#   vpn-bot-protocol-uninstall apply    <proto> <sha256>  backup, removal, JSON report
+#   vpn-bot-protocol-uninstall manifest <proto>           the resolved manifest (review)
+#
+#   <proto> is one of: xray awg socks5 mtproto hysteria2
+#
+# APPLY, in this order (a failure in steps 4-10 restores everything from the backup):
+#   1  re-compute the plan and compare its sha256 with the one the admin confirmed;
+#      a different host is refused (exit 65) and a fresh plan has to be confirmed
+#   2  (the bot, before calling apply: the per-client purge in the database)
+#   3  backup of everything that is about to change, verified with `tar -tzf`, in
+#      /var/backups/vpn-bot/uninstall/<proto>-<UTC ts>.tar.gz (root 0600) — without a
+#      valid backup nothing is touched (exit 67)
+#   4  units: stop -> disable -> (awg: mask) -> remove the manifest unit files and
+#      drop-ins -> daemon-reload -> reset-failed
+#   5  files and directories, one by one, each re-checked with realpath first
+#   6  ufw: `ufw delete allow <port>/<proto>` (removes the v4 and the v6 copy), then
+#      `ufw show added` / `ufw status` must not show the rule any more
+#   7  apt-get purge -y of the manifest packages that dpkg reports as `ii`
+#   8  userdel (never -r) of the manifest users that own no file left on `/`
+#   9  .env: <PROTO>_ENABLED=false where the protocol has that flag — exactly one
+#      line changed or appended, owner and mode kept
+#   10 marker /etc/vpn-bot/uninstalled/<proto> (JSON: ts, sha256, backup)
+# A repeated apply on a removed protocol is "nothing to do" and exits 0.
+#
+# PLAN HASH. The sha256 covers what the apply DECIDES — which units, unit files,
+# paths, ufw rules, packages and users it acts on, the .env edit and the marker —
+# and deliberately not what churns while the admin reads the plan or what the
+# purge (step 2) changes by design: file sizes, active states, the *.bak files
+# inside a directory that is removed whole, the AWG backups matched by the regex
+# and the SOCKS5 users matched by prefix+shell (the purge deletes those very
+# users). A rule matches whatever it matches at apply time; that is the policy.
+#
+# EXIT CODES: 0 ok / nothing to do · 2 usage · 64 validation (protocol, sha, .env,
+# not root) · 65 plan changed · 66 refused (blocking finding, another run holds the
+# lock) · 67 backup failed (nothing changed) · 70 a step failed and the rollback
+# succeeded · 71 a step failed and the rollback did not fully succeed.
+#
+# MODELS. Runs as root either way: directly from the bot's checkout in the root/api
+# model, or as /usr/local/sbin/vpn-bot-protocol-uninstall via the exact-path sudoers
+# grant in the non-root helper model. A non-root bot runs under ProtectSystem=strict,
+# so the helper re-enters PID 1's mount namespace (nsenter) before it reads or
+# writes anything, the same escape deploy/helpers/vpn-bot-socks5-user uses.
+#
+# TEST SEAM (never set in production): VPN_BOT_UNINSTALL_ROOT prefixes every host
+# path, and then every privileged tool MUST resolve inside
+# VPN_BOT_UNINSTALL_SELFTEST_BIN — a stub that is missing would otherwise run the
+# real systemctl/ufw/apt-get, and deploy.sh runs the test suite as root on the
+# production host. sudo's env_reset strips both variables.
+set -uo pipefail
+umask 077
+export LC_ALL=C
+
+readonly HELPER_VERSION=1
+readonly PROTOCOLS="xray awg socks5 mtproto hysteria2"
+
+readonly APP_DIR=/opt/vpn-service
+readonly ENV_FILE=/opt/vpn-service/.env
+readonly UNIT_DIR=/etc/systemd/system
+readonly MARKER_DIR=/etc/vpn-bot/uninstalled
+readonly BACKUP_DIR=/var/backups/vpn-bot/uninstall
+readonly LOG_FILE=/var/log/vpn-bot-uninstall.log
+readonly LOCK_FILE=/run/vpn-bot-uninstall.lock
+readonly META=vpn-bot-uninstall-meta
+readonly AWG_ALLOWED_DIR=/etc/amnezia/amneziawg
+# The only pattern in the manifest. @IF@ becomes AWG_INTERFACE (validated to
+# [A-Za-z0-9_-], so it carries no regex metacharacter). Pinned by the test suite.
+readonly AWG_FILE_RE_TEMPLATE='^\.?@IF@\.conf(\.lock|\..+\.bak|\.bak\..+)?$'
+readonly HY2_MARK_HELPER=/usr/local/sbin/vpnbot-hy2-warp-mark
+readonly HY2_MARK_UNIT=vpnbot-hy2-warp-mark.service
+
+readonly EXIT_USAGE=2 EXIT_VALIDATION=64 EXIT_PLAN_CHANGED=65 EXIT_REFUSED=66
+readonly EXIT_BACKUP=67 EXIT_ROLLED_BACK=70 EXIT_ROLLBACK_FAILED=71
+
+# Tools that change or read privileged state. Under the test seam each one must be
+# a stub; in production a missing optional one (ufw, iptables-save) is reported.
+readonly PRIV_TOOLS="systemctl ufw apt-get dpkg-query userdel useradd groupadd usermod getent iptables-save pgrep nsenter"
+
+R="${VPN_BOT_UNINSTALL_ROOT:-}"
+
+# --------------------------------------------------------------------------- #
+# Output: plain JSON, built without jq (not installed on the host)
+# --------------------------------------------------------------------------- #
+jstr() {
+	local s="$1"
+	s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+	s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"; s="${s//$'\t'/\\t}"
+	s="${s//[$'\x01'-$'\x1f']/}"
+	printf '"%s"' "$s"
+}
+# jobj key json-value [key json-value ...]
+jobj() {
+	local out="{" sep=""
+	while (($# >= 2)); do out+="${sep}$(jstr "$1"):$2"; sep=","; shift 2; done
+	printf '%s}' "$out"
+}
+# jarr json-value...
+jarr() { local IFS=","; printf '[%s]' "$*"; }
+jnum() { printf '%d' "${1:-0}"; }
+jbool() { if [[ "$1" == 1 ]]; then printf 'true'; else printf 'false'; fi; }
+
+log() {
+	local lf
+	lf="$(hp "$LOG_FILE")"
+	{ printf '%s [%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${PROTO:-?}" "$*" >>"$lf"; } 2>/dev/null || true
+	printf 'vpn-bot-protocol-uninstall: %s\n' "$*" >&2
+}
+
+# Print a JSON error object and exit.
+die_json() {
+	local code="$1" err="$2" detail="${3:-}"
+	jobj ok false error "$(jstr "$err")" detail "$(jstr "$detail")" protocol "$(jstr "${PROTO:-}")"
+	printf '\n'
+	[[ -n "$detail" ]] && printf 'vpn-bot-protocol-uninstall: %s: %s\n' "$err" "$detail" >&2
+	exit "$code"
+}
+
+usage() {
+	printf 'usage: %s plan <proto> | apply <proto> <sha256> | manifest <proto>\n' "${0##*/}" >&2
+	printf '       <proto>: %s\n' "$PROTOCOLS" >&2
+	exit "$EXIT_USAGE"
+}
+
+# Host path of an absolute path (the test seam prefixes it).
+hp() { printf '%s%s' "$R" "$1"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# --------------------------------------------------------------------------- #
+# Environment: test fence, root, mount namespace
+# --------------------------------------------------------------------------- #
+setup_environment() {
+	if [[ -n "$R" ]]; then
+		R="$(realpath -e -- "$R" 2>/dev/null)" || die_json "$EXIT_VALIDATION" selftest "VPN_BOT_UNINSTALL_ROOT does not exist"
+		[[ "$R" != "/" ]] || die_json "$EXIT_VALIDATION" selftest "VPN_BOT_UNINSTALL_ROOT must not be /"
+		local bin="${VPN_BOT_UNINSTALL_SELFTEST_BIN:-}" t p
+		[[ -n "$bin" && -d "$bin" ]] || die_json "$EXIT_VALIDATION" selftest "VPN_BOT_UNINSTALL_ROOT needs VPN_BOT_UNINSTALL_SELFTEST_BIN"
+		bin="$(realpath -e -- "$bin")"
+		for t in $PRIV_TOOLS; do
+			p="$(command -v "$t" 2>/dev/null || true)"
+			[[ -n "$p" && "$(realpath -e -- "$p" 2>/dev/null)" == "$bin/$t" ]] \
+				|| die_json "$EXIT_VALIDATION" selftest "$t resolves to '${p:-nothing}', not to a stub in $bin — refusing to run a real host tool"
+		done
+		return 0
+	fi
+	[[ "${EUID}" -eq 0 ]] || die_json "$EXIT_VALIDATION" not_root "must run as root (sudo -n ${0##*/} ...)"
+	export PATH=/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+	if [[ "${VPN_BOT_UNINSTALL_HOSTNS:-0}" != "1" ]]; then
+		local self_ns init_ns
+		self_ns="$(readlink /proc/self/ns/mnt 2>/dev/null || true)"
+		init_ns="$(readlink /proc/1/ns/mnt 2>/dev/null || true)"
+		if [[ -n "$init_ns" && "$self_ns" != "$init_ns" ]]; then
+			export VPN_BOT_UNINSTALL_HOSTNS=1
+			exec nsenter --mount=/proc/1/ns/mnt -- "$(readlink -f -- "$0")" "${ARGS[@]}"
+		fi
+	fi
+}
+
+# --------------------------------------------------------------------------- #
+# .env — the same tolerant reader as scripts/vpnbot-hy2-warp-mark: `export` and
+# spaces around `=` are accepted, the LAST assignment wins, an inline `# comment`
+# and one pair of surrounding quotes are stripped. The file is never sourced.
+# --------------------------------------------------------------------------- #
+env_raw() {
+	local f
+	f="$(hp "$ENV_FILE")"
+	[[ -r "$f" ]] || return 0
+	sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?$1[[:space:]]*=[[:space:]]*//p" "$f" \
+		| tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/" -e 's/[[:space:]]*$//'
+}
+env_or() { local v; v="$(env_raw "$1")"; printf '%s' "${v:-$2}"; }
+
+bad_env() { die_json "$EXIT_VALIDATION" invalid_env "$1"; }
+
+# A unit base name from .env (".service" tolerated and dropped).
+valid_unit_base() {
+	local n="$1"
+	[[ "$n" =~ ^[A-Za-z0-9@._-]+$ ]] || return 1
+	[[ "$n" != -* && "$n" != .* && "$n" != *..* && "$n" != *@* ]] || return 1
+	return 0
+}
+read_unit_base() {   # OUTVAR VAR default — the validated base name, or the run stops
+	local v
+	v="$(env_or "$2" "$3")"; v="${v%.service}"
+	valid_unit_base "$v" || bad_env "$2='$v' is not a unit name (^[A-Za-z0-9@._-]+$, no '@', '..' or leading '-'/'.')"
+	unit_forbidden "${v}.service" && bad_env "$2='$v' names a unit this helper never touches"
+	printf -v "$1" '%s' "$v"
+}
+valid_abs_path() {
+	local p="$1"
+	[[ "$p" == /* && "$p" != */ && "$p" != *//* ]] || return 1
+	[[ "/${p}/" != */../* && "/${p}/" != */./* ]] || return 1
+	[[ "$p" =~ ^[A-Za-z0-9/._@+-]+$ ]] || return 1
+	return 0
+}
+
+load_env() {
+	[[ -r "$(hp "$ENV_FILE")" ]] || bad_env "$ENV_FILE is not readable"
+	case "$PROTO" in
+	xray)
+		read_unit_base XRAY_SVC XRAY_SERVICE_NAME xray
+		;;
+	awg)
+		AWG_IF="$(env_or AWG_INTERFACE awg0)"
+		[[ "$AWG_IF" =~ ^[A-Za-z0-9_-]{1,15}$ ]] || bad_env "AWG_INTERFACE='$AWG_IF' is not an interface name"
+		case "$AWG_IF" in out-warp|*warp*|lo|eth*|ens*|enp*) bad_env "AWG_INTERFACE='$AWG_IF' is a shared interface" ;; esac
+		AWG_CONF="$(env_or AWG_CONFIG_PATH "${AWG_ALLOWED_DIR}/${AWG_IF}.conf")"
+		valid_abs_path "$AWG_CONF" || bad_env "AWG_CONFIG_PATH='$AWG_CONF' is not an absolute path without '..'"
+		[[ "${AWG_CONF%/*}" == "$AWG_ALLOWED_DIR" ]] || bad_env "AWG_CONFIG_PATH='$AWG_CONF' is outside $AWG_ALLOWED_DIR"
+		[[ "${AWG_CONF##*/}" == "${AWG_IF}.conf" ]] || bad_env "AWG_CONFIG_PATH='$AWG_CONF' does not belong to AWG_INTERFACE='$AWG_IF'"
+		AWG_DIR="${AWG_CONF%/*}"
+		AWG_RE="${AWG_FILE_RE_TEMPLATE//@IF@/$AWG_IF}"
+		;;
+	socks5)
+		read_unit_base SOCKS5_SVC SOCKS5_SERVICE_NAME danted
+		SOCKS_PREFIX="$(env_or SOCKS5_LOGIN_PREFIX vpn_socks_)"
+		[[ "$SOCKS_PREFIX" =~ ^[A-Za-z_][A-Za-z0-9_]{2,}$ ]] || bad_env "SOCKS5_LOGIN_PREFIX='$SOCKS_PREFIX' is too short or not [A-Za-z_][A-Za-z0-9_]+"
+		local norm="${SOCKS_PREFIX,,}"; norm="${norm//_/}"
+		case "$norm" in root|admin|user|test|ubuntu|www|daemon|nobody|vpnbot|sys|bin) bad_env "SOCKS5_LOGIN_PREFIX='$SOCKS_PREFIX' is too generic" ;; esac
+		SOCKS_SHELL="$(env_or SOCKS5_SYSTEM_USER_SHELL /usr/sbin/nologin)"
+		case "$SOCKS_SHELL" in /usr/sbin/nologin|/sbin/nologin|/bin/false|/usr/bin/false) ;;
+		*) bad_env "SOCKS5_SYSTEM_USER_SHELL='$SOCKS_SHELL' is a login shell — users with it are never deleted" ;; esac
+		;;
+	mtproto)
+		read_unit_base MTPROTO_SVC MTPROTO_SERVICE_NAME mtproxy
+		MTPROTO_DIR="$(env_or MTPROTO_CONFIG_DIR /etc/mtproxy)"
+		valid_abs_path "$MTPROTO_DIR" || bad_env "MTPROTO_CONFIG_DIR='$MTPROTO_DIR' is not an absolute path without '..'"
+		[[ "$MTPROTO_DIR" =~ ^/etc/mt(proxy|proto|g)[A-Za-z0-9._-]*$ ]] || bad_env "MTPROTO_CONFIG_DIR='$MTPROTO_DIR' is outside the allowed /etc/mt{proxy,proto,g}* prefix"
+		MTPROTO_BIN="$(env_or MTPROTO_BINARY_PATH /usr/local/bin/mtproto-proxy)"
+		valid_abs_path "$MTPROTO_BIN" || bad_env "MTPROTO_BINARY_PATH='$MTPROTO_BIN' is not an absolute path without '..'"
+		[[ "$MTPROTO_BIN" =~ ^/usr/local/s?bin/mt[A-Za-z0-9._-]*$ ]] || bad_env "MTPROTO_BINARY_PATH='$MTPROTO_BIN' is outside the allowed /usr/local/{bin,sbin}/mt* prefix"
+		;;
+	hysteria2)
+		read_unit_base HY2_SVC HYSTERIA2_SERVICE_NAME hysteria-server
+		read_unit_base HY2_AUTH_SVC HYSTERIA2_AUTH_SERVICE_NAME vpn-bot-hy2-auth
+		;;
+	esac
+}
+
+# --------------------------------------------------------------------------- #
+# Global deny-list — checked for every path, unit and user before it is touched,
+# whatever the manifest says (a manifest bug must not become a deletion).
+# --------------------------------------------------------------------------- #
+readonly FORBIDDEN_EXACT="/ /bin /boot /dev /etc /home /lib /lib64 /opt /proc /root /run /sbin /srv /sys /tmp /usr /var
+/usr/bin /usr/sbin /usr/lib /usr/local /usr/local/bin /usr/local/sbin /usr/local/etc /usr/local/share /usr/local/lib
+/var/lib /var/log /var/backups /etc/systemd /etc/systemd/system /etc/amnezia /etc/amnezia/amneziawg /opt/vpn-service
+/opt/vpn-service/scripts /opt/vpn-service/data /opt/vpn-service/.env"
+readonly FORBIDDEN_TREES="/etc/nginx /var/www /etc/vpn-bot /root /home /etc/ssh /etc/letsencrypt /etc/ufw /etc/sysctl.d
+/etc/sysctl.conf /etc/sudoers /etc/sudoers.d /etc/apt /var/lib/dpkg /var/lib/apt /usr/lib/systemd /lib/systemd
+/var/backups/vpn-bot /opt/vpn-service/data /opt/vpn-service/.git /opt/vpn-service/.venv /etc/passwd /etc/shadow
+/etc/group /etc/gshadow /boot /proc /sys /dev /etc/netplan /etc/network"
+
+path_forbidden() {
+	local p="$1" f base
+	for f in $FORBIDDEN_EXACT; do [[ "$p" == "$f" ]] && return 0; done
+	for f in $FORBIDDEN_TREES; do [[ "$p" == "$f" || "$p" == "$f"/* ]] && return 0; done
+	# p must not be an ancestor of anything protected either.
+	for f in $FORBIDDEN_EXACT $FORBIDDEN_TREES; do [[ "$f" != "/" && "$f" == "$p"/* ]] && return 0; done
+	base="${p##*/}"
+	case "$base" in *out-warp*|warp-*|*warp-routes*|*warp-split*|sshd*|ssh) return 0 ;; esac
+	return 1
+}
+
+unit_forbidden() {
+	case "$1" in
+	ssh.service|sshd.service|ssh.socket|nginx.service|vpn-bot.service|vpn-bot-subscription.service) return 0 ;;
+	ufw.service|cron.service|dbus.service|networking.service|systemd-*|getty@*|user@*) return 0 ;;
+	warp-*|vpn-bot-warp-*|*out-warp*|awg-quick@.service|vpn-bot-deploy*|vpn-relay*) return 0 ;;
+	esac
+	return 1
+}
+
+user_forbidden() {   # name uid
+	case "$1" in root|nobody|nogroup|vpn-bot|daemon|bin|sys|sync|www-data|syslog|messagebus|systemd-*|_apt|sshd) return 0 ;; esac
+	[[ "$2" =~ ^[0-9]+$ ]] || return 0
+	# Dynamic system accounts only: base-passwd's fixed ids are < 100, humans >= 1000.
+	(( $2 >= 100 && $2 < 1000 )) || return 0
+	return 1
+}
+
+# ============================================================================ #
+# >>> MANIFEST — everything this helper may remove, per protocol. Literal names
+#     only: no glob. The one pattern is AWG_FILE_RE_TEMPLATE above.
+# ============================================================================ #
+man_reset() {
+	M_UNITS=(); M_UNIT_FLAGS=(); M_UNIT_FILES=(); M_PATHS=(); M_UFW=(); M_PKGS=(); M_USERS=()
+	M_SOCKS_RULE=0; M_AWG_DIR=""; M_AWG_RE=""; M_ENV_KEY=""; M_SHARED=(); M_TEMPLATES=()
+}
+man_unit() { M_UNITS+=("$1"); M_UNIT_FLAGS+=("${2:-}"); }
+man_template() { M_TEMPLATES+=("$1"); }   # base name; loaded instances are stopped too
+man_unit_file() { M_UNIT_FILES+=("$1"); }
+man_path() { M_PATHS+=("$1"); }
+man_ufw() { M_UFW+=("$1"); }
+man_pkg() { M_PKGS+=("$1"); }
+man_user() { M_USERS+=("$1"); }
+man_env() { M_ENV_KEY="$1"; }
+man_awg_files() { M_AWG_DIR="$1"; M_AWG_RE="$2"; }
+man_shared() { M_SHARED+=("$1|$2"); }
+
+manifest_xray() {
+	man_unit "${XRAY_SVC}.service"
+	man_unit "${XRAY_SVC}@.service" template
+	man_template "${XRAY_SVC}"
+	man_unit_file "${UNIT_DIR}/${XRAY_SVC}.service"
+	man_unit_file "${UNIT_DIR}/${XRAY_SVC}@.service"
+	man_unit_file "${UNIT_DIR}/${XRAY_SVC}.service.d"
+	man_unit_file "${UNIT_DIR}/${XRAY_SVC}@.service.d"
+	man_path /usr/local/bin/xray
+	man_path /usr/local/share/xray
+	man_path /usr/local/etc/xray
+	man_path /var/log/xray
+	man_ufw 443/tcp
+	man_shared "user nobody" "owns the Xray config and logs, but is a shared system account"
+	man_shared "nginx, /etc/nginx, /var/www/anycastedge" "the REALITY self-steal / decoy site is shared with the host"
+	man_shared "/etc/vpn-bot/tls, /root/.acme.sh" "certificates and acme.sh also serve the subscription endpoint and Hysteria2"
+	man_shared "/etc/logrotate.d/xray" "installed by deploy.sh (MANAGED_HOST_FILES); missingok, inert without /var/log/xray"
+}
+
+manifest_awg() {
+	man_unit "awg-quick@${AWG_IF}.service" mask
+	man_awg_files "${AWG_DIR}" "${AWG_RE}"
+	man_ufw 11880/udp
+	man_shared "/etc/amnezia, /etc/amnezia/amneziawg" "the directories hold the WARP egress (out-warp) config too"
+	man_shared "/etc/amnezia/amneziawg/out-warp.conf (symlink), /etc/amnezia/out-warp.conf and its copies" "WARP egress interface, not the AWG server"
+	man_shared "amneziawg, amneziawg-dkms, amneziawg-tools, the kernel module, awg/awg-quick" "awg-quick@out-warp needs them"
+	man_shared "awg-quick@out-warp, warp-routes and vpn-bot-warp-routes" "WARP egress; warp-routes only Wants= the AWG unit, which stays masked"
+}
+
+manifest_socks5() {
+	man_unit "${SOCKS5_SVC}.service"
+	man_unit_file "${UNIT_DIR}/${SOCKS5_SVC}.service.d"
+	man_pkg dante-server
+	M_SOCKS_RULE=1
+	man_ufw 31337/tcp
+	man_env SOCKS5_ENABLED
+	man_shared "/usr/lib/systemd/system/${SOCKS5_SVC}.service, /etc/danted.conf" "package files: removed by apt-get purge dante-server, not by hand"
+}
+
+manifest_mtproto() {
+	man_unit "${MTPROTO_SVC}.service"
+	man_unit_file "${UNIT_DIR}/${MTPROTO_SVC}.service"
+	man_unit_file "${UNIT_DIR}/${MTPROTO_SVC}.service.d"
+	man_path "${MTPROTO_BIN}"
+	man_path "${MTPROTO_DIR}"
+	man_path "${APP_DIR}/scripts/run-mtproxy-managed"
+	man_user mtproxy
+	man_ufw 9443/tcp
+	man_env MTPROTO_ENABLED
+	man_shared "${APP_DIR}/deploy/run-mtproxy-managed" "tracked in the repository (the source of the runtime copy)"
+}
+
+manifest_hysteria2() {
+	# The fwmark tagger goes FIRST: its ExecStop (vpnbot-hy2-warp-mark clear) takes
+	# the mangle rules down, and that is verified before anything else is touched.
+	man_unit "${HY2_MARK_UNIT}" hy2mark
+	man_unit "${HY2_SVC}.service"
+	man_unit "${HY2_SVC}@.service" template
+	man_template "${HY2_SVC}"
+	man_unit "${HY2_AUTH_SVC}.service"
+	man_unit_file "${UNIT_DIR}/${HY2_MARK_UNIT}"
+	man_unit_file "${UNIT_DIR}/${HY2_SVC}.service"
+	man_unit_file "${UNIT_DIR}/${HY2_SVC}@.service"
+	man_unit_file "${UNIT_DIR}/${HY2_SVC}.service.d"
+	man_unit_file "${UNIT_DIR}/${HY2_SVC}@.service.d"
+	man_unit_file "${UNIT_DIR}/${HY2_AUTH_SVC}.service"
+	man_path "${HY2_MARK_HELPER}"
+	man_path /usr/local/bin/hysteria
+	man_path /etc/hysteria
+	man_user hysteria
+	man_ufw 443/udp
+	man_env HYSTERIA2_ENABLED
+	man_shared "${APP_DIR}/scripts/vpnbot-hy2-warp-mark" "tracked in the repository (the source of the installed copy)"
+	man_shared "/usr/local/sbin/acme-reload.sh" "skips the Hysteria2 copy without /etc/hysteria and the restart without the unit"
+	man_shared "/etc/vpn-bot/tls" "shared with nginx and the subscription endpoint"
+}
+# ============================================================================ #
+# <<< MANIFEST
+# ============================================================================ #
+
+build_manifest() {
+	man_reset
+	"manifest_${PROTO}"
+}
+
+# --------------------------------------------------------------------------- #
+# Inspection helpers
+# --------------------------------------------------------------------------- #
+# kind of a host path: absent | file | dir | symlink | other
+path_kind() {
+	local h
+	h="$(hp "$1")"
+	if [[ -L "$h" ]]; then echo symlink
+	elif [[ -d "$h" ]]; then echo dir
+	elif [[ -f "$h" ]]; then echo file
+	elif [[ -e "$h" ]]; then echo other
+	else echo absent; fi
+}
+
+# 0 when the path and every ancestor are real (no symlinked component): realpath of
+# the host path must be the path itself. A symlink ANYWHERE fails — that is the
+# whole "points outside the prefix" class, without trying to judge the target.
+path_is_real() {
+	local h rp
+	h="$(hp "$1")"
+	rp="$(realpath -m -- "$h" 2>/dev/null)" || return 1
+	[[ "$rp" == "$h" ]]
+}
+
+path_size() {
+	local h
+	h="$(hp "$1")"
+	du -sb -- "$h" 2>/dev/null | awk '{print $1; exit}'
+}
+
+path_entries() {
+	local h
+	h="$(hp "$1")"
+	find "$h" -mindepth 1 2>/dev/null | wc -l | tr -d ' '
+}
+
+# The package that owns an exact path, or nothing.
+dpkg_owner() {
+	local out line
+	out="$(dpkg-query -S "$1" 2>/dev/null)" || return 0
+	while IFS= read -r line; do
+		if [[ "$line" == *": $1" ]]; then printf '%s' "${line%%: *}"; return 0; fi
+	done <<<"$out"
+}
+
+# tracked | untracked | unknown — for a path inside the checkout.
+git_tracked_state() {
+	local repo rel rc
+	repo="$(hp "$APP_DIR")"
+	rel="${1#"$APP_DIR"/}"
+	have git || { echo unknown; return; }
+	git -C "$repo" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1
+	rc=$?
+	case "$rc" in 0) echo tracked ;; 1) echo untracked ;; *) echo unknown ;; esac
+}
+
+unit_prop() { systemctl show -p "$2" --value -- "$1" 2>/dev/null | head -n1; }
+
+# --------------------------------------------------------------------------- #
+# PLAN — inspect the host against the manifest. Fills the P_* tables, the
+# fingerprint (FP) and BLOCK (findings that refuse the apply).
+# --------------------------------------------------------------------------- #
+plan_reset() {
+	U_NAME=(); U_FLAG=(); U_LOAD=(); U_ACTIVE=(); U_FILESTATE=(); U_ACTIONS=()
+	F_PATH=(); F_KIND=(); F_STATE=(); F_REASON=(); F_SIZE=(); F_ENTRIES=(); F_STEP=(); F_GROUP=()
+	W_SPEC=(); W_STATE=(); W_LINE=(); W_REASON=()
+	K_NAME=(); K_STATE=(); K_VER=(); K_REASON=(); K_CONFFILES=()
+	S_NAME=(); S_UID=(); S_STATE=(); S_REASON=(); S_GROUP=()
+	E_KEY=""; E_STATE="none"; E_LINE=""
+	MARKER_STATE=""
+	BLOCK=(); WARN=(); FP=()
+}
+
+add_file() {   # path step(units|files) group
+	local p="$1" step="$2" group="${3:-}" kind state="delete" reason="" size=0 entries=0 owner tr
+	kind="$(path_kind "$p")"
+	if ! valid_abs_path "$p"; then
+		state="refuse"; reason="not a clean absolute path"
+	elif path_forbidden "$p"; then
+		state="refuse"; reason="on the global deny-list"
+	elif [[ "$kind" == absent ]]; then
+		if [[ -L "$(hp "$p")" ]]; then state="refuse"; reason="dangling symlink"; else state="absent"; fi
+	elif [[ "$kind" == symlink ]]; then
+		state="refuse"; reason="is a symlink (-> $(readlink -- "$(hp "$p")" 2>/dev/null))"
+	elif ! path_is_real "$p"; then
+		state="refuse"; reason="a parent directory is a symlink (realpath leaves the prefix)"
+	elif [[ "$kind" == other ]]; then
+		state="refuse"; reason="neither a regular file nor a directory"
+	elif [[ "$group" == awg && "$kind" != file ]]; then
+		state="refuse"; reason="matches the AWG file pattern but is not a regular file"
+	fi
+	if [[ "$state" == delete && "$p" == "$APP_DIR"/* ]]; then
+		tr="$(git_tracked_state "$p")"
+		case "$tr" in
+		tracked) state="skip"; reason="tracked in the repository" ;;
+		unknown) state="refuse"; reason="cannot tell whether it is tracked in ${APP_DIR} (git unavailable)" ;;
+		esac
+	fi
+	if [[ "$state" == delete ]]; then
+		owner="$(dpkg_owner "$p")"
+		if [[ -n "$owner" ]]; then state="skip"; reason="owned by the package ${owner} (dpkg -S)"; fi
+	fi
+	if [[ "$state" == delete ]]; then
+		size="$(path_size "$p")"; size="${size:-0}"
+		[[ "$kind" == dir ]] && entries="$(path_entries "$p")"
+	fi
+	F_PATH+=("$p"); F_KIND+=("$kind"); F_STATE+=("$state"); F_REASON+=("$reason")
+	F_SIZE+=("$size"); F_ENTRIES+=("${entries:-0}"); F_STEP+=("$step"); F_GROUP+=("$group")
+	[[ "$state" == refuse ]] && BLOCK+=("$p: $reason")
+	# AWG backups matched by the regex are not part of the fingerprint (see the header).
+	[[ "$group" == awg && "$state" == delete ]] || FP+=("path=$p step=$step kind=$kind state=$state")
+}
+
+plan_units() {
+	local i u flag load active fstate actions tmpl inst
+	for i in "${!M_UNITS[@]}"; do
+		plan_one_unit "${M_UNITS[$i]}" "${M_UNIT_FLAGS[$i]}"
+	done
+	# Loaded instances of the template units (xray@foo, hysteria-server@bar).
+	for tmpl in "${M_TEMPLATES[@]}"; do
+		while read -r inst _; do
+			[[ "$inst" == "${tmpl}@"?*.service ]] || continue
+			[[ "${inst%.service}" =~ ^[A-Za-z0-9@._-]+$ ]] || continue
+			plan_one_unit "$inst" instance
+		done < <(systemctl list-units --all --plain --no-legend --full -- "${tmpl}@*.service" 2>/dev/null || true)
+	done
+}
+
+plan_one_unit() {
+	local u="$1" flag="$2" load active fstate actions="" present=0
+	if unit_forbidden "$u"; then BLOCK+=("unit $u is on the global deny-list"); return; fi
+	if [[ "$flag" == template ]]; then
+		# A template cannot be stopped or shown, only (rarely) enabled through a
+		# DefaultInstance; its file goes with the unit files, its instances are
+		# found separately (plan_units).
+		load="template"; active="inactive"
+		fstate="$(systemctl is-enabled -- "$u" 2>/dev/null | head -n1)"
+	else
+		load="$(unit_prop "$u" LoadState)"; active="$(unit_prop "$u" ActiveState)"
+		fstate="$(unit_prop "$u" UnitFileState)"
+	fi
+	load="${load:-not-found}"; active="${active:-inactive}"
+	[[ "$load" != not-found || -e "$(hp "${UNIT_DIR}/${u}")" || -L "$(hp "${UNIT_DIR}/${u}")" ]] && present=1
+	if [[ "$load" == loaded ]]; then
+		case "$active" in active|activating|deactivating|reloading|refreshing) actions+="stop " ;; esac
+		[[ "$flag" == hy2mark ]] && actions+="clear-marks "
+	fi
+	case "$fstate" in enabled|enabled-runtime|linked|linked-runtime) actions+="disable " ;; esac
+	if [[ "$flag" == mask ]]; then
+		[[ "$load" == masked ]] || actions+="mask "
+	fi
+	[[ "$active" == failed ]] && actions+="reset-failed "
+	actions="${actions% }"
+	U_NAME+=("$u"); U_FLAG+=("$flag"); U_LOAD+=("$load"); U_ACTIVE+=("$active")
+	U_FILESTATE+=("${fstate:-}"); U_ACTIONS+=("$actions")
+	FP+=("unit=$u present=$present masked=$([[ "$load" == masked ]] && echo 1 || echo 0) flag=$flag")
+}
+
+plan_unit_files() {
+	local p
+	for p in "${M_UNIT_FILES[@]}"; do add_file "$p" units; done
+}
+
+plan_paths() {
+	local p
+	for p in "${M_PATHS[@]}"; do add_file "$p" files; done
+}
+
+plan_awg_files() {
+	[[ -n "$M_AWG_DIR" ]] || return 0
+	local d name refused=""
+	d="$(hp "$M_AWG_DIR")"
+	if [[ ! -d "$d" ]]; then FP+=("awgdir=$M_AWG_DIR absent"); return 0; fi
+	if ! path_is_real "$M_AWG_DIR" || [[ -L "$d" ]]; then
+		BLOCK+=("$M_AWG_DIR: is or sits under a symlink"); FP+=("awgdir=$M_AWG_DIR symlink"); return 0
+	fi
+	while IFS= read -r name; do
+		[[ "$name" =~ $M_AWG_RE ]] || continue
+		add_file "${M_AWG_DIR}/${name}" files awg
+		[[ "${F_STATE[-1]}" == refuse ]] && refused+="${name} "
+	done < <(find "$d" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort)
+	FP+=("awgdir=$M_AWG_DIR re=$M_AWG_RE refused=${refused% }")
+}
+
+plan_ufw() {
+	local spec added="" line re port n other
+	if ! have ufw; then
+		for spec in "${M_UFW[@]}"; do
+			W_SPEC+=("$spec"); W_STATE+=("skip"); W_LINE+=(""); W_REASON+=("ufw is not installed")
+			FP+=("ufw=$spec state=noufw")
+		done
+		return 0
+	fi
+	added="$(ufw show added 2>/dev/null || true)"
+	for spec in "${M_UFW[@]}"; do
+		re="^ufw allow ${spec}( comment '[^']*')?\$"
+		port="${spec%%/*}"; n=0; other=""
+		local any_proto_re="^ufw allow ${port}/(tcp|udp)( comment '[^']*')?\$"
+		local port_re="(^|[^0-9])${port}([^0-9]|\$)"
+		local -a matched=()
+		while IFS= read -r line; do
+			[[ -n "$line" && "$line" == "ufw "* ]] || continue
+			if [[ "$line" =~ $re ]]; then matched+=("$line")
+			elif [[ "$line" =~ $any_proto_re ]]; then :   # the same port, the other protocol's own rule
+			elif [[ "$line" =~ $port_re ]]; then other="$line"; fi
+		done <<<"$added"
+		if ((${#matched[@]} > 0)); then
+			for line in "${matched[@]}"; do
+				W_SPEC+=("$spec"); W_STATE+=("delete"); W_LINE+=("$line"); W_REASON+=(""); n=$((n + 1))
+			done
+		elif [[ -n "$other" ]]; then
+			W_SPEC+=("$spec"); W_STATE+=("skip"); W_LINE+=("$other")
+			W_REASON+=("a rule for port ${port} exists in a non-standard form — remove it by hand if it is this protocol's")
+		else
+			W_SPEC+=("$spec"); W_STATE+=("absent"); W_LINE+=(""); W_REASON+=("")
+		fi
+		FP+=("ufw=$spec deletes=$n other=$([[ -n "$other" ]] && echo 1 || echo 0)")
+	done
+}
+
+plan_packages() {
+	local pkg out st ver sim extra line
+	for pkg in "${M_PKGS[@]}"; do
+		out="$(dpkg-query -W -f='${db:Status-Abbrev}|${Version}' "$pkg" 2>/dev/null)" || out=""
+		st="${out%%|*}"; st="${st// /}"; ver="${out#*|}"
+		[[ "$out" == *"|"* ]] || ver=""
+		if [[ -z "$out" || "$st" == un || "$st" == "" ]]; then
+			K_NAME+=("$pkg"); K_STATE+=("absent"); K_VER+=(""); K_REASON+=("")
+		elif [[ "$st" == ii ]]; then
+			extra=""
+			sim="$(apt-get -s purge "$pkg" 2>/dev/null)" || { BLOCK+=("apt-get -s purge $pkg failed"); sim=""; }
+			while IFS= read -r line; do
+				case "$line" in
+				Purg\ *|Remv\ *)
+					line="${line#* }"; line="${line%% *}"; line="${line%%:*}"
+					[[ "$line" == "$pkg" ]] || extra+="${line} "
+					;;
+				esac
+			done <<<"$sim"
+			if [[ -n "$extra" ]]; then
+				BLOCK+=("apt-get purge $pkg would also remove: ${extra% }")
+				K_NAME+=("$pkg"); K_STATE+=("refuse"); K_VER+=("$ver"); K_REASON+=("would also remove ${extra% }")
+			else
+				K_NAME+=("$pkg"); K_STATE+=("purge"); K_VER+=("$ver"); K_REASON+=("")
+				# Its conffiles go into the backup: a rollback puts them back before the
+				# reinstall, which then keeps them (--force-confold).
+				local cf
+				while read -r cf _; do
+					[[ "$cf" == /etc/* ]] && valid_abs_path "$cf" && K_CONFFILES+=("$cf")
+				done < <(dpkg-query -W -f='${Conffiles}\n' "$pkg" 2>/dev/null)
+			fi
+		else
+			K_NAME+=("$pkg"); K_STATE+=("skip"); K_VER+=("$ver"); K_REASON+=("dpkg status '${st}', not 'ii'")
+		fi
+		FP+=("pkg=$pkg state=${K_STATE[-1]}")
+	done
+}
+
+# Every file on / (one filesystem) owned by one of the given uids, minus what the
+# manifest removes anyway. Prints "<uid>\t<path>" lines.
+owned_outside_manifest() {
+	(($# > 0)) || return 0
+	local -a expr=() ; local uid first=1 line u p skip i
+	for uid in "$@"; do
+		if ((first)); then expr+=(-uid "$uid"); first=0; else expr+=(-o -uid "$uid"); fi
+	done
+	while IFS=$'\t' read -r u p; do
+		[[ -n "$p" ]] || continue
+		p="${p#"$R"}"; [[ -n "$p" ]] || p="/"
+		skip=0
+		for i in "${!F_PATH[@]}"; do
+			[[ "${F_STATE[$i]}" == delete ]] || continue
+			if [[ "$p" == "${F_PATH[$i]}" || "$p" == "${F_PATH[$i]}"/* ]]; then skip=1; break; fi
+		done
+		((skip)) || printf '%s\t%s\n' "$u" "$p"
+	done < <(find "$(hp /)" -xdev \( "${expr[@]}" \) -printf '%U\t%p\n' 2>/dev/null)
+}
+
+plan_users() {
+	local name entry uid shell kept="" i
+	local -a cand_names=() cand_uids=() cand_group=()
+	for name in "${M_USERS[@]}"; do
+		entry="$(getent passwd -- "$name" 2>/dev/null)" || entry=""
+		if [[ -z "$entry" ]]; then
+			S_NAME+=("$name"); S_UID+=(""); S_STATE+=("absent"); S_REASON+=(""); S_GROUP+=("")
+			FP+=("user=$name state=absent"); continue
+		fi
+		uid="$(cut -d: -f3 <<<"$entry")"
+		if user_forbidden "$name" "$uid"; then
+			S_NAME+=("$name"); S_UID+=("$uid"); S_STATE+=("refuse"); S_REASON+=("protected account (uid $uid)"); S_GROUP+=("")
+			BLOCK+=("user $name (uid $uid) is protected"); FP+=("user=$name state=refuse"); continue
+		fi
+		cand_names+=("$name"); cand_uids+=("$uid"); cand_group+=("")
+	done
+	if ((M_SOCKS_RULE)); then
+		while IFS= read -r entry; do
+			name="${entry%%:*}"
+			[[ "$name" == "$SOCKS_PREFIX"* ]] || continue
+			uid="$(cut -d: -f3 <<<"$entry")"; shell="${entry##*:}"
+			if [[ "$shell" != "$SOCKS_SHELL" ]]; then
+				S_NAME+=("$name"); S_UID+=("$uid"); S_STATE+=("keep"); S_GROUP+=("socks")
+				S_REASON+=("shell ${shell:-<none>} is not SOCKS5_SYSTEM_USER_SHELL ${SOCKS_SHELL}")
+				kept+="${name} "; continue
+			fi
+			if user_forbidden "$name" "$uid"; then
+				S_NAME+=("$name"); S_UID+=("$uid"); S_STATE+=("keep"); S_GROUP+=("socks")
+				S_REASON+=("protected account (uid $uid)"); kept+="${name} "; continue
+			fi
+			cand_names+=("$name"); cand_uids+=("$uid"); cand_group+=("socks")
+		done < <(getent passwd 2>/dev/null | sort)
+	fi
+	# One traversal of / for every candidate.
+	local -A owned=()
+	while IFS=$'\t' read -r uid entry; do
+		[[ -n "${owned[$uid]:-}" ]] || owned[$uid]="$entry"
+	done < <(owned_outside_manifest "${cand_uids[@]}")
+	for i in "${!cand_names[@]}"; do
+		name="${cand_names[$i]}"; uid="${cand_uids[$i]}"
+		S_NAME+=("$name"); S_UID+=("$uid"); S_GROUP+=("${cand_group[$i]}")
+		if [[ -n "${owned[$uid]:-}" ]]; then
+			S_STATE+=("keep"); S_REASON+=("owns files outside the manifest, e.g. ${owned[$uid]}")
+		elif pgrep -u "$uid" >/dev/null 2>&1; then
+			S_STATE+=("keep"); S_REASON+=("has running processes")
+		else
+			S_STATE+=("delete"); S_REASON+=("")
+		fi
+		if [[ "${cand_group[$i]}" == socks ]]; then
+			[[ "${S_STATE[-1]}" == keep ]] && kept+="${name} "
+		else
+			FP+=("user=$name state=${S_STATE[-1]}")
+		fi
+	done
+	((M_SOCKS_RULE)) && FP+=("socks=${SOCKS_PREFIX}|${SOCKS_SHELL} kept=${kept% }")
+	return 0
+}
+
+plan_env() {
+	[[ -n "$M_ENV_KEY" ]] || { FP+=("env=none"); return 0; }
+	E_KEY="$M_ENV_KEY"
+	local f n v
+	f="$(hp "$ENV_FILE")"
+	n="$(grep -cE "^[[:space:]]*(export[[:space:]]+)?${E_KEY}[[:space:]]*=" "$f" 2>/dev/null || true)"
+	if [[ "${n:-0}" -eq 0 ]]; then
+		E_STATE="append"
+	else
+		v="$(env_raw "$E_KEY")"
+		case "${v,,}" in false|0|no|off) E_STATE="already_false" ;; *) E_STATE="set_false" ;; esac
+	fi
+	FP+=("env=$E_KEY state=$E_STATE")
+}
+
+plan_marker() {
+	if [[ -f "$(hp "${MARKER_DIR}/${PROTO}")" ]]; then MARKER_STATE="present"; else MARKER_STATE="create"; fi
+	FP+=("marker=$MARKER_STATE")
+}
+
+compute_plan() {
+	plan_reset
+	build_manifest
+	FP+=("protocol=$PROTO version=$HELPER_VERSION")
+	plan_units
+	plan_unit_files
+	plan_paths
+	plan_awg_files
+	plan_ufw
+	plan_packages
+	plan_users
+	plan_env
+	plan_marker
+	local b
+	for b in "${BLOCK[@]}"; do FP+=("block=$b"); done
+	PLAN_SHA="$(printf '%s\n' "${FP[@]}" | sha256sum | awk '{print $1}')"
+	nothing_to_do_eval
+}
+
+nothing_to_do_eval() {
+	local i
+	NOTHING=1
+	for i in "${!U_NAME[@]}"; do [[ -n "${U_ACTIONS[$i]}" ]] && NOTHING=0; done
+	for i in "${!F_PATH[@]}"; do [[ "${F_STATE[$i]}" == delete ]] && NOTHING=0; done
+	for i in "${!W_SPEC[@]}"; do [[ "${W_STATE[$i]}" == delete ]] && NOTHING=0; done
+	for i in "${!K_NAME[@]}"; do [[ "${K_STATE[$i]}" == purge ]] && NOTHING=0; done
+	for i in "${!S_NAME[@]}"; do [[ "${S_STATE[$i]}" == delete ]] && NOTHING=0; done
+	[[ "$E_STATE" == set_false || "$E_STATE" == append ]] && NOTHING=0
+	[[ "$MARKER_STATE" == create ]] && NOTHING=0
+	if ((NOTHING)) && [[ "$MARKER_STATE" == present ]]; then STATE="uninstalled"
+	else
+		STATE="partial"
+		for i in "${!U_NAME[@]}"; do
+			[[ "${U_LOAD[$i]}" == loaded && "${U_FLAG[$i]}" != instance ]] && { STATE="installed"; break; }
+		done
+	fi
+	BACKUP_ESTIMATE=0
+	for i in "${!F_PATH[@]}"; do
+		[[ "${F_STATE[$i]}" == delete ]] && BACKUP_ESTIMATE=$((BACKUP_ESTIMATE + ${F_SIZE[$i]:-0}))
+	done
+	return 0
+}
+
+plan_json() {
+	local i
+	local -a units=() files=() ufw=() pkgs=() users=() shared=() blocks=() warns=()
+	for i in "${!U_NAME[@]}"; do
+		units+=("$(jobj unit "$(jstr "${U_NAME[$i]}")" load "$(jstr "${U_LOAD[$i]}")" active "$(jstr "${U_ACTIVE[$i]}")" \
+			file_state "$(jstr "${U_FILESTATE[$i]}")" actions "$(jstr "${U_ACTIONS[$i]}")" \
+			state "$(jstr "$([[ -n "${U_ACTIONS[$i]}" ]] && echo act || echo absent)")")")
+	done
+	for i in "${!F_PATH[@]}"; do
+		files+=("$(jobj path "$(jstr "${F_PATH[$i]}")" kind "$(jstr "${F_KIND[$i]}")" state "$(jstr "${F_STATE[$i]}")" \
+			reason "$(jstr "${F_REASON[$i]}")" size "$(jnum "${F_SIZE[$i]}")" entries "$(jnum "${F_ENTRIES[$i]}")" \
+			step "$(jstr "${F_STEP[$i]}")" group "$(jstr "${F_GROUP[$i]}")")")
+	done
+	for i in "${!W_SPEC[@]}"; do
+		ufw+=("$(jobj rule "$(jstr "${W_SPEC[$i]}")" state "$(jstr "${W_STATE[$i]}")" line "$(jstr "${W_LINE[$i]}")" reason "$(jstr "${W_REASON[$i]}")")")
+	done
+	for i in "${!K_NAME[@]}"; do
+		pkgs+=("$(jobj name "$(jstr "${K_NAME[$i]}")" state "$(jstr "${K_STATE[$i]}")" version "$(jstr "${K_VER[$i]}")" reason "$(jstr "${K_REASON[$i]}")")")
+	done
+	for i in "${!S_NAME[@]}"; do
+		users+=("$(jobj name "$(jstr "${S_NAME[$i]}")" uid "$(jstr "${S_UID[$i]}")" state "$(jstr "${S_STATE[$i]}")" reason "$(jstr "${S_REASON[$i]}")" group "$(jstr "${S_GROUP[$i]}")")")
+	done
+	for i in "${M_SHARED[@]}"; do shared+=("$(jobj what "$(jstr "${i%%|*}")" reason "$(jstr "${i#*|}")")"); done
+	for i in "${BLOCK[@]}"; do blocks+=("$(jstr "$i")"); done
+	for i in "${WARN[@]}"; do warns+=("$(jstr "$i")"); done
+	jobj ok true version "$(jnum "$HELPER_VERSION")" protocol "$(jstr "$PROTO")" sha256 "$(jstr "$PLAN_SHA")" \
+		state "$(jstr "$STATE")" nothing_to_do "$(jbool "$NOTHING")" blocking "$(jarr "${blocks[@]}")" \
+		warnings "$(jarr "${warns[@]}")" units "$(jarr "${units[@]}")" files "$(jarr "${files[@]}")" \
+		ufw "$(jarr "${ufw[@]}")" packages "$(jarr "${pkgs[@]}")" users "$(jarr "${users[@]}")" \
+		env "$(jobj key "$(jstr "$E_KEY")" state "$(jstr "$E_STATE")")" \
+		marker "$(jobj path "$(jstr "${MARKER_DIR}/${PROTO}")" state "$(jstr "$MARKER_STATE")")" \
+		skipped_shared "$(jarr "${shared[@]}")" backup_dir "$(jstr "$BACKUP_DIR")" \
+		backup_estimate_bytes "$(jnum "$BACKUP_ESTIMATE")"
+	printf '\n'
+}
+
+manifest_json() {
+	build_manifest
+	local -a u=() uf=() p=() w=() k=() s=() sh=() tp=() i
+	for i in "${!M_UNITS[@]}"; do u+=("$(jobj unit "$(jstr "${M_UNITS[$i]}")" flag "$(jstr "${M_UNIT_FLAGS[$i]}")")"); done
+	for i in "${M_UNIT_FILES[@]}"; do uf+=("$(jstr "$i")"); done
+	for i in "${M_PATHS[@]}"; do p+=("$(jstr "$i")"); done
+	for i in "${M_UFW[@]}"; do w+=("$(jstr "$i")"); done
+	for i in "${M_PKGS[@]}"; do k+=("$(jstr "$i")"); done
+	for i in "${M_USERS[@]}"; do s+=("$(jstr "$i")"); done
+	for i in "${M_SHARED[@]}"; do sh+=("$(jobj what "$(jstr "${i%%|*}")" reason "$(jstr "${i#*|}")")"); done
+	for i in "${M_TEMPLATES[@]}"; do tp+=("$(jstr "$i")"); done
+	jobj protocol "$(jstr "$PROTO")" units "$(jarr "${u[@]}")" templates "$(jarr "${tp[@]}")" \
+		unit_files "$(jarr "${uf[@]}")" paths "$(jarr "${p[@]}")" awg_dir "$(jstr "$M_AWG_DIR")" awg_regex "$(jstr "$M_AWG_RE")" \
+		ufw "$(jarr "${w[@]}")" packages "$(jarr "${k[@]}")" users "$(jarr "${s[@]}")" \
+		socks_rule "$(jbool "$M_SOCKS_RULE")" socks_prefix "$(jstr "${SOCKS_PREFIX:-}")" socks_shell "$(jstr "${SOCKS_SHELL:-}")" \
+		env_key "$(jstr "$M_ENV_KEY")" skipped_shared "$(jarr "${sh[@]}")"
+	printf '\n'
+}
+
+# ============================================================================ #
+# APPLY
+# ============================================================================ #
+TOUCHED_REL=()      # archive members restored on rollback (relative host paths)
+DONE_UNITS=()       # index into U_* of every unit whose state we changed
+MASKED_UNITS=()
+UFW_DELETED=()      # the `ufw show added` lines we removed
+PKG_PURGED=()       # "name|version"
+USERS_DELETED=()    # "passwd-line|group-line|shadow-hash"
+ENV_CHANGED=0
+MARKER_WRITTEN=0
+MARKER_DIR_CREATED=0
+REMOVED=(); ABSENT=(); SKIPPED=(); ERRORS=()
+FAIL_STEP=""; FAIL_MSG=""
+ARCHIVE=""; STAGE=""; CMD_OUT=""
+
+item() { jobj kind "$(jstr "$1")" item "$(jstr "$2")" detail "$(jstr "${3:-}")"; }
+
+# run <cmd...>: log it, capture its output, keep the last lines for the report.
+run() {
+	log "run: $*"
+	"$@" >"$CMD_OUT" 2>&1
+	local rc=$?
+	if ((rc != 0)); then
+		RUN_TAIL="$(tail -n 5 "$CMD_OUT" 2>/dev/null | tr '\n' ' ')"
+		log "  rc=$rc ${RUN_TAIL}"
+	fi
+	return "$rc"
+}
+
+fail_step() { FAIL_STEP="$1"; FAIL_MSG="$2"; log "FAILED at step $1: $2"; return 1; }
+
+# TEST SEAM: with VPN_BOT_UNINSTALL_ROOT set (never in production), fail right
+# AFTER a step did its work, so the suite can prove the rollback undoes every step.
+selftest_fault() {
+	[[ -n "$R" && "${VPN_BOT_UNINSTALL_SELFTEST_FAIL:-}" == "$1" ]] || return 0
+	fail_step "$1" "selftest fault injected after step $1"
+}
+
+# Re-check a path right before it is removed (time of check = time of use).
+recheck_path() {
+	local p="$1"
+	valid_abs_path "$p" || return 1
+	path_forbidden "$p" && return 1
+	[[ -L "$(hp "$p")" ]] && return 1
+	path_is_real "$p" || return 1
+	return 0
+}
+
+remove_path() {   # index into F_*
+	local i="$1" p h
+	p="${F_PATH[$i]}"; h="$(hp "$p")"
+	if [[ ! -e "$h" && ! -L "$h" ]]; then
+		ABSENT+=("$(item path "$p" "gone before removal")"); return 0
+	fi
+	recheck_path "$p" || { fail_step "$2" "$p changed under the helper (symlink or deny-list) — refusing to remove it"; return 1; }
+	TOUCHED_REL+=("${p#/}")
+	if [[ -d "$h" ]]; then
+		run rm -rf --one-file-system -- "$h" || { fail_step "$2" "rm -rf $p failed: ${RUN_TAIL:-}"; return 1; }
+	else
+		run rm -f -- "$h" || { fail_step "$2" "rm -f $p failed: ${RUN_TAIL:-}"; return 1; }
+	fi
+	[[ ! -e "$h" && ! -L "$h" ]] || { fail_step "$2" "$p still exists after removal"; return 1; }
+	REMOVED+=("$(item "${F_KIND[$i]}" "$p" "$(numfmt_bytes "${F_SIZE[$i]}")")")
+	return 0
+}
+
+numfmt_bytes() { printf '%s bytes' "${1:-0}"; }
+
+# --- step 3: backup ----------------------------------------------------------
+declare -A LINKS_OF=()   # unit -> its enable/mask symlinks (relative host paths), from the backup
+unit_symlinks() {   # "<unit> <relative link>" for every enable/mask link of a manifest unit
+	local i u d rel
+	for i in "${!U_NAME[@]}"; do
+		u="${U_NAME[$i]}"
+		[[ -L "$(hp "${UNIT_DIR}/${u}")" ]] && printf '%s %s\n' "$u" "${UNIT_DIR#/}/${u}"
+		for d in "$(hp "$UNIT_DIR")"/*.wants "$(hp "$UNIT_DIR")"/*.requires "$(hp "$UNIT_DIR")"/*.upholds; do
+			rel="${d#"$R"}"; rel="${rel#/}"
+			[[ -L "$d/$u" ]] && printf '%s %s\n' "$u" "$rel/$u"
+		done
+	done
+	return 0
+}
+
+step_backup() {
+	local bdir ts free need i rel listing m
+	bdir="$(hp "$BACKUP_DIR")"
+	mkdir -p -- "$bdir" && chmod 0700 -- "$bdir" || { fail_step backup "cannot create $BACKUP_DIR"; return 1; }
+	ts="$(date -u +%Y%m%dT%H%M%SZ)"
+	ARCHIVE="${BACKUP_DIR}/${PROTO}-${ts}.tar.gz"
+	STAGE="$(mktemp -d -- "${bdir}/.stage.XXXXXX")" || { fail_step backup "mktemp failed"; return 1; }
+	mkdir -p -- "$STAGE/$META"
+	need=$((BACKUP_ESTIMATE + 64 * 1024 * 1024))
+	free="$(df -PB1 -- "$bdir" 2>/dev/null | awk 'NR==2 {print $4}')"
+	if [[ "$free" =~ ^[0-9]+$ ]] && ((free < need)); then
+		fail_step backup "not enough space in $BACKUP_DIR: need ~${need} bytes, have ${free}"; return 1
+	fi
+	# Metadata: the state the rollback (and a human) needs besides the files.
+	plan_json >"$STAGE/$META/plan.json"
+	{
+		for i in "${!U_NAME[@]}"; do
+			printf '%s load=%s active=%s file_state=%s actions=%s\n' "${U_NAME[$i]}" "${U_LOAD[$i]}" \
+				"${U_ACTIVE[$i]}" "${U_FILESTATE[$i]}" "${U_ACTIONS[$i]}"
+		done
+	} >"$STAGE/$META/units.txt"
+	if have ufw; then
+		ufw status numbered >"$STAGE/$META/ufw-status-numbered.txt" 2>&1 || true
+		ufw show added >"$STAGE/$META/ufw-show-added.txt" 2>&1 || true
+	fi
+	: >"$STAGE/$META/getent-passwd.txt"; : >"$STAGE/$META/getent-group.txt"; : >"$STAGE/$META/getent-shadow.txt"
+	for i in "${!S_NAME[@]}"; do
+		[[ "${S_STATE[$i]}" == delete ]] || continue
+		local pw gid
+		pw="$(getent passwd -- "${S_NAME[$i]}" 2>/dev/null || true)"
+		printf '%s\n' "$pw" >>"$STAGE/$META/getent-passwd.txt"
+		gid="$(cut -d: -f4 <<<"$pw")"
+		[[ -n "$gid" ]] && getent group -- "$gid" >>"$STAGE/$META/getent-group.txt" 2>/dev/null
+		getent shadow -- "${S_NAME[$i]}" >>"$STAGE/$META/getent-shadow.txt" 2>/dev/null || true
+	done
+	for i in "${!K_NAME[@]}"; do printf '%s %s %s\n' "${K_NAME[$i]}" "${K_STATE[$i]}" "${K_VER[$i]}"; done >"$STAGE/$META/packages.txt"
+	if [[ "$PROTO" == hysteria2 ]] && have iptables-save; then
+		iptables-save -t mangle >"$STAGE/$META/iptables-mangle.txt" 2>/dev/null || true
+	fi
+	{
+		printf 'Manual rollback of the %s uninstall (as root):\n' "$PROTO"
+		printf '  tar -xzf %s -C / --numeric-owner --xattrs --acls --no-overwrite-dir --exclude=%s\n' "$ARCHIVE" "$META"
+		printf '  rm -f %s/%s && systemctl daemon-reload\n' "$MARKER_DIR" "$PROTO"
+		printf 'then by hand, from %s/: re-add ufw rules (ufw-show-added.txt), reinstall packages\n' "$META"
+		printf '(packages.txt), recreate users (getent-*.txt), unmask/enable/start units (units.txt).\n'
+	} >"$STAGE/$META/ROLLBACK.txt"
+
+	local -a members=()
+	for i in "${!F_PATH[@]}"; do
+		[[ "${F_STATE[$i]}" == delete ]] && members+=("${F_PATH[$i]#/}")
+	done
+	local lu
+	while read -r lu rel; do
+		[[ -n "$rel" ]] || continue
+		members+=("$rel"); LINKS_OF[$lu]+="$rel "
+	done < <(unit_symlinks)
+	[[ -f "$(hp "$ENV_FILE")" ]] && members+=("${ENV_FILE#/}")
+	# Conffiles of a package that is purged (/etc/danted.conf): the reinstall of a
+	# rollback would otherwise bring back the package default instead of this host's.
+	for i in "${K_CONFFILES[@]}"; do
+		[[ -f "$(hp "$i")" && ! -L "$(hp "$i")" ]] && members+=("${i#/}")
+	done
+	local tmp="$(hp "$ARCHIVE").partial"
+	# Every member is a relative path starting with a letter (no option-like name), so
+	# no `--`: tar would read the second -C after it as a file name.
+	for m in "${members[@]}"; do
+		[[ "$m" =~ ^[A-Za-z0-9] ]] || { fail_step backup "unexpected archive member '$m'"; return 1; }
+	done
+	if ! tar --create --gzip --file "$tmp" --numeric-owner --xattrs --acls -C "$STAGE" "$META" \
+		-C "$(hp /)" "${members[@]}" >"$CMD_OUT" 2>&1; then
+		fail_step backup "tar failed: $(tail -n 3 "$CMD_OUT" | tr '\n' ' ')"; rm -f -- "$tmp"; return 1
+	fi
+	chmod 0600 -- "$tmp"
+	listing="$(tar -tzf "$tmp" 2>/dev/null)" || { fail_step backup "tar -tzf cannot read the archive"; rm -f -- "$tmp"; return 1; }
+	for m in "${members[@]}" "$META/plan.json" "$META/units.txt"; do
+		if ! grep -qxF -e "$m" -e "$m/" <<<"$listing"; then
+			fail_step backup "archive check: $m is missing from the archive"; rm -f -- "$tmp"; return 1
+		fi
+	done
+	mv -f -- "$tmp" "$(hp "$ARCHIVE")" || { fail_step backup "cannot move the archive into place"; return 1; }
+	ARCHIVE_SHA="$(sha256sum -- "$(hp "$ARCHIVE")" | awk '{print $1}')"
+	log "backup ${ARCHIVE} (${#members[@]} members, sha256 ${ARCHIVE_SHA}) verified"
+	return 0
+}
+
+# --- step 4: units -------------------------------------------------------------
+hy2_mark_value() {   # MARK / HYUID as the installed helper defines them
+	local h="$(hp "$HY2_MARK_HELPER")" v
+	v="$(sed -n "s/.*\b$1=\([0-9a-fA-Fx]*\).*/\1/p" "$h" 2>/dev/null | head -n1)"
+	printf '%s' "${v:-$2}"
+}
+
+hy2_clear_marks() {
+	local helper mark hyuid rules
+	helper="$(hp "$HY2_MARK_HELPER")"
+	mark="$(hy2_mark_value MARK 0x3d22)"; hyuid="$(hy2_mark_value HYUID 992)"
+	# The unit's ExecStop already ran `clear`; run it once more (idempotent) in case
+	# the unit was not active and the rules were left behind by hand.
+	if [[ -x "$helper" ]]; then
+		run "$helper" clear || WARN+=("${HY2_MARK_HELPER} clear exited non-zero (${RUN_TAIL:-}); the verification below decides")
+	fi
+	if have iptables-save; then
+		rules="$(iptables-save -t mangle 2>/dev/null | grep -iE -- "(${mark}|--uid-owner ${hyuid}( |$))" || true)"
+		if [[ -n "$rules" ]]; then
+			fail_step units "mangle rules of the Hysteria2 fwmark tagger are still installed: ${rules//$'\n'/; }"; return 1
+		fi
+	else
+		WARN+=("iptables-save not found: the Hysteria2 mangle rules could not be verified")
+	fi
+	REMOVED+=("$(item marks "fwmark ${mark} / uid-owner ${hyuid}" "mangle rules cleared and verified")")
+	return 0
+}
+
+step_units() {
+	local i u acts did
+	for i in "${!U_NAME[@]}"; do
+		u="${U_NAME[$i]}"; acts=" ${U_ACTIONS[$i]} "
+		if [[ "$acts" == "  " ]]; then
+			case "${U_LOAD[$i]}" in
+			not-found) ABSENT+=("$(item unit "$u" "not loaded")") ;;
+			masked) ABSENT+=("$(item unit "$u" "already masked")") ;;
+			*) SKIPPED+=("$(item unit "$u" "${U_LOAD[$i]}, ${U_ACTIVE[$i]}, ${U_FILESTATE[$i]:-?}: nothing to stop or disable")") ;;
+			esac
+			continue
+		fi
+		DONE_UNITS+=("$i"); did=""
+		if [[ "$acts" == *" stop "* ]]; then
+			run systemctl stop -- "$u" || { fail_step units "systemctl stop $u failed: ${RUN_TAIL:-}"; return 1; }
+			did+="stopped "
+		fi
+		if [[ "${U_FLAG[$i]}" == hy2mark ]]; then hy2_clear_marks || return 1; fi
+		if [[ "$acts" == *" disable "* ]]; then
+			# Its enable links are in the archive: the rollback puts them back as they were.
+			local l
+			for l in ${LINKS_OF[$u]:-}; do TOUCHED_REL+=("$l"); done
+			run systemctl disable -- "$u" || { fail_step units "systemctl disable $u failed: ${RUN_TAIL:-}"; return 1; }
+			did+="disabled "
+		fi
+		if [[ "$acts" == *" mask "* ]]; then
+			run systemctl mask -- "$u" || { fail_step units "systemctl mask $u failed: ${RUN_TAIL:-}"; return 1; }
+			MASKED_UNITS+=("$u"); did+="masked "
+		fi
+		[[ "$acts" == *" reset-failed "* ]] && did+="reset-failed "
+		REMOVED+=("$(item unit "$u" "${did% }")")
+	done
+	for i in "${!F_PATH[@]}"; do
+		[[ "${F_STEP[$i]}" == units ]] || continue
+		case "${F_STATE[$i]}" in
+		delete) remove_path "$i" units || return 1 ;;
+		absent) ABSENT+=("$(item path "${F_PATH[$i]}")") ;;
+		skip) SKIPPED+=("$(item path "${F_PATH[$i]}" "${F_REASON[$i]}")") ;;
+		esac
+	done
+	run systemctl daemon-reload || { fail_step units "systemctl daemon-reload failed: ${RUN_TAIL:-}"; return 1; }
+	for i in "${!U_NAME[@]}"; do
+		[[ " ${U_ACTIONS[$i]} " == "  " ]] && continue
+		systemctl reset-failed -- "${U_NAME[$i]}" >/dev/null 2>&1 || true
+	done
+	for i in "${!U_NAME[@]}"; do
+		[[ " ${U_ACTIONS[$i]} " == *" stop "* ]] || continue
+		if [[ "$(unit_prop "${U_NAME[$i]}" ActiveState)" == active ]]; then
+			fail_step units "${U_NAME[$i]} is still active after stop"; return 1
+		fi
+	done
+	return 0
+}
+
+# --- step 5: files -------------------------------------------------------------
+step_files() {
+	local i
+	for i in "${!F_PATH[@]}"; do
+		[[ "${F_STEP[$i]}" == files ]] || continue
+		case "${F_STATE[$i]}" in
+		delete) remove_path "$i" files || return 1 ;;
+		absent) ABSENT+=("$(item path "${F_PATH[$i]}")") ;;
+		skip) SKIPPED+=("$(item path "${F_PATH[$i]}" "${F_REASON[$i]}")") ;;
+		esac
+	done
+	return 0
+}
+
+# --- step 6: ufw ---------------------------------------------------------------
+step_ufw() {
+	local i spec added st re
+	local -A done_spec=()
+	for i in "${!W_SPEC[@]}"; do
+		spec="${W_SPEC[$i]}"
+		case "${W_STATE[$i]}" in
+		absent) ABSENT+=("$(item ufw "$spec")"); continue ;;
+		skip) SKIPPED+=("$(item ufw "$spec" "${W_REASON[$i]}")"); continue ;;
+		esac
+		[[ -n "${done_spec[$spec]:-}" ]] && { UFW_DELETED+=("${W_LINE[$i]}"); continue; }
+		done_spec[$spec]=1
+		UFW_DELETED+=("${W_LINE[$i]}")
+		run ufw delete allow "$spec" || { fail_step ufw "ufw delete allow $spec failed: ${RUN_TAIL:-}"; return 1; }
+		REMOVED+=("$(item ufw "$spec" "${W_LINE[$i]#ufw }")")
+	done
+	((${#done_spec[@]} > 0)) || return 0
+	added="$(ufw show added 2>/dev/null || true)"
+	st="$(ufw status 2>/dev/null || true)"
+	for spec in "${!done_spec[@]}"; do
+		re="^ufw allow ${spec}( comment '[^']*')?\$"
+		while IFS= read -r i; do
+			[[ "$i" =~ $re ]] && { fail_step ufw "ufw still has: $i"; return 1; }
+		done <<<"$added"
+		if grep -qE "^${spec}( \(v6\))?[[:space:]]" <<<"$st"; then
+			fail_step ufw "ufw status still lists ${spec}"; return 1
+		fi
+	done
+	return 0
+}
+
+# --- step 7: packages ----------------------------------------------------------
+step_packages() {
+	local i pkg st
+	for i in "${!K_NAME[@]}"; do
+		pkg="${K_NAME[$i]}"
+		case "${K_STATE[$i]}" in
+		absent) ABSENT+=("$(item package "$pkg")"); continue ;;
+		skip) SKIPPED+=("$(item package "$pkg" "${K_REASON[$i]}")"); continue ;;
+		purge) ;;
+		*) continue ;;
+		esac
+		st="$(dpkg-query -W -f='${db:Status-Abbrev}' "$pkg" 2>/dev/null | tr -d ' ')"
+		if [[ "$st" != ii ]]; then SKIPPED+=("$(item package "$pkg" "dpkg status '${st}' at apply time, not 'ii'")"); continue; fi
+		PKG_PURGED+=("${pkg}|${K_VER[$i]}")
+		local cf
+		for cf in "${K_CONFFILES[@]}"; do [[ -f "$(hp "$cf")" ]] && TOUCHED_REL+=("${cf#/}"); done
+		run env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q "$pkg" \
+			|| { fail_step packages "apt-get purge $pkg failed: ${RUN_TAIL:-}"; return 1; }
+		st="$(dpkg-query -W -f='${db:Status-Abbrev}' "$pkg" 2>/dev/null | tr -d ' ')"
+		[[ "$st" != ii ]] || { fail_step packages "$pkg is still installed after purge"; return 1; }
+		REMOVED+=("$(item package "$pkg" "purged (was ${K_VER[$i]})")")
+	done
+	((${#PKG_PURGED[@]} == 0)) || run systemctl daemon-reload || true
+	return 0
+}
+
+# --- step 8: users -------------------------------------------------------------
+step_users() {
+	local i name uid pw gr sh any
+	for i in "${!S_NAME[@]}"; do
+		name="${S_NAME[$i]}"; uid="${S_UID[$i]}"
+		case "${S_STATE[$i]}" in
+		absent) ABSENT+=("$(item user "$name")"); continue ;;
+		keep) SKIPPED+=("$(item user "$name" "${S_REASON[$i]}")"); continue ;;
+		delete) ;;
+		*) continue ;;
+		esac
+		pw="$(getent passwd -- "$name" 2>/dev/null || true)"
+		[[ -n "$pw" ]] || { ABSENT+=("$(item user "$name" "gone before userdel")"); continue; }
+		[[ "$(cut -d: -f3 <<<"$pw")" == "$uid" ]] || { fail_step users "$name changed uid since the plan"; return 1; }
+		user_forbidden "$name" "$uid" && { fail_step users "$name is protected"; return 1; }
+		# After step 5: no file left on / may belong to the account.
+		any="$(find "$(hp /)" -xdev -uid "$uid" -print -quit 2>/dev/null)"
+		if [[ -n "$any" ]]; then
+			SKIPPED+=("$(item user "$name" "still owns ${any#"$R"} — kept")"); continue
+		fi
+		if pgrep -u "$uid" >/dev/null 2>&1; then
+			SKIPPED+=("$(item user "$name" "has running processes — kept")"); continue
+		fi
+		gr="$(getent group -- "$(cut -d: -f4 <<<"$pw")" 2>/dev/null || true)"
+		sh="$(getent shadow -- "$name" 2>/dev/null | cut -d: -f2 || true)"
+		run userdel -- "$name" || { fail_step users "userdel $name failed: ${RUN_TAIL:-}"; return 1; }
+		USERS_DELETED+=("${pw}|${gr}|${sh}")
+		REMOVED+=("$(item user "$name" "uid ${uid}")")
+	done
+	return 0
+}
+
+# --- step 9: .env --------------------------------------------------------------
+step_env() {
+	case "$E_STATE" in
+	none) return 0 ;;
+	already_false) ABSENT+=("$(item env "${E_KEY}=false" "already set")"); return 0 ;;
+	esac
+	local f tmp last size diffout
+	f="$(hp "$ENV_FILE")"
+	tmp="$(mktemp -- "${f}.uninstall.XXXXXX")" || { fail_step env "mktemp next to .env failed"; return 1; }
+	if [[ "$E_STATE" == set_false ]]; then
+		# The LAST assignment is the one every reader honours; only that line changes.
+		last="$(grep -nE "^[[:space:]]*(export[[:space:]]+)?${E_KEY}[[:space:]]*=" "$f" | tail -n1 | cut -d: -f1)"
+		[[ "$last" =~ ^[0-9]+$ ]] || { rm -f -- "$tmp"; fail_step env "cannot find the ${E_KEY} line"; return 1; }
+		sed "${last}s/.*/${E_KEY}=false/" -- "$f" >"$tmp"
+		diffout="$(diff -- "$f" "$tmp" | grep -E '^[<>]' || true)"
+		if [[ "$(awk 'END {print NR}' "$f")" != "$(awk 'END {print NR}' "$tmp")" \
+			|| "$(grep -c '^<' <<<"$diffout")" != 1 || "$(grep -c '^>' <<<"$diffout")" != 1 \
+			|| "$(grep '^>' <<<"$diffout")" != "> ${E_KEY}=false" ]]; then
+			rm -f -- "$tmp"; fail_step env "the edit would change more than the one ${E_KEY} line"; return 1
+		fi
+	else
+		cat -- "$f" >"$tmp"
+		[[ -s "$f" && -n "$(tail -c1 -- "$f")" ]] && printf '\n' >>"$tmp"
+		printf '%s=false\n' "$E_KEY" >>"$tmp"
+		# The old file must be a byte prefix of the new one; the rest is one line.
+		size="$(stat -c %s -- "$f")"
+		if ! head -c "$size" -- "$tmp" | cmp -s - "$f" \
+			|| [[ "$(tail -c +"$((size + 1))" -- "$tmp" | tr -d '\n')" != "${E_KEY}=false" ]]; then
+			rm -f -- "$tmp"; fail_step env "the append would change more than one line"; return 1
+		fi
+	fi
+	chown --reference="$f" -- "$tmp" 2>/dev/null || { rm -f -- "$tmp"; fail_step env "cannot keep the owner of .env"; return 1; }
+	chmod --reference="$f" -- "$tmp" || { rm -f -- "$tmp"; fail_step env "cannot keep the mode of .env"; return 1; }
+	TOUCHED_REL+=("${ENV_FILE#/}")
+	mv -f -- "$tmp" "$f" || { rm -f -- "$tmp"; fail_step env "cannot move the edited .env into place"; return 1; }
+	ENV_CHANGED=1
+	REMOVED+=("$(item env "${E_KEY}=false" "$([[ "$E_STATE" == append ]] && echo "line appended" || echo "line ${last} replaced")")")
+	return 0
+}
+
+# --- step 10: marker -----------------------------------------------------------
+step_marker() {
+	local d f tmp
+	d="$(hp "$MARKER_DIR")"; f="$d/$PROTO"
+	[[ -d "$d" ]] || MARKER_DIR_CREATED=1
+	mkdir -p -- "$d" && chmod 0755 -- "$d" || { fail_step marker "cannot create $MARKER_DIR"; return 1; }
+	tmp="$(mktemp -- "$d/.${PROTO}.XXXXXX")" || { fail_step marker "mktemp in $MARKER_DIR failed"; return 1; }
+	jobj protocol "$(jstr "$PROTO")" ts "$(jstr "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" sha256 "$(jstr "$PLAN_SHA")" \
+		backup "$(jstr "$ARCHIVE")" backup_sha256 "$(jstr "${ARCHIVE_SHA:-}")" helper_version "$(jnum "$HELPER_VERSION")" >"$tmp"
+	printf '\n' >>"$tmp"
+	chmod 0644 -- "$tmp" && mv -f -- "$tmp" "$f" || { rm -f -- "$tmp"; fail_step marker "cannot write $MARKER_DIR/$PROTO"; return 1; }
+	MARKER_WRITTEN=1
+	REMOVED+=("$(item marker "${MARKER_DIR}/${PROTO}" "written")")
+	return 0
+}
+
+# --- rollback ------------------------------------------------------------------
+RB_ERRORS=()
+rb() { local what="$1"; shift; if ! run "$@"; then RB_ERRORS+=("$what: ${RUN_TAIL:-rc!=0}"); fi; }
+
+rollback() {
+	trap '' INT TERM HUP
+	log "ROLLBACK after a failure at step ${FAIL_STEP}"
+	local i u entry pw gr sh name uid gid gecos home shell line spec comment
+	# 1. files (unit files, drop-ins, enable links, paths, .env) from the archive
+	if ((${#TOUCHED_REL[@]} > 0)); then
+		rb "restore files" tar -xzf "$(hp "$ARCHIVE")" -C "$(hp /)" --numeric-owner --preserve-permissions \
+			--xattrs --acls --no-overwrite-dir -- "${TOUCHED_REL[@]}"
+	fi
+	# 2. packages
+	for entry in "${PKG_PURGED[@]}"; do
+		rb "reinstall ${entry%%|*}" env DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+			-o Dpkg::Options::=--force-confold "${entry%%|*}=${entry#*|}"
+	done
+	# 3. users (same uid/gid/home/shell, password hash back)
+	for entry in "${USERS_DELETED[@]}"; do
+		pw="${entry%%|*}"; entry="${entry#*|}"; gr="${entry%%|*}"; sh="${entry#*|}"
+		IFS=: read -r name _ uid gid gecos home shell <<<"$pw"
+		if [[ -n "$gr" ]] && ! getent group -- "$gid" >/dev/null 2>&1; then
+			rb "groupadd ${gr%%:*}" groupadd -g "$gid" -- "${gr%%:*}"
+		fi
+		rb "useradd $name" useradd -u "$uid" -g "$gid" -c "$gecos" -d "$home" -M -s "$shell" -- "$name"
+		if [[ -n "$sh" && "$sh" != "!"* && "$sh" != "*" ]]; then
+			# Not through run(): the hash must not land in the log.
+			usermod -p "$sh" -- "$name" >/dev/null 2>&1 || RB_ERRORS+=("restore password of $name")
+		fi
+	done
+	# 4. units: unmask what we masked, reload, put enablement and activity back
+	for u in "${MASKED_UNITS[@]}"; do rb "unmask $u" systemctl unmask -- "$u"; done
+	rb "daemon-reload" systemctl daemon-reload
+	for ((i = ${#DONE_UNITS[@]} - 1; i >= 0; i--)); do
+		local k="${DONE_UNITS[$i]}"
+		u="${U_NAME[$k]}"
+		case "${U_FILESTATE[$k]}" in
+		enabled|enabled-runtime) [[ "$(unit_prop "$u" UnitFileState)" == enabled* ]] || rb "enable $u" systemctl enable -- "$u" ;;
+		esac
+	done
+	for ((i = ${#DONE_UNITS[@]} - 1; i >= 0; i--)); do
+		local k="${DONE_UNITS[$i]}"
+		u="${U_NAME[$k]}"
+		[[ "${U_ACTIVE[$k]}" == active ]] && rb "start $u" systemctl start -- "$u"
+	done
+	# 5. ufw rules, with their comments
+	for line in "${UFW_DELETED[@]}"; do
+		spec="${line#ufw allow }"; comment=""
+		if [[ "$spec" == *" comment '"*"'" ]]; then
+			comment="${spec#* comment \'}"; comment="${comment%\'}"; spec="${spec%% comment *}"
+			rb "ufw allow $spec" ufw allow "$spec" comment "$comment"
+		else
+			rb "ufw allow $spec" ufw allow "$spec"
+		fi
+	done
+	# 6. marker
+	if ((MARKER_WRITTEN)); then rb "remove marker" rm -f -- "$(hp "${MARKER_DIR}/${PROTO}")"; fi
+	if ((MARKER_DIR_CREATED)); then rmdir -- "$(hp "$MARKER_DIR")" 2>/dev/null || true; fi
+	if ((${#RB_ERRORS[@]} > 0)); then
+		log "ROLLBACK INCOMPLETE: ${RB_ERRORS[*]}"
+	else
+		log "rollback complete"
+	fi
+}
+
+report_json() {   # ok nothing_to_do
+	local -a errs=() rbe=()
+	local i
+	for i in "${ERRORS[@]}"; do errs+=("$(jstr "$i")"); done
+	for i in "${RB_ERRORS[@]}"; do rbe+=("$(jstr "$i")"); done
+	jobj ok "$(jbool "$1")" protocol "$(jstr "$PROTO")" sha256 "$(jstr "$PLAN_SHA")" nothing_to_do "$(jbool "$2")" \
+		backup "$(jstr "$ARCHIVE")" backup_sha256 "$(jstr "${ARCHIVE_SHA:-}")" \
+		removed "$(jarr "${REMOVED[@]}")" already_absent "$(jarr "${ABSENT[@]}")" skipped "$(jarr "${SKIPPED[@]}")" \
+		errors "$(jarr "${errs[@]}")" failed_step "$(jstr "$FAIL_STEP")" rolled_back "$(jbool "${ROLLED_BACK:-0}")" \
+		rollback_errors "$(jarr "${rbe[@]}")" \
+		rollback_command "$(jstr "$([[ -n "$ARCHIVE" ]] && printf 'tar -xzf %s -C / --numeric-owner --xattrs --acls --no-overwrite-dir --exclude=%s && rm -f %s/%s && systemctl daemon-reload  # then see %s/ROLLBACK.txt in the archive' "$ARCHIVE" "$META" "$MARKER_DIR" "$PROTO" "$META")")"
+	printf '\n'
+}
+
+on_signal() {
+	FAIL_STEP="${CUR_STEP:-signal}"; FAIL_MSG="interrupted by a signal"
+	ERRORS+=("interrupted by a signal at step ${CUR_STEP:-?}")
+	if [[ "${IN_MUTATION:-0}" != 1 ]]; then report_json 0 0; exit "$EXIT_BACKUP"; fi
+	rollback; ROLLED_BACK=1
+	report_json 0 0
+	if ((${#RB_ERRORS[@]} > 0)); then exit "$EXIT_ROLLBACK_FAILED"; fi
+	exit "$EXIT_ROLLED_BACK"
+}
+
+cmd_apply() {
+	local want="$1" lockf
+	[[ "$want" =~ ^[0-9a-f]{64}$ ]] || die_json "$EXIT_VALIDATION" bad_sha "the plan hash must be 64 lowercase hex characters"
+	lockf="$(hp "$LOCK_FILE")"
+	mkdir -p -- "$(dirname -- "$lockf")"
+	exec 9>"$lockf" || die_json "$EXIT_REFUSED" lock "cannot open $LOCK_FILE"
+	flock -n 9 || die_json "$EXIT_REFUSED" busy "another uninstall is running"
+	CMD_OUT="$(mktemp)"; trap 'rm -f -- "$CMD_OUT"; [[ -n "$STAGE" ]] && rm -rf -- "$STAGE"' EXIT
+	compute_plan
+	if ((NOTHING)); then
+		log "nothing to do (state ${STATE})"
+		report_json 1 1
+		exit 0
+	fi
+	# step 1
+	if [[ "$want" != "$PLAN_SHA" ]]; then
+		jobj ok false error "$(jstr plan_changed)" protocol "$(jstr "$PROTO")" expected "$(jstr "$want")" actual "$(jstr "$PLAN_SHA")" \
+			detail "$(jstr "the host changed since the plan was made — confirm the new plan")"
+		printf '\n'
+		log "refused: plan changed (confirmed ${want}, host now ${PLAN_SHA})"
+		exit "$EXIT_PLAN_CHANGED"
+	fi
+	if ((${#BLOCK[@]} > 0)); then
+		local -a b=(); local x
+		for x in "${BLOCK[@]}"; do b+=("$(jstr "$x")"); done
+		jobj ok false error "$(jstr blocked)" protocol "$(jstr "$PROTO")" blocking "$(jarr "${b[@]}")"
+		printf '\n'
+		log "refused: ${BLOCK[*]}"
+		exit "$EXIT_REFUSED"
+	fi
+	log "apply started (plan ${PLAN_SHA}, state ${STATE})"
+	trap 'on_signal' INT TERM HUP
+	CUR_STEP=backup
+	if ! step_backup; then
+		ERRORS+=("${FAIL_MSG}")
+		report_json 0 0
+		exit "$EXIT_BACKUP"
+	fi
+	IN_MUTATION=1
+	local s
+	for s in units files ufw packages users env marker; do
+		CUR_STEP="$s"
+		if ! "step_${s}" || ! selftest_fault "$s"; then
+			ERRORS+=("${FAIL_MSG}")
+			rollback; ROLLED_BACK=1
+			report_json 0 0
+			if ((${#RB_ERRORS[@]} > 0)); then exit "$EXIT_ROLLBACK_FAILED"; fi
+			exit "$EXIT_ROLLED_BACK"
+		fi
+	done
+	IN_MUTATION=0
+	trap - INT TERM HUP
+	log "apply finished: ${#REMOVED[@]} removed, ${#ABSENT[@]} already absent, ${#SKIPPED[@]} skipped; backup ${ARCHIVE}"
+	report_json 1 0
+	exit 0
+}
+
+# ============================================================================ #
+ARGS=("$@")
+ACTION="${1:-}"
+PROTO="${2:-}"
+case "$ACTION" in
+plan|manifest) (($# == 2)) || usage ;;
+apply) (($# == 3)) || usage ;;
+*) usage ;;
+esac
+case " $PROTOCOLS " in *" $PROTO "*) ;; *) PROTO_BAD="$PROTO"; PROTO=""; die_json "$EXIT_VALIDATION" unknown_protocol "'${PROTO_BAD}' is not one of: ${PROTOCOLS}" ;; esac
+setup_environment
+load_env
+case "$ACTION" in
+plan) compute_plan; plan_json ;;
+manifest) manifest_json ;;
+apply) cmd_apply "$3" ;;
+esac

@@ -2,6 +2,7 @@
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from typing import Protocol
 
 from db.database import Database
 from models.enums import (
@@ -30,6 +31,10 @@ KeyPurger = Callable[[int, int], Awaitable[object]]
 ProxyPurger = Callable[[int, int, str | None], Awaitable[object]]
 
 
+class _UninstalledView(Protocol):
+    def is_uninstalled(self, name: str) -> bool: ...
+
+
 class ProtocolModulesService:
     def __init__(self, repo: ProtocolModulesRepository, db: Database) -> None:
         self._repo = repo
@@ -40,6 +45,15 @@ class ProtocolModulesService:
         self._proxy_accesses_repo: ProxyAccessRepository | None = None
         self._key_purgers: dict[VpnKeyType, KeyPurger] = {}
         self._proxy_purgers: dict[ProxyAccessType, ProxyPurger] = {}
+        # services.protocol_uninstall.UninstallRegistry: a protocol removed from
+        # the host is off whatever the database says, and cannot be switched on.
+        self._uninstalled: _UninstalledView | None = None
+
+    def attach_uninstall_registry(self, registry: _UninstalledView) -> None:
+        self._uninstalled = registry
+
+    def is_uninstalled(self, name: str) -> bool:
+        return self._uninstalled is not None and self._uninstalled.is_uninstalled(name)
 
     def attach_purge_handlers(
         self,
@@ -67,6 +81,8 @@ class ProtocolModulesService:
         return await self._repo.get_all()
 
     async def is_enabled(self, name: str) -> bool:
+        if self.is_uninstalled(name):
+            return False
         return await self._repo.is_enabled(name)
 
     async def disable_protocol(self, name: str, actor_id: int) -> tuple[int, int]:
@@ -100,6 +116,11 @@ class ProtocolModulesService:
 
     async def enable_protocol(self, name: str, actor_id: int) -> None:
         await self._require_superadmin(actor_id)
+        if self.is_uninstalled(name):
+            raise InvalidOperation(
+                "Протокол удалён с сервера, нужна переустановка",
+                key="module_enable_blocked_uninstalled",
+            )
         await self._repo.set_enabled(name, enabled=True)
         await self._write_audit(actor_id, "protocol_enabled", {"protocol": name})
         logger.info("Protocol %s enabled by user %d", name, actor_id)

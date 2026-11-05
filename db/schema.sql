@@ -307,7 +307,13 @@ CREATE TABLE IF NOT EXISTS protocol_modules (
     name        TEXT PRIMARY KEY,
     enabled     INTEGER NOT NULL DEFAULT 1,
     disabled_at TEXT,
-    disabled_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL
+    disabled_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+    -- v40: removed from the HOST (deploy/helpers/vpn-bot-protocol-uninstall), not
+    -- just switched off. For the UI and the audit trail only: the marker file
+    -- /etc/vpn-bot/uninstalled/<name> is the source of truth, reconciled at boot.
+    uninstalled_at   TEXT,
+    uninstalled_by   INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+    uninstall_backup TEXT
 );
 INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('xray', 1);
 INSERT OR IGNORE INTO protocol_modules (name, enabled) VALUES ('awg', 1);

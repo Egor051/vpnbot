@@ -22,6 +22,7 @@ from services.auto_refresh import LiveRefreshManager
 from services.offsite_backup import OffsiteBackupService
 from services.online_clients import OnlineClientsService
 from services.protocol_modules import ProtocolModulesService
+from services.protocol_uninstall import ProtocolUninstallService
 from services.proxy import ProxyService
 from services.relay_health import RelayHealthSupervisor
 from services.relay_management import RelayService
@@ -87,3 +88,8 @@ class Services:
     # disabled. Drives the background health loop that marks the Hysteria2 backend
     # degraded/healthy in BackendHealth.
     hysteria_health_probe: Hysteria2AuthHealthProbe | None = None
+    # Cascade removal of a protocol from the host (Protocol modules panel). Its
+    # registry (the /etc/vpn-bot/uninstalled markers) is what every backend
+    # consumer asks before talking to a backend. None only in lightweight test
+    # doubles; the real app always wires it.
+    protocol_uninstall: ProtocolUninstallService | None = None

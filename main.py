@@ -74,6 +74,9 @@ async def main() -> None:
         server_status_task: asyncio.Task[None] | None = None
         warp_split_feeds_task: asyncio.Task[None] | None = None
         relay_health_task: asyncio.Task[None] | None = None
+        # Protocols removed from the host: every backend loop below asks this on
+        # each pass (a protocol can be removed while the bot runs).
+        uninstalled = services.protocol_uninstall.registry if services.protocol_uninstall is not None else None
         try:
             if isinstance(dp.storage, TTLMemoryStorage):
                 fsm_cleanup_task = asyncio.create_task(
@@ -87,19 +90,19 @@ async def main() -> None:
                 )
             if settings.awg_stats_interval > 0:
                 awg_stats_task = asyncio.create_task(
-                    _awg_stats_loop(services.traffic_stats, settings.awg_stats_interval),
+                    _awg_stats_loop(services.traffic_stats, settings.awg_stats_interval, uninstalled),
                     name="awg-stats-collector",
                 )
                 logger.info("AWG stats collector started (interval=%ds)", settings.awg_stats_interval)
             if settings.xray_stats_interval > 0:
                 xray_stats_task = asyncio.create_task(
-                    _xray_stats_loop(services.traffic_stats, settings.xray_stats_interval),
+                    _xray_stats_loop(services.traffic_stats, settings.xray_stats_interval, uninstalled),
                     name="xray-stats-collector",
                 )
                 logger.info("Xray stats collector started (interval=%ds)", settings.xray_stats_interval)
             if settings.is_hysteria2_stats_ready() and settings.hysteria2_stats_interval > 0:
                 hysteria_stats_task = asyncio.create_task(
-                    _hysteria_stats_loop(services.traffic_stats, settings.hysteria2_stats_interval),
+                    _hysteria_stats_loop(services.traffic_stats, settings.hysteria2_stats_interval, uninstalled),
                     name="hysteria-stats-collector",
                 )
                 logger.info(
@@ -111,6 +114,7 @@ async def main() -> None:
                         services.hysteria_health_probe,
                         backend_health,
                         settings.hysteria2_health_interval,
+                        uninstalled,
                     ),
                     name="hysteria-health-probe",
                 )
@@ -175,7 +179,7 @@ async def main() -> None:
             if settings.relay_health_interval > 0:
                 if settings.xray_sni:
                     relay_health_task = asyncio.create_task(
-                        relay_health_loop(services.relay_health, settings.relay_health_interval),
+                        relay_health_loop(services.relay_health, settings.relay_health_interval, uninstalled),
                         name="relay-health",
                     )
                     logger.info(

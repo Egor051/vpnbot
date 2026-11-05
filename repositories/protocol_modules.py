@@ -20,6 +20,12 @@ class ProtocolModule:
     enabled: bool
     disabled_at: str | None = None
     disabled_by: int | None = None
+    # Removed from the HOST, not just switched off (v40). A mirror of the marker
+    # /etc/vpn-bot/uninstalled/<name> for the panel and the audit trail; the marker
+    # is the truth (services.protocol_uninstall.UninstallRegistry).
+    uninstalled_at: str | None = None
+    uninstalled_by: int | None = None
+    uninstall_backup: str | None = None
 
 
 class ProtocolModulesRepository:
@@ -28,7 +34,8 @@ class ProtocolModulesRepository:
 
     async def get_all(self) -> list[ProtocolModule]:
         cursor = await self.db.conn.execute(
-            "SELECT name, enabled, disabled_at, disabled_by FROM protocol_modules ORDER BY name"
+            "SELECT name, enabled, disabled_at, disabled_by, uninstalled_at, uninstalled_by, uninstall_backup "
+            "FROM protocol_modules ORDER BY name"
         )
         rows = await cursor.fetchall()
         return [
@@ -37,6 +44,9 @@ class ProtocolModulesRepository:
                 enabled=bool(row["enabled"]),
                 disabled_at=row["disabled_at"],
                 disabled_by=row["disabled_by"],
+                uninstalled_at=row["uninstalled_at"],
+                uninstalled_by=row["uninstalled_by"],
+                uninstall_backup=row["uninstall_backup"],
             )
             for row in rows
         ]
@@ -68,4 +78,32 @@ class ProtocolModulesRepository:
                 "UPDATE protocol_modules SET enabled = 0, disabled_at = ?, disabled_by = ? WHERE name = ?",
                 (disabled_at, disabled_by, name),
             )
+        await self.db.commit()
+
+    async def set_uninstalled(
+        self,
+        name: str,
+        *,
+        uninstalled_at: str,
+        uninstalled_by: int | None,
+        backup: str | None,
+    ) -> None:
+        """Record that *name* was removed from the host. Also switched off: an
+        uninstalled module is never enabled (disabled_at is kept if already set)."""
+        await self.db.conn.execute(
+            "UPDATE protocol_modules SET enabled = 0, "
+            "disabled_at = COALESCE(disabled_at, ?), "
+            "uninstalled_at = ?, uninstalled_by = ?, uninstall_backup = ? WHERE name = ?",
+            (uninstalled_at, uninstalled_at, uninstalled_by, backup, name),
+        )
+        await self.db.commit()
+
+    async def clear_uninstalled(self, name: str) -> None:
+        """Forget a removal (the marker is gone: reinstalled by hand). The module
+        stays switched off until an admin enables it."""
+        await self.db.conn.execute(
+            "UPDATE protocol_modules SET uninstalled_at = NULL, uninstalled_by = NULL, "
+            "uninstall_backup = NULL WHERE name = ?",
+            (name,),
+        )
         await self.db.commit()

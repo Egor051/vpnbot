@@ -45,6 +45,7 @@
 | `XRAY_APPLY_HELPER_PATH` | Нет | `/usr/local/sbin/vpn-bot-xray-apply` | Абсолютный путь к sudo-хелперу применения конфига Xray. |
 | `AWG_APPLY_HELPER_PATH` | Нет | `/usr/local/sbin/vpn-bot-awg-apply` | Абсолютный путь к sudo-хелперу применения конфига AWG. |
 | `MTPROTO_APPLY_HELPER_PATH` | Нет | `/usr/local/sbin/vpn-bot-mtproxy-apply` | Абсолютный путь к sudo-хелперу применения MTProto. |
+| `PROTOCOL_UNINSTALL_HELPER_PATH` | Нет | root-модель: `deploy/helpers/vpn-bot-protocol-uninstall` из checkout; helper-режим: `/usr/local/sbin/vpn-bot-protocol-uninstall` | Абсолютный путь к root-хелперу, удаляющему протокол с сервера («Выключить и удалить с сервера» в «Модулях протоколов», см. [protocol-uninstall.ru.md](protocol-uninstall.ru.md)). Задавайте, только если хелпер лежит в другом месте. |
 | `XRAY_HELPER_STAGING_DIR` | Нет | `$HELPER_STAGING_ROOT/xray` | Staging-каталог для файлов Xray-хелпера. |
 | `AWG_HELPER_STAGING_DIR` | Нет | `$HELPER_STAGING_ROOT/awg` | Staging-каталог для файлов AWG-хелпера. |
 | `MTPROTO_HELPER_STAGING_DIR` | Нет | `$HELPER_STAGING_ROOT/mtproxy` | Staging-каталог для файлов MTProto-хелпера. |

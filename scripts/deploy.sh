@@ -235,6 +235,17 @@ read -r -a WARP_SRCS <<< "${WARP_SRCS:-10.0.0.0/24 172.16.0.2}"
 # (per each unit's After=/Requires=, NOT alphabetical). Host-verify the names.
 WARP_ONESHOTS=(warp-routes.service vpn-bot-warp-split.service vpnbot-hy2-warp-mark.service warp-failsafe.service)
 
+# Protocols removed from this host by deploy/helpers/vpn-bot-protocol-uninstall — one
+# marker file per protocol (docs/protocol-uninstall.md). A marker takes the protocol's
+# units, host files and helpers out of EVERY check below: UNIT_SET and its post-state
+# regression, the unit drift scan, the protocol report, the MANAGED_HOST_FILES gates,
+# OUT_OF_REPO_HELPERS and the WARP_ONESHOTS reapply. Without it the next deploy would
+# watch units that are gone on purpose — Xray has no *_ENABLED flag at all — and
+# reinstall the danted drop-in for a purged dante-server. Overridable for the
+# DEPLOY_SELFTEST suites only.
+UNINSTALL_MARKER_DIR="${UNINSTALL_MARKER_DIR:-/etc/vpn-bot/uninstalled}"
+UNINSTALL_PROTOCOLS=(xray awg socks5 mtproto hysteria2)
+
 # systemd-networkd drop-in that keeps networkd from flushing the WARP `ip rule`s it
 # did not create (ManageForeignRoutingPolicyRules/Routes=no). Tracked at
 # deploy/networkd/10-keep-foreign-rules.conf; the Phase 1 check below is
@@ -446,7 +457,11 @@ MANAGED_HOST_FILES=(
   "deploy/vpn-bot-acme-reload.sh|/usr/local/sbin/acme-reload.sh|0755|root:root|hook|main|when=/etc/vpn-bot/tls/fullchain.pem"
   "deploy/host/ssh/00-root-key-only.conf|/etc/ssh/sshd_config.d/00-root-key-only.conf|0644|root:root|ssh|main"
   "deploy/host/ssh/ssh.socket-override.conf|/etc/systemd/system/ssh.socket.d/override.conf|0644|root:root|ssh|main"
-  "deploy/danted-warp.conf|/etc/systemd/system/danted.service.d/vpn-bot-warp.conf|0644|root:root|unit|main"
+  # Only where SOCKS5 is enabled and not removed from the host: after an uninstall
+  # (apt-get purge dante-server) this drop-in would otherwise come back, and the
+  # "did not exist before -> enable + start" branch would try to start a danted that
+  # is not installed any more.
+  "deploy/danted-warp.conf|/etc/systemd/system/danted.service.d/vpn-bot-warp.conf|0644|root:root|unit|main|gate=SOCKS5"
   # Only where MTProxy is enabled; vpnbot-managed.conf is the drop-in's old name.
   # (Replaces the mtproxy half of the Phase 1 unit-drift gate, which only reported.)
   "deploy/mtproxy-vpn-bot-managed.conf|/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf|0644|root:root|unit|main|gate=MTPROTO;legacy=/etc/systemd/system/mtproxy.service.d/vpnbot-managed.conf"
@@ -534,6 +549,7 @@ VENV_SNAPSHOT_DONE=0
 PHASE="preflight"   # preflight | interim | armed | done
 declare -a UNIT_SET=()
 declare -a MANAGED_LIST=()   # only the names read from deploy/managed-units.list, in order
+declare -a UNINSTALLED_UNITS=()   # "<unit>|<protocol>": left out of UNIT_SET, removed from the host
 # Self-diagnostic allowlist for the running-but-not-watched detector ONLY.
 # redeploy.sh launches deploy.sh DETACHED as a transient systemd unit via
 # `systemd-run --unit="${DEPLOY_UNIT:-vpn-bot-deploy}"`, so while a deploy runs the
@@ -660,6 +676,52 @@ unit_states() {
 }
 
 # --------------------------------------------------------------------------- #
+# Protocols removed from the host (see UNINSTALL_MARKER_DIR)
+# --------------------------------------------------------------------------- #
+proto_uninstalled() { [[ -f "${UNINSTALL_MARKER_DIR}/$1" ]]; }
+
+# The removed protocols, space-separated (empty when none).
+uninstalled_protocols() {
+  local p out=""
+  for p in "${UNINSTALL_PROTOCOLS[@]}"; do proto_uninstalled "$p" && out+="${p} "; done
+  printf '%s' "${out% }"
+}
+
+# The removed protocol a unit belongs to, or nothing. The names come from .env
+# (resolve_backend_units), with the same defaults, so this works before it ran too.
+# vpn-bot-hy2-auth.service is the repo's name of the unit the host runs as
+# HYSTERIA2_AUTH_SERVICE_NAME; vpnbot-hy2-warp-mark.service is the Hysteria2 tagger.
+unit_uninstalled_owner() {
+  local u="$1" x h a
+  x="${XRAY_SERVICE_NAME_V:-xray}"; h="${HY2_SERVICE_NAME_V:-hysteria-server}"
+  a="${HY2_AUTH_SERVICE_NAME_V:-vpn-bot-hy2-auth}"
+  if proto_uninstalled xray && [[ "$u" == "${x}.service" || "$u" == "${x}@"*.service ]]; then printf xray; return 0; fi
+  if proto_uninstalled awg && [[ "$u" == "awg-quick@${AWG_IFACE_V:-awg0}.service" ]]; then printf awg; return 0; fi
+  if proto_uninstalled socks5 && [[ "$u" == "${SOCKS5_SERVICE_NAME_V:-danted}.service" ]]; then printf socks5; return 0; fi
+  if proto_uninstalled mtproto && [[ "$u" == "${MTPROTO_SERVICE_NAME_V:-mtproxy}.service" ]]; then printf mtproto; return 0; fi
+  if proto_uninstalled hysteria2 && [[ "$u" == "${h}.service" || "$u" == "${h}@"*.service || "$u" == "${a}.service" \
+       || "$u" == vpn-bot-hy2-auth.service || "$u" == "$HY2_MARK_UNIT" ]]; then
+    printf hysteria2; return 0
+  fi
+  return 0
+}
+
+# The removed protocol an OUT_OF_REPO_HELPERS destination belongs to, or nothing.
+helper_uninstalled_owner() {
+  if [[ "$1" == /usr/local/sbin/vpnbot-hy2-warp-mark ]] && proto_uninstalled hysteria2; then printf hysteria2; fi
+  return 0
+}
+
+# MANAGED_HOST_FILES gate name -> uninstall marker name.
+gate_protocol() {
+  case "$1" in
+    XRAY) printf xray ;; AWG) printf awg ;; SOCKS5) printf socks5 ;;
+    MTPROTO) printf mtproto ;; HYSTERIA2) printf hysteria2 ;;
+  esac
+  return 0
+}
+
+# --------------------------------------------------------------------------- #
 # Out-of-repo helper drift (see OUT_OF_REPO_HELPERS above)
 # --------------------------------------------------------------------------- #
 # Scan each managed helper's installed copy against the tracked source under
@@ -682,6 +744,10 @@ scan_out_of_repo_helpers() {
     [[ "${role:-main}" == "${NODE_ROLE:-main}" ]] || continue
     base="$(basename "$dst")"
     src="${root}/${src_rel}"
+    # The protocol it serves was removed from the host: neither drift nor absent.
+    if [[ -n "$(helper_uninstalled_owner "$dst")" ]]; then
+      printf '%s|%s|%s|uninstalled|%s\n' "$base" "$src" "$dst" "$policy"; continue
+    fi
     if   [[ ! -e "$dst" ]];    then printf '%s|%s|%s|absent|%s\n' "$base" "$src" "$dst" "$policy"
     elif cmp -s "$src" "$dst"; then printf '%s|%s|%s|synced|%s\n' "$base" "$src" "$dst" "$policy"
     else                            printf '%s|%s|%s|drift|%s\n'  "$base" "$src" "$dst" "$policy"; fi
@@ -714,6 +780,7 @@ install_out_of_repo_helpers() {
         fi
         ;;
       synced) log "  ${base}: already in sync with the checkout" ;;
+      uninstalled) log "  ${base}: its protocol was removed from this host (uninstall marker) — left as it is" ;;
       drift)
         log "  ${base}: installed copy drifted from the checkout — reinstalling"
         install -o root -g root -m 0755 "$src" "$dst" \
@@ -760,6 +827,8 @@ install_out_of_repo_helpers() {
   local hy2_pre="${U_PRE_ACTIVE[$HY2_MARK_UNIT]:-}"
   if [[ "${NODE_ROLE:-main}" != "main" ]]; then
     :
+  elif [[ -n "$(unit_uninstalled_owner "$HY2_MARK_UNIT")" ]]; then
+    log "  ${HY2_MARK_UNIT}: Hysteria2 was removed from this host (uninstall marker) — not re-applied"
   elif [[ "$hy2_pre" == "active" ]]; then
     log "  ${HY2_MARK_UNIT} was active pre-deploy — re-applying to sync the --sport exemption with the current HYSTERIA2_PORT"
     systemctl restart "$HY2_MARK_UNIT" \
@@ -836,11 +905,14 @@ mh_opt() {
 # from .env. No gate = open. An unknown gate name reads as closed (and the test
 # suite rejects it).
 mh_gate_open() {
-  local gate var when
+  local gate var when proto
   when="$(mh_opt "$1" when)"
   if [[ -n "$when" && ! -e "$when" ]]; then return 1; fi
   gate="$(mh_opt "$1" gate)"
   [[ -n "$gate" ]] || return 0
+  # A protocol removed from the host keeps its gate shut whatever .env still says.
+  proto="$(gate_protocol "$gate")"
+  if [[ -n "$proto" ]] && proto_uninstalled "$proto"; then return 1; fi
   var="${gate}_ON"
   [[ "${!var:-no}" == "yes" ]]
 }
@@ -905,6 +977,9 @@ mh_entry_state() {
     MH_STATE="gated-off"
     if [[ -n "$(mh_opt "$MH_OPTS" when)" && ! -e "$(mh_opt "$MH_OPTS" when)" ]]; then
       MH_DETAIL="$(mh_opt "$MH_OPTS" when) is absent on this host"
+    elif [[ -n "$(gate_protocol "$(mh_opt "$MH_OPTS" gate)")" ]] \
+         && proto_uninstalled "$(gate_protocol "$(mh_opt "$MH_OPTS" gate)")"; then
+      MH_DETAIL="$(gate_protocol "$(mh_opt "$MH_OPTS" gate)") was removed from this host (${UNINSTALL_MARKER_DIR}/$(gate_protocol "$(mh_opt "$MH_OPTS" gate)"))"
     else
       MH_DETAIL="$(mh_opt "$MH_OPTS" gate)_ENABLED is off on this host"
     fi
@@ -2646,7 +2721,9 @@ rollback() {
     local w pre
     for w in "${WARP_ONESHOTS[@]}"; do
       pre="${U_PRE_ACTIVE[$w]:-<not snapshotted>}"
-      if [[ "$pre" == "active" ]]; then
+      if [[ -n "$(unit_uninstalled_owner "$w")" ]]; then
+        report+=("skip reapply ${w} (its protocol was removed from this host)")
+      elif [[ "$pre" == "active" ]]; then
         systemctl restart "$w"; report+=("reapply ${w} (was active pre-deploy): rc=$?"); warp_reapplied="yes"
       else
         report+=("skip reapply ${w} (pre-state=${pre}; not reactivating)")
@@ -2954,14 +3031,22 @@ resolve_backend_units() {
   MTPROTO_SERVICE_NAME_V="$(env_or MTPROTO_SERVICE_NAME mtproxy)"
   HY2_SERVICE_NAME_V="$(env_or HYSTERIA2_SERVICE_NAME hysteria-server)"
   HY2_AUTH_SERVICE_NAME_V="$(env_or HYSTERIA2_AUTH_SERVICE_NAME vpn-bot-hy2-auth)"
+  AWG_IFACE_V="$(env_or AWG_INTERFACE awg0)"
   SOCKS5_ON="$(yesno "$(env_val SOCKS5_ENABLED)")"
   MTPROTO_ON="$(yesno "$(env_val MTPROTO_ENABLED)")"
   HYSTERIA2_ON="$(yesno "$(env_val HYSTERIA2_ENABLED)")"
+  # Removed from the host (uninstall marker): off, whatever .env says. Xray has no
+  # *_ENABLED flag at all, so the marker is its only "off".
+  XRAY_ON="yes"
+  if proto_uninstalled xray;      then XRAY_ON="no"; fi
+  if proto_uninstalled socks5;    then SOCKS5_ON="no"; fi
+  if proto_uninstalled mtproto;   then MTPROTO_ON="no"; fi
+  if proto_uninstalled hysteria2; then HYSTERIA2_ON="no"; fi
   XRAY_UNIT="${XRAY_SERVICE_NAME_V}.service"
   # Modular-protocol matrix (label | gate var | gate on | unit). Reset first so
   # repeated calls (tests) do not accumulate.
   PROTO_LABEL=(); PROTO_GATE=(); PROTO_ON=(); PROTO_UNIT=()
-  proto_add "Xray"           "always"            "yes"           "${XRAY_SERVICE_NAME_V}.service"
+  proto_add "Xray"           "always"            "$XRAY_ON"      "${XRAY_SERVICE_NAME_V}.service"
   proto_add "SOCKS5"         "SOCKS5_ENABLED"    "$SOCKS5_ON"    "${SOCKS5_SERVICE_NAME_V}.service"
   proto_add "MTProto"        "MTPROTO_ENABLED"   "$MTPROTO_ON"   "${MTPROTO_SERVICE_NAME_V}.service"
   proto_add "Hysteria2"      "HYSTERIA2_ENABLED" "$HYSTERIA2_ON" "${HY2_SERVICE_NAME_V}.service"
@@ -2976,11 +3061,14 @@ resolve_backend_units() {
 # then snapshot each installed unit's class + pre-state (active/enabled).
 assemble_unit_set() {
   local raw line f base u utype urae tmr t
-  UNIT_SET=(); MANAGED_LIST=()
-  UNIT_SET+=("${XRAY_SERVICE_NAME_V}.service")            # Xray: always expected
-  if [[ "$SOCKS5_ON"    == "yes" ]]; then UNIT_SET+=("${SOCKS5_SERVICE_NAME_V}.service"); fi
-  if [[ "$MTPROTO_ON"   == "yes" ]]; then UNIT_SET+=("${MTPROTO_SERVICE_NAME_V}.service"); fi
-  if [[ "$HYSTERIA2_ON" == "yes" ]]; then
+  UNIT_SET=(); MANAGED_LIST=(); UNINSTALLED_UNITS=()
+  # Xray: always expected — unless removed from the host (it has no .env gate). A
+  # removed protocol's units are added here too, only so the filter below moves them
+  # into UNINSTALLED_UNITS and the report can name them.
+  UNIT_SET+=("${XRAY_SERVICE_NAME_V}.service")
+  if [[ "$SOCKS5_ON"    == "yes" ]] || proto_uninstalled socks5;  then UNIT_SET+=("${SOCKS5_SERVICE_NAME_V}.service"); fi
+  if [[ "$MTPROTO_ON"   == "yes" ]] || proto_uninstalled mtproto; then UNIT_SET+=("${MTPROTO_SERVICE_NAME_V}.service"); fi
+  if [[ "$HYSTERIA2_ON" == "yes" ]] || proto_uninstalled hysteria2; then
     UNIT_SET+=("${HY2_SERVICE_NAME_V}.service")
     UNIT_SET+=("${HY2_AUTH_SERVICE_NAME_V}.service")
   fi
@@ -2995,6 +3083,15 @@ assemble_unit_set() {
   done
   shopt -u nullglob
   readarray -t UNIT_SET < <(printf '%s\n' "${UNIT_SET[@]}" | awk 'NF && !seen[$0]++')
+  # Units of a protocol removed from the host leave the watched set: they are gone
+  # (or masked, awg-quick@awg0) on purpose, which is neither a regression nor drift.
+  local owner
+  local -a watched=()
+  for u in "${UNIT_SET[@]}"; do
+    owner="$(unit_uninstalled_owner "$u")"
+    if [[ -n "$owner" ]]; then UNINSTALLED_UNITS+=("${u}|${owner}"); else watched+=("$u"); fi
+  done
+  UNIT_SET=("${watched[@]}")
 
   skipped=()
   for u in "${UNIT_SET[@]}"; do
@@ -3021,7 +3118,11 @@ assemble_unit_set() {
 # unit is absent is NORMAL (INFO); only *enabled but not loaded* is a real
 # breakage (WARN). Args: label gate on unit. Echoes a single status phrase.
 classify_proto() {
-  local gate="$2" on="$3" unit="$4"
+  local gate="$2" on="$3" unit="$4" owner
+  owner="$(unit_uninstalled_owner "$unit")"
+  if [[ -n "$owner" ]]; then
+    echo "INFO: removed from this host (${UNINSTALL_MARKER_DIR}/${owner}) — not watched"; return 0
+  fi
   if unit_exists "$unit"; then
     echo "OK"
   elif [[ "$gate" == "always" ]]; then
@@ -3729,6 +3830,11 @@ for f in "$WT"/deploy/*.service; do
   base="$(basename "$f")"
   [[ "$base" == *.example.service ]] && continue
   [[ "$base" == "$BOT_UNIT" ]] && continue
+  # A unit of a protocol removed from the host is absent on purpose: not drift, not INFO.
+  if [[ -n "$(unit_uninstalled_owner "$base")" ]]; then
+    log "  ${base}: its protocol was removed from this host (uninstall marker) — not compared"
+    continue
+  fi
   inst="/etc/systemd/system/${base}"
   if [[ -f "$inst" ]]; then
     cmp -s "$f" "$inst" || drift+=("deploy/${base}|${inst}")
@@ -3877,6 +3983,9 @@ fi
 assemble_unit_set
 if [[ ${#skipped[@]} -gt 0 ]]; then
   log "units not installed (skipped from the health check): ${skipped[*]}"
+fi
+if [[ ${#UNINSTALLED_UNITS[@]} -gt 0 ]]; then
+  log "protocols removed from this host ($(uninstalled_protocols)) — their units are not watched: $(printf '%s ' "${UNINSTALLED_UNITS[@]%%|*}")"
 fi
 
 # Sidecar pre-states, taken HERE with the rest of the pre-states and before any
@@ -4035,11 +4144,29 @@ phase1_report() {
     printf '    %-15s %-30s %-18s %s\n' "$lbl" "$unit" "$states" "$(classify_proto "$lbl" "$gate" "$on" "$unit")"
   done
 
+  # --- Protocols removed from the host (deploy/helpers/vpn-bot-protocol-uninstall) ---
+  printf '\n  --- Protocols removed from this host (%s) ---\n' "$UNINSTALL_MARKER_DIR"
+  local removed_protos
+  removed_protos="$(uninstalled_protocols)"
+  if [[ -n "$removed_protos" ]]; then
+    printf '    removed: %s\n' "$removed_protos"
+    local uu
+    for uu in "${UNINSTALLED_UNITS[@]}"; do
+      printf '    %-40s left out of UNIT_SET (%s removed)\n' "${uu%%|*}" "${uu##*|}"
+    done
+    printf '    (their host files, helpers and WARP oneshots are skipped too; a reinstall removes the marker)\n'
+  else
+    printf '    none\n'
+  fi
+
   # --- Data-plane units from managed-units.list (not loaded => WARN, not fatal) ---
   printf '\n  --- managed-units.list (data-plane units with no .env variable) ---\n'
   if [[ ${#MANAGED_LIST[@]} -gt 0 ]]; then
     for u in "${MANAGED_LIST[@]}"; do
-      if unit_exists "$u"; then
+      if [[ -n "$(unit_uninstalled_owner "$u")" ]]; then
+        printf '    %-40s %-18s INFO: %s removed from this host (uninstall marker) — not watched\n' \
+          "$u" "$(unit_states "$u")" "$(unit_uninstalled_owner "$u")"
+      elif unit_exists "$u"; then
         printf '    %-40s %-18s OK\n' "$u" "$(unit_states "$u")"
       else
         printf '    %-40s %-18s WARN: listed but not loaded (typo, rename, or removed?)\n' "$u" "$(unit_states "$u")"
@@ -4403,6 +4530,7 @@ cat <<EOF
   schema_version   : ${SCHEMA_BEFORE} -> ${SCHEMA_AFTER} (target ${SCHEMA_EXPECT})
   backup           : ${ARCHIVE}
   units skipped    : ${skipped[*]:-none}
+  removed protocols: $(uninstalled_protocols | sed 's/^$/none/')
   host files       : $(host_files_summary)
 EOF
 # One line per sidecar (restarted / skipped), so a half-deployed host is visible

@@ -83,7 +83,7 @@ def test_v32_migration_adds_key_bundles_and_preserves_keys(tmp_path: Path) -> No
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             )
             assert version is not None
-            assert int(version["value"]) == CURRENT_SCHEMA_VERSION == 39
+            assert int(version["value"]) == CURRENT_SCHEMA_VERSION == 40
 
             table = await db.conn.execute_fetchone(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'key_bundles'"

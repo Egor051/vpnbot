@@ -65,6 +65,10 @@ install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpn-bot-socks5-user" /usr/
 install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpn-bot-xray-apply" /usr/local/sbin/vpn-bot-xray-apply
 install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpn-bot-awg-apply" /usr/local/sbin/vpn-bot-awg-apply
 install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpn-bot-mtproxy-apply" /usr/local/sbin/vpn-bot-mtproxy-apply
+# Cascade removal of a protocol from the host (docs/protocol-uninstall.md). Root
+# runs it from the checkout in the root model; helper mode needs this copy, which
+# the sudoers file below grants by exact path.
+install -o root -g root -m 0755 "${HELPER_SOURCE_DIR}/vpn-bot-protocol-uninstall" /usr/local/sbin/vpn-bot-protocol-uninstall
 
 # WARP outbound-IP masking helpers live in scripts/ (not deploy/helpers/). They
 # must be (re)installed here too, otherwise a `git reset` deploy leaves the stale

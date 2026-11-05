@@ -1154,6 +1154,9 @@ def backend_diagnostics_text(
         "",
     ]
     for status in statuses:
+        if status.uninstalled:
+            lines.append(f"{h(status.label)}: <b>UNINSTALLED</b> — {h(t('module_status_uninstalled_short'))}")
+            continue
         state = "DEGRADED" if status.degraded else "OK"
         lines.append(f"{h(status.label)}: <b>{state}</b>")
         if status.reason:
@@ -1201,6 +1204,10 @@ def system_diagnostics_text(
         lines.append("<b>Отключённые модули:</b>")
         for m in disabled_modules:
             label = PROTOCOL_DISPLAY.get(m.name, m.name)
+            if m.uninstalled_at:
+                ts_part = f" ({m.uninstalled_at[:10]})"
+                lines.append(f"🗑 {h(label)}: UNINSTALLED — {h(t('module_status_uninstalled_short'))}{h(ts_part)}")
+                continue
             ts_part = f" (отключён {m.disabled_at[:10]})" if m.disabled_at else ""
             lines.append(f"✗ {h(label)}: DISABLED{h(ts_part)}")
     return "\n".join(lines)
