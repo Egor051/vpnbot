@@ -213,46 +213,51 @@ callback `bundle:*`, который всё-таки пришёл (повтор, 
   нетронутым и даёт процессу ровно один читаемый секрет:
 
 ```bash
-sudo install -d -o root -g vpn-bot -m 0750 /etc/vpn-bot/tls
+sudo install -d -o root -g root -m 0755 /etc/vpn-bot/tls
 # Добавьте ВТОРУЮ цель в существующий вызов acme.sh --install-cert (hysteria-цель
 # не трогать), чтобы обновления попадали и сюда, и укажите в --reloadcmd трекнутый
-# хук раскладки — тогда новую цепочку подхватят ОБА читателя:
-sudo chmod 0755 /opt/vpn-service/deploy/vpn-bot-acme-reload.sh
+# хук раскладки, который ставит deploy.sh, — тогда новую цепочку подхватят все читатели:
 sudo acme.sh --install-cert -d <DOMAIN> \
   --fullchain-file /etc/vpn-bot/tls/fullchain.pem \
   --key-file       /etc/vpn-bot/tls/privkey.pem \
-  --reloadcmd      "/opt/vpn-service/deploy/vpn-bot-acme-reload.sh"
+  --reloadcmd      "/usr/local/sbin/acme-reload.sh"
 ```
 
 Ключ читается **один раз при старте**, поэтому обновление подхватывается этим рестартом.
 `ReadOnlyPaths` для него юниту не нужен: `ProtectSystem=strict` делает `/etc` read-only, а не
 невидимым, и доступ реально ограничивают права на файл.
 
-`deploy/vpn-bot-acme-reload.sh` — это трекнутая форма шага reload: он заново выставляет
-`root:vpn-bot` / `0640` на обновлённый ключ, отдаёт Hysteria2 её собственную копию и перезапускает
-**оба** сервиса — `hysteria-server` и `vpn-bot-subscription`. Запускается прямо из чекаута (как
-`deploy/update-ip2asn.sh`), поэтому деплой его обновляет; в `/usr/local/sbin` он не ставится.
-Прогнать вхолостую, не дожидаясь продления:
+`deploy/vpn-bot-acme-reload.sh` — трекнутая форма шага reload. `scripts/deploy.sh` ставит его как
+**`/usr/local/sbin/acme-reload.sh`** — файл хоста класса `hook` ([host-state.ru.md](host-state.ru.md)):
+именно этот путь записан в `Le_ReloadCmd` у acme.sh, так что сам acme.sh не перенастраивается.
+Перед установкой изменённой копии Phase 1 прогоняет её с `--dry-run` и останавливает деплой, если
+код возврата не 0. На каждом продлении хук:
+
+- заново выставляет владельцев и права, ровно как на main-сервере: каталог `root:root 0755`,
+  `fullchain.pem` и `privkey.pem` — `root:vpn-bot 0640` (`cert.pem` не трогается — его никто не
+  читает);
+- отдаёт Hysteria2 её собственную копию (`hysteria:hysteria`, `0644` / `0600`);
+- делает reload `nginx` (self-steal таргет REALITY), restart `hysteria-server` и **try-restart**
+  `vpn-bot-subscription` — продление никогда не поднимает эндпоинт, который вы остановили.
+
+Каждый шаг выполняется, даже если предыдущий упал (без `set -e`), а в конце хук выходит с кодом 1 —
+сбой попадает в лог acme.sh, а остальные потребители не остаются со старой цепочкой. Прогнать
+вхолостую, не дожидаясь продления:
 
 ```bash
-sudo /opt/vpn-service/deploy/vpn-bot-acme-reload.sh --dry-run
+sudo /usr/local/sbin/acme-reload.sh --dry-run
 ```
 
-> **Известное расхождение с хостом — проверьте своё.** На хосте, поднятом до того, как этот хук
-> стал трекаться, `--reloadcmd` может всё ещё указывать на написанный руками скрипт (например,
-> `/usr/local/sbin/acme-reload.sh`), который копирует сертификат в Hysteria2 и перезапускает
-> `hysteria-server`, но **никогда не перезапускает `vpn-bot-subscription`**. Тогда этот эндпоинт
-> после каждого продления продолжает отдавать **предыдущий** сертификат, пока его не перезапустит
-> что-то ещё — деплой или перезагрузка; именно поэтому проблему легко не заметить. Сначала
-> прочитайте живое значение, ничего не меняя:
+> **Проверьте, что реально вызывает acme.sh.** Раньше по этому пути лежал написанный руками
+> скрипт; первый деплой с реестром файлов хоста заменяет его (Phase 1 сначала покажет diff). Хост,
+> у которого `--reloadcmd` указывает на что-то другое, этим не покрыт:
 >
 > ```bash
-> sudo grep -r Le_ReloadCmd /root/.acme.sh/*/ ; sudo cat /usr/local/sbin/acme-reload.sh
+> sudo grep -r Le_ReloadCmd /root/.acme.sh/*/
 > ```
 >
-> Переключение `--reloadcmd` на трекнутый хук (повторите команду `--install-cert` выше — она
-> перезаписывает сохранённое значение) закрывает расхождение. Сделайте это **до** следующего
-> продления, а не после.
+> Если там не `/usr/local/sbin/acme-reload.sh`, повторите команду `--install-cert` выше (она
+> перезаписывает сохранённое значение) — до следующего продления, а не после.
 
 ## Go-live (установка drift, руками)
 
@@ -279,12 +284,12 @@ TLS-пары вообще не стартует (следующий раздел
 ```bash
 # 1. Копия TLS — групп-читаемая копия уже выпущенного Let's Encrypt-сертификата
 #    домена, ставится acme.sh (полная команда с --reloadcmd — в разделе выше).
-sudo install -d -o root -g vpn-bot -m 0750 /etc/vpn-bot/tls
+sudo install -d -o root -g root -m 0755 /etc/vpn-bot/tls
 sudo acme.sh --install-cert -d <домен> \
   --fullchain-file /etc/vpn-bot/tls/fullchain.pem \
   --key-file       /etc/vpn-bot/tls/privkey.pem \
-  --reloadcmd      "/opt/vpn-service/deploy/vpn-bot-acme-reload.sh"
-ls -l /etc/vpn-bot/tls          # ожидаем root:vpn-bot, privkey.pem 0640
+  --reloadcmd      "/usr/local/sbin/acme-reload.sh"
+ls -l /etc/vpn-bot/tls          # ожидаем fullchain.pem + privkey.pem root:vpn-bot 0640 (ставит хук)
 
 # 2. .env — флаг, порты и TLS-пара, одной правкой
 #    SUBSCRIPTION_ENABLED=true

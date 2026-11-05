@@ -1,0 +1,42 @@
+# Host files deploy.sh KNOWS about but deliberately does not install.
+#
+# Phase 1 scans the host directories listed in docs/host-state.md and warns about
+# every file that is neither installed by the deploy (MANAGED_HOST_FILES,
+# OUT_OF_REPO_HELPERS, deploy/*.service|*.timer of the host's role), nor owned by a
+# package (dpkg -S), nor matched here. A match here silences that warning; it does
+# NOT make deploy.sh install, check or back the file up.
+#
+# Format, one entry per line:
+#   <absolute path-glob>  # <class> — <reason, at least 20 characters>
+# The glob is a bash pattern (`*` also matches `/`). Classes:
+#   installer         written and updated by a third-party installer (Xray-install, get.hy2.sh…)
+#   provider          written by the VPS provider / cloud image, not by us
+#   backup-only       ours, but not in the repo: only the offsite system bundle keeps it
+#   deployment-local  unique to this deployment by design, cannot live in the repo
+# tests/test_deploy_host_state.py checks every line (class, reason length, absolute glob).
+
+# --- Xray (XTLS/Xray-install) -------------------------------------------------
+/etc/systemd/system/xray*.service  # installer — Xray-install ставит xray.service и xray@.service и переписывает их при обновлении
+/etc/systemd/system/xray*.service.d/*  # installer — drop-in'ы Xray-install (10-donot_touch_single_conf.conf), обновляются им же
+/usr/local/bin/xray  # installer — бинарник Xray-install, обновляется тем же установщиком (docs/operations.md: переустанавливается)
+
+# --- Hysteria2 (get.hy2.sh) ---------------------------------------------------
+/etc/systemd/system/hysteria-server*.service  # installer — get.hy2.sh ставит hysteria-server.service и hysteria-server@.service вместе с бинарником
+/etc/systemd/system/hysteria-server*.service.d/*  # installer — drop-in'ы к юнитам get.hy2.sh, живут вместе с установщиком
+/usr/local/bin/hysteria  # installer — бинарник get.hy2.sh, обновляется тем же установщиком
+
+# --- Other third-party binaries -----------------------------------------------
+/usr/local/bin/wgcf  # installer — бинарник wgcf (регистрация аккаунта WARP), переустанавливается, в репо не хранится
+/usr/local/bin/qr  # installer — сторонняя утилита, ставится вручную своим установщиком; деплой её не трогает
+
+# --- Backend helpers (deploy/helpers/, installed by setup-nonroot-helper-mode.sh)
+/usr/local/sbin/vpn-bot-xray-apply  # installer — ставит deploy/setup-nonroot-helper-mode.sh из deploy/helpers/, вне OUT_OF_REPO_HELPERS по замыслу
+/usr/local/sbin/vpn-bot-awg-apply  # installer — ставит deploy/setup-nonroot-helper-mode.sh из deploy/helpers/, вне OUT_OF_REPO_HELPERS по замыслу
+/usr/local/sbin/vpn-bot-mtproxy-apply  # installer — ставит deploy/setup-nonroot-helper-mode.sh из deploy/helpers/, вне OUT_OF_REPO_HELPERS по замыслу
+/usr/local/sbin/vpn-bot-socks5-user  # installer — ставит deploy/setup-nonroot-helper-mode.sh из deploy/helpers/, вне OUT_OF_REPO_HELPERS по замыслу
+
+# --- Provider / backup-only / deployment-local ---------------------------------
+/etc/netplan/*  # provider — сетевая конфигурация образа VPS; /etc/netplan не сканируется, запись для таблицы docs/host-state.md
+/var/spool/cron/crontabs/root  # backup-only — строку acme.sh --cron пишет acme.sh; файл держится в offsite system-бэкапе
+/etc/nginx/conf.d/*.conf  # backup-only — vhost decoy/self-steal с доменом хоста; перевод в шаблон репо — отдельная задача
+/usr/local/sbin/site-freshen.py  # deployment-local — rewriter decoy-сайта, по docs/hysteria.md в репо не хранится; держится в system-бэкапе

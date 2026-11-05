@@ -1,0 +1,6 @@
+[Unit]
+Description=Scheduled reboot (every 5th day of the month, 04:00 MSK)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl reboot

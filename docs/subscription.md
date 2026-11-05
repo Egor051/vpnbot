@@ -224,45 +224,51 @@ one endpoint.
   keeps the Hysteria2 material untouched and gives this process exactly one readable secret:
 
 ```bash
-sudo install -d -o root -g vpn-bot -m 0750 /etc/vpn-bot/tls
+sudo install -d -o root -g root -m 0755 /etc/vpn-bot/tls
 # Add a SECOND install target to the existing acme.sh --install-cert invocation
 # (keep the hysteria one as-is) so renewals land here too, and point --reloadcmd
-# at the tracked fan-out hook so BOTH readers pick the new chain up:
-sudo chmod 0755 /opt/vpn-service/deploy/vpn-bot-acme-reload.sh
+# at the fan-out hook deploy.sh installs, so every reader picks the new chain up:
 sudo acme.sh --install-cert -d <DOMAIN> \
   --fullchain-file /etc/vpn-bot/tls/fullchain.pem \
   --key-file       /etc/vpn-bot/tls/privkey.pem \
-  --reloadcmd      "/opt/vpn-service/deploy/vpn-bot-acme-reload.sh"
+  --reloadcmd      "/usr/local/sbin/acme-reload.sh"
 ```
 
 The key is read **once at startup**, so a renewal is picked up by that restart. The unit needs no
 `ReadOnlyPaths` for it: `ProtectSystem=strict` makes `/etc` read-only, not invisible, and the
 file mode is what actually gates access.
 
-`deploy/vpn-bot-acme-reload.sh` is the tracked form of that reload step: it re-asserts
-`root:vpn-bot` / `0640` on the renewed key, hands Hysteria2 its own copy, and restarts **both**
-`hysteria-server` and `vpn-bot-subscription`. It is run straight out of the checkout (like
-`deploy/update-ip2asn.sh`), so a deploy refreshes it; nothing installs it into `/usr/local/sbin`.
-Dry-run it any time without waiting for a renewal:
+`deploy/vpn-bot-acme-reload.sh` is the tracked form of that reload step. `scripts/deploy.sh`
+installs it as **`/usr/local/sbin/acme-reload.sh`** — a host file of class `hook`
+([host-state.md](host-state.md)) — which is the path acme.sh's stored `Le_ReloadCmd` names, so
+acme.sh itself is never reconfigured. Before installing a changed copy, Phase 1 runs it with
+`--dry-run` and stops the deploy if that does not exit 0. On every renewal the hook:
+
+- re-asserts the ownership the readers need, exactly as the main server runs it: the directory
+  `root:root 0755`, `fullchain.pem` and `privkey.pem` `root:vpn-bot 0640` (`cert.pem` is not
+  touched — nothing reads it);
+- hands Hysteria2 its own copy (`hysteria:hysteria`, `0644` / `0600`);
+- reloads `nginx` (REALITY's self-steal target), restarts `hysteria-server` and
+  **try-restarts** `vpn-bot-subscription` — a renewal never starts an endpoint you stopped.
+
+Every step is attempted even if an earlier one failed (no `set -e`), and the hook exits 1 at the
+end so the failure lands in the acme.sh log instead of leaving the other consumers on the old
+chain. Dry-run it any time without waiting for a renewal:
 
 ```bash
-sudo /opt/vpn-service/deploy/vpn-bot-acme-reload.sh --dry-run
+sudo /usr/local/sbin/acme-reload.sh --dry-run
 ```
 
-> **Known host divergence — check yours.** On a host provisioned before this hook was tracked,
-> `--reloadcmd` may still point at a hand-written script (e.g. `/usr/local/sbin/acme-reload.sh`)
-> that copies the certificate to Hysteria2 and restarts `hysteria-server` but **never restarts
-> `vpn-bot-subscription`**. That endpoint then keeps serving the **previous** certificate after
-> every renewal until something else restarts it — a deploy, or a reboot — which is easy to miss
-> because both of those happen often enough to mask it. Read the live value before changing
-> anything:
+> **Check what acme.sh actually calls.** The hook used to be a hand-written script at that same
+> path; the first deploy that carries the host-file registry replaces it (Phase 1 shows the diff
+> first). A host whose `--reloadcmd` names something else is not covered by it:
 >
 > ```bash
-> sudo grep -r Le_ReloadCmd /root/.acme.sh/*/ ; sudo cat /usr/local/sbin/acme-reload.sh
+> sudo grep -r Le_ReloadCmd /root/.acme.sh/*/
 > ```
 >
-> Switching `--reloadcmd` to the tracked hook (re-run the `--install-cert` command above; it
-> rewrites the stored value) closes it. Do it *before* the next renewal, not after.
+> If that is not `/usr/local/sbin/acme-reload.sh`, re-run the `--install-cert` command above (it
+> rewrites the stored value) — before the next renewal, not after.
 
 ## Go-live (drift install, by hand)
 
@@ -288,12 +294,12 @@ all (next section), so putting the `.env` first would only buy a failed restart.
 ```bash
 # 1. TLS copy — a group-readable copy of the domain's existing Let's Encrypt
 #    material, installed by acme.sh (full command + --reloadcmd: section above).
-sudo install -d -o root -g vpn-bot -m 0750 /etc/vpn-bot/tls
+sudo install -d -o root -g root -m 0755 /etc/vpn-bot/tls
 sudo acme.sh --install-cert -d <domain> \
   --fullchain-file /etc/vpn-bot/tls/fullchain.pem \
   --key-file       /etc/vpn-bot/tls/privkey.pem \
-  --reloadcmd      "/opt/vpn-service/deploy/vpn-bot-acme-reload.sh"
-ls -l /etc/vpn-bot/tls          # expect root:vpn-bot, privkey.pem 0640
+  --reloadcmd      "/usr/local/sbin/acme-reload.sh"
+ls -l /etc/vpn-bot/tls          # expect fullchain.pem + privkey.pem root:vpn-bot 0640 (set by the hook)
 
 # 2. .env — the flag, the ports and the TLS pair, in one edit
 #    SUBSCRIPTION_ENABLED=true

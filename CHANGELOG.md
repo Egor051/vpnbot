@@ -8,6 +8,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Host state as code (docs/host-state.md).** `scripts/deploy.sh` now owns the host files that
+  lived only on the servers: a new registry, `MANAGED_HOST_FILES`
+  (`"<src>|<dst>|<mode>|<owner:group>|<class>|<role>[|gate=…;legacy=…]"`), with the sources under
+  `deploy/host/`. Each class has a validator that Phase 1 runs on the candidate before anything
+  changes (`logrotate -d`, keys under `/proc/sys`, `systemd-analyze verify`, `[Section]`
+  structure, `<hook> --dry-run`, `sshd -t` on the composed config) and a post-action that Phase 2
+  runs only when the file actually changed (`sysctl -e -p`, `daemon-reload` + `enable --now` for a
+  timer that was enabled or new, `restart systemd-journald`; logrotate, networkd and the hook
+  need none). Main: `/etc/logrotate.d/xray`, `even-day-reboot.{service,timer}`, five
+  `/etc/sysctl.d` files, a journald drop-in (`SystemMaxUse=500M`, replacing the hand edit of the
+  dpkg conffile `journald.conf`, which is only reported), the networkd foreign-rules drop-in (no
+  longer "install by hand"), the acme hook at `/usr/local/sbin/acme-reload.sh`, the two ssh files,
+  and the danted / MTProxy drop-ins (the latter gated on `MTPROTO_ENABLED`, with its old name
+  `vpnbot-managed.conf` renamed when identical). Relay: its key-only sshd drop-in. **Retired**
+  files (`class absent`: `99-amneziawg.conf`, `warp-sample.{service,timer}`,
+  `site-freshen.sh`) are disabled and removed — unless cron, a unit or `.env` still names them,
+  which fails Phase 1. Every path is staged into the backup archive first, and both rollbacks
+  restore it (or remove it again) and re-apply unit enablement, sysctl values, journald and ssh.
+  The relay's helper/unit/sysctl restore goes through the same `stage_host_paths` /
+  `restore_host_paths` pair, line for line as before.
+- **Phase 1 reports host files nothing accounts for** — in `/etc/systemd/system` (and its
+  drop-ins), `/etc/sysctl.d`, `/usr/local/{s,}bin`, `/etc/logrotate.d`, `/etc/cron.d`, the
+  crontabs, `/etc/ssh/sshd_config.d`, `/etc/nginx/conf.d` and `/etc/systemd/*.conf.d`: anything
+  not deployed for the host's role, not owned by a package (one batched `dpkg -S`) and not in
+  `deploy/host/known-unmanaged.list` (`<glob>  # <installer|provider|backup-only|deployment-local>
+  — <reason>`) is a WARN with its mtime, and a drop-in for a unit that does not exist is called an
+  orphan. Never fatal.
+- **`ALLOW_SSH_CHANGE=1`** (forwarded by `scripts/redeploy.sh`). An ssh file on the host that
+  differs from the repo is never replaced on its own: Phase 1 shows the diff and stops before any
+  mutation. With the knob — and a second ssh session open — Phase 2 installs it, reloads ssh or,
+  for a `ListenStream` change, restarts `ssh.socket` and a running `ssh.service` (which would
+  otherwise keep its old sockets), and rolls back unless ssh is active, listening and answering
+  with an SSH banner; a restored config that fails `sshd -t` is left unreloaded and reported.
+
 - **Relay: conntrack limits from the relay's `.env` (docs/relay.md#conntrack).** Two new keys —
   `RELAY_CONNTRACK_MAX` (`net.netfilter.nf_conntrack_max`, default `65536`, 8192..1048576) and
   `RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT` (`net.netfilter.nf_conntrack_tcp_timeout_established`,
@@ -274,6 +308,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`deploy/vpn-bot-acme-reload.sh` matches the host it replaces.** Installed by the deploy as
+  `/usr/local/sbin/acme-reload.sh` (the path acme.sh's `Le_ReloadCmd` already names) instead of
+  being run out of the checkout — on hosts that have `/etc/vpn-bot/tls/fullchain.pem` only
+  (`when=`), so a host without subscription/Hysteria2 TLS is not blocked by its `--dry-run`.
+  No `set -e` any more: a failed step (an nginx reload) no longer ends the hook before the other
+  consumers are reloaded — every step runs and the hook exits 1 at the end, as the hand-written
+  predecessor did. Hysteria2's cert and key are staged under temporary names and moved into
+  place together; if either copy fails, the old pair stays and `hysteria-server` is NOT
+  restarted (a restart would stop the daemon still serving the old pair). `vpn-bot-subscription` is
+  **try-restarted** (a stopped endpoint stays stopped). Ownership defaults now reproduce the main
+  server instead of changing it: `/etc/vpn-bot/tls` `root:root 0755` (was `root:vpn-bot 0750`),
+  `fullchain.pem` and `privkey.pem` `root:vpn-bot 0640` (fullchain was `0644`), `cert.pem`
+  untouched. docs/subscription.md updated to match.
+- **The MTProxy drop-in left the unit-drift gate**: it is a host file now (installed, not just
+  reported), and the gate no longer stops a deploy over it.
+- **The networkd drop-in is no longer an "install by hand" hint** in the Phase 1 report; Phase 2
+  installs it (it still takes effect only at networkd's next start).
+
 - **User texts follow protocol availability, not only the backends.** A protocol switched off
   in `.env` (`XRAY_XHTTP_ENABLED`, `HYSTERIA2_ENABLED`, `SOCKS5_ENABLED`, `MTPROTO_ENABLED`) or
   with the module toggle in the admin panel is no longer described, compared with,
@@ -369,6 +421,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one image.
 
 ### Fixed
+
+- **A rollback could fire after a successful deploy.** `disarm()` is a function, and bash gives a
+  function's caller back the ERR trap it had on entry when the function leaves it unset, so
+  neither the main path nor `relay_phase2` ever cleared the rollback trap: any failing command
+  after `DEPLOY OK` would have rolled a healthy host back. Both call sites now clear it in their
+  own frame, and the EXIT handler always returns 0.
 
 - **`Subscription-Userinfo` reports all-time traffic, so a client's counter cannot go
   backwards (#294).** The header a client (happ, v2rayTun) receives counted traffic under

@@ -1,0 +1,16 @@
+# managed by scripts/deploy.sh from deploy/host/logrotate/xray — do not edit on the host
+# copytruncate, not create + a reopen signal: xray cannot reopen its log files on a
+# signal, and it writes them with O_APPEND, so truncating in place is safe — the
+# next write lands at offset 0 instead of leaving a sparse hole (checked 2026-11-03).
+/var/log/xray/access.log /var/log/xray/error.log {
+    daily
+    maxsize 200M
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    dateext
+    dateformat -%Y%m%d-%s
+}

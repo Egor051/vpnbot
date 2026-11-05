@@ -43,7 +43,9 @@
 #          (OUT_OF_REPO_HELPERS, role relay) and deploy/relay/vpn-relay.service
 #          verbatim, daemon-reload, enable, restart, verify = `vpn-relay-apply
 #          check`; any failure rolls back to the backup (files + saved table)
-#          and to the pre-deploy runtime sysctls (ip_forward, conntrack).
+#          and to the pre-deploy runtime sysctls (ip_forward, conntrack). Its host
+#          files (MANAGED_HOST_FILES, role relay) go through the same Phase 1
+#          gates and Phase 2 install/rollback as the main server's.
 #          See relay_deploy() below.
 # Read with env_sed_val (the sed parser of scripts/vpnbot-hy2-warp-mark: quotes,
 # spaces, inline comments, `export`, last assignment wins). Any other value is
@@ -61,7 +63,8 @@
 #   PHASE1_ONLY=1
 #     What:   Run the ENTIRE read-only Phase 1 (guards, lock, fetch, ruff /
 #             compileall / pytest in an isolated worktree, model detection,
-#             pre-flight matrix, unit-drift + helper-drift scan, UNIT_SET
+#             pre-flight matrix, unit-drift + helper-drift scan, the host-file
+#             scan (MANAGED_HOST_FILES + files nothing accounts for), UNIT_SET
 #             snapshot, WARP rollback-path facts), print the full report, and
 #             exit 0 WITHOUT entering Phase 2 — no `systemctl stop`, no
 #             config/unit/venv/helper mutations. Independent of FORCE (runs even
@@ -153,6 +156,25 @@
 #             if it cannot tolerate them it will misbehave or crash. Does NOT relax
 #             the "migration did not reach the target" rollback or the hard-fail on
 #             an unreadable schema — only the newer-than-target case.
+#
+#   ALLOW_SSH_CHANGE=1
+#     What:   BYPASSES THE SSH GATE of the host files (MANAGED_HOST_FILES, class ssh:
+#             sshd_config.d drop-ins and the ssh.socket ListenStream override). When
+#             such a file on the host DIFFERS from the repo, Phase 1 shows the diff
+#             and the deploy stops before any mutation. With this knob Phase 2
+#             installs the repo copy, then sshd -t, daemon-reload + restart
+#             ssh.socket (ListenStream) / reload ssh (sshd_config), and requires ssh
+#             active and listening on its port(s) — or rolls everything back. An
+#             ABSENT ssh file is installed without the knob (nothing to lose), a
+#             synced one is never touched.
+#     When:   ONLY when the repo copy is the intended one and you have reviewed the
+#             diff — and ALWAYS with a second ssh session open to the host until
+#             the deploy reports OK. If the HOST is right, copy its file into
+#             deploy/host/ssh/ byte-for-byte instead.
+#     Risk:   LOCKOUT. A wrong port, a wrong auth setting or a socket that does not
+#             come back cuts off every new connection. The port check and the
+#             rollback catch a dead port, not a key you can no longer log in with;
+#             the open second session is what saves you then.
 #
 #   DB_OWNER_USER=<user>   (default: vpn-bot)
 #     What:   The user that must own the data dir, vpn.db and its -wal/-shm
@@ -356,6 +378,114 @@ HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"
 # are NEVER re-applied by the deploy — see the rationale block in
 # install_out_of_repo_helpers. Do not add one "for symmetry" with the two above.
 
+# Host files whose content the REPO owns — "host state as code" (docs/host-state.md).
+# The same idea as OUT_OF_REPO_HELPERS (the checkout holds the source, the host a
+# copy), for configuration instead of executables, so every entry also says how a
+# candidate is VALIDATED before it is installed and what has to happen once the
+# installed copy actually changed. Phase 1 scans the entries of this host's role
+# against origin/main ($WT), validates every candidate Phase 2 would install, and
+# stops before any mutation on a candidate its validator refuses; Phase 2 stages
+# every path (stage_host_paths), then installs, repairs and retires
+# (install_managed_host_files); any later failure puts every path back
+# (host_files_rollback). Phase 1 also reports every file in the scanned host
+# directories that nothing here, in OUT_OF_REPO_HELPERS, in the role's deploy units,
+# in a package or in deploy/host/known-unmanaged.list accounts for.
+#
+# Format per entry: "<src in checkout>|<dst>|<mode>|<owner:group>|<class>|<role>[|<opts>]"
+#   class    validator (Phase 1, on the candidate)      after a change (Phase 2)
+#     logrotate  logrotate -d: no ^error line             -
+#     sysctl     every key exists under /proc/sys          sysctl -e -p <dst>
+#                (module keys — nf_conntrack, mptcp —
+#                 only WARN while the module is unloaded)
+#     unit       systemd-analyze verify (advisory, as for   daemon-reload; a *.timer is
+#                vpn-bot.service); drop-ins: [Section]      enable --now'ed if it was
+#                structure only                             enabled or did not exist
+#     journald   [Journal] section present                  restart systemd-journald
+#     networkd   [Network] section present                  - (next networkd restart)
+#     hook       <candidate> --dry-run exits 0              -
+#     ssh        sshd -t on sshd_config + the candidate;    daemon-reload + restart
+#                socket drop-in: a ListenStream port        ssh.socket (ListenStream) /
+#                A host copy that DIFFERS is never           reload ssh; then ssh must be
+#                replaced without ALLOW_SSH_CHANGE=1         active and listening, or
+#                (lockout risk) — Phase 1 refuses            the deploy rolls back
+#     absent     RETIRED: the deploy guarantees the file is gone. src/mode/owner are
+#                "-". Phase 1 FAILS if cron, a unit (/etc or /usr/lib, drop-ins too)
+#                or .env still names the path or its basename; Phase 2 stages it,
+#                `disable --now`s a unit file, then removes it.
+#   role     main | relay — an entry is invisible on a host of the other role.
+#   opts     optional, ";"-separated:
+#     gate=<PROTO>    the entry exists only while <PROTO>_ON=yes (resolve_backend_units,
+#                     i.e. <PROTO>_ENABLED in .env); closed = not installed, not checked
+#     when=<path>     the entry exists only on a host where <path> exists (same effect)
+#     legacy=<path>   an older name of the same file: a byte-identical legacy copy is
+#                     renamed to <dst> (no restart), a different one stops Phase 1
+#
+# Files are installed VERBATIM: keep the repo copy byte-identical to the host copy you
+# mean, or the first deploy reinstalls it. Completeness and the byte-for-byte pins of
+# the ssh and unchanged sysctl files: tests/test_deploy_host_state.py.
+MANAGED_HOST_FILES=(
+  # --- main ------------------------------------------------------------------
+  "deploy/host/logrotate/xray|/etc/logrotate.d/xray|0644|root:root|logrotate|main"
+  # Scheduled reboot. ExecStart reboots the host: the deploy only ever enables and
+  # starts the TIMER, never the service.
+  "deploy/host/systemd/even-day-reboot.service|/etc/systemd/system/even-day-reboot.service|0644|root:root|unit|main"
+  "deploy/host/systemd/even-day-reboot.timer|/etc/systemd/system/even-day-reboot.timer|0644|root:root|unit|main"
+  "deploy/host/sysctl/90-no-mptcp.conf|/etc/sysctl.d/90-no-mptcp.conf|0644|root:root|sysctl|main"
+  "deploy/host/sysctl/99-bbr.conf|/etc/sysctl.d/99-bbr.conf|0644|root:root|sysctl|main"
+  "deploy/host/sysctl/99-network-buffers.conf|/etc/sysctl.d/99-network-buffers.conf|0644|root:root|sysctl|main"
+  "deploy/host/sysctl/99-swap-tuning.conf|/etc/sysctl.d/99-swap-tuning.conf|0644|root:root|sysctl|main"
+  "deploy/host/sysctl/99-vpn-forwarding.conf|/etc/sysctl.d/99-vpn-forwarding.conf|0644|root:root|sysctl|main"
+  # A second copy of net.ipv4.ip_forward=1 (99-vpn-forwarding.conf carries it).
+  "-|/etc/sysctl.d/99-amneziawg.conf|-|-|absent|main"
+  "deploy/host/journald/10-vpn-bot.conf|/etc/systemd/journald.conf.d/10-vpn-bot.conf|0644|root:root|journald|main"
+  # == NETWORKD_DROPIN_SRC|NETWORKD_DROPIN_DST (pinned by the test suite).
+  "deploy/networkd/10-keep-foreign-rules.conf|/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf|0644|root:root|networkd|main"
+  # acme.sh's Le_ReloadCmd names this path; acme.sh itself is not touched. Only where
+  # there is renewal material to fan out: subscription and Hysteria2 are optional, and
+  # the hook's --dry-run (its validator) fails by design without the files.
+  "deploy/vpn-bot-acme-reload.sh|/usr/local/sbin/acme-reload.sh|0755|root:root|hook|main|when=/etc/vpn-bot/tls/fullchain.pem"
+  "deploy/host/ssh/00-root-key-only.conf|/etc/ssh/sshd_config.d/00-root-key-only.conf|0644|root:root|ssh|main"
+  "deploy/host/ssh/ssh.socket-override.conf|/etc/systemd/system/ssh.socket.d/override.conf|0644|root:root|ssh|main"
+  "deploy/danted-warp.conf|/etc/systemd/system/danted.service.d/vpn-bot-warp.conf|0644|root:root|unit|main"
+  # Only where MTProxy is enabled; vpnbot-managed.conf is the drop-in's old name.
+  # (Replaces the mtproxy half of the Phase 1 unit-drift gate, which only reported.)
+  "deploy/mtproxy-vpn-bot-managed.conf|/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf|0644|root:root|unit|main|gate=MTPROTO;legacy=/etc/systemd/system/mtproxy.service.d/vpnbot-managed.conf"
+  # Retired. The timer goes first so it is disabled before the service it triggers.
+  "-|/etc/systemd/system/warp-sample.timer|-|-|absent|main"
+  "-|/etc/systemd/system/warp-sample.service|-|-|absent|main"
+  # Its job is deploy/vpn-bot-decoy-freshen.sh now. NOT site-freshen.py: that is the
+  # deployment-local decoy rewriter (deploy/host/known-unmanaged.list).
+  "-|/usr/local/sbin/site-freshen.sh|-|-|absent|main"
+  # --- relay -----------------------------------------------------------------
+  "deploy/host/ssh/00-vpnrelay-keyonly.conf|/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf|0644|root:root|ssh|relay"
+)
+# Host-file knobs. The paths are overridable for the DEPLOY_SELFTEST suites only.
+ALLOW_SSH_CHANGE="${ALLOW_SSH_CHANGE:-0}"      # see the ENVIRONMENT KNOBS block
+SSHD_CONFIG="${SSHD_CONFIG:-/etc/ssh/sshd_config}"
+SSH_UNIT="${SSH_UNIT:-ssh.service}"
+SSH_SOCKET_UNIT="${SSH_SOCKET_UNIT:-ssh.socket}"
+SSH_LISTEN_WAIT="${SSH_LISTEN_WAIT:-10}"      # seconds the post-change port check retries
+SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+PROC_SYS="${PROC_SYS:-/proc/sys}"
+KNOWN_UNMANAGED_LIST="deploy/host/known-unmanaged.list"   # checkout-relative
+# Where Phase 1 looks for host files nothing accounts for (globs allowed). Symlinks
+# and *.wants/*.requires/*.upholds links are never reported.
+UNMANAGED_SCAN_DIRS=(
+  /etc/systemd/system /etc/sysctl.d /usr/local/sbin /usr/local/bin /etc/logrotate.d
+  /etc/cron.d /var/spool/cron/crontabs /etc/ssh/sshd_config.d /etc/nginx/conf.d
+  "/etc/systemd/*.conf.d"
+)
+# What may still name a retired (absent-class) file — the reference guard reads these
+# recursively, plus ${ENV_FILE}. /var/spool/cron covers root's crontab.
+ABSENT_REF_PATHS=(/etc/crontab /etc/cron.d /var/spool/cron /etc/systemd/system /usr/lib/systemd/system)
+# dpkg conffiles the report says are locally modified. Never written by the deploy.
+CONFFILE_REPORT_PATHS=(/etc/systemd/journald.conf)
+# Test fence. deploy.sh runs the pytest suite AS ROOT on the production host in
+# Phase 1, so under DEPLOY_SELFTEST=1 every host-file writer refuses a path outside
+# this directory: a test that forgot to override MANAGED_HOST_FILES fails loudly
+# instead of rewriting the real /etc/ssh.
+MH_SELFTEST_ROOT="${MH_SELFTEST_ROOT:-}"
+
 BOT_UNIT="vpn-bot.service"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
 # Post-start schema gate: how long to wait for bootstrap() to apply migrations up
@@ -437,6 +567,17 @@ declare -a drift=() absent=()
 # Out-of-repo helper drift, scanned read-only in Phase 1 (against the origin/main
 # worktree) and closed by Phase 2. Each entry: "<base>|<src>|<dst>|<state>".
 declare -a helper_drift=()
+# Host files (MANAGED_HOST_FILES). Phase 1: the scan rows, the unaccounted files and
+# the conffile states, for the report. Phase 2: what was staged, what changed, and
+# the pre-deploy state the rollback (host_files_rollback) puts back.
+MH_SRC=""; MH_DST=""; MH_MODE=""; MH_OWNER=""; MH_CLASS=""; MH_ROLE=""; MH_OPTS=""
+MH_SRCPATH=""; MH_STATE=""; MH_DETAIL=""; MH_LEGACY=""; MH_LEGACY_STATE=""
+MH_CAND_DIR=""
+declare -a MH_ROWS=() MH_UNACCOUNTED=() MH_CONFFILES=()
+declare -A HOST_STAGED=()
+declare -a HOST_STAGED_ORDER=()
+declare -a MH_CHANGED=() MH_UNITS_TOUCHED=() MH_ENABLED_BY_US=() MH_SYSCTL_ORDER=() MH_CREATED_DIRS=()
+declare -A MH_UNIT_PRE_ENABLED=() MH_UNIT_PRE_ACTIVE=() MH_SYSCTL_PRE=()
 MTPROXY_DROPIN_FOUND=""
 # Modular-protocol matrix (parallel arrays): label, gate var, gate on (yes/no), unit.
 declare -a PROTO_LABEL=() PROTO_GATE=() PROTO_ON=() PROTO_UNIT=()
@@ -455,6 +596,12 @@ cleanup() {
   [[ -n "$WT"    && -d "$WT"    ]] && git worktree remove --force "$WT" >/dev/null 2>&1
   git worktree prune >/dev/null 2>&1
   [[ -n "$STAGE" && -d "$STAGE" ]] && rm -rf "$STAGE"
+  if [[ -n "${MH_CAND_DIR:-}" && -d "${MH_CAND_DIR:-}" ]]; then rm -rf "$MH_CAND_DIR"; fi
+  # Always 0. A function called with an ERR trap set gets that trap back when it
+  # returns, whatever it did to it inside — so a disarm() run from inside a function
+  # (relay_phase2) leaves the rollback trap armed, and a non-zero return from this
+  # EXIT handler would fire a rollback AFTER a successful deploy.
+  return 0
 }
 trap cleanup EXIT
 
@@ -472,6 +619,9 @@ on_interim() {
 }
 arm_interim()  { PHASE="interim"; trap 'on_interim' ERR INT TERM HUP; }
 arm_rollback() { PHASE="armed";   trap 'rollback'   ERR INT TERM HUP; }
+# NOTE: called as a function, disarm cannot clear the ERR trap for its caller (bash
+# gives a function's caller back the ERR trap it had on entry when the function
+# leaves it unset) — every call site clears it again inline, in its own frame.
 disarm()       { PHASE="done";    trap - ERR INT TERM HUP; }
 # Explicit assertion failure while armed -> route through rollback with a message.
 # The relay role has its own rollback (relay_rollback: no bot, no DB); shared code
@@ -658,6 +808,1043 @@ install_out_of_repo_helpers() {
   else
     log "out-of-repo helpers already matched the checkout (no drift to close)"
   fi
+}
+
+# --------------------------------------------------------------------------- #
+# Host state as code — MANAGED_HOST_FILES (see the registry above)
+# --------------------------------------------------------------------------- #
+# Split one registry entry into MH_SRC MH_DST MH_MODE MH_OWNER MH_CLASS MH_ROLE
+# MH_OPTS (globals, so the callers' loops stay readable). Role defaults to main.
+mh_parse() {
+  IFS='|' read -r MH_SRC MH_DST MH_MODE MH_OWNER MH_CLASS MH_ROLE MH_OPTS <<< "$1"
+  MH_ROLE="${MH_ROLE:-main}"
+}
+
+# Value of key $2 in an opts string $1 ("k=v;k2=v2"); empty when absent.
+mh_opt() {
+  local kv
+  local -a parts=()
+  IFS=';' read -r -a parts <<< "$1"
+  for kv in "${parts[@]}"; do
+    if [[ "${kv%%=*}" == "$2" ]]; then printf '%s' "${kv#*=}"; return 0; fi
+  done
+  return 0
+}
+
+# 0 when the entry's gates are open on this host: opts when=<path> needs <path> to
+# exist, opts gate=<PROTO> needs <PROTO>_ON=yes as resolve_backend_units derived it
+# from .env. No gate = open. An unknown gate name reads as closed (and the test
+# suite rejects it).
+mh_gate_open() {
+  local gate var when
+  when="$(mh_opt "$1" when)"
+  if [[ -n "$when" && ! -e "$when" ]]; then return 1; fi
+  gate="$(mh_opt "$1" gate)"
+  [[ -n "$gate" ]] || return 0
+  var="${gate}_ON"
+  [[ "${!var:-no}" == "yes" ]]
+}
+
+# The unit a /etc/systemd/system/<unit>.d/<file> drop-in belongs to, or nothing for
+# anything else (a type-wide "service.d" included).
+dropin_unit() {
+  local d
+  d="$(basename "$(dirname "$1")")"
+  [[ "$d" == ?*.?*.d ]] || return 0
+  printf '%s' "${d%.d}"
+}
+
+# A gated drop-in must sit next to the unit its protocol is configured to run as
+# (*_SERVICE_NAME in .env), or it would configure a unit that does not exist.
+mh_gate_unit_ok() {
+  local gate unit want
+  gate="$(mh_opt "$1" gate)"
+  [[ -n "$gate" ]] || return 0
+  unit="$(dropin_unit "$2")"
+  [[ -n "$unit" ]] || return 0
+  case "$gate" in
+    MTPROTO)   want="${MTPROTO_SERVICE_NAME_V:-mtproxy}.service" ;;
+    SOCKS5)    want="${SOCKS5_SERVICE_NAME_V:-danted}.service" ;;
+    HYSTERIA2) want="${HY2_SERVICE_NAME_V:-hysteria-server}.service" ;;
+    *)         return 0 ;;
+  esac
+  [[ "$unit" == "$want" ]]
+}
+
+# Content matches, but do mode and owner? $1 path, $2 mode (0644), $3 owner:group.
+mh_meta_matches() {
+  local have_mode have_owner
+  have_mode="$(stat -c '%a' "$1" 2>/dev/null || true)"
+  have_owner="$(stat -c '%U:%G' "$1" 2>/dev/null || true)"
+  [[ "$have_mode" =~ ^[0-7]+$ && "$2" =~ ^[0-7]+$ ]] || return 1
+  [[ "$have_owner" == "$3" ]] || return 1
+  (( 8#$have_mode == 8#$2 ))
+}
+
+# State of the entry mh_parse just read, against the source under <root>. Sets
+# MH_SRCPATH MH_STATE MH_DETAIL MH_LEGACY MH_LEGACY_STATE:
+#   absent        not on the host -> Phase 2 installs it
+#   synced        content, mode and owner match the checkout -> nothing to do
+#   drift         content differs -> Phase 2 reinstalls (class ssh: ALLOW_SSH_CHANGE=1 only)
+#   meta          content matches, mode/owner do not -> Phase 2 fixes mode/owner only
+#   rename        only the legacy name is there (or both), byte-identical -> renamed
+#   legacy-drift  a legacy name with DIFFERENT content -> Phase 1 stops
+#   present       class absent: the retired file is still there -> Phase 2 removes it
+#   gone          class absent: already gone -> nothing to do
+#   gated-off     the protocol gate is closed on this host -> not looked at at all
+#   gate-unit-mismatch  gated drop-in for a unit .env does not name -> Phase 1 stops
+mh_entry_state() {
+  local root="${1%/}"
+  MH_SRCPATH="-"; MH_STATE=""; MH_DETAIL=""; MH_LEGACY=""; MH_LEGACY_STATE=""
+  if [[ "$MH_CLASS" == "absent" ]]; then
+    if [[ -e "$MH_DST" || -L "$MH_DST" ]]; then MH_STATE="present"; else MH_STATE="gone"; fi
+    return 0
+  fi
+  MH_SRCPATH="${root}/${MH_SRC}"
+  if ! mh_gate_open "$MH_OPTS"; then
+    MH_STATE="gated-off"
+    if [[ -n "$(mh_opt "$MH_OPTS" when)" && ! -e "$(mh_opt "$MH_OPTS" when)" ]]; then
+      MH_DETAIL="$(mh_opt "$MH_OPTS" when) is absent on this host"
+    else
+      MH_DETAIL="$(mh_opt "$MH_OPTS" gate)_ENABLED is off on this host"
+    fi
+    return 0
+  fi
+  if ! mh_gate_unit_ok "$MH_OPTS" "$MH_DST"; then
+    MH_STATE="gate-unit-mismatch"
+    MH_DETAIL="drop-in for $(dropin_unit "$MH_DST"), but .env runs $(mh_opt "$MH_OPTS" gate) as another unit"
+    return 0
+  fi
+  if [[ ! -e "$MH_DST" ]]; then
+    MH_STATE="absent"
+  elif ! cmp -s "$MH_SRCPATH" "$MH_DST"; then
+    MH_STATE="drift"
+  elif ! mh_meta_matches "$MH_DST" "$MH_MODE" "$MH_OWNER"; then
+    MH_STATE="meta"
+    MH_DETAIL="host has $(stat -c '0%a %U:%G' "$MH_DST" 2>/dev/null || echo '?'), repo wants ${MH_MODE} ${MH_OWNER}"
+  else
+    MH_STATE="synced"
+  fi
+  MH_LEGACY="$(mh_opt "$MH_OPTS" legacy)"
+  if [[ -n "$MH_LEGACY" ]] && [[ -e "$MH_LEGACY" || -L "$MH_LEGACY" ]]; then
+    if cmp -s "$MH_SRCPATH" "$MH_LEGACY"; then
+      MH_LEGACY_STATE="equal"
+      if [[ "$MH_STATE" == "absent" || "$MH_STATE" == "synced" ]]; then MH_STATE="rename"; fi
+    else
+      MH_LEGACY_STATE="differs"
+      MH_STATE="legacy-drift"
+    fi
+    MH_DETAIL="legacy name ${MH_LEGACY} on the host (${MH_LEGACY_STATE} to the repo)"
+  fi
+  return 0
+}
+
+# One line per entry of this host's role, against the sources under <root>:
+#   "<dst>|<src>|<class>|<state>|<mode>|<owner>|<detail>"
+scan_managed_host_files() {
+  local entry
+  for entry in "${MANAGED_HOST_FILES[@]}"; do
+    mh_parse "$entry"
+    [[ "$MH_ROLE" == "${NODE_ROLE:-main}" ]] || continue
+    mh_entry_state "$1"
+    printf '%s|%s|%s|%s|%s|%s|%s\n' "$MH_DST" "$MH_SRCPATH" "$MH_CLASS" "$MH_STATE" \
+      "$MH_MODE" "$MH_OWNER" "$MH_DETAIL"
+  done
+}
+
+# Every path Phase 2 may create, change or remove for this role: the dst (and legacy
+# name) of each entry whose gate is open, and every retired file. Staged before the
+# first mutation so the rollback can put each one back.
+managed_host_stage_paths() {
+  local entry legacy
+  for entry in "${MANAGED_HOST_FILES[@]}"; do
+    mh_parse "$entry"
+    [[ "$MH_ROLE" == "${NODE_ROLE:-main}" ]] || continue
+    if [[ "$MH_CLASS" != "absent" ]] && ! mh_gate_open "$MH_OPTS"; then continue; fi
+    printf '%s\n' "$MH_DST"
+    legacy="$(mh_opt "$MH_OPTS" legacy)"
+    if [[ -n "$legacy" ]]; then printf '%s\n' "$legacy"; fi
+  done
+}
+
+# Under DEPLOY_SELFTEST=1 a host-file writer may only touch paths below
+# MH_SELFTEST_ROOT (see its definition): the suites run as root on production hosts.
+mh_selftest_fence() {
+  [[ "${DEPLOY_SELFTEST:-0}" == "1" ]] || return 0
+  if [[ -z "$MH_SELFTEST_ROOT" || "$1" != "${MH_SELFTEST_ROOT%/}/"* ]]; then
+    die "DEPLOY_SELFTEST: refusing to write ${1} — outside MH_SELFTEST_ROOT='${MH_SELFTEST_ROOT}' (override MANAGED_HOST_FILES in the test)"
+  fi
+}
+
+# --- validators (Phase 1, on a candidate copy; never on the live file) -------------
+# The same fatal patterns the vpn-bot.service verify uses; anything else is advisory.
+SA_VERIFY_FATAL_RE='Unknown lvalue|Invalid|Failed to parse|not a valid'
+# Keys a kernel module provides: absent until the module is loaded, which is not a
+# fault in the file (nf_conntrack comes with the first conntrack rule, mptcp with
+# first use). Such a missing key WARNs; any other missing key refuses the file.
+SYSCTL_MODULE_KEY_RE='^net[./](netfilter|nf_conntrack_|mptcp)'
+
+# The candidates live under one private directory, mirroring their destination
+# paths: drop-ins with the same basename never collide, and a timer finds its
+# service next to it when systemd-analyze verify loads it.
+mh_candidate_dir_init() {
+  if [[ -z "$MH_CAND_DIR" || ! -d "$MH_CAND_DIR" ]]; then MH_CAND_DIR="$(mktemp -d)"; fi
+}
+
+# Copy <src> to the candidate path for <dst> with the target mode; prints the path.
+mh_candidate() {
+  local cand="${MH_CAND_DIR}${2}"
+  mkdir -p "$(dirname "$cand")" && cp "$1" "$cand" && chmod "$3" "$cand" || return 1
+  printf '%s' "$cand"
+}
+
+# The keys of a sysctl.d file, one per line: comment lines dropped, a leading "-"
+# (ignore-failure marker) stripped.
+mh_sysctl_keys() {
+  sed -n -e '/^[[:space:]]*[#;]/d' -e '/=/!d' -e 's/=.*$//' \
+         -e 's/^[[:space:]]*-\{0,1\}[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/./p' "$1"
+}
+
+mh_validate_logrotate() {
+  local out errs
+  command -v logrotate >/dev/null 2>&1 || { echo "logrotate not found — cannot validate"; return 1; }
+  out="$(logrotate -d "$1" 2>&1)" || true
+  errs="$(printf '%s\n' "$out" | grep -E '^error' || true)"
+  if [[ -n "$errs" ]]; then printf '%s\n' "$errs"; return 1; fi
+  echo "logrotate -d: no errors"
+}
+
+mh_validate_sysctl() {
+  local key path n=0
+  local -a bad=()
+  while IFS= read -r key; do
+    n=$(( n + 1 ))
+    if [[ "$key" == */* ]]; then path="${PROC_SYS}/${key}"; else path="${PROC_SYS}/${key//./\/}"; fi
+    [[ -e "$path" ]] && continue
+    if [[ "$key" =~ $SYSCTL_MODULE_KEY_RE ]]; then
+      echo "WARN: ${key} is not under ${PROC_SYS} (its module is not loaded now) — set once the module is loaded"
+    else
+      bad+=("$key")
+    fi
+  done < <(mh_sysctl_keys "$1")
+  if (( ${#bad[@]} > 0 )); then echo "unknown sysctl key(s), not under ${PROC_SYS}: ${bad[*]}"; return 1; fi
+  if (( n == 0 )); then echo "no key = value line in the file"; return 1; fi
+  echo "${n} key(s) checked against ${PROC_SYS}"
+}
+
+# Drop-ins, journald and networkd snippets cannot be verified on their own: require
+# a [Section] header (the named one when $2 is set) and no setting before the first
+# header — the two mistakes that make systemd ignore a file without a word.
+mh_validate_section() {
+  awk -v want="$2" '
+    /^[[:space:]]*([#;]|$)/ { next }
+    /^[[:space:]]*\[[A-Za-z]+\][[:space:]]*$/ {
+      hdr++; s = $0; sub(/^[[:space:]]*\[/, "", s); sub(/\][[:space:]]*$/, "", s)
+      if (s == want) found = 1
+      next
+    }
+    { if (!hdr) { print "line " NR ": setting before any [Section] header: " $0; bad = 1 } }
+    END {
+      if (!hdr) { print "no [Section] header"; exit 1 }
+      if (want != "" && !found) { print "no [" want "] section"; exit 1 }
+      if (bad) exit 1
+      print "section structure ok"
+    }' "$1"
+}
+
+mh_validate_unit() {
+  local out
+  if [[ "$2" == */*.d/*.conf ]]; then mh_validate_section "$1" ""; return; fi
+  if ! command -v systemd-analyze >/dev/null 2>&1; then
+    echo "WARN: systemd-analyze not found — verify skipped (advisory)"; return 0
+  fi
+  out="$(systemd-analyze verify "$1" 2>&1)" || true
+  if [[ -z "$out" ]]; then echo "systemd-analyze verify: clean"; return 0; fi
+  # grep reads to EOF (output discarded): no SIGPIPE on the printf under pipefail.
+  if printf '%s\n' "$out" | grep -iE "$SA_VERIFY_FATAL_RE" >/dev/null; then
+    printf '%s\n' "$out"; return 1
+  fi
+  printf '%s\n' "$out" | sed 's/^/WARN: /'
+}
+
+# The hook runs through the interpreter its shebang names, so a noexec /tmp under
+# the candidate cannot fail an otherwise valid hook.
+mh_validate_hook() {
+  local shebang out rc
+  local -a interp=()
+  IFS= read -r shebang < "$1" || true
+  if [[ "$shebang" == '#!'* ]]; then read -r -a interp <<< "${shebang#\#!}"; fi
+  out="$("${interp[@]}" "$1" --dry-run 2>&1)" && rc=0 || rc=$?
+  printf '%s\n' "$out" | sed 's/^/  | /'
+  if (( rc != 0 )); then echo "$(basename "$2") --dry-run exited ${rc}"; return 1; fi
+  echo "--dry-run exited 0"
+}
+
+# Ports the ListenStream= lines of a socket unit leave in effect, read from the
+# files given (or stdin) in order: an empty ListenStream= resets the list, as in
+# systemd, so only what follows the last reset counts. "0.0.0.0:54321",
+# "[::]:54321" and "54321" all give 54321.
+ssh_listen_ports() {
+  awk '
+    /^[[:space:]]*[#;]/ { next }
+    /^[[:space:]]*ListenStream[[:space:]]*=/ {
+      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+      if (v == "") { n = 0; next }
+      p = v; sub(/.*:/, "", p)
+      if (p ~ /^[0-9]+$/) ports[++n] = p
+    }
+    END { for (i = 1; i <= n; i++) if (!seen[ports[i]]++) print ports[i] }' "$@"
+}
+
+# sshd -t on a private copy of sshd_config whose Include of the drop-in directory
+# points at a copy of that directory with the candidate in it: the exact config sshd
+# would load, tested without touching /etc/ssh.
+mh_validate_ssh() {
+  local cand="$1" dst="$2" dropdir t out rc
+  if [[ "$dst" == *.socket.d/* ]]; then
+    mh_validate_section "$cand" Socket || return 1
+    out="$(ssh_listen_ports "$cand" | xargs)"
+    [[ -n "$out" ]] || { echo "no ListenStream= with a port after the last reset"; return 1; }
+    echo "ListenStream port(s): ${out}"
+    return 0
+  fi
+  command -v sshd >/dev/null 2>&1 || { echo "sshd not found — cannot run sshd -t"; return 1; }
+  dropdir="$(dirname "$dst")"
+  if ! awk -v d="$dropdir" 'tolower($1) == "include" && index($0, d) { f = 1 } END { exit !f }' "$SSHD_CONFIG"; then
+    echo "${SSHD_CONFIG} has no Include of ${dropdir} — the file would not take effect"; return 1
+  fi
+  t="$(mktemp -d)"
+  mkdir -p "${t}/dropins"
+  if [[ -d "$dropdir" ]]; then cp -a "${dropdir}/." "${t}/dropins/"; fi
+  cp "$cand" "${t}/dropins/$(basename "$dst")"
+  awk -v d="$dropdir" -v n="${t}/dropins" '
+    tolower($1) == "include" {
+      out = ""; s = $0
+      while ((i = index(s, d)) > 0) { out = out substr(s, 1, i - 1) n; s = substr(s, i + length(d)) }
+      $0 = out s
+    }
+    { print }' "$SSHD_CONFIG" > "${t}/sshd_config"
+  out="$(sshd -t -f "${t}/sshd_config" 2>&1)" && rc=0 || rc=$?
+  rm -rf "$t"
+  if (( rc != 0 )); then printf '%s\n' "$out"; echo "sshd -t with the candidate exited ${rc}"; return 1; fi
+  echo "sshd -t with the candidate: ok"
+}
+
+# Validate one candidate. Prints its findings; "WARN: " lines are advisory.
+# Returns 0 = installable, 1 = refused (Phase 1 stops, nothing changed).
+mh_validate() {
+  case "$1" in
+    logrotate) mh_validate_logrotate "$2" ;;
+    sysctl)    mh_validate_sysctl "$2" ;;
+    unit)      mh_validate_unit "$2" "$3" ;;
+    journald)  mh_validate_section "$2" Journal ;;
+    networkd)  mh_validate_section "$2" Network ;;
+    hook)      mh_validate_hook "$2" "$3" ;;
+    ssh)       mh_validate_ssh "$2" "$3" ;;
+    *)         echo "unknown class '${1}'"; return 1 ;;
+  esac
+}
+
+# --- the absent-class reference guard ---------------------------------------------
+# Every line that still names a retired file ($1) or its basename, as
+# "<file>:<line>:<text>": cron (system + every user crontab), units and their
+# drop-ins in both unit directories, and the bot's .env. The other retired files
+# ($2...) are not evidence — a timer naming its own service is about to go too.
+absent_ref_hits() {
+  local path="$1" base f e line skip
+  shift
+  local -a corpus=()
+  base="$(basename "$path")"
+  for f in "${ABSENT_REF_PATHS[@]}" "$ENV_FILE"; do
+    if [[ -e "$f" ]]; then corpus+=("$f"); fi
+  done
+  (( ${#corpus[@]} > 0 )) || return 0
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    f="${line%%:*}"; skip=0
+    for e in "$@"; do if [[ "$f" == "$e" ]]; then skip=1; fi; done
+    (( skip )) || printf '%s\n' "$line"
+  done < <(grep -rnsIF -e "$base" "${corpus[@]}" 2>/dev/null || true)
+  return 0
+}
+
+mh_show_diff() {   # $1 host copy, $2 repo copy
+  local out
+  command -v diff >/dev/null 2>&1 || { log "      (diff not available on this host)"; return 0; }
+  out="$(diff -u --label "host: $1" --label "repo: $2" "$1" "$2" 2>&1 || true)"
+  printf '%s\n' "$out" | sed 's/^/      /'
+}
+
+mh_action_text() {   # $1 class, $2 state, $3 dst
+  local verb="installs"
+  [[ "$2" == "drift" ]] && verb="reinstalls (diff above)"
+  case "$2" in
+    synced)             echo "in sync" ;;
+    gone)               echo "retired — already gone" ;;
+    gated-off)          echo "not on this host (gate closed) — not installed, not checked" ;;
+    present)            echo "retired — Phase 2 removes it (backed up first$([[ "$3" =~ \.(service|timer|socket|path)$ ]] && printf ', disable --now first'))" ;;
+    meta)               echo "content in sync, mode/owner differ — Phase 2 fixes mode/owner only" ;;
+    rename)             echo "byte-identical legacy name — Phase 2 renames it (daemon-reload, no restart)" ;;
+    legacy-drift)       echo "legacy name with DIFFERENT content — reconcile by hand (Phase 1 stops)" ;;
+    gate-unit-mismatch) echo "drop-in for a unit .env does not run — fix MANAGED_HOST_FILES (Phase 1 stops)" ;;
+    absent|drift)
+      case "$1" in
+        ssh)
+          if [[ "$2" == "drift" && "$ALLOW_SSH_CHANGE" != "1" ]]; then
+            echo "DIFFERS (diff above) — refused without ALLOW_SSH_CHANGE=1"
+          else
+            echo "Phase 2 ${verb}, then reloads ssh and checks it listens"
+          fi ;;
+        sysctl)   echo "Phase 2 ${verb}, then sysctl -e -p" ;;
+        unit)     echo "Phase 2 ${verb}, then daemon-reload$([[ "$3" == *.timer ]] && printf ' + enable --now')" ;;
+        journald) echo "Phase 2 ${verb}, then restarts systemd-journald" ;;
+        networkd) echo "Phase 2 ${verb} (effective at the next systemd-networkd restart)" ;;
+        *)        echo "Phase 2 ${verb}" ;;
+      esac ;;
+    *)                  echo "$2" ;;
+  esac
+}
+
+# Phase 1, both roles. Read-only. Scans every entry of this role against <root>,
+# shows the diff of every drift, validates every candidate Phase 2 would install,
+# and stops HERE — before any mutation — on:
+#   * a candidate its validator refuses;
+#   * a retired file that cron, a unit or .env still names (FAIL, not WARN);
+#   * a gated drop-in for a unit .env does not run;
+#   * a legacy name with different content (unless ALLOW_UNIT_DRIFT=1: left as is);
+#   * an ssh file that differs from the repo, unless ALLOW_SSH_CHANGE=1.
+# PHASE1_ONLY=1 reports the last two instead of stopping, like the other drift gates.
+# Fills MH_ROWS for the report.
+managed_host_phase1() {
+  local root="${1%/}" row dst src class state mode owner detail cand msg rc line refs t
+  local -a fail=() ssh_drift=() legacy_bad=() retired=() todo=()
+  mh_candidate_dir_init
+  MH_ROWS=()
+  readarray -t MH_ROWS < <(scan_managed_host_files "$root")
+  (( ${#MH_ROWS[@]} > 0 )) || { log "host files: no MANAGED_HOST_FILES entry for role ${NODE_ROLE:-main}"; return 0; }
+  for row in "${MH_ROWS[@]}"; do
+    IFS='|' read -r dst _ class _ <<< "$row"
+    if [[ "$class" == "absent" ]]; then retired+=("$dst"); fi
+  done
+
+  log "host files (MANAGED_HOST_FILES, role ${NODE_ROLE:-main}):"
+  for row in "${MH_ROWS[@]}"; do
+    IFS='|' read -r dst src class state mode owner detail <<< "$row"
+    log "  $(printf '%-9s %-12s %s' "$class" "$state" "$dst")${detail:+ — ${detail}}"
+    case "$state" in
+      present)
+        refs="$(absent_ref_hits "$dst" "${retired[@]}")"
+        if [[ -n "$refs" ]]; then
+          printf '%s\n' "$refs" | sed 's/^/      /' >&2
+          fail+=("${dst}: retired, but still named by the line(s) above — remove the reference first, or drop the absent entry")
+        fi ;;
+      gate-unit-mismatch) fail+=("${dst}: ${detail}") ;;
+      legacy-drift)
+        legacy_bad+=("$dst")
+        t="$(mh_opt "$(mh_entry_opts "$dst")" legacy)"
+        mh_show_diff "$t" "$src" ;;
+      absent|drift|rename)
+        [[ "$state" == "drift" ]] && mh_show_diff "$dst" "$src"
+        if [[ "$class" == "ssh" && "$state" == "drift" ]]; then ssh_drift+=("$dst"); fi
+        if cand="$(mh_candidate "$src" "$dst" "$mode")"; then
+          todo+=("${class}|${cand}|${dst}")
+        else
+          fail+=("${dst}: cannot build a candidate from ${src}")
+        fi ;;
+    esac
+  done
+
+  # Validate after every candidate exists, so a timer finds its service.
+  for t in "${todo[@]}"; do
+    IFS='|' read -r class cand dst <<< "$t"
+    msg="$(mh_validate "$class" "$cand" "$dst" 2>&1)" && rc=0 || rc=$?
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      if [[ "$line" == WARN:* ]]; then warn "    ${dst}: ${line#WARN: }"; else log "    ${dst}: ${line}"; fi
+    done <<< "$msg"
+    (( rc == 0 )) || fail+=("${dst} (${class}): the validator refused the repo candidate — see above")
+  done
+
+  if (( ${#fail[@]} > 0 )); then
+    for t in "${fail[@]}"; do warn "  ${t}"; done
+    die "host files: Phase 1 refused ${#fail[@]} entr(y/ies) (above) — nothing was changed"
+  fi
+
+  if (( ${#legacy_bad[@]} > 0 )); then
+    warn "host files with a legacy name whose content differs from the repo (diff above): ${legacy_bad[*]}"
+    warn "  deploy.sh will not merge two different drop-ins: decide which is right, make the repo"
+    warn "  copy say so, and remove the legacy file by hand."
+    if [[ "$ALLOW_UNIT_DRIFT" == "1" ]]; then
+      warn "ALLOW_UNIT_DRIFT=1: continuing — those entries are left exactly as they are"
+    elif [[ "$PHASE1_ONLY" == "1" ]]; then
+      warn "PHASE1_ONLY=1: reported, not fatal in inspection mode"
+    else
+      die "host file legacy drift (set ALLOW_UNIT_DRIFT=1 to deploy anyway and leave it as it is)"
+    fi
+  fi
+
+  if (( ${#ssh_drift[@]} > 0 )); then
+    if [[ "$ALLOW_SSH_CHANGE" == "1" ]]; then
+      warn "ALLOW_SSH_CHANGE=1: Phase 2 WILL change the ssh configuration: ${ssh_drift[*]}"
+      warn "  keep a SECOND ssh session open until the deploy reports OK (lockout risk)"
+    elif [[ "$PHASE1_ONLY" == "1" ]]; then
+      warn "ssh configuration differs from the repo (diff above): ${ssh_drift[*]}"
+      warn "  a real deploy refuses this without ALLOW_SSH_CHANGE=1 (not fatal in inspection mode)"
+    else
+      warn "ssh configuration differs from the repo (diff above): ${ssh_drift[*]}"
+      warn "  deploy.sh never changes sshd / ssh.socket configuration on its own — a bad one locks you out."
+      warn "  host is right: copy the host file byte-for-byte into deploy/host/ssh/ and redeploy"
+      warn "  repo is right: open a SECOND ssh session, then: sudo ALLOW_SSH_CHANGE=1 bash scripts/redeploy.sh"
+      die "ssh configuration drift — refusing to deploy without ALLOW_SSH_CHANGE=1; nothing was changed"
+    fi
+  fi
+}
+
+# The opts field of the entry for <dst> (this role), for the report helpers.
+mh_entry_opts() {
+  local entry
+  for entry in "${MANAGED_HOST_FILES[@]}"; do
+    mh_parse "$entry"
+    if [[ "$MH_DST" == "$1" && "$MH_ROLE" == "${NODE_ROLE:-main}" ]]; then printf '%s' "$MH_OPTS"; return 0; fi
+  done
+  return 0
+}
+
+# --- files nothing accounts for (Phase 1 report, never fatal) ----------------------
+# Is there any unit file for <unit>? Read from disk as well as from systemd, so a
+# template ("foo@.service") counts.
+unit_file_known() {
+  local d
+  unit_exists "$1" && return 0
+  for d in "$SYSTEMD_UNIT_DIR" /run/systemd/system /usr/local/lib/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
+    if [[ -e "${d}/${1}" ]]; then return 0; fi
+  done
+  return 1
+}
+
+# Files in UNMANAGED_SCAN_DIRS that are NOT (a) installed by the deploy for this
+# role — MANAGED_HOST_FILES (gate open, legacy names too), retired entries,
+# OUT_OF_REPO_HELPERS, the role's deploy/*.service|*.timer (relay: deploy/relay/ and
+# the sysctl file vpn-relay-apply writes) — (b) owned by a package (one batched
+# dpkg -S), or (c) matched by deploy/host/known-unmanaged.list under <root>.
+# Prints "<path>|<mtime>|<kind>"; kind: unaccounted | orphan:<unit> (a drop-in whose
+# unit does not exist — a gated-off entry's leftover shows up exactly like this).
+scan_unaccounted_host_files() {
+  local root="${1%/}" entry dst role f base line glob d mtime kind u legacy ok
+  local -A known=() owned=()
+  local -a globs=() found=() cand=() dirs=()
+  for entry in "${MANAGED_HOST_FILES[@]}"; do
+    mh_parse "$entry"
+    [[ "$MH_ROLE" == "${NODE_ROLE:-main}" ]] || continue
+    if [[ "$MH_CLASS" != "absent" ]] && ! mh_gate_open "$MH_OPTS"; then continue; fi
+    known["$MH_DST"]=1
+    legacy="$(mh_opt "$MH_OPTS" legacy)"
+    if [[ -n "$legacy" ]]; then known["$legacy"]=1; fi
+  done
+  for entry in "${OUT_OF_REPO_HELPERS[@]}"; do
+    IFS='|' read -r _ dst _ role <<< "$entry"
+    if [[ "${role:-main}" == "${NODE_ROLE:-main}" ]]; then known["$dst"]=1; fi
+  done
+  shopt -s nullglob
+  if [[ "${NODE_ROLE:-main}" == "relay" ]]; then
+    for f in "$root"/deploy/relay/*.service "$root"/deploy/relay/*.timer; do
+      known["${SYSTEMD_UNIT_DIR}/$(basename "$f")"]=1
+    done
+    known["$RELAY_SYSCTL_FILE"]=1
+  else
+    for f in "$root"/deploy/*.service "$root"/deploy/*.timer; do
+      base="$(basename "$f")"
+      [[ "$base" == *.example.* ]] && continue
+      known["${SYSTEMD_UNIT_DIR}/${base}"]=1
+    done
+  fi
+  shopt -u nullglob
+  if [[ -f "${root}/${KNOWN_UNMANAGED_LIST}" ]]; then
+    while IFS= read -r line; do
+      line="${line%%#*}"
+      line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      if [[ -n "$line" ]]; then globs+=("$line"); fi
+    done < "${root}/${KNOWN_UNMANAGED_LIST}"
+  fi
+
+  for d in "${UNMANAGED_SCAN_DIRS[@]}"; do
+    readarray -t dirs < <(compgen -G "$d" || true)
+    for f in "${dirs[@]}"; do
+      [[ -d "$f" ]] || continue
+      while IFS= read -r -d '' line; do found+=("$line"); done < <(
+        find "$f" -maxdepth 2 \( -type d \( -name '*.wants' -o -name '*.requires' -o -name '*.upholds' \) -prune \) \
+          -o -type f -print0 2>/dev/null)
+    done
+  done
+  for f in "${found[@]}"; do
+    [[ -n "${known[$f]:-}" ]] && continue
+    ok=0
+    for glob in "${globs[@]}"; do
+      # shellcheck disable=SC2053  # the right-hand side IS the pattern
+      if [[ "$f" == $glob ]]; then ok=1; break; fi
+    done
+    (( ok )) || cand+=("$f")
+  done
+  (( ${#cand[@]} > 0 )) || return 0
+  if command -v dpkg >/dev/null 2>&1; then
+    while IFS= read -r line; do
+      [[ "$line" == diversion* || "$line" != *": /"* ]] && continue
+      owned["${line#*: }"]=1
+    done < <(dpkg -S "${cand[@]}" 2>/dev/null || true)
+  fi
+  for f in "${cand[@]}"; do
+    [[ -n "${owned[$f]:-}" ]] && continue
+    mtime="$(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '?')"
+    kind="unaccounted"
+    if [[ "$f" == "${SYSTEMD_UNIT_DIR}"/*.d/* ]]; then
+      u="$(dropin_unit "$f")"
+      if [[ -n "$u" ]] && ! unit_file_known "$u"; then kind="orphan:${u}"; fi
+    fi
+    printf '%s|%s|%s\n' "$f" "$mtime" "$kind"
+  done | sort
+}
+
+# A dpkg conffile's state, for the report only — deploy.sh never writes one.
+conffile_state() {
+  local path="$1" pkg want have
+  [[ -e "$path" ]] || { echo "absent"; return 0; }
+  command -v dpkg-query >/dev/null 2>&1 || { echo "unknown (no dpkg-query)"; return 0; }
+  pkg="$(dpkg -S "$path" 2>/dev/null | awk -F': ' 'NR == 1 { print $1 }' || true)"
+  pkg="${pkg%%,*}"
+  [[ -n "$pkg" ]] || { echo "not owned by a package"; return 0; }
+  # shellcheck disable=SC2016  # a dpkg-query format string, not a shell expansion
+  want="$(dpkg-query -W -f='${Conffiles}\n' "$pkg" 2>/dev/null | awk -v p="$path" '$1 == p { print $2 }' || true)"
+  [[ -n "$want" ]] || { echo "owned by ${pkg}, not a conffile"; return 0; }
+  have="$(md5sum "$path" | awk '{ print $1 }')"
+  if [[ "$have" == "$want" ]]; then
+    echo "stock ${pkg} conffile (unmodified)"
+  else
+    echo "MODIFIED ${pkg} conffile — local edits; deploy.sh leaves it alone (docs/host-state.md)"
+  fi
+}
+
+# Phase 1, both roles: the registry gates, then the two informational scans.
+host_state_phase1() {
+  local row p mtime kind
+  managed_host_phase1 "$1"
+  MH_UNACCOUNTED=()
+  readarray -t MH_UNACCOUNTED < <(scan_unaccounted_host_files "$1")
+  if (( ${#MH_UNACCOUNTED[@]} > 0 )); then
+    warn "host files nothing accounts for (${#MH_UNACCOUNTED[@]}) — not deployed, not a package file, not in ${KNOWN_UNMANAGED_LIST} (informational):"
+    for row in "${MH_UNACCOUNTED[@]}"; do
+      IFS='|' read -r p mtime kind <<< "$row"
+      warn "    ${p}  (mtime ${mtime})$( [[ "$kind" == orphan:* ]] && printf ' — orphan drop-in for absent unit %s' "${kind#orphan:}")"
+    done
+  else
+    log "host files nothing accounts for: none"
+  fi
+  MH_CONFFILES=()
+  if [[ "${NODE_ROLE:-main}" == "main" ]]; then
+    for p in "${CONFFILE_REPORT_PATHS[@]}"; do
+      MH_CONFFILES+=("${p}|$(conffile_state "$p")")
+      log "conffile ${p}: ${MH_CONFFILES[-1]#*|}"
+    done
+  fi
+}
+
+# Phase 1 report section, both roles.
+host_state_report_block() {
+  local row dst src class state mode owner detail p mtime kind
+  printf '\n  --- Host files (MANAGED_HOST_FILES, role %s — docs/host-state.md) ---\n' "${NODE_ROLE:-main}"
+  if (( ${#MH_ROWS[@]} == 0 )); then
+    printf '    none for this role\n'
+  else
+    for row in "${MH_ROWS[@]}"; do
+      IFS='|' read -r dst src class state mode owner detail <<< "$row"
+      printf '    %-9s %-12s %s\n' "$class" "$state" "$dst"
+      printf '        -> %s\n' "$(mh_action_text "$class" "$state" "$dst")"
+      if [[ -n "$detail" ]]; then printf '           %s\n' "$detail"; fi
+    done
+  fi
+  for row in "${MH_CONFFILES[@]}"; do
+    printf '    conffile %s : %s\n' "${row%%|*}" "${row#*|}"
+  done
+  printf '\n  --- Host files nothing accounts for (WARN, not fatal) ---\n'
+  if (( ${#MH_UNACCOUNTED[@]} == 0 )); then
+    printf '    none\n'
+  else
+    for row in "${MH_UNACCOUNTED[@]}"; do
+      IFS='|' read -r p mtime kind <<< "$row"
+      if [[ "$kind" == orphan:* ]]; then
+        printf '    WARN %-60s %s  orphan drop-in for absent unit %s\n' "$p" "$mtime" "${kind#orphan:}"
+      else
+        printf '    WARN %-60s %s\n' "$p" "$mtime"
+      fi
+    done
+    printf '    install it from the repo (MANAGED_HOST_FILES), retire it (class absent),\n'
+    printf '    or record why it stays in %s\n' "$KNOWN_UNMANAGED_LIST"
+  fi
+}
+
+# --------------------------------------------------------------------------- #
+# Host-path backup — ONE mechanism for every file a deploy creates, changes or
+# removes outside the checkout: MANAGED_HOST_FILES of both roles and the relay's
+# helper/unit/sysctl file. Built on stage_path, so every copy lands in $STAGE and
+# therefore in the archive and its verified manifest. restore_host_paths puts each
+# path back from $STAGE, or removes it when it did not exist before the deploy.
+# --------------------------------------------------------------------------- #
+stage_host_paths() {
+  local p
+  for p in "$@"; do
+    [[ -n "$p" && -z "${HOST_STAGED[$p]:-}" ]] || continue
+    HOST_STAGED["$p"]=1
+    HOST_STAGED_ORDER+=("$p")
+    stage_path "$p"
+  done
+}
+
+# One report line per path, in staging order. Rollback context: never stops early.
+restore_host_paths() {
+  local p
+  if [[ -z "$STAGE" || ! -d "$STAGE" ]]; then
+    echo "backup stage MISSING — host files NOT restored — MANUAL ACTION REQUIRED (archive: ${ARCHIVE:-<none>})"
+    return 0
+  fi
+  for p in "${HOST_STAGED_ORDER[@]}"; do
+    mh_selftest_fence "$p"
+    if [[ -e "${STAGE}${p}" || -L "${STAGE}${p}" ]]; then
+      cp -a "${STAGE}${p}" "$p"; echo "restore ${p}: rc=$?"
+    else
+      rm -f "$p"; echo "remove ${p} (absent before the deploy): rc=$?"
+    fi
+  done
+}
+
+# Did <path> exist when Phase 2 staged it?
+mh_existed_before() { [[ -e "${STAGE}${1}" || -L "${STAGE}${1}" ]]; }
+
+# Pre-deploy enable/active state of a unit Phase 2 is about to touch (once).
+mh_note_unit() {
+  [[ -n "${MH_UNIT_PRE_ENABLED[$1]+x}" ]] && return 0
+  MH_UNIT_PRE_ENABLED["$1"]="$(systemctl is-enabled "$1" 2>/dev/null || true)"
+  MH_UNIT_PRE_ACTIVE["$1"]="$(systemctl is-active "$1" 2>/dev/null || true)"
+  MH_UNITS_TOUCHED+=("$1")
+}
+
+mh_is_unit_file() { [[ "$1" == "${SYSTEMD_UNIT_DIR}/"* && "$1" =~ \.(service|timer|socket|path)$ ]]; }
+
+# Does <port> answer with an SSH banner on one of the addresses `ss -tln` ($2) shows
+# it listening on? A listener alone proves nothing under socket activation: systemd
+# holds the socket, and an sshd that was started with the OLD sockets never accepts
+# on it. Wildcard addresses are probed on 127.0.0.1. No `timeout` = cannot probe.
+SSH_BANNER_TIMEOUT="${SSH_BANNER_TIMEOUT:-5}"
+ssh_banner_ok() {
+  local addr a banner
+  command -v timeout >/dev/null 2>&1 || return 0
+  while IFS= read -r addr; do
+    case "$addr" in
+      ""|"*"|0.0.0.0|"[::]") a="127.0.0.1" ;;
+      "["*"]")              a="${addr#[}"; a="${a%]}" ;;
+      *)                    a="$addr" ;;
+    esac
+    # shellcheck disable=SC2016  # expanded by the inner bash, from its own arguments
+    banner="$(timeout "$SSH_BANNER_TIMEOUT" bash -c 'exec 3<>"/dev/tcp/$0/$1" && head -c 4 <&3' "$a" "$1" 2>/dev/null || true)"
+    if [[ "$banner" == "SSH-" ]]; then return 0; fi
+  done < <(printf '%s\n' "$2" | awk -v p="$1" '{ n = split($4, f, ":"); if (f[n] == p) { a = $4; sub(":" p "$", "", a); print a } }')
+  return 1
+}
+
+# Probe for wait_for_listen: prints one line for every port that does not listen,
+# or listens without answering SSH.
+ssh_missing_ports() {
+  local listening p
+  listening="$(ss -tln 2>/dev/null || true)"
+  for p in "$@"; do
+    # grep reads to EOF (output discarded): no SIGPIPE on the printf under pipefail.
+    if ! printf '%s\n' "$listening" | grep -E "[^0-9]${p}[[:space:]]" >/dev/null; then
+      printf ':%s\n' "$p"
+    elif ! ssh_banner_ok "$p" "$listening"; then
+      printf ':%s (listening, but no SSH banner)\n' "$p"
+    fi
+  done
+  return 0
+}
+
+# Is ssh reachable after a change? The unit holding the socket must be active —
+# ssh.socket where it is active (socket activation: ssh.service may legitimately be
+# idle), ssh.service otherwise — and every port it should hold must be listening.
+ssh_alive_status() {
+  local sock svc holder
+  local -a ports=()
+  sock="$(systemctl is-active "$SSH_SOCKET_UNIT" 2>/dev/null || true)"
+  svc="$(systemctl is-active "$SSH_UNIT" 2>/dev/null || true)"
+  if [[ "$sock" == "active" ]]; then
+    holder="$SSH_SOCKET_UNIT"
+    readarray -t ports < <(systemctl cat "$SSH_SOCKET_UNIT" 2>/dev/null | ssh_listen_ports || true)
+  elif [[ "$svc" == "active" ]]; then
+    holder="$SSH_UNIT"
+    readarray -t ports < <(sshd -T -f "$SSHD_CONFIG" 2>/dev/null | awk '$1 == "port" { print $2 }' || true)
+  else
+    echo "neither ${SSH_SOCKET_UNIT} nor ${SSH_UNIT} is active (${sock:-unknown} / ${svc:-unknown})"
+    return 1
+  fi
+  (( ${#ports[@]} > 0 )) || ports=(22)
+  if ! command -v ss >/dev/null 2>&1; then echo "${holder} active; listening state UNKNOWN (ss not found)"; return 0; fi
+  if wait_for_listen "$SSH_LISTEN_WAIT" 1 ssh_missing_ports "${ports[@]}"; then
+    echo "${holder} active, listening on :${ports[*]} and answering SSH"
+    return 0
+  fi
+  echo "${holder} active, but NOT listening on ${LISTEN_MISSING//$'\n'/ } after ${SSH_LISTEN_WAIT}s"
+  return 1
+}
+
+# Phase 2, after an ssh entry changed (only reachable with ALLOW_SSH_CHANGE=1 for a
+# drift): sshd -t on the live config, daemon-reload + restart ssh.socket for a
+# ListenStream change, reload ssh for an sshd_config change, then ssh_alive_status.
+# Any failure rolls the deploy back, which restores the files and re-applies them.
+mh_ssh_apply() {
+  local d sock=0 conf=0 out msg svc
+  for d in "$@"; do if [[ "$d" == *.socket.d/* ]]; then sock=1; else conf=1; fi; done
+  out="$(sshd -t -f "$SSHD_CONFIG" 2>&1)" || rollback_now "sshd -t fails on the installed ssh configuration: ${out}"
+  svc="$(systemctl is-active "$SSH_UNIT" 2>/dev/null || true)"
+  if (( sock )); then
+    systemctl daemon-reload || rollback_now "daemon-reload failed after the ssh.socket change"
+    log "  restarting ${SSH_SOCKET_UNIT} (ListenStream changed)"
+    systemctl restart "$SSH_SOCKET_UNIT" || rollback_now "systemctl restart ${SSH_SOCKET_UNIT} failed after the ListenStream change"
+    # A running sshd keeps the listening sockets it was handed when it started
+    # (Accept=no): a new socket alone would leave it on the OLD port. Restart it so
+    # it takes the new ones; it also reads any sshd_config change. Open sessions
+    # survive (Debian's ssh.service runs with KillMode=process).
+    if [[ "$svc" == "active" ]]; then
+      log "  restarting ${SSH_UNIT} so the running sshd takes the new sockets (open sessions are kept)"
+      systemctl restart "$SSH_UNIT" || rollback_now "systemctl restart ${SSH_UNIT} failed after the ListenStream change"
+      conf=0
+    fi
+  fi
+  if (( conf )); then
+    if [[ "$(systemctl is-active "$SSH_UNIT" 2>/dev/null || true)" == "active" ]]; then
+      log "  reloading ${SSH_UNIT} (sshd_config.d changed; open sessions are kept)"
+      systemctl reload "$SSH_UNIT" || rollback_now "systemctl reload ${SSH_UNIT} failed after the sshd_config change"
+    else
+      log "  ${SSH_UNIT} is not running (socket-activated) — the next connection reads the new config"
+    fi
+  fi
+  msg="$(ssh_alive_status)" || rollback_now "ssh check failed after the change: ${msg}"
+  log "  ssh: ${msg}"
+}
+
+# Runtime values of a sysctl file's keys before Phase 2 applies it (first one wins).
+mh_note_sysctl() {
+  local key
+  while IFS= read -r key; do
+    [[ -n "${MH_SYSCTL_PRE[$key]+x}" ]] && continue
+    MH_SYSCTL_PRE["$key"]="$(sysctl -n "$key" 2>/dev/null || true)"
+    MH_SYSCTL_ORDER+=("$key")
+  done < <(mh_sysctl_keys "$1")
+}
+
+# Phase 2, both roles: install, repair and retire every entry of this role from the
+# checkout ($APP_DIR, after the reset), run each class's post-action once for the
+# files that actually changed, then rescan — nothing may still be absent, drifted or
+# present. Every path was staged by stage_host_paths before the first mutation.
+# Traps are armed: each mutation routes its own failure through rollback_now (ERR
+# is not inherited by functions).
+install_managed_host_files() {
+  local entry row class dst how dir t u out units=0 journald=0 msg
+  local -a timers=() sysctl_files=() ssh_changed=() bad=()
+  log "host files (MANAGED_HOST_FILES, role ${NODE_ROLE:-main}): installing / repairing / retiring from the checkout"
+  for entry in "${MANAGED_HOST_FILES[@]}"; do
+    mh_parse "$entry"
+    [[ "$MH_ROLE" == "${NODE_ROLE:-main}" ]] || continue
+    mh_entry_state "$APP_DIR"
+    case "$MH_STATE" in
+      synced)    log "  ${MH_DST}: in sync" ;;
+      gone)      log "  ${MH_DST}: retired, already gone" ;;
+      gated-off) log "  ${MH_DST}: skipped (${MH_DETAIL})" ;;
+      legacy-drift)
+        warn "  ${MH_DST}: ${MH_DETAIL} — left exactly as it is (ALLOW_UNIT_DRIFT=1)"
+        continue ;;
+      gate-unit-mismatch)
+        rollback_now "${MH_DST}: ${MH_DETAIL} (Phase 1 should have stopped here)" ;;
+      meta)
+        mh_selftest_fence "$MH_DST"
+        chown "$MH_OWNER" "$MH_DST" || rollback_now "chown ${MH_OWNER} ${MH_DST} failed"
+        chmod "$MH_MODE" "$MH_DST" || rollback_now "chmod ${MH_MODE} ${MH_DST} failed"
+        MH_CHANGED+=("${MH_CLASS}|${MH_DST}|meta")
+        log "  ${MH_DST}: mode/owner set to ${MH_MODE} ${MH_OWNER} (content was in sync)" ;;
+      present)
+        mh_selftest_fence "$MH_DST"
+        if mh_is_unit_file "$MH_DST"; then
+          u="$(basename "$MH_DST")"
+          mh_note_unit "$u"
+          systemctl disable --now --quiet "$u" || rollback_now "systemctl disable --now ${u} failed while retiring ${MH_DST}"
+        fi
+        rm -f "$MH_DST" || rollback_now "cannot remove the retired ${MH_DST}"
+        MH_CHANGED+=("absent|${MH_DST}|removed")
+        log "  ${MH_DST}: retired — removed (backed up in ${ARCHIVE:-the stage})" ;;
+      absent|drift|rename)
+        if [[ "$MH_CLASS" == "ssh" && "$MH_STATE" == "drift" && "$ALLOW_SSH_CHANGE" != "1" ]]; then
+          rollback_now "${MH_DST}: ssh drift without ALLOW_SSH_CHANGE=1 (Phase 1 should have stopped here)"
+        fi
+        mh_selftest_fence "$MH_DST"
+        dir="$(dirname "$MH_DST")"
+        if [[ ! -d "$dir" ]]; then
+          install -d -m 0755 -o root -g root "$dir" || rollback_now "cannot create ${dir}"
+          MH_CREATED_DIRS+=("$dir")
+        fi
+        if [[ "$MH_CLASS" == "unit" && "$MH_DST" == *.timer ]]; then mh_note_unit "$(basename "$MH_DST")"; fi
+        if [[ "$MH_CLASS" == "sysctl" ]]; then mh_note_sysctl "$MH_SRCPATH"; fi
+        install -o "${MH_OWNER%%:*}" -g "${MH_OWNER#*:}" -m "$MH_MODE" "$MH_SRCPATH" "$MH_DST" \
+          || rollback_now "failed to install ${MH_SRCPATH} to ${MH_DST}"
+        MH_CHANGED+=("${MH_CLASS}|${MH_DST}|${MH_STATE}")
+        log "  ${MH_DST}: ${MH_STATE} -> installed from ${MH_SRC} (${MH_MODE} ${MH_OWNER})" ;;
+      *)
+        rollback_now "${MH_DST}: unexpected host-file state '${MH_STATE}'" ;;
+    esac
+    if [[ "$MH_LEGACY_STATE" == "equal" ]]; then
+      mh_selftest_fence "$MH_LEGACY"
+      rm -f "$MH_LEGACY" || rollback_now "cannot remove the legacy name ${MH_LEGACY}"
+      MH_CHANGED+=("${MH_CLASS}|${MH_LEGACY}|removed-legacy")
+      log "  ${MH_LEGACY}: legacy name removed (same content now lives at ${MH_DST}; nothing restarted)"
+    fi
+  done
+
+  for row in "${MH_CHANGED[@]}"; do
+    IFS='|' read -r class dst how <<< "$row"
+    [[ "$how" == "meta" ]] && continue
+    case "$class" in
+      unit)
+        units=1
+        if [[ "$dst" == *.timer && "$how" != "removed-legacy" ]]; then timers+=("$dst"); fi
+        u="$(dropin_unit "$dst")"
+        if [[ -n "$u" ]]; then log "  ${dst}: takes effect at the next restart of ${u} (not restarted by the deploy)"; fi ;;
+      absent)    if mh_is_unit_file "$dst"; then units=1; fi ;;
+      sysctl)    sysctl_files+=("$dst") ;;
+      journald)  journald=1 ;;
+      ssh)       ssh_changed+=("$dst") ;;
+      networkd)  log "  ${dst}: takes effect at the next systemd-networkd restart (not restarted by the deploy)" ;;
+      logrotate) log "  ${dst}: logrotate reads it on its next run" ;;
+    esac
+  done
+  if (( units )); then
+    systemctl daemon-reload || rollback_now "systemctl daemon-reload failed after the host unit changes"
+  fi
+  for t in "${timers[@]}"; do
+    u="$(basename "$t")"
+    # enable --now only when it was enabled before, or the file did not exist: a
+    # timer the operator disabled stays disabled. Never the service: the deploy does
+    # not run a timer's job itself (even-day-reboot.service reboots the host).
+    if [[ "${MH_UNIT_PRE_ENABLED[$u]:-}" == "enabled" ]] || ! mh_existed_before "$t"; then
+      if [[ "${MH_UNIT_PRE_ENABLED[$u]:-}" != "enabled" ]]; then MH_ENABLED_BY_US+=("$u"); fi
+      systemctl enable --now --quiet "$u" || rollback_now "systemctl enable --now ${u} failed"
+      log "  ${u}: enabled + started (was ${MH_UNIT_PRE_ENABLED[$u]:-not installed})"
+    else
+      log "  ${u}: was ${MH_UNIT_PRE_ENABLED[$u]:-not enabled} before — left so"
+    fi
+  done
+  for t in "${sysctl_files[@]}"; do
+    out="$(sysctl -e -p "$t" 2>&1)" || rollback_now "sysctl -e -p ${t} failed: ${out}"
+    log "  sysctl -e -p ${t}: applied"
+  done
+  if (( journald )); then
+    systemctl restart systemd-journald || rollback_now "systemctl restart systemd-journald failed after the drop-in change"
+    log "  systemd-journald restarted (drop-in changed)"
+  fi
+  if (( ${#ssh_changed[@]} > 0 )); then mh_ssh_apply "${ssh_changed[@]}"; fi
+
+  while IFS='|' read -r dst _ class msg _; do
+    case "$msg" in absent|drift|meta|rename|present) bad+=("${dst} (${msg})") ;; esac
+  done < <(scan_managed_host_files "$APP_DIR")
+  (( ${#bad[@]} == 0 )) || rollback_now "host files still not as the checkout says after the install: ${bad[*]}"
+  log "host files: $(host_files_summary)"
+}
+
+host_files_summary() {
+  local row n=0 r=0 m=0
+  for row in "${MH_CHANGED[@]}"; do
+    case "${row##*|}" in
+      meta) m=$(( m + 1 )) ;;
+      removed|removed-legacy) r=$(( r + 1 )) ;;
+      *) n=$(( n + 1 )) ;;
+    esac
+  done
+  if (( n + r + m == 0 )); then echo "all in sync, nothing changed"; return 0; fi
+  echo "${n} installed, ${r} removed, ${m} mode/owner fixed"
+}
+
+# --- rollback ---------------------------------------------------------------------
+# The host-file part of BOTH rollbacks. Rollback context (set +e, never stops):
+# prints one report line per step.
+#   1. undo the enables this run made while the unit files are still on disk, so no
+#      dangling .wants link survives a unit file the restore removes;
+#   2. restore_host_paths — every staged path back, or removed if it was not there;
+#   3. re-apply what the restored files configure: daemon-reload, the pre-deploy
+#      enable/active state of every unit touched, the pre-deploy runtime value of
+#      every sysctl key applied, journald, and ssh — sshd -t on the RESTORED config
+#      first; if that fails ssh is NOT reloaded or restarted (loud FAIL instead).
+host_files_rollback() {
+  local u row class dst how reload=0 journald=0 sock=0 conf=0 k now out rc d
+  for u in "${MH_ENABLED_BY_US[@]}"; do
+    systemctl disable --now --quiet "$u" >/dev/null 2>&1
+    echo "disable --now ${u} (enabled by this deploy): rc=$?"
+  done
+  restore_host_paths
+  (( ${#MH_CHANGED[@]} > 0 )) || return 0
+  for row in "${MH_CHANGED[@]}"; do
+    IFS='|' read -r class dst how <<< "$row"
+    [[ "$how" == "meta" ]] && continue
+    case "$class" in
+      unit) reload=1 ;;
+      absent) if mh_is_unit_file "$dst"; then reload=1; fi ;;
+      journald) journald=1 ;;
+      ssh) if [[ "$dst" == *.socket.d/* ]]; then sock=1; reload=1; else conf=1; fi ;;
+    esac
+  done
+  if (( reload )); then systemctl daemon-reload; echo "daemon-reload (host files): rc=$?"; fi
+  for u in "${MH_UNITS_TOUCHED[@]}"; do
+    if [[ ! -e "${SYSTEMD_UNIT_DIR}/${u}" ]]; then echo "${u}: no unit file after the restore (as before the deploy)"; continue; fi
+    now="$(systemctl is-enabled "$u" 2>/dev/null || true)"
+    if [[ "${MH_UNIT_PRE_ENABLED[$u]}" == "enabled" && "$now" != "enabled" ]]; then
+      systemctl enable --quiet "$u"; echo "enable ${u} (enabled before the deploy): rc=$?"
+    elif [[ "${MH_UNIT_PRE_ENABLED[$u]}" != "enabled" && "$now" == "enabled" ]]; then
+      systemctl disable --quiet "$u"; echo "disable ${u} (${MH_UNIT_PRE_ENABLED[$u]:-not enabled} before the deploy): rc=$?"
+    fi
+    now="$(systemctl is-active "$u" 2>/dev/null || true)"
+    if [[ "${MH_UNIT_PRE_ACTIVE[$u]}" == "active" && "$now" != "active" ]]; then
+      systemctl start "$u"; echo "start ${u} (active before the deploy): rc=$?"
+    elif [[ "${MH_UNIT_PRE_ACTIVE[$u]}" != "active" && "$now" == "active" ]]; then
+      systemctl stop "$u"; echo "stop ${u} (${MH_UNIT_PRE_ACTIVE[$u]:-inactive} before the deploy): rc=$?"
+    fi
+  done
+  for k in "${MH_SYSCTL_ORDER[@]}"; do
+    if [[ -n "${MH_SYSCTL_PRE[$k]}" ]]; then
+      relay_restore_sysctl "$k" "${MH_SYSCTL_PRE[$k]}"
+    else
+      echo "${k} unreadable before the deploy (module not loaded) — left as it is"
+    fi
+  done
+  if (( journald )); then systemctl restart systemd-journald; echo "restart systemd-journald (drop-in restored): rc=$?"; fi
+  if (( sock || conf )); then
+    out="$(sshd -t -f "$SSHD_CONFIG" 2>&1)" && rc=0 || rc=$?
+    if (( rc != 0 )); then
+      echo "sshd -t on the RESTORED ssh config FAILED (rc=${rc}: ${out//$'\n'/; }) — ssh NOT reloaded or restarted — MANUAL ACTION REQUIRED, keep your session open"
+    else
+      echo "sshd -t on the restored ssh config: ok"
+      if (( sock )); then
+        systemctl restart "$SSH_SOCKET_UNIT"; echo "restart ${SSH_SOCKET_UNIT} (ListenStream restored): rc=$?"
+        # The running sshd still holds the sockets of the failed change (see mh_ssh_apply).
+        if [[ "$(systemctl is-active "$SSH_UNIT" 2>/dev/null || true)" == "active" ]]; then
+          systemctl restart "$SSH_UNIT"; echo "restart ${SSH_UNIT} (takes the restored sockets): rc=$?"
+          conf=0
+        fi
+      fi
+      if (( conf )); then
+        if [[ "$(systemctl is-active "$SSH_UNIT" 2>/dev/null || true)" == "active" ]]; then
+          systemctl reload "$SSH_UNIT"; echo "reload ${SSH_UNIT} (sshd_config.d restored): rc=$?"
+        else
+          echo "${SSH_UNIT} not running (socket-activated) — the next connection reads the restored config"
+        fi
+      fi
+    fi
+  fi
+  for d in "${MH_CREATED_DIRS[@]}"; do
+    if [[ -d "$d" && -z "$(ls -A "$d" 2>/dev/null)" ]]; then rmdir "$d"; echo "remove ${d} (created by this deploy, empty again): rc=$?"; fi
+  done
 }
 
 # --------------------------------------------------------------------------- #
@@ -1435,6 +2622,10 @@ rollback() {
     report+=("restore permission canary: FAIL — MANUAL ACTION REQUIRED")
     while IFS= read -r line; do [[ -n "$line" ]] && report+=("    ${line}"); done <<< "$canary_msg"
   fi
+  # Host files (MANAGED_HOST_FILES): the archive above already carried every one
+  # that existed; this removes what did not exist before, and re-applies the
+  # restored state (unit enablement, sysctl values, journald, ssh).
+  while IFS= read -r line; do [[ -n "$line" ]] && report+=("$line"); done < <(host_files_rollback)
   systemctl daemon-reload; report+=("daemon-reload: rc=$?")
 
   # Data-plane: restart a service only if its config actually changed (R1).
@@ -2081,6 +3272,9 @@ relay_phase1() {
     done
   fi
 
+  # Host files of the relay role (MANAGED_HOST_FILES), the same gates as on main.
+  host_state_phase1 "$WT"
+
   # The live relay through the checkout's own `check` — informational, never a
   # gate: absent/different/forwarding-off is exactly what Phase 2 fixes. It is the
   # strongest pre-check of a first transition, though: PASS here means the repo
@@ -2140,6 +3334,8 @@ relay_phase1_report() {
     printf '    %s matches the checkout\n' "$RELAY_HELPER"
   fi
 
+  host_state_report_block
+
   printf '\n  --- Live relay vs the render (checkout: vpn-relay-apply check) ---\n'
   printf '%s\n' "$RELAY_LIVE_OUT" | sed 's/^/    /'
   printf '    => %s\n' "$(relay_live_rc_text "$RELAY_LIVE_RC")"
@@ -2174,7 +3370,7 @@ relay_rollback() {
   trap - ERR INT TERM HUP
   set +e
   local -a report=()
-  local p state rc
+  local state rc line
   warn "ROLLBACK (relay): restoring PREV_SHA=${PREV_SHA:-<unknown>} and the backed-up relay state"
 
   git reset --hard "$PREV_SHA" >/dev/null 2>&1; report+=("git reset --hard ${PREV_SHA}: rc=$?")
@@ -2193,13 +3389,9 @@ relay_rollback() {
   fi
 
   if [[ -n "$STAGE" && -d "$STAGE" ]]; then
-    for p in "$RELAY_HELPER" "$RELAY_SYSTEM_UNIT" "$RELAY_SYSCTL_FILE"; do
-      if [[ -e "${STAGE}${p}" ]]; then
-        cp -a "${STAGE}${p}" "$p"; report+=("restore ${p}: rc=$?")
-      else
-        rm -f "$p"; report+=("remove ${p} (absent before the deploy): rc=$?")
-      fi
-    done
+    # helper, unit, sysctl file and the relay's MANAGED_HOST_FILES, in staging order:
+    # each back from the stage, or removed when it did not exist before the deploy.
+    while IFS= read -r line; do [[ -n "$line" ]] && report+=("$line"); done < <(host_files_rollback)
   else
     report+=("backup stage MISSING — helper/unit/sysctl file NOT restored — MANUAL ACTION REQUIRED (archive: ${ARCHIVE:-<none>})")
   fi
@@ -2277,15 +3469,18 @@ relay_retire_legacy_nft() {
 # applies the new one) is milliseconds; established flows keep their conntrack NAT.
 relay_phase2() {
   local out rc entry listing legacy_before
+  local -a mh_paths=()
   PREV_SHA="$(git rev-parse HEAD)"
   log "PREV_SHA=${PREV_SHA} (relay)"
 
   STAGE="$(make_stage_dir)" || die "cannot create the backup stage"
   manifest=()
   log "backing up the relay state (nothing is stopped for it)"
-  stage_path "$RELAY_HELPER"
-  stage_path "$RELAY_SYSTEM_UNIT"
-  stage_path "$RELAY_SYSCTL_FILE"
+  # The relay's own three files, then its MANAGED_HOST_FILES — one mechanism
+  # (stage_host_paths / restore_host_paths) for every file outside the checkout.
+  stage_host_paths "$RELAY_HELPER" "$RELAY_SYSTEM_UNIT" "$RELAY_SYSCTL_FILE"
+  readarray -t mh_paths < <(managed_host_stage_paths)
+  stage_host_paths "${mh_paths[@]}"
   install -d -m0755 "${STAGE}$(dirname "$RELAY_TABLE_DUMP")"
   if nft list table ip "$RELAY_TABLE" > "${STAGE}${RELAY_TABLE_DUMP}" 2>/dev/null; then
     manifest+=("${RELAY_TABLE_DUMP#/}")
@@ -2315,6 +3510,7 @@ relay_phase2() {
   # The registry mechanism, role-filtered: installs/refreshes vpn-relay-apply
   # (required on a relay) and nothing else; its failures reach relay_rollback.
   install_out_of_repo_helpers
+  install_managed_host_files
 
   log "installing ${RELAY_UNIT} from ${RELAY_UNIT_SRC} (verbatim)"
   install -m0644 "$RELAY_UNIT_SRC" "$RELAY_SYSTEM_UNIT" \
@@ -2333,6 +3529,10 @@ relay_phase2() {
   (( rc == 0 )) || rollback_now "vpn-relay-apply check failed after the restart (exit ${rc}: $(relay_live_rc_text "$rc"))"
 
   disarm
+  # disarm() is a function, and bash hands a function's caller back the ERR trap it
+  # had on entry (no errtrace) — so it cannot clear the trap armed above for THIS
+  # frame. Clear it here, or any failure after DEPLOY OK would roll the relay back.
+  trap - ERR INT TERM HUP
   legacy_before="absent"
   [[ -e "$RELAY_LEGACY_NFT" ]] && legacy_before="present"
   relay_retire_legacy_nft
@@ -2346,6 +3546,7 @@ relay_phase2() {
   backup           : ${ARCHIVE}
   unit             : ${RELAY_UNIT} active, enabled (before: active=${RELAY_PRE_ACTIVE:-unknown}, installed copy ${RELAY_UNIT_STATE:-unknown})
   verify           : vpn-relay-apply check OK
+  host files       : $(host_files_summary)
   ${RELAY_LEGACY_NFT} : ${legacy_before}$( [[ "$legacy_before" == "present" ]] && printf ' -> renamed to .pre-repo.<ts>')
 =============================
 
@@ -2535,14 +3736,9 @@ for f in "$WT"/deploy/*.service; do
     absent+=("${base} (not installed under /etc/systemd/system/)")
   fi
 done
-if [[ -f "$WT/deploy/mtproxy-vpn-bot-managed.conf" ]]; then
-  if [[ -n "$MTPROXY_DROPIN_FOUND" ]]; then
-    cmp -s "$WT/deploy/mtproxy-vpn-bot-managed.conf" "$MTPROXY_DROPIN_FOUND" \
-      || drift+=("deploy/mtproxy-vpn-bot-managed.conf|${MTPROXY_DROPIN_FOUND}")
-  else
-    absent+=("mtproxy drop-in (/etc/systemd/system/${MTPROTO_SERVICE_NAME_V}.service.d/{vpn-bot,vpnbot}-managed.conf)")
-  fi
-fi
+# The MTProxy managed drop-in used to be compared here too (report-only). It is a
+# MANAGED_HOST_FILES entry now — gated on MTPROTO_ENABLED, installed and renamed from
+# its legacy name by Phase 2 — so it is checked by host_state_phase1 below instead.
 shopt -u nullglob
 if [[ ${#absent[@]} -gt 0 ]]; then
   log "repo units NOT installed on this host (INFO, not drift — reconcile if this is a rename):"
@@ -2644,16 +3840,25 @@ if [[ ${#helper_drift[@]} -gt 0 ]]; then
   done
 fi
 
+# Host files as code (MANAGED_HOST_FILES): scan against origin/main ($WT), validate
+# every candidate Phase 2 would install, show the diff of every drift, and stop here
+# — before any mutation — on a refused candidate, a retired file something still
+# names, a differing legacy drop-in or an ssh change without ALLOW_SSH_CHANGE=1.
+# Then the informational scans: files nothing accounts for, modified dpkg conffiles.
+host_state_phase1 "$WT"
+
 # systemd-networkd foreign-rule guard (informational, never fatal). Keeps the WARP
-# `ip rule`s alive across a networkd (re)start; if it is missing/inactive we only
-# WARN with the one-line install command — WARP is modular, so this is never a gate.
+# `ip rule`s alive across a networkd (re)start. The drop-in itself is a
+# MANAGED_HOST_FILES entry (class networkd) now, so Phase 2 installs it; this only
+# says whether the RUNNING networkd has it — it takes effect at networkd's next
+# (re)start, which the deploy never forces. WARP is modular: never a gate.
 nwd_live_msg="$(networkd_foreign_rules_ok)" && nwd_live_rc=0 || nwd_live_rc=$?
 if (( nwd_live_rc == 0 )); then
   log "systemd-networkd foreign-rule guard: ${nwd_live_msg}"
 else
   warn "systemd-networkd foreign-rule guard: ${nwd_live_msg}"
-  warn "  a networkd restart could flush WARP's ip rules (2026-07-24 incident); install:"
-  warn "  install -o root -g root -m 0644 ${NETWORKD_DROPIN_SRC} ${NETWORKD_DROPIN_DST} && systemctl restart systemd-networkd"
+  warn "  a networkd restart could flush WARP's ip rules (2026-07-24 incident); Phase 2 installs"
+  warn "  ${NETWORKD_DROPIN_DST} from the registry (see the host files above) — effective at networkd's next start"
 fi
 
 # All-in-one subscription endpoint (informational, never fatal). The unit is
@@ -2766,6 +3971,9 @@ phase1_report() {
     printf '    none (installed helpers match origin/main, or WARP is not deployed on this host)\n'
   fi
 
+  # --- Host files as code (MANAGED_HOST_FILES) + files nothing accounts for ---
+  host_state_report_block
+
   # --- UNIT_SET: per-unit class + LoadState/ActiveState + is-enabled ---
   printf '\n  --- UNIT_SET (watched for an active-state regression across a deploy) ---\n'
   local u class disp t via
@@ -2877,6 +4085,7 @@ phase1_report() {
   else
     printf '    found : none (looked for vpn-bot-managed.conf and legacy vpnbot-managed.conf)\n'
   fi
+  printf '    (managed as a host file, gated on MTPROTO_ENABLED — see Host files above)\n'
 
   # --- WARP rollback-path facts (verify BEFORE a rollback would need them) ---
   printf '\n  --- WARP rollback-path data-plane facts (verified now, pre-emptively) ---\n'
@@ -2929,8 +4138,8 @@ phase1_report() {
     printf '    status          : OK (%s)\n' "$nwd_msg"
   else
     printf '    status          : INFO (%s)\n' "$nwd_msg"
-    printf '                      install: install -o root -g root -m 0644 %s %s && systemctl restart systemd-networkd\n' \
-      "$NETWORKD_DROPIN_SRC" "$NETWORKD_DROPIN_DST"
+    printf '                      managed: Phase 2 installs it (MANAGED_HOST_FILES, class networkd — see Host files);\n'
+    printf '                      it takes effect at the next systemd-networkd start, which the deploy never forces\n'
   fi
 
   # --- Post-deploy log scan visibility (bot.log is the PRIMARY source) ---
@@ -2992,6 +4201,11 @@ stage_path "$ENV_FILE"
 stage_path "$XRAY_CONF"
 stage_path "$AWG_CONF"
 stage_path "$MTPROXY_DIR"
+# Every host file Phase 2 may create, change or remove (MANAGED_HOST_FILES): staged
+# into the same archive, and put back — or removed again — by host_files_rollback.
+readarray -t _mh_paths < <(managed_host_stage_paths)
+stage_host_paths "${_mh_paths[@]}"
+unset _mh_paths
 
 ARCHIVE="${BACKUP_DIR}/backup-${TAG}-$(date +%Y%m%dT%H%M%S).tar.gz"
 create_backup_archive "$ARCHIVE"
@@ -3035,6 +4249,11 @@ log "installing prod dependencies"
 # deploy/vpn-bot.service names in ExecStartPre=. Installing it after the start
 # would fail the unit with 203/EXEC on any host that does not already have it.
 install_out_of_repo_helpers
+
+# Host files as code (MANAGED_HOST_FILES): install, repair and retire from the
+# advanced tree, run each class's post-action for what actually changed, rescan.
+# Validated in Phase 1; every path is in the archive; a failure rolls back.
+install_managed_host_files
 
 log "installing ${BOT_UNIT} from deploy/vpn-bot.service (verbatim)"
 install -m0644 "deploy/vpn-bot.service" "$SYSTEM_UNIT"
@@ -3171,6 +4390,10 @@ fi
 rm -rf "$VENV_PREV"
 rotate_backups
 disarm
+# disarm() is a function, and a function cannot CLEAR the ERR trap of its caller
+# (bash restores the trap it had on entry when the function leaves it unset), so
+# the rollback trap would stay armed through the report below. Clear it here.
+trap - ERR INT TERM HUP
 
 cat <<EOF
 
@@ -3180,6 +4403,7 @@ cat <<EOF
   schema_version   : ${SCHEMA_BEFORE} -> ${SCHEMA_AFTER} (target ${SCHEMA_EXPECT})
   backup           : ${ARCHIVE}
   units skipped    : ${skipped[*]:-none}
+  host files       : $(host_files_summary)
 EOF
 # One line per sidecar (restarted / skipped), so a half-deployed host is visible
 # in the same report that says DEPLOY OK. Not foldable into the heredoc above:
