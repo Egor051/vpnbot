@@ -553,6 +553,9 @@ async def _build_app(
         # can add its own paths; directories in it are walked at backup time.
         system_sources=settings.offsite_backup_system_paths,
         include_system=settings.offsite_backup_include_system,
+        # What the walk leaves out (config .bak copies, acme.sh's own code), on top
+        # of the hard SSH-host-private-key policy inside the service.
+        system_exclude=settings.offsite_backup_system_exclude,
     )
 
     anomaly_detection_service = AnomalyDetectionService(
