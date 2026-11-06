@@ -16,7 +16,7 @@ def modules_panel_keyboard(
     server» (a module switched off earlier may still have everything on the host) ·
     🗑 removed from the server → «🔒 Enable», which only explains that it needs a
     reinstall · ⛔ switched off in ``.env`` (``env_off``) → an info button «.env», which says
-    which flag. A protocol is offered only when ``.env`` AND the toggle allow it
+    which flag, instead of «Enable» (disabling and removal stay offered). A protocol is offered only when ``.env`` AND the toggle allow it
     (services/protocol_availability.py); the panel used to show «✅ Выключить» for
     a protocol ``.env`` had switched off, i.e. claim it was on.
     """
@@ -27,10 +27,22 @@ def modules_panel_keyboard(
         enabled = module.enabled if module else True
         label = PROTOCOL_DISPLAY.get(name, name)
         if name in env_off and name not in uninstalled:
-            rows.append([
+            # Off in .env: the toggle cannot turn it on, so «Enable» gives way to
+            # the .env note. Switching the module off and removing the protocol
+            # from the server stay available — the host may still carry it.
+            row = [
                 InlineKeyboardButton(text=f"⛔ {label}", callback_data="noop"),
                 InlineKeyboardButton(text=t("btn_module_env_off"), callback_data=f"admin:module:envoff:{name}"),
-            ])
+            ]
+            if enabled:
+                row.append(InlineKeyboardButton(text=t("btn_module_disable"), callback_data=f"admin:module:disable:{name}"))
+            rows.append(row)
+            if not enabled:
+                rows.append([
+                    InlineKeyboardButton(
+                        text=t("btn_module_uninstall", label=label), callback_data=f"admin:module:uninst:{name}"
+                    )
+                ])
             continue
         if name in uninstalled:
             rows.append([

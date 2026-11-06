@@ -514,8 +514,19 @@ def test_the_modules_panel_marks_a_protocol_switched_off_in_env(edits: list[tupl
     asyncio.run(modules_mod.admin_modules_panel(_Callback("admin:modules"), services))  # type: ignore[arg-type]
     datas = _callbacks(edits[-1][1])
     assert "admin:module:envoff:socks5" in datas
-    assert "admin:module:disable:socks5" not in datas
+    assert "admin:module:enable:socks5" not in datas
+    # Switching it off stays possible (Codex review): the host may still carry it.
+    assert "admin:module:disable:socks5" in datas
     assert "admin:module:disable:mtproto" in datas
+
+
+def test_a_protocol_off_in_env_can_still_be_removed_from_the_server() -> None:
+    from bot.keyboards.admin_modules import modules_panel_keyboard
+
+    datas = _callbacks(modules_panel_keyboard([ProtocolModule("socks5", False)], env_off=frozenset({"socks5"})))
+    assert "admin:module:envoff:socks5" in datas
+    assert "admin:module:uninst:socks5" in datas
+    assert "admin:module:enable:socks5" not in datas
 
 
 def test_enabling_a_protocol_switched_off_in_env_is_refused(edits: list[tuple[str, Any]]) -> None:
