@@ -134,8 +134,13 @@ async def warp_panel(callback: CallbackQuery, state: FSMContext, services: Servi
 
 
 @router.callback_query(F.data == "admin:warp:settings")
-async def warp_settings(callback: CallbackQuery, services: Services) -> None:
-    """Show the WARP settings screen."""
+async def warp_settings(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Show the WARP settings screen.
+
+    It is also «Назад» of «Заменить конфиг», so it leaves a pending upload: with
+    the waiting state kept, the next document sent would still replace the live
+    WARP config after the admin had walked away from the upload.
+    """
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -143,11 +148,13 @@ async def warp_settings(callback: CallbackQuery, services: Services) -> None:
         return
     try:
         await require_superadmin(services, callback.from_user.id)
-        state = await services.warp.get_state()
+        if await state.get_state() == WarpConfigStates.waiting_config.state:
+            await state.clear()
+        warp_state = await services.warp.get_state()
         await safe_edit_message_text(
             callback.message,
-            warp_settings_text(state),
-            reply_markup=warp_settings_keyboard(state),
+            warp_settings_text(warp_state),
+            reply_markup=warp_settings_keyboard(warp_state),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)

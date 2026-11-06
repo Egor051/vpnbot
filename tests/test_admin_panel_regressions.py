@@ -174,15 +174,82 @@ async def test_a_prefix_deleted_by_command_stays_deleted(tmp_path: Path) -> None
 async def test_a_feed_prefix_is_not_deleted_by_command(tmp_path: Path) -> None:
     db, _shell, _manager, repo, service, services = await _split_world(tmp_path)
     try:
+        await repo.replace_prefixes("google-goog", ["8.8.8.0/24"])  # supplied by an enabled feed
+        await repo.set_enabled("google-goog", True)
         await service.add_manual(["8.8.8.0/24"], actor_user_id=1)
-        await repo.replace_prefixes("goog", ["8.8.8.0/24"])  # also supplied by a feed
         message = _Message("/warp_split_del 8.8.8.0/24")
         await split_cmds.warp_split_del_cmd(message, services)  # type: ignore[arg-type]
         assert "8.8.8.0/24" in await repo.manual_prefixes()
         assert t("warp_split_report_unchanged") in message.answers[-1][0]
-        assert "goog" in message.answers[-1][0]
+        assert "google-goog" in message.answers[-1][0]
     finally:
         await db.close()
+
+
+@pytest.mark.usefixtures("split_private")
+async def test_deleting_a_collapsed_prefix_drops_its_manual_contributors(tmp_path: Path) -> None:
+    """The routed list is collapsed: two manual /25s are routed as one /24, which
+    matches no stored row. Deleting the /24 must drop both (Codex review)."""
+    db, _shell, manager, repo, service, services = await _split_world(tmp_path)
+    try:
+        await service.add_manual(["8.8.8.0/25", "8.8.8.128/25"], actor_user_id=1)
+        assert "8.8.8.0/24" in manager.read_list()
+        await split_cmds.warp_split_del_cmd(_Message("/warp_split_del 8.8.8.0/24"), services)  # type: ignore[arg-type]
+        assert "8.8.8.0/24" not in manager.read_list()
+        assert not {"8.8.8.0/25", "8.8.8.128/25"} & set(await repo.manual_prefixes())
+    finally:
+        await db.close()
+
+
+@pytest.mark.usefixtures("split_private")
+async def test_a_collapsed_prefix_with_a_feed_part_is_not_deleted(tmp_path: Path) -> None:
+    db, _shell, manager, repo, service, services = await _split_world(tmp_path)
+    try:
+        await repo.replace_prefixes("google-goog", ["8.8.8.128/25"])
+        await repo.set_enabled("google-goog", True)
+        await service.add_manual(["8.8.8.0/25"], actor_user_id=1)
+        assert "8.8.8.0/24" in manager.read_list()  # collapsed: half manual, half feed
+        message = _Message("/warp_split_del 8.8.8.0/24")
+        await split_cmds.warp_split_del_cmd(message, services)  # type: ignore[arg-type]
+        assert "8.8.8.0/25" in await repo.manual_prefixes()
+        assert "google-goog" in message.answers[-1][0]
+    finally:
+        await db.close()
+
+
+@pytest.mark.usefixtures("split_private")
+async def test_a_prefix_of_a_disabled_feed_can_be_deleted(tmp_path: Path) -> None:
+    db, _shell, manager, repo, service, services = await _split_world(tmp_path)
+    try:
+        await service.add_manual(["8.8.8.0/24"], actor_user_id=1)
+        await repo.replace_prefixes("google-goog", ["8.8.8.0/24"])  # cached, but the source is off
+        await split_cmds.warp_split_del_cmd(_Message("/warp_split_del 8.8.8.0/24"), services)  # type: ignore[arg-type]
+        assert "8.8.8.0/24" not in manager.read_list()
+    finally:
+        await db.close()
+
+
+def test_removing_a_range_splits_a_wider_manual_row() -> None:
+    import ipaddress
+
+    from services.warp_split_feeds import _manual_rows_without
+
+    drop, add = _manual_rows_without(["8.8.0.0/16", "1.1.1.0/24", "8.8.8.0/25"], ["8.8.0.0/21"])
+    assert set(drop) == {"8.8.0.0/16"}
+    remaining = [ipaddress.IPv4Network(item) for item in add]
+    assert sum(net.num_addresses for net in remaining) == 2**16 - 2**11
+    assert not any(net.overlaps(ipaddress.IPv4Network("8.8.0.0/21")) for net in remaining)
+
+
+def test_back_from_replace_config_leaves_the_upload(edits: list[tuple[str, Any]]) -> None:
+    """«Назад» of «Заменить конфиг» goes to the WARP settings, which must end the
+    upload: otherwise the next document still replaced the live config (Codex review)."""
+    from bot.fsm.states import WarpConfigStates
+
+    state = _State({"cancel_target": "admin:warp:settings"}, WarpConfigStates.waiting_config)
+    services = SimpleNamespace(users=_RoleUsers(UserRole.SUPERADMIN), warp=_Warp())
+    asyncio.run(warp_mod.warp_settings(_Callback("admin:warp:settings"), state, services))  # type: ignore[arg-type]
+    assert state.state is None
 
 
 @pytest.mark.usefixtures("split_private")

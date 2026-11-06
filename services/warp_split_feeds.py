@@ -82,6 +82,7 @@ from warp.split_merge import (
     SourceContribution,
     merge_split_list,
     parse_feed,
+    resolve_origins,
     validate_slug,
     validate_source_relations,
 )
@@ -995,25 +996,42 @@ class WarpSplitFeedService:
     async def remove_manual_many(
         self, prefixes: Sequence[str], *, actor_user_id: int | None = None
     ) -> ApplyOutcome:
-        """Drop several hand-typed prefixes and re-apply once.
+        """Drop the hand-typed address space of *prefixes* and re-apply once.
+
+        The routed list is collapsed (``merge_split_list``), so a prefix read from
+        it need not be stored verbatim: manual ``8.8.8.0/25`` + ``8.8.8.128/25``
+        are routed as ``8.8.8.0/24``. Matching the text deleted nothing and the
+        next merge kept the route. Instead every manual row inside a requested
+        range is dropped, and a wider manual row is split so that only the
+        requested range leaves it.
 
         The ``/warp_split_del`` command used to write the remaining list straight
-        to the file, which the next merge (built from the stored origins) undid:
-        the manual row was still in the database. Going through here keeps the
-        command and the panel's 🗑 on the same path.
+        to the file, which the next merge undid; it and the panel's 🗑 both come
+        here now.
         """
         await self.ensure_manual_adopted()
-        await self._repo.remove_manual_prefixes(list(prefixes))
+        drop, add = _manual_rows_without(await self._repo.manual_prefixes(), prefixes)
+        await self._repo.remove_manual_prefixes(drop)
+        await self._repo.add_manual_prefixes(add)
         return await self._manager.apply_computed(
             self._recompute_for_apply, actor_user_id=actor_user_id
         )
 
     async def feed_origins(self, prefix: str) -> list[str]:
-        """The feed sources (not ``manual``) that currently supply *prefix*."""
-        contributions = await self._repo.all_prefixes()
-        return sorted(
-            origin for origin, items in contributions.items() if origin != MANUAL_ORIGIN and prefix in items
-        )
+        """The feed sources that put address space inside *prefix* and would put
+        it back on the next merge.
+
+        By overlap, not by text: a routed prefix may be a collapse of several
+        contributions (see :func:`warp.split_merge.resolve_origins`). Only sources
+        that contribute to the list count — a disabled or subtract source's cached
+        prefixes do not come back, so they do not stand in the way of a delete.
+        """
+        live = {source.slug for source in await self._repo.list_sources() if source.contributes_to_list}
+        contributions = {
+            origin: items for origin, items in (await self._repo.all_prefixes()).items() if origin in live
+        }
+        owners = resolve_origins([prefix], contributions).get(prefix, ())
+        return sorted(owners)
 
     async def exclude_prefix(self, prefix: str, *, actor_user_id: int | None = None) -> ApplyOutcome:
         """Veto a feed-supplied prefix and re-apply.
@@ -1422,3 +1440,34 @@ async def warp_split_feeds_loop(service: WarpSplitFeedService, interval: int) ->
         except Exception:
             logger.warning("WARP split feed refresh failed", exc_info=True)
         await asyncio.sleep(_jittered(interval))
+
+
+def _manual_rows_without(manual: Sequence[str], ranges: Sequence[str]) -> tuple[list[str], list[str]]:
+    """``(rows to delete, rows to add)`` so the manual set no longer covers *ranges*.
+
+    CIDRs either nest or are disjoint: a manual row inside a range goes, a row
+    containing a range is replaced by what of it lies outside every range, a
+    disjoint row stays.
+    """
+    targets = [ipaddress.IPv4Network(item, strict=False) for item in ranges]
+    drop: list[str] = []
+    add: list[str] = []
+    for raw in manual:
+        net = ipaddress.IPv4Network(raw, strict=False)
+        if not any(net.overlaps(target) for target in targets):
+            continue
+        drop.append(raw)
+        rest = [net]
+        for target in targets:
+            pieces: list[ipaddress.IPv4Network] = []
+            for part in rest:
+                if part.subnet_of(target):
+                    continue
+                if target.subnet_of(part):
+                    pieces.extend(part.address_exclude(target))
+                else:
+                    pieces.append(part)
+            rest = pieces
+        add.extend(str(part) for part in sorted(rest))
+    return drop, add
+
