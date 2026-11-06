@@ -6,7 +6,7 @@ from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, InaccessibleMessage, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -31,7 +31,8 @@ from bot.formatters import (
     users_page_text,
 )
 from services.health import run_bot_health
-from bot.fsm.states import AdminCreateKeyStates, AdminAnnouncementStates, AdminEditUserNoteStates
+from bot.availability import current_availability
+from bot.fsm.states import AdminCreateKeyStates, AdminAnnouncementStates, AdminEditUserNoteStates, AdminUserSearchStates
 from bot.guards import require_superadmin, require_moderator_or_admin
 from bot.handlers.admin_dashboard import stop_server_status_auto_refresh
 from bot.handlers.common import (
@@ -44,40 +45,48 @@ from bot.handlers.common import (
     parse_int_callback,
 )
 from bot.keyboards.admin import (
+    ADMIN_GROUPS,
     ANNOUNCEMENT_PROTOCOL_OPTIONS,
     ANNOUNCEMENT_ROLE_OPTIONS,
     ANNOUNCEMENT_TRANSPORT_OPTIONS,
-    admin_issue_users_keyboard,
+    access_request_detail_keyboard,
+    admin_group_keyboard,
     admin_key_type_keyboard,
     admin_relay_route_keyboard,
     admin_vless_transport_keyboard,
     admin_xhttp_profile_keyboard,
     admin_panel_keyboard,
     moderator_panel_keyboard,
+    announcement_batch_confirm_keyboard,
     announcement_batches_keyboard,
+    announcement_cancel_keyboard,
     announcement_confirm_keyboard,
     announcement_protocols_keyboard,
     announcement_roles_keyboard,
     announcement_transports_keyboard,
     access_request_decision_confirm_keyboard,
+    backup_confirm_keyboard,
     block_user_confirm_keyboard,
     pending_requests_keyboard,
     unblock_user_confirm_keyboard,
+    user_action_confirm_keyboard,
     user_actions_keyboard,
+    user_search_keyboard,
     users_keyboard,
 )
-from bot.handlers.keys import ADMIN_KEYS_PAGE_SIZE, load_list_page
+from bot.handlers.keys import ADMIN_KEYS_PAGE_SIZE, load_list_page, protocol_offered
 from bot.keyboards.common import cancel_keyboard, confirm_cancel_keyboard
 from bot.keyboards.keys import VALID_FINGERPRINTS, expiry_choice_keyboard, fp_choice_keyboard, key_actions_keyboard, keys_list_keyboard, mtu_choice_keyboard
 from bot.messages import awg_config_filename, safe_callback_answer, safe_edit_message_text, send_config_with_qr
 from bot.pagination import MAX_PAGE, page_offset, split_page
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from bot.rate_limit import RateLimitExceeded, RateLimiter
-from i18n import all_variants, t
+from i18n import t
 from models.dto import RecipientFilter, TelegramUserProfile
 from models.access import is_blocked_user
 from models.enums import AccessRequestStatus, UserRole, VpnKeyType
 from services.errors import AccessDenied
+from services.protocol_availability import Protocol
 from services.relay import require_relay_for_issue
 from services.user_locks import UserLockManager
 from utils.formatting import h
@@ -97,30 +106,64 @@ AUDIT_PAGE_SIZE = 12
 ADMIN_PROXY_USER_LIMIT = 10
 
 
+async def admin_panel_view(services: Services, actor_user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """The admin panel, with the shortcut row for the queues that are not empty.
+
+    The counters are best-effort: a failure to count leaves the shortcut out, it
+    never keeps the panel from opening.
+    """
+    pending_requests = pending_trials = 0
+    try:
+        pending_requests = await services.access.count_pending(actor_user_id)
+    except Exception:
+        logger.debug("admin panel: pending access requests unavailable", exc_info=True)
+    try:
+        pending_trials = await services.trial_access.count_pending_requests(actor_user_id)
+    except Exception:
+        logger.debug("admin panel: pending trial requests unavailable", exc_info=True)
+    return t("admin_panel_title"), admin_panel_keyboard(
+        subscription_enabled=services.settings.subscription_enabled,
+        pending_requests=pending_requests,
+        pending_trials=pending_trials,
+    )
+
+
+def admin_group_view(services: Services, group: str) -> tuple[str, InlineKeyboardMarkup]:
+    """One section of the admin panel."""
+    return t(f"admin_group_{group}_title"), admin_group_keyboard(
+        group, subscription_enabled=services.settings.subscription_enabled
+    )
+
+
+async def staff_panel_view(services: Services, actor_user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """The panel of the actor's role: the admin panel, or the moderator panel.
+
+    ``admin:panel`` and ``admin:grp:people`` are the «back» targets of screens a
+    moderator sees too (requests, users). They used to require a superadmin, so a
+    moderator pressing «back» got «Недостаточно прав» and had no way out.
+    """
+    actor = await require_moderator_or_admin(services, actor_user_id)
+    if actor.role == UserRole.MODERATOR:
+        return t("moderator_panel_title"), moderator_panel_keyboard()
+    return await admin_panel_view(services, actor_user_id)
+
+
 @router.message(Command("admin"))
-async def admin_command(message: Message, services: Services) -> None:
-    """Handle the /admin command by opening the admin panel."""
+async def admin_command(message: Message, state: FSMContext, services: Services) -> None:
+    """Handle the /admin command by opening the admin panel.
+
+    Like the ``admin:panel`` button it leaves any flow in progress: the two entry
+    points used to differ there (the command kept a half-finished wizard alive).
+    """
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
         return
     try:
         await require_superadmin(services, message.from_user.id)
-        await message.answer(t("admin_panel_title"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
-    except Exception as exc:
-        await answer_message_error(message, exc)
-
-
-@router.message(F.text.in_(all_variants("btn_admin_panel")))
-async def admin_menu_message(message: Message, services: Services) -> None:
-    """Open the admin panel in response to the admin panel button."""
-    if message.from_user is None:
-        return
-    if not await ensure_private_message(message, t("admin_private_only_text")):
-        return
-    try:
-        await require_superadmin(services, message.from_user.id)
-        await message.answer(t("admin_panel_title"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
+        await state.clear()
+        text, markup = await admin_panel_view(services, message.from_user.id)
+        await message.answer(text, reply_markup=markup)
     except Exception as exc:
         await answer_message_error(message, exc)
 
@@ -151,22 +194,52 @@ async def warp_alert_dismiss(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "admin:panel")
 async def admin_panel(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """Show the admin panel via callback."""
+    """Show the panel of the actor's role (the admin panel, or a moderator's)."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
     if callback.from_user is None or callback.message is None:
         return
-    # Returning to the root panel abandons any in-progress flow, so drop the FSM
-    # state to avoid a stale half-finished dialog lingering across navigation.
-    await state.clear()
-    # Leaving the server-status card (its "Back" button lands here) ends the live
-    # auto-refresh loop before we overwrite the card, so it cannot fight us for
-    # the message.
-    stop_server_status_auto_refresh(callback.message, services)
     try:
-        await require_superadmin(services, callback.from_user.id)
-        await safe_edit_message_text(callback.message, t("admin_panel_title"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
+        text, markup = await staff_panel_view(services, callback.from_user.id)
+        # Returning to the root panel abandons any in-progress flow, so drop the FSM
+        # state to avoid a stale half-finished dialog lingering across navigation.
+        await state.clear()
+        # Leaving the server-status card ends its live auto-refresh loop before we
+        # overwrite the card, so it cannot fight us for the message.
+        stop_server_status_auto_refresh(callback.message, services)
+        await safe_edit_message_text(callback.message, text, reply_markup=markup)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+async def group_view_for_actor(services: Services, actor_user_id: int, group: str) -> tuple[str, InlineKeyboardMarkup]:
+    """A section for this actor: «Люди» is the moderator panel for a moderator;
+    every other section, and an unknown name, is superadmin-only."""
+    if group == "people":
+        actor = await require_moderator_or_admin(services, actor_user_id)
+        if actor.role == UserRole.MODERATOR:
+            return t("moderator_panel_title"), moderator_panel_keyboard()
+        return admin_group_view(services, group)
+    await require_superadmin(services, actor_user_id)
+    if group not in ADMIN_GROUPS:
+        return await admin_panel_view(services, actor_user_id)
+    return admin_group_view(services, group)
+
+
+@router.callback_query(F.data.regexp(r"^admin:grp:[a-z]+$"))
+async def admin_group(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """One section of the admin panel."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        text, markup = await group_view_for_actor(services, callback.from_user.id, callback.data.rsplit(":", 1)[-1])
+        await safe_callback_answer(callback)
+        await state.clear()
+        stop_server_status_auto_refresh(callback.message, services)
+        await safe_edit_message_text(callback.message, text, reply_markup=markup)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -174,20 +247,6 @@ async def admin_panel(callback: CallbackQuery, state: FSMContext, services: Serv
 @router.message(Command("moderator"))
 async def moderator_command(message: Message, services: Services) -> None:
     """Handle the /moderator command by opening the moderator panel."""
-    if message.from_user is None:
-        return
-    if not await ensure_private_message(message, t("admin_private_only_text")):
-        return
-    try:
-        await require_moderator_or_admin(services, message.from_user.id)
-        await message.answer(t("moderator_panel_title"), reply_markup=moderator_panel_keyboard())
-    except Exception as exc:
-        await answer_message_error(message, exc)
-
-
-@router.message(F.text.in_(all_variants("moderator_panel_title")))
-async def moderator_menu_message(message: Message, services: Services) -> None:
-    """Open the moderator panel in response to the moderator panel button."""
     if message.from_user is None:
         return
     if not await ensure_private_message(message, t("admin_private_only_text")):
@@ -254,7 +313,25 @@ async def _show_announcement_message_prompt(callback: CallbackQuery, state: FSMC
     """Advance to the message-entry stage once the audience segment is chosen."""
     await state.set_state(AdminAnnouncementStates.waiting_message)
     if callback.message is not None:
-        await safe_edit_message_text(callback.message, t("announce_prompt"), reply_markup=cancel_keyboard())
+        await safe_edit_message_text(callback.message, t("announce_prompt"), reply_markup=announcement_cancel_keyboard())
+
+
+# Announcement segment value → the availability protocol it stands for.
+_ANNOUNCEMENT_PROTOCOL_AVAILABILITY: dict[str, Protocol] = {
+    "xray": Protocol.XRAY,
+    "awg": Protocol.AWG,
+    "hysteria2": Protocol.HYSTERIA2,
+    "socks5": Protocol.SOCKS5,
+    "mtproto": Protocol.MTPROTO,
+}
+
+
+async def _unavailable_announcement_protocols(services: Services) -> frozenset[str]:
+    """The segment protocols that are switched off right now (marked, not hidden)."""
+    available = await current_availability(services)
+    return frozenset(
+        value for value, protocol in _ANNOUNCEMENT_PROTOCOL_AVAILABILITY.items() if protocol not in available
+    )
 
 
 @router.callback_query(F.data == "admin:announce")
@@ -269,7 +346,7 @@ async def admin_announcement_start(callback: CallbackQuery, state: FSMContext, s
         await require_superadmin(services, callback.from_user.id)
         await state.clear()
         await state.set_state(AdminAnnouncementStates.choosing_roles)
-        await state.update_data(cancel_target="admin:panel", sel_roles=[], sel_protocols=[], sel_transports=[])
+        await state.update_data(cancel_target="admin:grp:comms", sel_roles=[], sel_protocols=[], sel_transports=[])
         await safe_edit_message_text(
             callback.message,
             t("announce_choose_roles"),
@@ -295,7 +372,9 @@ async def admin_announcement_toggle_role(callback: CallbackQuery, state: FSMCont
             await safe_edit_message_text(
                 callback.message,
                 t("announce_choose_protocols"),
-                reply_markup=announcement_protocols_keyboard(set(data.get("sel_protocols") or [])),
+                reply_markup=announcement_protocols_keyboard(
+                set(data.get("sel_protocols") or []), unavailable=await _unavailable_announcement_protocols(services)
+            ),
             )
             return
         if value not in _ANNOUNCEMENT_ROLE_VALUES:
@@ -334,7 +413,9 @@ async def admin_announcement_roles_done(callback: CallbackQuery, state: FSMConte
         await safe_edit_message_text(
             callback.message,
             t("announce_choose_protocols"),
-            reply_markup=announcement_protocols_keyboard(set(data.get("sel_protocols") or [])),
+            reply_markup=announcement_protocols_keyboard(
+                set(data.get("sel_protocols") or []), unavailable=await _unavailable_announcement_protocols(services)
+            ),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -386,7 +467,9 @@ async def admin_announcement_toggle_protocol(callback: CallbackQuery, state: FSM
         await safe_edit_message_text(
             callback.message,
             t("announce_choose_protocols"),
-            reply_markup=announcement_protocols_keyboard(set(selected)),
+            reply_markup=announcement_protocols_keyboard(
+                set(selected), unavailable=await _unavailable_announcement_protocols(services)
+            ),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -433,7 +516,9 @@ async def admin_announcement_back_to_protocols(callback: CallbackQuery, state: F
         await safe_edit_message_text(
             callback.message,
             t("announce_choose_protocols"),
-            reply_markup=announcement_protocols_keyboard(set(data.get("sel_protocols") or [])),
+            reply_markup=announcement_protocols_keyboard(
+                set(data.get("sel_protocols") or []), unavailable=await _unavailable_announcement_protocols(services)
+            ),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -551,7 +636,7 @@ async def admin_announcement_send(
         await safe_edit_message_text(
             callback.message,
             t("announce_sent", total=result.total, success=result.success, failed=result.failed),
-            reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled),
+            reply_markup=admin_group_keyboard("comms"),
         )
     except RateLimitExceeded as exc:
         await answer_callback_error(callback, exc)
@@ -574,7 +659,7 @@ async def admin_announcement_schedule_request(callback: CallbackQuery, state: FS
         await safe_edit_message_text(
             callback.message,
             t("announce_schedule_prompt"),
-            reply_markup=cancel_keyboard(),
+            reply_markup=announcement_cancel_keyboard(),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -596,7 +681,7 @@ async def admin_announcement_schedule_time(message: Message, state: FSMContext, 
         data = await state.get_data()
         if "from_chat_id" not in data or "message_id" not in data:
             await state.clear()
-            await message.answer(t("announce_session_expired"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
+            await message.answer(t("announce_session_expired"), reply_markup=admin_group_keyboard("comms"))
             return
         from_chat_id = int(data["from_chat_id"])
         message_id = int(data["message_id"])
@@ -614,25 +699,32 @@ async def admin_announcement_schedule_time(message: Message, state: FSMContext, 
         msk_str = (dt + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
         await message.answer(
             t("announce_scheduled", batch_id=batch.id, total=batch.total_count, time=msk_str),
-            reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled),
+            reply_markup=admin_group_keyboard("comms"),
         )
     except Exception as exc:
         await state.clear()
         await answer_message_error(message, exc)
 
 
-@router.callback_query(AdminAnnouncementStates.confirming, F.data == "admin:announce:cancel")
+@router.callback_query(F.data == "admin:announce:cancel")
 async def admin_announcement_cancel(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """Cancel the announcement flow and return to the admin panel."""
+    """Cancel the announcement flow (any step) and return to «Рассылки».
+
+    Not bound to a state: every step of the wizard cancels through this callback,
+    and a button left over from an expired session must still lead somewhere.
+    """
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
-    await state.clear()
-    await safe_callback_answer(callback, t("announce_cancelled"))
     if callback.from_user is None or callback.message is None:
         return
     try:
         await require_superadmin(services, callback.from_user.id)
-        await safe_edit_message_text(callback.message, t("admin_panel_title"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
+        current = await state.get_state()
+        if current is None or current in AdminAnnouncementStates.__all_states_names__:
+            await state.clear()
+        await safe_callback_answer(callback, t("announce_cancelled"))
+        text, markup = admin_group_view(services, "comms")
+        await safe_edit_message_text(callback.message, text, reply_markup=markup)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -653,8 +745,33 @@ async def admin_announcement_batches(callback: CallbackQuery, services: Services
 
 
 @router.callback_query(F.data.regexp(r"^admin:announce:(resume|retry|cancelbatch):\d+$"))
+async def admin_announcement_batch_confirm(callback: CallbackQuery, services: Services) -> None:
+    """Ask before a batch action: each one sends a broadcast or stops one.
+
+    The same callback used to act at once; a button of that shape still sitting
+    in a chat now opens this confirmation instead.
+    """
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        _admin, _announce, action, raw_batch_id = callback.data.split(":", 3)
+        batch_id = int(raw_batch_id)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t(f"batch_confirm_{action}", id=batch_id),
+            reply_markup=announcement_batch_confirm_keyboard(action, batch_id),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:announce:(resume|retry|cancelbatch):\d+:ok$"))
 async def admin_announcement_batch_action(callback: CallbackQuery, services: Services, bot: Bot, rate_limiter: RateLimiter | None = None) -> None:
-    """Resume, retry, or cancel the selected announcement batch."""
+    """Resume, retry, or cancel the selected announcement batch (confirmed)."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -663,7 +780,7 @@ async def admin_announcement_batch_action(callback: CallbackQuery, services: Ser
         if rate_limiter is not None:
             rate_limiter.check(callback.from_user.id, "announcement_batch_action", 30)
         await require_superadmin(services, callback.from_user.id)
-        _admin, _announce, action, raw_batch_id = callback.data.split(":", 3)
+        _admin, _announce, action, raw_batch_id, _ok = callback.data.split(":", 4)
         batch_id = int(raw_batch_id)
         if action == "cancelbatch":
             await safe_callback_answer(callback, t("announce_update_list"))
@@ -735,7 +852,8 @@ async def admin_request_detail(callback: CallbackQuery, services: Services) -> N
             await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
             return
         request = await services.access.get_request(callback.from_user.id, request_id)
-        await safe_edit_message_text(callback.message, access_request_text(request), reply_markup=pending_requests_keyboard([request]))
+        pending = request if request.status == AccessRequestStatus.PENDING else None
+        await safe_edit_message_text(callback.message, access_request_text(request), reply_markup=access_request_detail_keyboard(pending))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -749,13 +867,13 @@ async def admin_approve(callback: CallbackQuery, services: Services, bot: Bot) -
         return
     await safe_callback_answer(callback)
     try:
-        # Authorization is enforced by services.access.get_request() below
-        # (require_moderator_or_admin) — see access_approval.py.
+        # Checked here and again by services.access.get_request() below.
+        await require_moderator_or_admin(services, callback.from_user.id)
         request_id = int(callback.data.rsplit(":", 1)[-1])
         request = await services.access.get_request(callback.from_user.id, request_id)
         if callback.message:
             if request.status != AccessRequestStatus.PENDING:
-                await safe_edit_message_text(callback.message, t("request_already_processed_msg"), reply_markup=pending_requests_keyboard([], page=0))
+                await safe_edit_message_text(callback.message, t("request_already_processed_msg"), reply_markup=access_request_detail_keyboard(None))
                 return
             await safe_edit_message_text(
                 callback.message,
@@ -775,12 +893,13 @@ async def admin_reject(callback: CallbackQuery, services: Services, bot: Bot) ->
         return
     await safe_callback_answer(callback)
     try:
-        # Authorization is enforced by services.access.get_request() below.
+        # Checked here and again by services.access.get_request() below.
+        await require_moderator_or_admin(services, callback.from_user.id)
         request_id = int(callback.data.rsplit(":", 1)[-1])
         request = await services.access.get_request(callback.from_user.id, request_id)
         if callback.message:
             if request.status != AccessRequestStatus.PENDING:
-                await safe_edit_message_text(callback.message, t("request_already_processed_msg"), reply_markup=pending_requests_keyboard([], page=0))
+                await safe_edit_message_text(callback.message, t("request_already_processed_msg"), reply_markup=access_request_detail_keyboard(None))
                 return
             await safe_edit_message_text(
                 callback.message,
@@ -800,14 +919,14 @@ async def admin_access_decision_confirm(callback: CallbackQuery, services: Servi
         return
     await safe_callback_answer(callback, t("processing"))
     try:
-        # Authorization is enforced by services.access.get_request()/approve()/
-        # reject() below (all call require_moderator_or_admin).
+        # Checked here and again by services.access.get_request()/approve()/reject().
+        await require_moderator_or_admin(services, callback.from_user.id)
         _admin, action, _confirm, raw_request_id = callback.data.split(":", 3)
         request_id = int(raw_request_id)
         current = await services.access.get_request(callback.from_user.id, request_id)
         if current.status != AccessRequestStatus.PENDING:
             if callback.message:
-                await safe_edit_message_text(callback.message, t("request_already_processed_msg"), reply_markup=pending_requests_keyboard([], page=0))
+                await safe_edit_message_text(callback.message, t("request_already_processed_msg"), reply_markup=access_request_detail_keyboard(None))
             return
         if action == "approve":
             request, changed = await services.access.approve(callback.from_user.id, request_id)
@@ -820,13 +939,29 @@ async def admin_access_decision_confirm(callback: CallbackQuery, services: Servi
                 await _safe_notify(bot, request.telegram_user_id, t("notify_rejected"))
             text = t("request_rejected_msg") if changed else t("request_already_processed_msg")
         if callback.message:
-            await safe_edit_message_text(callback.message, text, reply_markup=pending_requests_keyboard([], page=0))
+            await safe_edit_message_text(callback.message, text, reply_markup=access_request_detail_keyboard(None))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
+async def users_list_view(services: Services, actor_user_id: int, page: int) -> tuple[str, InlineKeyboardMarkup]:
+    total = await services.users.count_users(actor_user_id)
+    total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
+    items = await services.users.list_users(
+        actor_user_id,
+        limit=ADMIN_PAGE_SIZE + 1,
+        offset=page_offset(page, ADMIN_PAGE_SIZE),
+    )
+    users, has_next = split_page(items, ADMIN_PAGE_SIZE)
+    key_counts = await services.users.count_keys_for_users(actor_user_id, [user.telegram_user_id for user in users])
+    return (
+        users_page_text(users, page, key_counts),
+        users_keyboard(users, page=page, has_next=has_next, total_pages=total_pages),
+    )
+
+
 @router.callback_query(F.data.regexp(r"^admin:users(?::\d+)?$"))
-async def admin_users(callback: CallbackQuery, services: Services) -> None:
+async def admin_users(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Show a page of registered users."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
@@ -835,27 +970,89 @@ async def admin_users(callback: CallbackQuery, services: Services) -> None:
         return
     page = _page_from_callback(callback.data)
     try:
-        # Authorization enforced by services.users.count_users()/list_users().
-        total = await services.users.count_users(callback.from_user.id)
-        total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
-        items = await services.users.list_users(
-            callback.from_user.id,
-            limit=ADMIN_PAGE_SIZE + 1,
-            offset=page_offset(page, ADMIN_PAGE_SIZE),
-        )
-        users, has_next = split_page(items, ADMIN_PAGE_SIZE)
-        key_counts = await services.users.count_keys_for_users(callback.from_user.id, [user.telegram_user_id for user in users])
-        await safe_edit_message_text(
-            callback.message,
-            users_page_text(users, page, key_counts),
-            reply_markup=users_keyboard(users, page=page, has_next=has_next, total_pages=total_pages),
-        )
+        await require_moderator_or_admin(services, callback.from_user.id)
+        if await state.get_state() == AdminUserSearchStates.waiting_query.state:
+            await state.clear()
+        text, markup = await users_list_view(services, callback.from_user.id, page)
+        await safe_edit_message_text(callback.message, text, reply_markup=markup)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
+@router.callback_query(F.data == "admin:users:find")
+async def admin_users_find(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """«🔎 Найти»: ask for a Telegram id or a username."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    await safe_callback_answer(callback)
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_moderator_or_admin(services, callback.from_user.id)
+        await state.set_state(AdminUserSearchStates.waiting_query)
+        await state.update_data(cancel_target="admin:users")
+        await safe_edit_message_text(callback.message, t("user_search_prompt"), reply_markup=user_search_keyboard())
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.message(AdminUserSearchStates.waiting_query)
+async def admin_users_find_query(message: Message, state: FSMContext, services: Services) -> None:
+    """Show the matches: the card itself for one, a list for several."""
+    if message.from_user is None:
+        return
+    if not await ensure_private_message(message, t("admin_private_only_text")):
+        return
+    try:
+        await require_moderator_or_admin(services, message.from_user.id)
+        query = (message.text or "").strip()
+        users = await services.users.search_users(message.from_user.id, query, limit=ADMIN_PAGE_SIZE)
+        if not users:
+            await message.answer(t("user_search_nothing", query=h(query)), reply_markup=user_search_keyboard())
+            return
+        await state.clear()
+        if len(users) == 1:
+            text, markup = await user_card_view(services, message.from_user.id, users[0].telegram_user_id)
+            await message.answer(text, reply_markup=markup)
+            return
+        key_counts = await services.users.count_keys_for_users(message.from_user.id, [user.telegram_user_id for user in users])
+        await message.answer(
+            t("user_search_results", query=h(query)) + "\n\n" + users_page_text(users, 0, key_counts),
+            reply_markup=users_keyboard(users),
+        )
+    except Exception as exc:
+        await state.clear()
+        await answer_message_error(message, exc)
+
+
+async def user_card_view(services: Services, actor_user_id: int, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """The user card: the target, their last keys and traffic, the actions this actor may take.
+
+    One renderer for every way onto the card — the users list, «Отмена» of a
+    wizard started from it, the note editor — so they cannot drift apart.
+    """
+    actor = await require_moderator_or_admin(services, actor_user_id)
+    user = await services.users.get_user(user_id)
+    try:
+        keys = await services.vpn_keys.list_for_actor(actor_user_id, owner_user_id=user_id, limit=10)
+    except AccessDenied:
+        keys = []
+    stats_by_key_id = await services.traffic_stats.cached_for_keys(keys)
+    # Aggregated over ALL of the user's keys, not just the ten listed above —
+    # the limit bounds the list, never the total.
+    try:
+        traffic = await services.vpn_keys.traffic_summary_for_actor(actor_user_id, user_id)
+    except AccessDenied:
+        traffic = None
+    has_used_trial = not await services.trial_access.can_request_trial(user_id)
+    return (
+        user_card_text(user, keys, stats_by_key_id, viewer_user_id=actor_user_id, traffic=traffic),
+        user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role, actor_user_id=actor.telegram_user_id),
+    )
+
+
 @router.callback_query(F.data.startswith("admin:user:"))
-async def admin_user_detail(callback: CallbackQuery, services: Services) -> None:
+async def admin_user_detail(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Show the detail card for a single user with their keys."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
@@ -863,29 +1060,17 @@ async def admin_user_detail(callback: CallbackQuery, services: Services) -> None
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        actor = await require_moderator_or_admin(services, callback.from_user.id)
+        await require_moderator_or_admin(services, callback.from_user.id)
         user_id = parse_int_callback(callback.data.rsplit(":", 1)[-1])
         if user_id is None:
             await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
             return
-        user = await services.users.get_user(user_id)
-        try:
-            keys = await services.vpn_keys.list_for_actor(callback.from_user.id, owner_user_id=user_id, limit=10)
-        except AccessDenied:
-            keys = []
-        stats_by_key_id = await services.traffic_stats.cached_for_keys(keys)
-        # Aggregated over ALL of the user's keys, not just the ten listed above —
-        # the limit bounds the list, never the total.
-        try:
-            traffic = await services.vpn_keys.traffic_summary_for_actor(callback.from_user.id, user_id)
-        except AccessDenied:
-            traffic = None
-        has_used_trial = not await services.trial_access.can_request_trial(user_id)
-        await safe_edit_message_text(
-            callback.message,
-            user_card_text(user, keys, stats_by_key_id, viewer_user_id=callback.from_user.id, traffic=traffic),
-            reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role),
-        )
+        # The card is also «Отмена» of the flows started from it (issue a key,
+        # edit the note): arriving here leaves them.
+        if await state.get_state() is not None:
+            await state.clear()
+        text, markup = await user_card_view(services, callback.from_user.id, user_id)
+        await safe_edit_message_text(callback.message, text, reply_markup=markup)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -910,14 +1095,37 @@ async def admin_user_approve(callback: CallbackQuery, services: Services, rate_l
         if callback.message:
             user = await services.users.get_user(user_id)
             has_used_trial = not await services.trial_access.can_request_trial(user_id)
-            await safe_edit_message_text(callback.message, t("user_approved_msg"), reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role))
+            await safe_edit_message_text(callback.message, t("user_approved_msg"), reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role, actor_user_id=actor.telegram_user_id))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(F.data.startswith("admin:setmoderator:"))
+@router.callback_query(F.data.regexp(r"^admin:setmoderator:\d+$"))
+async def admin_set_moderator_confirm(callback: CallbackQuery, services: Services) -> None:
+    """Ask before giving or taking the moderator role."""
+    if callback.from_user is None or callback.data is None:
+        return
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    await safe_callback_answer(callback)
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        user_id = int(callback.data.rsplit(":", 1)[-1])
+        target = await services.users.get_user(user_id)
+        key = "moderator_remove_confirm" if target.role == UserRole.MODERATOR else "moderator_assign_confirm"
+        if callback.message:
+            await safe_edit_message_text(
+                callback.message,
+                t(key, user=h(target.username or str(target.telegram_user_id))),
+                reply_markup=user_action_confirm_keyboard(f"admin:setmoderator:{user_id}:ok", user_id),
+            )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:setmoderator:\d+:ok$"))
 async def admin_set_moderator(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
-    """Toggle the moderator role for the selected user."""
+    """Toggle the moderator role for the selected user (confirmed)."""
     if callback.from_user is None or callback.data is None:
         return
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -927,7 +1135,7 @@ async def admin_set_moderator(callback: CallbackQuery, services: Services, rate_
         actor = await require_superadmin(services, callback.from_user.id)
         if rate_limiter is not None:
             rate_limiter.check(callback.from_user.id, "admin_set_moderator", 10)
-        user_id = parse_int_callback(callback.data.rsplit(":", 1)[-1])
+        user_id = parse_int_callback(callback.data.split(":")[2])
         if user_id is None:
             await safe_callback_answer(callback, t("invalid_callback_btn"), show_alert=True)
             return
@@ -942,7 +1150,7 @@ async def admin_set_moderator(callback: CallbackQuery, services: Services, rate_
         if callback.message:
             user = await services.users.get_user(user_id)
             has_used_trial = not await services.trial_access.can_request_trial(user_id)
-            await safe_edit_message_text(callback.message, result_text, reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role))
+            await safe_edit_message_text(callback.message, result_text, reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role, actor_user_id=actor.telegram_user_id))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -962,7 +1170,7 @@ async def admin_block_user(callback: CallbackQuery, services: Services) -> None:
         if is_blocked_user(user):
             if callback.message:
                 has_used_trial = not await services.trial_access.can_request_trial(user_id)
-                await safe_edit_message_text(callback.message, t("user_already_blocked"), reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role))
+                await safe_edit_message_text(callback.message, t("user_already_blocked"), reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role, actor_user_id=actor.telegram_user_id))
             return
         key_counts = await services.users.count_keys_for_users(callback.from_user.id, [user_id])
         if callback.message:
@@ -992,7 +1200,7 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Services, 
         if is_blocked_user(current):
             if callback.message:
                 has_used_trial = not await services.trial_access.can_request_trial(user_id)
-                await safe_edit_message_text(callback.message, t("user_already_blocked"), reply_markup=user_actions_keyboard(current, has_used_trial=has_used_trial, actor_role=actor.role))
+                await safe_edit_message_text(callback.message, t("user_already_blocked"), reply_markup=user_actions_keyboard(current, has_used_trial=has_used_trial, actor_role=actor.role, actor_user_id=actor.telegram_user_id))
             return
         result = await services.users.block_user(callback.from_user.id, user_id, revoke_active_keys=True)
         await _safe_notify(bot, user_id, t("notify_user_blocked"))
@@ -1021,7 +1229,7 @@ async def admin_block_user_confirm(callback: CallbackQuery, services: Services, 
             ):
                 text += "\n\n" + t("static_mtproto_block_warning")
             has_used_trial = not await services.trial_access.can_request_trial(user_id)
-            await safe_edit_message_text(callback.message, text, reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role))
+            await safe_edit_message_text(callback.message, text, reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role, actor_user_id=actor.telegram_user_id))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -1044,7 +1252,7 @@ async def admin_unblock_user(callback: CallbackQuery, services: Services) -> Non
                 await safe_edit_message_text(
                     callback.message,
                     t("user_already_unblocked"),
-                    reply_markup=user_actions_keyboard(warning.user, has_used_trial=has_used_trial, actor_role=actor.role),
+                    reply_markup=user_actions_keyboard(warning.user, has_used_trial=has_used_trial, actor_role=actor.role, actor_user_id=actor.telegram_user_id),
                 )
                 return
             await safe_edit_message_text(
@@ -1076,7 +1284,7 @@ async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services
                 await safe_edit_message_text(
                     callback.message,
                     t("user_already_unblocked"),
-                    reply_markup=user_actions_keyboard(warning.user, has_used_trial=has_used_trial, actor_role=actor.role),
+                    reply_markup=user_actions_keyboard(warning.user, has_used_trial=has_used_trial, actor_role=actor.role, actor_user_id=actor.telegram_user_id),
                 )
             return
         user = await services.users.unblock_user(callback.from_user.id, user_id)
@@ -1084,7 +1292,7 @@ async def admin_unblock_user_confirm(callback: CallbackQuery, services: Services
             await safe_edit_message_text(
                 callback.message,
                 unblock_user_success_text(warning),
-                reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role),
+                reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role, actor_user_id=actor.telegram_user_id),
             )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1099,8 +1307,9 @@ async def admin_user_keys(callback: CallbackQuery, services: Services) -> None:
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
-        # Authorization enforced by load_list_page -> count_for_actor/list_for_actor
-        # (superadmin required to view another user's keys).
+        # Another user's keys are a superadmin's view (checked again by
+        # load_list_page -> count_for_actor/list_for_actor).
+        await require_superadmin(services, callback.from_user.id)
         _, _, raw_user_id, raw_page = callback.data.split(":", 3)
         user_id = int(raw_user_id)
         page = max(int(raw_page), 0)
@@ -1137,7 +1346,8 @@ async def admin_audit(callback: CallbackQuery, services: Services) -> None:
         return
     page = _page_from_callback(callback.data)
     try:
-        # Authorization enforced by services.audit.count_all()/recent() (superadmin).
+        # Checked here and again by services.audit.count_all()/recent().
+        await require_superadmin(services, callback.from_user.id)
         total = await services.audit.count_all(callback.from_user.id)
         total_pages = max(1, (total + AUDIT_PAGE_SIZE - 1) // AUDIT_PAGE_SIZE)
         items = await services.audit.recent(actor_user_id=callback.from_user.id, limit=AUDIT_PAGE_SIZE + 1, offset=page_offset(page, AUDIT_PAGE_SIZE))
@@ -1156,7 +1366,7 @@ async def admin_audit(callback: CallbackQuery, services: Services) -> None:
         await safe_edit_message_text(
             callback.message,
             audit_page_text(audit_items, page, audit_users),
-            reply_markup=_simple_nav(rows, "admin:panel", page=page, total_pages=total_pages),
+            reply_markup=_simple_nav(rows, "admin:grp:mon", page=page, total_pages=total_pages),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1189,7 +1399,7 @@ async def admin_stats(callback: CallbackQuery, services: Services) -> None:
         await safe_edit_message_text(
             callback.message,
             admin_stats_page_text(views, page, viewer_user_id=callback.from_user.id),
-            reply_markup=_simple_nav(rows, "admin:panel", page=page, total_pages=total_pages),
+            reply_markup=_simple_nav(rows, "admin:grp:mon", page=page, total_pages=total_pages),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1215,6 +1425,11 @@ async def admin_proxy_combined(callback: CallbackQuery, services: Services) -> N
                 mtproto_port_listening=runtime_status.port_listening,
             )
         runtime = replace(runtime, mtproto_runtime_secret_count=await services.mtproto.runtime_secret_count())
+        # «enabled» on this screen is the .env flag; the runtime module toggle is
+        # reported next to it, so the screen agrees with «Модули протоколов».
+        module_off = frozenset(
+            [name for name in ("socks5", "mtproto") if not await services.modules.is_enabled(name)]
+        )
         admin_stats = await services.proxy.get_admin_proxy_stats(
             callback.from_user.id,
             user_limit=ADMIN_PROXY_USER_LIMIT,
@@ -1222,8 +1437,8 @@ async def admin_proxy_combined(callback: CallbackQuery, services: Services) -> N
         )
         await safe_edit_message_text(
             callback.message,
-            proxy_admin_combined_text(lifecycle, admin_stats),
-            reply_markup=_simple_nav([], "admin:panel"),
+            proxy_admin_combined_text(lifecycle, admin_stats, module_off=module_off),
+            reply_markup=_simple_nav([], "admin:grp:mon"),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1273,15 +1488,20 @@ async def admin_backend_diagnostics(callback: CallbackQuery, services: Services)
         await safe_edit_message_text(
             callback.message,
             system_diagnostics_text(result, disabled_modules=disabled_modules),
-            reply_markup=_simple_nav([], "admin:panel"),
+            reply_markup=_simple_nav([], "admin:grp:mon"),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(F.data == "admin:issue")
-async def admin_issue_choose_user(callback: CallbackQuery, services: Services) -> None:
-    """Show the user list for choosing whom to issue a key to."""
+@router.callback_query(F.data.regexp(r"^admin:(issue|issuepage:\d+)$"))
+async def admin_issue_choose_user(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Old «Выдать ключ пользователю» entry: now the users list.
+
+    The panel had a second, separate list of users just for issuing a key; a key
+    is issued from the user's card («Выдать ключ»), which the search reaches in
+    two taps. Kept as an alias so the button in an old message still works.
+    """
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -1289,43 +1509,9 @@ async def admin_issue_choose_user(callback: CallbackQuery, services: Services) -
         return
     try:
         await require_superadmin(services, callback.from_user.id)
-        total = await services.users.count_users(callback.from_user.id)
-        total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
-        items = await services.users.list_users(callback.from_user.id, limit=ADMIN_PAGE_SIZE + 1)
-        users, has_next = split_page(items, ADMIN_PAGE_SIZE)
-        await safe_edit_message_text(
-            callback.message,
-            t("choose_user_for_key"),
-            reply_markup=admin_issue_users_keyboard(users, page=0, has_next=has_next, total_pages=total_pages),
-        )
-    except Exception as exc:
-        await answer_callback_error(callback, exc)
-
-
-@router.callback_query(F.data.regexp(r"^admin:issuepage:\d+$"))
-async def admin_issue_choose_user_page(callback: CallbackQuery, services: Services) -> None:
-    """Show a page of the user list for key issuance."""
-    if not await ensure_private_callback(callback, t("admin_private_only_text")):
-        return
-    await safe_callback_answer(callback)
-    if callback.from_user is None or callback.message is None or callback.data is None:
-        return
-    page = _page_from_callback(callback.data)
-    try:
-        await require_superadmin(services, callback.from_user.id)
-        total = await services.users.count_users(callback.from_user.id)
-        total_pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
-        items = await services.users.list_users(
-            callback.from_user.id,
-            limit=ADMIN_PAGE_SIZE + 1,
-            offset=page_offset(page, ADMIN_PAGE_SIZE),
-        )
-        users, has_next = split_page(items, ADMIN_PAGE_SIZE)
-        await safe_edit_message_text(
-            callback.message,
-            t("issue_select_user"),
-            reply_markup=admin_issue_users_keyboard(users, page=page, has_next=has_next, total_pages=total_pages),
-        )
+        await state.clear()
+        text, markup = await users_list_view(services, callback.from_user.id, _page_from_callback(callback.data))
+        await safe_edit_message_text(callback.message, text, reply_markup=markup)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
@@ -1346,31 +1532,40 @@ async def admin_issue_user_selected(callback: CallbackQuery, state: FSMContext, 
         owner_is_pending = user.role == UserRole.PENDING_USER
         await safe_callback_answer(callback)
         await state.set_state(AdminCreateKeyStates.choosing_type)
-        await state.update_data(owner_user_id=user.telegram_user_id, owner_is_pending=owner_is_pending, cancel_target="admin:panel")
-        text = f"{user_card_text(user)}\n\n{t('one_key_one_device')}\n\n{t('choose_key_type')}"
-        xray_on = await services.modules.is_enabled("xray")
-        awg_on = await services.modules.is_enabled("awg")
-        hy2_on = (
-            services.settings.hysteria2_enabled
-            and services.settings.is_hysteria2_ready()
-            and await services.modules.is_enabled("hysteria2")
+        # «Отмена» returns to the card the wizard was started from (the card
+        # itself, or that user's key list — both are one tap from the card), not
+        # to the root of the panel.
+        await state.update_data(
+            owner_user_id=user.telegram_user_id,
+            owner_is_pending=owner_is_pending,
+            cancel_target=f"admin:user:{user.telegram_user_id}",
         )
+        text = f"{user_card_text(user)}\n\n{t('one_key_one_device')}\n\n{t('choose_key_type')}"
+        # The same availability snapshot the user wizard renders from
+        # (services/protocol_availability.py: .env flag AND module toggle).
+        available = await current_availability(services)
         await safe_edit_message_text(
             callback.message,
             text,
             reply_markup=admin_key_type_keyboard(
                 user.telegram_user_id,
-                xray_enabled=xray_on,
-                awg_enabled=awg_on,
-                xhttp_enabled=services.settings.xray_xhttp_enabled,
-                hysteria2_enabled=hy2_on,
+                xray_enabled=Protocol.XRAY in available,
+                awg_enabled=Protocol.AWG in available,
+                xhttp_enabled=Protocol.XHTTP in available,
+                hysteria2_enabled=Protocol.HYSTERIA2 in available,
             ),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(AdminCreateKeyStates.choosing_type, F.data.regexp(r"^admin:proto:vless:\d+$"))
+# Also the «Назад» of the XHTTP profile step, which is in ``waiting_xhttp_profile``:
+# bound to ``choosing_type`` only, that button fell through to the stale-callback
+# catch-all.
+@router.callback_query(
+    StateFilter(AdminCreateKeyStates.choosing_type, AdminCreateKeyStates.waiting_xhttp_profile),
+    F.data.regexp(r"^admin:proto:vless:\d+$"),
+)
 async def admin_issue_proto_vless(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Show the VLESS transport selection (step 2) for the chosen user."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -1387,11 +1582,16 @@ async def admin_issue_proto_vless(callback: CallbackQuery, state: FSMContext, se
             await safe_callback_answer(callback, t("action_stale"), show_alert=True)
             await safe_edit_message_text(callback.message, t("action_stale_msg"), reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
             return
+        available = await current_availability(services)
+        if Protocol.XRAY not in available:
+            await safe_callback_answer(callback, t("protocol_unavailable"), show_alert=True)
+            return
         await safe_callback_answer(callback)
+        await state.set_state(AdminCreateKeyStates.choosing_type)
         await safe_edit_message_text(
             callback.message,
             t("choose_vless_transport"),
-            reply_markup=admin_vless_transport_keyboard(owner_user_id, xhttp_enabled=services.settings.xray_xhttp_enabled),
+            reply_markup=admin_vless_transport_keyboard(owner_user_id, xhttp_enabled=Protocol.XHTTP in available),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1432,6 +1632,11 @@ async def admin_issue_type_selected(callback: CallbackQuery, state: FSMContext, 
             return
         if transport == "http" and not services.settings.xray_xhttp_enabled:
             await safe_callback_answer(callback, t("vless_http_unavailable"), show_alert=True)
+            return
+        # A keyboard rendered before the module was switched off (or a forged
+        # callback) is refused here, exactly like the user wizard does.
+        if not await protocol_offered(services, key_type):
+            await safe_callback_answer(callback, t("protocol_unavailable"), show_alert=True)
             return
         await safe_callback_answer(callback)
         if transport == "http":
@@ -1582,6 +1787,7 @@ async def admin_issue_note(message: Message, state: FSMContext, services: Servic
     if not await ensure_private_message(message, t("admin_private_only_text")):
         return
     try:
+        await require_superadmin(services, message.from_user.id)
         note = _clean_note(message.text)
         data = await state.get_data()
         key_type = str(data.get("key_type") or "")
@@ -1656,16 +1862,23 @@ async def admin_issue_mtu(callback: CallbackQuery, state: FSMContext, services: 
 
 
 @router.callback_query(AdminCreateKeyStates.waiting_mtu, F.data == "mtu:custom")
-async def admin_issue_mtu_custom_request(callback: CallbackQuery, state: FSMContext) -> None:
+async def admin_issue_mtu_custom_request(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
     """Prompt the admin to enter a custom MTU value."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
-    if callback.message is None:
+    if callback.message is None or callback.from_user is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
         return
     await safe_callback_answer(callback)
     await state.set_state(AdminCreateKeyStates.waiting_mtu_custom)
     await state.update_data(mtu_prompt_msg_id=callback.message.message_id)
-    await safe_edit_message_text(callback.message, t("mtu_custom_prompt"), reply_markup=None)
+    # A typed value is expected, but the step keeps a way out (it used to have
+    # none but the /cancel command).
+    await safe_edit_message_text(callback.message, t("mtu_custom_prompt"), reply_markup=cancel_keyboard())
 
 
 @router.message(AdminCreateKeyStates.waiting_mtu_custom)
@@ -1740,14 +1953,19 @@ async def admin_issue_expiry_custom(callback: CallbackQuery, state: FSMContext, 
     """Prompt the admin to enter a custom number of expiry days."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
-    if callback.message is None:
+    if callback.message is None or callback.from_user is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
         return
     await safe_callback_answer(callback)
     await state.set_state(AdminCreateKeyStates.waiting_custom_days)
     await safe_edit_message_text(
         callback.message,
         t("expiry_custom_prompt", max=services.settings.key_max_trial_days),
-        reply_markup=None,
+        reply_markup=cancel_keyboard(),
     )
 
 
@@ -1894,9 +2112,10 @@ async def _deliver_key_to_pending_user(bot: Bot, result: Any, user_id: int, plai
                     document=BufferedInputFile(plain_awg_config.encode("utf-8"), filename=filename),
                 )
         else:
+            key = "admin_delivered_hysteria2" if result.key.key_type == VpnKeyType.HYSTERIA2 else "admin_delivered_xray"
             await bot.send_message(
                 user_id,
-                t("admin_delivered_xray", id=result.key.id, config_text=result.config_text),
+                t(key, id=result.key.id, config_text=result.config_text),
             )
     except Exception:
         logger.warning("Failed to deliver key to PENDING user %s", user_id, exc_info=True)
@@ -1925,7 +2144,7 @@ async def admin_trial_list(callback: CallbackQuery, services: Services) -> None:
             await safe_edit_message_text(
                 callback.message,
                 t("trial_no_pending"),
-                reply_markup=_simple_nav([], "admin:panel"),
+                reply_markup=_simple_nav([], "admin:grp:people"),
             )
             return
         lines = [t("trial_list_title")]
@@ -1945,7 +2164,7 @@ async def admin_trial_list(callback: CallbackQuery, services: Services) -> None:
             if has_next:
                 nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"admin:trial:{page + 1}"))
             keyboard.append(nav)
-        keyboard.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")])
+        keyboard.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:grp:people")])
         await safe_edit_message_text(
             callback.message,
             "\n".join(lines),
@@ -1970,7 +2189,7 @@ async def admin_trial_approve(callback: CallbackQuery, services: Services) -> No
         await safe_edit_message_text(
             callback.message,
             t("trial_approved_msg"),
-            reply_markup=_simple_nav([], "admin:panel"),
+            reply_markup=_simple_nav([], "admin:trial"),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -1986,34 +2205,55 @@ async def admin_trial_reject(callback: CallbackQuery, services: Services) -> Non
     try:
         await require_superadmin(services, callback.from_user.id)
         request_id = int(callback.data.rsplit(":", 1)[-1])
-        await safe_callback_answer(callback, t("announce_update_list"))
+        await safe_callback_answer(callback, t("processing"))
         await services.trial_access.reject_trial_request(callback.from_user.id, request_id)
         await safe_edit_message_text(
             callback.message,
             t("trial_rejected_msg"),
-            reply_markup=_simple_nav([], "admin:panel"),
+            reply_markup=_simple_nav([], "admin:trial"),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
 @router.callback_query(F.data.regexp(r"^admin:trial:reset:\d+$"))
+async def admin_trial_reset_confirm(callback: CallbackQuery, services: Services) -> None:
+    """Ask before giving the user their trial back."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        user_id = int(callback.data.rsplit(":", 1)[-1])
+        user = await services.users.get_user(user_id)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("trial_reset_confirm", user=h(user.username or str(user.telegram_user_id))),
+            reply_markup=user_action_confirm_keyboard(f"admin:trial:reset:{user_id}:ok", user_id),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:trial:reset:\d+:ok$"))
 async def admin_trial_reset(callback: CallbackQuery, services: Services) -> None:
-    """Reset a user's trial quota and refresh their user card."""
+    """Reset a user's trial quota and refresh their user card (confirmed)."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
         return
     try:
         actor = await require_superadmin(services, callback.from_user.id)
-        user_id = int(callback.data.rsplit(":", 1)[-1])
+        user_id = int(callback.data.split(":")[3])
         await safe_callback_answer(callback, t("trial_quota_resetting"))
         await services.trial_access.admin_reset_trial_quota(callback.from_user.id, user_id)
         user = await services.users.get_user(user_id)
         await safe_edit_message_text(
             callback.message,
             t("trial_quota_reset"),
-            reply_markup=user_actions_keyboard(user, has_used_trial=False, actor_role=actor.role),
+            reply_markup=user_actions_keyboard(user, has_used_trial=False, actor_role=actor.role, actor_user_id=actor.telegram_user_id),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -2032,7 +2272,11 @@ async def admin_edit_user_note(callback: CallbackQuery, state: FSMContext, servi
         user_id = int(callback.data.rsplit(":", 1)[-1])
         user = await services.users.get_user(user_id)
         await state.set_state(AdminEditUserNoteStates.waiting_note)
-        await state.update_data(target_user_id=user_id, note_prompt_msg_id=callback.message.message_id)
+        await state.update_data(
+            target_user_id=user_id,
+            note_prompt_msg_id=callback.message.message_id,
+            cancel_target=f"admin:user:{user_id}",
+        )
         current = t("admin_unote_current", note=h(user.note)) if user.note else ""
         await safe_edit_message_text(
             callback.message,
@@ -2051,7 +2295,7 @@ async def admin_edit_user_note_input(message: Message, state: FSMContext, servic
     if not await ensure_private_message(message, t("admin_private_only_text")):
         return
     try:
-        actor = await require_superadmin(services, message.from_user.id)
+        await require_superadmin(services, message.from_user.id)
         data = await state.get_data()
         user_id = int(data["target_user_id"])
         note_prompt_msg_id = data.get("note_prompt_msg_id")
@@ -2060,14 +2304,8 @@ async def admin_edit_user_note_input(message: Message, state: FSMContext, servic
                 await bot.delete_message(chat_id=message.chat.id, message_id=note_prompt_msg_id)
         await services.notes.update_user_note(message.from_user.id, user_id, message.text)
         await state.clear()
-        user = await services.users.get_user(user_id)
-        keys = await services.vpn_keys.list_for_actor(message.from_user.id, owner_user_id=user_id, limit=10)
-        stats_by_key_id = await services.traffic_stats.cached_for_keys(keys)
-        has_used_trial = not await services.trial_access.can_request_trial(user_id)
-        await message.answer(
-            user_card_text(user, keys, stats_by_key_id, viewer_user_id=message.from_user.id),
-            reply_markup=user_actions_keyboard(user, has_used_trial=has_used_trial, actor_role=actor.role),
-        )
+        text, markup = await user_card_view(services, message.from_user.id, user_id)
+        await message.answer(text, reply_markup=markup)
     except ValueError as exc:
         await answer_message_error(message, exc)
     except Exception as exc:
@@ -2076,8 +2314,30 @@ async def admin_edit_user_note_input(message: Message, state: FSMContext, servic
 
 
 @router.callback_query(F.data == "admin:backup")
+async def admin_backup_confirm(callback: CallbackQuery, services: Services) -> None:
+    """Ask before the backup: it sends the database to every admin."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        if not services.offsite_backup.enabled:
+            await safe_callback_answer(callback, t("backup_disabled"), show_alert=True)
+            return
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("backup_confirm", count=len(services.settings.admin_ids)),
+            reply_markup=backup_confirm_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:backup:ok")
 async def admin_backup_now(callback: CallbackQuery, services: Services, bot: Bot) -> None:
-    """Trigger an on-demand offsite backup and send it to admins."""
+    """Trigger an on-demand offsite backup and send it to admins (confirmed)."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None:
@@ -2113,7 +2373,7 @@ async def admin_backup_now(callback: CallbackQuery, services: Services, bot: Bot
                 system_success=system["success"],
                 system_failed=system["failed"],
             )
-        await safe_edit_message_text(callback.message, text, reply_markup=admin_panel_keyboard(subscription_enabled=services.settings.subscription_enabled))
+        await safe_edit_message_text(callback.message, text, reply_markup=admin_group_keyboard("ops"))
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

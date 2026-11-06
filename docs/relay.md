@@ -4,7 +4,7 @@ A **relay** is a second entry point into this server: a small VPS (here: in Russ
 that forwards client traffic at L4 to the main server. A key issued "via relay" is an
 ordinary key whose link points at the relay instead of the main host. There can be
 **several relays**; they are managed in the bot's admin panel (**🛡 Админ-панель →
-🛰 Управлять relay**) and stored in the `relays` table of `vpn.db`. With no relay in
+🧩 Протоколы и маршрутизация → 🛰 Управлять relay**) and stored in the `relays` table of `vpn.db`. With no relay in
 the table the feature is invisible.
 
 ## Topology
@@ -229,7 +229,7 @@ Then on the **main server**:
 
 1. A DNS A record for the relay — e.g. `relay2.anycastedge.net` → the relay's IPv4 — with
    Cloudflare proxying **off** (see [DNS](#dns--use-a-name-not-an-address)).
-2. **🛡 Админ-панель → 🛰 Управлять relay → Добавить relay**: host = that name, source IPs = the
+2. **🛡 Админ-панель → 🧩 Протоколы и маршрутизация → 🛰 Управлять relay → Добавить relay**: host = that name, source IPs = the
    relay's egress IPv4 (for a DNAT relay usually the address it is reached at), name and label
    as in [Managing relays](#managing-relays-in-the-admin-panel). (`RELAY_HOST` /
    `RELAY_SOURCE_IPS` in the main `.env` are legacy since relays moved to the panel: they only
@@ -264,7 +264,7 @@ Not done in this release; what it would take:
 
 ## Managing relays in the admin panel
 
-SUPERADMIN only. **🛡 Админ-панель → 🛰 Управлять relay** lists every relay with its
+SUPERADMIN only. **🛡 Админ-панель → 🧩 Протоколы и маршрутизация → 🛰 Управлять relay** lists every relay with its
 label, name, host, on/off, «в подписках», the number of active keys and the result of
 the latest health probe.
 
@@ -452,7 +452,7 @@ TLS ≈ 0.29 s).
   [Forwarding the subscription port](#forwarding-the-subscription-port-2096-through-a-relay).
 - **Existing bundles gain relay members only through the admin reconcile.** Adding a relay
   or switching one on does not touch existing bundles by itself. Admin panel →
-  «🔗 All-in-One» → «Дополнить все подписки по текущим настройкам» adds the members through
+  «🧩 Протоколы и маршрутизация» → «🔗 All-in-One» → «Дополнить все подписки по текущим настройкам» adds the members through
   every relay that is enabled and «в подписках» to every active bundle (or «Перевести все
   подписки в базовый вид», which also drops the XHTTP members) — see
   [docs/subscription.md](subscription.md#bringing-existing-bundles-in-line).

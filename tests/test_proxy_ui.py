@@ -16,7 +16,7 @@ from bot.formatters import (
 from bot.handlers.admin import admin_proxy_combined
 from bot.handlers.proxy import proxy_confirm, proxy_stats
 from bot.rate_limit import RateLimiter
-from bot.keyboards.admin import admin_panel_keyboard
+from bot.keyboards.admin import admin_group_keyboard
 from bot.keyboards.proxy import proxy_menu_keyboard
 from i18n import t
 from models.dto import (
@@ -172,7 +172,8 @@ def test_proxy_keyboard_hides_disabled_or_already_issued_types() -> None:
 
 
 def test_admin_keyboard_has_single_proxy_button() -> None:
-    buttons = _buttons(admin_panel_keyboard())
+    # The proxy screen lives in the «Мониторинг» section of the panel.
+    buttons = _buttons(admin_group_keyboard("mon"))
 
     assert ("🌐 Прокси: статус и статистика", "admin:proxy") in buttons
     assert all(cb != "admin:proxy_stats" for _, cb in buttons)

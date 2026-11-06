@@ -11,8 +11,7 @@ from bot.availability import current_availability
 from bot.container import Services
 from bot.formatters import main_menu_text, proxy_access_text, user_proxy_stats_text
 from bot.fsm.states import ProxyStates
-from bot.handlers.common import answer_callback_error, is_admin, profile_from_tg
-from bot.keyboards.common import main_menu
+from bot.handlers.common import answer_callback_error, main_menu_markup, profile_from_tg
 from bot.keyboards.proxy import proxy_back_keyboard, proxy_confirm_keyboard, proxy_menu_keyboard
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
@@ -179,7 +178,7 @@ async def proxy_back(callback: CallbackQuery, services: Services) -> None:
         await safe_edit_message_text(
             callback.message,
             main_menu_text(callback.from_user),
-            reply_markup=main_menu(await is_admin(services, callback.from_user.id)),
+            reply_markup=await main_menu_markup(services, callback.from_user.id),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)

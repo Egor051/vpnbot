@@ -990,10 +990,29 @@ class WarpSplitFeedService:
 
     async def remove_manual(self, prefix: str, *, actor_user_id: int | None = None) -> ApplyOutcome:
         """Drop a hand-typed prefix and re-apply."""
+        return await self.remove_manual_many([prefix], actor_user_id=actor_user_id)
+
+    async def remove_manual_many(
+        self, prefixes: Sequence[str], *, actor_user_id: int | None = None
+    ) -> ApplyOutcome:
+        """Drop several hand-typed prefixes and re-apply once.
+
+        The ``/warp_split_del`` command used to write the remaining list straight
+        to the file, which the next merge (built from the stored origins) undid:
+        the manual row was still in the database. Going through here keeps the
+        command and the panel's 🗑 on the same path.
+        """
         await self.ensure_manual_adopted()
-        await self._repo.remove_manual_prefixes([prefix])
+        await self._repo.remove_manual_prefixes(list(prefixes))
         return await self._manager.apply_computed(
             self._recompute_for_apply, actor_user_id=actor_user_id
+        )
+
+    async def feed_origins(self, prefix: str) -> list[str]:
+        """The feed sources (not ``manual``) that currently supply *prefix*."""
+        contributions = await self._repo.all_prefixes()
+        return sorted(
+            origin for origin, items in contributions.items() if origin != MANUAL_ORIGIN and prefix in items
         )
 
     async def exclude_prefix(self, prefix: str, *, actor_user_id: int | None = None) -> ApplyOutcome:

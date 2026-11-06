@@ -145,7 +145,10 @@ def keys_list_keyboard(
 
     create_callback = f"admin:issue:{owner_user_id}" if owner_user_id is not None else "keys:create"
     rows.append([InlineKeyboardButton(text=t("btn_create_key"), callback_data=create_callback)])
-    rows.append([InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data=back_data)])
+    # In the admin view (a user's keys) «back» returns to that user's card, so it
+    # must not read «to the main menu».
+    back_key = "btn_back_to_user" if owner_user_id is not None else "btn_back_to_menu"
+    rows.append([InlineKeyboardButton(text=t(back_key), callback_data=back_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

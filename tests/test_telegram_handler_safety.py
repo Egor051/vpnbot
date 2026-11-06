@@ -104,6 +104,13 @@ class _State:
         self.state = None
 
 
+class _StaffUsers:
+    """The handlers check the role themselves now (and the service again)."""
+
+    async def require_moderator_or_admin(self, telegram_user_id: int) -> User:
+        return User(telegram_user_id, "mod", "Mod", UserRole.MODERATOR, "now", "now", None)
+
+
 async def _allow_private(*args: object, **kwargs: object) -> bool:
     return True
 
@@ -212,10 +219,16 @@ def test_admin_issue_type_matching_owner_enters_note_state(monkeypatch) -> None:
         async def require_superadmin(self, telegram_user_id: int) -> User:
             return User(telegram_user_id, "admin", "Admin", UserRole.SUPERADMIN, "now", "now", None)
 
+    class Modules:
+        async def is_enabled(self, name: str) -> bool:
+            return True
+
     async def run() -> None:
         state = _State({"owner_user_id": 200})
         callback = _Callback("admin:ctype:awg:200")
-        await admin_issue_type_selected(callback, state, SimpleNamespace(users=Users()))  # type: ignore[arg-type]
+        # The step checks the module toggle (as the user wizard does), so the fake
+        # services carry one.
+        await admin_issue_type_selected(callback, state, SimpleNamespace(users=Users(), modules=Modules()))  # type: ignore[arg-type]
 
         assert state.state == AdminCreateKeyStates.waiting_note
         assert state.data["owner_user_id"] == 200
@@ -508,7 +521,7 @@ def test_admin_approve_first_callback_only_shows_confirmation(monkeypatch) -> No
     async def run() -> None:
         access = Access()
         callback = _Callback("admin:approve:5")
-        await admin_approve(callback, SimpleNamespace(access=access), SimpleNamespace())  # type: ignore[arg-type]
+        await admin_approve(callback, SimpleNamespace(access=access, users=_StaffUsers()), SimpleNamespace())  # type: ignore[arg-type]
 
         assert access.approve_calls == 0
         assert "Подтвердите действие" in edits[-1][0]
@@ -550,7 +563,7 @@ def test_admin_access_confirm_approve_changes_pending_request_and_notifies(monke
         access = Access()
         bot = Bot()
         callback = _Callback("admin:approve:confirm:5")
-        await admin_access_decision_confirm(callback, SimpleNamespace(access=access), bot)  # type: ignore[arg-type]
+        await admin_access_decision_confirm(callback, SimpleNamespace(access=access, users=_StaffUsers()), bot)  # type: ignore[arg-type]
 
         assert access.approve_calls == 1
         assert bot.sent == [(200, "Ваша заявка одобрена. Отправьте /start, чтобы открыть меню.")]
@@ -590,7 +603,7 @@ def test_admin_access_confirm_reject_changes_pending_request_and_notifies(monkey
         access = Access()
         bot = Bot()
         callback = _Callback("admin:reject:confirm:5")
-        await admin_access_decision_confirm(callback, SimpleNamespace(access=access), bot)  # type: ignore[arg-type]
+        await admin_access_decision_confirm(callback, SimpleNamespace(access=access, users=_StaffUsers()), bot)  # type: ignore[arg-type]
 
         assert access.reject_calls == 1
         assert bot.sent == [(200, "Ваша заявка отклонена.")]
@@ -621,7 +634,7 @@ def test_admin_access_confirm_processed_request_does_not_change_again(monkeypatc
     async def run() -> None:
         access = Access()
         callback = _Callback("admin:reject:confirm:5")
-        await admin_access_decision_confirm(callback, SimpleNamespace(access=access), SimpleNamespace())  # type: ignore[arg-type]
+        await admin_access_decision_confirm(callback, SimpleNamespace(access=access, users=_StaffUsers()), SimpleNamespace())  # type: ignore[arg-type]
 
         assert access.reject_calls == 0
         assert edits == ["Заявка уже была обработана."]

@@ -6,9 +6,10 @@ Admin-only commands (superadmin gate via require_superadmin):
   /warp_split_del     — remove one or more CIDRs
   /warp_split_reload  — re-apply the current file (recovery after manual edits)
 
-The bot is a thin controller: it reads the list file directly (0644) and writes
-exclusively through the privileged helper (vpn-bot-warp-split-apply). It never
-calls ip/route/iptables/awg-quick — all of that lives in the helper script.
+Add and delete go through :class:`services.warp_split_feeds.WarpSplitFeedService`,
+exactly like the panel's buttons, so a prefix typed here is stored as
+origin='manual' and survives the next merge. The bot never calls
+ip/route/iptables/awg-quick — all of that lives in the privileged helpers.
 """
 from __future__ import annotations
 
@@ -105,26 +106,15 @@ async def warp_split_add_cmd(message: Message, services: Services) -> None:
             await message.answer(t("warp_split_no_tokens"))
             return
 
-        mgr = services.warp_split
-        current_list = mgr.read_list()
-        current_set = set(current_list)
-
-        results, accepted = mgr.process_add_tokens(tokens, current_set)
-
-        if not accepted and all(r.status == "dup" for r in results):
-            await message.answer(_format_add_report(results, changed=False))
-            return
-
-        if not accepted:
-            await message.answer(_format_add_report(results, changed=False))
-            return
-
-        new_list = sorted(
-            current_set | set(accepted),
-            key=lambda s: __import__("ipaddress").ip_network(s),
+        # The same path as the panel's «Добавить» button: the prefix is recorded as
+        # origin='manual' in the database before the list is re-merged. Writing
+        # the file directly (as this command used to) lost the prefix on the next
+        # merge, which builds the list from the stored origins.
+        results, outcome = await services.warp_split_feeds.add_manual(
+            tokens, actor_user_id=message.from_user.id
         )
-        await mgr.apply_list(new_list)
-        await message.answer(_format_add_report(results, changed=True))
+        changed = outcome is not None and outcome.changed
+        await message.answer(_format_add_report(results, changed=changed))
 
     except WarpSplitError as exc:
         await message.answer(t("warp_split_apply_error", error=h(exc)))
@@ -162,17 +152,31 @@ async def warp_split_del_cmd(message: Message, services: Services) -> None:
             return
 
         mgr = services.warp_split
-        current_list = mgr.read_list()
+        results, _remaining = mgr.process_del_tokens(tokens, mgr.read_list())
 
-        results, remaining = mgr.process_del_tokens(tokens, current_list)
+        # A prefix a feed supplies cannot be deleted — the next refresh brings it
+        # back — so, like the panel (🚫 instead of 🗑), the command leaves it in
+        # place and says where it comes from. Only hand-typed prefixes are
+        # removed, through the database, so the next merge does not undo it.
+        manual: list[str] = []
+        for r in results:
+            if r.status != "removed":
+                continue
+            origins = await services.warp_split_feeds.feed_origins(r.canonical)
+            if origins:
+                r.status = "feed"
+                r.note = ", ".join(origins)
+            else:
+                manual.append(r.canonical)
 
-        removed = [r for r in results if r.status == "removed"]
-        if not removed:
+        if not manual:
             await message.answer(_format_del_report(results, changed=False))
             return
 
-        await mgr.apply_list(remaining)
-        await message.answer(_format_del_report(results, changed=True))
+        outcome = await services.warp_split_feeds.remove_manual_many(
+            manual, actor_user_id=message.from_user.id
+        )
+        await message.answer(_format_del_report(results, changed=outcome.changed))
 
     except WarpSplitError as exc:
         await message.answer(t("warp_split_reject", error=h(exc)))
@@ -201,7 +205,10 @@ async def warp_split_reload_cmd(message: Message, services: Services) -> None:
             await message.answer(t("warp_split_reload_empty"))
             return
 
-        await mgr.apply_list(current_list)
+        # reapply() forces the helper even on an unchanged file — the same call as
+        # the panel's «🔄 Применить». apply_list() short-circuits on a byte-identical
+        # file, so this command used to report a reload that never ran.
+        await mgr.reapply()
         await message.answer(t("warp_split_reloaded", count=len(current_list)))
 
     except WarpSplitError as exc:
@@ -243,6 +250,8 @@ def _format_del_report(results: list, *, changed: bool) -> str:  # type: ignore[
         elif r.status == "not_found":
             note = f" ({h(r.note)})" if r.note else ""
             lines.append(t("warp_split_report_not_found", cidr=code(r.canonical or r.raw), note=note))
+        elif r.status == "feed":
+            lines.append(t("warp_split_report_from_feed", cidr=code(r.canonical), origin=h(r.note)))
 
     if not changed:
         lines.append("\n" + t("warp_split_report_unchanged"))

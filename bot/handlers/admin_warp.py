@@ -12,6 +12,7 @@ from bot.fsm.states import WarpConfigStates
 from bot.guards import require_superadmin
 from bot.handlers.common import answer_callback_error, answer_message_error
 from bot.keyboards.warp_keyboard import (
+    warp_action_confirm_keyboard,
     warp_delete_confirm_keyboard,
     warp_main_keyboard,
     warp_settings_keyboard,
@@ -152,7 +153,33 @@ async def warp_settings(callback: CallbackQuery, services: Services) -> None:
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(F.data == "admin:warp:killswitch:toggle")
+@router.callback_query(F.data.in_({"admin:warp:killswitch:toggle", "admin:warp:disable", "admin:warp:restart"}))
+async def warp_action_confirm(callback: CallbackQuery, services: Services) -> None:
+    """Ask before a WARP action that changes where traffic goes.
+
+    Turning the routes off, re-running them, and flipping the kill-switch used to
+    happen on the first tap. The same callbacks now open this confirmation; the
+    action runs on ``…:ok``.
+    """
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.message is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        action = callback.data.removeprefix("admin:warp:")
+        if action == "killswitch:toggle":
+            state = await services.warp.get_state()
+            text = t("warp_killswitch_off_confirm") if state.kill_switch else t("warp_killswitch_on_confirm")
+        else:
+            text = t(f"warp_{action}_confirm")
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(callback.message, text, reply_markup=warp_action_confirm_keyboard(action))
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:warp:killswitch:toggle:ok")
 async def warp_killswitch_toggle(
     callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None
 ) -> None:
@@ -205,7 +232,7 @@ async def warp_enable(callback: CallbackQuery, services: Services, rate_limiter:
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(F.data == "admin:warp:disable")
+@router.callback_query(F.data == "admin:warp:disable:ok")
 async def warp_disable(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
     """Turn split ROUTING off: reconcile table T → empty (all direct); list preserved."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -224,7 +251,7 @@ async def warp_disable(callback: CallbackQuery, services: Services, rate_limiter
         await answer_callback_error(callback, exc)
 
 
-@router.callback_query(F.data == "admin:warp:restart")
+@router.callback_query(F.data == "admin:warp:restart:ok")
 async def warp_restart(callback: CallbackQuery, services: Services, rate_limiter: RateLimiter | None = None) -> None:
     """Restart split ROUTING: off-reconcile then on-reconcile (final state: on)."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -235,6 +262,13 @@ async def warp_restart(callback: CallbackQuery, services: Services, rate_limiter
         await require_superadmin(services, callback.from_user.id)
         if rate_limiter is not None:
             rate_limiter.check(callback.from_user.id, "warp_toggle", 10)
+        # The restart verb always ends ON. With the routes off it would switch
+        # them on under the label of a restart, so it is refused: «Включить» is
+        # the button for that.
+        if (await services.warp_split.status()).intended_state != "on":
+            await safe_callback_answer(callback, t("warp_restart_routes_off"), show_alert=True)
+            await _render_main(callback, services)
+            return
         await safe_callback_answer(callback, t("warp_processing"))
         await services.warp_split.restart_routes()
         await _render_main(callback, services)
@@ -246,9 +280,13 @@ async def warp_restart(callback: CallbackQuery, services: Services, rate_limiter
 # ── config upload ──────────────────────────────────────────────────────────
 
 
-@router.callback_query(F.data == "admin:warp:upload")
+@router.callback_query(F.data.in_({"admin:warp:upload", "admin:warp:replace"}))
 async def warp_upload_start(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
-    """Prompt the admin to send the AmneziaWG config as a document."""
+    """Prompt the admin to send the AmneziaWG config as a document.
+
+    ``admin:warp:replace`` is «Заменить конфиг» in the WARP settings: the same
+    upload, whose «Назад» returns to the settings it was started from.
+    """
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await safe_callback_answer(callback)
@@ -256,12 +294,13 @@ async def warp_upload_start(callback: CallbackQuery, state: FSMContext, services
         return
     try:
         await require_superadmin(services, callback.from_user.id)
+        back = "admin:warp:settings" if callback.data == "admin:warp:replace" else "admin:warp"
         await state.set_state(WarpConfigStates.waiting_config)
-        await state.update_data(cancel_target="admin:warp", upload_prompt_msg_id=callback.message.message_id)
+        await state.update_data(cancel_target=back, upload_prompt_msg_id=callback.message.message_id)
         await safe_edit_message_text(
             callback.message,
             t("warp_upload_prompt"),
-            reply_markup=warp_upload_keyboard(),
+            reply_markup=warp_upload_keyboard(back),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -278,29 +317,30 @@ async def warp_upload_receive(message: Message, state: FSMContext, services: Ser
         await require_superadmin(services, message.from_user.id)
         if rate_limiter is not None:
             rate_limiter.check(message.from_user.id, "warp_upload", 30)
+        upload_keyboard = warp_upload_keyboard(str((await state.get_data()).get("cancel_target") or "admin:warp"))
         document = message.document
         if document is None:
-            await message.answer(t("warp_upload_not_document"), reply_markup=warp_upload_keyboard())
+            await message.answer(t("warp_upload_not_document"), reply_markup=upload_keyboard)
             return
         if (document.file_size or 0) > _MAX_CONFIG_BYTES:
-            await message.answer(t("warp_upload_too_large"), reply_markup=warp_upload_keyboard())
+            await message.answer(t("warp_upload_too_large"), reply_markup=upload_keyboard)
             return
         try:
             buffer = BytesIO()
             await bot.download(document, destination=buffer)
             if len(buffer.getvalue()) > _MAX_CONFIG_BYTES:
-                await message.answer(t("warp_upload_too_large"), reply_markup=warp_upload_keyboard())
+                await message.answer(t("warp_upload_too_large"), reply_markup=upload_keyboard)
                 return
             config_text = buffer.getvalue().decode("utf-8")
         except (UnicodeDecodeError, ValueError):
-            await message.answer(t("warp_upload_read_failed"), reply_markup=warp_upload_keyboard())
+            await message.answer(t("warp_upload_read_failed"), reply_markup=upload_keyboard)
             return
         try:
             validate_amnezia_config(config_text)
         except WarpConfigError as exc:
             await message.answer(
                 t("warp_config_invalid", error=h(str(exc))),
-                reply_markup=warp_upload_keyboard(),
+                reply_markup=upload_keyboard,
             )
             return
         data = await state.get_data()

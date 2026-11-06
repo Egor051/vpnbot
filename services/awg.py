@@ -22,6 +22,7 @@ from services.audit import AuditService
 from services.backend_health import BackendHealth
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.notes import normalize_note
+from services.protocol_availability import ModuleToggles
 from services.user_locks import UserLockManager
 from services.users import UserService
 from utils.formatting import code, h
@@ -65,11 +66,15 @@ class AwgService:
         audit: AuditService,
         user_locks: UserLockManager | None = None,
         backend_health: BackendHealth | None = None,
+        modules: ModuleToggles | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
         self.users = users
         self.adapter = adapter
         self.ip_allocator = ip_allocator
+        # Runtime module toggle: no new AWG key while the module is off (see
+        # XrayService.modules). None skips the check.
+        self.modules = modules
         self.settings = settings
         self.clock = clock
         self.ids = ids
@@ -93,6 +98,8 @@ class AwgService:
     ) -> VpnKeyCreateResult:
         """Provision a new AWG peer and persist its key, returning the client config."""
         self.backend_health.require_mutation_allowed(VpnKeyType.AWG)
+        if self.modules is not None and not await self.modules.is_enabled("awg"):
+            raise InvalidOperation("Протокол сейчас отключён", key="protocol_unavailable")
         self.settings.validate_awg_ready()
         self._ensure_ipv4_network()
         clean_note = normalize_note(note)

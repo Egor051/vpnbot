@@ -53,7 +53,9 @@ def test_main_keyboard_off_shows_enable() -> None:
     kb = warp_main_keyboard(state, _split_status("off", n_table=0, n_list=2))
     btns = _buttons(kb)
     assert (t("btn_warp_enable"), "admin:warp:enable") in btns
-    assert (t("btn_warp_restart"), "admin:warp:restart") in btns
+    # The restart verb always ends ON: offered with the routes off, «restart»
+    # switched them on. Only «Включить» is offered there now.
+    assert all(d != "admin:warp:restart" for _, d in btns)
     assert all(d != "admin:warp:disable" for _, d in btns)
 
 
@@ -93,7 +95,8 @@ def test_killswitch_toggle_handler_flips_and_persists(monkeypatch) -> None:
 def test_settings_keyboard_hosts_split_entry() -> None:
     btns = _buttons(warp_settings_keyboard(WarpState(routes_count=2)))
     assert (t("btn_warp_split"), "wsplit:p:0") in btns
-    assert (t("btn_warp_replace"), "admin:warp:upload") in btns
+    # «Заменить конфиг» is its own callback so that its «Назад» returns here.
+    assert (t("btn_warp_replace"), "admin:warp:replace") in btns
     assert (t("btn_warp_delete"), "admin:warp:delete") in btns
     # Split sits above the Back button.
     datas = [d for _, d in btns]

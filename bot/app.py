@@ -423,6 +423,7 @@ async def _build_app(
         backend_health=backend_health,
         xhttp_adapter=xray_xhttp_adapter,
         relays=relay_catalog,
+        modules=protocol_modules_service,
     )
     awg_service = AwgService(
         vpn_keys=vpn_keys_repo,
@@ -435,6 +436,7 @@ async def _build_app(
         audit=audit_service,
         user_locks=user_locks,
         backend_health=backend_health,
+        modules=protocol_modules_service,
     )
     hysteria_service = HysteriaService(
         vpn_keys=vpn_keys_repo,

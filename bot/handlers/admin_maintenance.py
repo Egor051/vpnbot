@@ -10,7 +10,11 @@ from bot.container import Services
 from bot.fsm.states import MaintenanceStates
 from bot.guards import require_superadmin
 from bot.handlers.common import answer_callback_error, answer_message_error
-from bot.keyboards.admin import maintenance_enable_skip_keyboard, maintenance_panel_keyboard
+from bot.keyboards.admin import (
+    maintenance_disable_confirm_keyboard,
+    maintenance_enable_skip_keyboard,
+    maintenance_panel_keyboard,
+)
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
 from i18n import t
@@ -117,8 +121,32 @@ async def admin_maintenance_enable_default(callback: CallbackQuery, state: FSMCo
 
 
 @router.callback_query(F.data == "admin:maintenance:disable")
+async def admin_maintenance_disable_confirm(callback: CallbackQuery, state: FSMContext, services: Services) -> None:
+    """Ask before ending maintenance: it sends a message to every user.
+
+    The same callback used to act at once; a button of that shape left in a chat
+    now opens this confirmation.
+    """
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    await state.clear()
+    if callback.from_user is None or callback.message is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        await safe_callback_answer(callback)
+        await safe_edit_message_text(
+            callback.message,
+            t("maintenance_disable_confirm"),
+            reply_markup=maintenance_disable_confirm_keyboard(),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data == "admin:maintenance:disable:ok")
 async def admin_maintenance_disable(callback: CallbackQuery, state: FSMContext, services: Services, bot: Bot) -> None:
-    """Disable maintenance and broadcast that works are finished."""
+    """Disable maintenance and broadcast that works are finished (confirmed)."""
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     await state.clear()

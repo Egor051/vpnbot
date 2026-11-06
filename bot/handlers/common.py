@@ -116,6 +116,16 @@ async def is_admin(services: Services, user_id: int) -> bool:
     return user.role == UserRole.SUPERADMIN
 
 
+async def main_menu_markup(services: Services, user_id: int) -> InlineKeyboardMarkup:
+    """The main menu for this user: with the admin panel entry for a superadmin,
+    the moderator panel entry for a moderator, neither for everybody else."""
+    try:
+        role = (await services.users.get_user(user_id)).role
+    except NotFound:
+        role = None
+    return main_menu(role == UserRole.SUPERADMIN, is_moderator=role == UserRole.MODERATOR)
+
+
 class InvalidCallbackData(ValueError):
     """Raised when a callback payload cannot be parsed; shown to the user verbatim."""
 
@@ -333,7 +343,7 @@ async def menu_command(message: Message, services: Services) -> None:
         await services.users.require_approved_or_admin(message.from_user.id)
         await message.answer(
             main_menu_text(message.from_user),
-            reply_markup=main_menu(await is_admin(services, message.from_user.id)),
+            reply_markup=await main_menu_markup(services, message.from_user.id),
         )
     except Exception as exc:
         await answer_message_error(message, exc)
@@ -352,16 +362,33 @@ async def menu_callback(callback: CallbackQuery, services: Services) -> None:
         await safe_edit_message_text(
             callback.message,
             main_menu_text(callback.from_user),
-            reply_markup=main_menu(await is_admin(services, callback.from_user.id)),
+            reply_markup=await main_menu_markup(services, callback.from_user.id),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
 
 
 @router.message(Command("cancel"))
-async def cancel_command(message: Message, state: FSMContext) -> None:
-    """Handle the /cancel command by clearing the current FSM state."""
+async def cancel_command(message: Message, state: FSMContext, services: Services | None = None) -> None:
+    """Handle the /cancel command by clearing the current FSM state.
+
+    In an admin wizard it returns to the screen the wizard was started from —
+    the same place as that wizard's «Отмена» button; it used to drop the admin
+    in the main menu instead.
+    """
     if not await ensure_private_message(message):
         return
+    data = await state.get_data()
+    target = str(data.get("cancel_target") or "")
     await state.clear()
+    if target.startswith("admin:") and message.from_user is not None:
+        from bot.handlers.callbacks import admin_cancel_view  # late: callbacks imports this module
+
+        try:
+            view = await admin_cancel_view(services, message.from_user.id, target)
+        except Exception:
+            view = None
+        if view is not None:
+            await message.answer(f"{t('cancel_done')}\n\n{view[0]}", reply_markup=view[1])
+            return
     await message.answer(t("cancel_done"), reply_markup=back_to_menu())

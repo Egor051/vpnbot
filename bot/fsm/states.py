@@ -48,6 +48,12 @@ class AdminEditUserNoteStates(StatesGroup):
     waiting_note = State()
 
 
+class AdminUserSearchStates(StatesGroup):
+    """«🔎 Найти» in the users list: waiting for a Telegram id or a username."""
+
+    waiting_query = State()
+
+
 class AdminAnnouncementStates(StatesGroup):
     choosing_roles = State()
     choosing_protocols = State()

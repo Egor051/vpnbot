@@ -349,7 +349,11 @@ no SSH required:
   delete. (The entry point moved here from the main WARP panel; Back returns to
   Settings.)
 - **Commands:** `/warp_split_list`, `/warp_split_add <cidr…>`,
-  `/warp_split_del <cidr…>`, `/warp_split_reload`.
+  `/warp_split_del <cidr…>`, `/warp_split_reload`. They take the same path as the
+  buttons: `add`/`del` record the prefix in the database (origin `manual`), so the next
+  merge keeps the change; `del` leaves a prefix a feed supplies in place and points at
+  🚫 instead; `reload` re-runs the helper even when the file is unchanged, exactly like
+  🔄 Apply. (Before, the commands wrote the file directly and the next merge undid them.)
 
 Both paths are pure presentation over `WarpSplitManager`: input is IPv4-only with a
 mandatory mask, host bits are normalised, guard ranges (`0.0.0.0/0`, the AWG client

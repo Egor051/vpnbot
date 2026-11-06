@@ -17,21 +17,23 @@ def warp_main_keyboard(state: WarpState, split_status: SplitStatus) -> InlineKey
     rows: list[list[InlineKeyboardButton]] = []
     if not state.config_present:
         rows.append([InlineKeyboardButton(text=t("btn_warp_upload"), callback_data="admin:warp:upload")])
-    else:
-        if split_status.intended_state == "on":
-            toggle = InlineKeyboardButton(text=t("btn_warp_disable"), callback_data="admin:warp:disable")
-        else:
-            toggle = InlineKeyboardButton(text=t("btn_warp_enable"), callback_data="admin:warp:enable")
+    elif split_status.intended_state == "on":
+        # Both actions change what traffic does, so each opens a confirmation.
+        # «Перезапустить» exists only while the routes are on: the restart verb
+        # always ends ON, so on a switched-off WARP it used to switch the routes
+        # back on under the label of a restart.
         rows.append(
             [
-                toggle,
+                InlineKeyboardButton(text=t("btn_warp_disable"), callback_data="admin:warp:disable"),
                 InlineKeyboardButton(text=t("btn_warp_restart"), callback_data="admin:warp:restart"),
             ]
         )
+    else:
+        rows.append([InlineKeyboardButton(text=t("btn_warp_enable"), callback_data="admin:warp:enable")])
     # Settings is always reachable — it hosts config management and the Split-list
     # GUI entry point (which is independent of the tunnel-module state).
     rows.append([InlineKeyboardButton(text=t("btn_warp_settings"), callback_data="admin:warp:settings")])
-    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")])
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:grp:infra")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -47,7 +49,7 @@ def warp_settings_keyboard(state: WarpState) -> InlineKeyboardMarkup:
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t("btn_warp_replace"), callback_data="admin:warp:upload")],
+            [InlineKeyboardButton(text=t("btn_warp_replace"), callback_data="admin:warp:replace")],
             [InlineKeyboardButton(text=t("btn_warp_delete"), callback_data="admin:warp:delete")],
             [InlineKeyboardButton(text=kill_label, callback_data="admin:warp:killswitch:toggle")],
             [InlineKeyboardButton(text=t("btn_warp_split"), callback_data="wsplit:p:0")],
@@ -56,10 +58,25 @@ def warp_settings_keyboard(state: WarpState) -> InlineKeyboardMarkup:
     )
 
 
-def warp_upload_keyboard() -> InlineKeyboardMarkup:
-    """Build the keyboard shown while waiting for a config upload."""
+def warp_upload_keyboard(back_data: str = "admin:warp") -> InlineKeyboardMarkup:
+    """Build the keyboard shown while waiting for a config upload.
+
+    «Назад» returns to where the upload was started: the WARP screen for a first
+    upload, the WARP settings for «Заменить конфиг».
+    """
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=t("btn_back"), callback_data="admin:warp")]]
+        inline_keyboard=[[InlineKeyboardButton(text=t("btn_back"), callback_data=back_data)]]
+    )
+
+
+def warp_action_confirm_keyboard(action: str) -> InlineKeyboardMarkup:
+    """Confirm ``admin:warp:<action>`` (disable / restart / killswitch:toggle)."""
+    cancel = "admin:warp:settings" if action == "killswitch:toggle" else "admin:warp"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_confirm"), callback_data=f"admin:warp:{action}:ok")],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data=cancel)],
+        ]
     )
 
 

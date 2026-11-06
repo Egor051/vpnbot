@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from i18n import t
+
 from bot.formatters import system_diagnostics_text
 from models.dto import User
 from models.enums import ProxyAccessType, UserRole, VpnKeyType
@@ -643,7 +645,8 @@ def test_admin_diagnostics_handler_uses_run_bot_health(monkeypatch: pytest.Monke
         assert "db" in called_with
         assert len(callback.message.edits) == 1
         text, _ = callback.message.edits[0]
-        assert "Diagnostics" in text
+        # The title is localized now (it was a hard-coded English «Diagnostics»).
+        assert text.splitlines()[0] == t("diag_title", overall="OK")
         assert "Non-root OK" in text
 
     asyncio.run(run())

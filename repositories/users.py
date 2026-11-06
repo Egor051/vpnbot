@@ -184,6 +184,37 @@ class UserRepository:
         rows = await cursor.fetchall()
         return [user for row in rows if (user := _row_to_user(row)) is not None]
 
+    async def search_users(self, query: str, limit: int = 10) -> list[User]:
+        """Find users by exact Telegram id or by a username substring (case-insensitive).
+
+        ``query`` is what an admin typed: ``123456``, ``@name`` or ``name``. A
+        leading ``@`` is ignored; ``%``/``_`` are matched literally.
+        """
+        text = query.strip()
+        if text.startswith("@"):
+            text = text[1:]
+        if not text:
+            return []
+        if text.isdigit():
+            if len(text) > 19:  # beyond SQLite's 64-bit INTEGER: no such id
+                return []
+            cursor = await self.db.conn.execute(
+                "SELECT * FROM users WHERE telegram_user_id = ? LIMIT 1", (int(text),)
+            )
+        else:
+            pattern = "%" + text.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            cursor = await self.db.conn.execute(
+                """
+                SELECT * FROM users
+                WHERE lower(username) LIKE ? ESCAPE '\\'
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (pattern, _clamp_limit(limit)),
+            )
+        rows = await cursor.fetchall()
+        return [user for row in rows if (user := _row_to_user(row)) is not None]
+
     async def count_announcement_recipients(self) -> int:
         """Return the number of non-blocked users eligible to receive announcements."""
         cursor = await self.db.conn.execute(

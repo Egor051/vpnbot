@@ -195,6 +195,10 @@ class UserService:
             raise InvalidOperation("Пользователь заблокирован. Сначала разблокируйте пользователя.")
         if current.role == UserRole.APPROVED_USER and not repeat_after_block:
             return current, False, False
+        # A request filed by a moderator (older builds let /start do that) closes
+        # without a role change: approving must not demote them to APPROVED_USER.
+        if current.role == UserRole.MODERATOR:
+            return current, False, False
         if current.role not in {UserRole.PENDING_USER, UserRole.APPROVED_USER, UserRole.BLOCKED_USER}:
             raise InvalidOperation("Нельзя одобрить пользователя в текущей роли")
         await self.users.set_role(target_user_id, UserRole.APPROVED_USER, self.clock.now(), blocked_at=None)
@@ -207,7 +211,7 @@ class UserService:
         user = await self.users.get_by_id(target_user_id)
         if user is None:
             return None, False
-        if user.role == UserRole.SUPERADMIN or is_blocked_user(user) or user.role == UserRole.APPROVED_USER:
+        if user.role in {UserRole.SUPERADMIN, UserRole.MODERATOR, UserRole.APPROVED_USER} or is_blocked_user(user):
             return user, False
         if user.role != UserRole.PENDING_USER:
             raise InvalidOperation("Нельзя отклонить пользователя в текущей роли")
@@ -473,6 +477,11 @@ class UserService:
         """Return a paginated list of users."""
         await self.require_moderator_or_admin(actor_user_id)
         return await self.users.list_users(limit=limit, offset=offset)
+
+    async def search_users(self, actor_user_id: int, query: str, limit: int = 10) -> list[User]:
+        """Find users by Telegram id or username for the admin «🔎 Найти»."""
+        await self.require_moderator_or_admin(actor_user_id)
+        return await self.users.search_users(query, limit=limit)
 
     async def count_keys_for_users(self, actor_user_id: int, user_ids: list[int]) -> dict[int, int]:
         """Return the key count per user for the given user IDs."""
