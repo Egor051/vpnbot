@@ -229,6 +229,25 @@ async def test_a_prefix_of_a_disabled_feed_can_be_deleted(tmp_path: Path) -> Non
         await db.close()
 
 
+@pytest.mark.usefixtures("split_private")
+async def test_a_feed_range_carved_out_by_a_scoped_subtraction_does_not_block_a_delete(tmp_path: Path) -> None:
+    """The feed caches 8.8.8.0/24 but its scoped subtraction removes it: the route
+    is the manual row's alone, so the delete goes through (Codex review)."""
+    db, _shell, manager, repo, service, services = await _split_world(tmp_path)
+    try:
+        await repo.replace_prefixes("google-goog", ["8.8.8.0/24", "9.9.0.0/16"])
+        await repo.replace_prefixes("google-cloud", ["8.8.8.0/24"])  # subtract, scoped to google-goog
+        await repo.set_enabled("google-goog", True)
+        await repo.set_enabled("google-cloud", True)
+        await service.add_manual(["8.8.8.0/24"], actor_user_id=1)
+        assert "8.8.8.0/24" in manager.read_list()
+        assert await service.feed_origins("8.8.8.0/24") == []
+        await split_cmds.warp_split_del_cmd(_Message("/warp_split_del 8.8.8.0/24"), services)  # type: ignore[arg-type]
+        assert "8.8.8.0/24" not in manager.read_list()
+    finally:
+        await db.close()
+
+
 def test_removing_a_range_splits_a_wider_manual_row() -> None:
     import ipaddress
 
