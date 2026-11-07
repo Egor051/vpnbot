@@ -1452,14 +1452,20 @@ async def _ensure_can_enter_create(actor_user_id: int, services: Services) -> No
         raise AccessDenied(t("ensure_send_start"), key="ensure_send_start") from exc
 
 
-async def _protocol_enabled(services: Services, key_type: str) -> bool:
+async def protocol_offered(services: Services, key_type: str) -> bool:
     """Whether the given protocol is currently offered for key creation.
 
     Mirrors the availability checks that gate the create-menu buttons, so a
     replayed/stale ``keys:create:*`` (or ``trial:proto:*``) callback for a
     disabled protocol is refused up front instead of walking the whole wizard
-    only to fail at the service layer.
+    only to fail at the service layer. Shared with the admin «Выдать ключ»
+    wizard, which used to skip this check altogether.
     """
+    return await _protocol_enabled(services, key_type)
+
+
+async def _protocol_enabled(services: Services, key_type: str) -> bool:
+    """See :func:`protocol_offered`."""
     if key_type == VpnKeyType.XRAY.value:
         return await services.modules.is_enabled("xray")
     if key_type == VpnKeyType.AWG.value:

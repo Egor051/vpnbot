@@ -21,7 +21,7 @@ def admin_bundles_panel_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_aio_to_basic"), callback_data=f"admin:aio:plan:{MODE_BASIC}")],
             [InlineKeyboardButton(text=t("btn_aio_top_up"), callback_data=f"admin:aio:plan:{MODE_TOP_UP}")],
-            [InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")],
+            [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:grp:infra")],
         ]
     )
 

@@ -32,6 +32,11 @@ class AccessApprovalService:
                 return AccessRequestResult(user=user, request=None, created=False)
             if user.role == UserRole.APPROVED_USER and not blocked:
                 return AccessRequestResult(user=user, request=None, created=False)
+            # A moderator already has access. Without this branch /start filed a
+            # fresh access request for them, which approve() and reject() then
+            # could not resolve, so it sat in the queue for good.
+            if user.role == UserRole.MODERATOR and not blocked:
+                return AccessRequestResult(user=user, request=None, created=False)
 
             pending = await self.requests.get_pending_for_user(profile.telegram_user_id)
             if pending is not None:

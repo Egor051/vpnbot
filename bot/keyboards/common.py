@@ -26,8 +26,12 @@ FAQ_TOPICS: tuple[tuple[str, str], ...] = (
 FAQ_PER_PAGE = 5
 
 
-def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Build the main menu inline keyboard, optionally with the admin panel entry."""
+def main_menu(is_admin: bool = False, *, is_moderator: bool = False) -> InlineKeyboardMarkup:
+    """Build the main menu, with the admin panel entry or the moderator panel entry.
+
+    A moderator had no way into their panel from the menu: only typing
+    /moderator, a command the client does not even suggest to them.
+    """
     rows = [
         [InlineKeyboardButton(text=t("btn_my_keys"), callback_data="keys:list")],
         [InlineKeyboardButton(text=t("btn_create_key"), callback_data="keys:create:menu")],
@@ -37,6 +41,8 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     ]
     if is_admin:
         rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
+    elif is_moderator:
+        rows.append([InlineKeyboardButton(text=t("btn_moderator_panel"), callback_data="admin:moderator_panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -105,22 +111,3 @@ def confirm_cancel_keyboard(confirm_data: str, cancel_data: str = "cancel") -> I
             [InlineKeyboardButton(text=t("btn_cancel"), callback_data=cancel_data)],
         ]
     )
-
-
-def pagination_keyboard(
-    *,
-    prev_data: str | None,
-    next_data: str | None,
-    back_data: str,
-) -> InlineKeyboardMarkup:
-    """Build a generic prev/next pagination keyboard with a back button."""
-    rows: list[list[InlineKeyboardButton]] = []
-    nav: list[InlineKeyboardButton] = []
-    if prev_data:
-        nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=prev_data))
-    if next_data:
-        nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=next_data))
-    if nav:
-        rows.append(nav)
-    rows.append([InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data=back_data)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)

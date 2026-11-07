@@ -6,14 +6,19 @@ from repositories.protocol_modules import PROTOCOL_DISPLAY, PROTOCOL_NAMES, Prot
 
 
 def modules_panel_keyboard(
-    modules: list[ProtocolModule], uninstalled: frozenset[str] = frozenset()
+    modules: list[ProtocolModule],
+    uninstalled: frozenset[str] = frozenset(),
+    env_off: frozenset[str] = frozenset(),
 ) -> InlineKeyboardMarkup:
     """One row per protocol: its state and the action it allows.
 
     ✅ enabled → «Disable» · ❌ disabled → «Enable», plus a row «🗑 Remove from the
     server» (a module switched off earlier may still have everything on the host) ·
     🗑 removed from the server → «🔒 Enable», which only explains that it needs a
-    reinstall.
+    reinstall · ⛔ switched off in ``.env`` (``env_off``) → an info button «.env», which says
+    which flag, instead of «Enable» (disabling and removal stay offered). A protocol is offered only when ``.env`` AND the toggle allow it
+    (services/protocol_availability.py); the panel used to show «✅ Выключить» for
+    a protocol ``.env`` had switched off, i.e. claim it was on.
     """
     rows: list[list[InlineKeyboardButton]] = []
     by_name = {m.name: m for m in modules}
@@ -21,6 +26,24 @@ def modules_panel_keyboard(
         module = by_name.get(name)
         enabled = module.enabled if module else True
         label = PROTOCOL_DISPLAY.get(name, name)
+        if name in env_off and name not in uninstalled:
+            # Off in .env: the toggle cannot turn it on, so «Enable» gives way to
+            # the .env note. Switching the module off and removing the protocol
+            # from the server stay available — the host may still carry it.
+            row = [
+                InlineKeyboardButton(text=f"⛔ {label}", callback_data="noop"),
+                InlineKeyboardButton(text=t("btn_module_env_off"), callback_data=f"admin:module:envoff:{name}"),
+            ]
+            if enabled:
+                row.append(InlineKeyboardButton(text=t("btn_module_disable"), callback_data=f"admin:module:disable:{name}"))
+            rows.append(row)
+            if not enabled:
+                rows.append([
+                    InlineKeyboardButton(
+                        text=t("btn_module_uninstall", label=label), callback_data=f"admin:module:uninst:{name}"
+                    )
+                ])
+            continue
         if name in uninstalled:
             rows.append([
                 InlineKeyboardButton(text=f"🗑 {label}", callback_data="noop"),
@@ -40,7 +63,7 @@ def modules_panel_keyboard(
                     text=t("btn_module_uninstall", label=label), callback_data=f"admin:module:uninst:{name}"
                 )
             ])
-    rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:grp:infra")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -69,12 +92,6 @@ def module_enable_confirm_keyboard(name: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t("btn_module_enable_confirm"), callback_data=f"admin:module:enable:{name}:exec")],
             [InlineKeyboardButton(text=t("btn_cancel"), callback_data="admin:modules")],
         ]
-    )
-
-
-def modules_back_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=t("btn_modules_back"), callback_data="admin:modules")]]
     )
 
 

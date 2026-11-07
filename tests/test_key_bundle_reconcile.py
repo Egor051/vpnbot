@@ -24,7 +24,7 @@ from conftest import make_relay, relay_snapshot
 
 from adapters.clock import ClockProvider
 from bot.handlers import admin_bundles
-from bot.keyboards.admin import admin_panel_keyboard
+from bot.keyboards.admin import admin_group_keyboard
 from config.settings import Settings
 from db.database import Database
 from i18n import t
@@ -759,9 +759,10 @@ def _callbacks(markup: object) -> list[str]:
 
 
 def test_admin_panel_shows_the_section_only_with_subscriptions_on() -> None:
-    assert "admin:aio" in _callbacks(admin_panel_keyboard(subscription_enabled=True))
-    assert "admin:aio" not in _callbacks(admin_panel_keyboard(subscription_enabled=False))
-    assert "admin:aio" not in _callbacks(admin_panel_keyboard())
+    # «All-in-One» sits in the «Протоколы и маршрутизация» section of the panel.
+    assert "admin:aio" in _callbacks(admin_group_keyboard("infra", subscription_enabled=True))
+    assert "admin:aio" not in _callbacks(admin_group_keyboard("infra", subscription_enabled=False))
+    assert "admin:aio" not in _callbacks(admin_group_keyboard("infra"))
 
 
 @pytest.mark.parametrize(

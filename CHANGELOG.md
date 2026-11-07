@@ -357,6 +357,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Admin panel regrouped (admin-panel audit, 2026-11).** The root is five sections instead of
+  eighteen buttons in one column: «👥 Люди и доступ» (requests, trials, users), «📊 Мониторинг»
+  (dashboard, server status, key stats, proxy, diagnostics, action log), «📢 Рассылки»
+  (announcement, unfinished broadcasts), «🧩 Протоколы и маршрутизация» (modules, relays,
+  All-in-One, WARP) and «🛠 Обслуживание» (maintenance, DB backup), plus a shortcut row
+  «⏳ Заявки: N · 🧪 Пробные: M» while a queue is not empty. Every screen keeps its callback, so
+  keyboards left in chat history keep working; «Назад» of each screen goes to its section. The
+  dashboard links to requests, trials, diagnostics and the log. The users list has
+  «🔎 Найти пользователя» (Telegram id or username); the separate «Выдать ключ пользователю» list
+  is gone — a key is issued from the user's card (`admin:issue`/`admin:issuepage:N` now open the
+  users list).
+- **Confirmations for actions with a wide effect.** Ending maintenance (it notifies every user),
+  sending/continuing/retrying/cancelling a broadcast batch, turning WARP routing off, restarting it
+  and flipping the kill-switch, switching a relay off or out of subscriptions while keys use it,
+  giving/taking the moderator role, resetting a trial and the DB backup now ask first. The old
+  one-tap callbacks open the confirmation; the action runs on `…:ok`.
+- **The dashboard, the proxy screen and the diagnostics are localized** (they were hard-coded in
+  Russian/English). Russian texts are unchanged.
+
 - **Hysteria2: BBR `conservative` profile.** `deploy/hysteria/config.yaml` gains a top-level
   `congestion: {type: bbr, bbrProfile: conservative}`. It is server-local (not negotiated, not in
   the `hysteria2://` link) and only shapes the client's download while that direction is not on
@@ -488,7 +507,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `pip install --require-hashes`, and `opencv-python-headless` is a 61 MB wheel to check
   one image.
 
+### Removed
+
+- Text handlers for «🛡 Админ-панель» / «Панель модератора:» typed as a message (the bot sends no
+  reply keyboard), and the unused `pagination_keyboard`, `modules_back_keyboard`,
+  `proxy_admin_status_text`, `proxy_page_text`, `proxy_entry_text`.
+
 ### Fixed
+
+- **`/warp_split_add` and `/warp_split_del` were undone by the next merge.** They wrote the list
+  file directly, while the list is rebuilt from the database (origin `manual` + feeds): a prefix
+  added by the command disappeared, a deleted one came back. They now go through the feed service
+  like the panel's buttons; `del` leaves a feed-supplied prefix in place and says so.
+  `/warp_split_reload` reported a reload without running the helper on an unchanged file — it now
+  forces it, like «🔄 Применить».
+- **Moderators.** `/start` from a moderator filed an access request that could be neither approved
+  nor rejected; it now shows the main menu, which has a «🛡 Панель модератора» entry, and an old
+  request of that kind closes without a role change. «Назад» from the requests/users lists and the
+  result of a decision led to the superadmin panel and answered «Недостаточно прав» — they now open
+  the panel of the actor's role.
+- **«Назад» on the XHTTP profile step of «Выдать ключ»** hit the stale-callback alert.
+- **«🔄 Перезапустить» on switched-off WARP routes switched them on.** The button is offered only
+  while the routes are on, and the restart is refused otherwise.
+- **No key on a switched-off module.** `XrayService.create_xray_key` and `AwgService.create_awg_key`
+  check the module toggle (as Hysteria2 already did), and the admin wizard checks it at the
+  protocol step and builds its menu from the same availability as the user wizard.
+- **The user card offered actions the service refused** («Одобрить»/«Заблокировать» on a
+  superadmin, «Заблокировать» to a moderator on a moderator, blocking oneself).
+- **«Модули протоколов» showed «✅ Выключить» for a protocol switched off in `.env`.** It now shows
+  «⛔ … · ℹ️ .env» with the flag name; the proxy screen marks a proxy whose module is off.
+- «Отмена» and `/cancel` of a wizard started from a user card return to that card; the request
+  detail has «📋 К заявкам»; manual MTU/expiry input has a «Отмена» button; «Заменить конфиг»
+  returns to the WARP settings; an announcement cancels the same way at every step and marks
+  protocols that are switched off; a pending owner of a Hysteria2 key is no longer told it is an
+  Xray key.
 
 - **The SOCKS5 and Hysteria2 buttons in Protocol modules did nothing.** Every handler matched
   `admin:module:…:[a-z]+`, which no name with a digit (`socks5`, `hysteria2`) satisfies, so

@@ -17,9 +17,7 @@ from models.dto import (
     ProxyAccessStatsItem,
     ProxyAdminStats,
     ProxyAccess,
-    ProxyEntry,
     ProxyLifecycleStats,
-    ProxyServiceStatus,
     ProxyUserStats,
     TrafficStats,
     UnblockUserWarning,
@@ -992,11 +990,25 @@ def _status_display_order() -> tuple[ProxyAccessStatus, ...]:
     )
 
 
-def proxy_admin_combined_text(lifecycle: ProxyLifecycleStats, stats: ProxyAdminStats) -> str:
-    lines = ["<b>Прокси — статус и статистика</b>"]
+def proxy_admin_combined_text(
+    lifecycle: ProxyLifecycleStats,
+    stats: ProxyAdminStats,
+    *,
+    module_off: frozenset[str] = frozenset(),
+) -> str:
+    """The admin proxy screen.
+
+    ``module_off`` names the proxies («socks5», «mtproto») whose runtime module
+    toggle is off. ``enabled`` alone reflects only the ``.env`` flag; without the
+    marker the screen said «enabled: yes» for a proxy the «Модули протоколов»
+    panel shows as switched off.
+    """
+    lines = [t("proxy_admin_title")]
     runtime = stats.runtime
 
     lines.extend(["", "<b>SOCKS5 / Dante</b>"])
+    if "socks5" in module_off:
+        lines.append(t("proxy_admin_module_off"))
     if runtime is not None:
         lines.append(f"• enabled: {h(_yes_no(runtime.socks5_enabled))}")
         if runtime.socks5_enabled:
@@ -1027,6 +1039,8 @@ def proxy_admin_combined_text(lifecycle: ProxyLifecycleStats, stats: ProxyAdminS
         lines.append(f"• failed: {h(socks5_failed)}")
 
     lines.extend(["", "<b>MTProto</b>"])
+    if "mtproto" in module_off:
+        lines.append(t("proxy_admin_module_off"))
     if runtime is not None:
         lines.append(f"• enabled: {h(_yes_no(runtime.mtproto_enabled))}")
         if runtime.mtproto_enabled:
@@ -1067,7 +1081,7 @@ def proxy_admin_combined_text(lifecycle: ProxyLifecycleStats, stats: ProxyAdminS
     if mtproto_failed:
         lines.append(f"• failed: {h(mtproto_failed)}")
 
-    lines.extend(["", "<b>Пользователи</b>"])
+    lines.extend(["", t("proxy_admin_users_header")])
     if stats.last_issued_at:
         lines.append(f"• last issued: {h(_format_proxy_datetime(stats.last_issued_at))}")
     if not stats.users:
@@ -1085,58 +1099,6 @@ def proxy_admin_combined_text(lifecycle: ProxyLifecycleStats, stats: ProxyAdminS
     if stats.hidden_users > 0:
         lines.append(t("proxy_stats_hidden_users", n=stats.hidden_users))
     lines.extend(["", t("proxy_stats_traffic_note")])
-    return "\n".join(lines)
-
-
-def proxy_admin_status_text(status: ProxyServiceStatus, stats: ProxyLifecycleStats) -> str:
-    socks5_port = status.socks5_port if status.socks5_port is not None else t("not_set")
-    mtproto_active = "unknown" if status.mtproto_systemd_active is None else ("yes" if status.mtproto_systemd_active else "no")
-    mtproto_listening = "unknown" if status.mtproto_port_listening is None else ("yes" if status.mtproto_port_listening else "no")
-    mtproto_traffic_text = (
-        "Traffic: per-user stats for MTProto not available without reliable server-side accounting by secret."
-    )
-    mtproto_revoke_note = (
-        "Managed mode: individual server-side revoke by removing secret from active MTProxy list."
-        if status.mtproto_mode == "managed"
-        else "Static mode: shared secret in use, individual server-side revoke impossible without secret rotation."
-    )
-    lines = [
-        t("proxy_title").replace("<b>", "").replace("</b>", "") + " " + "status",
-        "",
-        "<b>SOCKS5 / Dante</b>",
-        f"Enabled: {h('yes' if status.socks5_enabled else 'no')}",
-        f"Host: {code(status.socks5_host or t('not_set'))}",
-        f"Port: {code(socks5_port)}",
-        f"Public name: {h(status.socks5_public_name)}",
-        f"Service: {code(status.socks5_service_name)}",
-        f"Issued: {h(stats.socks5_issued)}",
-        f"Active: {h(stats.socks5_active)}",
-        f"Revoked/blocked: {h(stats.socks5_revoked)}",
-        t("proxy_socks5_traffic_note"),
-        "",
-        "<b>MTProto</b>",
-        f"Enabled: {h('yes' if status.mtproto_enabled else 'no')}",
-        f"Mode: {h(status.mtproto_mode)}",
-        f"Host: {code(status.mtproto_host or t('not_set'))}",
-        f"Port: {code(status.mtproto_port)}",
-        f"Public name: {h(status.mtproto_public_name)}",
-        f"Service: {code(status.mtproto_service_name)}",
-        f"Systemd active: {h(mtproto_active)}",
-        f"Port listening: {h(mtproto_listening)}",
-        f"Stats URL configured: {h('yes' if status.mtproto_stats_url_configured else 'no')}",
-        f"Issued: {h(stats.mtproto_issued)}",
-        f"Active: {h(stats.mtproto_active)}",
-        f"Deactivated/blocked: {h(stats.mtproto_deactivated)}",
-        f"Managed issued: {h(stats.mtproto_managed_issued)}",
-        f"Managed active secrets: {h(stats.mtproto_managed_active)}",
-        f"Managed revoked: {h(stats.mtproto_managed_revoked)}",
-        f"Legacy/static records: {h(stats.mtproto_legacy_static)}",
-        f"Apply failed: {h(stats.mtproto_apply_failed)}",
-        f"Revoke failed: {h(stats.mtproto_revoke_failed)}",
-        mtproto_traffic_text,
-        "",
-        mtproto_revoke_note,
-    ]
     return "\n".join(lines)
 
 
@@ -1190,7 +1152,7 @@ def system_diagnostics_text(
     overall = result.overall.upper()
     ts = result.timestamp[:19].replace("T", " ") + " UTC"
     lines = [
-        f"<b>Diagnostics</b>  <b>{h(overall)}</b>",
+        t("diag_title", overall=h(overall)),
         f"<i>{h(ts)}</i>",
         "",
     ]
@@ -1201,14 +1163,14 @@ def system_diagnostics_text(
             lines.append(f"  └ {h(item.details)}")
     if disabled_modules:
         lines.append("")
-        lines.append("<b>Отключённые модули:</b>")
+        lines.append(t("diag_disabled_modules"))
         for m in disabled_modules:
             label = PROTOCOL_DISPLAY.get(m.name, m.name)
             if m.uninstalled_at:
                 ts_part = f" ({m.uninstalled_at[:10]})"
                 lines.append(f"🗑 {h(label)}: UNINSTALLED — {h(t('module_status_uninstalled_short'))}{h(ts_part)}")
                 continue
-            ts_part = f" (отключён {m.disabled_at[:10]})" if m.disabled_at else ""
+            ts_part = t("diag_module_disabled_since", date=m.disabled_at[:10]) if m.disabled_at else ""
             lines.append(f"✗ {h(label)}: DISABLED{h(ts_part)}")
     return "\n".join(lines)
 
@@ -1237,30 +1199,8 @@ def announcement_batches_text(batches: list[AnnouncementBatch]) -> str:
     return "\n".join(lines)
 
 
-def proxy_entry_text(entry: ProxyEntry) -> str:
-    lines = [
-        f"<b>{h(entry.proxy_type)}</b>",
-        f"{t('field_host')}: {code(entry.host)}",
-        f"{t('field_port')}: {code(entry.port)}",
-    ]
-    if entry.login:
-        lines.append(f"{t('field_login')}: {code(entry.login)}")
-    if entry.password:
-        lines.append(f"{t('field_password')}: {code(entry.password)}")
-    if entry.note:
-        lines.append(f"{t('field_description')}: {h(entry.note)}")
-    lines.append(f"{t('field_status')}: {h(entry.status.value)}")
-    return "\n".join(lines)
-
-
 def _redact_diagnostic_reason(value: str, limit: int = 180) -> str:
     return _redact(value, limit)
-
-
-def proxy_page_text(entries: list[ProxyEntry], page: int) -> str:
-    if not entries:
-        return f"{t('proxy_title')}\n\n{t('proxy_not_configured')}"
-    return f"{t('proxy_title')} · page {page + 1}\n\n" + "\n\n".join(proxy_entry_text(entry) for entry in entries)
 
 
 def access_request_text(request: AccessRequest) -> str:
@@ -1509,7 +1449,7 @@ def dashboard_traffic_lines(snap: DashboardSnapshot) -> list[str]:
 
 
 def dashboard_text(snap: DashboardSnapshot) -> str:
-    lines: list[str] = [f"<b>📊 Дашборд</b>  <i>обновлено {h(snap.refreshed_at)}</i>", ""]
+    lines: list[str] = [t("dashboard_title", time=h(snap.refreshed_at)), ""]
 
     # Users
     approved = snap.users_by_role.get("APPROVED_USER", 0)
@@ -1519,29 +1459,37 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
     superadmins = snap.users_by_role.get("SUPERADMIN", 0)
     total_users = sum(snap.users_by_role.values())
     lines += [
-        "<b>👥 Пользователи</b>",
-        f"  Всего: <b>{h(total_users)}</b>  (одобрено: {h(approved)} | ожидают: {h(pending)} | заблок.: {h(blocked)})",
+        t("dashboard_users_header"),
+        t("dashboard_users_total", total=h(total_users), approved=h(approved), pending=h(pending), blocked=h(blocked)),
     ]
     if moderators or superadmins:
-        lines.append(f"  Модераторов: {h(moderators)} | Админов: {h(superadmins)}")
-    lines.append(f"  Новых за 7д: {h(snap.new_users_7d)} | за 30д: {h(snap.new_users_30d)}")
-    lines.append(f"  С активными ключами: {h(snap.users_with_active_keys)}")
+        lines.append(t("dashboard_users_staff", moderators=h(moderators), admins=h(superadmins)))
+    lines.append(t("dashboard_users_new", d7=h(snap.new_users_7d), d30=h(snap.new_users_30d)))
+    lines.append(t("dashboard_users_with_keys", count=h(snap.users_with_active_keys)))
     attention_parts = []
     if snap.pending_access_requests:
-        attention_parts.append(f"⏳ Заявок: {snap.pending_access_requests}")
+        attention_parts.append(t("dashboard_attention_requests", count=snap.pending_access_requests))
     if snap.pending_trial_requests:
-        attention_parts.append(f"⏳ Пробных: {snap.pending_trial_requests}")
+        attention_parts.append(t("dashboard_attention_trials", count=snap.pending_trial_requests))
     if attention_parts:
         lines.append("  " + " | ".join(attention_parts))
     lines.append("")
 
     # Keys
     k = snap.keys
+    stuck = "⚠️ " + str(k.stuck) if k.stuck else "0"
     lines += [
-        "<b>🔑 VPN-ключи</b>",
-        f"  Активных: <b>{h(k.active)}</b>  (Xray: {h(k.xray_active)} | AWG: {h(k.awg_active)} | Hy2: {h(k.hysteria2_active)})  · всего: {h(k.total)}",
-        f"  Истекают 7д: {h(k.expiring_7d)} | 30д: {h(k.expiring_30d)}",
-        f"  Зависших: {'⚠️ ' + str(k.stuck) if k.stuck else '0'} | Ср. на пользователя: {h(f'{k.avg_per_user:.1f}')}",
+        t("dashboard_keys_header"),
+        t(
+            "dashboard_keys_active",
+            active=h(k.active),
+            xray=h(k.xray_active),
+            awg=h(k.awg_active),
+            hy2=h(k.hysteria2_active),
+            total=h(k.total),
+        ),
+        t("dashboard_keys_expiring", d7=h(k.expiring_7d), d30=h(k.expiring_30d)),
+        t("dashboard_keys_stuck", stuck=stuck, avg=h(f"{k.avg_per_user:.1f}")),
         "",
     ]
 
@@ -1550,13 +1498,12 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
     lines.append("")
 
     # Proxy
-    stuck_proxy_str = f"  ⚠️ Зависших: {snap.stuck_proxies}" if snap.stuck_proxies else ""
     lines += [
-        "<b>🌐 Прокси</b>",
+        t("dashboard_proxy_header"),
         f"  SOCKS5: {h(snap.active_socks5)} | MTProto: {h(snap.active_mtproto)}",
     ]
-    if stuck_proxy_str:
-        lines.append(stuck_proxy_str)
+    if snap.stuck_proxies:
+        lines.append(t("dashboard_proxy_stuck", count=snap.stuck_proxies))
     lines.append("")
 
     # System
@@ -1565,15 +1512,15 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
         icon = "✅" if not s.degraded else "⚠️"
         health_parts.append(f"{icon} {h(s.label)}")
     w = snap.warp
-    warp_str = "вкл" if w.enabled else "выкл"
+    warp_str = t("dashboard_warp_on") if w.enabled else t("dashboard_warp_off")
     if w.enabled:
-        warp_str += f" · тоннель: {'↑' if w.tunnel_up else '↓'}"
+        warp_str += t("dashboard_warp_tunnel", state="↑" if w.tunnel_up else "↓")
         if w.fail_streak:
-            warp_str += f" · ошибок: {w.fail_streak}"
+            warp_str += t("dashboard_warp_errors", count=w.fail_streak)
     lines += [
-        "<b>⚙️ Система</b>",
+        t("dashboard_system_header"),
         "  " + " | ".join(health_parts),
-        f"  WARP: {h(warp_str)} | БД: {h(format_bytes(snap.db_size_bytes))}",
+        t("dashboard_warp_db", warp=h(warp_str), db=h(format_bytes(snap.db_size_bytes))),
     ]
     if snap.last_backup_at is not None:
         from datetime import timezone as _tz
@@ -1581,14 +1528,14 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
         delta = now_dt - snap.last_backup_at.replace(tzinfo=_tz.utc) if snap.last_backup_at.tzinfo is None else now_dt - snap.last_backup_at
         hours = int(delta.total_seconds() // 3600)
         if hours < 1:
-            backup_age = f"{int(delta.total_seconds() // 60)} мин назад"
+            backup_age = t("dashboard_age_minutes", n=int(delta.total_seconds() // 60))
         elif hours < 24:
-            backup_age = f"{hours} ч назад"
+            backup_age = t("dashboard_age_hours", n=hours)
         else:
-            backup_age = f"{hours // 24} д назад"
-        lines.append(f"  Последний бэкап: {h(backup_age)}")
+            backup_age = t("dashboard_age_days", n=hours // 24)
+        lines.append(t("dashboard_backup_last", age=h(backup_age)))
     else:
-        lines.append("  Последний бэкап: нет данных")
+        lines.append(t("dashboard_backup_none"))
     lines.append("")
 
     # Activity
@@ -1597,12 +1544,12 @@ def dashboard_text(snap: DashboardSnapshot) -> str:
         action = str(audit_entry.get("action") or "")
         recent_actions.append(h(action))
     lines += [
-        "<b>📋 Активность</b>",
-        f"  Аудит 24ч: {h(snap.audit_count_24h)} | 7д: {h(snap.audit_count_7d)}",
-        f"  Объявлений за 30д: {h(snap.announcements_30d)}",
+        t("dashboard_activity_header"),
+        t("dashboard_activity_audit", d1=h(snap.audit_count_24h), d7=h(snap.audit_count_7d)),
+        t("dashboard_activity_announcements", count=h(snap.announcements_30d)),
     ]
     if recent_actions:
-        lines.append("  Последние:")
+        lines.append(t("dashboard_activity_recent"))
         for action in recent_actions:
             lines.append(f"    {action}")
 

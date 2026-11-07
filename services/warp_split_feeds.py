@@ -82,6 +82,7 @@ from warp.split_merge import (
     SourceContribution,
     merge_split_list,
     parse_feed,
+    resolve_origins,
     validate_slug,
     validate_source_relations,
 )
@@ -298,7 +299,7 @@ class WarpSplitFeedService:
 
     # ── merge ─────────────────────────────────────────────────────────────────
 
-    async def build_plan(self) -> MergePlan:
+    async def build_plan(self, *, manual_override: Sequence[str] | None = None) -> MergePlan:
         """Compute the candidate list from stored state. Never touches the network.
 
         Raises :class:`WarpFeedError` when an enabled operand has no stored
@@ -309,7 +310,9 @@ class WarpSplitFeedService:
         """
         sources = await self._repo.list_sources()
         stored = await self._repo.all_prefixes()
-        manual = _to_networks(stored.get(MANUAL_ORIGIN, ()))
+        # ``manual_override`` answers "what would be routed with this manual set"
+        # without touching the database (see feed_origins).
+        manual = _to_networks(stored.get(MANUAL_ORIGIN, ()) if manual_override is None else manual_override)
         exclusions = _to_networks(await self._repo.exclusions())
 
         contributions: list[SourceContribution] = []
@@ -990,11 +993,58 @@ class WarpSplitFeedService:
 
     async def remove_manual(self, prefix: str, *, actor_user_id: int | None = None) -> ApplyOutcome:
         """Drop a hand-typed prefix and re-apply."""
+        return await self.remove_manual_many([prefix], actor_user_id=actor_user_id)
+
+    async def remove_manual_many(
+        self, prefixes: Sequence[str], *, actor_user_id: int | None = None
+    ) -> ApplyOutcome:
+        """Drop the hand-typed address space of *prefixes* and re-apply once.
+
+        The routed list is collapsed (``merge_split_list``), so a prefix read from
+        it need not be stored verbatim: manual ``8.8.8.0/25`` + ``8.8.8.128/25``
+        are routed as ``8.8.8.0/24``. Matching the text deleted nothing and the
+        next merge kept the route. Instead every manual row inside a requested
+        range is dropped, and a wider manual row is split so that only the
+        requested range leaves it.
+
+        The ``/warp_split_del`` command used to write the remaining list straight
+        to the file, which the next merge undid; it and the panel's 🗑 both come
+        here now.
+        """
         await self.ensure_manual_adopted()
-        await self._repo.remove_manual_prefixes([prefix])
+        drop, add = _manual_rows_without(await self._repo.manual_prefixes(), prefixes)
+        await self._repo.remove_manual_prefixes(drop)
+        await self._repo.add_manual_prefixes(add)
         return await self._manager.apply_computed(
             self._recompute_for_apply, actor_user_id=actor_user_id
         )
+
+    async def feed_origins(self, prefix: str) -> list[str]:
+        """The feeds that would keep *prefix* routed if its manual rows were deleted.
+
+        Answered by a dry-run merge — the very computation the next apply runs,
+        scoped subtractions and exclusions included — with the manual coverage of
+        *prefix* taken out: an empty answer means deleting the manual rows removes
+        the route. A raw overlap with the cached feeds is not enough (a scoped
+        subtraction may have carved that range out of the feed), and neither is a
+        text match (the routed list is collapsed).
+
+        The names are the contributing sources that overlap the range; ``feed`` if
+        none can be named.
+        """
+        target = ipaddress.IPv4Network(prefix, strict=False)
+        manual = await self._repo.manual_prefixes()
+        drop, add = _manual_rows_without(manual, [prefix])
+        without = [item for item in manual if item not in set(drop)] + add
+        plan = await self.build_plan(manual_override=without)
+        if not any(ipaddress.IPv4Network(item).overlaps(target) for item in plan.prefixes):
+            return []
+        live = {source.slug for source in await self._repo.list_sources() if source.contributes_to_list}
+        contributions = {
+            origin: items for origin, items in (await self._repo.all_prefixes()).items() if origin in live
+        }
+        owners = resolve_origins([prefix], contributions).get(prefix, ())
+        return sorted(owners) or ["feed"]
 
     async def exclude_prefix(self, prefix: str, *, actor_user_id: int | None = None) -> ApplyOutcome:
         """Veto a feed-supplied prefix and re-apply.
@@ -1403,3 +1453,34 @@ async def warp_split_feeds_loop(service: WarpSplitFeedService, interval: int) ->
         except Exception:
             logger.warning("WARP split feed refresh failed", exc_info=True)
         await asyncio.sleep(_jittered(interval))
+
+
+def _manual_rows_without(manual: Sequence[str], ranges: Sequence[str]) -> tuple[list[str], list[str]]:
+    """``(rows to delete, rows to add)`` so the manual set no longer covers *ranges*.
+
+    CIDRs either nest or are disjoint: a manual row inside a range goes, a row
+    containing a range is replaced by what of it lies outside every range, a
+    disjoint row stays.
+    """
+    targets = [ipaddress.IPv4Network(item, strict=False) for item in ranges]
+    drop: list[str] = []
+    add: list[str] = []
+    for raw in manual:
+        net = ipaddress.IPv4Network(raw, strict=False)
+        if not any(net.overlaps(target) for target in targets):
+            continue
+        drop.append(raw)
+        rest = [net]
+        for target in targets:
+            pieces: list[ipaddress.IPv4Network] = []
+            for part in rest:
+                if part.subnet_of(target):
+                    continue
+                if target.subnet_of(part):
+                    pieces.extend(part.address_exclude(target))
+                else:
+                    pieces.append(part)
+            rest = pieces
+        add.extend(str(part) for part in sorted(rest))
+    return drop, add
+

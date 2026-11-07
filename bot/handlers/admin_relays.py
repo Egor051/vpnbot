@@ -29,6 +29,7 @@ from bot.keyboards.admin_relays import (
     relay_delete_impact_keyboard,
     relay_label_step_keyboard,
     relay_source_step_keyboard,
+    relay_toggle_confirm_keyboard,
     relays_list_keyboard,
 )
 from bot.messages import safe_callback_answer, safe_edit_message_text
@@ -197,8 +198,14 @@ async def relay_card(callback: CallbackQuery, state: FSMContext, services: Servi
 # ── toggles, probe ────────────────────────────────────────────────────────────
 
 
-@router.callback_query(F.data.regexp(r"^admin:relay:\d+:toggle:(enabled|subs)$"))
+@router.callback_query(F.data.regexp(r"^admin:relay:\d+:toggle:(enabled|subs)(:ok)?$"))
 async def relay_toggle(callback: CallbackQuery, services: Services) -> None:
+    """Switch a relay on/off, or in/out of subscriptions.
+
+    Switching it OFF (or OUT) while keys ride it takes their links away, so that
+    direction asks first (``…:ok`` runs it). Switching on, or a relay without
+    keys, acts at once as before.
+    """
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -206,9 +213,20 @@ async def relay_toggle(callback: CallbackQuery, services: Services) -> None:
     try:
         await require_superadmin(services, callback.from_user.id)
         relay_id = _relay_id(callback.data)
-        field = callback.data.rsplit(":", 1)[-1]
+        parts = callback.data.split(":")
+        field = parts[4]
+        confirmed = len(parts) == 6
         try:
-            relay = await services.relays.get(callback.from_user.id, relay_id)
+            relay, usage = await services.relays.usage(callback.from_user.id, relay_id)
+            turning_off = relay.enabled if field == "enabled" else relay.in_subscriptions
+            if turning_off and usage.active_keys > 0 and not confirmed:
+                await safe_callback_answer(callback)
+                await safe_edit_message_text(
+                    callback.message,
+                    t(f"relay_toggle_{field}_confirm", label=h(relay.label), count=usage.active_keys),
+                    reply_markup=relay_toggle_confirm_keyboard(relay_id, field),
+                )
+                return
             if field == "enabled":
                 result = await services.relays.update(callback.from_user.id, relay_id, enabled=not relay.enabled)
             else:
@@ -219,7 +237,12 @@ async def relay_toggle(callback: CallbackQuery, services: Services) -> None:
             await _relay_gone(callback, services)
             return
         await safe_callback_answer(callback, t("relay_saved_short"))
-        await _show_card(callback, services, relay_id, _update_notice(result))
+        notice = _update_notice(result)
+        # A relay added to subscriptions reaches the subscriptions already issued
+        # only through «All-in-One → Дополнить»: say so, it is in another section.
+        if field == "subs" and result.relay.in_subscriptions and getattr(getattr(services, "settings", None), "subscription_enabled", False):
+            notice = f"{notice}\n\n{t('relay_subs_topup_hint')}"
+        await _show_card(callback, services, relay_id, notice)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

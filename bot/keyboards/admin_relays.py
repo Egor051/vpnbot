@@ -22,7 +22,7 @@ def relays_list_keyboard(overviews: Sequence[RelayOverview]) -> InlineKeyboardMa
         for overview in overviews
     ]
     rows.append([InlineKeyboardButton(text=t("btn_relay_add"), callback_data="admin:relay:add")])
-    rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:grp:infra")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -99,6 +99,16 @@ def relay_add_confirm_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_relay_create"), callback_data="admin:relay:add:confirm")],
             [InlineKeyboardButton(text=t("btn_cancel"), callback_data="admin:relays")],
+        ]
+    )
+
+
+def relay_toggle_confirm_keyboard(relay_id: int, field: str) -> InlineKeyboardMarkup:
+    """Confirm switching a relay off / out of subscriptions while it carries keys."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_confirm"), callback_data=f"admin:relay:{relay_id}:toggle:{field}:ok")],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data=f"admin:relay:{relay_id}")],
         ]
     )
 

@@ -364,8 +364,8 @@ uuid/secret/label, the usual `xray_tcp_*` / `xray_http_*` / `hy2_*` prefix — w
 link points at the relay's host instead of the main host. Topology, DNS and the
 limitations are in [docs/relay.md](relay.md).
 
-**Relays are managed in the admin panel, not here** (🛡 Админ-панель → 🛰 Управлять
-relay; stored in the `relays` table): name, host, source IPs, the marker in key names,
+**Relays are managed in the admin panel, not here** (🛡 Админ-панель → 🧩 Протоколы и маршрутизация →
+🛰 Управлять relay; stored in the `relays` table): name, host, source IPs, the marker in key names,
 on/off and «в подписках», several relays at once. See
 [docs/relay.md](relay.md#managing-relays-in-the-admin-panel).
 

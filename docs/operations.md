@@ -188,7 +188,7 @@ failure.
 
 **Admin diagnostics in the bot (on-demand):**
 
-Open the admin panel in Telegram → *Диагностика backend*. This runs a live read-only health
+Open the admin panel in Telegram → *📊 Мониторинг* → *Диагностика backend*. This runs a live read-only health
 check and shows:
 
 ```
@@ -347,7 +347,7 @@ confirm the file does not come back.
 
 ## Maintenance mode (bot lockdown)
 
-A superadmin can put the whole bot into maintenance from the admin panel (🛠 *Maintenance mode* → enable). While it is on, `MaintenanceModeMiddleware` drops every incoming update from non-superadmins and replies with the maintenance banner; only the superadmins in `ADMIN_IDS` keep full access. The state is persisted in the `maintenance_settings` table, so it **survives a bot restart** — turn it off from the panel when you are done. Use it as a bot-level lockdown for safe DB or backend edits; it is independent of the systemd unit and of backend DEGRADED state (which gates a single backend rather than the whole bot).
+A superadmin can put the whole bot into maintenance from the admin panel (🛠 *Обслуживание* → 🛠 *Maintenance mode* → enable; ending it asks for a confirmation, since it notifies every user). While it is on, `MaintenanceModeMiddleware` drops every incoming update from non-superadmins and replies with the maintenance banner; only the superadmins in `ADMIN_IDS` keep full access. The state is persisted in the `maintenance_settings` table, so it **survives a bot restart** — turn it off from the panel when you are done. Use it as a bot-level lockdown for safe DB or backend edits; it is independent of the systemd unit and of backend DEGRADED state (which gates a single backend rather than the whole bot).
 
 ## Server status panel
 

@@ -18,7 +18,7 @@ from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
 from bot.uninstall_texts import uninstall_plan_text, uninstall_report_text
 from i18n import t
-from repositories.protocol_modules import PROTOCOL_DISPLAY, PROTOCOL_NAMES
+from repositories.protocol_modules import PROTOCOL_DISPLAY, PROTOCOL_NAMES, ProtocolModule
 from services.errors import ServiceError
 from services.protocol_uninstall import PlanChangedError, ProtocolUninstallService, UninstallPlan
 
@@ -36,6 +36,34 @@ def _uninstalled(services: Services) -> frozenset[str]:
     return uninstall.registry.names if uninstall is not None else frozenset()
 
 
+# The .env flag that gates each protocol (Xray and AWG have none).
+_ENV_FLAGS: dict[str, str] = {
+    "hysteria2": "HYSTERIA2_ENABLED",
+    "socks5": "SOCKS5_ENABLED",
+    "mtproto": "MTPROTO_ENABLED",
+}
+
+
+def _env_off(services: Services) -> frozenset[str]:
+    """Protocols switched off in ``.env`` — the toggle cannot turn those on."""
+    settings = getattr(services, "settings", None)
+    if settings is None:
+        return frozenset()
+    off: set[str] = set()
+    hy2_ready = getattr(settings, "is_hysteria2_ready", None)
+    if not (getattr(settings, "hysteria2_enabled", False) and callable(hy2_ready) and hy2_ready()):
+        off.add("hysteria2")
+    if not getattr(settings, "socks5_enabled", False):
+        off.add("socks5")
+    if not getattr(settings, "mtproto_enabled", False):
+        off.add("mtproto")
+    return frozenset(off)
+
+
+def _panel_markup(services: Services, modules: list[ProtocolModule]) -> InlineKeyboardMarkup:
+    return modules_panel_keyboard(modules, _uninstalled(services), _env_off(services))
+
+
 @router.callback_query(F.data == "admin:modules")
 async def admin_modules_panel(callback: CallbackQuery, services: Services) -> None:
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
@@ -49,7 +77,7 @@ async def admin_modules_panel(callback: CallbackQuery, services: Services) -> No
         await safe_edit_message_text(
             callback.message,
             t("modules_panel_title"),
-            reply_markup=modules_panel_keyboard(modules, _uninstalled(services)),
+            reply_markup=_panel_markup(services, modules),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -123,7 +151,7 @@ async def admin_module_disable_exec(callback: CallbackQuery, services: Services)
         await safe_edit_message_text(
             callback.message,
             text,
-            reply_markup=modules_panel_keyboard(modules, _uninstalled(services)),
+            reply_markup=_panel_markup(services, modules),
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -146,6 +174,11 @@ async def admin_module_enable_confirm(callback: CallbackQuery, services: Service
             # Removed from the host: switching the toggle back would offer a
             # backend that is not there. Only a reinstall (and the marker gone) helps.
             await safe_callback_answer(callback, t("module_enable_blocked_uninstalled"), show_alert=True)
+            return
+        if name in _env_off(services):
+            await safe_callback_answer(
+                callback, t("module_env_off_alert", label=PROTOCOL_DISPLAY.get(name, name), flag=_ENV_FLAGS[name]), show_alert=True
+            )
             return
         label = PROTOCOL_DISPLAY.get(name, name)
         await safe_edit_message_text(
@@ -176,7 +209,27 @@ async def admin_module_enable_exec(callback: CallbackQuery, services: Services) 
         await safe_edit_message_text(
             callback.message,
             t("module_enabled_ok", label=label),
-            reply_markup=modules_panel_keyboard(modules, _uninstalled(services)),
+            reply_markup=_panel_markup(services, modules),
+        )
+    except Exception as exc:
+        await answer_callback_error(callback, exc)
+
+
+@router.callback_query(F.data.regexp(r"^admin:module:envoff:[a-z0-9]+$"))
+async def admin_module_env_off(callback: CallbackQuery, services: Services) -> None:
+    """The «.env» info button next to a protocol that ``.env`` switches off: say which flag."""
+    if not await ensure_private_callback(callback, t("admin_private_only_text")):
+        return
+    if callback.from_user is None or callback.data is None:
+        return
+    try:
+        await require_superadmin(services, callback.from_user.id)
+        name = callback.data.split(":")[-1]
+        if name not in _ENV_FLAGS:
+            await safe_callback_answer(callback)
+            return
+        await safe_callback_answer(
+            callback, t("module_env_off_alert", label=PROTOCOL_DISPLAY.get(name, name), flag=_ENV_FLAGS[name]), show_alert=True
         )
     except Exception as exc:
         await answer_callback_error(callback, exc)
@@ -254,7 +307,7 @@ async def admin_module_uninstall_exec(callback: CallbackQuery, services: Service
         await safe_edit_message_text(
             callback.message,
             service_error_text(exc),
-            reply_markup=modules_panel_keyboard(modules, _uninstalled(services)),
+            reply_markup=_panel_markup(services, modules),
         )
         return
     except Exception:
@@ -263,12 +316,12 @@ async def admin_module_uninstall_exec(callback: CallbackQuery, services: Service
         await safe_edit_message_text(
             callback.message,
             t("internal_error"),
-            reply_markup=modules_panel_keyboard(modules, _uninstalled(services)),
+            reply_markup=_panel_markup(services, modules),
         )
         return
     modules = await services.modules.get_all()
     await safe_edit_message_text(
         callback.message,
         uninstall_report_text(report),
-        reply_markup=modules_panel_keyboard(modules, _uninstalled(services)),
+        reply_markup=_panel_markup(services, modules),
     )

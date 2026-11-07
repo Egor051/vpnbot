@@ -7,9 +7,8 @@ from aiogram.types import Message
 
 from bot.container import Services
 from bot.formatters import key_detail_text, main_menu_text
-from bot.handlers.common import answer_message_error, is_admin, profile_from_tg
+from bot.handlers.common import answer_message_error, main_menu_markup, profile_from_tg
 from bot.keyboards.admin import access_request_keyboard
-from bot.keyboards.common import main_menu
 from bot.keyboards.keys import request_trial_keyboard, trial_key_show_keyboard
 from bot.private_chat import ensure_private_message
 from bot.rate_limit import RateLimiter
@@ -44,10 +43,12 @@ async def start_command(message: Message, services: Services, bot: Bot, rate_lim
             else:
                 await message.answer(t("blocked_request_pending"))
             return
-        if result.user.role in {UserRole.SUPERADMIN, UserRole.APPROVED_USER}:
+        # A moderator has access too: before, /start filed an access request for
+        # them (see AccessApprovalService.create_or_get_request) and showed no menu.
+        if result.user.role in {UserRole.SUPERADMIN, UserRole.MODERATOR, UserRole.APPROVED_USER}:
             await message.answer(
                 main_menu_text(message.from_user),
-                reply_markup=main_menu(await is_admin(services, message.from_user.id)),
+                reply_markup=await main_menu_markup(services, message.from_user.id),
             )
             return
 

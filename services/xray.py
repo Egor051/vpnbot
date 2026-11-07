@@ -37,6 +37,7 @@ from services.key_naming import (
     normalize_transport,
 )
 from services.notes import normalize_note
+from services.protocol_availability import ModuleToggles
 from services.relay import RelayCatalog, RelayUnavailable, relay_link_host, require_relay_for_issue
 from services.user_locks import UserLockManager
 from services.users import UserService
@@ -142,8 +143,14 @@ class XrayService:
         xhttp_adapter: XrayConfigAdapter | None = None,
         unix_clock: Callable[[], float] = time.time,
         relays: RelayCatalog | None = None,
+        modules: ModuleToggles | None = None,
     ) -> None:
         self.vpn_keys = vpn_keys
+        # The runtime module toggle. Issuing a key is refused while the «Xray»
+        # module is switched off — the same rule hysteria.issue() applies — so no
+        # caller (user wizard, admin wizard, trial, a stale button) can create a
+        # key on a disabled module. None (tests, tools) skips the check.
+        self.modules = modules
         # The relays a key's link may point at (see services.relay). Empty by
         # default, which refuses every relay key and leaves direct keys unchanged.
         self.relays = relays if relays is not None else RelayCatalog()
@@ -168,6 +175,10 @@ class XrayService:
         self.user_locks: UserLockManager = user_locks if user_locks is not None else getattr(users, "user_locks", UserLockManager())
         self.backend_health = backend_health or BackendHealth()
         self._lock = asyncio.Lock()
+
+    async def _ensure_module_enabled(self) -> None:
+        if self.modules is not None and not await self.modules.is_enabled("xray"):
+            raise InvalidOperation("Протокол сейчас отключён", key="protocol_unavailable")
 
     @staticmethod
     def _normalize_transport(value: object) -> str:
@@ -303,6 +314,7 @@ class XrayService:
         prefix, so reconciliation and XRAY_MANAGED_LABEL_RE are unaffected.
         """
         self.backend_health.require_mutation_allowed(VpnKeyType.XRAY)
+        await self._ensure_module_enabled()
         self.settings.validate_xray_ready()
         # Before any DB write or apply: a relay switched off mid-wizard must not
         # leave behind a key whose link can never be rendered.

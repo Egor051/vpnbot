@@ -98,7 +98,7 @@ e.g. `🇷🇺➜` → `hy2_x7k2p_🇷🇺➜🇫🇮`). The relay label is foll
 
 A bundle keeps the composition it was created with: adding or switching on a relay, or turning
 a protocol on or off, does not change existing bundles by itself. The superadmin brings them in
-line from the admin panel → **«🔗 All-in-One»** (shown only while `SUBSCRIPTION_ENABLED=true`):
+line from the admin panel → «🧩 Протоколы и маршрутизация» → **«🔗 All-in-One»** (shown only while `SUBSCRIPTION_ENABLED=true`):
 
 - **«Перевести все подписки в базовый вид»** — every active bundle gets the composition a
   **new basic** bundle would get right now: VLESS (TCP) and Hysteria2, plus their copies through
@@ -185,7 +185,7 @@ guard before any service is reached. There is **no new button in the main menu**
 | **Create key** | An «All-in-One» option next to VLESS / AmneziaWG / Hysteria2. After the AmneziaWG notice it asks for the **kind** (basic / extended, both explained), then reuses the ordinary create wizard (note → expiry → confirm). The result screen lists what the bundle actually contains and names any protocol left out because its backend is off. Admins create a bundle through this same wizard; the admin «issue a key to a user» flow has no all-in-one option. |
 | **My keys** | An ordinary entry in the list, sorted by creation date among the keys and numbered from the same running count as them. |
 | **Bundle card** | The same five actions a key card has — Config · Stats · Revoke · Note · Delete — plus a line saying AmneziaWG is issued as a **separate key**. |
-| **Admin panel → «🔗 All-in-One»** | Superadmin only: the two bulk operations of [Bringing existing bundles in line](#bringing-existing-bundles-in-line). |
+| **Admin panel → «🧩 Протоколы» → «🔗 All-in-One»** | Superadmin only: the two bulk operations of [Bringing existing bundles in line](#bringing-existing-bundles-in-line). |
 
 - **Config** shows `https://<host>[:<port>]/sub/<token>`. The host is **not a setting of its
   own**: it is `HYSTERIA2_SNI` (falling back to `HYSTERIA2_HOST`), because the endpoint

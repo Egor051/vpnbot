@@ -115,7 +115,7 @@ class AuditService:
             raise RuntimeError("AuditService.count_all requires a UserRepository; pass users= to AuditService()")
         user = await self.users.get_by_id(actor_user_id)
         if user is None or user.role != UserRole.SUPERADMIN:
-            raise AccessDenied("Недостаточно прав")
+            raise AccessDenied("Недостаточно прав", key="err_insufficient_rights")
         return await self.audit_logs.count_all()
 
     async def recent(self, actor_user_id: int, limit: int = 20, offset: int = 0) -> list[dict[str, object]]:
@@ -124,7 +124,7 @@ class AuditService:
             raise RuntimeError("AuditService.recent requires a UserRepository; pass users= to AuditService()")
         user = await self.users.get_by_id(actor_user_id)
         if user is None or user.role != UserRole.SUPERADMIN:
-            raise AccessDenied("Недостаточно прав")
+            raise AccessDenied("Недостаточно прав", key="err_insufficient_rights")
         return await self.audit_logs.list_recent(limit=limit, offset=offset)
 
     async def recent_for_entity(
@@ -141,7 +141,7 @@ class AuditService:
             raise RuntimeError("AuditService.recent_for_entity requires a UserRepository; pass users= to AuditService()")
         user = await self.users.get_by_id(actor_user_id)
         if user is None or user.role != UserRole.SUPERADMIN:
-            raise AccessDenied("Недостаточно прав")
+            raise AccessDenied("Недостаточно прав", key="err_insufficient_rights")
         return await self.recent_for_entity_internal(
             entity_type=entity_type,
             entity_id=entity_id,

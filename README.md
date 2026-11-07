@@ -318,7 +318,7 @@ operations remain in [docs/operations.md](docs/operations.md).
 **Roles.** Access is tiered:
 
 - **Superadmin** — every ID in `ADMIN_IDS`. Full control, including assigning/removing the moderator role and all backend and user actions.
-- **Moderator** — assigned by a superadmin from the admin panel (there is no env var for it). Can approve/reject access requests and block/unblock and manage users, but **cannot** assign/remove the moderator role, block another moderator or a superadmin, or manage another owner's keys/proxy access (that stays superadmin- or owner-only).
+- **Moderator** — assigned by a superadmin from the admin panel (there is no env var for it). Opens their panel with «🛡 Moderator panel» in the main menu (or `/moderator`). Can approve/reject access requests and block/unblock and manage users, but **cannot** assign/remove the moderator role, block another moderator or a superadmin, or manage another owner's keys/proxy access (that stays superadmin- or owner-only).
 - **Approved user** — issues and manages their own keys/proxy access.
 - **Pending user** — awaiting approval; **Blocked user** — bot access revoked.
 

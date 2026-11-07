@@ -31,6 +31,25 @@ def access_request_decision_confirm_keyboard(request_id: int, action: str) -> In
     )
 
 
+def access_request_detail_keyboard(request: AccessRequest | None) -> InlineKeyboardMarkup:
+    """One request's screen, and the screen after a decision.
+
+    A pending request gets approve/reject; every variant leads back to the list
+    (the «to requests» button) — the detail used to reuse the list keyboard, whose only way
+    out was the admin panel, so a moderator had no way back at all.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if request is not None:
+        rows.append(
+            [
+                InlineKeyboardButton(text=t("btn_approve"), callback_data=f"admin:approve:{request.id}"),
+                InlineKeyboardButton(text=t("btn_reject"), callback_data=f"admin:reject:{request.id}"),
+            ]
+        )
+    rows.append([InlineKeyboardButton(text=t("btn_to_requests"), callback_data="admin:reqs")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def moderator_panel_keyboard() -> InlineKeyboardMarkup:
     """Build the moderator panel inline keyboard."""
     return InlineKeyboardMarkup(
@@ -42,12 +61,75 @@ def moderator_panel_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+# The groups of the admin panel. Every leaf screen keeps its old callback, so a
+# keyboard still sitting in a chat's history opens the same screen as before;
+# only the panel itself gained this one level. ``people`` is also the moderator's
+# section — its handler renders the moderator panel for a moderator.
+ADMIN_GROUPS: tuple[str, ...] = ("people", "mon", "comms", "infra", "ops")
+
+
+def admin_group_keyboard(group: str, *, subscription_enabled: bool = False) -> InlineKeyboardMarkup:
+    """One section of the admin panel (``admin:grp:<group>``)."""
+    def row(key: str, data: str) -> list[InlineKeyboardButton]:
+        return [InlineKeyboardButton(text=t(key), callback_data=data)]
+
+    rows: list[list[InlineKeyboardButton]]
+    if group == "people":
+        rows = [
+            row("btn_access_requests", "admin:reqs"),
+            row("btn_trial_accesses", "admin:trial"),
+            row("btn_users", "admin:users"),
+        ]
+    elif group == "mon":
+        rows = [
+            row("btn_dashboard", "admin:dashboard"),
+            row("btn_server_status", "admin:server_status"),
+            row("btn_key_stats", "admin:stats"),
+            row("btn_proxy_status", "admin:proxy"),
+            row("btn_backend_diagnostics", "admin:diagnostics"),
+            row("btn_action_logs", "admin:audit"),
+        ]
+    elif group == "comms":
+        rows = [
+            row("btn_announcement", "admin:announce"),
+            row("btn_announcement_recovery", "admin:announce_batches"),
+        ]
+    elif group == "infra":
+        rows = [
+            row("btn_modules", "admin:modules"),
+            row("btn_relays", "admin:relays"),
+            *([row("btn_admin_bundles", "admin:aio")] if subscription_enabled else []),
+            row("btn_warp", "admin:warp"),
+        ]
+    elif group == "ops":
+        rows = [
+            row("btn_maintenance", "admin:maintenance"),
+            row("btn_db_backup", "admin:backup"),
+        ]
+    else:
+        rows = []
+    rows.append(row("btn_admin_panel", "admin:panel"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def dashboard_keyboard() -> InlineKeyboardMarkup:
-    """Build the refresh/back inline keyboard for the admin dashboard."""
+    """The dashboard: refresh, a way into the screens its figures summarise, back.
+
+    The dashboard repeats the counters of other screens (requests, trials,
+    diagnostics, the audit log); it used to offer no way to act on them.
+    """
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("btn_dashboard_refresh"), callback_data="admin:dashboard:refresh")],
-            [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")],
+            [
+                InlineKeyboardButton(text=t("btn_access_requests"), callback_data="admin:reqs"),
+                InlineKeyboardButton(text=t("btn_trial_accesses"), callback_data="admin:trial"),
+            ],
+            [
+                InlineKeyboardButton(text=t("btn_backend_diagnostics"), callback_data="admin:diagnostics"),
+                InlineKeyboardButton(text=t("btn_action_logs"), callback_data="admin:audit"),
+            ],
+            [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:grp:mon")],
         ]
     )
 
@@ -63,7 +145,7 @@ def server_status_keyboard(detailed_enabled: bool = False) -> InlineKeyboardMark
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=toggle_text, callback_data="admin:server_status:toggle_detailed")],
-            [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")],
+            [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:grp:mon")],
         ]
     )
 
@@ -77,7 +159,27 @@ def maintenance_panel_keyboard(enabled: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [toggle],
-            [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:panel")],
+            [InlineKeyboardButton(text=t("btn_back"), callback_data="admin:grp:ops")],
+        ]
+    )
+
+
+def maintenance_disable_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Ending maintenance messages every user, so it is one more tap, not one."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_maintenance_disable_confirm"), callback_data="admin:maintenance:disable:ok")],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="admin:maintenance")],
+        ]
+    )
+
+
+def backup_confirm_keyboard() -> InlineKeyboardMarkup:
+    """The backup sends the database to every admin: confirm first."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_backup_confirm"), callback_data="admin:backup:ok")],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="admin:grp:ops")],
         ]
     )
 
@@ -92,40 +194,43 @@ def maintenance_enable_skip_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def admin_panel_keyboard(*, subscription_enabled: bool = False) -> InlineKeyboardMarkup:
-    """Build the full admin panel inline keyboard.
+def admin_panel_keyboard(
+    *,
+    subscription_enabled: bool = False,
+    pending_requests: int = 0,
+    pending_trials: int = 0,
+) -> InlineKeyboardMarkup:
+    """The admin panel: five sections, plus a shortcut row while there is a queue.
 
-    The «All-in-One» row exists only while ``SUBSCRIPTION_ENABLED`` is on, like
-    every other all-in-one button; its handlers refuse on their own as well.
+    The panel used to be eighteen buttons in one column with no order — monitoring,
+    people, broadcasts and infrastructure interleaved. Each section now holds at
+    most six screens (:func:`admin_group_keyboard`); every screen kept its old
+    callback. The shortcut row points at the same handlers as the «Люди» section,
+    so the most frequent action (answer a request) stays one tap away.
+
+    ``subscription_enabled`` is accepted for the callers that pass it; the
+    «All-in-One» row lives in the «Протоколы» section now.
     """
-    bundles_row = (
-        [[InlineKeyboardButton(text=t("btn_admin_bundles"), callback_data="admin:aio")]]
-        if subscription_enabled
-        else []
-    )
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=t("btn_server_status"), callback_data="admin:server_status")],
-            [InlineKeyboardButton(text=t("btn_dashboard"), callback_data="admin:dashboard")],
-            [InlineKeyboardButton(text=t("btn_access_requests"), callback_data="admin:reqs")],
-            [InlineKeyboardButton(text=t("btn_users"), callback_data="admin:users")],
-            [InlineKeyboardButton(text=t("btn_issue_key_to_user"), callback_data="admin:issue")],
-            [InlineKeyboardButton(text=t("btn_trial_accesses"), callback_data="admin:trial")],
-            [InlineKeyboardButton(text=t("btn_key_stats"), callback_data="admin:stats")],
-            [InlineKeyboardButton(text=t("btn_proxy_status"), callback_data="admin:proxy")],
-            [InlineKeyboardButton(text=t("btn_announcement"), callback_data="admin:announce")],
-            [InlineKeyboardButton(text=t("btn_warp"), callback_data="admin:warp")],
-            [InlineKeyboardButton(text=t("btn_modules"), callback_data="admin:modules")],
-            [InlineKeyboardButton(text=t("btn_relays"), callback_data="admin:relays")],
-            *bundles_row,
-            [InlineKeyboardButton(text=t("btn_maintenance"), callback_data="admin:maintenance")],
-            [InlineKeyboardButton(text=t("btn_backend_diagnostics"), callback_data="admin:diagnostics")],
-            [InlineKeyboardButton(text=t("btn_action_logs"), callback_data="admin:audit")],
-            [InlineKeyboardButton(text=t("btn_announcement_recovery"), callback_data="admin:announce_batches")],
-            [InlineKeyboardButton(text=t("btn_db_backup"), callback_data="admin:backup")],
+    del subscription_enabled
+    rows: list[list[InlineKeyboardButton]] = []
+    shortcuts: list[InlineKeyboardButton] = []
+    if pending_requests > 0:
+        shortcuts.append(InlineKeyboardButton(text=t("btn_pending_requests", count=pending_requests), callback_data="admin:reqs"))
+    if pending_trials > 0:
+        shortcuts.append(InlineKeyboardButton(text=t("btn_pending_trials", count=pending_trials), callback_data="admin:trial"))
+    if shortcuts:
+        rows.append(shortcuts)
+    rows.extend(
+        [
+            [InlineKeyboardButton(text=t("btn_group_people"), callback_data="admin:grp:people")],
+            [InlineKeyboardButton(text=t("btn_group_mon"), callback_data="admin:grp:mon")],
+            [InlineKeyboardButton(text=t("btn_group_comms"), callback_data="admin:grp:comms")],
+            [InlineKeyboardButton(text=t("btn_group_infra"), callback_data="admin:grp:infra")],
+            [InlineKeyboardButton(text=t("btn_group_ops"), callback_data="admin:grp:ops")],
             [InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data="menu:main")],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def announcement_confirm_keyboard() -> InlineKeyboardMarkup:
@@ -175,21 +280,34 @@ def announcement_roles_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text=t("btn_seg_all"), callback_data="admin:announce:role:all")])
     if selected:
         rows.append([InlineKeyboardButton(text=t("btn_seg_next"), callback_data="admin:announce:roles:done")])
-    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
+    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="admin:announce:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def announcement_protocols_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
-    """Build the protocol-selection (stage 2) keyboard for a segmented announcement."""
+def announcement_protocols_keyboard(
+    selected: set[str], *, unavailable: frozenset[str] = frozenset()
+) -> InlineKeyboardMarkup:
+    """Build the protocol-selection (stage 2) keyboard for a segmented announcement.
+
+    A protocol that is switched off right now stays selectable — its users may
+    still hold keys and be the very audience of the message — but carries a
+    «выкл.» mark, so the choice is not made blind.
+    """
     rows: list[list[InlineKeyboardButton]] = [
-        [_segment_option_button(label, value in selected, f"admin:announce:proto:{value}")]
+        [
+            _segment_option_button(
+                f"{label} · {t('seg_protocol_off')}" if value in unavailable else label,
+                value in selected,
+                f"admin:announce:proto:{value}",
+            )
+        ]
         for value, label in ANNOUNCEMENT_PROTOCOL_OPTIONS
     ]
     rows.append([InlineKeyboardButton(text=t("btn_seg_all"), callback_data="admin:announce:proto:all")])
     if selected:
         rows.append([InlineKeyboardButton(text=t("btn_seg_next"), callback_data="admin:announce:protos:done")])
     rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:announce:back:roles")])
-    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
+    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="admin:announce:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -203,27 +321,54 @@ def announcement_transports_keyboard(selected: set[str]) -> InlineKeyboardMarkup
     if selected:
         rows.append([InlineKeyboardButton(text=t("btn_seg_next"), callback_data="admin:announce:trs:done")])
     rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:announce:back:protos")])
-    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="cancel")])
+    rows.append([InlineKeyboardButton(text=t("btn_cancel"), callback_data="admin:announce:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def announcement_cancel_keyboard() -> InlineKeyboardMarkup:
+    """Single «Отмена» for the text-input steps of the announcement wizard.
+
+    Every step of that wizard cancels through ``admin:announce:cancel`` now; the
+    choice steps used the generic ``cancel`` and the confirm step this callback,
+    two mechanisms for one action.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=t("btn_cancel"), callback_data="admin:announce:cancel")]]
+    )
 
 
 def announcement_batches_keyboard(batches: list[AnnouncementBatch]) -> InlineKeyboardMarkup:
-    """Build the keyboard listing announcement batches with status-based actions."""
+    """Build the keyboard listing announcement batches with status-based actions.
+
+    One row per batch (its action next to its cancel) instead of two, so ten
+    batches fit in twelve rows. Each button opens a confirmation
+    (:func:`announcement_batch_confirm_keyboard`): every action here sends a
+    broadcast or stops one.
+    """
     rows: list[list[InlineKeyboardButton]] = []
     for batch in batches:
-        actions: list[InlineKeyboardButton] = []
+        row: list[InlineKeyboardButton] = []
         if batch.status == "scheduled":
-            actions.append(InlineKeyboardButton(text=f"{t('btn_send_now')} #{batch.id}", callback_data=f"admin:announce:resume:{batch.id}"))
+            row.append(InlineKeyboardButton(text=f"{t('btn_send_now')} #{batch.id}", callback_data=f"admin:announce:resume:{batch.id}"))
         if batch.status in {"pending", "sending"}:
-            actions.append(InlineKeyboardButton(text=t("btn_batch_continue", id=batch.id), callback_data=f"admin:announce:resume:{batch.id}"))
+            row.append(InlineKeyboardButton(text=t("btn_batch_continue", id=batch.id), callback_data=f"admin:announce:resume:{batch.id}"))
         if batch.status == "failed":
-            actions.append(InlineKeyboardButton(text=t("btn_batch_retry", id=batch.id), callback_data=f"admin:announce:retry:{batch.id}"))
-        if actions:
-            rows.append(actions)
-        rows.append([InlineKeyboardButton(text=t("btn_batch_cancel", id=batch.id), callback_data=f"admin:announce:cancelbatch:{batch.id}")])
+            row.append(InlineKeyboardButton(text=t("btn_batch_retry", id=batch.id), callback_data=f"admin:announce:retry:{batch.id}"))
+        row.append(InlineKeyboardButton(text=t("btn_batch_cancel", id=batch.id), callback_data=f"admin:announce:cancelbatch:{batch.id}"))
+        rows.append(row)
     rows.append([InlineKeyboardButton(text=t("btn_refresh"), callback_data="admin:announce_batches")])
-    rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:grp:comms")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def announcement_batch_confirm_keyboard(action: str, batch_id: int) -> InlineKeyboardMarkup:
+    """Confirm a batch action (``admin:announce:<action>:<id>:ok``)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_confirm"), callback_data=f"admin:announce:{action}:{batch_id}:ok")],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data="admin:announce_batches")],
+        ]
+    )
 
 
 def pending_requests_keyboard(requests: list[AccessRequest], page: int = 0, has_next: bool = False, total_pages: int = 1) -> InlineKeyboardMarkup:
@@ -246,7 +391,8 @@ def pending_requests_keyboard(requests: list[AccessRequest], page: int = 0, has_
         if has_next:
             nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"admin:reqs:{page + 1}"))
         rows.append(nav)
-    rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
+    # admin:grp:people is role-aware: a moderator lands on their own panel.
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:grp:people")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -278,8 +424,17 @@ def users_keyboard(
         if has_next:
             nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"{nav_prefix}:{page + 1}"))
         rows.append(nav)
-    rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
+    rows.append([InlineKeyboardButton(text=t("btn_user_search"), callback_data="admin:users:find")])
+    # admin:grp:people is role-aware: a moderator lands on their own panel.
+    rows.append([InlineKeyboardButton(text=t("btn_back"), callback_data="admin:grp:people")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def user_search_keyboard() -> InlineKeyboardMarkup:
+    """While waiting for the search query: back to the list."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=t("btn_cancel"), callback_data="admin:users")]]
+    )
 
 
 def user_actions_keyboard(
@@ -287,37 +442,59 @@ def user_actions_keyboard(
     *,
     has_used_trial: bool = False,
     actor_role: UserRole = UserRole.MODERATOR,
+    actor_user_id: int | None = None,
 ) -> InlineKeyboardMarkup:
-    """Build the user management actions keyboard scoped to the actor's role.
+    """Build the user management actions keyboard for this actor and this target.
 
     The ``actor_role`` default is intentionally the least-privileged role that
     still has a user card (MODERATOR): if a caller forgets to pass the real
     actor role, the keyboard fails closed and hides superadmin-only actions
     instead of exposing them.
+
+    Only actions the service would carry out are shown. The card used to offer
+    «Одобрить» and «Заблокировать» on a superadmin, and «Заблокировать» to a
+    moderator on another moderator — buttons whose only outcome, after a
+    confirmation screen, was a refusal (services/users.py: set_role, block_user).
     """
     rows: list[list[InlineKeyboardButton]] = []
+    uid = user.telegram_user_id
     blocked = is_blocked_user(user)
     is_moderator_actor = actor_role == UserRole.MODERATOR
+    is_self = actor_user_id is not None and actor_user_id == uid
+    target_is_staff = user.role in {UserRole.SUPERADMIN, UserRole.MODERATOR}
 
-    if not is_moderator_actor and user.role not in {UserRole.APPROVED_USER, UserRole.MODERATOR} and not blocked:
-        rows.append([InlineKeyboardButton(text=t("btn_approve_user"), callback_data=f"admin:userapprove:{user.telegram_user_id}")])
-    if not blocked:
-        rows.append([InlineKeyboardButton(text=t("btn_block"), callback_data=f"admin:block:{user.telegram_user_id}")])
+    if not is_moderator_actor and user.role == UserRole.PENDING_USER and not blocked:
+        rows.append([InlineKeyboardButton(text=t("btn_approve_user"), callback_data=f"admin:userapprove:{uid}")])
+    can_block = not blocked and not is_self and user.role != UserRole.SUPERADMIN
+    if is_moderator_actor and target_is_staff:
+        can_block = False
+    if can_block:
+        rows.append([InlineKeyboardButton(text=t("btn_block"), callback_data=f"admin:block:{uid}")])
     if blocked:
-        rows.append([InlineKeyboardButton(text=t("btn_unblock"), callback_data=f"admin:unblock:{user.telegram_user_id}")])
+        rows.append([InlineKeyboardButton(text=t("btn_unblock"), callback_data=f"admin:unblock:{uid}")])
     if not is_moderator_actor:
         if user.role in {UserRole.APPROVED_USER, UserRole.MODERATOR, UserRole.SUPERADMIN, UserRole.PENDING_USER} and not blocked:
-            rows.append([InlineKeyboardButton(text=t("btn_issue_key"), callback_data=f"admin:issue:{user.telegram_user_id}")])
+            rows.append([InlineKeyboardButton(text=t("btn_issue_key"), callback_data=f"admin:issue:{uid}")])
         if has_used_trial:
-            rows.append([InlineKeyboardButton(text=t("btn_reset_trial"), callback_data=f"admin:trial:reset:{user.telegram_user_id}")])
-        rows.append([InlineKeyboardButton(text=t("btn_user_keys"), callback_data=f"admin:ukeys:{user.telegram_user_id}:0")])
-        rows.append([InlineKeyboardButton(text=t("btn_edit_note_user"), callback_data=f"admin:unote:{user.telegram_user_id}")])
-    if not is_moderator_actor and not blocked and user.role == UserRole.APPROVED_USER:
-        rows.append([InlineKeyboardButton(text=t("btn_set_moderator"), callback_data=f"admin:setmoderator:{user.telegram_user_id}")])
-    if not is_moderator_actor and user.role == UserRole.MODERATOR:
-        rows.append([InlineKeyboardButton(text=t("btn_remove_moderator"), callback_data=f"admin:setmoderator:{user.telegram_user_id}")])
+            rows.append([InlineKeyboardButton(text=t("btn_reset_trial"), callback_data=f"admin:trial:reset:{uid}")])
+        rows.append([InlineKeyboardButton(text=t("btn_user_keys"), callback_data=f"admin:ukeys:{uid}:0")])
+        rows.append([InlineKeyboardButton(text=t("btn_edit_note_user"), callback_data=f"admin:unote:{uid}")])
+        if not blocked and user.role == UserRole.APPROVED_USER:
+            rows.append([InlineKeyboardButton(text=t("btn_set_moderator"), callback_data=f"admin:setmoderator:{uid}")])
+        if user.role == UserRole.MODERATOR:
+            rows.append([InlineKeyboardButton(text=t("btn_remove_moderator"), callback_data=f"admin:setmoderator:{uid}")])
     rows.append([InlineKeyboardButton(text=t("btn_to_users"), callback_data="admin:users")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def user_action_confirm_keyboard(confirm_data: str, user_id: int) -> InlineKeyboardMarkup:
+    """Confirm a role change or a trial reset; «Отмена» returns to the card."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t("btn_confirm"), callback_data=confirm_data)],
+            [InlineKeyboardButton(text=t("btn_cancel"), callback_data=f"admin:user:{user_id}")],
+        ]
+    )
 
 
 def block_user_confirm_keyboard(user: User) -> InlineKeyboardMarkup:
@@ -416,21 +593,3 @@ def trial_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
             ]
         ]
     )
-
-
-def admin_issue_users_keyboard(users: list[User], page: int = 0, has_next: bool = False, total_pages: int = 1) -> InlineKeyboardMarkup:
-    """Build the paginated keyboard for selecting a user to issue a key to."""
-    rows: list[list[InlineKeyboardButton]] = []
-    for user in users:
-        title = format_user_display(user.telegram_user_id, user.username)
-        rows.append([InlineKeyboardButton(text=title, callback_data=f"admin:issue:{user.telegram_user_id}")])
-    if page > 0 or has_next:
-        nav: list[InlineKeyboardButton] = []
-        if page > 0:
-            nav.append(InlineKeyboardButton(text=t("btn_prev"), callback_data=f"admin:issuepage:{page - 1}"))
-        nav.append(InlineKeyboardButton(text=f"{page + 1} / {total_pages}", callback_data="noop"))
-        if has_next:
-            nav.append(InlineKeyboardButton(text=t("btn_next"), callback_data=f"admin:issuepage:{page + 1}"))
-        rows.append(nav)
-    rows.append([InlineKeyboardButton(text=t("btn_admin_panel"), callback_data="admin:panel")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)

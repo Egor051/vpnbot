@@ -1140,7 +1140,8 @@ async def test_list_and_card(world: _World, panel_services: Any) -> None:
     callback = _Callback("admin:relays")
     await panel.relays_panel(callback, _State(), panel_services)  # type: ignore[arg-type]
     assert "ru1" in callback.message.last_text and RELAY_HOST in callback.message.last_text
-    assert _callbacks(callback.message.last_markup) == [f"admin:relay:{relay.id}", "admin:relay:add", "admin:panel"]
+    # «Назад» returns to the «Протоколы и маршрутизация» section of the panel.
+    assert _callbacks(callback.message.last_markup) == [f"admin:relay:{relay.id}", "admin:relay:add", "admin:grp:infra"]
 
     card = _Callback(f"admin:relay:{relay.id}")
     await panel.relay_card(card, _State(), panel_services)  # type: ignore[arg-type]
