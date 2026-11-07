@@ -243,7 +243,18 @@ WARP_ONESHOTS=(warp-routes.service vpn-bot-warp-split.service vpnbot-hy2-warp-ma
 # watch units that are gone on purpose — Xray has no *_ENABLED flag at all — and
 # reinstall the danted drop-in for a purged dante-server. Overridable for the
 # DEPLOY_SELFTEST suites only.
-UNINSTALL_MARKER_DIR="${UNINSTALL_MARKER_DIR:-/etc/vpn-bot/uninstalled}"
+# Test fence. deploy.sh runs the pytest suite AS ROOT on the production host in
+# Phase 1, where real markers live, so under DEPLOY_SELFTEST=1 an unset value points
+# at a directory that never exists: a suite that sources this file sees no removed
+# protocol unless it sets UNINSTALL_MARKER_DIR itself, and an explicit value is kept.
+# Without this a host marker for mtproto gates a test's own mtproxy drop-in off. The
+# Python side is fenced the same way (tests/conftest.py). Outside the selftest the
+# default is the real directory, as before. A `case`, not `if [[ ... == "1" ]]`:
+# that exact line marks the DEPLOY_SELFTEST seam below for the tests.
+case "${DEPLOY_SELFTEST:-0}" in
+  1) UNINSTALL_MARKER_DIR="${UNINSTALL_MARKER_DIR:-/nonexistent/vpn-bot-selftest/uninstalled}" ;;
+  *) UNINSTALL_MARKER_DIR="${UNINSTALL_MARKER_DIR:-/etc/vpn-bot/uninstalled}" ;;
+esac
 UNINSTALL_PROTOCOLS=(xray awg socks5 mtproto hysteria2)
 
 # systemd-networkd drop-in that keeps networkd from flushing the WARP `ip rule`s it

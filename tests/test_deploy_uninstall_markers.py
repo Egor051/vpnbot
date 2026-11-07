@@ -15,7 +15,8 @@ was removed on purpose:
 
 Plus two hosts facts the uninstall relies on, pinned here: the acme hook copes
 with Hysteria2 gone, and vpn-bot-warp-routes passes without the awg0 client
-interface (the skip-not-fail branch of #241).
+interface (the skip-not-fail branch of #241). And the selftest default: a suite that
+sources deploy.sh without UNINSTALL_MARKER_DIR never reads the host's real markers.
 
 Driven through the DEPLOY_SELFTEST seam with systemctl stubbed; every path is
 under tmp_path (deploy.sh runs this suite as root on the production host).
@@ -271,6 +272,71 @@ def test_socks5_switched_off_in_env_also_leaves_the_dropin_out(tmp_path: Path) -
     proc = lab.run(BOTH, SOCKS5_ON="no", UNINSTALL_MARKER_DIR=str(markers))
     assert proc.returncode == 0, proc.stdout
     assert not dst.exists()
+
+
+# --------------------------------------------------------------------------- #
+# The selftest default: the host's own markers stay out of every suite
+# --------------------------------------------------------------------------- #
+HOST_MARKER_DIR = "/etc/vpn-bot/uninstalled"
+
+
+def _source_bare(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Source deploy.sh with exactly `env` (no inherited variables) and print the marker
+    directory it resolved plus every protocol it counts as removed."""
+    driver = tmp_path / "bare.sh"
+    driver.write_text(
+        f'set -uo pipefail\nexport DEPLOY_SELFTEST=1\nsource "{DEPLOY_SH}"\n'
+        'VENV=/nonexistent; VENV_PREV=/nonexistent; WT=""; STAGE=""\n'
+        'printf "DIR=%s\\n" "$UNINSTALL_MARKER_DIR"\n'
+        'for p in "${UNINSTALL_PROTOCOLS[@]}"; do proto_uninstalled "$p" && printf "REMOVED %s\\n" "$p"; done\n'
+        "echo END\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(["bash", str(driver)], cwd=str(tmp_path), env=env, capture_output=True, text=True,
+                          check=False)
+    assert proc.returncode == 0 and "END" in proc.stdout.splitlines(), proc.stdout + proc.stderr
+    return proc
+
+
+def _removed(out: str) -> list[str]:
+    return [ln.split()[1] for ln in out.splitlines() if ln.startswith("REMOVED ")]
+
+
+def test_the_selftest_default_never_reads_the_host_markers(tmp_path: Path) -> None:
+    """deploy.sh runs this suite as root on the production host, where real markers sit
+    in /etc/vpn-bot/uninstalled. A harness that sources deploy.sh without setting
+    UNINSTALL_MARKER_DIR must not see them: a host mtproto marker used to gate the
+    test's own mtproxy drop-in off and fail four tests in test_deploy_host_state."""
+    proc = _source_bare(tmp_path, env={})
+    (marker_dir,) = _line(proc.stdout, "DIR")
+    assert marker_dir != HOST_MARKER_DIR
+    assert not Path(marker_dir).exists(), marker_dir
+    assert _removed(proc.stdout) == []
+
+
+def test_an_explicit_marker_dir_is_kept_under_the_selftest(tmp_path: Path) -> None:
+    """The fence only fills an UNSET value: a suite that drives the markers (the _run
+    harness above) passes its own directory and must get exactly that one back."""
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    (markers / "mtproto").write_text("{}\n", encoding="utf-8")
+    proc = _source_bare(tmp_path, env={"UNINSTALL_MARKER_DIR": str(markers)})
+    assert _line(proc.stdout, "DIR") == [str(markers)]
+    assert _removed(proc.stdout) == ["mtproto"]
+
+
+def test_outside_the_selftest_the_default_is_still_the_host_directory() -> None:
+    """The fence must not reach a real deploy: without DEPLOY_SELFTEST=1 the default
+    stays the directory vpn-bot-protocol-uninstall writes to. Runs the real assignment
+    block alone, since sourcing deploy.sh without the seam would deploy."""
+    text = _read(DEPLOY_SH)
+    start = text.index('case "${DEPLOY_SELFTEST:-0}" in\n  1) UNINSTALL_MARKER_DIR=')
+    block = text[start : text.index("\nesac\n", start) + len("\nesac\n")]
+    for env in ({}, {"DEPLOY_SELFTEST": "0"}):
+        proc = subprocess.run(["bash", "-c", block + 'printf "%s\\n" "$UNINSTALL_MARKER_DIR"'], env=env,
+                              capture_output=True, text=True, check=False)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout == HOST_MARKER_DIR + "\n", env
 
 
 # --------------------------------------------------------------------------- #
