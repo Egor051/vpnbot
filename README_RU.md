@@ -233,7 +233,7 @@ make audit                 # pip-audit по requirements + constraints
 make lint                  # ruff из закреплённого .venv-lint/ (не из PATH)
 python -m compileall .
 python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ warp/ main.py init_db.py
-python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=62
+python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=71
 ```
 
 GitHub Actions запускает эти проверки без production-секретов и живых сервисов. Workflow

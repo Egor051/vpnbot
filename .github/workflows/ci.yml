@@ -88,7 +88,25 @@ jobs:
         run: python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ subscription_server/ warp/ main.py init_db.py
 
       - name: Run tests with coverage
-        run: python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=62
+        # Branch coverage comes from [tool.coverage.run] branch = true. -rs prints
+        # why each skipped test was skipped, so a skip that hides a regression is
+        # visible in the log instead of being one more "s".
+        run: python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=71 -rs
+
+      # Per-layer floors (ratchet). The TOTAL gate above can stay green while one
+      # layer quietly loses its tests behind gains elsewhere; these read the same
+      # .coverage file and fail on a per-layer drop.
+      - name: Coverage report — repositories
+        run: python -m coverage report --include='repositories/*'
+
+      - name: Coverage report — warp
+        run: python -m coverage report --include='warp/*'
+
+      - name: Coverage report — services
+        run: python -m coverage report --include='services/*'
+
+      - name: Coverage report — adapters
+        run: python -m coverage report --include='adapters/*'
 
   tests-host-like:
     # Reproduces the environment in which scripts/deploy.sh Phase 1 runs pytest on

@@ -349,7 +349,7 @@ make audit                 # pip-audit over requirements + constraints
 make lint                  # ruff, from the pinned .venv-lint/ (never PATH's ruff)
 python -m compileall .
 python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ warp/ main.py init_db.py
-python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=62
+python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=71
 ```
 
 GitHub Actions runs these gates without production secrets or live services. Contribution

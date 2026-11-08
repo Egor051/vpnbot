@@ -43,7 +43,7 @@ typecheck:
 	python -m mypy --strict $(MYPY_PATHS)
 
 test:
-	python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=62
+	python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=71 -rs
 
 audit:
 	python -m pip_audit -r requirements.txt -r constraints.txt
