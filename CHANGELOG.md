@@ -365,9 +365,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   serialisation), `ShellRunner` (timeouts, exit codes, decoding, redaction), the SOCKS5 and
   trial-access services, the proxy/WARP/traffic repositories, every refusal branch of the root
   helpers `vpn-bot-{awg,xray,mtproxy}-apply` and `vpn-bot-socks5-user`, and a row-by-row
-  upgrade check of every schema snapshot (v29–v39) on a populated database. One test is an
-  expected failure (`xfail(strict=True)`) documenting a known bug: `ShellRunner` truncates
-  stderr before redacting it, so a secret cut by the output limit leaks its prefix.
+  upgrade check of every schema snapshot (v29–v39) on a populated database. These tests found
+  that `ShellRunner` truncated output before redacting it (fixed, see Security).
 - **Admin panel regrouped (admin-panel audit, 2026-11).** The root is five sections instead of
   eighteen buttons in one column: «👥 Люди и доступ» (requests, trials, users), «📊 Мониторинг»
   (dashboard, server status, key stats, proxy, diagnostics, action log), «📢 Рассылки»
@@ -609,6 +608,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- **Secrets are redacted before any output is truncated.** `ShellRunner` used to keep only the
+  first `max_output_chars` bytes of a child's stdout/stderr and redact `sensitive_values`
+  afterwards, so a secret that crossed the limit was no longer matched and its prefix reached
+  `result.stderr` and the WARNING log. It now captures each stream whole (up to a memory
+  ceiling of 8 MiB, or 4 bytes per requested character), decodes, redacts the complete text
+  (longest value first), and only then cuts it to the limit; a stream cut by the ceiling drops
+  its incomplete UTF-8 tail and any tail that is the start of a sensitive value. stdout is now
+  redacted too — no caller lists a value it needs back from stdout. Affected: the SOCKS5
+  password (`chpasswd`, `set-password` helper), the AWG private key (`wg pubkey`) and preshared
+  key (`wg set … preshared-key`). Two other places cut untrusted error text and now redact it
+  first: `FeedFetchError` (a custom feed URL can carry credentials; the message is cut to
+  512/200/160 characters for the source row, journal, alert and panel) and the anomaly
+  auto-revoke failure quoted in admin alerts (cut to 120).
 - **Four runtime dependencies bumped to clear 49 new `pip-audit` advisories.** Advisories
   published after the last green `main` run turned the `Dependency Audit` job red on the
   pinned set — and with it every PR, since both test jobs wait on that job:

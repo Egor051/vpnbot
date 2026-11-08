@@ -23,6 +23,8 @@ from pathlib import Path
 
 import aiohttp
 
+from utils.redact import redact_value
+
 logger = logging.getLogger(__name__)
 
 # Only these schemes may be fetched. An admin types the URL for a custom source,
@@ -34,7 +36,17 @@ _MAX_REDIRECTS = 5
 
 
 class FeedFetchError(RuntimeError):
-    """The feed could not be retrieved. The caller falls back to the cache."""
+    """The feed could not be retrieved. The caller falls back to the cache.
+
+    The message is redacted HERE, at construction, because it is cut further down
+    the line — 512 characters on the source row, 200 in the run journal and the
+    fail-streak alert, 160 in the panel — and a cut credential no longer matches
+    any redaction pattern. The URL is typed by an admin and may carry one
+    (``https://user:pass@…``, ``?token=…``), and transport errors quote it.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(redact_value(message))
 
 
 @dataclass(frozen=True, slots=True)
