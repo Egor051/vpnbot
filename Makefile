@@ -42,8 +42,19 @@ compile:
 typecheck:
 	python -m mypy --strict $(MYPY_PATHS)
 
+# Per-layer coverage floors: the same numbers CI enforces in the "Coverage floor"
+# steps of .github/workflows/ci.yml. Raise them there and here together.
+FLOOR_REPOSITORIES = 88
+FLOOR_WARP         = 89
+FLOOR_SERVICES     = 82
+FLOOR_ADAPTERS     = 76
+
 test:
 	python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=71 -rs
+	python -m coverage report --include='repositories/*' --fail-under=$(FLOOR_REPOSITORIES) > /dev/null
+	python -m coverage report --include='warp/*' --fail-under=$(FLOOR_WARP) > /dev/null
+	python -m coverage report --include='services/*' --fail-under=$(FLOOR_SERVICES) > /dev/null
+	python -m coverage report --include='adapters/*' --fail-under=$(FLOOR_ADAPTERS) > /dev/null
 
 audit:
 	python -m pip_audit -r requirements.txt -r constraints.txt
