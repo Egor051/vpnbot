@@ -88,7 +88,29 @@ jobs:
         run: python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ subscription_server/ warp/ main.py init_db.py
 
       - name: Run tests with coverage
-        run: python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=62
+        # Branch coverage comes from [tool.coverage.run] branch = true. -rs prints
+        # why each skipped test was skipped, so a skip that hides a regression is
+        # visible in the log instead of being one more "s".
+        run: python -m pytest --cov=. --cov-report=term-missing --cov-fail-under=71 -rs
+
+      # Per-layer floors (ratchet). The TOTAL gate above can stay green while one
+      # layer quietly loses its tests behind gains elsewhere; these read the same
+      # .coverage file and fail on a per-layer drop. Each N is the layer's value as
+      # measured by this job, minus 1 (CI run 42525873156: repositories 89%, warp
+      # 90%, services 83%, adapters 77%). When a PR raises a layer, raise its N to
+      # the new CI value minus 1; never lower one to get green. Keep
+      # COVERAGE_FLOORS in the Makefile in step with these.
+      - name: Coverage floor — repositories (>= 88%)
+        run: python -m coverage report --include='repositories/*' --fail-under=88
+
+      - name: Coverage floor — warp (>= 89%)
+        run: python -m coverage report --include='warp/*' --fail-under=89
+
+      - name: Coverage floor — services (>= 82%)
+        run: python -m coverage report --include='services/*' --fail-under=82
+
+      - name: Coverage floor — adapters (>= 76%)
+        run: python -m coverage report --include='adapters/*' --fail-under=76
 
   tests-host-like:
     # Reproduces the environment in which scripts/deploy.sh Phase 1 runs pytest on

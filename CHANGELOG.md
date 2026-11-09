@@ -357,6 +357,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Coverage gate raised and split per layer.** The overall branch-coverage floor goes from
+  `--cov-fail-under=62` to `71`, and CI now also fails on a drop in any one layer
+  (`repositories/`, `warp/`, `services/`, `adapters/`) through `coverage report --include=...
+  --fail-under=N` steps, so a layer can no longer lose its tests behind gains elsewhere. New
+  hermetic tests cover the WARP manager state machine (start/stop/install/rollback, lock
+  serialisation), `ShellRunner` (timeouts, exit codes, decoding, redaction), the SOCKS5 and
+  trial-access services, the proxy/WARP/traffic repositories, every refusal branch of the root
+  helpers `vpn-bot-{awg,xray,mtproxy}-apply` and `vpn-bot-socks5-user`, and a row-by-row
+  upgrade check of every schema snapshot (v29–v39) on a populated database. One test is an
+  expected failure (`xfail(strict=True)`) documenting a known bug: `ShellRunner` truncates
+  stderr before redacting it, so a secret cut by the output limit leaks its prefix.
 - **Admin panel regrouped (admin-panel audit, 2026-11).** The root is five sections instead of
   eighteen buttons in one column: «👥 Люди и доступ» (requests, trials, users), «📊 Мониторинг»
   (dashboard, server status, key stats, proxy, diagnostics, action log), «📢 Рассылки»

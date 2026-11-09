@@ -114,8 +114,12 @@ With coverage report:
 python -m pytest --cov=. --cov-report=term-missing
 ```
 
-CI enforces a minimum of 62% branch coverage. Tests live in `tests/` and do not
-require a live VPN server — all system-level calls are mocked.
+CI enforces a minimum of 71% branch coverage overall, plus a per-layer floor for
+`repositories/`, `warp/`, `services/` and `adapters/` (the `coverage report
+--include=... --fail-under=N` steps in `.github/workflows/ci.yml`). The floors are a
+ratchet: when a PR raises a layer's coverage, raise its floor to the new CI value
+minus one. Tests live in `tests/` and do not require a live VPN server — all
+system-level calls are mocked.
 
 When adding a feature, add or update tests in `tests/`. Name files after the
 feature area, e.g. `test_<area>.py`.
@@ -126,7 +130,7 @@ feature area, e.g. `test_<area>.py`.
 make lint
 python -m compileall .
 python -m mypy --strict bot/ services/ adapters/ config/ models/ utils/ repositories/ db/ hy2_auth/ warp/ main.py init_db.py
-python -m pytest --cov=. --cov-fail-under=62
+python -m pytest --cov=. --cov-fail-under=71
 make audit
 ```
 
@@ -231,7 +235,7 @@ When adding features, observe these requirements:
 1. Open a PR against `main` with a descriptive title following the commit format.
 2. Fill in the PR template: summary, change type, affected areas, testing steps,
    and security checklist.
-3. All CI gates must pass (ruff, compileall, mypy, pytest ≥ 62% coverage, pip_audit).
+3. All CI gates must pass (ruff, compileall, mypy, pytest ≥ 71% coverage plus per-layer floors, pip_audit).
 4. A reviewer will check security implications, code clarity, test coverage, and
    adherence to project conventions.
 5. Address review comments.
