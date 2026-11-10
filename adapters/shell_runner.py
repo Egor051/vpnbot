@@ -1,5 +1,6 @@
 
 import asyncio
+import codecs
 import logging
 import os
 import signal
@@ -17,6 +18,15 @@ COMMAND_NOT_FOUND_STDERR = "command not found"
 TIMEOUT_RETURNCODE = 124
 TIMEOUT_STDERR = "timeout"
 
+# Memory ceiling for one captured stream, in bytes. It is NOT the output limit:
+# a stream is captured whole (up to this ceiling), redacted, and only then cut to
+# the caller's max_output_chars — so a secret is always seen complete by the
+# redaction, wherever the output limit falls. The ceiling only stops a runaway
+# child from exhausting memory; it is raised to 4 bytes per requested character
+# (the UTF-8 worst case) for callers that ask for very large outputs.
+CAPTURE_CAP_BYTES = 8 * 1024 * 1024
+_READ_CHUNK = 64 * 1024
+
 
 class ShellRunner:
     """Runs shell commands asynchronously, redacting sensitive values from logs and error output."""
@@ -33,17 +43,20 @@ class ShellRunner:
         sensitive_values: Sequence[str] = (),
         max_output_chars: int | None = None,
     ) -> ShellResult:
-        """Execute a subprocess; redact sensitive_values from logged/returned stderr and args.
+        """Execute a subprocess; redact sensitive_values from its args, stdout and stderr.
 
-        The stored ``result.stderr`` and ``result.args`` are redacted, so surfacing either in
-        an error message cannot leak a value passed via ``sensitive_values``. ``result.stdout``
-        is returned verbatim because some callers consume it (e.g. ``wg genkey`` writes the
-        generated key to stdout); treat stdout as potentially sensitive and never log it raw.
+        ``result.args``, ``result.stdout`` and ``result.stderr`` are all redacted, and the
+        redaction runs on the COMPLETE captured output before it is cut to the output
+        limit — so no fragment of a value passed in ``sensitive_values`` can reach the
+        result or the log, wherever the limit falls. Pass in ``sensitive_values`` only
+        what must never come back: a caller that needs a generated secret from stdout
+        (``wg genkey``) does not list it there. stdout is never logged.
         """
         if not args:
             raise ValueError("args must not be empty")
 
         output_limit = self.max_output_chars if max_output_chars is None else max_output_chars
+        capture_cap = max(CAPTURE_CAP_BYTES, 4 * output_limit)
         safe_args = self._redact_args(args, sensitive_values)
         try:
             process = await asyncio.create_subprocess_exec(
@@ -63,24 +76,21 @@ class ShellRunner:
         stderr_task: asyncio.Task[tuple[bytes, bool]] | None = None
         stdin_task: asyncio.Task[None] | None = None
         try:
-            stdout_task = asyncio.create_task(self._read_stream_limited(process.stdout, output_limit))
-            stderr_task = asyncio.create_task(self._read_stream_limited(process.stderr, output_limit))
+            stdout_task = asyncio.create_task(self._read_stream_capped(process.stdout, capture_cap))
+            stderr_task = asyncio.create_task(self._read_stream_capped(process.stderr, capture_cap))
             stdin_task = asyncio.create_task(self._write_stdin(process, input_text))
             await asyncio.wait_for(process.wait(), timeout=timeout)
             await stdin_task
-            stdout_raw, stdout_truncated = await stdout_task
-            stderr_raw, stderr_truncated = await stderr_task
+            stdout_raw, stdout_capped = await stdout_task
+            stderr_raw, stderr_capped = await stderr_task
         except asyncio.TimeoutError:
             await self._terminate(process)
             await self._drain_tasks(stdout_task, stderr_task, stdin_task)
             logger.error("Команда превысила timeout: %s", " ".join(safe_args))
             return ShellResult(tuple(safe_args), TIMEOUT_RETURNCODE, "", TIMEOUT_STDERR)
 
-        stdout = self._compact(stdout_raw, stdout_truncated, output_limit)
-        # Redact secrets from the full decoded stderr BEFORE truncating, so a value that
-        # straddles the truncation boundary cannot survive in logs or on the result.
-        stderr_text = self._redact(stderr_raw.decode("utf-8", errors="replace"), sensitive_values)
-        stderr = self._compact_text(stderr_text, stderr_truncated, output_limit)
+        stdout = self._finalize_output(stdout_raw, stdout_capped, sensitive_values, output_limit)
+        stderr = self._finalize_output(stderr_raw, stderr_capped, sensitive_values, output_limit)
         if process.returncode != 0:
             logger.warning(
                 "Команда завершилась с ошибкой rc=%s: %s; stderr=%s",
@@ -148,33 +158,67 @@ class ShellRunner:
             process.stdin.close()
         await process.stdin.wait_closed()
 
-    async def _read_stream_limited(self, stream: asyncio.StreamReader | None, max_output_bytes: int) -> tuple[bytes, bool]:
-        """Read up to max_output_bytes from the stream, draining the rest.
+    async def _read_stream_capped(self, stream: asyncio.StreamReader | None, cap_bytes: int) -> tuple[bytes, bool]:
+        """Read the stream to EOF, keeping at most ``cap_bytes``; report whether it hit the cap.
 
-        The cap is applied in bytes; a multibyte UTF-8 sequence cut at the boundary is
-        rendered safe later by ``decode(errors="replace")``. The remainder of the stream
-        is still consumed so the child does not block on a full pipe.
+        The cap bounds memory only — it is not the output limit (see
+        ``_finalize_output``). Bytes past it are still read and dropped, so the child
+        never blocks on a full pipe.
         """
         if stream is None:
             return b"", False
         chunks: list[bytes] = []
         total = 0
-        truncated = False
+        capped = False
         while True:
-            chunk = await stream.read(1024)
+            chunk = await stream.read(_READ_CHUNK)
             if not chunk:
                 break
-            remaining = max_output_bytes - total
-            if remaining > 0:
-                chunks.append(chunk[:remaining])
-                total += min(len(chunk), remaining)
-            if len(chunk) > remaining:
-                truncated = True
-        return b"".join(chunks), truncated
+            room = cap_bytes - total
+            if room > 0:
+                chunks.append(chunk[:room])
+                total += min(len(chunk), room)
+            if len(chunk) > room:
+                capped = True
+        return b"".join(chunks), capped
 
-    def _compact(self, data: bytes, truncated: bool = False, max_output_chars: int | None = None) -> str:
-        output_limit = self.max_output_chars if max_output_chars is None else max_output_chars
-        return self._compact_text(data.decode("utf-8", errors="replace"), truncated, output_limit)
+    def _finalize_output(
+        self,
+        data: bytes,
+        capped: bool,
+        sensitive_values: Sequence[str],
+        max_output_chars: int,
+    ) -> str:
+        """Decode → redact → cut to the output limit, in exactly that order.
+
+        Redacting the whole captured text first is what guarantees that a secret
+        crossing the output limit is replaced as a whole instead of leaving its
+        prefix behind. The only cut that happens before redaction is the memory cap,
+        and a capture that hit it is cleaned up before redaction can be fooled by it:
+        an incomplete trailing UTF-8 sequence is dropped (it could be half of a
+        secret's character), and after redaction any tail that is the beginning of a
+        sensitive value is dropped too — that tail is a secret cut by the cap.
+        """
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        text = decoder.decode(data, final=not capped)
+        text = self._redact(text, sensitive_values)
+        if capped:
+            text = self._drop_partial_secret_tail(text, sensitive_values)
+        return self._compact_text(text, capped, max_output_chars)
+
+    @staticmethod
+    def _drop_partial_secret_tail(text: str, sensitive_values: Sequence[str]) -> str:
+        """Remove a trailing fragment that is the start of any sensitive value."""
+        changed = True
+        while changed and text:
+            changed = False
+            for value in sensitive_values:
+                for size in range(min(len(value) - 1, len(text)), 0, -1):
+                    if text.endswith(value[:size]):
+                        text = text[:-size]
+                        changed = True
+                        break
+        return text
 
     def _compact_text(self, text: str, truncated: bool, max_output_chars: int) -> str:
         text = text.strip()
@@ -186,8 +230,9 @@ class ShellRunner:
         return [self._redact(item, sensitive_values) for item in args]
 
     def _redact(self, text: str, sensitive_values: Sequence[str]) -> str:
+        # Longest first: when one sensitive value contains another, replacing the
+        # shorter one first would split the longer one and leave its remainder.
         redacted = text
-        for value in sensitive_values:
-            if value:
-                redacted = redacted.replace(value, "***")
+        for value in sorted((v for v in sensitive_values if v), key=len, reverse=True):
+            redacted = redacted.replace(value, "***")
         return redacted

@@ -114,21 +114,38 @@ async def test_nonzero_rc_is_logged_with_redaction(caplog: pytest.LogCaptureFixt
     assert SECRET not in caplog.text
 
 
-# Invariant: stdout is returned verbatim even when it contains a sensitive value
-# (callers such as `wg genkey` consume it) — redaction applies only to args and
-# stderr, and stdout is never written to the log.
-async def test_stdout_is_not_redacted_and_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+# Invariant: stdout is redacted like stderr (a sensitive value never comes back
+# on the result), and stdout is never written to the log. A caller that needs a
+# generated secret from stdout (`wg genkey`) simply does not list it.
+async def test_stdout_is_redacted_and_not_logged(caplog: pytest.LogCaptureFixture) -> None:
     # Arrange
     runner = ShellRunner()
     caplog.set_level(logging.DEBUG, logger=LOGGER)
-    code = f"import sys; print('{SECRET}'); sys.exit(1)"
+    code = "import sys; sys.stdout.write(sys.stdin.read()); sys.exit(1)"
 
     # Act
-    result = await runner.run([PY, "-c", code], sensitive_values=[SECRET])
+    result = await runner.run([PY, "-c", code], input_text=f"key={SECRET}", sensitive_values=[SECRET])
 
     # Assert
-    assert result.stdout == SECRET
+    assert result.stdout == "key=***"
     assert SECRET not in caplog.text
+    assert "key=" not in caplog.text  # stdout is never logged, redacted or not
+
+
+# Invariant: when one sensitive value contains another, the longer one is
+# replaced whole — redacting the shorter first would leave the rest of the
+# longer one behind.
+async def test_overlapping_secrets_are_redacted_whole() -> None:
+    # Arrange
+    runner = ShellRunner()
+    short, long = "abc", "abcdef-XYZ"
+    code = f"import sys; sys.stderr.write('{long}'); sys.exit(1)"
+
+    # Act
+    result = await runner.run([PY, "-c", code], sensitive_values=[short, long])
+
+    # Assert
+    assert result.stderr == "***"
 
 
 # Invariant: an empty string in sensitive_values is ignored — it must not turn
@@ -179,18 +196,20 @@ async def test_invalid_utf8_is_replaced_not_raised() -> None:
     assert result.stderr == "err�"
 
 
-# Invariant: the output cap is applied in BYTES; a multibyte character cut at the
-# boundary decodes to U+FFFD and the result is marked truncated.
-async def test_multibyte_char_cut_at_limit_is_replaced() -> None:
+# Invariant: the output limit counts CHARACTERS of the decoded text, so a
+# multibyte character is never cut in half by it: 'aaя' fits a limit of 3, and
+# 'aaяb' is cut after the whole 'я'.
+@pytest.mark.parametrize(("payload", "expected"), [("aaя", "aaя"), ("aaяb", "aaя...[truncated]")])
+async def test_output_limit_counts_characters(payload: str, expected: str) -> None:
     # Arrange
     runner = ShellRunner(max_output_chars=3)
-    code = "import sys; sys.stdout.buffer.write('aaя'.encode())"  # 'я' is 2 bytes
+    code = f"import sys; sys.stdout.buffer.write({payload!r}.encode())"
 
     # Act
     result = await runner.run([PY, "-c", code])
 
     # Assert
-    assert result.stdout == "aa�...[truncated]"
+    assert result.stdout == expected
 
 
 # Invariant: a per-call max_output_chars overrides the instance default for
@@ -209,35 +228,129 @@ async def test_per_call_output_limit_overrides_default() -> None:
     assert default.stdout == "x" * 100
 
 
-# Invariant: stderr is redacted BEFORE it is truncated, so a secret straddling
-# the truncation boundary cannot leave a recognisable prefix behind.
-#
-# KNOWN BUG — this invariant does not hold today. _read_stream_limited() keeps
-# only the first `max_output_chars` BYTES of the pipe, so the redaction in run()
-# sees an already-cut secret, cannot match it, and its prefix survives in
-# result.stderr and in the WARNING log ("abhunt...[truncated]" for the secret
-# "hunter2-SECRET" at a limit of 6). Affects every caller that passes
-# sensitive_values: the SOCKS5 password (adapters/dante_users.py) and the AWG
-# private key / preshared key (adapters/awg_config.py). strict=True makes this
-# test fail as soon as the fix lands, forcing the marker to be removed.
-@pytest.mark.xfail(
-    strict=True,
-    reason="shell_runner truncates stderr before redaction: a secret on the cut leaks its prefix",
-)
-async def test_secret_straddling_truncation_boundary_is_redacted(caplog: pytest.LogCaptureFixture) -> None:
+# The boundary harness. The secret is built from characters that appear nowhere
+# else in the output (filler '.', marker '*', suffix '...[truncated]'), so "not a
+# single character of the secret in the result" can be asserted literally. The
+# payload reaches the child on stdin, so the argv (which IS logged) never holds
+# the secret in the first place; only the output path is under test.
+BOUNDARY_SECRET = "XQ7Z-9KWB"
+BOUNDARY_LIMIT = 16
+ECHO_STDIN = "import sys; data = sys.stdin.read(); sys.{stream}.write(data); sys.exit(1)"
+
+
+def _secret_offsets(limit: int, secret: str) -> list[pytest.param]:
+    """Secret wholly before the cut, across it at every offset 1..len-1, right after it."""
+    cases = [pytest.param(limit - len(secret) - 2, id="before")]
+    cases += [pytest.param(limit - inside, id=f"across-{inside}") for inside in range(1, len(secret))]
+    cases.append(pytest.param(limit, id="after"))
+    return cases
+
+
+def _fragments(secret: str) -> list[str]:
+    return [secret[i:j] for i in range(len(secret)) for j in range(i + 2, len(secret) + 1)]
+
+
+# Invariant: the output limit is applied AFTER redaction, so wherever the
+# secret sits relative to the cut — before it, across it at any offset, or just
+# after it — not one character of it reaches result.stdout / result.stderr, and
+# no fragment of it reaches the log.
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize("start", _secret_offsets(BOUNDARY_LIMIT, BOUNDARY_SECRET))
+async def test_secret_at_output_limit_never_leaks(
+    caplog: pytest.LogCaptureFixture, stream: str, start: int
+) -> None:
     # Arrange
     runner = ShellRunner()
-    caplog.set_level(logging.WARNING, logger=LOGGER)
-    code = f"import sys; sys.stderr.write('ab{SECRET}'); sys.exit(1)"
-    fragments = [SECRET[:k] for k in range(3, len(SECRET) + 1)]
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    payload = "." * start + BOUNDARY_SECRET + "." * 20
 
     # Act
-    result = await runner.run([PY, "-c", code], sensitive_values=[SECRET], max_output_chars=6)
+    result = await runner.run(
+        [PY, "-c", ECHO_STDIN.format(stream=stream)],
+        input_text=payload,
+        sensitive_values=[BOUNDARY_SECRET],
+        max_output_chars=BOUNDARY_LIMIT,
+    )
 
     # Assert
-    assert result.stderr.startswith("ab")
-    assert not [f for f in fragments if f in result.stderr], result.stderr
-    assert not [f for f in fragments if f in caplog.text], caplog.text
+    output = getattr(result, stream)
+    assert output.endswith("...[truncated]")
+    assert not set(BOUNDARY_SECRET) & set(result.stdout + result.stderr), (result.stdout, result.stderr)
+    assert not [f for f in _fragments(BOUNDARY_SECRET) if f in caplog.text], caplog.text
+
+
+# Invariant: the memory cap (the one cut that happens before redaction) cannot
+# leak a secret either — a secret cut by the cap, at any offset, is dropped from
+# the tail instead of surviving as a prefix. Checked on the finaliser directly,
+# with an output limit far above the cut, so nothing else can hide a leak.
+@pytest.mark.parametrize("inside", range(1, len(BOUNDARY_SECRET)))
+def test_secret_cut_by_memory_cap_is_dropped(inside: int) -> None:
+    # Arrange
+    captured = ("." * 40 + BOUNDARY_SECRET[:inside]).encode()
+
+    # Act
+    text = ShellRunner()._finalize_output(captured, True, [BOUNDARY_SECRET], 10_000)
+
+    # Assert
+    assert text == "." * 40 + "...[truncated]"
+
+
+# Invariant: a multibyte secret cut by the cap mid-character is dropped too —
+# the incomplete UTF-8 tail is discarded instead of decoding to U+FFFD, which
+# would otherwise shield the secret prefix in front of it from the tail check.
+@pytest.mark.parametrize("cut_bytes", range(1, len("КЛЮЧ-ЖЁСТКИЙ".encode())))
+def test_multibyte_secret_cut_by_memory_cap_is_dropped(cut_bytes: int) -> None:
+    # Arrange
+    secret = "КЛЮЧ-ЖЁСТКИЙ"
+    captured = b"." * 40 + secret.encode()[:cut_bytes]
+
+    # Act
+    text = ShellRunner()._finalize_output(captured, True, [secret], 10_000)
+
+    # Assert
+    assert text == "." * 40 + "...[truncated]"
+
+
+# Invariant: end to end, the cap cut is reachable inside the output limit —
+# redaction shrinks each long secret to "***", pulling the cut point forward —
+# and still nothing of the cut secret is returned or logged.
+@pytest.mark.parametrize("inside", [1, 2, 3, 4])
+async def test_secret_cut_by_memory_cap_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, inside: int
+) -> None:
+    # Arrange: two 30-char secrets (60 bytes) then the third cut by a 64-byte cap;
+    # redacted, the cut lands at char 6 + inside, well inside a 16-char limit.
+    secret = (BOUNDARY_SECRET * 4)[:30]
+    monkeypatch.setattr(shell_runner_module, "CAPTURE_CAP_BYTES", 64)
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    payload = secret * 2 + "." * (4 - inside) + secret + "." * 100
+
+    # Act
+    result = await ShellRunner().run(
+        [PY, "-c", ECHO_STDIN.format(stream="stderr")],
+        input_text=payload,
+        sensitive_values=[secret],
+        max_output_chars=16,
+    )
+
+    # Assert
+    assert result.stderr == "******" + "." * (4 - inside) + "...[truncated]"
+    assert not [f for f in _fragments(secret) if f in caplog.text], caplog.text
+
+
+# Invariant: a capped stream whose tail merely RESEMBLES nothing secret keeps
+# all of it; the tail clean-up only removes the start of a sensitive value.
+def test_partial_tail_cleanup_only_removes_secret_prefixes() -> None:
+    # Arrange
+    values = ["SECRET", "TOKEN"]
+
+    # Act
+    kept = ShellRunner._drop_partial_secret_tail("abc..SEC", values)
+    stacked = ShellRunner._drop_partial_secret_tail("abc..TOK", values)
+    untouched = ShellRunner._drop_partial_secret_tail("abc..xyz", values)
+
+    # Assert
+    assert (kept, stacked, untouched) == ("abc..", "abc..", "abc..xyz")
 
 
 # Invariant: input_text is delivered on stdin (UTF-8) and stdin is closed, so a
@@ -483,45 +596,68 @@ async def test_write_stdin_noop_without_text_or_pipe(stdin: _FakeStdin | None, t
         assert stdin.written == b"" and stdin.closed is False
 
 
-# Invariant: a missing stream reads as empty and not truncated.
+# Invariant: a missing stream reads as empty and not capped.
 async def test_read_stream_none_is_empty() -> None:
     # Arrange
     runner = ShellRunner()
 
     # Act
-    result = await runner._read_stream_limited(None, 10)
+    result = await runner._read_stream_capped(None, 10)
 
     # Assert
     assert result == (b"", False)
 
 
-# Invariant: output of exactly the limit is NOT truncated; one byte over is.
-@pytest.mark.parametrize(("size", "truncated"), [(10, False), (11, True)])
-async def test_read_stream_limit_boundary(size: int, truncated: bool) -> None:
+# Invariant: output of exactly the memory cap is kept whole and NOT reported as
+# capped; one byte over is.
+@pytest.mark.parametrize(("size", "capped"), [(10, False), (11, True)])
+async def test_read_stream_cap_boundary(size: int, capped: bool) -> None:
     # Arrange
     reader = _reader(b"x" * size)
 
     # Act
-    data, was_truncated = await ShellRunner()._read_stream_limited(reader, 10)
+    data, was_capped = await ShellRunner()._read_stream_capped(reader, 10)
 
     # Assert
     assert data == b"x" * min(size, 10)
-    assert was_truncated is truncated
+    assert was_capped is capped
 
 
-# Invariant: output far beyond the limit (many chunks) is still fully drained —
-# so the child never blocks on a full pipe — but only `limit` bytes are kept.
-async def test_read_stream_drains_beyond_limit() -> None:
+# Invariant: output far beyond the cap (many chunks) is still fully drained —
+# so the child never blocks on a full pipe — but only `cap` bytes are kept.
+async def test_read_stream_drains_beyond_cap() -> None:
     # Arrange
-    reader = _reader(b"y" * 5000)
+    reader = _reader(b"y" * 300_000)
 
     # Act
-    data, was_truncated = await ShellRunner()._read_stream_limited(reader, 100)
+    data, was_capped = await ShellRunner()._read_stream_capped(reader, 100)
 
     # Assert
     assert data == b"y" * 100
-    assert was_truncated is True
+    assert was_capped is True
     assert reader.at_eof()
+
+
+# Invariant: the memory cap follows large requested limits (4 bytes per
+# character), so a caller asking for 2M characters is never cut by the 8 MiB
+# default first.
+async def test_capture_cap_scales_with_requested_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange
+    caps: list[int] = []
+    real = ShellRunner._read_stream_capped
+
+    async def spy(self: ShellRunner, stream: Any, cap_bytes: int) -> tuple[bytes, bool]:
+        caps.append(cap_bytes)
+        return await real(self, stream, cap_bytes)
+
+    monkeypatch.setattr(ShellRunner, "_read_stream_capped", spy)
+
+    # Act
+    await ShellRunner().run([PY, "-c", "pass"], max_output_chars=16)
+    await ShellRunner().run([PY, "-c", "pass"], max_output_chars=3_000_000)
+
+    # Assert
+    assert caps == [shell_runner_module.CAPTURE_CAP_BYTES] * 2 + [12_000_000] * 2
 
 
 # Invariant: a large child output does not deadlock the runner (the reader

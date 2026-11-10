@@ -754,7 +754,11 @@ class AnomalyDetectionService:
                 record = getattr(self._backend_health, "record_skipped_revocation", None)
                 if record is not None:
                     record()
-            return False, str(exc)
+            # Redacted here, whole, because every alert that shows it cuts it to 120
+            # characters, and a secret cut in half no longer matches a redaction
+            # pattern. (The log line above gets the full text, which the logging
+            # formatter redacts as a whole.)
+            return False, redact_value(str(exc))
 
     async def _send_alert_to_admins(self, text: str) -> None:
         if self.bot is None:

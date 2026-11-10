@@ -69,8 +69,11 @@ def test_shell_result_args_are_redacted() -> None:
     result = asyncio.run(runner.run(["echo", "TOPSECRET"], sensitive_values=["TOPSECRET"]))
     assert "TOPSECRET" not in " ".join(result.args)
     assert result.args == ("echo", "***")
-    # stdout is documented as verbatim (some callers consume generated keys).
-    assert "TOPSECRET" in result.stdout
+    # stdout is redacted too: a value listed in sensitive_values never comes back.
+    # (Callers that consume a generated secret from stdout, e.g. `wg genkey`, do
+    # not list it.)
+    assert "TOPSECRET" not in result.stdout
+    assert result.stdout == "***"
 
 
 # --- awg_config --------------------------------------------------------------
