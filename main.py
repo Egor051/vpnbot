@@ -53,6 +53,7 @@ async def main() -> None:
     from bot.fsm.ttl_storage import TTLMemoryStorage, fsm_cleanup_loop
     from bot.handlers.admin_bundles import runner as bundle_reconcile_runner
     from services.anomaly_detection import anomaly_detection_loop
+    from services.host_check import host_check_loop
     from services.key_expiry import key_expiry_loop
     from services.offsite_backup import offsite_backup_loop
     from services.relay_health import relay_health_loop
@@ -74,6 +75,7 @@ async def main() -> None:
         server_status_task: asyncio.Task[None] | None = None
         warp_split_feeds_task: asyncio.Task[None] | None = None
         relay_health_task: asyncio.Task[None] | None = None
+        host_check_task: asyncio.Task[None] | None = None
         # Protocols removed from the host: every backend loop below asks this on
         # each pass (a protocol can be removed while the bot runs).
         uninstalled = services.protocol_uninstall.registry if services.protocol_uninstall is not None else None
@@ -188,6 +190,14 @@ async def main() -> None:
                     )
                 else:
                     logger.warning("Relay health monitor not started: XRAY_SNI is empty")
+            # Host invariants: what vpn-bot-host-check.timer (and every deploy) last
+            # wrote to /var/lib/vpn-bot-host-check/last.json; an alert on a change.
+            if settings.host_check_interval > 0 and services.host_check is not None:
+                host_check_task = asyncio.create_task(
+                    host_check_loop(services.host_check, settings.host_check_interval),
+                    name="host-check-alerts",
+                )
+                logger.info("Host check alerts started (interval=%ds)", settings.host_check_interval)
             server_status_task = asyncio.create_task(
                 services.server_status.run(),
                 name="server-status-sampler",
@@ -258,6 +268,9 @@ async def main() -> None:
             if relay_health_task is not None:
                 relay_health_task.cancel()
                 await asyncio.gather(relay_health_task, return_exceptions=True)
+            if host_check_task is not None:
+                host_check_task.cancel()
+                await asyncio.gather(host_check_task, return_exceptions=True)
             if server_status_task is not None:
                 server_status_task.cancel()
                 await asyncio.gather(server_status_task, return_exceptions=True)

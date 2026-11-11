@@ -384,6 +384,11 @@ OUT_OF_REPO_HELPERS=(
   # L4 relay data plane: executed by deploy/relay/vpn-relay.service (ExecStart=),
   # so `required` on every relay host; invisible on a main server.
   "scripts/vpn-relay-apply|/usr/local/sbin/vpn-relay-apply|required|relay"
+  # The host invariants check (docs/host-state.md#effective-state): executed by
+  # vpn-bot-host-check.service (a MANAGED_HOST_FILES unit of BOTH roles), so
+  # `required` on every host of either role — one entry per role.
+  "scripts/vpn-bot-host-check|/usr/local/sbin/vpn-bot-host-check|required"
+  "scripts/vpn-bot-host-check|/usr/local/sbin/vpn-bot-host-check|required|relay"
 )
 # The one helper that is EXECUTED by a systemd unit (warp-routes.service runs it),
 # so a fresh binary only takes effect on restart. Refreshing it triggers a
@@ -425,6 +430,12 @@ HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"
 #     journald   [Journal] section present                  restart systemd-journald
 #     networkd   [Network] section present                  - (next networkd restart)
 #     hook       <candidate> --dry-run exits 0              -
+#     plain      - (a file installed verbatim)              - (nothing is reloaded)
+#     resolved   [Resolve] section present                  try-reload-or-restart
+#                                                           systemd-resolved, then
+#                                                           `getent ahosts` must answer
+#                                                           within RESOLVED_PROBE_WAIT s,
+#                                                           or the deploy rolls back
 #     ssh        sshd -t on sshd_config + the candidate;    daemon-reload + restart
 #                socket drop-in: a ListenStream port        ssh.socket (ListenStream) /
 #                A host copy that DIFFERS is never           reload ssh; then ssh must be
@@ -433,7 +444,9 @@ HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"
 #     absent     RETIRED: the deploy guarantees the file is gone. src/mode/owner are
 #                "-". Phase 1 FAILS if cron, a unit (/etc or /usr/lib, drop-ins too)
 #                or .env still names the path or its basename; Phase 2 stages it,
-#                `disable --now`s a unit file, then removes it.
+#                `disable --now`s a unit file, then removes it. A retired
+#                sshd_config.d file is followed by the same sshd -t + reload + port
+#                check as an ssh change (a running sshd keeps the old setting).
 #   role     main | relay — an entry is invisible on a host of the other role.
 #   opts     optional, ";"-separated:
 #     gate=<PROTO>    the entry exists only while <PROTO>_ON=yes (resolve_backend_units,
@@ -445,6 +458,11 @@ HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"
 # Files are installed VERBATIM: keep the repo copy byte-identical to the host copy you
 # mean, or the first deploy reinstalls it. Completeness and the byte-for-byte pins of
 # the ssh and unchanged sysctl files: tests/test_deploy_host_state.py.
+#
+# Byte-for-byte on the host is not "in effect": a drop-in another file outranks, a
+# shadowed unit or a live value nobody applied is invisible to this registry. That is
+# scripts/vpn-bot-host-check (HOST INVARIANTS below; docs/host-state.md#effective-state)
+# — it reads THIS array, so every entry added here is checked for effect as well.
 MANAGED_HOST_FILES=(
   # --- main ------------------------------------------------------------------
   "deploy/host/logrotate/xray|/etc/logrotate.d/xray|0644|root:root|logrotate|main"
@@ -482,8 +500,26 @@ MANAGED_HOST_FILES=(
   # Its job is deploy/vpn-bot-decoy-freshen.sh now. NOT site-freshen.py: that is the
   # deployment-local decoy rewriter (deploy/host/known-unmanaged.list).
   "-|/usr/local/sbin/site-freshen.sh|-|-|absent|main"
+  # The host invariants check and its schedule: 5 min after boot, then daily.
+  "deploy/host/systemd/vpn-bot-host-check.service|/etc/systemd/system/vpn-bot-host-check.service|0644|root:root|unit|main"
+  "deploy/host/systemd/vpn-bot-host-check.timer|/etc/systemd/system/vpn-bot-host-check.timer|0644|root:root|unit|main"
+  # cloud-init stays off: on a reboot it rewrote sshd_config.d and sudoers.d. Its two
+  # files are retired so they cannot come back (both were removed by hand first).
+  "deploy/host/cloud/cloud-init.disabled|/etc/cloud/cloud-init.disabled|0644|root:root|plain|main"
+  "-|/etc/ssh/sshd_config.d/50-cloud-init.conf|-|-|absent|main"
+  "-|/etc/sudoers.d/90-cloud-init-users|-|-|absent|main"
+  # DNS of the main server (docs/host-state.md, "DNS on the main server"): a plain
+  # resolv.conf (byte-identical to the host's) and resolved's upstreams as a drop-in.
+  # /etc/systemd/resolved.conf itself is a dpkg conffile: never written (reported).
+  "deploy/host/dns/resolv.conf|/etc/resolv.conf|0644|root:root|plain|main"
+  "deploy/host/resolved/10-vpn-bot.conf|/etc/systemd/resolved.conf.d/10-vpn-bot.conf|0644|root:root|resolved|main"
   # --- relay -----------------------------------------------------------------
   "deploy/host/ssh/00-vpnrelay-keyonly.conf|/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf|0644|root:root|ssh|relay"
+  "deploy/host/systemd/vpn-bot-host-check.service|/etc/systemd/system/vpn-bot-host-check.service|0644|root:root|unit|relay"
+  "deploy/host/systemd/vpn-bot-host-check.timer|/etc/systemd/system/vpn-bot-host-check.timer|0644|root:root|unit|relay"
+  "deploy/host/cloud/cloud-init.disabled|/etc/cloud/cloud-init.disabled|0644|root:root|plain|relay"
+  "-|/etc/ssh/sshd_config.d/50-cloud-init.conf|-|-|absent|relay"
+  "-|/etc/sudoers.d/90-cloud-init-users|-|-|absent|relay"
 )
 # Host-file knobs. The paths are overridable for the DEPLOY_SELFTEST suites only.
 ALLOW_SSH_CHANGE="${ALLOW_SSH_CHANGE:-0}"      # see the ENVIRONMENT KNOBS block
@@ -505,7 +541,33 @@ UNMANAGED_SCAN_DIRS=(
 # recursively, plus ${ENV_FILE}. /var/spool/cron covers root's crontab.
 ABSENT_REF_PATHS=(/etc/crontab /etc/cron.d /var/spool/cron /etc/systemd/system /usr/lib/systemd/system)
 # dpkg conffiles the report says are locally modified. Never written by the deploy.
-CONFFILE_REPORT_PATHS=(/etc/systemd/journald.conf)
+CONFFILE_REPORT_PATHS=(/etc/systemd/journald.conf /etc/systemd/resolved.conf)
+# Class resolved: after the drop-in changed, `getent ahosts <host>` must answer within
+# this many seconds (retried once a second), or the deploy rolls back.
+RESOLVED_UNIT="${RESOLVED_UNIT:-systemd-resolved}"
+RESOLVED_PROBE_HOST="${RESOLVED_PROBE_HOST:-github.com}"
+RESOLVED_PROBE_WAIT="${RESOLVED_PROBE_WAIT:-10}"
+# --------------------------------------------------------------------------- #
+# HOST INVARIANTS — scripts/vpn-bot-host-check (docs/host-state.md#effective-state)
+# --------------------------------------------------------------------------- #
+# Phase 1 runs the checkout's copy with --pre-install: the host judged as Phase 2 is
+# about to leave it (every repo file in place, every retired file gone), read-only.
+#   BEATEN, MISMATCH                                           -> FAIL (nothing changed)
+#   LATENT on an sshd auth key (HOST_CHECK_SSHD_AUTH_KEYS) not
+#     in deploy/host/accepted-overrides.list                   -> FAIL
+#   any other LATENT, WARN                                     -> WARN
+# PHASE1_ONLY=1 reports a FAIL instead of stopping, like the other drift gates. There
+# is NO knob past a FAIL: fix the host (or the repo); a LATENT that is meant to stay
+# goes into accepted-overrides.list — the one sanctioned way to accept it.
+# Phase 2 runs it again after the host files and the unit are installed, before the
+# bot starts, and writes HOST_CHECK_STATE; a BEATEN or MISMATCH rolls back (rollback_now,
+# the ssh gate's path). Both reports carry the rows. The paths are overridable for the
+# DEPLOY_SELFTEST suites only.
+HOST_CHECK_BIN="${HOST_CHECK_BIN:-}"     # empty = <checkout>/scripts/vpn-bot-host-check
+HOST_CHECK_ROOT="${HOST_CHECK_ROOT:-}"   # empty = the real host (tests: a fixture root)
+HOST_CHECK_STATE="${HOST_CHECK_STATE:-/var/lib/vpn-bot-host-check/last.json}"
+HOST_CHECK_SSHD_AUTH_KEYS=(passwordauthentication kbdinteractiveauthentication permitrootlogin
+                           permitemptypasswords pubkeyauthentication authenticationmethods)
 # Test fence. deploy.sh runs the pytest suite AS ROOT on the production host in
 # Phase 1, so under DEPLOY_SELFTEST=1 every host-file writer refuses a path outside
 # this directory: a test that forgot to override MANAGED_HOST_FILES fails loudly
@@ -605,6 +667,10 @@ declare -A HOST_STAGED=()
 declare -a HOST_STAGED_ORDER=()
 declare -a MH_CHANGED=() MH_UNITS_TOUCHED=() MH_ENABLED_BY_US=() MH_SYSCTL_ORDER=() MH_CREATED_DIRS=()
 declare -A MH_UNIT_PRE_ENABLED=() MH_UNIT_PRE_ACTIVE=() MH_SYSCTL_PRE=()
+# Host invariants: the rows of the last scripts/vpn-bot-host-check run, its SUMMARY
+# line, which phase ran it and its exit code (empty = not run).
+declare -a HC_ROWS=()
+HC_SUMMARY=""; HC_PHASE=""; HC_RC=""
 MTPROXY_DROPIN_FOUND=""
 # Modular-protocol matrix (parallel arrays): label, gate var, gate on (yes/no), unit.
 declare -a PROTO_LABEL=() PROTO_GATE=() PROTO_ON=() PROTO_UNIT=()
@@ -1227,6 +1293,8 @@ mh_validate() {
     networkd)  mh_validate_section "$2" Network ;;
     hook)      mh_validate_hook "$2" "$3" ;;
     ssh)       mh_validate_ssh "$2" "$3" ;;
+    plain)     echo "plain file — installed verbatim, nothing to validate" ;;
+    resolved)  mh_validate_section "$2" Resolve ;;
     *)         echo "unknown class '${1}'"; return 1 ;;
   esac
 }
@@ -1285,6 +1353,8 @@ mh_action_text() {   # $1 class, $2 state, $3 dst
         unit)     echo "Phase 2 ${verb}, then daemon-reload$([[ "$3" == *.timer ]] && printf ' + enable --now')" ;;
         journald) echo "Phase 2 ${verb}, then restarts systemd-journald" ;;
         networkd) echo "Phase 2 ${verb} (effective at the next systemd-networkd restart)" ;;
+        plain)    echo "Phase 2 ${verb} (nothing is reloaded)" ;;
+        resolved) echo "Phase 2 ${verb}, then try-reload-or-restart ${RESOLVED_UNIT} + getent ahosts ${RESOLVED_PROBE_HOST}" ;;
         *)        echo "Phase 2 ${verb}" ;;
       esac ;;
     *)                  echo "$2" ;;
@@ -1614,6 +1684,35 @@ mh_note_unit() {
 
 mh_is_unit_file() { [[ "$1" == "${SYSTEMD_UNIT_DIR}/"* && "$1" =~ \.(service|timer|socket|path)$ ]]; }
 
+# A drop-in of the sshd_config next to SSHD_CONFIG (a retired one needs an ssh reload).
+mh_is_sshd_dropin() { [[ "$1" == "$(dirname "$SSHD_CONFIG")/sshd_config.d/"* ]]; }
+
+# Class resolved: does the host resolve names after the drop-in changed? Retried once
+# a second, within RESOLVED_PROBE_WAIT seconds of WALL time: against DNS servers that
+# do not answer, one getent blocks through the resolver's own retries (timeout x
+# attempts x servers), so every lookup runs under `timeout` with what is left of the
+# deadline, and the attempts are counted too. Prints one line either way.
+resolved_lookup_status() {
+  local i left start="$SECONDS"
+  local -a bound=()
+  for (( i = 0; i <= RESOLVED_PROBE_WAIT; i++ )); do
+    left=$(( RESOLVED_PROBE_WAIT - (SECONDS - start) ))
+    if (( left <= 0 )); then
+      (( i == 0 )) || break
+      left=1   # RESOLVED_PROBE_WAIT=0: one bounded attempt, as before
+    fi
+    bound=()
+    if command -v timeout >/dev/null 2>&1; then bound=(timeout --kill-after=1 "$left"); fi
+    if "${bound[@]}" getent ahosts "$RESOLVED_PROBE_HOST" >/dev/null 2>&1; then
+      echo "getent ahosts ${RESOLVED_PROBE_HOST}: resolves (after $(( SECONDS - start ))s)"
+      return 0
+    fi
+    if (( i < RESOLVED_PROBE_WAIT )); then sleep 1; fi
+  done
+  echo "getent ahosts ${RESOLVED_PROBE_HOST} found nothing within ${RESOLVED_PROBE_WAIT}s"
+  return 1
+}
+
 # Does <port> answer with an SSH banner on one of the addresses `ss -tln` ($2) shows
 # it listening on? A listener alone proves nothing under socket activation: systemd
 # holds the socket, and an sshd that was started with the OLD sockets never accepts
@@ -1731,7 +1830,7 @@ mh_note_sysctl() {
 # Traps are armed: each mutation routes its own failure through rollback_now (ERR
 # is not inherited by functions).
 install_managed_host_files() {
-  local entry row class dst how dir t u out units=0 journald=0 msg
+  local entry row class dst how dir t u out units=0 journald=0 resolved=0 msg
   local -a timers=() sysctl_files=() ssh_changed=() bad=()
   log "host files (MANAGED_HOST_FILES, role ${NODE_ROLE:-main}): installing / repairing / retiring from the checkout"
   for entry in "${MANAGED_HOST_FILES[@]}"; do
@@ -1799,12 +1898,17 @@ install_managed_host_files() {
         if [[ "$dst" == *.timer && "$how" != "removed-legacy" ]]; then timers+=("$dst"); fi
         u="$(dropin_unit "$dst")"
         if [[ -n "$u" ]]; then log "  ${dst}: takes effect at the next restart of ${u} (not restarted by the deploy)"; fi ;;
-      absent)    if mh_is_unit_file "$dst"; then units=1; fi ;;
+      absent)
+        if mh_is_unit_file "$dst"; then units=1; fi
+        # A running sshd keeps a removed drop-in's setting until it is reloaded.
+        if mh_is_sshd_dropin "$dst"; then ssh_changed+=("$dst"); fi ;;
       sysctl)    sysctl_files+=("$dst") ;;
       journald)  journald=1 ;;
+      resolved)  resolved=1 ;;
       ssh)       ssh_changed+=("$dst") ;;
       networkd)  log "  ${dst}: takes effect at the next systemd-networkd restart (not restarted by the deploy)" ;;
       logrotate) log "  ${dst}: logrotate reads it on its next run" ;;
+      plain)     log "  ${dst}: installed verbatim (nothing reloaded)" ;;
     esac
   done
   if (( units )); then
@@ -1830,6 +1934,13 @@ install_managed_host_files() {
   if (( journald )); then
     systemctl restart systemd-journald || rollback_now "systemctl restart systemd-journald failed after the drop-in change"
     log "  systemd-journald restarted (drop-in changed)"
+  fi
+  if (( resolved )); then
+    systemctl try-reload-or-restart "$RESOLVED_UNIT" \
+      || rollback_now "systemctl try-reload-or-restart ${RESOLVED_UNIT} failed after the drop-in change"
+    log "  ${RESOLVED_UNIT} reloaded (drop-in changed)"
+    msg="$(resolved_lookup_status)" || rollback_now "name resolution fails after the ${RESOLVED_UNIT} drop-in change: ${msg}"
+    log "  ${msg}"
   fi
   if (( ${#ssh_changed[@]} > 0 )); then mh_ssh_apply "${ssh_changed[@]}"; fi
 
@@ -1864,7 +1975,7 @@ host_files_summary() {
 #      every sysctl key applied, journald, and ssh — sshd -t on the RESTORED config
 #      first; if that fails ssh is NOT reloaded or restarted (loud FAIL instead).
 host_files_rollback() {
-  local u row class dst how reload=0 journald=0 sock=0 conf=0 k now out rc d
+  local u row class dst how reload=0 journald=0 resolved=0 sock=0 conf=0 k now out rc d
   for u in "${MH_ENABLED_BY_US[@]}"; do
     systemctl disable --now --quiet "$u" >/dev/null 2>&1
     echo "disable --now ${u} (enabled by this deploy): rc=$?"
@@ -1876,8 +1987,11 @@ host_files_rollback() {
     [[ "$how" == "meta" ]] && continue
     case "$class" in
       unit) reload=1 ;;
-      absent) if mh_is_unit_file "$dst"; then reload=1; fi ;;
+      absent)
+        if mh_is_unit_file "$dst"; then reload=1; fi
+        if mh_is_sshd_dropin "$dst"; then conf=1; fi ;;
       journald) journald=1 ;;
+      resolved) resolved=1 ;;
       ssh) if [[ "$dst" == *.socket.d/* ]]; then sock=1; reload=1; else conf=1; fi ;;
     esac
   done
@@ -1905,6 +2019,9 @@ host_files_rollback() {
     fi
   done
   if (( journald )); then systemctl restart systemd-journald; echo "restart systemd-journald (drop-in restored): rc=$?"; fi
+  if (( resolved )); then
+    systemctl try-reload-or-restart "$RESOLVED_UNIT"; echo "try-reload-or-restart ${RESOLVED_UNIT} (drop-in restored): rc=$?"
+  fi
   if (( sock || conf )); then
     out="$(sshd -t -f "$SSHD_CONFIG" 2>&1)" && rc=0 || rc=$?
     if (( rc != 0 )); then
@@ -1931,6 +2048,187 @@ host_files_rollback() {
   for d in "${MH_CREATED_DIRS[@]}"; do
     if [[ -d "$d" && -z "$(ls -A "$d" 2>/dev/null)" ]]; then rmdir "$d"; echo "remove ${d} (created by this deploy, empty again): rc=$?"; fi
   done
+}
+
+# --------------------------------------------------------------------------- #
+# Host invariants — scripts/vpn-bot-host-check (see HOST INVARIANTS at the top)
+# --------------------------------------------------------------------------- #
+# This role's MANAGED_HOST_FILES entries with their gates evaluated HERE, the way
+# every other host-file step sees them: open entries and retired ones.
+hc_registry_lines() {
+  local entry
+  for entry in "${MANAGED_HOST_FILES[@]}"; do
+    mh_parse "$entry"
+    [[ "$MH_ROLE" == "${NODE_ROLE:-main}" ]] || continue
+    if [[ "$MH_CLASS" != "absent" ]] && ! mh_gate_open "$MH_OPTS"; then continue; fi
+    printf '%s\n' "$entry"
+  done
+}
+
+# Run the check from checkout <root>; phase1 = --pre-install, nothing written;
+# phase2 = the installed host, HOST_CHECK_STATE written. Fills HC_ROWS, HC_SUMMARY,
+# HC_RC (2+ = it could not judge the host, 4 = only the state file failed). The output
+# is read line by line as data: never evaluated.
+host_invariants_run() {
+  local root="${1%/}" phase="$2" bin reg err out rc line
+  local -a args=()
+  HC_ROWS=(); HC_SUMMARY=""; HC_PHASE="$phase"; HC_RC=""
+  bin="${HOST_CHECK_BIN:-${root}/scripts/vpn-bot-host-check}"
+  # A `case`, not an `if` on DEPLOY_SELFTEST: that line marks the seam for the tests.
+  case "${DEPLOY_SELFTEST:-0}" in
+    1)
+      [[ -n "$HOST_CHECK_ROOT" ]] || die "DEPLOY_SELFTEST: HOST_CHECK_ROOT is empty — the host check would read the real host"
+      if [[ "$phase" == phase2 ]]; then mh_selftest_fence "$HOST_CHECK_STATE"; fi ;;
+  esac
+  reg="$(mktemp)" || { HC_RC=3; return 0; }
+  err="$(mktemp)" || { rm -f "$reg"; HC_RC=3; return 0; }
+  hc_registry_lines > "$reg"
+  args=(--repo "$root" --role "${NODE_ROLE:-main}" --registry "$reg" --env "$ENV_FILE")
+  if [[ -n "$HOST_CHECK_ROOT" ]]; then args+=(--root "$HOST_CHECK_ROOT"); fi
+  if [[ "$phase" == phase1 ]]; then args+=(--pre-install --no-state); else args+=(--state "$HOST_CHECK_STATE"); fi
+  # Through bash, like the relay helper in Phase 1: a noexec worktree cannot stop it.
+  out="$(bash "$bin" "${args[@]}" 2>"$err")" && rc=0 || rc=$?
+  while IFS= read -r line; do
+    if [[ -n "$line" ]]; then warn "  host check: ${line}"; fi
+  done < "$err"
+  rm -f "$reg" "$err"
+  while IFS= read -r line; do
+    case "$line" in
+      SUMMARY\|*) HC_SUMMARY="$line" ;;
+      BEATEN\|*|MISMATCH\|*|LATENT\|*|ACCEPTED\|*|WARN\|*|PENDING\|*|INFO\|*|OK\|*) HC_ROWS+=("$line") ;;
+    esac
+  done <<< "$out"
+  HC_RC="$rc"
+  # Exit 0/1 without a SUMMARY line means it did not get to the end.
+  if [[ -z "$HC_SUMMARY" ]] && (( rc < 2 )); then HC_RC=3; fi
+  return 0
+}
+
+# FAIL | WARN | INFO | OK for one row. FAIL in Phase 1: BEATEN, MISMATCH, and a
+# LATENT on an sshd auth key (an accepted one arrives as ACCEPTED). In Phase 2 a
+# LATENT never fails: only BEATEN/MISMATCH roll back.
+hc_severity() {
+  local v fam key k
+  IFS='|' read -r v fam key _ <<< "$1"
+  case "$v" in
+    BEATEN|MISMATCH) echo FAIL ;;
+    LATENT)
+      if [[ "$HC_PHASE" == phase1 && "$fam" == sshd ]]; then
+        for k in "${HOST_CHECK_SSHD_AUTH_KEYS[@]}"; do
+          if [[ "$key" == "$k" ]]; then echo FAIL; return 0; fi
+        done
+      fi
+      echo WARN ;;
+    WARN) echo WARN ;;
+    OK)   echo OK ;;
+    *)    echo INFO ;;
+  esac
+}
+
+hc_row_text() {   # $1 severity, $2 row
+  local v fam key path text
+  IFS='|' read -r v fam key path text <<< "$2"
+  printf '%-4s %-8s %s %s — %s' "$1" "$v" "$fam" "$key" "$text"
+  if [[ -n "$path" && "$path" != "-" && "$text" != *"$path"* ]]; then printf ' [%s]' "$path"; fi
+}
+
+# "beaten 0, mismatch 0, latent 2 (accepted 1), warn 3, pending 1" from HC_SUMMARY.
+hc_summary_text() {
+  local f k
+  local -A n=()
+  local -a parts=()
+  if [[ -z "$HC_SUMMARY" ]]; then
+    echo "the check could not run (exit ${HC_RC:-?})"; return 0
+  fi
+  IFS='|' read -r -a parts <<< "$HC_SUMMARY"
+  for f in "${parts[@]}"; do
+    k="${f%%=*}"
+    if [[ "$f" == *=* ]]; then n["$k"]="${f#*=}"; fi
+  done
+  printf 'beaten %s, mismatch %s, latent %s (accepted %s), warn %s' \
+    "${n[beaten]:-?}" "${n[mismatch]:-?}" "${n[latent]:-?}" "${n[accepted]:-?}" "${n[warn]:-?}"
+  if [[ "${n[pending]:-0}" != "0" ]]; then printf ', pending %s (checked again after the install)' "${n[pending]}"; fi
+  if [[ "${HC_RC:-}" == "4" ]]; then printf '; %s NOT written' "$HOST_CHECK_STATE"; fi
+  printf '\n'
+}
+
+# Phase 1, both roles, read-only. Stops HERE — before any mutation — on a FAIL row,
+# unless PHASE1_ONLY=1 (reported, not fatal in inspection mode).
+host_invariants_phase1() {
+  local row sev n_fail=0
+  log "host invariants (scripts/vpn-bot-host-check --pre-install, role ${NODE_ROLE:-main}): the host as Phase 2 would leave it"
+  host_invariants_run "$1" phase1
+  if (( HC_RC >= 2 )); then
+    if [[ "$PHASE1_ONLY" == "1" ]]; then
+      warn "host invariants: the check could not run (exit ${HC_RC}) — a real deploy stops here (PHASE1_ONLY=1: not fatal)"
+      return 0
+    fi
+    die "host invariants: the check could not run (exit ${HC_RC}, see above) — nothing was changed"
+  fi
+  for row in "${HC_ROWS[@]}"; do
+    sev="$(hc_severity "$row")"
+    case "$sev" in
+      OK)   ;;
+      FAIL) n_fail=$(( n_fail + 1 )); warn "  $(hc_row_text FAIL "$row")" ;;
+      WARN) warn "  $(hc_row_text WARN "$row")" ;;
+      *)    log "  $(hc_row_text INFO "$row")" ;;
+    esac
+  done
+  log "host invariants: $(hc_summary_text)"
+  (( n_fail > 0 )) || return 0
+  warn "host invariants: ${n_fail} FAIL finding(s) above — BEATEN, MISMATCH, or LATENT on an sshd auth key"
+  warn "  a repo value that is not in effect is not deployed: fix the host (or the repo) and re-run;"
+  warn "  a LATENT that is meant to stay goes into deploy/host/accepted-overrides.list (there is no knob)"
+  if [[ "$PHASE1_ONLY" == "1" ]]; then
+    warn "PHASE1_ONLY=1: reported, not fatal in inspection mode — a real deploy stops here"
+  else
+    die "host invariants: ${n_fail} fatal finding(s) — nothing was changed"
+  fi
+}
+
+# Phase 2, both roles, after the host files (and the role's unit) are installed. A
+# BEATEN or MISMATCH means the repo's host state is not in effect after this very
+# deploy: rollback_now, the path the ssh gate takes. Writes HOST_CHECK_STATE.
+host_invariants_phase2() {
+  local row v
+  local -a fatal=()
+  log "host invariants after the install (scripts/vpn-bot-host-check, role ${NODE_ROLE:-main})"
+  host_invariants_run "$1" phase2
+  if (( HC_RC >= 2 && HC_RC != 4 )); then
+    rollback_now "host invariants: the check could not run after the install (exit ${HC_RC})"
+  fi
+  for row in "${HC_ROWS[@]}"; do
+    v="${row%%|*}"
+    case "$v" in
+      BEATEN|MISMATCH) fatal+=("$row"); warn "  $(hc_row_text FAIL "$row")" ;;
+      LATENT|WARN)     warn "  $(hc_row_text WARN "$row")" ;;
+      ACCEPTED|INFO|PENDING) log "  $(hc_row_text INFO "$row")" ;;
+    esac
+  done
+  log "host invariants: $(hc_summary_text)"
+  if (( HC_RC == 4 )); then warn "host invariants: ${HOST_CHECK_STATE} could not be written — the rows above are the verdict"; fi
+  if (( ${#fatal[@]} > 0 )); then
+    rollback_now "host invariants after the install: ${#fatal[@]} BEATEN/MISMATCH finding(s) (above) — the repo's host state is not in effect"
+  fi
+}
+
+# The rows a report carries: every one but OK, with its severity for this phase.
+host_invariants_report_rows() {
+  local row sev
+  for row in "${HC_ROWS[@]}"; do
+    sev="$(hc_severity "$row")"
+    [[ "$sev" == OK ]] && continue
+    printf '    %s\n' "$(hc_row_text "$sev" "$row")"
+  done
+}
+
+# PHASE1_ONLY report section, both roles.
+host_invariants_report_block() {
+  printf '\n  --- Host invariants (scripts/vpn-bot-host-check, role %s — docs/host-state.md#effective-state) ---\n' "${NODE_ROLE:-main}"
+  if [[ -z "$HC_RC" ]]; then printf '    not run\n'; return 0; fi
+  printf '    %s\n' "$(hc_summary_text)"
+  host_invariants_report_rows
+  printf '    FAIL = a real deploy stops here; WARN = reported; PENDING = Phase 2 checks it after the install\n'
 }
 
 # --------------------------------------------------------------------------- #
@@ -2236,6 +2534,7 @@ rotate_backups() {
   local f
   # `|| true`: on a fresh host the glob matches nothing and `ls` exits non-zero;
   # with `set -o pipefail` + `set -e` that would otherwise abort the whole deploy.
+  # shellcheck disable=SC2012  # our own backup-<tag>-<ts>.tar.gz names; ls -t is the sort
   ls -1t "$BACKUP_DIR"/backup-*.tar.gz 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | while IFS= read -r f; do
     rm -f "$f"
   done || true
@@ -2610,6 +2909,7 @@ restart_sidecar_units() {
         warn "already restarted onto the new code, and the rollback does not revert them: ${restarted[*]} — restart them by hand once the tree is back on ${PREV_SHA}"
       fi
       rollback_now "${u} did not come back from the deploy restart: active before, ${post} after ${SIDECAR_ACTIVE_WAIT}s (systemctl restart rc=${rc}). It runs the same code as vpn-bot, so this is a regression caused by this deploy"
+      # shellcheck disable=SC2317  # reached when a test replaces rollback_now
       return 1
     fi
     restarted+=("$u")
@@ -3384,8 +3684,10 @@ relay_phase1() {
     done
   fi
 
-  # Host files of the relay role (MANAGED_HOST_FILES), the same gates as on main.
+  # Host files of the relay role (MANAGED_HOST_FILES), the same gates as on main,
+  # then whether they would be in effect (host invariants).
   host_state_phase1 "$WT"
+  host_invariants_phase1 "$WT"
 
   # The live relay through the checkout's own `check` — informational, never a
   # gate: absent/different/forwarding-off is exactly what Phase 2 fixes. It is the
@@ -3447,6 +3749,7 @@ relay_phase1_report() {
   fi
 
   host_state_report_block
+  host_invariants_report_block
 
   printf '\n  --- Live relay vs the render (checkout: vpn-relay-apply check) ---\n'
   printf '%s\n' "$RELAY_LIVE_OUT" | sed 's/^/    /'
@@ -3460,6 +3763,7 @@ relay_phase1_report() {
   printf '\n===================================================================\n'
 }
 
+# shellcheck disable=SC2034  # PHASE is state for the trap handlers, like arm_rollback's
 arm_relay_rollback() { PHASE="armed"; trap 'relay_rollback' ERR INT TERM HUP; }
 
 # One pre-deploy sysctl back, as a rollback report line. The value is read back:
@@ -3640,6 +3944,9 @@ relay_phase2() {
   printf '%s\n' "$out" | sed 's/^/    /'
   (( rc == 0 )) || rollback_now "vpn-relay-apply check failed after the restart (exit ${rc}: $(relay_live_rc_text "$rc"))"
 
+  # Is the relay's host state in effect now? A BEATEN/MISMATCH rolls back.
+  host_invariants_phase2 "$APP_DIR"
+
   disarm
   # disarm() is a function, and bash hands a function's caller back the ERR trap it
   # had on entry (no errtrace) — so it cannot clear the trap armed above for THIS
@@ -3659,10 +3966,11 @@ relay_phase2() {
   unit             : ${RELAY_UNIT} active, enabled (before: active=${RELAY_PRE_ACTIVE:-unknown}, installed copy ${RELAY_UNIT_STATE:-unknown})
   verify           : vpn-relay-apply check OK
   host files       : $(host_files_summary)
+  host invariants  : $(hc_summary_text)
   ${RELAY_LEGACY_NFT} : ${legacy_before}$( [[ "$legacy_before" == "present" ]] && printf ' -> renamed to .pre-repo.<ts>')
-=============================
-
 EOF
+  host_invariants_report_rows
+  printf '=============================\n\n'
 }
 
 # The whole relay deploy: Phase 1 (read-only), then Phase 2 unless PHASE1_ONLY.
@@ -3698,6 +4006,7 @@ relay_deploy() {
 # =========================================================================== #
 # Test seam: let the self-test harness source every definition above without
 # running a real deploy. Never set DEPLOY_SELFTEST in production.
+# shellcheck disable=SC2317  # `exit` runs when the file is executed, `return` when sourced
 if [[ "${DEPLOY_SELFTEST:-0}" == "1" ]]; then return 0 2>/dev/null || exit 0; fi
 
 [[ "${EUID}" -eq 0 ]] || die "run as root (recommended entry point: sudo bash scripts/redeploy.sh)"
@@ -3964,6 +4273,10 @@ fi
 # Then the informational scans: files nothing accounts for, modified dpkg conffiles.
 host_state_phase1 "$WT"
 
+# Host invariants: would the repo's host state be IN EFFECT once Phase 2 is done? A
+# BEATEN/MISMATCH, or a LATENT on an sshd auth key nobody accepted, stops here.
+host_invariants_phase1 "$WT"
+
 # systemd-networkd foreign-rule guard (informational, never fatal). Keeps the WARP
 # `ip rule`s alive across a networkd (re)start. The drop-in itself is a
 # MANAGED_HOST_FILES entry (class networkd) now, so Phase 2 installs it; this only
@@ -4079,6 +4392,7 @@ phase1_report() {
   # --- Out-of-repo helper drift: closed automatically by Phase 2 (no gate) ---
   printf '\n  --- Out-of-repo helper drift (/usr/local/sbin copies vs origin/main) ---\n'
   if [[ ${#helper_drift[@]} -gt 0 ]]; then
+    # shellcheck disable=SC2016  # the backticks are literal text in the report
     printf '    %d helper(s) differ from origin/main (or are a missing `required` helper) — a REAL deploy refreshes them itself:\n' "${#helper_drift[@]}"
     local hrow hbase hsrc hdst
     for hrow in "${helper_drift[@]}"; do
@@ -4093,6 +4407,8 @@ phase1_report() {
 
   # --- Host files as code (MANAGED_HOST_FILES) + files nothing accounts for ---
   host_state_report_block
+  # --- Host invariants: is it in effect (scripts/vpn-bot-host-check) ---
+  host_invariants_report_block
 
   # --- UNIT_SET: per-unit class + LoadState/ActiveState + is-enabled ---
   printf '\n  --- UNIT_SET (watched for an active-state regression across a deploy) ---\n'
@@ -4397,6 +4713,11 @@ log "installing ${BOT_UNIT} from deploy/vpn-bot.service (verbatim)"
 install -m0644 "deploy/vpn-bot.service" "$SYSTEM_UNIT"
 systemctl daemon-reload
 
+# Host invariants on the host as this deploy left it, before the bot starts: a repo
+# value that is not in effect (BEATEN/MISMATCH) rolls back. Writes the state file the
+# bot alerts from.
+host_invariants_phase2 "$APP_DIR"
+
 # Start + health poll (replaces a blind sleep) ------------------------------
 DEPLOY_START="$(date '+%Y-%m-%d %H:%M:%S')"
 # Byte offset of bot.log BEFORE start, so the post-deploy scan reads only what
@@ -4543,7 +4864,9 @@ cat <<EOF
   units skipped    : ${skipped[*]:-none}
   removed protocols: $(uninstalled_protocols | sed 's/^$/none/')
   host files       : $(host_files_summary)
+  host invariants  : $(hc_summary_text)
 EOF
+host_invariants_report_rows
 # One line per sidecar (restarted / skipped), so a half-deployed host is visible
 # in the same report that says DEPLOY OK. Not foldable into the heredoc above:
 # the list is per-host and variable-length.

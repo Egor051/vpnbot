@@ -626,6 +626,21 @@ STRINGS: dict[str, str] = {
         "🟢 <b>Relay «{label}» ({name}) снова доступен</b>\n"
         "Проверка {host}:{port} снова проходит."
     ),
+    # ── инварианты хоста (scripts/vpn-bot-host-check, docs/host-state.ru.md) ────
+    "host_check_alert": (
+        "🛑 <b>Состояние хоста: на сервере {role} изменения</b>\n"
+        "Проверка {at}: BEATEN/MISMATCH {fatal}, LATENT {latent}. Новое:\n"
+        "{lines}\n\n"
+        "BEATEN/MISMATCH — значение из репозитория не действует; следующий деплой остановится в Phase 1. "
+        "LATENT — сейчас верно, но перевернётся, если убрать файл-победитель. "
+        "Строки: /var/lib/vpn-bot-host-check/last.json, docs/host-state.ru.md."
+    ),
+    "host_check_alert_line": "• <b>{verdict}</b> {family} <code>{setting}</code> — {text}",
+    "host_check_alert_more": "• … и ещё {count} (см. last.json)",
+    "host_check_cleared": (
+        "✅ <b>Состояние хоста: сервер {role} снова в норме</b>\n"
+        "Проверка {at}: BEATEN/MISMATCH больше нет."
+    ),
     # ── relay panel (admin → «🛰 Управлять relay») ───────────────────────────
     "btn_relays": "🛰 Управлять relay",
     "relays_title": "<b>🛰 Relay</b>",

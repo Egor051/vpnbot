@@ -615,6 +615,21 @@ STRINGS: dict[str, str] = {
         "🟢 <b>Relay «{label}» ({name}) is back</b>\n"
         "The check of {host}:{port} passes again."
     ),
+    # ── host invariants (scripts/vpn-bot-host-check, docs/host-state.md) ────────
+    "host_check_alert": (
+        "🛑 <b>Host state: the {role} server changed</b>\n"
+        "Check of {at}: BEATEN/MISMATCH {fatal}, LATENT {latent}. New:\n"
+        "{lines}\n\n"
+        "BEATEN/MISMATCH — a value the repo sets is not in effect; the next deploy stops in Phase 1. "
+        "LATENT — right now, but it flips once the winning file is gone. "
+        "Rows: /var/lib/vpn-bot-host-check/last.json, docs/host-state.md."
+    ),
+    "host_check_alert_line": "• <b>{verdict}</b> {family} <code>{setting}</code> — {text}",
+    "host_check_alert_more": "• … and {count} more (see last.json)",
+    "host_check_cleared": (
+        "✅ <b>Host state: the {role} server is back in line</b>\n"
+        "Check of {at}: no BEATEN/MISMATCH any more."
+    ),
     # ── relay panel (admin → «🛰 Manage relays») ─────────────────────────────
     "btn_relays": "🛰 Manage relays",
     "relays_title": "<b>🛰 Relays</b>",

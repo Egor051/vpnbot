@@ -52,15 +52,22 @@ bundle also carries state that is not a deployed file and so is not listed here:
 | `/etc/sysctl.d/99-vpn-forwarding.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | the one `net.ipv4.ip_forward=1` |
 | `/etc/systemd/journald.conf.d/10-vpn-bot.conf` | repo-managed (`journald`) | deploy.sh | `/etc/systemd` | `SystemMaxUse=500M`; replaces a hand edit of `journald.conf` |
 | `/etc/systemd/journald.conf` | dpkg conffile | the `systemd` package | `/etc/systemd` | never written by the deploy; Phase 1 reports it **MODIFIED** while the old hand edit is still in it — restore the stock file by hand once the drop-in is live |
+| `/etc/systemd/resolved.conf.d/10-vpn-bot.conf` | repo-managed (`resolved`) | deploy.sh | `/etc/systemd` | `DNS=1.1.1.1 8.8.8.8`, `FallbackDNS=1.0.0.1 8.8.4.4`; replaces a hand edit of `resolved.conf` — [DNS on the main server](#dns-on-the-main-server) |
+| `/etc/systemd/resolved.conf` | dpkg conffile | systemd-resolved's package | `/etc/systemd` | never written by the deploy; reported **MODIFIED** until a separate manual script returns it to the package default |
+| `/etc/resolv.conf` | repo-managed (`plain`) | deploy.sh, from `deploy/host/dns/resolv.conf` | — (in the repo) | a plain file, not resolved's stub symlink; byte-identical to the host's; invariant `path-regular` |
 | `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | `/etc/systemd` | keeps networkd from flushing WARP's `ip rule`s; effective at networkd's next start |
 | `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, from `deploy/vpn-bot-acme-reload.sh` | `/usr/local/sbin` | acme.sh's `Le_ReloadCmd`; only where there is renewal material; [subscription.md](subscription.md#tls-termination) |
 | `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/ssh` | key-only root login; see [ALLOW_SSH_CHANGE](#allow_ssh_change-and-the-lockout-risk) |
 | `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/systemd` | `ListenStream` on 54321 (IPv4 + IPv6) |
+| `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh, from `deploy/host/cloud/cloud-init.disabled` | — (in the repo) | empty marker: cloud-init stays off (it rewrote sshd and sudoers on a reboot) |
+| `/etc/systemd/system/vpn-bot-host-check.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot: the host invariants check — [Effective state](#effective-state) |
+| `/etc/systemd/system/vpn-bot-host-check.timer` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | 5 min after boot, then daily; `enable --now` like any registry timer |
+| `/var/lib/vpn-bot-host-check/last.json` | state | `vpn-bot-host-check` | — | the last verdict (atomic, `root` `0644`); read by the bot |
 | `/etc/systemd/system/danted.service.d/vpn-bot-warp.conf` | repo-managed (`unit`) | deploy.sh, from `deploy/danted-warp.conf` | `/etc/systemd` | ordering after the WARP interface |
 | `/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf` | repo-managed (`unit`, `gate=MTPROTO`) | deploy.sh, from `deploy/mtproxy-vpn-bot-managed.conf` | `/etc/systemd` | only while `MTPROTO_ENABLED=true`; a byte-identical old name `vpnbot-managed.conf` is renamed. With MTProxy off, a leftover drop-in is reported as an orphan |
 | `/etc/systemd/system/vpn-bot.service` | repo-managed | deploy.sh, verbatim | `/etc/systemd` | the privilege-model gates apply |
 | `/etc/systemd/system/<deploy/*.service, *.timer>` | repo-managed | the operator, by hand | `/etc/systemd` | Phase 1's unit-drift gate prints the install commands |
-| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | from `scripts/` |
+| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms`, `vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | from `scripts/` |
 | `/usr/local/sbin/vpn-bot-{xray,awg,mtproxy}-apply`, `vpn-bot-socks5-user` | backup-only (`installer`) | `deploy/setup-nonroot-helper-mode.sh` | `/usr/local/sbin` | source `deploy/helpers/` |
 | `/usr/local/etc/xray/config.json` | template + host values | the bot (clients) / operator | recovery bundle | structure checked by `deploy/backend-config-sync.py` |
 | `/etc/amnezia/amneziawg/awg0.conf` | template + host values | the bot (peers) / operator | recovery bundle; `/etc/amnezia` | same gate |
@@ -78,6 +85,8 @@ bundle also carries state that is not a deployed file and so is not listed here:
 | `/etc/systemd/system/warp-sample.timer` | retired | — | — | `disable --now`, then removed |
 | `/etc/systemd/system/warp-sample.service` | retired | — | — | `disable --now`, then removed |
 | `/usr/local/sbin/site-freshen.sh` | retired | — | — | its job is `deploy/vpn-bot-decoy-freshen.sh` now |
+| `/etc/ssh/sshd_config.d/50-cloud-init.conf` | retired | — | — | cloud-init's `PasswordAuthentication yes`; removed by hand first, the entry keeps it from coming back (a removal reloads ssh) |
+| `/etc/sudoers.d/90-cloud-init-users` | retired | — | — | cloud-init's `NOPASSWD:ALL` grant; removed by hand first |
 
 ### relay
 
@@ -88,6 +97,10 @@ The relay runs no bot, so it sends no offsite backup: its files come back from t
 |---|---|---|---|
 | `/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf` | repo-managed (`ssh`) | deploy.sh | key-only login |
 | `/usr/local/sbin/vpn-relay-apply` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | |
+| `/usr/local/sbin/vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | the host invariants check |
+| `/etc/systemd/system/vpn-bot-host-check.service`, `.timer` | repo-managed (`unit`) | deploy.sh | as on main; the relay's verdict stays in its journal — [Between deploys](#between-deploys) |
+| `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh | cloud-init stays off |
+| `/etc/ssh/sshd_config.d/50-cloud-init.conf`, `/etc/sudoers.d/90-cloud-init-users` | retired | — | cloud-init's password login and `NOPASSWD:ALL` grant |
 | `/etc/systemd/system/vpn-relay.service` | repo-managed | deploy.sh, verbatim | |
 | `/etc/sysctl.d/90-vpn-relay.conf` | template + host values | `vpn-relay-apply apply`, from the relay's `.env` | |
 
@@ -112,8 +125,10 @@ same file. A closed gate means the entry is neither installed nor checked.
 | `journald` | a `[Journal]` section | `systemctl restart systemd-journald` |
 | `networkd` | a `[Network]` section | — (takes effect at networkd's next start) |
 | `hook` | `<candidate> --dry-run` exits 0 | — |
+| `plain` | — (installed verbatim) | — (nothing is reloaded) |
+| `resolved` | a `[Resolve]` section | `systemctl try-reload-or-restart systemd-resolved`, then `getent ahosts github.com` within 10 s — or the deploy rolls back (the rollback reloads too) |
 | `ssh` | `sshd -t` on `sshd_config` with the candidate swapped into a copy of its drop-in directory; a socket drop-in must leave a `ListenStream` port | see [below](#allow_ssh_change-and-the-lockout-risk) |
-| `absent` | nothing may still name it (below) | `disable --now` if it is a unit file, then removed |
+| `absent` | nothing may still name it (below) | `disable --now` if it is a unit file, then removed; an `sshd_config.d` file is followed by `sshd -t` + reload + the port check, like an ssh change |
 
 **Phase 1** (read-only, also under `PHASE1_ONLY=1`) scans every entry against `origin/main` and
 reports a state per file: `synced`, `absent` (will be installed), `drift` (will be reinstalled —
@@ -134,6 +149,183 @@ other file under `/var/spool/cron`, `/etc/crontab`, `/etc/cron.d`, the unit dire
 `/etc/systemd/system` and `/usr/lib/systemd/system` (drop-ins included) and `.env` for the path
 or its basename. A hit **fails** the deploy and names the file and line: remove the reference
 first, or drop the retirement.
+
+## Effective state
+
+A registry entry guarantees that the repo's file lies on the host byte for byte, with its mode
+and owner. It does **not** guarantee that the file is in effect. On the relay,
+`00-vpnrelay-keyonly.conf` (`PasswordAuthentication no`) beat `50-cloud-init.conf` (`yes`) and
+active `PasswordAuthentication yes` / `PermitRootLogin yes` lines in the main `sshd_config` only
+by parse order — rename the file and the host silently takes passwords, while every deploy stays
+green. The main server had the same with `00-root-key-only.conf`.
+
+`scripts/vpn-bot-host-check` closes that class. It is strictly read-only — the one file it writes
+is its own state file — and it is the single implementation: deploy Phase 1, deploy Phase 2 and
+`vpn-bot-host-check.timer` all run it. Run it by hand with
+`sudo /usr/local/sbin/vpn-bot-host-check --no-state`.
+
+### Verdicts
+
+| Verdict | Meaning | Deploy Phase 1 | Deploy Phase 2 | Bot (main) |
+|---|---|---|---|---|
+| **BEATEN** | a value a repo-managed file sets is not in effect: another file wins | FAIL | rollback | alert |
+| **MISMATCH** | the live value (`sshd -T`, `sysctl -n`, `systemctl show`) differs from what the files give, for a key a repo file sets; a repo unit that is masked, waits for `daemon-reload`, or (a timer the deploy installs) is not enabled+active; an `invariants.list` line that does not hold | FAIL | rollback | alert |
+| **LATENT** | right now, but a loser that is neither repo-managed nor vendor holds another value: remove the winner and the value silently flips. The row names the winner, the losers and `winner gone -> <value> from <file>` | FAIL on an sshd auth key¹, else WARN | reported | alert when new |
+| **ACCEPTED** | a LATENT listed in `deploy/host/accepted-overrides.list` | reported | reported | — |
+| **WARN** | host state outside the repo worth a look (below) | WARN | reported | — |
+| **PENDING** | Phase 1 only: the deploy changes it now; Phase 2 checks it | reported | — | — |
+
+¹ `PasswordAuthentication`, `KbdInteractiveAuthentication`, `PermitRootLogin`,
+`PermitEmptyPasswords`, `PubkeyAuthentication`, `AuthenticationMethods`.
+
+`PHASE1_ONLY=1` (`CHECK=1`) reports a FAIL instead of stopping, like the other drift gates. There
+is **no knob** past a FAIL in a real deploy — fix the host, or the repo.
+
+**Phase 1 judges the host as Phase 2 is about to leave it** (`--pre-install`): every repo file of
+the role in place of its host copy (absent ones included), every retired file gone, a byte-equal
+legacy name gone. So a repo file another file would outrank is caught before anything is
+installed; a live value the deploy is about to change is PENDING. **Phase 2** runs it again
+right after the host files and the role's unit are installed (on main: before the bot starts),
+writes the state file, and rolls back on any BEATEN/MISMATCH — the same path as the ssh gate.
+Both the `PHASE1_ONLY` report and `DEPLOY OK` carry the rows.
+
+### The vendor rule
+
+VENDOR = a file under `/usr/lib`, `/lib` or `/usr/local/lib`, **plus** a file under `/etc` that a
+package owns (one batched `dpkg -S`) and that is not modified locally (its md5 equals its line in
+`dpkg-query -W -f='${Conffiles}'`). A repo value over a vendor value is normal, not LATENT: on both
+hosts `99-bbr.conf` overrides procps' unmodified `/etc/sysctl.d/10-bufferbloat.conf`, and the
+provider's `99-cloudimg-ipv6.conf` overrides procps' unmodified `10-ipv6-privacy.conf`. A loser
+that is a **modified** conffile is LATENT. A symlink is judged by its target.
+
+`/etc/ssh/sshd_config` is managed by ucf, not a dpkg conffile: the conffile check cannot see it, so
+it is never vendor — its lines are judged like any other file's.
+
+### Precedence, family by family
+
+- **sshd** — `/etc/ssh/sshd_config` walked the way sshd reads it: `Include` expanded in place
+  (globs, C-locale order, a relative path is relative to `/etc/ssh`); the **first** value wins.
+  The main file is a setter like any drop-in: its lines after the `Include` are losers too, its
+  lines before it beat every drop-in. Keys inside `Match` (until the next `Match` or the end of
+  that file) are left out and listed as INFO. Multi-value keywords are not judged: `Port`,
+  `ListenAddress`, `HostKey`, `HostCertificate`, `AcceptEnv`, `SetEnv`, `Subsystem`, `AllowUsers`,
+  `DenyUsers`, `AllowGroups`, `DenyGroups`. Aliases: `ChallengeResponseAuthentication` =
+  `KbdInteractiveAuthentication`, `prohibit-password` = `without-password`. Live: `sshd -T`.
+- **sysctl** — at boot, the order of `systemd-analyze cat-config sysctl.d`; the **last** value
+  wins. The order of `sysctl --system` is measured, not assumed: `sysctl --system --dry-run`
+  (procps ≥ 4.0.3; the hosts have 4.0.4; it writes nothing), its `* Applying <path>` lines.
+  Measured on the hosts: `/etc/sysctl.conf` is applied once more at the very end, although it is
+  already linked as `99-sysctl.conf`. A key whose boot winner differs from its `sysctl --system`
+  winner is LATENT. Without `--dry-run` the order is assumed (the boot order, then
+  `/etc/sysctl.conf`) and the report says so. A key with `/` and no `.` is normalised to dots; a
+  leading `-` is dropped; spaces in a value are squeezed; a key with `*` is never compared with
+  `/proc`. Live: `sysctl -n`.
+- **systemd `*.conf` + `*.conf.d`** — `journald`, `networkd`, `resolved`, `logind`, `timesyncd`,
+  `system`: the order of `systemd-analyze cat-config systemd/<x>.conf` (the main file, then the
+  drop-ins by name), key = `Section.Key`, the **last** value wins. Except list settings —
+  `Resolve.DNS`, `Resolve.FallbackDNS`, `Resolve.Domains`, `Time.NTP`, `Time.FallbackNTP`: there
+  the entries of every file add up and an empty assignment resets, so the accumulated list is
+  compared (a server left in `resolved.conf` next to the drop-in's is BEATEN). There is no
+  generic live readout for these, so they are judged on precedence only.
+- **Units the repo installs**, by role, from the same sources as `UNIT_SET` and
+  `MANAGED_HOST_FILES`: on main `deploy/vpn-bot.service`, every `deploy/*.service|*.timer` that is
+  installed on the host, and the registry's units and drop-ins; on a relay `deploy/relay/*.service`
+  and the registry's. Never a `*.example.*`. `FragmentPath` other than ours or a masked unit →
+  BEATEN; `NeedDaemonReload=yes` → MISMATCH; our drop-in not in `DropInPaths` → BEATEN; a drop-in
+  there that is neither ours nor vendor (`/etc`, `/run`, generators) → LATENT; a timer the deploy
+  installs that is not `enabled` + `active` → MISMATCH. (The `deploy/*.timer` units the operator
+  installs by hand belong to modular subsystems and are not required to run.) `systemctl show` is
+  read line by line as `Key=Value`, never evaluated.
+
+### What is expected
+
+Only explicit lists — no "sensible" defaults:
+
+- the **sysctl, sshd and systemd `*.conf` keys are derived from the repo files of the role**: add a
+  file to `MANAGED_HOST_FILES` and its keys are checked from then on
+  (`tests/test_host_check.py` pins this against the real registry);
+- beyond that, **`deploy/host/invariants.list`**, one line per invariant:
+
+  ```text
+  <main|relay|all>|<probe>|<key>|<expected>|<reason, at least 20 characters>
+  ```
+
+  The probes are a closed set — no arbitrary commands: `sshd` (vs `sshd -T`), `sysctl` (vs
+  `sysctl -n`), `systemd-conf:<x>` (vs the files), `unit-prop:<unit>:<Prop>` (`systemctl show`),
+  `path-present`, `path-absent`, `path-regular` (exists and is **not** a symlink),
+  `tcp-listen:<port>`. `~X` as the expected value means "contains X as a whole token"
+  (`~22` matches `[::]:22 (Stream)`, not `:2222`). Seeded: on main `ssh.socket` listens on 54321,
+  `even-day-reboot.timer` is enabled and active, `/etc/resolv.conf` is a plain file; on a relay
+  `ssh.socket` listens on 22; on both `/etc/cloud/cloud-init.disabled` exists.
+
+### Accepting a LATENT
+
+A LATENT that is meant to stay goes into **`deploy/host/accepted-overrides.list`** — the only
+sanctioned way; there is no `ALLOW_*` knob (`redeploy.sh` would not forward one anyway):
+
+```text
+<path>|<key>|<reason, at least 20 characters>
+```
+
+`path` is the file the row names (the loser, a foreign drop-in, or the file that wins at
+`sysctl --system`), `key` the row's key (sysctl key, lower-case sshd keyword, `Section.Key`, or the
+unit name for a drop-in). An entry turns exactly that row into ACCEPTED and nothing else; an
+entry that matches nothing is listed as INFO. The format is checked by `tests/test_host_check.py`.
+Under the vendor rule the list starts **empty**.
+
+### WARN checks
+
+Host state outside the repo, reported, never fatal, never a key or a password in the output:
+cloud-init alive (no `/etc/cloud/cloud-init.disabled`); `logrotate -d /etc/logrotate.conf` lines
+that **start** with `error:`, and `duplicate log entry` (never a substring "error": it is in paths
+such as `error.log`); `NOPASSWD: ALL` in sudoers; a non-root account with a login shell and a
+usable password (`passwd -S` = P, read from `/etc/shadow`) or a non-empty `authorized_keys`; a
+locally modified dpkg conffile under `/etc/systemd`, `/etc/sysctl*`, `/etc/logrotate*`, `/etc/cloud`
+or `/etc/sudoers*`, with the keys it sets (a setting that lives only in a modified conffile is host
+state outside the repo — on main today `journald.conf`, which duplicates the managed drop-in, and
+`resolved.conf`, see below).
+
+The check never removes or edits a file that is not in the registry. What it finds is closed with
+the registry: a file the repo should own gets an entry, a file that must not come back gets
+`class absent` (cloud-init's `50-cloud-init.conf` and `90-cloud-init-users` on both roles), a
+marker gets `class plain` (`/etc/cloud/cloud-init.disabled`).
+
+### Between deploys
+
+`vpn-bot-host-check.timer` (a registry unit of both roles) runs the check 5 minutes after every
+boot and then daily (`RandomizedDelaySec=30min`, `Persistent=true`). The boot run matters most:
+cloud-init, the provider and apt change a host on a reboot, and `even-day-reboot.timer` reboots it
+only every 5 days. Each run — and every deploy's Phase 2 — atomically rewrites
+`/var/lib/vpn-bot-host-check/last.json` (`root`, `0644`): the time, the role, the counts and the
+rows. A BEATEN/MISMATCH makes the service exit 1, so the unit shows as failed and
+`journalctl -u vpn-bot-host-check` has the rows.
+
+On **main** the bot reads that file every `HOST_CHECK_INTERVAL` seconds and alerts the superadmins
+(`ADMIN_IDS`, the same broadcast as the relay alerts) when a row turns BEATEN or MISMATCH, when a
+LATENT is new, and once when the last BEATEN/MISMATCH is gone. Never twice for the same row: what
+was reported is kept in the database, so a restart does not repeat it.
+
+A **relay** runs no bot, and the bot has no channel to a relay — relays are rows in the database,
+probed from outside by a TLS handshake through their DNAT — so none is built for this. A relay's
+verdict is in its journal (`journalctl -u vpn-bot-host-check`, the failed unit) and in Phase 1 of
+every relay deploy (`CHECK=1` shows it without deploying).
+
+### DNS on the main server
+
+- `/etc/resolv.conf` is a **plain file**, not systemd-resolved's stub symlink (rewritten on
+  2026-08-25): `nameserver 1.1.1.1`, `nameserver 8.8.8.8`. It is `deploy/host/dns/resolv.conf`
+  (class `plain`, byte-identical to the host's — `tests/test_deploy_host_state.py` pins its
+  sha256), and the `path-regular` invariant fails if a symlink comes back.
+- systemd-resolved still runs; its upstreams `DNS=1.1.1.1 8.8.8.8` and
+  `FallbackDNS=1.0.0.1 8.8.4.4` lived only in a hand edit of the dpkg conffile
+  `/etc/systemd/resolved.conf`. They are `deploy/host/resolved/10-vpn-bot.conf` now (class
+  `resolved`): after a change, `systemctl try-reload-or-restart systemd-resolved`, then
+  `getent ahosts github.com` must answer within 10 s, or the deploy rolls back (the rollback puts
+  the old file back and reloads the same way).
+- `/etc/systemd/resolved.conf` itself is never written by the deploy (reported as a modified
+  conffile). After this layout is deployed it goes back to the package default with a separate
+  manual script, which checks that the effective configuration did not change. The first deploy
+  changes nothing effective: the drop-in carries the conffile's values and `resolv.conf` is synced.
 
 ## Files nothing accounts for
 

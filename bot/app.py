@@ -72,6 +72,7 @@ from services.protocol_modules import ProtocolModulesService
 from services.protocol_uninstall import ProtocolUninstallService, UninstallRegistry
 from services.proxy import ProxyService
 from services.relay import RelayCatalog
+from services.host_check import HostCheckMonitor
 from services.relay_health import build_relay_health_supervisor
 from services.relay_management import RelayService
 from services.server_status import ServerStatusService
@@ -655,6 +656,9 @@ async def _build_app(
         relays=relays_repo,
     )
     relay_health_supervisor = build_relay_health_supervisor(settings, relays_repo.list_all)
+    # What the host check (vpn-bot-host-check.timer) last found; alerts the
+    # superadmins on a change, remembering what it reported in schema_meta.
+    host_check_monitor = HostCheckMonitor(store=db, admin_ids=settings.admin_ids)
 
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
 
@@ -816,6 +820,7 @@ async def _build_app(
         relay_health=relay_health_supervisor,
         hysteria_health_probe=hysteria_health_probe,
         protocol_uninstall=protocol_uninstall_service,
+        host_check=host_check_monitor,
     )
 
     await _startup_reconcile_keys(services)
@@ -825,6 +830,7 @@ async def _build_app(
     trial_access_service.bot = bot
     anomaly_detection_service.bot = bot
     relay_health_supervisor.bot = bot
+    host_check_monitor.bot = bot
     warp_manager.bot = bot
     # FSM state is in-memory only — bot restart clears in-progress wizards.
     # TTLMemoryStorage expires sessions idle for >30 min via the fsm_cleanup_loop

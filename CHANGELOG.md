@@ -8,6 +8,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Host invariants: the EFFECTIVE host state, checked at deploy, at boot and daily
+  (docs/host-state.md#effective-state).** `MANAGED_HOST_FILES` guarantees a repo file lies on the
+  host byte for byte; it never said whether the file is in effect. On the relay
+  `00-vpnrelay-keyonly.conf` (`PasswordAuthentication no`) beat `50-cloud-init.conf` (`yes`) and
+  active `yes` lines in the main `sshd_config` only by parse order, and the deploy stayed green.
+  New `scripts/vpn-bot-host-check` (bash, strictly read-only: it writes only its state file) is the
+  one implementation, run by deploy Phase 1 (`--pre-install`: the host as Phase 2 will leave it),
+  Phase 2 and the new `vpn-bot-host-check.timer` (5 min after boot, then daily; both roles). Rows:
+  **BEATEN** (another file outranks a repo value), **MISMATCH** (`sshd -T` / `sysctl -n` /
+  `systemctl show` ≠ the files; a shadowed, masked or reload-pending repo unit; a repo timer not
+  enabled+active; an invariant that does not hold), **LATENT** (right now, but a loser that is
+  neither repo nor vendor holds another value — the row prints the winner, the losers and
+  `winner gone -> <value> from <file>`), WARN (cloud-init alive, `logrotate -d` lines starting with
+  `error:` and duplicate entries, `NOPASSWD: ALL`, login accounts with a password or keys, keys
+  living only in a modified conffile — never a key or a hash in the output). Vendor = `/usr/lib`,
+  `/lib`, `/usr/local/lib`, or an `/etc` file a package owns (one batched `dpkg -S`) whose md5 is
+  its `${Conffiles}` line. Precedence per family: sshd (Include in place, C-order globs, relative to
+  `/etc/ssh`, first wins, main file included, Match excluded and listed, aliases), sysctl (boot order
+  from `systemd-analyze cat-config sysctl.d`, last wins; the `sysctl --system` order measured with
+  `--dry-run`, a differing winner is LATENT), systemd `*.conf` (`cat-config systemd/<x>.conf`,
+  `Section.Key`, last wins), units (FragmentPath, NeedDaemonReload, DropInPaths). The sysctl, sshd
+  and systemd-conf keys come from the role's repo files automatically; anything else from the new
+  `deploy/host/invariants.list` (closed probe set, seeded for both roles). The new
+  `deploy/host/accepted-overrides.list` is the only way to accept a LATENT (empty). Result:
+  `/var/lib/vpn-bot-host-check/last.json`, atomic, `0644 root`.
+- **Superadmin alerts from the host check** (`services/host_check.py`, `HOST_CHECK_INTERVAL`,
+  default 300 s, `0` = off): the bot reads `last.json` and alerts through the relay alerts'
+  broadcast when a row turns BEATEN/MISMATCH, when a LATENT is new, and once when it is clean
+  again — never twice for the same row, across restarts too (`schema_meta`). A relay runs no bot
+  and the bot has no channel to it: its verdict stays in its journal and in its Phase 1.
+- **Host files: classes `plain` and `resolved`, cloud-init and the main server's DNS in the repo.**
+  `plain` installs a file verbatim and reloads nothing; `resolved` validates `[Resolve]`, then
+  `try-reload-or-restart systemd-resolved` and `getent ahosts github.com` within 10 s, or rolls
+  back (the rollback reloads too). New entries: `/etc/cloud/cloud-init.disabled` (both roles),
+  retired `50-cloud-init.conf` and `90-cloud-init-users` (both roles — removed by hand, kept from
+  coming back; a retired `sshd_config.d` file now gets `sshd -t` + reload + the port check), and
+  on main `/etc/resolv.conf` (plain, byte-identical to the host's, sha256 pinned) and
+  `/etc/systemd/resolved.conf.d/10-vpn-bot.conf` (`DNS=1.1.1.1 8.8.8.8`,
+  `FallbackDNS=1.0.0.1 8.8.4.4`, taken over from the hand-edited conffile, which the deploy only
+  reports). Nothing effective changes on the first deploy.
+
 - **Removing a protocol from the server (docs/protocol-uninstall.md).** Protocol modules offers
   «Disable only» (as before) and «Disable and remove from the server»; a module switched off
   earlier gets «🗑 Remove from the server». A new root helper,
@@ -356,6 +397,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     change nothing.
 
 ### Changed
+
+- **`deploy.sh` stops on a host value that is not in effect.** Phase 1 prints a «Host
+  invariants» section: BEATEN and MISMATCH, and a LATENT on an sshd auth key
+  (`PasswordAuthentication`, `KbdInteractiveAuthentication`, `PermitRootLogin`,
+  `PermitEmptyPasswords`, `PubkeyAuthentication`, `AuthenticationMethods`) not listed in
+  `deploy/host/accepted-overrides.list`, stop the deploy before any mutation (`PHASE1_ONLY=1`
+  reports them); other LATENTs and WARNs are reported. Phase 2 runs the check again after the
+  host files are installed and rolls back on BEATEN/MISMATCH. Both reports carry the rows. No
+  new `ALLOW_*` knob. `deploy.sh` is shellcheck-clean.
 
 - **Coverage gate raised and split per layer.** The overall branch-coverage floor goes from
   `--cov-fail-under=62` to `71`, and CI now also fails on a drop in any one layer

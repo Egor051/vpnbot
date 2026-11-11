@@ -259,7 +259,7 @@ SQLite — локальный backend хранилища; путь по умол
 | [docs/configuration.ru.md](docs/configuration.ru.md) | Полный справочник переменных окружения (все бэкенды, WARP, legacy-aliases). |
 | [docs/deployment.ru.md](docs/deployment.ru.md) | Установка для обеих моделей, Xray API mode, разовая настройка сервера, smoke-чеклист. |
 | [docs/operations.ru.md](docs/operations.ru.md) | Production runbook: health-проверки, backup/restore, восстановление из degraded, rollback, ручная проверка. |
-| [docs/host-state.ru.md](docs/host-state.ru.md) | Файлы хоста вне чекаута: что deploy.sh ставит, чинит и удаляет, о чём только сообщает, `ALLOW_SSH_CHANGE`. |
+| [docs/host-state.ru.md](docs/host-state.ru.md) | Файлы хоста вне чекаута: что deploy.sh ставит, чинит и удаляет, о чём только сообщает, `ALLOW_SSH_CHANGE`; действуют ли они (инварианты хоста: BEATEN / MISMATCH / LATENT — при деплое, при загрузке и раз в сутки). |
 | [docs/hysteria.ru.md](docs/hysteria.ru.md) | Hysteria2 (apernet v2): data plane, эндпоинт `hy2_auth`, Traffic Stats API, health и восстановление. |
 | [docs/proxy.ru.md](docs/proxy.ru.md) | SOCKS5/Dante и MTProto (static + managed): развёртывание и восстановление. |
 | [docs/warp.ru.md](docs/warp.ru.md) | WARP-сокрытие исходящего IP: формат конфига, установка, proxy egress, selective-split. |

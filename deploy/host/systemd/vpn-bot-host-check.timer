@@ -1,0 +1,13 @@
+[Unit]
+Description=vpn-bot host invariants check: 5 min after every boot, then daily
+
+[Timer]
+# The boot run matters most: cloud-init, the provider and apt change a host on a
+# reboot, and even-day-reboot.timer reboots it only every 5 days.
+OnBootSec=5min
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

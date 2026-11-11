@@ -52,15 +52,22 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/sysctl.d/99-vpn-forwarding.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | единственный `net.ipv4.ip_forward=1` |
 | `/etc/systemd/journald.conf.d/10-vpn-bot.conf` | repo-managed (`journald`) | deploy.sh | `/etc/systemd` | `SystemMaxUse=500M`; заменяет ручную правку `journald.conf` |
 | `/etc/systemd/journald.conf` | conffile dpkg | пакет `systemd` | `/etc/systemd` | деплой его не пишет; Phase 1 сообщает **MODIFIED**, пока в нём осталась старая ручная правка — верните стоковый файл руками, когда drop-in уже действует |
+| `/etc/systemd/resolved.conf.d/10-vpn-bot.conf` | repo-managed (`resolved`) | deploy.sh | `/etc/systemd` | `DNS=1.1.1.1 8.8.8.8`, `FallbackDNS=1.0.0.1 8.8.4.4`; заменяет ручную правку `resolved.conf` — [DNS на основном сервере](#dns-на-основном-сервере) |
+| `/etc/systemd/resolved.conf` | conffile dpkg | пакет systemd-resolved | `/etc/systemd` | деплой его не пишет; в отчёте **MODIFIED**, пока отдельный ручной скрипт не вернёт его к дефолту пакета |
+| `/etc/resolv.conf` | repo-managed (`plain`) | deploy.sh, из `deploy/host/dns/resolv.conf` | — (в репо) | обычный файл, а не stub-symlink resolved; побайтно равен копии хоста; инвариант `path-regular` |
 | `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | `/etc/systemd` | не даёт networkd сбрасывать `ip rule` WARP; действует со следующего старта networkd |
 | `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, из `deploy/vpn-bot-acme-reload.sh` | `/usr/local/sbin` | `Le_ReloadCmd` у acme.sh; только там, где есть сертификат; [subscription.ru.md](subscription.ru.md#tls-терминация) |
 | `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/ssh` | вход root только по ключу; см. [ALLOW_SSH_CHANGE](#allow_ssh_change-и-риск-потери-доступа) |
 | `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/systemd` | `ListenStream` на 54321 (IPv4 + IPv6) |
+| `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh, из `deploy/host/cloud/cloud-init.disabled` | — (в репо) | пустой маркер: cloud-init выключен (на ребуте он переписывал sshd и sudoers) |
+| `/etc/systemd/system/vpn-bot-host-check.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot: проверка инвариантов хоста — [Эффективное состояние](#эффективное-состояние) |
+| `/etc/systemd/system/vpn-bot-host-check.timer` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | через 5 минут после загрузки, затем раз в сутки; `enable --now`, как любой таймер реестра |
+| `/var/lib/vpn-bot-host-check/last.json` | состояние | `vpn-bot-host-check` | — | последний вердикт (атомарно, `root` `0644`); его читает бот |
 | `/etc/systemd/system/danted.service.d/vpn-bot-warp.conf` | repo-managed (`unit`) | deploy.sh, из `deploy/danted-warp.conf` | `/etc/systemd` | порядок запуска после интерфейса WARP |
 | `/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf` | repo-managed (`unit`, `gate=MTPROTO`) | deploy.sh, из `deploy/mtproxy-vpn-bot-managed.conf` | `/etc/systemd` | только пока `MTPROTO_ENABLED=true`; побайтно равный файл со старым именем `vpnbot-managed.conf` переименовывается. При выключенном MTProxy оставшийся drop-in показывается как сирота |
 | `/etc/systemd/system/vpn-bot.service` | repo-managed | deploy.sh, как есть | `/etc/systemd` | действуют гейты модели привилегий |
 | `/etc/systemd/system/<deploy/*.service, *.timer>` | repo-managed | оператор, руками | `/etc/systemd` | drift-гейт юнитов в Phase 1 печатает команды установки |
-| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | из `scripts/` |
+| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms`, `vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | из `scripts/` |
 | `/usr/local/sbin/vpn-bot-{xray,awg,mtproxy}-apply`, `vpn-bot-socks5-user` | backup-only (`installer`) | `deploy/setup-nonroot-helper-mode.sh` | `/usr/local/sbin` | исходники в `deploy/helpers/` |
 | `/usr/local/etc/xray/config.json` | шаблон + значения хоста | бот (клиенты) / оператор | бандл восстановления | структуру проверяет `deploy/backend-config-sync.py` |
 | `/etc/amnezia/amneziawg/awg0.conf` | шаблон + значения хоста | бот (peers) / оператор | бандл восстановления; `/etc/amnezia` | тот же гейт |
@@ -78,6 +85,8 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/systemd/system/warp-sample.timer` | retired | — | — | `disable --now`, затем удаляется |
 | `/etc/systemd/system/warp-sample.service` | retired | — | — | `disable --now`, затем удаляется |
 | `/usr/local/sbin/site-freshen.sh` | retired | — | — | его работу теперь делает `deploy/vpn-bot-decoy-freshen.sh` |
+| `/etc/ssh/sshd_config.d/50-cloud-init.conf` | retired | — | — | `PasswordAuthentication yes` от cloud-init; сначала удалён руками, запись не даёт ему вернуться (удаление перезагружает ssh) |
+| `/etc/sudoers.d/90-cloud-init-users` | retired | — | — | `NOPASSWD:ALL` от cloud-init; сначала удалён руками |
 
 ### relay
 
@@ -88,6 +97,10 @@ drift, удаляет выведенные из оборота — а в Phase 1
 |---|---|---|---|
 | `/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf` | repo-managed (`ssh`) | deploy.sh | вход только по ключу |
 | `/usr/local/sbin/vpn-relay-apply` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | |
+| `/usr/local/sbin/vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | проверка инвариантов хоста |
+| `/etc/systemd/system/vpn-bot-host-check.service`, `.timer` | repo-managed (`unit`) | deploy.sh | как на main; вердикт relay остаётся в его журнале — [Между деплоями](#между-деплоями) |
+| `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh | cloud-init выключен |
+| `/etc/ssh/sshd_config.d/50-cloud-init.conf`, `/etc/sudoers.d/90-cloud-init-users` | retired | — | вход по паролю и `NOPASSWD:ALL` от cloud-init |
 | `/etc/systemd/system/vpn-relay.service` | repo-managed | deploy.sh, как есть | |
 | `/etc/sysctl.d/90-vpn-relay.conf` | шаблон + значения хоста | `vpn-relay-apply apply`, из `.env` relay | |
 
@@ -112,8 +125,10 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `journald` | секция `[Journal]` | `systemctl restart systemd-journald` |
 | `networkd` | секция `[Network]` | — (действует со следующего старта networkd) |
 | `hook` | `<кандидат> --dry-run` выходит с 0 | — |
+| `plain` | — (ставится как есть) | — (ничего не перезагружается) |
+| `resolved` | секция `[Resolve]` | `systemctl try-reload-or-restart systemd-resolved`, затем `getent ahosts github.com` в течение 10 с — иначе деплой откатывается (rollback тоже перезагружает resolved) |
 | `ssh` | `sshd -t` на `sshd_config`, где кандидат подставлен в копию каталога drop-in'ов; drop-in сокета должен оставлять порт `ListenStream` | см. [ниже](#allow_ssh_change-и-риск-потери-доступа) |
-| `absent` | ничто не должно на него ссылаться (ниже) | `disable --now`, если это unit-файл, затем удаление |
+| `absent` | ничто не должно на него ссылаться (ниже) | `disable --now`, если это unit-файл, затем удаление; после файла из `sshd_config.d` — `sshd -t` + reload + проверка порта, как после изменения ssh |
 
 **Phase 1** (только чтение, в том числе при `PHASE1_ONLY=1`) сверяет каждую запись с
 `origin/main` и показывает состояние каждого файла: `synced`, `absent` (будет установлен),
@@ -134,6 +149,185 @@ journald, ssh.
 во всех остальных файлах под `/var/spool/cron`, в `/etc/crontab`, `/etc/cron.d`, в каталогах юнитов
 `/etc/systemd/system` и `/usr/lib/systemd/system` (включая drop-in'ы) и в `.env`. Совпадение
 **проваливает** деплой с указанием файла и строки: сначала уберите ссылку или отмените вывод.
+
+## Эффективное состояние
+
+Запись в реестре гарантирует, что файл из репо лежит на хосте байт в байт, с нужными mode и owner.
+Она **не** гарантирует, что этот файл действует. На relay `00-vpnrelay-keyonly.conf`
+(`PasswordAuthentication no`) выигрывал у `50-cloud-init.conf` (`yes`) и у активных строк
+`PasswordAuthentication yes` / `PermitRootLogin yes` в главном `sshd_config` только за счёт порядка
+разбора — переименуйте файл, и хост молча начнёт принимать пароли, а каждый деплой останется
+зелёным. На main было то же самое с `00-root-key-only.conf`.
+
+`scripts/vpn-bot-host-check` закрывает этот класс. Скрипт строго read-only — единственный файл,
+который он пишет, это его собственный state-файл — и это единственная реализация: её вызывают
+Phase 1 деплоя, Phase 2 деплоя и `vpn-bot-host-check.timer`. Вручную:
+`sudo /usr/local/sbin/vpn-bot-host-check --no-state`.
+
+### Вердикты
+
+| Вердикт | Значение | Phase 1 деплоя | Phase 2 деплоя | Бот (main) |
+|---|---|---|---|---|
+| **BEATEN** | значение из repo-managed файла не действует: выигрывает другой файл | FAIL | rollback | алерт |
+| **MISMATCH** | живое значение (`sshd -T`, `sysctl -n`, `systemctl show`) ≠ тому, что дают файлы, для ключа, который задаёт repo-файл; юнит из репо замаскирован, ждёт `daemon-reload` или (таймер, который ставит деплой) не enabled+active; строка `invariants.list` не выполняется | FAIL | rollback | алерт |
+| **LATENT** | сейчас верно, но проигравший файл — не repo и не vendor — держит другое значение: уберут победителя, и значение молча перевернётся. В строке — победитель, проигравшие и `winner gone -> <значение> from <файл>` | FAIL для auth-ключа sshd¹, иначе WARN | в отчёте | алерт, если новый |
+| **ACCEPTED** | LATENT из `deploy/host/accepted-overrides.list` | в отчёте | в отчёте | — |
+| **WARN** | состояние хоста вне репо, на которое стоит посмотреть (ниже) | WARN | в отчёте | — |
+| **PENDING** | только Phase 1: деплой сейчас это меняет; проверит Phase 2 | в отчёте | — | — |
+
+¹ `PasswordAuthentication`, `KbdInteractiveAuthentication`, `PermitRootLogin`,
+`PermitEmptyPasswords`, `PubkeyAuthentication`, `AuthenticationMethods`.
+
+`PHASE1_ONLY=1` (`CHECK=1`) показывает FAIL, не останавливаясь, как и остальные drift-гейты.
+**Ручки**, чтобы пройти FAIL в настоящем деплое, нет — чините хост или репо.
+
+**Phase 1 оценивает хост таким, каким его оставит Phase 2** (`--pre-install`): каждый repo-файл
+роли — на месте копии хоста (и ещё не установленные тоже), каждый выведенный из оборота файл —
+удалён, побайтно равное старое имя — удалено. Поэтому repo-файл, который перебил бы другой файл,
+ловится до любой установки; живое значение, которое деплой сейчас поменяет, — PENDING. **Phase 2**
+запускает проверку ещё раз сразу после установки файлов хоста и юнита роли (на main — до старта
+бота), пишет state-файл и откатывается на любом BEATEN/MISMATCH — тем же путём, что ssh-гейт.
+Строки есть и в отчёте `PHASE1_ONLY`, и в `DEPLOY OK`.
+
+### Правило vendor
+
+VENDOR = файл в `/usr/lib`, `/lib` или `/usr/local/lib` **плюс** файл в `/etc`, который
+принадлежит пакету (`dpkg -S` одним вызовом) и не изменён локально (md5 совпадает со строкой из
+`dpkg-query -W -f='${Conffiles}'`). Repo-значение поверх vendor — норма, не LATENT: на обоих
+хостах `99-bbr.conf` перекрывает неизменённый `/etc/sysctl.d/10-bufferbloat.conf` из procps, а
+провайдерский `99-cloudimg-ipv6.conf` — неизменённый `10-ipv6-privacy.conf`. Проигравший
+**изменённый** conffile — LATENT. Symlink оценивается по своей цели.
+
+`/etc/ssh/sshd_config` управляется ucf, а не является conffile dpkg: проверка conffile'ов его не
+видит, поэтому он никогда не vendor — его строки оцениваются как строки любого другого файла.
+
+### Старшинство по семействам
+
+- **sshd** — `/etc/ssh/sshd_config` обходится так, как его читает sshd: `Include` раскрывается на
+  месте (glob, сортировка C-locale, относительный путь — от `/etc/ssh`); выигрывает **первое**
+  значение. Главный файл участвует наравне с drop-in'ами: его строки после `Include` — тоже
+  проигравшие, строки до него перебивают любой drop-in. Ключи внутри `Match` (до следующего
+  `Match` или конца того файла) исключаются из анализа и печатаются как INFO. Мульти-ключи не
+  оцениваются: `Port`, `ListenAddress`, `HostKey`, `HostCertificate`, `AcceptEnv`, `SetEnv`,
+  `Subsystem`, `AllowUsers`, `DenyUsers`, `AllowGroups`, `DenyGroups`. Алиасы:
+  `ChallengeResponseAuthentication` = `KbdInteractiveAuthentication`,
+  `prohibit-password` = `without-password`. Живое значение: `sshd -T`.
+- **sysctl** — при загрузке порядок `systemd-analyze cat-config sysctl.d`; выигрывает
+  **последнее** значение. Порядок `sysctl --system` замеряется, а не предполагается:
+  `sysctl --system --dry-run` (procps ≥ 4.0.3; на хостах 4.0.4; ничего не пишет), его строки
+  `* Applying <path>`. Замер на хостах: `/etc/sysctl.conf` применяется ещё раз в самом конце, хотя
+  уже прилинкован как `99-sysctl.conf`. Ключ, у которого победитель при загрузке ≠ победителю
+  `sysctl --system`, — LATENT. Без `--dry-run` порядок предполагается (порядок загрузки, затем
+  `/etc/sysctl.conf`), и отчёт это помечает. Ключ с `/` без `.` приводится к точкам; ведущий `-`
+  срезается; пробелы в значении схлопываются; ключ с `*` с `/proc` не сверяется. Живое значение:
+  `sysctl -n`.
+- **systemd `*.conf` + `*.conf.d`** — `journald`, `networkd`, `resolved`, `logind`, `timesyncd`,
+  `system`: порядок `systemd-analyze cat-config systemd/<x>.conf` (главный файл, затем drop-in'ы
+  по имени), ключ = `Section.Key`, выигрывает **последнее** значение. Кроме списочных настроек —
+  `Resolve.DNS`, `Resolve.FallbackDNS`, `Resolve.Domains`, `Time.NTP`, `Time.FallbackNTP`: у них
+  значения всех файлов складываются, а пустое присваивание сбрасывает список, поэтому сверяется
+  накопленный список (сервер, оставшийся в `resolved.conf` рядом с серверами drop-in, — BEATEN).
+  Общего способа прочитать для них живое значение нет, поэтому они оцениваются только по
+  старшинству.
+- **Юниты, которые ставит репо**, по роли, из тех же источников, что `UNIT_SET` и
+  `MANAGED_HOST_FILES`: на main — `deploy/vpn-bot.service`, каждый установленный на хосте
+  `deploy/*.service|*.timer` и юниты и drop-in'ы реестра; на relay — `deploy/relay/*.service` и
+  записи реестра. `*.example.*` — никогда. `FragmentPath` не наш или юнит замаскирован → BEATEN;
+  `NeedDaemonReload=yes` → MISMATCH; нашего drop-in нет в `DropInPaths` → BEATEN; там же drop-in,
+  который не наш и не vendor (`/etc`, `/run`, генераторы), → LATENT; таймер, который ставит деплой,
+  не `enabled` + `active` → MISMATCH. (`deploy/*.timer`, которые оператор ставит руками, относятся
+  к модульным подсистемам и работать не обязаны.) Вывод `systemctl show` читается построчно как
+  `Key=Value` и никогда не исполняется.
+
+### Что ожидается
+
+Только явные списки — никаких «логичных» умолчаний:
+
+- **ключи sysctl, sshd и systemd `*.conf` выводятся из repo-файлов роли автоматически**: добавили
+  файл в `MANAGED_HOST_FILES` — его ключи проверяются (`tests/test_host_check.py` проверяет это на
+  настоящем реестре);
+- сверх этого — **`deploy/host/invariants.list`**, одна строка на инвариант:
+
+  ```text
+  <main|relay|all>|<probe>|<key>|<expected>|<причина, не короче 20 символов>
+  ```
+
+  Типы probe — закрытый список, произвольных команд нет: `sshd` (против `sshd -T`), `sysctl`
+  (против `sysctl -n`), `systemd-conf:<x>` (против файлов), `unit-prop:<unit>:<Prop>`
+  (`systemctl show`), `path-present`, `path-absent`, `path-regular` (существует и **не** symlink),
+  `tcp-listen:<port>`. Ожидаемое `~X` значит «содержит X целым токеном» (`~22` совпадает с
+  `[::]:22 (Stream)`, но не с `:2222`). Засеяно: на main `ssh.socket` слушает 54321,
+  `even-day-reboot.timer` enabled и active, `/etc/resolv.conf` — обычный файл; на relay
+  `ssh.socket` слушает 22; на обеих ролях есть `/etc/cloud/cloud-init.disabled`.
+
+### Как принять LATENT
+
+LATENT, который должен остаться, записывается в **`deploy/host/accepted-overrides.list`** — это
+единственный санкционированный способ; ручки `ALLOW_*` нет (`redeploy.sh` её бы и не передал):
+
+```text
+<path>|<key>|<причина, не короче 20 символов>
+```
+
+`path` — файл, который называет строка (проигравший, чужой drop-in или файл, который выигрывает
+при `sysctl --system`), `key` — ключ строки (ключ sysctl, keyword sshd в нижнем регистре,
+`Section.Key` или имя юнита для drop-in). Запись превращает в ACCEPTED ровно эту строку и ничего
+больше; запись, которая ни с чем не совпала, печатается как INFO. Формат проверяет
+`tests/test_host_check.py`. По правилу vendor стартовый список **пустой**.
+
+### WARN-проверки
+
+Состояние хоста вне репо — в отчёте, никогда не фатально, ключи и пароли не печатаются никогда:
+cloud-init жив (нет `/etc/cloud/cloud-init.disabled`); строки `logrotate -d /etc/logrotate.conf`,
+которые **начинаются** с `error:`, и `duplicate log entry` (никогда не подстрока «error»: она есть
+в путях вроде `error.log`); `NOPASSWD: ALL` в sudoers; не-root аккаунт с login shell и рабочим
+паролем (`passwd -S` = P, читается из `/etc/shadow`) или непустым `authorized_keys`; локально
+изменённый conffile dpkg в `/etc/systemd`, `/etc/sysctl*`, `/etc/logrotate*`, `/etc/cloud` или
+`/etc/sudoers*` — с ключами, которые он задаёт (настройка, живущая только в изменённом conffile,
+— состояние хоста вне репо; сейчас на main это `journald.conf`, дублирующий managed drop-in, и
+`resolved.conf`, см. ниже).
+
+Проверка никогда не удаляет и не правит файлы вне реестра. Найденное закрывается реестром: файл,
+которым должен владеть репо, получает запись; файл, который не должен вернуться, — `class absent`
+(`50-cloud-init.conf` и `90-cloud-init-users` от cloud-init на обеих ролях); маркер — `class plain`
+(`/etc/cloud/cloud-init.disabled`).
+
+### Между деплоями
+
+`vpn-bot-host-check.timer` (юнит реестра на обеих ролях) запускает проверку через 5 минут после
+каждой загрузки и затем раз в сутки (`RandomizedDelaySec=30min`, `Persistent=true`). Загрузочный
+прогон — главный: cloud-init, провайдер и apt меняют хост именно на ребуте, а
+`even-day-reboot.timer` перезагружает его раз в 5 дней. Каждый прогон — и Phase 2 каждого деплоя —
+атомарно переписывает `/var/lib/vpn-bot-host-check/last.json` (`root`, `0644`): время, роль,
+счётчики, строки. На BEATEN/MISMATCH сервис выходит с кодом 1: юнит виден как failed, а строки
+есть в `journalctl -u vpn-bot-host-check`.
+
+На **main** бот читает этот файл каждые `HOST_CHECK_INTERVAL` секунд и шлёт алерт суперадминам
+(`ADMIN_IDS`, та же рассылка, что у алертов relay), когда строка становится BEATEN или MISMATCH,
+когда появляется новый LATENT, и один раз, когда последний BEATEN/MISMATCH ушёл. Без повторов по
+той же строке: отправленное хранится в базе, рестарт его не повторяет.
+
+На **relay** бота нет, и канала от бота к relay тоже нет — relay — это строки в базе, которые
+проверяются снаружи TLS-handshake'ом через их DNAT, — поэтому новый канал ради этого не строится.
+Вердикт relay — в его журнале (`journalctl -u vpn-bot-host-check`, failed-юнит) и в Phase 1
+каждого деплоя relay (`CHECK=1` показывает его без деплоя).
+
+### DNS на основном сервере
+
+- `/etc/resolv.conf` — **обычный файл**, а не stub-symlink systemd-resolved (переписан
+  2026-08-25): `nameserver 1.1.1.1`, `nameserver 8.8.8.8`. Это `deploy/host/dns/resolv.conf`
+  (класс `plain`, побайтно равен копии хоста — sha256 закреплён в
+  `tests/test_deploy_host_state.py`), а инвариант `path-regular` падает, если вернётся symlink.
+- systemd-resolved по-прежнему работает; его upstream'ы `DNS=1.1.1.1 8.8.8.8` и
+  `FallbackDNS=1.0.0.1 8.8.4.4` жили только в ручной правке conffile dpkg
+  `/etc/systemd/resolved.conf`. Теперь это `deploy/host/resolved/10-vpn-bot.conf` (класс
+  `resolved`): после изменения — `systemctl try-reload-or-restart systemd-resolved`, затем
+  `getent ahosts github.com` должен ответить в течение 10 с, иначе деплой откатывается (rollback
+  возвращает старый файл и так же перезагружает resolved).
+- Сам `/etc/systemd/resolved.conf` деплой никогда не пишет (он в отчёте как изменённый conffile).
+  После деплоя этой раскладки его вернут к дефолту пакета отдельным ручным скриптом, который
+  проверяет, что эффективная конфигурация не изменилась. Первый деплой ничего эффективного не
+  меняет: drop-in несёт значения conffile, а `resolv.conf` уже synced.
 
 ## Файлы, которые ничем не учтены
 

@@ -3,7 +3,7 @@
 Pinned here, through the DEPLOY_SELFTEST=1 seam with every host command stubbed and
 every path under the test's temp dir:
 
-1. **Per class** (logrotate, sysctl, unit, journald, networkd, hook, ssh): absent ->
+1. **Per class** (logrotate, sysctl, unit, journald, networkd, hook, ssh, resolved): absent ->
    installed + post-action; synced -> nothing; drift -> reinstalled; a candidate the
    validator refuses -> Phase 1 fails with nothing changed; a failure after the
    install -> rollback puts the host copy back.
@@ -26,6 +26,9 @@ every path under the test's temp dir:
    three-path restore line for line.
 9. **The acme hook**: --dry-run prints exactly the host's TLS ownership/modes, and a
    failing step does not stop the other consumers from being reloaded.
+10. **plain** (installed verbatim, nothing reloaded), **resolved** (reload, then
+    `getent ahosts` or roll back — the rollback reloads too), and a retired
+    sshd_config.d file (sshd -t + reload + port check, like an ssh change).
 
 deploy.sh runs this suite AS ROOT on the production host in Phase 1, so nothing
 here may reach a real path: every test registry points under tmp_path and
@@ -67,6 +70,9 @@ HOST_SHA256 = {
     "deploy/host/sysctl/99-network-buffers.conf": "735896de105ea0f5d3defda9a4cea1b3090d0611f0581155dfd43ab2ae286996",
     "deploy/host/sysctl/99-swap-tuning.conf": "4afe1c8fd814e15718256ff5796866f25a083d8eabb5f63cd1967fb4637fd2a8",
     "deploy/host/sysctl/99-vpn-forwarding.conf": "7de9e61bfd3ef0b34bcacfba0fcbd0896611812ed74015f2dac1446c3bacd743",
+    # `sha256sum /etc/resolv.conf` on the main server, 2026-11-11 (a plain file there,
+    # not resolved's stub symlink): the repo copy must read "synced" on the first deploy.
+    "deploy/host/dns/resolv.conf": "bfb36a68f16a2d677cd490d7fe7742ed80075203eb7a382e610783d0b74a6d5b",
 }
 
 
@@ -161,6 +167,13 @@ done
 exit $rc
 """
 
+GETENT = r"""
+echo "getent $*" >> "$LOGS/getent.log"
+[[ -f "$SD/getent_fail" ]] && exit 2
+echo "140.82.121.4    STREAM github.com"
+exit 0
+"""
+
 INSTALL = r"""
 echo "install $*" >> "$LOGS/install.log"
 mode=""; dirs=0; args=()
@@ -209,7 +222,7 @@ class Lab:
         self.scan_dirs: list[Path] = []
         for name, body in (("systemctl", SYSTEMCTL), ("sysctl", SYSCTL), ("logrotate", LOGROTATE),
                            ("systemd-analyze", SYSTEMD_ANALYZE), ("sshd", SSHD), ("ss", SS),
-                           ("dpkg", DPKG), ("install", INSTALL), ("sleep", "exit 0\n")):
+                           ("dpkg", DPKG), ("install", INSTALL), ("getent", GETENT), ("sleep", "exit 0\n")):
             _stub(self.stub / name, body)
 
     # --- fixtures -----------------------------------------------------------
@@ -262,7 +275,7 @@ class Lab:
             f'STAGE="{self.stage}"; APP_DIR="{self.repo}"; ENV_FILE="{self.env_file}"\n'
             f'MH_SELFTEST_ROOT="{self.tmp}"\n'
             f'SYSTEMD_UNIT_DIR="{self.unitdir}"; PROC_SYS="{self.proc}"; SSHD_CONFIG="{self.sshd_config}"\n'
-            "SSH_LISTEN_WAIT=2\n"
+            "SSH_LISTEN_WAIT=2; RESOLVED_PROBE_WAIT=3\n"
             f'ABSENT_REF_PATHS=("{self.h("etc/crontab")}" "{self.h("etc/cron.d")}" "{self.h("var/spool/cron")}" '
             f'"{self.unitdir}" "{self.h("usr/lib/systemd/system")}")\n'
             f"UNMANAGED_SCAN_DIRS=({scan})\n"
@@ -323,6 +336,7 @@ class Case:
             "sysctl": lambda: lab.flag("fail_sysctl_p"),
             "unit": lambda: lab.flag("fail_daemon-reload"),
             "journald": lambda: lab.flag("fail_restart_systemd-journald"),
+            "resolved": lambda: lab.flag("getent_fail"),
             "ssh": lambda: lab.flag("ssh.service.active", "active"),  # but nothing listens
         }.get(self.cls, lambda: lab.flag("install_corrupt"))()
 
@@ -340,6 +354,10 @@ class Case:
             assert "systemctl enable --now --quiet x.timer" in sc
         elif self.cls == "journald":
             assert sc == ["systemctl restart systemd-journald"]
+        elif self.cls == "resolved":
+            assert sc == ["systemctl try-reload-or-restart systemd-resolved"]
+            assert lab.log("getent") == ["getent ahosts github.com"]
+            assert "getent ahosts github.com: resolves (after 0s)" in out
         elif self.cls == "ssh":
             assert any(ln.startswith("sshd -t") for ln in lab.log("sshd"))
             assert sc == ["systemctl reload ssh.service"]
@@ -363,6 +381,8 @@ CASES = [
          TIMER.format(d="new"), TIMER.format(d="old"), TIMER.format(d="x") + "BROKEN=1\n"),
     Case("journald", "etc/systemd/journald.conf.d/10-vpn-bot.conf",
          "[Journal]\nSystemMaxUse=500M\n", "[Journal]\nSystemMaxUse=400M\n", "SystemMaxUse=500M\n"),
+    Case("resolved", "etc/systemd/resolved.conf.d/10-vpn-bot.conf",
+         "[Resolve]\nDNS=1.1.1.1 8.8.8.8\n", "[Resolve]\nDNS=9.9.9.9\n", "[Journal]\nDNS=1.1.1.1\n"),
     Case("networkd", "etc/systemd/networkd.conf.d/10-keep.conf",
          "[Network]\nManageForeignRoutes=no\n", "[Network]\n", "[Journal]\nManageForeignRoutes=no\n"),
     Case("hook", "usr/local/sbin/acme-reload.sh",
@@ -461,6 +481,12 @@ def test_a_failure_after_the_install_rolls_the_file_back(tmp_path: Path, case: C
         assert "NOT listening on :22" in proc.stdout
         assert "sshd -t on the restored ssh config: ok" in proc.stdout
         assert lab.mutating_systemctl()[-1] == "systemctl reload ssh.service", "re-applied after the restore"
+    if case.cls == "resolved":
+        assert "name resolution fails after the systemd-resolved drop-in change" in proc.stdout
+        assert "getent ahosts github.com found nothing within 3s" in proc.stdout
+        assert len(lab.log("getent")) == 4, "retried once a second for RESOLVED_PROBE_WAIT"
+        assert "try-reload-or-restart systemd-resolved (drop-in restored): rc=0" in proc.stdout
+        assert lab.mutating_systemctl()[-1] == "systemctl try-reload-or-restart systemd-resolved", "the restored file is reloaded"
 
 
 def test_a_file_that_did_not_exist_is_removed_again_with_its_new_directory(tmp_path: Path) -> None:
@@ -903,15 +929,16 @@ def test_a_relay_installs_only_the_relay_entry(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # 6. Static guards on the real registry and deploy/host/
 # --------------------------------------------------------------------------- #
-VALID_CLASSES = {"logrotate", "sysctl", "unit", "journald", "networkd", "hook", "ssh", "absent"}
+VALID_CLASSES = {"logrotate", "sysctl", "unit", "journald", "networkd", "hook", "ssh", "plain", "resolved", "absent"}
 VALID_GATES = {"MTPROTO", "SOCKS5", "HYSTERIA2"}
 
 
 def test_registry_entries_are_well_formed() -> None:
     entries = _registry()
     assert entries, "MANAGED_HOST_FILES is empty — the parser is broken"
-    dsts = [e[1] for e in entries]
-    assert len(dsts) == len(set(dsts)), "duplicate destinations"
+    # One entry per destination AND role: both roles carry e.g. the cloud-init marker.
+    dsts = [(e[1], e[5]) for e in entries]
+    assert len(dsts) == len(set(dsts)), "duplicate destinations within one role"
     for e in entries:
         assert len(e) in (6, 7), f"6 or 7 fields: {e}"
         src, dst, mode, owner, cls, role = e[:6]
@@ -1272,3 +1299,127 @@ def test_hook_has_no_errexit() -> None:
     code = [ln for ln in _read(HOOK).splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
     assert "set -uo pipefail" in code
     assert not any(re.match(r"\s*set\s+-[a-z]*e", ln) for ln in code)
+
+
+# --------------------------------------------------------------------------- #
+# 10. plain, resolved, a retired sshd drop-in
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("host_has", ["absent", "older", "same"])
+def test_plain_is_installed_verbatim_and_nothing_is_reloaded(tmp_path: Path, host_has: str) -> None:
+    lab = Lab(tmp_path)
+    dst = lab.add("plain", "etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n\n")
+    if host_has == "older":
+        lab.put("etc/resolv.conf", "nameserver 127.0.0.53\n")
+    elif host_has == "same":
+        lab.put("etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n\n")
+    proc = lab.run(BOTH)
+    assert proc.returncode == 0, proc.stdout
+    assert "plain file — installed verbatim, nothing to validate" in proc.stdout or host_has == "same"
+    assert _read(dst) == "nameserver 1.1.1.1\nnameserver 8.8.8.8\n\n"
+    assert oct(dst.stat().st_mode & 0o777) == oct(0o644)
+    assert lab.mutating_systemctl() == [] and lab.log("sysctl") == [] and lab.log("getent") == []
+    if host_has == "same":
+        assert "all in sync, nothing changed" in proc.stdout
+    else:
+        assert "installed verbatim (nothing reloaded)" in proc.stdout
+
+
+def test_an_empty_plain_file_is_installed(tmp_path: Path) -> None:
+    """The cloud-init marker: an empty file is a file."""
+    lab = Lab(tmp_path)
+    dst = lab.add("plain", "etc/cloud/cloud-init.disabled", "")
+    proc = lab.run(BOTH)
+    assert proc.returncode == 0, proc.stdout
+    assert dst.is_file() and dst.stat().st_size == 0
+
+
+def test_a_failed_reload_of_resolved_rolls_back_too(tmp_path: Path) -> None:
+    lab = Lab(tmp_path)
+    dst = lab.add("resolved", "etc/systemd/resolved.conf.d/10-vpn-bot.conf", "[Resolve]\nDNS=1.1.1.1\n")
+    lab.flag("fail_try-reload-or-restart")
+    proc = lab.run(BOTH)
+    assert proc.returncode == 42 and "ROLLBACK_CALLED" in proc.stdout, proc.stdout
+    assert "try-reload-or-restart systemd-resolved failed after the drop-in change" in proc.stdout
+    assert not dst.exists(), "it did not exist before the deploy"
+    assert lab.log("getent") == []
+
+
+SSHD_DROPIN_YES = "PasswordAuthentication yes\n"
+
+
+def test_a_retired_sshd_dropin_is_removed_and_ssh_reloaded(tmp_path: Path) -> None:
+    lab = Lab(tmp_path)
+    dst = lab.retire("etc/ssh/sshd_config.d/50-cloud-init.conf")
+    lab.put("etc/ssh/sshd_config.d/50-cloud-init.conf", SSHD_DROPIN_YES)
+    lab.ssh_up("22")
+    proc = lab.run(BOTH)
+    assert proc.returncode == 0, proc.stdout
+    assert not dst.exists()
+    assert any(ln.startswith("sshd -t") for ln in lab.log("sshd"))
+    assert lab.mutating_systemctl() == ["systemctl reload ssh.service"]
+    assert "ssh.service active, listening on :22" in proc.stdout
+
+
+def test_a_retired_sshd_dropin_comes_back_with_a_reload_on_rollback(tmp_path: Path) -> None:
+    lab = Lab(tmp_path)
+    dst = lab.retire("etc/ssh/sshd_config.d/50-cloud-init.conf")
+    lab.put("etc/ssh/sshd_config.d/50-cloud-init.conf", SSHD_DROPIN_YES)
+    lab.flag("ssh.service.active", "active")   # active, but nothing listens: the check fails
+    proc = lab.run(BOTH)
+    assert proc.returncode == 42 and "ROLLBACK_CALLED" in proc.stdout, proc.stdout
+    assert _read(dst) == SSHD_DROPIN_YES
+    assert "sshd -t on the restored ssh config: ok" in proc.stdout
+    assert lab.mutating_systemctl()[-1] == "systemctl reload ssh.service"
+
+
+def test_a_retired_sudoers_file_is_just_removed(tmp_path: Path) -> None:
+    lab = Lab(tmp_path)
+    dst = lab.retire("etc/sudoers.d/90-cloud-init-users")
+    lab.put("etc/sudoers.d/90-cloud-init-users", "ubuntu ALL=(ALL) NOPASSWD:ALL\n", 0o440)
+    proc = lab.run(BOTH)
+    assert proc.returncode == 0, proc.stdout
+    assert not dst.exists() and lab.mutating_systemctl() == [] and lab.log("sshd") == []
+
+
+def test_the_real_registry_carries_the_cloud_init_and_dns_entries() -> None:
+    reg = {(e[1], e[5]): e for e in _registry()}
+    for role in ("main", "relay"):
+        assert reg["/etc/cloud/cloud-init.disabled", role][2:5] == ["0644", "root:root", "plain"]
+        assert reg["/etc/ssh/sshd_config.d/50-cloud-init.conf", role][4] == "absent"
+        assert reg["/etc/sudoers.d/90-cloud-init-users", role][4] == "absent"
+        for unit in ("vpn-bot-host-check.service", "vpn-bot-host-check.timer"):
+            assert reg[f"/etc/systemd/system/{unit}", role][:5] == [
+                f"deploy/host/systemd/{unit}", f"/etc/systemd/system/{unit}", "0644", "root:root", "unit"]
+    assert reg["/etc/resolv.conf", "main"][:5] == ["deploy/host/dns/resolv.conf", "/etc/resolv.conf", "0644", "root:root", "plain"]
+    assert ("/etc/resolv.conf", "relay") not in reg
+    assert reg["/etc/systemd/resolved.conf.d/10-vpn-bot.conf", "main"][:5] == [
+        "deploy/host/resolved/10-vpn-bot.conf", "/etc/systemd/resolved.conf.d/10-vpn-bot.conf", "0644", "root:root", "resolved"]
+    assert (ROOT / "deploy/host/cloud/cloud-init.disabled").read_bytes() == b""
+
+
+def test_the_resolved_dropin_sets_exactly_the_hosts_upstreams() -> None:
+    lines = [ln for ln in _read(ROOT / "deploy/host/resolved/10-vpn-bot.conf").splitlines()
+             if ln.strip() and not ln.lstrip().startswith("#")]
+    assert lines == ["[Resolve]", "DNS=1.1.1.1 8.8.8.8", "FallbackDNS=1.0.0.1 8.8.4.4"]
+
+
+def test_the_resolved_conffile_is_reported_never_written() -> None:
+    text = _read(DEPLOY_SH)
+    assert re.search(r"^CONFFILE_REPORT_PATHS=\(.*/etc/systemd/resolved\.conf.*\)$", text, re.M)
+    assert not [e for e in _registry() if e[1] == "/etc/systemd/resolved.conf"]
+
+
+def test_a_resolver_that_hangs_is_bounded_by_the_deadline(tmp_path: Path) -> None:
+    """Unanswering DNS servers make one getent block through the resolver's retries:
+    every lookup runs under `timeout`, and the wall clock bounds the whole probe."""
+    import time
+    lab = Lab(tmp_path)
+    dst = lab.add("resolved", "etc/systemd/resolved.conf.d/10-vpn-bot.conf", "[Resolve]\nDNS=1.1.1.1\n")
+    _stub(lab.stub / "getent", 'echo "getent $*" >> "$LOGS/getent.log"\nexec /bin/sleep 60\n')
+    started = time.monotonic()
+    proc = lab.run(BOTH, RESOLVED_PROBE_WAIT="2")
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 42 and "ROLLBACK_CALLED" in proc.stdout, proc.stdout
+    assert "getent ahosts github.com found nothing within 2s" in proc.stdout
+    assert elapsed < 15, f"the probe ran {elapsed:.0f}s past its 2s deadline"
+    assert not dst.exists()

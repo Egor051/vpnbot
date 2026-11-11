@@ -1,0 +1,1423 @@
+#!/usr/bin/env bash
+#
+# vpn-bot-host-check — is the EFFECTIVE host state what the repo says it is?
+#
+# MANAGED_HOST_FILES (scripts/deploy.sh) guarantees that a repo file lies on the host
+# byte for byte with the right mode and owner. It does NOT say whether that file is
+# in effect. Found on the relay: 00-vpnrelay-keyonly.conf (PasswordAuthentication no)
+# won over 50-cloud-init.conf (yes) and over active "PasswordAuthentication yes" /
+# "PermitRootLogin yes" lines in the MAIN sshd_config purely by parse order — rename
+# the file and the host silently accepts passwords, while the deploy stays green.
+# This script is the one implementation of that check; Phase 1 and Phase 2 of
+# scripts/deploy.sh and vpn-bot-host-check.timer all run it.
+#
+# STRICTLY READ-ONLY. The only thing it ever writes is its own state file (--state,
+# default /var/lib/vpn-bot-host-check/last.json), atomically: mktemp in the same
+# directory, then mv. It never touches a file of the host, never reloads anything,
+# never runs `sysctl --system` without --dry-run, never evals command output.
+#
+# Verdicts, one per output row (docs/host-state.md#effective-state):
+#   BEATEN    a value a repo-managed file sets is not in effect: another file wins.
+#   MISMATCH  the live value (sshd -T / sysctl -n / systemctl show) differs from what
+#             the files give, for a key a repo-managed file sets; a repo unit that is
+#             shadowed, masked, waiting for daemon-reload or (a timer) not running;
+#             an entry of deploy/host/invariants.list that does not hold.
+#   LATENT    right now, but a loser that is neither repo-managed nor vendor holds
+#             another value: remove the winner and the value silently flips.
+#   ACCEPTED  a LATENT that deploy/host/accepted-overrides.list accepts.
+#   WARN      host state outside the repo worth a look (cloud-init alive, logrotate
+#             errors, NOPASSWD: ALL, login accounts, modified conffiles, ...).
+#   PENDING   (--pre-install only) the deploy is about to change it; Phase 2 checks it.
+#   INFO / OK the rest.
+#
+# VENDOR = a file under /usr/lib, /lib or /usr/local/lib, or a file under /etc that a
+# package owns (one batched `dpkg -S`) and that is not modified locally (its md5 is
+# the one in `dpkg-query ${Conffiles}`). A repo value over a vendor value is normal.
+#
+# Output: one row per line, "VERDICT|family|key|path|text", then
+# "SUMMARY|role=..|mode=..|beaten=N|mismatch=N|latent=N|accepted=N|warn=N|pending=N|info=N|ok=N".
+# Exit: 0 no BEATEN/MISMATCH, 1 some, 2 usage, 3 cannot run, 4 the state file could
+# not be written (rows are still printed).
+#
+# Usage: vpn-bot-host-check [--repo DIR] [--role main|relay] [--registry FILE]
+#                           [--pre-install] [--state FILE | --no-state] [--env FILE]
+#                           [--root DIR]
+#   --repo DIR       the checkout (default /opt/vpn-service): scripts/deploy.sh, deploy/
+#   --role ROLE      host role; default: NODE_ROLE from the checkout's .env (main if unset)
+#   --registry FILE  MANAGED_HOST_FILES entries of this role, gates already evaluated
+#                    (deploy.sh passes its own). Default: the array in
+#                    <repo>/scripts/deploy.sh, gates evaluated here from .env.
+#   --pre-install    Phase 1: judge the host as Phase 2 is about to leave it — every
+#                    repo file in place of its host copy, every retired file gone.
+#   --root DIR       read the host under DIR (tests). Commands are not re-rooted.
+set -uo pipefail
+export LC_ALL=C
+
+APP_DIR="/opt/vpn-service"
+ROOT=""
+ROLE=""
+REGISTRY_FILE=""
+PRE_INSTALL=0
+STATE_FILE="/var/lib/vpn-bot-host-check/last.json"
+WRITE_STATE=1
+ENV_FILE=""
+
+# Logical host paths (read under --root).
+UNINSTALL_MARKER_DIR="/etc/vpn-bot/uninstalled"
+SSHD_CONFIG="/etc/ssh/sshd_config"
+SSHD_DIR="/etc/ssh"
+UNIT_DIR="/etc/systemd/system"
+SYSCTL_CONF="/etc/sysctl.conf"
+LOGROTATE_CONF="/etc/logrotate.conf"
+CLOUD_DISABLED="/etc/cloud/cloud-init.disabled"
+
+INVARIANTS_LIST="deploy/host/invariants.list"          # checkout-relative
+ACCEPTED_LIST="deploy/host/accepted-overrides.list"    # checkout-relative
+
+# sshd keywords that take several values (or repeat) — not a first-wins setting.
+SSHD_EXCLUDED=" port listenaddress hostkey hostcertificate acceptenv setenv subsystem allowusers denyusers allowgroups denygroups "
+SYSTEMD_CONF_FAMILIES=(journald networkd resolved logind timesyncd system)
+# systemd *.conf settings that are LISTS, not scalars: every assignment in every file
+# adds to the list, an empty one resets it (resolved.conf(5), timesyncd.conf(5)). For
+# these the effective value is the accumulated list, never "the last line".
+SYSTEMD_LIST_KEYS=" resolved|Resolve.DNS resolved|Resolve.FallbackDNS resolved|Resolve.Domains timesyncd|Time.NTP timesyncd|Time.FallbackNTP "
+VENDOR_RE='^/(usr/lib|lib|usr/local/lib)/'
+CATCFG_RE='^# (/[^[:space:]]+)$'
+APPLYING_RE='^\* Applying (/[^[:space:]]+) \.\.\.$'
+# Where a modified dpkg conffile is host state outside the repo worth reporting.
+CONFFILE_WARN_RE='^/etc/(systemd/|sysctl|logrotate|cloud/|sudoers)'
+
+usage() { sed -n '/^# Usage:/,/^set -uo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
+die_usage()    { printf 'vpn-bot-host-check: %s\n' "$*" >&2; exit 2; }
+die_internal() { printf 'vpn-bot-host-check: %s\n' "$*" >&2; exit 3; }
+
+while (( $# > 0 )); do
+  case "$1" in
+    --repo)        APP_DIR="${2:?--repo needs a directory}"; shift 2 ;;
+    --role)        ROLE="${2:?--role needs main or relay}"; shift 2 ;;
+    --registry)    REGISTRY_FILE="${2:?--registry needs a file}"; shift 2 ;;
+    --pre-install) PRE_INSTALL=1; shift ;;
+    --state)       STATE_FILE="${2:?--state needs a file}"; WRITE_STATE=1; shift 2 ;;
+    --no-state)    WRITE_STATE=0; shift ;;
+    --env)         ENV_FILE="${2:?--env needs a file}"; shift 2 ;;
+    --root)        ROOT="${2%/}"; shift 2 ;;
+    -h|--help)     usage; exit 0 ;;
+    *)             die_usage "unknown argument '$1' (see --help)" ;;
+  esac
+done
+APP_DIR="${APP_DIR%/}"
+ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
+
+# --------------------------------------------------------------------------- #
+# Rows
+# --------------------------------------------------------------------------- #
+declare -a ROWS=()
+declare -A COUNT=([BEATEN]=0 [MISMATCH]=0 [LATENT]=0 [ACCEPTED]=0 [WARN]=0 [PENDING]=0 [INFO]=0 [OK]=0)
+declare -A ACCEPT=() ACCEPT_HIT=()
+
+clean() {
+  local s="$1"
+  s="${s//$'\r'/}"; s="${s//$'\n'/ }"; s="${s//|//}"
+  printf '%s' "$s"
+}
+
+# row VERDICT FAMILY KEY PATH TEXT. A LATENT that accepted-overrides.list names
+# (path + key) becomes ACCEPTED — exactly that row, nothing else.
+row() {
+  local v="$1" fam="$2" key="$3" path="$4" text="$5"
+  if [[ "$v" == LATENT && -n "${ACCEPT["${path}|${key}"]+x}" ]]; then
+    v=ACCEPTED
+    text="${text} — accepted (${ACCEPTED_LIST}): ${ACCEPT["${path}|${key}"]}"
+    ACCEPT_HIT["${path}|${key}"]=1
+  fi
+  ROWS+=("${v}|$(clean "$fam")|$(clean "$key")|$(clean "$path")|$(clean "$text")")
+  COUNT[$v]=$(( ${COUNT[$v]:-0} + 1 ))
+}
+
+# --------------------------------------------------------------------------- #
+# Host paths. Every path below is LOGICAL (/etc/...); fs() maps it under --root.
+# In --pre-install mode OVERLAY maps a path to the repo copy Phase 2 installs there
+# and RETIRED holds the paths Phase 2 removes.
+# --------------------------------------------------------------------------- #
+declare -A OVERLAY=() RETIRED=() TOUCHED=() REPO=()
+
+fs() { printf '%s%s' "$ROOT" "$1"; }
+
+logical() {
+  local p="$1"
+  if [[ -n "$ROOT" && "$p" == "$ROOT"/* ]]; then p="${p#"$ROOT"}"; fi
+  printf '%s' "$p"
+}
+
+# /a/b/../c -> /a/c. read -a, not word splitting: a path component is never globbed.
+norm_path() {
+  local part
+  local -a parts=() out=()
+  IFS=/ read -r -a parts <<< "$1"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ""|.) ;;
+      ..) if (( ${#out[@]} > 0 )); then unset 'out[-1]'; fi ;;
+      *) out+=("$part") ;;
+    esac
+  done
+  local IFS=/
+  printf '/%s' "${out[*]}"
+}
+
+# The logical path a symlink chain ends at (never leaves --root; /dev/null kept).
+resolve_l() {
+  local p="$1" t n=0
+  while (( n < 16 )); do
+    [[ -n "${OVERLAY[$p]+x}" ]] && break
+    [[ -L "$(fs "$p")" ]] || break
+    t="$(readlink "$(fs "$p")")" || break
+    if [[ "$t" == /* ]]; then p="$t"; else p="$(dirname "$p")/${t}"; fi
+    n=$(( n + 1 ))
+  done
+  norm_path "$p"
+}
+
+# Does the path exist once Phase 2 is done (pre-install) / now (otherwise)?
+exists_l() {
+  [[ -n "${OVERLAY[$1]+x}" ]] && return 0
+  [[ -n "${RETIRED[$1]+x}" ]] && return 1
+  [[ -e "$(fs "$1")" || -L "$(fs "$1")" ]]
+}
+
+# The file to read for a logical path: the repo copy (overlay), the host file (the
+# symlink target re-rooted), or /dev/null for a masked one.
+content_fs() {
+  local p="$1" r
+  if [[ -n "${OVERLAY[$p]+x}" ]]; then printf '%s' "${OVERLAY[$p]}"; return 0; fi
+  r="$(resolve_l "$p")"
+  if [[ "$r" == /dev/null ]]; then printf '/dev/null'; return 0; fi
+  if [[ -n "${OVERLAY[$r]+x}" ]]; then printf '%s' "${OVERLAY[$r]}"; return 0; fi
+  fs "$r"
+}
+
+# Pathname glob over the host (plus overlay files, minus retired ones), sorted in
+# the C locale, one logical path per line. The glob may only sit in the last part.
+glob_l() {
+  local pat="$1" f pd pb
+  local -a hits=()
+  while IFS= read -r f; do
+    if [[ -n "$f" ]]; then hits+=("$(logical "$f")"); fi
+  done < <(compgen -G "$(fs "$pat")" || true)
+  pd="$(dirname "$pat")"; pb="$(basename "$pat")"
+  for f in "${!OVERLAY[@]}"; do
+    # shellcheck disable=SC2053  # the right-hand sides ARE the pattern
+    if [[ "$(dirname "$f")" == $pd && "$(basename "$f")" == $pb ]]; then hits+=("$f"); fi
+  done
+  for f in "${hits[@]}"; do
+    [[ -n "${RETIRED[$f]+x}" ]] && continue
+    [[ -f "$(content_fs "$f")" ]] || continue
+    printf '%s\n' "$f"
+  done | sort -u
+}
+
+# --------------------------------------------------------------------------- #
+# .env — the same two readers as scripts/deploy.sh (env_val for the *_ENABLED gates,
+# env_sed_val for NODE_ROLE); tests/test_host_check.py pins both against deploy.sh.
+# --------------------------------------------------------------------------- #
+env_val() {
+  local key="$1" line val
+  [[ -f "$ENV_FILE" ]] || { printf ''; return 0; }
+  line=$(grep -E "^[[:space:]]*${key}=" "$ENV_FILE" 2>/dev/null | grep -vE '^[[:space:]]*#' | tail -n1 || true)
+  val="${line#*=}"
+  val="$(printf '%s' "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                                  -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")"
+  printf '%s' "$val"
+}
+
+env_sed_val() {
+  local key="$1" file="${2:-$ENV_FILE}"
+  [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
+  [[ -r "$file" ]] || return 0
+  sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?${key}[[:space:]]*=[[:space:]]*//p" "$file" \
+    | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/" -e 's/[[:space:]]*$//'
+}
+
+# deploy.sh's mh_gate_open, for runs without --registry (the timer): when=<path>
+# needs the path on the host, gate=<PROTO> needs <PROTO>_ENABLED and no uninstall
+# marker. Xray has no *_ENABLED flag (open unless removed); an unknown gate is closed.
+gate_open() {
+  local kv when="" gate="" proto val
+  local -a parts=()
+  IFS=';' read -r -a parts <<< "$1"
+  for kv in "${parts[@]}"; do
+    case "${kv%%=*}" in
+      when) when="${kv#*=}" ;;
+      gate) gate="${kv#*=}" ;;
+    esac
+  done
+  if [[ -n "$when" && ! -e "$(fs "$when")" ]]; then return 1; fi
+  [[ -n "$gate" ]] || return 0
+  case "$gate" in
+    XRAY) proto=xray ;; SOCKS5) proto=socks5 ;; MTPROTO) proto=mtproto ;; HYSTERIA2) proto=hysteria2 ;;
+    *) return 1 ;;
+  esac
+  [[ -f "$(fs "${UNINSTALL_MARKER_DIR}/${proto}")" ]] && return 1
+  [[ "$gate" == XRAY ]] && return 0
+  val="$(env_val "${gate}_ENABLED")"
+  case "${val,,}" in true|1|yes|on) return 0 ;; *) return 1 ;; esac
+}
+
+resolve_role() {
+  local raw
+  if [[ -z "$ROLE" ]]; then
+    raw="$(env_sed_val NODE_ROLE)"
+    case "$raw" in
+      ""|main) ROLE=main ;;
+      relay)   ROLE=relay ;;
+      *) die_internal "NODE_ROLE='${raw}' in ${ENV_FILE} is not a host role (main | relay)" ;;
+    esac
+  fi
+  [[ "$ROLE" == main || "$ROLE" == relay ]] || die_usage "--role must be main or relay, not '${ROLE}'"
+}
+
+# --------------------------------------------------------------------------- #
+# The registry: MANAGED_HOST_FILES of this role, and the units the repo installs.
+# --------------------------------------------------------------------------- #
+declare -a REG=()            # "src|dst|class|opts" — this role, gate open; dst logical
+declare -a REG_ABSENT=()     # retired dsts of this role
+declare -a UNITS_DEPLOY=()   # "src|dst": unit files deploy.sh installs verbatim
+declare -a UNITS_SHIPPED=()  # "src|dst": deploy/*.service|*.timer the operator installs
+
+registry_lines() {
+  if [[ -n "$REGISTRY_FILE" ]]; then
+    [[ -r "$REGISTRY_FILE" ]] || die_internal "cannot read the registry ${REGISTRY_FILE}"
+    cat "$REGISTRY_FILE"
+    return 0
+  fi
+  [[ -r "${APP_DIR}/scripts/deploy.sh" ]] || die_internal "cannot read ${APP_DIR}/scripts/deploy.sh (MANAGED_HOST_FILES)"
+  # The array literal, entry by entry — parsed, never sourced or evaluated.
+  awk '
+    /^MANAGED_HOST_FILES=\($/ { on = 1; next }
+    on && /^\)/ { exit }
+    on && /^[[:space:]]*"/ { s = $0; sub(/^[[:space:]]*"/, "", s); sub(/"[[:space:]]*$/, "", s); print s }
+  ' "${APP_DIR}/scripts/deploy.sh"
+}
+
+load_registry() {
+  local line src dst class role opts legacy n=0
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+    line="${line#\"}"; line="${line%\"}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    IFS='|' read -r src dst _ _ class role opts <<< "$line"
+    n=$(( n + 1 ))
+    [[ "${role:-main}" == "$ROLE" ]] || continue
+    dst="$(logical "$dst")"
+    if [[ "$class" == absent ]]; then REG_ABSENT+=("$dst"); continue; fi
+    if [[ -z "$REGISTRY_FILE" ]] && ! gate_open "${opts:-}"; then continue; fi
+    if [[ ! -f "${APP_DIR}/${src}" ]]; then
+      row WARN registry "$src" "$dst" "the repo source ${src} is not in ${APP_DIR} — ${dst} is not judged"
+      continue
+    fi
+    REG+=("${src}|${dst}|${class}|${opts:-}")
+    REPO["$dst"]=1
+    if (( PRE_INSTALL )); then
+      OVERLAY["$dst"]="${APP_DIR}/${src}"
+      legacy="$(opt_of "${opts:-}" legacy)"
+      if [[ -n "$legacy" ]]; then RETIRED["$(logical "$legacy")"]=1; fi
+    fi
+  done < <(registry_lines)
+  # Parsing deploy.sh found nothing: a broken parse, never "no files to check".
+  if [[ -z "$REGISTRY_FILE" ]] && (( n == 0 )); then
+    die_internal "no MANAGED_HOST_FILES entry in ${APP_DIR}/scripts/deploy.sh — cannot judge the host"
+  fi
+  if (( PRE_INSTALL )); then
+    for dst in "${REG_ABSENT[@]}"; do RETIRED["$dst"]=1; done
+  fi
+}
+
+opt_of() {
+  local kv
+  local -a parts=()
+  IFS=';' read -r -a parts <<< "$1"
+  for kv in "${parts[@]}"; do
+    if [[ "${kv%%=*}" == "$2" ]]; then printf '%s' "${kv#*=}"; return 0; fi
+  done
+  return 0
+}
+
+collect_units() {
+  local f base
+  shopt -s nullglob
+  if [[ "$ROLE" == relay ]]; then
+    for f in "${APP_DIR}"/deploy/relay/*.service "${APP_DIR}"/deploy/relay/*.timer; do
+      base="$(basename "$f")"; [[ "$base" == *.example.* ]] && continue
+      UNITS_DEPLOY+=("${f}|${UNIT_DIR}/${base}")
+    done
+  else
+    if [[ -f "${APP_DIR}/deploy/vpn-bot.service" ]]; then
+      UNITS_DEPLOY+=("${APP_DIR}/deploy/vpn-bot.service|${UNIT_DIR}/vpn-bot.service")
+    fi
+    for f in "${APP_DIR}"/deploy/*.service "${APP_DIR}"/deploy/*.timer; do
+      base="$(basename "$f")"
+      [[ "$base" == vpn-bot.service || "$base" == *.example.* ]] && continue
+      UNITS_SHIPPED+=("${f}|${UNIT_DIR}/${base}")
+    done
+  fi
+  shopt -u nullglob
+  for f in "${UNITS_DEPLOY[@]}"; do
+    REPO["${f#*|}"]=1
+    if (( PRE_INSTALL )); then OVERLAY["${f#*|}"]="${f%%|*}"; fi
+  done
+}
+
+# Pre-install: the paths Phase 2 actually changes (a repo copy that differs from the
+# host's, a retired file still there). Live values of what they set are PENDING.
+mark_touched() {
+  local p
+  (( PRE_INSTALL )) || return 0
+  for p in "${!OVERLAY[@]}"; do
+    if ! cmp -s "${OVERLAY[$p]}" "$(fs "$p")" 2>/dev/null || [[ -L "$(fs "$p")" ]]; then TOUCHED["$p"]=1; fi
+  done
+  for p in "${!RETIRED[@]}"; do
+    if [[ -e "$(fs "$p")" || -L "$(fs "$p")" ]]; then TOUCHED["$p"]=1; fi
+  done
+}
+
+# --------------------------------------------------------------------------- #
+# Vendor / repo / foreign
+# --------------------------------------------------------------------------- #
+declare -A CLASS=() CONFMD5=() CONFPKG=()
+CONF_LOADED=0
+
+# Every conffile of every installed package: path -> md5, path -> package. One call.
+load_conffiles() {
+  local line pkg="" p m flag
+  (( CONF_LOADED )) && return 0
+  CONF_LOADED=1
+  command -v dpkg-query >/dev/null 2>&1 || return 0
+  # shellcheck disable=SC2016  # a dpkg-query format string, not a shell expansion
+  while IFS= read -r line; do
+    if [[ "$line" == " "* ]]; then
+      read -r p m flag <<< "$line"
+      [[ "${flag:-}" == obsolete || -z "${m:-}" ]] && continue
+      CONFMD5["$p"]="$m"; CONFPKG["$p"]="$pkg"
+    elif [[ -n "$line" ]]; then
+      pkg="$line"
+    fi
+  done < <(dpkg-query -W -f='${Package}\n${Conffiles}\n' 2>/dev/null || true)
+}
+
+md5_of() { md5sum "$1" 2>/dev/null | awk '{ print $1 }'; }
+
+# Classify the given logical paths (once each): repo | vendor | foreign.
+classify_files() {
+  local p t line owned_path
+  local -a cand=() targets=()
+  local -A target=() owned=()
+  for p in "$@"; do
+    [[ -n "$p" && -z "${CLASS[$p]+x}" ]] || continue
+    if [[ -n "${REPO[$p]+x}" ]]; then CLASS["$p"]=repo; continue; fi
+    t="$(resolve_l "$p")"
+    if [[ "$p" =~ $VENDOR_RE || "$t" =~ $VENDOR_RE ]]; then CLASS["$p"]=vendor; continue; fi
+    CLASS["$p"]=foreign
+    if [[ "$t" == /etc/* ]]; then cand+=("$p"); target["$p"]="$t"; targets+=("$t"); fi
+  done
+  (( ${#cand[@]} > 0 )) || return 0
+  command -v dpkg >/dev/null 2>&1 || return 0
+  load_conffiles
+  while IFS= read -r line; do
+    [[ "$line" == diversion* || "$line" != *": /"* ]] && continue
+    owned_path="${line#*: }"
+    owned["$owned_path"]="${line%%: *}"
+  done < <(dpkg -S "${targets[@]}" 2>/dev/null || true)
+  for p in "${cand[@]}"; do
+    t="${target[$p]}"
+    [[ -n "${owned[$t]+x}" && -n "${CONFMD5[$t]+x}" ]] || continue
+    if [[ "$(md5_of "$(fs "$t")")" == "${CONFMD5[$t]}" ]]; then CLASS["$p"]=vendor; fi
+  done
+}
+
+# --------------------------------------------------------------------------- #
+# Parsers: one record per setting, "line<TAB>key<TAB>value".
+# --------------------------------------------------------------------------- #
+# sshd_config: keyword up to whitespace or "=", an optional "=", the value; a "#"
+# that starts a token ends the line. Keywords are lower-cased; spaces squeezed.
+# shellcheck disable=SC2016  # an awk program
+SSHD_TOKENIZER='
+{
+  sub(/\r$/, ""); line = $0
+  sub(/^[ \t]+/, "", line)
+  if (line == "" || substr(line, 1, 1) == "#") next
+  if (match(line, /^[^ \t=]+/) == 0) next
+  kw = tolower(substr(line, 1, RLENGTH)); rest = substr(line, RLENGTH + 1)
+  sub(/^[ \t]*=?[ \t]*/, "", rest)
+  if (match(rest, /(^|[ \t])#/)) rest = substr(rest, 1, RSTART - 1)
+  sub(/[ \t]+$/, "", rest); gsub(/[ \t]+/, " ", rest)
+  print NR "\t" kw "\t" rest
+}'
+# sysctl.d: key = value; "#"/";" comments; a leading "-" (ignore failure) dropped;
+# a key with "/" and no "." uses slashes as separators.
+# shellcheck disable=SC2016  # an awk program
+SYSCTL_PARSER='
+{
+  sub(/\r$/, ""); line = $0
+  if (line ~ /^[ \t]*([#;]|$)/) next
+  eq = index(line, "="); if (eq == 0) next
+  k = substr(line, 1, eq - 1); v = substr(line, eq + 1)
+  gsub(/^[ \t]+|[ \t]+$/, "", k); gsub(/^[ \t]+|[ \t]+$/, "", v)
+  sub(/^-[ \t]*/, "", k)
+  if (index(k, "/") > 0 && index(k, ".") == 0) gsub(/\//, ".", k)
+  gsub(/[ \t]+/, " ", v)
+  if (k != "") print NR "\t" k "\t" v
+}'
+# systemd *.conf: [Section] then Key=Value; the key is Section.Key.
+# shellcheck disable=SC2016  # an awk program
+INI_PARSER='
+{
+  sub(/\r$/, ""); line = $0
+  if (line ~ /^[ \t]*([#;]|$)/) next
+  if (line ~ /^[ \t]*\[[^]]+\][ \t]*$/) { s = line; sub(/^[ \t]*\[/, "", s); sub(/\][ \t]*$/, "", s); sec = s; next }
+  eq = index(line, "="); if (eq == 0) next
+  k = substr(line, 1, eq - 1); v = substr(line, eq + 1)
+  gsub(/^[ \t]+|[ \t]+$/, "", k); gsub(/^[ \t]+|[ \t]+$/, "", v); gsub(/[ \t]+/, " ", v)
+  if (k != "") print NR "\t" (sec == "" ? "" : sec ".") k "\t" v
+}'
+
+# The generic precedence judgement. stdin: sections "@C" (file<TAB>class), "@E"
+# (key<TAB>expected<TAB>repo file) and "@R" (file<TAB>key<TAB>value<TAB>line, in
+# application order). mode=first|last; lists=" Key1 Key2 " are list settings (values
+# add up across files, an empty assignment resets). Prints
+# "EFF<TAB>key<TAB>value<TAB>file" for every key and "<VERDICT><TAB>key<TAB>path<TAB>text"
+# rows.
+# shellcheck disable=SC2016  # an awk program
+ANALYZER='
+BEGIN { FS = "\t" }
+/^@C$/ { sec = "C"; next }
+/^@E$/ { sec = "E"; next }
+/^@R$/ { sec = "R"; next }
+sec == "C" { cls[$1] = $2; next }
+sec == "E" { ex[$1] = $2; exf[$1] = $3; ne++; ek[ne] = $1; next }
+sec == "R" {
+  k = $2
+  if (!(k in cnt)) { nk++; keys[nk] = k; cnt[k] = 0 }
+  n = ++cnt[k]; sf[k, n] = $1; sv[k, n] = $3; sl[k, n] = $4
+  next
+}
+function shown(v) { return (v == "") ? "\"\"" : v }
+function at(k, i) { return sf[k, i] ":" sl[k, i] " = " shown(sv[k, i]) }
+# A list setting: LEFF = the accumulated list (first occurrence of each entry kept, in
+# order), LFROM[entry] = the file that added it, LRESETF = the file of the last reset.
+function accumulate(k,   j, m, x, toks) {
+  LEFF = ""; LRESETF = ""; split("", LFROM)
+  for (j = 1; j <= cnt[k]; j++) {
+    if (sv[k, j] == "") { LEFF = ""; split("", LFROM); LRESETF = sf[k, j]; continue }
+    m = split(sv[k, j], toks, " ")
+    for (x = 1; x <= m; x++)
+      if (!(toks[x] in LFROM)) { LFROM[toks[x]] = sf[k, j]; LEFF = LEFF (LEFF == "" ? "" : " ") toks[x] }
+  }
+}
+function judge_list(k,   e, ef, off, m, x, toks, want) {
+  accumulate(k)
+  print "EFF\t" k "\t" LEFF "\t" sf[k, cnt[k]]
+  if (!(k in ex)) return
+  done[k] = 1; e = ex[k]; ef = exf[k]
+  if (LEFF == e) { print "OK\t" k "\t" ef "\t" shown(LEFF) " (a list: the entries of every file add up)"; return }
+  # Who changes it: the file of the first entry in effect that the repo file did not
+  # add; else (a repo entry is missing) the file of the last reset.
+  off = ""
+  m = split(LEFF, toks, " ")
+  for (x = 1; x <= m; x++) if (LFROM[toks[x]] != ef) { off = LFROM[toks[x]]; break }
+  if (off == "" && LRESETF != "" && LRESETF != ef) off = LRESETF
+  if (off == "") {
+    print "MISMATCH\t" k "\t" ef "\tthe host copy of " ef " gives " shown(LEFF) ", the repo copy " shown(e) " — the deploy reinstalls it"
+  } else {
+    print "BEATEN\t" k "\t" off "\tin effect " shown(LEFF) ", the repo value of " ef " is " shown(e) ": " off " changes it (a list setting — the entries of every file add up, an empty assignment resets)"
+  }
+}
+END {
+  rule = (mode == "first") ? "the first value wins" : "the last value wins"
+  for (i = 1; i <= nk; i++) {
+    k = keys[i]; n = cnt[k]
+    if (index(lists, " " k " ") > 0) { judge_list(k); continue }
+    w = (mode == "first") ? 1 : n
+    wf = sf[k, w]; wv = sv[k, w]
+    r = 0
+    if (mode == "first") { for (j = 1; j <= n; j++) if (sf[k, j] != wf) { r = j; break } }
+    else { for (j = n; j >= 1; j--) if (sf[k, j] != wf) { r = j; break } }
+    print "EFF\t" k "\t" wv "\t" wf
+    if (k in ex) {
+      done[k] = 1; e = ex[k]; ef = exf[k]
+      if (wv != e) {
+        if (wf == ef) {
+          print "MISMATCH\t" k "\t" ef "\tthe host copy of " ef " sets " shown(wv) ", the repo copy " shown(e) " — the deploy reinstalls it"
+        } else {
+          print "BEATEN\t" k "\t" wf "\t" at(k, w) " wins over the repo value " shown(e) " of " ef " (" rule ")"
+        }
+        continue
+      }
+      if (wf != ef && cls[wf] != "repo") {
+        print "WARN\t" k "\t" wf "\tshadowed: " at(k, w) " sets the repo value itself, so " ef " does not decide (" rule ")"
+      } else {
+        print "OK\t" k "\t" ef "\t" shown(wv) " from " wf
+      }
+    }
+    losers = ""; no = 0; split("", seen)
+    for (j = 1; j <= n; j++) {
+      if (sf[k, j] == wf || sv[k, j] == wv) continue
+      losers = losers (losers == "" ? "" : ", ") at(k, j)
+      if (cls[sf[k, j]] == "foreign" && !(sf[k, j] in seen)) { seen[sf[k, j]] = 1; off[++no] = sf[k, j] }
+    }
+    gone = (r > 0) ? shown(sv[k, r]) " from " sf[k, r] : "unset (built-in default)"
+    for (j = 1; j <= no; j++)
+      print "LATENT\t" k "\t" off[j] "\twinner " at(k, w) "; losers: " losers "; winner gone -> " gone
+  }
+  for (i = 1; i <= ne; i++) {
+    k = ek[i]
+    if (!(k in done)) print "MISMATCH\t" k "\t" exf[k] "\tno file sets it — " exf[k] " is not on the host or not read (repo value " shown(ex[k]) ")"
+  }
+}'
+
+# Records of one family, kept as text: "file<TAB>key<TAB>value<TAB>line" in order.
+declare -A FAM_REC=() FAM_EXP=() FAM_FILES=()
+declare -A EFFV=() EFFF=()    # "family|key" -> effective value / winning file
+
+add_rec()  { FAM_REC[$1]+="$2"$'\t'"$3"$'\t'"$4"$'\t'"$5"$'\n'; FAM_FILES[$1]+="$2"$'\n'; }
+
+# Parse <file> (logical) with <parser> into family <fam>.
+parse_into() {
+  local fam="$1" file="$2" parser="$3" src lineno key val
+  src="$(content_fs "$file")"
+  [[ "$src" == /dev/null ]] && return 0
+  if [[ ! -r "$src" ]]; then row WARN "$fam" "-" "$file" "cannot read ${file}"; return 0; fi
+  FAM_FILES[$fam]+="${file}"$'\n'
+  while IFS=$'\t' read -r lineno key val; do
+    [[ -n "$key" ]] && add_rec "$fam" "$file" "$key" "$val" "$lineno"
+  done < <(awk "$parser" "$src")
+}
+
+# Expected values: the repo copy of <dst>, parsed with <parser>; within one file the
+# first (sshd) or last (others) occurrence counts.
+expect_from() {
+  local fam="$1" src="$2" dst="$3" parser="$4" mode="$5" lineno key val
+  local -A got=()
+  while IFS=$'\t' read -r lineno key val; do
+    [[ -n "$key" ]] || continue
+    if [[ "$fam" == sshd ]]; then
+      [[ "$key" == match ]] && break
+      sshd_key "$key"; key="$SSHD_KEY"
+      [[ "$SSHD_EXCLUDED" == *" ${key} "* || "$key" == include ]] && continue
+      sshd_value "$val"; val="$SSHD_VAL"
+    fi
+    if [[ "$mode" == first && -n "${got[$key]+x}" ]]; then continue; fi
+    if [[ "$SYSTEMD_LIST_KEYS" == *" ${fam}|${key} "* && -n "$val" && -n "${got[$key]:-}" ]]; then
+      got["$key"]="$(list_add "${got[$key]}" "$val")"
+      continue
+    fi
+    got["$key"]="$val"
+  done < <(awk "$parser" "$src")
+  for key in "${!got[@]}"; do
+    FAM_EXP[$fam]+="${key}"$'\t'"${got[$key]}"$'\t'"${dst}"$'\n'
+  done
+}
+
+# "a b" + "b c" -> "a b c": a list setting's entries, each once, in order.
+list_add() {
+  local acc="$1" x
+  local -a add=()
+  read -r -a add <<< "$2"
+  for x in "${add[@]}"; do
+    [[ " ${acc} " == *" ${x} "* ]] || acc="${acc:+${acc} }${x}"
+  done
+  printf '%s' "$acc"
+}
+
+# Run the analyzer over one family and turn its output into rows.
+analyze() {
+  local fam="$1" mode="$2" f verdict key path text lists=" " e
+  local -a known=()
+  local -A fileset=()
+  read -r -a known <<< "$SYSTEMD_LIST_KEYS"
+  for e in "${known[@]}"; do
+    if [[ "${e%%|*}" == "$fam" ]]; then lists+="${e#*|} "; fi
+  done
+  [[ -n "${FAM_REC[$fam]:-}${FAM_EXP[$fam]:-}" ]] || return 0
+  while IFS= read -r f; do [[ -n "$f" ]] && fileset["$f"]=1; done <<< "${FAM_FILES[$fam]:-}"
+  while IFS=$'\t' read -r verdict key path text; do
+    case "$verdict" in
+      EFF) EFFV["${fam}|${key}"]="$path"; EFFF["${fam}|${key}"]="$text" ;;
+      "")  ;;
+      *)   row "$verdict" "$fam" "$key" "$path" "$text" ;;
+    esac
+  done < <(
+    {
+      printf '@C\n'
+      for f in "${!fileset[@]}"; do printf '%s\t%s\n' "$f" "${CLASS[$f]:-foreign}"; done
+      printf '@E\n%s' "${FAM_EXP[$fam]:-}"
+      printf '@R\n%s' "${FAM_REC[$fam]:-}"
+    } | awk -v mode="$mode" -v lists="$lists" "$ANALYZER"
+  )
+}
+
+# --------------------------------------------------------------------------- #
+# sshd
+# --------------------------------------------------------------------------- #
+SSHD_KEY=""; SSHD_VAL=""
+sshd_key() {
+  case "$1" in
+    challengeresponseauthentication) SSHD_KEY=kbdinteractiveauthentication ;;
+    *) SSHD_KEY="$1" ;;
+  esac
+}
+sshd_value() {
+  local v="$1"
+  if [[ "$v" == \"*\" && "$v" != *" "* && ${#v} -ge 2 ]]; then v="${v:1:${#v}-2}"; fi
+  if [[ "$v" =~ ^[A-Za-z-]+$ ]]; then v="${v,,}"; fi
+  [[ "$v" == prohibit-password ]] && v=without-password
+  SSHD_VAL="$v"
+}
+
+declare -a SSHD_MATCHED=()
+# Walk a config file the way sshd does: Include expanded in place (globs, C-locale
+# order, relative to /etc/ssh), Match scoped to the rest of its file.
+sshd_walk() {
+  local file="$1" ctx="$2" depth="$3" src lineno kw val arg m
+  local -a args=() incs=()
+  if (( depth > 16 )); then row WARN sshd include "$file" "Include nested deeper than 16 — not followed"; return 0; fi
+  exists_l "$file" || return 0
+  src="$(content_fs "$file")"
+  [[ "$src" == /dev/null ]] && return 0
+  if [[ ! -r "$src" ]]; then row WARN sshd "-" "$file" "cannot read ${file}"; return 0; fi
+  FAM_FILES[sshd]+="${file}"$'\n'
+  while IFS=$'\t' read -r lineno kw val; do
+    case "$kw" in
+      include)
+        read -r -a args <<< "$val"
+        for arg in "${args[@]}"; do
+          arg="${arg#\"}"; arg="${arg%\"}"
+          [[ "$arg" == /* ]] || arg="${SSHD_DIR}/${arg}"
+          readarray -t incs < <(glob_l "$arg")
+          for m in "${incs[@]}"; do
+            if [[ -n "$m" ]]; then sshd_walk "$m" "$ctx" $(( depth + 1 )); fi
+          done
+        done ;;
+      match) ctx=match ;;
+      *)
+        sshd_key "$kw"
+        [[ "$SSHD_EXCLUDED" == *" ${SSHD_KEY} "* ]] && continue
+        sshd_value "$val"
+        if [[ "$ctx" == match ]]; then
+          SSHD_MATCHED+=("${file}:${lineno}|${SSHD_KEY}")
+        else
+          add_rec sshd "$file" "$SSHD_KEY" "$SSHD_VAL" "$lineno"
+        fi ;;
+    esac
+  done < <(awk "$SSHD_TOKENIZER" "$src")
+}
+
+declare -A SSHD_LIVE=()
+SSHD_LIVE_OK=0
+sshd_live() {
+  local out rc line k v
+  if ! command -v sshd >/dev/null 2>&1; then
+    row WARN sshd "sshd -T" "$SSHD_CONFIG" "sshd not found — live values not compared"; return 0
+  fi
+  out="$(sshd -T -f "$(fs "$SSHD_CONFIG")" 2>&1)" && rc=0 || rc=$?
+  if (( rc != 0 )); then
+    row WARN sshd "sshd -T" "$SSHD_CONFIG" "sshd -T failed (rc ${rc}): ${out%%$'\n'*} — live values not compared"
+    return 0
+  fi
+  while IFS= read -r line; do
+    k="${line%% *}"; v="${line#* }"
+    [[ -n "$k" && "$line" == *" "* ]] || continue
+    sshd_key "$k"; sshd_value "$v"
+    [[ -n "${SSHD_LIVE[$SSHD_KEY]+x}" ]] || SSHD_LIVE["$SSHD_KEY"]="$SSHD_VAL"
+  done <<< "$out"
+  SSHD_LIVE_OK=1
+}
+
+gather_sshd() {
+  local e src dst class
+  for e in "${REG[@]}"; do
+    IFS='|' read -r src dst class _ <<< "$e"
+    if [[ "$dst" == "${SSHD_DIR}/"* ]]; then
+      expect_from sshd "${APP_DIR}/${src}" "$dst" "$SSHD_TOKENIZER" first
+    fi
+  done
+  sshd_walk "$SSHD_CONFIG" global 0
+}
+
+# --------------------------------------------------------------------------- #
+# sysctl and the systemd *.conf families
+# --------------------------------------------------------------------------- #
+# The files `systemd-analyze cat-config <what>` shows, in order (its "# <path>"
+# headers: the first line, or right after an empty line, naming an existing file).
+cat_config_files() {
+  local out line prev="" p
+  command -v systemd-analyze >/dev/null 2>&1 || return 1
+  out="$(systemd-analyze cat-config "$1" 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    if [[ -z "$prev" && "$line" =~ $CATCFG_RE ]]; then
+      p="${BASH_REMATCH[1]}"
+      if [[ "$p" == *.conf ]] && { [[ -e "$(fs "$p")" || -L "$(fs "$p")" ]] || [[ -n "${OVERLAY[$p]+x}" ]]; }; then
+        printf '%s\n' "$p"
+      fi
+    fi
+    prev="$line"
+  done <<< "$out"
+}
+
+# Insert <paths> into an ordered list by basename (C order), each masking an entry
+# with the same basename — the systemd/procps rule for /etc copies. Retired paths
+# leave the list. Prints the new order.
+insert_by_basename() {
+  local list="$1" p ins b placed
+  shift
+  local -a cur=() next=()
+  while IFS= read -r p; do
+    if [[ -n "$p" && -z "${RETIRED[$p]+x}" ]]; then cur+=("$p"); fi
+  done <<< "$list"
+  for ins in "$@"; do
+    b="${ins##*/}"; next=(); placed=0
+    for p in "${cur[@]}"; do
+      [[ "${p##*/}" == "$b" ]] && continue
+      if (( ! placed )) && [[ "${p##*/}" > "$b" ]]; then next+=("$ins"); placed=1; fi
+      next+=("$p")
+    done
+    (( placed )) || next+=("$ins")
+    cur=("${next[@]}")
+  done
+  if (( ${#cur[@]} > 0 )); then printf '%s\n' "${cur[@]}"; fi
+}
+
+# Overlay files of a drop-in directory (pre-install).
+overlay_in() {
+  local p
+  for p in "${!OVERLAY[@]}"; do
+    # shellcheck disable=SC2053
+    if [[ "$p" == $1 ]]; then printf '%s\n' "$p"; fi
+  done | sort
+}
+
+SYSCTL_BOOT=""; SYSCTL_SYSTEM=""; SYSCTL_SYSTEM_HOW=""
+gather_sysctl() {
+  local e src dst class boot sys ver tail_conf="" p
+  local -a ov=()
+  for e in "${REG[@]}"; do
+    IFS='|' read -r src dst class _ <<< "$e"
+    if [[ "$dst" == /etc/sysctl.d/*.conf ]]; then
+      expect_from sysctl "${APP_DIR}/${src}" "$dst" "$SYSCTL_PARSER" last
+    fi
+  done
+  readarray -t ov < <(overlay_in '/etc/sysctl.d/*.conf')
+  if ! boot="$(cat_config_files sysctl.d)"; then
+    if [[ -n "${FAM_EXP[sysctl]:-}" ]]; then
+      row WARN sysctl "boot order" "-" "systemd-analyze cat-config sysctl.d failed — sysctl precedence not judged"
+    else
+      row INFO sysctl "boot order" "-" "systemd-analyze cat-config sysctl.d failed — sysctl precedence not judged"
+    fi
+    return 0
+  fi
+  SYSCTL_BOOT="$(insert_by_basename "$boot" "${ov[@]}")"
+  # The order `sysctl --system` applies, measured (procps >= 4.0.3 has --dry-run,
+  # which writes nothing). /etc/sysctl.conf is applied once more at the very end.
+  ver="$(sysctl --version 2>/dev/null || true)"
+  if [[ "$ver" =~ ([0-9]+)\.([0-9]+)\.([0-9]+) ]] \
+     && (( BASH_REMATCH[1] > 4 || (BASH_REMATCH[1] == 4 && (BASH_REMATCH[2] > 0 || BASH_REMATCH[3] >= 3)) )); then
+    sys=""
+    while IFS= read -r p; do
+      if [[ "$p" =~ $APPLYING_RE ]]; then sys+="${BASH_REMATCH[1]}"$'\n'; fi
+    done < <(sysctl --system --dry-run 2>/dev/null || true)
+    SYSCTL_SYSTEM_HOW="measured with sysctl --system --dry-run"
+  else
+    sys="${boot}"$'\n'
+    if [[ -e "$(fs "$SYSCTL_CONF")" ]]; then sys+="${SYSCTL_CONF}"$'\n'; fi
+    SYSCTL_SYSTEM_HOW="NOT measured (procps without --dry-run: '${ver%%$'\n'*}') — assumed: the boot order, then ${SYSCTL_CONF}"
+    row INFO sysctl "sysctl --system" "-" "order of sysctl --system ${SYSCTL_SYSTEM_HOW}"
+  fi
+  # /etc/sysctl.conf stays last whatever is inserted before it.
+  if [[ "$sys" == *"${SYSCTL_CONF}"$'\n' ]]; then
+    tail_conf="$SYSCTL_CONF"
+    sys="$(printf '%s' "$sys" | awk -v t="$SYSCTL_CONF" 'BEGIN { n = 0 } { l[++n] = $0 } END { last = 0; for (i = n; i >= 1; i--) if (l[i] == t) { last = i; break } for (i = 1; i <= n; i++) if (i != last) print l[i] }')"
+  fi
+  SYSCTL_SYSTEM="$(insert_by_basename "$sys" "${ov[@]}")"
+  if [[ -n "$tail_conf" ]]; then SYSCTL_SYSTEM+=$'\n'"${tail_conf}"; fi
+  while IFS= read -r p; do
+    if [[ -n "$p" ]]; then parse_into sysctl "$p" "$SYSCTL_PARSER"; fi
+  done <<< "$SYSCTL_BOOT"
+  while IFS= read -r p; do
+    if [[ -n "$p" ]]; then FAM_FILES[sysctl]+="${p}"$'\n'; fi
+  done <<< "$SYSCTL_SYSTEM"
+}
+
+gather_systemd_conf() {
+  local x e src dst class order main rest p have_repo
+  local -a ov=()
+  for x in "${SYSTEMD_CONF_FAMILIES[@]}"; do
+    have_repo=0
+    for e in "${REG[@]}"; do
+      IFS='|' read -r src dst class _ <<< "$e"
+      if [[ "$dst" == "/etc/systemd/${x}.conf.d/"*.conf ]]; then
+        expect_from "$x" "${APP_DIR}/${src}" "$dst" "$INI_PARSER" last
+        have_repo=1
+      fi
+    done
+    readarray -t ov < <(overlay_in "/etc/systemd/${x}.conf.d/*.conf")
+    if ! order="$(cat_config_files "systemd/${x}.conf")"; then
+      if (( have_repo )); then
+        row WARN "$x" "cat-config" "-" "systemd-analyze cat-config systemd/${x}.conf failed — precedence not judged"
+      fi
+      continue
+    fi
+    # The main file first, then the drop-ins in basename order.
+    main=""; rest="$order"
+    if [[ "${order%%$'\n'*}" == */"${x}.conf" ]]; then main="${order%%$'\n'*}"; rest="${order#*$'\n'}"; [[ "$rest" == "$order" ]] && rest=""; fi
+    order="$(insert_by_basename "$rest" "${ov[@]}")"
+    if [[ -n "$main" ]]; then order="${main}"$'\n'"${order}"; fi
+    while IFS= read -r p; do
+      if [[ -n "$p" ]]; then parse_into "$x" "$p" "$INI_PARSER"; fi
+    done <<< "$order"
+  done
+}
+
+# Boot order vs `sysctl --system`: the winner after `sysctl --system` differs.
+sysctl_system_rows() {
+  local p lineno key val
+  local -A sysw=() sysf=()
+  [[ -n "$SYSCTL_SYSTEM" ]] || return 0
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    exists_l "$p" || continue
+    [[ "$(content_fs "$p")" == /dev/null || ! -r "$(content_fs "$p")" ]] && continue
+    while IFS=$'\t' read -r lineno key val; do
+      [[ -n "$key" ]] || continue
+      sysw["$key"]="$val"; sysf["$key"]="${p}:${lineno}"
+    done < <(awk "$SYSCTL_PARSER" "$(content_fs "$p")")
+  done <<< "$SYSCTL_SYSTEM"
+  for key in "${!sysw[@]}"; do
+    [[ -n "${EFFV["sysctl|${key}"]+x}" ]] || continue
+    if [[ "${sysw[$key]}" != "${EFFV["sysctl|${key}"]}" ]]; then
+      row LATENT sysctl "$key" "${sysf[$key]%:*}" \
+        "at boot ${EFFF["sysctl|${key}"]} = ${EFFV["sysctl|${key}"]} wins (systemd-sysctl); after \`sysctl --system\` ${sysf[$key]} = ${sysw[$key]} wins (order ${SYSCTL_SYSTEM_HOW})"
+    fi
+  done
+}
+
+# --------------------------------------------------------------------------- #
+# Live values
+# --------------------------------------------------------------------------- #
+# Keys a touched file sets (pre-install): their live value is the deploy's to change.
+key_touched() {
+  local fam="$1" key="$2" p lineno k v parser where src
+  (( PRE_INSTALL )) || return 1
+  case "$fam" in
+    sshd)   parser="$SSHD_TOKENIZER"; where="${SSHD_DIR}/*" ;;
+    sysctl) parser="$SYSCTL_PARSER";  where="/etc/sysctl*" ;;
+    *)      parser="$INI_PARSER";     where="/etc/systemd/${fam}.conf*" ;;
+  esac
+  for p in "${!TOUCHED[@]}"; do
+    # shellcheck disable=SC2053  # the right-hand side IS the pattern
+    [[ "$p" == $where ]] || continue
+    for src in "$(fs "$p")" "${OVERLAY[$p]:-}"; do
+      [[ -n "$src" && -r "$src" ]] || continue
+      while IFS=$'\t' read -r lineno k v; do
+        if [[ "$fam" == sshd ]]; then sshd_key "$k"; k="$SSHD_KEY"; fi
+        [[ "$k" == "$key" ]] && return 0
+      done < <(awk "$parser" "$src")
+    done
+  done
+  return 1
+}
+
+sysctl_live() {
+  local key="$1" out
+  [[ "$key" == *"*"* ]] && return 2
+  out="$(sysctl -n "$key" 2>/dev/null)" || return 1
+  out="${out//$'\t'/ }"; out="$(printf '%s' "$out" | tr -s ' ')"
+  LIVE_VAL="$out"
+}
+
+LIVE_VAL=""
+live_rows() {
+  local line key file
+  # sshd: repo keys against sshd -T.
+  while IFS=$'\t' read -r key _ file; do
+    [[ -n "$key" ]] || continue
+    [[ -n "${EFFV["sshd|${key}"]+x}" ]] || continue
+    if key_touched sshd "$key"; then row PENDING sshd "$key" "$file" "live value not compared: the deploy changes the files that set it"; continue; fi
+    (( SSHD_LIVE_OK )) || continue
+    if [[ -z "${SSHD_LIVE[$key]+x}" ]]; then
+      row MISMATCH sshd "$key" "$file" "sshd -T does not report ${key} (files give ${EFFV["sshd|${key}"]})"
+    elif [[ "${SSHD_LIVE[$key]}" != "${EFFV["sshd|${key}"]}" ]]; then
+      row MISMATCH sshd "$key" "$file" "sshd -T says ${SSHD_LIVE[$key]}, the files give ${EFFV["sshd|${key}"]} (${EFFF["sshd|${key}"]})"
+    fi
+  done <<< "${FAM_EXP[sshd]:-}"
+  # sysctl: repo keys against sysctl -n.
+  while IFS=$'\t' read -r key _ file; do
+    [[ -n "$key" ]] || continue
+    [[ -n "${EFFV["sysctl|${key}"]+x}" ]] || continue
+    if key_touched sysctl "$key"; then row PENDING sysctl "$key" "$file" "live value not compared: the deploy changes the files that set it"; continue; fi
+    sysctl_live "$key"; line=$?
+    case "$line" in
+      0) if [[ "$LIVE_VAL" != "${EFFV["sysctl|${key}"]}" ]]; then
+           row MISMATCH sysctl "$key" "$file" "sysctl -n says ${LIVE_VAL}, the files give ${EFFV["sysctl|${key}"]} (${EFFF["sysctl|${key}"]})"
+         fi ;;
+      1) row INFO sysctl "$key" "$file" "live value unreadable (its module is not loaded?) — not compared" ;;
+      *) row INFO sysctl "$key" "$file" "glob key — not compared with /proc" ;;
+    esac
+  done <<< "${FAM_EXP[sysctl]:-}"
+}
+
+# --------------------------------------------------------------------------- #
+# Units and drop-ins the repo installs
+# --------------------------------------------------------------------------- #
+declare -A UPROP=()
+unit_show() {
+  local unit="$1" p line k
+  local -a args=()
+  shift
+  for p in "$@"; do args+=(-p "$p"); done
+  UPROP=()
+  # Read line by line as Key=Value — never evaluated.
+  while IFS= read -r line; do
+    [[ "$line" == *=* ]] || continue
+    k="${line%%=*}"
+    if [[ -n "${UPROP[$k]+x}" ]]; then UPROP["$k"]+=$'\n'"${line#*=}"; else UPROP["$k"]="${line#*=}"; fi
+  done < <(systemctl show "${args[@]}" -- "$unit" 2>/dev/null || true)
+}
+
+dropin_unit() {
+  local d
+  d="$(basename "$(dirname "$1")")"
+  [[ "$d" == ?*.?*.d ]] || return 0
+  printf '%s' "${d%.d}"
+}
+
+declare -A U_DROPINS=() U_FRAG=() U_LOAD=() U_RELOAD=() U_FILE_STATE=() U_ACTIVE=()
+# Phase A of the unit checks: ask systemd once per unit, remember the answers.
+gather_unit() {
+  local unit="$1" d
+  [[ -n "${U_LOAD[$unit]+x}" ]] && return 0
+  unit_show "$unit" LoadState FragmentPath NeedDaemonReload DropInPaths UnitFileState ActiveState
+  U_LOAD["$unit"]="${UPROP[LoadState]:-}"
+  U_FRAG["$unit"]="${UPROP[FragmentPath]:-}"
+  U_RELOAD["$unit"]="${UPROP[NeedDaemonReload]:-}"
+  U_DROPINS["$unit"]="${UPROP[DropInPaths]:-}"
+  U_FILE_STATE["$unit"]="${UPROP[UnitFileState]:-}"
+  U_ACTIVE["$unit"]="${UPROP[ActiveState]:-}"
+  local -a ds=()
+  read -r -a ds <<< "${U_DROPINS[$unit]}"
+  for d in "${ds[@]}"; do
+    UNIT_CLASSIFY+=("$(logical "$d")")
+  done
+}
+
+declare -a UNIT_FILES=()   # "unit|dst|kind": kind deploy | shipped | registry
+declare -a UNIT_DROPS=()   # "unit|dst"
+declare -a UNIT_CLASSIFY=()
+gather_units() {
+  local e src dst class u
+  for e in "${UNITS_DEPLOY[@]}"; do UNIT_FILES+=("$(basename "${e#*|}")|${e#*|}|deploy"); done
+  for e in "${UNITS_SHIPPED[@]}"; do UNIT_FILES+=("$(basename "${e#*|}")|${e#*|}|shipped"); done
+  for e in "${REG[@]}"; do
+    IFS='|' read -r src dst class _ <<< "$e"
+    [[ "$dst" == "${UNIT_DIR}/"* ]] || continue
+    if [[ "$dst" =~ \.(service|timer|socket|path)$ && "$(dirname "$dst")" == "$UNIT_DIR" ]]; then
+      UNIT_FILES+=("$(basename "$dst")|${dst}|registry")
+    else
+      u="$(dropin_unit "$dst")"
+      if [[ -n "$u" ]]; then UNIT_DROPS+=("${u}|${dst}"); fi
+    fi
+  done
+  for e in "${UNIT_FILES[@]}" "${UNIT_DROPS[@]}"; do
+    u="${e%%|*}"
+    gather_unit "$u"
+  done
+}
+
+unit_pending() {   # unit: does Phase 2 change its file or one of its repo drop-ins?
+  local e
+  (( PRE_INSTALL )) || return 1
+  for e in "${UNIT_FILES[@]}" "${UNIT_DROPS[@]}"; do
+    [[ "${e%%|*}" == "$1" ]] || continue
+    e="${e#*|}"; e="${e%%|*}"
+    [[ -n "${TOUCHED[$e]+x}" ]] && return 0
+  done
+  for e in "${!TOUCHED[@]}"; do
+    [[ "$(dropin_unit "$e")" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+declare -A FOREIGN_DONE=()
+foreign_dropins() {   # unit: LATENT for each drop-in that is neither ours nor vendor
+  local unit="$1" d l
+  local -a ds=()
+  [[ -n "${FOREIGN_DONE[$unit]+x}" ]] && return 0
+  FOREIGN_DONE["$unit"]=1
+  read -r -a ds <<< "${U_DROPINS[$unit]}"
+  for d in "${ds[@]}"; do
+    l="$(logical "$d")"
+    if [[ "${CLASS[$l]:-foreign}" == foreign ]]; then
+      row LATENT unit "$unit" "$l" "foreign drop-in ${l} is merged into ${unit} on top of the repo's configuration — host state outside the repo; remove it, move it into the repo, or accept it"
+    fi
+  done
+}
+
+unit_rows() {
+  local e unit dst kind frag want ok
+  local -a ds=()
+  for e in "${UNIT_FILES[@]}"; do
+    IFS='|' read -r unit dst kind <<< "$e"
+    if [[ "$kind" == shipped ]] && ! exists_l "$dst"; then continue; fi
+    if unit_pending "$unit"; then row PENDING unit "$unit" "$dst" "the deploy installs or changes this unit now — checked after the install"; continue; fi
+    if ! exists_l "$dst"; then
+      row MISMATCH unit "$unit" "$dst" "the repo installs ${dst}, but it is not on the host"; continue
+    fi
+    case "${U_LOAD[$unit]}" in
+      masked)    row BEATEN unit "$unit" "$dst" "${unit} is masked — ${dst} does not act"; continue ;;
+      not-found|"") row MISMATCH unit "$unit" "$dst" "${dst} is on the host but ${unit} is not loaded (LoadState=${U_LOAD[$unit]:-unknown}) — systemctl daemon-reload?"; continue ;;
+    esac
+    frag="$(logical "${U_FRAG[$unit]}")"
+    ok=1
+    if [[ "$frag" != "$dst" ]]; then
+      row BEATEN unit "$unit" "$dst" "systemd loads ${unit} from ${frag:-<nothing>}, not from ${dst}"; ok=0
+    fi
+    if [[ "${U_RELOAD[$unit]}" == yes ]]; then
+      row MISMATCH unit "$unit" "$dst" "NeedDaemonReload=yes — the running definition is not the file on disk (systemctl daemon-reload)"; ok=0
+    fi
+    if [[ "$unit" == *.timer && "$kind" != shipped ]]; then
+      if [[ "${U_FILE_STATE[$unit]}" != enabled || "${U_ACTIVE[$unit]}" != active ]]; then
+        row MISMATCH unit "$unit" "$dst" "timer is ${U_FILE_STATE[$unit]:-?}/${U_ACTIVE[$unit]:-?}, the repo wants enabled/active"; ok=0
+      fi
+    fi
+    foreign_dropins "$unit"
+    if (( ok )); then row OK unit "$unit" "$dst" "loaded from ${dst}"; fi
+  done
+  for e in "${UNIT_DROPS[@]}"; do
+    unit="${e%%|*}"; dst="${e#*|}"
+    if unit_pending "$unit"; then row PENDING unit "$unit" "$dst" "the deploy installs or changes this drop-in now — checked after the install"; continue; fi
+    if [[ "${U_LOAD[$unit]}" == not-found || -z "${U_LOAD[$unit]}" ]]; then
+      row INFO unit "$unit" "$dst" "${unit} is not loaded on this host — its drop-in is not checked"; continue
+    fi
+    if ! exists_l "$dst"; then row MISMATCH unit "$unit" "$dst" "the repo installs ${dst}, but it is not on the host"; continue; fi
+    if [[ "${U_RELOAD[$unit]}" == yes ]]; then
+      row MISMATCH unit "$unit" "$dst" "NeedDaemonReload=yes — ${dst} is not what ${unit} runs with (systemctl daemon-reload)"
+      continue
+    fi
+    want=0
+    read -r -a ds <<< "${U_DROPINS[$unit]}"
+    for frag in "${ds[@]}"; do
+      if [[ "$(logical "$frag")" == "$dst" ]]; then want=1; fi
+    done
+    if (( want )); then
+      row OK unit "$unit" "$dst" "merged into ${unit}"
+    else
+      row BEATEN unit "$unit" "$dst" "${dst} is not among the drop-ins of ${unit} (DropInPaths: ${U_DROPINS[$unit]:-none}) — a same-named drop-in elsewhere shadows it"
+    fi
+    foreign_dropins "$unit"
+  done
+}
+
+# --------------------------------------------------------------------------- #
+# deploy/host/invariants.list and deploy/host/accepted-overrides.list
+# --------------------------------------------------------------------------- #
+INV_PROBE_RE='^(sshd|sysctl|systemd-conf:[a-z]+|unit-prop:[A-Za-z0-9@._-]+:[A-Za-z]+|path-present|path-absent|path-regular|tcp-listen:[0-9]+)$'
+
+load_accepted() {
+  local f="${APP_DIR}/${ACCEPTED_LIST}" line n=0 path key why
+  [[ -f "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$(( n + 1 ))
+    [[ -z "${line//[[:space:]]/}" || "$line" =~ ^[[:space:]]*# ]] && continue
+    IFS='|' read -r path key why <<< "$line"
+    if [[ "$path" != /* || -z "$key" || ${#why} -lt 20 ]]; then
+      row WARN accepted "line ${n}" "$ACCEPTED_LIST" "malformed line ${n} (want: path, key, reason of 20+ characters, separated by vertical bars) — ignored"
+      continue
+    fi
+    ACCEPT["${path}|${key}"]="$why"
+  done < "$f"
+}
+
+# Does <have> satisfy <want>? "~X": X appears as a whole token; otherwise equality.
+inv_match() {
+  local have="$1" want="$2"
+  if [[ "$want" == "~"* ]]; then
+    awk -v h="$have" -v w="${want:1}" 'BEGIN {
+      n = length(h); lw = length(w)
+      if (lw == 0) exit 1
+      for (i = 1; i + lw - 1 <= n; i++) {
+        if (substr(h, i, lw) != w) continue
+        b = (i == 1) ? "" : substr(h, i - 1, 1); a = substr(h, i + lw, 1)
+        if (b !~ /[A-Za-z0-9]/ && a !~ /[A-Za-z0-9]/) exit 0
+      }
+      exit 1 }'
+    return
+  fi
+  [[ "$have" == "$want" ]]
+}
+
+invariant_rows() {
+  local f="${APP_DIR}/${INVARIANTS_LIST}" line n=0 role probe key want why have tag fam unit prop port
+  [[ -f "$f" ]] || { row WARN invariant "-" "$INVARIANTS_LIST" "${INVARIANTS_LIST} is missing from the checkout"; return 0; }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$(( n + 1 ))
+    [[ -z "${line//[[:space:]]/}" || "$line" =~ ^[[:space:]]*# ]] && continue
+    IFS='|' read -r role probe key want why <<< "$line"
+    if [[ ! "$role" =~ ^(main|relay|all)$ || ! "$probe" =~ $INV_PROBE_RE || -z "$key" || -z "$want" || ${#why} -lt 20 ]]; then
+      row WARN invariant "line ${n}" "$INVARIANTS_LIST" "malformed line ${n} (want: role, probe, key, expected, reason of 20+ characters, separated by vertical bars) — ignored"
+      continue
+    fi
+    [[ "$role" == all || "$role" == "$ROLE" ]] || continue
+    tag="${probe}"; [[ "$key" != "-" ]] && tag="${probe} ${key}"
+    have=""
+    case "$probe" in
+      sshd)
+        sshd_key "${key,,}"; key="$SSHD_KEY"; sshd_value "$want"; want="$SSHD_VAL"
+        if key_touched sshd "$key"; then row PENDING invariant "$tag" "-" "the deploy changes it now — checked after the install"; continue; fi
+        if (( SSHD_LIVE_OK )); then have="${SSHD_LIVE[$key]:-<unset>}"; else have="${EFFV["sshd|${key}"]:-<unset>}"; fi ;;
+      sysctl)
+        if key_touched sysctl "$key"; then row PENDING invariant "$tag" "-" "the deploy changes it now — checked after the install"; continue; fi
+        if sysctl_live "$key"; then have="$LIVE_VAL"; else have="<unreadable>"; fi ;;
+      systemd-conf:*)
+        fam="${probe#systemd-conf:}"
+        have="${EFFV["${fam}|${key}"]:-<unset>}" ;;
+      unit-prop:*)
+        unit="${probe#unit-prop:}"; prop="${unit##*:}"; unit="${unit%:*}"
+        if unit_pending "$unit"; then row PENDING invariant "$tag" "-" "the deploy changes ${unit} now — checked after the install"; continue; fi
+        unit_show "$unit" "$prop"
+        have="${UPROP[$prop]:-<unset>}"; have="${have//$'\n'/ }" ;;
+      path-present) if exists_l "$key"; then have=present; else have=absent; fi; want="${want/#-/present}" ;;
+      path-absent)  if exists_l "$key"; then have=present; else have=absent; fi; want="${want/#-/absent}" ;;
+      path-regular)
+        if [[ -n "${OVERLAY[$key]+x}" ]]; then have=regular
+        elif [[ -n "${RETIRED[$key]+x}" ]]; then have=absent
+        elif [[ -L "$(fs "$key")" ]]; then have="symlink -> $(readlink "$(fs "$key")")"
+        elif [[ -f "$(fs "$key")" ]]; then have=regular
+        elif [[ -e "$(fs "$key")" ]]; then have="not a regular file"
+        else have=absent; fi
+        want="${want/#-/regular}" ;;
+      tcp-listen:*)
+        port="${probe#tcp-listen:}"
+        if ss -Htln 2>/dev/null | awk -v p="$port" '{ n = split($4, a, ":"); if (a[n] == p) f = 1 } END { exit !f }'; then
+          have=listening
+        else
+          have="not listening"
+        fi
+        want="${want/#-/listening}" ;;
+    esac
+    if inv_match "$have" "$want"; then
+      row OK invariant "$tag" "$key" "${have}"
+    else
+      row MISMATCH invariant "$tag" "$key" "expected ${want}, found ${have} — ${why}"
+    fi
+  done < "$f"
+}
+
+# --------------------------------------------------------------------------- #
+# WARN checks — host state outside the repo. Never print a key or a password.
+# --------------------------------------------------------------------------- #
+warn_cloud_init() {
+  if [[ -d "$(fs /etc/cloud)" ]] && ! exists_l "$CLOUD_DISABLED"; then
+    row WARN cloud-init "cloud-init" "$CLOUD_DISABLED" "cloud-init is installed and not disabled (${CLOUD_DISABLED} absent) — it rewrites ssh, sudoers and network config at boot"
+  fi
+}
+
+warn_logrotate() {
+  local out line n=0
+  command -v logrotate >/dev/null 2>&1 || return 0
+  [[ -e "$(fs "$LOGROTATE_CONF")" ]] || return 0
+  out="$(logrotate -d "$(fs "$LOGROTATE_CONF")" 2>&1 || true)"
+  # Only lines that START with "error:", and duplicate entries. Never a substring
+  # "error": it is in paths (…/error.log).
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    n=$(( n + 1 ))
+    (( n <= 20 )) || continue
+    row WARN logrotate "logrotate -d" "$LOGROTATE_CONF" "${line:0:300}"
+  done < <(printf '%s\n' "$out" | awk '/^error:/ || /duplicate log entry/')
+  if (( n > 20 )); then row WARN logrotate "logrotate -d" "$LOGROTATE_CONF" "... and $(( n - 20 )) more error line(s)"; fi
+}
+
+warn_sudoers() {
+  local f l who
+  local -a files=()
+  [[ -e "$(fs /etc/sudoers)" ]] && files+=(/etc/sudoers)
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    # sudo skips includedir files whose name has a "." or ends in "~".
+    [[ "$(basename "$f")" == *.* || "$f" == *"~" ]] && continue
+    files+=("$f")
+  done < <(glob_l '/etc/sudoers.d/*')
+  for f in "${files[@]}"; do
+    [[ -r "$(content_fs "$f")" ]] || continue
+    while IFS=$'\t' read -r l who; do
+      row WARN sudo "NOPASSWD: ALL" "$f" "${f}:${l} grants NOPASSWD: ALL to ${who}"
+    done < <(awk '
+      { sub(/\r$/, "") }
+      /^[ \t]*#/ { next }
+      /NOPASSWD[ \t]*:[ \t]*ALL([ \t,]|$)/ { split($0, w, /[ \t]+/); who = (w[1] == "" ? w[2] : w[1]); print NR "\t" who }
+    ' "$(content_fs "$f")")
+  done
+}
+
+warn_accounts() {
+  local name uid shell home pw status keys
+  local -A shells=() shadow=()
+  [[ -r "$(fs /etc/passwd)" ]] || return 0
+  if [[ -r "$(fs /etc/shells)" ]]; then
+    while IFS= read -r shell; do [[ "$shell" == /* ]] && shells["$shell"]=1; done < "$(fs /etc/shells)"
+  fi
+  if [[ -r "$(fs /etc/shadow)" ]]; then
+    while IFS=: read -r name pw _; do shadow["$name"]="$pw"; done < "$(fs /etc/shadow)"
+  fi
+  while IFS=: read -r name _ uid _ _ home shell; do
+    [[ -n "$name" && "$uid" =~ ^[0-9]+$ ]] || continue
+    (( uid == 0 )) && continue
+    case "${shell##*/}" in ""|nologin|false|sync|halt|shutdown) continue ;; esac
+    if (( ${#shells[@]} > 0 )) && [[ -z "${shells[$shell]+x}" ]]; then continue; fi
+    # passwd -S: L when the hash starts with "!" (or "*"), NP when empty, P otherwise.
+    pw="${shadow[$name]-}"
+    status=""
+    if [[ -n "$pw" && "$pw" != '!'* && "$pw" != '*'* ]]; then status="password set (passwd -S: P)"; fi
+    keys=0
+    if [[ -r "$(fs "${home}/.ssh/authorized_keys")" ]]; then
+      keys="$(awk '!/^[ \t]*(#|$)/ { n++ } END { print n + 0 }' "$(fs "${home}/.ssh/authorized_keys")")"
+    fi
+    if [[ -n "$status" ]]; then
+      row WARN account "$name" "-" "non-root account ${name} (uid ${uid}) has login shell ${shell} and a usable password"
+    fi
+    if (( keys > 0 )); then
+      row WARN account "$name" "${home}/.ssh/authorized_keys" "non-root account ${name} (uid ${uid}) has login shell ${shell} and ${keys} authorized key(s)"
+    fi
+  done < "$(fs /etc/passwd)"
+}
+
+# The keys a file sets, names only: Section.Key, sysctl keys, top-level YAML keys,
+# logrotate directives; for sudoers only a line count.
+file_keys() {
+  local logical_p="$1" src="$2"
+  case "$logical_p" in
+    /etc/sudoers*)
+      awk '!/^[ \t]*(#|$)/ || /^#include/ { n++ } END { printf "%d active line(s)", n }' "$src" ;;
+    /etc/cloud/*)
+      awk '/^[A-Za-z0-9_]+:/ { k = $0; sub(/:.*/, "", k); if (!(k in s)) { s[k] = 1; o = o (o == "" ? "" : ", ") k } } END { print o }' "$src" ;;
+    /etc/sysctl*)
+      awk "$SYSCTL_PARSER" "$src" | awk -F'\t' '!($2 in s) { s[$2] = 1; o = o (o == "" ? "" : ", ") $2 } END { print o }' ;;
+    *)
+      if grep -qE '^[[:space:]]*\[[^]]+\][[:space:]]*$' "$src" 2>/dev/null; then
+        awk "$INI_PARSER" "$src" | awk -F'\t' '!($2 in s) { s[$2] = 1; o = o (o == "" ? "" : ", ") $2 } END { print o }'
+      else
+        awk '!/^[ \t]*(#|$)/ { k = $1; if (!(k in s)) { s[k] = 1; o = o (o == "" ? "" : ", ") k } } END { print o }' "$src"
+      fi ;;
+  esac
+}
+
+warn_conffiles() {
+  local p keys
+  load_conffiles
+  for p in "${!CONFMD5[@]}"; do
+    [[ "$p" =~ $CONFFILE_WARN_RE ]] || continue
+    [[ -f "$(fs "$p")" ]] || continue
+    [[ "$(md5_of "$(fs "$p")")" == "${CONFMD5[$p]}" ]] && continue
+    keys="$(file_keys "$p" "$(fs "$p")")"
+    row WARN conffile "${CONFPKG[$p]}" "$p" "locally modified ${CONFPKG[$p]} conffile — what lives only here is host state outside the repo; sets: ${keys:-nothing}"
+  done
+}
+
+# --------------------------------------------------------------------------- #
+# Output and the state file
+# --------------------------------------------------------------------------- #
+json_str() {
+  local s="$1"
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+  s="${s//$'\t'/\\t}"; s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"
+  s="${s//[$'\001'-$'\037']/}"
+  printf '"%s"' "$s"
+}
+
+write_state() {
+  local dir tmp r v fam key path text first=1 mode
+  dir="$(dirname "$STATE_FILE")"
+  mode=installed; (( PRE_INSTALL )) && mode=pre-install
+  if [[ ! -d "$dir" ]]; then mkdir -m 0755 "$dir" 2>/dev/null || return 1; fi
+  tmp="$(mktemp "${dir}/.last.json.XXXXXX" 2>/dev/null)" || return 1
+  {
+    printf '{\n  "version": 1,\n  "generated_at": %s,\n  "role": %s,\n  "mode": %s,\n' \
+      "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(json_str "$ROLE")" "$(json_str "$mode")"
+    printf '  "counts": {"beaten": %d, "mismatch": %d, "latent": %d, "accepted": %d, "warn": %d, "pending": %d, "info": %d, "ok": %d},\n' \
+      "${COUNT[BEATEN]}" "${COUNT[MISMATCH]}" "${COUNT[LATENT]}" "${COUNT[ACCEPTED]}" "${COUNT[WARN]}" \
+      "${COUNT[PENDING]}" "${COUNT[INFO]}" "${COUNT[OK]}"
+    printf '  "rows": ['
+    for r in "${ROWS[@]}"; do
+      IFS='|' read -r v fam key path text <<< "$r"
+      (( first )) || printf ','
+      first=0
+      printf '\n    {"verdict": %s, "family": %s, "key": %s, "path": %s, "text": %s}' \
+        "$(json_str "$v")" "$(json_str "$fam")" "$(json_str "$key")" "$(json_str "$path")" "$(json_str "$text")"
+    done
+    printf '\n  ]\n}\n'
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$STATE_FILE" || { rm -f "$tmp"; return 1; }
+}
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+main() {
+  local m f rc=0 k mode
+  [[ -d "$APP_DIR" ]] || die_internal "checkout ${APP_DIR} not found"
+  resolve_role
+  load_registry
+  collect_units
+  mark_touched
+  load_accepted
+
+  # A. Gather: files, records, expectations, systemd's view of the units.
+  gather_sshd
+  gather_sysctl
+  gather_systemd_conf
+  gather_units
+  # B. One classification of every file involved (one batched dpkg -S).
+  local -a all=()
+  for k in "${!FAM_FILES[@]}"; do
+    while IFS= read -r f; do [[ -n "$f" ]] && all+=("$f"); done <<< "${FAM_FILES[$k]}"
+  done
+  classify_files "${all[@]}" "${UNIT_CLASSIFY[@]}"
+  # C. Judge.
+  analyze sshd first
+  for m in "${SSHD_MATCHED[@]}"; do
+    row INFO sshd "${m#*|}" "${m%|*}" "inside a Match block — excluded from the analysis (it applies to matching connections only)"
+  done
+  analyze sysctl last
+  sysctl_system_rows
+  for k in "${SYSTEMD_CONF_FAMILIES[@]}"; do analyze "$k" last; done
+  sshd_live
+  live_rows
+  unit_rows
+  invariant_rows
+  warn_cloud_init
+  warn_logrotate
+  warn_sudoers
+  warn_accounts
+  warn_conffiles
+  for k in "${!ACCEPT[@]}"; do
+    if [[ -z "${ACCEPT_HIT[$k]+x}" ]]; then
+      row INFO accepted "${k#*|}" "${k%%|*}" "accepted override matches no LATENT on this host (another role, or fixed) — remove it once it is obsolete"
+    fi
+  done
+
+  for f in "${ROWS[@]}"; do printf '%s\n' "$f"; done
+  mode=installed; (( PRE_INSTALL )) && mode=pre-install
+  printf 'SUMMARY|role=%s|mode=%s|beaten=%d|mismatch=%d|latent=%d|accepted=%d|warn=%d|pending=%d|info=%d|ok=%d\n' \
+    "$ROLE" "$mode" "${COUNT[BEATEN]}" "${COUNT[MISMATCH]}" "${COUNT[LATENT]}" "${COUNT[ACCEPTED]}" \
+    "${COUNT[WARN]}" "${COUNT[PENDING]}" "${COUNT[INFO]}" "${COUNT[OK]}"
+  if (( COUNT[BEATEN] + COUNT[MISMATCH] > 0 )); then rc=1; fi
+  if (( WRITE_STATE )); then
+    if ! write_state; then
+      printf 'vpn-bot-host-check: could not write %s\n' "$STATE_FILE" >&2
+      rc=4
+    fi
+  fi
+  return "$rc"
+}
+
+main
+exit $?
