@@ -1389,7 +1389,9 @@ mh_pristine_from_dpkg() {
   # shellcheck disable=SC2016  # dpkg-query format strings, not shell expansions
   line="$(dpkg-query -W -f='${db:Status-Abbrev}|${Version}|${Architecture}\n' "$pkg" 2>/dev/null | awk 'NR == 1' || true)"
   IFS='|' read -r status ver arch <<< "$line"
-  if [[ "${status:0:2}" != "ii" || -z "$ver" || -z "$arch" ]]; then
+  # The SECOND letter is the package state (i = installed); the first is only the
+  # selection — a held package reads "hi", one marked for removal "ri".
+  if [[ "${status:1:1}" != "i" || -z "$ver" || -z "$arch" ]]; then
     MH_PRISTINE_WHY["$dst"]="package ${pkg} is not installed (dpkg-query: '${status:-nothing}')"; return 0
   fi
   # shellcheck disable=SC2016

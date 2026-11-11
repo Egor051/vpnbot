@@ -284,11 +284,11 @@ class PLab:
         return self.h(rel)
 
     def package(self, pkg: str, version: str, conffiles: dict[str, str], *, recorded: dict[str, str] | None = None,
-                arch: str = "amd64") -> Path:
+                arch: str = "amd64", status: str = "ii ") -> Path:
         """An installed package, its conffiles (logical path -> shipped content) as dpkg
         records them, and its .deb (a tar stream: the dpkg-deb stub only cats it)."""
         with (self.sd / "dpkg_db").open("a", encoding="utf-8") as f:
-            f.write(f"{pkg}|ii |{version}|{arch}\n")
+            f.write(f"{pkg}|{status}|{version}|{arch}\n")
         recorded = recorded or {}
         (self.sd / f"conffiles_{pkg}").write_text(
             "".join(f" {p} {recorded.get(p, _md5(c))}\n" for p, c in conffiles.items()), encoding="utf-8")
@@ -463,6 +463,23 @@ def test_a_version_found_nowhere_is_a_warn_and_the_file_is_untouched(tmp_path: P
     assert lab.mutating_systemctl() == []
     assert "SUMMARY-LINE: all in sync, nothing changed" in proc.stdout
     assert "its class pristine entry cannot restore it now" in proc.stdout, "the conffile stays a WARN"
+
+
+@pytest.mark.parametrize(("status", "restored"), [("hi ", True), ("ri ", True), ("rc ", False), ("un ", False)])
+def test_a_held_package_is_still_installed(tmp_path: Path, status: str, restored: bool) -> None:
+    """${db:Status-Abbrev}: the FIRST letter is the selection (h = hold, r = remove), the
+    second the state — `hi` is installed. Only that second letter decides."""
+    lab = PLab(tmp_path)
+    conf = lab.pristine("dpkg:systemd", "etc/systemd/journald.conf")
+    lab.put("etc/systemd/journald.conf", "[Journal]\n#SystemMaxUse=\n# edited\n")
+    lab.cache(lab.package("systemd", "255.4-1ubuntu8.18", {"/etc/systemd/journald.conf": STOCK_JOURNALD}, status=status))
+    proc = lab.run(STATE_ONLY + INSTALL_ONLY)
+    assert proc.returncode == 0 and "PHASE2-OK" in proc.stdout, proc.stdout
+    if restored:
+        assert conf.read_text(encoding="utf-8") == STOCK_JOURNALD
+    else:
+        assert f"cannot restore: package systemd is not installed (dpkg-query: '{status}')" in proc.stdout
+        assert conf.read_text(encoding="utf-8") == "[Journal]\n#SystemMaxUse=\n# edited\n"
 
 
 def test_a_copy_whose_md5_is_not_dpkgs_is_a_warn(tmp_path: Path) -> None:
@@ -803,6 +820,59 @@ def test_check_match_blocks_are_part_of_the_proof(tmp_path: Path) -> None:
     assert proc.returncode == 1
 
 
+def test_check_match_scoped_multi_value_keywords_are_part_of_the_proof(tmp_path: Path) -> None:
+    """DenyUsers inside a Match block: excluded from the global analysis (multi-value),
+    invisible to `sshd -T` without -C — the structural comparison must still see it."""
+    lab = PLab(tmp_path)
+    tpl = template(lab.dropdir_logical)
+    lab.entries.append(f"ucf:/usr/share/openssh/sshd_config|{lab.h('etc/ssh/sshd_config')}|0644|{OWNER}|pristine|main")
+    lab.put("etc/ssh/sshd_config", tpl + "Match Address 192.0.2.0/24\n    DenyUsers root\n")
+    copy = tmp_path / "copy"
+    copy.write_text(tpl, encoding="utf-8")
+    proc = _check(lab, "--pre-install", "--pristine", f"/etc/ssh/sshd_config={copy}")
+    rows = [ln for ln in proc.stdout.splitlines() if "|pristine|" in ln]
+    assert [r.split("|")[:3] for r in rows] == [["MISMATCH", "pristine", "Match"]], proc.stdout
+    assert proc.returncode == 1
+
+
+def test_check_an_accumulating_resolved_setting_is_a_list(tmp_path: Path) -> None:
+    """DNSStubListenerExtra= adds a listener per assignment: the conffile's listener is in
+    effect next to the drop-in's, and restoring the package default drops it."""
+    lab = PLab(tmp_path)
+    lab.add("resolved", "etc/systemd/resolved.conf.d/10-vpn-bot.conf",
+            RESOLVED_DROPIN + "DNSStubListenerExtra=127.0.0.3\n")
+    lab.pristine("dpkg:systemd-resolved", "etc/systemd/resolved.conf")
+    lab.put("etc/systemd/resolved.conf", "[Resolve]\nDNSStubListenerExtra=127.0.0.2\n")
+    copy = tmp_path / "copy"
+    copy.write_text(STOCK_RESOLVED, encoding="utf-8")
+    proc = _check(lab, "--pre-install", "--pristine", f"/etc/systemd/resolved.conf={copy}")
+    rows = [ln.split("|") for ln in proc.stdout.splitlines() if "|pristine|" in ln]
+    assert [r[:3] for r in rows] == [["MISMATCH", "pristine", "Resolve.DNSStubListenerExtra"]], proc.stdout
+    assert "sets Resolve.DNSStubListenerExtra=127.0.0.2 that no repo file carries" in rows[0][4]
+    assert "127.0.0.2 127.0.0.3" in rows[0][4], "the listeners add up"
+
+
+@pytest.mark.parametrize(("hand", "ok"), [("SystemMaxUse=500M", True), ("SystemMaxUse=1G", False)],
+                         ids=["duplicate", "overridden"])
+def test_check_a_hand_value_another_file_overrides_is_not_provably_dead(tmp_path: Path, hand: str, ok: bool) -> None:
+    """A setting the check does not know to accumulate: a hand edit that repeats the
+    drop-in is provably harmless, one that another file overrides with ANOTHER value is
+    dead only if the setting really is last-wins — refused rather than guessed."""
+    lab = PLab(tmp_path)
+    lab.add("journald", "etc/systemd/journald.conf.d/10-vpn-bot.conf", JOURNALD_DROPIN)
+    lab.pristine("dpkg:systemd", "etc/systemd/journald.conf")
+    lab.put("etc/systemd/journald.conf", f"[Journal]\n{hand}\n")
+    copy = tmp_path / "copy"
+    copy.write_text(STOCK_JOURNALD, encoding="utf-8")
+    proc = _check(lab, "--pre-install", "--pristine", f"/etc/systemd/journald.conf={copy}")
+    rows = [ln.split("|") for ln in proc.stdout.splitlines() if "|pristine|" in ln]
+    if ok:
+        assert [r[:3] for r in rows] == [["OK", "pristine", "/etc/systemd/journald.conf"]], proc.stdout
+    else:
+        assert [r[:3] for r in rows] == [["MISMATCH", "pristine", "Journal.SystemMaxUse"]], proc.stdout
+        assert "/etc/systemd/journald.conf.d/10-vpn-bot.conf:" in rows[0][4] and "cannot prove" in rows[0][4]
+
+
 # --------------------------------------------------------------------------- #
 # 5. The real registry
 # --------------------------------------------------------------------------- #
@@ -858,7 +928,7 @@ def test_the_package_manager_agrees_where_the_package_is_installed() -> None:
         if src.startswith("dpkg:"):
             status = subprocess.run(["dpkg-query", "-W", "-f=${db:Status-Abbrev}", src[5:]], capture_output=True,
                                     text=True, check=False)
-            if status.returncode != 0 or not status.stdout.startswith("ii"):
+            if status.returncode != 0 or status.stdout[1:2] != "i":
                 continue   # known to dpkg, but not installed here
             out = subprocess.run(["dpkg-query", "-W", "-f=${Conffiles}\\n", src[5:]], capture_output=True, text=True,
                                  check=False)

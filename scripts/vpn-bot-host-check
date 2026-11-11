@@ -91,7 +91,7 @@ SYSTEMD_CONF_FAMILIES=(journald networkd resolved logind timesyncd system)
 # systemd *.conf settings that are LISTS, not scalars: every assignment in every file
 # adds to the list, an empty one resets it (resolved.conf(5), timesyncd.conf(5)). For
 # these the effective value is the accumulated list, never "the last line".
-SYSTEMD_LIST_KEYS=" resolved|Resolve.DNS resolved|Resolve.FallbackDNS resolved|Resolve.Domains timesyncd|Time.NTP timesyncd|Time.FallbackNTP "
+SYSTEMD_LIST_KEYS=" resolved|Resolve.DNS resolved|Resolve.FallbackDNS resolved|Resolve.Domains resolved|Resolve.DNSStubListenerExtra timesyncd|Time.NTP timesyncd|Time.FallbackNTP "
 VENDOR_RE='^/(usr/lib|lib|usr/local/lib)/'
 CATCFG_RE='^# (/[^[:space:]]+)$'
 APPLYING_RE='^\* Applying (/[^[:space:]]+) \.\.\.$'
@@ -736,12 +736,15 @@ sshd_walk() {
       match) ctx="match ${val}" ;;
       *)
         sshd_key "$kw"
-        [[ "$SSHD_EXCLUDED" == *" ${SSHD_KEY} "* ]] && continue
         sshd_value "$val"
         if [[ "$ctx" == match* ]]; then
-          SSHD_MATCHED+=("${file}:${lineno}|${SSHD_KEY}")
+          # Every Match-scoped directive goes into the pristine proof — the multi-value
+          # ones too (DenyUsers inside a Match is invisible to `sshd -T` without -C).
           SSHD_MATCH_REC+=("${ctx#match }"$'\t'"${SSHD_KEY}"$'\t'"${SSHD_VAL}")
+          [[ "$SSHD_EXCLUDED" == *" ${SSHD_KEY} "* ]] && continue
+          SSHD_MATCHED+=("${file}:${lineno}|${SSHD_KEY}")
         else
+          [[ "$SSHD_EXCLUDED" == *" ${SSHD_KEY} "* ]] && continue
           add_rec sshd "$file" "$SSHD_KEY" "$SSHD_VAL" "$lineno"
         fi ;;
     esac
@@ -1358,6 +1361,23 @@ pristine_rows() {
       fi
       row MISMATCH pristine "$key" "$d" "$text"
     done < <(printf '%s\n' "${!keys[@]}" | sort)
+    # A systemd setting the check models as last-wins may in fact accumulate (as
+    # Resolve.DNSStubListenerExtra= does): a value of the host copy that another file
+    # overrides with a DIFFERENT value is dead only if the setting really is last-wins,
+    # which the check cannot prove. Only an exact duplicate (the hand edit repeats the
+    # drop-in) or a modelled list setting passes.
+    if [[ "$fam" != sshd && "$fam" != sysctl && -f "$(fs "$d")" ]]; then
+      local -A said=()
+      while IFS=$'\t' read -r _ key hv; do
+        [[ -n "$key" && -z "${said[$key]+x}" ]] || continue
+        [[ "$SYSTEMD_LIST_KEYS" == *" ${fam}|${key} "* ]] && continue
+        x="$(printf '%s' "${FAM_REC[$fam]:-}" | awk -F'\t' -v d="$d" -v k="$key" -v v="$hv" \
+               '$1 != d && $2 == k && $3 != v && !f { print $1 ":" $4 " = " $3; f = 1 }')"
+        [[ -n "$x" ]] || continue
+        said["$key"]=1; diffs=$(( diffs + 1 ))
+        row MISMATCH pristine "$key" "$d" "${d} sets ${key}=${hv} while ${x}: dead if ${key} is last-wins, lost if it accumulates (as Resolve.DNSStubListenerExtra= does) — the check cannot prove which; move it into a repo drop-in, or delete the line by hand, first"
+      done < <(awk "$INI_PARSER" "$(fs "$d")")
+    fi
     if [[ "$fam" == sshd && "$base_m" != "$now_m" ]]; then
       diffs=$(( diffs + 1 ))
       row MISMATCH pristine "Match" "$d" "the settings inside Match blocks change with the package default of ${d} — move what the hand edit puts in a Match block into a repo drop-in first"

@@ -171,7 +171,8 @@ LATENT на auth-ключе sshd, то есть FAIL в Phase 1, на каждо
 **Откуда берётся копия** (Phase 1, только чтение хоста; все временные файлы — в приватном рабочем
 каталоге деплоя, который удаляется при выходе):
 
-- `dpkg:<package>` — версия = `dpkg-query ${Version}` **установленного** пакета. `.deb` берётся
+- `dpkg:<package>` — версия = `dpkg-query ${Version}` **установленного** пакета (вторая буква
+  `${db:Status-Abbrev}` — `i`: удерживаемый пакет, `hi`, тоже подходит). `.deb` берётся
   сначала из `/var/cache/apt/archives` (`:` эпохи в имени файла — `%3a`), иначе
   `apt-get download <package>=<version>` скачивает его в рабочий каталог (под `timeout`).
   `dpkg-deb --fsys-tarfile | tar -xO ./<dst>` извлекает один файл, и его md5 обязан совпасть с тем,
@@ -194,8 +195,12 @@ LATENT на auth-ключе sshd, то есть FAIL в Phase 1, на каждо
 
 - `scripts/vpn-bot-host-check --pre-install --pristine <dst>=<copy>` оценивает хост с копией на
   месте файла (тот же overlay, что для файлов репо) и сравнивает эффективное значение **каждого**
-  ключа семейства файла — не только ключей из репо; для sshd ещё и настройки внутри блоков
-  `Match` — с ней и без неё. Обе стороны — хост таким, каким его иначе оставит Phase 2 (файлы репо
+  ключа семейства файла — не только ключей из репо; для sshd ещё и каждую директиву внутри блоков
+  `Match`, включая мульти-ключи (`DenyUsers`, `AllowUsers`, …), — с ней и без неё. Для systemd
+  `*.conf` отвергается и значение копии хоста, которое другой файл перекрывает *другим*
+  значением: оно мертво, только если настройка действительно last-wins, а накопительная
+  (как `DNSStubListenerExtra=`) его потеряет. Проходит лишь точный дубль (ручная правка повторяет
+  drop-in) или смоделированная списочная настройка. Обе стороны — хост таким, каким его иначе оставит Phase 2 (файлы репо
   на месте, выведенные удалены), поэтому оценивается только сам возврат. Любое отличие —
   `MISMATCH` семейства `pristine` и FAIL в Phase 1:
   `<file> sets <key>=<value> that no repo file carries — move it into a repo drop-in first`.
@@ -302,7 +307,8 @@ VENDOR = файл в `/usr/lib`, `/lib` или `/usr/local/lib` **плюс** ф�
 - **systemd `*.conf` + `*.conf.d`** — `journald`, `networkd`, `resolved`, `logind`, `timesyncd`,
   `system`: порядок `systemd-analyze cat-config systemd/<x>.conf` (главный файл, затем drop-in'ы
   по имени), ключ = `Section.Key`, выигрывает **последнее** значение. Кроме списочных настроек —
-  `Resolve.DNS`, `Resolve.FallbackDNS`, `Resolve.Domains`, `Time.NTP`, `Time.FallbackNTP`: у них
+  `Resolve.DNS`, `Resolve.FallbackDNS`, `Resolve.Domains`, `Resolve.DNSStubListenerExtra`, `Time.NTP`,
+  `Time.FallbackNTP`: у них
   значения всех файлов складываются, а пустое присваивание сбрасывает список, поэтому сверяется
   накопленный список (сервер, оставшийся в `resolved.conf` рядом с серверами drop-in, — BEATEN).
   Общего способа прочитать для них живое значение нет, поэтому они оцениваются только по

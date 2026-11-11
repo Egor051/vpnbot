@@ -170,7 +170,8 @@ undo any later hand edit the same way.
 **Where the copy comes from** (Phase 1, read-only on the host; every temporary file lives in the
 deploy's private work directory, removed when it exits):
 
-- `dpkg:<package>` — the version is `dpkg-query ${Version}` of the **installed** package. The
+- `dpkg:<package>` — the version is `dpkg-query ${Version}` of the **installed** package (the
+  second letter of `${db:Status-Abbrev}` is `i`: a held package, `hi`, counts). The
   `.deb` is taken from `/var/cache/apt/archives` first (an epoch's `:` is `%3a` in the file name),
   else `apt-get download <package>=<version>` fetches it into the work directory (bounded by
   `timeout`). `dpkg-deb --fsys-tarfile | tar -xO ./<dst>` takes the one file out, and its md5 must
@@ -193,8 +194,12 @@ edit meant something:
 
 - `scripts/vpn-bot-host-check --pre-install --pristine <dst>=<copy>` judges the host with the
   copy in place (the same overlay as for repo files) and compares the effective value of **every**
-  key of the file's family — not only the repo's keys; for sshd also the settings inside `Match`
-  blocks — with and without it. Both sides are the host as Phase 2 leaves it otherwise (repo files
+  key of the file's family — not only the repo's keys; for sshd also every directive inside `Match`
+  blocks, the multi-value ones (`DenyUsers`, `AllowUsers`, …) included — with and without it.
+  For a systemd `*.conf` a value of the host copy that another file overrides with a *different*
+  value is refused too: it is dead only if that setting really is last-wins, and a setting that
+  accumulates (like `DNSStubListenerExtra=`) would lose it. Only an exact duplicate (the hand edit
+  repeats the drop-in) or a modelled list setting passes. Both sides are the host as Phase 2 leaves it otherwise (repo files
   in, retired files gone), so only the restore itself is judged. Any difference is a `MISMATCH`
   of family `pristine` and a Phase 1 FAIL:
   `<file> sets <key>=<value> that no repo file carries — move it into a repo drop-in first`.
@@ -302,7 +307,8 @@ it is never vendor — its lines are judged like any other file's.
 - **systemd `*.conf` + `*.conf.d`** — `journald`, `networkd`, `resolved`, `logind`, `timesyncd`,
   `system`: the order of `systemd-analyze cat-config systemd/<x>.conf` (the main file, then the
   drop-ins by name), key = `Section.Key`, the **last** value wins. Except list settings —
-  `Resolve.DNS`, `Resolve.FallbackDNS`, `Resolve.Domains`, `Time.NTP`, `Time.FallbackNTP`: there
+  `Resolve.DNS`, `Resolve.FallbackDNS`, `Resolve.Domains`, `Resolve.DNSStubListenerExtra`, `Time.NTP`,
+  `Time.FallbackNTP`: there
   the entries of every file add up and an empty assignment resets, so the accumulated list is
   compared (a server left in `resolved.conf` next to the drop-in's is BEATEN). There is no
   generic live readout for these, so they are judged on precedence only.
