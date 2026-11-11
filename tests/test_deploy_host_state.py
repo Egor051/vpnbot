@@ -357,7 +357,9 @@ class Case:
         elif self.cls == "resolved":
             assert sc == ["systemctl try-reload-or-restart systemd-resolved"]
             assert lab.log("getent") == ["getent ahosts github.com"]
-            assert "getent ahosts github.com: resolves (after 0s)" in out
+            # The number is SECONDS - start: whole wall-clock seconds, so it reads 1
+            # whenever the probe straddles a second boundary, however short it ran.
+            assert re.search(r"getent ahosts github\.com: resolves \(after \d+s\)", out), out
         elif self.cls == "ssh":
             assert any(ln.startswith("sshd -t") for ln in lab.log("sshd"))
             assert sc == ["systemctl reload ssh.service"]
