@@ -11,7 +11,7 @@
 drift, удаляет выведенные из оборота — а в Phase 1 сообщает обо всех остальных файлах в
 сканируемых каталогах хоста, которые ничем не учтены.
 
-## Четыре класса
+## Пять классов
 
 Каждый файл хоста относится ровно к одному из них:
 
@@ -21,6 +21,7 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | **шаблон + значения хоста** | в репо — *форма*, на хосте — значения | оператор / бот, проверяется гейтом деплоя |
 | **backup-only** | по замыслу не в репо; перечислен в `deploy/host/known-unmanaged.list` | сторонний установщик, провайдер или оператор — и offsite-бэкап |
 | **retired** | запись `class absent`: файла быть *не* должно | `deploy.sh` его удаляет |
+| **дефолт пакета** | сам пакет: запись `class pristine` называет `dpkg:<package>` или `ucf:<template>` | `deploy.sh`, и только обратно к дефолту пакета — [Дефолты пакетов](#дефолты-пакетов-class-pristine) |
 
 `known-unmanaged.list` помечает каждую backup-only запись тем, кто её пишет: `installer`
 (Xray-install, get.hy2.sh, `setup-nonroot-helper-mode.sh`…), `provider` (образ VPS),
@@ -51,14 +52,15 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/sysctl.d/99-swap-tuning.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | |
 | `/etc/sysctl.d/99-vpn-forwarding.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | единственный `net.ipv4.ip_forward=1` |
 | `/etc/systemd/journald.conf.d/10-vpn-bot.conf` | repo-managed (`journald`) | deploy.sh | `/etc/systemd` | `SystemMaxUse=500M`; заменяет ручную правку `journald.conf` |
-| `/etc/systemd/journald.conf` | conffile dpkg | пакет `systemd` | `/etc/systemd` | деплой его не пишет; Phase 1 сообщает **MODIFIED**, пока в нём осталась старая ручная правка — верните стоковый файл руками, когда drop-in уже действует |
+| `/etc/systemd/journald.conf` | дефолт пакета (`pristine`, `dpkg:systemd`) | пакет `systemd`; deploy.sh возвращает дефолт пакета | `/etc/systemd` | старая ручная правка (`SystemMaxUse=500M`) лишь дублирует drop-in: Phase 2 возвращает стоковый файл, когда Phase 1 доказала, что ничего эффективного не меняется, затем перезапускает journald |
 | `/etc/systemd/resolved.conf.d/10-vpn-bot.conf` | repo-managed (`resolved`) | deploy.sh | `/etc/systemd` | `DNS=1.1.1.1 8.8.8.8`, `FallbackDNS=1.0.0.1 8.8.4.4`; заменяет ручную правку `resolved.conf` — [DNS на основном сервере](#dns-на-основном-сервере) |
-| `/etc/systemd/resolved.conf` | conffile dpkg | пакет systemd-resolved | `/etc/systemd` | деплой его не пишет; в отчёте **MODIFIED**, пока отдельный ручной скрипт не вернёт его к дефолту пакета |
+| `/etc/systemd/resolved.conf` | дефолт пакета (`pristine`, `dpkg:systemd-resolved`) | пакет systemd-resolved; deploy.sh возвращает дефолт пакета | `/etc/systemd` | ручная правка (`DNS=`, `FallbackDNS=`) дублирует drop-in: возвращается как `journald.conf`, затем reload как у класса `resolved` |
 | `/etc/resolv.conf` | repo-managed (`plain`) | deploy.sh, из `deploy/host/dns/resolv.conf` | — (в репо) | обычный файл, а не stub-symlink resolved; побайтно равен копии хоста; инвариант `path-regular` |
 | `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | `/etc/systemd` | не даёт networkd сбрасывать `ip rule` WARP; действует со следующего старта networkd |
 | `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, из `deploy/vpn-bot-acme-reload.sh` | `/usr/local/sbin` | `Le_ReloadCmd` у acme.sh; только там, где есть сертификат; [subscription.ru.md](subscription.ru.md#tls-терминация) |
 | `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/ssh` | вход root только по ключу; см. [ALLOW_SSH_CHANGE](#allow_ssh_change-и-риск-потери-доступа) |
 | `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/systemd` | `ListenStream` на 54321 (IPv4 + IPv6) |
+| `/etc/ssh/sshd_config` | дефолт пакета (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh возвращает шаблон | `/etc/ssh` | активные `PasswordAuthentication yes` / `PermitRootLogin yes` образа провайдера после `Include` — LATENT, который останавливает Phase 1: файл возвращается, когда доказано, что `sshd -T` побайтно не меняется, — без `ALLOW_SSH_CHANGE` |
 | `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh, из `deploy/host/cloud/cloud-init.disabled` | — (в репо) | пустой маркер: cloud-init выключен (на ребуте он переписывал sshd и sudoers) |
 | `/etc/systemd/system/vpn-bot-host-check.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot: проверка инвариантов хоста — [Эффективное состояние](#эффективное-состояние) |
 | `/etc/systemd/system/vpn-bot-host-check.timer` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | через 5 минут после загрузки, затем раз в сутки; `enable --now`, как любой таймер реестра |
@@ -96,6 +98,7 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | Путь | Класс | Кто ставит | Заметки |
 |---|---|---|---|
 | `/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf` | repo-managed (`ssh`) | deploy.sh | вход только по ключу |
+| `/etc/ssh/sshd_config` | дефолт пакета (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh возвращает шаблон | как на main |
 | `/usr/local/sbin/vpn-relay-apply` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | |
 | `/usr/local/sbin/vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | проверка инвариантов хоста |
 | `/etc/systemd/system/vpn-bot-host-check.service`, `.timer` | repo-managed (`unit`) | deploy.sh | как на main; вердикт relay остаётся в его журнале — [Между деплоями](#между-деплоями) |
@@ -112,7 +115,9 @@ drift, удаляет выведенные из оборота — а в Phase 1
 "<src в чекауте>|<dst>|<mode>|<owner:group>|<class>|<role>[|<opts>]"
 ```
 
-`role` — `main` или `relay`: хост видит только записи своей роли. `opts` необязателен:
+`role` — `main` или `relay`: хост видит только записи своей роли. У класса `pristine` `src` —
+не файл чекаута, а откуда берётся дефолт пакета: `dpkg:<package>` или `ucf:<template>`. `opts`
+необязателен:
 `gate=<PROTO>` делает запись существующей только при включённом `<PROTO>_ENABLED` в `.env`,
 `when=<path>` — только на хосте, где есть `<path>`, а `legacy=<path>` называет старое имя того же
 файла. Закрытый gate означает, что запись не ставится и не проверяется.
@@ -129,14 +134,17 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `resolved` | секция `[Resolve]` | `systemctl try-reload-or-restart systemd-resolved`, затем `getent ahosts github.com` в течение 10 с — иначе деплой откатывается (rollback тоже перезагружает resolved) |
 | `ssh` | `sshd -t` на `sshd_config`, где кандидат подставлен в копию каталога drop-in'ов; drop-in сокета должен оставлять порт `ListenStream` | см. [ниже](#allow_ssh_change-и-риск-потери-доступа) |
 | `absent` | ничто не должно на него ссылаться (ниже) | `disable --now`, если это unit-файл, затем удаление; после файла из `sshd_config.d` — `sshd -t` + reload + проверка порта, как после изменения ssh |
+| `pristine` | у копии md5 самого пакетного менеджера; её установка не меняет ничего эффективного (host check `--pristine`; для `sshd_config` ещё `sshd -T`) | атомарная установка; `journald.conf` → restart journald, `resolved.conf` → как `resolved`, `sshd_config` → как `ssh` — [ниже](#дефолты-пакетов-class-pristine) |
 
 **Phase 1** (только чтение, в том числе при `PHASE1_ONLY=1`) сверяет каждую запись с
 `origin/main` и показывает состояние каждого файла: `synced`, `absent` (будет установлен),
 `drift` (будет переустановлен — печатается diff), `meta` (содержимое верное, права/владелец нет —
-чинится на месте), `rename`, `present` / `gone` (выведенные файлы), `gated-off`. Она проверяет
+чинится на месте), `rename`, `present` / `gone` (выведенные файлы), `gated-off`, `cannot-restore`
+(дефолт пакета не удалось получить или проверить: WARN, никогда не остановка). Она проверяет
 каждого кандидата, которого поставит Phase 2, и **останавливается до любых изменений**, если
 валидатор его отверг, если на выведенный файл ещё есть ссылка, если файл со старым именем
-отличается от репо или если ssh-файл отличается без `ALLOW_SSH_CHANGE=1`.
+отличается от репо, если ssh-файл отличается без `ALLOW_SSH_CHANGE=1` или если возврат дефолта
+пакета изменил бы эффективную конфигурацию.
 
 **Phase 2** сначала кладёт каждый путь, который может тронуть, в архив бэкапа, затем ставит, чинит
 и удаляет, выполняет post-action каждого класса один раз для того, что реально изменилось, и
@@ -144,6 +152,76 @@ drift, удаляет выведенные из оборота — а в Phase 1
 rollback, который возвращает каждый сохранённый файл — или снова удаляет его, если его не было, —
 и заново применяет восстановленное состояние: enable юнитов, прежние значения sysctl в рантайме,
 journald, ssh.
+
+## Дефолты пакетов (class pristine)
+
+Некоторые файлы хоста репо нести *не* должно, но они всё равно дело деплоя: conffile dpkg, чья
+ручная правка лишь дублирует drop-in из репо (`SystemMaxUse` в `journald.conf`, `DNS=` /
+`FallbackDNS=` в `resolved.conf`), и управляемый ucf `sshd_config`, где образ провайдера оставляет
+активными `PasswordAuthentication yes` / `PermitRootLogin yes` после `Include`. Эти строки —
+LATENT на auth-ключе sshd, то есть FAIL в Phase 1, на каждом новом хосте из этого образа. Никаких
+ручных скриптов: запись `class pristine` заставляет деплой самому вернуть **дефолт пакета** — и так
+же откатывать любые будущие ручные правки.
+
+```text
+"dpkg:<package>|<dst>|0644|root:root|pristine|<role>"
+"ucf:<template>|<dst>|0644|root:root|pristine|<role>"
+```
+
+**Откуда берётся копия** (Phase 1, только чтение хоста; все временные файлы — в приватном рабочем
+каталоге деплоя, который удаляется при выходе):
+
+- `dpkg:<package>` — версия = `dpkg-query ${Version}` **установленного** пакета. `.deb` берётся
+  сначала из `/var/cache/apt/archives` (`:` эпохи в имени файла — `%3a`), иначе
+  `apt-get download <package>=<version>` скачивает его в рабочий каталог (под `timeout`).
+  `dpkg-deb --fsys-tarfile | tar -xO ./<dst>` извлекает один файл, и его md5 обязан совпасть с тем,
+  что `dpkg-query ${Conffiles}` записывает для `<dst>`. Копия хоста, у которой уже этот md5, *и
+  есть* дефолт пакета: ничего не скачивается, запись — `synced`.
+- `ucf:<template>` — копия = шаблон, который поставляет пакет. Его md5 обязан совпасть с тем, что
+  dpkg записал для него (`md5sums` пакета-владельца, `dpkg-query --control-path <pkg> md5sums`), а
+  `<dst>` должен быть зарегистрирован в `/var/lib/ucf/hashfile`. То, что ucf зарегистрировал для
+  `<dst>`, **не** возвращается: это шаблон в том виде, как его отрендерил maintainer-скрипт при
+  установке, с ответами debconf. На обоих хостах этот md5 — `eb86be66…`: шаблон с
+  `PermitRootLogin yes`, который postinst openssh-server пишет, когда
+  `openssh-server/permit-root-login` = false (так его предзадаёт образ провайдера), а шаблон —
+  `0a12ef5c…` (= md5sums dpkg). Отчёт печатает оба.
+- Копии нет (не в кэше и не скачивается, нет нужной утилиты, файл не conffile этого пакета, ucf
+  его не регистрирует) или md5 не совпал → `WARN … cannot restore: <почему>`; файл остаётся ровно
+  таким, как есть, деплой идёт дальше.
+
+**Доказательство эффекта** — Phase 1, до любых изменений; это единственный способ узнать, значила
+ли ручная правка что-нибудь:
+
+- `scripts/vpn-bot-host-check --pre-install --pristine <dst>=<copy>` оценивает хост с копией на
+  месте файла (тот же overlay, что для файлов репо) и сравнивает эффективное значение **каждого**
+  ключа семейства файла — не только ключей из репо; для sshd ещё и настройки внутри блоков
+  `Match` — с ней и без неё. Обе стороны — хост таким, каким его иначе оставит Phase 2 (файлы репо
+  на месте, выведенные удалены), поэтому оценивается только сам возврат. Любое отличие —
+  `MISMATCH` семейства `pristine` и FAIL в Phase 1:
+  `<file> sets <key>=<value> that no repo file carries — move it into a repo drop-in first`.
+  Без отличий — строка `OK pristine`, это и есть доказательство, оно печатается в логе и в отчёте;
+  без этой строки Phase 1 тоже падает.
+- Для `sshd_config` ещё: `sshd -T` на приватной копии дерева sshd с `sshd_config` хоста и на копии
+  с дефолтом пакета — каталог drop-in'ов с обеих сторон один и тот же, такой, каким его оставит
+  Phase 2, — должен выдать побайтно одно и то же. Это ловит то, что host check не оценивает
+  (`Port`, `ListenAddress` и другие мульти-ключи). Другой вывод, `sshd -T`, который не отработал,
+  или нет `sshd` → FAIL.
+- Это доказательство и есть защита от потери доступа для `sshd_config`, поэтому возврату его
+  дефолта пакета **не** нужен `ALLOW_SSH_CHANGE` — осознанное, задокументированное исключение.
+  Ручка по-прежнему защищает каждый repo-managed ssh-файл.
+
+**Phase 2**: оригинал сохраняется вместе с остальными путями хоста; копия ставится атомарно
+(временный файл в том же каталоге, mode и owner из записи, затем `mv`); затем post-action
+семейства — `journald.conf`: `systemctl restart systemd-journald`; `resolved.conf`: как у класса
+`resolved` (`try-reload-or-restart` + `getent ahosts` с повторами); `sshd_config`: как у класса
+`ssh` (`sshd -t`, reload, ssh active и слушает). Потом обычный host check Phase 2. Любой сбой —
+`rollback_now`: оригинал возвращается, и post-action выполняется на нём ещё раз.
+
+**Правило conffile'ов.** Деплой никогда не пишет conffile dpkg (`CONFFILE_REPORT_PATHS` только в
+отчёте) — с ровно одним исключением: запись `class pristine`, и только с копией, проверенной md5
+самого пакетного менеджера. Содержимое, написанное в репо, деплой в conffile не кладёт никогда.
+Локально изменённый conffile с такой записью в `--pre-install` — `PENDING` («Phase 2 restores the
+package default»), а не WARN, и после установки его WARN пропадает сам; без записи он остаётся WARN.
 
 **Выведенные файлы защищены.** Перед удалением Phase 1 ищет путь или его basename в crontab root и
 во всех остальных файлах под `/var/spool/cron`, в `/etc/crontab`, `/etc/cron.d`, в каталогах юнитов
@@ -169,11 +247,11 @@ Phase 1 деплоя, Phase 2 деплоя и `vpn-bot-host-check.timer`. Вру
 | Вердикт | Значение | Phase 1 деплоя | Phase 2 деплоя | Бот (main) |
 |---|---|---|---|---|
 | **BEATEN** | значение из repo-managed файла не действует: выигрывает другой файл | FAIL | rollback | алерт |
-| **MISMATCH** | живое значение (`sshd -T`, `sysctl -n`, `systemctl show`) ≠ тому, что дают файлы, для ключа, который задаёт repo-файл; юнит из репо замаскирован, ждёт `daemon-reload` или (таймер, который ставит деплой) не enabled+active; строка `invariants.list` не выполняется | FAIL | rollback | алерт |
+| **MISMATCH** | живое значение (`sshd -T`, `sysctl -n`, `systemctl show`) ≠ тому, что дают файлы, для ключа, который задаёт repo-файл; юнит из репо замаскирован, ждёт `daemon-reload` или (таймер, который ставит деплой) не enabled+active; строка `invariants.list` не выполняется; (`--pristine`) возврат дефолта пакета изменил бы ключ | FAIL | rollback | алерт |
 | **LATENT** | сейчас верно, но проигравший файл — не repo и не vendor — держит другое значение: уберут победителя, и значение молча перевернётся. В строке — победитель, проигравшие и `winner gone -> <значение> from <файл>` | FAIL для auth-ключа sshd¹, иначе WARN | в отчёте | алерт, если новый |
 | **ACCEPTED** | LATENT из `deploy/host/accepted-overrides.list` | в отчёте | в отчёте | — |
 | **WARN** | состояние хоста вне репо, на которое стоит посмотреть (ниже) | WARN | в отчёте | — |
-| **PENDING** | только Phase 1: деплой сейчас это меняет; проверит Phase 2 | в отчёте | — | — |
+| **PENDING** | только Phase 1: деплой сейчас это меняет; проверит Phase 2 (в том числе изменённый conffile, который Phase 2 вернёт к дефолту пакета) | в отчёте | — | — |
 
 ¹ `PasswordAuthentication`, `KbdInteractiveAuthentication`, `PermitRootLogin`,
 `PermitEmptyPasswords`, `PubkeyAuthentication`, `AuthenticationMethods`.
@@ -284,8 +362,9 @@ cloud-init жив (нет `/etc/cloud/cloud-init.disabled`); строки `logro
 паролем (`passwd -S` = P, читается из `/etc/shadow`) или непустым `authorized_keys`; локально
 изменённый conffile dpkg в `/etc/systemd`, `/etc/sysctl*`, `/etc/logrotate*`, `/etc/cloud` или
 `/etc/sudoers*` — с ключами, которые он задаёт (настройка, живущая только в изменённом conffile,
-— состояние хоста вне репо; сейчас на main это `journald.conf`, дублирующий managed drop-in, и
-`resolved.conf`, см. ниже).
+— состояние хоста вне репо). Conffile с записью `class pristine` в `--pre-install` вместо этого
+`PENDING`, если у деплоя есть его дефолт пакета, а его WARN пропадает, когда Phase 2 его вернула —
+[Дефолты пакетов](#дефолты-пакетов-class-pristine).
 
 Проверка никогда не удаляет и не правит файлы вне реестра. Найденное закрывается реестром: файл,
 которым должен владеть репо, получает запись; файл, который не должен вернуться, — `class absent`
@@ -324,10 +403,11 @@ cloud-init жив (нет `/etc/cloud/cloud-init.disabled`); строки `logro
   `resolved`): после изменения — `systemctl try-reload-or-restart systemd-resolved`, затем
   `getent ahosts github.com` должен ответить в течение 10 с, иначе деплой откатывается (rollback
   возвращает старый файл и так же перезагружает resolved).
-- Сам `/etc/systemd/resolved.conf` деплой никогда не пишет (он в отчёте как изменённый conffile).
-  После деплоя этой раскладки его вернут к дефолту пакета отдельным ручным скриптом, который
-  проверяет, что эффективная конфигурация не изменилась. Первый деплой ничего эффективного не
-  меняет: drop-in несёт значения conffile, а `resolv.conf` уже synced.
+- Сам `/etc/systemd/resolved.conf` возвращается к дефолту пакета через свою запись `class
+  pristine` — без ручного скрипта: Phase 1 доказывает, что эффективные `DNS=` / `FallbackDNS=`
+  (из drop-in) не меняются, Phase 2 возвращает стоковый файл и перезагружает resolved как у класса
+  `resolved`. Ничего эффективного не меняется: drop-in несёт значения conffile, а `resolv.conf`
+  уже synced.
 
 ## Файлы, которые ничем не учтены
 
@@ -362,6 +442,13 @@ Phase 1 перечисляет каждый файл в этих каталог�
 Чтобы вывести файл из оборота, добавьте `"-|<path>|-|-|absent|<role>"`. Его копия остаётся в
 архивах деплоя (`/var/backups/vpn-bot`, последние `BACKUP_KEEP`).
 
+Чтобы вернуть собственный файл пакета к его дефолту, добавьте
+`"dpkg:<package>|<path>|0644|root:root|pristine|<role>"` (conffile dpkg) или
+`"ucf:<template>|<path>|0644|root:root|pristine|<role>"` (файл под ucf). Путь должен быть в
+семействе, которое покрывает доказательство эффекта: `/etc/ssh/sshd_config`,
+`/etc/systemd/<x>.conf`, sysctl. `tests/test_deploy_pristine.py` закрепляет форму и то, что путь —
+conffile этого пакета.
+
 ## ALLOW_SSH_CHANGE и риск потери доступа
 
 Неверный drop-in `sshd_config.d` или `ListenStream` отрезает все новые ssh-подключения. Поэтому для
@@ -392,3 +479,7 @@ SSH-баннером**: при socket activation один listener ничего 
 
 Проверка порта ловит мёртвый порт, но не ключ, с которым больше нельзя войти. Тогда спасает вторая
 сессия: проверьте из неё новый вход, прежде чем что-либо закрывать.
+
+Сам `/etc/ssh/sshd_config` — не класс `ssh`: он только возвращается к своему дефолту пакета (класс
+`pristine`) после того, как Phase 1 доказала, что `sshd -T` побайтно не меняется, — там защищает
+это доказательство, и ручка не нужна и не читается.

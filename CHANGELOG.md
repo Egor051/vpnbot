@@ -8,6 +8,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Host files: class `pristine` — the deploy puts a package's own file back to its PACKAGE
+  DEFAULT by itself (docs/host-state.md#package-defaults-class-pristine).** No manual script on a
+  new host and every later hand edit undone the same way. Entry:
+  `<dpkg:<package>|ucf:<template>>|<dst>|<mode>|<owner>|pristine|<role>`; seeded:
+  `/etc/systemd/journald.conf` (`dpkg:systemd`) and `/etc/systemd/resolved.conf`
+  (`dpkg:systemd-resolved`) on main, `/etc/ssh/sshd_config` (`ucf:/usr/share/openssh/sshd_config`)
+  on both roles. The copy: for dpkg the `.deb` of the installed version from
+  `/var/cache/apt/archives`, else `apt-get download <pkg>=<ver>` into the deploy's work directory,
+  `dpkg-deb --fsys-tarfile | tar -xO`, md5 = `dpkg-query ${Conffiles}`; for ucf the template, md5 =
+  the owning package's md5sums, `<dst>` registered in `/var/lib/ucf/hashfile` (what ucf registered —
+  on both hosts the template plus `PermitRootLogin yes` from the provider's debconf answer — is
+  reported, not restored). No verified copy → `WARN cannot restore: <why>`, file untouched, the
+  deploy goes on. Phase 1 proves the effect unchanged before any mutation:
+  `vpn-bot-host-check --pre-install --pristine <dst>=<copy>` compares every key of the family (and
+  sshd's Match blocks) with and without the copy — a key only the hand edit carries is a FAIL
+  (`<file> sets <key>=<value> that no repo file carries — move it into a repo drop-in first`) — and
+  for `sshd_config` `sshd -T` on private trees must be byte-for-byte equal; that proof replaces
+  `ALLOW_SSH_CHANGE` for `sshd_config` (a documented exception). Phase 2 installs atomically (tmp +
+  `mv`), then restarts journald / reloads resolved with the `getent` probe / reloads ssh with the
+  listen check; a failure rolls back and repeats the post-action. A modified conffile with an entry
+  is PENDING in `--pre-install`, not WARN. The one exception to "the deploy never writes a
+  conffile": only a pristine entry, only with a copy the package manager's md5 vouches for.
+
 - **Host invariants: the EFFECTIVE host state, checked at deploy, at boot and daily
   (docs/host-state.md#effective-state).** `MANAGED_HOST_FILES` guarantees a repo file lies on the
   host byte for byte; it never said whether the file is in effect. On the relay
