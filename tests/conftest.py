@@ -108,6 +108,41 @@ def _isolate_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+# The operator knobs scripts/deploy.sh reads from its environment
+# (`NAME="${NAME:-0}"`): the run mode and every gate bypass. deploy.sh runs this
+# suite as its Phase 1 gate, in its own environment, so whatever the operator set
+# for THAT deploy reaches every test — `CHECK=1 redeploy` exports PHASE1_ONLY=1,
+# `FORCE=1` and the ALLOW_* are passed through as given. tests/test_deploy_knob_isolation.py
+# fails when deploy.sh gains a knob that is missing here, or drops one listed here.
+DEPLOY_ENV_KNOBS: tuple[str, ...] = (
+    "PHASE1_ONLY",
+    "FORCE",
+    "ALLOW_MODEL_SWITCH",
+    "ALLOW_UNIT_DRIFT",
+    "ALLOW_BACKEND_CONFIG_DRIFT",
+    "ALLOW_SCHEMA_DOWNGRADE",
+    "ALLOW_SSH_CHANGE",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_deploy_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip deploy.sh's operator knobs from every test's environment.
+
+    The same host-only class as ``_isolate_settings_env`` (cf. #239/#246/#318):
+    a test that sources deploy.sh and leaves a knob at its default inherits the
+    value of the deploy that is running the suite. Under ``CHECK=1 redeploy``
+    ``test_relay_phase1_stops_on_an_auth_latent`` saw PHASE1_ONLY=1, and Phase 1
+    reported the LATENT instead of stopping on it — red on the box, green in CI.
+
+    ``delenv`` only: a test that sets a knob itself (``monkeypatch.setenv``, which
+    runs after this fixture, or a ``NAME=value`` line in its bash driver) still
+    gets exactly that value. DEPLOY_SELFTEST is not a knob and is left alone.
+    """
+    for key in DEPLOY_ENV_KNOBS:
+        monkeypatch.delenv(key, raising=False)
+
+
 def _load_module(module_name: str, path: Path) -> ModuleType:
     loader = importlib.machinery.SourceFileLoader(module_name, str(path))
     spec = importlib.util.spec_from_loader(loader.name, loader)

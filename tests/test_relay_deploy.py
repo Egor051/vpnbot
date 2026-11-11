@@ -554,7 +554,11 @@ class RelayHost:
             f'MH_SELFTEST_ROOT="{self.tmp}"\n'
             f'HOST_CHECK_BIN="{self.checker}"; HOST_CHECK_ROOT="{self.host_root}"\n'
             f'HOST_CHECK_STATE="{self.tmp}/hc/last.json"\n'
-            'NODE_ROLE=relay; TAG=abc1234\n'
+            # Pinned, never inherited: deploy.sh runs this suite as its Phase 1 gate,
+            # and under `CHECK=1 redeploy` PHASE1_ONLY=1 is in that environment, which
+            # turns every relay_phase1 stop into a report. A test that wants
+            # inspection mode sets PHASE1_ONLY=1 in its own body.
+            'PHASE1_ONLY=0; NODE_ROLE=relay; TAG=abc1234\n'
         )
         return _source_and_run(self.tmp, prelude + body, env_text="NODE_ROLE=relay\n", extra_path=self.stub)
 
@@ -934,3 +938,20 @@ def test_relay_phase1_stops_on_an_auth_latent(tmp_path: Path) -> None:
     assert "host invariants: 1 fatal finding(s) — nothing was changed" in proc.stderr
     (call,) = host.log("host-check")
     assert f"--repo {wt} --role relay" in call and call.endswith("--pre-install --no-state")
+
+
+def test_relay_host_pins_phase1_only_against_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RelayHost.run never inherits PHASE1_ONLY, even past the conftest scrub.
+
+    deploy.sh runs this suite as its Phase 1 gate; under `CHECK=1 redeploy` the
+    environment carries PHASE1_ONLY=1 (tests/test_deploy_knob_isolation.py). The
+    setenv here stands for a leak the autouse fixture did not catch.
+    """
+    monkeypatch.setenv("PHASE1_ONLY", "1")
+    host = RelayHost(tmp_path)
+    proc = host.run('echo "MODE=$PHASE1_ONLY"\nPHASE1_ONLY=1\necho "OPT-IN=$PHASE1_ONLY"\n')
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "MODE=0" in proc.stdout, "the prelude pins the real-deploy mode"
+    assert "OPT-IN=1" in proc.stdout, "a test body can still ask for inspection mode"
