@@ -10,6 +10,7 @@ from services.audit import AuditService
 from services.awg import AwgService
 from services.backend_health import BackendHealth
 from services.dashboard import DashboardService
+from services.host_check import HostCheckMonitor
 from services.hysteria import HysteriaService
 from services.key_bundle_views import KeyBundleViewService
 from services.key_bundles import KeyBundleService
@@ -93,3 +94,7 @@ class Services:
     # consumer asks before talking to a backend. None only in lightweight test
     # doubles; the real app always wires it.
     protocol_uninstall: ProtocolUninstallService | None = None
+    # Superadmin alerts from the host invariants check (scripts/vpn-bot-host-check):
+    # reads /var/lib/vpn-bot-host-check/last.json, alerts on a change. None only in
+    # lightweight test doubles; HOST_CHECK_INTERVAL gates the loop in main.py.
+    host_check: HostCheckMonitor | None = None

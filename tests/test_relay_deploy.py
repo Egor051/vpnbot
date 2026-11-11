@@ -366,11 +366,12 @@ def test_rollback_now_picks_the_rollback_of_the_role(tmp_path: Path) -> None:
     assert proc.returncode == 43 and "RELAY-ROLLBACK" in proc.stdout
 
 
-def test_scan_on_a_relay_sees_only_the_relay_helper(tmp_path: Path) -> None:
+def test_scan_on_a_relay_sees_only_the_relay_helpers(tmp_path: Path) -> None:
+    """The relay data-plane helper and the host invariants check (both roles run it)."""
     out = _shared_functions_output(tmp_path, "NODE_ROLE=relay\n", 'scan_out_of_repo_helpers "$APP_DIR"')
     rows = [ln for ln in out.split("\n--SC--\n")[0].splitlines() if "|" in ln]
-    assert [r.split("|")[0] for r in rows] == ["vpn-relay-apply"]
-    assert rows[0].endswith("|absent|required")
+    assert [r.split("|")[0] for r in rows] == ["vpn-relay-apply", "vpn-bot-host-check"]
+    assert all(r.endswith("|absent|required") for r in rows)
 
 
 # --------------------------------------------------------------------------- #
@@ -444,6 +445,17 @@ exit 0
 """
 
 # The installed copy of vpn-relay-apply (copied from the fake checkout's scripts/).
+# Stands in for scripts/vpn-bot-host-check: logs its arguments, prints the rows in
+# $SD/hc_rows (none by default) and a SUMMARY line counting them.
+FAKE_HOST_CHECK = r"""
+echo "host-check $*" >> "$LOGS/host-check.log"
+rows="$(cat "$SD/hc_rows" 2>/dev/null)"
+[[ -n "$rows" ]] && printf '%s\n' "$rows"
+b=$(grep -c '^BEATEN|' <<< "$rows"); m=$(grep -c '^MISMATCH|' <<< "$rows"); l=$(grep -c '^LATENT|' <<< "$rows")
+echo "SUMMARY|role=relay|mode=x|beaten=$b|mismatch=$m|latent=$l|accepted=0|warn=0|pending=0|info=0|ok=1"
+(( b + m == 0 ))
+"""
+
 FAKE_HELPER = r"""#!/usr/bin/env bash
 echo "helper $*" >> "$LOGS/helper.log"
 echo "vpn-relay-apply: fake $*"
@@ -485,6 +497,12 @@ class RelayHost:
         # (python3) must not leave the box. `id` pins the root code paths everywhere.
         _stub(self.stub / "id", '[[ "$1" == "-u" ]] && echo 0\n')
         _stub(self.stub / "python3", f'echo "probe $4 $5 $6" >> "{self.logs}/probe.log"\nexit 0\n')
+        # The host invariants check (scripts/vpn-bot-host-check) has its own suite,
+        # tests/test_host_check.py; here a fake records how the relay deploy calls it.
+        self.host_root = tmp_path / "hostroot"
+        self.host_root.mkdir()
+        self.checker = self.stub / "fake-host-check"
+        _stub(self.checker, FAKE_HOST_CHECK)
         self.set_forward("0")
 
     # --- host states -------------------------------------------------------
@@ -534,6 +552,8 @@ class RelayHost:
             # The fence makes a forgotten override fail instead of writing /etc.
             "MANAGED_HOST_FILES=()\nUNMANAGED_SCAN_DIRS=()\n"
             f'MH_SELFTEST_ROOT="{self.tmp}"\n'
+            f'HOST_CHECK_BIN="{self.checker}"; HOST_CHECK_ROOT="{self.host_root}"\n'
+            f'HOST_CHECK_STATE="{self.tmp}/hc/last.json"\n'
             'NODE_ROLE=relay; TAG=abc1234\n'
         )
         return _source_and_run(self.tmp, prelude + body, env_text="NODE_ROLE=relay\n", extra_path=self.stub)
@@ -868,3 +888,49 @@ def test_every_disarm_call_clears_the_err_trap_in_its_own_frame() -> None:
     assert len(calls) == 2, calls  # main Phase 2 + relay_phase2
     for i in calls:
         assert any(ln.strip() == "trap - ERR INT TERM HUP" for ln in lines[i + 1 : i + 6]), lines[i : i + 6]
+
+
+# --------------------------------------------------------------------------- #
+# Host invariants (scripts/vpn-bot-host-check) on a relay
+# --------------------------------------------------------------------------- #
+def test_relay_phase2_runs_the_host_check_and_writes_the_state(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    proc = host.phase2()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    (call,) = host.log("host-check")
+    assert "--role relay" in call and call.endswith(f"--state {tmp_path}/hc/last.json")
+    assert "--pre-install" not in call
+    assert "host invariants  : beaten 0, mismatch 0, latent 0 (accepted 0), warn 0" in proc.stdout
+
+
+def test_relay_phase2_rolls_back_on_a_beaten_host_value(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    (host.sd / "hc_rows").write_text(
+        "BEATEN|sshd|passwordauthentication|/etc/ssh/sshd_config.d/50-cloud-init.conf|yes wins over no\n",
+        encoding="utf-8")
+    proc = host.phase2()
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "ROLLBACK REPORT (relay)" in proc.stderr
+    assert "host invariants after the install: 1 BEATEN/MISMATCH finding(s)" in proc.stderr
+    assert "DEPLOY OK (relay)" not in proc.stdout
+
+
+def test_relay_phase1_stops_on_an_auth_latent(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    (host.sd / "hc_rows").write_text(
+        "LATENT|sshd|passwordauthentication|/etc/ssh/sshd_config.d/50-cloud-init.conf|winner ... gone -> yes\n",
+        encoding="utf-8")
+    wt = tmp_path / "wt"
+    (wt / "scripts").mkdir(parents=True)
+    (wt / "scripts" / "vpn-relay-apply").write_text(_read(RELAY_HELPER_SRC), encoding="utf-8")
+    env = tmp_path / "relay.env"
+    env.write_text("NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=150.251.152.243\nRELAY_WAN_IFACE=eth0\n", encoding="utf-8")
+    proc = host.run(f'ENV_FILE="{env}"; WT="{wt}"\nrelay_phase1\necho PHASE1-RETURNED\n')
+    assert proc.returncode == 1
+    assert "PHASE1-RETURNED" not in proc.stdout
+    assert "host invariants: 1 fatal finding(s) — nothing was changed" in proc.stderr
+    (call,) = host.log("host-check")
+    assert f"--repo {wt} --role relay" in call and call.endswith("--pre-install --no-state")

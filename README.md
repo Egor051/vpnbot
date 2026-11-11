@@ -375,7 +375,7 @@ schema version internally).
 | [docs/configuration.md](docs/configuration.md) | Complete environment-variable reference (all backends, WARP, legacy aliases). |
 | [docs/deployment.md](docs/deployment.md) | Install steps for both models, Xray API mode, one-time server setup, smoke checklist. |
 | [docs/operations.md](docs/operations.md) | Production runbook: health checks, backup/restore, degraded recovery, rollback, manual verification. |
-| [docs/host-state.md](docs/host-state.md) | Host files outside the checkout: what deploy.sh installs, repairs and retires, what it only reports, `ALLOW_SSH_CHANGE`. |
+| [docs/host-state.md](docs/host-state.md) | Host files outside the checkout: what deploy.sh installs, repairs and retires, what it only reports, `ALLOW_SSH_CHANGE`; whether they are in effect (host invariants: BEATEN / MISMATCH / LATENT, at deploy, at boot and daily). |
 | [docs/hysteria.md](docs/hysteria.md) | Hysteria2 (apernet v2): data plane, `hy2_auth` endpoint, Traffic Stats API, health & recovery. |
 | [docs/proxy.md](docs/proxy.md) | SOCKS5/Dante and MTProto (static + managed) deployment and recovery. |
 | [docs/warp.md](docs/warp.md) | WARP outbound-IP masking: config format, install, proxy egress, selective-split. |

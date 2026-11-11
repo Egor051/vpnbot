@@ -1,0 +1,36 @@
+# Host invariants the repo expects BEYOND what its own files set.
+#
+# scripts/vpn-bot-host-check derives the sysctl, sshd and systemd *.conf keys to check
+# from the repo files of the host's role on its own (MANAGED_HOST_FILES) — add a file
+# there and its keys are checked. This list is for what no repo file carries.
+#
+# Format, one entry per line ('#' starts a comment line):
+#   <role>|<probe>|<key>|<expected>|<reason, at least 20 characters>
+# role      main | relay | all
+# probe     a closed set — no arbitrary commands:
+#   sshd                  key = sshd keyword; compared with `sshd -T`
+#   sysctl                key = sysctl key; compared with `sysctl -n`
+#   systemd-conf:<x>      x = journald|networkd|resolved|logind|timesyncd|system;
+#                         key = Section.Key; compared with what the files give
+#   unit-prop:<unit>:<P>  key = -; `systemctl show -p <P> <unit>` (several lines joined)
+#   path-present          key = path; expected = -
+#   path-absent           key = path; expected = -
+#   path-regular          key = path; exists and is NOT a symlink; expected = -
+#   tcp-listen:<port>     key = -; something listens on TCP <port>; expected = -
+# expected  the value; "~X" = contains X as a whole token ("~22" matches
+#           "[::]:22 (Stream)", not ":2222"); "-" where the probe needs none.
+# A line that does not hold is a MISMATCH: fatal in deploy Phase 1, a rollback in
+# Phase 2, an alert to the superadmins on the main server.
+# tests/test_host_check.py checks every line (probe set, field count, reason length).
+
+# --- main ----------------------------------------------------------------------
+main|unit-prop:ssh.socket:Listen|-|~54321|ssh listens on 54321 through ssh.socket.d/override.conf; a socket left on 22 only is a lockout after the next firewall change
+main|unit-prop:even-day-reboot.timer:UnitFileState|-|enabled|the scheduled reboot is how kernel and library updates take effect; a disabled timer silently stops them
+main|unit-prop:even-day-reboot.timer:ActiveState|-|active|an enabled timer that is not running schedules nothing until the next boot
+main|path-regular|/etc/resolv.conf|-|the main server resolves through a plain resolv.conf from the repo (deploy/host/dns/resolv.conf), not resolved's stub symlink
+
+# --- relay ---------------------------------------------------------------------
+relay|unit-prop:ssh.socket:Listen|-|~22|the relay's only management path is sshd on 22 through ssh.socket; without it the relay is unreachable
+
+# --- both roles ----------------------------------------------------------------
+all|path-present|/etc/cloud/cloud-init.disabled|-|cloud-init must stay off: on a reboot it rewrote sshd_config.d and sudoers.d behind the repo's back

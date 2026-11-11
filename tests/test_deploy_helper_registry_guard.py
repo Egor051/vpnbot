@@ -188,6 +188,8 @@ def parse_registry(deploy_text: str) -> dict[str, tuple[str, str, str, str]]:
     scan_out_of_repo_helpers does in bash. Every role counts as "registered": the
     guards below ask whether the drift gate knows a helper at all, and a relay
     helper is gated on every relay host just as a main helper is on every main one.
+    A helper of BOTH roles has one entry per role; they are merged here into one
+    value whose role is "main,relay" — and they must agree on everything else.
     """
     start = deploy_text.index("OUT_OF_REPO_HELPERS=(")
     body = deploy_text[start:].splitlines()[1:]
@@ -202,7 +204,13 @@ def parse_registry(deploy_text: str) -> dict[str, tuple[str, str, str, str]]:
             raise AssertionError(f"unparseable OUT_OF_REPO_HELPERS entry: {line!r}")
         src, dst = m.group(1), m.group(2)
         policy, role = m.group(3) or "absent-ok", m.group(4) or "main"
-        out[dst.rsplit("/", 1)[-1]] = (src, dst, policy, role)
+        name = dst.rsplit("/", 1)[-1]
+        if name in out:
+            prev = out[name]
+            if prev[:3] != (src, dst, policy):
+                raise AssertionError(f"{name}: its entries of different roles disagree: {prev} vs {line!r}")
+            role = ",".join(sorted({*prev[3].split(","), role}))
+        out[name] = (src, dst, policy, role)
     return out
 
 
@@ -462,7 +470,8 @@ def test_registry_entries_are_well_formed() -> None:
         assert policy in VALID_POLICIES, f"{name}: unknown policy {policy!r}"
         # An unknown role would match no NODE_ROLE at all: the entry would be scanned
         # on no host, i.e. silently unmanaged — the exact failure this module guards.
-        assert role in VALID_ROLES, f"{name}: unknown role {role!r}"
+        for one in role.split(","):
+            assert one in VALID_ROLES, f"{name}: unknown role {one!r}"
 
 
 def test_relay_helper_is_registered_for_the_relay_role_only() -> None:
@@ -477,7 +486,14 @@ def test_relay_helper_is_registered_for_the_relay_role_only() -> None:
         "relay",
     )
     others = {name: entry[3] for name, entry in registry.items() if name != "vpn-relay-apply"}
-    assert set(others.values()) == {"main"}, f"only the relay helper may carry a non-main role: {others}"
+    # The host invariants check runs on both roles (vpn-bot-host-check.service is a
+    # MANAGED_HOST_FILES unit of each), so it is the one helper with an entry per role.
+    both = {name for name, role in others.items() if role == "main,relay"}
+    assert both == {"vpn-bot-host-check"}, f"only the host check may be on both roles: {others}"
+    assert {role for name, role in others.items() if name not in both} == {"main"}, (
+        f"only the relay helper may be relay-only: {others}"
+    )
+    assert registry["vpn-bot-host-check"][2] == "required", "a unit executes it on every host"
 
 
 def test_registry_has_no_duplicate_entries() -> None:
@@ -485,8 +501,8 @@ def test_registry_has_no_duplicate_entries() -> None:
     silently collapsed here — count the raw entries instead."""
     text = _read(DEPLOY_SH)
     body = text[text.index("OUT_OF_REPO_HELPERS=(") :].split("\n)", 1)[0]
-    raw = [m.group(2) for m in (REGISTRY_ENTRY_RE.match(ln) for ln in body.splitlines()) if m]
-    assert len(raw) == len(set(raw)), f"duplicate OUT_OF_REPO_HELPERS destinations: {raw}"
+    raw = [(m.group(2), m.group(4) or "main") for m in (REGISTRY_ENTRY_RE.match(ln) for ln in body.splitlines()) if m]
+    assert len(raw) == len(set(raw)), f"duplicate OUT_OF_REPO_HELPERS destinations within one role: {raw}"
 
 
 # --------------------------------------------------------------------------- #
@@ -984,5 +1000,6 @@ def test_registry_parser_reads_the_real_array_whole() -> None:
     body = text[text.index("OUT_OF_REPO_HELPERS=(") :].split("\n)", 1)[0]
     quoted = [ln for ln in body.splitlines() if ln.strip().startswith('"')]
     assert quoted, "the array has no entries at all"
-    assert len(registry) == len(quoted), "parse_registry dropped entries the array declares"
+    names = {REGISTRY_ENTRY_RE.match(ln).group(2).rsplit("/", 1)[-1] for ln in quoted}  # type: ignore[union-attr]
+    assert len(registry) == len(names), "parse_registry dropped entries the array declares"
     assert registry["vpn-bot-db-perms"][2] == "required"

@@ -1,0 +1,17 @@
+# LATENT findings of scripts/vpn-bot-host-check that are accepted on purpose.
+#
+# LATENT = the effective value is right now, but a loser that is neither repo-managed
+# nor vendor holds another value: remove the winner and the value silently flips.
+# This file is the ONLY sanctioned way to accept one; there is no ALLOW_* knob.
+# An entry silences exactly the LATENT row with this path and key — nothing else.
+#
+# Format, one entry per line ('#' starts a comment line):
+#   <path>|<key>|<reason, at least 20 characters>
+# path  the file the LATENT row names (the loser, a foreign drop-in, or the file that
+#       wins at `sysctl --system`)
+# key   the row's key: the sysctl key, the lower-case sshd keyword, Section.Key of a
+#       systemd *.conf, or the unit name for a foreign drop-in
+# tests/test_host_check.py checks the format, as for known-unmanaged.list.
+#
+# Empty on purpose: under the vendor rule (docs/host-state.md#effective-state) neither
+# host has a LATENT left to accept (sweep of 2026-11-11).

@@ -762,6 +762,9 @@ class Settings:
     relay_env_vars: tuple[str, ...] = ()
     # Seconds between relay health probes; 0 disables the monitor.
     relay_health_interval: int = 300
+    # Seconds between reads of the host check state file
+    # (/var/lib/vpn-bot-host-check/last.json); 0 disables the alerts.
+    host_check_interval: int = 300
     # Appended to the display name of standalone keys and basic-subscription
     # members (``<label>_🇫🇮``). Display only — never part of email_label.
     server_flag_emoji: str = "🇫🇮"
@@ -1382,5 +1385,6 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         relay_seed=relay_seed,
         relay_env_vars=relay_env_vars,
         relay_health_interval=_int_range("RELAY_HEALTH_INTERVAL", 300, 0, 86400),
+        host_check_interval=_int_range("HOST_CHECK_INTERVAL", 300, 0, 86400),
         server_flag_emoji=server_flag_emoji,
     )

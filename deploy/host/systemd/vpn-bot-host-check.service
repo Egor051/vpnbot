@@ -1,0 +1,19 @@
+[Unit]
+Description=vpn-bot host invariants: is the effective host state what the repo says (read-only)
+Documentation=file:///opt/vpn-service/docs/host-state.md
+
+[Service]
+Type=oneshot
+# Read-only check; writes only /var/lib/vpn-bot-host-check/last.json (atomically).
+# Exit 1 = BEATEN or MISMATCH found: the unit shows as failed and the journal has the
+# rows. On the main server the bot reads last.json and alerts the superadmins.
+ExecStart=/usr/local/sbin/vpn-bot-host-check
+StateDirectory=vpn-bot-host-check
+StateDirectoryMode=0755
+UMask=0022
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+Nice=10
+IOSchedulingClass=idle
