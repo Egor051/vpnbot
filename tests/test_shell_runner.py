@@ -14,6 +14,8 @@ import asyncio
 import logging
 import signal
 import sys
+import time
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -22,6 +24,7 @@ import pytest
 
 import adapters.shell_runner as shell_runner_module
 from adapters.shell_runner import (
+    CAPTURE_CAP_BYTES,
     COMMAND_NOT_FOUND_RETURNCODE,
     COMMAND_NOT_FOUND_STDERR,
     TIMEOUT_RETURNCODE,
@@ -351,6 +354,99 @@ def test_partial_tail_cleanup_only_removes_secret_prefixes() -> None:
 
     # Assert
     assert (kept, stacked, untouched) == ("abc..", "abc..", "abc..xyz")
+
+
+# Invariant: wherever the cap splits a secret (every offset 1..len-1), not one
+# character of it survives the clean-up. The cut is the LONGEST matching prefix
+# across all values: a shorter value that also matches the tail and is listed
+# first must not win, or the rest of the cut secret would stay. Empty values are
+# skipped.
+TAIL_SECRET = "Kq7Zw2Xn9RtB4mVy8LpC3sHd6FjG1aEu5NcT0oWiYb+="
+
+
+@pytest.mark.parametrize("inside", range(1, len(TAIL_SECRET)))
+def test_tail_cleanup_drops_secret_cut_at_every_offset(inside: int) -> None:
+    # Arrange: the decoy's one-char prefix is the last char of the cut secret.
+    filler = "." * 40
+    decoy = TAIL_SECRET[inside - 1] + "!"
+
+    # Act
+    result = ShellRunner._drop_partial_secret_tail(filler + TAIL_SECRET[:inside], ["", decoy, TAIL_SECRET])
+
+    # Assert
+    assert result == filler
+    assert not set(TAIL_SECRET) & set(result), result
+
+
+# Invariant: with no value that can leave a proper prefix behind (none at all,
+# an empty one, a one-char one), a capped tail is kept as is and nothing raises.
+@pytest.mark.parametrize("values", [pytest.param([], id="none"), pytest.param(["", "a"], id="empty-and-1-char")])
+def test_tail_cleanup_without_multichar_values_keeps_text(values: list[str]) -> None:
+    # Arrange
+    text = "abc..a"
+
+    # Act
+    result = ShellRunner._drop_partial_secret_tail(text, values)
+
+    # Assert
+    assert result == text
+
+
+# Invariant: the cap cuts once, so the clean-up cuts once. A full capture that
+# merely repeats a secret's first character loses only the fragment one cut can
+# leave (len - 1 at most), never the whole text, and the cost does not grow with
+# the output: the looping version spent minutes on this input, blocking the
+# event loop.
+@pytest.mark.parametrize(
+    ("secret", "dropped"),
+    [pytest.param("aZ", 1, id="2-char"), pytest.param("a" * 47 + "Z", 47, id="48-char")],
+)
+def test_tail_cleanup_cuts_once_in_bounded_time(secret: str, dropped: int) -> None:
+    # Arrange
+    text = "a" * CAPTURE_CAP_BYTES
+
+    # Act
+    started = time.perf_counter()
+    result = ShellRunner._drop_partial_secret_tail(text, [secret])
+    elapsed = time.perf_counter() - started
+
+    # Assert
+    assert elapsed < 0.5, f"{elapsed:.3f}s"
+    assert len(text) - len(result) == dropped
+    assert text.startswith(result)
+
+
+# Invariant: the clean-up repairs the cap's cut, so it runs only when the cap
+# actually cut. An uncapped stream ended where the child ended it: a tail that
+# looks like the start of a secret is real output and comes back unchanged. The
+# capped row is the control that proves the spy is wired.
+@pytest.mark.parametrize(
+    ("capped", "calls", "expected"),
+    [
+        pytest.param(False, 0, "." * 40 + BOUNDARY_SECRET[:4], id="uncapped"),
+        pytest.param(True, 1, "." * 40 + "...[truncated]", id="capped"),
+    ],
+)
+def test_tail_cleanup_runs_only_on_capped_stream(
+    monkeypatch: pytest.MonkeyPatch, capped: bool, calls: int, expected: str
+) -> None:
+    # Arrange
+    seen: list[str] = []
+    real = ShellRunner._drop_partial_secret_tail
+
+    def spy(text: str, values: Sequence[str]) -> str:
+        seen.append(text)
+        return real(text, values)
+
+    monkeypatch.setattr(ShellRunner, "_drop_partial_secret_tail", staticmethod(spy))
+    captured = ("." * 40 + BOUNDARY_SECRET[:4]).encode()
+
+    # Act
+    text = ShellRunner()._finalize_output(captured, capped, [BOUNDARY_SECRET], 10_000)
+
+    # Assert
+    assert len(seen) == calls
+    assert text == expected
 
 
 # Invariant: input_text is delivered on stdin (UTF-8) and stdin is closed, so a

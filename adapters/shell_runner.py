@@ -208,17 +208,30 @@ class ShellRunner:
 
     @staticmethod
     def _drop_partial_secret_tail(text: str, sensitive_values: Sequence[str]) -> str:
-        """Remove a trailing fragment that is the start of any sensitive value."""
-        changed = True
-        while changed and text:
-            changed = False
-            for value in sensitive_values:
-                for size in range(min(len(value) - 1, len(text)), 0, -1):
-                    if text.endswith(value[:size]):
-                        text = text[:-size]
-                        changed = True
-                        break
-        return text
+        """Drop the one trailing fragment the memory cap left of a sensitive value.
+
+        The cap cuts the capture exactly once, so at most one secret is split by it,
+        and what survives of it is a proper prefix sitting at the very end. That cut
+        is undone once: the longest proper prefix of any sensitive value the text
+        ends with is removed, and nothing else. Repeating the cut would also eat real
+        output that merely repeats a secret's first characters (``"a" * 8 MiB``
+        against ``"aZ"`` would lose all of it, in quadratic time). Only the last
+        ``max(len(value)) - 1`` characters are looked at, so the cost does not
+        depend on the length of the output.
+        """
+        # A value of length 0 or 1 has no proper prefix to leave behind.
+        values = [value for value in sensitive_values if len(value) > 1]
+        if not values:
+            return text
+        tail = text[-(max(len(value) for value in values) - 1) :]
+        cut = 0
+        for value in values:
+            # Only sizes above the best match so far can change the answer.
+            for size in range(min(len(value) - 1, len(tail)), cut, -1):
+                if tail.endswith(value[:size]):
+                    cut = size
+                    break
+        return text[:-cut] if cut else text
 
     def _compact_text(self, text: str, truncated: bool, max_output_chars: int) -> str:
         text = text.strip()

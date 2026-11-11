@@ -614,7 +614,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `result.stderr` and the WARNING log. It now captures each stream whole (up to a memory
   ceiling of 8 MiB, or 4 bytes per requested character), decodes, redacts the complete text
   (longest value first), and only then cuts it to the limit; a stream cut by the ceiling drops
-  its incomplete UTF-8 tail and any tail that is the start of a sensitive value. stdout is now
+  its incomplete UTF-8 tail and then, once, the longest tail that is the start of a sensitive
+  value — the one fragment a single cut can leave. That check reads only the last
+  `max(len(value)) - 1` characters, so a full 8 MiB capture costs milliseconds and output that
+  merely repeats a secret's first character is not eaten away. stdout is now
   redacted too — no caller lists a value it needs back from stdout. Affected: the SOCKS5
   password (`chpasswd`, `set-password` helper), the AWG private key (`wg pubkey`) and preshared
   key (`wg set … preshared-key`). Two other places cut untrusted error text and now redact it
