@@ -77,6 +77,10 @@ ACCEPTED_LIST="deploy/host/accepted-overrides.list"    # checkout-relative
 # sshd keywords that take several values (or repeat) — not a first-wins setting.
 SSHD_EXCLUDED=" port listenaddress hostkey hostcertificate acceptenv setenv subsystem allowusers denyusers allowgroups denygroups "
 SYSTEMD_CONF_FAMILIES=(journald networkd resolved logind timesyncd system)
+# systemd *.conf settings that are LISTS, not scalars: every assignment in every file
+# adds to the list, an empty one resets it (resolved.conf(5), timesyncd.conf(5)). For
+# these the effective value is the accumulated list, never "the last line".
+SYSTEMD_LIST_KEYS=" resolved|Resolve.DNS resolved|Resolve.FallbackDNS resolved|Resolve.Domains timesyncd|Time.NTP timesyncd|Time.FallbackNTP "
 VENDOR_RE='^/(usr/lib|lib|usr/local/lib)/'
 CATCFG_RE='^# (/[^[:space:]]+)$'
 APPLYING_RE='^\* Applying (/[^[:space:]]+) \.\.\.$'
@@ -478,8 +482,10 @@ INI_PARSER='
 
 # The generic precedence judgement. stdin: sections "@C" (file<TAB>class), "@E"
 # (key<TAB>expected<TAB>repo file) and "@R" (file<TAB>key<TAB>value<TAB>line, in
-# application order). mode=first|last. Prints "EFF<TAB>key<TAB>value<TAB>file" for
-# every key and "<VERDICT><TAB>key<TAB>path<TAB>text" rows.
+# application order). mode=first|last; lists=" Key1 Key2 " are list settings (values
+# add up across files, an empty assignment resets). Prints
+# "EFF<TAB>key<TAB>value<TAB>file" for every key and "<VERDICT><TAB>key<TAB>path<TAB>text"
+# rows.
 # shellcheck disable=SC2016  # an awk program
 ANALYZER='
 BEGIN { FS = "\t" }
@@ -496,10 +502,40 @@ sec == "R" {
 }
 function shown(v) { return (v == "") ? "\"\"" : v }
 function at(k, i) { return sf[k, i] ":" sl[k, i] " = " shown(sv[k, i]) }
+# A list setting: LEFF = the accumulated list (first occurrence of each entry kept, in
+# order), LFROM[entry] = the file that added it, LRESETF = the file of the last reset.
+function accumulate(k,   j, m, x, toks) {
+  LEFF = ""; LRESETF = ""; split("", LFROM)
+  for (j = 1; j <= cnt[k]; j++) {
+    if (sv[k, j] == "") { LEFF = ""; split("", LFROM); LRESETF = sf[k, j]; continue }
+    m = split(sv[k, j], toks, " ")
+    for (x = 1; x <= m; x++)
+      if (!(toks[x] in LFROM)) { LFROM[toks[x]] = sf[k, j]; LEFF = LEFF (LEFF == "" ? "" : " ") toks[x] }
+  }
+}
+function judge_list(k,   e, ef, off, m, x, toks, want) {
+  accumulate(k)
+  print "EFF\t" k "\t" LEFF "\t" sf[k, cnt[k]]
+  if (!(k in ex)) return
+  done[k] = 1; e = ex[k]; ef = exf[k]
+  if (LEFF == e) { print "OK\t" k "\t" ef "\t" shown(LEFF) " (a list: the entries of every file add up)"; return }
+  # Who changes it: the file of the first entry in effect that the repo file did not
+  # add; else (a repo entry is missing) the file of the last reset.
+  off = ""
+  m = split(LEFF, toks, " ")
+  for (x = 1; x <= m; x++) if (LFROM[toks[x]] != ef) { off = LFROM[toks[x]]; break }
+  if (off == "" && LRESETF != "" && LRESETF != ef) off = LRESETF
+  if (off == "") {
+    print "MISMATCH\t" k "\t" ef "\tthe host copy of " ef " gives " shown(LEFF) ", the repo copy " shown(e) " — the deploy reinstalls it"
+  } else {
+    print "BEATEN\t" k "\t" off "\tin effect " shown(LEFF) ", the repo value of " ef " is " shown(e) ": " off " changes it (a list setting — the entries of every file add up, an empty assignment resets)"
+  }
+}
 END {
   rule = (mode == "first") ? "the first value wins" : "the last value wins"
   for (i = 1; i <= nk; i++) {
     k = keys[i]; n = cnt[k]
+    if (index(lists, " " k " ") > 0) { judge_list(k); continue }
     w = (mode == "first") ? 1 : n
     wf = sf[k, w]; wv = sv[k, w]
     r = 0
@@ -570,6 +606,10 @@ expect_from() {
       sshd_value "$val"; val="$SSHD_VAL"
     fi
     if [[ "$mode" == first && -n "${got[$key]+x}" ]]; then continue; fi
+    if [[ "$SYSTEMD_LIST_KEYS" == *" ${fam}|${key} "* && -n "$val" && -n "${got[$key]:-}" ]]; then
+      got["$key"]="$(list_add "${got[$key]}" "$val")"
+      continue
+    fi
     got["$key"]="$val"
   done < <(awk "$parser" "$src")
   for key in "${!got[@]}"; do
@@ -577,10 +617,26 @@ expect_from() {
   done
 }
 
+# "a b" + "b c" -> "a b c": a list setting's entries, each once, in order.
+list_add() {
+  local acc="$1" x
+  local -a add=()
+  read -r -a add <<< "$2"
+  for x in "${add[@]}"; do
+    [[ " ${acc} " == *" ${x} "* ]] || acc="${acc:+${acc} }${x}"
+  done
+  printf '%s' "$acc"
+}
+
 # Run the analyzer over one family and turn its output into rows.
 analyze() {
-  local fam="$1" mode="$2" f verdict key path text
+  local fam="$1" mode="$2" f verdict key path text lists=" " e
+  local -a known=()
   local -A fileset=()
+  read -r -a known <<< "$SYSTEMD_LIST_KEYS"
+  for e in "${known[@]}"; do
+    if [[ "${e%%|*}" == "$fam" ]]; then lists+="${e#*|} "; fi
+  done
   [[ -n "${FAM_REC[$fam]:-}${FAM_EXP[$fam]:-}" ]] || return 0
   while IFS= read -r f; do [[ -n "$f" ]] && fileset["$f"]=1; done <<< "${FAM_FILES[$fam]:-}"
   while IFS=$'\t' read -r verdict key path text; do
@@ -595,7 +651,7 @@ analyze() {
       for f in "${!fileset[@]}"; do printf '%s\t%s\n' "$f" "${CLASS[$f]:-foreign}"; done
       printf '@E\n%s' "${FAM_EXP[$fam]:-}"
       printf '@R\n%s' "${FAM_REC[$fam]:-}"
-    } | awk -v mode="$mode" "$ANALYZER"
+    } | awk -v mode="$mode" -v lists="$lists" "$ANALYZER"
   )
 }
 

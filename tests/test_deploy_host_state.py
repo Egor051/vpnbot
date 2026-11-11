@@ -483,7 +483,7 @@ def test_a_failure_after_the_install_rolls_the_file_back(tmp_path: Path, case: C
         assert lab.mutating_systemctl()[-1] == "systemctl reload ssh.service", "re-applied after the restore"
     if case.cls == "resolved":
         assert "name resolution fails after the systemd-resolved drop-in change" in proc.stdout
-        assert "getent ahosts github.com found nothing for 3s" in proc.stdout
+        assert "getent ahosts github.com found nothing within 3s" in proc.stdout
         assert len(lab.log("getent")) == 4, "retried once a second for RESOLVED_PROBE_WAIT"
         assert "try-reload-or-restart systemd-resolved (drop-in restored): rc=0" in proc.stdout
         assert lab.mutating_systemctl()[-1] == "systemctl try-reload-or-restart systemd-resolved", "the restored file is reloaded"
@@ -1407,3 +1407,19 @@ def test_the_resolved_conffile_is_reported_never_written() -> None:
     text = _read(DEPLOY_SH)
     assert re.search(r"^CONFFILE_REPORT_PATHS=\(.*/etc/systemd/resolved\.conf.*\)$", text, re.M)
     assert not [e for e in _registry() if e[1] == "/etc/systemd/resolved.conf"]
+
+
+def test_a_resolver_that_hangs_is_bounded_by_the_deadline(tmp_path: Path) -> None:
+    """Unanswering DNS servers make one getent block through the resolver's retries:
+    every lookup runs under `timeout`, and the wall clock bounds the whole probe."""
+    import time
+    lab = Lab(tmp_path)
+    dst = lab.add("resolved", "etc/systemd/resolved.conf.d/10-vpn-bot.conf", "[Resolve]\nDNS=1.1.1.1\n")
+    _stub(lab.stub / "getent", 'echo "getent $*" >> "$LOGS/getent.log"\nexec /bin/sleep 60\n')
+    started = time.monotonic()
+    proc = lab.run(BOTH, RESOLVED_PROBE_WAIT="2")
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 42 and "ROLLBACK_CALLED" in proc.stdout, proc.stdout
+    assert "getent ahosts github.com found nothing within 2s" in proc.stdout
+    assert elapsed < 15, f"the probe ran {elapsed:.0f}s past its 2s deadline"
+    assert not dst.exists()

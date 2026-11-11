@@ -222,8 +222,11 @@ it is never vendor — its lines are judged like any other file's.
   `/proc`. Live: `sysctl -n`.
 - **systemd `*.conf` + `*.conf.d`** — `journald`, `networkd`, `resolved`, `logind`, `timesyncd`,
   `system`: the order of `systemd-analyze cat-config systemd/<x>.conf` (the main file, then the
-  drop-ins by name), key = `Section.Key`, the **last** value wins. There is no generic live
-  readout for these, so they are judged on precedence only.
+  drop-ins by name), key = `Section.Key`, the **last** value wins. Except list settings —
+  `Resolve.DNS`, `Resolve.FallbackDNS`, `Resolve.Domains`, `Time.NTP`, `Time.FallbackNTP`: there
+  the entries of every file add up and an empty assignment resets, so the accumulated list is
+  compared (a server left in `resolved.conf` next to the drop-in's is BEATEN). There is no
+  generic live readout for these, so they are judged on precedence only.
 - **Units the repo installs**, by role, from the same sources as `UNIT_SET` and
   `MANAGED_HOST_FILES`: on main `deploy/vpn-bot.service`, every `deploy/*.service|*.timer` that is
   installed on the host, and the registry's units and drop-ins; on a relay `deploy/relay/*.service`

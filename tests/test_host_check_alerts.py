@@ -18,6 +18,7 @@ import pytest
 from i18n import use_locale
 from services.host_check import (
     META_KEY,
+    TELEGRAM_MESSAGE_LIMIT,
     HostCheckMonitor,
     HostCheckStateError,
     Reported,
@@ -170,6 +171,23 @@ async def test_many_new_rows_are_capped(tmp_path: Path) -> None:
     with use_locale("en"):
         await h.monitor.check_once()
     assert h.sent[0].count("<b>LATENT</b>") == 15 and "… and 5 more" in h.sent[0]
+
+
+async def test_long_rows_stay_within_telegrams_message_limit(tmp_path: Path) -> None:
+    """15 rows of 300 characters would be ~5400: Telegram rejects the whole message,
+    broadcast_to_admins swallows that, and the rows would be remembered as reported."""
+    h = Harness(tmp_path)
+    _write(h.path, *[_row("LATENT", f"net.ipv4.conf.k{i}", family="sysctl", text="x" * 400) for i in range(20)])
+    for locale in ("en", "ru"):
+        h.sent.clear()
+        h.store.meta.clear()
+        with use_locale(locale):
+            await h.monitor.check_once()
+        msg = h.sent[0]
+        assert len(msg) <= TELEGRAM_MESSAGE_LIMIT, len(msg)
+        shown = msg.count("<b>LATENT</b>")
+        assert 0 < shown < 15
+        assert f" {20 - shown} " in msg.split("<b>LATENT</b>")[-1], "the rest is counted"
 
 
 async def test_row_text_is_escaped(tmp_path: Path) -> None:

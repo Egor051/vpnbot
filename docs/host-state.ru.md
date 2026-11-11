@@ -223,8 +223,12 @@ VENDOR = файл в `/usr/lib`, `/lib` или `/usr/local/lib` **плюс** ф�
   `sysctl -n`.
 - **systemd `*.conf` + `*.conf.d`** — `journald`, `networkd`, `resolved`, `logind`, `timesyncd`,
   `system`: порядок `systemd-analyze cat-config systemd/<x>.conf` (главный файл, затем drop-in'ы
-  по имени), ключ = `Section.Key`, выигрывает **последнее** значение. Общего способа прочитать для
-  них живое значение нет, поэтому они оцениваются только по старшинству.
+  по имени), ключ = `Section.Key`, выигрывает **последнее** значение. Кроме списочных настроек —
+  `Resolve.DNS`, `Resolve.FallbackDNS`, `Resolve.Domains`, `Time.NTP`, `Time.FallbackNTP`: у них
+  значения всех файлов складываются, а пустое присваивание сбрасывает список, поэтому сверяется
+  накопленный список (сервер, оставшийся в `resolved.conf` рядом с серверами drop-in, — BEATEN).
+  Общего способа прочитать для них живое значение нет, поэтому они оцениваются только по
+  старшинству.
 - **Юниты, которые ставит репо**, по роли, из тех же источников, что `UNIT_SET` и
   `MANAGED_HOST_FILES`: на main — `deploy/vpn-bot.service`, каждый установленный на хосте
   `deploy/*.service|*.timer` и юниты и drop-in'ы реестра; на relay — `deploy/relay/*.service` и

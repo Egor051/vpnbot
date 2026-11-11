@@ -50,11 +50,16 @@ STATE_PATH = Path("/var/lib/vpn-bot-host-check/last.json")
 # schema_meta key: the rows already reported, as JSON {"fatal": [...], "latent": [...]}.
 META_KEY = "host_check_alerted"
 FATAL_VERDICTS = frozenset({"BEATEN", "MISMATCH"})
-# Rows listed in one Telegram message; the rest is counted.
+# Rows listed in one Telegram message at most; the rest is counted.
 MAX_LISTED = 15
 # A row's text is cut to this many characters in the message (the full row is in
 # last.json and in the journal of vpn-bot-host-check.service).
 MAX_TEXT = 300
+# Telegram rejects a message over 4096 characters as a whole — and broadcast_to_admins
+# swallows that, so an oversized alert would be lost while its rows are remembered as
+# reported. The rendered length (HTML tags and entities included, so more than
+# Telegram counts) is kept within this.
+TELEGRAM_MESSAGE_LIMIT = 4096
 
 
 class HostCheckStateError(ValueError):
@@ -165,20 +170,34 @@ def _line(finding: Finding) -> str:
 
 
 def render_alert(report: HostCheckReport, new: list[Finding]) -> str:
-    """The message for rows that just turned BEATEN/MISMATCH or LATENT."""
-    lines = [_line(f) for f in new[:MAX_LISTED]]
-    if len(new) > MAX_LISTED:
-        lines.append(t("host_check_alert_more", count=len(new) - MAX_LISTED))
+    """The message for rows that just turned BEATEN/MISMATCH or LATENT.
+
+    Rows are listed in order (the fatal ones first) while the whole message, with the
+    «… and N more» line for the rest, stays within TELEGRAM_MESSAGE_LIMIT.
+    """
     fatal = sum(1 for f in report.findings if f.verdict in FATAL_VERDICTS)
     latent = sum(1 for f in report.findings if f.verdict == "LATENT")
-    return t(
-        "host_check_alert",
-        role=h(report.role),
-        at=h(report.generated_at),
-        fatal=fatal,
-        latent=latent,
-        lines="\n".join(lines),
-    )
+
+    def message(lines: list[str]) -> str:
+        return t(
+            "host_check_alert",
+            role=h(report.role),
+            at=h(report.generated_at),
+            fatal=fatal,
+            latent=latent,
+            lines="\n".join(lines),
+        )
+
+    def more(count: int) -> list[str]:
+        return [t("host_check_alert_more", count=count)] if count > 0 else []
+
+    lines: list[str] = []
+    for finding in new[:MAX_LISTED]:
+        candidate = [*lines, _line(finding)]
+        if len(message(candidate + more(len(new) - len(candidate)))) > TELEGRAM_MESSAGE_LIMIT:
+            break
+        lines = candidate
+    return message(lines + more(len(new) - len(lines)))
 
 
 def render_cleared(report: HostCheckReport) -> str:

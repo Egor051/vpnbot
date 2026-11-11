@@ -1215,3 +1215,44 @@ def test_the_checker_never_evaluates_command_output() -> None:
     assert not re.search(r"\beval\b", code)
     assert not re.search(r"\|\s*head\b", code), "no `| head` (the SIGPIPE class): use awk 'NR<=N'"
     assert not re.search(r"(^|[;&|]\s*)(source|\.)\s+\S", code, re.M), "never sources anything"
+
+
+def test_resolved_dns_is_a_list_a_foreign_server_in_the_conffile_is_beaten(tmp_path: Path) -> None:
+    """DNS= entries of every file add up (an empty assignment resets): a server left in
+    resolved.conf is in effect next to the repo's two — the repo value is not."""
+    lab = HostLab(tmp_path)
+    lab.add("resolved", "/etc/systemd/resolved.conf.d/10-vpn-bot.conf", RESOLVED,
+            src="deploy/host/resolved/10-vpn-bot.conf")
+    lab.host("etc/systemd/resolved.conf", "[Resolve]\nDNS=192.0.2.1\n")
+    res = lab.run()
+    assert res.rc == 1, res.out
+    beaten = res.find("BEATEN", "resolved", "Resolve.DNS", "/etc/systemd/resolved.conf")
+    assert beaten and "in effect 192.0.2.1 1.1.1.1 8.8.8.8" in beaten[0][4]
+    assert res.find("OK", "resolved", "Resolve.FallbackDNS")
+    assert not res.verdicts("LATENT"), "a list setting has no 'winner gone'"
+
+
+def test_resolved_dns_list_reset_and_duplicates(tmp_path: Path) -> None:
+    lab = HostLab(tmp_path)
+    lab.add("resolved", "/etc/systemd/resolved.conf.d/10-vpn-bot.conf", RESOLVED,
+            src="deploy/host/resolved/10-vpn-bot.conf")
+    # A reset before ours drops the conffile's server; duplicates of ours change nothing.
+    lab.host("etc/systemd/resolved.conf", "[Resolve]\nDNS=192.0.2.1\nFallbackDNS=1.0.0.1 8.8.4.4\n")
+    lab.host("etc/systemd/resolved.conf.d/05-reset.conf", "[Resolve]\nDNS=\n")
+    res = lab.run()
+    assert res.rc == 0, res.out
+    assert res.keys("OK", "resolved") == {"Resolve.DNS", "Resolve.FallbackDNS"}
+    # A reset after ours drops the repo servers.
+    lab.host("etc/systemd/resolved.conf.d/90-provider.conf", "[Resolve]\nDNS=\nDNS=9.9.9.9\n")
+    res = lab.run()
+    beaten = res.find("BEATEN", "resolved", "Resolve.DNS", "/etc/systemd/resolved.conf.d/90-provider.conf")
+    assert beaten and "in effect 9.9.9.9" in beaten[0][4], res.out
+
+
+def test_the_invariant_probe_sees_the_accumulated_list(tmp_path: Path) -> None:
+    lab = HostLab(tmp_path)
+    lab.repo_file("deploy/host/invariants.list",
+                  "main|systemd-conf:resolved|Resolve.DNS|1.1.1.1 8.8.8.8|the main server's upstream resolvers\n")
+    lab.host("etc/systemd/resolved.conf", "[Resolve]\nDNS=1.1.1.1\n")
+    lab.host("etc/systemd/resolved.conf.d/10-x.conf", "[Resolve]\nDNS=8.8.8.8\n")
+    assert lab.run().find("OK", "invariant", "systemd-conf:resolved Resolve.DNS")

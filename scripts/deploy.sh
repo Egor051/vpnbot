@@ -1688,17 +1688,28 @@ mh_is_unit_file() { [[ "$1" == "${SYSTEMD_UNIT_DIR}/"* && "$1" =~ \.(service|tim
 mh_is_sshd_dropin() { [[ "$1" == "$(dirname "$SSHD_CONFIG")/sshd_config.d/"* ]]; }
 
 # Class resolved: does the host resolve names after the drop-in changed? Retried once
-# a second for RESOLVED_PROBE_WAIT seconds. Prints one line either way.
+# a second, within RESOLVED_PROBE_WAIT seconds of WALL time: against DNS servers that
+# do not answer, one getent blocks through the resolver's own retries (timeout x
+# attempts x servers), so every lookup runs under `timeout` with what is left of the
+# deadline, and the attempts are counted too. Prints one line either way.
 resolved_lookup_status() {
-  local i
+  local i left start="$SECONDS"
+  local -a bound=()
   for (( i = 0; i <= RESOLVED_PROBE_WAIT; i++ )); do
-    if getent ahosts "$RESOLVED_PROBE_HOST" >/dev/null 2>&1; then
-      echo "getent ahosts ${RESOLVED_PROBE_HOST}: resolves (after ${i}s)"
+    left=$(( RESOLVED_PROBE_WAIT - (SECONDS - start) ))
+    if (( left <= 0 )); then
+      (( i == 0 )) || break
+      left=1   # RESOLVED_PROBE_WAIT=0: one bounded attempt, as before
+    fi
+    bound=()
+    if command -v timeout >/dev/null 2>&1; then bound=(timeout --kill-after=1 "$left"); fi
+    if "${bound[@]}" getent ahosts "$RESOLVED_PROBE_HOST" >/dev/null 2>&1; then
+      echo "getent ahosts ${RESOLVED_PROBE_HOST}: resolves (after $(( SECONDS - start ))s)"
       return 0
     fi
     if (( i < RESOLVED_PROBE_WAIT )); then sleep 1; fi
   done
-  echo "getent ahosts ${RESOLVED_PROBE_HOST} found nothing for ${RESOLVED_PROBE_WAIT}s"
+  echo "getent ahosts ${RESOLVED_PROBE_HOST} found nothing within ${RESOLVED_PROBE_WAIT}s"
   return 1
 }
 
