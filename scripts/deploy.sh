@@ -1500,10 +1500,10 @@ mh_pristine_prepare() {
   done
 }
 
-# <config> as <dir>/sshd_config with every Include of the drop-in directory (absolute,
-# or relative to /etc/ssh) pointed at <dir>/sshd_config.d. Other Includes are kept:
-# they read the same live files on both sides of the proof.
-mh_sshd_private_config() {
+# <file> with every Include of the drop-in directory (absolute, or relative to
+# /etc/ssh) pointed at <dir>/sshd_config.d, to stdout. Other Includes are kept: they
+# read the same live files on both sides of the proof.
+mh_sshd_redirect() {
   local dropdir
   dropdir="$(dirname "$SSHD_CONFIG")/sshd_config.d"
   awk -v d="$dropdir" -v n="${2}/sshd_config.d" '
@@ -1518,12 +1518,16 @@ mh_sshd_private_config() {
       }
       $0 = out
     }
-    { print }' "$1" > "${2}/sshd_config"
+    { print }' "$1"
 }
+
+mh_sshd_private_config() { mh_sshd_redirect "$1" "$2" > "${2}/sshd_config"; }
 
 # A private sshd tree under <dir>: <config> as its sshd_config, and the drop-in
 # directory as Phase 2 will leave it — the host's, plus the candidates Phase 2 installs
 # there (they mirror their destination under MH_CAND_DIR), minus the retired files.
+# The Includes of every copied drop-in are pointed at the private directory too, so a
+# drop-in that names a retired file by its absolute path does not read the live one.
 mh_sshd_private_tree() {
   local dropdir f
   dropdir="$(dirname "$SSHD_CONFIG")/sshd_config.d"
@@ -1532,6 +1536,10 @@ mh_sshd_private_tree() {
   if [[ -d "${MH_CAND_DIR}${dropdir}" ]]; then cp -a "${MH_CAND_DIR}${dropdir}/." "${2}/sshd_config.d/" || return 1; fi
   for f in "${MH_RETIRED_PRESENT[@]}"; do
     if [[ "$f" == "${dropdir}/"* ]]; then rm -f "${2}/sshd_config.d/${f#"${dropdir}/"}"; fi
+  done
+  for f in "${2}/sshd_config.d"/*; do
+    [[ -f "$f" ]] || continue
+    mh_sshd_redirect "$f" "$2" > "${f}.redirected" && mv -f "${f}.redirected" "$f" || return 1
   done
   mh_sshd_private_config "$1" "$2"
 }

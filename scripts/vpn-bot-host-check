@@ -713,7 +713,7 @@ declare -a SSHD_MATCH_REC=()   # "condition<TAB>key<TAB>value" in walk order (pr
 # Walk a config file the way sshd does: Include expanded in place (globs, C-locale
 # order, relative to /etc/ssh), Match scoped to the rest of its file.
 sshd_walk() {
-  local file="$1" ctx="$2" depth="$3" src lineno kw val arg m
+  local file="$1" ctx="$2" depth="$3" src lineno kw val arg m outer="$2"
   local -a args=() incs=()
   if (( depth > 16 )); then row WARN sshd include "$file" "Include nested deeper than 16 — not followed"; return 0; fi
   exists_l "$file" || return 0
@@ -733,7 +733,9 @@ sshd_walk() {
             if [[ -n "$m" ]]; then sshd_walk "$m" "$ctx" $(( depth + 1 )); fi
           done
         done ;;
-      match) ctx="match ${val}" ;;
+      # A Match inside a file included under a Match applies only where BOTH hold
+      # (sshd never activates it from an inactive Include): keep the enclosing one.
+      match) if [[ "$outer" == match* ]]; then ctx="${outer} && ${val}"; else ctx="match ${val}"; fi ;;
       *)
         sshd_key "$kw"
         sshd_value "$val"
@@ -908,8 +910,10 @@ gather_systemd_conf() {
     # The main file first, then the drop-ins in basename order.
     main=""; rest="$order"
     if [[ "${order%%$'\n'*}" == */"${x}.conf" ]]; then main="${order%%$'\n'*}"; rest="${order#*$'\n'}"; [[ "$rest" == "$order" ]] && rest=""; fi
-    # A package default Phase 2 puts back where the host has no main file (--pristine).
-    if [[ -z "$main" && -n "${OVERLAY[/etc/systemd/${x}.conf]+x}" ]]; then main="/etc/systemd/${x}.conf"; fi
+    # A package default Phase 2 puts at /etc/systemd/<x>.conf (--pristine) is THE main
+    # file: where the host has none, or only a vendor one under /usr/lib, systemd reads
+    # the /etc file instead once it is installed.
+    if [[ -n "${OVERLAY[/etc/systemd/${x}.conf]+x}" ]]; then main="/etc/systemd/${x}.conf"; fi
     order="$(insert_by_basename "$rest" "${ov[@]}")"
     if [[ -n "$main" ]]; then order="${main}"$'\n'"${order}"; fi
     while IFS= read -r p; do

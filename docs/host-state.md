@@ -195,7 +195,10 @@ edit meant something:
 - `scripts/vpn-bot-host-check --pre-install --pristine <dst>=<copy>` judges the host with the
   copy in place (the same overlay as for repo files) and compares the effective value of **every**
   key of the file's family — not only the repo's keys; for sshd also every directive inside `Match`
-  blocks, the multi-value ones (`DenyUsers`, `AllowUsers`, …) included — with and without it.
+  blocks, the multi-value ones (`DenyUsers`, `AllowUsers`, …) included, each with every enclosing
+  condition (a `Match` in a file included under a `Match` applies only where both hold) — with
+  and without it. A package default for `/etc/systemd/<x>.conf` is judged as *the* main file,
+  in place of a vendor one under `/usr/lib` (systemd reads the `/etc` file instead).
   For a systemd `*.conf` a value of the host copy that another file overrides with a *different*
   value is refused too: it is dead only if that setting really is last-wins, and a setting that
   accumulates (like `DNSStubListenerExtra=`) would lose it. Only an exact duplicate (the hand edit
@@ -207,7 +210,8 @@ edit meant something:
   that row Phase 1 fails too.
 - `sshd_config` also: `sshd -T` on a private copy of the sshd tree with the host's `sshd_config`,
   and on one with the package default — the same drop-in directory on both sides, as Phase 2 will
-  leave it — must print byte for byte the same. This catches what the host check does not judge
+  leave it, the drop-ins' own `Include`s of that directory pointed at the private copy too — must
+  print byte for byte the same. This catches what the host check does not judge
   (`Port`, `ListenAddress` and the other multi-value keywords). A different output, an `sshd -T`
   that does not run, or no `sshd` → FAIL.
 - That proof is the lockout guard for `sshd_config`, so restoring its package default does **not**

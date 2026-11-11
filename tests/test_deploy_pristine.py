@@ -677,6 +677,23 @@ def test_the_new_host_case_needs_no_hand_step(tmp_path: Path) -> None:
     assert "SUMMARY-LINE: 1 installed, 1 removed, 0 mode/owner fixed, 1 restored to the package default" in proc.stdout
 
 
+def test_an_include_inside_a_dropin_sees_the_dropins_as_phase2_leaves_them(tmp_path: Path) -> None:
+    """A drop-in that includes a retired file by its absolute path: the private tree
+    must not reach the live copy. With it, both sides saw the retired file's SetEnv and
+    called the host copy's repetition redundant — after Phase 2 neither would be left."""
+    lab, tpl, conf = _real_path_ssh_lab(tmp_path)
+    dropdir = lab.h("etc/ssh/sshd_config.d")
+    lab.put("etc/ssh/sshd_config.d/10-local.conf", f"Include {dropdir}/50-cloud-init.conf\n")
+    lab.put("etc/ssh/sshd_config.d/50-cloud-init.conf", "SetEnv VPN_MODE=restricted\n")
+    lab.retire("etc/ssh/sshd_config.d/50-cloud-init.conf")
+    lab.put("etc/ssh/sshd_config", tpl + "SetEnv VPN_MODE=restricted\n")
+    proc = lab.run(STATE_ONLY + INSTALL_ONLY)
+    assert proc.returncode == 1, proc.stdout
+    assert "-setenv VPN_MODE=restricted" in proc.stdout and "sshd -T differs with the package default" in proc.stdout
+    assert conf.read_text(encoding="utf-8") == tpl + "SetEnv VPN_MODE=restricted\n"
+    assert lab.h("etc/ssh/sshd_config.d/50-cloud-init.conf").exists(), "nothing changed"
+
+
 # --------------------------------------------------------------------------- #
 # 3. Phase 2: post-action, rollback, synced
 # --------------------------------------------------------------------------- #
@@ -871,6 +888,39 @@ def test_check_a_hand_value_another_file_overrides_is_not_provably_dead(tmp_path
     else:
         assert [r[:3] for r in rows] == [["MISMATCH", "pristine", "Journal.SystemMaxUse"]], proc.stdout
         assert "/etc/systemd/journald.conf.d/10-vpn-bot.conf:" in rows[0][4] and "cannot prove" in rows[0][4]
+
+
+def test_check_a_restored_etc_main_file_outranks_the_vendor_one(tmp_path: Path) -> None:
+    """No /etc/systemd/journald.conf on the host, a vendor main file under /usr/lib: once
+    the /etc file is installed systemd reads it INSTEAD of the vendor one."""
+    lab = PLab(tmp_path)
+    lab.pristine("dpkg:systemd", "etc/systemd/journald.conf")
+    lab.put("usr/lib/systemd/journald.conf", "[Journal]\nStorage=volatile\n")
+    copy = tmp_path / "copy"
+    copy.write_text(STOCK_JOURNALD, encoding="utf-8")
+    proc = _check(lab, "--pre-install", "--pristine", f"/etc/systemd/journald.conf={copy}")
+    rows = [ln.split("|") for ln in proc.stdout.splitlines() if "|pristine|" in ln]
+    assert [r[:3] for r in rows] == [["MISMATCH", "pristine", "Journal.Storage"]], proc.stdout
+    assert "changes Journal.Storage: volatile -> <unset>" in rows[0][4]
+
+
+def test_check_a_match_inside_a_conditional_include_keeps_the_outer_condition(tmp_path: Path) -> None:
+    """The host includes 90-local.conf only under `Match Address`; inside it `Match User
+    root` + `DenyUsers root` therefore applies to that subnet alone. The template includes
+    the whole directory globally: root is denied from everywhere — a different effect."""
+    lab = PLab(tmp_path)
+    tpl = template(lab.dropdir_logical)
+    lab.entries.append(f"ucf:/usr/share/openssh/sshd_config|{lab.h('etc/ssh/sshd_config')}|0644|{OWNER}|pristine|main")
+    lab.put("etc/ssh/sshd_config.d/00-key.conf", KEY_ONLY)
+    lab.put("etc/ssh/sshd_config.d/90-local.conf", "Match User root\n    DenyUsers root\n")
+    lab.put("etc/ssh/sshd_config", "Include /etc/ssh/sshd_config.d/00-key.conf\n"
+                                   "Match Address 192.0.2.0/24\n    Include /etc/ssh/sshd_config.d/90-local.conf\n")
+    copy = tmp_path / "copy"
+    copy.write_text(tpl, encoding="utf-8")
+    proc = _check(lab, "--pre-install", "--pristine", f"/etc/ssh/sshd_config={copy}")
+    rows = [ln.split("|") for ln in proc.stdout.splitlines() if "|pristine|" in ln]
+    assert ["MISMATCH", "pristine", "Match"] in [r[:3] for r in rows], proc.stdout
+    assert proc.returncode == 1
 
 
 # --------------------------------------------------------------------------- #
