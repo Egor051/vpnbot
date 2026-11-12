@@ -346,7 +346,9 @@ VENDOR = файл в `/usr/lib`, `/lib` или `/usr/local/lib` **плюс** ф�
   `tcp-listen:<port>`. Ожидаемое `~X` значит «содержит X целым токеном» (`~22` совпадает с
   `[::]:22 (Stream)`, но не с `:2222`). Засеяно: на main `ssh.socket` слушает 54321,
   `even-day-reboot.timer` enabled и active, `/etc/resolv.conf` — обычный файл; на relay
-  `ssh.socket` слушает 22; на обеих ролях есть `/etc/cloud/cloud-init.disabled`.
+  `ssh.socket` слушает 22 и `ufw.service` masked (его входной фильтр —
+  `table inet vpnrelay_input`, см. [docs/relay.ru.md](relay.ru.md#входной-фильтр)); на обеих
+  ролях есть `/etc/cloud/cloud-init.disabled`.
 
 ### Как принять LATENT
 

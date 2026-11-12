@@ -345,7 +345,9 @@ Only explicit lists — no "sensible" defaults:
   `tcp-listen:<port>`. `~X` as the expected value means "contains X as a whole token"
   (`~22` matches `[::]:22 (Stream)`, not `:2222`). Seeded: on main `ssh.socket` listens on 54321,
   `even-day-reboot.timer` is enabled and active, `/etc/resolv.conf` is a plain file; on a relay
-  `ssh.socket` listens on 22; on both `/etc/cloud/cloud-init.disabled` exists.
+  `ssh.socket` listens on 22 and `ufw.service` is masked (its input filter is
+  `table inet vpnrelay_input`, see [docs/relay.md](relay.md#the-input-filter)); on both
+  `/etc/cloud/cloud-init.disabled` exists.
 
 ### Accepting a LATENT
 

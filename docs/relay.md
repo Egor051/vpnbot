@@ -25,7 +25,7 @@ client ──TCP+UDP/443──▶ relay (RU VPS)
 - A relayed client lands in the **same inbounds** as a direct one: VLESS (TCP) and
   every VLESS (HTTP) profile on vless-in :443, Hysteria2 on UDP/443. Nothing on the
   main server is relay-aware.
-- The relay host itself (nftables table, `ip_forward`, its systemd unit) is deployed **from
+- The relay host itself (nftables tables, `ip_forward`, its systemd unit) is deployed **from
   this repository** with the same `scripts/redeploy.sh`, in the host role
   `NODE_ROLE=relay` — see [The relay host](#the-relay-host-node_rolerelay).
 
@@ -45,22 +45,23 @@ re-imported — the panel says how many there are when the host changes.
 ## The relay host (`NODE_ROLE=relay`)
 
 A relay host runs **one thing**: `vpn-relay.service`, a oneshot that executes
-`/usr/local/sbin/vpn-relay-apply apply`. That helper renders the nftables table
-`ip vpnrelay` from the relay's `.env`, applies it in **one atomic `nft -f` transaction**
-(`table ip vpnrelay` + `delete table ip vpnrelay` + the new table — nft commits all of it or
-leaves the previous table as it was) and then sets the sysctls — `net.ipv4.ip_forward = 1` and
+`/usr/local/sbin/vpn-relay-apply apply`. That helper renders two nftables tables from the
+relay's `.env` — `ip vpnrelay` (forwarding) and `inet vpnrelay_input` (the
+[input filter](#the-input-filter)) — applies both in **one atomic `nft -f` transaction**
+(for each: `table …` + `delete table …` + the new table — nft commits all of it or leaves the
+previous tables as they were) and then sets the sysctls — `net.ipv4.ip_forward = 1` and
 the two conntrack values from `.env` (see [conntrack](#conntrack)) — at runtime and in
 `/etc/sysctl.d/90-vpn-relay.conf`.
 
 Nothing else from this repository runs there: no `vpn-bot`, no `vpn-bot-subscription`, no
 `hy2_auth`, no database, no Xray, AmneziaWG or WARP, and **no Telegram at all** — the bot's
 `BOT_TOKEN` on a second host would fight the main bot for `getUpdates`. `config/settings.py`
-is never loaded; the relay has its own minimal `.env`. The relay's own INPUT/OUTPUT (SSH on
-:22) is never touched: the ruleset has no `input`/`output` hook (pinned by tests), and an
-sshd drop-in such as `/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf` is not the deploy's
-business.
+is never loaded; the relay has its own minimal `.env`. The forwarding table has no
+`input`/`output` hook (pinned by tests): what comes in to the relay itself is the
+[input filter](#the-input-filter)'s business, and nothing hooks `output`.
 
-For the default ports the rendered ruleset is exactly what the hand-made relay ran:
+For the default ports the forwarding table is exactly what the hand-made relay ran (the input
+table follows it in the same file, see [below](#the-input-filter)):
 
 ```
 table ip vpnrelay
@@ -90,6 +91,103 @@ the MSS clamp and the forward chain (policy drop, only DNAT'ed flows and their r
 do not depend on the ports. No flowtable or other tuning: on the 1-vCPU relay 107 Mbit/s of
 forwarding left the CPU 96–98 % idle.
 
+### The input filter
+
+What comes in to the relay **itself** is dropped by default — the way UFW does it on the main
+server, but with a table this repository owns: `table inet vpnrelay_input` (`inet`: sshd
+listens on IPv4 and IPv6), applied by `vpn-relay-apply` in the same transaction as
+`ip vpnrelay`. The relayed traffic is not affected: DNAT'ed flows go through the forward hook
+and never reach `input`.
+
+```
+table inet vpnrelay_input {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    iif "lo" accept
+    ct state established,related accept
+    ct state invalid drop
+    ip protocol icmp accept
+    meta l4proto ipv6-icmp accept
+    ip6 saddr fe80::/10 udp dport 546 accept comment "dhcpv6 client"
+    tcp dport 22 accept comment "ssh"
+    tcp dport { … } accept comment "RELAY_INPUT_EXTRA_TCP"
+    udp dport { … } accept comment "RELAY_INPUT_EXTRA_UDP"
+    counter
+  }
+}
+```
+
+- ICMPv6 always passes (without it NDP, and with it IPv6, breaks), and so does the DHCPv6
+  client (udp 546 from link-local). The trailing `counter` counts what the policy drops.
+- **The SSH ports are never configured.** They come from `ss -Hltunp`: every TCP listener on a
+  non-loopback address owned by `sshd` (or `sshd-session`), or held by systemd for a port that
+  `ssh.socket` declares (`systemctl show -p Listen ssh.socket` — socket activation before sshd
+  ever ran). Move sshd to another port and the next apply follows it. **No SSH port found →
+  nothing is applied**: `no SSH port found — refusing to install a drop policy`, exit `8`,
+  neither table changes. The unit is ordered `After=ssh.socket ssh.service`, so at boot sshd
+  listens before apply looks.
+- The rules are written exactly as `nft list` prints them (one port without braces), so
+  `check` compares the live table with the render directly.
+- **UFW stays masked on the relay** — never `ufw enable` there: UFW's forward chain
+  (policy DROP) is a second base chain on the same hook and drops the relayed 443 whatever
+  `table ip vpnrelay` says. The host check holds it: `ufw.service` `UnitFileState=masked` is a
+  relay invariant (`deploy/host/invariants.list`), a MISMATCH otherwise — fatal in deploy
+  Phase 1.
+- `RELAY_INPUT_FILTER=off` removes the table in the same transaction; nothing filters INPUT and
+  `check` expects the table absent.
+
+#### Keeping access: the dead-man and `input-confirm`
+
+No console is ever needed. The TCP port set the filter lets in (the SSH ports plus
+`RELAY_INPUT_EXTRA_TCP`) is hashed; `/etc/vpn-relay/input.confirmed` holds the hash of the last
+confirmed set.
+
+- **The first enable, and any change of that set** (a new extra TCP port, sshd on another
+  port): `apply` first arms a dead-man,
+  `systemd-run --on-active=300 --unit=vpn-relay-input-deadman vpn-relay-apply input-off`, and
+  only then applies the tables. A dead-man that cannot be armed → nothing is applied (exit
+  `9`). The deploy then ends with
+
+  ```
+  input filter     : PENDING CONFIRM (reverts at 2026-11-12 10:05:00 UTC)
+  ```
+
+  instead of `OK`, followed by the instruction.
+- **Open a NEW ssh session** to the relay and run `vpn-relay-apply input-confirm` within 5
+  minutes: it stops the timer and writes the marker with the hash. Otherwise the timer runs
+  `input-off`: only `table inet vpnrelay_input` goes (forwarding is untouched), the reason goes
+  to the journal (`journalctl -u vpn-relay-input-deadman`, or `-t vpn-relay-apply` when run by
+  hand), and the relay is reachable exactly as before. Re-deploy and confirm in time.
+- **The session you deployed from proves nothing**: it rides an established connection, which
+  the filter always lets through. `input-confirm` checks that its own ssh session (the nearest
+  `sshd` ancestor of the command) began after the filter was applied, and refuses otherwise —
+  also from a console or from a tmux/screen started earlier. Run it directly in the new
+  session; `ssh root@<relay> vpn-relay-apply input-confirm` from your machine is a new session
+  too.
+- **The same set as the marker → no dead-man, no confirmation**: an ordinary deploy stays
+  fully automatic. UDP ports never ask for a confirmation (they cannot cost ssh).
+- At boot `vpn-relay.service` applies both tables: a confirmed set needs nothing, an
+  unconfirmed one arms the dead-man again.
+- `vpn-relay-apply input-status` prints the state in one line — `OK (tcp 22; confirmed …)`,
+  `PENDING CONFIRM (reverts at …)`, `ABSENT — the dead-man removed it at …`,
+  `off (RELAY_INPUT_FILTER=off)`; DEPLOY OK prints it as `input filter`.
+
+#### Opening a port
+
+For a service on the relay itself that must be reachable from outside (say, an exporter on
+9100):
+
+1. `RELAY_INPUT_EXTRA_TCP=9100` (or `RELAY_INPUT_EXTRA_UDP=…`) in `/opt/vpn-service/.env`;
+2. `sudo FORCE=1 bash scripts/redeploy.sh` — a new TCP port changes the set, so DEPLOY OK says
+   PENDING CONFIRM;
+3. in a NEW ssh session: `vpn-relay-apply input-confirm`.
+
+A port that listens on a public address but is **not** let in is an error of `check` (exit
+`18`, `tcp/9100 listening but filtered: …`), and every deploy ends with `check` — a new service
+is never silently dead behind the drop policy. Open it as above, bind it to loopback, or — when
+it must stay closed from outside — declare it: `RELAY_INPUT_CLOSED_TCP=9100`
+(`RELAY_INPUT_CLOSED_UDP` for UDP). Loopback listeners and the DHCPv6 client are not judged.
+
 ### The relay's `.env`
 
 `/opt/vpn-service/.env`, from [`deploy/relay/relay.env.example`](../deploy/relay/relay.env.example).
@@ -107,6 +205,10 @@ helper for `HYSTERIA2_PORT`): optional `export`, spaces around `=`, quotes, trai
 | `RELAY_CHECK_SNI` | — | When set (and 443 is forwarded), `vpn-relay-apply check` also does a TLS handshake to the upstream with this SNI and **verifies the certificate**. Use the main server's `XRAY_SNI`: REALITY hands an unknown client to its decoy, whose certificate is valid for that name. |
 | `RELAY_CONNTRACK_MAX` | `65536` | `net.netfilter.nf_conntrack_max`, an integer in 8192..1048576. Every relayed flow is one conntrack entry; when the table is full the kernel drops new flows. |
 | `RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT` | `86400` | `net.netfilter.nf_conntrack_tcp_timeout_established`, seconds, 300..432000 (the kernel default is 432000 = 5 days). |
+| `RELAY_INPUT_FILTER` | `on` | `on`: the [input filter](#the-input-filter) (policy drop). `off`: no `table inet vpnrelay_input`, INPUT is not filtered. |
+| `RELAY_INPUT_EXTRA_TCP` | — | Comma-separated TCP ports the input filter lets in besides SSH. A change asks for `input-confirm` again. |
+| `RELAY_INPUT_EXTRA_UDP` | — | The same for UDP (no confirmation). |
+| `RELAY_INPUT_CLOSED_TCP`, `RELAY_INPUT_CLOSED_UDP` | — | Ports that listen on a public address but are meant to stay closed from outside: `check` does not call them "listening but filtered". A port cannot be both extra and closed; an SSH port cannot be closed. |
 
 A value outside its range, with a sign, a unit or a leading zero is refused with exit `3`
 before anything is applied, like a bad port.
@@ -115,18 +217,26 @@ before anything is applied, like a bad port.
 
 | Command | Does |
 |---|---|
-| `apply` | Render + apply the table atomically, then the sysctl file and the three runtime values (conntrack first, `ip_forward=1` last). What the unit runs. |
-| `check` | Read-only: the live table equals the render (counters ignored; a diff is printed), `ip_forward=1`, both conntrack values equal `.env`, a TCP connect to the upstream on **every** forwarded TCP port, and the TLS handshake when `RELAY_CHECK_SNI` is set. A conntrack table more than 80 % full is a warning, not a failure. Every deploy ends with it. |
-| `check --dry-run` | Validate `.env` and render; as root also `nft -c` (syntax check, nothing applied). Deploy Phase 1 runs it from the checkout. |
+| `apply` | Render + apply both tables atomically (the dead-man first when the input filter's TCP set is not confirmed), then the sysctl file and the three runtime values (conntrack first, `ip_forward=1` last). What the unit runs. |
+| `check` | Read-only: both live tables equal the render (counters ignored; a diff is printed), every port that listens on a public address is let in or declared closed, `ip_forward=1`, both conntrack values equal `.env`, a TCP connect to the upstream on **every** forwarded TCP port, and the TLS handshake when `RELAY_CHECK_SNI` is set. A pending confirmation is shown, not a failure; a conntrack table more than 80 % full is a warning. Every deploy ends with it. |
+| `check --dry-run` | Validate `.env`, find the SSH ports and render; say whether the TCP set is confirmed; as root also `nft -c` (syntax check, nothing applied). Deploy Phase 1 runs it from the checkout. |
 | `show` | Print the rendered ruleset. |
+| `input-confirm` | Keep the input filter: from a NEW ssh session, while the dead-man is armed. Stops the timer, writes `/etc/vpn-relay/input.confirmed`. |
+| `input-off` | Remove `table inet vpnrelay_input` only, the reason to the journal. What the dead-man runs; by hand it lasts until the next apply. |
+| `input-status` | The input filter's state in one line (DEPLOY OK prints it). |
 
 Exit codes: `0` ok · `2` usage · `3` bad/missing `.env` value · `4` WAN interface unresolved ·
-`5` not root / tool missing · `6` nft rejected the ruleset (live table unchanged) · `7` the
+`5` not root / tool missing · `6` nft rejected the ruleset (live tables unchanged) · `7` the
 sysctl file or a sysctl could not be set (incl. `nf_conntrack_max` still absent after `modprobe
-nf_conntrack`) · `10` table absent · `11` live table differs from the render · `12` ip_forward
+nf_conntrack`) · `8` no SSH port found — nothing applied · `9` the dead-man could not be armed —
+nothing applied · `10` table absent · `11` live table differs from the render · `12` ip_forward
 is not 1 · `13` the upstream does not answer on a forwarded TCP port · `14` TLS handshake failed ·
-`15` a conntrack sysctl differs from `.env`. `check` runs table → ip_forward → conntrack → TCP →
-TLS, reports every failure and exits with the first one.
+`15` a conntrack sysctl differs from `.env` · `16` `table inet vpnrelay_input` absent although
+`RELAY_INPUT_FILTER=on` (e.g. the dead-man removed it), or present although it is `off` · `17`
+the input table differs from the render · `18` a port listens but is filtered · `19`
+`input-confirm` refused (nothing pending, too late, or not a new ssh session). `check` runs
+table → input table → listening ports → ip_forward → conntrack → TCP → TLS, reports every
+failure and exits with the first one.
 
 ### conntrack
 
@@ -173,17 +283,25 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   `vpn-relay-apply check --dry-run` from the checkout, the relay's pre-state (including the
   runtime `nf_conntrack_max` and `nf_conntrack_tcp_timeout_established`), the installed unit
   compared with `deploy/relay/vpn-relay.service`, and the checkout's `check` against the live
-  relay — on a relay that still runs the hand-made ruleset a **PASS** there (or `15`, see
-  [conntrack](#conntrack), with `ok: table ip vpnrelay matches`) proves the repo reproduces it
-  1:1.
-- **Phase 2**: back up the live `nft list table ip vpnrelay`, the installed helper, the unit
-  and the sysctl file (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; nothing is
+  relay — on a relay that still runs the hand-made ruleset `ok: table ip vpnrelay matches`
+  there proves the repo reproduces it 1:1 (the exit is `16` until the
+  [input filter](#the-input-filter) exists, `15` before the [conntrack](#conntrack) values are
+  set, PASS after both). The dry-run names the SSH ports it found and whether the input
+  filter's TCP set is confirmed — i.e. whether Phase 2 will end with PENDING CONFIRM — and a
+  port that listens but would be filtered is called out: Phase 2's `check` would roll back.
+- **Phase 2**: back up the live `nft list table ip vpnrelay` and
+  `nft list table inet vpnrelay_input`, the installed helper, the unit and the sysctl file (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; nothing is
   stopped for it); `git reset --hard origin/main`; install `vpn-relay-apply` through
   `OUT_OF_REPO_HELPERS` (role `relay`) and `deploy/relay/vpn-relay.service` verbatim;
   `daemon-reload`, `enable`, `restart vpn-relay` (established flows keep their conntrack NAT
-  across the millisecond gap); verify with `vpn-relay-apply check`.
+  across the millisecond gap); verify with `vpn-relay-apply check`. DEPLOY OK carries
+  `input filter : …` from `vpn-relay-apply input-status`; with `PENDING CONFIRM` it is followed
+  by the instruction to run `input-confirm` from a NEW ssh session within 5 minutes.
 - **Any failure** rolls back: the previous checkout, helper, unit and sysctl file (or their
-  absence), the saved table re-applied in one transaction, the unit's enabled/active state, the
+  absence), the saved forwarding table re-applied in one transaction, the input filter as it
+  was — a confirmed one from its dump, one that did not exist removed, one that was still
+  waiting for `input-confirm` removed too (restored, it could outlive its dead-man; removing is
+  the safe direction) — and the dead-man the deploy armed stopped, the unit's enabled/active state, the
   previous `ip_forward` and the previous runtime conntrack values (each read back; a value that
   was unreadable before the deploy — nf_conntrack not loaded — is left as `apply` set it). The
   deploy exits non-zero with a rollback report.
@@ -197,6 +315,13 @@ On the relay (Ubuntu 24.04, root SSH with a key):
 
 ```bash
 apt-get update && apt-get install -y git python3-venv nftables
+```
+
+UFW must stay off on a relay ([why](#the-input-filter)) — mask it (works whether the package is
+installed or not; the host check refuses a relay where it is not masked):
+
+```bash
+systemctl mask --now ufw.service
 ```
 
 ```bash
@@ -222,7 +347,15 @@ cd /opt/vpn-service && sudo FORCE=1 bash scripts/redeploy.sh
 would say "nothing to deploy" — exactly as on the main server. Every later update is the usual
 `sudo CHECK=1 bash scripts/redeploy.sh`, then `sudo bash scripts/redeploy.sh`.
 
+The first deploy enables the [input filter](#the-input-filter) and ends with `input filter :
+PENDING CONFIRM (reverts at …)`: open a **new** ssh session within 5 minutes and run
+
+```bash
+vpn-relay-apply input-confirm
+```
+
 Check it: `systemctl status vpn-relay`, `nft list table ip vpnrelay`,
+`nft list table inet vpnrelay_input`, `/usr/local/sbin/vpn-relay-apply input-status`,
 `/usr/local/sbin/vpn-relay-apply check`.
 
 Then on the **main server**:

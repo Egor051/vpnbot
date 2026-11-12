@@ -1038,6 +1038,7 @@ def test_invariants_list_is_well_formed_and_seeded() -> None:
         ("main", "unit-prop:even-day-reboot.timer:ActiveState", "-", "active"),
         ("main", "path-regular", "/etc/resolv.conf", "-"),
         ("relay", "unit-prop:ssh.socket:Listen", "-", "~22"),
+        ("relay", "unit-prop:ufw.service:UnitFileState", "-", "masked"),
         ("all", "path-present", "/etc/cloud/cloud-init.disabled", "-"),
     }, seen
 
@@ -1065,6 +1066,26 @@ def test_the_real_invariants_hold_on_a_host_that_matches_them(tmp_path: Path) ->
     assert inv and all(r[0] == "OK" for r in inv), res.out
     lab.unit("ssh.socket", Listen="0.0.0.0:22 (Stream)")
     assert lab.run().find("MISMATCH", "invariant", "unit-prop:ssh.socket:Listen")
+
+
+def test_the_relay_keeps_ufw_masked(tmp_path: Path) -> None:
+    """The relay's INPUT filter is table inet vpnrelay_input; UFW's forward chain
+    (policy DROP) would drop the relayed 443, so ufw.service must stay masked there —
+    and only there: the main server runs UFW."""
+    lab = _relay_lab(tmp_path)
+    lab.repo_file("deploy/host/invariants.list", INVARIANTS.read_text(encoding="utf-8"))
+    lab.unit("ssh.socket", Listen="0.0.0.0:22 (Stream)\nListen=[::]:22 (Stream)")
+    lab.host("etc/cloud/cloud-init.disabled", "")
+    lab.unit("ufw.service", UnitFileState="masked")
+    res = lab.run(role="relay")
+    assert res.find("OK", "invariant", "unit-prop:ufw.service:UnitFileState"), res.out
+    lab.unit("ufw.service", UnitFileState="enabled")
+    res = lab.run(role="relay")
+    (row,) = res.find("MISMATCH", "invariant", "unit-prop:ufw.service:UnitFileState")
+    assert "expected masked, found enabled" in row[4] and "forward" in row[4]
+    lab.unit("ssh.socket", Listen="0.0.0.0:54321 (Stream)")
+    main = lab.run()
+    assert not main.find("MISMATCH", "invariant", "unit-prop:ufw.service:UnitFileState"), "relay-only"
 
 
 # --------------------------------------------------------------------------- #

@@ -2,15 +2,18 @@
 #
 # vpn-relay-apply — the data plane of an L4 relay host (NODE_ROLE=relay).
 #
-# Renders the nftables table `ip vpnrelay` from the relay's .env and applies it
-# ATOMICALLY: a single `nft -f` transaction carries
+# Renders two nftables tables from the relay's .env and applies them ATOMICALLY:
+# a single `nft -f` transaction carries
 #
-#     table ip vpnrelay            (creates it if it is missing, so the next line
-#     delete table ip vpnrelay      cannot fail on a fresh host)
-#     table ip vpnrelay { ... }    (the new ruleset)
+#     table ip vpnrelay                  (creates it if it is missing, so the next
+#     delete table ip vpnrelay            line cannot fail on a fresh host)
+#     table ip vpnrelay { ... }          (forwarding: DNAT, masquerade, forward chain)
+#     table inet vpnrelay_input          (the same create + delete ...)
+#     delete table inet vpnrelay_input
+#     table inet vpnrelay_input { ... }  (the INPUT filter; absent with RELAY_INPUT_FILTER=off)
 #
 # so the relay never runs half a ruleset: nft either commits the whole file or
-# leaves the previous table exactly as it was. Then the sysctls: it renders
+# leaves the previous tables exactly as they were. Then the sysctls: it renders
 # /etc/sysctl.d/90-vpn-relay.conf whole (written atomically, only when it differs)
 #
 #     net.ipv4.ip_forward = 1
@@ -28,30 +31,66 @@
 # is still absent after `nft -f`, apply runs `modprobe nf_conntrack` and retries;
 # if that does not help it exits 7.
 #
-# The ruleset is the one the hand-installed relay ran before this helper existed
-# (captured from the live host 2026-11-03): DNAT tcp/udp <port> -> <upstream>:<port>
-# on the WAN interface, masquerade of the DNAT'ed flows towards the upstream, a
-# SYN MSS clamp to the route MTU, and a forward chain with policy drop that only
-# lets the DNAT'ed flows (and their replies) through. With
-# RELAY_FORWARD_TCP_PORTS=443, RELAY_FORWARD_UDP_PORTS=443 the rendered file is
-# byte-identical to that capture (tests/fixtures/relay/vpn-relay.nft).
+# FORWARDING — table ip vpnrelay. The ruleset is the one the hand-installed relay
+# ran before this helper existed (captured from the live host 2026-11-03): DNAT
+# tcp/udp <port> -> <upstream>:<port> on the WAN interface, masquerade of the
+# DNAT'ed flows towards the upstream, a SYN MSS clamp to the route MTU, and a
+# forward chain with policy drop that only lets the DNAT'ed flows (and their
+# replies) through. With RELAY_FORWARD_TCP_PORTS=443, RELAY_FORWARD_UDP_PORTS=443
+# that table is byte-identical to that capture (tests/fixtures/relay/vpn-relay.nft),
+# whatever the input filter does. It has no input or output hook.
 #
-# It NEVER renders a `hook input` or `hook output` chain: the relay's own INPUT
-# (SSH on :22, key-only) is not this helper's business and stays reachable
-# whatever this table looks like. Pinned by tests/test_vpn_relay_apply.py.
+# INPUT — table inet vpnrelay_input (inet: sshd listens on IPv4 and IPv6). One
+# chain, `type filter hook input priority filter; policy drop;`, the way UFW does
+# it on the main server but owned by this helper: UFW itself must stay masked here,
+# because its forward chain (policy DROP) is a separate base chain on the same hook
+# and drops the relayed 443 whatever table ip vpnrelay says (host-check invariant:
+# ufw.service masked). The rules: lo, established/related accept, invalid drop,
+# ICMP and ICMPv6 (NDP needs it), the DHCPv6 client (udp 546 from fe80::/10), the
+# SSH ports, and RELAY_INPUT_EXTRA_TCP / RELAY_INPUT_EXTRA_UDP. DNAT'ed flows go
+# through the forward hook, never input: the filter cannot touch the relay traffic.
+#
+# The SSH ports are never hardcoded. They come from `ss -Hltunp`: every TCP
+# listener on a non-loopback address owned by sshd (or sshd-session), or held by
+# systemd (PID 1) for a port ssh.socket declares (`systemctl show -p Listen
+# ssh.socket` — socket activation, before sshd ever ran). No SSH port found ->
+# exit 8, NOTHING is applied: a drop policy is never installed without the port
+# the operator comes in through.
+#
+# Access is guarded by a dead-man, so no console is ever needed. The TCP port set
+# the filter lets in (SSH + RELAY_INPUT_EXTRA_TCP) is hashed; when the hash is not
+# the one in ${RELAY_STATE_DIR}/input.confirmed (the first enable, or ANY change of
+# that set), apply first arms
+#
+#     systemd-run --on-active=300 --unit=vpn-relay-input-deadman <this helper> input-off
+#
+# then applies, and the filter stays only if `vpn-relay-apply input-confirm` is run
+# from a NEW ssh session within 5 minutes: input-confirm stops the timer and writes
+# the marker with the hash. A session that already existed rides an established
+# connection, which the filter always lets through, so it proves nothing —
+# input-confirm refuses it. When the hash matches the marker, apply needs no
+# dead-man and no confirmation: an ordinary deploy stays fully automatic. A
+# dead-man that cannot be armed -> exit 9, nothing applied.
 #
 # Installed by scripts/deploy.sh (OUT_OF_REPO_HELPERS, role relay) to
 #   /usr/local/sbin/vpn-relay-apply
 # and executed by deploy/relay/vpn-relay.service (ExecStart=... apply).
 #
 # Usage (root, except `show` and a non-root `check --dry-run`):
-#   vpn-relay-apply apply             render + apply the table, then the sysctls
+#   vpn-relay-apply apply             render + apply both tables (dead-man first when
+#                                     the TCP set is not confirmed), then the sysctls
 #   vpn-relay-apply check             verify the live state (exit codes below)
 #   vpn-relay-apply check --dry-run   parse/validate .env and render; as root also
 #                                     `nft -c` (syntax check, applies nothing).
 #                                     Touches nothing — deploy.sh Phase 1 runs it
 #                                     from the checkout.
 #   vpn-relay-apply show              print the rendered ruleset
+#   vpn-relay-apply input-confirm     keep the input filter: from a NEW ssh session,
+#                                     while the dead-man is armed
+#   vpn-relay-apply input-off         remove table inet vpnrelay_input only (what the
+#                                     dead-man runs); the reason goes to the journal
+#   vpn-relay-apply input-status      one line: off | PENDING CONFIRM (reverts at ...) |
+#                                     OK (...) | ABSENT ... — DEPLOY OK prints it
 #
 # .env — RELAY_ENV (default /opt/vpn-service/.env). Read with the same sed parser
 # as scripts/deploy.sh (env_sed_val) and scripts/vpnbot-hy2-warp-mark: optional
@@ -76,17 +115,31 @@
 #                            default 86400 (s), 300..432000 ->
 #                            net.netfilter.nf_conntrack_tcp_timeout_established (the
 #                            kernel default is 432000 = 5 days).
+#   RELAY_INPUT_FILTER       on | off, default on. off: table inet vpnrelay_input is
+#                            removed and INPUT is not filtered.
+#   RELAY_INPUT_EXTRA_TCP    optional, comma-separated ports the filter also lets in
+#   RELAY_INPUT_EXTRA_UDP    (besides SSH, ICMP and DHCPv6). Default: none.
+#   RELAY_INPUT_CLOSED_TCP   optional, comma-separated ports that listen on a public
+#   RELAY_INPUT_CLOSED_UDP   address but are meant to stay closed from outside:
+#                            `check` does not call them "listening but filtered".
+#
+# State: ${RELAY_STATE_DIR:-/etc/vpn-relay}/input.confirmed (the confirmed hash,
+# written by input-confirm only) and ${RELAY_RUN_DIR:-/run/vpn-relay}/input.pending /
+# input.reverted (what waits for a confirmation / what the dead-man removed).
 #
 # Exit codes (distinct on purpose — deploy.sh and the operator read them):
 #    0  ok
 #    2  usage
 #    3  .env missing/unreadable, or a value is invalid
 #    4  the WAN interface could not be resolved
-#    5  not root, or a required tool (nft, sysctl, ip, python3) is missing
-#    6  nft rejected the ruleset (apply, or the dry-run syntax check) — the live
-#       table is unchanged
+#    5  not root, or a required tool (nft, sysctl, ip, python3, ss, systemd-run) is missing
+#    6  nft rejected the ruleset (apply, input-off, or the dry-run syntax check) —
+#       the live tables are unchanged
 #    7  the sysctl file or a sysctl (ip_forward, conntrack) could not be set,
 #       incl. net.netfilter.nf_conntrack_max still absent after modprobe nf_conntrack
+#    8  no SSH port found — refusing to install a drop policy (nothing applied)
+#    9  apply: the dead-man could not be armed — refusing to install an unconfirmed
+#       drop policy without it (nothing applied)
 #   10  check: table ip vpnrelay is absent
 #   11  check: the live table differs from the one rendered from .env
 #   12  check: net.ipv4.ip_forward != 1
@@ -94,18 +147,32 @@
 #   14  check: TLS handshake to the upstream failed
 #   15  check: a conntrack sysctl differs from .env (nf_conntrack_max,
 #       nf_conntrack_tcp_timeout_established) or cannot be read
-# `check` runs every step it can, in this order — table (10/11), ip_forward (12),
-# conntrack (15), TCP (13), TLS (14) — and exits with the code of the FIRST failure.
-# A conntrack table more than 80% full (nf_conntrack_count vs nf_conntrack_max,
-# both read with sysctl — not /proc/net/stat, which the relay's 6.8 kernel does
-# not have) is a WARNING on stderr, not a failure.
+#   16  check: table inet vpnrelay_input is absent although RELAY_INPUT_FILTER=on
+#       (e.g. the dead-man removed it), or present although it is off
+#   17  check: table inet vpnrelay_input differs from the one rendered from .env and
+#       the listening SSH ports (policy drop included)
+#   18  check: a port listens on a public address but the filter closes it
+#       ("listening but filtered") — a new service would be silently dead
+#   19  input-confirm refused (nothing pending, too late, or not a new ssh session)
+# `check` runs every step it can, in this order — table (10/11), input filter
+# (16/17), listening ports (18), ip_forward (12), conntrack (15), TCP (13), TLS (14)
+# — and exits with the code of the FIRST failure. A conntrack table more than 80%
+# full (nf_conntrack_count vs nf_conntrack_max, both read with sysctl — not
+# /proc/net/stat, which the relay's 6.8 kernel does not have) is a WARNING on
+# stderr, not a failure.
 
 set -euo pipefail
 
 RELAY_ENV="${RELAY_ENV:-/opt/vpn-service/.env}"
 RELAY_SYSCTL_FILE="${RELAY_SYSCTL_FILE:-/etc/sysctl.d/90-vpn-relay.conf}"
 RELAY_PROBE_TIMEOUT="${RELAY_PROBE_TIMEOUT:-5}"
+RELAY_STATE_DIR="${RELAY_STATE_DIR:-/etc/vpn-relay}"
+RELAY_RUN_DIR="${RELAY_RUN_DIR:-/run/vpn-relay}"
 TABLE="vpnrelay"
+INPUT_TABLE="vpnrelay_input"
+INPUT_MARKER="${RELAY_STATE_DIR}/input.confirmed"
+INPUT_PENDING="${RELAY_RUN_DIR}/input.pending"
+INPUT_REVERTED="${RELAY_RUN_DIR}/input.reverted"
 
 readonly SYSCTL_FORWARD="net.ipv4.ip_forward"
 readonly SYSCTL_CT_MAX="net.netfilter.nf_conntrack_max"
@@ -113,9 +180,15 @@ readonly SYSCTL_CT_EST="net.netfilter.nf_conntrack_tcp_timeout_established"
 readonly SYSCTL_CT_COUNT="net.netfilter.nf_conntrack_count"
 readonly CT_MAX_DEFAULT=65536 CT_MAX_MIN=8192 CT_MAX_MAX=1048576
 readonly CT_EST_DEFAULT=86400 CT_EST_MIN=300 CT_EST_MAX=432000
+readonly DEADMAN_UNIT="vpn-relay-input-deadman"
+readonly DEADMAN_SECONDS=300
+# Hashed together with the TCP port set: bump it when the input chain's rules change
+# in a way that could cost ssh, so the next apply asks for a confirmation again.
+readonly INPUT_FILTER_GEN="vpnrelay_input/1"
 
-readonly E_USAGE=2 E_CONFIG=3 E_IFACE=4 E_TOOL=5 E_NFT=6 E_SYSCTL=7
+readonly E_USAGE=2 E_CONFIG=3 E_IFACE=4 E_TOOL=5 E_NFT=6 E_SYSCTL=7 E_NOSSH=8 E_DEADMAN=9
 readonly E_ABSENT=10 E_DIFF=11 E_FORWARD=12 E_TCP=13 E_TLS=14 E_CONNTRACK=15
+readonly E_INPUT=16 E_INPUT_DIFF=17 E_FILTERED=18 E_CONFIRM=19
 
 ME="vpn-relay-apply"
 log()  { printf '%s: %s\n' "$ME" "$*"; }
@@ -124,7 +197,7 @@ warn() { printf '%s: WARNING: %s\n' "$ME" "$*" >&2; }
 fail() { local rc="$1"; shift; err "$*"; exit "$rc"; }
 
 usage() {
-  err "usage: ${ME} {apply | check [--dry-run] | show}"
+  err "usage: ${ME} {apply | check [--dry-run] | show | input-confirm | input-off | input-status}"
   exit "$E_USAGE"
 }
 
@@ -193,7 +266,42 @@ valid_hostname() {
 }
 
 # --------------------------------------------------------------------------- #
-# Configuration (populates the globals below; exits 3/4/5 on a bad value)
+# Small list helpers (port lists are sorted numerically, one per line)
+# --------------------------------------------------------------------------- #
+# lines_to_array NAME TEXT — NAME=(lines of TEXT); empty TEXT gives an empty array
+# (`readarray <<< ""` would give one empty element).
+lines_to_array() {
+  local -n _dst="$1"
+  _dst=()
+  [[ -z "$2" ]] || readarray -t _dst <<< "$2"
+}
+
+# in_list WORD LIST... — WORD is one of LIST.
+in_list() {
+  local want="$1" w
+  shift
+  for w in "$@"; do [[ "$w" == "$want" ]] && return 0; done
+  return 1
+}
+
+# The union of the arguments, sorted numerically, one per line.
+sorted_union() { (( $# )) || return 0; printf '%s\n' "$@" | sort -n -u; }
+
+# "-" for an empty list, else the ports joined with a comma.
+list_text() { if (( $# )); then local IFS=','; printf '%s' "$*"; else printf -- '-'; fi; }
+
+# An nft dport expression the way `nft list` prints it: one port bare, several as
+# an anonymous set "{ a, b }" — so `check` can compare the live table with the render.
+nft_set() {
+  if (( $# == 1 )); then printf '%s' "$1"; return 0; fi
+  local out="{ $1" p
+  shift
+  for p in "$@"; do out+=", ${p}"; done
+  printf '%s }' "$out"
+}
+
+# --------------------------------------------------------------------------- #
+# Configuration (populates the globals below; exits 3/4/5/8 on a bad value)
 # --------------------------------------------------------------------------- #
 UPSTREAM=""
 IFACE=""
@@ -201,7 +309,17 @@ IFACE_SOURCE=""
 CHECK_SNI=""
 CT_MAX=""
 CT_EST=""
+INPUT_FILTER="on"
+# 1 = a non-root `check --dry-run`: an empty SSH discovery is a note, not exit 8
+# (ss shows the owner of root's sockets only to root).
+DISCOVERY_SOFT=0
+INPUT_SKIPPED=0
+SS_OUT=""
 declare -a TCP_PORTS=() UDP_PORTS=()
+declare -a SSH_PORTS=() IN_EXTRA_TCP=() IN_EXTRA_UDP=() IN_CLOSED_TCP=() IN_CLOSED_UDP=()
+# IN_TCP: every TCP port the filter lets in (SSH + extra) — the set that is hashed.
+# IN_EXTRA_TCP_RULE: the extra TCP ports that are not SSH ports (their own rule).
+declare -a IN_TCP=() IN_EXTRA_TCP_RULE=()
 
 resolve_iface() {
   local v devs n
@@ -223,6 +341,40 @@ resolve_iface() {
   fi
   valid_ifname "$devs" || fail "$E_IFACE" "default-route interface '${devs}' is not a valid interface name"
   IFACE="$devs"; IFACE_SOURCE="IPv4 default route"
+}
+
+# RELAY_INPUT_FILTER alone (input-status needs nothing else).
+load_input_knob() {
+  local raw
+  [[ -r "$RELAY_ENV" ]] || fail "$E_CONFIG" "${RELAY_ENV} is missing or unreadable (template: deploy/relay/relay.env.example)"
+  raw="$(env_sed_val RELAY_INPUT_FILTER)"
+  INPUT_FILTER="${raw:-on}"
+  [[ "$INPUT_FILTER" == "on" || "$INPUT_FILTER" == "off" ]] \
+    || fail "$E_CONFIG" "RELAY_INPUT_FILTER='${INPUT_FILTER}' is neither on nor off"
+}
+
+# An optional port list: empty = none.
+optional_ports() {
+  local name="$1" raw
+  raw="$(env_sed_val "$name")"
+  [[ -z "$raw" ]] || parse_ports "$name" "$raw"
+}
+
+load_input_config() {
+  local out p
+  load_input_knob
+  out="$(optional_ports RELAY_INPUT_EXTRA_TCP)";  lines_to_array IN_EXTRA_TCP "$out"
+  out="$(optional_ports RELAY_INPUT_EXTRA_UDP)";  lines_to_array IN_EXTRA_UDP "$out"
+  out="$(optional_ports RELAY_INPUT_CLOSED_TCP)"; lines_to_array IN_CLOSED_TCP "$out"
+  out="$(optional_ports RELAY_INPUT_CLOSED_UDP)"; lines_to_array IN_CLOSED_UDP "$out"
+  for p in "${IN_CLOSED_TCP[@]}"; do
+    ! in_list "$p" "${IN_EXTRA_TCP[@]}" \
+      || fail "$E_CONFIG" "tcp port ${p} is in both RELAY_INPUT_EXTRA_TCP (open) and RELAY_INPUT_CLOSED_TCP (closed)"
+  done
+  for p in "${IN_CLOSED_UDP[@]}"; do
+    ! in_list "$p" "${IN_EXTRA_UDP[@]}" \
+      || fail "$E_CONFIG" "udp port ${p} is in both RELAY_INPUT_EXTRA_UDP (open) and RELAY_INPUT_CLOSED_UDP (closed)"
+  done
 }
 
 load_config() {
@@ -251,13 +403,92 @@ load_config() {
   valid_uint_range "$CT_EST" "$CT_EST_MIN" "$CT_EST_MAX" \
     || fail "$E_CONFIG" "RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT='${CT_EST}' is not an integer (seconds) in ${CT_EST_MIN}..${CT_EST_MAX}"
 
+  load_input_config
   resolve_iface
+  [[ "$INPUT_FILTER" == "off" ]] || resolve_input_ports
+}
+
+# --------------------------------------------------------------------------- #
+# Listening sockets and the SSH ports (ss + ssh.socket; read-only)
+# --------------------------------------------------------------------------- #
+# One row per listening TCP / bound UDP socket on a NON-loopback address:
+#   <tcp|udp> <address> <port> <users:(...) of ss, or "-">
+# The address loses its brackets and its %interface; loopback is 127.0.0.0/8, ::1
+# and ::ffff:127.0.0.0/104. The users field stays last (process names are quoted).
+listeners() {
+  printf '%s\n' "$SS_OUT" | awk '
+    ($1 != "tcp" && $1 != "udp") || ($1 == "tcp" && $2 != "LISTEN") { next }
+    {
+      if (!match($5, /:[^:]*$/)) next
+      port = substr($5, RSTART + 1)
+      addr = substr($5, 1, RSTART - 1)
+      if (port !~ /^[0-9]+$/) next
+      sub(/%.*$/, "", addr)
+      gsub(/\[|\]/, "", addr)
+      if (addr ~ /^127\./ || addr == "::1" || addr ~ /^::ffff:127\./) next
+      i = index($0, "users:(")
+      print $1, addr, port, (i ? substr($0, i) : "-")
+    }'
+}
+
+# The process names of an ss users:(("a",pid=..),("b",...)) field, comma-joined.
+proc_names() {
+  local rest="$1" re='\("([^"]+)",' name
+  local -a seen=()
+  while [[ "$rest" =~ $re ]]; do
+    name="${BASH_REMATCH[1]}"
+    rest="${rest#*"${BASH_REMATCH[0]}"}"
+    in_list "$name" "${seen[@]}" || seen+=("$name")
+  done
+  if (( ${#seen[@]} )); then local IFS=','; printf '%s' "${seen[*]}"; else printf '?'; fi
+}
+
+# The TCP ports ssh.socket declares (Listen=0.0.0.0:22 (Stream), Listen=[::]:22 (Stream)).
+ssh_socket_ports() {
+  { systemctl show -p Listen ssh.socket 2>/dev/null || true; } \
+    | sed -n 's/^Listen=\(.*:\)\{0,1\}\([0-9]\{1,5\}\) (Stream)$/\2/p' | sort -n -u
+}
+
+read_listeners() {
+  require_tool ss
+  SS_OUT="$(ss -Hltunp 2>/dev/null)" || fail "$E_TOOL" "ss -Hltunp failed"
+}
+
+resolve_input_ports() {
+  local proto addr port users out p hint=""
+  local -a sshd=() held=() socket=()
+  read_listeners
+  while read -r proto addr port users; do
+    [[ "$proto" == "tcp" ]] || continue
+    case "$users" in
+      *'("sshd",'*|*'("sshd-session",'*) sshd+=("$port") ;;
+      *'("systemd",pid=1,'*)             held+=("$port") ;;
+    esac
+  done < <(listeners)
+  if (( ${#held[@]} )); then
+    out="$(ssh_socket_ports)"; lines_to_array socket "$out"
+    for p in "${held[@]}"; do in_list "$p" "${socket[@]}" && sshd+=("$p"); done
+  fi
+  out="$(sorted_union "${sshd[@]}")"; lines_to_array SSH_PORTS "$out"
+
+  if (( ${#SSH_PORTS[@]} == 0 )); then
+    if (( DISCOVERY_SOFT )); then INPUT_SKIPPED=1; return 0; fi
+    [[ "$(id -u)" == "0" ]] || hint=" (not root: ss shows the owner of root's sockets only to root)"
+    fail "$E_NOSSH" "no SSH port found — refusing to install a drop policy: no TCP listener of sshd (or of ssh.socket) on a non-loopback address in \`ss -Hltunp\`${hint}. Nothing was applied."
+  fi
+  for p in "${IN_CLOSED_TCP[@]}"; do
+    ! in_list "$p" "${SSH_PORTS[@]}" \
+      || fail "$E_CONFIG" "RELAY_INPUT_CLOSED_TCP lists ${p}, an SSH port (sshd listens there): the SSH ports are always open"
+  done
+  out="$(sorted_union "${SSH_PORTS[@]}" "${IN_EXTRA_TCP[@]}")"; lines_to_array IN_TCP "$out"
+  IN_EXTRA_TCP_RULE=()
+  for p in "${IN_EXTRA_TCP[@]}"; do in_list "$p" "${SSH_PORTS[@]}" || IN_EXTRA_TCP_RULE+=("$p"); done
 }
 
 # --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
-render() {
+render_forward() {
   local p
   printf 'table ip %s\n' "$TABLE"
   printf 'delete table ip %s\n' "$TABLE"
@@ -285,16 +516,50 @@ render() {
   printf '}\n'
 }
 
-# Comparable form of a `table ip vpnrelay { ... }` block: counter values dropped
-# (they grow on a live table), whitespace collapsed, blank lines removed. Applied
-# to both `nft list table` and the rendered table, so `check` compares structure.
+# The input filter; with RELAY_INPUT_FILTER=off only the create + delete pair, so
+# the same transaction removes a table left from before. Rules exactly as `nft list`
+# prints them (one-port sets bare, see nft_set).
+render_input() {
+  printf 'table inet %s\n' "$INPUT_TABLE"
+  printf 'delete table inet %s\n' "$INPUT_TABLE"
+  [[ "$INPUT_FILTER" == "on" ]] || return 0
+  printf 'table inet %s {\n' "$INPUT_TABLE"
+  printf '  chain input {\n'
+  printf '    type filter hook input priority filter; policy drop;\n'
+  printf '    iif "lo" accept\n'
+  printf '    ct state established,related accept\n'
+  printf '    ct state invalid drop\n'
+  printf '    ip protocol icmp accept\n'
+  printf '    meta l4proto ipv6-icmp accept\n'
+  printf '    ip6 saddr fe80::/10 udp dport 546 accept comment "dhcpv6 client"\n'
+  printf '    tcp dport %s accept comment "ssh"\n' "$(nft_set "${SSH_PORTS[@]}")"
+  if (( ${#IN_EXTRA_TCP_RULE[@]} )); then
+    printf '    tcp dport %s accept comment "RELAY_INPUT_EXTRA_TCP"\n' "$(nft_set "${IN_EXTRA_TCP_RULE[@]}")"
+  fi
+  if (( ${#IN_EXTRA_UDP[@]} )); then
+    printf '    udp dport %s accept comment "RELAY_INPUT_EXTRA_UDP"\n' "$(nft_set "${IN_EXTRA_UDP[@]}")"
+  fi
+  printf '    counter\n'
+  printf '  }\n'
+  printf '}\n'
+}
+
+render() {
+  render_forward
+  render_input
+}
+
+# Comparable form of a table block: counter values dropped (they grow on a live
+# table), whitespace collapsed, blank lines removed. Applied to both `nft list
+# table` and the rendered table, so `check` compares structure.
 normalize_table() {
   sed -E -e 's/counter packets [0-9]+ bytes [0-9]+/counter/g' \
          -e 's/[[:space:]]+/ /g' -e 's/^ //' -e 's/ $//' \
     | awk 'NF'
 }
 
-rendered_table_block() { render | sed -n "/^table ip ${TABLE} {\$/,\$p"; }
+rendered_table_block() { render_forward | sed -n "/^table ip ${TABLE} {\$/,\$p"; }
+rendered_input_block() { render_input | sed -n "/^table inet ${INPUT_TABLE} {\$/,\$p"; }
 
 # The whole of ${RELAY_SYSCTL_FILE}.
 render_sysctl() {
@@ -304,11 +569,136 @@ render_sysctl() {
     "$SYSCTL_CT_EST" "$CT_EST"
 }
 
+# --------------------------------------------------------------------------- #
+# Confirmation state: the hash, the marker, the pending/reverted notes
+# --------------------------------------------------------------------------- #
+input_hash() {
+  printf '%s\ntcp %s\n' "$INPUT_FILTER_GEN" "${IN_TCP[*]}" | sha256sum | awk '{print $1}'
+}
+
+# kv_get FILE KEY — the last KEY=value of FILE (empty when absent/unreadable).
+kv_get() {
+  [[ -r "$1" ]] || return 0
+  sed -n "s/^$2=//p" "$1" | tail -n1
+}
+
+confirmed_hash() {
+  local h
+  h="$(kv_get "$INPUT_MARKER" sha256)"
+  [[ "$h" =~ ^[0-9a-f]{64}$ ]] && printf '%s' "$h"
+  return 0
+}
+
+# Atomic: a temp file next to DST, then rename. Lines from the arguments.
+write_state() {
+  local dst="$1" tmp
+  shift
+  mkdir -p "$(dirname "$dst")"
+  tmp="$(mktemp "${dst}.XXXXXX")"
+  if ! { printf '%s\n' "$@" > "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$dst"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+fmt_time() { date -d "@$1" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || printf '@%s' "$1"; }
+
+# To the journal: under systemd stdout already is the journal ($JOURNAL_STREAM);
+# from a shell `logger` puts it there as well.
+journal() {
+  log "$*"
+  if [[ -z "${JOURNAL_STREAM:-}" ]] && command -v logger >/dev/null 2>&1; then
+    logger -t "$ME" -p user.warning -- "$*" >/dev/null 2>&1 || true
+  fi
+}
+
+# --------------------------------------------------------------------------- #
+# The dead-man (a transient systemd timer that runs `input-off`)
+# --------------------------------------------------------------------------- #
+deadman_active() { [[ "$(systemctl is-active "${DEADMAN_UNIT}.timer" 2>/dev/null || true)" == "active" ]]; }
+
+disarm_deadman() { systemctl stop "${DEADMAN_UNIT}.timer" >/dev/null 2>&1 || true; }
+
+# A fresh ${DEADMAN_SECONDS}s timer (an older one is replaced). It runs THIS file's
+# input-off, so the dead-man always speaks the version that armed it.
+arm_deadman() {
+  local self out
+  self="$(readlink -f -- "${BASH_SOURCE[0]}")"
+  disarm_deadman
+  systemctl reset-failed "${DEADMAN_UNIT}.timer" "${DEADMAN_UNIT}.service" >/dev/null 2>&1 || true
+  if ! out="$(systemd-run --quiet --collect --timer-property=RemainAfterElapse=no \
+                --on-active="$DEADMAN_SECONDS" --unit="$DEADMAN_UNIT" \
+                --description="vpn-relay input filter dead-man (input-off unless input-confirm)" \
+                "$self" input-off 2>&1)"; then
+    err "systemd-run: ${out:-<no output>}"
+    return 1
+  fi
+}
+
+# Removes table inet vpnrelay_input (never table ip vpnrelay) in one transaction;
+# a pending confirmation becomes "reverted". $1 = why, for the journal.
+input_remove() {
+  local why="$1" tmp state="already absent" now
+  if nft list table inet "$INPUT_TABLE" >/dev/null 2>&1; then state="removed"; fi
+  tmp="$(mktemp)"
+  printf 'table inet %s\ndelete table inet %s\n' "$INPUT_TABLE" "$INPUT_TABLE" > "$tmp"
+  if ! nft -f "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+  if [[ -f "$INPUT_PENDING" ]]; then
+    now="$(date +%s)"
+    write_state "$INPUT_REVERTED" "$(cat "$INPUT_PENDING")" "reverted_at=${now}" \
+      || warn "cannot write ${INPUT_REVERTED}"
+    rm -f "$INPUT_PENDING"
+  fi
+  journal "table inet ${INPUT_TABLE} ${state} — ${why}; table ip ${TABLE} (forwarding) untouched"
+}
+
+# --------------------------------------------------------------------------- #
+# The ssh session a command runs in
+# --------------------------------------------------------------------------- #
+# Seconds since the ssh session of this process began: the elapsed time of its
+# nearest sshd (or sshd-session) ancestor — the per-connection sshd that serves
+# it. Prints nothing when there is none: a console, a cron job, or a tmux/screen
+# server started earlier (its parent is PID 1, not an sshd).
+ssh_session_age() {
+  local pid="$$" hops=0 ppid etimes comm
+  while (( hops < 64 )) && [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 )); do
+    read -r ppid etimes comm < <(ps -o ppid=,etimes=,comm= -p "$pid" 2>/dev/null || true) || return 0
+    case "$comm" in
+      sshd|sshd-session)
+        [[ "$etimes" =~ ^[0-9]+$ ]] && printf '%s\n' "$etimes"
+        return 0 ;;
+    esac
+    pid="$ppid"
+    hops=$(( hops + 1 ))
+  done
+}
+
 summary() {
+  local mh mt
   log "upstream ${UPSTREAM}; WAN interface ${IFACE} (${IFACE_SOURCE})"
   log "forward tcp: ${TCP_PORTS[*]}; udp: ${UDP_PORTS[*]}"
   log "conntrack: max ${CT_MAX}; tcp established timeout ${CT_EST}s"
   if [[ -n "$CHECK_SNI" ]]; then log "check TLS SNI: ${CHECK_SNI}"; else log "check TLS SNI: not set (handshake skipped)"; fi
+  if [[ "$INPUT_FILTER" == "off" ]]; then
+    log "input filter: off (RELAY_INPUT_FILTER=off) — table inet ${INPUT_TABLE} is removed, INPUT is not filtered"
+    return 0
+  fi
+  if (( INPUT_SKIPPED )); then
+    log "input filter: on; SSH port discovery skipped (not root: ss shows the owner of root's sockets only to root)"
+    return 0
+  fi
+  log "input filter: on (policy drop); ssh tcp: $(list_text "${SSH_PORTS[@]}"); extra tcp: $(list_text "${IN_EXTRA_TCP[@]}"); extra udp: $(list_text "${IN_EXTRA_UDP[@]}"); declared closed tcp: $(list_text "${IN_CLOSED_TCP[@]}"), udp: $(list_text "${IN_CLOSED_UDP[@]}")"
+  mh="$(confirmed_hash)"
+  if [[ -n "$mh" && "$mh" == "$(input_hash)" ]]; then
+    log "input filter: tcp $(list_text "${IN_TCP[@]}") is confirmed (${INPUT_MARKER}) — no dead-man, no confirmation needed"
+  else
+    mt="$(kv_get "$INPUT_MARKER" tcp)"
+    log "input filter: tcp $(list_text "${IN_TCP[@]}") is NOT confirmed (${INPUT_MARKER}: ${mt:-none}) — apply arms a ${DEADMAN_SECONDS}s dead-man and waits for input-confirm from a new ssh session"
+  fi
 }
 
 # --------------------------------------------------------------------------- #
@@ -357,19 +747,74 @@ cmd_show() {
 }
 
 cmd_apply() {
-  local tmp cur want out
+  local tmp cur want out hash="" need_confirm=0 had_pending=0 now reverts
   require_root apply
   require_tool nft
   require_tool sysctl
   load_config
+  if [[ "$INPUT_FILTER" == "on" ]]; then
+    require_tool systemctl
+    require_tool systemd-run
+    require_tool sha256sum
+  fi
   summary
 
   tmp="$(mktemp)"
   # shellcheck disable=SC2064  # expand now: the path is fixed for this run
   trap "rm -f '${tmp}'" EXIT
   render > "$tmp"
-  nft -f "$tmp" || fail "$E_NFT" "nft rejected the ruleset — the previous table ip ${TABLE} (if any) is unchanged"
-  log "table ip ${TABLE} applied (one atomic nft transaction)"
+
+  [[ -f "$INPUT_PENDING" ]] && had_pending=1
+  if [[ "$INPUT_FILTER" == "on" ]]; then
+    hash="$(input_hash)"
+    [[ "$hash" == "$(confirmed_hash)" ]] || need_confirm=1
+  fi
+
+  # The dead-man BEFORE the drop policy: an unconfirmed filter is never live unguarded.
+  if (( need_confirm )); then
+    if ! arm_deadman; then
+      # arm_deadman stopped the previous timer: a still-unconfirmed older filter
+      # would now be unguarded, so it goes too (the safe direction).
+      if (( had_pending )); then
+        input_remove "the dead-man could not be re-armed for the unconfirmed filter" || true
+      fi
+      fail "$E_DEADMAN" "cannot arm the dead-man (systemd-run ${DEADMAN_UNIT}) — refusing to install an unconfirmed drop policy without it; nothing was applied"
+    fi
+    log "dead-man armed: ${DEADMAN_UNIT}.timer runs \`${ME} input-off\` in ${DEADMAN_SECONDS}s unless input-confirm stops it"
+  fi
+
+  if ! nft -f "$tmp"; then
+    if (( need_confirm )); then
+      if (( had_pending )); then
+        # The previous, still unconfirmed filter stays live: the fresh timer guards it now.
+        write_state "$INPUT_PENDING" "$(sed '/^reverts_at=/d' "$INPUT_PENDING")" \
+          "reverts_at=$(( $(date +%s) + DEADMAN_SECONDS ))" || true
+      else
+        disarm_deadman   # the live filter is the confirmed one (or none): nothing to guard
+      fi
+    fi
+    fail "$E_NFT" "nft rejected the ruleset — the previous table ip ${TABLE} and table inet ${INPUT_TABLE} (if any) are unchanged"
+  fi
+  if [[ "$INPUT_FILTER" == "on" ]]; then
+    log "table ip ${TABLE} and table inet ${INPUT_TABLE} applied (one atomic nft transaction)"
+  else
+    log "table ip ${TABLE} applied, table inet ${INPUT_TABLE} removed (one atomic nft transaction)"
+  fi
+
+  if (( need_confirm )); then
+    now="$(date +%s)"
+    reverts=$(( now + DEADMAN_SECONDS ))
+    write_state "$INPUT_PENDING" "sha256=${hash}" "tcp=${IN_TCP[*]}" "applied_at=${now}" "reverts_at=${reverts}" \
+      || warn "cannot write ${INPUT_PENDING} (input-confirm needs it; the dead-man still reverts the filter)"
+    rm -f "$INPUT_REVERTED"
+    log "input filter PENDING CONFIRM (tcp $(list_text "${IN_TCP[@]}"); reverts at $(fmt_time "$reverts")):"
+    log "  open a NEW ssh session and run \`${ME} input-confirm\` within $(( DEADMAN_SECONDS / 60 )) minutes, otherwise the filter removes itself"
+  else
+    # Confirmed set (or filter off): nothing left to guard.
+    if (( had_pending )) || deadman_active; then disarm_deadman; fi
+    rm -f "$INPUT_PENDING" "$INPUT_REVERTED"
+    [[ "$INPUT_FILTER" == "off" ]] || log "input filter: tcp $(list_text "${IN_TCP[@]}") confirmed earlier (${INPUT_MARKER}) — no dead-man"
+  fi
 
   # The sysctl file, rendered whole; replaced atomically and only when it differs.
   want="$(render_sysctl)"
@@ -402,6 +847,7 @@ cmd_apply() {
 
 cmd_check_dry_run() {
   local tmp
+  [[ "$(id -u)" == "0" ]] || DISCOVERY_SOFT=1
   load_config
   summary
   if [[ "$(id -u)" == "0" ]]; then
@@ -415,6 +861,76 @@ cmd_check_dry_run() {
   else
     log "dry-run: ruleset renders (nft -c skipped: needs root)"
   fi
+}
+
+# Part of cmd_check (uses its note_fail): the input table and the listening ports.
+check_input() {
+  local live diff_out reverted_at proto addr port users key p
+  local -a keys=()
+  local -A addrs=() names=()
+  if [[ "$INPUT_FILTER" == "off" ]]; then
+    if nft list table inet "$INPUT_TABLE" >/dev/null 2>&1; then
+      note_fail "$E_INPUT" "table inet ${INPUT_TABLE} is loaded although RELAY_INPUT_FILTER=off — re-apply (systemctl restart vpn-relay) to remove it"
+    else
+      log "ok: input filter off (RELAY_INPUT_FILTER=off): table inet ${INPUT_TABLE} absent, INPUT is not filtered"
+    fi
+    return 0
+  fi
+
+  if live="$(nft list table inet "$INPUT_TABLE" 2>/dev/null)"; then
+    diff_out="$(diff -u --label "live (nft list table inet ${INPUT_TABLE})" --label "rendered from ${RELAY_ENV} + ss" \
+                  <(printf '%s\n' "$live" | normalize_table) \
+                  <(rendered_input_block | normalize_table) || true)"
+    if [[ -z "$diff_out" ]]; then
+      log "ok: table inet ${INPUT_TABLE} matches the render (policy drop; ssh tcp $(list_text "${SSH_PORTS[@]}"))"
+    else
+      printf '%s\n' "$diff_out" >&2
+      note_fail "$E_INPUT_DIFF" "table inet ${INPUT_TABLE} differs from the render (diff above, counters ignored) — re-apply; a changed TCP set asks for input-confirm again"
+    fi
+    if [[ -f "$INPUT_PENDING" ]]; then
+      if deadman_active; then
+        log "input filter: PENDING CONFIRM (reverts at $(fmt_time "$(kv_get "$INPUT_PENDING" reverts_at)")) — run \`${ME} input-confirm\` from a NEW ssh session"
+      else
+        warn "input filter is unconfirmed and no dead-man is armed — re-apply (systemctl restart vpn-relay) to arm one"
+      fi
+    fi
+  else
+    reverted_at="$(kv_get "$INPUT_REVERTED" reverted_at)"
+    if [[ "$reverted_at" =~ ^[0-9]+$ ]]; then
+      note_fail "$E_INPUT" "table inet ${INPUT_TABLE} is absent: the dead-man removed it at $(fmt_time "$reverted_at") (tcp $(kv_get "$INPUT_REVERTED" tcp) was not confirmed) — re-apply and run input-confirm from a NEW ssh session within $(( DEADMAN_SECONDS / 60 )) minutes"
+    else
+      note_fail "$E_INPUT" "table inet ${INPUT_TABLE} is absent although RELAY_INPUT_FILTER=on"
+    fi
+  fi
+
+  # Every port that listens on a public address: let in by a rule, or declared
+  # closed. Judged against the render, so a port the next apply would close shows
+  # here before it does (Phase 1 runs this against the live host).
+  while read -r proto addr port users; do
+    key="${proto}/${port}"
+    addrs["$key"]+="${addrs[$key]:+ }${addr}"
+    names["$key"]="$(proc_names "$users")"
+  done < <(listeners)
+  (( ${#addrs[@]} == 0 )) || readarray -t keys < <(printf '%s\n' "${!addrs[@]}" | sort -t/ -k1,1 -k2,2n)
+  for key in "${keys[@]}"; do
+    proto="${key%/*}"; port="${key#*/}"
+    if [[ "$proto" == "tcp" ]]; then
+      if in_list "$port" "${SSH_PORTS[@]}"; then p="ssh"
+      elif in_list "$port" "${IN_EXTRA_TCP[@]}"; then p="RELAY_INPUT_EXTRA_TCP"
+      elif in_list "$port" "${IN_CLOSED_TCP[@]}"; then p="closed on purpose (RELAY_INPUT_CLOSED_TCP)"
+      else p=""; fi
+    else
+      if [[ "$port" == "546" && "${addrs[$key]}" != *.* ]]; then p="dhcpv6 client (fe80::/10)"
+      elif in_list "$port" "${IN_EXTRA_UDP[@]}"; then p="RELAY_INPUT_EXTRA_UDP"
+      elif in_list "$port" "${IN_CLOSED_UDP[@]}"; then p="closed on purpose (RELAY_INPUT_CLOSED_UDP)"
+      else p=""; fi
+    fi
+    if [[ -n "$p" ]]; then
+      log "ok: ${key} on ${addrs[$key]} (${names[$key]}) — ${p}"
+    else
+      note_fail "$E_FILTERED" "${key} listening but filtered: ${names[$key]} listens on ${addrs[$key]} and the input filter drops it — open it (RELAY_INPUT_EXTRA_${proto^^}=${port}) or declare it closed (RELAY_INPUT_CLOSED_${proto^^}=${port}), or bind it to loopback"
+    fi
+  done
 }
 
 cmd_check() {
@@ -443,7 +959,10 @@ cmd_check() {
     note_fail "$E_ABSENT" "table ip ${TABLE} is absent"
   fi
 
-  # 2. forwarding
+  # 2. the input filter and the ports that listen behind it
+  check_input
+
+  # 3. forwarding
   fwd="$(sysctl -n "$SYSCTL_FORWARD" 2>/dev/null || true)"
   if [[ "$fwd" == "1" ]]; then
     log "ok: ${SYSCTL_FORWARD} = 1"
@@ -451,7 +970,7 @@ cmd_check() {
     note_fail "$E_FORWARD" "${SYSCTL_FORWARD} = ${fwd:-<unreadable>}, expected 1"
   fi
 
-  # 3. the conntrack sysctls equal .env (runtime values: apply sets them, the file
+  # 4. the conntrack sysctls equal .env (runtime values: apply sets them, the file
   #    alone cannot — see the header), and how full the table is
   ct_max="$(sysctl -n "$SYSCTL_CT_MAX" 2>/dev/null || true)"
   ct_est="$(sysctl -n "$SYSCTL_CT_EST" 2>/dev/null || true)"
@@ -474,7 +993,7 @@ cmd_check() {
     fi
   fi
 
-  # 4. the upstream answers on every forwarded TCP port
+  # 5. the upstream answers on every forwarded TCP port
   for p in "${TCP_PORTS[@]}"; do
     if out="$(probe tcp "$UPSTREAM" "$p" "$RELAY_PROBE_TIMEOUT" 2>&1)"; then
       log "ok: TCP connect ${UPSTREAM}:${p}"
@@ -483,7 +1002,7 @@ cmd_check() {
     fi
   done
 
-  # 5. TLS on 443 with the configured SNI (certificate verified)
+  # 6. TLS on 443 with the configured SNI (certificate verified)
   if [[ " ${TCP_PORTS[*]} " == *" 443 "* ]]; then
     if [[ -n "$CHECK_SNI" ]]; then
       if out="$(probe tls "$UPSTREAM" 443 "$RELAY_PROBE_TIMEOUT" "$CHECK_SNI" 2>&1)"; then
@@ -503,6 +1022,111 @@ cmd_check() {
   log "check OK"
 }
 
+# What the dead-man runs; by hand it takes the filter off until the next apply.
+cmd_input_off() {
+  local why="on request (it comes back with the next apply unless RELAY_INPUT_FILTER=off)" tcp applied
+  require_root input-off
+  require_tool nft
+  if [[ -f "$INPUT_PENDING" ]]; then
+    tcp="$(kv_get "$INPUT_PENDING" tcp)"
+    applied="$(kv_get "$INPUT_PENDING" applied_at)"
+    why="the input filter (tcp ${tcp:-?}, applied at $( [[ "$applied" =~ ^[0-9]+$ ]] && fmt_time "$applied" || printf '?')) was not confirmed with \`${ME} input-confirm\` from a new ssh session"
+  fi
+  input_remove "$why" || fail "$E_NFT" "nft could not remove table inet ${INPUT_TABLE}"
+  # By hand while a timer waits: nothing is left for it to guard. (From the timer
+  # itself it has already elapsed; stopping it again is a no-op.)
+  command -v systemctl >/dev/null 2>&1 && disarm_deadman
+  return 0
+}
+
+cmd_input_confirm() {
+  local sha tcp applied reverts reverted_at age now start svc
+  require_root input-confirm
+  require_tool nft
+  require_tool systemctl
+  require_tool ps
+
+  if [[ ! -f "$INPUT_PENDING" ]]; then
+    reverted_at="$(kv_get "$INPUT_REVERTED" reverted_at)"
+    if [[ "$reverted_at" =~ ^[0-9]+$ ]]; then
+      fail "$E_CONFIRM" "too late: the dead-man removed the input filter at $(fmt_time "$reverted_at") (tcp $(kv_get "$INPUT_REVERTED" tcp) was not confirmed). Apply it again (sudo FORCE=1 bash scripts/redeploy.sh, or systemctl restart vpn-relay) and confirm from a NEW ssh session within $(( DEADMAN_SECONDS / 60 )) minutes"
+    fi
+    if [[ -n "$(confirmed_hash)" ]] && nft list table inet "$INPUT_TABLE" >/dev/null 2>&1; then
+      log "nothing to confirm: the input filter (tcp $(kv_get "$INPUT_MARKER" tcp)) was confirmed at $(kv_get "$INPUT_MARKER" confirmed_at)"
+      return 0
+    fi
+    fail "$E_CONFIRM" "nothing to confirm: no input filter is waiting for a confirmation (${INPUT_PENDING} absent)"
+  fi
+
+  sha="$(kv_get "$INPUT_PENDING" sha256)"
+  tcp="$(kv_get "$INPUT_PENDING" tcp)"
+  applied="$(kv_get "$INPUT_PENDING" applied_at)"
+  reverts="$(kv_get "$INPUT_PENDING" reverts_at)"
+  [[ "$sha" =~ ^[0-9a-f]{64}$ && "$applied" =~ ^[0-9]+$ ]] \
+    || fail "$E_CONFIRM" "${INPUT_PENDING} is malformed — re-apply (systemctl restart vpn-relay)"
+  deadman_active \
+    || fail "$E_CONFIRM" "the dead-man timer ${DEADMAN_UNIT}.timer is not armed (it has fired, or was stopped by hand) — nothing to confirm; re-apply and confirm within $(( DEADMAN_SECONDS / 60 )) minutes"
+  nft list table inet "$INPUT_TABLE" >/dev/null 2>&1 \
+    || fail "$E_CONFIRM" "table inet ${INPUT_TABLE} is not loaded — nothing to confirm; re-apply"
+
+  # The proof is the session itself: it must have come in THROUGH the filter.
+  age="$(ssh_session_age)"
+  [[ -n "$age" ]] \
+    || fail "$E_CONFIRM" "not run from an ssh session (no sshd among this process's ancestors — a console, or a tmux/screen started earlier?). Run it directly in a NEW ssh session: that session is the proof the filter lets ssh in"
+  now="$(date +%s)"
+  start=$(( now - age ))
+  if (( start < applied )); then
+    fail "$E_CONFIRM" "this ssh session began at $(fmt_time "$start"), before the filter was applied at $(fmt_time "$applied"): it rides an established connection, which the filter always lets through, so it proves nothing. Open a NEW ssh session and run \`${ME} input-confirm\` there (the filter reverts at $( [[ "$reverts" =~ ^[0-9]+$ ]] && fmt_time "$reverts" || printf '?'))"
+  fi
+
+  disarm_deadman
+  ! deadman_active || fail "$E_CONFIRM" "could not stop ${DEADMAN_UNIT}.timer — not confirmed (the dead-man still reverts the filter)"
+  svc="$(systemctl is-active "${DEADMAN_UNIT}.service" 2>/dev/null || true)"
+  if [[ "$svc" == "active" || "$svc" == "activating" ]] || [[ ! -f "$INPUT_PENDING" ]] \
+     || ! nft list table inet "$INPUT_TABLE" >/dev/null 2>&1; then
+    fail "$E_CONFIRM" "too late: the dead-man fired and is removing (or removed) the input filter — re-apply and confirm within $(( DEADMAN_SECONDS / 60 )) minutes"
+  fi
+
+  write_state "$INPUT_MARKER" \
+    "# vpn-relay-apply input-confirm: the input filter's TCP set, confirmed from a new ssh session" \
+    "sha256=${sha}" "tcp=${tcp}" "confirmed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    || fail "$E_CONFIRM" "the dead-man is stopped and the filter stays, but ${INPUT_MARKER} could not be written: the next apply will ask for a confirmation again"
+  rm -f "$INPUT_PENDING" "$INPUT_REVERTED"
+  journal "input filter confirmed: tcp ${tcp} (session started $(fmt_time "$start"), filter applied $(fmt_time "$applied")); dead-man stopped, ${INPUT_MARKER} written — applies with this TCP set need no confirmation"
+}
+
+# One line for DEPLOY OK and the operator.
+cmd_input_status() {
+  local present=0 reverted_at
+  require_root input-status
+  require_tool nft
+  load_input_knob
+  nft list table inet "$INPUT_TABLE" >/dev/null 2>&1 && present=1
+  if [[ "$INPUT_FILTER" == "off" ]]; then
+    if (( present )); then echo "off (RELAY_INPUT_FILTER=off) but table inet ${INPUT_TABLE} is still loaded — re-apply"
+    else echo "off (RELAY_INPUT_FILTER=off)"; fi
+  elif (( present )) && [[ -f "$INPUT_PENDING" ]]; then
+    if deadman_active; then
+      echo "PENDING CONFIRM (reverts at $(fmt_time "$(kv_get "$INPUT_PENDING" reverts_at)"))"
+    else
+      echo "UNCONFIRMED (tcp $(kv_get "$INPUT_PENDING" tcp)) and NO dead-man armed — re-apply"
+    fi
+  elif (( present )); then
+    if [[ -n "$(confirmed_hash)" ]]; then
+      echo "OK (tcp $(kv_get "$INPUT_MARKER" tcp); confirmed $(kv_get "$INPUT_MARKER" confirmed_at))"
+    else
+      echo "UNCONFIRMED (no ${INPUT_MARKER}) — re-apply"
+    fi
+  else
+    reverted_at="$(kv_get "$INPUT_REVERTED" reverted_at)"
+    if [[ "$reverted_at" =~ ^[0-9]+$ ]]; then
+      echo "ABSENT — the dead-man removed it at $(fmt_time "$reverted_at") (tcp $(kv_get "$INPUT_REVERTED" tcp) was not confirmed)"
+    else
+      echo "ABSENT (table inet ${INPUT_TABLE} not loaded)"
+    fi
+  fi
+}
+
 case "${1:-}" in
   apply) [[ $# -eq 1 ]] || usage; cmd_apply ;;
   show)  [[ $# -eq 1 ]] || usage; cmd_show ;;
@@ -511,5 +1135,8 @@ case "${1:-}" in
     elif [[ $# -eq 2 && "$2" == "--dry-run" ]]; then cmd_check_dry_run
     else usage; fi
     ;;
+  input-confirm) [[ $# -eq 1 ]] || usage; cmd_input_confirm ;;
+  input-off)     [[ $# -eq 1 ]] || usage; cmd_input_off ;;
+  input-status)  [[ $# -eq 1 ]] || usage; cmd_input_status ;;
   *) usage ;;
 esac

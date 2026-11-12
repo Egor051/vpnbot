@@ -1,0 +1,7 @@
+udp   UNCONN 0      0      [fe80::be24:11ff:febf:df1d]%eth0:546           [::]:*    users:(("systemd-network",pid=612,fd=23))
+udp   UNCONN 0      0                 127.0.0.54:53                0.0.0.0:*    users:(("systemd-resolve",pid=500,fd=16))
+udp   UNCONN 0      0              127.0.0.53%lo:53                0.0.0.0:*    users:(("systemd-resolve",pid=500,fd=14))
+tcp   LISTEN 0      4096           127.0.0.53%lo:53                0.0.0.0:*    users:(("systemd-resolve",pid=500,fd=15))
+tcp   LISTEN 0      4096              127.0.0.54:53                0.0.0.0:*    users:(("systemd-resolve",pid=500,fd=17))
+tcp   LISTEN 0      4096                 0.0.0.0:22                0.0.0.0:*    users:(("sshd",pid=1001,fd=3),("systemd",pid=1,fd=117))
+tcp   LISTEN 0      4096                    [::]:22                   [::]:*    users:(("sshd",pid=1001,fd=4),("systemd",pid=1,fd=118))

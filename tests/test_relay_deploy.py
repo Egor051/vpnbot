@@ -15,10 +15,16 @@ git / install, like the rest of the deploy suites. Pinned here:
    output with NODE_ROLE absent and NODE_ROLE=main, and never show a relay piece.
 5. **The relay role touches no main unit and no DB**, installs its helper through
    OUT_OF_REPO_HELPERS (role-filtered) and its unit verbatim, and **rolls back** —
-   files, saved table, enable/active state, ip_forward and the conntrack sysctls
+   files, saved tables, enable/active state, ip_forward and the conntrack sysctls
    (nf_conntrack_max, nf_conntrack_tcp_timeout_established) snapshotted in
    relay_snapshot_prestate — when the restart or the final `vpn-relay-apply check`
    fails.
+6. **The input filter** (table inet vpnrelay_input, its dead-man): backed up with
+   the forwarding table; the rollback restores a confirmed filter, removes one that
+   did not exist or was still waiting for input-confirm, and always stops a dead-man
+   the deploy's apply armed. DEPLOY OK carries `vpn-relay-apply input-status` and,
+   for PENDING CONFIRM, the instruction to confirm from a NEW ssh session. The
+   helper's state paths are pinned into tmp: deploy.sh runs this suite on the relay.
 """
 
 from __future__ import annotations
@@ -40,6 +46,9 @@ FIXTURES = ROOT / "tests" / "fixtures" / "relay"
 MANUAL_UNIT = FIXTURES / "vpn-relay.manual.service"
 CAPTURED_RULESET = FIXTURES / "vpn-relay.nft"
 LIVE_LISTING = FIXTURES / "nft-list-live.txt"
+INPUT_LISTING = FIXTURES / "nft-list-input-live.txt"
+SS_LISTEN = FIXTURES / "ss-listen.txt"
+DEADMAN_TIMER = "vpn-relay-input-deadman.timer"
 
 pytestmark = pytest.mark.timeout(60)
 
@@ -210,7 +219,9 @@ exit 0
 """
 
 
-def _guard(tmp_path: Path, role: str, *, active: tuple[str, ...] = (), loaded: tuple[str, ...] = ()):
+def _guard(
+    tmp_path: Path, role: str, *, active: tuple[str, ...] = (), loaded: tuple[str, ...] = ()
+) -> tuple[subprocess.CompletedProcess[str], str]:
     stub, sd = tmp_path / "stub", tmp_path / "sd"
     stub.mkdir()
     sd.mkdir()
@@ -388,18 +399,28 @@ case "$1" in
   show) [[ -f "$SD/$unit.active" ]] && echo loaded || echo not-found; exit 0 ;;
   restart)
     rc="$(cat "$SD/restart_rc" 2>/dev/null || echo 0)"
-    rm -f "$SD/table"
+    rm -f "$SD/table" "$SD/input_table"
     # ExecStart = vpn-relay-apply apply, which sets the sysctls from .env (here its
-    # defaults). A failed restart has set them too: the worst case for the rollback
-    # (apply exiting 7 after its first sysctl writes).
+    # defaults) and installs the input filter — arming the dead-man for a TCP set that
+    # is not confirmed. A failed restart has done all of it too: the worst case for the
+    # rollback (apply exiting 7 after its first sysctl writes).
     echo 65536 > "$SD/net.netfilter.nf_conntrack_max"
     echo 86400 > "$SD/net.netfilter.nf_conntrack_tcp_timeout_established"
     echo 1 > "$SD/forward"
+    touch "$SD/input_table"
+    if [[ -f "$SD/restart_arms_deadman" ]]; then
+      echo active > "$SD/vpn-relay-input-deadman.timer.active"
+      mkdir -p "$SD/run"; printf 'sha256=x\ntcp=22\n' > "$SD/run/input.pending"
+    fi
     if [[ "$rc" == "0" ]]; then echo active > "$SD/$unit.active"; touch "$SD/table"
     else echo failed > "$SD/$unit.active"; fi
     exit "$rc" ;;
-  start) echo active > "$SD/$unit.active"; touch "$SD/table"; exit 0 ;;
-  stop) echo inactive > "$SD/$unit.active"; rm -f "$SD/table"; exit 0 ;;
+  start) echo active > "$SD/$unit.active"; [[ "$unit" == vpn-relay.service ]] && touch "$SD/table" "$SD/input_table"; exit 0 ;;
+  stop)
+    echo inactive > "$SD/$unit.active"
+    # ExecStop of vpn-relay.service removes both tables; stopping a timer removes none.
+    [[ "$unit" == vpn-relay.service ]] && rm -f "$SD/table" "$SD/input_table"
+    exit 0 ;;
   enable) echo enabled > "$SD/$unit.enabled"; exit 0 ;;
   disable) rm -f "$SD/$unit.enabled"; exit 0 ;;
 esac
@@ -410,8 +431,16 @@ RELAY_NFT = r"""
 echo "nft $*" >> "$LOGS/nft.log"
 case "$*" in
   "list table ip vpnrelay") [[ -f "$SD/table" ]] || exit 1; cat "$LIVE_LISTING" ;;
-  "-f -") cat > "$LOGS/nft-restore.nft"; touch "$SD/table" ;;
+  "list table inet vpnrelay_input") [[ -f "$SD/input_table" ]] || exit 1; cat "$INPUT_LISTING" ;;
+  "-f -")
+    cat > "$LOGS/nft-stdin.tmp"
+    if grep -q 'table inet vpnrelay_input' "$LOGS/nft-stdin.tmp"; then
+      mv "$LOGS/nft-stdin.tmp" "$LOGS/nft-restore-input.nft"; touch "$SD/input_table"
+    else
+      mv "$LOGS/nft-stdin.tmp" "$LOGS/nft-restore.nft"; touch "$SD/table"
+    fi ;;
   "delete table ip vpnrelay") rm -f "$SD/table" ;;
+  "delete table inet vpnrelay_input") rm -f "$SD/input_table" ;;
 esac
 exit 0
 """
@@ -458,6 +487,10 @@ echo "SUMMARY|role=relay|mode=x|beaten=$b|mismatch=$m|latent=$l|accepted=0|warn=
 
 FAKE_HELPER = r"""#!/usr/bin/env bash
 echo "helper $*" >> "$LOGS/helper.log"
+if [[ "$1" == "input-status" ]]; then
+  cat "$SD/input_status" 2>/dev/null || echo "OK (tcp 22; confirmed 2026-11-11T10:00:00Z)"
+  exit 0
+fi
 echo "vpn-relay-apply: fake $*"
 exit "$(cat "$SD/check_rc" 2>/dev/null || echo 0)"
 """
@@ -497,6 +530,11 @@ class RelayHost:
         # (python3) must not leave the box. `id` pins the root code paths everywhere.
         _stub(self.stub / "id", '[[ "$1" == "-u" ]] && echo 0\n')
         _stub(self.stub / "python3", f'echo "probe $4 $5 $6" >> "{self.logs}/probe.log"\nexit 0\n')
+        # The checkout's helper reads the listening sockets (SSH discovery) and, in
+        # apply only, arms a dead-man: neither may see or touch the real relay.
+        _stub(self.stub / "ss", f'echo "ss $*" >> "{self.logs}/ss.log"\ncat "{SS_LISTEN}"\n')
+        _stub(self.stub / "systemd-run", f'echo "systemd-run $*" >> "{self.logs}/systemd-run.log"\n')
+        _stub(self.stub / "logger", f'echo "logger $*" >> "{self.logs}/logger.log"\n')
         # The host invariants check (scripts/vpn-bot-host-check) has its own suite,
         # tests/test_host_check.py; here a fake records how the relay deploy calls it.
         self.host_root = tmp_path / "hostroot"
@@ -517,6 +555,18 @@ class RelayHost:
         self.set_forward("1")
         self.set_conntrack(*KERNEL_CT)
 
+    def on_this_version(self, *, pending: bool = False) -> None:
+        """A relay already running the input filter: confirmed, or still pending."""
+        (self.sd / "input_table").touch()
+        if pending:
+            (self.sd / f"{DEADMAN_TIMER}.active").write_text("active", encoding="utf-8")
+            self.pending.parent.mkdir(parents=True, exist_ok=True)
+            self.pending.write_text("sha256=x\ntcp=22\n", encoding="utf-8")
+
+    @property
+    def pending(self) -> Path:
+        return self.sd / "run" / "input.pending"
+
     def set_forward(self, value: str) -> None:
         (self.sd / "forward").write_text(value, encoding="utf-8")
 
@@ -536,7 +586,11 @@ class RelayHost:
     # --- running ----------------------------------------------------------
     def run(self, body: str) -> subprocess.CompletedProcess[str]:
         prelude = (
-            f'export SD="{self.sd}" LOGS="{self.logs}" LIVE_LISTING="{LIVE_LISTING}"\n'
+            f'export SD="{self.sd}" LOGS="{self.logs}" LIVE_LISTING="{LIVE_LISTING}" INPUT_LISTING="{INPUT_LISTING}"\n'
+            # The helper's confirmation state and deploy.sh's view of it: in tmp, never
+            # the relay's real /etc/vpn-relay and /run/vpn-relay (the suite runs there).
+            f'export RELAY_STATE_DIR="{self.tmp}/etc-vpn-relay" RELAY_RUN_DIR="{self.sd}/run"\n'
+            f'RELAY_INPUT_PENDING="{self.sd}/run/input.pending"\n'
             f'APP_DIR="{self.repo}"; cd "$APP_DIR"\n'
             f'BACKUP_DIR="{self.backups}"\n'
             f'RELAY_SYSTEM_UNIT="{self.unit}"\n'
@@ -580,7 +634,7 @@ class RelayHost:
 def _assert_no_main_piece_touched(host: RelayHost) -> None:
     for line in host.log("systemctl"):
         args = line.split()[1:]
-        assert args[0] == "daemon-reload" or args[-1] == "vpn-relay.service", line
+        assert args[0] == "daemon-reload" or args[-1] in {"vpn-relay.service", DEADMAN_TIMER}, line
     assert host.log("sqlite3") == [], "a relay deploy never opens a database"
     assert not (host.sbin / "vpn-bot-db-perms").exists(), "a main-role helper was installed on a relay"
 
@@ -594,7 +648,7 @@ def test_relay_phase2_migrates_the_hand_installed_relay(tmp_path: Path) -> None:
 
     assert _read(host.unit) == _read(REPO_UNIT), "the unit is installed verbatim"
     assert _read(host.helper) == FAKE_HELPER, "the helper comes from OUT_OF_REPO_HELPERS"
-    assert host.log("helper") == ["helper check"], "verify = vpn-relay-apply check"
+    assert host.log("helper") == ["helper check", "helper input-status"], "verify = vpn-relay-apply check"
     sc = [ln.removeprefix("systemctl ") for ln in host.log("systemctl")]
     mutating = [c for c in sc if c.split()[0] not in {"is-active", "is-enabled"}]
     assert mutating == ["daemon-reload", "enable --quiet vpn-relay.service", "restart vpn-relay.service"]
@@ -781,13 +835,19 @@ def test_relay_phase1_refuses_an_env_that_does_not_render(tmp_path: Path) -> Non
     assert host.log("systemctl") == [] and host.log("nft") == [] and host.log("sysctl") == []
 
 
-@pytest.mark.parametrize("conntrack", [KERNEL_CT, ("65536", "86400")])
+@pytest.mark.parametrize(
+    ("conntrack", "input_filter"),
+    [(KERNEL_CT, False), (("65536", "86400"), False), (("65536", "86400"), True)],
+    ids=["hand-made", "conntrack-set", "this-version"],
+)
 def test_relay_phase1_reports_the_first_transition_without_mutating(
-    tmp_path: Path, conntrack: tuple[str, str]
+    tmp_path: Path, conntrack: tuple[str, str], input_filter: bool
 ) -> None:
     host = RelayHost(tmp_path)
     host.hand_installed()
     host.set_conntrack(*conntrack)
+    if input_filter:
+        host.on_this_version()
     wt = tmp_path / "wt"
     (wt / "scripts").mkdir(parents=True)
     (wt / "deploy" / "relay").mkdir(parents=True)
@@ -813,14 +873,24 @@ def test_relay_phase1_reports_the_first_transition_without_mutating(
     assert "ok: table ip vpnrelay matches" in out, "the repo renders the hand-made ruleset 1:1"
     assert f"{CT_MAX}={conntrack[0]}; {CT_EST}={conntrack[1]}" in out, "pre-state log line"
     assert f"nf_conntrack_max={conntrack[0]} nf_conntrack_tcp_timeout_established={conntrack[1]}" in out
-    if conntrack == KERNEL_CT:
-        # The hand-made relay never set them: the first deploy of this version does.
-        assert "the table and ip_forward match; the conntrack sysctls differ from .env" in out
+    if not input_filter:
+        # The hand-made relay has no input filter: the first deploy of this version
+        # adds it (and, its TCP set never confirmed, arms the dead-man).
+        assert "table inet vpnrelay_input absent (or present with RELAY_INPUT_FILTER=off) — Phase 2 applies" in out
+        assert "FAIL: table inet vpnrelay_input is absent although RELAY_INPUT_FILTER=on" in out
         assert "PASS" not in out
+        assert ("the conntrack sysctls differ" in out or "FAIL: net.netfilter" in out) is (conntrack == KERNEL_CT)
     else:
         assert "PASS" in out
+    assert "input filter: on (policy drop); ssh tcp: 22" in out, "the dry-run shows what Phase 2 applies"
+    assert "is NOT confirmed" in out and "dead-man" in out
+    assert "ok: tcp/22 on 0.0.0.0 :: (sshd,systemd) — ssh" in out
+    state = "present" if input_filter else "absent"
+    assert f"table inet vpnrelay_input : {state} (dead-man {DEADMAN_TIMER}: inactive)" in out, "the pre-state"
     assert not [c for c in host.log("sysctl") if "-w" in c], "Phase 1 writes no sysctl"
     assert host.log("probe") == ["probe tcp 150.251.152.243 443"]
+    assert host.log("systemd-run") == [] and host.log("logger") == [], "Phase 1 arms nothing"
+    assert not (tmp_path / "etc-vpn-relay").exists() and not host.pending.exists()
 
 
 def test_relay_phase2_routes_every_mutation_through_the_rollback() -> None:
@@ -844,23 +914,31 @@ def test_redeploy_wrapper_needs_no_relay_branch() -> None:
     assert "relay_deploy" not in text and "vpn-relay" not in text
 
 
-def test_repo_unit_runs_the_helper_and_never_touches_input() -> None:
+def test_repo_unit_runs_the_helper_and_owns_both_tables() -> None:
     unit = _read(REPO_UNIT)
-    assert "ExecStart=/usr/local/sbin/vpn-relay-apply apply" in unit
-    assert "ExecStop=-/usr/sbin/nft delete table ip vpnrelay" in unit
-    assert "Type=oneshot" in unit and "RemainAfterExit=yes" in unit
-    assert "After=network-online.target" in unit and "WantedBy=multi-user.target" in unit
-    assert "/etc/vpn-relay.nft\n" not in unit.split("[Unit]", 1)[1]
+    body = unit.split("[Unit]", 1)[1]
+    assert "ExecStart=/usr/local/sbin/vpn-relay-apply apply" in body
+    assert re.findall(r"^ExecStop=.*$", body, re.M) == [
+        "ExecStop=-/usr/sbin/nft delete table ip vpnrelay",
+        "ExecStop=-/usr/sbin/nft delete table inet vpnrelay_input",
+    ]
+    assert "Type=oneshot" in body and "RemainAfterExit=yes" in body
+    # sshd listens before apply reads the SSH ports (it refuses a drop policy without one)
+    assert "After=network-online.target ssh.socket ssh.service" in body
+    assert "WantedBy=multi-user.target" in body
+    assert "/etc/vpn-relay.nft\n" not in body
 
 
 def test_relay_env_example_covers_the_keys_the_helper_reads() -> None:
     example = _read(ROOT / "deploy" / "relay" / "relay.env.example")
     helper = _read(RELAY_HELPER_SRC)
-    keys = set(re.findall(r"env_sed_val (RELAY_[A-Z0-9_]+)", helper))
+    keys = set(re.findall(r"(?:env_sed_val|optional_ports) (RELAY_[A-Z0-9_]+)", helper))
     assert keys == {
         "RELAY_UPSTREAM_IPV4", "RELAY_FORWARD_TCP_PORTS", "RELAY_FORWARD_UDP_PORTS",
         "RELAY_WAN_IFACE", "RELAY_CHECK_SNI",
         "RELAY_CONNTRACK_MAX", "RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT",
+        "RELAY_INPUT_FILTER", "RELAY_INPUT_EXTRA_TCP", "RELAY_INPUT_EXTRA_UDP",
+        "RELAY_INPUT_CLOSED_TCP", "RELAY_INPUT_CLOSED_UDP",
     }
     for key in [*keys, "NODE_ROLE"]:
         assert re.search(rf"^#? ?{key}=", example, re.M), key
@@ -955,3 +1033,184 @@ def test_relay_host_pins_phase1_only_against_the_environment(
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "MODE=0" in proc.stdout, "the prelude pins the real-deploy mode"
     assert "OPT-IN=1" in proc.stdout, "a test body can still ask for inspection mode"
+
+
+# --------------------------------------------------------------------------- #
+# The input filter (table inet vpnrelay_input) and its dead-man in the deploy
+# --------------------------------------------------------------------------- #
+def _helper_assignment(name: str) -> str:
+    m = re.search(rf'^{name}="(?:\$\{{{name}:-)?([^"}}]+)\}}?"$', _read(RELAY_HELPER_SRC), re.M)
+    assert m, name
+    return m.group(1)
+
+
+def test_deploy_and_helper_name_the_same_input_filter_pieces() -> None:
+    text = _read(DEPLOY_SH)
+    helper = _read(RELAY_HELPER_SRC)
+    assert 'RELAY_INPUT_TABLE="vpnrelay_input"' in text and 'INPUT_TABLE="vpnrelay_input"' in helper
+    assert f'RELAY_DEADMAN_TIMER="{DEADMAN_TIMER}"' in text
+    assert 'readonly DEADMAN_UNIT="vpn-relay-input-deadman"' in helper
+    run_dir = _helper_assignment("RELAY_RUN_DIR")
+    assert 'INPUT_PENDING="${RELAY_RUN_DIR}/input.pending"' in helper
+    assert f'RELAY_INPUT_PENDING="${{RELAY_INPUT_PENDING:-{run_dir}/input.pending}}"' in text
+    assert _helper_assignment("RELAY_STATE_DIR") == "/etc/vpn-relay"
+    assert 'INPUT_MARKER="${RELAY_STATE_DIR}/input.confirmed"' in helper
+
+
+def test_relay_tests_never_reach_the_relays_own_input_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """deploy.sh runs this suite ON the relay: the rollback's `rm -f` of the pending
+    note and the helper's marker reads must hit tmp, even past a leaked override."""
+    for name in ("RELAY_STATE_DIR", "RELAY_RUN_DIR", "RELAY_INPUT_PENDING"):
+        monkeypatch.setenv(name, f"/nonexistent/leak/{name}")
+    host = RelayHost(tmp_path)
+    proc = host.run('echo "PATHS=$RELAY_STATE_DIR|$RELAY_RUN_DIR|$RELAY_INPUT_PENDING"\n')
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    (line,) = [ln for ln in proc.stdout.splitlines() if ln.startswith("PATHS=")]
+    assert all(p.startswith(str(tmp_path)) for p in line.removeprefix("PATHS=").split("|")), line
+
+
+def test_relay_backup_holds_the_input_table(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    host.on_this_version()
+    assert host.phase2().returncode == 0
+    (archive,) = host.backups.glob("backup-relay-abc1234-*.tar.gz")
+    dump = subprocess.run(
+        ["tar", "-xzOf", str(archive), "./var/lib/vpn-bot-deploy/relay-input-table.pre-deploy.nft"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert dump == _read(INPUT_LISTING)
+
+
+def test_deploy_ok_carries_the_input_filter_status(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    host.on_this_version()
+    proc = host.phase2()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "  input filter     : OK (tcp 22; confirmed 2026-11-11T10:00:00Z)\n" in proc.stdout
+    assert "input-confirm" not in proc.stdout, "a confirmed set asks for nothing"
+
+
+def test_deploy_ok_with_a_pending_confirmation_says_so_not_ok(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    (host.sd / "restart_arms_deadman").touch()
+    (host.sd / "input_status").write_text("PENDING CONFIRM (reverts at 2026-11-12 10:05:00 UTC)\n", encoding="utf-8")
+    proc = host.phase2()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "  input filter     : PENDING CONFIRM (reverts at 2026-11-12 10:05:00 UTC)\n" in proc.stdout
+    assert "input filter     : OK" not in proc.stdout
+    after = proc.stdout.split("=============================\n", 1)[1]
+    assert "Open a NEW ssh session to this relay and run, within 5 minutes:" in after
+    assert f"{host.helper} input-confirm" in after
+    assert "otherwise the filter removes itself" in after
+    assert "This session does not count" in after
+    assert host.state(f"{DEADMAN_TIMER}.active") == "active", "a successful deploy leaves the dead-man armed"
+    assert host.pending.exists()
+
+
+def test_deploy_ok_survives_a_failing_input_status(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    host.run(":")  # nothing; then make input-status fail
+    (host.repo / "scripts" / "vpn-relay-apply").write_text(
+        FAKE_HELPER.replace('if [[ "$1" == "input-status" ]]; then', 'if [[ "$1" == "input-status" ]]; then exit 3;'),
+        encoding="utf-8")
+    proc = host.phase2()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "  input filter     : unknown (vpn-relay-apply input-status failed)\n" in proc.stdout
+    assert "ROLLBACK" not in proc.stderr
+
+
+def test_rollback_removes_an_input_filter_that_did_not_exist(tmp_path: Path) -> None:
+    """The hand-made relay had no input filter: the deploy's apply added one and armed
+    its dead-man; the rollback takes both away."""
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    (host.sd / "restart_arms_deadman").touch()
+    host.fail_check(13)
+    proc = host.phase2()
+    assert proc.returncode == 1
+    assert host.state("input_table") == "<absent>"
+    assert host.state(f"{DEADMAN_TIMER}.active") == "inactive" and not host.pending.exists()
+    assert "delete table inet vpnrelay_input (absent before the deploy): rc=0" in proc.stderr
+    assert f"{DEADMAN_TIMER} stopped, pending note dropped: now inactive" in proc.stderr
+    assert host.state("table") == "", "the forwarding table is back as before"
+    _assert_no_main_piece_touched(host)
+
+
+def test_rollback_restores_a_confirmed_input_filter_and_stops_the_new_dead_man(tmp_path: Path) -> None:
+    """A changed TCP set: the deploy's apply armed a dead-man for it. The confirmed
+    filter from before comes back from its dump, and that dead-man must not take it
+    off five minutes later."""
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    host.on_this_version()
+    (host.sd / "restart_arms_deadman").touch()
+    host.fail_check(17)
+    proc = host.phase2()
+    assert proc.returncode == 1
+    restored = _read(host.logs / "nft-restore-input.nft")
+    assert restored == "table inet vpnrelay_input\ndelete table inet vpnrelay_input\n" + _read(INPUT_LISTING)
+    assert host.state("input_table") == ""
+    assert "re-apply the saved table inet vpnrelay_input: rc=0" in proc.stderr
+    assert host.state(f"{DEADMAN_TIMER}.active") == "inactive" and not host.pending.exists()
+
+
+def test_rollback_removes_a_filter_that_was_waiting_for_input_confirm(tmp_path: Path) -> None:
+    """Restored, an unconfirmed filter could outlive its dead-man: removed instead —
+    the safe direction (sshd is reachable without the filter)."""
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    host.on_this_version(pending=True)
+    host.fail_check(13)
+    proc = host.phase2()
+    assert proc.returncode == 1
+    assert host.state("input_table") == "<absent>"
+    assert not (host.logs / "nft-restore-input.nft").exists()
+    assert "was waiting for input-confirm before the deploy — removed instead of restored" in proc.stderr
+    assert host.state(f"{DEADMAN_TIMER}.active") == "inactive" and not host.pending.exists()
+
+
+def test_relay_phase2_refuses_when_the_input_table_cannot_be_backed_up(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    proc = host.run(
+        'relay_snapshot_prestate\nRELAY_PRE_INPUT_TABLE=present\nRELAY_UNIT_STATE="$(relay_unit_state "$APP_DIR")"\n'
+        "relay_phase2\necho PHASE2-RETURNED\n"
+    )
+    assert proc.returncode == 1
+    assert "table inet vpnrelay_input was present in Phase 1 but cannot be listed now" in proc.stderr
+    assert "nothing was changed" in proc.stderr
+    assert not [c for c in host.log("systemctl") if c.split()[1] in {"restart", "enable", "daemon-reload"}]
+
+
+def test_relay_phase1_refuses_a_relay_without_an_ssh_port(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    _stub(host.stub / "ss", 'echo "tcp LISTEN 0 4096 127.0.0.1:22 0.0.0.0:* users:((\\"sshd\\",pid=1,fd=3))"\n')
+    wt = tmp_path / "wt"
+    (wt / "scripts").mkdir(parents=True)
+    (wt / "scripts" / "vpn-relay-apply").write_text(_read(RELAY_HELPER_SRC), encoding="utf-8")
+    env = tmp_path / "relay.env"
+    env.write_text("NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=150.251.152.243\nRELAY_WAN_IFACE=eth0\n", encoding="utf-8")
+    proc = host.run(f'ENV_FILE="{env}"; WT="{wt}"\nrelay_phase1\necho PHASE1-RETURNED\n')
+    assert proc.returncode == 1
+    assert "PHASE1-RETURNED" not in proc.stdout
+    assert "no SSH port found" in proc.stderr and "nothing was changed" in proc.stderr
+    assert not [c for c in host.log("nft") if not c.startswith("nft list")]
+    assert host.log("systemd-run") == []
+
+
+def test_relay_rollback_names_every_input_filter_step() -> None:
+    """The rollback report covers the input table and the dead-man in every branch."""
+    text = _read(DEPLOY_SH)
+    body = text[text.index("\nrelay_rollback() {") :]
+    body = body[: body.index("\n}\n", 1)]
+    i_table = body.index('if [[ "$RELAY_PRE_DEADMAN" == "active" ]]')
+    assert body.index("re-apply the saved table ip") < i_table, "after the forwarding table"
+    assert i_table < body.index('systemctl stop "$RELAY_DEADMAN_TIMER"') < body.index('rm -f "$RELAY_INPUT_PENDING"')
+    assert body.index('rm -f "$RELAY_INPUT_PENDING"') < body.index("net.ipv4.ip_forward pre-deploy"), "before sysctls"
