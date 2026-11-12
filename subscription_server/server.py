@@ -1,18 +1,27 @@
 
+import asyncio
 import hashlib
+import ipaddress
+import json
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 from aiohttp import web
 
 from bot.rate_limit import RateLimitExceeded, RateLimiter
+from models.dto import Relay
 from subscription_server.config import SubscriptionConfig
 from subscription_server.render import SubscriptionRenderError, render_subscription
 from subscription_server.store import BundleStoreUnavailable, ReadOnlyBundleStore
 
 logger = logging.getLogger(__name__)
+
+# (host, port, timeout seconds) -> did a TCP connection open. Only ever called with
+# the probing relay's own address (see _relay_ssh_probe_handler).
+ProbeConnect = Callable[[str, int, float], Awaitable[bool]]
 
 _STORE_KEY: web.AppKey[ReadOnlyBundleStore] = web.AppKey("subscription_store", ReadOnlyBundleStore)
 _CONFIG_KEY: web.AppKey[SubscriptionConfig] = web.AppKey("subscription_config", SubscriptionConfig)
@@ -20,14 +29,29 @@ _LIMITER_KEY: web.AppKey[RateLimiter] = web.AppKey("subscription_limiter", RateL
 # Wall clock (unix seconds) the renderer reads once per response — only the
 # rotating spiderX of bundle children depends on it. Injectable for tests.
 _CLOCK_KEY: web.AppKey[Callable[[], float]] = web.AppKey("subscription_clock")
+# The TCP connect of POST /relay/ssh-probe. Injectable for tests (every test client
+# is 127.0.0.1, which the handler refuses to connect to).
+_PROBE_CONNECT_KEY: web.AppKey[ProbeConnect] = web.AppKey("relay_probe_connect")
+
+# POST /relay/ssh-probe — main proves to a relay that a NEW TCP connection from the
+# outside reaches its SSH ports through the relay's input filter (docs/relay.md).
+RELAY_PROBE_PATH = "/relay/ssh-probe"
+RELAY_PROBE_MAX_PORTS = 4
+RELAY_PROBE_CONNECT_TIMEOUT = 5.0
+# Its own limiter bucket, fixed and always on: every accepted probe makes this host
+# open up to RELAY_PROBE_MAX_PORTS connections, so the limit must not depend on the
+# subscription's SUBSCRIPTION_RATE_LIMIT_* (which may be 0). A relay's apply asks at
+# most twice per run.
+RELAY_PROBE_RATE_WINDOW_SECONDS = 60
+RELAY_PROBE_RATE_BURST = 6
 
 # Tokens are ``secrets.token_urlsafe(32)`` — 43 URL-safe characters. Anything
 # outside this shape cannot be a token we issued, so it is rejected before the
 # database is touched: a public endpoint must not turn junk paths into queries.
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
-# Nothing about this endpoint reads a request body, so cap it low: a caller
-# cannot make us buffer anything.
+# GET /sub reads no body and POST /relay/ssh-probe reads at most a few ports, so cap
+# it low: a caller cannot make us buffer anything.
 _MAX_BODY_BYTES = 4 * 1024
 
 
@@ -207,17 +231,173 @@ async def _subscription_handler(request: web.Request) -> web.Response:
         return _not_found()
 
 
+async def tcp_connect(host: str, port: int, timeout: float) -> bool:
+    """Open a TCP connection to *host*:*port* and close it; True when it opened.
+
+    A connection that opens is the whole answer: nothing is sent or read, so the
+    far end (sshd) sees a client that came and went before its banner.
+    """
+    try:
+        _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
+    except (OSError, TimeoutError):
+        return False
+    writer.close()
+    with suppress(Exception):
+        await asyncio.wait_for(writer.wait_closed(), 1.0)
+    return True
+
+
+class _BadProbeRequest(ValueError):
+    """The body of a relay's ssh-probe is not 1 to 4 distinct ports in 1..65535."""
+
+
+def _probe_ports(raw: bytes) -> tuple[int, ...]:
+    """The ports of a probe request: a JSON array of 1 to 4 distinct integers, 1..65535."""
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise _BadProbeRequest("body is not JSON") from exc
+    if not isinstance(value, list) or not 1 <= len(value) <= RELAY_PROBE_MAX_PORTS:
+        raise _BadProbeRequest(f"body must be a JSON array of 1 to {RELAY_PROBE_MAX_PORTS} ports")
+    # `type(...) is int`: a JSON true/false is a Python bool, which isinstance() calls an int.
+    if not all(type(port) is int and 1 <= port <= 65535 for port in value):
+        raise _BadProbeRequest("every port must be an integer in 1..65535")
+    if len(set(value)) != len(value):
+        raise _BadProbeRequest("ports must be distinct")
+    return tuple(value)
+
+
+def _probe_caller(remote: str | None) -> ipaddress.IPv4Address | None:
+    """The peer of a probe as the IPv4 address main may connect back to, or None.
+
+    Relays are IPv4 (their source IPs are IPv4 networks), so an IPv4-mapped IPv6 peer
+    is unwrapped and any other IPv6 peer is nobody. Loopback, unspecified, multicast,
+    link-local and reserved addresses are refused whatever a relay's source IPs say:
+    the probe connects to the caller, and none of those is a relay out there.
+    """
+    if not remote:
+        return None
+    try:
+        address = ipaddress.ip_address(remote)
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is None:
+            return None
+        address = address.ipv4_mapped
+    if (
+        address.is_loopback
+        or address.is_unspecified
+        or address.is_multicast
+        or address.is_link_local
+        or address.is_reserved
+    ):
+        return None
+    return address
+
+
+def _relay_of(relays: tuple[Relay, ...], address: ipaddress.IPv4Address) -> Relay | None:
+    """The first ENABLED relay whose source IPs cover *address*."""
+    for relay in relays:
+        if relay.enabled and any(address in network for network in relay.source_ips):
+            return relay
+    return None
+
+
+async def _relay_ssh_probe_handler(request: web.Request) -> web.Response:
+    """Serve ``POST /relay/ssh-probe``: TCP-connect back to the caller's SSH ports.
+
+    A relay's apply asks this after it installed an input filter that is not
+    confirmed yet (scripts/vpn-relay-apply): every port that answers proves that a
+    NEW connection from the outside passes the filter — what ``input-confirm`` from
+    a new ssh session proves by hand.
+
+    * Rate limit first, keyed by the peer, so a 429 cannot tell a relay from anyone.
+    * The peer must be inside the source IPs of an ENABLED relay of the ``relays``
+      table, read live; otherwise — and while ``SUBSCRIPTION_ENABLED=false``, and
+      on any internal fault — the same empty 404 as every refusal of this server.
+    * Only then the body is judged: a JSON array of 1 to 4 distinct ports in 1..65535,
+      anything else is an empty 400.
+    * The connections go to the caller's own address and nowhere else — no address
+      is taken from the body — concurrently, 5 s each. The answer is
+      ``{"<port>": "ok" | "fail"}``.
+    """
+    config: SubscriptionConfig = request.app[_CONFIG_KEY]
+    limiter: RateLimiter = request.app[_LIMITER_KEY]
+    store: ReadOnlyBundleStore = request.app[_STORE_KEY]
+    try:
+        bucket = _client_key(request)
+        try:
+            limiter.check(
+                bucket, "relay-ssh-probe", RELAY_PROBE_RATE_WINDOW_SECONDS, burst=RELAY_PROBE_RATE_BURST
+            )
+        except RateLimitExceeded as exc:
+            logger.warning(
+                "relay ssh-probe: rate limit hit for client %s — %d requests per %ds exhausted, "
+                "answering 429 (Retry-After: %ds)",
+                _bucket_tag(bucket),
+                RELAY_PROBE_RATE_BURST,
+                RELAY_PROBE_RATE_WINDOW_SECONDS,
+                exc.retry_after,
+            )
+            return web.Response(
+                status=429, text="", content_type="text/plain", headers={"Retry-After": str(exc.retry_after)}
+            )
+        if not config.enabled:
+            return _not_found()
+        caller = _probe_caller(request.remote)
+        if caller is None:
+            return _not_found()
+        try:
+            relays = await store.load_relays()
+        except BundleStoreUnavailable:
+            return _not_found()
+        relay = _relay_of(relays.relays, caller)
+        if relay is None:
+            # Routine for anyone who finds the route: quiet, and no address in the log.
+            logger.debug("relay ssh-probe: client %s is no enabled relay — 404", _bucket_tag(bucket))
+            return _not_found()
+        try:
+            ports = _probe_ports(await request.read())
+        except (web.HTTPRequestEntityTooLarge, _BadProbeRequest) as exc:
+            reason = str(exc) if isinstance(exc, _BadProbeRequest) else "body too large"
+            logger.info("relay ssh-probe: relay %s sent a bad request (%s) — 400", relay.name, reason)
+            return web.Response(status=400, text="", content_type="text/plain")
+
+        connect = request.app[_PROBE_CONNECT_KEY]
+        target = str(caller)
+        opened = await asyncio.gather(*(connect(target, port, RELAY_PROBE_CONNECT_TIMEOUT) for port in ports))
+        answer = {str(port): ("ok" if ok else "fail") for port, ok in zip(ports, opened, strict=True)}
+        logger.info(
+            "relay ssh-probe: relay %s — tcp %s",
+            relay.name,
+            ", ".join(f"{port} {verdict}" for port, verdict in answer.items()),
+        )
+        return web.Response(
+            status=200,
+            text=json.dumps(answer, separators=(",", ":")),
+            content_type="application/json",
+            headers={"Cache-Control": "no-store"},
+        )
+    except Exception:
+        logger.warning("relay ssh-probe: unexpected error — answering 404", exc_info=True)
+        return _not_found()
+
+
 def build_app(
     store: ReadOnlyBundleStore,
     config: SubscriptionConfig,
     *,
     clock: Callable[[], float] = time.time,
+    probe_connect: ProbeConnect = tcp_connect,
 ) -> web.Application:
-    """Build the aiohttp app with its ONE route, ``GET /sub/{token}``.
+    """Build the aiohttp app with its two routes, ``GET /sub/{token}`` and
+    ``POST /relay/ssh-probe``.
 
     No health route and no listing route on purpose: anything else on this
     process would be reachable from the internet once the public TLS listener is
-    on, and the endpoint's whole job is to answer exactly one question.
+    on. The second route answers only the relays of the ``relays`` table, and
+    only about their own SSH ports (see :func:`_relay_ssh_probe_handler`).
     """
     install_log_guards()
     app = web.Application(client_max_size=_MAX_BODY_BYTES)
@@ -225,5 +405,7 @@ def build_app(
     app[_CONFIG_KEY] = config
     app[_LIMITER_KEY] = RateLimiter()
     app[_CLOCK_KEY] = clock
+    app[_PROBE_CONNECT_KEY] = probe_connect
     app.router.add_get("/sub/{token}", _subscription_handler)
+    app.router.add_post(RELAY_PROBE_PATH, _relay_ssh_probe_handler)
     return app

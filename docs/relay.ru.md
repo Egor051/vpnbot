@@ -145,19 +145,28 @@ table inet vpnrelay_input {
   порту): `apply` сначала ставит dead-man,
   `systemd-run --on-active=300 --unit=vpn-relay-input-deadman vpn-relay-apply input-off`, и
   только потом применяет таблицы. Если dead-man не ставится — не применяется ничего (код `9`).
-  Деплой тогда заканчивается строкой
+- **Подтверждает основной сервер** ([ниже](#main-подтверждает-фильтр-post-relayssh-probe)):
+  сразу после такого apply relay просит main подключиться к его портам SSH снаружи. Если
+  отвечают все, фильтр подтверждается ровно так, как это сделал бы `input-confirm`, и деплой
+  заканчивается строкой
 
   ```
-  input filter     : PENDING CONFIRM (reverts at 2026-11-12 10:05:00 UTC)
+  input filter     : CONFIRMED by main probe (tcp 22; 2026-11-12 10:00:05 UTC)
+  ```
+
+  и делать ничего не нужно. Если main подтвердить не смог, деплой заканчивается строкой
+
+  ```
+  input filter     : PENDING CONFIRM (reverts at 2026-11-12 10:05:00 UTC) — main probe did not confirm it: <причина>
   ```
 
   вместо `OK` и инструкцией под ней.
-- **Откройте НОВУЮ ssh-сессию** к relay и в течение 5 минут выполните
-  `vpn-relay-apply input-confirm`: таймер останавливается, маркер с хешем записывается. Иначе
-  таймер запустит `input-off`: снимется только `table inet vpnrelay_input` (проброс не
-  трогается), причина уйдёт в журнал (`journalctl -u vpn-relay-input-deadman`, или
-  `-t vpn-relay-apply` при ручном запуске), и relay будет доступен ровно как раньше.
-  Повторите деплой и подтвердите вовремя.
+- **Или вручную: откройте НОВУЮ ssh-сессию** к relay и в течение 5 минут выполните
+  `vpn-relay-apply input-confirm`: таймер останавливается, маркер с хешем записывается. Если
+  нет ни того, ни другого, таймер запустит `input-off`: снимется только
+  `table inet vpnrelay_input` (проброс не трогается), причина уйдёт в журнал
+  (`journalctl -u vpn-relay-input-deadman`, или `-t vpn-relay-apply` при ручном запуске), и
+  relay будет доступен ровно как раньше. Повторите деплой и подтвердите вовремя.
 - **Сессия, из которой шёл деплой, ничего не доказывает**: она едет по established-соединению,
   которое фильтр пропускает всегда. `input-confirm` проверяет, что его собственная ssh-сессия
   (ближайший предок-`sshd` команды) началась после применения фильтра, и иначе отказывает — в
@@ -167,18 +176,61 @@ table inet vpnrelay_input {
   полностью автоматическим. UDP-порты подтверждения не требуют никогда (SSH они стоить не могут).
 - При загрузке `vpn-relay.service` применяет обе таблицы: подтверждённому набору ничего не
   нужно, неподтверждённый снова ставит dead-man.
-- `vpn-relay-apply input-status` печатает состояние одной строкой — `OK (tcp 22; confirmed …)`,
-  `PENDING CONFIRM (reverts at …)`, `ABSENT — the dead-man removed it at …`,
-  `off (RELAY_INPUT_FILTER=off)`; DEPLOY OK печатает её как `input filter`.
+- `vpn-relay-apply input-status` печатает состояние одной строкой — `OK (tcp 22; confirmed … by
+  ssh-session|main-probe)`, `CONFIRMED by main probe (tcp 22; …)` (сразу после apply, чья проба
+  его подтвердила), `PENDING CONFIRM (reverts at …) — <почему main не подтвердил>`,
+  `ABSENT — the dead-man removed it at …`, `off (RELAY_INPUT_FILTER=off)`; DEPLOY OK печатает её
+  как `input filter`. В маркере записано, кто подтвердил: `confirmed_by=ssh-session` или
+  `main-probe`.
+
+#### Main подтверждает фильтр: `POST /relay/ssh-probe`
+
+`input-confirm` доказывает, что **новое** TCP-соединение снаружи проходит через фильтр к порту
+SSH. То же может доказать основной сервер — и тогда деплою relay не нужна и ssh-сессия:
+
+1. После `apply`, оставившего фильтр в PENDING (dead-man взведён, таблицы и sysctl на месте),
+   relay отправляет POST со своими портами SSH — JSON-массив, например `[22]` — на endpoint
+   подписки main, `RELAY_CONFIRM_URL` (по умолчанию `https://<RELAY_CHECK_SNI>:2096/relay/ssh-probe`).
+   curl проверяет сертификат, не использует прокси, не следует редиректам и всегда соединяется
+   с `RELAY_UPSTREAM_IPV4` (`--resolve`): запрос не уходит никуда, кроме основного сервера.
+2. Main отвечает только вызывающему, чей адрес входит в **source IPs включённого relay** в
+   админ-панели (таблица `relays` читается вживую); всем остальным, а также на любой запрос при
+   `SUBSCRIPTION_ENABLED=false` — обычный пустой `404` этого endpoint'а. Тело, в котором не 1–4
+   разных порта из 1..65535, — `400`. Затем main делает TCP connect обратно **на адрес самого
+   вызывающего** — никогда на адрес из запроса — к каждому порту, параллельно, по 5 с, и отвечает
+   `{"22":"ok"}` (или `"fail"`). У него свой rate limit (6 запросов в минуту на адрес, до проверки
+   relay), в лог — имя relay и вердикты, ничего больше.
+3. **Все порты SSH `ok`** → relay подтверждает фильтр тем же путём, что и `input-confirm`
+   (dead-man остановлен, маркер записан с `confirmed_by=main-probe`). **Всё остальное** — нет URL,
+   нет `curl`, main недоступен (один повтор), `404`, порт с `fail`, больше 4 портов SSH, порт SSH,
+   который ещё и пробрасывается (main попал бы через DNAT сам в себя), — оставляет фильтр в
+   PENDING с причиной в `input-status` и в DEPLOY OK; dead-man откатит его, если не придёт
+   `input-confirm`, который работает ровно как раньше. Проба никогда не роняет `apply`.
+
+Что для этого нужно:
+
+- **На main**: endpoint подписки опубликован (`SUBSCRIPTION_ENABLED=true`,
+  `SUBSCRIPTION_PUBLIC_PORT`, TLS — [docs/subscription.ru.md](subscription.ru.md)), и relay
+  **добавлен в админ-панели, включён, а адрес, с которого он ходит на main, есть в его source IPs**
+  — до первого деплоя relay.
+- **На relay**: `curl` и URL — `RELAY_CHECK_SNI` для умолчания
+  (`https://<RELAY_CHECK_SNI>:2096/relay/ssh-probe`: на main, у которого `XRAY_SNI` — его
+  собственный домен, как с self-steal decoy, это домен и порт подписки) или
+  `RELAY_CONFIRM_URL=https://<домен подписки>[:<порт>]` (путь по умолчанию `/relay/ssh-probe`).
+  `RELAY_CONFIRM_URL=off` выключает пробу: только ручное подтверждение.
+
+Неудачная проба с URL по умолчанию так и говорит (`… set RELAY_CONFIRM_URL`): сертификат, не
+подходящий к `RELAY_CHECK_SNI`, или пустой `:2096` значат, что подписка живёт в другом месте.
 
 #### Как открыть порт
 
 Для сервиса на самом relay, который должен быть доступен снаружи (скажем, exporter на 9100):
 
 1. `RELAY_INPUT_EXTRA_TCP=9100` (или `RELAY_INPUT_EXTRA_UDP=…`) в `/opt/vpn-service/.env`;
-2. `sudo FORCE=1 bash scripts/redeploy.sh` — новый TCP-порт меняет набор, поэтому DEPLOY OK
-   скажет PENDING CONFIRM;
-3. в НОВОЙ ssh-сессии: `vpn-relay-apply input-confirm`.
+2. `sudo FORCE=1 bash scripts/redeploy.sh` — новый TCP-порт меняет набор: ставится dead-man, и
+   его подтверждает проба main (DEPLOY OK: `CONFIRMED by main probe`);
+3. только если DEPLOY OK говорит PENDING CONFIRM: в НОВОЙ ssh-сессии
+   `vpn-relay-apply input-confirm`.
 
 Порт, который слушает на публичном адресе, но фильтром **не** пропускается, — ошибка `check`
 (код `18`, `tcp/9100 listening but filtered: …`), а каждый деплой заканчивается `check`, так что
@@ -209,6 +261,7 @@ Hysteria2 — `HYSTERIA2_PORT`): необязательный `export`, проб
 | `RELAY_INPUT_EXTRA_TCP` | — | TCP-порты через запятую, которые входной фильтр пропускает помимо SSH. Изменение снова требует `input-confirm`. |
 | `RELAY_INPUT_EXTRA_UDP` | — | То же для UDP (без подтверждения). |
 | `RELAY_INPUT_CLOSED_TCP`, `RELAY_INPUT_CLOSED_UDP` | — | Порты, которые слушают на публичном адресе, но снаружи должны оставаться закрытыми: `check` не называет их «listening but filtered». Порт не может быть одновременно extra и closed; порт SSH закрыть нельзя. |
+| `RELAY_CONFIRM_URL` | `https://<RELAY_CHECK_SNI>:2096/relay/ssh-probe`; без `RELAY_CHECK_SNI` — нет | Куда `apply` обращается к main, чтобы [подтвердить ожидающий фильтр](#main-подтверждает-фильтр-post-relayssh-probe): `https://<DNS-имя>[:<порт>][/<путь>]` (без пути — `/relay/ssh-probe`; адрес, `http`, query или userinfo отклоняются), всегда на `RELAY_UPSTREAM_IPV4`. `off` — без пробы. |
 
 Значение вне диапазона, со знаком, единицей измерения или ведущим нулём отвергается с кодом
 `3` до каких-либо изменений — так же, как неверный порт.
@@ -217,11 +270,11 @@ Hysteria2 — `HYSTERIA2_PORT`): необязательный `export`, проб
 
 | Команда | Что делает |
 |---|---|
-| `apply` | Рендер + атомарное применение обеих таблиц (если набор TCP-портов входного фильтра не подтверждён — сначала dead-man), затем sysctl-файл и три значения в рантайме (сначала conntrack, `ip_forward=1` последним). Это запускает unit. |
+| `apply` | Рендер + атомарное применение обеих таблиц (если набор TCP-портов входного фильтра не подтверждён — сначала dead-man), затем sysctl-файл и три значения в рантайме (сначала conntrack, `ip_forward=1` последним); для неподтверждённого набора последней — [проба main](#main-подтверждает-фильтр-post-relayssh-probe). Это запускает unit. |
 | `check` | Только чтение: обе живые таблицы совпадают с рендером (счётчики не сравниваются; при расхождении печатается diff), каждый порт, слушающий на публичном адресе, пропущен фильтром или объявлен закрытым, `ip_forward=1`, оба значения conntrack равны `.env`, TCP-connect к upstream на **каждый** пробрасываемый TCP-порт и TLS-handshake, если задан `RELAY_CHECK_SNI`. Ожидающее подтверждение показывается, а не считается ошибкой; таблица conntrack, заполненная больше чем на 80 %, — предупреждение. Им заканчивается каждый деплой. |
-| `check --dry-run` | Проверить `.env`, найти порты SSH и отрендерить; сказать, подтверждён ли набор TCP-портов; под root ещё `nft -c` (проверка синтаксиса, ничего не применяется). Это запускает Phase 1 деплоя из checkout. |
+| `check --dry-run` | Проверить `.env`, найти порты SSH и отрендерить; сказать, подтверждён ли набор TCP-портов и какой URL возьмёт проба main; под root ещё `nft -c` (проверка синтаксиса, ничего не применяется). Это запускает Phase 1 деплоя из checkout. |
 | `show` | Напечатать отрендеренный ruleset. |
-| `input-confirm` | Оставить входной фильтр: из НОВОЙ ssh-сессии, пока взведён dead-man. Останавливает таймер, пишет `/etc/vpn-relay/input.confirmed`. |
+| `input-confirm` | Оставить входной фильтр: из НОВОЙ ssh-сессии, пока взведён dead-man. Останавливает таймер, пишет `/etc/vpn-relay/input.confirmed` (`confirmed_by=ssh-session`) — тот же путь, что у пробы main. |
 | `input-off` | Снять только `table inet vpnrelay_input`, причину — в журнал. Это запускает dead-man; вручную — до следующего apply. |
 | `input-status` | Состояние входного фильтра одной строкой (его печатает DEPLOY OK). |
 
@@ -289,21 +342,26 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
   что репозиторий воспроизводит его 1:1 (код `16`, пока нет [входного фильтра](#входной-фильтр),
   `15`, пока не выставлены значения [conntrack](#conntrack), PASS — после обоих). Dry-run
   называет найденные порты SSH и говорит, подтверждён ли набор TCP-портов входного фильтра, то
-  есть закончится ли Phase 2 строкой PENDING CONFIRM; порт, который слушает, но был бы закрыт
-  фильтром, отмечается отдельно: `check` в Phase 2 откатил бы деплой.
+  есть поставит ли Phase 2 dead-man, и URL пробы main, которая его подтвердит; порт, который
+  слушает, но был бы закрыт фильтром, отмечается отдельно: `check` в Phase 2 откатил бы деплой.
 - **Phase 2**: бэкап живых `nft list table ip vpnrelay` и `nft list table inet vpnrelay_input`,
-  установленного хелпера, unit'а и sysctl-файла (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; ради бэкапа ничего не
+  установленного хелпера, unit'а, sysctl-файла и маркера подтверждения
+  `/etc/vpn-relay/input.confirmed` (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; ради бэкапа ничего не
   останавливается); `git reset --hard origin/main`; установка `vpn-relay-apply` через
   `OUT_OF_REPO_HELPERS` (роль `relay`) и `deploy/relay/vpn-relay.service` как есть;
   `daemon-reload`, `enable`, `restart vpn-relay` (установленные потоки сохраняют NAT в
-  conntrack на миллисекундный разрыв); проверка `vpn-relay-apply check`. В DEPLOY OK есть
-  `input filter : …` из `vpn-relay-apply input-status`; при `PENDING CONFIRM` за ним идёт
-  инструкция выполнить `input-confirm` из НОВОЙ ssh-сессии в течение 5 минут.
+  conntrack на миллисекундный разрыв; неподтверждённый набор здесь же подтверждает проба main);
+  проверка `vpn-relay-apply check`. В DEPLOY OK есть `input filter : …` из
+  `vpn-relay-apply input-status` — `CONFIRMED by main probe (…)`, и делать ничего не нужно, или
+  `PENDING CONFIRM (…) — <причина>`, за которым идут причина и инструкция выполнить
+  `input-confirm` из НОВОЙ ssh-сессии в течение 5 минут.
 - **Любой сбой** откатывает: прежний checkout, хелпер, unit и sysctl-файл (или их отсутствие),
   сохранённая таблица проброса применяется заново одной транзакцией, входной фильтр — как был:
   подтверждённый восстанавливается из дампа, отсутствовавший снимается, ждавший `input-confirm`
   тоже снимается (восстановленный, он мог бы пережить свой dead-man; снять — безопасное
-  направление), а dead-man, поставленный деплоем, останавливается; восстанавливаются enabled/active
+  направление), маркер подтверждения — как был (подтверждение, которое проба main записала во
+  время рестарта, относится к набору, которого больше нет в живых), а dead-man, поставленный
+  деплоем, останавливается; восстанавливаются enabled/active
   unit'а, прежний `ip_forward` и прежние значения conntrack в рантайме (каждое перечитывается;
   значение, которое до деплоя не читалось — nf_conntrack не был загружен, — остаётся таким, как
   его выставил `apply`). Деплой выходит с ненулевым кодом и отчётом об откате.
@@ -335,7 +393,14 @@ install -m 0600 -o root -g root /opt/vpn-service/deploy/relay/relay.env.example 
 ```
 
 Отредактируйте `/opt/vpn-service/.env`: `RELAY_UPSTREAM_IPV4` = IPv4 основного сервера и
-желательно `RELAY_CHECK_SNI` = `XRAY_SNI` основного сервера. Затем проверка и деплой:
+желательно `RELAY_CHECK_SNI` = `XRAY_SNI` основного сервера — из него же собирается URL, по
+которому relay просит пробу main (`https://<RELAY_CHECK_SNI>:2096/relay/ssh-probe`); если endpoint
+подписки на другом домене или порту, задайте ещё `RELAY_CONFIRM_URL=https://<тот домен>:<порт>`.
+
+До первого деплоя на **основном сервере**: A-запись DNS для relay и relay в админ-панели,
+**включённый**, с egress-IPv4 relay в source IPs (шаги 1–2 ниже) — проба main отвечает только
+адресу включённого relay. (Выключите «в подписках» до конца деплоя, если новые подписки не должны
+получить relay-участников на несколько минут раньше.) Затем проверка и деплой:
 
 ```bash
 cd /opt/vpn-service && sudo CHECK=1 bash scripts/redeploy.sh
@@ -349,8 +414,10 @@ cd /opt/vpn-service && sudo FORCE=1 bash scripts/redeploy.sh
 запуск ответит «nothing to deploy» — ровно как на основном сервере. Дальше обновления
 обычные: `sudo CHECK=1 bash scripts/redeploy.sh`, затем `sudo bash scripts/redeploy.sh`.
 
-Первый деплой включает [входной фильтр](#входной-фильтр) и заканчивается строкой `input filter :
-PENDING CONFIRM (reverts at …)`: в течение 5 минут откройте **новую** ssh-сессию и выполните
+Первый деплой включает [входной фильтр](#входной-фильтр), проба main его подтверждает, и
+DEPLOY OK говорит `input filter : CONFIRMED by main probe (…)` — запускать ничего не нужно. Только
+если там `PENDING CONFIRM (reverts at …) — <причина>`: исправьте названное или в течение 5 минут
+откройте **новую** ssh-сессию и выполните
 
 ```bash
 vpn-relay-apply input-confirm
@@ -360,7 +427,7 @@ vpn-relay-apply input-confirm
 `nft list table inet vpnrelay_input`, `/usr/local/sbin/vpn-relay-apply input-status`,
 `/usr/local/sbin/vpn-relay-apply check`.
 
-Затем на **основном сервере**:
+На **основном сервере** (шаги 1–2 — до первого деплоя relay, см. выше):
 
 1. A-запись DNS для relay — например, `relay2.anycastedge.net` → IPv4 relay — в Cloudflare
    **без проксирования** (см. [DNS](#dns--указывайте-имя-а-не-адрес)).

@@ -7,6 +7,7 @@ path a client takes: bundle rows written by the bot, read live by a separate
 read-only process, rendered by the same link builders the single-key view uses.
 """
 
+import asyncio
 import base64
 import html
 import logging
@@ -21,7 +22,9 @@ from types import SimpleNamespace
 from urllib.parse import quote, unquote
 
 import pytest
+from aiohttp import ClientResponse, web
 from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.typedefs import Handler
 
 from adapters.clock import ClockProvider
 from bot import rate_limit as rate_limit_module
@@ -550,8 +553,8 @@ async def test_malformed_tokens_never_reach_the_database(
         await harness.db.close()
 
 
-async def test_only_the_sub_route_exists(tmp_path: Path) -> None:
-    """One route, one method. No health endpoint, no listing, no writes."""
+async def test_only_the_sub_and_the_relay_probe_routes_exist(tmp_path: Path) -> None:
+    """Two routes, one method each. No health endpoint, no listing, no writes."""
     harness = await _seed(tmp_path)
     client, store = await _client(harness)
     try:
@@ -559,6 +562,8 @@ async def test_only_the_sub_route_exists(tmp_path: Path) -> None:
         assert (await client.get("/")).status == 404
         assert (await client.get("/sub/")).status == 404
         assert (await client.post(f"/sub/{harness.token}")).status == 405
+        assert (await client.get("/relay/ssh-probe")).status == 405
+        assert (await client.post("/relay/ssh-probe/x", data=b"[22]")).status == 404
     finally:
         await client.close()
         await store.close()
@@ -2188,3 +2193,369 @@ def test_docs_document_the_tls_decision_and_the_reading_user() -> None:
         assert "acme.sh" in text
         assert "0640" in text
         assert "ufw-subscription.sh" in text
+
+
+# ── POST /relay/ssh-probe: main confirms a relay's input filter ───────────────
+
+RELAY_PEER = "203.0.113.7"
+
+
+class _Connect:
+    """The probe's TCP connect, recorded: (host, port, timeout) per call."""
+
+    def __init__(self, open_ports: frozenset[int] = frozenset({22})) -> None:
+        self.open_ports = open_ports
+        self.calls: list[tuple[str, int, float]] = []
+
+    async def __call__(self, host: str, port: int, timeout: float) -> bool:
+        self.calls.append((host, port, timeout))
+        return port in self.open_ports
+
+
+async def _add_relay(harness: _Harness, *, name: str = "ru1", source_ips: str = "203.0.113.0/24",
+                     enabled: bool = True) -> int:
+    from config import validators
+    from repositories.relays import RelayRepository
+
+    relay = await RelayRepository(harness.db).create(
+        name=name,
+        label=name,
+        host=f"{name}.example.net",
+        source_ips=validators.parse_ipv4_networks("source_ips", source_ips),
+        now="2026-11-12T00:00:00+00:00",
+        enabled=enabled,
+    )
+    return relay.id
+
+
+async def _probe_client(
+    harness: _Harness, connect: _Connect | None = None
+) -> tuple[TestClient[web.Request, web.Application], ReadOnlyBundleStore, _Connect]:
+    """A client whose requests come from the address in X-Test-Peer.
+
+    Every TestClient request really comes from 127.0.0.1, which the probe refuses to
+    connect to; the peer is rewritten before the app sees the request, so the
+    handler's own derivation (request.remote) is what is tested.
+    """
+    store = ReadOnlyBundleStore(harness.db.path)
+    await store.connect()
+    connect = connect or _Connect()
+    app = build_app(store, load_config(harness.settings), probe_connect=connect)
+
+    @web.middleware
+    async def _peer(request: web.Request, handler: Handler) -> web.StreamResponse:
+        peer = request.headers.get("X-Test-Peer")
+        return await handler(request.clone(remote=peer) if peer else request)
+
+    app.middlewares.append(_peer)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    return client, store, connect
+
+
+async def _post_probe(
+    client: TestClient[web.Request, web.Application], body: bytes | str, peer: str = RELAY_PEER
+) -> tuple[int, str, ClientResponse]:
+    resp = await client.post(
+        "/relay/ssh-probe",
+        data=body.encode("utf-8") if isinstance(body, str) else body,
+        headers={"X-Test-Peer": peer, "Content-Type": "application/json"},
+    )
+    return resp.status, await resp.text(), resp
+
+
+async def test_relay_probe_connects_back_to_the_callers_own_address(tmp_path: Path) -> None:
+    harness = await _seed(tmp_path)
+    await _add_relay(harness)
+    client, store, connect = await _probe_client(harness)
+    try:
+        status, body, resp = await _post_probe(client, "[22, 2222]")
+        assert status == 200
+        assert body == '{"22":"ok","2222":"fail"}'
+        assert resp.headers["Content-Type"].startswith("application/json")
+        assert resp.headers["Cache-Control"] == "no-store"
+        # Only the caller, only the ports it named, 5 s each — nothing from the body
+        # can name another address.
+        assert connect.calls == [(RELAY_PEER, 22, 5.0), (RELAY_PEER, 2222, 5.0)]
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_relay_probe_unwraps_an_ipv4_mapped_peer(tmp_path: Path) -> None:
+    harness = await _seed(tmp_path)
+    await _add_relay(harness)
+    client, store, connect = await _probe_client(harness)
+    try:
+        status, body, _ = await _post_probe(client, "[22]", peer=f"::ffff:{RELAY_PEER}")
+        assert (status, body) == (200, '{"22":"ok"}')
+        assert connect.calls == [(RELAY_PEER, 22, 5.0)]
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+@pytest.mark.parametrize(
+    ("relay", "peer"),
+    [
+        ({}, "198.51.100.9"),                         # not in any relay's source IPs
+        ({"enabled": False}, RELAY_PEER),             # in them, but the relay is switched off
+        (None, RELAY_PEER),                           # no relay at all
+        ({}, "2001:db8::7"),                          # an IPv6 peer: relays are IPv4
+        ({"source_ips": "127.0.0.0/8"}, "127.0.0.1"),  # never back to this host itself
+    ],
+)
+async def test_relay_probe_answers_404_to_anyone_but_an_enabled_relay(
+    tmp_path: Path, relay: dict[str, object] | None, peer: str
+) -> None:
+    harness = await _seed(tmp_path)
+    if relay is not None:
+        await _add_relay(harness, **relay)  # type: ignore[arg-type]
+    client, store, connect = await _probe_client(harness)
+    try:
+        # A body that would be a 400 for a relay: a stranger learns nothing from it.
+        for body in ("[22]", "[0, 1, 2, 3, 4, 5]", "junk"):
+            status, text, _ = await _post_probe(client, body, peer=peer)
+            assert (status, text) == (404, ""), body
+        assert connect.calls == [], "no connection for a stranger"
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "[]",
+        "[22, 2222, 2223, 2224, 2225]",   # more than 4
+        "[0]",
+        "[65536]",
+        "[-22]",
+        '["22"]',
+        "[22.0]",
+        "[true]",
+        "[22, 22]",
+        "[null]",
+        '{"ports": [22]}',
+        "22",
+        "not json",
+        b"\xff\xfe",
+    ],
+)
+async def test_relay_probe_refuses_a_bad_port_list_with_400(tmp_path: Path, body: str | bytes) -> None:
+    harness = await _seed(tmp_path)
+    await _add_relay(harness)
+    client, store, connect = await _probe_client(harness)
+    try:
+        status, text, _ = await _post_probe(client, body)
+        assert (status, text) == (400, "")
+        assert connect.calls == []
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_relay_probe_refuses_an_oversized_body_with_400(tmp_path: Path) -> None:
+    harness = await _seed(tmp_path)
+    await _add_relay(harness)
+    client, store, connect = await _probe_client(harness)
+    try:
+        status, _, _ = await _post_probe(client, "[" + " " * 8192 + "22]")
+        assert status == 400
+        assert connect.calls == []
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_relay_probe_accepts_the_edges_of_the_range(tmp_path: Path) -> None:
+    harness = await _seed(tmp_path)
+    await _add_relay(harness)
+    client, store, connect = await _probe_client(harness, _Connect(frozenset({1, 65535})))
+    try:
+        status, body, _ = await _post_probe(client, "[1, 65535, 22, 443]")
+        assert status == 200
+        assert body == '{"1":"ok","65535":"ok","22":"fail","443":"fail"}'
+        assert [port for _, port, _ in connect.calls] == [1, 65535, 22, 443]
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_relay_probe_is_off_with_the_subscription(tmp_path: Path) -> None:
+    harness = await _seed(tmp_path, subscription_enabled=False)
+    await _add_relay(harness)
+    client, store, connect = await _probe_client(harness)
+    try:
+        assert (await _post_probe(client, "[22]"))[:2] == (404, "")
+        assert connect.calls == []
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_relay_probe_reads_the_relays_live(tmp_path: Path) -> None:
+    """A relay switched off (or added) in the admin panel is answered that way on the
+    very next probe — no restart, like every other read of this server."""
+    from repositories.relays import RelayRepository
+
+    harness = await _seed(tmp_path)
+    client, store, connect = await _probe_client(harness)
+    try:
+        assert (await _post_probe(client, "[22]"))[0] == 404
+        relay_id = await _add_relay(harness)
+        assert (await _post_probe(client, "[22]"))[0] == 200
+        await RelayRepository(harness.db).update(
+            relay_id, {"enabled": False}, now="2026-11-12T00:00:01+00:00", updated_by=None
+        )
+        assert (await _post_probe(client, "[22]"))[0] == 404
+        assert len(connect.calls) == 1
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_relay_probe_fails_closed_on_an_unreadable_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = await _seed(tmp_path)
+    await _add_relay(harness)
+    client, store, connect = await _probe_client(harness)
+
+    async def _boom() -> object:
+        raise BundleStoreUnavailable("disk I/O error")
+
+    monkeypatch.setattr(store, "load_relays", _boom)
+    try:
+        assert (await _post_probe(client, "[22]"))[:2] == (404, "")
+        assert connect.calls == []
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_relay_probe_is_rate_limited_per_peer_whatever_the_subscription_limit(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The harness switches SUBSCRIPTION_RATE_LIMIT_SECONDS off; the probe opens
+    connections, so its own limit holds anyway — before the relay check, so a 429
+    cannot tell a relay from a stranger."""
+    from subscription_server.server import RELAY_PROBE_RATE_BURST
+
+    harness = await _seed(tmp_path)
+    await _add_relay(harness)
+    client, store, connect = await _probe_client(harness)
+    try:
+        for _ in range(RELAY_PROBE_RATE_BURST):
+            assert (await _post_probe(client, "[22]"))[0] == 200
+        with caplog.at_level(logging.WARNING, logger="subscription_server.server"):
+            status, text, resp = await _post_probe(client, "[22]")
+        assert (status, text) == (429, "")
+        assert 1 <= int(resp.headers["Retry-After"]) <= 60
+        assert len(connect.calls) == RELAY_PROBE_RATE_BURST, "a refused probe connects nowhere"
+        assert "relay ssh-probe: rate limit hit for client" in caplog.text
+        assert RELAY_PEER not in caplog.text
+        # A stranger gets its own bucket, and the same 429 once it is spent.
+        for _ in range(RELAY_PROBE_RATE_BURST):
+            assert (await _post_probe(client, "[22]", peer="198.51.100.9"))[0] == 404
+        assert (await _post_probe(client, "[22]", peer="198.51.100.9"))[0] == 429
+        # The subscription route is not throttled by the probe's bucket.
+        assert (await client.get(f"/sub/{harness.token}", headers={"X-Test-Peer": RELAY_PEER})).status == 200
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+async def test_relay_probe_logs_the_relay_and_the_verdicts_and_nothing_else(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness = await _seed(tmp_path)
+    await _add_relay(harness, name="ru2")
+    client, store, _ = await _probe_client(harness)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            await _post_probe(client, "[22, 2222]")
+            await _post_probe(client, "[22]", peer="198.51.100.9")
+        assert "relay ssh-probe: relay ru2 — tcp 22 ok, 2222 fail" in caplog.text
+        assert RELAY_PEER not in caplog.text and "198.51.100.9" not in caplog.text
+        assert harness.token not in caplog.text
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
+
+
+def test_probe_caller_refuses_addresses_that_are_not_a_relay_out_there() -> None:
+    from subscription_server.server import _probe_caller
+
+    assert str(_probe_caller("203.0.113.7")) == "203.0.113.7"
+    assert str(_probe_caller("::ffff:203.0.113.7")) == "203.0.113.7"
+    for remote in (None, "", "junk", "127.0.0.1", "::1", "::ffff:127.0.0.1", "0.0.0.0", "224.0.0.1",  # noqa: S104
+                   "169.254.1.1", "240.0.0.1", "255.255.255.255", "2001:db8::1"):
+        assert _probe_caller(remote) is None, remote
+
+
+async def test_tcp_connect_reports_an_open_and_a_closed_port() -> None:
+    from subscription_server.server import tcp_connect
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    open_port = listener.getsockname()[1]
+    closed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    closed.bind(("127.0.0.1", 0))
+    closed_port = closed.getsockname()[1]
+    closed.close()
+    try:
+        assert await tcp_connect("127.0.0.1", open_port, 2.0) is True
+        assert await tcp_connect("127.0.0.1", closed_port, 2.0) is False
+    finally:
+        listener.close()
+
+
+async def test_tcp_connect_gives_up_at_its_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    from subscription_server.server import tcp_connect
+
+    async def _never(host: str, port: int) -> object:
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(asyncio, "open_connection", _never)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    assert await tcp_connect("192.0.2.1", 22, 0.2) is False
+    assert loop.time() - started < 2
+
+
+async def test_relay_probe_connects_to_every_port_at_once(tmp_path: Path) -> None:
+    """Four ports cost one timeout, not four: the relay's curl gives main 20 s."""
+
+    class _Slow(_Connect):
+        async def __call__(self, host: str, port: int, timeout: float) -> bool:
+            await asyncio.sleep(0.3)
+            return await super().__call__(host, port, timeout)
+
+    harness = await _seed(tmp_path)
+    await _add_relay(harness)
+    client, store, connect = await _probe_client(harness, _Slow())
+    try:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        status, _, _ = await _post_probe(client, "[22, 2222, 2223, 2224]")
+        assert status == 200
+        assert loop.time() - started < 1.0
+        assert len(connect.calls) == 4
+    finally:
+        await client.close()
+        await store.close()
+        await harness.db.close()
