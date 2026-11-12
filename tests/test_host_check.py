@@ -956,11 +956,13 @@ def _real_registry() -> list[list[str]]:
 
 
 def _expected_keys(role: str) -> set[tuple[str, str]]:
-    """Every (family, key) a repo file of this role sets, read here in Python."""
+    """Every (family, key) a repo file of this role sets, read here in Python.
+
+    A class pristine entry carries no repo file (its source is the package default)."""
     out: set[tuple[str, str]] = set()
     for e in _real_registry():
         src, dst, cls, erole = e[0], e[1], e[4], e[5]
-        if erole != role or cls == "absent":
+        if erole != role or cls in {"absent", "pristine"}:
             continue
         text = (ROOT / src).read_text(encoding="utf-8")
         if dst.startswith("/etc/sysctl.d/"):
@@ -996,7 +998,7 @@ def test_every_key_of_every_repo_file_is_judged(tmp_path: Path, role: str) -> No
     lab.host("etc/ssh/sshd_config", "Include /etc/ssh/sshd_config.d/*.conf\n")
     for e in _real_registry():
         src, dst, cls, erole = e[0], e[1], e[4], e[5]
-        if erole == role and cls != "absent" and (dst.startswith(("/etc/sysctl.d/", "/etc/ssh/sshd_config.d/"))
+        if erole == role and cls not in {"absent", "pristine"} and (dst.startswith(("/etc/sysctl.d/", "/etc/ssh/sshd_config.d/"))
                                                   or re.match(r"^/etc/systemd/[a-z]+\.conf\.d/", dst)):
             lab.host(dst.lstrip("/"), (ROOT / src).read_text(encoding="utf-8"))
     res = lab.run(role=role, registry=False, repo=ROOT)

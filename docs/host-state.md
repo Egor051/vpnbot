@@ -11,7 +11,7 @@ has nothing to restore them from, and nobody notices a hand edit that drifted.
 when they drift, removes the ones that were retired — and in Phase 1 it reports every other file
 in the scanned host directories that nothing accounts for.
 
-## The four classes
+## The five classes
 
 Every file on a host is in exactly one of these:
 
@@ -21,6 +21,7 @@ Every file on a host is in exactly one of these:
 | **template + host values** | the repo holds the *shape*, the host the values | the operator / the bot, checked by a deploy gate |
 | **backup-only** | not in the repo by design; listed in `deploy/host/known-unmanaged.list` | a third-party installer, the provider, or the operator — and the offsite backup |
 | **retired** | a `class absent` entry: the file must *not* exist | `deploy.sh` removes it |
+| **package default** | the package itself: a `class pristine` entry names `dpkg:<package>` or `ucf:<template>` | `deploy.sh`, and only back to the package default — [Package defaults](#package-defaults-class-pristine) |
 
 `known-unmanaged.list` tags each backup-only entry with who writes it: `installer` (Xray-install,
 get.hy2.sh, `setup-nonroot-helper-mode.sh`…), `provider` (the VPS image), `backup-only` (ours,
@@ -51,14 +52,15 @@ bundle also carries state that is not a deployed file and so is not listed here:
 | `/etc/sysctl.d/99-swap-tuning.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | |
 | `/etc/sysctl.d/99-vpn-forwarding.conf` | repo-managed (`sysctl`) | deploy.sh | `/etc/sysctl.d` | the one `net.ipv4.ip_forward=1` |
 | `/etc/systemd/journald.conf.d/10-vpn-bot.conf` | repo-managed (`journald`) | deploy.sh | `/etc/systemd` | `SystemMaxUse=500M`; replaces a hand edit of `journald.conf` |
-| `/etc/systemd/journald.conf` | dpkg conffile | the `systemd` package | `/etc/systemd` | never written by the deploy; Phase 1 reports it **MODIFIED** while the old hand edit is still in it — restore the stock file by hand once the drop-in is live |
+| `/etc/systemd/journald.conf` | package default (`pristine`, `dpkg:systemd`) | the `systemd` package; deploy.sh puts the package default back | `/etc/systemd` | its old hand edit (`SystemMaxUse=500M`) only duplicates the drop-in: Phase 2 restores the stock file once Phase 1 has proven nothing effective changes, then restarts journald |
 | `/etc/systemd/resolved.conf.d/10-vpn-bot.conf` | repo-managed (`resolved`) | deploy.sh | `/etc/systemd` | `DNS=1.1.1.1 8.8.8.8`, `FallbackDNS=1.0.0.1 8.8.4.4`; replaces a hand edit of `resolved.conf` — [DNS on the main server](#dns-on-the-main-server) |
-| `/etc/systemd/resolved.conf` | dpkg conffile | systemd-resolved's package | `/etc/systemd` | never written by the deploy; reported **MODIFIED** until a separate manual script returns it to the package default |
+| `/etc/systemd/resolved.conf` | package default (`pristine`, `dpkg:systemd-resolved`) | systemd-resolved's package; deploy.sh puts the package default back | `/etc/systemd` | its hand edit (`DNS=`, `FallbackDNS=`) duplicates the drop-in: restored like `journald.conf`, then reloaded as class `resolved` |
 | `/etc/resolv.conf` | repo-managed (`plain`) | deploy.sh, from `deploy/host/dns/resolv.conf` | — (in the repo) | a plain file, not resolved's stub symlink; byte-identical to the host's; invariant `path-regular` |
 | `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | `/etc/systemd` | keeps networkd from flushing WARP's `ip rule`s; effective at networkd's next start |
 | `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, from `deploy/vpn-bot-acme-reload.sh` | `/usr/local/sbin` | acme.sh's `Le_ReloadCmd`; only where there is renewal material; [subscription.md](subscription.md#tls-termination) |
 | `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/ssh` | key-only root login; see [ALLOW_SSH_CHANGE](#allow_ssh_change-and-the-lockout-risk) |
 | `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/systemd` | `ListenStream` on 54321 (IPv4 + IPv6) |
+| `/etc/ssh/sshd_config` | package default (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh puts the template back | `/etc/ssh` | the provider image's active `PasswordAuthentication yes` / `PermitRootLogin yes` after the `Include` are a LATENT that stops Phase 1: restored once `sshd -T` is proven byte-for-byte the same — no `ALLOW_SSH_CHANGE` |
 | `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh, from `deploy/host/cloud/cloud-init.disabled` | — (in the repo) | empty marker: cloud-init stays off (it rewrote sshd and sudoers on a reboot) |
 | `/etc/systemd/system/vpn-bot-host-check.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot: the host invariants check — [Effective state](#effective-state) |
 | `/etc/systemd/system/vpn-bot-host-check.timer` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | 5 min after boot, then daily; `enable --now` like any registry timer |
@@ -96,6 +98,7 @@ The relay runs no bot, so it sends no offsite backup: its files come back from t
 | Path | Class | Installed by | Notes |
 |---|---|---|---|
 | `/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf` | repo-managed (`ssh`) | deploy.sh | key-only login |
+| `/etc/ssh/sshd_config` | package default (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh puts the template back | as on main |
 | `/usr/local/sbin/vpn-relay-apply` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | |
 | `/usr/local/sbin/vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | the host invariants check |
 | `/etc/systemd/system/vpn-bot-host-check.service`, `.timer` | repo-managed (`unit`) | deploy.sh | as on main; the relay's verdict stays in its journal — [Between deploys](#between-deploys) |
@@ -112,7 +115,9 @@ The registry is `MANAGED_HOST_FILES` in `scripts/deploy.sh`, one entry per file:
 "<src in checkout>|<dst>|<mode>|<owner:group>|<class>|<role>[|<opts>]"
 ```
 
-`role` is `main` or `relay`: a host only ever sees the entries of its own role. `opts` is
+`role` is `main` or `relay`: a host only ever sees the entries of its own role. For class
+`pristine`, `src` is not a file of the checkout but where the package default comes from:
+`dpkg:<package>` or `ucf:<template>`. `opts` is
 optional: `gate=<PROTO>` makes the entry exist only while `<PROTO>_ENABLED` is on in `.env`,
 `when=<path>` only on a host where `<path>` exists, and `legacy=<path>` names an older name of the
 same file. A closed gate means the entry is neither installed nor checked.
@@ -129,20 +134,103 @@ same file. A closed gate means the entry is neither installed nor checked.
 | `resolved` | a `[Resolve]` section | `systemctl try-reload-or-restart systemd-resolved`, then `getent ahosts github.com` within 10 s — or the deploy rolls back (the rollback reloads too) |
 | `ssh` | `sshd -t` on `sshd_config` with the candidate swapped into a copy of its drop-in directory; a socket drop-in must leave a `ListenStream` port | see [below](#allow_ssh_change-and-the-lockout-risk) |
 | `absent` | nothing may still name it (below) | `disable --now` if it is a unit file, then removed; an `sshd_config.d` file is followed by `sshd -t` + reload + the port check, like an ssh change |
+| `pristine` | the copy carries the package manager's md5; restoring it changes nothing effective (host check `--pristine`; for `sshd_config` also `sshd -T`) | installed atomically; `journald.conf` → restart journald, `resolved.conf` → as `resolved`, `sshd_config` → as `ssh` — [below](#package-defaults-class-pristine) |
 
 **Phase 1** (read-only, also under `PHASE1_ONLY=1`) scans every entry against `origin/main` and
 reports a state per file: `synced`, `absent` (will be installed), `drift` (will be reinstalled —
 the diff is printed), `meta` (content right, mode/owner wrong — fixed in place), `rename`,
-`present` / `gone` (retired files), `gated-off`. It validates every candidate Phase 2 would
+`present` / `gone` (retired files), `gated-off`, `cannot-restore` (a package default that could
+not be obtained or verified: a WARN, never a stop). It validates every candidate Phase 2 would
 install and **stops before any mutation** when a validator refuses one, when a retired file is
-still referenced, when a legacy-named file differs from the repo, or when an ssh file differs
-without `ALLOW_SSH_CHANGE=1`.
+still referenced, when a legacy-named file differs from the repo, when an ssh file differs
+without `ALLOW_SSH_CHANGE=1`, or when restoring a package default would change the effective
+configuration.
 
 **Phase 2** stages every path it may touch into the backup archive first, then installs,
 repairs and removes, runs each class's post-action once for what actually changed, and rescans:
 nothing may still be absent, drifted or present. Any failure takes the normal rollback, which
 puts every staged file back — or removes it again when it did not exist — and re-applies the
 restored state: unit enablement, the previous runtime sysctl values, journald, ssh.
+
+## Package defaults (class pristine)
+
+Some host files the repo must *not* carry are still the deploy's business: a dpkg conffile whose
+hand edit only duplicates a repo drop-in (`journald.conf`'s `SystemMaxUse`, `resolved.conf`'s
+`DNS=` / `FallbackDNS=`), and the ucf-managed `sshd_config`, where the provider image leaves
+`PasswordAuthentication yes` / `PermitRootLogin yes` active after the `Include`. Those lines are a
+LATENT on an sshd auth key — Phase 1 FAIL — on every new host built from that image. No manual
+script: a `class pristine` entry makes the deploy put the **package default** back by itself, and
+undo any later hand edit the same way.
+
+```text
+"dpkg:<package>|<dst>|0644|root:root|pristine|<role>"
+"ucf:<template>|<dst>|0644|root:root|pristine|<role>"
+```
+
+**Where the copy comes from** (Phase 1, read-only on the host; every temporary file lives in the
+deploy's private work directory, removed when it exits):
+
+- `dpkg:<package>` — the version is `dpkg-query ${Version}` of the **installed** package (the
+  second letter of `${db:Status-Abbrev}` is `i`: a held package, `hi`, counts). The
+  `.deb` is taken from `/var/cache/apt/archives` first (an epoch's `:` is `%3a` in the file name),
+  else `apt-get download <package>=<version>` fetches it into the work directory (bounded by
+  `timeout`). `dpkg-deb --fsys-tarfile | tar -xO ./<dst>` takes the one file out, and its md5 must
+  be the one `dpkg-query ${Conffiles}` records for `<dst>`. A host copy that already has that md5
+  *is* the package default: nothing is fetched, the entry reads `synced`.
+- `ucf:<template>` — the copy is the template the package ships. Its md5 must be the one dpkg
+  records for it (the owning package's `md5sums`, `dpkg-query --control-path <pkg> md5sums`), and
+  `<dst>` must be registered in `/var/lib/ucf/hashfile`. What ucf registered for `<dst>` is **not**
+  what is restored: it is the template as the maintainer script rendered it at install, debconf
+  answers included. On both hosts that md5 is `eb86be66…` — the template with
+  `PermitRootLogin yes`, which openssh-server's postinst writes when
+  `openssh-server/permit-root-login` is false, as the provider image preseeds it — while the
+  template is `0a12ef5c…` (= dpkg's md5sums). The report prints both.
+- No copy (not cached and not downloadable, a tool missing, the file not a conffile of that
+  package, not registered by ucf) or a wrong md5 → `WARN … cannot restore: <why>`; the file is left
+  exactly as it is and the deploy goes on.
+
+**The effect proof** — Phase 1, before any mutation; it is the only way to know whether a hand
+edit meant something:
+
+- `scripts/vpn-bot-host-check --pre-install --pristine <dst>=<copy>` judges the host with the
+  copy in place (the same overlay as for repo files) and compares the effective value of **every**
+  key of the file's family — not only the repo's keys; for sshd also every directive inside `Match`
+  blocks, the multi-value ones (`DenyUsers`, `AllowUsers`, …) included, each with every enclosing
+  condition (a `Match` in a file included under a `Match` applies only where both hold) — with
+  and without it. A package default for `/etc/systemd/<x>.conf` is judged as *the* main file,
+  in place of a vendor one under `/usr/lib` (systemd reads the `/etc` file instead).
+  For a systemd `*.conf` a value of the host copy that another file overrides with a *different*
+  value is refused too: it is dead only if that setting really is last-wins, and a setting that
+  accumulates (like `DNSStubListenerExtra=`) would lose it. Only an exact duplicate (the hand edit
+  repeats the drop-in) or a modelled list setting passes. Both sides are the host as Phase 2 leaves it otherwise (repo files
+  in, retired files gone), so only the restore itself is judged. Any difference is a `MISMATCH`
+  of family `pristine` and a Phase 1 FAIL:
+  `<file> sets <key>=<value> that no repo file carries — move it into a repo drop-in first`.
+  No difference is an `OK pristine` row — the proof, printed in the log and the report; without
+  that row Phase 1 fails too.
+- `sshd_config` also: `sshd -T` on a private copy of the sshd tree with the host's `sshd_config`,
+  and on one with the package default — the same drop-in directory on both sides, as Phase 2 will
+  leave it, the drop-ins' own `Include`s of that directory pointed at the private copy too — must
+  print byte for byte the same. This catches what the host check does not judge
+  (`Port`, `ListenAddress` and the other multi-value keywords). A different output, an `sshd -T`
+  that does not run, or no `sshd` → FAIL.
+- That proof is the lockout guard for `sshd_config`, so restoring its package default does **not**
+  need `ALLOW_SSH_CHANGE` — a deliberate, documented exception. The knob still guards every
+  repo-managed ssh file.
+
+**Phase 2**: the original is staged with every other host path; the copy is installed atomically
+(a temporary file in the same directory, the entry's mode and owner, then `mv`); then the
+family's post-action — `journald.conf`: `systemctl restart systemd-journald`; `resolved.conf`: as
+class `resolved` (`try-reload-or-restart` + `getent ahosts` with retries); `sshd_config`: as class
+`ssh` (`sshd -t`, reload, ssh active and listening). Then the normal Phase 2 host check. Any
+failure is `rollback_now`: the original comes back and the post-action runs again on it.
+
+**The conffile rule.** The deploy never writes a dpkg conffile (`CONFFILE_REPORT_PATHS` are only
+reported) — with exactly one exception: a `class pristine` entry, and only with a copy the package
+manager's own md5 vouches for. The deploy never puts content written in the repo into a conffile.
+A locally modified conffile that has such an entry is `PENDING` in `--pre-install` ("Phase 2
+restores the package default"), not WARN, and its WARN is gone after the install; one without an
+entry stays a WARN.
 
 **Retired files are guarded.** Before removing one, Phase 1 searches root's crontab and every
 other file under `/var/spool/cron`, `/etc/crontab`, `/etc/cron.d`, the unit directories
@@ -169,11 +257,11 @@ is its own state file — and it is the single implementation: deploy Phase 1, d
 | Verdict | Meaning | Deploy Phase 1 | Deploy Phase 2 | Bot (main) |
 |---|---|---|---|---|
 | **BEATEN** | a value a repo-managed file sets is not in effect: another file wins | FAIL | rollback | alert |
-| **MISMATCH** | the live value (`sshd -T`, `sysctl -n`, `systemctl show`) differs from what the files give, for a key a repo file sets; a repo unit that is masked, waits for `daemon-reload`, or (a timer the deploy installs) is not enabled+active; an `invariants.list` line that does not hold | FAIL | rollback | alert |
+| **MISMATCH** | the live value (`sshd -T`, `sysctl -n`, `systemctl show`) differs from what the files give, for a key a repo file sets; a repo unit that is masked, waits for `daemon-reload`, or (a timer the deploy installs) is not enabled+active; an `invariants.list` line that does not hold; (`--pristine`) restoring a package default would change a key | FAIL | rollback | alert |
 | **LATENT** | right now, but a loser that is neither repo-managed nor vendor holds another value: remove the winner and the value silently flips. The row names the winner, the losers and `winner gone -> <value> from <file>` | FAIL on an sshd auth key¹, else WARN | reported | alert when new |
 | **ACCEPTED** | a LATENT listed in `deploy/host/accepted-overrides.list` | reported | reported | — |
 | **WARN** | host state outside the repo worth a look (below) | WARN | reported | — |
-| **PENDING** | Phase 1 only: the deploy changes it now; Phase 2 checks it | reported | — | — |
+| **PENDING** | Phase 1 only: the deploy changes it now; Phase 2 checks it (a modified conffile Phase 2 restores to its package default included) | reported | — | — |
 
 ¹ `PasswordAuthentication`, `KbdInteractiveAuthentication`, `PermitRootLogin`,
 `PermitEmptyPasswords`, `PubkeyAuthentication`, `AuthenticationMethods`.
@@ -223,7 +311,8 @@ it is never vendor — its lines are judged like any other file's.
 - **systemd `*.conf` + `*.conf.d`** — `journald`, `networkd`, `resolved`, `logind`, `timesyncd`,
   `system`: the order of `systemd-analyze cat-config systemd/<x>.conf` (the main file, then the
   drop-ins by name), key = `Section.Key`, the **last** value wins. Except list settings —
-  `Resolve.DNS`, `Resolve.FallbackDNS`, `Resolve.Domains`, `Time.NTP`, `Time.FallbackNTP`: there
+  `Resolve.DNS`, `Resolve.FallbackDNS`, `Resolve.Domains`, `Resolve.DNSStubListenerExtra`, `Time.NTP`,
+  `Time.FallbackNTP`: there
   the entries of every file add up and an empty assignment resets, so the accumulated list is
   compared (a server left in `resolved.conf` next to the drop-in's is BEATEN). There is no
   generic live readout for these, so they are judged on precedence only.
@@ -282,8 +371,9 @@ such as `error.log`); `NOPASSWD: ALL` in sudoers; a non-root account with a logi
 usable password (`passwd -S` = P, read from `/etc/shadow`) or a non-empty `authorized_keys`; a
 locally modified dpkg conffile under `/etc/systemd`, `/etc/sysctl*`, `/etc/logrotate*`, `/etc/cloud`
 or `/etc/sudoers*`, with the keys it sets (a setting that lives only in a modified conffile is host
-state outside the repo — on main today `journald.conf`, which duplicates the managed drop-in, and
-`resolved.conf`, see below).
+state outside the repo). A conffile with a `class pristine` entry is `PENDING` instead in
+`--pre-install` when the deploy has its package default, and its WARN is gone once Phase 2 restored
+it — [Package defaults](#package-defaults-class-pristine).
 
 The check never removes or edits a file that is not in the registry. What it finds is closed with
 the registry: a file the repo should own gets an entry, a file that must not come back gets
@@ -322,10 +412,11 @@ every relay deploy (`CHECK=1` shows it without deploying).
   `resolved`): after a change, `systemctl try-reload-or-restart systemd-resolved`, then
   `getent ahosts github.com` must answer within 10 s, or the deploy rolls back (the rollback puts
   the old file back and reloads the same way).
-- `/etc/systemd/resolved.conf` itself is never written by the deploy (reported as a modified
-  conffile). After this layout is deployed it goes back to the package default with a separate
-  manual script, which checks that the effective configuration did not change. The first deploy
-  changes nothing effective: the drop-in carries the conffile's values and `resolv.conf` is synced.
+- `/etc/systemd/resolved.conf` itself goes back to the package default through its `class
+  pristine` entry — no manual script: Phase 1 proves that the effective `DNS=` / `FallbackDNS=`
+  (the drop-in's) do not change, Phase 2 restores the stock file and reloads resolved like class
+  `resolved`. Nothing effective changes: the drop-in carries the conffile's values and
+  `resolv.conf` is synced.
 
 ## Files nothing accounts for
 
@@ -362,6 +453,12 @@ called out as an **orphan drop-in for absent unit**. For each warning, decide: p
 To retire a file, add `"-|<path>|-|-|absent|<role>"`. Its backup copy stays in the deploy
 archives (`/var/backups/vpn-bot`, the last `BACKUP_KEEP`).
 
+To put a package's own file back to its default, add
+`"dpkg:<package>|<path>|0644|root:root|pristine|<role>"` (a dpkg conffile) or
+`"ucf:<template>|<path>|0644|root:root|pristine|<role>"` (a ucf-managed file). The path must be
+in a family the effect proof covers: `/etc/ssh/sshd_config`, `/etc/systemd/<x>.conf`, sysctl.
+`tests/test_deploy_pristine.py` pins the form and that the path is that package's conffile.
+
 ## ALLOW_SSH_CHANGE and the lockout risk
 
 A wrong `sshd_config.d` drop-in or `ListenStream` cuts off every new ssh connection. So for
@@ -391,3 +488,7 @@ case ssh is left alone and the rollback report says so in capitals.
 
 The port check catches a dead port, not a key you can no longer log in with. The second session
 is what saves you then: test a fresh login from it before closing anything.
+
+`/etc/ssh/sshd_config` itself is not class `ssh`: it only ever goes back to its package default
+(class `pristine`), after Phase 1 has proven `sshd -T` byte-for-byte unchanged — that proof is
+the guard there, and the knob is neither needed nor read.

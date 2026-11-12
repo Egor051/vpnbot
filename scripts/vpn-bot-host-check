@@ -30,6 +30,13 @@
 #   PENDING   (--pre-install only) the deploy is about to change it; Phase 2 checks it.
 #   INFO / OK the rest.
 #
+# Class pristine (--pristine DST=COPY, with --pre-install only): Phase 2 puts the
+# package default COPY at DST. DST is judged with COPY in its place, and the effective
+# value of EVERY key of DST's family — not only the repo's keys — is compared with and
+# without it: any difference is a MISMATCH of family "pristine" ("<DST> sets <key>=<value>
+# that no repo file carries — move it into a repo drop-in first"), no difference an OK
+# row for DST. That OK row is the effect proof deploy.sh requires before it restores.
+#
 # VENDOR = a file under /usr/lib, /lib or /usr/local/lib, or a file under /etc that a
 # package owns (one batched `dpkg -S`) and that is not modified locally (its md5 is
 # the one in `dpkg-query ${Conffiles}`). A repo value over a vendor value is normal.
@@ -40,8 +47,8 @@
 # not be written (rows are still printed).
 #
 # Usage: vpn-bot-host-check [--repo DIR] [--role main|relay] [--registry FILE]
-#                           [--pre-install] [--state FILE | --no-state] [--env FILE]
-#                           [--root DIR]
+#                           [--pre-install [--pristine DST=COPY]...]
+#                           [--state FILE | --no-state] [--env FILE] [--root DIR]
 #   --repo DIR       the checkout (default /opt/vpn-service): scripts/deploy.sh, deploy/
 #   --role ROLE      host role; default: NODE_ROLE from the checkout's .env (main if unset)
 #   --registry FILE  MANAGED_HOST_FILES entries of this role, gates already evaluated
@@ -49,6 +56,9 @@
 #                    <repo>/scripts/deploy.sh, gates evaluated here from .env.
 #   --pre-install    Phase 1: judge the host as Phase 2 is about to leave it — every
 #                    repo file in place of its host copy, every retired file gone.
+#   --pristine DST=COPY  (repeatable, with --pre-install) a class pristine entry of this
+#                    role that Phase 2 restores: COPY is the verified package default
+#                    for DST. Proves that the restore changes nothing effective.
 #   --root DIR       read the host under DIR (tests). Commands are not re-rooted.
 set -uo pipefail
 export LC_ALL=C
@@ -61,6 +71,7 @@ PRE_INSTALL=0
 STATE_FILE="/var/lib/vpn-bot-host-check/last.json"
 WRITE_STATE=1
 ENV_FILE=""
+declare -a PRISTINE_ARGS=()
 
 # Logical host paths (read under --root).
 UNINSTALL_MARKER_DIR="/etc/vpn-bot/uninstalled"
@@ -80,7 +91,7 @@ SYSTEMD_CONF_FAMILIES=(journald networkd resolved logind timesyncd system)
 # systemd *.conf settings that are LISTS, not scalars: every assignment in every file
 # adds to the list, an empty one resets it (resolved.conf(5), timesyncd.conf(5)). For
 # these the effective value is the accumulated list, never "the last line".
-SYSTEMD_LIST_KEYS=" resolved|Resolve.DNS resolved|Resolve.FallbackDNS resolved|Resolve.Domains timesyncd|Time.NTP timesyncd|Time.FallbackNTP "
+SYSTEMD_LIST_KEYS=" resolved|Resolve.DNS resolved|Resolve.FallbackDNS resolved|Resolve.Domains resolved|Resolve.DNSStubListenerExtra timesyncd|Time.NTP timesyncd|Time.FallbackNTP "
 VENDOR_RE='^/(usr/lib|lib|usr/local/lib)/'
 CATCFG_RE='^# (/[^[:space:]]+)$'
 APPLYING_RE='^\* Applying (/[^[:space:]]+) \.\.\.$'
@@ -97,6 +108,7 @@ while (( $# > 0 )); do
     --role)        ROLE="${2:?--role needs main or relay}"; shift 2 ;;
     --registry)    REGISTRY_FILE="${2:?--registry needs a file}"; shift 2 ;;
     --pre-install) PRE_INSTALL=1; shift ;;
+    --pristine)    PRISTINE_ARGS+=("${2:?--pristine needs DST=COPY}"); shift 2 ;;
     --state)       STATE_FILE="${2:?--state needs a file}"; WRITE_STATE=1; shift 2 ;;
     --no-state)    WRITE_STATE=0; shift ;;
     --env)         ENV_FILE="${2:?--env needs a file}"; shift 2 ;;
@@ -107,6 +119,7 @@ while (( $# > 0 )); do
 done
 APP_DIR="${APP_DIR%/}"
 ENV_FILE="${ENV_FILE:-${APP_DIR}/.env}"
+if (( ${#PRISTINE_ARGS[@]} > 0 && ! PRE_INSTALL )); then die_usage "--pristine needs --pre-install"; fi
 
 # --------------------------------------------------------------------------- #
 # Rows
@@ -281,6 +294,8 @@ resolve_role() {
 # --------------------------------------------------------------------------- #
 declare -a REG=()            # "src|dst|class|opts" — this role, gate open; dst logical
 declare -a REG_ABSENT=()     # retired dsts of this role
+declare -A PRISTINE_SRC=()   # class pristine dst -> its source (dpkg:<pkg> | ucf:<template>)
+declare -A PRISTINE_COPY=()  # --pristine: dst -> the package default Phase 2 restores
 declare -a UNITS_DEPLOY=()   # "src|dst": unit files deploy.sh installs verbatim
 declare -a UNITS_SHIPPED=()  # "src|dst": deploy/*.service|*.timer the operator installs
 
@@ -309,6 +324,9 @@ load_registry() {
     n=$(( n + 1 ))
     [[ "${role:-main}" == "$ROLE" ]] || continue
     dst="$(logical "$dst")"
+    # A package default, not a repo file: no repo source, no expected values. Judged
+    # with --pristine (pre-install); otherwise its host copy is read like any file.
+    if [[ "$class" == pristine ]]; then PRISTINE_SRC["$dst"]="$src"; continue; fi
     if [[ "$class" == absent ]]; then REG_ABSENT+=("$dst"); continue; fi
     if [[ -z "$REGISTRY_FILE" ]] && ! gate_open "${opts:-}"; then continue; fi
     if [[ ! -f "${APP_DIR}/${src}" ]]; then
@@ -330,6 +348,22 @@ load_registry() {
   if (( PRE_INSTALL )); then
     for dst in "${REG_ABSENT[@]}"; do RETIRED["$dst"]=1; done
   fi
+  load_pristine
+}
+
+# --pristine DST=COPY: DST must be a class pristine entry of this role; COPY takes its
+# place like a repo file's overlay.
+load_pristine() {
+  local a d c
+  for a in "${PRISTINE_ARGS[@]}"; do
+    d="${a%%=*}"; c="${a#*=}"
+    [[ "$a" == *=* && "$d" == /* && -n "$c" ]] || die_usage "--pristine wants DST=COPY, not '${a}'"
+    d="$(logical "$d")"
+    [[ -n "${PRISTINE_SRC[$d]+x}" ]] || die_usage "--pristine ${d}: no class pristine entry of role ${ROLE} names it"
+    [[ -f "$c" && -r "$c" ]] || die_internal "--pristine ${d}: cannot read ${c}"
+    OVERLAY["$d"]="$c"
+    PRISTINE_COPY["$d"]="$c"
+  done
 }
 
 opt_of() {
@@ -430,7 +464,8 @@ classify_files() {
   for p in "${cand[@]}"; do
     t="${target[$p]}"
     [[ -n "${owned[$t]+x}" && -n "${CONFMD5[$t]+x}" ]] || continue
-    if [[ "$(md5_of "$(fs "$t")")" == "${CONFMD5[$t]}" ]]; then CLASS["$p"]=vendor; fi
+    # The content as judged: a package default Phase 2 restores (--pristine) is vendor.
+    if [[ "$(md5_of "$(content_fs "$p")")" == "${CONFMD5[$t]}" ]]; then CLASS["$p"]=vendor; fi
   done
 }
 
@@ -674,10 +709,11 @@ sshd_value() {
 }
 
 declare -a SSHD_MATCHED=()
+declare -a SSHD_MATCH_REC=()   # "condition<TAB>key<TAB>value" in walk order (pristine proof)
 # Walk a config file the way sshd does: Include expanded in place (globs, C-locale
 # order, relative to /etc/ssh), Match scoped to the rest of its file.
 sshd_walk() {
-  local file="$1" ctx="$2" depth="$3" src lineno kw val arg m
+  local file="$1" ctx="$2" depth="$3" src lineno kw val arg m outer="$2"
   local -a args=() incs=()
   if (( depth > 16 )); then row WARN sshd include "$file" "Include nested deeper than 16 — not followed"; return 0; fi
   exists_l "$file" || return 0
@@ -697,14 +733,20 @@ sshd_walk() {
             if [[ -n "$m" ]]; then sshd_walk "$m" "$ctx" $(( depth + 1 )); fi
           done
         done ;;
-      match) ctx=match ;;
+      # A Match inside a file included under a Match applies only where BOTH hold
+      # (sshd never activates it from an inactive Include): keep the enclosing one.
+      match) if [[ "$outer" == match* ]]; then ctx="${outer} && ${val}"; else ctx="match ${val}"; fi ;;
       *)
         sshd_key "$kw"
-        [[ "$SSHD_EXCLUDED" == *" ${SSHD_KEY} "* ]] && continue
         sshd_value "$val"
-        if [[ "$ctx" == match ]]; then
+        if [[ "$ctx" == match* ]]; then
+          # Every Match-scoped directive goes into the pristine proof — the multi-value
+          # ones too (DenyUsers inside a Match is invisible to `sshd -T` without -C).
+          SSHD_MATCH_REC+=("${ctx#match }"$'\t'"${SSHD_KEY}"$'\t'"${SSHD_VAL}")
+          [[ "$SSHD_EXCLUDED" == *" ${SSHD_KEY} "* ]] && continue
           SSHD_MATCHED+=("${file}:${lineno}|${SSHD_KEY}")
         else
+          [[ "$SSHD_EXCLUDED" == *" ${SSHD_KEY} "* ]] && continue
           add_rec sshd "$file" "$SSHD_KEY" "$SSHD_VAL" "$lineno"
         fi ;;
     esac
@@ -868,6 +910,10 @@ gather_systemd_conf() {
     # The main file first, then the drop-ins in basename order.
     main=""; rest="$order"
     if [[ "${order%%$'\n'*}" == */"${x}.conf" ]]; then main="${order%%$'\n'*}"; rest="${order#*$'\n'}"; [[ "$rest" == "$order" ]] && rest=""; fi
+    # A package default Phase 2 puts at /etc/systemd/<x>.conf (--pristine) is THE main
+    # file: where the host has none, or only a vendor one under /usr/lib, systemd reads
+    # the /etc file instead once it is installed.
+    if [[ -n "${OVERLAY[/etc/systemd/${x}.conf]+x}" ]]; then main="/etc/systemd/${x}.conf"; fi
     order="$(insert_by_basename "$rest" "${ov[@]}")"
     if [[ -n "$main" ]]; then order="${main}"$'\n'"${order}"; fi
     while IFS= read -r p; do
@@ -1211,6 +1257,142 @@ invariant_rows() {
 }
 
 # --------------------------------------------------------------------------- #
+# Class pristine (--pristine, pre-install): does restoring the package default change
+# anything effective? Every key of the file's family — not only the repo's — once with
+# the package default in place (the main run) and once with the host copy (a second
+# gather in a subshell, the pristine overlays dropped; nothing of it leaks out). For
+# sshd the Match-scoped settings are compared too, in walk order. deploy.sh adds the
+# byte-for-byte `sshd -T` proof for sshd_config itself (multi-value keywords such as
+# Port are not judged here).
+# --------------------------------------------------------------------------- #
+PRISTINE_BASE=""
+
+pristine_family() {
+  local x
+  case "$1" in
+    "$SSHD_CONFIG") echo sshd ;;
+    /etc/sysctl.conf|/etc/sysctl.d/*.conf) echo sysctl ;;
+    /etc/systemd/*.conf)
+      x="${1#/etc/systemd/}"; x="${x%.conf}"
+      if [[ " ${SYSTEMD_CONF_FAMILIES[*]} " == *" ${x} "* ]]; then echo "$x"; fi ;;
+  esac
+}
+
+# The effective value of every key of every family, as "E<TAB>family|key<TAB>value",
+# and the Match-scoped sshd settings as "M<TAB>condition<TAB>key<TAB>value". Run in a
+# subshell: it overwrites the gather state.
+effective_dump() {
+  local k m
+  FAM_REC=(); FAM_EXP=(); FAM_FILES=(); EFFV=(); EFFF=(); SSHD_MATCHED=(); SSHD_MATCH_REC=()
+  SYSCTL_BOOT=""; SYSCTL_SYSTEM=""; SYSCTL_SYSTEM_HOW=""
+  gather_sshd
+  gather_sysctl
+  gather_systemd_conf
+  analyze sshd first > /dev/null
+  analyze sysctl last > /dev/null
+  for k in "${SYSTEMD_CONF_FAMILIES[@]}"; do analyze "$k" last > /dev/null; done
+  for k in "${!EFFV[@]}"; do printf 'E\t%s\t%s\n' "$k" "${EFFV[$k]}"; done
+  for m in "${SSHD_MATCH_REC[@]}"; do printf 'M\t%s\n' "$m"; done
+}
+
+# The baseline: the host as Phase 2 leaves it, but every pristine file as it is now.
+pristine_baseline() {
+  local d
+  (( ${#PRISTINE_COPY[@]} > 0 )) || return 0
+  for d in "${!PRISTINE_COPY[@]}"; do unset 'OVERLAY[$d]'; done
+  effective_dump
+}
+
+# The value <key> of family <fam> has in the HOST copy of <file> (exit 1: not set
+# there) — the first one for sshd (outside Match), the last one otherwise.
+file_sets() {
+  local fam="$1" src lineno k v val="" found=0 parser
+  src="$(fs "$2")"
+  [[ -f "$src" && -r "$src" ]] || return 1
+  if [[ "$fam" == sshd ]]; then
+    while IFS=$'\t' read -r lineno k v; do
+      [[ "$k" == match ]] && break
+      sshd_key "$k"
+      [[ "$SSHD_KEY" == "$3" ]] || continue
+      sshd_value "$v"; printf '%s' "$SSHD_VAL"; return 0
+    done < <(awk "$SSHD_TOKENIZER" "$src")
+    return 1
+  fi
+  parser="$INI_PARSER"; [[ "$fam" == sysctl ]] && parser="$SYSCTL_PARSER"
+  while IFS=$'\t' read -r lineno k v; do
+    if [[ "$k" == "$3" ]]; then val="$v"; found=1; fi
+  done < <(awk "$parser" "$src")
+  (( found )) || return 1
+  printf '%s' "$val"
+}
+
+pristine_rows() {
+  local d fam tag k v x key bv nv hv text n diffs base_m now_m m
+  local -A base_v=() keys=()
+  (( ${#PRISTINE_COPY[@]} > 0 )) || return 0
+  base_m=""
+  while IFS=$'\t' read -r tag k v x; do
+    case "$tag" in
+      E) base_v["$k"]="$v" ;;
+      M) base_m+="${k}"$'\t'"${v}"$'\t'"${x}"$'\n' ;;
+    esac
+  done <<< "$PRISTINE_BASE"
+  now_m=""
+  for m in "${SSHD_MATCH_REC[@]}"; do now_m+="${m}"$'\n'; done
+  for d in "${!PRISTINE_COPY[@]}"; do
+    fam="$(pristine_family "$d")"
+    if [[ -z "$fam" ]]; then
+      row MISMATCH pristine "-" "$d" "no effect proof for ${d}: the check models sshd_config, the systemd *.conf files and sysctl only"
+      continue
+    fi
+    keys=()
+    for k in "${!base_v[@]}" "${!EFFV[@]}"; do
+      if [[ "${k%%|*}" == "$fam" ]]; then keys["$k"]=1; fi
+    done
+    n=0; diffs=0
+    while IFS= read -r k; do
+      [[ -n "$k" ]] || continue
+      n=$(( n + 1 ))
+      bv="${base_v[$k]-<unset>}"; nv="${EFFV[$k]-<unset>}"
+      [[ "$bv" == "$nv" ]] && continue
+      diffs=$(( diffs + 1 )); key="${k#*|}"
+      if hv="$(file_sets "$fam" "$d" "$key")"; then
+        text="${d} sets ${key}=${hv} that no repo file carries — move it into a repo drop-in first (in effect now: ${bv}; with the package default: ${nv})"
+      elif [[ "$bv" == "<unset>" ]]; then
+        text="the package default of ${d} sets ${key}=${nv}, unset now — restoring it would change the effective configuration"
+      else
+        text="restoring the package default of ${d} changes ${key}: ${bv} -> ${nv}"
+      fi
+      row MISMATCH pristine "$key" "$d" "$text"
+    done < <(printf '%s\n' "${!keys[@]}" | sort)
+    # A systemd setting the check models as last-wins may in fact accumulate (as
+    # Resolve.DNSStubListenerExtra= does): a value of the host copy that another file
+    # overrides with a DIFFERENT value is dead only if the setting really is last-wins,
+    # which the check cannot prove. Only an exact duplicate (the hand edit repeats the
+    # drop-in) or a modelled list setting passes.
+    if [[ "$fam" != sshd && "$fam" != sysctl && -f "$(fs "$d")" ]]; then
+      local -A said=()
+      while IFS=$'\t' read -r _ key hv; do
+        [[ -n "$key" && -z "${said[$key]+x}" ]] || continue
+        [[ "$SYSTEMD_LIST_KEYS" == *" ${fam}|${key} "* ]] && continue
+        x="$(printf '%s' "${FAM_REC[$fam]:-}" | awk -F'\t' -v d="$d" -v k="$key" -v v="$hv" \
+               '$1 != d && $2 == k && $3 != v && !f { print $1 ":" $4 " = " $3; f = 1 }')"
+        [[ -n "$x" ]] || continue
+        said["$key"]=1; diffs=$(( diffs + 1 ))
+        row MISMATCH pristine "$key" "$d" "${d} sets ${key}=${hv} while ${x}: dead if ${key} is last-wins, lost if it accumulates (as Resolve.DNSStubListenerExtra= does) — the check cannot prove which; move it into a repo drop-in, or delete the line by hand, first"
+      done < <(awk "$INI_PARSER" "$(fs "$d")")
+    fi
+    if [[ "$fam" == sshd && "$base_m" != "$now_m" ]]; then
+      diffs=$(( diffs + 1 ))
+      row MISMATCH pristine "Match" "$d" "the settings inside Match blocks change with the package default of ${d} — move what the hand edit puts in a Match block into a repo drop-in first"
+    fi
+    if (( diffs == 0 )); then
+      row OK pristine "$d" "$d" "restoring the package default (${PRISTINE_SRC[$d]}) changes nothing effective: ${n} ${fam} key(s) compared with and without it"
+    fi
+  done
+}
+
+# --------------------------------------------------------------------------- #
 # WARN checks — host state outside the repo. Never print a key or a password.
 # --------------------------------------------------------------------------- #
 warn_cloud_init() {
@@ -1310,14 +1492,23 @@ file_keys() {
 }
 
 warn_conffiles() {
-  local p keys
+  local p keys note
   load_conffiles
   for p in "${!CONFMD5[@]}"; do
     [[ "$p" =~ $CONFFILE_WARN_RE ]] || continue
     [[ -f "$(fs "$p")" ]] || continue
     [[ "$(md5_of "$(fs "$p")")" == "${CONFMD5[$p]}" ]] && continue
     keys="$(file_keys "$p" "$(fs "$p")")"
-    row WARN conffile "${CONFPKG[$p]}" "$p" "locally modified ${CONFPKG[$p]} conffile — what lives only here is host state outside the repo; sets: ${keys:-nothing}"
+    if [[ -n "${PRISTINE_COPY[$p]+x}" ]]; then
+      row PENDING conffile "${CONFPKG[$p]}" "$p" "locally modified ${CONFPKG[$p]} conffile — Phase 2 restores the package default (sets now: ${keys:-nothing})"
+      continue
+    fi
+    note=""
+    if [[ -n "${PRISTINE_SRC[$p]+x}" ]]; then
+      if (( PRE_INSTALL )); then note=" — its class pristine entry cannot restore it now (see the deploy log)"
+      else note=" — a class pristine entry: the next deploy restores the package default"; fi
+    fi
+    row WARN conffile "${CONFPKG[$p]}" "$p" "locally modified ${CONFPKG[$p]} conffile — what lives only here is host state outside the repo; sets: ${keys:-nothing}${note}"
   done
 }
 
@@ -1369,6 +1560,8 @@ main() {
   collect_units
   mark_touched
   load_accepted
+  # The pristine baseline first, while the gather state is still empty (a subshell).
+  PRISTINE_BASE="$(pristine_baseline)"
 
   # A. Gather: files, records, expectations, systemd's view of the units.
   gather_sshd
@@ -1389,6 +1582,7 @@ main() {
   analyze sysctl last
   sysctl_system_rows
   for k in "${SYSTEMD_CONF_FAMILIES[@]}"; do analyze "$k" last; done
+  pristine_rows
   sshd_live
   live_rows
   unit_rows

@@ -18,6 +18,10 @@ The fix is in tests/ only: tests/conftest.py strips the knobs (autouse
    inside a test; DEPLOY_SELFTEST, which is not a knob, still passes through.
 3. **Regression.** A child pytest started with PHASE1_ONLY=1 exported (the
    `CHECK=1 redeploy` environment) passes test_relay_phase1_stops_on_an_auth_latent.
+4. **Class pristine.** sshd_config goes back to its package default WITHOUT
+   ALLOW_SSH_CHANGE, and a key only the hand edit carries stops Phase 1: both hold in
+   a child started with ALLOW_SSH_CHANGE=1 and PHASE1_ONLY=1 exported — a leaked knob
+   would make the first pass for the wrong reason and turn the second into a report.
 
 A monkeypatch.setenv in this process cannot stand in for 2 and 3: it runs after
 the autouse fixture, so it would test a leak the fixture never sees. Only an
@@ -52,6 +56,9 @@ RUN_MODE_KNOBS = ("PHASE1_ONLY", "FORCE")
 PROBE_OUT = "VPNBOT_TEST_ENV_PROBE_OUT"
 PROBE = "tests/test_deploy_knob_isolation.py::test_no_deploy_knob_reaches_a_test"
 AUTH_LATENT = "tests/test_relay_deploy.py::test_relay_phase1_stops_on_an_auth_latent"
+PRISTINE_SSH = ("tests/test_deploy_pristine.py::"
+                "test_sshd_config_with_yes_lines_after_the_include_is_restored_without_the_knob")
+PRISTINE_FAIL = "tests/test_deploy_pristine.py::test_a_key_no_repo_file_carries_stops_phase1[journald]"
 
 
 def _read_env_assignment(text: str, name: str) -> bool:
@@ -126,4 +133,13 @@ def test_conftest_strips_every_knob_from_an_ambient_deploy_environment(tmp_path:
 # --------------------------------------------------------------------------- #
 def test_relay_auth_latent_stop_holds_under_check_redeploy(tmp_path: Path) -> None:
     proc = _child_pytest(tmp_path, AUTH_LATENT, PHASE1_ONLY="1")
+    assert _passed_once(proc), proc.stdout + proc.stderr
+
+
+# --------------------------------------------------------------------------- #
+# 4. Class pristine under the operator's knobs
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("node", [PRISTINE_SSH, PRISTINE_FAIL], ids=["sshd-without-the-knob", "phase1-fail"])
+def test_pristine_holds_under_the_operators_knobs(tmp_path: Path, node: str) -> None:
+    proc = _child_pytest(tmp_path, node, ALLOW_SSH_CHANGE="1", PHASE1_ONLY="1")
     assert _passed_once(proc), proc.stdout + proc.stderr

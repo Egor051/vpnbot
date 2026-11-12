@@ -487,7 +487,7 @@ def test_a_failure_after_the_install_rolls_the_file_back(tmp_path: Path, case: C
         assert "name resolution fails after the systemd-resolved drop-in change" in proc.stdout
         assert "getent ahosts github.com found nothing within 3s" in proc.stdout
         assert len(lab.log("getent")) == 4, "retried once a second for RESOLVED_PROBE_WAIT"
-        assert "try-reload-or-restart systemd-resolved (drop-in restored): rc=0" in proc.stdout
+        assert "try-reload-or-restart systemd-resolved (configuration restored): rc=0" in proc.stdout
         assert lab.mutating_systemctl()[-1] == "systemctl try-reload-or-restart systemd-resolved", "the restored file is reloaded"
 
 
@@ -500,7 +500,7 @@ def test_a_file_that_did_not_exist_is_removed_again_with_its_new_directory(tmp_p
     assert not dst.exists() and not dst.parent.exists()
     assert f"remove {dst} (absent before the deploy): rc=0" in proc.stdout
     assert f"remove {dst.parent} (created by this deploy, empty again): rc=0" in proc.stdout
-    assert "restart systemd-journald (drop-in restored)" in proc.stdout
+    assert "restart systemd-journald (configuration restored)" in proc.stdout
 
 
 def test_mode_and_owner_are_repaired_without_a_post_action(tmp_path: Path) -> None:
@@ -931,7 +931,9 @@ def test_a_relay_installs_only_the_relay_entry(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # 6. Static guards on the real registry and deploy/host/
 # --------------------------------------------------------------------------- #
-VALID_CLASSES = {"logrotate", "sysctl", "unit", "journald", "networkd", "hook", "ssh", "plain", "resolved", "absent"}
+VALID_CLASSES = {"logrotate", "sysctl", "unit", "journald", "networkd", "hook", "ssh", "plain", "resolved", "absent",
+                 "pristine"}
+PRISTINE_SOURCE_RE = re.compile(r"dpkg:[a-z0-9][a-z0-9+.-]+|ucf:/[^\s|]+")
 VALID_GATES = {"MTPROTO", "SOCKS5", "HYSTERIA2"}
 
 
@@ -951,6 +953,9 @@ def test_registry_entries_are_well_formed() -> None:
             assert (src, mode, owner) == ("-", "-", "-"), f"a retired entry carries no source: {e}"
             assert len(e) == 6
             continue
+        if cls == "pristine":
+            assert PRISTINE_SOURCE_RE.fullmatch(src), f"a pristine source is dpkg:<package> or ucf:<template>: {e}"
+            assert len(e) == 6, f"a pristine entry takes no options: {e}"
         assert re.fullmatch(r"0[0-7]{3}", mode), e
         assert re.fullmatch(r"[a-z_][a-z0-9_-]*:[a-z_][a-z0-9_-]*", owner), e
         if len(e) == 7:
@@ -967,7 +972,7 @@ def test_registry_entries_are_well_formed() -> None:
 
 def test_every_registry_source_exists() -> None:
     for e in _registry():
-        if e[4] != "absent":
+        if e[4] not in {"absent", "pristine"}:
             assert (ROOT / e[0]).is_file(), f"{e[1]}: source {e[0]} missing from the checkout"
 
 
@@ -1405,10 +1410,15 @@ def test_the_resolved_dropin_sets_exactly_the_hosts_upstreams() -> None:
     assert lines == ["[Resolve]", "DNS=1.1.1.1 8.8.8.8", "FallbackDNS=1.0.0.1 8.8.4.4"]
 
 
-def test_the_resolved_conffile_is_reported_never_written() -> None:
+def test_the_resolved_conffile_is_reported_and_written_only_as_its_package_default() -> None:
+    """The one exception to "deploy.sh never writes a conffile": class pristine, whose
+    source is the package itself — never a file of the repo."""
     text = _read(DEPLOY_SH)
     assert re.search(r"^CONFFILE_REPORT_PATHS=\(.*/etc/systemd/resolved\.conf.*\)$", text, re.M)
-    assert not [e for e in _registry() if e[1] == "/etc/systemd/resolved.conf"]
+    for conf in ("/etc/systemd/resolved.conf", "/etc/systemd/journald.conf"):
+        writers = [e for e in _registry() if e[1] == conf]
+        assert [e[4] for e in writers] == ["pristine"], writers
+        assert writers[0][0].startswith("dpkg:")
 
 
 def test_a_resolver_that_hangs_is_bounded_by_the_deadline(tmp_path: Path) -> None:

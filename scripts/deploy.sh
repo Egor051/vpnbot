@@ -175,6 +175,11 @@
 #             come back cuts off every new connection. The port check and the
 #             rollback catch a dead port, not a key you can no longer log in with;
 #             the open second session is what saves you then.
+#     NOT for: /etc/ssh/sshd_config itself (class pristine). That file only ever goes
+#             back to the PACKAGE DEFAULT, and only after Phase 1 has proven that
+#             `sshd -T` gives byte-for-byte the same effective configuration with it
+#             as without it — the proof is the lockout guard there, so the knob is
+#             neither needed nor consulted (a deliberate, documented exception).
 #
 #   DB_OWNER_USER=<user>   (default: vpn-bot)
 #     What:   The user that must own the data dir, vpn.db and its -wal/-shm
@@ -447,6 +452,29 @@ HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"
 #                `disable --now`s a unit file, then removes it. A retired
 #                sshd_config.d file is followed by the same sshd -t + reload + port
 #                check as an ssh change (a running sshd keeps the old setting).
+#     pristine   the file goes back to the PACKAGE DEFAULT — never to content written
+#                in the repo. src is where the default comes from:
+#                  dpkg:<package>    a conffile of <package>: the .deb of the INSTALLED
+#                                    version (${APT_ARCHIVES}, else `apt-get download
+#                                    <pkg>=<ver>`), extracted with dpkg-deb; its md5
+#                                    must be the one dpkg-query ${Conffiles} records
+#                  ucf:<template>    a ucf-managed file: the package's template; its
+#                                    md5 must be the one dpkg records for it (the
+#                                    owning package's md5sums), and <dst> must be
+#                                    registered in ${UCF_HASHFILE}
+#                No copy, or a wrong md5 -> WARN "cannot restore", the file is left
+#                alone, the deploy goes on. Phase 1 proves, before any mutation, that
+#                the restore changes NOTHING effective: scripts/vpn-bot-host-check
+#                --pre-install --pristine <dst>=<copy> compares every key of the
+#                family with and without it (a key only the hand edit carries is a
+#                FAIL), and for sshd_config `sshd -T` must be byte-for-byte the same
+#                (that proof replaces ALLOW_SSH_CHANGE here). Phase 2 stages the old
+#                copy, installs the default atomically (tmp + mv in the same dir), then
+#                the family's post-action: journald.conf -> restart systemd-journald,
+#                resolved.conf -> as class resolved, sshd_config -> as class ssh.
+#                THE ONE EXCEPTION to "deploy.sh never writes a conffile"
+#                (CONFFILE_REPORT_PATHS): only a pristine entry, and only with a copy
+#                the package manager's own md5 vouches for.
 #   role     main | relay — an entry is invisible on a host of the other role.
 #   opts     optional, ";"-separated:
 #     gate=<PROTO>    the entry exists only while <PROTO>_ON=yes (resolve_backend_units,
@@ -510,11 +538,19 @@ MANAGED_HOST_FILES=(
   "-|/etc/sudoers.d/90-cloud-init-users|-|-|absent|main"
   # DNS of the main server (docs/host-state.md, "DNS on the main server"): a plain
   # resolv.conf (byte-identical to the host's) and resolved's upstreams as a drop-in.
-  # /etc/systemd/resolved.conf itself is a dpkg conffile: never written (reported).
+  # /etc/systemd/resolved.conf itself goes back to the package default (pristine).
   "deploy/host/dns/resolv.conf|/etc/resolv.conf|0644|root:root|plain|main"
   "deploy/host/resolved/10-vpn-bot.conf|/etc/systemd/resolved.conf.d/10-vpn-bot.conf|0644|root:root|resolved|main"
+  # Package defaults (class pristine): hand edits of these duplicate the repo drop-ins
+  # above (SystemMaxUse, DNS/FallbackDNS) or, in sshd_config, are the provider's
+  # active "PasswordAuthentication yes" / "PermitRootLogin yes" lines behind our
+  # drop-in — a LATENT that stops Phase 1. Restored only when nothing effective changes.
+  "dpkg:systemd|/etc/systemd/journald.conf|0644|root:root|pristine|main"
+  "dpkg:systemd-resolved|/etc/systemd/resolved.conf|0644|root:root|pristine|main"
+  "ucf:/usr/share/openssh/sshd_config|/etc/ssh/sshd_config|0644|root:root|pristine|main"
   # --- relay -----------------------------------------------------------------
   "deploy/host/ssh/00-vpnrelay-keyonly.conf|/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf|0644|root:root|ssh|relay"
+  "ucf:/usr/share/openssh/sshd_config|/etc/ssh/sshd_config|0644|root:root|pristine|relay"
   "deploy/host/systemd/vpn-bot-host-check.service|/etc/systemd/system/vpn-bot-host-check.service|0644|root:root|unit|relay"
   "deploy/host/systemd/vpn-bot-host-check.timer|/etc/systemd/system/vpn-bot-host-check.timer|0644|root:root|unit|relay"
   "deploy/host/cloud/cloud-init.disabled|/etc/cloud/cloud-init.disabled|0644|root:root|plain|relay"
@@ -540,8 +576,16 @@ UNMANAGED_SCAN_DIRS=(
 # What may still name a retired (absent-class) file — the reference guard reads these
 # recursively, plus ${ENV_FILE}. /var/spool/cron covers root's crontab.
 ABSENT_REF_PATHS=(/etc/crontab /etc/cron.d /var/spool/cron /etc/systemd/system /usr/lib/systemd/system)
-# dpkg conffiles the report says are locally modified. Never written by the deploy.
+# dpkg conffiles the report says are locally modified. The deploy never writes a
+# conffile — with ONE exception: a class pristine entry, and only with a copy of the
+# package default that dpkg's own md5 vouches for (never content written in the repo).
 CONFFILE_REPORT_PATHS=(/etc/systemd/journald.conf /etc/systemd/resolved.conf)
+# Class pristine: where the package default comes from (paths overridable for the
+# DEPLOY_SELFTEST suites only). `apt-get download` runs under `timeout` for this many
+# seconds; every file lands in the deploy's private work directory (MH_CAND_DIR).
+APT_ARCHIVES="${APT_ARCHIVES:-/var/cache/apt/archives}"
+UCF_HASHFILE="${UCF_HASHFILE:-/var/lib/ucf/hashfile}"
+PRISTINE_DOWNLOAD_TIMEOUT="${PRISTINE_DOWNLOAD_TIMEOUT:-120}"
 # Class resolved: after the drop-in changed, `getent ahosts <host>` must answer within
 # this many seconds (retried once a second), or the deploy rolls back.
 RESOLVED_UNIT="${RESOLVED_UNIT:-systemd-resolved}"
@@ -555,6 +599,9 @@ RESOLVED_PROBE_WAIT="${RESOLVED_PROBE_WAIT:-10}"
 #   BEATEN, MISMATCH                                           -> FAIL (nothing changed)
 #   LATENT on an sshd auth key (HOST_CHECK_SSHD_AUTH_KEYS) not
 #     in deploy/host/accepted-overrides.list                   -> FAIL
+#   a class pristine file Phase 2 restores (--pristine): MISMATCH
+#     of family pristine (the restore would change a key), or no
+#     OK row for it (no effect proof)                          -> FAIL
 #   any other LATENT, WARN                                     -> WARN
 # PHASE1_ONLY=1 reports a FAIL instead of stopping, like the other drift gates. There
 # is NO knob past a FAIL: fix the host (or the repo); a LATENT that is meant to stay
@@ -663,6 +710,12 @@ MH_SRC=""; MH_DST=""; MH_MODE=""; MH_OWNER=""; MH_CLASS=""; MH_ROLE=""; MH_OPTS=
 MH_SRCPATH=""; MH_STATE=""; MH_DETAIL=""; MH_LEGACY=""; MH_LEGACY_STATE=""
 MH_CAND_DIR=""
 declare -a MH_ROWS=() MH_UNACCOUNTED=() MH_CONFFILES=()
+# Class pristine, filled once in Phase 1 (mh_pristine_prepare): dst -> the verified
+# package default under MH_CAND_DIR, how it was obtained, or why it was not.
+declare -A MH_PRISTINE_COPY=() MH_PRISTINE_HOW=() MH_PRISTINE_WHY=()
+# Phase 1: the retired files under the sshd drop-in directory (the sshd -T proof
+# builds the drop-in directory as Phase 2 will leave it).
+declare -a MH_RETIRED_PRESENT=()
 declare -A HOST_STAGED=()
 declare -a HOST_STAGED_ORDER=()
 declare -a MH_CHANGED=() MH_UNITS_TOUCHED=() MH_ENABLED_BY_US=() MH_SYSCTL_ORDER=() MH_CREATED_DIRS=()
@@ -1042,6 +1095,10 @@ mh_meta_matches() {
 #   gone          class absent: already gone -> nothing to do
 #   gated-off     the protocol gate is closed on this host -> not looked at at all
 #   gate-unit-mismatch  gated drop-in for a unit .env does not name -> Phase 1 stops
+#   cannot-restore  class pristine: no verified package default (mh_pristine_prepare
+#                 says why) -> WARN, the file is left alone, the deploy goes on
+# Class pristine compares against the verified copy mh_pristine_prepare left in
+# MH_CAND_DIR — the same copy in Phase 1 and Phase 2 (one process); <root> is unused.
 mh_entry_state() {
   local root="${1%/}"
   MH_SRCPATH="-"; MH_STATE=""; MH_DETAIL=""; MH_LEGACY=""; MH_LEGACY_STATE=""
@@ -1049,7 +1106,16 @@ mh_entry_state() {
     if [[ -e "$MH_DST" || -L "$MH_DST" ]]; then MH_STATE="present"; else MH_STATE="gone"; fi
     return 0
   fi
-  MH_SRCPATH="${root}/${MH_SRC}"
+  if [[ "$MH_CLASS" == "pristine" ]]; then
+    MH_SRCPATH="${MH_PRISTINE_COPY[$MH_DST]:-}"
+    if [[ -z "$MH_SRCPATH" || ! -f "$MH_SRCPATH" ]]; then
+      MH_SRCPATH="-"; MH_STATE="cannot-restore"
+      MH_DETAIL="cannot restore: ${MH_PRISTINE_WHY[$MH_DST]:-the package default was not obtained (Phase 1 did not prepare it)}"
+      return 0
+    fi
+  else
+    MH_SRCPATH="${root}/${MH_SRC}"
+  fi
   if ! mh_gate_open "$MH_OPTS"; then
     MH_STATE="gated-off"
     if [[ -n "$(mh_opt "$MH_OPTS" when)" && ! -e "$(mh_opt "$MH_OPTS" when)" ]]; then
@@ -1076,6 +1142,9 @@ mh_entry_state() {
     MH_DETAIL="host has $(stat -c '0%a %U:%G' "$MH_DST" 2>/dev/null || echo '?'), repo wants ${MH_MODE} ${MH_OWNER}"
   else
     MH_STATE="synced"
+  fi
+  if [[ "$MH_CLASS" == "pristine" && -z "$MH_DETAIL" ]]; then
+    MH_DETAIL="package default: ${MH_PRISTINE_HOW[$MH_DST]:-verified}"
   fi
   MH_LEGACY="$(mh_opt "$MH_OPTS" legacy)"
   if [[ -n "$MH_LEGACY" ]] && [[ -e "$MH_LEGACY" || -L "$MH_LEGACY" ]]; then
@@ -1282,6 +1351,246 @@ mh_validate_ssh() {
   echo "sshd -t with the candidate: ok"
 }
 
+# --- class pristine: the package default ---------------------------------------------
+md5_of() { md5sum "$1" 2>/dev/null | awk '{ print $1 }' || true; }
+
+# The family a pristine destination belongs to — what proves that restoring it changes
+# nothing effective, and what Phase 2 runs once it changed: ssh (the main sshd_config
+# only), a systemd *.conf family, or sysctl. Nothing for any other path: Phase 1 refuses
+# such an entry (there is no effect proof for it).
+mh_pristine_family() {
+  if [[ "$1" == "$SSHD_CONFIG" ]]; then echo ssh; return 0; fi
+  if [[ "$1" =~ /etc/systemd/(journald|networkd|resolved|logind|timesyncd|system)\.conf$ ]]; then
+    echo "${BASH_REMATCH[1]}"; return 0
+  fi
+  if [[ "$1" =~ /etc/sysctl\.(conf|d/[^/]+\.conf)$ ]]; then echo sysctl; fi
+  return 0
+}
+
+mh_pristine_section() {
+  case "$1" in
+    journald) echo Journal ;; networkd) echo Network ;; resolved) echo Resolve ;;
+    logind) echo Login ;; timesyncd) echo Time ;; system) echo Manager ;;
+  esac
+}
+
+# dpkg:<package> — the conffile <dst> exactly as the INSTALLED version of <package>
+# ships it, at <out>. The .deb comes from APT_ARCHIVES (an epoch's ":" is "%3a" in the
+# file name), else `apt-get download <pkg>=<ver>` into MH_CAND_DIR; dpkg-deb
+# --fsys-tarfile | tar -xO takes the one file out. Its md5 must be the one
+# dpkg-query ${Conffiles} records for <dst>. A host copy that already has that md5 IS
+# the package default: nothing is fetched. Sets MH_PRISTINE_COPY/HOW, or
+# MH_PRISTINE_WHY for <dst>. Every read tolerates failure: the set -e of the deploy
+# must never turn "cannot restore" into a dead Phase 1.
+mh_pristine_from_dpkg() {
+  local pkg="$1" dst="$2" out="$3" line status ver arch want have name deb from dl msg rc
+  local -a bound=()
+  command -v dpkg-query >/dev/null 2>&1 || { MH_PRISTINE_WHY["$dst"]="dpkg-query not found"; return 0; }
+  # shellcheck disable=SC2016  # dpkg-query format strings, not shell expansions
+  line="$(dpkg-query -W -f='${db:Status-Abbrev}|${Version}|${Architecture}\n' "$pkg" 2>/dev/null | awk 'NR == 1' || true)"
+  IFS='|' read -r status ver arch <<< "$line"
+  # The SECOND letter is the package state (i = installed); the first is only the
+  # selection — a held package reads "hi", one marked for removal "ri".
+  if [[ "${status:1:1}" != "i" || -z "$ver" || -z "$arch" ]]; then
+    MH_PRISTINE_WHY["$dst"]="package ${pkg} is not installed (dpkg-query: '${status:-nothing}')"; return 0
+  fi
+  # shellcheck disable=SC2016
+  want="$(dpkg-query -W -f='${Conffiles}\n' "$pkg" 2>/dev/null \
+            | awk -v p="$dst" '$1 == p && $3 != "obsolete" && !f { print $2; f = 1 }' || true)"
+  if [[ ! "$want" =~ ^[0-9a-f]{32}$ ]]; then
+    MH_PRISTINE_WHY["$dst"]="${dst} is not a conffile of ${pkg} ${ver} (dpkg-query \${Conffiles})"; return 0
+  fi
+  if [[ -f "$dst" && "$(md5_of "$dst")" == "$want" ]]; then
+    if cp "$dst" "$out"; then
+      MH_PRISTINE_COPY["$dst"]="$out"
+      MH_PRISTINE_HOW["$dst"]="${pkg} ${ver}: the host copy already is it (md5 ${want} = dpkg's)"
+    else
+      MH_PRISTINE_WHY["$dst"]="cannot copy ${dst} into ${out%/*}"
+    fi
+    return 0
+  fi
+  name="${pkg}_${ver//:/%3a}_${arch}.deb"
+  if [[ -f "${APT_ARCHIVES}/${name}" ]]; then
+    deb="${APT_ARCHIVES}/${name}"; from="${deb}"
+  else
+    command -v apt-get >/dev/null 2>&1 \
+      || { MH_PRISTINE_WHY["$dst"]="${name} is not in ${APT_ARCHIVES} and apt-get is not found"; return 0; }
+    dl="${MH_CAND_DIR}/pristine-apt"
+    mkdir -p "$dl" || { MH_PRISTINE_WHY["$dst"]="cannot create ${dl}"; return 0; }
+    if command -v timeout >/dev/null 2>&1; then bound=(timeout --kill-after=5 "$PRISTINE_DOWNLOAD_TIMEOUT"); fi
+    msg="$(cd "$dl" && "${bound[@]}" apt-get download "${pkg}=${ver}" 2>&1)" && rc=0 || rc=$?
+    if (( rc != 0 )) || [[ ! -f "${dl}/${name}" ]]; then
+      msg="$(printf '%s\n' "$msg" | awk 'NF { l = $0 } END { print l }')"
+      MH_PRISTINE_WHY["$dst"]="${pkg} ${ver} is neither in ${APT_ARCHIVES} nor downloadable (apt-get download exit ${rc}${msg:+: ${msg}})"
+      return 0
+    fi
+    deb="${dl}/${name}"; from="apt-get download"
+  fi
+  command -v dpkg-deb >/dev/null 2>&1 || { MH_PRISTINE_WHY["$dst"]="dpkg-deb not found"; return 0; }
+  # tar reads the whole stream (no --occurrence), so dpkg-deb never takes a SIGPIPE.
+  msg="$( { dpkg-deb --fsys-tarfile "$deb" | tar -xO "./${dst#/}" > "$out"; } 2>&1 )" && rc=0 || rc=$?
+  if (( rc != 0 )); then
+    msg="$(printf '%s\n' "$msg" | awk 'NF { l = $0 } END { print l }')"
+    MH_PRISTINE_WHY["$dst"]="cannot extract ./${dst#/} from ${name} (exit ${rc}${msg:+: ${msg}})"; return 0
+  fi
+  have="$(md5_of "$out")"
+  if [[ "$have" != "$want" ]]; then
+    MH_PRISTINE_WHY["$dst"]="${dst} in ${name} has md5 ${have:-?}, dpkg records ${want} for it"; return 0
+  fi
+  MH_PRISTINE_COPY["$dst"]="$out"
+  MH_PRISTINE_HOW["$dst"]="${pkg} ${ver} from ${from} (md5 ${want} = dpkg's)"
+}
+
+# ucf:<template> — a file a package's maintainer script installs through ucf. The
+# package default is the template the package ships; its md5 must be the one dpkg
+# records for it (the owning package's md5sums), and ucf must register <dst> (a line
+# in UCF_HASHFILE). ucf's own md5 for <dst> is what the maintainer script rendered
+# from the template at install time — debconf answers included (openssh-server turns
+# "PermitRootLogin yes" on when openssh-server/permit-root-login is false, which the
+# provider image preseeds) — so it is reported, never restored.
+mh_pristine_from_ucf() {
+  local tpl="$1" dst="$2" out="$3" pkg sums want have reg
+  [[ -f "$tpl" && -r "$tpl" ]] || { MH_PRISTINE_WHY["$dst"]="the template ${tpl} is not on this host"; return 0; }
+  if ! command -v dpkg >/dev/null 2>&1 || ! command -v dpkg-query >/dev/null 2>&1; then
+    MH_PRISTINE_WHY["$dst"]="dpkg / dpkg-query not found — the template cannot be verified"; return 0
+  fi
+  pkg="$(dpkg -S "$tpl" 2>/dev/null | awk -F': ' -v p="$tpl" '$1 !~ /^diversion/ && $2 == p && !f { print $1; f = 1 }' || true)"
+  pkg="${pkg%%,*}"
+  [[ -n "$pkg" ]] || { MH_PRISTINE_WHY["$dst"]="the template ${tpl} is not owned by a package (dpkg -S)"; return 0; }
+  sums="$(dpkg-query --control-path "$pkg" md5sums 2>/dev/null || true)"
+  if [[ -z "$sums" || ! -r "$sums" ]]; then
+    MH_PRISTINE_WHY["$dst"]="${pkg} has no md5sums (dpkg-query --control-path ${pkg} md5sums)"; return 0
+  fi
+  want="$(awk -v p="${tpl#/}" '$2 == p && !f { print $1; f = 1 }' "$sums" || true)"
+  if [[ ! "$want" =~ ^[0-9a-f]{32}$ ]]; then
+    MH_PRISTINE_WHY["$dst"]="dpkg records no md5 for ${tpl} (${pkg} md5sums)"; return 0
+  fi
+  have="$(md5_of "$tpl")"
+  if [[ "$have" != "$want" ]]; then
+    MH_PRISTINE_WHY["$dst"]="the template ${tpl} has md5 ${have:-?}, dpkg records ${want} for it (${pkg}) — changed on this host"; return 0
+  fi
+  [[ -r "$UCF_HASHFILE" ]] || { MH_PRISTINE_WHY["$dst"]="${UCF_HASHFILE} is not readable — ucf does not manage ${dst} here"; return 0; }
+  reg="$(awk -v p="$dst" '$2 == p && !f { print $1; f = 1 }' "$UCF_HASHFILE" || true)"
+  [[ -n "$reg" ]] || { MH_PRISTINE_WHY["$dst"]="ucf does not register ${dst} (no line in ${UCF_HASHFILE})"; return 0; }
+  cp "$tpl" "$out" || { MH_PRISTINE_WHY["$dst"]="cannot copy ${tpl} into ${out%/*}"; return 0; }
+  MH_PRISTINE_COPY["$dst"]="$out"
+  MH_PRISTINE_HOW["$dst"]="the ${pkg} template ${tpl} (md5 ${want} = dpkg's)"
+  if [[ "$reg" != "$want" ]]; then
+    MH_PRISTINE_HOW["$dst"]+="; ucf registered ${reg} for ${dst}: the template as the maintainer script rendered it at install (debconf answers) — not what is restored"
+  fi
+}
+
+# Phase 1: obtain and verify the package default of every pristine entry of this role,
+# once. Read-only on the host: the copies, and a .deb apt-get download fetches, land
+# in the deploy's private work directory (MH_CAND_DIR) only.
+mh_pristine_prepare() {
+  local entry out
+  for entry in "${MANAGED_HOST_FILES[@]}"; do
+    mh_parse "$entry"
+    [[ "$MH_ROLE" == "${NODE_ROLE:-main}" && "$MH_CLASS" == "pristine" ]] || continue
+    [[ -z "${MH_PRISTINE_COPY[$MH_DST]+x}${MH_PRISTINE_WHY[$MH_DST]+x}" ]] || continue
+    out="${MH_CAND_DIR}/pristine${MH_DST}"
+    if ! mkdir -p "$(dirname "$out")"; then MH_PRISTINE_WHY["$MH_DST"]="cannot create $(dirname "$out")"; continue; fi
+    case "$MH_SRC" in
+      dpkg:?*) mh_pristine_from_dpkg "${MH_SRC#dpkg:}" "$MH_DST" "$out" ;;
+      ucf:/?*) mh_pristine_from_ucf "${MH_SRC#ucf:}" "$MH_DST" "$out" ;;
+      *)       MH_PRISTINE_WHY["$MH_DST"]="unknown source '${MH_SRC}' (want dpkg:<package> or ucf:<template>)" ;;
+    esac
+    if [[ -n "${MH_PRISTINE_WHY[$MH_DST]+x}" ]]; then rm -f "$out"; unset 'MH_PRISTINE_COPY[$MH_DST]'; fi
+  done
+}
+
+# <file> with every Include of the drop-in directory (absolute, or relative to
+# /etc/ssh) pointed at <dir>/sshd_config.d, to stdout. Other Includes are kept: they
+# read the same live files on both sides of the proof.
+mh_sshd_redirect() {
+  local dropdir
+  dropdir="$(dirname "$SSHD_CONFIG")/sshd_config.d"
+  awk -v d="$dropdir" -v n="${2}/sshd_config.d" '
+    tolower($1) == "include" {
+      out = $1
+      for (i = 2; i <= NF; i++) {
+        a = $i; q = ""
+        if (substr(a, 1, 1) == "\"") { q = "\""; a = substr(a, 2); sub(/"$/, "", a) }
+        if (a == d || index(a, d "/") == 1) a = n substr(a, length(d) + 1)
+        else if (index(a, "sshd_config.d/") == 1) a = n substr(a, length("sshd_config.d") + 1)
+        out = out " " q a q
+      }
+      $0 = out
+    }
+    { print }' "$1"
+}
+
+mh_sshd_private_config() { mh_sshd_redirect "$1" "$2" > "${2}/sshd_config"; }
+
+# A private sshd tree under <dir>: <config> as its sshd_config, and the drop-in
+# directory as Phase 2 will leave it — the host's, plus the candidates Phase 2 installs
+# there (they mirror their destination under MH_CAND_DIR), minus the retired files.
+# The Includes of every copied drop-in are pointed at the private directory too, so a
+# drop-in that names a retired file by its absolute path does not read the live one.
+mh_sshd_private_tree() {
+  local dropdir f
+  dropdir="$(dirname "$SSHD_CONFIG")/sshd_config.d"
+  rm -rf "$2" && mkdir -p "${2}/sshd_config.d" || return 1
+  if [[ -d "$dropdir" ]]; then cp -a "${dropdir}/." "${2}/sshd_config.d/" || return 1; fi
+  if [[ -d "${MH_CAND_DIR}${dropdir}" ]]; then cp -a "${MH_CAND_DIR}${dropdir}/." "${2}/sshd_config.d/" || return 1; fi
+  for f in "${MH_RETIRED_PRESENT[@]}"; do
+    if [[ "$f" == "${dropdir}/"* ]]; then rm -f "${2}/sshd_config.d/${f#"${dropdir}/"}"; fi
+  done
+  for f in "${2}/sshd_config.d"/*; do
+    [[ -f "$f" ]] || continue
+    mh_sshd_redirect "$f" "$2" > "${f}.redirected" && mv -f "${f}.redirected" "$f" || return 1
+  done
+  mh_sshd_private_config "$1" "$2"
+}
+
+# The effect proof of a pristine sshd_config: `sshd -T` on a private tree with the
+# host's sshd_config and on one with the package default (the same drop-ins, as Phase
+# 2 leaves them) must print byte for byte the same. This proof — not ALLOW_SSH_CHANGE —
+# is what guards the access here. No sshd, a failing sshd -T or any difference: refused.
+mh_pristine_sshd_proof() {
+  local cand="$1" dst="$2" base="${MH_CAND_DIR}/sshd-T" side rc
+  if [[ "$dst" != "$SSHD_CONFIG" ]]; then
+    echo "class pristine covers the main sshd_config (${SSHD_CONFIG}) only, not ${dst}"; return 1
+  fi
+  command -v sshd >/dev/null 2>&1 || { echo "sshd not found — no proof that the restore leaves sshd's effective configuration unchanged"; return 1; }
+  if ! mh_sshd_private_tree "$dst" "${base}/now" || ! mh_sshd_private_tree "$cand" "${base}/default"; then
+    echo "cannot build the private sshd trees under ${base} — no proof"; return 1
+  fi
+  for side in now default; do
+    sshd -T -f "${base}/${side}/sshd_config" > "${base}/${side}.T" 2> "${base}/${side}.err" && rc=0 || rc=$?
+    if (( rc != 0 )); then
+      awk 'NR <= 5' "${base}/${side}.err" "${base}/${side}.T"
+      echo "sshd -T on $([[ "$side" == now ]] && echo "the host's sshd_config" || echo "the package default") exited ${rc} — no proof that the restore changes nothing"
+      return 1
+    fi
+  done
+  if ! cmp -s "${base}/now.T" "${base}/default.T"; then
+    if command -v diff >/dev/null 2>&1; then
+      diff -u --label "sshd -T now" --label "sshd -T with the package default" "${base}/now.T" "${base}/default.T" || true
+    fi
+    echo "sshd -T differs with the package default (above) — the hand edit carries effective settings: move them into a repo drop-in first"
+    return 1
+  fi
+  echo "sshd -T: byte-for-byte the same with the package default ($(awk 'END { print NR }' "${base}/now.T") lines) — the restore changes nothing effective"
+}
+
+# Phase 1 check of a pristine candidate (the verified package default). sshd: the
+# sshd -T proof above. A systemd *.conf: its [Section]; the effect of every key is
+# proven by the host check (--pristine) right after. Anything else has no proof.
+mh_validate_pristine() {
+  local fam
+  fam="$(mh_pristine_family "$2")"
+  case "$fam" in
+    ssh) mh_pristine_sshd_proof "$1" "$2" ;;
+    journald|networkd|resolved|logind|timesyncd|system)
+      mh_validate_section "$1" "$(mh_pristine_section "$fam")" || return 1
+      echo "the effect of every ${fam} key is proven by the host check (--pristine) below" ;;
+    sysctl) echo "the effect of every sysctl key is proven by the host check (--pristine) below" ;;
+    *) echo "no effect proof for ${2}: class pristine covers the main sshd_config, the systemd *.conf files and sysctl only"; return 1 ;;
+  esac
+}
+
 # Validate one candidate. Prints its findings; "WARN: " lines are advisory.
 # Returns 0 = installable, 1 = refused (Phase 1 stops, nothing changed).
 mh_validate() {
@@ -1295,6 +1604,7 @@ mh_validate() {
     ssh)       mh_validate_ssh "$2" "$3" ;;
     plain)     echo "plain file — installed verbatim, nothing to validate" ;;
     resolved)  mh_validate_section "$2" Resolve ;;
+    pristine)  mh_validate_pristine "$2" "$3" ;;
     *)         echo "unknown class '${1}'"; return 1 ;;
   esac
 }
@@ -1322,10 +1632,10 @@ absent_ref_hits() {
   return 0
 }
 
-mh_show_diff() {   # $1 host copy, $2 repo copy
+mh_show_diff() {   # $1 host copy, $2 repo copy (or the package default: $3 = its label)
   local out
   command -v diff >/dev/null 2>&1 || { log "      (diff not available on this host)"; return 0; }
-  out="$(diff -u --label "host: $1" --label "repo: $2" "$1" "$2" 2>&1 || true)"
+  out="$(diff -u --label "host: $1" --label "${3:-repo}: $2" "$1" "$2" 2>&1 || true)"
   printf '%s\n' "$out" | sed 's/^/      /'
 }
 
@@ -1341,8 +1651,16 @@ mh_action_text() {   # $1 class, $2 state, $3 dst
     rename)             echo "byte-identical legacy name — Phase 2 renames it (daemon-reload, no restart)" ;;
     legacy-drift)       echo "legacy name with DIFFERENT content — reconcile by hand (Phase 1 stops)" ;;
     gate-unit-mismatch) echo "drop-in for a unit .env does not run — fix MANAGED_HOST_FILES (Phase 1 stops)" ;;
+    cannot-restore)     echo "left exactly as it is (WARN, not fatal)" ;;
     absent|drift)
       case "$1" in
+        pristine)
+          case "$(mh_pristine_family "$3")" in
+            ssh)      echo "Phase 2 restores the package default (sshd -T proven unchanged; no ALLOW_SSH_CHANGE), then sshd -t, reloads ssh and checks it listens" ;;
+            journald) echo "Phase 2 restores the package default (effect proven unchanged), then restarts systemd-journald" ;;
+            resolved) echo "Phase 2 restores the package default (effect proven unchanged), then try-reload-or-restart ${RESOLVED_UNIT} + getent ahosts ${RESOLVED_PROBE_HOST}" ;;
+            *)        echo "Phase 2 restores the package default (effect proven unchanged; nothing to apply)" ;;
+          esac ;;
         ssh)
           if [[ "$2" == "drift" && "$ALLOW_SSH_CHANGE" != "1" ]]; then
             echo "DIFFERS (diff above) — refused without ALLOW_SSH_CHANGE=1"
@@ -1368,25 +1686,35 @@ mh_action_text() {   # $1 class, $2 state, $3 dst
 #   * a retired file that cron, a unit or .env still names (FAIL, not WARN);
 #   * a gated drop-in for a unit .env does not run;
 #   * a legacy name with different content (unless ALLOW_UNIT_DRIFT=1: left as is);
-#   * an ssh file that differs from the repo, unless ALLOW_SSH_CHANGE=1.
-# PHASE1_ONLY=1 reports the last two instead of stopping, like the other drift gates.
-# Fills MH_ROWS for the report.
+#   * an ssh file that differs from the repo, unless ALLOW_SSH_CHANGE=1;
+#   * a pristine file whose package default would change sshd -T (the effect of the
+#     other families is proven by the host check, host_invariants_phase1).
+# A pristine entry without a verified package default is a WARN ("cannot restore"),
+# never a stop. PHASE1_ONLY=1 reports the legacy and ssh drift instead of stopping,
+# like the other drift gates. Fills MH_ROWS for the report.
 managed_host_phase1() {
   local root="${1%/}" row dst src class state mode owner detail cand msg rc line refs t
   local -a fail=() ssh_drift=() legacy_bad=() retired=() todo=()
   mh_candidate_dir_init
+  mh_pristine_prepare
   MH_ROWS=()
   readarray -t MH_ROWS < <(scan_managed_host_files "$root")
   (( ${#MH_ROWS[@]} > 0 )) || { log "host files: no MANAGED_HOST_FILES entry for role ${NODE_ROLE:-main}"; return 0; }
+  MH_RETIRED_PRESENT=()
   for row in "${MH_ROWS[@]}"; do
-    IFS='|' read -r dst _ class _ <<< "$row"
+    IFS='|' read -r dst _ class state _ <<< "$row"
     if [[ "$class" == "absent" ]]; then retired+=("$dst"); fi
+    if [[ "$class" == "absent" && "$state" == "present" ]]; then MH_RETIRED_PRESENT+=("$dst"); fi
   done
 
   log "host files (MANAGED_HOST_FILES, role ${NODE_ROLE:-main}):"
   for row in "${MH_ROWS[@]}"; do
     IFS='|' read -r dst src class state mode owner detail <<< "$row"
-    log "  $(printf '%-9s %-12s %s' "$class" "$state" "$dst")${detail:+ — ${detail}}"
+    if [[ "$state" == "cannot-restore" ]]; then
+      warn "  $(printf '%-9s %-12s %s' "$class" "$state" "$dst") — ${detail} — left as it is"
+    else
+      log "  $(printf '%-9s %-12s %s' "$class" "$state" "$dst")${detail:+ — ${detail}}"
+    fi
     case "$state" in
       present)
         refs="$(absent_ref_hits "$dst" "${retired[@]}")"
@@ -1400,7 +1728,8 @@ managed_host_phase1() {
         t="$(mh_opt "$(mh_entry_opts "$dst")" legacy)"
         mh_show_diff "$t" "$src" ;;
       absent|drift|rename)
-        [[ "$state" == "drift" ]] && mh_show_diff "$dst" "$src"
+        if [[ "$state" == "drift" && "$class" == "pristine" ]]; then mh_show_diff "$dst" "$src" "package default"
+        elif [[ "$state" == "drift" ]]; then mh_show_diff "$dst" "$src"; fi
         if [[ "$class" == "ssh" && "$state" == "drift" ]]; then ssh_drift+=("$dst"); fi
         if cand="$(mh_candidate "$src" "$dst" "$mode")"; then
           todo+=("${class}|${cand}|${dst}")
@@ -1560,7 +1889,8 @@ scan_unaccounted_host_files() {
   done | sort
 }
 
-# A dpkg conffile's state, for the report only — deploy.sh never writes one.
+# A dpkg conffile's state, for the report. deploy.sh never writes a conffile, except
+# through a class pristine entry (back to the package default) — mh_conffile_note.
 conffile_state() {
   local path="$1" pkg want have
   [[ -e "$path" ]] || { echo "absent"; return 0; }
@@ -1575,13 +1905,30 @@ conffile_state() {
   if [[ "$have" == "$want" ]]; then
     echo "stock ${pkg} conffile (unmodified)"
   else
-    echo "MODIFIED ${pkg} conffile — local edits; deploy.sh leaves it alone (docs/host-state.md)"
+    echo "MODIFIED ${pkg} conffile — local edits"
   fi
+}
+
+# What the deploy does with a MODIFIED conffile <path>: its pristine entry's state, or
+# nothing at all without one.
+mh_conffile_note() {
+  local row dst class state detail
+  for row in "${MH_ROWS[@]}"; do
+    IFS='|' read -r dst _ class state _ _ detail <<< "$row"
+    [[ "$dst" == "$1" && "$class" == "pristine" ]] || continue
+    case "$state" in
+      absent|drift)   echo "; Phase 2 restores the package default (class pristine)" ;;
+      cannot-restore) echo "; class pristine ${detail}" ;;
+      *)              echo "; class pristine: ${state}" ;;
+    esac
+    return 0
+  done
+  echo "; deploy.sh leaves it alone — no pristine entry (docs/host-state.md)"
 }
 
 # Phase 1, both roles: the registry gates, then the two informational scans.
 host_state_phase1() {
-  local row p mtime kind
+  local row p mtime kind t
   managed_host_phase1 "$1"
   MH_UNACCOUNTED=()
   readarray -t MH_UNACCOUNTED < <(scan_unaccounted_host_files "$1")
@@ -1597,7 +1944,9 @@ host_state_phase1() {
   MH_CONFFILES=()
   if [[ "${NODE_ROLE:-main}" == "main" ]]; then
     for p in "${CONFFILE_REPORT_PATHS[@]}"; do
-      MH_CONFFILES+=("${p}|$(conffile_state "$p")")
+      t="$(conffile_state "$p")"
+      if [[ "$t" == MODIFIED* ]]; then t+="$(mh_conffile_note "$p")"; fi
+      MH_CONFFILES+=("${p}|${t}")
       log "conffile ${p}: ${MH_CONFFILES[-1]#*|}"
     done
   fi
@@ -1803,7 +2152,7 @@ mh_ssh_apply() {
   fi
   if (( conf )); then
     if [[ "$(systemctl is-active "$SSH_UNIT" 2>/dev/null || true)" == "active" ]]; then
-      log "  reloading ${SSH_UNIT} (sshd_config.d changed; open sessions are kept)"
+      log "  reloading ${SSH_UNIT} (sshd configuration changed; open sessions are kept)"
       systemctl reload "$SSH_UNIT" || rollback_now "systemctl reload ${SSH_UNIT} failed after the sshd_config change"
     else
       log "  ${SSH_UNIT} is not running (socket-activated) — the next connection reads the new config"
@@ -1821,6 +2170,25 @@ mh_note_sysctl() {
     MH_SYSCTL_PRE["$key"]="$(sysctl -n "$key" 2>/dev/null || true)"
     MH_SYSCTL_ORDER+=("$key")
   done < <(mh_sysctl_keys "$1")
+}
+
+# Phase 2, class pristine: put the verified package default (MH_SRCPATH) at MH_DST
+# atomically — a temporary file in the same directory, mode/owner from the entry, then
+# mv. A failure removes the temporary file and returns 1 (the caller rolls back).
+mh_pristine_install() {
+  local dir tmp
+  mh_selftest_fence "$MH_DST"
+  dir="$(dirname "$MH_DST")"
+  if [[ ! -d "$dir" ]]; then
+    install -d -m 0755 -o root -g root "$dir" || return 1
+    MH_CREATED_DIRS+=("$dir")
+  fi
+  tmp="$(mktemp "${dir}/.$(basename "$MH_DST").vpn-bot-pristine.XXXXXX")" || return 1
+  if cp "$MH_SRCPATH" "$tmp" && chown "$MH_OWNER" "$tmp" && chmod "$MH_MODE" "$tmp" && mv -f "$tmp" "$MH_DST"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
 }
 
 # Phase 2, both roles: install, repair and retire every entry of this role from the
@@ -1841,6 +2209,7 @@ install_managed_host_files() {
       synced)    log "  ${MH_DST}: in sync" ;;
       gone)      log "  ${MH_DST}: retired, already gone" ;;
       gated-off) log "  ${MH_DST}: skipped (${MH_DETAIL})" ;;
+      cannot-restore) warn "  ${MH_DST}: ${MH_DETAIL} — left as it is" ;;
       legacy-drift)
         warn "  ${MH_DST}: ${MH_DETAIL} — left exactly as it is (ALLOW_UNIT_DRIFT=1)"
         continue ;;
@@ -1863,6 +2232,13 @@ install_managed_host_files() {
         MH_CHANGED+=("absent|${MH_DST}|removed")
         log "  ${MH_DST}: retired — removed (backed up in ${ARCHIVE:-the stage})" ;;
       absent|drift|rename)
+        if [[ "$MH_CLASS" == "pristine" ]]; then
+          # No ALLOW_SSH_CHANGE for sshd_config: Phase 1 proved the effect unchanged.
+          mh_pristine_install || rollback_now "failed to restore the package default of ${MH_DST}"
+          MH_CHANGED+=("pristine|${MH_DST}|${MH_STATE}")
+          log "  ${MH_DST}: ${MH_STATE} -> the package default restored (${MH_PRISTINE_HOW[$MH_DST]:-verified}; ${MH_MODE} ${MH_OWNER})"
+          continue
+        fi
         if [[ "$MH_CLASS" == "ssh" && "$MH_STATE" == "drift" && "$ALLOW_SSH_CHANGE" != "1" ]]; then
           rollback_now "${MH_DST}: ssh drift without ALLOW_SSH_CHANGE=1 (Phase 1 should have stopped here)"
         fi
@@ -1909,6 +2285,13 @@ install_managed_host_files() {
       networkd)  log "  ${dst}: takes effect at the next systemd-networkd restart (not restarted by the deploy)" ;;
       logrotate) log "  ${dst}: logrotate reads it on its next run" ;;
       plain)     log "  ${dst}: installed verbatim (nothing reloaded)" ;;
+      pristine)
+        case "$(mh_pristine_family "$dst")" in
+          journald) journald=1 ;;
+          resolved) resolved=1 ;;
+          ssh)      ssh_changed+=("$dst") ;;
+          *)        log "  ${dst}: package default restored; its effect was proven unchanged — nothing to apply" ;;
+        esac ;;
     esac
   done
   if (( units )); then
@@ -1932,13 +2315,13 @@ install_managed_host_files() {
     log "  sysctl -e -p ${t}: applied"
   done
   if (( journald )); then
-    systemctl restart systemd-journald || rollback_now "systemctl restart systemd-journald failed after the drop-in change"
-    log "  systemd-journald restarted (drop-in changed)"
+    systemctl restart systemd-journald || rollback_now "systemctl restart systemd-journald failed after the journald configuration change"
+    log "  systemd-journald restarted (its configuration changed)"
   fi
   if (( resolved )); then
     systemctl try-reload-or-restart "$RESOLVED_UNIT" \
       || rollback_now "systemctl try-reload-or-restart ${RESOLVED_UNIT} failed after the drop-in change"
-    log "  ${RESOLVED_UNIT} reloaded (drop-in changed)"
+    log "  ${RESOLVED_UNIT} reloaded (its configuration changed)"
     msg="$(resolved_lookup_status)" || rollback_now "name resolution fails after the ${RESOLVED_UNIT} drop-in change: ${msg}"
     log "  ${msg}"
   fi
@@ -1952,16 +2335,18 @@ install_managed_host_files() {
 }
 
 host_files_summary() {
-  local row n=0 r=0 m=0
+  local row n=0 r=0 m=0 p=0
   for row in "${MH_CHANGED[@]}"; do
     case "${row##*|}" in
       meta) m=$(( m + 1 )) ;;
       removed|removed-legacy) r=$(( r + 1 )) ;;
-      *) n=$(( n + 1 )) ;;
+      *) if [[ "$row" == pristine\|* ]]; then p=$(( p + 1 )); else n=$(( n + 1 )); fi ;;
     esac
   done
-  if (( n + r + m == 0 )); then echo "all in sync, nothing changed"; return 0; fi
-  echo "${n} installed, ${r} removed, ${m} mode/owner fixed"
+  if (( n + r + m + p == 0 )); then echo "all in sync, nothing changed"; return 0; fi
+  printf '%s installed, %s removed, %s mode/owner fixed' "$n" "$r" "$m"
+  if (( p > 0 )); then printf ', %s restored to the package default' "$p"; fi
+  printf '\n'
 }
 
 # --- rollback ---------------------------------------------------------------------
@@ -1993,6 +2378,12 @@ host_files_rollback() {
       journald) journald=1 ;;
       resolved) resolved=1 ;;
       ssh) if [[ "$dst" == *.socket.d/* ]]; then sock=1; reload=1; else conf=1; fi ;;
+      pristine)
+        case "$(mh_pristine_family "$dst")" in
+          journald) journald=1 ;;
+          resolved) resolved=1 ;;
+          ssh)      conf=1 ;;
+        esac ;;
     esac
   done
   if (( reload )); then systemctl daemon-reload; echo "daemon-reload (host files): rc=$?"; fi
@@ -2018,9 +2409,9 @@ host_files_rollback() {
       echo "${k} unreadable before the deploy (module not loaded) — left as it is"
     fi
   done
-  if (( journald )); then systemctl restart systemd-journald; echo "restart systemd-journald (drop-in restored): rc=$?"; fi
+  if (( journald )); then systemctl restart systemd-journald; echo "restart systemd-journald (configuration restored): rc=$?"; fi
   if (( resolved )); then
-    systemctl try-reload-or-restart "$RESOLVED_UNIT"; echo "try-reload-or-restart ${RESOLVED_UNIT} (drop-in restored): rc=$?"
+    systemctl try-reload-or-restart "$RESOLVED_UNIT"; echo "try-reload-or-restart ${RESOLVED_UNIT} (configuration restored): rc=$?"
   fi
   if (( sock || conf )); then
     out="$(sshd -t -f "$SSHD_CONFIG" 2>&1)" && rc=0 || rc=$?
@@ -2038,7 +2429,7 @@ host_files_rollback() {
       fi
       if (( conf )); then
         if [[ "$(systemctl is-active "$SSH_UNIT" 2>/dev/null || true)" == "active" ]]; then
-          systemctl reload "$SSH_UNIT"; echo "reload ${SSH_UNIT} (sshd_config.d restored): rc=$?"
+          systemctl reload "$SSH_UNIT"; echo "reload ${SSH_UNIT} (sshd configuration restored): rc=$?"
         else
           echo "${SSH_UNIT} not running (socket-activated) — the next connection reads the restored config"
         fi
@@ -2065,12 +2456,32 @@ hc_registry_lines() {
   done
 }
 
-# Run the check from checkout <root>; phase1 = --pre-install, nothing written;
-# phase2 = the installed host, HOST_CHECK_STATE written. Fills HC_ROWS, HC_SUMMARY,
-# HC_RC (2+ = it could not judge the host, 4 = only the state file failed). The output
-# is read line by line as data: never evaluated.
+# The pristine files Phase 2 restores (Phase 1 rows absent/drift), as "<dst>|<copy>":
+# the host check overlays each with its package default and proves the effect.
+hc_pristine_restores() {
+  local row dst src class state
+  for row in "${MH_ROWS[@]}"; do
+    IFS='|' read -r dst src class state _ <<< "$row"
+    if [[ "$class" == "pristine" ]] && [[ "$state" == "absent" || "$state" == "drift" ]]; then
+      printf '%s|%s\n' "$dst" "$src"
+    fi
+  done
+}
+
+# <path> as the host check names it: without HOST_CHECK_ROOT (tests read a fake root).
+hc_logical() {
+  local p="$1"
+  if [[ -n "$HOST_CHECK_ROOT" && "$p" == "${HOST_CHECK_ROOT%/}/"* ]]; then p="${p#"${HOST_CHECK_ROOT%/}"}"; fi
+  printf '%s' "$p"
+}
+
+# Run the check from checkout <root>; phase1 = --pre-install (with --pristine for every
+# package default Phase 2 restores), nothing written; phase2 = the installed host,
+# HOST_CHECK_STATE written. Fills HC_ROWS, HC_SUMMARY, HC_RC (2+ = it could not judge
+# the host, 4 = only the state file failed). The output is read line by line as data:
+# never evaluated.
 host_invariants_run() {
-  local root="${1%/}" phase="$2" bin reg err out rc line
+  local root="${1%/}" phase="$2" bin reg err out rc line pr
   local -a args=()
   HC_ROWS=(); HC_SUMMARY=""; HC_PHASE="$phase"; HC_RC=""
   bin="${HOST_CHECK_BIN:-${root}/scripts/vpn-bot-host-check}"
@@ -2085,7 +2496,14 @@ host_invariants_run() {
   hc_registry_lines > "$reg"
   args=(--repo "$root" --role "${NODE_ROLE:-main}" --registry "$reg" --env "$ENV_FILE")
   if [[ -n "$HOST_CHECK_ROOT" ]]; then args+=(--root "$HOST_CHECK_ROOT"); fi
-  if [[ "$phase" == phase1 ]]; then args+=(--pre-install --no-state); else args+=(--state "$HOST_CHECK_STATE"); fi
+  if [[ "$phase" == phase1 ]]; then
+    args+=(--pre-install --no-state)
+    while IFS= read -r pr; do
+      if [[ -n "$pr" ]]; then args+=(--pristine "${pr%%|*}=${pr#*|}"); fi
+    done < <(hc_pristine_restores)
+  else
+    args+=(--state "$HOST_CHECK_STATE")
+  fi
   # Through bash, like the relay helper in Phase 1: a noexec worktree cannot stop it.
   out="$(bash "$bin" "${args[@]}" 2>"$err")" && rc=0 || rc=$?
   while IFS= read -r line; do
@@ -2153,9 +2571,12 @@ hc_summary_text() {
 }
 
 # Phase 1, both roles, read-only. Stops HERE — before any mutation — on a FAIL row,
-# unless PHASE1_ONLY=1 (reported, not fatal in inspection mode).
+# unless PHASE1_ONLY=1 (reported, not fatal in inspection mode). A pristine file Phase
+# 2 restores needs its effect proof: an OK row of family pristine for its path (a
+# MISMATCH row there is already a FAIL); no row at all is a FAIL too.
 host_invariants_phase1() {
-  local row sev n_fail=0
+  local row sev n_fail=0 v fam path pr dst
+  local -A proven=()
   log "host invariants (scripts/vpn-bot-host-check --pre-install, role ${NODE_ROLE:-main}): the host as Phase 2 would leave it"
   host_invariants_run "$1" phase1
   if (( HC_RC >= 2 )); then
@@ -2167,16 +2588,26 @@ host_invariants_phase1() {
   fi
   for row in "${HC_ROWS[@]}"; do
     sev="$(hc_severity "$row")"
+    IFS='|' read -r v fam _ path _ <<< "$row"
+    if [[ "$fam" == pristine ]] && [[ "$v" == OK || "$v" == MISMATCH ]]; then proven["$path"]=1; fi
     case "$sev" in
-      OK)   ;;
+      OK)   if [[ "$fam" == pristine ]]; then log "  $(hc_row_text OK "$row")"; fi ;;   # the effect proof
       FAIL) n_fail=$(( n_fail + 1 )); warn "  $(hc_row_text FAIL "$row")" ;;
       WARN) warn "  $(hc_row_text WARN "$row")" ;;
       *)    log "  $(hc_row_text INFO "$row")" ;;
     esac
   done
+  while IFS= read -r pr; do
+    [[ -n "$pr" ]] || continue
+    dst="$(hc_logical "${pr%%|*}")"
+    if [[ -z "${proven[$dst]+x}" ]]; then
+      n_fail=$(( n_fail + 1 ))
+      warn "  FAIL pristine ${dst} — the host check gave no effect proof for restoring its package default"
+    fi
+  done < <(hc_pristine_restores)
   log "host invariants: $(hc_summary_text)"
   (( n_fail > 0 )) || return 0
-  warn "host invariants: ${n_fail} FAIL finding(s) above — BEATEN, MISMATCH, or LATENT on an sshd auth key"
+  warn "host invariants: ${n_fail} FAIL finding(s) above — BEATEN, MISMATCH, LATENT on an sshd auth key, or a package default without its effect proof"
   warn "  a repo value that is not in effect is not deployed: fix the host (or the repo) and re-run;"
   warn "  a LATENT that is meant to stay goes into deploy/host/accepted-overrides.list (there is no knob)"
   if [[ "$PHASE1_ONLY" == "1" ]]; then
@@ -2212,12 +2643,13 @@ host_invariants_phase2() {
   fi
 }
 
-# The rows a report carries: every one but OK, with its severity for this phase.
+# The rows a report carries: every one but OK (an effect proof of class pristine
+# excepted), with its severity for this phase.
 host_invariants_report_rows() {
   local row sev
   for row in "${HC_ROWS[@]}"; do
     sev="$(hc_severity "$row")"
-    [[ "$sev" == OK ]] && continue
+    if [[ "$sev" == OK && "$row" != OK\|pristine\|* ]]; then continue; fi
     printf '    %s\n' "$(hc_row_text "$sev" "$row")"
   done
 }
@@ -2228,7 +2660,8 @@ host_invariants_report_block() {
   if [[ -z "$HC_RC" ]]; then printf '    not run\n'; return 0; fi
   printf '    %s\n' "$(hc_summary_text)"
   host_invariants_report_rows
-  printf '    FAIL = a real deploy stops here; WARN = reported; PENDING = Phase 2 checks it after the install\n'
+  printf '    FAIL = a real deploy stops here; WARN = reported; PENDING = Phase 2 checks it after the install;\n'
+  printf '    OK pristine = the proof that restoring a package default changes nothing effective\n'
 }
 
 # --------------------------------------------------------------------------- #
