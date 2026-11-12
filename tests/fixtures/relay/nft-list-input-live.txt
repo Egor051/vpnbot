@@ -1,0 +1,13 @@
+table inet vpnrelay_input {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iif "lo" accept
+		ct state established,related accept
+		ct state invalid drop
+		ip protocol icmp accept
+		meta l4proto ipv6-icmp accept
+		ip6 saddr fe80::/10 udp dport 546 accept comment "dhcpv6 client"
+		tcp dport 22 accept comment "ssh"
+		counter packets 48211 bytes 2893260
+	}
+}

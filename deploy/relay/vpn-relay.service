@@ -1,11 +1,19 @@
 # vpnbot L4 relay — the data plane of a NODE_ROLE=relay host (docs/relay.md).
 #
-# Renders nftables table `ip vpnrelay` from /opt/vpn-service/.env (RELAY_* keys,
-# template deploy/relay/relay.env.example) and applies it atomically, then sets
-# the sysctls (conntrack from .env, net.ipv4.ip_forward=1) — see
-# scripts/vpn-relay-apply. The conntrack values are set here on every start:
-# systemd-sysctl runs before nf_conntrack is loaded and cannot set them. `stop`
-# removes the table; the leading "-" keeps a stop clean when the table is already gone.
+# Renders nftables table `ip vpnrelay` (forwarding) and `inet vpnrelay_input` (the
+# INPUT filter, policy drop) from /opt/vpn-service/.env (RELAY_* keys, template
+# deploy/relay/relay.env.example) and the listening SSH ports, applies both in one
+# atomic transaction, then sets the sysctls (conntrack from .env,
+# net.ipv4.ip_forward=1) — see scripts/vpn-relay-apply. The conntrack values are set
+# here on every start: systemd-sysctl runs before nf_conntrack is loaded and cannot
+# set them. A TCP set of the input filter that was never confirmed arms the
+# vpn-relay-input-deadman timer (5 minutes, `vpn-relay-apply input-confirm` from a
+# new ssh session stops it). `stop` removes both tables; the leading "-" keeps a stop
+# clean when a table is already gone.
+#
+# After= sshd: the helper reads the SSH ports from the listening sockets and refuses
+# to install a drop policy without one, so sshd (ssh.service, or ssh.socket under
+# socket activation) must be listening first. A unit that does not exist orders nothing.
 #
 # Installed VERBATIM by scripts/deploy.sh in the relay role (the same way
 # deploy/vpn-bot.service is installed on the main server), enabled, restarted,
@@ -16,8 +24,8 @@
 # /etc/vpn-relay.nft; that file is renamed to /etc/vpn-relay.nft.pre-repo.<ts>
 # after the first successful deploy and is not read any more.
 [Unit]
-Description=vpnbot L4 relay (nftables table ip vpnrelay from /opt/vpn-service/.env)
-After=network-online.target
+Description=vpnbot L4 relay (nftables tables ip vpnrelay + inet vpnrelay_input from /opt/vpn-service/.env)
+After=network-online.target ssh.socket ssh.service
 Wants=network-online.target
 
 [Service]
@@ -25,6 +33,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/vpn-relay-apply apply
 ExecStop=-/usr/sbin/nft delete table ip vpnrelay
+ExecStop=-/usr/sbin/nft delete table inet vpnrelay_input
 
 [Install]
 WantedBy=multi-user.target

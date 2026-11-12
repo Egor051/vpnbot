@@ -8,6 +8,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Relay: INPUT filter — `table inet vpnrelay_input`, policy drop, owned by
+  `vpn-relay-apply` (docs/relay.md#the-input-filter).** Nothing filtered what came in to the
+  relay itself (ufw masked, nftables.service disabled, only `table ip vpnrelay`). The helper now
+  renders a second table in the same atomic `nft -f`: one `hook input` chain, policy drop —
+  lo, established/related, invalid drop, ICMP, ICMPv6 (NDP), the DHCPv6 client
+  (`ip6 saddr fe80::/10 udp dport 546`), the SSH ports, `RELAY_INPUT_EXTRA_TCP` /
+  `RELAY_INPUT_EXTRA_UDP` (new, empty by default). The forwarding table stays byte-identical to
+  the captured one in every scenario. **SSH ports are discovered, never hardcoded**:
+  `ss -Hltunp` listeners of `sshd`/`sshd-session` on non-loopback addresses, or held by systemd
+  for a port `ssh.socket` declares; none found → `no SSH port found — refusing to install a drop
+  policy`, exit 8, nothing applied. **Access without a console**: the first enable and any change
+  of the TCP set (hash vs `/etc/vpn-relay/input.confirmed`) arm
+  `systemd-run --on-active=300 --unit=vpn-relay-input-deadman … input-off` BEFORE the table goes
+  in (cannot arm → exit 9, nothing applied); `vpn-relay-apply input-confirm`, accepted only from an
+  ssh session that began after the filter was applied, stops it and writes the marker;
+  `input-off` removes only `vpnrelay_input` and logs why. The confirmed set needs no dead-man, so
+  an ordinary deploy stays automatic; DEPLOY OK prints `input filter: PENDING CONFIRM (reverts at
+  …)` instead of OK while one is pending. `check` verifies the table (16 absent / present with
+  `RELAY_INPUT_FILTER=off`, 17 differs) and fails with 18 on a port that listens on a public
+  address but is filtered (`RELAY_INPUT_CLOSED_TCP/UDP` declare one that must stay closed). New
+  knob `RELAY_INPUT_FILTER=on|off` (default on); new commands `input-confirm`, `input-off`,
+  `input-status`. The deploy backs up the input table and rolls it back with its dead-man state
+  (a filter still waiting for confirmation is removed, never restored). `vpn-relay.service`:
+  `After=ssh.socket ssh.service`, `ExecStop` removes both tables. Host check: `ufw.service`
+  `UnitFileState=masked` is a relay invariant — UFW's forward chain (policy DROP) would drop the
+  relayed 443.
+
 - **Host files: class `pristine` — the deploy puts a package's own file back to its PACKAGE
   DEFAULT by itself (docs/host-state.md#package-defaults-class-pristine).** No manual script on a
   new host and every later hand edit undone the same way. Entry:

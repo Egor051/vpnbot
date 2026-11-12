@@ -31,6 +31,7 @@ main|path-regular|/etc/resolv.conf|-|the main server resolves through a plain re
 
 # --- relay ---------------------------------------------------------------------
 relay|unit-prop:ssh.socket:Listen|-|~22|the relay's only management path is sshd on 22 through ssh.socket; without it the relay is unreachable
+relay|unit-prop:ufw.service:UnitFileState|-|masked|the relay's INPUT filter is table inet vpnrelay_input (vpn-relay-apply); UFW's own forward chain (policy DROP) is a second base chain on the forward hook and would drop the relayed 443 whatever table ip vpnrelay says
 
 # --- both roles ----------------------------------------------------------------
 all|path-present|/etc/cloud/cloud-init.disabled|-|cloud-init must stay off: on a reboot it rewrote sshd_config.d and sudoers.d behind the repo's back
