@@ -43,10 +43,12 @@
 #          reset, install the helper (OUT_OF_REPO_HELPERS, role relay) and
 #          deploy/relay/vpn-relay.service verbatim, daemon-reload, enable,
 #          restart, verify = `vpn-relay-apply check`; any failure rolls back to
-#          the backup (files + saved tables + the input filter's dead-man state)
-#          and to the pre-deploy runtime sysctls (ip_forward, conntrack). A TCP
-#          set of the input filter that is not confirmed yet leaves DEPLOY OK
-#          with "input filter: PENDING CONFIRM (reverts at ...)". Its host
+#          the backup (files + saved tables + the input filter's dead-man state
+#          and confirmation marker) and to the pre-deploy runtime sysctls
+#          (ip_forward, conntrack). A TCP set of the input filter that is not
+#          confirmed yet is confirmed by main's probe during the restart (DEPLOY
+#          OK: "input filter: CONFIRMED by main probe ..."); when main cannot,
+#          DEPLOY OK says "input filter: PENDING CONFIRM (reverts at ...)" and why. Its host
 #          files (MANAGED_HOST_FILES, role relay) go through the same Phase 1
 #          gates and Phase 2 install/rollback as the main server's.
 #          See relay_deploy() below.
@@ -325,6 +327,10 @@ RELAY_INPUT_TABLE="vpnrelay_input"
 RELAY_INPUT_DUMP="/var/lib/vpn-bot-deploy/relay-input-table.pre-deploy.nft"
 RELAY_DEADMAN_TIMER="vpn-relay-input-deadman.timer"
 RELAY_INPUT_PENDING="${RELAY_INPUT_PENDING:-/run/vpn-relay/input.pending}"
+# The confirmed set (written by input-confirm or by main's probe during the restart:
+# backed up and restored with the rest) and the probe's note for that set.
+RELAY_INPUT_MARKER="${RELAY_INPUT_MARKER:-/etc/vpn-relay/input.confirmed}"
+RELAY_INPUT_PROBE="${RELAY_INPUT_PROBE:-/run/vpn-relay/input.probe}"
 # Phase 1 pre-state of the relay, the rollback's reference.
 RELAY_PRE_ACTIVE=""
 RELAY_PRE_ENABLED=""
@@ -4101,8 +4107,8 @@ relay_live_rc_text() {
     13) echo "the upstream does not answer on a forwarded TCP port — Phase 2's verify runs the same probe and would ROLL BACK; fix that first" ;;
     14) echo "TLS handshake to the upstream failed — Phase 2's verify would ROLL BACK; fix that (or RELAY_CHECK_SNI) first" ;;
     15) echo "the table and ip_forward match; the conntrack sysctls differ from .env (RELAY_CONNTRACK_*) — Phase 2 sets them" ;;
-    16) echo "table inet ${RELAY_INPUT_TABLE} absent (or present with RELAY_INPUT_FILTER=off) — Phase 2 applies the input filter; a TCP set not confirmed yet arms the 5-minute dead-man and waits for input-confirm from a NEW ssh session" ;;
-    17) echo "table inet ${RELAY_INPUT_TABLE} differs from the render (diff above) — Phase 2 replaces it; a changed TCP set asks for input-confirm again" ;;
+    16) echo "table inet ${RELAY_INPUT_TABLE} absent (or present with RELAY_INPUT_FILTER=off) — Phase 2 applies the input filter; a TCP set not confirmed yet arms the 5-minute dead-man, then main's probe confirms it (or input-confirm from a NEW ssh session)" ;;
+    17) echo "table inet ${RELAY_INPUT_TABLE} differs from the render (diff above) — Phase 2 replaces it; a changed TCP set needs a confirmation again (main's probe, or input-confirm)" ;;
     18) echo "a port listens on a public address but the input filter closes it — Phase 2's verify runs the same check and would ROLL BACK; open it (RELAY_INPUT_EXTRA_*), declare it (RELAY_INPUT_CLOSED_*) or bind it to loopback first" ;;
     8)  echo "no SSH port found — the input filter is never installed without one (vpn-relay-apply exit 8)" ;;
     5)  echo "could not run the live check here (exit 5: not root / tool missing)" ;;
@@ -4223,8 +4229,9 @@ relay_phase1_report() {
   printf '    back up the live tables + %s, %s, %s\n' "$RELAY_HELPER" "$RELAY_SYSTEM_UNIT" "$RELAY_SYSCTL_FILE"
   printf '    git reset --hard origin/main; install the helper; install %s verbatim\n' "$RELAY_UNIT_SRC"
   printf '    daemon-reload; enable + restart %s; verify with vpn-relay-apply check\n' "$RELAY_UNIT"
-  printf '    input filter: a TCP set not confirmed yet (see the dry-run above) arms the 5-minute dead-man;\n'
-  printf '      DEPLOY OK then says PENDING CONFIRM and input-confirm must run from a NEW ssh session\n'
+  printf '    input filter: a TCP set not confirmed yet (see the dry-run above) arms the 5-minute dead-man,\n'
+  printf '      then main probes the ssh ports (main probe above): DEPLOY OK says CONFIRMED by main probe;\n'
+  printf '      if main cannot, it says PENDING CONFIRM and why, and input-confirm must run from a NEW ssh session\n'
   printf '    any failure -> rollback (files + saved tables + dead-man state + enable/active state + ip_forward + conntrack sysctls)\n'
   printf '\n===================================================================\n'
 }
@@ -4329,8 +4336,8 @@ relay_rollback() {
   # Whatever the restored filter is, it is not waiting for a confirmation any more:
   # a dead-man the deploy's apply armed must not take it off in 5 minutes.
   systemctl stop "$RELAY_DEADMAN_TIMER" >/dev/null 2>&1
-  rm -f "$RELAY_INPUT_PENDING"
-  report+=("${RELAY_DEADMAN_TIMER} stopped, pending note dropped: now $(systemctl is-active "$RELAY_DEADMAN_TIMER" 2>/dev/null || true)")
+  rm -f "$RELAY_INPUT_PENDING" "$RELAY_INPUT_PROBE"
+  report+=("${RELAY_DEADMAN_TIMER} stopped, pending and probe notes dropped (${RELAY_INPUT_MARKER} restored with the files above): now $(systemctl is-active "$RELAY_DEADMAN_TIMER" 2>/dev/null || true)")
 
   if [[ "$RELAY_PRE_FORWARD" =~ ^[01]$ ]]; then
     report+=("$(relay_restore_sysctl net.ipv4.ip_forward "$RELAY_PRE_FORWARD")")
@@ -4377,7 +4384,7 @@ relay_retire_legacy_nft() {
 # until the restart, and the restart's gap (ExecStop deletes the table, ExecStart
 # applies the new one) is milliseconds; established flows keep their conntrack NAT.
 relay_phase2() {
-  local out rc entry listing legacy_before input_status
+  local out rc entry listing legacy_before input_status probe_why
   local -a mh_paths=()
   PREV_SHA="$(git rev-parse HEAD)"
   log "PREV_SHA=${PREV_SHA} (relay)"
@@ -4385,9 +4392,11 @@ relay_phase2() {
   STAGE="$(make_stage_dir)" || die "cannot create the backup stage"
   manifest=()
   log "backing up the relay state (nothing is stopped for it)"
-  # The relay's own three files, then its MANAGED_HOST_FILES — one mechanism
+  # The relay's own three files and the input filter's confirmation marker (main's
+  # probe may write it during the restart; a rollback puts back the one that matches
+  # the restored filter), then its MANAGED_HOST_FILES — one mechanism
   # (stage_host_paths / restore_host_paths) for every file outside the checkout.
-  stage_host_paths "$RELAY_HELPER" "$RELAY_SYSTEM_UNIT" "$RELAY_SYSCTL_FILE"
+  stage_host_paths "$RELAY_HELPER" "$RELAY_SYSTEM_UNIT" "$RELAY_SYSCTL_FILE" "$RELAY_INPUT_MARKER"
   readarray -t mh_paths < <(managed_host_stage_paths)
   stage_host_paths "${mh_paths[@]}"
   install -d -m0755 "${STAGE}$(dirname "$RELAY_TABLE_DUMP")"
@@ -4435,7 +4444,7 @@ relay_phase2() {
     || rollback_now "failed to install ${RELAY_UNIT_SRC} to ${RELAY_SYSTEM_UNIT}"
   systemctl daemon-reload || rollback_now "systemctl daemon-reload failed"
   systemctl enable --quiet "$RELAY_UNIT" || rollback_now "systemctl enable ${RELAY_UNIT} failed"
-  log "restarting ${RELAY_UNIT} (vpn-relay-apply apply: table ip ${RELAY_TABLE} + table inet ${RELAY_INPUT_TABLE} from .env, conntrack sysctls, ip_forward=1)"
+  log "restarting ${RELAY_UNIT} (vpn-relay-apply apply: table ip ${RELAY_TABLE} + table inet ${RELAY_INPUT_TABLE} from .env, conntrack sysctls, ip_forward=1; a TCP set not confirmed yet: dead-man, then main's probe)"
   systemctl restart "$RELAY_UNIT" \
     || rollback_now "${RELAY_UNIT} restart failed — vpn-relay-apply apply exited non-zero (see: journalctl -u ${RELAY_UNIT} -n 50 --no-pager)"
   [[ "$(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true)" == "active" ]] \
@@ -4458,10 +4467,13 @@ relay_phase2() {
   [[ -e "$RELAY_LEGACY_NFT" ]] && legacy_before="present"
   relay_retire_legacy_nft
   rotate_backups
-  # One line from the helper: off | OK (...) | PENDING CONFIRM (reverts at ...) | ...
+  # One line from the helper: off | OK (...) | CONFIRMED by main probe (...) |
+  # PENDING CONFIRM (reverts at ...) — <why main did not confirm> | ...
   input_status="$(RELAY_ENV="$ENV_FILE" "$RELAY_HELPER" input-status 2>/dev/null)" \
     || input_status="unknown (vpn-relay-apply input-status failed)"
   input_status="${input_status##*$'\n'}"
+  probe_why=""
+  [[ "$input_status" != "PENDING CONFIRM"*" — "* ]] || probe_why="${input_status#* — }"
 
   cat <<EOF
 
@@ -4480,7 +4492,8 @@ EOF
   printf '=============================\n\n'
   if [[ "$input_status" == "PENDING CONFIRM"* ]]; then
     cat <<EOF
-!! input filter ${input_status}: the INPUT drop policy is live, guarded by a dead-man.
+!! input filter ${input_status%% — *}: the INPUT drop policy is live, guarded by a dead-man.
+!! ${probe_why:-main probe: no result recorded}
 !! Open a NEW ssh session to this relay and run, within 5 minutes:
 !!     ${RELAY_HELPER} input-confirm
 !! otherwise the filter removes itself (${RELAY_DEADMAN_TIMER} -> vpn-relay-apply input-off).

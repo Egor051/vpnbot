@@ -6,6 +6,10 @@ revoke takes effect immediately and without a restart), fails closed on any
 internal fault, and keeps serving while the bot is down. Run it with
 ``python -m subscription_server``.
 
+Its one other route, ``POST /relay/ssh-probe``, lets a relay of the ``relays``
+table have its new input filter confirmed: the endpoint TCP-connects back to that
+relay's own address on its SSH ports (see :mod:`subscription_server.server`).
+
 Two deliberate differences from :mod:`hy2_auth`:
 
 * it reads the database **through the ordinary repositories** rather than raw

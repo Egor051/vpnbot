@@ -1,10 +1,12 @@
 # All-in-one subscription endpoint
 
 A **separate process** (`python -m subscription_server`, unit
-`deploy/vpn-bot-subscription.service`) that serves one route — `GET /sub/{token}` — returning
-the base64 subscription body for an all-in-one bundle: every child key of that bundle rendered
-as its ordinary client link. It is **disabled by default** (`SUBSCRIPTION_ENABLED=false`, in
-which case every request is answered with `404` and the bot shows nothing about bundles).
+`deploy/vpn-bot-subscription.service`) that serves `GET /sub/{token}` — the base64 subscription
+body for an all-in-one bundle: every child key of that bundle rendered as its ordinary client
+link. It is **disabled by default** (`SUBSCRIPTION_ENABLED=false`, in which case every request
+is answered with `404` and the bot shows nothing about bundles). Its only other route,
+[`POST /relay/ssh-probe`](#relay-ssh-probe-post-relayssh-probe), answers the relays of the
+admin panel and nobody else.
 
 Canonical references live where every other feature's do:
 
@@ -172,6 +174,34 @@ bundle by `bundle_id` plus a 12-hex-character SHA-256 fingerprint of the token. 
 request carries neither: the `429` is decided before the token is read, and its `WARNING` line
 names only the limiter bucket (16 hex characters of a SHA-256 of the peer address) and the limit
 that was hit — enough to see the refusal in `journalctl` and nothing that identifies a token.
+
+### Relay ssh-probe (`POST /relay/ssh-probe`)
+
+A relay's `vpn-relay-apply` calls it after it installed an input filter that is not confirmed yet,
+so that a relay deploy needs no ssh session ([docs/relay.md](relay.md#main-confirms-the-filter-post-relayssh-probe)).
+What the endpoint does, in this order:
+
+1. **Rate limit**, keyed by the peer address, before anything else — so a `429` cannot tell a
+   relay from anyone: 6 requests per 60 s, always on, its own bucket (independent of
+   `SUBSCRIPTION_RATE_LIMIT_*`, which may be `0`), because every accepted probe opens
+   connections.
+2. **Who asks.** The peer (an IPv4-mapped IPv6 peer is unwrapped; any other IPv6, loopback,
+   link-local, multicast or reserved address is nobody) must be inside the source IPs of an
+   **enabled** relay of the `relays` table, read live like everything else here. Otherwise — and
+   while `SUBSCRIPTION_ENABLED=false`, and on an unreadable database or any internal fault — the
+   same empty `404` as every refusal of this server. `X-Forwarded-For` and the like are never
+   read: there is no proxy in this stack.
+3. **What it asks.** The body must be a JSON array of 1–4 distinct integers in 1..65535
+   (`[22]`, `[22,2222]`); anything else — more than 4, 0, a string, a duplicate, not JSON, more
+   than the 4 KiB body cap — is an empty `400`. Judged only after step 2, so a stranger learns
+   nothing from it.
+4. **The probe.** A TCP connect to **the peer's own address** — no address is ever taken from the
+   request — on each port, concurrently, 5 s each; nothing is sent. The answer is
+   `200 application/json`, `Cache-Control: no-store`: `{"22":"ok","2222":"fail"}`.
+
+It logs one `INFO` line per probe — `relay ssh-probe: relay ru1 — tcp 22 ok` — the relay's name
+and the verdicts, never the address; a refused stranger is a `DEBUG` line with the limiter bucket
+only, a throttled one a `WARNING` with the bucket.
 
 ## Bot UI
 

@@ -8,6 +8,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Relay: main confirms the input filter itself — `POST /relay/ssh-probe`
+  (docs/relay.md#main-confirms-the-filter-post-relayssh-probe).** The first deploy of a new relay,
+  and every change of the filter's TCP set, used to wait for `vpn-relay-apply input-confirm` from a
+  new ssh session. What that proves — a NEW TCP connection from outside reaches the SSH port
+  through the filter — main now proves. **Main**: the subscription endpoint has a second route,
+  `POST /relay/ssh-probe`. Rate limit first (6 per 60 s per peer, its own bucket, always on, so a
+  `429` cannot tell a relay from anyone); then the peer must be inside the source IPs of an
+  ENABLED relay of the `relays` table, read live (else, and while `SUBSCRIPTION_ENABLED=false`, the
+  server's usual empty `404`; loopback/link-local/multicast/reserved and non-mapped IPv6 peers are
+  nobody); then the body must be a JSON array of 1–4 distinct ports in 1..65535 (else an empty
+  `400`). Main TCP-connects back to the caller's own address — never one from the request — on
+  each port, concurrently, 5 s each, and answers `{"<port>":"ok"|"fail"}`. Log: the relay's name
+  and the verdicts, no address, no token. **Relay**: after an `apply` that left the filter PENDING
+  (dead-man armed, tables and sysctls in place), `vpn-relay-apply` POSTs the SSH ports with `curl`
+  to `RELAY_CONFIRM_URL` (new; default `https://<RELAY_CHECK_SNI>:2096/relay/ssh-probe`, `off` = no
+  probe) — TLS verified, no proxy, no redirect, `--resolve` pinned to `RELAY_UPSTREAM_IPV4`, one
+  retry on a network error. Every SSH port `ok` → the very path `input-confirm` runs (now one
+  function, `confirm_pending`): dead-man stopped, marker written with `confirmed_by=main-probe`
+  (`input-confirm` writes `confirmed_by=ssh-session`). Anything else — no URL, no curl, main
+  unreachable, `404`, a failed port, more than 4 SSH ports, an SSH port that is also forwarded —
+  leaves it PENDING with the reason in `${RELAY_RUN_DIR}/input.probe`; the dead-man reverts it
+  unless `input-confirm` comes, which works as before. The probe never fails `apply`.
+  `input-status`: `CONFIRMED by main probe (tcp …; …)` right after such an apply,
+  `PENDING CONFIRM (reverts at …) — <why main did not confirm it>`, `OK (…; confirmed … by
+  <who>)`. **Deploy**: DEPLOY OK prints `input filter : CONFIRMED by main probe …` with no «!!»
+  block, or the PENDING line with the reason in the «!!» block; Phase 2 backs up
+  `/etc/vpn-relay/input.confirmed` and the rollback restores it (a confirmation main wrote during
+  the restart is for a set that is no longer live) and drops the probe note. A new relay is added
+  in the admin panel (enabled) BEFORE its first deploy.
+
 - **Relay: INPUT filter — `table inet vpnrelay_input`, policy drop, owned by
   `vpn-relay-apply` (docs/relay.md#the-input-filter).** Nothing filtered what came in to the
   relay itself (ufw masked, nftables.service disabled, only `table ip vpnrelay`). The helper now

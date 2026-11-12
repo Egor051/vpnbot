@@ -72,6 +72,21 @@
 # dead-man and no confirmation: an ordinary deploy stays fully automatic. A
 # dead-man that cannot be armed -> exit 9, nothing applied.
 #
+# The main server confirms it, so no ssh session is needed either. Right after an
+# apply that left the filter PENDING, apply asks main to prove what input-confirm
+# proves: `curl` POSTs the SSH ports (a JSON array, at most 4) to main's subscription
+# endpoint, POST /relay/ssh-probe. Main answers only a caller inside the source IPs
+# of an ENABLED relay of its relays table (404 to anyone else), TCP-connects back to
+# the caller's own address on each port (5 s each) and answers
+# {"<port>":"ok"|"fail"}. Every SSH port "ok" = a NEW connection from the outside
+# passed the filter: the same path as input-confirm runs (dead-man stopped, marker
+# written, confirmed_by=main-probe). Anything else — no URL, curl missing, main
+# unreachable, 404, a port that fails — leaves the filter PENDING, the reason noted:
+# the dead-man reverts it unless input-confirm comes, which works exactly as before.
+# The request goes to RELAY_CONFIRM_URL (default https://<RELAY_CHECK_SNI>:2096/relay/ssh-probe),
+# over TLS with the certificate verified, and ALWAYS to RELAY_UPSTREAM_IPV4
+# (`curl --resolve`, no proxy, no redirect): it never goes anywhere but the main server.
+#
 # Installed by scripts/deploy.sh (OUT_OF_REPO_HELPERS, role relay) to
 #   /usr/local/sbin/vpn-relay-apply
 # and executed by deploy/relay/vpn-relay.service (ExecStart=... apply).
@@ -89,8 +104,9 @@
 #                                     while the dead-man is armed
 #   vpn-relay-apply input-off         remove table inet vpnrelay_input only (what the
 #                                     dead-man runs); the reason goes to the journal
-#   vpn-relay-apply input-status      one line: off | PENDING CONFIRM (reverts at ...) |
-#                                     OK (...) | ABSENT ... — DEPLOY OK prints it
+#   vpn-relay-apply input-status      one line: off | PENDING CONFIRM (reverts at ...)
+#                                     [— why main did not confirm] | CONFIRMED by main
+#                                     probe (...) | OK (...) | ABSENT ... — DEPLOY OK prints it
 #
 # .env — RELAY_ENV (default /opt/vpn-service/.env). Read with the same sed parser
 # as scripts/deploy.sh (env_sed_val) and scripts/vpnbot-hy2-warp-mark: optional
@@ -122,10 +138,18 @@
 #   RELAY_INPUT_CLOSED_TCP   optional, comma-separated ports that listen on a public
 #   RELAY_INPUT_CLOSED_UDP   address but are meant to stay closed from outside:
 #                            `check` does not call them "listening but filtered".
+#   RELAY_CONFIRM_URL        optional. Where apply asks main to confirm a PENDING filter:
+#                            https://<dns name>[:<port>][/<path>] (no path = /relay/ssh-probe),
+#                            or `off` (no probe: input-confirm only). Default, when
+#                            RELAY_CHECK_SNI is set: https://<RELAY_CHECK_SNI>:2096/relay/ssh-probe
+#                            — the subscription's domain and port on a self-steal main
+#                            server; without RELAY_CHECK_SNI there is no default (no probe).
 #
-# State: ${RELAY_STATE_DIR:-/etc/vpn-relay}/input.confirmed (the confirmed hash,
-# written by input-confirm only) and ${RELAY_RUN_DIR:-/run/vpn-relay}/input.pending /
-# input.reverted (what waits for a confirmation / what the dead-man removed).
+# State: ${RELAY_STATE_DIR:-/etc/vpn-relay}/input.confirmed (the confirmed hash and
+# who confirmed it — confirmed_by=ssh-session | main-probe; written by a confirmation
+# only) and ${RELAY_RUN_DIR:-/run/vpn-relay}/input.pending / input.reverted /
+# input.probe (what waits for a confirmation / what the dead-man removed / what main's
+# probe answered for that set).
 #
 # Exit codes (distinct on purpose — deploy.sh and the operator read them):
 #    0  ok
@@ -133,6 +157,7 @@
 #    3  .env missing/unreadable, or a value is invalid
 #    4  the WAN interface could not be resolved
 #    5  not root, or a required tool (nft, sysctl, ip, python3, ss, systemd-run) is missing
+#       (curl is optional: without it there is no main probe, the filter stays PENDING)
 #    6  nft rejected the ruleset (apply, input-off, or the dry-run syntax check) —
 #       the live tables are unchanged
 #    7  the sysctl file or a sysctl (ip_forward, conntrack) could not be set,
@@ -168,11 +193,14 @@ RELAY_SYSCTL_FILE="${RELAY_SYSCTL_FILE:-/etc/sysctl.d/90-vpn-relay.conf}"
 RELAY_PROBE_TIMEOUT="${RELAY_PROBE_TIMEOUT:-5}"
 RELAY_STATE_DIR="${RELAY_STATE_DIR:-/etc/vpn-relay}"
 RELAY_RUN_DIR="${RELAY_RUN_DIR:-/run/vpn-relay}"
+# Seconds between the two attempts of the main probe (tests set 0).
+RELAY_CONFIRM_RETRY_DELAY="${RELAY_CONFIRM_RETRY_DELAY:-3}"
 TABLE="vpnrelay"
 INPUT_TABLE="vpnrelay_input"
 INPUT_MARKER="${RELAY_STATE_DIR}/input.confirmed"
 INPUT_PENDING="${RELAY_RUN_DIR}/input.pending"
 INPUT_REVERTED="${RELAY_RUN_DIR}/input.reverted"
+INPUT_PROBE="${RELAY_RUN_DIR}/input.probe"
 
 readonly SYSCTL_FORWARD="net.ipv4.ip_forward"
 readonly SYSCTL_CT_MAX="net.netfilter.nf_conntrack_max"
@@ -185,6 +213,17 @@ readonly DEADMAN_SECONDS=300
 # Hashed together with the TCP port set: bump it when the input chain's rules change
 # in a way that could cost ssh, so the next apply asks for a confirmation again.
 readonly INPUT_FILTER_GEN="vpnrelay_input/1"
+# The main probe (POST /relay/ssh-probe on main's subscription endpoint). The default
+# port is the subscription's public port of this deployment (docs/subscription.md);
+# main refuses more than 4 ports per request.
+readonly PROBE_PATH="/relay/ssh-probe"
+readonly PROBE_DEFAULT_PORT=2096
+readonly PROBE_MAX_PORTS=4
+readonly PROBE_ATTEMPTS=2
+readonly PROBE_CONNECT_TIMEOUT=5
+# Main connects to every port concurrently, 5 s each: 20 s covers that and the TLS.
+readonly PROBE_MAX_TIME=20
+readonly PROBE_MAX_BODY=4096
 
 readonly E_USAGE=2 E_CONFIG=3 E_IFACE=4 E_TOOL=5 E_NFT=6 E_SYSCTL=7 E_NOSSH=8 E_DEADMAN=9
 readonly E_ABSENT=10 E_DIFF=11 E_FORWARD=12 E_TCP=13 E_TLS=14 E_CONNTRACK=15
@@ -310,6 +349,13 @@ CHECK_SNI=""
 CT_MAX=""
 CT_EST=""
 INPUT_FILTER="on"
+# The main probe: the URL (empty = no probe), its host and port (for --resolve), where
+# the URL came from, and — without one — why there is none.
+CONFIRM_URL=""
+CONFIRM_HOST=""
+CONFIRM_PORT=""
+CONFIRM_SRC=""
+CONFIRM_NOTE=""
 # 1 = a non-root `check --dry-run`: an empty SSH discovery is a note, not exit 8
 # (ss shows the owner of root's sockets only to root).
 DISCOVERY_SOFT=0
@@ -351,6 +397,44 @@ load_input_knob() {
   INPUT_FILTER="${raw:-on}"
   [[ "$INPUT_FILTER" == "on" || "$INPUT_FILTER" == "off" ]] \
     || fail "$E_CONFIG" "RELAY_INPUT_FILTER='${INPUT_FILTER}' is neither on nor off"
+}
+
+# https://<dns name>[:<port>][/<path>] -> CONFIRM_URL/HOST/PORT; 1 when it is not one.
+# A name, never an address: TLS verifies it, and the connection is pinned to the
+# upstream anyway (--resolve). No query, no userinfo, nothing to escape.
+parse_confirm_url() {
+  local url="$1" host port path
+  local re='^https://([A-Za-z0-9.-]+)(:([0-9]+))?(/[A-Za-z0-9._~/-]*)?$'
+  [[ "$url" =~ $re ]] || return 1
+  # Copy first: the tests below overwrite BASH_REMATCH.
+  host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[3]}"; path="${BASH_REMATCH[4]}"
+  valid_hostname "$host" || return 1
+  ! [[ "$host" =~ ^[0-9.]+$ ]] || return 1
+  if [[ -n "$port" ]]; then
+    { [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )); } || return 1
+  fi
+  [[ -n "$path" && "$path" != "/" ]] || path="$PROBE_PATH"
+  CONFIRM_HOST="$host"
+  CONFIRM_PORT="${port:-443}"
+  CONFIRM_URL="https://${host}${port:+:${port}}${path}"
+}
+
+load_confirm_url() {
+  local raw
+  raw="$(env_sed_val RELAY_CONFIRM_URL)"
+  if [[ "$raw" == "off" ]]; then
+    CONFIRM_NOTE="RELAY_CONFIRM_URL=off"
+  elif [[ -n "$raw" ]]; then
+    parse_confirm_url "$raw" \
+      || fail "$E_CONFIG" "RELAY_CONFIRM_URL='${raw}' is not https://<dns name>[:<port>][/<path>] (or off)"
+    CONFIRM_SRC="RELAY_CONFIRM_URL"
+  elif [[ -n "$CHECK_SNI" ]]; then
+    parse_confirm_url "https://${CHECK_SNI}:${PROBE_DEFAULT_PORT}${PROBE_PATH}" \
+      || fail "$E_CONFIG" "RELAY_CHECK_SNI='${CHECK_SNI}' cannot name the main probe's default URL — set RELAY_CONFIRM_URL"
+    CONFIRM_SRC="default: RELAY_CHECK_SNI, port ${PROBE_DEFAULT_PORT}"
+  else
+    CONFIRM_NOTE="no URL: RELAY_CONFIRM_URL is unset and there is no RELAY_CHECK_SNI to build the default from"
+  fi
 }
 
 # An optional port list: empty = none.
@@ -403,6 +487,7 @@ load_config() {
   valid_uint_range "$CT_EST" "$CT_EST_MIN" "$CT_EST_MAX" \
     || fail "$E_CONFIG" "RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT='${CT_EST}' is not an integer (seconds) in ${CT_EST_MIN}..${CT_EST_MAX}"
 
+  load_confirm_url
   load_input_config
   resolve_iface
   [[ "$INPUT_FILTER" == "off" ]] || resolve_input_ports
@@ -653,6 +738,7 @@ input_remove() {
       || warn "cannot write ${INPUT_REVERTED}"
     rm -f "$INPUT_PENDING"
   fi
+  rm -f "$INPUT_PROBE"
   journal "table inet ${INPUT_TABLE} ${state} — ${why}; table ip ${TABLE} (forwarding) untouched"
 }
 
@@ -692,12 +778,21 @@ summary() {
     return 0
   fi
   log "input filter: on (policy drop); ssh tcp: $(list_text "${SSH_PORTS[@]}"); extra tcp: $(list_text "${IN_EXTRA_TCP[@]}"); extra udp: $(list_text "${IN_EXTRA_UDP[@]}"); declared closed tcp: $(list_text "${IN_CLOSED_TCP[@]}"), udp: $(list_text "${IN_CLOSED_UDP[@]}")"
+  if [[ -n "$CONFIRM_URL" ]]; then
+    log "main probe: ${CONFIRM_URL} via ${UPSTREAM} (${CONFIRM_SRC})"
+  else
+    log "main probe: none (${CONFIRM_NOTE}) — a set that is not confirmed waits for input-confirm"
+  fi
   mh="$(confirmed_hash)"
   if [[ -n "$mh" && "$mh" == "$(input_hash)" ]]; then
     log "input filter: tcp $(list_text "${IN_TCP[@]}") is confirmed (${INPUT_MARKER}) — no dead-man, no confirmation needed"
   else
     mt="$(kv_get "$INPUT_MARKER" tcp)"
-    log "input filter: tcp $(list_text "${IN_TCP[@]}") is NOT confirmed (${INPUT_MARKER}: ${mt:-none}) — apply arms a ${DEADMAN_SECONDS}s dead-man and waits for input-confirm from a new ssh session"
+    if [[ -n "$CONFIRM_URL" ]]; then
+      log "input filter: tcp $(list_text "${IN_TCP[@]}") is NOT confirmed (${INPUT_MARKER}: ${mt:-none}) — apply arms a ${DEADMAN_SECONDS}s dead-man, then asks main to probe the ssh ports; if main cannot confirm, it waits for input-confirm from a new ssh session"
+    else
+      log "input filter: tcp $(list_text "${IN_TCP[@]}") is NOT confirmed (${INPUT_MARKER}: ${mt:-none}) — apply arms a ${DEADMAN_SECONDS}s dead-man and waits for input-confirm from a new ssh session"
+    fi
   fi
 }
 
@@ -720,6 +815,165 @@ except Exception as exc:
 '
 
 probe() { python3 -I -c "$PROBE_PY" "$@"; }
+
+# --------------------------------------------------------------------------- #
+# Confirmation: the one path both proofs end in (input-confirm, the main probe)
+# --------------------------------------------------------------------------- #
+# Stop the dead-man, make sure it has not fired, write the marker for the set that
+# is pending. $1 = who confirmed (the marker's confirmed_by), $2 = the proof, for the
+# journal. Returns 1 with the reason on stderr; the caller decides what that costs.
+confirm_pending() {
+  local by="$1" proof="$2" sha tcp svc
+  sha="$(kv_get "$INPUT_PENDING" sha256)"
+  tcp="$(kv_get "$INPUT_PENDING" tcp)"
+  if ! [[ "$sha" =~ ^[0-9a-f]{64}$ ]]; then
+    err "${INPUT_PENDING} is missing or malformed — not confirmed; re-apply (systemctl restart vpn-relay)"
+    return 1
+  fi
+  disarm_deadman
+  if deadman_active; then
+    err "could not stop ${DEADMAN_UNIT}.timer — not confirmed (the dead-man still reverts the filter)"
+    return 1
+  fi
+  svc="$(systemctl is-active "${DEADMAN_UNIT}.service" 2>/dev/null || true)"
+  if [[ "$svc" == "active" || "$svc" == "activating" ]] || [[ ! -f "$INPUT_PENDING" ]] \
+     || ! nft list table inet "$INPUT_TABLE" >/dev/null 2>&1; then
+    err "too late: the dead-man fired and is removing (or removed) the input filter — re-apply and confirm within $(( DEADMAN_SECONDS / 60 )) minutes"
+    return 1
+  fi
+  if ! write_state "$INPUT_MARKER" \
+         "# vpn-relay-apply: the input filter's TCP set, confirmed by ${by}" \
+         "sha256=${sha}" "tcp=${tcp}" "confirmed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "confirmed_by=${by}"; then
+    err "the dead-man is stopped and the filter stays, but ${INPUT_MARKER} could not be written: the next apply will ask for a confirmation again"
+    return 1
+  fi
+  rm -f "$INPUT_PENDING" "$INPUT_REVERTED"
+  journal "input filter confirmed by ${by}: tcp ${tcp} (${proof}); dead-man stopped, ${INPUT_MARKER} written — applies with this TCP set need no confirmation"
+}
+
+# --------------------------------------------------------------------------- #
+# The main probe: main TCP-connects back to the SSH ports through the filter
+# --------------------------------------------------------------------------- #
+PROBE_RESULT=""   # ok | fail | skipped
+PROBE_REASON=""
+
+# One line, bounded: it goes into a state file and into DEPLOY OK.
+one_line() {
+  local s="${1//[$'\r\n\t']/ }"
+  printf '%s' "${s:0:400}"
+}
+
+probe_http_reason() {
+  case "$1" in
+    404) printf '%s' "main answered 404: this relay's address is not in the source IPs of an ENABLED relay in the admin panel (add the relay there first), or SUBSCRIPTION_ENABLED=false on main" ;;
+    400) printf '%s' "main answered 400: it did not accept the request (ports $(list_text "${SSH_PORTS[@]}"))" ;;
+    429) printf '%s' "main answered 429: too many probes from this address, try again in a minute" ;;
+    *)   printf '%s' "main answered HTTP ${1}" ;;
+  esac
+}
+
+# Sets PROBE_RESULT and PROBE_REASON. Never fails apply: everything that is not
+# "every SSH port ok" leaves the filter PENDING, which is where it already is.
+main_probe() {
+  local body p attempt rc code line resp errf text compact delay hint=""
+  local okre='^\{("[0-9]{1,5}":"(ok|fail)"(,"[0-9]{1,5}":"(ok|fail)")*)?\}$'
+  local -a failed=()
+  PROBE_RESULT="skipped"
+  PROBE_REASON=""
+  if [[ -z "$CONFIRM_URL" ]]; then PROBE_REASON="$CONFIRM_NOTE"; return 0; fi
+  if (( ${#SSH_PORTS[@]} > PROBE_MAX_PORTS )); then
+    PROBE_REASON="${#SSH_PORTS[@]} ssh ports ($(list_text "${SSH_PORTS[@]}")) — main probes at most ${PROBE_MAX_PORTS}"
+    return 0
+  fi
+  for p in "${SSH_PORTS[@]}"; do
+    if in_list "$p" "${TCP_PORTS[@]}"; then
+      PROBE_REASON="ssh port ${p} is also forwarded (RELAY_FORWARD_TCP_PORTS): main would reach itself through the DNAT, not this relay's sshd"
+      return 0
+    fi
+  done
+  if ! command -v curl >/dev/null 2>&1; then PROBE_REASON="curl not found"; return 0; fi
+  delay="$RELAY_CONFIRM_RETRY_DELAY"
+  [[ "$delay" =~ ^[0-9]{1,2}$ ]] || delay=3
+  [[ "$CONFIRM_SRC" == default* ]] \
+    && hint=" — the default URL is the subscription's port ${PROBE_DEFAULT_PORT} on RELAY_CHECK_SNI; if main's subscription endpoint is elsewhere, set RELAY_CONFIRM_URL"
+
+  body="[$(IFS=','; printf '%s' "${SSH_PORTS[*]}")]"
+  resp="$(mktemp)"
+  errf="$(mktemp)"
+  PROBE_RESULT="fail"
+  log "main probe: asking ${CONFIRM_URL} (via ${UPSTREAM}) to connect to tcp $(list_text "${SSH_PORTS[@]}") from outside"
+  for (( attempt = 1; attempt <= PROBE_ATTEMPTS; attempt++ )); do
+    : > "$resp"
+    : > "$errf"
+    # -q first: no ~/.curlrc. No proxy (main must see THIS host's address), https only,
+    # no redirects followed, the connection pinned to the upstream.
+    code="$(curl -q --silent --show-error --noproxy '*' --proto '=https' --tlsv1.2 \
+              --connect-timeout "$PROBE_CONNECT_TIMEOUT" --max-time "$PROBE_MAX_TIME" \
+              --max-filesize "$PROBE_MAX_BODY" \
+              --resolve "${CONFIRM_HOST}:${CONFIRM_PORT}:${UPSTREAM}" \
+              -H 'Content-Type: application/json' --data-binary "$body" \
+              -o "$resp" -w '%{http_code}' -- "$CONFIRM_URL" 2>"$errf")" && rc=0 || rc=$?
+    if (( rc != 0 )); then
+      line=""
+      IFS= read -r line < "$errf" || true
+      PROBE_REASON="main unreachable (curl exit ${rc}${line:+: ${line}})${hint}"
+    elif [[ "$code" == "200" ]]; then
+      text="$(<"$resp")"
+      compact="${text//[[:space:]]/}"
+      if (( ${#text} > PROBE_MAX_BODY )) || ! [[ "$compact" =~ $okre ]]; then
+        PROBE_REASON="main answered 200 with something that is not {\"<port>\":\"ok|fail\"}"
+        break
+      fi
+      failed=()
+      for p in "${SSH_PORTS[@]}"; do
+        [[ "$compact" == *"\"${p}\":\"ok\""* ]] || failed+=("$p")
+      done
+      if (( ${#failed[@]} == 0 )); then
+        PROBE_RESULT="ok"
+        PROBE_REASON="main connected to tcp $(list_text "${SSH_PORTS[@]}") from outside through the filter"
+      else
+        PROBE_REASON="main could not connect to tcp $(list_text "${failed[@]}") through the filter (${compact})"
+      fi
+      break
+    else
+      PROBE_REASON="$(probe_http_reason "$code")"
+      # A 404 or a 400 is an answer: asking again changes nothing.
+      [[ "$code" == "429" || "$code" =~ ^5 ]] || break
+    fi
+    if (( attempt < PROBE_ATTEMPTS )); then
+      log "main probe: attempt ${attempt} failed (${PROBE_REASON}) — again in ${delay}s"
+      sleep "$delay"
+    fi
+  done
+  rm -f "$resp" "$errf"
+}
+
+# After an apply that left the filter PENDING: the probe, and the confirmation when
+# main reached every SSH port. $1 = the hash of the pending set. Never fails apply.
+input_probe_confirm() {
+  local hash="$1" now reason
+  main_probe
+  now="$(date +%s)"
+  if [[ "$PROBE_RESULT" == "ok" ]]; then
+    if confirm_pending "main-probe" "$PROBE_REASON"; then
+      write_state "$INPUT_PROBE" "result=ok" "sha256=${hash}" "at=${now}" "reason=$(one_line "$PROBE_REASON")" \
+        || warn "cannot write ${INPUT_PROBE} (the filter is confirmed all the same)"
+      log "input filter: CONFIRMED by main probe (tcp $(list_text "${SSH_PORTS[@]}")) — dead-man stopped, ${INPUT_MARKER} written"
+      return 0
+    fi
+    PROBE_RESULT="fail"
+    PROBE_REASON="main reached every ssh port, but the confirmation did not complete (see above)"
+  fi
+  reason="$(one_line "$PROBE_REASON")"
+  write_state "$INPUT_PROBE" "result=${PROBE_RESULT}" "sha256=${hash}" "at=${now}" "reason=${reason}" \
+    || warn "cannot write ${INPUT_PROBE}"
+  if [[ "$PROBE_RESULT" == "skipped" ]]; then
+    log "input filter: no main probe (${reason}) — still PENDING CONFIRM"
+  else
+    warn "input filter: main probe did not confirm it: ${reason} — still PENDING CONFIRM"
+  fi
+  log "  open a NEW ssh session and run \`${ME} input-confirm\` within $(( DEADMAN_SECONDS / 60 )) minutes, otherwise the filter removes itself"
+}
 
 # --------------------------------------------------------------------------- #
 # Commands
@@ -780,7 +1034,7 @@ cmd_apply() {
       fi
       fail "$E_DEADMAN" "cannot arm the dead-man (systemd-run ${DEADMAN_UNIT}) — refusing to install an unconfirmed drop policy without it; nothing was applied"
     fi
-    log "dead-man armed: ${DEADMAN_UNIT}.timer runs \`${ME} input-off\` in ${DEADMAN_SECONDS}s unless input-confirm stops it"
+    log "dead-man armed: ${DEADMAN_UNIT}.timer runs \`${ME} input-off\` in ${DEADMAN_SECONDS}s unless a confirmation (main's probe or input-confirm) stops it"
   fi
 
   if ! nft -f "$tmp"; then
@@ -806,13 +1060,12 @@ cmd_apply() {
     reverts=$(( now + DEADMAN_SECONDS ))
     write_state "$INPUT_PENDING" "sha256=${hash}" "tcp=${IN_TCP[*]}" "applied_at=${now}" "reverts_at=${reverts}" \
       || warn "cannot write ${INPUT_PENDING} (input-confirm needs it; the dead-man still reverts the filter)"
-    rm -f "$INPUT_REVERTED"
-    log "input filter PENDING CONFIRM (tcp $(list_text "${IN_TCP[@]}"); reverts at $(fmt_time "$reverts")):"
-    log "  open a NEW ssh session and run \`${ME} input-confirm\` within $(( DEADMAN_SECONDS / 60 )) minutes, otherwise the filter removes itself"
+    rm -f "$INPUT_REVERTED" "$INPUT_PROBE"
+    log "input filter PENDING CONFIRM (tcp $(list_text "${IN_TCP[@]}"); reverts at $(fmt_time "$reverts"))"
   else
     # Confirmed set (or filter off): nothing left to guard.
     if (( had_pending )) || deadman_active; then disarm_deadman; fi
-    rm -f "$INPUT_PENDING" "$INPUT_REVERTED"
+    rm -f "$INPUT_PENDING" "$INPUT_REVERTED" "$INPUT_PROBE"
     [[ "$INPUT_FILTER" == "off" ]] || log "input filter: tcp $(list_text "${IN_TCP[@]}") confirmed earlier (${INPUT_MARKER}) — no dead-man"
   fi
 
@@ -843,6 +1096,10 @@ cmd_apply() {
   # Forwarding last: the forward chain's policy drop and the conntrack limits are
   # in place by the time the kernel starts routing.
   set_sysctl "$SYSCTL_FORWARD" 1
+
+  # Everything is in place: ask main to confirm the pending filter (never fails apply).
+  (( need_confirm )) && input_probe_confirm "$hash"
+  return 0
 }
 
 cmd_check_dry_run() {
@@ -1040,7 +1297,7 @@ cmd_input_off() {
 }
 
 cmd_input_confirm() {
-  local sha tcp applied reverts reverted_at age now start svc
+  local sha applied reverts reverted_at age now start
   require_root input-confirm
   require_tool nft
   require_tool systemctl
@@ -1059,7 +1316,6 @@ cmd_input_confirm() {
   fi
 
   sha="$(kv_get "$INPUT_PENDING" sha256)"
-  tcp="$(kv_get "$INPUT_PENDING" tcp)"
   applied="$(kv_get "$INPUT_PENDING" applied_at)"
   reverts="$(kv_get "$INPUT_PENDING" reverts_at)"
   [[ "$sha" =~ ^[0-9a-f]{64}$ && "$applied" =~ ^[0-9]+$ ]] \
@@ -1079,25 +1335,28 @@ cmd_input_confirm() {
     fail "$E_CONFIRM" "this ssh session began at $(fmt_time "$start"), before the filter was applied at $(fmt_time "$applied"): it rides an established connection, which the filter always lets through, so it proves nothing. Open a NEW ssh session and run \`${ME} input-confirm\` there (the filter reverts at $( [[ "$reverts" =~ ^[0-9]+$ ]] && fmt_time "$reverts" || printf '?'))"
   fi
 
-  disarm_deadman
-  ! deadman_active || fail "$E_CONFIRM" "could not stop ${DEADMAN_UNIT}.timer — not confirmed (the dead-man still reverts the filter)"
-  svc="$(systemctl is-active "${DEADMAN_UNIT}.service" 2>/dev/null || true)"
-  if [[ "$svc" == "active" || "$svc" == "activating" ]] || [[ ! -f "$INPUT_PENDING" ]] \
-     || ! nft list table inet "$INPUT_TABLE" >/dev/null 2>&1; then
-    fail "$E_CONFIRM" "too late: the dead-man fired and is removing (or removed) the input filter — re-apply and confirm within $(( DEADMAN_SECONDS / 60 )) minutes"
-  fi
+  # The same end as the main probe's: dead-man stopped, marker written.
+  confirm_pending "ssh-session" \
+    "a new ssh session, started $(fmt_time "$start"), filter applied $(fmt_time "$applied")" \
+    || exit "$E_CONFIRM"
+}
 
-  write_state "$INPUT_MARKER" \
-    "# vpn-relay-apply input-confirm: the input filter's TCP set, confirmed from a new ssh session" \
-    "sha256=${sha}" "tcp=${tcp}" "confirmed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-    || fail "$E_CONFIRM" "the dead-man is stopped and the filter stays, but ${INPUT_MARKER} could not be written: the next apply will ask for a confirmation again"
-  rm -f "$INPUT_PENDING" "$INPUT_REVERTED"
-  journal "input filter confirmed: tcp ${tcp} (session started $(fmt_time "$start"), filter applied $(fmt_time "$applied")); dead-man stopped, ${INPUT_MARKER} written — applies with this TCP set need no confirmation"
+# What main's probe answered for the set with hash $1, as " — ..." for the PENDING
+# line (nothing when it did not run for that set).
+probe_note() {
+  local result reason
+  [[ -n "$1" && "$(kv_get "$INPUT_PROBE" sha256)" == "$1" ]] || return 0
+  result="$(kv_get "$INPUT_PROBE" result)"
+  reason="$(kv_get "$INPUT_PROBE" reason)"
+  case "$result" in
+    fail)    printf ' — main probe did not confirm it: %s' "${reason:-?}" ;;
+    skipped) printf ' — no main probe: %s' "${reason:-?}" ;;
+  esac
 }
 
 # One line for DEPLOY OK and the operator.
 cmd_input_status() {
-  local present=0 reverted_at
+  local present=0 reverted_at mh at by
   require_root input-status
   require_tool nft
   load_input_knob
@@ -1107,13 +1366,22 @@ cmd_input_status() {
     else echo "off (RELAY_INPUT_FILTER=off)"; fi
   elif (( present )) && [[ -f "$INPUT_PENDING" ]]; then
     if deadman_active; then
-      echo "PENDING CONFIRM (reverts at $(fmt_time "$(kv_get "$INPUT_PENDING" reverts_at)"))"
+      echo "PENDING CONFIRM (reverts at $(fmt_time "$(kv_get "$INPUT_PENDING" reverts_at)"))$(probe_note "$(kv_get "$INPUT_PENDING" sha256)")"
     else
       echo "UNCONFIRMED (tcp $(kv_get "$INPUT_PENDING" tcp)) and NO dead-man armed — re-apply"
     fi
   elif (( present )); then
-    if [[ -n "$(confirmed_hash)" ]]; then
-      echo "OK (tcp $(kv_get "$INPUT_MARKER" tcp); confirmed $(kv_get "$INPUT_MARKER" confirmed_at))"
+    mh="$(confirmed_hash)"
+    if [[ -n "$mh" ]]; then
+      at="$(kv_get "$INPUT_PROBE" at)"
+      by="$(kv_get "$INPUT_MARKER" confirmed_by)"
+      if [[ "$(kv_get "$INPUT_PROBE" result)" == "ok" && "$(kv_get "$INPUT_PROBE" sha256)" == "$mh" ]]; then
+        # This apply's own confirmation (the note lives in /run until the next apply).
+        if [[ "$at" =~ ^[0-9]+$ ]]; then at="$(fmt_time "$at")"; else at="$(kv_get "$INPUT_MARKER" confirmed_at)"; fi
+        echo "CONFIRMED by main probe (tcp $(kv_get "$INPUT_MARKER" tcp); ${at})"
+      else
+        echo "OK (tcp $(kv_get "$INPUT_MARKER" tcp); confirmed $(kv_get "$INPUT_MARKER" confirmed_at)${by:+ by ${by}})"
+      fi
     else
       echo "UNCONFIRMED (no ${INPUT_MARKER}) — re-apply"
     fi

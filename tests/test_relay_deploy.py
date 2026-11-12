@@ -412,6 +412,14 @@ case "$1" in
       echo active > "$SD/vpn-relay-input-deadman.timer.active"
       mkdir -p "$SD/run"; printf 'sha256=x\ntcp=22\n' > "$SD/run/input.pending"
     fi
+    # ... and main's probe confirmed that set: dead-man stopped, the marker written
+    # (RELAY_INPUT_MARKER of the prelude), the probe's note left in /run.
+    if [[ -f "$SD/restart_probe_confirms" ]]; then
+      echo inactive > "$SD/vpn-relay-input-deadman.timer.active"; rm -f "$SD/run/input.pending"
+      mkdir -p "$SD/../etc-vpn-relay" "$SD/run"
+      printf 'sha256=new\ntcp=22 8080\nconfirmed_by=main-probe\n' > "$SD/../etc-vpn-relay/input.confirmed"
+      printf 'result=ok\nsha256=new\n' > "$SD/run/input.probe"
+    fi
     if [[ "$rc" == "0" ]]; then echo active > "$SD/$unit.active"; touch "$SD/table"
     else echo failed > "$SD/$unit.active"; fi
     exit "$rc" ;;
@@ -530,6 +538,8 @@ class RelayHost:
         # (python3) must not leave the box. `id` pins the root code paths everywhere.
         _stub(self.stub / "id", '[[ "$1" == "-u" ]] && echo 0\n')
         _stub(self.stub / "python3", f'echo "probe $4 $5 $6" >> "{self.logs}/probe.log"\nexit 0\n')
+        # ... nor main's /relay/ssh-probe (apply's curl): unreachable, logged.
+        _stub(self.stub / "curl", f'echo "curl $*" >> "{self.logs}/curl.log"\nexit 7\n')
         # The checkout's helper reads the listening sockets (SSH discovery) and, in
         # apply only, arms a dead-man: neither may see or touch the real relay.
         _stub(self.stub / "ss", f'echo "ss $*" >> "{self.logs}/ss.log"\ncat "{SS_LISTEN}"\n')
@@ -558,6 +568,9 @@ class RelayHost:
     def on_this_version(self, *, pending: bool = False) -> None:
         """A relay already running the input filter: confirmed, or still pending."""
         (self.sd / "input_table").touch()
+        if not pending:
+            self.marker.parent.mkdir(parents=True, exist_ok=True)
+            self.marker.write_text("sha256=old\ntcp=22\nconfirmed_by=ssh-session\n", encoding="utf-8")
         if pending:
             (self.sd / f"{DEADMAN_TIMER}.active").write_text("active", encoding="utf-8")
             self.pending.parent.mkdir(parents=True, exist_ok=True)
@@ -566,6 +579,14 @@ class RelayHost:
     @property
     def pending(self) -> Path:
         return self.sd / "run" / "input.pending"
+
+    @property
+    def marker(self) -> Path:
+        return self.tmp / "etc-vpn-relay" / "input.confirmed"
+
+    @property
+    def probe_note(self) -> Path:
+        return self.sd / "run" / "input.probe"
 
     def set_forward(self, value: str) -> None:
         (self.sd / "forward").write_text(value, encoding="utf-8")
@@ -591,6 +612,8 @@ class RelayHost:
             # the relay's real /etc/vpn-relay and /run/vpn-relay (the suite runs there).
             f'export RELAY_STATE_DIR="{self.tmp}/etc-vpn-relay" RELAY_RUN_DIR="{self.sd}/run"\n'
             f'RELAY_INPUT_PENDING="{self.sd}/run/input.pending"\n'
+            f'RELAY_INPUT_MARKER="{self.tmp}/etc-vpn-relay/input.confirmed"\n'
+            f'RELAY_INPUT_PROBE="{self.sd}/run/input.probe"\n'
             f'APP_DIR="{self.repo}"; cd "$APP_DIR"\n'
             f'BACKUP_DIR="{self.backups}"\n'
             f'RELAY_SYSTEM_UNIT="{self.unit}"\n'
@@ -848,6 +871,7 @@ def test_relay_phase1_reports_the_first_transition_without_mutating(
     host.set_conntrack(*conntrack)
     if input_filter:
         host.on_this_version()
+    marker_before = _read(host.marker) if host.marker.exists() else None
     wt = tmp_path / "wt"
     (wt / "scripts").mkdir(parents=True)
     (wt / "deploy" / "relay").mkdir(parents=True)
@@ -890,7 +914,9 @@ def test_relay_phase1_reports_the_first_transition_without_mutating(
     assert not [c for c in host.log("sysctl") if "-w" in c], "Phase 1 writes no sysctl"
     assert host.log("probe") == ["probe tcp 150.251.152.243 443"]
     assert host.log("systemd-run") == [] and host.log("logger") == [], "Phase 1 arms nothing"
-    assert not (tmp_path / "etc-vpn-relay").exists() and not host.pending.exists()
+    assert (_read(host.marker) if host.marker.exists() else None) == marker_before, "Phase 1 confirms nothing"
+    assert not host.pending.exists() and not host.probe_note.exists()
+    assert not (host.logs / "curl.log").exists(), "Phase 1 never asks main to probe"
 
 
 def test_relay_phase2_routes_every_mutation_through_the_rollback() -> None:
@@ -938,7 +964,7 @@ def test_relay_env_example_covers_the_keys_the_helper_reads() -> None:
         "RELAY_WAN_IFACE", "RELAY_CHECK_SNI",
         "RELAY_CONNTRACK_MAX", "RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT",
         "RELAY_INPUT_FILTER", "RELAY_INPUT_EXTRA_TCP", "RELAY_INPUT_EXTRA_UDP",
-        "RELAY_INPUT_CLOSED_TCP", "RELAY_INPUT_CLOSED_UDP",
+        "RELAY_INPUT_CLOSED_TCP", "RELAY_INPUT_CLOSED_UDP", "RELAY_CONFIRM_URL",
     }
     for key in [*keys, "NODE_ROLE"]:
         assert re.search(rf"^#? ?{key}=", example, re.M), key
@@ -1055,6 +1081,9 @@ def test_deploy_and_helper_name_the_same_input_filter_pieces() -> None:
     assert f'RELAY_INPUT_PENDING="${{RELAY_INPUT_PENDING:-{run_dir}/input.pending}}"' in text
     assert _helper_assignment("RELAY_STATE_DIR") == "/etc/vpn-relay"
     assert 'INPUT_MARKER="${RELAY_STATE_DIR}/input.confirmed"' in helper
+    assert 'RELAY_INPUT_MARKER="${RELAY_INPUT_MARKER:-/etc/vpn-relay/input.confirmed}"' in text
+    assert 'INPUT_PROBE="${RELAY_RUN_DIR}/input.probe"' in helper
+    assert f'RELAY_INPUT_PROBE="${{RELAY_INPUT_PROBE:-{run_dir}/input.probe}}"' in text
 
 
 def test_relay_tests_never_reach_the_relays_own_input_state(
@@ -1062,10 +1091,12 @@ def test_relay_tests_never_reach_the_relays_own_input_state(
 ) -> None:
     """deploy.sh runs this suite ON the relay: the rollback's `rm -f` of the pending
     note and the helper's marker reads must hit tmp, even past a leaked override."""
-    for name in ("RELAY_STATE_DIR", "RELAY_RUN_DIR", "RELAY_INPUT_PENDING"):
+    for name in ("RELAY_STATE_DIR", "RELAY_RUN_DIR", "RELAY_INPUT_PENDING", "RELAY_INPUT_MARKER", "RELAY_INPUT_PROBE"):
         monkeypatch.setenv(name, f"/nonexistent/leak/{name}")
     host = RelayHost(tmp_path)
-    proc = host.run('echo "PATHS=$RELAY_STATE_DIR|$RELAY_RUN_DIR|$RELAY_INPUT_PENDING"\n')
+    proc = host.run(
+        'echo "PATHS=$RELAY_STATE_DIR|$RELAY_RUN_DIR|$RELAY_INPUT_PENDING|$RELAY_INPUT_MARKER|$RELAY_INPUT_PROBE"\n'
+    )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     (line,) = [ln for ln in proc.stdout.splitlines() if ln.startswith("PATHS=")]
     assert all(p.startswith(str(tmp_path)) for p in line.removeprefix("PATHS=").split("|")), line
@@ -1082,6 +1113,75 @@ def test_relay_backup_holds_the_input_table(tmp_path: Path) -> None:
         capture_output=True, text=True, check=True,
     ).stdout
     assert dump == _read(INPUT_LISTING)
+    marker = subprocess.run(
+        ["tar", "-xzOf", str(archive), "." + str(host.marker)], capture_output=True, text=True, check=True
+    ).stdout
+    assert marker == "sha256=old\ntcp=22\nconfirmed_by=ssh-session\n", "the confirmation marker is backed up"
+
+
+def test_deploy_ok_with_main_confirming_the_filter_asks_for_nothing(tmp_path: Path) -> None:
+    """main's probe confirmed the new set during the restart: DEPLOY OK says so, and
+    there is no «!!» block — nothing is left for the operator to do."""
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    (host.sd / "restart_arms_deadman").touch()
+    (host.sd / "restart_probe_confirms").touch()
+    (host.sd / "input_status").write_text(
+        "CONFIRMED by main probe (tcp 22 8080; 2026-11-12 10:00:05 UTC)\n", encoding="utf-8"
+    )
+    proc = host.phase2()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "  input filter     : CONFIRMED by main probe (tcp 22 8080; 2026-11-12 10:00:05 UTC)\n" in proc.stdout
+    assert "!!" not in proc.stdout
+    assert "input-confirm" not in proc.stdout and "PENDING" not in proc.stdout
+    assert host.state(f"{DEADMAN_TIMER}.active") == "inactive" and not host.pending.exists()
+    assert "confirmed_by=main-probe" in _read(host.marker), "a successful deploy keeps main's confirmation"
+
+
+def test_deploy_ok_when_main_did_not_confirm_prints_why(tmp_path: Path) -> None:
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    (host.sd / "restart_arms_deadman").touch()
+    why = (
+        "main probe did not confirm it: main answered 404: this relay's address is not in the source IPs "
+        "of an ENABLED relay in the admin panel (add the relay there first), or SUBSCRIPTION_ENABLED=false on main"
+    )
+    (host.sd / "input_status").write_text(
+        f"PENDING CONFIRM (reverts at 2026-11-12 10:05:00 UTC) — {why}\n", encoding="utf-8"
+    )
+    proc = host.phase2()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert f"  input filter     : PENDING CONFIRM (reverts at 2026-11-12 10:05:00 UTC) — {why}\n" in proc.stdout
+    after = proc.stdout.split("=============================\n", 1)[1]
+    assert "!! input filter PENDING CONFIRM (reverts at 2026-11-12 10:05:00 UTC): the INPUT drop policy is live" in after
+    assert f"!! {why}\n" in after
+    assert f"{host.helper} input-confirm" in after
+    assert host.state(f"{DEADMAN_TIMER}.active") == "active", "the dead-man still reverts it"
+
+
+@pytest.mark.parametrize("before", ["confirmed", "none"])
+def test_rollback_puts_back_the_marker_main_wrote_during_the_restart(tmp_path: Path, before: str) -> None:
+    """main confirmed the deploy's set, then the verify failed: the filter comes back
+    as it was, and so does the marker — a confirmation of a set that is not live is
+    not left behind."""
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    if before == "confirmed":
+        host.on_this_version()
+    (host.sd / "restart_arms_deadman").touch()
+    (host.sd / "restart_probe_confirms").touch()
+    host.fail_check(18)
+    proc = host.phase2()
+    assert proc.returncode == 1
+    if before == "confirmed":
+        assert _read(host.marker) == "sha256=old\ntcp=22\nconfirmed_by=ssh-session\n"
+        assert f"restore {host.marker}: rc=0" in proc.stderr
+        assert host.state("input_table") == "", "the confirmed filter comes back from its dump"
+    else:
+        assert not host.marker.exists()
+        assert f"remove {host.marker} (absent before the deploy): rc=0" in proc.stderr
+        assert host.state("input_table") == "<absent>"
+    assert not host.probe_note.exists() and not host.pending.exists()
 
 
 def test_deploy_ok_carries_the_input_filter_status(tmp_path: Path) -> None:
@@ -1137,7 +1237,8 @@ def test_rollback_removes_an_input_filter_that_did_not_exist(tmp_path: Path) -> 
     assert host.state("input_table") == "<absent>"
     assert host.state(f"{DEADMAN_TIMER}.active") == "inactive" and not host.pending.exists()
     assert "delete table inet vpnrelay_input (absent before the deploy): rc=0" in proc.stderr
-    assert f"{DEADMAN_TIMER} stopped, pending note dropped: now inactive" in proc.stderr
+    assert f"{DEADMAN_TIMER} stopped, pending and probe notes dropped" in proc.stderr
+    assert "now inactive" in proc.stderr
     assert host.state("table") == "", "the forwarding table is back as before"
     _assert_no_main_piece_touched(host)
 

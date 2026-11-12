@@ -210,6 +210,34 @@ row="$(awk -v p="$pid" '$1 == p {print $2, $3, $4; exit}' "@TABLE@")"
 exit 0
 """
 
+# `curl ... --data-binary <body> -o <file> -w '%{http_code}' -- <url>`: the n-th call
+# answers with the n-th line of @ANSWERS@ ("<rc> <http code> <body>"; the last line
+# repeats). It keeps every request body, and never touches the network.
+CURL_STUB = r"""
+echo "curl $*" >> "@LOG@"
+out=""; data=""
+args=("$@")
+for (( i = 0; i < ${#args[@]}; i++ )); do
+  case "${args[$i]}" in
+    -o) out="${args[$((i + 1))]}" ;;
+    --data-binary) data="${args[$((i + 1))]}" ;;
+  esac
+done
+printf '%s\n' "$data" >> "@BODIES@"
+n="$(wc -l < "@BODIES@")"
+total="$(wc -l < "@ANSWERS@")"
+(( n <= total )) || n="$total"
+line="$(sed -n "${n}p" "@ANSWERS@")"
+rc="${line%% *}"; rest="${line#* }"; code="${rest%% *}"; body="${rest#* }"
+if [[ "$rc" != "0" ]]; then
+  echo "curl: (${rc}) Failed to connect to the upstream" >&2
+  printf '000'
+  exit "$rc"
+fi
+printf '%s' "$body" > "$out"
+printf '%s' "$code"
+"""
+
 # The process tree of the confirming command: shell <- per-session sshd <- listener.
 SESSIONS = {
     # a session opened after the filter was applied (sshd started 0 s ago)
@@ -272,6 +300,11 @@ class Relay:
         self.systemd_run_rc = 0
         self.tcp_rc = 0
         self.tls_rc = 0
+        # What main's /relay/ssh-probe answers, one (curl rc, http code, body) per
+        # call, the last repeating. Default: main unreachable (curl exit 7).
+        self.curl_answers: list[tuple[int, int, str]] = [(7, 0, "")]
+        self.curl_bodies = tmp_path / "curl-bodies.txt"
+        self.probe_note = self.run_dir / "input.probe"
 
     @property
     def forward(self) -> str | None:
@@ -376,6 +409,14 @@ class Relay:
             MODPROBE_STUB.replace("@LOG@", str(log)).replace("@LOADS@", "1" if self.modprobe_loads else "0")
             .replace("@CREATE@", create),
         )
+        answers = self.tmp / "curl-answers.txt"
+        answers.write_text("".join(f"{rc} {code} {body}\n" for rc, code, body in self.curl_answers), encoding="utf-8")
+        self.curl_bodies.touch()
+        _stub(
+            self.bin / "curl",
+            CURL_STUB.replace("@LOG@", str(log)).replace("@ANSWERS@", str(answers))
+            .replace("@BODIES@", str(self.curl_bodies)),
+        )
         # The probes run as `python3 -I -c <code> <mode> <host> <port> <timeout> [sni]`.
         _stub(
             self.bin / "python3",
@@ -394,6 +435,7 @@ class Relay:
         env["RELAY_STATE_DIR"] = str(self.state_dir)
         env["RELAY_RUN_DIR"] = str(self.run_dir)
         env["RELAY_PROBE_TIMEOUT"] = "5"
+        env["RELAY_CONFIRM_RETRY_DELAY"] = "0"
         if self.journal_stream:
             env["JOURNAL_STREAM"] = "8:4711"
         return subprocess.run(
@@ -1141,6 +1183,7 @@ def test_input_confirm_stops_the_timer_and_writes_the_marker(relay: Relay, sessi
     marker = relay.kv(relay.marker)
     assert marker["sha256"] == input_hash(22) and marker["tcp"] == "22"
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", marker["confirmed_at"])
+    assert marker["confirmed_by"] == "ssh-session"
     assert oct(relay.marker.stat().st_mode & 0o777) == "0o644"
     assert not relay.pending.exists()
     assert relay.input_live() is not None, "the filter stays"
@@ -1212,6 +1255,259 @@ def test_input_confirm_reports_a_timer_that_does_not_stop(relay: Relay) -> None:
     proc = relay.run("input-confirm")
     assert proc.returncode == 19
     assert "could not stop" in proc.stderr and not relay.marker.exists()
+
+
+# --------------------------------------------------------------------------- #
+# The main probe: main confirms a PENDING filter (POST /relay/ssh-probe)
+# --------------------------------------------------------------------------- #
+SNI = "anycastedge.example.net"
+DEFAULT_URL = f"https://{SNI}:2096/relay/ssh-probe"
+
+
+@pytest.fixture
+def probing(relay: Relay) -> Relay:
+    """A relay whose .env names the main server's domain (RELAY_CHECK_SNI): the probe's
+    default URL. curl still answers "unreachable" until a test says otherwise."""
+    relay.write_env(f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CHECK_SNI={SNI}\n")
+    return relay
+
+
+def _curl_calls(relay: Relay) -> list[str]:
+    return [c for c in relay.calls() if c.startswith("curl ")]
+
+
+def _bodies(relay: Relay) -> list[str]:
+    return relay.curl_bodies.read_text(encoding="utf-8").splitlines()
+
+
+def test_a_probe_that_reaches_every_ssh_port_confirms_like_input_confirm(probing: Relay) -> None:
+    probing.curl_answers = [(0, 200, '{"22":"ok"}')]
+    proc = probing.run("apply")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    marker = probing.kv(probing.marker)
+    assert marker["sha256"] == input_hash(22) and marker["tcp"] == "22"
+    assert marker["confirmed_by"] == "main-probe"
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", marker["confirmed_at"])
+    assert not probing.deadman_armed() and f"systemctl stop {DEADMAN_TIMER}" in probing.calls()
+    assert not probing.pending.exists()
+    assert probing.input_live() is not None, "the filter stays"
+    assert "CONFIRMED by main probe (tcp 22)" in proc.stdout
+    assert "open a NEW ssh session" not in proc.stdout
+    status = probing.run("input-status").stdout.strip()
+    assert re.fullmatch(r"CONFIRMED by main probe \(tcp 22; \d{4}-\d\d-\d\d \d\d:\d\d:\d\d \S+\)", status), status
+    # ... and from now on the set needs nothing: no dead-man, no probe, status OK.
+    probing.clear_calls()
+    assert probing.run("apply").returncode == 0
+    assert _deadman_runs(probing) == [] and _curl_calls(probing) == []
+    assert not probing.probe_note.exists()
+    assert re.fullmatch(
+        r"OK \(tcp 22; confirmed \S+ by main-probe\)", probing.run("input-status").stdout.strip()
+    )
+
+
+def test_the_probe_runs_after_the_filter_and_the_sysctls_and_goes_only_to_the_upstream(probing: Relay) -> None:
+    probing.curl_answers = [(0, 200, '{"22":"ok"}')]
+    assert probing.run("apply").returncode == 0
+    calls = probing.calls()
+    (curl,) = _curl_calls(probing)
+    nft = next(i for i, c in enumerate(calls) if c.startswith("nft -f"))
+    last_sysctl = max(i for i, c in enumerate(calls) if c.startswith("sysctl -q -w"))
+    assert nft < last_sysctl < calls.index(curl), "the probe proves the filter that is live"
+    args = curl.split()
+    assert args[1] == "-q", "~/.curlrc never steers it"
+    assert args[-2:] == ["--", DEFAULT_URL]
+    assert f"--resolve {SNI}:2096:{UPSTREAM}" in curl, "pinned to RELAY_UPSTREAM_IPV4"
+    assert "--noproxy *" in curl and "--proto =https" in curl
+    assert "-k" not in args and "--insecure" not in args, "the certificate is verified"
+    assert not any(a in args for a in ("-L", "--location")), "no redirect is followed"
+    assert _bodies(probing) == ["[22]"]
+
+
+def test_the_probe_sends_every_ssh_port_and_needs_all_of_them(probing: Relay) -> None:
+    probing.ss_text = _ss(("tcp", "0.0.0.0:22", f"users:(({SSHD}))"), ("tcp", "[::]:2222", f"users:(({SSHD}))"))
+    probing.socket_listen = ""
+    probing.curl_answers = [(0, 200, '{"22":"ok","2222":"fail"}')]
+    proc = probing.run("apply")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _bodies(probing) == ["[22,2222]"]
+    assert probing.deadman_armed() and probing.pending.exists() and not probing.marker.exists()
+    status = probing.run("input-status").stdout.strip()
+    assert status.startswith("PENDING CONFIRM (reverts at ")
+    assert "main probe did not confirm it: main could not connect to tcp 2222 through the filter" in status
+
+
+@pytest.mark.parametrize(
+    ("answers", "fragment", "calls"),
+    [
+        ([(0, 200, '{"22":"fail"}')], "main could not connect to tcp 22 through the filter", 1),
+        ([(28, 0, "")], "main unreachable (curl exit 28", 2),          # timeout, retried once
+        ([(7, 0, "")], "main unreachable (curl exit 7", 2),            # refused, retried once
+        ([(0, 404, "")], "main answered 404: this relay's address is not in the source IPs", 1),
+        ([(0, 400, "")], "main answered 400", 1),
+        ([(0, 503, ""), (0, 429, "")], "main answered 429", 2),
+        ([(0, 200, '{"22":"ok"} trailing')], "main answered 200 with something that is not", 1),
+        ([(0, 200, '{"23":"ok"}')], "main could not connect to tcp 22", 1),    # not our port
+        ([(0, 200, '{"122":"ok"}')], "main could not connect to tcp 22", 1),
+    ],
+)
+def test_a_probe_that_does_not_reach_every_ssh_port_leaves_the_filter_pending(
+    probing: Relay, answers: list[tuple[int, int, str]], fragment: str, calls: int
+) -> None:
+    probing.curl_answers = answers
+    proc = probing.run("apply")
+    assert proc.returncode == 0, "the probe never fails apply: " + proc.stdout + proc.stderr
+    assert len(_curl_calls(probing)) == calls
+    assert probing.deadman_armed(), "the dead-man still reverts the filter"
+    assert probing.pending.exists() and not probing.marker.exists()
+    assert fragment in proc.stderr
+    assert "open a NEW ssh session" in proc.stdout and "input-confirm" in proc.stdout
+    status = probing.run("input-status").stdout.strip()
+    assert status.startswith("PENDING CONFIRM (reverts at ") and f"— main probe did not confirm it: {fragment}" in status
+    # The dead-man fires: the filter goes, exactly as without a probe.
+    assert probing.run("input-off").returncode == 0
+    assert probing.input_live() is None and not probing.probe_note.exists()
+    assert probing.run("input-status").stdout.startswith("ABSENT — the dead-man removed it at ")
+
+
+def test_a_failed_probe_says_where_the_default_url_comes_from(probing: Relay) -> None:
+    proc = probing.run("apply")
+    assert "the default URL is the subscription's port 2096 on RELAY_CHECK_SNI" in proc.stderr
+    assert "set RELAY_CONFIRM_URL" in proc.stderr
+
+
+def test_a_retry_that_reaches_main_confirms(probing: Relay) -> None:
+    probing.curl_answers = [(28, 0, ""), (0, 200, '{"22":"ok"}')]
+    proc = probing.run("apply")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert len(_curl_calls(probing)) == 2
+    assert probing.kv(probing.marker)["confirmed_by"] == "main-probe"
+    assert "attempt 1 failed" in proc.stdout
+
+
+def test_input_confirm_still_works_after_a_failed_probe(probing: Relay) -> None:
+    probing.curl_answers = [(0, 404, "")]
+    assert probing.run("apply").returncode == 0
+    assert probing.pending.exists()
+    proc = probing.run("input-confirm")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    marker = probing.kv(probing.marker)
+    assert marker["sha256"] == input_hash(22) and marker["confirmed_by"] == "ssh-session"
+    assert not probing.deadman_armed() and not probing.pending.exists()
+    assert re.fullmatch(r"OK \(tcp 22; confirmed \S+ by ssh-session\)", probing.run("input-status").stdout.strip())
+
+
+def test_a_probe_ok_whose_confirmation_cannot_complete_stays_pending(probing: Relay) -> None:
+    """main reached the port, but the dead-man does not stop: not confirmed, the
+    timer still reverts the filter — the same refusal as input-confirm's."""
+    probing.curl_answers = [(0, 200, '{"22":"ok"}')]
+    (probing.units / f"{DEADMAN_TIMER}.stuck").touch()
+    proc = probing.run("apply")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "could not stop" in proc.stderr
+    assert not probing.marker.exists() and probing.pending.exists() and probing.deadman_armed()
+    assert "the confirmation did not complete" in probing.run("input-status").stdout
+
+
+def test_the_confirmed_set_is_never_probed(confirmed: Relay) -> None:
+    confirmed.write_env(f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CHECK_SNI={SNI}\n")
+    confirmed.curl_answers = [(0, 200, '{"22":"ok"}')]
+    assert confirmed.run("apply").returncode == 0
+    assert _curl_calls(confirmed) == []
+
+
+@pytest.mark.parametrize(
+    ("value", "url", "resolve"),
+    [
+        ("https://sub.example.org:8443", "https://sub.example.org:8443/relay/ssh-probe", "sub.example.org:8443"),
+        ("https://sub.example.org/", "https://sub.example.org/relay/ssh-probe", "sub.example.org:443"),
+        ("https://sub.example.org:2096/custom/probe", "https://sub.example.org:2096/custom/probe", "sub.example.org:2096"),
+        ('"https://sub.example.org:2096/relay/ssh-probe"  # quoted, commented',
+         "https://sub.example.org:2096/relay/ssh-probe", "sub.example.org:2096"),
+    ],
+)
+def test_relay_confirm_url_overrides_the_default(probing: Relay, value: str, url: str, resolve: str) -> None:
+    probing.write_env(f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CHECK_SNI={SNI}\nRELAY_CONFIRM_URL={value}\n")
+    probing.curl_answers = [(0, 200, '{"22":"ok"}')]
+    assert probing.run("apply").returncode == 0
+    (curl,) = _curl_calls(probing)
+    assert curl.split()[-1] == url
+    assert f"--resolve {resolve}:{UPSTREAM}" in curl
+
+
+@pytest.mark.parametrize(
+    ("env", "reason"),
+    [
+        (f"RELAY_CHECK_SNI={SNI}\nRELAY_CONFIRM_URL=off\n", "no main probe: RELAY_CONFIRM_URL=off"),
+        ("", "no main probe: no URL: RELAY_CONFIRM_URL is unset and there is no RELAY_CHECK_SNI"),
+    ],
+)
+def test_no_url_means_no_probe(relay: Relay, env: str, reason: str) -> None:
+    relay.write_env(f"RELAY_UPSTREAM_IPV4={UPSTREAM}\n{env}")
+    proc = relay.run("apply")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _curl_calls(relay) == []
+    assert relay.deadman_armed() and relay.pending.exists()
+    assert "open a NEW ssh session" in proc.stdout
+    assert reason in relay.run("input-status").stdout
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://sub.example.org/relay/ssh-probe",      # cleartext
+        "https://203.0.113.10:2096/relay/ssh-probe",   # an address, not a name
+        "https://sub.example.org:0/x",
+        "https://sub.example.org:65536/x",
+        "https://sub.example.org:02096/x",
+        "https://sub.example.org/x?y=1",
+        "https://user@sub.example.org/x",
+        "https://sub.example.org/x y",
+        "https://-bad-.example.org/x",
+        "sub.example.org:2096",
+        "on",
+    ],
+)
+def test_an_invalid_relay_confirm_url_is_refused_before_anything_applies(relay: Relay, value: str) -> None:
+    relay.write_env(f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CONFIRM_URL={value}\n")
+    proc = relay.run("apply")
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert "RELAY_CONFIRM_URL=" in proc.stderr
+    assert not any(c.startswith(("nft", "systemd-run", "curl")) for c in relay.calls())
+
+
+def test_more_ssh_ports_than_main_probes_are_not_probed(probing: Relay) -> None:
+    probing.ss_text = _ss(*[("tcp", f"0.0.0.0:{p}", f"users:(({SSHD}))") for p in (22, 2201, 2202, 2203, 2204)])
+    probing.socket_listen = ""
+    proc = probing.run("apply")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _curl_calls(probing) == []
+    assert "5 ssh ports (22,2201,2202,2203,2204) — main probes at most 4" in probing.run("input-status").stdout
+
+
+def test_an_ssh_port_that_is_also_forwarded_is_not_probed(probing: Relay) -> None:
+    """main would connect to the relay's 2222, be DNAT'ed back to itself and see its
+    own sshd answer: an "ok" that proves nothing about this relay."""
+    probing.write_env(f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_CHECK_SNI={SNI}\nRELAY_FORWARD_TCP_PORTS=443,2222\n")
+    probing.ss_text = _ss(("tcp", "0.0.0.0:2222", f"users:(({SSHD}))"))
+    probing.socket_listen = ""
+    probing.curl_answers = [(0, 200, '{"2222":"ok"}')]
+    assert probing.run("apply").returncode == 0
+    assert _curl_calls(probing) == [] and not probing.marker.exists()
+    assert "ssh port 2222 is also forwarded" in probing.run("input-status").stdout
+
+
+def test_dry_run_names_the_probe(probing: Relay) -> None:
+    proc = probing.run("check", "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+    assert f"main probe: {DEFAULT_URL} via {UPSTREAM} (default: RELAY_CHECK_SNI, port 2096)" in proc.stdout
+    assert "then asks main to probe the ssh ports" in proc.stdout
+    assert _curl_calls(probing) == [], "a dry run probes nothing"
+
+
+def test_check_never_probes(probing: Relay) -> None:
+    probing.curl_answers = [(0, 200, '{"22":"ok"}')]
+    assert probing.run("check").returncode in (0, 16)
+    assert _curl_calls(probing) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -1317,9 +1613,13 @@ def test_input_status_follows_the_lifecycle(relay: Relay) -> None:
     assert relay.run("input-status").stdout.startswith("UNCONFIRMED (no ")
     assert relay.run("apply").returncode == 0
     status = relay.run("input-status").stdout.strip()
-    assert re.fullmatch(r"PENDING CONFIRM \(reverts at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d \S+\)", status), status
+    assert re.fullmatch(
+        r"PENDING CONFIRM \(reverts at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d \S+\)"
+        r" — no main probe: no URL: RELAY_CONFIRM_URL is unset and there is no RELAY_CHECK_SNI .*",
+        status,
+    ), status
     assert relay.run("input-confirm").returncode == 0
-    assert re.fullmatch(r"OK \(tcp 22; confirmed \S+\)", relay.run("input-status").stdout.strip())
+    assert re.fullmatch(r"OK \(tcp 22; confirmed \S+ by ssh-session\)", relay.run("input-status").stdout.strip())
     relay.write_env(f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_INPUT_EXTRA_TCP=8080\n")
     assert relay.run("apply").returncode == 0
     assert relay.run("input-off").returncode == 0

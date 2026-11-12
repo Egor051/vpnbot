@@ -209,6 +209,28 @@ class ReadOnlyBundleStore:
             bundle=bundle, keys=active, traffic=totals if totals.measured else None, relays=relays
         )
 
+    async def load_relays(self) -> RelaySnapshot:
+        """The ``relays`` table as it stands now (``POST /relay/ssh-probe`` reads it).
+
+        Read live like everything else here: a relay added, switched off or deleted
+        in the admin panel is answered that way on the very next probe.
+
+        Raises :class:`BundleStoreUnavailable` if the database read itself fails.
+        """
+        async with self._lock:
+            try:
+                await self._db.ensure_fresh()
+                relays = RelaySnapshot.of(await self._relays.list_all())
+            except (aiosqlite.Error, OSError, ValueError) as exc:
+                self._infra_failures += 1
+                logger.error(
+                    "subscription: live DB read of relays failed (infra failure #%d) — failing closed: %s",
+                    self._infra_failures,
+                    exc,
+                )
+                raise BundleStoreUnavailable(str(exc)) from exc
+        return relays
+
     async def healthcheck(self) -> bool:
         """Probe the DB with a trivial live read; False when it cannot be read."""
         async with self._lock:

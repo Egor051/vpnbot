@@ -146,18 +146,29 @@ confirmed set.
   port): `apply` first arms a dead-man,
   `systemd-run --on-active=300 --unit=vpn-relay-input-deadman vpn-relay-apply input-off`, and
   only then applies the tables. A dead-man that cannot be armed → nothing is applied (exit
-  `9`). The deploy then ends with
+  `9`).
+- **The main server confirms it** ([below](#main-confirms-the-filter-post-relayssh-probe)):
+  right after that apply the relay asks main to connect to its SSH ports from outside. When
+  every one answers, the filter is confirmed exactly as `input-confirm` would do it, and the
+  deploy ends with
 
   ```
-  input filter     : PENDING CONFIRM (reverts at 2026-11-12 10:05:00 UTC)
+  input filter     : CONFIRMED by main probe (tcp 22; 2026-11-12 10:00:05 UTC)
+  ```
+
+  and nothing to do. When main cannot confirm it, the deploy ends with
+
+  ```
+  input filter     : PENDING CONFIRM (reverts at 2026-11-12 10:05:00 UTC) — main probe did not confirm it: <why>
   ```
 
   instead of `OK`, followed by the instruction.
-- **Open a NEW ssh session** to the relay and run `vpn-relay-apply input-confirm` within 5
-  minutes: it stops the timer and writes the marker with the hash. Otherwise the timer runs
-  `input-off`: only `table inet vpnrelay_input` goes (forwarding is untouched), the reason goes
-  to the journal (`journalctl -u vpn-relay-input-deadman`, or `-t vpn-relay-apply` when run by
-  hand), and the relay is reachable exactly as before. Re-deploy and confirm in time.
+- **Or confirm by hand: open a NEW ssh session** to the relay and run
+  `vpn-relay-apply input-confirm` within 5 minutes: it stops the timer and writes the marker
+  with the hash. Without either, the timer runs `input-off`: only `table inet vpnrelay_input`
+  goes (forwarding is untouched), the reason goes to the journal
+  (`journalctl -u vpn-relay-input-deadman`, or `-t vpn-relay-apply` when run by hand), and the
+  relay is reachable exactly as before. Re-deploy and confirm in time.
 - **The session you deployed from proves nothing**: it rides an established connection, which
   the filter always lets through. `input-confirm` checks that its own ssh session (the nearest
   `sshd` ancestor of the command) began after the filter was applied, and refuses otherwise —
@@ -168,9 +179,52 @@ confirmed set.
   fully automatic. UDP ports never ask for a confirmation (they cannot cost ssh).
 - At boot `vpn-relay.service` applies both tables: a confirmed set needs nothing, an
   unconfirmed one arms the dead-man again.
-- `vpn-relay-apply input-status` prints the state in one line — `OK (tcp 22; confirmed …)`,
-  `PENDING CONFIRM (reverts at …)`, `ABSENT — the dead-man removed it at …`,
-  `off (RELAY_INPUT_FILTER=off)`; DEPLOY OK prints it as `input filter`.
+- `vpn-relay-apply input-status` prints the state in one line — `OK (tcp 22; confirmed … by
+  ssh-session|main-probe)`, `CONFIRMED by main probe (tcp 22; …)` (right after the apply whose
+  probe confirmed it), `PENDING CONFIRM (reverts at …) — <why main did not confirm it>`,
+  `ABSENT — the dead-man removed it at …`, `off (RELAY_INPUT_FILTER=off)`; DEPLOY OK prints it as
+  `input filter`. The marker says who confirmed: `confirmed_by=ssh-session` or `main-probe`.
+
+#### Main confirms the filter: `POST /relay/ssh-probe`
+
+What `input-confirm` proves is that a **new** TCP connection from outside reaches the SSH port
+through the filter. The main server can prove the same, so a relay deploy needs no ssh session
+either:
+
+1. After an `apply` that left the filter PENDING (dead-man armed, tables and sysctls in place),
+   the relay POSTs its SSH ports — a JSON array, e.g. `[22]` — to main's subscription endpoint,
+   `RELAY_CONFIRM_URL` (default `https://<RELAY_CHECK_SNI>:2096/relay/ssh-probe`). curl verifies
+   the certificate, uses no proxy, follows no redirect, and always connects to
+   `RELAY_UPSTREAM_IPV4` (`--resolve`): the request never goes anywhere but the main server.
+2. Main answers only a caller whose address is inside the **source IPs of an enabled relay** in
+   the admin panel (read live from the `relays` table); anyone else, and every request while
+   `SUBSCRIPTION_ENABLED=false`, gets the endpoint's usual empty `404`. A body that is not 1–4
+   distinct ports in 1..65535 is a `400`. Then main TCP-connects back to **the caller's own
+   address** — never to an address from the request — on each port, concurrently, 5 s each, and
+   answers `{"22":"ok"}` (or `"fail"`). It has its own rate limit (6 requests per minute per
+   address, before the relay check) and logs the relay's name and the verdicts, nothing else.
+3. **Every SSH port `ok`** → the relay confirms through the very path `input-confirm` runs (dead-man
+   stopped, marker written with `confirmed_by=main-probe`). **Anything else** — no URL, `curl`
+   missing, main unreachable (one retry), `404`, a port that failed, more than 4 SSH ports, an SSH
+   port that is also forwarded (main would reach itself through the DNAT) — leaves the filter
+   PENDING with the reason in `input-status` and in DEPLOY OK; the dead-man reverts it unless
+   `input-confirm` comes, which works exactly as before. The probe never fails `apply`.
+
+What it needs:
+
+- **On main**: the subscription endpoint public (`SUBSCRIPTION_ENABLED=true`,
+  `SUBSCRIPTION_PUBLIC_PORT`, TLS — [docs/subscription.md](subscription.md)), and the relay
+  **added in the admin panel, enabled, with the address it reaches main from in its source IPs**
+  — before its first deploy.
+- **On the relay**: `curl`, and a URL — `RELAY_CHECK_SNI` for the default
+  (`https://<RELAY_CHECK_SNI>:2096/relay/ssh-probe`: on a main server whose `XRAY_SNI` is its own
+  domain, as with the self-steal decoy, that is the subscription's domain and port) or
+  `RELAY_CONFIRM_URL=https://<subscription domain>[:<port>]` (path `/relay/ssh-probe` by default).
+  `RELAY_CONFIRM_URL=off` turns the probe off: confirmation by hand only.
+
+A failed probe whose URL is the default says so (`… set RELAY_CONFIRM_URL`): a certificate that
+does not match `RELAY_CHECK_SNI`, or nothing listening on `:2096`, means the subscription lives
+elsewhere.
 
 #### Opening a port
 
@@ -178,9 +232,9 @@ For a service on the relay itself that must be reachable from outside (say, an e
 9100):
 
 1. `RELAY_INPUT_EXTRA_TCP=9100` (or `RELAY_INPUT_EXTRA_UDP=…`) in `/opt/vpn-service/.env`;
-2. `sudo FORCE=1 bash scripts/redeploy.sh` — a new TCP port changes the set, so DEPLOY OK says
-   PENDING CONFIRM;
-3. in a NEW ssh session: `vpn-relay-apply input-confirm`.
+2. `sudo FORCE=1 bash scripts/redeploy.sh` — a new TCP port changes the set: the dead-man is
+   armed and main's probe confirms it (DEPLOY OK: `CONFIRMED by main probe`);
+3. only if DEPLOY OK says PENDING CONFIRM: in a NEW ssh session, `vpn-relay-apply input-confirm`.
 
 A port that listens on a public address but is **not** let in is an error of `check` (exit
 `18`, `tcp/9100 listening but filtered: …`), and every deploy ends with `check` — a new service
@@ -209,6 +263,7 @@ helper for `HYSTERIA2_PORT`): optional `export`, spaces around `=`, quotes, trai
 | `RELAY_INPUT_EXTRA_TCP` | — | Comma-separated TCP ports the input filter lets in besides SSH. A change asks for `input-confirm` again. |
 | `RELAY_INPUT_EXTRA_UDP` | — | The same for UDP (no confirmation). |
 | `RELAY_INPUT_CLOSED_TCP`, `RELAY_INPUT_CLOSED_UDP` | — | Ports that listen on a public address but are meant to stay closed from outside: `check` does not call them "listening but filtered". A port cannot be both extra and closed; an SSH port cannot be closed. |
+| `RELAY_CONFIRM_URL` | `https://<RELAY_CHECK_SNI>:2096/relay/ssh-probe`; none without `RELAY_CHECK_SNI` | Where `apply` asks main to [confirm a pending filter](#main-confirms-the-filter-post-relayssh-probe): `https://<dns name>[:<port>][/<path>]` (no path = `/relay/ssh-probe`; an address, `http`, a query or userinfo are refused), always sent to `RELAY_UPSTREAM_IPV4`. `off` = no probe. |
 
 A value outside its range, with a sign, a unit or a leading zero is refused with exit `3`
 before anything is applied, like a bad port.
@@ -217,11 +272,11 @@ before anything is applied, like a bad port.
 
 | Command | Does |
 |---|---|
-| `apply` | Render + apply both tables atomically (the dead-man first when the input filter's TCP set is not confirmed), then the sysctl file and the three runtime values (conntrack first, `ip_forward=1` last). What the unit runs. |
+| `apply` | Render + apply both tables atomically (the dead-man first when the input filter's TCP set is not confirmed), then the sysctl file and the three runtime values (conntrack first, `ip_forward=1` last); for a set that is not confirmed, last, [main's probe](#main-confirms-the-filter-post-relayssh-probe). What the unit runs. |
 | `check` | Read-only: both live tables equal the render (counters ignored; a diff is printed), every port that listens on a public address is let in or declared closed, `ip_forward=1`, both conntrack values equal `.env`, a TCP connect to the upstream on **every** forwarded TCP port, and the TLS handshake when `RELAY_CHECK_SNI` is set. A pending confirmation is shown, not a failure; a conntrack table more than 80 % full is a warning. Every deploy ends with it. |
-| `check --dry-run` | Validate `.env`, find the SSH ports and render; say whether the TCP set is confirmed; as root also `nft -c` (syntax check, nothing applied). Deploy Phase 1 runs it from the checkout. |
+| `check --dry-run` | Validate `.env`, find the SSH ports and render; say whether the TCP set is confirmed and which URL main's probe would use; as root also `nft -c` (syntax check, nothing applied). Deploy Phase 1 runs it from the checkout. |
 | `show` | Print the rendered ruleset. |
-| `input-confirm` | Keep the input filter: from a NEW ssh session, while the dead-man is armed. Stops the timer, writes `/etc/vpn-relay/input.confirmed`. |
+| `input-confirm` | Keep the input filter: from a NEW ssh session, while the dead-man is armed. Stops the timer, writes `/etc/vpn-relay/input.confirmed` (`confirmed_by=ssh-session`) — the same path main's probe takes. |
 | `input-off` | Remove `table inet vpnrelay_input` only, the reason to the journal. What the dead-man runs; by hand it lasts until the next apply. |
 | `input-status` | The input filter's state in one line (DEPLOY OK prints it). |
 
@@ -287,21 +342,27 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   there proves the repo reproduces it 1:1 (the exit is `16` until the
   [input filter](#the-input-filter) exists, `15` before the [conntrack](#conntrack) values are
   set, PASS after both). The dry-run names the SSH ports it found and whether the input
-  filter's TCP set is confirmed — i.e. whether Phase 2 will end with PENDING CONFIRM — and a
-  port that listens but would be filtered is called out: Phase 2's `check` would roll back.
+  filter's TCP set is confirmed — i.e. whether Phase 2 arms the dead-man — and the URL of main's
+  probe that will confirm it, and a port that listens but would be filtered is called out:
+  Phase 2's `check` would roll back.
 - **Phase 2**: back up the live `nft list table ip vpnrelay` and
-  `nft list table inet vpnrelay_input`, the installed helper, the unit and the sysctl file (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; nothing is
+  `nft list table inet vpnrelay_input`, the installed helper, the unit, the sysctl file and the
+  confirmation marker `/etc/vpn-relay/input.confirmed` (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; nothing is
   stopped for it); `git reset --hard origin/main`; install `vpn-relay-apply` through
   `OUT_OF_REPO_HELPERS` (role `relay`) and `deploy/relay/vpn-relay.service` verbatim;
   `daemon-reload`, `enable`, `restart vpn-relay` (established flows keep their conntrack NAT
-  across the millisecond gap); verify with `vpn-relay-apply check`. DEPLOY OK carries
-  `input filter : …` from `vpn-relay-apply input-status`; with `PENDING CONFIRM` it is followed
-  by the instruction to run `input-confirm` from a NEW ssh session within 5 minutes.
+  across the millisecond gap; a set that is not confirmed is confirmed by main's probe here);
+  verify with `vpn-relay-apply check`. DEPLOY OK carries `input filter : …` from
+  `vpn-relay-apply input-status` — `CONFIRMED by main probe (…)` with nothing to do, or
+  `PENDING CONFIRM (…) — <why>` followed by the reason and the instruction to run
+  `input-confirm` from a NEW ssh session within 5 minutes.
 - **Any failure** rolls back: the previous checkout, helper, unit and sysctl file (or their
   absence), the saved forwarding table re-applied in one transaction, the input filter as it
   was — a confirmed one from its dump, one that did not exist removed, one that was still
   waiting for `input-confirm` removed too (restored, it could outlive its dead-man; removing is
-  the safe direction) — and the dead-man the deploy armed stopped, the unit's enabled/active state, the
+  the safe direction) — the confirmation marker as it was (a confirmation main's probe wrote
+  during the restart is for a set that is no longer live), the dead-man the deploy armed
+  stopped, the unit's enabled/active state, the
   previous `ip_forward` and the previous runtime conntrack values (each read back; a value that
   was unreadable before the deploy — nf_conntrack not loaded — is left as `apply` set it). The
   deploy exits non-zero with a rollback report.
@@ -333,7 +394,15 @@ install -m 0600 -o root -g root /opt/vpn-service/deploy/relay/relay.env.example 
 ```
 
 Edit `/opt/vpn-service/.env`: `RELAY_UPSTREAM_IPV4` = the main server's IPv4, and preferably
-`RELAY_CHECK_SNI` = the main server's `XRAY_SNI`. Then inspect, and deploy:
+`RELAY_CHECK_SNI` = the main server's `XRAY_SNI` — it also makes the URL main's probe is asked at
+(`https://<RELAY_CHECK_SNI>:2096/relay/ssh-probe`); when the subscription endpoint is on another
+domain or port, set `RELAY_CONFIRM_URL=https://<that domain>:<port>` too.
+
+Before the first deploy, on the **main server**: a DNS A record for the relay and the relay in
+the admin panel, **enabled**, with the relay's egress IPv4 in its source IPs (steps 1–2 below) —
+main's probe answers only the address of an enabled relay. (Switch «в подписках» off until the
+deploy is done if new bundles must not get relay members a few minutes early.) Then inspect, and
+deploy:
 
 ```bash
 cd /opt/vpn-service && sudo CHECK=1 bash scripts/redeploy.sh
@@ -347,8 +416,10 @@ cd /opt/vpn-service && sudo FORCE=1 bash scripts/redeploy.sh
 would say "nothing to deploy" — exactly as on the main server. Every later update is the usual
 `sudo CHECK=1 bash scripts/redeploy.sh`, then `sudo bash scripts/redeploy.sh`.
 
-The first deploy enables the [input filter](#the-input-filter) and ends with `input filter :
-PENDING CONFIRM (reverts at …)`: open a **new** ssh session within 5 minutes and run
+The first deploy enables the [input filter](#the-input-filter), main's probe confirms it, and
+DEPLOY OK says `input filter : CONFIRMED by main probe (…)` — nothing to run. Only if it says
+`PENDING CONFIRM (reverts at …) — <why>`: fix what it names, or open a **new** ssh session within
+5 minutes and run
 
 ```bash
 vpn-relay-apply input-confirm
@@ -358,7 +429,7 @@ Check it: `systemctl status vpn-relay`, `nft list table ip vpnrelay`,
 `nft list table inet vpnrelay_input`, `/usr/local/sbin/vpn-relay-apply input-status`,
 `/usr/local/sbin/vpn-relay-apply check`.
 
-Then on the **main server**:
+On the **main server** (steps 1–2 before the relay's first deploy, see above):
 
 1. A DNS A record for the relay — e.g. `relay2.anycastedge.net` → the relay's IPv4 — with
    Cloudflare proxying **off** (see [DNS](#dns--use-a-name-not-an-address)).
