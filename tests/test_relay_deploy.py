@@ -961,7 +961,7 @@ def test_relay_env_example_covers_the_keys_the_helper_reads() -> None:
     helper = _read(RELAY_HELPER_SRC)
     keys = set(re.findall(r"(?:env_sed_val|optional_ports) (RELAY_[A-Z0-9_]+)", helper))
     assert keys == {
-        "RELAY_UPSTREAM_IPV4", "RELAY_FORWARD_TCP_PORTS", "RELAY_FORWARD_UDP_PORTS",
+        "RELAY_UPSTREAM_IPV4", "RELAY_UPSTREAM_HOST", "RELAY_FORWARD_TCP_PORTS", "RELAY_FORWARD_UDP_PORTS",
         "RELAY_WAN_IFACE", "RELAY_CHECK_SNI",
         "RELAY_CONNTRACK_MAX", "RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT",
         "RELAY_INPUT_FILTER", "RELAY_INPUT_EXTRA_TCP", "RELAY_INPUT_EXTRA_UDP",

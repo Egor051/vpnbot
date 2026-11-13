@@ -1,0 +1,683 @@
+#!/usr/bin/python3 -I
+"""vpn-relay-agent — the only thing the main server's bot may run on a relay (docs/relay.md).
+
+The relay has no Telegram bot and never talks to the Telegram API. The bot on the main
+server manages it over SSH with ONE key, whose line in root's authorized_keys is
+
+    restrict,command="/usr/local/sbin/vpn-relay-agent" ssh-ed25519 AAAA... vpn-relay-agent
+
+so whatever the client asks for, sshd runs this program, with the request in
+SSH_ORIGINAL_COMMAND. Nothing of it reaches a shell. The request must match one line
+of the whitelist EXACTLY (full-string regular expressions, length-capped, ASCII only);
+everything else is refused with exit 2 before anything is read or changed:
+
+    hello <token>                         complete the pairing (43-char base64url token)
+    status                                facts about the relay, read-only
+    apply target=<dns name> tcp=<ports> udp=<ports>
+                                          re-point / re-port the forward; rolled back
+                                          when the ruleset or its check fails
+    update                                move the checkout to the newest release tag
+                                          (never backwards) and reinstall from it
+    uninstall                             remove everything scripts/install.sh installed
+
+Before a successful `hello` only `hello` is accepted. `hello` compares sha256(token)
+with the hash scripts/install.sh stored from the pairing code (constant time), within
+the code's expiry; a repeated `hello` with the SAME token after the pairing answers
+again (the bot may retry its checks), any other token is refused.
+
+Output: ONE JSON object on stdout — {"ok": true|false, "cmd": ..., ...}. Exit codes:
+0 ok · 2 refused (not on the whitelist, a bad argument) · 3 not allowed (token, not
+paired, expired) · 4 failed (the operation itself; the relay is as it was) · 5 busy
+(another mutating call holds the lock).
+
+Every call is logged to the journal (logger -t vpn-relay-agent) with the command
+name, the caller's address and the verdict — never the token.
+
+`update` and `uninstall` run in a transient systemd unit (systemd-run --wait), so a
+dropped SSH connection cannot cut them in half. Their bodies are the internal entry
+points `--internal-update` / `--internal-uninstall`, which only root can start and
+which refuse to run inside an SSH session: the SSH client cannot reach them (a
+forced command gets no argv).
+
+TEST SEAM: VPN_RELAY_AGENT_SELFTEST=1 (ignored inside an SSH session) re-roots every
+path under VPN_RELAY_AGENT_ROOT and runs external commands only from
+VPN_RELAY_AGENT_SELFTEST_BIN. sshd passes no such variable (AcceptEnv is LANG LC_*
+at most, PermitUserEnvironment is off), and the seam is off whenever SSH_CONNECTION
+is set.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import fcntl
+import hashlib
+import hmac
+import json
+import os
+import re
+import shutil
+import subprocess  # noqa: S404 — fixed argv lists of system tools, never a shell
+import sys
+import tempfile
+import time
+from collections.abc import Iterator, Sequence
+from pathlib import Path
+from typing import Any
+
+AGENT_VERSION = "1"
+PROTOCOL = 1
+MAX_REQUEST = 512
+# Accepted `hello` after the code's expiry (clock skew between the two hosts).
+HELLO_GRACE_SECONDS = 900
+MAX_PORTS = 8
+
+SELFTEST = os.environ.get("VPN_RELAY_AGENT_SELFTEST") == "1" and "SSH_CONNECTION" not in os.environ
+_ROOT = os.environ.get("VPN_RELAY_AGENT_ROOT", "") if SELFTEST else ""
+_BIN = os.environ.get("VPN_RELAY_AGENT_SELFTEST_BIN", "") if SELFTEST else ""
+
+
+def P(path: str) -> Path:
+    """A host path, re-rooted under the test seam."""
+    return Path(_ROOT + path) if _ROOT else Path(path)
+
+
+APP_DIR = P("/opt/vpn-service")
+ENV_FILE = P("/opt/vpn-service/.env")
+STATE_DIR = P("/etc/vpn-relay")
+PAIRING_FILE = P("/etc/vpn-relay/pairing.json")
+INSTALL_FILE = P("/etc/vpn-relay/install.json")
+UPSTREAM_STATE = P("/etc/vpn-relay/upstream.resolved")
+VAR_DIR = P("/var/lib/vpn-relay")
+UPDATE_FILE = P("/var/lib/vpn-relay/update.json")
+LOCK_FILE = P("/run/vpn-relay-agent.lock")
+UNINSTALL_RESULT = P("/run/vpn-relay-uninstall.json")
+APPLY_HELPER = "/usr/local/sbin/vpn-relay-apply"
+AGENT_PATH = "/usr/local/sbin/vpn-relay-agent"
+UNIT_DIR = P("/etc/systemd/system")
+SYSCTL_FILE = P("/etc/sysctl.d/90-vpn-relay.conf")
+UNITS = ("vpn-relay-resolve.timer", "vpn-relay-resolve.service", "vpn-relay.service")
+TABLES = (("ip", "vpnrelay"), ("inet", "vpnrelay_input"))
+SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+KEY_MARKER = f'command="{AGENT_PATH}"'
+
+E_OK, E_REFUSED, E_DENIED, E_FAILED, E_BUSY = 0, 2, 3, 4, 5
+
+# --------------------------------------------------------------------------- #
+# The whitelist. Full-string matches; nothing else is ever parsed.
+# --------------------------------------------------------------------------- #
+_TOKEN_RE = r"[A-Za-z0-9_-]{43}"
+_PORTS = r"[0-9]{1,5}(?:,[0-9]{1,5}){0,7}"
+_HOST = r"[A-Za-z0-9.-]{1,253}"
+WHITELIST: dict[str, re.Pattern[str]] = {
+    "hello": re.compile(rf"hello (?P<token>{_TOKEN_RE})"),
+    "status": re.compile(r"status"),
+    "apply": re.compile(rf"apply target=(?P<target>{_HOST}) tcp=(?P<tcp>{_PORTS}) udp=(?P<udp>{_PORTS})"),
+    "update": re.compile(r"update"),
+    "uninstall": re.compile(r"uninstall"),
+}
+_LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
+
+
+class Refused(Exception):
+    """A request that is not on the whitelist or carries a bad argument (exit 2)."""
+
+
+class Denied(Exception):
+    """Not allowed: token, pairing, expiry (exit 3)."""
+
+
+class Failed(Exception):
+    """The operation failed; whatever it changed was put back (exit 4)."""
+
+
+class Busy(Exception):
+    """Another mutating call holds the lock (exit 5)."""
+
+
+# --------------------------------------------------------------------------- #
+# Validation (the bot validates the same way first: services/relay_pairing.py)
+# --------------------------------------------------------------------------- #
+def valid_dns_name(value: str) -> bool:
+    """A DNS name with at least two labels, not an IPv4 literal."""
+    if not value or len(value) > 253 or value.endswith(".") or "." not in value:
+        return False
+    labels = value.split(".")
+    if not all(_LABEL.fullmatch(label) for label in labels):
+        return False
+    return not labels[-1].isdigit()
+
+
+def parse_ports(raw: str) -> list[int]:
+    items = raw.split(",")
+    if not raw or len(items) > MAX_PORTS:
+        raise Refused("ports: 1..8 comma-separated ports")
+    ports: list[int] = []
+    for item in items:
+        if not re.fullmatch(r"[1-9][0-9]{0,4}", item) or int(item) > 65535:
+            raise Refused(f"ports: {item!r} is not a port in 1..65535")
+        if int(item) in ports:
+            raise Refused(f"ports: {item} twice")
+        ports.append(int(item))
+    return sorted(ports)
+
+
+def parse_request(raw: str | None) -> tuple[str, dict[str, str]]:
+    """The whitelisted command and its named arguments, or Refused."""
+    if raw is None:
+        raise Refused("no command (this key only runs the relay agent)")
+    if len(raw) > MAX_REQUEST or not raw.isascii() or not raw.isprintable():
+        raise Refused("malformed request")
+    for name, pattern in WHITELIST.items():
+        match = pattern.fullmatch(raw)
+        if match is not None:
+            return name, {k: v for k, v in match.groupdict().items() if v is not None}
+    raise Refused("not an agent command")
+
+
+# --------------------------------------------------------------------------- #
+# Small host helpers
+# --------------------------------------------------------------------------- #
+def command_env() -> dict[str, str]:
+    """A fixed environment for every external command: nothing the caller sent."""
+    path = f"{_BIN}:{SAFE_PATH}" if _BIN else SAFE_PATH
+    env = {"PATH": path, "LC_ALL": "C", "LANG": "C"}
+    if SELFTEST:
+        # The whole seam, or a nested agent (update/uninstall) would run on the host.
+        env.update(VPN_RELAY_AGENT_SELFTEST="1", VPN_RELAY_AGENT_ROOT=_ROOT, VPN_RELAY_AGENT_SELFTEST_BIN=_BIN)
+    return env
+
+
+def run(args: Sequence[str], *, timeout: float = 60, check: bool = False) -> subprocess.CompletedProcess[str]:
+    if _BIN:
+        exe = Path(_BIN) / Path(args[0]).name
+        if not exe.exists():
+            return subprocess.CompletedProcess(list(args), 127, "", f"selftest: no stub for {args[0]}")
+        args = [str(exe), *args[1:]]
+    try:
+        result = subprocess.run(  # noqa: S603 — argv only, fixed programs, never a shell
+            list(args),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=command_env(),
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(list(args), 127, "", f"{args[0]}: not found")
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(list(args), 124, "", f"{args[0]}: timeout after {timeout}s")
+    if check and result.returncode != 0:
+        raise Failed(f"{Path(args[0]).name} exit {result.returncode}: {tail(result.stderr or result.stdout)}")
+    return result
+
+
+def tail(text: str, lines: int = 12) -> str:
+    return "\n".join(text.strip().splitlines()[-lines:])
+
+
+def journal(message: str) -> None:
+    with contextlib.suppress(Exception):
+        run(["logger", "-t", "vpn-relay-agent", "--", message], timeout=5)
+
+
+def read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_atomic(path: Path, text: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def write_json(path: Path, data: dict[str, Any], mode: int = 0o600) -> None:
+    write_atomic(path, json.dumps(data, indent=2, sort_keys=True) + "\n", mode)
+
+
+@contextlib.contextmanager
+def exclusive() -> Iterator[None]:
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Busy("another agent call is running") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+# --------------------------------------------------------------------------- #
+# .env (the same reader as vpn-relay-apply / deploy.sh: last assignment wins)
+# --------------------------------------------------------------------------- #
+def _assignment(key: str) -> re.Pattern[str]:
+    return re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=\s*(?P<value>.*)$")
+
+
+def env_value(text: str, key: str) -> str:
+    value = ""
+    pattern = _assignment(key)
+    for line in text.splitlines():
+        match = pattern.match(line)
+        if match:
+            value = match["value"]
+    value = re.sub(r"\s*#.*$", "", value).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value
+
+
+def env_with(text: str, values: dict[str, str | None]) -> str:
+    """*text* with each key set (its last assignment replaced, others dropped) or removed (None)."""
+    lines = text.splitlines()
+    for key, value in values.items():
+        pattern = _assignment(key)
+        hits = [i for i, line in enumerate(lines) if pattern.match(line)]
+        if value is None:
+            lines = [line for i, line in enumerate(lines) if i not in hits]
+            continue
+        if hits:
+            lines[hits[-1]] = f"{key}={value}"
+            lines = [line for i, line in enumerate(lines) if i not in hits[:-1]]
+        else:
+            lines.append(f"{key}={value}")
+    return "\n".join(lines) + "\n"
+
+
+def read_env() -> str:
+    try:
+        return ENV_FILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise Failed(f"{ENV_FILE} is unreadable: {exc}") from None
+
+
+# --------------------------------------------------------------------------- #
+# Facts
+# --------------------------------------------------------------------------- #
+def ports_of(raw: str) -> list[int]:
+    try:
+        return parse_ports(raw.replace(" ", "")) if raw else [443]
+    except Refused:
+        return []
+
+
+def live_target() -> str | None:
+    out = run(["nft", "list", "table", "ip", "vpnrelay"], timeout=10)
+    if out.returncode != 0:
+        return None
+    targets = sorted(set(re.findall(r"dnat to ([0-9.]+):[0-9]+", out.stdout)))
+    return targets[0] if len(targets) == 1 else None
+
+
+def resolve(name: str) -> list[str]:
+    out = run(["getent", "ahostsv4", name], timeout=15)
+    found = {line.split()[0] for line in out.stdout.splitlines() if line.split()}
+    return sorted(a for a in found if re.fullmatch(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}", a))
+
+
+def ssh_ports() -> list[int]:
+    """TCP ports sshd listens on (or systemd holds for ssh.socket)."""
+    ports: set[int] = set()
+    out = run(["ss", "-Hltnp"], timeout=10)
+    for line in out.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or '"sshd' not in line:
+            continue
+        port = fields[3].rsplit(":", 1)[-1]
+        if port.isdigit():
+            ports.add(int(port))
+    sock = run(["systemctl", "show", "-p", "Listen", "ssh.socket"], timeout=10)
+    for port in re.findall(r":([0-9]{1,5}) \(Stream\)", sock.stdout):
+        ports.add(int(port))
+    return sorted(ports)
+
+
+def unit_state(unit: str) -> str:
+    return run(["systemctl", "is-active", unit], timeout=10).stdout.strip() or "unknown"
+
+
+def egress(target: str | None) -> dict[str, str]:
+    if not target:
+        return {}
+    out = run(["ip", "-4", "route", "get", target], timeout=10).stdout
+    src = re.search(r"\bsrc ([0-9.]+)", out)
+    dev = re.search(r"\bdev (\S+)", out)
+    return {"src": src.group(1) if src else "", "dev": dev.group(1) if dev else ""}
+
+
+def checkout_ref() -> dict[str, str]:
+    head = run(["git", "-C", str(APP_DIR), "rev-parse", "HEAD"], timeout=15).stdout.strip()
+    tag = run(["git", "-C", str(APP_DIR), "describe", "--tags", "--always"], timeout=15).stdout.strip()
+    return {"commit": head, "describe": tag}
+
+
+def facts(*, with_check: bool) -> dict[str, Any]:
+    env = read_env()
+    host = env_value(env, "RELAY_UPSTREAM_HOST")
+    target = live_target()
+    data: dict[str, Any] = {
+        "agent": AGENT_VERSION,
+        "protocol": PROTOCOL,
+        "target_host": host or env_value(env, "RELAY_UPSTREAM_IPV4"),
+        "tcp": ports_of(env_value(env, "RELAY_FORWARD_TCP_PORTS")),
+        "udp": ports_of(env_value(env, "RELAY_FORWARD_UDP_PORTS")),
+        "live_target": target,
+        "resolved": resolve(host) if host else [],
+        "ip_forward": run(["sysctl", "-n", "net.ipv4.ip_forward"], timeout=5).stdout.strip(),
+        "units": {unit: unit_state(unit) for unit in ("vpn-relay.service", "vpn-relay-resolve.timer")},
+        "ssh_ports": ssh_ports(),
+        "egress": egress(target),
+        "checkout": checkout_ref(),
+        "update": read_json(UPDATE_FILE) or {},
+    }
+    if with_check:
+        out = run([APPLY_HELPER, "check"], timeout=90)
+        data["check"] = {
+            "rc": out.returncode,
+            "lines": [ln for ln in (out.stdout + out.stderr).splitlines() if ln.strip()][-25:],
+        }
+    return data
+
+
+# --------------------------------------------------------------------------- #
+# Commands
+# --------------------------------------------------------------------------- #
+def pairing() -> dict[str, Any]:
+    data = read_json(PAIRING_FILE)
+    if data is None or not isinstance(data.get("token_sha256"), str):
+        raise Denied("this relay has no pairing (run scripts/install.sh with a pairing code)")
+    return data
+
+
+def require_paired() -> dict[str, Any]:
+    data = pairing()
+    if not data.get("paired_at"):
+        raise Denied("not paired yet: hello first")
+    return data
+
+
+def cmd_hello(args: dict[str, str]) -> dict[str, Any]:
+    token = args["token"]
+    with exclusive():
+        data = pairing()
+        digest = hashlib.sha256(token.encode("ascii")).hexdigest()
+        if not hmac.compare_digest(digest, str(data["token_sha256"])):
+            raise Denied("token does not match this relay's pairing code")
+        if not data.get("paired_at"):
+            exp = data.get("exp")
+            if not isinstance(exp, int) or time.time() > exp + HELLO_GRACE_SECONDS:
+                raise Denied("the pairing code has expired — issue a new one in the bot and re-run the installer")
+            data["paired_at"] = int(time.time())
+            write_json(PAIRING_FILE, data)
+        return {"paired_at": data["paired_at"], **facts(with_check=False)}
+
+
+def cmd_status(_: dict[str, str]) -> dict[str, Any]:
+    require_paired()
+    return facts(with_check=True)
+
+
+def cmd_apply(args: dict[str, str]) -> dict[str, Any]:
+    target = args["target"]
+    if not valid_dns_name(target):
+        raise Refused(f"target: {target!r} is not a DNS name")
+    tcp, udp = parse_ports(args["tcp"]), parse_ports(args["udp"])
+    with exclusive():
+        require_paired()
+        clash = sorted(set(tcp) & set(ssh_ports()))
+        if clash:
+            raise Refused(f"tcp {clash} is where sshd listens — forwarding it would lock the bot out")
+        if not resolve(target):
+            raise Failed(f"{target} does not resolve to an IPv4 address on the relay — nothing changed")
+        before = read_env()
+        after = env_with(
+            before,
+            {
+                "RELAY_UPSTREAM_IPV4": None,
+                "RELAY_UPSTREAM_HOST": target,
+                "RELAY_FORWARD_TCP_PORTS": ",".join(map(str, tcp)),
+                "RELAY_FORWARD_UDP_PORTS": ",".join(map(str, udp)),
+            },
+        )
+        write_atomic(ENV_FILE, after)
+        applied = run([APPLY_HELPER, "apply"], timeout=120)
+        checked = run([APPLY_HELPER, "check"], timeout=90) if applied.returncode == 0 else None
+        # 13/14: the upstream does not answer — the new target is wrong; 10-12/15/20:
+        # the table or the sysctls did not take. 16-18 belong to the input filter.
+        if applied.returncode != 0 or (checked is not None and checked.returncode in (10, 11, 12, 13, 14, 15, 20)):
+            write_atomic(ENV_FILE, before)
+            back = run([APPLY_HELPER, "apply"], timeout=120)
+            failed = applied if applied.returncode != 0 or checked is None else checked
+            restored = "restored" if back.returncode == 0 else f"RESTORE FAILED, rc {back.returncode}"
+            raise Failed(
+                f"the new forward did not work (vpn-relay-apply exit {failed.returncode}), rolled back "
+                f"({restored}): {tail(failed.stdout + failed.stderr)}"
+            )
+        return {"applied": {"target": target, "tcp": tcp, "udp": udp}, **facts(with_check=False)}
+
+
+def _transient(unit: str, internal: str, timeout: int) -> subprocess.CompletedProcess[str]:
+    if SELFTEST:
+        return run([AGENT_PATH, internal], timeout=timeout)
+    return run(
+        ["systemd-run", f"--unit={unit}", "--collect", "--wait", "--quiet",
+         "-p", f"TimeoutStartSec={timeout}", AGENT_PATH, internal],
+        timeout=timeout + 30,
+    )
+
+
+def cmd_update(_: dict[str, str]) -> dict[str, Any]:
+    with exclusive():
+        require_paired()
+        done = _transient("vpn-relay-update", "--internal-update", 900)
+    result = read_json(UPDATE_FILE) or {}
+    if done.returncode != 0 or result.get("state") == "failed":
+        raise Failed(str(result.get("message") or tail(done.stderr) or f"update unit exit {done.returncode}"))
+    return {"update": result}
+
+
+def cmd_uninstall(_: dict[str, str]) -> dict[str, Any]:
+    with exclusive():
+        require_paired()
+        with contextlib.suppress(OSError):
+            UNINSTALL_RESULT.unlink()
+        done = _transient("vpn-relay-uninstall", "--internal-uninstall", 300)
+    result = read_json(UNINSTALL_RESULT) or {}
+    if done.returncode != 0 or not result.get("ok"):
+        raise Failed(str(result.get("message") or tail(done.stderr) or f"uninstall unit exit {done.returncode}"))
+    return {"uninstall": result}
+
+
+COMMANDS = {
+    "hello": cmd_hello,
+    "status": cmd_status,
+    "apply": cmd_apply,
+    "update": cmd_update,
+    "uninstall": cmd_uninstall,
+}
+
+
+# --------------------------------------------------------------------------- #
+# Internal: update (in its own transient unit)
+# --------------------------------------------------------------------------- #
+def _release_key(tag: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in tag[1:].split("."))
+
+
+def internal_update() -> int:
+    started = int(time.time())
+
+    def note(state: str, message: str, **extra: Any) -> None:
+        write_json(UPDATE_FILE, {"state": state, "message": message, "started_at": started,
+                                 "finished_at": int(time.time()) if state != "running" else None, **extra}, 0o644)
+
+    if installer_relay() is None:
+        note("failed", "this is not a relay installed by install.sh — refusing")
+        return 1
+    note("running", "fetching release tags")
+    git = ["git", "-C", str(APP_DIR)]
+    old = run([*git, "rev-parse", "HEAD"], timeout=15).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", old):
+        note("failed", f"{APP_DIR} is not a git checkout")
+        return 1
+    fetched = run([*git, "fetch", "--quiet", "--tags", "--force", "origin"], timeout=180)
+    if fetched.returncode != 0:
+        note("failed", f"git fetch failed: {tail(fetched.stderr)}", from_commit=old)
+        return 1
+    tags = [t for t in run([*git, "tag", "-l", "v*"], timeout=15).stdout.split() if re.fullmatch(r"v[0-9]+(\.[0-9]+){1,3}", t)]
+    if not tags:
+        note("noop", "no release tag (v*) in the repository", from_commit=old)
+        return 0
+    latest = max(tags, key=_release_key)
+    target = run([*git, "rev-parse", f"{latest}^{{commit}}"], timeout=15).stdout.strip()
+    if target == old or run([*git, "merge-base", "--is-ancestor", target, old], timeout=15).returncode == 0:
+        note("noop", f"already at or past {latest}", from_commit=old, release=latest)
+        return 0
+    if run([*git, "merge-base", "--is-ancestor", old, target], timeout=15).returncode != 0:
+        note("failed", f"{old[:12]} is not an ancestor of {latest} — not moving sideways", from_commit=old, release=latest)
+        return 1
+    note("running", f"checking out {latest}", from_commit=old, release=latest)
+    if run([*git, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", target], timeout=60).returncode != 0:
+        note("failed", f"git checkout {latest} failed", from_commit=old, release=latest)
+        return 1
+    installer = APP_DIR / "scripts" / "install.sh"
+    done = run(["bash", str(installer), "--relay-update"], timeout=600)
+    if done.returncode != 0:
+        run([*git, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", old], timeout=60)
+        note("failed", f"the installer of {latest} failed and rolled back (exit {done.returncode}): {tail(done.stderr)}",
+             from_commit=old, release=latest)
+        return 1
+    note("succeeded", f"updated to {latest}", from_commit=old, to_commit=target, release=latest)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Internal: uninstall (in its own transient unit)
+# --------------------------------------------------------------------------- #
+def strip_agent_keys(path: Path) -> int:
+    """Drop every authorized_keys line that runs this agent; the rest stays byte-identical."""
+    try:
+        original = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return 0
+    lines = original.splitlines(keepends=True)
+    kept = [line for line in lines if KEY_MARKER not in line]
+    if len(kept) != len(lines):
+        st = path.stat()
+        write_atomic(path, "".join(kept), st.st_mode & 0o777)
+        with contextlib.suppress(OSError):
+            os.chown(path, st.st_uid, st.st_gid)
+    return len(lines) - len(kept)
+
+
+def installer_relay() -> dict[str, Any] | None:
+    """install.json when this host is a relay scripts/install.sh installed, else None."""
+    install = read_json(INSTALL_FILE)
+    if install is None or install.get("installer") != "vpn-relay":
+        return None
+    env = ENV_FILE.read_text(encoding="utf-8") if ENV_FILE.exists() else ""
+    if (UNIT_DIR / "vpn-bot.service").exists() or env_value(env, "NODE_ROLE") != "relay":
+        return None
+    return install
+
+
+def internal_uninstall() -> int:
+    steps: list[str] = []
+    install = installer_relay()
+    if install is None:
+        write_json(UNINSTALL_RESULT, {"ok": False, "message": "this is not a relay installed by install.sh — refusing"})
+        return 1
+    for unit in UNITS:
+        run(["systemctl", "disable", "--now", unit], timeout=60)
+    run(["systemctl", "stop", "vpn-relay-input-deadman.timer"], timeout=30)
+    for family, table in TABLES:
+        if run(["nft", "list", "table", family, table], timeout=10).returncode == 0:
+            run(["nft", "delete", "table", family, table], timeout=10)
+    steps.append("units stopped and disabled, tables removed")
+    for unit in UNITS:
+        with contextlib.suppress(FileNotFoundError):
+            (UNIT_DIR / unit).unlink()
+    run(["systemctl", "daemon-reload"], timeout=60)
+    with contextlib.suppress(FileNotFoundError):
+        SYSCTL_FILE.unlink()
+    before = str(install.get("ip_forward_before", "0"))
+    run(["sysctl", "-q", "-w", f"net.ipv4.ip_forward={'1' if before == '1' else '0'}"], timeout=10)
+    steps.append(f"sysctl file removed, ip_forward={before}")
+    keys = Path(_ROOT + str(install["authorized_keys"])) if isinstance(install.get("authorized_keys"), str) else P("/root/.ssh/authorized_keys")
+    steps.append(f"{strip_agent_keys(keys)} agent key line(s) removed from {keys}")
+    for path in (P(APPLY_HELPER), STATE_DIR, VAR_DIR):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+    if install.get("created_app_dir") is True and APP_DIR.is_dir():
+        shutil.rmtree(APP_DIR, ignore_errors=True)
+        steps.append(f"{APP_DIR} removed")
+    backups = install.get("adoption_backup")
+    message = "relay uninstalled" + (f"; the pre-install relay is kept in {backups}" if backups else "")
+    with contextlib.suppress(FileNotFoundError):
+        P(AGENT_PATH).unlink()
+    write_json(UNINSTALL_RESULT, {"ok": True, "message": message, "steps": steps})
+    journal(message)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Entry
+# --------------------------------------------------------------------------- #
+def emit(payload: dict[str, Any]) -> None:
+    sys.stdout.write(json.dumps(payload, sort_keys=True) + "\n")
+    sys.stdout.flush()
+
+
+def main(argv: Sequence[str]) -> int:
+    if len(argv) == 2 and argv[1] in ("--internal-update", "--internal-uninstall"):
+        if "SSH_CONNECTION" in os.environ or (os.geteuid() != 0 and not SELFTEST):
+            sys.stderr.write("vpn-relay-agent: internal entry points run only as root, outside ssh\n")
+            return E_REFUSED
+        return internal_update() if argv[1] == "--internal-update" else internal_uninstall()
+    if len(argv) != 1:
+        emit({"ok": False, "error": "arguments are not accepted; the request comes from SSH_ORIGINAL_COMMAND"})
+        return E_REFUSED
+    caller = (os.environ.get("SSH_CONNECTION") or "local").split(" ")[0]
+    name = "?"
+    try:
+        name, args = parse_request(os.environ.get("SSH_ORIGINAL_COMMAND"))
+        payload = COMMANDS[name](args)
+    except Refused as exc:
+        rc, payload = E_REFUSED, {"ok": False, "error": f"refused: {exc}"}
+    except Denied as exc:
+        rc, payload = E_DENIED, {"ok": False, "error": str(exc)}
+    except Busy as exc:
+        rc, payload = E_BUSY, {"ok": False, "error": str(exc)}
+    except Failed as exc:
+        rc, payload = E_FAILED, {"ok": False, "error": str(exc)}
+    except Exception as exc:  # the bot gets a reason, never a traceback
+        rc, payload = E_FAILED, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    else:
+        rc, payload = E_OK, {"ok": True, **payload}
+    payload["cmd"] = name
+    journal(f"{name} from {caller}: {'ok' if rc == 0 else 'rc ' + str(rc)}")
+    emit(payload)
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
