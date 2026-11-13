@@ -543,6 +543,70 @@ def test_advance_never_runs_next_to_a_deploy(tmp_path: Path) -> None:
     assert host.state()["phase"] == 1  # type: ignore[index]
 
 
+def test_phase2_keeps_the_udp_half_of_a_rule_without_a_protocol(tmp_path: Path) -> None:
+    """`ufw allow 54321` opens tcp AND udp (ufw(8)); a udp service may share the number
+    (Hysteria2). Phase 2 closes tcp only: the same rule for udp first, then the shared one."""
+    host = Deploy(tmp_path, "main", env="SSH_PORT=60022\nHYSTERIA2_PORT=54321\n")
+    host.phase1((54321,), 60022)
+    host.flag("ufw", "allow 54321|ssh\nallow from 10.0.0.0/8 to any port 54321|\nallow 60022/tcp|vpn-bot:ssh-migration\n")
+    host.journal(CONN.format(raddr="203.0.113.9", laddr="198.51.100.7", lport=60022))
+    proc = host.helper("advance", "--listen-wait", "0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    rules = host.ufw_rules()
+    assert "allow 54321|ssh" not in rules and "allow from 10.0.0.0/8 to any port 54321|" not in rules
+    assert "allow 54321/udp|ssh" in rules, rules
+    assert "allow from 10.0.0.0/8 to any port 54321 proto udp|" in rules, rules
+    assert "allow 60022/tcp|vpn-bot:ssh" in rules
+    log = host.log("ufw")
+    assert log.index("ufw allow 54321/udp comment ssh") < log.index("ufw delete allow 54321"), "udp first"
+    assert "udp 54321 stays open" in proc.stdout
+
+
+def test_phase2_leaves_a_shared_rule_when_its_udp_half_cannot_be_added(tmp_path: Path) -> None:
+    host = Deploy(tmp_path, "main", env="SSH_PORT=60022\n")
+    host.phase1((54321,), 60022)
+    host.flag("ufw", "allow 54321|\n")
+    host.journal(CONN.format(raddr="203.0.113.9", laddr="198.51.100.7", lport=60022))
+    host.flag("ufw_fail")                     # every `ufw allow` fails from here
+    proc = host.helper("advance", "--listen-wait", "0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert host.ufw_rules() == ["allow 54321|"], "tcp stays open rather than udp closing"
+    assert "left as it is, tcp 54321 stays open" in proc.stdout
+
+
+def test_the_helper_reenters_the_host_mount_namespace_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The non-root bot runs under ProtectSystem=strict and sudo keeps that mount
+    namespace: `confirm` re-executes itself in PID 1's (nsenter), like the other helpers."""
+    import importlib.machinery
+    import importlib.util
+    import sys
+    monkeypatch.delenv("VPN_BOT_SSH_PORT_SELFTEST", raising=False)
+    monkeypatch.delenv("VPN_BOT_SSH_PORT_HOSTNS", raising=False)
+    loader = importlib.machinery.SourceFileLoader("vpn_bot_ssh_port_ns", str(HELPER))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = mod
+    loader.exec_module(mod)
+    ns = {"/proc/self/ns/mnt": "mnt:[4026532999]", "/proc/1/ns/mnt": "mnt:[4026531841]"}
+    monkeypatch.setattr(mod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(mod.os, "readlink", lambda p: ns[p])
+    argv = mod.host_mount_namespace_argv(["confirm", "--port", "60022", "--since", "1", "--admin", "5"])
+    assert argv[:3] == ["nsenter", "--mount=/proc/1/ns/mnt", "--"] and argv[-7:] == [
+        "confirm", "--port", "60022", "--since", "1", "--admin", "5"]
+    assert mod.host_mount_namespace_argv(["--role", "relay", "advance"]) is not None
+    # A read stays in the caller's sandbox (vpn-bot-host-check.service: ProtectSystem=full).
+    assert mod.host_mount_namespace_argv(["--env", "/x", "plan"]) is None
+    ns["/proc/self/ns/mnt"] = ns["/proc/1/ns/mnt"]
+    assert mod.host_mount_namespace_argv(["confirm"]) is None, "already in the host namespace"
+    ns["/proc/self/ns/mnt"] = "mnt:[4026532999]"
+    monkeypatch.setenv("VPN_BOT_SSH_PORT_HOSTNS", "1")
+    assert mod.host_mount_namespace_argv(["confirm"]) is None, "never twice"
+    monkeypatch.delenv("VPN_BOT_SSH_PORT_HOSTNS")
+    monkeypatch.setattr(mod.os, "geteuid", lambda: 1000)
+    assert mod.host_mount_namespace_argv(["confirm"]) is None, "only as root"
+
+
 def test_firewall_open_adds_a_migration_rule_and_undo_removes_only_that(tmp_path: Path) -> None:
     host = Host(tmp_path, "main", env="SSH_PORT=60022\n")
     host.flag("ufw", "allow 54321/tcp|\n")

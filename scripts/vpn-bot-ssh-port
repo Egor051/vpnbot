@@ -61,7 +61,12 @@ failed its post-check and was reverted to the previous port set; 5 cannot run (a
 or the state file).
 
 Never evaluates command output; every command is an argv list. Stdlib only: the
-relay has no venv.
+relay has no venv. Run as root from a process in another mount namespace (the non-root
+bot's ProtectSystem=strict, which sudo keeps) it re-executes itself in PID 1's first
+(nsenter), like deploy/helpers/vpn-bot-socks5-user: /var/lib/vpn-bot must be writable.
+In phase 2 a UFW rule for the old port without a protocol (tcp AND udp) is split: the
+same rule for udp is added first, then the shared one goes — a udp service on that
+number keeps its port.
 """
 from __future__ import annotations
 
@@ -711,6 +716,8 @@ class UfwRule:
     comment: str
     ports: list[int]      # the single port it opens for tcp, or [] (not a simple rule)
     mentions: bool        # names the port somewhere (multi-port, app profile ...)
+    tcp_only: bool = True  # False: no protocol given — ufw(8): "will allow tcp and udp"
+    simple: bool = True    # "<port>[/tcp]" (else "... to <addr> port <port> [proto tcp]")
 
 
 def ufw_rules(port_of_interest: int) -> list[UfwRule] | None:
@@ -726,12 +733,13 @@ def ufw_rules(port_of_interest: int) -> list[UfwRule] | None:
         toks = spec.split()
         ports: list[int] = []
         simple = re.fullmatch(r"(?:in )?(?:on \S+ )?(\d+)(/tcp)?", spec)
-        ext = re.fullmatch(r"(?:in )?(?:on \S+ )?(?:from \S+ )?to \S+ port (\d+)(?: proto tcp)?", spec)
+        ext = re.fullmatch(r"(?:in )?(?:on \S+ )?(?:from \S+ )?to \S+ port (\d+)( proto tcp)?", spec)
         mm = simple or ext
         if mm:
             ports = [int(mm.group(1))]
         mentions = any(re.search(rf"(^|[^0-9]){port_of_interest}([^0-9]|$)", t) for t in toks)
-        rules.append(UfwRule(f"{verb} {spec}", comment, ports, mentions))
+        rules.append(UfwRule(f"{verb} {spec}", comment, ports, mentions,
+                             tcp_only=bool(mm and mm.group(2)), simple=simple is not None))
     return rules
 
 
@@ -804,13 +812,32 @@ def firewall_close(ctx: Ctx, from_: list[int], to: int) -> list[str]:
         if f == to:
             continue
         for r in ufw_rules(f) or []:
-            if r.ports == [f]:
+            if r.ports == [f] and not r.tcp_only:
+                # tcp AND udp: keep the udp half (a udp service may share the number,
+                # Hysteria2 for one) — the same rule for udp first, then the shared one goes.
+                notes.append(ufw_split_off_udp(r, f))
+            elif r.ports == [f]:
                 rc, text = ufw("delete", *r.text.split())
                 notes.append(f"ufw: closed {f} ('{r.text}')" if rc == 0
                              else f"ufw: could not delete '{r.text}' (rc {rc}: {text.strip()}) — {f} stays open")
             elif r.mentions:
                 notes.append(f"ufw: '{r.text}' also names {f} and is not a plain tcp rule — left as it is")
     return notes
+
+
+def ufw_split_off_udp(r: UfwRule, port: int) -> str:
+    """A rule without a protocol opens tcp AND udp: add the same rule for udp (with its
+    comment), and only once ufw lists it delete the shared one — the udp side never has
+    a gap, and a failure leaves the shared rule (tcp stays open: the safe direction)."""
+    udp = f"{r.text}/udp" if r.simple else f"{r.text} proto udp"
+    args = udp.split() + (["comment", r.comment] if r.comment else [])
+    rc, text = ufw(*args)
+    if rc != 0 or not any(x.text == udp for x in ufw_rules(port) or []):
+        return f"ufw: '{r.text}' also opens udp {port}, and adding '{udp}' failed (rc {rc}: {text.strip()}) — left as it is, tcp {port} stays open"
+    rc, text = ufw("delete", *r.text.split())
+    if rc != 0:
+        return f"ufw: added '{udp}', but could not delete '{r.text}' (rc {rc}: {text.strip()}) — tcp {port} stays open"
+    return f"ufw: closed tcp {port} ('{r.text}' -> '{udp}': udp {port} stays open)"
 
 
 # --------------------------------------------------------------------------- #
@@ -957,7 +984,48 @@ def port_arg(text: str) -> int:
     return int(text)
 
 
+WRITING_COMMANDS = frozenset({"confirm", "record", "advance", "firewall-open", "firewall-undo", "firewall-close"})
+GLOBAL_OPTIONS_WITH_VALUE = frozenset({"--env", "--repo", "--role", "--root"})
+
+
+def subcommand(argv: Sequence[str]) -> str:
+    skip = False
+    for tok in argv:
+        if skip:
+            skip = False
+        elif tok in GLOBAL_OPTIONS_WITH_VALUE:
+            skip = True
+        elif not tok.startswith("-"):
+            return tok
+    return ""
+
+
+def host_mount_namespace_argv(argv: Sequence[str]) -> list[str] | None:
+    """The argv to re-run this helper in PID 1's mount namespace, or None when it already
+    runs there. The non-root bot runs under ProtectSystem=strict and sudo keeps that
+    mount namespace: /var/lib/vpn-bot would be read-only for `confirm`. The same escape
+    as deploy/helpers/vpn-bot-socks5-user and vpn-bot-protocol-uninstall."""
+    if SELFTEST or os.geteuid() != 0 or os.environ.get("VPN_BOT_SSH_PORT_HOSTNS") == "1":
+        return None
+    if subcommand(argv) not in WRITING_COMMANDS:
+        return None                      # plan/status/render read: stay in the caller's sandbox
+    try:
+        if os.readlink("/proc/self/ns/mnt") == os.readlink("/proc/1/ns/mnt"):
+            return None
+    except OSError:
+        return None
+    return ["nsenter", "--mount=/proc/1/ns/mnt", "--", sys.executable, "-I", os.path.realpath(sys.argv[0]), *argv]
+
+
 def main(argv: Sequence[str]) -> int:
+    reexec = host_mount_namespace_argv(argv)
+    if reexec is not None:
+        os.environ["VPN_BOT_SSH_PORT_HOSTNS"] = "1"
+        try:
+            os.execvpe(reexec[0], reexec, os.environ)  # noqa: S606 — fixed argv: nsenter, this interpreter, this script
+        except OSError as exc:
+            print(f"vpn-bot-ssh-port: cannot enter the host mount namespace ({exc}) — going on in this one",
+                  file=sys.stderr)
     ap = argparse.ArgumentParser(prog="vpn-bot-ssh-port", description="SSH_PORT migration (docs/host-state.md#ssh-port)")
     ap.add_argument("--env")
     ap.add_argument("--repo")

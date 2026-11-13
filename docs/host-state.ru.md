@@ -558,7 +558,9 @@ openssh-server 1:9.6p1-3ubuntu13: он идёт по `Include` в `sshd_config.d
    убирается из сокета и Port-drop-in (`Port SSH_PORT` один), файрвол его закрывает — main:
    удаляются правила, разрешающие ровно старый порт (`ufw show added`: `<port>[/tcp]`, `… port
    <port> [proto tcp]`), а правило миграции на месте получает комментарий `vpn-bot:ssh` (ufw
-   обновляет комментарий без окна); правило, которое так не убрать (app-профиль, список портов),
+   обновляет комментарий без окна); правило без протокола открывает tcp **и** udp (ufw(8)), поэтому
+   оно разделяется — сначала добавляется то же правило для udp, потом удаляется общее, и
+   udp-сервис на том же номере (например, Hysteria2) свой порт сохраняет; правило, которое так не убрать (app-профиль, список портов),
    — заметка, а не ошибка: оставить порт открытым — безопасная сторона. Relay: входной фильтр
    применяется заново (`vpn-relay-apply apply`, одна транзакция nft) и отбрасывает старый порт.
    `phase: 2`.
@@ -569,7 +571,7 @@ openssh-server 1:9.6p1-3ubuntu13: он идёт по `Include` в `sshd_config.d
 |---|---|---|
 | `relay-probe` | relay | проба с main (`POST /relay/ssh-probe`) подключилась к `SSH_PORT` через входной фильтр: в `/etc/vpn-relay/input.confirmed` `confirmed_by=main-probe`, в наборе `tcp=` есть `SSH_PORT`, `confirmed_at` ≥ `since` |
 | `journal` | обе | sshd записал подключение с **нелокального** адреса на `SSH_PORT` (`journalctl -u ssh.service --since @<since>`). openssh 9.6 пишет `Connection from <raddr> port <rport> on <laddr> port <lport> rdomain ""` **только при `LogLevel VERBOSE`** — проверено бинарником из noble; при `INFO` такой строки нет, отсюда `LogLevel VERBOSE` в Port-drop-in. Loopback, собственные адреса хоста (`ip -o addr`) и `raddr == laddr` ничего не доказывают |
-| `bot` | main | суперадмин нажал **«Подтвердить»** под сообщением бота «SSH теперь и на порту N — подключись на него и нажми Подтвердить»; бот запускает `vpn-bot-ssh-port confirm --port N --since S --admin ID` (sudo, точный путь в `deploy/sudoers.d/vpn-bot.example`) |
+| `bot` | main | суперадмин нажал **«Подтвердить»** под сообщением бота «SSH теперь и на порту N — подключись на него и нажми Подтвердить»; бот запускает `vpn-bot-ssh-port confirm --port N --since S --admin ID` (sudo, точный путь в `deploy/sudoers.d/vpn-bot.example`; при `ProtectSystem=strict` бота без root хелпер сначала входит в mount namespace PID 1, как и остальные хелперы) |
 
 **Без доказательства фазы 2 не будет никогда.** Его ищут каждый деплой (план Phase 1; деплой,
 который его нашёл, сам выполняет фазу 2 с `rollback_now`), загрузка и ежедневный прогон

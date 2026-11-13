@@ -558,7 +558,9 @@ When the port ssh listens on (`systemctl show -p Listen ssh.socket`) is not `SSH
    socket and the Port drop-in (`Port SSH_PORT` alone), and the firewall closes it — main: the
    rules that allow exactly the old port (`ufw show added`: `<port>[/tcp]`, `… port <port> [proto
    tcp]`) are deleted and the migration rule is relabelled `vpn-bot:ssh` in place (ufw updates a
-   rule's comment without a gap); a rule this cannot remove (an app profile, a port list) is a note,
+   rule's comment without a gap); a rule without a protocol opens tcp **and** udp (ufw(8)), so it is
+   split — the same rule for udp is added first, then the shared one is deleted, and a udp service
+   on that number (Hysteria2, say) keeps its port; a rule this cannot remove (an app profile, a port list) is a note,
    never a failure — leaving a port open is the safe direction. Relay: the input filter is applied
    again (`vpn-relay-apply apply`, one nft transaction) and drops the old port. `phase: 2`.
 
@@ -568,7 +570,7 @@ When the port ssh listens on (`systemctl show -p Listen ssh.socket`) is not `SSH
 |---|---|---|
 | `relay-probe` | relay | main's probe (`POST /relay/ssh-probe`) connected to `SSH_PORT` through the input filter: `/etc/vpn-relay/input.confirmed` says `confirmed_by=main-probe`, its `tcp=` set holds `SSH_PORT`, `confirmed_at` ≥ `since` |
 | `journal` | both | sshd logged a connection from a **non-local** address on `SSH_PORT` (`journalctl -u ssh.service --since @<since>`). openssh 9.6 writes `Connection from <raddr> port <rport> on <laddr> port <lport> rdomain ""` **only at `LogLevel VERBOSE`** — measured with the noble binary; at `INFO` the line does not exist, hence the `LogLevel VERBOSE` in the Port drop-in. Loopback, the host's own addresses (`ip -o addr`) and `raddr == laddr` prove nothing |
-| `bot` | main | a superadmin pressed **«Подтвердить»** under the bot's message «SSH теперь и на порту N — подключись на него и нажми Подтвердить»; the bot runs `vpn-bot-ssh-port confirm --port N --since S --admin ID` (sudo, exact-path grant in `deploy/sudoers.d/vpn-bot.example`) |
+| `bot` | main | a superadmin pressed **«Подтвердить»** under the bot's message «SSH теперь и на порту N — подключись на него и нажми Подтвердить»; the bot runs `vpn-bot-ssh-port confirm --port N --since S --admin ID` (sudo, exact-path grant in `deploy/sudoers.d/vpn-bot.example`; under the non-root bot's `ProtectSystem=strict` the helper re-enters PID 1's mount namespace first, as the other helpers do) |
 
 **Without a proof there is no phase 2, ever.** It is looked for by every deploy (Phase 1's plan; a
 deploy that finds one performs phase 2 itself, with `rollback_now`), at boot and daily
