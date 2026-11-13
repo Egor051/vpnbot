@@ -661,8 +661,9 @@ deploy.sh, `OUT_OF_REPO_HELPERS`, `required` on main) derives the whole rule set
 `sshd -T`, `systemctl show -p Listen ssh.socket` and the `ss` rows of sshd (or of PID 1 for a
 socket port) — is never deleted (`keep`); when none of them answers, nothing is deleted at all and
 ufw is neither enabled nor its incoming policy changed. Before either of those two steps every such
-port is opened too (`vpn-bot:ssh`): `SSH_PORT` alone may not be where ssh is (an inactive
-`ssh.socket`, an sshd still on 22); afterwards that rule is only kept while sshd listens there. A
+port is opened too (`vpn-bot:ssh`) and read back from ufw (its v4 and v6 copy): `SSH_PORT` alone
+may not be where ssh is (an inactive `ssh.socket`, an sshd still on 22). A port that is not
+verifiably open blocks both steps. Afterwards that rule is only kept while sshd listens there. A
 module that is on but whose rule cannot be written down here (its port unknown, no default route)
 keeps whatever is recognisably its own — by its key or by its `vpn-bot:<module>` comment.
 
@@ -688,7 +689,7 @@ dead-man.**
 |---|---|---|
 | deploy.sh Phase 1 | every deploy of main | `plan` from the checkout: the section «UFW» and the report. Stops (`PHASE1_ONLY=1`: reported) on a refused plan, a main server without ufw, and a public listener the set neither allows nor declares closed |
 | deploy.sh Phase 2 | after the helpers | `save` of the UFW state (files, enabled or not, the dead-man state) before the SSH port opens anything |
-| | after the host files and the SSH port state | `apply`, then `listeners`; either failing is `rollback_now`, and the rollback `restore`s the saved state |
+| | after the host files and the SSH port state | `apply`, then `listeners`; either failing is `rollback_now`, and the rollback `restore`s the saved state — a restored change that still waited for its proof gets its dead-man again (the timer re-armed, or reverted at once past its deadline) |
 | | DEPLOY OK | `status`, one line |
 | the bot | a protocol switched on in «Модули протоколов»; a protocol removed from the host | `apply` (sudo, exact-path grant). `vpn-bot-protocol-uninstall` no longer touches ufw — its marker takes the module out of the set: **one owner of the rules** |
 | `vpn-bot-ssh-port` | phase 1 / phase 2 of a migration | `firewall-open` / `firewall-close` run `apply` |

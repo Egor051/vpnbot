@@ -1365,49 +1365,55 @@ def revert(ctx: Ctx, st: dict[str, Any]) -> tuple[bool, list[str]]:
 
 def deadman_check(ctx: Ctx) -> int:
     with lock(ctx):
-        st = load_deadman(ctx)
-        if st is None or st.get("state") != "pending":
-            stop_timer()
-            print("vpn-bot-ufw-apply: no UFW change waits for a proof")
-            return 0
-        armed = int(st.get("armed_at") or 0)
-        deadline = int(st.get("deadline") or 0)
-        proof = ""
-        bc = st.get("bot_confirm")
-        if isinstance(bc, dict) and int(bc.get("at") or 0) >= armed:
-            proof = f"bot: superadmin {bc.get('admin_id')} pressed «Подтвердить» ({iso(int(bc.get('at') or 0))})"
-        if not proof:
-            ports = sorted({*(int(p) for p in st.get("ssh_ports") or []), *live_ssh_ports(ctx, listeners("tcp"))[0]})
-            detail = journal_proof(ctx, ports, armed)
-            if detail:
-                proof = f"journal: {detail}"
-        if proof:
-            finish_deadman(ctx, st, "confirmed", proof)
-            print(f"vpn-bot-ufw-apply: UFW change confirmed ({proof}) — {describe(st)}; dead-man stopped")
-            return 0
-        if time.time() < deadline:
-            if not timer_active():
-                ok, text = arm_timer()
-                print(f"vpn-bot-ufw-apply: dead-man re-armed (it was not running — a reboot?): "
-                      f"{'ok' if ok else 'FAILED ' + text}")
-            print(f"vpn-bot-ufw-apply: waiting for a proof until {iso(deadline)} — {describe(st)}")
-            return 0
-        ok, notes = revert(ctx, st)
-        if not ok:
-            # Still pending, the timer still running: the next check tries again.
-            data = dict(st)
-            data["last_error"] = f"{iso(time.time())} revert failed: {'; '.join(notes)}"
-            write_atomic(ctx, ctx.host(DEADMAN_STATE), json.dumps(data, indent=2, sort_keys=True) + "\n")
-            if not timer_active():
-                arm_timer()
-            print(f"vpn-bot-ufw-apply: FAIL: no proof by {iso(deadline)}, and the REVERT FAILED — still pending, "
-                  f"retried at the next check: {'; '.join(notes)}")
-            return EXIT_CANNOT
-        finish_deadman(ctx, st, "reverted", "")
-        print(f"vpn-bot-ufw-apply: no proof by {iso(deadline)} — REVERTED: {describe(st)}")
-        for n in notes:
-            print(f"vpn-bot-ufw-apply:   {n}")
+        return check_pending(ctx)
+
+
+def check_pending(ctx: Ctx) -> int:
+    """The dead-man's check, under the caller's lock: proof -> confirmed; deadline passed
+    -> revert (retried while it fails); else make sure the timer runs."""
+    st = load_deadman(ctx)
+    if st is None or st.get("state") != "pending":
+        stop_timer()
+        print("vpn-bot-ufw-apply: no UFW change waits for a proof")
         return 0
+    armed = int(st.get("armed_at") or 0)
+    deadline = int(st.get("deadline") or 0)
+    proof = ""
+    bc = st.get("bot_confirm")
+    if isinstance(bc, dict) and int(bc.get("at") or 0) >= armed:
+        proof = f"bot: superadmin {bc.get('admin_id')} pressed «Подтвердить» ({iso(int(bc.get('at') or 0))})"
+    if not proof:
+        ports = sorted({*(int(p) for p in st.get("ssh_ports") or []), *live_ssh_ports(ctx, listeners("tcp"))[0]})
+        detail = journal_proof(ctx, ports, armed)
+        if detail:
+            proof = f"journal: {detail}"
+    if proof:
+        finish_deadman(ctx, st, "confirmed", proof)
+        print(f"vpn-bot-ufw-apply: UFW change confirmed ({proof}) — {describe(st)}; dead-man stopped")
+        return 0
+    if time.time() < deadline:
+        if not timer_active():
+            ok, text = arm_timer()
+            print(f"vpn-bot-ufw-apply: dead-man re-armed (it was not running — a reboot?): "
+                  f"{'ok' if ok else 'FAILED ' + text}")
+        print(f"vpn-bot-ufw-apply: waiting for a proof until {iso(deadline)} — {describe(st)}")
+        return 0
+    ok, notes = revert(ctx, st)
+    if not ok:
+        # Still pending, the timer still running: the next check tries again.
+        data = dict(st)
+        data["last_error"] = f"{iso(time.time())} revert failed: {'; '.join(notes)}"
+        write_atomic(ctx, ctx.host(DEADMAN_STATE), json.dumps(data, indent=2, sort_keys=True) + "\n")
+        if not timer_active():
+            arm_timer()
+        print(f"vpn-bot-ufw-apply: FAIL: no proof by {iso(deadline)}, and the REVERT FAILED — still pending, "
+              f"retried at the next check: {'; '.join(notes)}")
+        return EXIT_CANNOT
+    finish_deadman(ctx, st, "reverted", "")
+    print(f"vpn-bot-ufw-apply: no proof by {iso(deadline)} — REVERTED: {describe(st)}")
+    for n in notes:
+        print(f"vpn-bot-ufw-apply:   {n}")
+    return 0
 
 
 def confirm(ctx: Ctx, since: int, admin: int) -> int:
@@ -1505,6 +1511,9 @@ def apply(ctx: Ctx, ssh_given: str | None) -> int:
         elif risky and not plan.live:
             fail(failures, f"the port sshd listens on cannot be told ({plan.live_why}) — "
                            f"{'; '.join(c['what'] for c in risky)} NOT changed")
+        elif risky and (missing := ssh_not_open(ctx, plan.live)):
+            fail(failures, f"ufw does not open the port(s) sshd listens on ({csv(missing)}) — "
+                           f"{'; '.join(c['what'] for c in risky)} NOT changed")
         elif risky:
             rc_deadman = arm_and_change(ctx, plan, risky, failures)
         # 3. Deletions last.
@@ -1535,6 +1544,27 @@ def apply(ctx: Ctx, ssh_given: str | None) -> int:
         if rc_deadman:
             return rc_deadman
         return EXIT_NOT_CONVERGED if failures else 0
+
+
+def ssh_not_open(ctx: Ctx, live: list[int]) -> list[int]:
+    """The live ssh ports no rule of ufw (read again, now) opens — each with its v4 copy and,
+    with IPv6, its v6 copy. Any one of them blocks enabling ufw or a new incoming policy."""
+    now = read_ufw(ctx)
+    if not now.present or now.error:
+        return list(live)
+    missing: list[int] = []
+    for p in live:
+        ok = False
+        for r in now.rules:
+            if r.key is None or not opens(r.key, p, "tcp"):
+                continue
+            need = families_of(r.key, now.ipv6) & {"v4", "v6"}
+            if not now.families_known or need <= r.families:
+                ok = True
+                break
+        if not ok:
+            missing.append(p)
+    return missing
 
 
 def arm_and_change(ctx: Ctx, plan: Plan, risky: list[dict[str, str]], failures: list[str]) -> int:
@@ -1635,7 +1665,15 @@ def restore(ctx: Ctx, d: Path) -> int:
             rc, text = ufw("reload")
             say(f"ufw reload: rc {rc}" + (f" — {one(text.strip())}" if rc else ""))
         say("restored: " + (", ".join(changed) if changed else "nothing had changed"))
-        return 0 if rc == 0 else EXIT_CANNOT
+        result = 0 if rc == 0 else EXIT_CANNOT
+        # The snapshot may hold a change that was still waiting for its proof: its recovery
+        # must run again — the timer re-armed, or (deadline passed) the revert right now.
+        dm = load_deadman(ctx)
+        if dm is not None and dm.get("state") == "pending":
+            say("the restored state has a UFW change waiting for its proof — its dead-man runs again")
+            if check_pending(ctx) != 0:
+                result = EXIT_CANNOT
+        return result
 
 
 # --------------------------------------------------------------------------- #

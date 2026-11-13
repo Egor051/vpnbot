@@ -1362,3 +1362,56 @@ def test_a_marked_rule_of_a_module_whose_port_is_unknown_stays(tmp_path: Path) -
     assert ("keep", "awg", "yes", "allow 11880/udp") in _rules(plan)
     assert host.apply().returncode == 0
     assert host.rules()["allow 11880/udp"] == ("vpn-bot:awg", BOTH)
+
+
+def test_no_risky_step_when_the_live_ssh_rule_could_not_be_added(tmp_path: Path) -> None:
+    """The ssh allowance failed to go in: ufw stays inactive, no dead-man is armed."""
+    host = Host(tmp_path, active=False, rules=[], ssh=(22,))
+    host.flag("ssh.socket.active", "inactive")
+    host.flag("socket_ports", "")
+    host.flag("ss_tcp", 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=600,fd=3))\n')
+    host.flag("ufw_fail_add")
+    proc = host.apply()
+    assert proc.returncode == 4, proc.stdout
+    assert "ufw does not open the port(s) sshd listens on (22)" in proc.stdout
+    assert "ufw --force enable" not in host.ufw_mutations() and host.log("systemd-run") == []
+    assert json.loads((host.sd / "ufw.json").read_text(encoding="utf-8"))["active"] is False
+    assert not host.h(DEADMAN).exists()
+
+
+def test_a_missing_v6_copy_of_the_live_ssh_rule_blocks_a_new_policy(tmp_path: Path) -> None:
+    host = Host(tmp_path, incoming="ACCEPT", rules=[["allow 54321/tcp", "vpn-bot:ssh", ["v4"]]])
+    host.flag("ufw_fail_add")
+    proc = host.apply()
+    assert proc.returncode == 4 and "(54321)" in proc.stdout, proc.stdout
+    assert not [c for c in host.ufw_mutations() if c.startswith("ufw default")]
+
+
+@pytest.mark.parametrize("expired", [True, False])
+def test_restoring_a_pending_change_runs_its_deadman_again(tmp_path: Path, expired: bool) -> None:
+    """A deploy saved a host whose policy change still waited for its proof; meanwhile the
+    dead-man reverted it; the rollback brings the unproven policy back — and its recovery:
+    reverted at once when the deadline has passed, the timer re-armed when it has not."""
+    host = Host(tmp_path, incoming="ACCEPT")
+    assert host.apply().returncode == 0                       # pending: incoming deny
+    st = _deadman(host)
+    if expired:
+        st["deadline"] = int(time.time()) - 1
+    host.put(DEADMAN, json.dumps(st))
+    snap = tmp_path / "snap"
+    assert host.helper("save", "--dir", str(snap)).returncode == 0
+    # The dead-man fires (its deadline forced past) and the timer goes.
+    st2 = dict(st, deadline=int(time.time()) - 1)
+    host.put(DEADMAN, json.dumps(st2))
+    assert "REVERTED" in host.helper("deadman-check").stdout
+    assert 'DEFAULT_INPUT_POLICY="ACCEPT"' in host.defaults()
+    host.clear_logs()
+    proc = host.helper("restore", "--dir", str(snap))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "its dead-man runs again" in proc.stdout
+    if expired:
+        assert _deadman(host)["state"] == "reverted" and 'DEFAULT_INPUT_POLICY="ACCEPT"' in host.defaults()
+        assert "ufw default allow incoming" in host.ufw_mutations()
+    else:
+        assert _deadman(host)["state"] == "pending" and 'DEFAULT_INPUT_POLICY="DROP"' in host.defaults()
+        assert host.log("systemd-run"), "the restored change has its timer again"
