@@ -30,8 +30,9 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_bundles, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, ssh_port, start, ufw
+from bot.handlers import admin, admin_bundles, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, security, settings as settings_handler, ssh_port, start, ufw
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
+from bot.wizard_notifier import TelegramWizardNotifier
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
 from bot.middlewares.locale import LocaleMiddleware
@@ -58,6 +59,8 @@ from repositories.maintenance_settings import MaintenanceSettingsRepository
 from repositories.server_status_settings import ServerStatusSettingsRepository
 from repositories.warp_split_sources import WarpSplitSourceRepository
 from repositories.vpn_keys import VpnKeyRepository
+from repositories.totp import TotpRepository
+from repositories.wizard_runs import WizardRunRepository
 from services.access_approval import AccessApprovalService
 from services.anomaly_detection import AnomalyDetectionService
 from services.auto_refresh import LiveRefreshManager
@@ -87,6 +90,8 @@ from services.server_status import ServerStatusService
 from services.socks5 import Socks5Service
 from services.superadmin_claim import SuperadminClaimService, claim_status
 from services.superadmins import SuperadminSet
+from services.totp import TotpService
+from services.wizard import WizardService
 from services.mtproto import MtProtoService
 from services.traffic_stats import TrafficStatsService
 from services.trial_access import TrialAccessService
@@ -869,6 +874,27 @@ async def _build_app(
         db_path=settings.db_path,
     )
 
+    async def _totp_alert(text: str) -> None:
+        """Five wrong TOTP codes in a row: every superadmin hears about it."""
+        for admin_id in settings.admin_ids:
+            try:
+                await bot.send_message(admin_id, text)
+            except Exception:
+                logger.warning("Failed to send the TOTP lockout alert to admin %d", admin_id, exc_info=True)
+
+    totp_service = TotpService(repo=TotpRepository(db), audit=audit_service, clock=clock, alert=_totp_alert)
+    # The setup wizard launches its root helper through sudo in the helper model
+    # (exact-path grant `vpn-bot-wizard launch *`), directly as root otherwise — the
+    # same split as the UFW helper.
+    wizard_service = WizardService(
+        repo=WizardRunRepository(db),
+        audit=audit_service,
+        clock=clock,
+        shell=shell,
+        runner=PrivilegedHelperRunner(shell=shell, use_sudo=settings.privilege_helpers_enabled),
+        store=db,
+    )
+
     services = Services(
         settings=settings,
         db=db,
@@ -910,6 +936,8 @@ async def _build_app(
         ssh_port=ssh_port_monitor,
         ufw_deadman=ufw_deadman_monitor,
         superadmin_claim=superadmin_claim_service,
+        totp=totp_service,
+        wizard=wizard_service,
     )
 
     await _startup_reconcile_keys(services)
@@ -927,6 +955,7 @@ async def _build_app(
     ssh_port_monitor.bot = bot
     ufw_deadman_monitor.bot = bot
     warp_manager.bot = bot
+    wizard_service.notifier = TelegramWizardNotifier(bot=bot, service=wizard_service, admin_ids=settings.admin_ids)
     # FSM state is in-memory only — bot restart clears in-progress wizards.
     # TTLMemoryStorage expires sessions idle for >30 min via the fsm_cleanup_loop
     # background task started in main.py.
@@ -963,6 +992,9 @@ async def _build_app(
     dp.callback_query.outer_middleware(ConfigDocumentCleanupMiddleware())
 
     dp.include_router(start.router)
+    # Early: its FSM-state message handlers read the TOTP codes, and the gate of a
+    # dangerous action can be asked from any screen.
+    dp.include_router(security.router)
     dp.include_router(common.router)
     dp.include_router(settings_handler.router)
     dp.include_router(admin.router)
@@ -979,6 +1011,7 @@ async def _build_app(
     dp.include_router(admin_maintenance.router)
     dp.include_router(ssh_port.router)
     dp.include_router(ufw.router)
+    dp.include_router(admin_wizard.router)
     dp.include_router(admin_bundles.router)
     dp.include_router(keys.router)
     dp.include_router(key_bundles.router)

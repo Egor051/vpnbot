@@ -34,6 +34,7 @@ from bot.keyboards.admin_relays import (
 )
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback, ensure_private_message
+from bot.totp_gate import require_totp
 from bot.relays import relay_card_text, relay_delete_impact_text, relay_draft_text, relays_list_text
 from config.validators import DEFAULT_RELAY_LABEL, format_ipv4_networks, ipv4_address
 from i18n import t
@@ -336,7 +337,7 @@ async def relay_delete_prompt(callback: CallbackQuery, services: Services) -> No
 
 
 @router.callback_query(F.data.regexp(r"^admin:relay:\d+:del:(yes|keys|disable)$"))
-async def relay_delete_execute(callback: CallbackQuery, services: Services) -> None:
+async def relay_delete_execute(callback: CallbackQuery, services: Services, state: FSMContext | None = None) -> None:
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
     if callback.from_user is None or callback.message is None or callback.data is None:
@@ -346,6 +347,9 @@ async def relay_delete_execute(callback: CallbackQuery, services: Services) -> N
         relay_id = _relay_id(callback.data)
         action = callback.data.rsplit(":", 1)[-1]
         actor = callback.from_user.id
+        # Deleting the relay WITH its keys is a mass deletion: TOTP first when enabled.
+        if action == "keys" and not await require_totp(callback, state, services, action="relay_delete_keys"):
+            return
         try:
             if action == "disable":
                 relay = await services.relays.get(actor, relay_id)

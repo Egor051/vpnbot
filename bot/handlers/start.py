@@ -96,6 +96,11 @@ async def _claim_superadmin(
         return
     await publish_admin_commands(bot, services.settings, profile.telegram_user_id)
     await message.answer(t("superadmin_claim_success"))
+    # Optional first-setup step: the second factor for the dangerous actions.
+    if getattr(services, "totp", None) is not None:
+        from bot.handlers.security import claim_offer_keyboard
+
+        await message.answer(t("totp_claim_offer"), reply_markup=claim_offer_keyboard())
     if message.from_user is not None:
         await message.answer(
             main_menu_text(message.from_user),

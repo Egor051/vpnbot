@@ -2,6 +2,7 @@
 import logging
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup
 
 from bot.container import Services
@@ -16,6 +17,7 @@ from bot.keyboards.admin_modules import (
 )
 from bot.messages import safe_callback_answer, safe_edit_message_text
 from bot.private_chat import ensure_private_callback
+from bot.totp_gate import require_totp
 from bot.uninstall_texts import uninstall_plan_text, uninstall_report_text
 from i18n import t
 from repositories.protocol_modules import PROTOCOL_DISPLAY, PROTOCOL_NAMES, ProtocolModule
@@ -131,18 +133,26 @@ async def admin_module_disable_step2(callback: CallbackQuery, services: Services
 
 
 @router.callback_query(F.data.regexp(r"^admin:module:disable:[a-z0-9]+:exec$"))
-async def admin_module_disable_exec(callback: CallbackQuery, services: Services) -> None:
-    """Execute protocol disable: delete all data and mark as disabled."""
+async def admin_module_disable_exec(callback: CallbackQuery, services: Services, state: FSMContext | None = None) -> None:
+    """Execute protocol disable: delete all data and mark as disabled.
+
+    Dangerous (every key and access of the protocol is deleted): asks the TOTP code
+    first when the superadmin has it enabled (bot/totp_gate.py).
+    """
     if not await ensure_private_callback(callback, t("admin_private_only_text")):
         return
-    await safe_callback_answer(callback, t("module_disabling"))
     if callback.from_user is None or callback.message is None or callback.data is None:
+        await safe_callback_answer(callback)
         return
     try:
         await require_superadmin(services, callback.from_user.id)
         name = callback.data.split(":")[-2]
         if name not in PROTOCOL_NAMES:
+            await safe_callback_answer(callback)
             return
+        if not await require_totp(callback, state, services, action="protocol_disable"):
+            return
+        await safe_callback_answer(callback, t("module_disabling"))
         label = PROTOCOL_DISPLAY.get(name, name)
         deleted, failed = await services.modules.disable_protocol(name, callback.from_user.id)
         modules = await services.modules.get_all()
@@ -269,7 +279,7 @@ async def admin_module_uninstall_plan(callback: CallbackQuery, services: Service
 
 
 @router.callback_query(F.data.regexp(r"^admin:module:uninst:[a-z0-9]+:x:[0-9a-f]{12}$"))
-async def admin_module_uninstall_exec(callback: CallbackQuery, services: Services) -> None:
+async def admin_module_uninstall_exec(callback: CallbackQuery, services: Services, state: FSMContext | None = None) -> None:
     """Apply the plan the admin confirmed: purge, then the helper's removal.
 
     The callback is answered at once — the removal takes minutes and a late answer
@@ -289,6 +299,9 @@ async def admin_module_uninstall_exec(callback: CallbackQuery, services: Service
         return
     try:
         await require_superadmin(services, callback.from_user.id)
+        # Dangerous: asks the TOTP code first when the superadmin has it enabled.
+        if not await require_totp(callback, state, services, action="protocol_uninstall"):
+            return
     except Exception as exc:
         await answer_callback_error(callback, exc)
         return
