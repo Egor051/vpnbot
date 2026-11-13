@@ -210,8 +210,12 @@ def run(argv: Sequence[str], *, timeout: int = COMMAND_TIMEOUT) -> tuple[int, st
         if exe is None:
             return 127, f"{args[0]}: refused (VPN_BOT_UFW_SELFTEST: not a stub in VPN_BOT_UFW_SELFTEST_BIN)"
         args[0] = exe
+    # Every output parsed here (`ufw status`, `ss`, `systemctl show` ...) is the C locale's:
+    # ufw translates "Status: active" — a translated line would read as "unknown".
+    env = {k: v for k, v in os.environ.items() if k not in ("LANGUAGE", "LC_MESSAGES")}
+    env["LC_ALL"] = "C"
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)  # noqa: S603
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False, env=env)  # noqa: S603
     except FileNotFoundError:
         return 127, f"{argv[0]}: not found"
     except subprocess.TimeoutExpired:
@@ -823,6 +827,9 @@ def read_ufw(ctx: Ctx) -> UfwState:
         return st
     m = re.search(r"^Status: (active|inactive)", text, re.M)
     st.active = None if m is None else m.group(1) == "active"
+    if st.active is None:
+        st.error = f"`ufw status` said neither active nor inactive: {one(text.strip())[:200]}"
+        return st
     d = read_defaults(ctx)
     # ufw's own use_ipv6(): IPV6=yes AND a kernel with IPv6 — else it keeps no v6 copies.
     st.ipv6 = d.get("IPV6", "yes").lower() == "yes" and ctx.host(PROC_IPV6).exists()
@@ -1511,8 +1518,8 @@ def apply(ctx: Ctx, ssh_given: str | None) -> int:
         elif risky and not plan.live:
             fail(failures, f"the port sshd listens on cannot be told ({plan.live_why}) — "
                            f"{'; '.join(c['what'] for c in risky)} NOT changed")
-        elif risky and (missing := ssh_not_open(ctx, plan.live)):
-            fail(failures, f"ufw does not open the port(s) sshd listens on ({csv(missing)}) — "
+        elif risky and (blocked := ssh_not_open(ctx, plan.live)):
+            fail(failures, f"ufw would not let ssh in — {'; '.join(blocked)} — "
                            f"{'; '.join(c['what'] for c in risky)} NOT changed")
         elif risky:
             rc_deadman = arm_and_change(ctx, plan, risky, failures)
@@ -1546,25 +1553,44 @@ def apply(ctx: Ctx, ssh_given: str | None) -> int:
         return EXIT_NOT_CONVERGED if failures else 0
 
 
-def ssh_not_open(ctx: Ctx, live: list[int]) -> list[int]:
-    """The live ssh ports no rule of ufw (read again, now) opens — each with its v4 copy and,
-    with IPv6, its v6 copy. Any one of them blocks enabling ufw or a new incoming policy."""
+def ssh_not_open(ctx: Ctx, live: list[int]) -> list[str]:
+    """Why a live ssh port would not be reachable from anywhere once ufw enforces its rules
+    (read again, now), one line per port; empty = all open. ufw's user rules are first
+    match wins (ufw(8)), so the rules are walked in their order: the first one that
+    concerns tcp <port> from any source decides — an allow/limit with every copy (v4, and v6
+    with IPv6) opens it, a deny/reject before it blocks it. A rule limited to one source or
+    interface neither opens it for everyone nor blocks everyone. An unparseable rule that
+    names the port (an app profile, say) stops the walk: effective access cannot be told."""
     now = read_ufw(ctx)
     if not now.present or now.error:
-        return list(live)
-    missing: list[int] = []
+        return [f"{p}: ufw cannot be read ({now.error or 'not installed'})" for p in live]
+    why: list[str] = []
     for p in live:
-        ok = False
+        verdict = f"{p}: no rule opens it"
         for r in now.rules:
-            if r.key is None or not opens(r.key, p, "tcp"):
+            k = r.key
+            if k is None:
+                if re.search(rf"(^|[^0-9]){p}([^0-9]|$)", r.text) or " app " in f" {r.text} ":
+                    verdict = f"{p}: '{r.text}' comes first and cannot be judged"
+                    break
                 continue
-            need = families_of(r.key, now.ipv6) & {"v4", "v6"}
-            if not now.families_known or need <= r.families:
-                ok = True
+            if k.route or k.direction != "in" or k.dapp or k.proto not in ("any", "tcp"):
+                continue
+            if not port_covered(k.dport, p):
+                continue
+            if k.action in ("deny", "reject") and k.src == "any" and k.sport == "any" and not k.iface_in:
+                verdict = f"{p}: '{r.text}' comes first and blocks it (first match wins)"
                 break
-        if not ok:
-            missing.append(p)
-    return missing
+            if k.action in ("allow", "limit") and k.src == "any" and k.sport == "any" and not k.iface_in:
+                need = families_of(k, now.ipv6) & {"v4", "v6"}
+                if now.families_known and not need <= r.families:
+                    verdict = f"{p}: '{r.text}' lacks its {','.join(sorted(need - r.families))} copy"
+                else:
+                    verdict = ""
+                break
+        if verdict:
+            why.append(verdict)
+    return why
 
 
 def arm_and_change(ctx: Ctx, plan: Plan, risky: list[dict[str, str]], failures: list[str]) -> int:

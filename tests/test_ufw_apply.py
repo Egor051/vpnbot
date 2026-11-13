@@ -111,7 +111,10 @@ cmd = args[0] if args else ""
 if cmd == "__save":          # the fixture: write user*.rules from the JSON state
     save(); sys.exit(0)
 if cmd == "status":
-    print("Status: " + ("active" if st["active"] else "inactive"))
+    if os.path.exists(f"{SD}/translated") and os.environ.get("LC_ALL") != "C":
+        print("Status: " + ("aktiv" if st["active"] else "inaktiv"))      # ufw's de translation
+    else:
+        print("Status: " + ("active" if st["active"] else "inactive"))
     sys.exit(0)
 if cmd == "show" and args[1:] == ["added"]:
     print("Added user rules (see 'ufw status' for running firewall):")
@@ -1373,7 +1376,7 @@ def test_no_risky_step_when_the_live_ssh_rule_could_not_be_added(tmp_path: Path)
     host.flag("ufw_fail_add")
     proc = host.apply()
     assert proc.returncode == 4, proc.stdout
-    assert "ufw does not open the port(s) sshd listens on (22)" in proc.stdout
+    assert "ufw would not let ssh in — 22: no rule opens it" in proc.stdout
     assert "ufw --force enable" not in host.ufw_mutations() and host.log("systemd-run") == []
     assert json.loads((host.sd / "ufw.json").read_text(encoding="utf-8"))["active"] is False
     assert not host.h(DEADMAN).exists()
@@ -1383,7 +1386,7 @@ def test_a_missing_v6_copy_of_the_live_ssh_rule_blocks_a_new_policy(tmp_path: Pa
     host = Host(tmp_path, incoming="ACCEPT", rules=[["allow 54321/tcp", "vpn-bot:ssh", ["v4"]]])
     host.flag("ufw_fail_add")
     proc = host.apply()
-    assert proc.returncode == 4 and "(54321)" in proc.stdout, proc.stdout
+    assert proc.returncode == 4 and "54321: 'allow 54321/tcp' lacks its v6 copy" in proc.stdout, proc.stdout
     assert not [c for c in host.ufw_mutations() if c.startswith("ufw default")]
 
 
@@ -1415,3 +1418,40 @@ def test_restoring_a_pending_change_runs_its_deadman_again(tmp_path: Path, expir
     else:
         assert _deadman(host)["state"] == "pending" and 'DEFAULT_INPUT_POLICY="DROP"' in host.defaults()
         assert host.log("systemd-run"), "the restored change has its timer again"
+
+
+def test_an_earlier_deny_shadowing_the_ssh_allow_blocks_enabling(tmp_path: Path) -> None:
+    """ufw: first match wins. An unmarked `deny 54321/tcp` before our allow (it stays: not
+    ours) would block ssh once ufw is on — ufw is not enabled."""
+    host = Host(tmp_path, active=False, rules=[["deny 54321/tcp", "", BOTH]])
+    proc = host.apply()
+    assert proc.returncode == 4, proc.stdout
+    assert "54321: 'deny 54321/tcp' comes first and blocks it (first match wins)" in proc.stdout
+    assert "ufw --force enable" not in host.ufw_mutations() and host.log("systemd-run") == []
+    # A deny limited to one source blocks nobody else: enabling goes on.
+    host2 = Host(tmp_path / "b", active=False,
+                 rules=[["deny from 1.2.3.4 to any port 5555 proto tcp", "", ["v4"]]])
+    host2.flag("ss_tcp", TCP_MEASURED)
+    assert host2.apply().returncode == 0
+    assert "ufw --force enable" in host2.ufw_mutations()
+
+
+def test_ufw_status_is_read_in_the_c_locale(tmp_path: Path) -> None:
+    """ufw translates `Status: inactive`; every command runs with LC_ALL=C."""
+    host = Host(tmp_path, active=False)
+    host.flag("translated")
+    env = host.env_run()
+    env.update(LANG="de_DE.UTF-8", LC_ALL="de_DE.UTF-8", LANGUAGE="de")
+    argv = ["python3", "-I", str(HELPER), "--env", str(host.env_file), "--repo", str(host.repo),
+            "--root", str(host.root), "--ssh-port-helper", "", "plan", "--ssh-ports", "54321"]
+    out = subprocess.run(argv, env=env, capture_output=True, text=True, check=False).stdout
+    assert "active=no" in out and "error=" not in out, out
+
+
+def test_a_status_line_nobody_can_read_is_an_error_never_a_skipped_enable(tmp_path: Path) -> None:
+    host = Host(tmp_path, active=False)
+    _stub(host.stub / "ufw", 'import sys\nprint("Status: unbekannt")\n', "#!/usr/bin/env python3\n")
+    plan = host.plan()
+    assert any("neither active nor inactive" in e for e in plan.get("error", [])), plan
+    proc = host.apply()
+    assert proc.returncode == 5 and "neither active nor inactive" in proc.stderr

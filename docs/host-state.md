@@ -662,8 +662,11 @@ deploy.sh, `OUT_OF_REPO_HELPERS`, `required` on main) derives the whole rule set
 socket port) — is never deleted (`keep`); when none of them answers, nothing is deleted at all and
 ufw is neither enabled nor its incoming policy changed. Before either of those two steps every such
 port is opened too (`vpn-bot:ssh`) and read back from ufw (its v4 and v6 copy): `SSH_PORT` alone
-may not be where ssh is (an inactive `ssh.socket`, an sshd still on 22). A port that is not
-verifiably open blocks both steps. Afterwards that rule is only kept while sshd listens there. A
+may not be where ssh is (an inactive `ssh.socket`, an sshd still on 22). The check follows
+ufw's own order — first match wins (ufw(8)): an earlier `deny`/`reject` for that port from any
+source, or an earlier rule naming it that cannot be judged, counts as closed. A port that is not
+verifiably open blocks both steps. Every command runs with `LC_ALL=C` (ufw translates
+`Status: active`); a status line that reads as neither is an error, never a skipped enable. Afterwards that rule is only kept while sshd listens there. A
 module that is on but whose rule cannot be written down here (its port unknown, no default route)
 keeps whatever is recognisably its own — by its key or by its `vpn-bot:<module>` comment.
 
