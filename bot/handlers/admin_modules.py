@@ -21,6 +21,7 @@ from i18n import t
 from repositories.protocol_modules import PROTOCOL_DISPLAY, PROTOCOL_NAMES, ProtocolModule
 from services.errors import ServiceError
 from services.protocol_uninstall import PlanChangedError, ProtocolUninstallService, UninstallPlan
+from utils.formatting import h
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -204,11 +205,15 @@ async def admin_module_enable_exec(callback: CallbackQuery, services: Services) 
         if name not in PROTOCOL_NAMES:
             return
         label = PROTOCOL_DISPLAY.get(name, name)
-        await services.modules.enable_protocol(name, callback.from_user.id)
+        firewall = await services.modules.enable_protocol(name, callback.from_user.id)
         modules = await services.modules.get_all()
+        text = t("module_enabled_ok", label=label)
+        if firewall is not None:
+            key = "module_firewall_ok" if firewall.ok else "module_firewall_failed"
+            text += "\n" + t(key, summary=h(firewall.summary))
         await safe_edit_message_text(
             callback.message,
-            t("module_enabled_ok", label=label),
+            text,
             reply_markup=_panel_markup(services, modules),
         )
     except Exception as exc:

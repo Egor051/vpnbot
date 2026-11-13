@@ -506,13 +506,20 @@ tar xzf recovery.tar.gz            # MANIFEST.json содержит исходн
 
 ## Firewall и открытые порты
 
-- По возможности держите SSH открытым только для доверенных источников.
-- Откройте публичный TCP-порт Xray, обычно `443/tcp`.
-- Откройте публичный UDP-порт AWG endpoint из `AWG_ENDPOINT_PORT` или `ListenPort` в конфиге AWG.
-- Если включён Hysteria2, откройте публичный **UDP**-порт Hysteria2 из `HYSTERIA2_PORT` (дефолт `443` — чистый QUIC, без salamander; сосуществует с Xray на TCP/443, другой транспорт). Эндпоинт `hy2_auth` (`HYSTERIA2_AUTH_LISTEN`) и Traffic Stats API (`HYSTERIA2_STATS_LISTEN`) держите только на loopback — никогда не открывайте их в интернет.
-- Открывайте Dante/SOCKS только если намеренно развёртываете отдельный прокси с защитой.
-- Держите `XRAY_STATS_SERVER` привязанным только к localhost, например `127.0.0.1:<port>`. Никогда не открывайте Xray stats API в интернет.
-- Если политика UFW для перенаправленного трафика по умолчанию `deny`, явно разрешите трафик AWG-клиентов.
+UFW основного сервера вычисляется, а не набирается руками: `scripts/vpn-bot-ufw-apply` открывает
+публичный порт каждого протокола, который включён в `.env` и не удалён с сервера, — Xray `443/tcp`,
+`ListenPort/udp` AWG и route-правило его клиентов, Hysteria2 `HYSTERIA2_PORT/udp`, SOCKS5, endpoint
+подписки, MTProto, — плюс `SSH_PORT` и `deploy/host/ufw/extra.list`, и закрывает то, чего в наборе
+больше нет ([host-state.ru.md](host-state.ru.md#фаервол-ufw)). Его запускает деплой, а также бот при
+включении и удалении протокола. Никогда не `ufw allow` руками: правило, которое не принадлежит ни
+модулю, ни ssh, кладётся в `extra.list`.
+
+- Эндпоинт `hy2_auth` (`HYSTERIA2_AUTH_LISTEN`) и Traffic Stats API Hysteria2
+  (`HYSTERIA2_STATS_LISTEN`) держите только на loopback, а `XRAY_STATS_SERVER` — на localhost,
+  например `127.0.0.1:<port>`. Никогда не открывайте Xray stats API в интернет. Проверка слушателей
+  в деплое падает на публичном TCP-слушателе, которого набор не разрешает и не объявляет закрытым
+  (`main|closed <port>/tcp|<почему>` в `extra.list`).
+- Политика routed не меняется никогда: AWG-клиенты выходят в интернет через своё route-правило.
 
 Примеры read-only проверок:
 

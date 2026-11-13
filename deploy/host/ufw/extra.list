@@ -1,0 +1,23 @@
+# deploy/host/ufw/extra.list — every UFW rule of the main server that is neither a
+# module's nor ssh's, and every public listener that is closed on purpose
+# (docs/host-state.md#the-firewall-ufw).
+#
+#   role|rule|reason
+#
+#   role    main (a relay has no UFW: its input filter is vpnrelay_input)
+#   rule    a ufw rule exactly as `ufw show added` prints it, without "ufw " and
+#           without a comment — vpn-bot-ufw-apply adds it with comment 'vpn-bot:extra':
+#             main|allow 8080/tcp|<why>
+#             main|allow from 203.0.113.7 to any port 9100 proto tcp|<why>
+#             main|route allow in on wg1 out on eth0 from 10.9.0.0/24|<why>
+#           or `closed <port>/<tcp|udp>`: something listens there on a public or
+#           wildcard address and the firewall keeps it closed on purpose (the deploy's
+#           listener check fails on a public TCP listener that is neither allowed nor
+#           declared closed):
+#             main|closed 8443/tcp|<why>
+#   reason  why, in at least 20 characters
+#
+# The module rules (Xray, Hysteria2, SOCKS5, subscription, MTProto, AWG) and the ssh
+# port come from .env and the module table — never list them here. Measured on
+# 2026-11-12 every rule and public listener of the main server is a module's or ssh's:
+# nothing goes here.

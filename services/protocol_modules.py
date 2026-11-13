@@ -16,6 +16,7 @@ from repositories.protocol_modules import ProtocolModule, ProtocolModulesReposit
 from repositories.proxy_accesses import ProxyAccessRepository
 from repositories.vpn_keys import VpnKeyRepository
 from services.errors import InvalidOperation
+from services.ufw import UfwApplier, UfwApplyResult
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +49,15 @@ class ProtocolModulesService:
         # services.protocol_uninstall.UninstallRegistry: a protocol removed from
         # the host is off whatever the database says, and cannot be switched on.
         self._uninstalled: _UninstalledView | None = None
+        # services.ufw.UfwApplier: switching a protocol on re-runs vpn-bot-ufw-apply
+        # (docs/host-state.md#the-firewall-ufw). None in test doubles: no firewall.
+        self._firewall: UfwApplier | None = None
 
     def attach_uninstall_registry(self, registry: _UninstalledView) -> None:
         self._uninstalled = registry
+
+    def attach_firewall(self, firewall: UfwApplier) -> None:
+        self._firewall = firewall
 
     def is_uninstalled(self, name: str) -> bool:
         return self._uninstalled is not None and self._uninstalled.is_uninstalled(name)
@@ -114,7 +121,10 @@ class ProtocolModulesService:
         )
         return deleted, failed
 
-    async def enable_protocol(self, name: str, actor_id: int) -> None:
+    async def enable_protocol(self, name: str, actor_id: int) -> UfwApplyResult | None:
+        """Switch a protocol on, then converge the firewall on the set (vpn-bot-ufw-apply
+        apply). Returns its result — None when no firewall is wired. A failing apply does
+        not undo the switch: the next deploy converges the firewall anyway."""
         await self._require_superadmin(actor_id)
         if self.is_uninstalled(name):
             raise InvalidOperation(
@@ -124,6 +134,9 @@ class ProtocolModulesService:
         await self._repo.set_enabled(name, enabled=True)
         await self._write_audit(actor_id, "protocol_enabled", {"protocol": name})
         logger.info("Protocol %s enabled by user %d", name, actor_id)
+        if self._firewall is None:
+            return None
+        return await self._firewall.apply(f"enabling {name}")
 
     async def _require_superadmin(self, actor_id: int) -> None:
         users = self._users

@@ -29,6 +29,7 @@ from services.relay_health import RelayHealthSupervisor
 from services.relay_management import RelayService
 from services.server_status import ServerStatusService
 from services.ssh_port import SshPortMonitor
+from services.ufw import UfwDeadmanMonitor
 from services.socks5 import Socks5Service
 from services.traffic_stats import TrafficStatsService
 from services.trial_access import TrialAccessService
@@ -103,3 +104,7 @@ class Services:
     # superadmins when phase 1 starts (with «Подтвердить») and when it is done; the
     # button runs the helper's confirm. None only in lightweight test doubles.
     ssh_port: SshPortMonitor | None = None
+    # The UFW dead-man (scripts/vpn-bot-ufw-apply): tells the superadmins when a change
+    # of the incoming policy waits for its proof (with «Подтвердить») and how it ended.
+    # None only in lightweight test doubles.
+    ufw_deadman: UfwDeadmanMonitor | None = None

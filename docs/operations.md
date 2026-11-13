@@ -626,13 +626,20 @@ token.
 
 ## Firewall and exposed ports
 
-- Keep SSH open only from trusted sources where possible.
-- Open the public Xray TCP port, usually `443/tcp`.
-- Open the public AWG endpoint UDP port from `AWG_ENDPOINT_PORT` or the AWG config `ListenPort`.
-- If Hysteria2 is enabled, open the public Hysteria2 **UDP** port from `HYSTERIA2_PORT` (default `443` — plain QUIC, no salamander; coexists with Xray on TCP/443, different transport). Keep the `hy2_auth` endpoint (`HYSTERIA2_AUTH_LISTEN`) and the Traffic Stats API (`HYSTERIA2_STATS_LISTEN`) bound to loopback only — never expose them to the internet.
-- Open Dante/SOCKS only if a separate proxy is intentionally deployed and protected.
-- Keep `XRAY_STATS_SERVER` bound to localhost only, for example `127.0.0.1:<port>`. Never expose the Xray stats API to the internet.
-- If UFW default routed policy is `deny`, explicitly allow routed traffic required by AWG clients.
+The main server's UFW is computed, not typed: `scripts/vpn-bot-ufw-apply` opens the public port of
+every protocol that `.env` enables and that is not removed from the host — Xray `443/tcp`, the AWG
+`ListenPort/udp` and the route rule of its clients, Hysteria2 `HYSTERIA2_PORT/udp`, SOCKS5, the
+subscription endpoint, MTProto — plus `SSH_PORT` and `deploy/host/ufw/extra.list`, and closes what
+is no longer in that set ([host-state.md](host-state.md#the-firewall-ufw)). The deploy runs it, so
+does the bot when a protocol is switched on or removed. Never `ufw allow` by hand: put a rule that
+is neither a module's nor ssh's into `extra.list`.
+
+- Keep the `hy2_auth` endpoint (`HYSTERIA2_AUTH_LISTEN`) and the Hysteria2 Traffic Stats API
+  (`HYSTERIA2_STATS_LISTEN`) bound to loopback only, and `XRAY_STATS_SERVER` bound to localhost,
+  for example `127.0.0.1:<port>`. Never expose the Xray stats API to the internet. The deploy's
+  listener check fails on a public TCP listener the set neither allows nor declares
+  closed (`main|closed <port>/tcp|<why>` in `extra.list`).
+- The routed policy is never changed: AWG clients reach the internet through their route rule.
 
 Example read-only checks:
 

@@ -2105,82 +2105,22 @@ def test_deploy_check_is_silent_while_the_feature_is_off(tmp_path: Path) -> None
     assert "intentionally inert" in message
 
 
-def test_ufw_rule_is_a_tracked_artifact_reading_the_port_from_env() -> None:
-    """The firewall rule ships as a re-runnable script, not as a command someone
-    typed once: a `ufw reset` or a rebuilt host would otherwise lose it silently."""
-    script = ROOT / "deploy" / "ufw-subscription.sh"
-    text = script.read_text(encoding="utf-8")
-    assert script.stat().st_mode & 0o111, "script must be executable"
-    assert "SUBSCRIPTION_PUBLIC_PORT" in text
-    assert "ufw allow" in text and "ufw delete allow" in text
-    assert "comment" in text
-    # The port is never hardcoded, and .env is parsed rather than sourced (it
-    # holds the bot token and every backend secret).
-    assert "source " not in text and ". /opt" not in text
-    assert re.search(r"ufw allow \"\$\{?PORT", text)
-
-
-def test_ufw_script_refuses_to_open_a_port_for_a_disabled_feature(tmp_path: Path) -> None:
-    """Driven for real against a stub `ufw`: no rule is added while
-    SUBSCRIPTION_ENABLED is false, and the port comes from .env when it is true."""
-    env_file = tmp_path / ".env"
-    stub_bin = tmp_path / "bin"
-    stub_bin.mkdir()
-    calls = tmp_path / "ufw-calls.log"
-    (stub_bin / "ufw").write_text(
-        f'#!/usr/bin/env bash\necho "$@" >> {calls}\nexit 0\n', encoding="utf-8"
+def test_the_public_port_is_a_row_of_the_ufw_module_table_not_a_script() -> None:
+    """The firewall rule is computed, not typed: scripts/vpn-bot-ufw-apply opens
+    SUBSCRIPTION_PUBLIC_PORT/tcp while SUBSCRIPTION_ENABLED is true (and closes it
+    when it is not). The hand-run deploy/ufw-subscription.sh is gone, and nothing
+    points an operator at it any more (docs/host-state.md#the-firewall-ufw)."""
+    helper = (ROOT / "scripts" / "vpn-bot-ufw-apply").read_text(encoding="utf-8")
+    assert re.search(
+        r'Module\("subscription", "SUBSCRIPTION_ENABLED", "", "tcp", \("SUBSCRIPTION_PUBLIC_PORT",\), "0"\)', helper
     )
-    (stub_bin / "ufw").chmod(0o755)
-    script = ROOT / "deploy" / "ufw-subscription.sh"
-
-    def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["bash", str(script), *args],
-            capture_output=True,
-            text=True,
-            env={
-                "PATH": f"{stub_bin}:/usr/bin:/bin",
-                "ENV_FILE": str(env_file),
-                "HOME": str(tmp_path),
-            },
-            timeout=60,
-        )
-
-    env_file.write_text("SUBSCRIPTION_ENABLED=false\nSUBSCRIPTION_PUBLIC_PORT=2096\n", encoding="utf-8")
-    disabled = _run([])
-    assert disabled.returncode != 0
-    assert not calls.exists(), "no ufw rule may be added while the feature is off"
-
-    env_file.write_text("SUBSCRIPTION_ENABLED=true\nSUBSCRIPTION_PUBLIC_PORT=2096\n", encoding="utf-8")
-    enabled = _run([])
-    assert enabled.returncode == 0, enabled.stderr
-    assert "allow 2096/tcp" in calls.read_text(encoding="utf-8")
-
-    calls.unlink()
-    removed = _run(["--delete"])
-    assert removed.returncode == 0, removed.stderr
-    assert "delete allow 2096/tcp" in calls.read_text(encoding="utf-8")
-
-
-def test_ufw_script_rejects_a_missing_or_bogus_port(tmp_path: Path) -> None:
-    env_file = tmp_path / ".env"
-    stub_bin = tmp_path / "bin"
-    stub_bin.mkdir()
-    (stub_bin / "ufw").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    (stub_bin / "ufw").chmod(0o755)
-    script = ROOT / "deploy" / "ufw-subscription.sh"
-
-    for content in ("SUBSCRIPTION_ENABLED=true\n", "SUBSCRIPTION_ENABLED=true\nSUBSCRIPTION_PUBLIC_PORT=nope\n"):
-        env_file.write_text(content, encoding="utf-8")
-        result = subprocess.run(
-            ["bash", str(script)],
-            capture_output=True,
-            text=True,
-            env={"PATH": f"{stub_bin}:/usr/bin:/bin", "ENV_FILE": str(env_file), "HOME": str(tmp_path)},
-            timeout=60,
-        )
-        assert result.returncode != 0
-        assert "ufw-subscription:" in result.stderr
+    assert not (ROOT / "deploy" / "ufw-subscription.sh").exists()
+    # deploy/vpn-bot-subscription.service is not in the list on purpose: it is installed
+    # by hand, and any byte of it changed is unit drift that stops the next deploy.
+    for rel in ("scripts/deploy.sh", ".env.example",
+                "subscription_server/__main__.py", "docs/subscription.md", "docs/subscription.ru.md",
+                "docs/configuration.md", "docs/configuration.ru.md", "docs/relay.md", "docs/relay.ru.md"):
+        assert "ufw-subscription.sh" not in (ROOT / rel).read_text(encoding="utf-8"), rel
 
 
 def test_docs_document_the_tls_decision_and_the_reading_user() -> None:
@@ -2192,7 +2132,7 @@ def test_docs_document_the_tls_decision_and_the_reading_user() -> None:
         assert "vpn-bot" in text
         assert "acme.sh" in text
         assert "0640" in text
-        assert "ufw-subscription.sh" in text
+        assert "vpn-bot-ufw-apply" in text
 
 
 # ── POST /relay/ssh-probe: main confirms a relay's input filter ───────────────

@@ -26,7 +26,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_bundles, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, ssh_port, start
+from bot.handlers import admin, admin_bundles, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, ssh_port, start, ufw
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
@@ -74,6 +74,7 @@ from services.proxy import ProxyService
 from services.relay import RelayCatalog
 from services.host_check import HostCheckMonitor
 from services.ssh_port import SshPortMonitor
+from services.ufw import UfwApplier, UfwDeadmanMonitor
 from services.relay_health import build_relay_health_supervisor
 from services.relay_management import RelayService
 from services.server_status import ServerStatusService
@@ -246,6 +247,12 @@ async def _build_app(
     if removed_from_host:
         logger.info("Protocols removed from this host (uninstall markers): %s", ", ".join(sorted(removed_from_host)))
     protocol_modules_service.attach_uninstall_registry(uninstall_registry)
+    # The main server's UFW is computed by scripts/vpn-bot-ufw-apply
+    # (docs/host-state.md#the-firewall-ufw): switching a protocol on and removing one
+    # from the host run its `apply` — through sudo in the helper model (exact-path
+    # grant), directly as root otherwise.
+    ufw_applier = UfwApplier(runner=PrivilegedHelperRunner(shell=shell, use_sudo=settings.privilege_helpers_enabled))
+    protocol_modules_service.attach_firewall(ufw_applier)
     dashboard_repo = DashboardRepository(db)
 
     audit_service = AuditService(audit_repo, clock, users_repo)
@@ -278,6 +285,7 @@ async def _build_app(
         audit=audit_service,
         backend_health=backend_health,
         relays=relays_repo,
+        firewall=ufw_applier,
     )
     # The marker is the truth; the protocol_modules.uninstalled_* columns follow it.
     # A mismatch is logged as a warning and corrected, never a startup failure.
@@ -668,6 +676,13 @@ async def _build_app(
         admin_ids=settings.admin_ids,
         runner=PrivilegedHelperRunner(shell=shell, use_sudo=settings.privilege_helpers_enabled),
     )
+    # A UFW policy change waiting for its proof (docs/host-state.md#the-firewall-ufw):
+    # one message with «Подтвердить», one when it was confirmed or reverted.
+    ufw_deadman_monitor = UfwDeadmanMonitor(
+        store=db,
+        admin_ids=settings.admin_ids,
+        runner=PrivilegedHelperRunner(shell=shell, use_sudo=settings.privilege_helpers_enabled),
+    )
 
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
 
@@ -831,6 +846,7 @@ async def _build_app(
         protocol_uninstall=protocol_uninstall_service,
         host_check=host_check_monitor,
         ssh_port=ssh_port_monitor,
+        ufw_deadman=ufw_deadman_monitor,
     )
 
     await _startup_reconcile_keys(services)
@@ -842,6 +858,7 @@ async def _build_app(
     relay_health_supervisor.bot = bot
     host_check_monitor.bot = bot
     ssh_port_monitor.bot = bot
+    ufw_deadman_monitor.bot = bot
     warp_manager.bot = bot
     # FSM state is in-memory only — bot restart clears in-progress wizards.
     # TTLMemoryStorage expires sessions idle for >30 min via the fsm_cleanup_loop
@@ -894,6 +911,7 @@ async def _build_app(
     dp.include_router(admin_relays.router)
     dp.include_router(admin_maintenance.router)
     dp.include_router(ssh_port.router)
+    dp.include_router(ufw.router)
     dp.include_router(admin_bundles.router)
     dp.include_router(keys.router)
     dp.include_router(key_bundles.router)

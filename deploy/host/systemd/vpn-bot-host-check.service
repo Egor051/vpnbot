@@ -6,6 +6,11 @@ Documentation=file:///opt/vpn-service/docs/host-state.md
 # proven migration happens; then this check judges the result.
 Wants=vpn-bot-ssh-port.service
 After=vpn-bot-ssh-port.service
+# Main: a UFW policy change still waiting for its proof is kept or reverted first
+# (docs/host-state.md#the-firewall-ufw) — after a reboot this is the moment it happens.
+# A relay has no such unit: Wants= of a missing unit is a no-op.
+Wants=vpn-bot-ufw-deadman.service
+After=vpn-bot-ufw-deadman.service
 
 [Service]
 Type=oneshot

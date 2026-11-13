@@ -339,10 +339,11 @@ ls -l /etc/vpn-bot/tls          # expect fullchain.pem + privkey.pem root:vpn-bo
 #    SUBSCRIPTION_TLS_CERT=/etc/vpn-bot/tls/fullchain.pem
 #    SUBSCRIPTION_TLS_KEY=/etc/vpn-bot/tls/privkey.pem
 
-# 3. Firewall (tracked rule — never a hand-typed `ufw allow`)
-sudo bash deploy/ufw-subscription.sh          # reads the port from .env
-#   ... and to close it again:
-sudo bash deploy/ufw-subscription.sh --delete
+# 3. Firewall: nothing to type. SUBSCRIPTION_PUBLIC_PORT/tcp is a row of the UFW module
+#    table (scripts/vpn-bot-ufw-apply, docs/host-state.md#the-firewall-ufw): the next
+#    deploy opens it while SUBSCRIPTION_ENABLED=true and closes it once it is false.
+#    Without a deploy:
+sudo /usr/local/sbin/vpn-bot-ufw-apply apply
 
 # 4. Unit — drift-installed by hand; deploy.sh never installs it
 sudo install -m0644 deploy/vpn-bot-subscription.service /etc/systemd/system/

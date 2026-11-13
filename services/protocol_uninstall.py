@@ -16,6 +16,10 @@ Two-phase, so the admin confirms what is actually on the host:
    (any purge failure stops here: the backend is NOT removed while clients may
    still be live on it), then ``helper apply <proto> <sha256>``, which backs up,
    removes, and rolls itself back on any error.
+3. After a removal, ``vpn-bot-ufw-apply apply`` (services.ufw.UfwApplier): the marker
+   takes the module out of the UFW set, so its rules leave the firewall — the helper
+   itself no longer touches ufw (one owner of the rules,
+   docs/host-state.md#the-firewall-ufw).
 
 The marker ``/etc/vpn-bot/uninstalled/<proto>`` the helper writes last is the
 source of truth that a protocol is gone; the ``protocol_modules.uninstalled_*``
@@ -37,7 +41,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -49,6 +53,7 @@ from models.enums import AuditEntityType, ProxyAccessType, VpnKeyType
 from repositories.protocol_modules import PROTOCOL_NAMES, ProtocolModulesRepository
 from services.backend_health import BackendHealth, BackendType
 from services.errors import InvalidOperation
+from services.ufw import UfwApplier
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +298,9 @@ class UninstallReport:
     rollback_command: str = ""
     purged: int = 0
     exit_code: int = 0
+    # vpn-bot-ufw-apply apply after the removal: None = not run (no firewall wired).
+    firewall_ok: bool | None = None
+    firewall: str = ""
 
     @classmethod
     def from_json(cls, protocol: str, data: Mapping[str, Any], *, exit_code: int, purged: int) -> UninstallReport:
@@ -339,8 +347,10 @@ class ProtocolUninstallService:
         relays: Any = None,
         runner: PrivilegedHelperRunner | None = None,
         helper_path: Path | None = None,
+        firewall: UfwApplier | None = None,
     ) -> None:
         self._settings = settings
+        self._firewall = firewall
         self._registry = registry
         self._modules = modules
         self._repo = modules_repo
@@ -513,6 +523,10 @@ class ProtocolUninstallService:
                     },
                 )
                 logger.info("Protocol %s removed from the host by %d; backup %s", name, actor_id, report.backup)
+                # Its marker takes the module out of the UFW set: the rules go now.
+                if self._firewall is not None:
+                    fw = await self._firewall.apply(f"removing {name} from the host")
+                    report = replace(report, firewall_ok=fw.ok, firewall=fw.summary)
             else:
                 await self._write_audit(
                     actor_id,

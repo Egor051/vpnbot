@@ -48,8 +48,8 @@ async def _start_sites(runner: web.AppRunner, config: SubscriptionConfig) -> Non
         if config.public_port:  # pragma: no cover - load_config refuses this combination
             logger.error("subscription: public port set without TLS material — public listener NOT started")
         return
-    # host=None binds every interface (v4 + v6); the port must be opened in ufw
-    # via deploy/ufw-subscription.sh.
+    # host=None binds every interface (v4 + v6); the deploy opens the port in UFW
+    # (scripts/vpn-bot-ufw-apply, module `subscription`).
     public = web.TCPSite(runner, None, config.public_port, ssl_context=ssl_context)
     await public.start()
     logger.info("subscription endpoint listening on :%s (HTTPS, cert=%s)", config.public_port, config.tls_cert)

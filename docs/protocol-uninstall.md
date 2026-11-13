@@ -15,7 +15,7 @@ from the host.
 
 1. **Plan.** The bot runs `vpn-bot-protocol-uninstall plan <proto>` (read-only) and
    shows: the units and what happens to each (stop / disable / mask), the files and
-   directories with sizes, the UFW rules, the packages, the users, what is **kept as
+   directories with sizes, the packages, the users, what is **kept as
    shared** and why, what is **already absent**, the backup path. For Xray the bot
    adds a warning when relays exist — their VLESS keys stop working.
 2. **Confirm.** The button carries the first 12 characters of the plan's sha256; an
@@ -35,8 +35,10 @@ from the host.
       `daemon-reload` → `reset-failed`.
    5. Files and directories, one by one, each re-checked with `realpath` right before
       `rm` (a path or a parent that became a symlink stops the run).
-   6. UFW: `ufw delete allow <port>/<proto>` (the v4 and the v6 copy), then `ufw show
-      added` / `ufw status` must not list it.
+   6. UFW: **nothing** — the helper never touches the firewall. `scripts/vpn-bot-ufw-apply`
+      owns every rule ([host-state.md](host-state.md#the-firewall-ufw)): the marker of step 10
+      takes the module out of its set, and the bot runs `vpn-bot-ufw-apply apply` right after
+      a successful removal (its result is the last line of the report). One owner of the rules.
    7. `apt-get purge -y` of the manifest packages dpkg reports as `ii` (a purge that
       would drag other packages along is refused in the plan).
    8. `userdel` (never `-r`) of the manifest users, only when `find / -xdev -uid <uid>`
@@ -49,8 +51,8 @@ from the host.
    A failure in steps 4–10 restores everything from the archive, reinstalls a purged
    package (`--force-confold`, so the restored conffile stays), recreates deleted
    users with their uid/gid and password hash, unmasks/re-enables/restarts the units
-   that were enabled/active and re-adds the UFW rules with their comments. The
-   report says which step failed and whether the rollback was complete.
+   that were enabled/active. The report says which step failed and whether the rollback was
+   complete; UFW was never changed, so there is nothing of it to put back.
 4. **Report**: removed / already absent / skipped / errors, the backup, the manual
    rollback command. A second apply on a removed protocol is "nothing to do".
 
@@ -59,7 +61,7 @@ Log: `/var/log/vpn-bot-uninstall.log`. Audit: `protocol_uninstalled`,
 
 ### What the plan hash covers
 
-What the apply **decides**: which units, unit files, paths, UFW rules, packages and
+What the apply **decides**: which units, unit files, paths, packages and
 users it acts on, the `.env` edit and the marker. Not: file sizes, active states,
 the `*.bak` files inside a directory removed whole, the AWG files matched by the
 pattern and the SOCKS5 users matched by prefix+shell — step 2 (the purge) creates
@@ -71,13 +73,17 @@ Unit and path names `.env` can override are read by the helper itself (the same
 tolerant reader as `scripts/vpnbot-hy2-warp-mark`), validated, and confined to the
 protocol's prefix.
 
-| Protocol | Units | Files and directories | UFW | Packages | Users | `.env` |
-|---|---|---|---|---|---|---|
-| Xray | `XRAY_SERVICE_NAME`.service, `@`.service + instances | `/etc/systemd/system/xray{,@}.service{,.d}`, `/usr/local/bin/xray`, `/usr/local/share/xray`, `/usr/local/etc/xray` (config, lock, every `.bak` with the REALITY key), `/var/log/xray` | 443/tcp | — | — | — |
-| AmneziaWG | `awg-quick@AWG_INTERFACE` (stop, disable, **mask**) | in `dirname(AWG_CONFIG_PATH)` only files matching `^\.?awg0\.conf(\.lock\|\..+\.bak\|\.bak\..+)?$` | 11880/udp | — | — | — |
-| SOCKS5 | `SOCKS5_SERVICE_NAME` | `/etc/systemd/system/<unit>.service.d/` | 31337/tcp | `dante-server` | prefix `SOCKS5_LOGIN_PREFIX` **and** shell `SOCKS5_SYSTEM_USER_SHELL` | `SOCKS5_ENABLED` |
-| MTProto | `MTPROTO_SERVICE_NAME` | its unit file and `.service.d/`, `MTPROTO_BINARY_PATH`, `MTPROTO_CONFIG_DIR`, `/opt/vpn-service/scripts/run-mtproxy-managed` (untracked runtime copy; checked with `git ls-files`) | 9443/tcp | — | `mtproxy` | `MTPROTO_ENABLED` |
-| Hysteria2 | `vpnbot-hy2-warp-mark` **first** (its ExecStop clears the fwmark rules; verified in the mangle table), `HYSTERIA2_SERVICE_NAME` + `@`, `HYSTERIA2_AUTH_SERVICE_NAME` | their unit files / drop-ins, `/usr/local/sbin/vpnbot-hy2-warp-mark`, `/usr/local/bin/hysteria`, `/etc/hysteria` | 443/udp | — | `hysteria` | `HYSTERIA2_ENABLED` |
+| Protocol | Units | Files and directories | Packages | Users | `.env` |
+|---|---|---|---|---|---|
+| Xray | `XRAY_SERVICE_NAME`.service, `@`.service + instances | `/etc/systemd/system/xray{,@}.service{,.d}`, `/usr/local/bin/xray`, `/usr/local/share/xray`, `/usr/local/etc/xray` (config, lock, every `.bak` with the REALITY key), `/var/log/xray` | — | — | — |
+| AmneziaWG | `awg-quick@AWG_INTERFACE` (stop, disable, **mask**) | in `dirname(AWG_CONFIG_PATH)` only files matching `^\.?awg0\.conf(\.lock\|\..+\.bak\|\.bak\..+)?$` | — | — | — |
+| SOCKS5 | `SOCKS5_SERVICE_NAME` | `/etc/systemd/system/<unit>.service.d/` | `dante-server` | prefix `SOCKS5_LOGIN_PREFIX` **and** shell `SOCKS5_SYSTEM_USER_SHELL` | `SOCKS5_ENABLED` |
+| MTProto | `MTPROTO_SERVICE_NAME` | its unit file and `.service.d/`, `MTPROTO_BINARY_PATH`, `MTPROTO_CONFIG_DIR`, `/opt/vpn-service/scripts/run-mtproxy-managed` (untracked runtime copy; checked with `git ls-files`) | — | `mtproxy` | `MTPROTO_ENABLED` |
+| Hysteria2 | `vpnbot-hy2-warp-mark` **first** (its ExecStop clears the fwmark rules; verified in the mangle table), `HYSTERIA2_SERVICE_NAME` + `@`, `HYSTERIA2_AUTH_SERVICE_NAME` | their unit files / drop-ins, `/usr/local/sbin/vpnbot-hy2-warp-mark`, `/usr/local/bin/hysteria`, `/etc/hysteria` | — | `hysteria` | `HYSTERIA2_ENABLED` |
+
+The UFW rules of a protocol (its port, AWG's route rule of its clients) are no column here: they
+are rows of the module table of `scripts/vpn-bot-ufw-apply`, computed from `.env`, and leave the
+firewall with the marker.
 
 The helper's own deny-list refuses, whatever a manifest says: `/`, `/etc`, `/usr`,
 `/var`, `/etc/systemd/system`, `/etc/amnezia(/amneziawg)`, `/opt/vpn-service`, the
@@ -142,11 +148,11 @@ groupadd -g <gid> <name>; useradd -u <uid> -g <gid> -d <home> -M -s <shell> <nam
 systemctl unmask awg-quick@awg0.service      # AWG only
 systemctl daemon-reload
 systemctl enable --now <unit> ...            # units.txt says which were enabled/active
-# 5. ufw rules: re-run the lines of ufw-show-added.txt for the protocol's ports
-ufw allow 443/tcp comment 'Xray Reality HTTPS'
-# 6. the bot: drop the marker and restart, then enable the module in the panel
+# 5. the bot: drop the marker and restart, then enable the module in the panel
 rm -f /etc/vpn-bot/uninstalled/<proto>
 systemctl restart vpn-bot
+# 6. ufw: the module is in the set again — the protocol's rules come back by themselves
+/usr/local/sbin/vpn-bot-ufw-apply apply
 ```
 
 A **reinstall** without the archive works the same way at the end: install the

@@ -21,8 +21,9 @@
 #   4  units: stop -> disable -> (awg: mask) -> remove the manifest unit files and
 #      drop-ins -> daemon-reload -> reset-failed
 #   5  files and directories, one by one, each re-checked with realpath first
-#   6  ufw: `ufw delete allow <port>/<proto>` (removes the v4 and the v6 copy), then
-#      `ufw show added` / `ufw status` must not show the rule any more
+#   6  (no ufw step) — this helper never touches the firewall: vpn-bot-ufw-apply owns
+#      every rule (docs/host-state.md#the-firewall-ufw). The marker of step 10 takes the
+#      module out of its set, and the bot runs `vpn-bot-ufw-apply apply` right after.
 #   7  apt-get purge -y of the manifest packages that dpkg reports as `ii`
 #   8  userdel (never -r) of the manifest users that own no file left on `/`
 #   9  .env: <PROTO>_ENABLED=false where the protocol has that flag — exactly one
@@ -31,7 +32,7 @@
 # A repeated apply on a removed protocol is "nothing to do" and exits 0.
 #
 # PLAN HASH. The sha256 covers what the apply DECIDES — which units, unit files,
-# paths, ufw rules, packages and users it acts on, the .env edit and the marker —
+# paths, packages and users it acts on, the .env edit and the marker —
 # and deliberately not what churns while the admin reads the plan or what the
 # purge (step 2) changes by design: file sizes, active states, the *.bak files
 # inside a directory that is removed whole, the AWG backups matched by the regex
@@ -290,14 +291,13 @@ user_forbidden() {   # name uid
 #     only: no glob. The one pattern is AWG_FILE_RE_TEMPLATE above.
 # ============================================================================ #
 man_reset() {
-	M_UNITS=(); M_UNIT_FLAGS=(); M_UNIT_FILES=(); M_PATHS=(); M_UFW=(); M_PKGS=(); M_USERS=()
+	M_UNITS=(); M_UNIT_FLAGS=(); M_UNIT_FILES=(); M_PATHS=(); M_PKGS=(); M_USERS=()
 	M_SOCKS_RULE=0; M_AWG_DIR=""; M_AWG_RE=""; M_ENV_KEY=""; M_SHARED=(); M_TEMPLATES=()
 }
 man_unit() { M_UNITS+=("$1"); M_UNIT_FLAGS+=("${2:-}"); }
 man_template() { M_TEMPLATES+=("$1"); }   # base name; loaded instances are stopped too
 man_unit_file() { M_UNIT_FILES+=("$1"); }
 man_path() { M_PATHS+=("$1"); }
-man_ufw() { M_UFW+=("$1"); }
 man_pkg() { M_PKGS+=("$1"); }
 man_user() { M_USERS+=("$1"); }
 man_env() { M_ENV_KEY="$1"; }
@@ -316,7 +316,6 @@ manifest_xray() {
 	man_path /usr/local/share/xray
 	man_path /usr/local/etc/xray
 	man_path /var/log/xray
-	man_ufw 443/tcp
 	man_shared "user nobody" "owns the Xray config and logs, but is a shared system account"
 	man_shared "nginx, /etc/nginx, /var/www/anycastedge" "the REALITY self-steal / decoy site is shared with the host"
 	man_shared "/etc/vpn-bot/tls, /root/.acme.sh" "certificates and acme.sh also serve the subscription endpoint and Hysteria2"
@@ -326,7 +325,6 @@ manifest_xray() {
 manifest_awg() {
 	man_unit "awg-quick@${AWG_IF}.service" mask
 	man_awg_files "${AWG_DIR}" "${AWG_RE}"
-	man_ufw 11880/udp
 	man_shared "/etc/amnezia, /etc/amnezia/amneziawg" "the directories hold the WARP egress (out-warp) config too"
 	man_shared "/etc/amnezia/amneziawg/out-warp.conf (symlink), /etc/amnezia/out-warp.conf and its copies" "WARP egress interface, not the AWG server"
 	man_shared "amneziawg, amneziawg-dkms, amneziawg-tools, the kernel module, awg/awg-quick" "awg-quick@out-warp needs them"
@@ -338,7 +336,6 @@ manifest_socks5() {
 	man_unit_file "${UNIT_DIR}/${SOCKS5_SVC}.service.d"
 	man_pkg dante-server
 	M_SOCKS_RULE=1
-	man_ufw 31337/tcp
 	man_env SOCKS5_ENABLED
 	man_shared "/usr/lib/systemd/system/${SOCKS5_SVC}.service, /etc/danted.conf" "package files: removed by apt-get purge dante-server, not by hand"
 }
@@ -351,7 +348,6 @@ manifest_mtproto() {
 	man_path "${MTPROTO_DIR}"
 	man_path "${APP_DIR}/scripts/run-mtproxy-managed"
 	man_user mtproxy
-	man_ufw 9443/tcp
 	man_env MTPROTO_ENABLED
 	man_shared "${APP_DIR}/deploy/run-mtproxy-managed" "tracked in the repository (the source of the runtime copy)"
 }
@@ -374,7 +370,6 @@ manifest_hysteria2() {
 	man_path /usr/local/bin/hysteria
 	man_path /etc/hysteria
 	man_user hysteria
-	man_ufw 443/udp
 	man_env HYSTERIA2_ENABLED
 	man_shared "${APP_DIR}/scripts/vpnbot-hy2-warp-mark" "tracked in the repository (the source of the installed copy)"
 	man_shared "/usr/local/sbin/acme-reload.sh" "skips the Hysteria2 copy without /etc/hysteria and the restart without the unit"
@@ -454,7 +449,6 @@ unit_prop() { systemctl show -p "$2" --value -- "$1" 2>/dev/null | head -n1; }
 plan_reset() {
 	U_NAME=(); U_FLAG=(); U_LOAD=(); U_ACTIVE=(); U_FILESTATE=(); U_ACTIONS=()
 	F_PATH=(); F_KIND=(); F_STATE=(); F_REASON=(); F_SIZE=(); F_ENTRIES=(); F_STEP=(); F_GROUP=()
-	W_SPEC=(); W_STATE=(); W_LINE=(); W_REASON=()
 	K_NAME=(); K_STATE=(); K_VER=(); K_REASON=(); K_CONFFILES=()
 	S_NAME=(); S_UID=(); S_STATE=(); S_REASON=(); S_GROUP=()
 	E_KEY=""; E_STATE="none"; E_LINE=""
@@ -571,42 +565,6 @@ plan_awg_files() {
 		[[ "${F_STATE[-1]}" == refuse ]] && refused+="${name} "
 	done < <(find "$d" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort)
 	FP+=("awgdir=$M_AWG_DIR re=$M_AWG_RE refused=${refused% }")
-}
-
-plan_ufw() {
-	local spec added="" line re port n other
-	if ! have ufw; then
-		for spec in "${M_UFW[@]}"; do
-			W_SPEC+=("$spec"); W_STATE+=("skip"); W_LINE+=(""); W_REASON+=("ufw is not installed")
-			FP+=("ufw=$spec state=noufw")
-		done
-		return 0
-	fi
-	added="$(ufw show added 2>/dev/null || true)"
-	for spec in "${M_UFW[@]}"; do
-		re="^ufw allow ${spec}( comment '[^']*')?\$"
-		port="${spec%%/*}"; n=0; other=""
-		local any_proto_re="^ufw allow ${port}/(tcp|udp)( comment '[^']*')?\$"
-		local port_re="(^|[^0-9])${port}([^0-9]|\$)"
-		local -a matched=()
-		while IFS= read -r line; do
-			[[ -n "$line" && "$line" == "ufw "* ]] || continue
-			if [[ "$line" =~ $re ]]; then matched+=("$line")
-			elif [[ "$line" =~ $any_proto_re ]]; then :   # the same port, the other protocol's own rule
-			elif [[ "$line" =~ $port_re ]]; then other="$line"; fi
-		done <<<"$added"
-		if ((${#matched[@]} > 0)); then
-			for line in "${matched[@]}"; do
-				W_SPEC+=("$spec"); W_STATE+=("delete"); W_LINE+=("$line"); W_REASON+=(""); n=$((n + 1))
-			done
-		elif [[ -n "$other" ]]; then
-			W_SPEC+=("$spec"); W_STATE+=("skip"); W_LINE+=("$other")
-			W_REASON+=("a rule for port ${port} exists in a non-standard form — remove it by hand if it is this protocol's")
-		else
-			W_SPEC+=("$spec"); W_STATE+=("absent"); W_LINE+=(""); W_REASON+=("")
-		fi
-		FP+=("ufw=$spec deletes=$n other=$([[ -n "$other" ]] && echo 1 || echo 0)")
-	done
 }
 
 plan_packages() {
@@ -753,7 +711,6 @@ compute_plan() {
 	plan_unit_files
 	plan_paths
 	plan_awg_files
-	plan_ufw
 	plan_packages
 	plan_users
 	plan_env
@@ -769,7 +726,6 @@ nothing_to_do_eval() {
 	NOTHING=1
 	for i in "${!U_NAME[@]}"; do [[ -n "${U_ACTIONS[$i]}" ]] && NOTHING=0; done
 	for i in "${!F_PATH[@]}"; do [[ "${F_STATE[$i]}" == delete ]] && NOTHING=0; done
-	for i in "${!W_SPEC[@]}"; do [[ "${W_STATE[$i]}" == delete ]] && NOTHING=0; done
 	for i in "${!K_NAME[@]}"; do [[ "${K_STATE[$i]}" == purge ]] && NOTHING=0; done
 	for i in "${!S_NAME[@]}"; do [[ "${S_STATE[$i]}" == delete ]] && NOTHING=0; done
 	[[ "$E_STATE" == set_false || "$E_STATE" == append ]] && NOTHING=0
@@ -790,7 +746,7 @@ nothing_to_do_eval() {
 
 plan_json() {
 	local i
-	local -a units=() files=() ufw=() pkgs=() users=() shared=() blocks=() warns=()
+	local -a units=() files=() pkgs=() users=() shared=() blocks=() warns=()
 	for i in "${!U_NAME[@]}"; do
 		units+=("$(jobj unit "$(jstr "${U_NAME[$i]}")" load "$(jstr "${U_LOAD[$i]}")" active "$(jstr "${U_ACTIVE[$i]}")" \
 			file_state "$(jstr "${U_FILESTATE[$i]}")" actions "$(jstr "${U_ACTIONS[$i]}")" \
@@ -800,9 +756,6 @@ plan_json() {
 		files+=("$(jobj path "$(jstr "${F_PATH[$i]}")" kind "$(jstr "${F_KIND[$i]}")" state "$(jstr "${F_STATE[$i]}")" \
 			reason "$(jstr "${F_REASON[$i]}")" size "$(jnum "${F_SIZE[$i]}")" entries "$(jnum "${F_ENTRIES[$i]}")" \
 			step "$(jstr "${F_STEP[$i]}")" group "$(jstr "${F_GROUP[$i]}")")")
-	done
-	for i in "${!W_SPEC[@]}"; do
-		ufw+=("$(jobj rule "$(jstr "${W_SPEC[$i]}")" state "$(jstr "${W_STATE[$i]}")" line "$(jstr "${W_LINE[$i]}")" reason "$(jstr "${W_REASON[$i]}")")")
 	done
 	for i in "${!K_NAME[@]}"; do
 		pkgs+=("$(jobj name "$(jstr "${K_NAME[$i]}")" state "$(jstr "${K_STATE[$i]}")" version "$(jstr "${K_VER[$i]}")" reason "$(jstr "${K_REASON[$i]}")")")
@@ -816,7 +769,7 @@ plan_json() {
 	jobj ok true version "$(jnum "$HELPER_VERSION")" protocol "$(jstr "$PROTO")" sha256 "$(jstr "$PLAN_SHA")" \
 		state "$(jstr "$STATE")" nothing_to_do "$(jbool "$NOTHING")" blocking "$(jarr "${blocks[@]}")" \
 		warnings "$(jarr "${warns[@]}")" units "$(jarr "${units[@]}")" files "$(jarr "${files[@]}")" \
-		ufw "$(jarr "${ufw[@]}")" packages "$(jarr "${pkgs[@]}")" users "$(jarr "${users[@]}")" \
+		packages "$(jarr "${pkgs[@]}")" users "$(jarr "${users[@]}")" \
 		env "$(jobj key "$(jstr "$E_KEY")" state "$(jstr "$E_STATE")")" \
 		marker "$(jobj path "$(jstr "${MARKER_DIR}/${PROTO}")" state "$(jstr "$MARKER_STATE")")" \
 		skipped_shared "$(jarr "${shared[@]}")" backup_dir "$(jstr "$BACKUP_DIR")" \
@@ -826,18 +779,17 @@ plan_json() {
 
 manifest_json() {
 	build_manifest
-	local -a u=() uf=() p=() w=() k=() s=() sh=() tp=() i
+	local -a u=() uf=() p=() k=() s=() sh=() tp=() i
 	for i in "${!M_UNITS[@]}"; do u+=("$(jobj unit "$(jstr "${M_UNITS[$i]}")" flag "$(jstr "${M_UNIT_FLAGS[$i]}")")"); done
 	for i in "${M_UNIT_FILES[@]}"; do uf+=("$(jstr "$i")"); done
 	for i in "${M_PATHS[@]}"; do p+=("$(jstr "$i")"); done
-	for i in "${M_UFW[@]}"; do w+=("$(jstr "$i")"); done
 	for i in "${M_PKGS[@]}"; do k+=("$(jstr "$i")"); done
 	for i in "${M_USERS[@]}"; do s+=("$(jstr "$i")"); done
 	for i in "${M_SHARED[@]}"; do sh+=("$(jobj what "$(jstr "${i%%|*}")" reason "$(jstr "${i#*|}")")"); done
 	for i in "${M_TEMPLATES[@]}"; do tp+=("$(jstr "$i")"); done
 	jobj protocol "$(jstr "$PROTO")" units "$(jarr "${u[@]}")" templates "$(jarr "${tp[@]}")" \
 		unit_files "$(jarr "${uf[@]}")" paths "$(jarr "${p[@]}")" awg_dir "$(jstr "$M_AWG_DIR")" awg_regex "$(jstr "$M_AWG_RE")" \
-		ufw "$(jarr "${w[@]}")" packages "$(jarr "${k[@]}")" users "$(jarr "${s[@]}")" \
+		packages "$(jarr "${k[@]}")" users "$(jarr "${s[@]}")" \
 		socks_rule "$(jbool "$M_SOCKS_RULE")" socks_prefix "$(jstr "${SOCKS_PREFIX:-}")" socks_shell "$(jstr "${SOCKS_SHELL:-}")" \
 		env_key "$(jstr "$M_ENV_KEY")" skipped_shared "$(jarr "${sh[@]}")"
 	printf '\n'
@@ -849,7 +801,6 @@ manifest_json() {
 TOUCHED_REL=()      # archive members restored on rollback (relative host paths)
 DONE_UNITS=()       # index into U_* of every unit whose state we changed
 MASKED_UNITS=()
-UFW_DELETED=()      # the `ufw show added` lines we removed
 PKG_PURGED=()       # "name|version"
 USERS_DELETED=()    # "passwd-line|group-line|shadow-hash"
 ENV_CHANGED=0
@@ -970,7 +921,7 @@ step_backup() {
 		printf 'Manual rollback of the %s uninstall (as root):\n' "$PROTO"
 		printf '  tar -xzf %s -C / --numeric-owner --xattrs --acls --no-overwrite-dir --exclude=%s\n' "$ARCHIVE" "$META"
 		printf '  rm -f %s/%s && systemctl daemon-reload\n' "$MARKER_DIR" "$PROTO"
-		printf 'then by hand, from %s/: re-add ufw rules (ufw-show-added.txt), reinstall packages\n' "$META"
+		printf 'then by hand, from %s/: reinstall packages\n' "$META"
 		printf '(packages.txt), recreate users (getent-*.txt), unmask/enable/start units (units.txt).\n'
 	} >"$STAGE/$META/ROLLBACK.txt"
 
@@ -1108,37 +1059,6 @@ step_files() {
 	return 0
 }
 
-# --- step 6: ufw ---------------------------------------------------------------
-step_ufw() {
-	local i spec added st re
-	local -A done_spec=()
-	for i in "${!W_SPEC[@]}"; do
-		spec="${W_SPEC[$i]}"
-		case "${W_STATE[$i]}" in
-		absent) ABSENT+=("$(item ufw "$spec")"); continue ;;
-		skip) SKIPPED+=("$(item ufw "$spec" "${W_REASON[$i]}")"); continue ;;
-		esac
-		[[ -n "${done_spec[$spec]:-}" ]] && { UFW_DELETED+=("${W_LINE[$i]}"); continue; }
-		done_spec[$spec]=1
-		UFW_DELETED+=("${W_LINE[$i]}")
-		run ufw delete allow "$spec" || { fail_step ufw "ufw delete allow $spec failed: ${RUN_TAIL:-}"; return 1; }
-		REMOVED+=("$(item ufw "$spec" "${W_LINE[$i]#ufw }")")
-	done
-	((${#done_spec[@]} > 0)) || return 0
-	added="$(ufw show added 2>/dev/null || true)"
-	st="$(ufw status 2>/dev/null || true)"
-	for spec in "${!done_spec[@]}"; do
-		re="^ufw allow ${spec}( comment '[^']*')?\$"
-		while IFS= read -r i; do
-			[[ "$i" =~ $re ]] && { fail_step ufw "ufw still has: $i"; return 1; }
-		done <<<"$added"
-		if grep -qE "^${spec}( \(v6\))?[[:space:]]" <<<"$st"; then
-			fail_step ufw "ufw status still lists ${spec}"; return 1
-		fi
-	done
-	return 0
-}
-
 # --- step 7: packages ----------------------------------------------------------
 step_packages() {
 	local i pkg st
@@ -1260,7 +1180,7 @@ rb() { local what="$1"; shift; if ! run "$@"; then RB_ERRORS+=("$what: ${RUN_TAI
 rollback() {
 	trap '' INT TERM HUP
 	log "ROLLBACK after a failure at step ${FAIL_STEP}"
-	local i u entry pw gr sh name uid gid gecos home shell line spec comment
+	local i u entry pw gr sh name uid gid gecos home shell line
 	# 1. files (unit files, drop-ins, enable links, paths, .env) from the archive
 	if ((${#TOUCHED_REL[@]} > 0)); then
 		rb "restore files" tar -xzf "$(hp "$ARCHIVE")" -C "$(hp /)" --numeric-owner --preserve-permissions \
@@ -1298,16 +1218,6 @@ rollback() {
 		local k="${DONE_UNITS[$i]}"
 		u="${U_NAME[$k]}"
 		[[ "${U_ACTIVE[$k]}" == active ]] && rb "start $u" systemctl start -- "$u"
-	done
-	# 5. ufw rules, with their comments
-	for line in "${UFW_DELETED[@]}"; do
-		spec="${line#ufw allow }"; comment=""
-		if [[ "$spec" == *" comment '"*"'" ]]; then
-			comment="${spec#* comment \'}"; comment="${comment%\'}"; spec="${spec%% comment *}"
-			rb "ufw allow $spec" ufw allow "$spec" comment "$comment"
-		else
-			rb "ufw allow $spec" ufw allow "$spec"
-		fi
 	done
 	# 6. marker
 	if ((MARKER_WRITTEN)); then rb "remove marker" rm -f -- "$(hp "${MARKER_DIR}/${PROTO}")"; fi
@@ -1383,7 +1293,7 @@ cmd_apply() {
 	fi
 	IN_MUTATION=1
 	local s
-	for s in units files ufw packages users env marker; do
+	for s in units files packages users env marker; do
 		CUR_STEP="$s"
 		if ! "step_${s}" || ! selftest_fault "$s"; then
 			ERRORS+=("${FAIL_MSG}")
