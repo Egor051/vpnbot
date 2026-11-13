@@ -13,7 +13,9 @@
 
 Бот никогда не выполняет переданную ему команду, кнопки «shell» нет. Режим — это
 фиксированный набор helper'ов из [`scripts/wizard/`](../scripts/wizard/), которые
-`deploy.sh` ставит в `/usr/local/sbin` (`OUT_OF_REPO_HELPERS`, политика `required`):
+`deploy.sh` ставит в `/usr/local/sbin` (`OUT_OF_REPO_HELPERS`, политика `required`), а на
+свежем сервере — `scripts/install.sh` (`INSTALL_HELPERS`, те же файлы, откатываются
+вместе с остальным при неудачной установке):
 
 | Установленный helper | Роль |
 |---|---|
@@ -133,8 +135,10 @@ namespace PID 1 (`nsenter --mount=/proc/1/ns/mnt`), так же как `vpn-bot-
 
 * **plan** — `git fetch origin main`; коммиты `HEAD..origin/main`,
   `CURRENT_SCHEMA_VERSION` обеих версий и живая схема; затем `CHECK=1 redeploy.sh`
-  (deploy.sh `PHASE1_ONLY=1`: вся Phase 1 только на чтение, включая тесты). Уже на
-  `origin/main` — делать нечего, запуск на этом заканчивается.
+  (deploy.sh `PHASE1_ONLY=1`: вся Phase 1 только на чтение, включая тесты). `HEAD` уже
+  **равен** `origin/main` (полные SHA — та же проверка, что в deploy.sh) — делать нечего,
+  запуск на этом заканчивается. Checkout *впереди* `origin/main` (локальный коммит) — не
+  no-op: план предупреждает, что деплой сбросит checkout и эти коммиты пропадут.
   План запоминает точную ревизию `origin/main`, которую описывает.
 * **подтверждение** (TOTP) → **apply** — только эта ревизия: снова `git fetch origin
   main`, и если `origin/main` сдвинулся после плана (другие коммиты, возможно, другая

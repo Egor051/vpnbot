@@ -153,19 +153,31 @@ def step_plan(ctx: Any) -> int:
     _, target = git(ctx, "rev-parse", "origin/main")
     # The revision this plan describes: apply deploys it or nothing (see step_apply).
     save_plan(ctx, target.strip())
+    _, head_full = git(ctx, "rev-parse", "HEAD")
     _, count = git(ctx, "rev-list", "--count", "HEAD..origin/main")
+    _, ahead = git(ctx, "rev-list", "--count", "origin/main..HEAD")
     _, log = git(ctx, "log", "--oneline", "--no-decorate", f"--max-count={MAX_COMMITS}", "HEAD..origin/main")
     schema_head, schema_tip, schema_live = schema_of(ctx, "HEAD"), schema_of(ctx, "origin/main"), live_schema()
     n = int(count.strip()) if count.strip().isdigit() else 0
+    local_only = int(ahead.strip()) if ahead.strip().isdigit() else 0
     lines = [f"HEAD {head} → origin/main {tip}: {n} commit(s)"]
     lines += [f"  {c}" for c in log.strip().splitlines()]
     if n > MAX_COMMITS:
         lines.append(f"  … and {n - MAX_COMMITS} more")
+    if local_only:
+        # HEAD..origin/main does not see these (git rev-list: A..B is ^A B), and
+        # deploy.sh resets the checkout to origin/main: they are dropped.
+        lines.append(
+            f"⚠ the checkout has {local_only} commit(s) that are NOT on origin/main — "
+            "the deploy resets it to origin/main and they are gone"
+        )
     if schema_tip != schema_head:
         lines.append(f"schema migration: {schema_head} → {schema_tip} (live {schema_live})")
     else:
         lines.append(f"schema: no migration ({schema_tip}, live {schema_live})")
-    if n == 0 and ctx.params.get("force") != "1":
+    # The same test deploy.sh makes (HEAD == origin/main), never "no incoming commits":
+    # a checkout AHEAD of origin/main has none and is still not at origin/main.
+    if head_full.strip() and head_full.strip() == target.strip() and ctx.params.get("force") != "1":
         lines.append("already at origin/main — nothing to deploy")
         ctx.event("plan", text="\n".join(lines), noop=True, commits=0, schema_from=schema_head, schema_to=schema_tip)
         return 0

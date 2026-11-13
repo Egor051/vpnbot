@@ -13,7 +13,9 @@ The admin panel has two new sections, both **SUPERADMIN only**:
 
 The bot never runs a command it was given and has no "shell" button. A mode is a fixed
 set of helpers in [`scripts/wizard/`](../scripts/wizard/), installed to
-`/usr/local/sbin` by `deploy.sh` (`OUT_OF_REPO_HELPERS`, policy `required`):
+`/usr/local/sbin` by `deploy.sh` (`OUT_OF_REPO_HELPERS`, policy `required`) and, on a
+fresh host, by `scripts/install.sh` (`INSTALL_HELPERS`, the same files, rolled back with
+the rest of a failed install):
 
 | Installed helper | Role |
 |---|---|
@@ -135,7 +137,9 @@ A thin wrapper around the one supported redeploy path, `scripts/redeploy.sh`:
 * **plan** — `git fetch origin main`; the commits `HEAD..origin/main`, the
   `CURRENT_SCHEMA_VERSION` of both and the live schema; then `CHECK=1 redeploy.sh`
   (deploy.sh `PHASE1_ONLY=1`: the whole read-only Phase 1, the test suite included).
-  Already at `origin/main`: nothing to do, the run ends there.
+  `HEAD` already **is** `origin/main` (full SHAs — deploy.sh's own test): nothing to do,
+  the run ends there. A checkout *ahead* of `origin/main` (a local commit) is not a no-op:
+  the plan warns that the deploy resets the checkout and those commits are gone.
   The plan records the exact `origin/main` revision it describes.
 * **confirm** (TOTP) → **apply** — only that revision: `git fetch origin main` again, and
   if `origin/main` moved since the plan (other commits, maybe another migration than the

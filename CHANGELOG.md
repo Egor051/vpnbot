@@ -10,7 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Setup wizard: «🧙 Мастер настройки» in the admin panel (docs/wizard.md), SUPERADMIN only.**
   Every mode is a fixed set of root helpers in `scripts/wizard/` (stdlib Python), installed to
-  `/usr/local/sbin` by deploy.sh (`OUT_OF_REPO_HELPERS`, `required` on main):
+  `/usr/local/sbin` by deploy.sh (`OUT_OF_REPO_HELPERS`, `required` on main) and on a fresh host
+  by `scripts/install.sh` (`INSTALL_HELPERS`, manifest-backed, rolled back on failure):
   `vpn-bot-wizard` (the only entry point: `launch --mode M --run N --phase plan|execute
   [--param k=v]`), `vpn-bot-wizard-lib`, `vpn-bot-wizard-selfcheck`, `vpn-bot-wizard-dump`,
   `vpn-bot-wizard-update`. No command execution, no «shell»: the launcher refuses any mode,
@@ -41,7 +42,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   still matches a secret pattern. Sent as a file.
 - **Wizard mode «Обновить бота»**: the plan is `git fetch` + the commits `HEAD..origin/main` +
   the schema migration + `CHECK=1 redeploy.sh` (Phase 1), and records the exact `origin/main`
-  revision it shows; after the confirmation the full redeploy runs in the wizard's unit — only
+  revision it shows (a no-op only when `HEAD` IS that revision; local commits not on
+  `origin/main` are named as lost by the deploy); after the confirmation the full redeploy runs in the wizard's unit — only
   for that revision (origin/main moved since the plan: nothing is deployed); the report after the restart is DEPLOY OK (`succeeded`),
   the ROLLBACK REPORT (`rolled_back`), or `failed` without a report.
 - **`REDEPLOY_ATTACH=pipe`** for `scripts/redeploy.sh`: `systemd-run --wait --pipe` under `set -o

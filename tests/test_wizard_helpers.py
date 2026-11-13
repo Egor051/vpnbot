@@ -359,7 +359,7 @@ def test_dump_verify_refuses_an_artifact_with_a_secret(host: Host) -> None:
 TIP = "b" * 40
 
 
-def _git_stub(host: Host, *, commits: int = 2) -> None:
+def _git_stub(host: Host, *, commits: int = 2, head: str = "a" * 40, ahead: int = 0) -> None:
     """origin/main is TIP unless $SD/tip says otherwise (a push after the plan)."""
     host.stub("git", rf'''
 case "$*" in
@@ -367,7 +367,9 @@ case "$*" in
   *"rev-parse --short HEAD"*) echo aaaaaaa ;;
   *"rev-parse --short origin/main"*) echo bbbbbbb ;;
   *"rev-parse origin/main"*) cat "$SD/tip" 2>/dev/null || echo {TIP} ;;
-  *"rev-list --count"*) echo {commits} ;;
+  *"rev-parse HEAD"*) echo {head} ;;
+  *"rev-list --count HEAD..origin/main"*) echo {commits} ;;
+  *"rev-list --count origin/main..HEAD"*) echo {ahead} ;;
   *"log --oneline"*) [ {commits} -gt 0 ] && printf 'bbbbbbb feat: two\ncccccc1 fix: one\n' ;;
   *"show HEAD:db/database.py"*) echo "CURRENT_SCHEMA_VERSION = 41" ;;
   *"show origin/main:db/database.py"*) echo "CURRENT_SCHEMA_VERSION = 42" ;;
@@ -413,7 +415,7 @@ def test_update_plan_shows_commits_and_the_migration_and_runs_check(host: Host) 
 
 
 def test_update_plan_is_a_noop_when_already_at_origin_main(host: Host) -> None:
-    _git_stub(host, commits=0)
+    _git_stub(host, commits=0, head=TIP)
     _redeploy_stub(host, "ok")
     assert host.launcher("run", "--mode", "update", "--run", "21", "--phase", "plan").returncode == 0
     plan = [e for e in host.events(21) if e["event"] == "plan"][0]
@@ -656,3 +658,15 @@ def test_launch_reenters_the_host_mount_namespace(monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("VPN_BOT_WIZARD_HOSTNS")
     namespaces["/proc/1/ns/mnt"] = "mnt:[1]"
     assert launcher.host_mount_namespace_argv(argv) is None  # already in the host's
+
+
+def test_update_plan_is_not_a_noop_when_the_checkout_is_ahead(host: Host) -> None:
+    """A local hotfix commit: nothing incoming (HEAD..origin/main is empty), yet HEAD is
+    not origin/main — the deploy would reset it. That is a plan, with a warning."""
+    _git_stub(host, commits=0, head="e" * 40, ahead=1)
+    _redeploy_stub(host, "ok")
+    assert host.launcher("run", "--mode", "update", "--run", "35", "--phase", "plan").returncode == 0
+    plan = [e for e in host.events(35) if e["event"] == "plan"][0]
+    assert plan["noop"] is False
+    assert "1 commit(s) that are NOT on origin/main" in plan["text"]
+    assert host.calls_of("bash")  # the CHECK ran
