@@ -1,0 +1,130 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-totp-reset — remove a superadmin's TOTP second factor, from a root shell.
+
+The way back for a superadmin who lost BOTH the phone with the authenticator and the
+backup codes (docs/wizard.md#emergency-reset). It needs root on the host — the same
+trust as editing .env — and nothing from Telegram.
+
+  vpn-bot-totp-reset <telegram_id> [--yes] [--db PATH] [--env FILE]
+
+Deletes the user's row in totp_credentials and every backup code
+(totp_backup_codes), in one transaction, and writes the audit row
+`totp_reset_cli` (actor NULL, entity security/<telegram_id>). The bot reads TOTP
+state from the database on every check, so the reset takes effect at once; an
+elevation the bot still holds in memory expires within 5 minutes (or restart the
+bot: `systemctl restart vpn-bot`). The user can enable TOTP again from
+«Безопасность».
+
+The database is DB_PATH from /opt/vpn-service/.env (default
+/opt/vpn-service/data/vpn.db); --db overrides it. Without --yes it asks on a
+terminal and refuses without one.
+
+Exit: 0 reset (or nothing to reset: says so), 2 usage, 3 cannot run.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+APP_DIR = "/opt/vpn-service"
+DEFAULT_DB = f"{APP_DIR}/data/vpn.db"
+
+
+def env_value(path: Path, name: str) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    value = ""
+    for line in text.splitlines():
+        m = re.match(rf"^\s*(?:export\s+)?{name}\s*=\s*(.*)$", line)
+        if m:
+            raw = m.group(1).strip()
+            if raw[:1] in ("'", '"'):
+                end = raw.find(raw[0], 1)
+                value = raw[1:end] if end > 0 else raw[1:]
+            else:
+                value = re.sub(r"\s+#.*$", "", raw).strip()
+    return value
+
+
+def usage(msg: str) -> int:
+    print(f"vpn-bot-totp-reset: {msg}\nusage: vpn-bot-totp-reset <telegram_id> [--yes] [--db PATH] [--env FILE]", file=sys.stderr)
+    return 2
+
+
+def main(argv: list[str]) -> int:
+    user_id: int | None = None
+    yes = False
+    db_arg = env_arg = ""
+    rest = list(argv)
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--yes":
+            yes = True
+        elif arg in ("--db", "--env") and rest:
+            value = rest.pop(0)
+            if arg == "--db":
+                db_arg = value
+            else:
+                env_arg = value
+        elif re.fullmatch(r"[1-9][0-9]{0,14}", arg) and user_id is None:
+            user_id = int(arg)
+        else:
+            return usage(f"unexpected argument {arg!r}")
+    if user_id is None:
+        return usage("the Telegram id is required")
+    if os.geteuid() != 0 and os.environ.get("VPN_BOT_TOTP_RESET_SELFTEST") != "1":
+        print("vpn-bot-totp-reset: run as root", file=sys.stderr)
+        return 3
+    if not yes and not sys.stdin.isatty():
+        print("vpn-bot-totp-reset: not a terminal — pass --yes", file=sys.stderr)
+        return 2
+    db_path = Path(db_arg or env_value(Path(env_arg or f"{APP_DIR}/.env"), "DB_PATH") or DEFAULT_DB)
+    if not db_path.is_file():
+        print(f"vpn-bot-totp-reset: no database at {db_path}", file=sys.stderr)
+        return 3
+    if not yes:
+        answer = input(f"Remove TOTP and all backup codes of Telegram user {user_id}? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("vpn-bot-totp-reset: nothing changed")
+            return 0
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=30, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                codes = conn.execute("DELETE FROM totp_backup_codes WHERE telegram_user_id = ?", (user_id,)).rowcount
+                creds = conn.execute("DELETE FROM totp_credentials WHERE telegram_user_id = ?", (user_id,)).rowcount
+                if creds or codes:
+                    conn.execute(
+                        "INSERT INTO audit_log (actor_user_id, action, entity_type, entity_id, details_json, created_at) "
+                        "VALUES (NULL, 'totp_reset_cli', 'security', ?, ?, ?)",
+                        (str(user_id), json.dumps({"backup_codes_removed": codes, "via": "vpn-bot-totp-reset"}), now),
+                    )
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        print(f"vpn-bot-totp-reset: database error: {exc}", file=sys.stderr)
+        return 3
+    if not creds and not codes:
+        print(f"vpn-bot-totp-reset: Telegram user {user_id} has no TOTP — nothing to reset")
+        return 0
+    print(f"vpn-bot-totp-reset: TOTP of Telegram user {user_id} removed ({codes} backup code(s)); audit row totp_reset_cli written")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
