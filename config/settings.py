@@ -765,6 +765,10 @@ class Settings:
     # Seconds between reads of the host check state file
     # (/var/lib/vpn-bot-host-check/last.json); 0 disables the alerts.
     host_check_interval: int = 300
+    # The port ssh listens on (both roles; docs/host-state.md#the-ssh-port). The deploy
+    # and scripts/vpn-bot-ssh-port move ssh there in two proven phases; the bot only
+    # reports the migration and offers «Подтвердить». Default 54321.
+    ssh_port: int = 54321
     # Appended to the display name of standalone keys and basic-subscription
     # members (``<label>_🇫🇮``). Display only — never part of email_label.
     server_flag_emoji: str = "🇫🇮"
@@ -1386,5 +1390,6 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         relay_env_vars=relay_env_vars,
         relay_health_interval=_int_range("RELAY_HEALTH_INTERVAL", 300, 0, 86400),
         host_check_interval=_int_range("HOST_CHECK_INTERVAL", 300, 0, 86400),
+        ssh_port=_int_range("SSH_PORT", 54321, 1, 65535),
         server_flag_emoji=server_flag_emoji,
     )

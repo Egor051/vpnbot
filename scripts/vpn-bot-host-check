@@ -292,7 +292,7 @@ resolve_role() {
 # --------------------------------------------------------------------------- #
 # The registry: MANAGED_HOST_FILES of this role, and the units the repo installs.
 # --------------------------------------------------------------------------- #
-declare -a REG=()            # "src|dst|class|opts" — this role, gate open; dst logical
+declare -a REG=()            # "src|dst|class|opts" — this role, gate open; src a path, dst logical
 declare -a REG_ABSENT=()     # retired dsts of this role
 declare -A PRISTINE_SRC=()   # class pristine dst -> its source (dpkg:<pkg> | ucf:<template>)
 declare -A PRISTINE_COPY=()  # --pristine: dst -> the package default Phase 2 restores
@@ -329,14 +329,18 @@ load_registry() {
     if [[ "$class" == pristine ]]; then PRISTINE_SRC["$dst"]="$src"; continue; fi
     if [[ "$class" == absent ]]; then REG_ABSENT+=("$dst"); continue; fi
     if [[ -z "$REGISTRY_FILE" ]] && ! gate_open "${opts:-}"; then continue; fi
-    if [[ ! -f "${APP_DIR}/${src}" ]]; then
-      row WARN registry "$src" "$dst" "the repo source ${src} is not in ${APP_DIR} — ${dst} is not judged"
+    # An absolute src is a copy deploy.sh rendered (opts render=ssh-port) for this run;
+    # without --registry the template itself stands in (its @SSH_PORT@ lines carry
+    # only Port, a multi-value keyword this check never judges).
+    if [[ "$src" != /* ]]; then src="${APP_DIR}/${src}"; fi
+    if [[ ! -f "$src" ]]; then
+      row WARN registry "$src" "$dst" "the repo source ${src} is not there — ${dst} is not judged"
       continue
     fi
     REG+=("${src}|${dst}|${class}|${opts:-}")
     REPO["$dst"]=1
     if (( PRE_INSTALL )); then
-      OVERLAY["$dst"]="${APP_DIR}/${src}"
+      OVERLAY["$dst"]="$src"
       legacy="$(opt_of "${opts:-}" legacy)"
       if [[ -n "$legacy" ]]; then RETIRED["$(logical "$legacy")"]=1; fi
     fi
@@ -779,7 +783,7 @@ gather_sshd() {
   for e in "${REG[@]}"; do
     IFS='|' read -r src dst class _ <<< "$e"
     if [[ "$dst" == "${SSHD_DIR}/"* ]]; then
-      expect_from sshd "${APP_DIR}/${src}" "$dst" "$SSHD_TOKENIZER" first
+      expect_from sshd "$src" "$dst" "$SSHD_TOKENIZER" first
     fi
   done
   sshd_walk "$SSHD_CONFIG" global 0
@@ -844,7 +848,7 @@ gather_sysctl() {
   for e in "${REG[@]}"; do
     IFS='|' read -r src dst class _ <<< "$e"
     if [[ "$dst" == /etc/sysctl.d/*.conf ]]; then
-      expect_from sysctl "${APP_DIR}/${src}" "$dst" "$SYSCTL_PARSER" last
+      expect_from sysctl "$src" "$dst" "$SYSCTL_PARSER" last
     fi
   done
   readarray -t ov < <(overlay_in '/etc/sysctl.d/*.conf')
@@ -896,7 +900,7 @@ gather_systemd_conf() {
     for e in "${REG[@]}"; do
       IFS='|' read -r src dst class _ <<< "$e"
       if [[ "$dst" == "/etc/systemd/${x}.conf.d/"*.conf ]]; then
-        expect_from "$x" "${APP_DIR}/${src}" "$dst" "$INI_PARSER" last
+        expect_from "$x" "$src" "$dst" "$INI_PARSER" last
         have_repo=1
       fi
     done
@@ -1257,6 +1261,77 @@ invariant_rows() {
 }
 
 # --------------------------------------------------------------------------- #
+# The SSH port — SSH_PORT in .env (docs/host-state.md#the-ssh-port). The decision is
+# scripts/vpn-bot-ssh-port's `plan` (the checkout's copy, read-only: `systemctl show`,
+# `ss`, `sshd -T`, the journal); this only turns its answer into rows:
+#   steady   ssh.socket holds exactly SSH_PORT (OK), and so does the fallback — sshd
+#            -T, i.e. ssh.service started without the socket (OK, else MISMATCH)
+#   start    SSH_PORT is not the port ssh listens on and no migration has started:
+#            MISMATCH (the next deploy starts phase 1); --pre-install: PENDING
+#   wait     phase 1 waits for a proof: PENDING, with what it waits for
+#   finish   proven: PENDING (phase 2: vpn-bot-ssh-port.service or the deploy) — a
+#            phase 2 that failed and was reverted is a WARN with its reason
+#   cancel   SSH_PORT went back before a proof: PENDING (the next deploy drops the other)
+#   refused  SSH_PORT is no port, the port of a service of this role, or ssh.socket is
+#            not active: MISMATCH
+# --------------------------------------------------------------------------- #
+SSH_PORT_HELPER_REL="scripts/vpn-bot-ssh-port"
+SSH_PORT_DROPIN="/etc/ssh/sshd_config.d/00-vpn-bot-port.conf"
+SSH_SOCKET_DROPIN="/etc/systemd/system/ssh.socket.d/override.conf"
+
+ssh_port_rows() {
+  local helper="${APP_DIR}/${SSH_PORT_HELPER_REL}" out line rc
+  local -A P=()
+  local -a args=(--env "$ENV_FILE" --repo "$APP_DIR" --role "$ROLE")
+  if [[ ! -f "$helper" ]]; then
+    row INFO ssh-port SSH_PORT "-" "the checkout has no ${SSH_PORT_HELPER_REL} — the SSH port is not judged"
+    return 0
+  fi
+  if [[ -n "$ROOT" ]]; then args+=(--root "$ROOT"); fi
+  out="$(python3 -I "$helper" "${args[@]}" plan 2>/dev/null)" && rc=0 || rc=$?
+  # key=value lines, read as data — never evaluated.
+  while IFS= read -r line; do
+    if [[ "$line" == *=* ]]; then P["${line%%=*}"]="${line#*=}"; fi
+  done <<< "$out"
+  case "${P[action]:-}" in
+    refused)
+      row MISMATCH ssh-port SSH_PORT "$ENV_FILE" "${P[error]:-the SSH port plan was refused} — a deploy refuses it too"
+      return 0 ;;
+    "")
+      row WARN ssh-port SSH_PORT "$helper" "the SSH port plan could not run (exit ${rc}) — the SSH port is not judged"
+      return 0 ;;
+  esac
+  case "${P[action]}" in
+    steady)
+      row OK ssh-port ssh.socket "$SSH_SOCKET_DROPIN" "listens on ${P[current]} = SSH_PORT (${P[ssh_port_source]})"
+      if (( PRE_INSTALL )) && [[ -n "${TOUCHED[$SSH_PORT_DROPIN]+x}" ]]; then
+        row PENDING ssh-port fallback "$SSH_PORT_DROPIN" "the deploy installs the Port drop-in now — sshd -T is checked after the install"
+      elif [[ -z "${P[fallback]}" ]]; then
+        row WARN ssh-port fallback "$SSH_PORT_DROPIN" "sshd -T gave no port — the fallback (ssh.service without ssh.socket) is not judged"
+      elif [[ "${P[fallback]}" == "${P[ssh_port]}" ]]; then
+        row OK ssh-port fallback "$SSH_PORT_DROPIN" "sshd -T listens on ${P[fallback]} = SSH_PORT (ssh.service without ssh.socket)"
+      else
+        row MISMATCH ssh-port fallback "$SSH_PORT_DROPIN" "sshd -T would listen on ${P[fallback]}, not on SSH_PORT=${P[ssh_port]}: ssh.service started without ssh.socket (the fallback path) would sit behind the firewall — ${SSH_PORT_DROPIN} is not in effect"
+      fi ;;
+    start)
+      if (( PRE_INSTALL )); then
+        row PENDING ssh-port migration "$SSH_SOCKET_DROPIN" "${P[status]}"
+      else
+        row MISMATCH ssh-port migration "$SSH_SOCKET_DROPIN" "SSH_PORT=${P[ssh_port]}, but ssh.socket listens on ${P[current]} and no migration has started — the next deploy starts it (phase 1: both ports; ${P[from]} closes only after a proof)"
+      fi ;;
+    wait|cancel)
+      row PENDING ssh-port migration "$SSH_SOCKET_DROPIN" "${P[status]}" ;;
+    finish)
+      row PENDING ssh-port migration "$SSH_SOCKET_DROPIN" "${P[status]}$( (( PRE_INSTALL )) || printf ' (vpn-bot-ssh-port.service or the next deploy)')"
+      if [[ -n "${P[last_error]:-}" ]]; then
+        row WARN ssh-port phase2 "$SSH_SOCKET_DROPIN" "the last phase 2 failed and was reverted: ${P[last_error]}"
+      fi ;;
+    *)
+      row WARN ssh-port SSH_PORT "$helper" "unknown SSH port plan '${P[action]}'" ;;
+  esac
+}
+
+# --------------------------------------------------------------------------- #
 # Class pristine (--pristine, pre-install): does restoring the package default change
 # anything effective? Every key of the file's family — not only the repo's — once with
 # the package default in place (the main run) and once with the host copy (a second
@@ -1587,6 +1662,7 @@ main() {
   live_rows
   unit_rows
   invariant_rows
+  ssh_port_rows
   warn_cloud_init
   warn_logrotate
   warn_sudoers

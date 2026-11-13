@@ -71,7 +71,7 @@ SOCKS5-пользователей по префиксу+shell — шаг 2 (сн
 удаляемого** с причинами (nobody, nginx и decoy-сайт, сертификаты и acme.sh,
 `/etc/logrotate.d/xray`, каталоги `/etc/amnezia`, всё out-warp и warp-*, пакеты
 amneziawg*, файлы пакета dante-server, чужие SOCKS5-пользователи, tracked-файлы
-репозитория, база, sshd, порты 22/54321, eth0, sysctl).
+репозитория, база, sshd, порт 22 и SSH-порт (`SSH_PORT`, по умолчанию 54321), eth0, sysctl).
 
 Источник истины — маркер. Бот читает его при старте и после apply: startup reconcile,
 сборщики статистики Xray/AWG/Hysteria2, health-probe Hysteria2, детектор аномалий,

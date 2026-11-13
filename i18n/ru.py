@@ -641,6 +641,27 @@ STRINGS: dict[str, str] = {
         "✅ <b>Состояние хоста: сервер {role} снова в норме</b>\n"
         "Проверка {at}: BEATEN/MISMATCH больше нет."
     ),
+    # ── SSH port migration (SSH_PORT, docs/host-state.md#the-ssh-port) ──────────
+    "ssh_port_started": (
+        "🔐 <b>SSH-порт переезжает: {old} → {new}</b>\n"
+        "SSH теперь и на порту {new} — подключись на него новым соединением и нажми «Подтвердить».\n"
+        "Порт {old} открыт и закроется только после доказательства, что {new} работает снаружи: "
+        "это подтверждение, подключение извне в журнале sshd или проба с main (relay). "
+        "Фаза 1 с {since}."
+    ),
+    "ssh_port_done": (
+        "✅ <b>SSH-порт переехал: {old} → {new}</b>\n"
+        "Доказательство: {proof}. Порт {old} закрыт ({at})."
+    ),
+    "ssh_port_cancelled": (
+        "↩️ <b>Переезд SSH-порта отменён</b>\n"
+        "SSH_PORT снова {old}: порт {new} убран, {old} не закрывался."
+    ),
+    "btn_ssh_port_confirm": "✅ Подтвердить: я зашёл на порт {port}",
+    "ssh_port_confirmed_alert": "Принято: порт {port} подтверждён. Старый порт закроется сейчас.",
+    "ssh_port_confirmed": "🔐 Порт {port} подтверждён.\n<code>{line}</code>",
+    "ssh_port_confirm_stale": "Эта миграция SSH-порта уже не ждёт подтверждения.",
+    "ssh_port_confirm_failed": "vpn-bot-ssh-port не принял подтверждение — подробности в журнале бота.",
     # ── relay panel (admin → «🛰 Управлять relay») ───────────────────────────
     "btn_relays": "🛰 Управлять relay",
     "relays_title": "<b>🛰 Relay</b>",

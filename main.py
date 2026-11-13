@@ -54,6 +54,7 @@ async def main() -> None:
     from bot.handlers.admin_bundles import runner as bundle_reconcile_runner
     from services.anomaly_detection import anomaly_detection_loop
     from services.host_check import host_check_loop
+    from services.ssh_port import ssh_port_loop
     from services.key_expiry import key_expiry_loop
     from services.offsite_backup import offsite_backup_loop
     from services.relay_health import relay_health_loop
@@ -76,6 +77,7 @@ async def main() -> None:
         warp_split_feeds_task: asyncio.Task[None] | None = None
         relay_health_task: asyncio.Task[None] | None = None
         host_check_task: asyncio.Task[None] | None = None
+        ssh_port_task: asyncio.Task[None] | None = None
         # Protocols removed from the host: every backend loop below asks this on
         # each pass (a protocol can be removed while the bot runs).
         uninstalled = services.protocol_uninstall.registry if services.protocol_uninstall is not None else None
@@ -198,6 +200,13 @@ async def main() -> None:
                     name="host-check-alerts",
                 )
                 logger.info("Host check alerts started (interval=%ds)", settings.host_check_interval)
+            # The SSH port migration (/var/lib/vpn-bot/ssh-migration.json): one
+            # message per step, on the host check's interval.
+            if settings.host_check_interval > 0 and services.ssh_port is not None:
+                ssh_port_task = asyncio.create_task(
+                    ssh_port_loop(services.ssh_port, settings.host_check_interval),
+                    name="ssh-port-alerts",
+                )
             server_status_task = asyncio.create_task(
                 services.server_status.run(),
                 name="server-status-sampler",
@@ -271,6 +280,9 @@ async def main() -> None:
             if host_check_task is not None:
                 host_check_task.cancel()
                 await asyncio.gather(host_check_task, return_exceptions=True)
+            if ssh_port_task is not None:
+                ssh_port_task.cancel()
+                await asyncio.gather(ssh_port_task, return_exceptions=True)
             if server_status_task is not None:
                 server_status_task.cancel()
                 await asyncio.gather(server_status_task, return_exceptions=True)

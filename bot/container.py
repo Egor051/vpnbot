@@ -28,6 +28,7 @@ from services.proxy import ProxyService
 from services.relay_health import RelayHealthSupervisor
 from services.relay_management import RelayService
 from services.server_status import ServerStatusService
+from services.ssh_port import SshPortMonitor
 from services.socks5 import Socks5Service
 from services.traffic_stats import TrafficStatsService
 from services.trial_access import TrialAccessService
@@ -98,3 +99,7 @@ class Services:
     # reads /var/lib/vpn-bot-host-check/last.json, alerts on a change. None only in
     # lightweight test doubles; HOST_CHECK_INTERVAL gates the loop in main.py.
     host_check: HostCheckMonitor | None = None
+    # The SSH port migration (SSH_PORT, scripts/vpn-bot-ssh-port): tells the
+    # superadmins when phase 1 starts (with «Подтвердить») and when it is done; the
+    # button runs the helper's confirm. None only in lightweight test doubles.
+    ssh_port: SshPortMonitor | None = None

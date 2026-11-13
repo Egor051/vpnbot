@@ -104,4 +104,12 @@ Cmnd_Alias VPN_BOT_WARP_SPLIT = \
     /usr/local/sbin/vpn-bot-warp-split-state restart, \
     /usr/local/sbin/vpn-bot-warp-split-state status
 
-vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_UNINSTALL, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT
+# The SSH port migration (docs/host-state.md#the-ssh-port): «Подтвердить» in the bot is
+# one of the proofs that SSH_PORT works from outside. Only the `confirm` verb; the
+# helper (installed by deploy.sh, OUT_OF_REPO_HELPERS) takes exactly
+# --port <port> --since <epoch> --admin <id>, all numeric, refuses any migration but the
+# one waiting for proof, and writes nothing but that proof into its own state file.
+Cmnd_Alias VPN_BOT_SSH_PORT = \
+    /usr/local/sbin/vpn-bot-ssh-port confirm *
+
+vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_UNINSTALL, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT, VPN_BOT_SSH_PORT

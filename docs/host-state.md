@@ -59,7 +59,10 @@ bundle also carries state that is not a deployed file and so is not listed here:
 | `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | `/etc/systemd` | keeps networkd from flushing WARP's `ip rule`s; effective at networkd's next start |
 | `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, from `deploy/vpn-bot-acme-reload.sh` | `/usr/local/sbin` | acme.sh's `Le_ReloadCmd`; only where there is renewal material; [subscription.md](subscription.md#tls-termination) |
 | `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/ssh` | key-only root login; see [ALLOW_SSH_CHANGE](#allow_ssh_change-and-the-lockout-risk) |
-| `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/systemd` | `ListenStream` on 54321 (IPv4 + IPv6) |
+| `/etc/systemd/system/ssh.socket.d/override.conf` | template + host values (`ssh`, `render=ssh-port`) | deploy.sh, rendered from `SSH_PORT` | `/etc/systemd` | `ListenStream` on `SSH_PORT` (IPv4 + IPv6); during a migration on both ports — [The SSH port](#the-ssh-port). For 54321 byte-identical to the old fixed file |
+| `/etc/ssh/sshd_config.d/00-vpn-bot-port.conf` | template + host values (`ssh`, `render=ssh-port`) | deploy.sh, rendered from `SSH_PORT` | `/etc/ssh` | `Port SSH_PORT` (the fallback path: ssh.service without the socket) + `LogLevel VERBOSE` (the journal proof) |
+| `/etc/systemd/system/vpn-bot-ssh-port.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot `vpn-bot-ssh-port advance`: phase 2 of a proven migration; pulled in by `vpn-bot-host-check.service` (`Wants=`), never enabled on its own |
+| `/var/lib/vpn-bot/ssh-migration.json` | state | `vpn-bot-ssh-port` | — | the migration (`from`, `to`, `phase`, `since`, proof); atomic, `root` `0644`; read by the bot |
 | `/etc/ssh/sshd_config` | package default (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh puts the template back | `/etc/ssh` | the provider image's active `PasswordAuthentication yes` / `PermitRootLogin yes` after the `Include` are a LATENT that stops Phase 1: restored once `sshd -T` is proven byte-for-byte the same — no `ALLOW_SSH_CHANGE` |
 | `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh, from `deploy/host/cloud/cloud-init.disabled` | — (in the repo) | empty marker: cloud-init stays off (it rewrote sshd and sudoers on a reboot) |
 | `/etc/systemd/system/vpn-bot-host-check.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot: the host invariants check — [Effective state](#effective-state) |
@@ -69,7 +72,7 @@ bundle also carries state that is not a deployed file and so is not listed here:
 | `/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf` | repo-managed (`unit`, `gate=MTPROTO`) | deploy.sh, from `deploy/mtproxy-vpn-bot-managed.conf` | `/etc/systemd` | only while `MTPROTO_ENABLED=true`; a byte-identical old name `vpnbot-managed.conf` is renamed. With MTProxy off, a leftover drop-in is reported as an orphan |
 | `/etc/systemd/system/vpn-bot.service` | repo-managed | deploy.sh, verbatim | `/etc/systemd` | the privilege-model gates apply |
 | `/etc/systemd/system/<deploy/*.service, *.timer>` | repo-managed | the operator, by hand | `/etc/systemd` | Phase 1's unit-drift gate prints the install commands |
-| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms`, `vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | from `scripts/` |
+| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms`, `vpn-bot-host-check`, `vpn-bot-ssh-port` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | from `scripts/` |
 | `/usr/local/sbin/vpn-bot-{xray,awg,mtproxy}-apply`, `vpn-bot-socks5-user` | backup-only (`installer`) | `deploy/setup-nonroot-helper-mode.sh` | `/usr/local/sbin` | source `deploy/helpers/` |
 | `/usr/local/etc/xray/config.json` | template + host values | the bot (clients) / operator | recovery bundle | structure checked by `deploy/backend-config-sync.py` |
 | `/etc/amnezia/amneziawg/awg0.conf` | template + host values | the bot (peers) / operator | recovery bundle; `/etc/amnezia` | same gate |
@@ -101,6 +104,10 @@ The relay runs no bot, so it sends no offsite backup: its files come back from t
 | `/etc/ssh/sshd_config` | package default (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh puts the template back | as on main |
 | `/usr/local/sbin/vpn-relay-apply` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | |
 | `/usr/local/sbin/vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | the host invariants check |
+| `/usr/local/sbin/vpn-bot-ssh-port` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | the SSH port migration — [The SSH port](#the-ssh-port) |
+| `/etc/systemd/system/ssh.socket.d/override.conf`, `/etc/ssh/sshd_config.d/00-vpn-bot-port.conf` | template + host values (`ssh`, `render=ssh-port`) | deploy.sh, rendered from `SSH_PORT` | as on main; the relay had no override (the package's 22) — its first deploy starts the migration 22 → 54321 |
+| `/etc/systemd/system/vpn-bot-ssh-port.service` | repo-managed (`unit`) | deploy.sh | as on main |
+| `/var/lib/vpn-bot/ssh-migration.json` | state | `vpn-bot-ssh-port` | as on main (no bot reads it here) |
 | `/etc/systemd/system/vpn-bot-host-check.service`, `.timer` | repo-managed (`unit`) | deploy.sh | as on main; the relay's verdict stays in its journal — [Between deploys](#between-deploys) |
 | `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh | cloud-init stays off |
 | `/etc/ssh/sshd_config.d/50-cloud-init.conf`, `/etc/sudoers.d/90-cloud-init-users` | retired | — | cloud-init's password login and `NOPASSWD:ALL` grant |
@@ -120,7 +127,10 @@ The registry is `MANAGED_HOST_FILES` in `scripts/deploy.sh`, one entry per file:
 `dpkg:<package>` or `ucf:<template>`. `opts` is
 optional: `gate=<PROTO>` makes the entry exist only while `<PROTO>_ENABLED` is on in `.env`,
 `when=<path>` only on a host where `<path>` exists, and `legacy=<path>` names an older name of the
-same file. A closed gate means the entry is neither installed nor checked.
+same file. A closed gate means the entry is neither installed nor checked. `render=ssh-port` makes
+`src` a template: every line with `@SSH_PORT@` is written once per port the SSH port plan decided
+([The SSH port](#the-ssh-port)), and the rendered copy is compared, validated and installed like
+any repo file.
 
 | class | Phase 1 validates the candidate with | Phase 2, after an actual change |
 |---|---|---|
@@ -213,7 +223,11 @@ edit meant something:
   leave it, the drop-ins' own `Include`s of that directory pointed at the private copy too — must
   print byte for byte the same. This catches what the host check does not judge
   (`Port`, `ListenAddress` and the other multi-value keywords). A different output, an `sshd -T`
-  that does not run, or no `sshd` → FAIL.
+  that does not run, or no `sshd` → FAIL. Both sides carry the **rendered** Port drop-in
+  (`00-vpn-bot-port.conf` for the ports Phase 2 leaves — [The SSH port](#the-ssh-port)), never the
+  template. `Port` accumulates across files: a `Port` line in the host's `sshd_config` listens *in
+  addition* to `SSH_PORT`, the package default does not have it, so the outputs differ and the
+  FAIL says so — set `SSH_PORT` to that port, or drop the line (the SSH port is `SSH_PORT` now).
 - That proof is the lockout guard for `sshd_config`, so restoring its package default does **not**
   need `ALLOW_SSH_CHANGE` — a deliberate, documented exception. The knob still guards every
   repo-managed ssh file.
@@ -343,11 +357,12 @@ Only explicit lists — no "sensible" defaults:
   `sysctl -n`), `systemd-conf:<x>` (vs the files), `unit-prop:<unit>:<Prop>` (`systemctl show`),
   `path-present`, `path-absent`, `path-regular` (exists and is **not** a symlink),
   `tcp-listen:<port>`. `~X` as the expected value means "contains X as a whole token"
-  (`~22` matches `[::]:22 (Stream)`, not `:2222`). Seeded: on main `ssh.socket` listens on 54321,
-  `even-day-reboot.timer` is enabled and active, `/etc/resolv.conf` is a plain file; on a relay
-  `ssh.socket` listens on 22 and `ufw.service` is masked (its input filter is
-  `table inet vpnrelay_input`, see [docs/relay.md](relay.md#the-input-filter)); on both
-  `/etc/cloud/cloud-init.disabled` exists.
+  (`~22` matches `[::]:22 (Stream)`, not `:2222`). Seeded: on main `even-day-reboot.timer` is
+  enabled and active, `/etc/resolv.conf` is a plain file; on a relay `ufw.service` is masked (its
+  input filter is `table inet vpnrelay_input`, see [docs/relay.md](relay.md#the-input-filter)); on
+  both `/etc/cloud/cloud-init.disabled` exists. The SSH port is **not** in the list (a fixed port
+  would contradict `SSH_PORT` during and after a migration): family `ssh-port` judges it —
+  [The SSH port](#the-ssh-port).
 
 ### Accepting a LATENT
 
@@ -494,3 +509,114 @@ is what saves you then: test a fresh login from it before closing anything.
 `/etc/ssh/sshd_config` itself is not class `ssh`: it only ever goes back to its package default
 (class `pristine`), after Phase 1 has proven `sshd -T` byte-for-byte unchanged — that proof is
 the guard there, and the knob is neither needed nor read.
+
+The **SSH port migration** needs no knob either: the two `render=ssh-port` files change without it
+exactly when the host copy is the rendering of the ports ssh listens on now — a step of
+[the migration](#the-ssh-port), guarded by listening on both ports and by a proof. A hand edit of
+those files is a drift like any other and needs the knob.
+
+## The SSH port
+
+**One setting, both roles:** `SSH_PORT` in `/opt/vpn-service/.env` (main and relay; absent or
+empty = **54321**). Validated before anything changes: a whole number 1..65535 without a leading
+zero; not a TCP port of a service of this role — main: `XRAY_PUBLIC_PORT` (443), `XRAY_XHTTP_PORT`,
+`SUBSCRIPTION_BIND_PORT`, `SUBSCRIPTION_PUBLIC_PORT`, `SOCKS5_PORT`, `MTPROTO_PORT`,
+`MTPROTO_INTERNAL_STATS_PORT`, `HEALTH_PORT`; relay: `RELAY_FORWARD_TCP_PORTS` (443),
+`RELAY_INPUT_EXTRA_TCP`, `RELAY_INPUT_CLOSED_TCP` — and not a port another process listens on
+(`ss`). A refusal stops Phase 1: `ssh port: REFUSED — …; nothing was changed`.
+
+With the default, the main server does not move (it already listens on 54321 through
+`ssh.socket`; its override renders byte-identical) and an existing relay moves from the package's 22
+to 54321 by itself, at its next deploy.
+
+### Two files, rendered
+
+| File | Template line | What it is for |
+|---|---|---|
+| `/etc/systemd/system/ssh.socket.d/override.conf` | `ListenStream=0.0.0.0:@SSH_PORT@`, `ListenStream=[::]:@SSH_PORT@` after a reset | the socket: what ssh listens on |
+| `/etc/ssh/sshd_config.d/00-vpn-bot-port.conf` | `Port @SSH_PORT@`, plus `LogLevel VERBOSE` | the fallback: `ssh.service` started **without** `ssh.socket` binds `Port` itself — it listens where the socket does, not on 22 behind the firewall |
+
+`scripts/vpn-bot-ssh-port render` writes each `@SSH_PORT@` line once per port, in ascending order.
+Ubuntu 24.04's `sshd-socket-generator` turns the same `Port` lines into
+`/run/systemd/generator/ssh.socket.d/addresses.conf` at every `daemon-reload` (measured with
+openssh-server 1:9.6p1-3ubuntu13, it follows the `Include` into `sshd_config.d`); `override.conf`
+sorts after `addresses.conf` and resets `ListenStream=`, so the repo file decides either way.
+
+### The migration: two phases, each automatic
+
+When the port ssh listens on (`systemctl show -p Listen ssh.socket`) is not `SSH_PORT`:
+
+1. **Phase 1 — a deploy.** Both files are rendered for the old port(s) **and** `SSH_PORT`: ssh
+   listens on both. The firewall follows: on a relay `table inet vpnrelay_input` takes the ssh ports
+   from `ss` on its own (the deploy's restart of `vpn-relay` re-applies it; the changed set is
+   confirmed by main's probe — [docs/relay.md](relay.md#the-input-filter)); on main the deploy opens
+   `SSH_PORT` in UFW **before** the socket changes, with a rule commented
+   `vpn-bot:ssh-migration` (or runs `vpn-bot-ufw-apply apply` where that helper is installed — it
+   then owns the firewall). The old port is not touched. The state goes to
+   `/var/lib/vpn-bot/ssh-migration.json` (`from`, `to`, `phase: 1`, `since`).
+2. **Phase 2 — only after a proof** that `SSH_PORT` works **from outside**: the old port leaves the
+   socket and the Port drop-in (`Port SSH_PORT` alone), and the firewall closes it — main: the
+   rules that allow exactly the old port (`ufw show added`: `<port>[/tcp]`, `… port <port> [proto
+   tcp]`) are deleted and the migration rule is relabelled `vpn-bot:ssh` in place (ufw updates a
+   rule's comment without a gap); a rule this cannot remove (an app profile, a port list) is a note,
+   never a failure — leaving a port open is the safe direction. Relay: the input filter is applied
+   again (`vpn-relay-apply apply`, one nft transaction) and drops the old port. `phase: 2`.
+
+**The proof** — any one, each later than the start of phase 1 (`since`):
+
+| Proof | Role | Where it comes from |
+|---|---|---|
+| `relay-probe` | relay | main's probe (`POST /relay/ssh-probe`) connected to `SSH_PORT` through the input filter: `/etc/vpn-relay/input.confirmed` says `confirmed_by=main-probe`, its `tcp=` set holds `SSH_PORT`, `confirmed_at` ≥ `since` |
+| `journal` | both | sshd logged a connection from a **non-local** address on `SSH_PORT` (`journalctl -u ssh.service --since @<since>`). openssh 9.6 writes `Connection from <raddr> port <rport> on <laddr> port <lport> rdomain ""` **only at `LogLevel VERBOSE`** — measured with the noble binary; at `INFO` the line does not exist, hence the `LogLevel VERBOSE` in the Port drop-in. Loopback, the host's own addresses (`ip -o addr`) and `raddr == laddr` prove nothing |
+| `bot` | main | a superadmin pressed **«Подтвердить»** under the bot's message «SSH теперь и на порту N — подключись на него и нажми Подтвердить»; the bot runs `vpn-bot-ssh-port confirm --port N --since S --admin ID` (sudo, exact-path grant in `deploy/sudoers.d/vpn-bot.example`) |
+
+**Without a proof there is no phase 2, ever.** It is looked for by every deploy (Phase 1's plan; a
+deploy that finds one performs phase 2 itself, with `rollback_now`), at boot and daily
+(`vpn-bot-host-check.timer` → `vpn-bot-host-check.service` `Wants=` `vpn-bot-ssh-port.service` →
+`vpn-bot-ssh-port advance`), right after every DEPLOY OK of a host in phase 1 (a relay whose filter
+main's probe just confirmed finishes in the same run), and at once after «Подтвердить». `advance`
+takes the deploy's lock (`/run/vpn-bot-deploy.lock`) or leaves the work to the running deploy; it
+touches only files that are exactly what phase 1 left there.
+
+The bot tells the superadmins once when phase 1 starts (with the button) and once when the
+migration is done (`schema_meta` remembers it across restarts). A relay runs no bot: its state is in
+its deploy report and journal. The deploy prints the state in Phase 1, in the report and in DEPLOY
+OK, e.g.
+
+```text
+ssh port: migrating 22 -> 54321 (waiting for proof: main's probe of tcp 54321 (RELAY_CONFIRM_URL), or an ssh connection from outside on 54321 in the sshd log)
+```
+
+`SSH_PORT` changed again while waiting: a new phase 1 from the original port(s) to the new value
+(the unproven port is dropped, the original never closed); `SSH_PORT` back on the original port: the
+unproven one is dropped (`phase: 0`, called off).
+
+### The post-check of each phase
+
+`sshd -t` on the installed configuration; `daemon-reload`, `restart ssh.socket` and — when sshd
+runs — `restart ssh` (a running sshd keeps the sockets it was started with); then `ssh.socket`
+must be active, `systemctl show -p Listen ssh.socket` must hold **exactly** the planned ports,
+every planned port must listen and answer with an SSH banner, and a port the step removed must no
+longer listen. Any failure: in a deploy `rollback_now` — the previous files, the previous state
+file, the UFW rule phase 1 opened removed again, the socket and ssh restarted on the restored set;
+in `advance` its own revert to the previous set, the reason in the state file's `last_error`
+(host check: a WARN).
+
+**Open sessions survive.** Measured on the noble package: `ssh.socket` is `Accept=no`, enabling it
+links `ssh.service.requires/ssh.socket`, so restarting the socket restarts `ssh.service` too — and
+`ssh.service` has `KillMode=process`: only the listening sshd gets SIGTERM; each session is its own
+sshd child (`sshd: user@pts/N`; openssh 9.6 has no `sshd-session` yet — 9.8+) holding its own TCP
+connection, and stays. A session on the old port also survives phase 2: the firewall lets
+established connections through (UFW's `ctstate RELATED,ESTABLISHED`, the relay filter's
+`ct state established,related accept`). The deploy itself runs under `systemd-run`, outside any ssh
+session.
+
+### What the host check says (family `ssh-port`)
+
+| Plan | Installed host (timer, Phase 2) | `--pre-install` (Phase 1) |
+|---|---|---|
+| on `SSH_PORT` | `OK ssh.socket`; `OK fallback` when `sshd -T` gives exactly `SSH_PORT`, else `MISMATCH fallback` (the Port drop-in is not in effect) | the same; the fallback `PENDING` while the deploy installs the drop-in |
+| `SSH_PORT` ≠ listening, no migration | `MISMATCH migration` — the next deploy starts phase 1 | `PENDING` (this deploy starts it) |
+| phase 1, no proof | `PENDING migration` with what it waits for | the same |
+| phase 1, proven | `PENDING` (phase 2 next); a failed, reverted phase 2 adds a `WARN` | `PENDING` |
+| `SSH_PORT` refused | `MISMATCH SSH_PORT` with the reason | the same (Phase 1 refuses anyway) |

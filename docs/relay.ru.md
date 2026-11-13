@@ -123,7 +123,11 @@ table inet vpnrelay_input {
   не-loopback адресе, принадлежащий `sshd` (или `sshd-session`), либо удерживаемый systemd на
   порту, который объявляет `ssh.socket` (`systemctl show -p Listen ssh.socket` — socket
   activation до первого запуска sshd). Перенесёте sshd на другой порт — следующий apply пойдёт
-  за ним. **Порт SSH не найден → не применяется ничего**: `no SSH port found — refusing to
+  за ним; поэтому [переезду SSH-порта](host-state.ru.md#ssh-порт) (`SSH_PORT`, по умолчанию 54321:
+  relay, который ещё на 22, переезжает при следующем деплое) правила здесь не нужны: в фазе 1 ssh
+  слушает 22 и 54321, и рестарт `vpn-relay` пускает оба (набор TCP изменился — его подтверждает
+  проба с main, и это подтверждение 54321 и есть доказательство переезда); в фазе 2 22 уходит из
+  `ssh.socket`, и следующий apply его отбрасывает. **Порт SSH не найден → не применяется ничего**: `no SSH port found — refusing to
   install a drop policy`, код `8`, ни одна таблица не меняется. Unit упорядочен
   `After=ssh.socket ssh.service`, поэтому при загрузке sshd слушает раньше, чем apply смотрит.
 - Правила записаны ровно так, как их печатает `nft list` (один порт — без фигурных скобок),
@@ -250,6 +254,7 @@ Hysteria2 — `HYSTERIA2_PORT`): необязательный `export`, проб
 | Переменная | По умолчанию | Смысл |
 |---|---|---|
 | `NODE_ROLE` | `main` | `relay` на relay-хосте. Любое другое значение отвергается до каких-либо изменений. |
+| `SSH_PORT` | `54321` | Порт, на котором слушает ssh — [SSH-порт](host-state.ru.md#ssh-порт). Деплой переводит ssh туда в две фазы (оба порта, затем — когда это доказали проба с main или подключение извне в журнале sshd — только новый), без `ALLOW_SSH_CHANGE`. Не может быть пробрасываемым, extra или closed TCP-портом (отказ). |
 | `RELAY_UPSTREAM_IPV4` | — (обязательна) | IPv4 основного сервера. |
 | `RELAY_FORWARD_TCP_PORTS` | `443` | Через запятую, 1..65535; каждый пробрасывается 1:1. |
 | `RELAY_FORWARD_UDP_PORTS` | `443` | То же для UDP (Hysteria2). |
@@ -351,7 +356,11 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
   `OUT_OF_REPO_HELPERS` (роль `relay`) и `deploy/relay/vpn-relay.service` как есть;
   `daemon-reload`, `enable`, `restart vpn-relay` (установленные потоки сохраняют NAT в
   conntrack на миллисекундный разрыв; неподтверждённый набор здесь же подтверждает проба main);
-  проверка `vpn-relay-apply check`. В DEPLOY OK есть `input filter : …` из
+  проверка `vpn-relay-apply check`. Вокруг файлов хоста двигается [SSH-порт](host-state.ru.md#ssh-порт),
+  когда этого требует `SSH_PORT` (фаза 1: оба порта; рестарт `vpn-relay` пускает их, проба с main
+  их подтверждает); сразу после DEPLOY OK `vpn-bot-ssh-port.service` один раз ищет доказательство,
+  так что relay обычно заканчивает переезд в том же прогоне.
+  В DEPLOY OK есть `ssh port: …` и `input filter : …` из
   `vpn-relay-apply input-status` — `CONFIRMED by main probe (…)`, и делать ничего не нужно, или
   `PENDING CONFIRM (…) — <причина>`, за которым идут причина и инструкция выполнить
   `input-confirm` из НОВОЙ ssh-сессии в течение 5 минут.

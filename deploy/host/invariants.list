@@ -23,14 +23,16 @@
 # Phase 2, an alert to the superadmins on the main server.
 # tests/test_host_check.py checks every line (probe set, field count, reason length).
 
+# The SSH port is not here: it follows SSH_PORT in .env on both roles, and the host
+# check judges it from that (family ssh-port, docs/host-state.md#the-ssh-port) — a
+# fixed port in this list would contradict the setting during and after a migration.
+
 # --- main ----------------------------------------------------------------------
-main|unit-prop:ssh.socket:Listen|-|~54321|ssh listens on 54321 through ssh.socket.d/override.conf; a socket left on 22 only is a lockout after the next firewall change
 main|unit-prop:even-day-reboot.timer:UnitFileState|-|enabled|the scheduled reboot is how kernel and library updates take effect; a disabled timer silently stops them
 main|unit-prop:even-day-reboot.timer:ActiveState|-|active|an enabled timer that is not running schedules nothing until the next boot
 main|path-regular|/etc/resolv.conf|-|the main server resolves through a plain resolv.conf from the repo (deploy/host/dns/resolv.conf), not resolved's stub symlink
 
 # --- relay ---------------------------------------------------------------------
-relay|unit-prop:ssh.socket:Listen|-|~22|the relay's only management path is sshd on 22 through ssh.socket; without it the relay is unreachable
 relay|unit-prop:ufw.service:UnitFileState|-|masked|the relay's INPUT filter is table inet vpnrelay_input (vpn-relay-apply); UFW's own forward chain (policy DROP) is a second base chain on the forward hook and would drop the relayed 443 whatever table ip vpnrelay says
 
 # --- both roles ----------------------------------------------------------------
