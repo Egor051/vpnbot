@@ -630,6 +630,27 @@ STRINGS: dict[str, str] = {
         "✅ <b>Host state: the {role} server is back in line</b>\n"
         "Check of {at}: no BEATEN/MISMATCH any more."
     ),
+    # ── SSH port migration (SSH_PORT, docs/host-state.md#the-ssh-port) ──────────
+    "ssh_port_started": (
+        "🔐 <b>The SSH port is moving: {old} → {new}</b>\n"
+        "SSH is on port {new} too now — connect there with a new session and press «Confirm».\n"
+        "Port {old} stays open and closes only once {new} is proven to work from outside: "
+        "this confirmation, a connection from outside in the sshd log, or main's probe (relay). "
+        "Phase 1 since {since}."
+    ),
+    "ssh_port_done": (
+        "✅ <b>The SSH port moved: {old} → {new}</b>\n"
+        "Proof: {proof}. Port {old} is closed ({at})."
+    ),
+    "ssh_port_cancelled": (
+        "↩️ <b>SSH port move called off</b>\n"
+        "SSH_PORT is {old} again: port {new} was dropped, {old} was never closed."
+    ),
+    "btn_ssh_port_confirm": "✅ Confirm: I am in on port {port}",
+    "ssh_port_confirmed_alert": "Done: port {port} confirmed. The old port closes now.",
+    "ssh_port_confirmed": "🔐 Port {port} confirmed.\n<code>{line}</code>",
+    "ssh_port_confirm_stale": "This SSH port migration is not waiting for a confirmation any more.",
+    "ssh_port_confirm_failed": "vpn-bot-ssh-port refused the confirmation — the bot's log says why.",
     # ── relay panel (admin → «🛰 Manage relays») ─────────────────────────────
     "btn_relays": "🛰 Manage relays",
     "relays_title": "<b>🛰 Relays</b>",

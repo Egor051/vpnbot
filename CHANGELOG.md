@@ -8,6 +8,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The SSH port is one setting, `SSH_PORT`, and moves by itself on both roles
+  (docs/host-state.md#the-ssh-port).** `SSH_PORT` in `.env` of the main server and of a relay
+  (absent = 54321: the main server does not change, an existing relay moves from the package's 22
+  at its next deploy). Refused before anything changes when it is not a port, the TCP port of a
+  service of the role (main: 443, `XRAY_XHTTP_PORT`, `SUBSCRIPTION_*_PORT`, `SOCKS5_PORT`,
+  `MTPROTO_*PORT`, `HEALTH_PORT`; relay: the forwarded, extra and closed TCP ports) or a port
+  another process listens on. `deploy/host/ssh/ssh.socket-override.conf` is a template now (opts
+  `render=ssh-port`; for 54321 it renders byte-identical to the old fixed file) and goes to both
+  roles; new `/etc/ssh/sshd_config.d/00-vpn-bot-port.conf` carries `Port <SSH_PORT>` — ssh.service
+  started without the socket listens there too — and `LogLevel VERBOSE`. A change is a migration
+  in two automatic phases. **Phase 1** (a deploy): ssh.socket listens on the old port AND
+  `SSH_PORT`; the firewall follows (relay: `vpnrelay_input` takes the ports from `ss`; main: UFW
+  opens `SSH_PORT` first with a rule `vpn-bot:ssh-migration`, or `vpn-bot-ufw-apply apply` where
+  that helper exists); the old port is not touched; the state goes to
+  `/var/lib/vpn-bot/ssh-migration.json`. **Phase 2** only after a proof that `SSH_PORT` works from
+  outside — main's probe of the relay (`input.confirmed`, `confirmed_by=main-probe`), a connection
+  from a non-local address on `SSH_PORT` in the sshd log (`Connection from … on … port N`, which
+  openssh 9.6 of noble writes only at `LogLevel VERBOSE` — measured with the package's sshd), or
+  «Подтвердить» under the bot's message to the superadmins (`vpn-bot-ssh-port confirm` through a
+  new exact sudo grant): the old port leaves the socket, the Port drop-in and the firewall (UFW: the
+  rules for exactly that port deleted, the migration rule relabelled `vpn-bot:ssh` in place).
+  Without a proof there is no phase 2; every deploy, the boot run and the daily run of
+  `vpn-bot-host-check.timer` (its service now `Wants=` the new oneshot `vpn-bot-ssh-port.service`)
+  look for one, and so do DEPLOY OK and the button. **No `ALLOW_SSH_CHANGE`** for these steps (a
+  host copy that is the rendering of the live ports); a hand edit still needs it. Each phase is
+  post-checked (`sshd -t`, the socket active, `systemctl show -p Listen` exactly the planned ports,
+  each answering SSH, a removed port no longer listening): a failure is `rollback_now` in a deploy —
+  files, state file and the UFW rule back — and a revert to the previous set in `advance`. Open
+  sessions survive: `ssh.service` is `KillMode=process`, each session its own sshd child. New
+  helper `scripts/vpn-bot-ssh-port` (stdlib Python, `OUT_OF_REPO_HELPERS` of both roles): `plan`,
+  `render`, `record`, `firewall-open|undo|close`, `advance`, `confirm`. The deploy prints
+  `ssh port: migrating A -> B (waiting for proof: …)` in Phase 1, the report and DEPLOY OK. The
+  host check has a family `ssh-port`: `MISMATCH` when `SSH_PORT` is not where ssh listens and no
+  migration started, `PENDING` in phase 1, and afterwards the fallback (`sshd -T`) must listen on
+  `SSH_PORT`. The pristine proof of `sshd_config` runs with the rendered Port drop-in and names a
+  `Port` line of the host's `sshd_config` (it accumulates). The bot tells the superadmins once when
+  phase 1 starts (with the button) and once when it is done.
+
 - **Relay: main confirms the input filter itself — `POST /relay/ssh-probe`
   (docs/relay.md#main-confirms-the-filter-post-relayssh-probe).** The first deploy of a new relay,
   and every change of the filter's TCP set, used to wait for `vpn-relay-apply input-confirm` from a
@@ -477,6 +515,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     change nothing.
 
 ### Changed
+
+- **Host invariants: the SSH port is judged from `SSH_PORT`, not from a fixed line.** The
+  `invariants.list` lines `main|unit-prop:ssh.socket:Listen|-|~54321` and
+  `relay|unit-prop:ssh.socket:Listen|-|~22` are gone — a fixed port contradicts `SSH_PORT` during
+  and after a migration; family `ssh-port` of `vpn-bot-host-check` replaces them
+  (docs/host-state.md#the-ssh-port). The relay's ssh.socket override and the Port drop-in are new
+  registry entries of the relay role.
 
 - **`deploy.sh` stops on a host value that is not in effect.** Phase 1 prints a «Host
   invariants» section: BEATEN and MISMATCH, and a LATENT on an sshd auth key

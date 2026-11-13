@@ -185,6 +185,12 @@
 #             `sshd -T` gives byte-for-byte the same effective configuration with it
 #             as without it — the proof is the lockout guard there, so the knob is
 #             neither needed nor consulted (a deliberate, documented exception).
+#     NOT for: the SSH_PORT migration (docs/host-state.md#the-ssh-port). Moving ssh to
+#             SSH_PORT changes the two render=ssh-port files without the knob: phase 1
+#             only ADDS the new port (the old one keeps listening), phase 2 removes the
+#             old one only after a proof that the new one works from outside. The
+#             exception covers exactly a host copy that is the rendering of the ports
+#             ssh listens on now; a hand edit of those files still needs the knob.
 #
 #   DB_OWNER_USER=<user>   (default: vpn-bot)
 #     What:   The user that must own the data dir, vpn.db and its -wal/-shm
@@ -413,6 +419,11 @@ OUT_OF_REPO_HELPERS=(
   # `required` on every host of either role — one entry per role.
   "scripts/vpn-bot-host-check|/usr/local/sbin/vpn-bot-host-check|required"
   "scripts/vpn-bot-host-check|/usr/local/sbin/vpn-bot-host-check|required|relay"
+  # The SSH port migration (docs/host-state.md#the-ssh-port): executed by
+  # vpn-bot-ssh-port.service (a MANAGED_HOST_FILES unit of BOTH roles) and, on main,
+  # by the bot through sudo (`confirm`) — `required` on every host of either role.
+  "scripts/vpn-bot-ssh-port|/usr/local/sbin/vpn-bot-ssh-port|required"
+  "scripts/vpn-bot-ssh-port|/usr/local/sbin/vpn-bot-ssh-port|required|relay"
 )
 # The one helper that is EXECUTED by a systemd unit (warp-routes.service runs it),
 # so a fresh binary only takes effect on restart. Refreshing it triggers a
@@ -501,9 +512,17 @@ HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"
 #     when=<path>     the entry exists only on a host where <path> exists (same effect)
 #     legacy=<path>   an older name of the same file: a byte-identical legacy copy is
 #                     renamed to <dst> (no restart), a different one stops Phase 1
+#     render=ssh-port src is a TEMPLATE: every line with @SSH_PORT@ is written once
+#                     per port of the set the SSH port plan decided (SSH PORT below;
+#                     scripts/vpn-bot-ssh-port render). The rendered copy is the
+#                     candidate, compared, validated and installed like any repo file.
+#                     A drift of such a file needs no ALLOW_SSH_CHANGE=1 exactly when
+#                     the host copy is the rendering of the ports ssh listens on NOW:
+#                     a migration step (both ports, or — proven — the new one alone).
+#                     Any other difference is a hand edit: the knob, as for every ssh file.
 #
-# Files are installed VERBATIM: keep the repo copy byte-identical to the host copy you
-# mean, or the first deploy reinstalls it. Completeness and the byte-for-byte pins of
+# Files are installed VERBATIM (render=ssh-port: rendered, then verbatim): keep the
+# repo copy byte-identical to the host copy you mean, or the first deploy reinstalls it. Completeness and the byte-for-byte pins of
 # the ssh and unchanged sysctl files: tests/test_deploy_host_state.py.
 #
 # Byte-for-byte on the host is not "in effect": a drop-in another file outranks, a
@@ -532,7 +551,14 @@ MANAGED_HOST_FILES=(
   # the hook's --dry-run (its validator) fails by design without the files.
   "deploy/vpn-bot-acme-reload.sh|/usr/local/sbin/acme-reload.sh|0755|root:root|hook|main|when=/etc/vpn-bot/tls/fullchain.pem"
   "deploy/host/ssh/00-root-key-only.conf|/etc/ssh/sshd_config.d/00-root-key-only.conf|0644|root:root|ssh|main"
-  "deploy/host/ssh/ssh.socket-override.conf|/etc/systemd/system/ssh.socket.d/override.conf|0644|root:root|ssh|main"
+  # The SSH port: two templates rendered from SSH_PORT (docs/host-state.md#the-ssh-port).
+  # The socket's ListenStream= and the fallback's Port (+ LogLevel VERBOSE, the
+  # journal proof); during a migration both carry the old port(s) and SSH_PORT.
+  "deploy/host/ssh/ssh.socket-override.conf|/etc/systemd/system/ssh.socket.d/override.conf|0644|root:root|ssh|main|render=ssh-port"
+  "deploy/host/ssh/00-vpn-bot-port.conf|/etc/ssh/sshd_config.d/00-vpn-bot-port.conf|0644|root:root|ssh|main|render=ssh-port"
+  # Phase 2 of a proven migration outside a deploy; vpn-bot-host-check.service pulls
+  # it in (Wants=), so the boot run and the daily run of its timer look for the proof.
+  "deploy/host/systemd/vpn-bot-ssh-port.service|/etc/systemd/system/vpn-bot-ssh-port.service|0644|root:root|unit|main"
   # Only where SOCKS5 is enabled and not removed from the host: after an uninstall
   # (apt-get purge dante-server) this drop-in would otherwise come back, and the
   # "did not exist before -> enable + start" branch would try to start a danted that
@@ -569,6 +595,9 @@ MANAGED_HOST_FILES=(
   "ucf:/usr/share/openssh/sshd_config|/etc/ssh/sshd_config|0644|root:root|pristine|main"
   # --- relay -----------------------------------------------------------------
   "deploy/host/ssh/00-vpnrelay-keyonly.conf|/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf|0644|root:root|ssh|relay"
+  "deploy/host/ssh/ssh.socket-override.conf|/etc/systemd/system/ssh.socket.d/override.conf|0644|root:root|ssh|relay|render=ssh-port"
+  "deploy/host/ssh/00-vpn-bot-port.conf|/etc/ssh/sshd_config.d/00-vpn-bot-port.conf|0644|root:root|ssh|relay|render=ssh-port"
+  "deploy/host/systemd/vpn-bot-ssh-port.service|/etc/systemd/system/vpn-bot-ssh-port.service|0644|root:root|unit|relay"
   "ucf:/usr/share/openssh/sshd_config|/etc/ssh/sshd_config|0644|root:root|pristine|relay"
   "deploy/host/systemd/vpn-bot-host-check.service|/etc/systemd/system/vpn-bot-host-check.service|0644|root:root|unit|relay"
   "deploy/host/systemd/vpn-bot-host-check.timer|/etc/systemd/system/vpn-bot-host-check.timer|0644|root:root|unit|relay"
@@ -576,6 +605,34 @@ MANAGED_HOST_FILES=(
   "-|/etc/ssh/sshd_config.d/50-cloud-init.conf|-|-|absent|relay"
   "-|/etc/sudoers.d/90-cloud-init-users|-|-|absent|relay"
 )
+# --------------------------------------------------------------------------- #
+# SSH PORT — SSH_PORT in .env, both roles (docs/host-state.md#the-ssh-port)
+# --------------------------------------------------------------------------- #
+# scripts/vpn-bot-ssh-port owns the decision; this script asks it in Phase 1 (`plan`,
+# read-only, from the checkout being deployed) and acts on the answer:
+#   steady   ssh listens on SSH_PORT only: the two render=ssh-port files carry it
+#   start    phase 1: the files carry the old port(s) AND SSH_PORT; main opens SSH_PORT
+#            in UFW first (firewall-open); after the install `record start` writes
+#            the state file
+#   wait     phase 1, no proof yet: nothing changes (the files stay on both ports)
+#   finish   proven: the files carry SSH_PORT alone, `record finish`, the old port is
+#            closed in UFW (firewall-close; a rule it cannot remove is only a note)
+#   cancel   SSH_PORT went back to the old port before a proof: the unproven one goes
+# A refusal (SSH_PORT not a port, the port of a service of this role or of another
+# listener, ssh.socket not active) stops Phase 1: nothing is changed. The post-check of
+# the socket change (mh_ssh_apply) requires exactly the planned ports; any failure is
+# rollback_now — the old files, the old state file, the UFW rule removed again.
+# After DEPLOY OK a plan in phase 1 starts vpn-bot-ssh-port.service once: a relay
+# whose filter main's probe just confirmed finishes without waiting for a timer.
+SSH_PORT_HELPER_REL="scripts/vpn-bot-ssh-port"
+SSH_PORT_UNIT="vpn-bot-ssh-port.service"
+SSH_PORT_ROOT="${SSH_PORT_ROOT:-}"     # tests: the helper reads and writes host paths under it
+SSH_PORT_HELPER=""                     # Phase 1 copies the checkout's helper into MH_CAND_DIR
+SSH_PLAN_ACTION=""; SSH_PLAN_PORT=""; SSH_PLAN_CURRENT=""; SSH_PLAN_LISTEN=""; SSH_PLAN_FROM=""
+SSH_PLAN_TO=""; SSH_PLAN_PROOF=""; SSH_PLAN_PROOF_DETAIL=""; SSH_PLAN_STATUS=""; SSH_PLAN_ERROR=""
+SSH_FW_OPENED=0                        # Phase 2 opened SSH_PLAN_TO in UFW (rollback undoes it)
+SSH_FINAL_STATUS=""
+declare -A MH_SSH_STEP=()              # dst -> 1: an ssh drift that is a migration step
 # Host-file knobs. The paths are overridable for the DEPLOY_SELFTEST suites only.
 ALLOW_SSH_CHANGE="${ALLOW_SSH_CHANGE:-0}"      # see the ENVIRONMENT KNOBS block
 SSHD_CONFIG="${SSHD_CONFIG:-/etc/ssh/sshd_config}"
@@ -1132,6 +1189,12 @@ mh_entry_state() {
       MH_DETAIL="cannot restore: ${MH_PRISTINE_WHY[$MH_DST]:-the package default was not obtained (Phase 1 did not prepare it)}"
       return 0
     fi
+  elif [[ "$(mh_opt "$MH_OPTS" render)" == "ssh-port" ]]; then
+    if ! MH_SRCPATH="$(mh_render_src "$root" "$MH_SRC" "$SSH_PLAN_LISTEN")"; then
+      MH_SRCPATH="-"; MH_STATE="cannot-render"
+      MH_DETAIL="no SSH port plan to render ${MH_SRC} from (SSH PORT above) — left as it is"
+      return 0
+    fi
   else
     MH_SRCPATH="${root}/${MH_SRC}"
   fi
@@ -1164,6 +1227,12 @@ mh_entry_state() {
   fi
   if [[ "$MH_CLASS" == "pristine" && -z "$MH_DETAIL" ]]; then
     MH_DETAIL="package default: ${MH_PRISTINE_HOW[$MH_DST]:-verified}"
+  fi
+  if [[ "$(mh_opt "$MH_OPTS" render)" == "ssh-port" && -z "$MH_DETAIL" ]]; then
+    MH_DETAIL="rendered from SSH_PORT for port(s) ${SSH_PLAN_LISTEN}"
+    if [[ -n "${MH_SSH_STEP[$MH_DST]:-}" ]]; then
+      MH_DETAIL+=" — a migration step from ${SSH_PLAN_CURRENT} (no ALLOW_SSH_CHANGE needed)"
+    fi
   fi
   MH_LEGACY="$(mh_opt "$MH_OPTS" legacy)"
   if [[ -n "$MH_LEGACY" ]] && [[ -e "$MH_LEGACY" || -L "$MH_LEGACY" ]]; then
@@ -1236,6 +1305,57 @@ mh_candidate() {
   local cand="${MH_CAND_DIR}${2}"
   mkdir -p "$(dirname "$cand")" && cp "$1" "$cand" && chmod "$3" "$cand" || return 1
   printf '%s' "$cand"
+}
+
+# --- render=ssh-port: the two SSH port templates --------------------------------------
+# The checkout's helper, through python3 -I (a noexec worktree cannot stop it). Phase 1
+# copies the helper of the commit being deployed into MH_CAND_DIR; Phase 2 and both
+# rollbacks use that copy (after `git reset` to PREV_SHA the checkout may have none).
+ssh_port_helper() {
+  local repo="${1%/}" bin
+  shift
+  bin="${SSH_PORT_HELPER:-${repo}/${SSH_PORT_HELPER_REL}}"
+  local -a args=(--env "$ENV_FILE" --repo "$repo" --role "${NODE_ROLE:-main}")
+  if [[ -n "$SSH_PORT_ROOT" ]]; then args+=(--root "$SSH_PORT_ROOT"); fi
+  python3 -I "$bin" "${args[@]}" "$@"
+}
+
+# <root>/<template> rendered for <ports> (comma-separated), under MH_CAND_DIR; prints the
+# path. Rendered once per checkout root and port set. Fails without a port set.
+mh_render_src() {
+  local root="${1%/}" src="$2" ports="$3" out
+  [[ -n "$ports" && -n "$MH_CAND_DIR" && -d "$MH_CAND_DIR" ]] || return 1
+  out="${MH_CAND_DIR}/rendered/${ports}${root}/${src}"
+  if [[ ! -f "$out" ]]; then
+    mkdir -p "$(dirname "$out")" || return 1
+    if ! ssh_port_helper "$root" render --template "${root}/${src}" --ports "$ports" > "$out"; then
+      rm -f "$out"; return 1
+    fi
+  fi
+  printf '%s' "$out"
+}
+
+# The template (checkout-relative src) of this role's render=ssh-port entry for <dst>.
+mh_render_template_of() {
+  local entry
+  for entry in "${MANAGED_HOST_FILES[@]}"; do
+    mh_parse "$entry"
+    if [[ "$MH_DST" == "$1" && "$MH_ROLE" == "${NODE_ROLE:-main}" && "$(mh_opt "$MH_OPTS" render)" == "ssh-port" ]]; then
+      printf '%s' "$MH_SRC"; return 0
+    fi
+  done
+  return 1
+}
+
+# Is the host copy of the render=ssh-port entry <dst> exactly the rendering of the ports
+# ssh listens on NOW (SSH_PLAN_CURRENT)? Then a difference to the planned rendering is a
+# migration step, not a hand edit. <root> = the checkout whose template is compared.
+mh_ssh_port_step() {
+  local root="$1" dst="$2" tpl now
+  [[ -n "$SSH_PLAN_CURRENT" && -n "$SSH_PLAN_ACTION" && "$SSH_PLAN_ACTION" != "refused" ]] || return 1
+  tpl="$(mh_render_template_of "$dst")" || return 1
+  now="$(mh_render_src "$root" "$tpl" "$SSH_PLAN_CURRENT")" || return 1
+  cmp -s "$now" "$dst"
 }
 
 # The keys of a sysctl.d file, one per line: comment lines dropped, a leading "-"
@@ -1588,6 +1708,10 @@ mh_pristine_sshd_proof() {
     if command -v diff >/dev/null 2>&1; then
       diff -u --label "sshd -T now" --label "sshd -T with the package default" "${base}/now.T" "${base}/default.T" || true
     fi
+    # grep reads to EOF (output discarded): no SIGPIPE on the diff under pipefail.
+    if diff "${base}/now.T" "${base}/default.T" 2>/dev/null | grep -E '^[<>] (port|listenaddress) ' >/dev/null; then
+      echo "the port lines differ: Port ACCUMULATES across files — a Port line in the host's sshd_config listens IN ADDITION to SSH_PORT (00-vpn-bot-port.conf), and restoring the package default would drop it from the fallback path. The SSH port is SSH_PORT in .env now (docs/host-state.md#the-ssh-port): set SSH_PORT to that port, or drop the line"
+    fi
     echo "sshd -T differs with the package default (above) — the hand edit carries effective settings: move them into a repo drop-in first"
     return 1
   fi
@@ -1671,6 +1795,7 @@ mh_action_text() {   # $1 class, $2 state, $3 dst
     legacy-drift)       echo "legacy name with DIFFERENT content — reconcile by hand (Phase 1 stops)" ;;
     gate-unit-mismatch) echo "drop-in for a unit .env does not run — fix MANAGED_HOST_FILES (Phase 1 stops)" ;;
     cannot-restore)     echo "left exactly as it is (WARN, not fatal)" ;;
+    cannot-render)      echo "left exactly as it is (no SSH port plan — a real deploy stops in Phase 1)" ;;
     absent|drift)
       case "$1" in
         pristine)
@@ -1681,7 +1806,9 @@ mh_action_text() {   # $1 class, $2 state, $3 dst
             *)        echo "Phase 2 restores the package default (effect proven unchanged; nothing to apply)" ;;
           esac ;;
         ssh)
-          if [[ "$2" == "drift" && "$ALLOW_SSH_CHANGE" != "1" ]]; then
+          if [[ "$2" == "drift" && -n "${MH_SSH_STEP[$3]:-}" ]]; then
+            echo "Phase 2 renders the SSH port step (${SSH_PLAN_CURRENT} -> ${SSH_PLAN_LISTEN}; no ALLOW_SSH_CHANGE), then sshd -t, restarts the socket and requires exactly ${SSH_PLAN_LISTEN}"
+          elif [[ "$2" == "drift" && "$ALLOW_SSH_CHANGE" != "1" ]]; then
             echo "DIFFERS (diff above) — refused without ALLOW_SSH_CHANGE=1"
           else
             echo "Phase 2 ${verb}, then reloads ssh and checks it listens"
@@ -1731,6 +1858,8 @@ managed_host_phase1() {
     IFS='|' read -r dst src class state mode owner detail <<< "$row"
     if [[ "$state" == "cannot-restore" ]]; then
       warn "  $(printf '%-9s %-12s %s' "$class" "$state" "$dst") — ${detail} — left as it is"
+    elif [[ "$state" == "cannot-render" ]]; then
+      warn "  $(printf '%-9s %-12s %s' "$class" "$state" "$dst") — ${detail}"
     else
       log "  $(printf '%-9s %-12s %s' "$class" "$state" "$dst")${detail:+ — ${detail}}"
     fi
@@ -1742,6 +1871,8 @@ managed_host_phase1() {
           fail+=("${dst}: retired, but still named by the line(s) above — remove the reference first, or drop the absent entry")
         fi ;;
       gate-unit-mismatch) fail+=("${dst}: ${detail}") ;;
+      cannot-render)
+        if [[ "$PHASE1_ONLY" != "1" ]]; then fail+=("${dst}: ${detail}"); fi ;;
       legacy-drift)
         legacy_bad+=("$dst")
         t="$(mh_opt "$(mh_entry_opts "$dst")" legacy)"
@@ -1749,7 +1880,8 @@ managed_host_phase1() {
       absent|drift|rename)
         if [[ "$state" == "drift" && "$class" == "pristine" ]]; then mh_show_diff "$dst" "$src" "package default"
         elif [[ "$state" == "drift" ]]; then mh_show_diff "$dst" "$src"; fi
-        if [[ "$class" == "ssh" && "$state" == "drift" ]]; then ssh_drift+=("$dst"); fi
+        # A migration step of a render=ssh-port file is not a hand edit: no knob.
+        if [[ "$class" == "ssh" && "$state" == "drift" && -z "${MH_SSH_STEP[$dst]:-}" ]]; then ssh_drift+=("$dst"); fi
         if cand="$(mh_candidate "$src" "$dst" "$mode")"; then
           todo+=("${class}|${cand}|${dst}")
         else
@@ -2006,6 +2138,171 @@ host_state_report_block() {
 }
 
 # --------------------------------------------------------------------------- #
+# The SSH port (SSH PORT block at the top; docs/host-state.md#the-ssh-port)
+# --------------------------------------------------------------------------- #
+# Where the helper keeps the migration state — staged by Phase 2 with the host files
+# (empty without a plan: nothing of the SSH port is touched then).
+ssh_port_state_path() {
+  if [[ -n "$SSH_PLAN_ACTION" && "$SSH_PLAN_ACTION" != "refused" ]]; then
+    printf '%s/var/lib/vpn-bot/ssh-migration.json' "$SSH_PORT_ROOT"
+  fi
+}
+
+# Phase 1, both roles, read-only, BEFORE the host-file scan: the two render=ssh-port
+# entries are rendered from this answer. A refusal stops here — nothing changed —
+# unless PHASE1_ONLY=1 (reported; the two entries then read cannot-render).
+ssh_port_phase1() {
+  local root="${1%/}" out err rc line k v entry tpl planned
+  mh_candidate_dir_init
+  if [[ ! -f "${root}/${SSH_PORT_HELPER_REL}" ]]; then
+    # No plan: a render=ssh-port entry then reads cannot-render, which stops Phase 1.
+    warn "ssh port: the checkout has no ${SSH_PORT_HELPER_REL} — no SSH port plan"
+    SSH_PLAN_STATUS="ssh port: not checked (no ${SSH_PORT_HELPER_REL} in the checkout)"
+    return 0
+  fi
+  SSH_PORT_HELPER="${MH_CAND_DIR}/vpn-bot-ssh-port"
+  cp "${root}/${SSH_PORT_HELPER_REL}" "$SSH_PORT_HELPER" \
+    || die "cannot copy ${root}/${SSH_PORT_HELPER_REL} into ${MH_CAND_DIR}; nothing was changed"
+  err="$(mktemp)" || die "cannot create a temporary file; nothing was changed"
+  out="$(ssh_port_helper "$root" plan 2>"$err")" && rc=0 || rc=$?
+  while IFS= read -r line; do
+    if [[ -n "$line" ]]; then warn "  ssh port helper: ${line}"; fi
+  done < "$err"
+  rm -f "$err"
+  # key=value lines, read as data — never evaluated.
+  while IFS= read -r line; do
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      ssh_port)     SSH_PLAN_PORT="$v" ;;
+      action)       SSH_PLAN_ACTION="$v" ;;
+      current)      SSH_PLAN_CURRENT="$v" ;;
+      listen)       SSH_PLAN_LISTEN="$v" ;;
+      from)         SSH_PLAN_FROM="$v" ;;
+      to)           SSH_PLAN_TO="$v" ;;
+      proof)        SSH_PLAN_PROOF="$v" ;;
+      proof_detail) SSH_PLAN_PROOF_DETAIL="$v" ;;
+      status)       SSH_PLAN_STATUS="$v" ;;
+      error)        SSH_PLAN_ERROR="$v" ;;
+    esac
+  done <<< "$out"
+  if (( rc != 0 )); then
+    SSH_PLAN_ACTION="refused"; SSH_PLAN_LISTEN=""
+    SSH_PLAN_STATUS="ssh port: REFUSED — ${SSH_PLAN_ERROR:-the helper exited ${rc} (see above)}"
+    if [[ "$PHASE1_ONLY" == "1" ]]; then
+      warn "${SSH_PLAN_STATUS} — a real deploy stops here (PHASE1_ONLY=1: not fatal)"
+      return 0
+    fi
+    die "${SSH_PLAN_STATUS} — nothing was changed"
+  fi
+  log "${SSH_PLAN_STATUS}"
+  # A drift of a render=ssh-port file that is exactly the rendering of the ports ssh
+  # listens on now is a migration step, not a hand edit: no ALLOW_SSH_CHANGE.
+  MH_SSH_STEP=()
+  for entry in "${MANAGED_HOST_FILES[@]}"; do
+    mh_parse "$entry"
+    [[ "$MH_ROLE" == "${NODE_ROLE:-main}" && "$(mh_opt "$MH_OPTS" render)" == "ssh-port" ]] || continue
+    [[ -f "$MH_DST" ]] || continue
+    tpl="$MH_SRC"
+    planned="$(mh_render_src "$root" "$tpl" "$SSH_PLAN_LISTEN")" || continue
+    if ! cmp -s "$planned" "$MH_DST" && mh_ssh_port_step "$root" "$MH_DST"; then MH_SSH_STEP["$MH_DST"]=1; fi
+  done
+  return 0
+}
+
+# Phase 2, both roles, armed, after the helpers and before install_managed_host_files.
+# Phase 1 of a migration on main: SSH_PLAN_TO is opened in the firewall FIRST — open
+# before anything listens costs nothing, the other order would leave the socket behind
+# a closed port. A failure is rollback_now, which removes the rule again.
+# Only a rule THIS call added is undone by a rollback (the helper's last line says
+# added=yes|no): a 'vpn-bot:ssh-migration' rule already there stays. A failed call may
+# have added one before its check failed — nothing was there then, so it is undone.
+ssh_port_phase2_pre() {
+  local out
+  [[ "$SSH_PLAN_ACTION" == "start" ]] || return 0
+  SSH_FW_OPENED=1
+  out="$(ssh_port_helper "$APP_DIR" firewall-open --port "$SSH_PLAN_TO" 2>&1)" \
+    || rollback_now "ssh port: could not open ${SSH_PLAN_TO} in the firewall before phase 1: ${out}"
+  if [[ "${out##*$'\n'}" != "added=yes" ]]; then SSH_FW_OPENED=0; fi
+  log "  ssh port: ${out%$'\n'added=*}"
+}
+
+# Phase 2, both roles, armed, right after install_managed_host_files (its post-check —
+# sshd -t, the socket active, exactly the planned ports — has passed): the state file.
+# Before the host invariants: they judge the migration from it.
+ssh_port_phase2_post() {
+  local out
+  case "$SSH_PLAN_ACTION" in
+    start)
+      out="$(ssh_port_helper "$APP_DIR" record --action start --from "$SSH_PLAN_FROM" --to "$SSH_PLAN_TO" 2>&1)" \
+        || rollback_now "ssh port: cannot write the migration state: ${out}"
+      log "  ssh port: phase 1 — ${SSH_SOCKET_UNIT} listens on ${SSH_PLAN_LISTEN}; ${out}" ;;
+    finish|cancel)
+      out="$(ssh_port_helper "$APP_DIR" record --action "$SSH_PLAN_ACTION" --from "$SSH_PLAN_FROM" --to "$SSH_PLAN_TO" \
+               --proof-kind "$SSH_PLAN_PROOF" --proof-detail "$SSH_PLAN_PROOF_DETAIL" 2>&1)" \
+        || rollback_now "ssh port: cannot write the migration state: ${out}"
+      log "  ssh port: ${SSH_PLAN_ACTION} — ${SSH_SOCKET_UNIT} listens on ${SSH_PLAN_LISTEN}; ${out}" ;;
+  esac
+  return 0
+}
+
+# The rollback's part (host_files_rollback): the UFW rule phase 1 opened goes again.
+ssh_port_rollback() {
+  local out rc
+  (( SSH_FW_OPENED )) && [[ -n "$SSH_PLAN_TO" && -n "$SSH_PORT_HELPER" ]] || return 0
+  out="$(ssh_port_helper "$APP_DIR" firewall-undo --port "$SSH_PLAN_TO" 2>&1)"; rc=$?
+  echo "ssh port firewall (opened by this deploy): ${out//$'\n'/; }: rc=${rc}"
+}
+
+# After DEPLOY OK, both roles, disarmed: never a rollback, never a failed deploy.
+#   finish  the old port(s) leave the firewall now — not inside the armed part, so a
+#           rollback finds the firewall exactly as it was (leaving a port open is the
+#           safe direction; a rule the helper cannot remove is a note).
+#   cancel  the rule phase 1 opened for the dropped target goes.
+#   start / wait  vpn-bot-ssh-port.service once: the proof may be here already (a
+#           relay's filter was just confirmed by main's probe). The unit takes the
+#           deploy lock, so ours is released first.
+# Sets SSH_FINAL_STATUS, the line DEPLOY OK prints.
+ssh_port_after_deploy() {
+  local out rc line
+  if [[ -z "$SSH_PLAN_ACTION" || -z "$SSH_PORT_HELPER" ]]; then
+    SSH_FINAL_STATUS="${SSH_PLAN_STATUS:-ssh port: not checked}"; return 0
+  fi
+  case "$SSH_PLAN_ACTION" in
+    finish)
+      while IFS= read -r line; do
+        if [[ -n "$line" ]]; then log "ssh port: ${line}"; fi
+      done < <(ssh_port_helper "$APP_DIR" firewall-close --from "$SSH_PLAN_FROM" --to "$SSH_PLAN_TO" 2>&1 || true) ;;
+    cancel)
+      out="$(ssh_port_helper "$APP_DIR" firewall-undo --port "$SSH_PLAN_FROM" 2>&1)" || true
+      log "ssh port: ${out}" ;;
+    start|wait)
+      if [[ -n "$LOCK_FD" ]]; then exec {LOCK_FD}>&-; LOCK_FD=""; fi
+      log "ssh port: looking for the proof now (systemctl start ${SSH_PORT_UNIT})"
+      out="$(systemctl start "$SSH_PORT_UNIT" 2>&1)" && rc=0 || rc=$?
+      if (( rc != 0 )); then
+        warn "ssh port: ${SSH_PORT_UNIT} failed (rc ${rc}${out:+: ${out}}) — the old port stays open; the unit's journal says why"
+      fi ;;
+  esac
+  SSH_FINAL_STATUS="$(ssh_port_helper "$APP_DIR" status 2>/dev/null)" || SSH_FINAL_STATUS="$SSH_PLAN_STATUS"
+  return 0
+}
+
+# The Phase 1 report section, both roles.
+ssh_port_report_block() {
+  printf '\n  --- SSH port (SSH_PORT in .env — docs/host-state.md#the-ssh-port) ---\n'
+  printf '    %s\n' "${SSH_PLAN_STATUS:-not checked}"
+  if [[ -n "$SSH_PLAN_CURRENT" ]]; then
+    printf '    SSH_PORT=%s; %s listens on %s now; Phase 2 renders the ssh files for %s\n' \
+      "${SSH_PLAN_PORT:-?}" "$SSH_SOCKET_UNIT" "$SSH_PLAN_CURRENT" "${SSH_PLAN_LISTEN:-<nothing>}"
+  fi
+  case "$SSH_PLAN_ACTION" in
+    start)   printf '    phase 1: both ports listen, the old one is not touched; the new one is closed only after a proof\n' ;;
+    finish)  printf '    proof: %s — %s\n' "$SSH_PLAN_PROOF" "$SSH_PLAN_PROOF_DETAIL" ;;
+    refused) printf '    a real deploy stops here; nothing is changed\n' ;;
+  esac
+}
+
+# --------------------------------------------------------------------------- #
 # Host-path backup — ONE mechanism for every file a deploy creates, changes or
 # removes outside the checkout: MANAGED_HOST_FILES of both roles and the relay's
 # helper/unit/sysctl file. Built on stage_path, so every copy lands in $STAGE and
@@ -2179,6 +2476,41 @@ mh_ssh_apply() {
   fi
   msg="$(ssh_alive_status)" || rollback_now "ssh check failed after the change: ${msg}"
   log "  ssh: ${msg}"
+  if [[ -n "$SSH_PLAN_LISTEN" ]]; then
+    msg="$(ssh_port_exact_status)" || rollback_now "ssh port check failed after the change: ${msg}"
+    log "  ssh port: ${msg}"
+  fi
+}
+
+# The SSH port plan's post-check, both phases: ssh.socket is active and holds EXACTLY
+# the planned ports (SSH_PLAN_LISTEN — `systemctl show -p Listen`, what systemd really
+# loaded), and no port the step removed (SSH_PLAN_CURRENT minus the plan) still
+# listens. That every planned port listens and answers SSH is ssh_alive_status's.
+ssh_port_exact_status() {
+  local have want p listening
+  local -a removed=()
+  want="$(printf '%s\n' "${SSH_PLAN_LISTEN//,/$'\n'}" | sort -n -u | xargs)"
+  if [[ "$(systemctl is-active "$SSH_SOCKET_UNIT" 2>/dev/null || true)" != "active" ]]; then
+    echo "${SSH_SOCKET_UNIT} is not active — the SSH port plan needs it"; return 1
+  fi
+  have="$( { systemctl show -p Listen "$SSH_SOCKET_UNIT" 2>/dev/null || true; } \
+            | sed -n 's/^Listen=.*:\([0-9]\{1,5\}\) (Stream)$/\1/p' | sort -n -u | xargs)"
+  if [[ "$have" != "$want" ]]; then
+    echo "${SSH_SOCKET_UNIT} listens on ${have:-nothing}, the plan wants exactly ${want}"; return 1
+  fi
+  for p in ${SSH_PLAN_CURRENT//,/ }; do
+    [[ ",${SSH_PLAN_LISTEN}," == *",${p},"* ]] || removed+=("$p")
+  done
+  if (( ${#removed[@]} > 0 )) && command -v ss >/dev/null 2>&1; then
+    listening="$(ss -tln 2>/dev/null || true)"
+    for p in "${removed[@]}"; do
+      # grep reads to EOF (output discarded): no SIGPIPE on the printf under pipefail.
+      if printf '%s\n' "$listening" | grep -E "[^0-9]${p}[[:space:]]" >/dev/null; then
+        echo "port ${p} still listens although this step removed it from ${SSH_SOCKET_UNIT}"; return 1
+      fi
+    done
+  fi
+  echo "${SSH_SOCKET_UNIT} holds exactly ${want}${removed[*]:+; ${removed[*]} no longer listens}"
 }
 
 # Runtime values of a sysctl file's keys before Phase 2 applies it (first one wins).
@@ -2229,6 +2561,8 @@ install_managed_host_files() {
       gone)      log "  ${MH_DST}: retired, already gone" ;;
       gated-off) log "  ${MH_DST}: skipped (${MH_DETAIL})" ;;
       cannot-restore) warn "  ${MH_DST}: ${MH_DETAIL} — left as it is" ;;
+      cannot-render)
+        rollback_now "${MH_DST}: ${MH_DETAIL} (Phase 1 should have stopped here)" ;;
       legacy-drift)
         warn "  ${MH_DST}: ${MH_DETAIL} — left exactly as it is (ALLOW_UNIT_DRIFT=1)"
         continue ;;
@@ -2258,7 +2592,7 @@ install_managed_host_files() {
           log "  ${MH_DST}: ${MH_STATE} -> the package default restored (${MH_PRISTINE_HOW[$MH_DST]:-verified}; ${MH_MODE} ${MH_OWNER})"
           continue
         fi
-        if [[ "$MH_CLASS" == "ssh" && "$MH_STATE" == "drift" && "$ALLOW_SSH_CHANGE" != "1" ]]; then
+        if [[ "$MH_CLASS" == "ssh" && "$MH_STATE" == "drift" && "$ALLOW_SSH_CHANGE" != "1" && -z "${MH_SSH_STEP[$MH_DST]:-}" ]]; then
           rollback_now "${MH_DST}: ssh drift without ALLOW_SSH_CHANGE=1 (Phase 1 should have stopped here)"
         fi
         mh_selftest_fence "$MH_DST"
@@ -2385,6 +2719,7 @@ host_files_rollback() {
     echo "disable --now ${u} (enabled by this deploy): rc=$?"
   done
   restore_host_paths
+  ssh_port_rollback
   (( ${#MH_CHANGED[@]} > 0 )) || return 0
   for row in "${MH_CHANGED[@]}"; do
     IFS='|' read -r class dst how <<< "$row"
@@ -2465,12 +2800,18 @@ host_files_rollback() {
 # --------------------------------------------------------------------------- #
 # This role's MANAGED_HOST_FILES entries with their gates evaluated HERE, the way
 # every other host-file step sees them: open entries and retired ones.
+# A render=ssh-port entry goes with the copy rendered from checkout <root> for the SSH
+# port plan as its (absolute) src: the check overlays and reads what Phase 2 installs.
 hc_registry_lines() {
-  local entry
+  local entry rendered
   for entry in "${MANAGED_HOST_FILES[@]}"; do
     mh_parse "$entry"
     [[ "$MH_ROLE" == "${NODE_ROLE:-main}" ]] || continue
     if [[ "$MH_CLASS" != "absent" ]] && ! mh_gate_open "$MH_OPTS"; then continue; fi
+    if [[ "$(mh_opt "$MH_OPTS" render)" == "ssh-port" ]] \
+       && rendered="$(mh_render_src "${1:-$APP_DIR}" "$MH_SRC" "$SSH_PLAN_LISTEN")"; then
+      entry="${rendered}|${MH_DST}|${MH_MODE}|${MH_OWNER}|${MH_CLASS}|${MH_ROLE}|${MH_OPTS}"
+    fi
     printf '%s\n' "$entry"
   done
 }
@@ -2512,7 +2853,7 @@ host_invariants_run() {
   esac
   reg="$(mktemp)" || { HC_RC=3; return 0; }
   err="$(mktemp)" || { rm -f "$reg"; HC_RC=3; return 0; }
-  hc_registry_lines > "$reg"
+  hc_registry_lines "$root" > "$reg"
   args=(--repo "$root" --role "${NODE_ROLE:-main}" --registry "$reg" --env "$ENV_FILE")
   if [[ -n "$HOST_CHECK_ROOT" ]]; then args+=(--root "$HOST_CHECK_ROOT"); fi
   if [[ "$phase" == phase1 ]]; then
@@ -4151,6 +4492,7 @@ relay_phase1() {
 
   # Host files of the relay role (MANAGED_HOST_FILES), the same gates as on main,
   # then whether they would be in effect (host invariants).
+  ssh_port_phase1 "$WT"
   host_state_phase1 "$WT"
   host_invariants_phase1 "$WT"
 
@@ -4218,6 +4560,7 @@ relay_phase1_report() {
     printf '    %s matches the checkout\n' "$RELAY_HELPER"
   fi
 
+  ssh_port_report_block
   host_state_report_block
   host_invariants_report_block
 
@@ -4398,7 +4741,7 @@ relay_phase2() {
   # (stage_host_paths / restore_host_paths) for every file outside the checkout.
   stage_host_paths "$RELAY_HELPER" "$RELAY_SYSTEM_UNIT" "$RELAY_SYSCTL_FILE" "$RELAY_INPUT_MARKER"
   readarray -t mh_paths < <(managed_host_stage_paths)
-  stage_host_paths "${mh_paths[@]}"
+  stage_host_paths "${mh_paths[@]}" "$(ssh_port_state_path)"
   install -d -m0755 "${STAGE}$(dirname "$RELAY_TABLE_DUMP")"
   if nft list table ip "$RELAY_TABLE" > "${STAGE}${RELAY_TABLE_DUMP}" 2>/dev/null; then
     manifest+=("${RELAY_TABLE_DUMP#/}")
@@ -4437,7 +4780,11 @@ relay_phase2() {
   # The registry mechanism, role-filtered: installs/refreshes vpn-relay-apply
   # (required on a relay) and nothing else; its failures reach relay_rollback.
   install_out_of_repo_helpers
+  ssh_port_phase2_pre
   install_managed_host_files
+  # The migration state, before the restart below: vpn-relay-apply then takes the ssh
+  # ports from the listening sockets (a step changes them: the filter follows).
+  ssh_port_phase2_post
 
   log "installing ${RELAY_UNIT} from ${RELAY_UNIT_SRC} (verbatim)"
   install -m0644 "$RELAY_UNIT_SRC" "$RELAY_SYSTEM_UNIT" \
@@ -4467,6 +4814,7 @@ relay_phase2() {
   [[ -e "$RELAY_LEGACY_NFT" ]] && legacy_before="present"
   relay_retire_legacy_nft
   rotate_backups
+  ssh_port_after_deploy
   # One line from the helper: off | OK (...) | CONFIRMED by main probe (...) |
   # PENDING CONFIRM (reverts at ...) — <why main did not confirm> | ...
   input_status="$(RELAY_ENV="$ENV_FILE" "$RELAY_HELPER" input-status 2>/dev/null)" \
@@ -4486,6 +4834,7 @@ relay_phase2() {
   input filter     : ${input_status:-unknown}
   host files       : $(host_files_summary)
   host invariants  : $(hc_summary_text)
+  ${SSH_FINAL_STATUS:-ssh port: not checked}
   ${RELAY_LEGACY_NFT} : ${legacy_before}$( [[ "$legacy_before" == "present" ]] && printf ' -> renamed to .pre-repo.<ts>')
 EOF
   host_invariants_report_rows
@@ -4801,6 +5150,9 @@ fi
 # — before any mutation — on a refused candidate, a retired file something still
 # names, a differing legacy drop-in or an ssh change without ALLOW_SSH_CHANGE=1.
 # Then the informational scans: files nothing accounts for, modified dpkg conffiles.
+# The SSH port (SSH_PORT in .env): the plan the two render=ssh-port host files are
+# rendered from — before the host-file scan. A refusal stops here, nothing changed.
+ssh_port_phase1 "$WT"
 host_state_phase1 "$WT"
 
 # Host invariants: would the repo's host state be IN EFFECT once Phase 2 is done? A
@@ -4935,6 +5287,8 @@ phase1_report() {
     printf '    none (installed helpers match origin/main, or WARP is not deployed on this host)\n'
   fi
 
+  # --- The SSH port (SSH_PORT): the plan the ssh files are rendered from ---
+  ssh_port_report_block
   # --- Host files as code (MANAGED_HOST_FILES) + files nothing accounts for ---
   host_state_report_block
   # --- Host invariants: is it in effect (scripts/vpn-bot-host-check) ---
@@ -5188,7 +5542,7 @@ stage_path "$MTPROXY_DIR"
 # Every host file Phase 2 may create, change or remove (MANAGED_HOST_FILES): staged
 # into the same archive, and put back — or removed again — by host_files_rollback.
 readarray -t _mh_paths < <(managed_host_stage_paths)
-stage_host_paths "${_mh_paths[@]}"
+stage_host_paths "${_mh_paths[@]}" "$(ssh_port_state_path)"
 unset _mh_paths
 
 ARCHIVE="${BACKUP_DIR}/backup-${TAG}-$(date +%Y%m%dT%H%M%S).tar.gz"
@@ -5236,8 +5590,11 @@ install_out_of_repo_helpers
 
 # Host files as code (MANAGED_HOST_FILES): install, repair and retire from the
 # advanced tree, run each class's post-action for what actually changed, rescan.
-# Validated in Phase 1; every path is in the archive; a failure rolls back.
+# Validated in Phase 1; every path is in the archive; a failure rolls back. The SSH
+# port around it: the firewall opens a new port first, the state file follows.
+ssh_port_phase2_pre
 install_managed_host_files
+ssh_port_phase2_post
 
 log "installing ${BOT_UNIT} from deploy/vpn-bot.service (verbatim)"
 install -m0644 "deploy/vpn-bot.service" "$SYSTEM_UNIT"
@@ -5383,6 +5740,9 @@ disarm
 # (bash restores the trap it had on entry when the function leaves it unset), so
 # the rollback trap would stay armed through the report below. Clear it here.
 trap - ERR INT TERM HUP
+# The SSH port after the deploy (never a rollback): close the old port of a finished
+# migration, or look for the proof of one in phase 1 right away.
+ssh_port_after_deploy
 
 cat <<EOF
 
@@ -5395,6 +5755,7 @@ cat <<EOF
   removed protocols: $(uninstalled_protocols | sed 's/^$/none/')
   host files       : $(host_files_summary)
   host invariants  : $(hc_summary_text)
+  ${SSH_FINAL_STATUS:-ssh port: not checked}
 EOF
 host_invariants_report_rows
 # One line per sidecar (restarted / skipped), so a half-deployed host is visible

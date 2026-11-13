@@ -122,7 +122,12 @@ table inet vpnrelay_input {
 - **The SSH ports are never configured.** They come from `ss -Hltunp`: every TCP listener on a
   non-loopback address owned by `sshd` (or `sshd-session`), or held by systemd for a port that
   `ssh.socket` declares (`systemctl show -p Listen ssh.socket` — socket activation before sshd
-  ever ran). Move sshd to another port and the next apply follows it. **No SSH port found →
+  ever ran). Move sshd to another port and the next apply follows it — that is how the
+  [SSH port migration](host-state.md#the-ssh-port) (`SSH_PORT`, default 54321: a relay still on
+  22 moves at its next deploy) needs no rule here: in phase 1 ssh listens on 22 and 54321 and the
+  restart of `vpn-relay` lets both in (a changed TCP set, so main's probe confirms it — and that
+  confirmation of 54321 is the migration's proof); in phase 2 22 leaves `ssh.socket` and the next
+  apply drops it. **No SSH port found →
   nothing is applied**: `no SSH port found — refusing to install a drop policy`, exit `8`,
   neither table changes. The unit is ordered `After=ssh.socket ssh.service`, so at boot sshd
   listens before apply looks.
@@ -252,6 +257,7 @@ helper for `HYSTERIA2_PORT`): optional `export`, spaces around `=`, quotes, trai
 | Variable | Default | Meaning |
 |---|---|---|
 | `NODE_ROLE` | `main` | `relay` on a relay host. Any other value is refused before the deploy changes anything. |
+| `SSH_PORT` | `54321` | The port ssh listens on — [the SSH port](host-state.md#the-ssh-port). The deploy moves ssh there in two phases (both ports, then — proven by main's probe or by a connection from outside in the sshd log — the new one alone), no `ALLOW_SSH_CHANGE`. Never a forwarded, extra or closed TCP port (refused). |
 | `RELAY_UPSTREAM_IPV4` | — (required) | IPv4 of the main server. |
 | `RELAY_FORWARD_TCP_PORTS` | `443` | Comma-separated, 1..65535; each forwarded 1:1. |
 | `RELAY_FORWARD_UDP_PORTS` | `443` | Same for UDP (Hysteria2). |
@@ -352,7 +358,11 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   `OUT_OF_REPO_HELPERS` (role `relay`) and `deploy/relay/vpn-relay.service` verbatim;
   `daemon-reload`, `enable`, `restart vpn-relay` (established flows keep their conntrack NAT
   across the millisecond gap; a set that is not confirmed is confirmed by main's probe here);
-  verify with `vpn-relay-apply check`. DEPLOY OK carries `input filter : …` from
+  verify with `vpn-relay-apply check`. Around the host files the [SSH port](host-state.md#the-ssh-port)
+  moves when `SSH_PORT` asks for it (phase 1: both ports; the restart of `vpn-relay` then lets
+  them in and main's probe confirms them); right after DEPLOY OK `vpn-bot-ssh-port.service` looks
+  for the proof once, so the relay usually finishes the migration in the same run.
+  DEPLOY OK carries `ssh port: …` and `input filter : …` from
   `vpn-relay-apply input-status` — `CONFIRMED by main probe (…)` with nothing to do, or
   `PENDING CONFIRM (…) — <why>` followed by the reason and the instruction to run
   `input-confirm` from a NEW ssh session within 5 minutes.

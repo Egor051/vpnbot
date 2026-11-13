@@ -1,0 +1,1141 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-ssh-port — the SSH port of this host follows SSH_PORT in .env, without a lockout.
+
+ONE setting, both roles: ``SSH_PORT`` in /opt/vpn-service/.env (main and relay;
+absent or empty = 54321). Two repo files are TEMPLATES rendered from it
+(scripts/deploy.sh, MANAGED_HOST_FILES, opts ``render=ssh-port``):
+
+    /etc/systemd/system/ssh.socket.d/override.conf   ListenStream= per port
+    /etc/ssh/sshd_config.d/00-vpn-bot-port.conf      Port per port + LogLevel VERBOSE
+
+A template line that carries ``@SSH_PORT@`` is written once per port of the set,
+in ascending order; every other line verbatim. The Port drop-in makes the fallback
+path — ssh.service started without ssh.socket — listen where the socket does.
+
+When the port ssh listens on now is not SSH_PORT, the move is a migration in two
+phases, each one automatic, and the old port is never closed on trust:
+
+  PHASE 1 (a deploy)  ssh.socket listens on the old port(s) AND SSH_PORT; the
+                      firewall follows (relay: vpnrelay_input takes the ports from
+                      `ss`; main: a UFW rule 'vpn-bot:ssh-migration' for SSH_PORT,
+                      or vpn-bot-ufw-apply when it is installed). The old port is not
+                      touched. The state goes to /var/lib/vpn-bot/ssh-migration.json.
+  PHASE 2             only once SSH_PORT is PROVEN to work from outside: the old port
+                      leaves the socket and the Port drop-in, the firewall closes it.
+
+Proof — any one of (each must be later than the start of phase 1):
+  relay-probe  relay: main's probe (POST /relay/ssh-probe) connected to SSH_PORT
+               through the input filter — /etc/vpn-relay/input.confirmed says
+               confirmed_by=main-probe and its tcp set holds SSH_PORT.
+  journal      both roles: sshd logged a connection from a NON-local address on
+               SSH_PORT. openssh 9.6 (noble) writes, at LogLevel VERBOSE only:
+                   Connection from <raddr> port <rport> on <laddr> port <lport> rdomain ""
+               (measured with /usr/sbin/sshd of 1:9.6p1-3ubuntu13: INFO does not log
+               it) — the Port drop-in sets LogLevel VERBOSE for that reason.
+  bot          main: a superadmin pressed «Подтвердить» in the bot; the bot runs
+               `vpn-bot-ssh-port confirm` through sudo.
+
+Without proof there is no phase 2, ever. Every deploy, the boot run and every run of
+vpn-bot-host-check.timer (vpn-bot-host-check.service Wants= vpn-bot-ssh-port.service,
+which runs `advance`) look for it; `confirm` starts that unit at once.
+
+Usage (root, except `render` and a `plan` / `status` that can read what they need):
+  vpn-bot-ssh-port plan             read-only: what this host should do now, as
+                                    key=value lines (deploy.sh, vpn-bot-host-check)
+  vpn-bot-ssh-port status           read-only: one line
+  vpn-bot-ssh-port render --template FILE --ports P[,P...]
+  vpn-bot-ssh-port record --action start|finish|cancel --from P[,P] --to P
+                          [--proof-kind K --proof-detail TEXT]     (deploy.sh)
+  vpn-bot-ssh-port firewall-open --port P      main: open P before phase 1 (deploy.sh)
+  vpn-bot-ssh-port firewall-undo --port P      main: drop the rule firewall-open added
+  vpn-bot-ssh-port firewall-close --from P[,P] --to P    main: close the old port(s)
+  vpn-bot-ssh-port advance [--listen-wait S]   phase 1 + proof -> phase 2 (the unit)
+  vpn-bot-ssh-port confirm --port P --since EPOCH --admin ID    proof `bot` (sudo)
+Common options: --env FILE (default /opt/vpn-service/.env), --repo DIR (default
+/opt/vpn-service, the templates), --role main|relay (default NODE_ROLE of --env),
+--root DIR (tests: every host path is read and written under DIR).
+
+Exit codes: 0 ok; 2 usage; 3 refused (SSH_PORT invalid or taken by a service of this
+role, ssh.socket not active, a hand-edited ssh file, a stale confirmation); 4 phase 2
+failed its post-check and was reverted to the previous port set; 5 cannot run (a tool
+or the state file).
+
+Never evaluates command output; every command is an argv list. Stdlib only: the
+relay has no venv. Run as root from a process in another mount namespace (the non-root
+bot's ProtectSystem=strict, which sudo keeps) it re-executes itself in PID 1's first
+(nsenter), like deploy/helpers/vpn-bot-socks5-user: /var/lib/vpn-bot must be writable.
+In phase 2 a UFW rule for the old port without a protocol (tcp AND udp) is split: the
+same rule for udp is added first, then the shared one goes — a udp service on that
+number keeps its port.
+"""
+from __future__ import annotations
+
+import argparse
+import calendar
+import contextlib
+import fcntl
+import ipaddress
+import json
+import os
+import re
+import socket
+import subprocess  # noqa: S404 — fixed argv lists of system tools, never a shell
+import sys
+import tempfile
+import time
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+DEFAULT_PORT = 54321
+APP_DIR = "/opt/vpn-service"
+STATE_FILE = "/var/lib/vpn-bot/ssh-migration.json"
+# The deploy's lock: `advance` never runs next to a deploy (the deploy decides then).
+DEPLOY_LOCK = "/run/vpn-bot-deploy.lock"
+SSHD_CONFIG = "/etc/ssh/sshd_config"
+SOCKET_UNIT = "ssh.socket"
+SSH_UNIT = "ssh.service"
+ADVANCE_UNIT = "vpn-bot-ssh-port.service"
+RELAY_UNIT = "vpn-relay.service"
+RELAY_HELPER = "/usr/local/sbin/vpn-relay-apply"
+RELAY_MARKER = "/etc/vpn-relay/input.confirmed"
+UFW_APPLY = "/usr/local/sbin/vpn-bot-ufw-apply"
+UFW_MIGRATION_COMMENT = "vpn-bot:ssh-migration"
+UFW_SSH_COMMENT = "vpn-bot:ssh"
+PLACEHOLDER = "@SSH_PORT@"
+# (template in the checkout, host path) — the MANAGED_HOST_FILES entries with
+# opts render=ssh-port (tests/test_ssh_port.py pins the two lists together).
+TEMPLATES: tuple[tuple[str, str], ...] = (
+    ("deploy/host/ssh/ssh.socket-override.conf", "/etc/systemd/system/ssh.socket.d/override.conf"),
+    ("deploy/host/ssh/00-vpn-bot-port.conf", "/etc/ssh/sshd_config.d/00-vpn-bot-port.conf"),
+)
+# TCP ports the services of a role listen on, from .env: (key, default). A key read
+# as a comma-separated list on the relay. SSH_PORT may not be one of them.
+MAIN_TCP_SERVICES: tuple[tuple[str, str], ...] = (
+    ("XRAY_PUBLIC_PORT", "443"),
+    ("XRAY_XHTTP_PORT", "8443"),
+    ("SUBSCRIPTION_BIND_PORT", "8445"),
+    ("SUBSCRIPTION_PUBLIC_PORT", "0"),
+    ("SOCKS5_PORT", ""),
+    ("MTPROTO_PORT", "8443"),
+    ("MTPROTO_INTERNAL_STATS_PORT", "8888"),
+    ("HEALTH_PORT", ""),
+)
+RELAY_TCP_SERVICES: tuple[tuple[str, str], ...] = (
+    ("RELAY_FORWARD_TCP_PORTS", "443"),
+    ("RELAY_INPUT_EXTRA_TCP", ""),
+    ("RELAY_INPUT_CLOSED_TCP", ""),
+)
+SSH_PROCS = frozenset({"sshd", "sshd-session"})
+CONN_RE = re.compile(r"Connection from (\S+) port (\d+) on (\S+) port (\d+)(?:\s|$)")
+LISTEN_RE = re.compile(r"^Listen=(.*):(\d+) \(Stream\)$")
+USERS_RE = re.compile(r'\("([^"]+)",pid=(\d+)')
+PORT_RE = re.compile(r"^[1-9][0-9]{0,4}$")
+EXIT_REFUSED = 3
+EXIT_REVERTED = 4
+EXIT_CANNOT = 5
+COMMAND_TIMEOUT = 60
+
+SELFTEST = os.environ.get("VPN_BOT_SSH_PORT_SELFTEST") == "1"
+
+
+class Refused(Exception):
+    """The plan cannot go on: the reason is for the operator."""
+
+
+class Cannot(Exception):
+    """A tool or a file the helper needs failed."""
+
+
+# --------------------------------------------------------------------------- #
+# Context: paths (under --root in tests), .env, commands
+# --------------------------------------------------------------------------- #
+@dataclass
+class Ctx:
+    env_file: Path
+    repo: Path
+    root: str
+    role: str = ""
+    env_text: str = ""
+    listen_wait: int = 10
+
+    def host(self, path: str) -> Path:
+        return Path(f"{self.root}{path}")
+
+    @property
+    def state_path(self) -> Path:
+        return self.host(STATE_FILE)
+
+    def env(self, key: str) -> str:
+        return env_sed_val(self.env_text, key)
+
+
+def env_sed_val(text: str, key: str) -> str:
+    """scripts/deploy.sh's env_sed_val: optional `export`, spaces around `=`, an inline
+    `# comment`, double then single quotes, the last assignment wins."""
+    rx = re.compile(r"^\s*(?:export\s+)?" + re.escape(key) + r"\s*=\s*(.*)$")
+    val: str | None = None
+    for line in text.split("\n"):        # sed's lines: a CR stays part of the value
+        m = rx.match(line)
+        if m:
+            val = m.group(1)
+    if val is None:
+        return ""
+    val = re.sub(r"\s*#.*$", "", val)
+    for q in ('"', "'"):
+        if len(val) >= 2 and val.startswith(q) and val.endswith(q):
+            val = val[1:-1]
+    return val.rstrip()
+
+
+def run(argv: Sequence[str], *, timeout: int = COMMAND_TIMEOUT) -> tuple[int, str]:
+    """(exit code, stdout+stderr); 127 = not found, 124 = timeout."""
+    try:
+        proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout, check=False)  # noqa: S603
+    except FileNotFoundError:
+        return 127, f"{argv[0]}: not found"
+    except subprocess.TimeoutExpired:
+        return 124, f"{argv[0]}: timed out after {timeout}s"
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def out_of(argv: Sequence[str], *, timeout: int = COMMAND_TIMEOUT) -> str | None:
+    """stdout of a command that must succeed, or None."""
+    try:
+        proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout, check=False)  # noqa: S603
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def csv(ports: Sequence[int]) -> str:
+    return ",".join(str(p) for p in ports)
+
+
+def parse_ports(text: str) -> list[int]:
+    out: set[int] = set()
+    for part in re.split(r"[,\s]+", text.strip()):
+        if PORT_RE.match(part) and int(part) <= 65535:
+            out.add(int(part))
+    return sorted(out)
+
+
+def iso(ts: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def fence(ctx: Ctx, path: Path) -> None:
+    """Under VPN_BOT_SSH_PORT_SELFTEST=1 nothing outside --root is ever written."""
+    if SELFTEST and (not ctx.root or not str(path).startswith(ctx.root.rstrip("/") + "/")):
+        raise Cannot(f"selftest: refusing to write {path} outside --root {ctx.root!r}")
+
+
+def write_atomic(ctx: Ctx, path: Path, data: str, mode: int = 0o644) -> None:
+    """A temporary file in the same directory (never follows a planted link), then rename."""
+    fence(ctx, path)
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        if os.geteuid() == 0 and not SELFTEST:
+            os.chown(tmp, 0, 0)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def read_text(path: Path) -> str | None:
+    """A regular file's text; None when absent. A symlink is never followed."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise Cannot(f"cannot read {path}: {exc}") from exc
+    with os.fdopen(fd, encoding="utf-8", newline="") as fh:      # bytes as they are (a CR too)
+        return fh.read()
+
+
+# --------------------------------------------------------------------------- #
+# Templates
+# --------------------------------------------------------------------------- #
+def render(template: str, ports: Sequence[int]) -> str:
+    lines: list[str] = []
+    for line in template.splitlines(keepends=True):
+        if PLACEHOLDER in line:
+            lines.extend(line.replace(PLACEHOLDER, str(p)) for p in sorted(set(ports)))
+        else:
+            lines.append(line)
+    return "".join(lines)
+
+
+def template_text(ctx: Ctx, rel: str) -> str:
+    text = read_text(ctx.repo / rel)
+    if text is None:
+        raise Cannot(f"template {ctx.repo / rel} not found")
+    return text
+
+
+# --------------------------------------------------------------------------- #
+# SSH_PORT and the ports of this role's services
+# --------------------------------------------------------------------------- #
+def resolve_role(ctx: Ctx) -> None:
+    if ctx.role:
+        if ctx.role not in ("main", "relay"):
+            raise Refused(f"--role must be main or relay, not {ctx.role!r}")
+        return
+    raw = ctx.env("NODE_ROLE")
+    if raw in ("", "main"):
+        ctx.role = "main"
+    elif raw == "relay":
+        ctx.role = "relay"
+    else:
+        raise Refused(f"NODE_ROLE={raw!r} in {ctx.env_file} is not a host role (main | relay)")
+
+
+def ssh_port(ctx: Ctx) -> tuple[int, str]:
+    raw = ctx.env("SSH_PORT")
+    if raw == "":
+        return DEFAULT_PORT, "default"
+    if not PORT_RE.match(raw) or int(raw) > 65535:
+        raise Refused(f"SSH_PORT={raw!r} in {ctx.env_file} is not a TCP port (1..65535, no leading zero)")
+    return int(raw), "env"
+
+
+def service_ports(ctx: Ctx) -> dict[int, str]:
+    """port -> the .env key of a TCP service of this role that uses it."""
+    taken: dict[int, str] = {}
+    if ctx.role == "relay":
+        for key, default in RELAY_TCP_SERVICES:
+            for p in parse_ports(ctx.env(key) or default):
+                taken.setdefault(p, key)
+        return taken
+    for key, default in MAIN_TCP_SERVICES:
+        raw = ctx.env(key)
+        if key == "XRAY_PUBLIC_PORT" and not raw:
+            raw = ctx.env("XRAY_SERVER_PORT")
+        for p in parse_ports(raw or default):
+            taken.setdefault(p, key)
+    return taken
+
+
+@dataclass
+class Listener:
+    port: int
+    addr: str
+    procs: list[tuple[str, int]] = field(default_factory=list)
+
+
+def tcp_listeners() -> list[Listener] | None:
+    out = out_of(["ss", "-Hltnp"])
+    if out is None:
+        return None
+    rows: list[Listener] = []
+    for line in out.splitlines():
+        toks = line.split()
+        if "LISTEN" not in toks:
+            continue
+        i = toks.index("LISTEN")
+        if len(toks) < i + 4:
+            continue
+        local = toks[i + 3]
+        addr, _, port = local.rpartition(":")
+        if not port.isdigit():
+            continue
+        procs = [(m.group(1), int(m.group(2))) for m in USERS_RE.finditer(line)]
+        rows.append(Listener(int(port), addr, procs))
+    return rows
+
+
+def held_by_ssh(row: Listener, sock_ports: Sequence[int]) -> bool:
+    """sshd itself, or systemd (PID 1) holding a port ssh.socket declares."""
+    for name, pid in row.procs:
+        if name in SSH_PROCS:
+            return True
+        if name == "systemd" and pid == 1 and row.port in sock_ports:
+            return True
+    return False
+
+
+def check_port_free(ctx: Ctx, port: int, sock_ports: Sequence[int]) -> None:
+    taken = service_ports(ctx)
+    if port in taken:
+        raise Refused(f"SSH_PORT={port} is the port of {taken[port]} on this {ctx.role} server — pick another one")
+    rows = tcp_listeners()
+    for row in rows or []:
+        if row.port == port and row.procs and not held_by_ssh(row, sock_ports):
+            names = ",".join(sorted({n for n, _ in row.procs}))
+            raise Refused(f"SSH_PORT={port} is in use by {names} (listening on {row.addr}:{port}) — pick another port")
+
+
+# --------------------------------------------------------------------------- #
+# What ssh listens on now
+# --------------------------------------------------------------------------- #
+# `systemctl show` only (key=value lines, read as data): the host check runs this
+# read-only, and `show` is what systemd really has loaded.
+def unit_props(unit: str, *props: str) -> list[str]:
+    argv = ["systemctl", "show"]
+    for p in props:
+        argv += ["-p", p]
+    out = out_of([*argv, unit]) or ""
+    return [ln.strip() for ln in out.splitlines()]
+
+
+def unit_state(unit: str) -> str:
+    for line in unit_props(unit, "ActiveState"):
+        if line.startswith("ActiveState="):
+            return line.split("=", 1)[1] or "unknown"
+    return "unknown"
+
+
+def socket_state() -> str:
+    return unit_state(SOCKET_UNIT)
+
+
+def unit_active(unit: str) -> bool:
+    return unit_state(unit) == "active"
+
+
+def socket_ports() -> list[int]:
+    ports: set[int] = set()
+    for line in unit_props(SOCKET_UNIT, "Listen"):
+        m = LISTEN_RE.match(line)
+        if m:
+            ports.add(int(m.group(2)))
+    return sorted(ports)
+
+
+def sshd_ports(ctx: Ctx) -> list[int]:
+    out = out_of(["sshd", "-T", "-f", str(ctx.host(SSHD_CONFIG))])
+    if out is None:
+        return []
+    return sorted({int(ln.split()[1]) for ln in out.splitlines() if re.match(r"^port \d+$", ln.strip())})
+
+
+# --------------------------------------------------------------------------- #
+# The state file
+# --------------------------------------------------------------------------- #
+@dataclass
+class State:
+    from_: list[int]
+    to: int
+    phase: int            # 1 = both ports, 2 = done, 0 = cancelled
+    since: int
+    raw: dict[str, Any]
+
+
+def load_state(ctx: Ctx) -> State | None:
+    text = read_text(ctx.state_path)
+    if text is None:
+        return None
+    try:
+        data = json.loads(text)
+        from_ = [int(p) for p in data["from"]]
+        to = int(data["to"])
+        phase = int(data["phase"])
+        since = int(data["since"])
+        if not from_ or phase not in (0, 1, 2) or not all(1 <= p <= 65535 for p in [*from_, to]):
+            raise ValueError("out of range")
+    except (ValueError, KeyError, TypeError) as exc:
+        print(f"vpn-bot-ssh-port: {ctx.state_path} is not a migration state ({exc}) — ignored, "
+              "the live ports decide", file=sys.stderr)
+        return None
+    return State(sorted(set(from_)), to, phase, since, data)
+
+
+def save_state(ctx: Ctx, data: dict[str, Any]) -> None:
+    data["version"] = 1
+    data["updated_at"] = int(time.time())
+    write_atomic(ctx, ctx.state_path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+# --------------------------------------------------------------------------- #
+# Proofs
+# --------------------------------------------------------------------------- #
+@dataclass
+class Proof:
+    kind: str
+    detail: str
+
+
+def proof_relay(ctx: Ctx, st: State) -> Proof | None:
+    if ctx.role != "relay":
+        return None
+    text = read_text(ctx.host(RELAY_MARKER)) or ""
+    kv: dict[str, str] = {}
+    for line in text.splitlines():
+        m = re.match(r"^([a-z_]+)=(.*)$", line)
+        if m:
+            kv[m.group(1)] = m.group(2)
+    if kv.get("confirmed_by") != "main-probe" or st.to not in parse_ports(kv.get("tcp", "")):
+        return None
+    try:
+        at = calendar.timegm(time.strptime(kv.get("confirmed_at", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
+    if at < st.since:
+        return None
+    return Proof("relay-probe", f"main's probe connected to tcp {st.to} through the input filter "
+                                f"(confirmed {kv.get('confirmed_at')})")
+
+
+def proof_bot(ctx: Ctx, st: State) -> Proof | None:
+    if ctx.role != "main":
+        return None
+    c = st.raw.get("bot_confirm")
+    if not isinstance(c, dict):
+        return None
+    try:
+        port, at, admin = int(c["port"]), int(c["at"]), int(c["admin_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if port != st.to or at < st.since:
+        return None
+    return Proof("bot", f"superadmin {admin} pressed «Подтвердить» in the bot ({iso(at)})")
+
+
+def local_addresses() -> set[str]:
+    out = out_of(["ip", "-o", "addr", "show"]) or ""
+    addrs: set[str] = set()
+    for m in re.finditer(r"\binet6? ([0-9a-fA-F:.]+)/\d+", out):
+        addrs.add(normal_addr(m.group(1)))
+    return addrs
+
+
+def normal_addr(addr: str) -> str:
+    a = addr.strip("[]").split("%", 1)[0]
+    try:
+        ip = ipaddress.ip_address(a)
+    except ValueError:
+        return a
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return str(ip.ipv4_mapped)
+    return str(ip)
+
+
+def is_local(raddr: str, laddr: str, own: set[str]) -> bool:
+    r = normal_addr(raddr)
+    try:
+        ip = ipaddress.ip_address(r)
+    except ValueError:
+        return True                      # not an address: proves nothing
+    return ip.is_loopback or ip.is_unspecified or r == normal_addr(laddr) or r in own
+
+
+def proof_journal(st: State) -> Proof | None:
+    out = out_of(["journalctl", "--no-pager", "-q", "-o", "short-iso", "-u", SSH_UNIT,
+                  "--since", f"@{st.since}"], timeout=120)
+    if not out:
+        return None
+    own: set[str] | None = None
+    for line in out.splitlines():
+        m = CONN_RE.search(line)
+        if not m or int(m.group(4)) != st.to:
+            continue
+        if own is None:
+            own = local_addresses()
+        if is_local(m.group(1), m.group(3), own):
+            continue
+        stamp = line.split(" ", 1)[0]
+        return Proof("journal", f"sshd logged a connection from {m.group(1)} on port {st.to} ({stamp})")
+    return None
+
+
+def find_proof(ctx: Ctx, st: State) -> Proof | None:
+    return proof_relay(ctx, st) or proof_bot(ctx, st) or proof_journal(st)
+
+
+def waiting_for(ctx: Ctx, to: int) -> str:
+    if ctx.role == "relay":
+        return (f"main's probe of tcp {to} (RELAY_CONFIRM_URL), or an ssh connection from outside "
+                f"on {to} in the sshd log")
+    return f"an ssh connection from outside on {to} in the sshd log, or «Подтвердить» in the bot"
+
+
+# --------------------------------------------------------------------------- #
+# The plan: what this host should do now (read-only)
+# --------------------------------------------------------------------------- #
+@dataclass
+class Plan:
+    port: int = 0
+    source: str = ""
+    role: str = ""
+    socket: str = ""
+    current: list[int] = field(default_factory=list)
+    fallback: list[int] = field(default_factory=list)
+    state: str = "none"
+    action: str = ""      # steady | start | wait | finish | cancel
+    from_: list[int] = field(default_factory=list)
+    to: int = 0
+    since: int = 0
+    listen: list[int] = field(default_factory=list)
+    proof: Proof | None = None
+    done: str = ""
+    last_error: str = ""
+
+    def status(self, ctx: Ctx) -> str:
+        a, b = csv(self.from_), self.to
+        if self.action == "steady":
+            return f"ssh port: {self.port} (SSH_PORT{', default' if self.source == 'default' else ''}){self.done}"
+        if self.action == "start":
+            return (f"ssh port: migrating {a} -> {b} (phase 1 starts now: ssh.socket listens on both; "
+                    f"then waiting for proof: {waiting_for(ctx, b)})")
+        if self.action == "wait":
+            return f"ssh port: migrating {a} -> {b} (waiting for proof: {waiting_for(ctx, b)})"
+        if self.action == "finish" and self.proof is not None:
+            return f"ssh port: migrating {a} -> {b} — proven ({self.proof.kind}: {self.proof.detail}); phase 2 closes {a}"
+        if self.action == "cancel":
+            return f"ssh port: back to {self.port} (SSH_PORT) — the unproven {a} is dropped, {self.port} never closed"
+        return f"ssh port: {self.action}"
+
+
+def compute_plan(ctx: Ctx) -> Plan:
+    resolve_role(ctx)
+    plan = Plan(role=ctx.role)
+    plan.port, plan.source = ssh_port(ctx)
+    plan.socket = socket_state()
+    if plan.socket != "active":
+        raise Refused(f"{SOCKET_UNIT} is {plan.socket}: the SSH port is moved through ssh.socket "
+                      "(socket activation, the Ubuntu 24.04 default) — nothing is changed without it")
+    plan.current = socket_ports()
+    if not plan.current:
+        raise Refused(f"cannot tell which port {SOCKET_UNIT} listens on (systemctl show -p Listen) — "
+                      "nothing is changed")
+    plan.fallback = sshd_ports(ctx)
+    check_port_free(ctx, plan.port, plan.current)
+    st = load_state(ctx)
+    p = plan.port
+    if st is not None and isinstance(st.raw.get("last_error"), str):
+        plan.last_error = st.raw["last_error"]
+    if st is not None and st.phase == 1:
+        plan.state = "phase1"
+        if p == st.to:
+            plan.from_, plan.to, plan.since = st.from_, st.to, st.since
+            plan.proof = find_proof(ctx, st)
+            if plan.proof is not None:
+                plan.action, plan.listen = "finish", [p]
+            else:
+                plan.action, plan.listen = "wait", sorted({*st.from_, p})
+            return plan
+        rest = [f for f in st.from_ if f != p]
+        if not rest:
+            # SSH_PORT is back on the old port: the unproven target is dropped.
+            plan.action, plan.from_, plan.to, plan.since, plan.listen = "cancel", [st.to], p, st.since, [p]
+            return plan
+        plan.action, plan.from_, plan.to, plan.listen = "start", rest, p, sorted({*rest, p})
+        return plan
+    if st is not None:
+        plan.state = "done" if st.phase == 2 else "cancelled"
+    extra = [c for c in plan.current if c != p]
+    if not extra:
+        plan.action, plan.listen = "steady", [p]
+        if st is not None and st.phase == 2 and st.to == p:
+            when = st.raw.get("done_iso") or "?"
+            plan.done = f"; migrated from {csv(st.from_)} at {when}"
+        return plan
+    plan.action, plan.from_, plan.to, plan.listen = "start", extra, p, sorted({*extra, p})
+    return plan
+
+
+def plan_lines(ctx: Ctx, plan: Plan) -> list[str]:
+    def one(s: str) -> str:
+        return s.replace("\n", " ").replace("\r", " ")
+
+    return [
+        f"ssh_port={plan.port}",
+        f"ssh_port_source={plan.source}",
+        f"role={plan.role}",
+        f"socket={plan.socket}",
+        f"current={csv(plan.current)}",
+        f"fallback={csv(plan.fallback)}",
+        f"state={plan.state}",
+        f"action={plan.action}",
+        f"from={csv(plan.from_)}",
+        f"to={plan.to or ''}",
+        f"since={plan.since or ''}",
+        f"listen={csv(plan.listen)}",
+        f"proof={plan.proof.kind if plan.proof else 'none'}",
+        f"proof_detail={one(plan.proof.detail) if plan.proof else ''}",
+        f"waiting_for={one(waiting_for(ctx, plan.to)) if plan.to else ''}",
+        f"status={one(plan.status(ctx))}",
+        f"last_error={one(plan.last_error)}",
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Recording (deploy.sh after its own install, and advance)
+# --------------------------------------------------------------------------- #
+def record(ctx: Ctx, action: str, from_: list[int], to: int, proof: Proof | None) -> str:
+    now = int(time.time())
+    st = load_state(ctx)
+    if action == "start":
+        data: dict[str, Any] = {
+            "role": ctx.role, "from": from_, "to": to, "phase": 1, "since": now, "since_iso": iso(now),
+            "proof": None, "bot_confirm": None, "done_at": None, "done_iso": None, "last_error": None,
+        }
+    elif action in ("finish", "cancel"):
+        if st is None or st.phase != 1:
+            raise Refused(f"no migration in phase 1 to {action} ({ctx.state_path})")
+        data = dict(st.raw)
+        data.update({"phase": 2 if action == "finish" else 0, "done_at": now, "done_iso": iso(now),
+                     "last_error": None})
+        if proof is not None:
+            data["proof"] = {"kind": proof.kind, "detail": proof.detail, "at": now}
+    else:
+        raise Refused(f"unknown record action {action!r}")
+    save_state(ctx, data)
+    return f"{ctx.state_path}: {action} {csv(data['from'])} -> {data['to']} (phase {data['phase']})"
+
+
+def note_error(ctx: Ctx, text: str) -> None:
+    st = load_state(ctx)
+    if st is None:
+        return
+    data = dict(st.raw)
+    data["last_error"] = f"{iso(time.time())} {text}"
+    with contextlib.suppress(OSError, Cannot):
+        save_state(ctx, data)
+
+
+# --------------------------------------------------------------------------- #
+# The firewall of the main server (UFW). A relay's vpnrelay_input follows `ss`.
+# --------------------------------------------------------------------------- #
+UFW_RULE_RE = re.compile(r"^ufw (allow|limit) (.*?)(?: comment '([^']*)')?$")
+
+
+@dataclass
+class UfwRule:
+    text: str             # without "ufw " and without the comment
+    comment: str
+    ports: list[int]      # the single port it opens for tcp, or [] (not a simple rule)
+    mentions: bool        # names the port somewhere (multi-port, app profile ...)
+    tcp_only: bool = True  # False: no protocol given — ufw(8): "will allow tcp and udp"
+    simple: bool = True    # "<port>[/tcp]" (else "... to <addr> port <port> [proto tcp]")
+
+
+def ufw_rules(port_of_interest: int) -> list[UfwRule] | None:
+    out = out_of(["ufw", "show", "added"])
+    if out is None:
+        return None
+    rules: list[UfwRule] = []
+    for line in out.splitlines():
+        m = UFW_RULE_RE.match(line.strip())
+        if not m:
+            continue
+        verb, spec, comment = m.group(1), m.group(2), m.group(3) or ""
+        toks = spec.split()
+        ports: list[int] = []
+        simple = re.fullmatch(r"(?:in )?(?:on \S+ )?(\d+)(/tcp)?", spec)
+        ext = re.fullmatch(r"(?:in )?(?:on \S+ )?(?:from \S+ )?to \S+ port (\d+)( proto tcp)?", spec)
+        mm = simple or ext
+        if mm:
+            ports = [int(mm.group(1))]
+        mentions = any(re.search(rf"(^|[^0-9]){port_of_interest}([^0-9]|$)", t) for t in toks)
+        rules.append(UfwRule(f"{verb} {spec}", comment, ports, mentions,
+                             tcp_only=bool(mm and mm.group(2)), simple=simple is not None))
+    return rules
+
+
+def ufw_allows_from_anywhere(rules: list[UfwRule], port: int) -> UfwRule | None:
+    for r in rules:
+        if r.ports == [port] and " from " not in f" {r.text} ":
+            return r
+    return None
+
+
+def ufw(*args: str) -> tuple[int, str]:
+    return run(["ufw", *args])
+
+
+def firewall_open(ctx: Ctx, port: int) -> tuple[str, bool]:
+    """(what happened, whether THIS call added a rule). Only an added rule may be undone:
+    a 'vpn-bot:ssh-migration' rule already there (a migration whose state file was
+    lost) belongs to the host as it was, and a rollback must leave it."""
+    if ctx.role == "relay":
+        return f"relay: table inet vpnrelay_input takes the ssh ports from the listening sockets — {port} follows by itself", False
+    if os.access(ctx.host(UFW_APPLY), os.X_OK):
+        rc, text = run([str(ctx.host(UFW_APPLY)), "apply"])
+        if rc != 0:
+            raise Cannot(f"{UFW_APPLY} apply failed (rc {rc}): {text.strip()}")
+        return f"{UFW_APPLY} apply: the firewall follows the listening ports", False
+    rules = ufw_rules(port)
+    if rules is None:
+        return "ufw is not installed (or `ufw show added` fails) — no host firewall to open", False
+    have = ufw_allows_from_anywhere(rules, port)
+    if have is not None:
+        return f"ufw already allows {port}/tcp ('{have.text}') — nothing added", False
+    rc, text = ufw("allow", f"{port}/tcp", "comment", UFW_MIGRATION_COMMENT)
+    rules = ufw_rules(port) or []
+    if rc != 0 or ufw_allows_from_anywhere(rules, port) is None:
+        raise Cannot(f"ufw allow {port}/tcp failed (rc {rc}): {text.strip()}")
+    return f"ufw: opened {port}/tcp (rule comment '{UFW_MIGRATION_COMMENT}')", True
+
+
+def firewall_undo(ctx: Ctx, port: int) -> str:
+    if ctx.role == "relay" or os.access(ctx.host(UFW_APPLY), os.X_OK):
+        return "nothing to undo here"
+    rules = ufw_rules(port)
+    if rules is None:
+        return "ufw is not installed — nothing to undo"
+    ours = [r for r in rules if r.ports == [port] and r.comment == UFW_MIGRATION_COMMENT]
+    if not ours:
+        return f"ufw: no '{UFW_MIGRATION_COMMENT}' rule for {port} — nothing to undo"
+    rc, text = ufw("delete", *ours[0].text.split())
+    if rc != 0:
+        raise Cannot(f"ufw delete {ours[0].text} failed (rc {rc}): {text.strip()}")
+    return f"ufw: removed '{ours[0].text}' (added for the migration)"
+
+
+def firewall_close(ctx: Ctx, from_: list[int], to: int) -> list[str]:
+    """Close the old port(s). Leaving a port open is the safe direction: a rule this
+    cannot remove is a note, never a failure."""
+    notes: list[str] = []
+    if ctx.role == "relay":
+        return [f"relay: table inet vpnrelay_input drops {csv(from_)} once nothing listens there"]
+    if os.access(ctx.host(UFW_APPLY), os.X_OK):
+        rc, text = run([str(ctx.host(UFW_APPLY)), "apply"])
+        return [f"{UFW_APPLY} apply: rc {rc}{' — ' + text.strip() if rc else ''}"]
+    rules = ufw_rules(to)
+    if rules is None:
+        return ["ufw is not installed — no host firewall to close"]
+    mig = [r for r in rules if r.ports == [to] and r.comment == UFW_MIGRATION_COMMENT]
+    if mig:
+        # Same rule, new comment: ufw updates it in place — the port never closes.
+        rc, text = ufw(*mig[0].text.split(), "comment", UFW_SSH_COMMENT)
+        notes.append(f"ufw: '{mig[0].text}' is the ssh rule now (comment '{UFW_SSH_COMMENT}')"
+                     if rc == 0 else f"ufw: relabelling '{mig[0].text}' failed (rc {rc}) — it stays open as it is")
+    for f in from_:
+        if f == to:
+            continue
+        for r in ufw_rules(f) or []:
+            if r.ports == [f] and not r.tcp_only:
+                # tcp AND udp: keep the udp half (a udp service may share the number,
+                # Hysteria2 for one) — the same rule for udp first, then the shared one goes.
+                notes.append(ufw_split_off_udp(r, f))
+            elif r.ports == [f]:
+                rc, text = ufw("delete", *r.text.split())
+                notes.append(f"ufw: closed {f} ('{r.text}')" if rc == 0
+                             else f"ufw: could not delete '{r.text}' (rc {rc}: {text.strip()}) — {f} stays open")
+            elif r.mentions:
+                notes.append(f"ufw: '{r.text}' also names {f} and is not a plain tcp rule — left as it is")
+    return notes
+
+
+def ufw_split_off_udp(r: UfwRule, port: int) -> str:
+    """A rule without a protocol opens tcp AND udp: add the same rule for udp (with its
+    comment), and only once ufw lists it delete the shared one — the udp side never has
+    a gap, and a failure leaves the shared rule (tcp stays open: the safe direction)."""
+    udp = f"{r.text}/udp" if r.simple else f"{r.text} proto udp"
+    args = udp.split() + (["comment", r.comment] if r.comment else [])
+    rc, text = ufw(*args)
+    if rc != 0 or not any(x.text == udp for x in ufw_rules(port) or []):
+        return f"ufw: '{r.text}' also opens udp {port}, and adding '{udp}' failed (rc {rc}: {text.strip()}) — left as it is, tcp {port} stays open"
+    rc, text = ufw("delete", *r.text.split())
+    if rc != 0:
+        return f"ufw: added '{udp}', but could not delete '{r.text}' (rc {rc}: {text.strip()}) — tcp {port} stays open"
+    return f"ufw: closed tcp {port} ('{r.text}' -> '{udp}': udp {port} stays open)"
+
+
+# --------------------------------------------------------------------------- #
+# advance: phase 1 + proof -> phase 2, outside a deploy
+# --------------------------------------------------------------------------- #
+@contextlib.contextmanager
+def deploy_lock(ctx: Ctx) -> Iterator[bool]:
+    path = ctx.host(DEPLOY_LOCK)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fence(ctx, path)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)
+
+
+def banner_ok(ctx: Ctx, port: int) -> bool:
+    if SELFTEST:
+        return not ctx.host(f"/selftest/no-banner-{port}").exists()
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            return s.recv(4) == b"SSH-"
+    except OSError:
+        return False
+
+
+def listen_problems(ctx: Ctx, expected: list[int], removed: list[int]) -> list[str]:
+    probs: list[str] = []
+    if socket_state() != "active":
+        probs.append(f"{SOCKET_UNIT} is not active")
+    have = socket_ports()
+    if have != sorted(expected):
+        probs.append(f"{SOCKET_UNIT} listens on {csv(have) or 'nothing'}, expected {csv(expected)}")
+    rows = tcp_listeners()
+    if rows is None:
+        probs.append("ss -Hltnp failed")
+        return probs
+    for p in expected:
+        if not any(r.port == p for r in rows):
+            probs.append(f"nothing listens on {p}")
+        elif not banner_ok(ctx, p):
+            probs.append(f"{p} listens but does not answer SSH")
+    for p in removed:
+        if any(r.port == p and (held_by_ssh(r, [p]) or not r.procs) for r in rows):
+            probs.append(f"ssh still listens on {p}")
+    return probs
+
+
+def apply_set(ctx: Ctx, expected: list[int], removed: list[int], ssh_was_active: bool) -> list[str]:
+    rc, text = run(["sshd", "-t", "-f", str(ctx.host(SSHD_CONFIG))])
+    if rc != 0:
+        return [f"sshd -t fails: {text.strip()}"]
+    for argv in (["systemctl", "daemon-reload"], ["systemctl", "restart", SOCKET_UNIT]):
+        rc, text = run(argv)
+        if rc != 0:
+            return [f"{' '.join(argv)} failed (rc {rc}): {text.strip()}"]
+    if ssh_was_active:
+        # Accept=no: the running sshd keeps the sockets it was started with. Open
+        # sessions survive: ssh.service has KillMode=process.
+        rc, text = run(["systemctl", "restart", SSH_UNIT])
+        if rc != 0:
+            return [f"systemctl restart {SSH_UNIT} failed (rc {rc}): {text.strip()}"]
+    deadline = time.monotonic() + max(ctx.listen_wait, 0)
+    while True:
+        probs = listen_problems(ctx, expected, removed)
+        if not probs or time.monotonic() >= deadline:
+            return probs
+        time.sleep(1)
+
+
+def phase2(ctx: Ctx, plan: Plan) -> int:
+    old_set = sorted({*plan.from_, plan.to})
+    new_set = [plan.to]
+    targets: list[tuple[Path, str | None, str]] = []
+    for rel, dst in TEMPLATES:
+        tpl = template_text(ctx, rel)
+        path = ctx.host(dst)
+        have = read_text(path)
+        if have != render(tpl, old_set):
+            msg = (f"{dst} is not what phase 1 left there (rendered for {csv(old_set)}) — a deploy decides "
+                   "(an ssh file that differs needs ALLOW_SSH_CHANGE=1); nothing changed")
+            note_error(ctx, msg)
+            print(f"vpn-bot-ssh-port: {msg}", file=sys.stderr)
+            return EXIT_REFUSED
+        targets.append((path, have, render(tpl, new_set)))
+    ssh_was_active = unit_active(SSH_UNIT)
+    print(f"vpn-bot-ssh-port: phase 2: {csv(plan.from_)} -> {plan.to} ({plan.proof.kind if plan.proof else '?'})")
+    for path, _, new in targets:
+        write_atomic(ctx, path, new)
+    probs = apply_set(ctx, new_set, plan.from_, ssh_was_active)
+    if probs:
+        for path, old, _ in targets:
+            if old is not None:
+                write_atomic(ctx, path, old)
+        back = apply_set(ctx, old_set, [], ssh_was_active)
+        msg = (f"phase 2 failed its check ({'; '.join(probs)}) — reverted to {csv(old_set)}: "
+               + ("ssh listens there again" if not back else "REVERT CHECK FAILED TOO: " + "; ".join(back)))
+        note_error(ctx, msg)
+        print(f"vpn-bot-ssh-port: {msg}", file=sys.stderr)
+        return EXIT_REVERTED
+    for note in firewall_close(ctx, plan.from_, plan.to):
+        print(f"vpn-bot-ssh-port: {note}")
+    if ctx.role == "relay" and unit_active(RELAY_UNIT):
+        # The input filter takes the ssh ports from `ss`: apply it again (one nft
+        # transaction — a failure leaves the previous filter, which still lets the new
+        # port in). Not a restart: ExecStop would delete the forwarding table first.
+        rc, text = run([str(ctx.host(RELAY_HELPER)), "apply"], timeout=180)
+        print(f"vpn-bot-ssh-port: vpn-relay-apply apply: rc {rc}" + (f" — {text.strip()}" if rc else ""))
+    print(f"vpn-bot-ssh-port: {record(ctx, 'finish', plan.from_, plan.to, plan.proof)}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Commands
+# --------------------------------------------------------------------------- #
+def make_ctx(args: argparse.Namespace) -> Ctx:
+    root = (args.root or "").rstrip("/")
+    if SELFTEST and not root:
+        raise Cannot("VPN_BOT_SSH_PORT_SELFTEST=1 needs --root")
+    env_file = Path(args.env or APP_DIR + "/.env")
+    ctx = Ctx(env_file=env_file, repo=Path(args.repo or APP_DIR), root=root, role=args.role or "")
+    ctx.env_text = read_text(env_file) or ""
+    if getattr(args, "listen_wait", None) is not None:
+        ctx.listen_wait = int(args.listen_wait)
+    return ctx
+
+
+def ports_arg(text: str) -> list[int]:
+    ports = parse_ports(text)
+    if not ports or len(ports) != len([t for t in text.split(",") if t.strip()]):
+        raise argparse.ArgumentTypeError(f"not a port list: {text!r}")
+    return ports
+
+
+def port_arg(text: str) -> int:
+    if not PORT_RE.match(text) or int(text) > 65535:
+        raise argparse.ArgumentTypeError(f"not a port: {text!r}")
+    return int(text)
+
+
+WRITING_COMMANDS = frozenset({"confirm", "record", "advance", "firewall-open", "firewall-undo", "firewall-close"})
+GLOBAL_OPTIONS_WITH_VALUE = frozenset({"--env", "--repo", "--role", "--root"})
+
+
+def subcommand(argv: Sequence[str]) -> str:
+    skip = False
+    for tok in argv:
+        if skip:
+            skip = False
+        elif tok in GLOBAL_OPTIONS_WITH_VALUE:
+            skip = True
+        elif not tok.startswith("-"):
+            return tok
+    return ""
+
+
+def host_mount_namespace_argv(argv: Sequence[str]) -> list[str] | None:
+    """The argv to re-run this helper in PID 1's mount namespace, or None when it already
+    runs there. The non-root bot runs under ProtectSystem=strict and sudo keeps that
+    mount namespace: /var/lib/vpn-bot would be read-only for `confirm`. The same escape
+    as deploy/helpers/vpn-bot-socks5-user and vpn-bot-protocol-uninstall."""
+    if SELFTEST or os.geteuid() != 0 or os.environ.get("VPN_BOT_SSH_PORT_HOSTNS") == "1":
+        return None
+    if subcommand(argv) not in WRITING_COMMANDS:
+        return None                      # plan/status/render read: stay in the caller's sandbox
+    try:
+        if os.readlink("/proc/self/ns/mnt") == os.readlink("/proc/1/ns/mnt"):
+            return None
+    except OSError:
+        return None
+    return ["nsenter", "--mount=/proc/1/ns/mnt", "--", sys.executable, "-I", os.path.realpath(sys.argv[0]), *argv]
+
+
+def main(argv: Sequence[str]) -> int:
+    reexec = host_mount_namespace_argv(argv)
+    if reexec is not None:
+        os.environ["VPN_BOT_SSH_PORT_HOSTNS"] = "1"
+        try:
+            os.execvpe(reexec[0], reexec, os.environ)  # noqa: S606 — fixed argv: nsenter, this interpreter, this script
+        except OSError as exc:
+            print(f"vpn-bot-ssh-port: cannot enter the host mount namespace ({exc}) — going on in this one",
+                  file=sys.stderr)
+    ap = argparse.ArgumentParser(prog="vpn-bot-ssh-port", description="SSH_PORT migration (docs/host-state.md#ssh-port)")
+    ap.add_argument("--env")
+    ap.add_argument("--repo")
+    ap.add_argument("--role", choices=("main", "relay"))
+    ap.add_argument("--root")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("plan")
+    sub.add_parser("status")
+    p = sub.add_parser("render")
+    p.add_argument("--template", required=True)
+    p.add_argument("--ports", required=True, type=ports_arg)
+    p = sub.add_parser("record")
+    p.add_argument("--action", required=True, choices=("start", "finish", "cancel"))
+    p.add_argument("--from", dest="from_", required=True, type=ports_arg)
+    p.add_argument("--to", required=True, type=port_arg)
+    p.add_argument("--proof-kind", default="")
+    p.add_argument("--proof-detail", default="")
+    for name in ("firewall-open", "firewall-undo"):
+        p = sub.add_parser(name)
+        p.add_argument("--port", required=True, type=port_arg)
+    p = sub.add_parser("firewall-close")
+    p.add_argument("--from", dest="from_", required=True, type=ports_arg)
+    p.add_argument("--to", required=True, type=port_arg)
+    p = sub.add_parser("advance")
+    p.add_argument("--listen-wait", type=int, default=10)
+    p = sub.add_parser("confirm")
+    p.add_argument("--port", required=True, type=port_arg)
+    p.add_argument("--since", required=True, type=int)
+    p.add_argument("--admin", required=True, type=int)
+    args = ap.parse_args(argv)
+
+    try:
+        if args.cmd == "render":
+            tpl = read_text(Path(args.template))
+            if tpl is None:
+                raise Cannot(f"template {args.template} not found")
+            sys.stdout.write(render(tpl, args.ports))
+            return 0
+        ctx = make_ctx(args)
+        if args.cmd == "plan":
+            try:
+                plan = compute_plan(ctx)
+            except Refused as exc:
+                print(f"role={ctx.role}")
+                print("action=refused")
+                print(f"error={str(exc).replace(chr(10), ' ')}")
+                return EXIT_REFUSED
+            print("\n".join(plan_lines(ctx, plan)))
+            return 0
+        if args.cmd == "status":
+            print(compute_plan(ctx).status(ctx))
+            return 0
+        resolve_role(ctx)
+        if args.cmd == "record":
+            proof = Proof(args.proof_kind, args.proof_detail) if args.proof_kind else None
+            print(record(ctx, args.action, args.from_, args.to, proof))
+            return 0
+        if args.cmd == "firewall-open":
+            # The last line tells deploy.sh whether a rollback has a rule to undo.
+            text, added = firewall_open(ctx, args.port)
+            print(text)
+            print(f"added={'yes' if added else 'no'}")
+            return 0
+        if args.cmd == "firewall-undo":
+            print(firewall_undo(ctx, args.port))
+            return 0
+        if args.cmd == "firewall-close":
+            for note in firewall_close(ctx, args.from_, args.to):
+                print(note)
+            return 0
+        if args.cmd == "advance":
+            with deploy_lock(ctx) as got:
+                if not got:
+                    print("vpn-bot-ssh-port: a deploy holds the lock — it looks for the proof itself")
+                    return 0
+                plan = compute_plan(ctx)
+                if plan.action != "finish":
+                    print(plan.status(ctx))
+                    return 0
+                return phase2(ctx, plan)
+        if args.cmd == "confirm":
+            return confirm(ctx, args.port, args.since, args.admin)
+    except Refused as exc:
+        print(f"vpn-bot-ssh-port: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    except (Cannot, OSError) as exc:
+        print(f"vpn-bot-ssh-port: {exc}", file=sys.stderr)
+        return EXIT_CANNOT
+    return 2
+
+
+def confirm(ctx: Ctx, port: int, since: int, admin: int) -> int:
+    if ctx.role != "main":
+        raise Refused("confirm is the bot's proof: main server only")
+    st = load_state(ctx)
+    if st is None or st.phase != 1 or st.to != port or st.since != since:
+        raise Refused(f"no migration to {port} started at {since} is waiting for proof — the button is stale")
+    if admin <= 0:
+        raise Refused("admin id must be a positive Telegram id")
+    data = dict(st.raw)
+    data["bot_confirm"] = {"port": port, "admin_id": admin, "at": int(time.time())}
+    save_state(ctx, data)
+    rc, text = run(["systemctl", "start", "--no-block", ADVANCE_UNIT])
+    print(f"confirmed: {port} (superadmin {admin}); {ADVANCE_UNIT} "
+          + ("started" if rc == 0 else f"could not be started (rc {rc}: {text.strip()}) — the next timer run finishes it"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

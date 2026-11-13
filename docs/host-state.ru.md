@@ -59,7 +59,10 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf` | repo-managed (`networkd`) | deploy.sh | `/etc/systemd` | не даёт networkd сбрасывать `ip rule` WARP; действует со следующего старта networkd |
 | `/usr/local/sbin/acme-reload.sh` | repo-managed (`hook`, `when=/etc/vpn-bot/tls/fullchain.pem`) | deploy.sh, из `deploy/vpn-bot-acme-reload.sh` | `/usr/local/sbin` | `Le_ReloadCmd` у acme.sh; только там, где есть сертификат; [subscription.ru.md](subscription.ru.md#tls-терминация) |
 | `/etc/ssh/sshd_config.d/00-root-key-only.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/ssh` | вход root только по ключу; см. [ALLOW_SSH_CHANGE](#allow_ssh_change-и-риск-потери-доступа) |
-| `/etc/systemd/system/ssh.socket.d/override.conf` | repo-managed (`ssh`) | deploy.sh | `/etc/systemd` | `ListenStream` на 54321 (IPv4 + IPv6) |
+| `/etc/systemd/system/ssh.socket.d/override.conf` | шаблон + значения хоста (`ssh`, `render=ssh-port`) | deploy.sh, рендер из `SSH_PORT` | `/etc/systemd` | `ListenStream` на `SSH_PORT` (IPv4 + IPv6); во время переезда — на обоих портах, [SSH-порт](#ssh-порт). Для 54321 байт в байт прежний фиксированный файл |
+| `/etc/ssh/sshd_config.d/00-vpn-bot-port.conf` | шаблон + значения хоста (`ssh`, `render=ssh-port`) | deploy.sh, рендер из `SSH_PORT` | `/etc/ssh` | `Port SSH_PORT` (запасной путь: ssh.service без сокета) + `LogLevel VERBOSE` (доказательство по журналу) |
+| `/etc/systemd/system/vpn-bot-ssh-port.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot `vpn-bot-ssh-port advance`: фаза 2 доказанного переезда; его подтягивает `vpn-bot-host-check.service` (`Wants=`), сам не включается |
+| `/var/lib/vpn-bot/ssh-migration.json` | состояние | `vpn-bot-ssh-port` | — | переезд (`from`, `to`, `phase`, `since`, доказательство); атомарно, `root` `0644`; его читает бот |
 | `/etc/ssh/sshd_config` | дефолт пакета (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh возвращает шаблон | `/etc/ssh` | активные `PasswordAuthentication yes` / `PermitRootLogin yes` образа провайдера после `Include` — LATENT, который останавливает Phase 1: файл возвращается, когда доказано, что `sshd -T` побайтно не меняется, — без `ALLOW_SSH_CHANGE` |
 | `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh, из `deploy/host/cloud/cloud-init.disabled` | — (в репо) | пустой маркер: cloud-init выключен (на ребуте он переписывал sshd и sudoers) |
 | `/etc/systemd/system/vpn-bot-host-check.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot: проверка инвариантов хоста — [Эффективное состояние](#эффективное-состояние) |
@@ -69,7 +72,7 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf` | repo-managed (`unit`, `gate=MTPROTO`) | deploy.sh, из `deploy/mtproxy-vpn-bot-managed.conf` | `/etc/systemd` | только пока `MTPROTO_ENABLED=true`; побайтно равный файл со старым именем `vpnbot-managed.conf` переименовывается. При выключенном MTProxy оставшийся drop-in показывается как сирота |
 | `/etc/systemd/system/vpn-bot.service` | repo-managed | deploy.sh, как есть | `/etc/systemd` | действуют гейты модели привилегий |
 | `/etc/systemd/system/<deploy/*.service, *.timer>` | repo-managed | оператор, руками | `/etc/systemd` | drift-гейт юнитов в Phase 1 печатает команды установки |
-| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms`, `vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | из `scripts/` |
+| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms`, `vpn-bot-host-check`, `vpn-bot-ssh-port` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | из `scripts/` |
 | `/usr/local/sbin/vpn-bot-{xray,awg,mtproxy}-apply`, `vpn-bot-socks5-user` | backup-only (`installer`) | `deploy/setup-nonroot-helper-mode.sh` | `/usr/local/sbin` | исходники в `deploy/helpers/` |
 | `/usr/local/etc/xray/config.json` | шаблон + значения хоста | бот (клиенты) / оператор | бандл восстановления | структуру проверяет `deploy/backend-config-sync.py` |
 | `/etc/amnezia/amneziawg/awg0.conf` | шаблон + значения хоста | бот (peers) / оператор | бандл восстановления; `/etc/amnezia` | тот же гейт |
@@ -101,6 +104,10 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/ssh/sshd_config` | дефолт пакета (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh возвращает шаблон | как на main |
 | `/usr/local/sbin/vpn-relay-apply` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | |
 | `/usr/local/sbin/vpn-bot-host-check` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | проверка инвариантов хоста |
+| `/usr/local/sbin/vpn-bot-ssh-port` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | переезд SSH-порта — [SSH-порт](#ssh-порт) |
+| `/etc/systemd/system/ssh.socket.d/override.conf`, `/etc/ssh/sshd_config.d/00-vpn-bot-port.conf` | шаблон + значения хоста (`ssh`, `render=ssh-port`) | deploy.sh, рендер из `SSH_PORT` | как на main; у relay override не было (22 из пакета) — его первый деплой начинает переезд 22 → 54321 |
+| `/etc/systemd/system/vpn-bot-ssh-port.service` | repo-managed (`unit`) | deploy.sh | как на main |
+| `/var/lib/vpn-bot/ssh-migration.json` | состояние | `vpn-bot-ssh-port` | как на main (бот его здесь не читает) |
 | `/etc/systemd/system/vpn-bot-host-check.service`, `.timer` | repo-managed (`unit`) | deploy.sh | как на main; вердикт relay остаётся в его журнале — [Между деплоями](#между-деплоями) |
 | `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh | cloud-init выключен |
 | `/etc/ssh/sshd_config.d/50-cloud-init.conf`, `/etc/sudoers.d/90-cloud-init-users` | retired | — | вход по паролю и `NOPASSWD:ALL` от cloud-init |
@@ -120,7 +127,10 @@ drift, удаляет выведенные из оборота — а в Phase 1
 необязателен:
 `gate=<PROTO>` делает запись существующей только при включённом `<PROTO>_ENABLED` в `.env`,
 `when=<path>` — только на хосте, где есть `<path>`, а `legacy=<path>` называет старое имя того же
-файла. Закрытый gate означает, что запись не ставится и не проверяется.
+файла. Закрытый gate означает, что запись не ставится и не проверяется. `render=ssh-port` делает
+`src` шаблоном: каждая строка с `@SSH_PORT@` пишется по разу на каждый порт, который решил план
+SSH-порта ([SSH-порт](#ssh-порт)), а отрендеренная копия сравнивается, проверяется и ставится как
+любой файл репо.
 
 | class | Phase 1 проверяет кандидата | Phase 2 после фактического изменения |
 |---|---|---|
@@ -214,7 +224,11 @@ LATENT на auth-ключе sshd, то есть FAIL в Phase 1, на каждо
   Phase 2, а `Include` этого каталога внутри самих drop-in'ов тоже указывают на приватную копию, —
   должен выдать побайтно одно и то же. Это ловит то, что host check не оценивает
   (`Port`, `ListenAddress` и другие мульти-ключи). Другой вывод, `sshd -T`, который не отработал,
-  или нет `sshd` → FAIL.
+  или нет `sshd` → FAIL. С обеих сторон лежит **отрендеренный** Port-drop-in
+  (`00-vpn-bot-port.conf` для портов, которые оставит Phase 2 — [SSH-порт](#ssh-порт)), никогда не
+  шаблон. `Port` накапливается по файлам: строка `Port` в `sshd_config` хоста слушает
+  *вдобавок* к `SSH_PORT`, в дефолте пакета её нет — выводы различаются, и FAIL так и говорит:
+  поставьте этот порт в `SSH_PORT` или уберите строку (SSH-порт теперь — это `SSH_PORT`).
 - Это доказательство и есть защита от потери доступа для `sshd_config`, поэтому возврату его
   дефолта пакета **не** нужен `ALLOW_SSH_CHANGE` — осознанное, задокументированное исключение.
   Ручка по-прежнему защищает каждый repo-managed ssh-файл.
@@ -344,11 +358,12 @@ VENDOR = файл в `/usr/lib`, `/lib` или `/usr/local/lib` **плюс** ф�
   (против `sysctl -n`), `systemd-conf:<x>` (против файлов), `unit-prop:<unit>:<Prop>`
   (`systemctl show`), `path-present`, `path-absent`, `path-regular` (существует и **не** symlink),
   `tcp-listen:<port>`. Ожидаемое `~X` значит «содержит X целым токеном» (`~22` совпадает с
-  `[::]:22 (Stream)`, но не с `:2222`). Засеяно: на main `ssh.socket` слушает 54321,
-  `even-day-reboot.timer` enabled и active, `/etc/resolv.conf` — обычный файл; на relay
-  `ssh.socket` слушает 22 и `ufw.service` masked (его входной фильтр —
+  `[::]:22 (Stream)`, но не с `:2222`). Засеяно: на main `even-day-reboot.timer` enabled и
+  active, `/etc/resolv.conf` — обычный файл; на relay `ufw.service` masked (его входной фильтр —
   `table inet vpnrelay_input`, см. [docs/relay.ru.md](relay.ru.md#входной-фильтр)); на обеих
-  ролях есть `/etc/cloud/cloud-init.disabled`.
+  ролях есть `/etc/cloud/cloud-init.disabled`. SSH-порта в списке **нет** (фиксированный порт
+  противоречил бы `SSH_PORT` во время и после переезда): его оценивает семейство `ssh-port` —
+  [SSH-порт](#ssh-порт).
 
 ### Как принять LATENT
 
@@ -495,3 +510,115 @@ SSH-баннером**: при socket activation один listener ничего 
 Сам `/etc/ssh/sshd_config` — не класс `ssh`: он только возвращается к своему дефолту пакета (класс
 `pristine`) после того, как Phase 1 доказала, что `sshd -T` побайтно не меняется, — там защищает
 это доказательство, и ручка не нужна и не читается.
+
+**Переезду SSH-порта** ручка тоже не нужна: два файла `render=ssh-port` меняются без неё ровно
+тогда, когда копия на хосте — рендер портов, на которых ssh слушает сейчас, то есть шаг
+[переезда](#ssh-порт), который защищают двойное прослушивание и доказательство. Ручная правка этих
+файлов — обычный дрейф, ей ручка нужна.
+
+## SSH-порт
+
+**Одна настройка, обе роли:** `SSH_PORT` в `/opt/vpn-service/.env` (main и relay; нет или пусто =
+**54321**). Проверяется до любых изменений: целое 1..65535 без ведущего нуля; не TCP-порт сервиса
+этой роли — main: `XRAY_PUBLIC_PORT` (443), `XRAY_XHTTP_PORT`, `SUBSCRIPTION_BIND_PORT`,
+`SUBSCRIPTION_PUBLIC_PORT`, `SOCKS5_PORT`, `MTPROTO_PORT`, `MTPROTO_INTERNAL_STATS_PORT`,
+`HEALTH_PORT`; relay: `RELAY_FORWARD_TCP_PORTS` (443), `RELAY_INPUT_EXTRA_TCP`,
+`RELAY_INPUT_CLOSED_TCP` — и не порт, который слушает другой процесс (`ss`). Отказ останавливает
+Phase 1: `ssh port: REFUSED — …; nothing was changed`.
+
+С дефолтом main не двигается (он уже слушает 54321 через `ssh.socket`, его override рендерится байт
+в байт), а существующий relay сам переезжает с 22 из пакета на 54321 при следующем деплое.
+
+### Два файла, рендер
+
+| Файл | Строка шаблона | Зачем |
+|---|---|---|
+| `/etc/systemd/system/ssh.socket.d/override.conf` | `ListenStream=0.0.0.0:@SSH_PORT@`, `ListenStream=[::]:@SSH_PORT@` после сброса | сокет: на чём слушает ssh |
+| `/etc/ssh/sshd_config.d/00-vpn-bot-port.conf` | `Port @SSH_PORT@`, плюс `LogLevel VERBOSE` | запасной путь: `ssh.service`, запущенный **без** `ssh.socket`, сам слушает `Port` — там же, где сокет, а не на 22 за файрволом |
+
+`scripts/vpn-bot-ssh-port render` пишет каждую строку с `@SSH_PORT@` по разу на порт, по
+возрастанию. `sshd-socket-generator` Ubuntu 24.04 превращает те же строки `Port` в
+`/run/systemd/generator/ssh.socket.d/addresses.conf` при каждом `daemon-reload` (замерено на
+openssh-server 1:9.6p1-3ubuntu13: он идёт по `Include` в `sshd_config.d`); `override.conf`
+сортируется после `addresses.conf` и сбрасывает `ListenStream=`, так что решает файл репо.
+
+### Переезд: две фазы, обе автоматические
+
+Когда порт, на котором слушает ssh (`systemctl show -p Listen ssh.socket`), — не `SSH_PORT`:
+
+1. **Фаза 1 — деплой.** Оба файла рендерятся для старого порта (портов) **и** `SSH_PORT`: ssh
+   слушает оба. Файрвол следует за ними: на relay `table inet vpnrelay_input` сам берёт порты ssh
+   из `ss` (рестарт `vpn-relay` в деплое применяет его заново, изменённый набор подтверждает проба
+   с main — [docs/relay.ru.md](relay.ru.md#входной-фильтр)); на main деплой открывает `SSH_PORT`
+   в UFW **до** изменения сокета, правилом с комментарием `vpn-bot:ssh-migration` (или
+   `vpn-bot-ufw-apply apply`, где этот хелпер установлен, — тогда файрвол его). Старый порт не
+   трогается. Состояние пишется в `/var/lib/vpn-bot/ssh-migration.json` (`from`, `to`,
+   `phase: 1`, `since`).
+2. **Фаза 2 — только после доказательства**, что `SSH_PORT` работает **снаружи**: старый порт
+   убирается из сокета и Port-drop-in (`Port SSH_PORT` один), файрвол его закрывает — main:
+   удаляются правила, разрешающие ровно старый порт (`ufw show added`: `<port>[/tcp]`, `… port
+   <port> [proto tcp]`), а правило миграции на месте получает комментарий `vpn-bot:ssh` (ufw
+   обновляет комментарий без окна); правило без протокола открывает tcp **и** udp (ufw(8)), поэтому
+   оно разделяется — сначала добавляется то же правило для udp, потом удаляется общее, и
+   udp-сервис на том же номере (например, Hysteria2) свой порт сохраняет; правило, которое так не убрать (app-профиль, список портов),
+   — заметка, а не ошибка: оставить порт открытым — безопасная сторона. Relay: входной фильтр
+   применяется заново (`vpn-relay-apply apply`, одна транзакция nft) и отбрасывает старый порт.
+   `phase: 2`.
+
+**Доказательство** — любое одно, позже начала фазы 1 (`since`):
+
+| Доказательство | Роль | Откуда |
+|---|---|---|
+| `relay-probe` | relay | проба с main (`POST /relay/ssh-probe`) подключилась к `SSH_PORT` через входной фильтр: в `/etc/vpn-relay/input.confirmed` `confirmed_by=main-probe`, в наборе `tcp=` есть `SSH_PORT`, `confirmed_at` ≥ `since` |
+| `journal` | обе | sshd записал подключение с **нелокального** адреса на `SSH_PORT` (`journalctl -u ssh.service --since @<since>`). openssh 9.6 пишет `Connection from <raddr> port <rport> on <laddr> port <lport> rdomain ""` **только при `LogLevel VERBOSE`** — проверено бинарником из noble; при `INFO` такой строки нет, отсюда `LogLevel VERBOSE` в Port-drop-in. Loopback, собственные адреса хоста (`ip -o addr`) и `raddr == laddr` ничего не доказывают |
+| `bot` | main | суперадмин нажал **«Подтвердить»** под сообщением бота «SSH теперь и на порту N — подключись на него и нажми Подтвердить»; бот запускает `vpn-bot-ssh-port confirm --port N --since S --admin ID` (sudo, точный путь в `deploy/sudoers.d/vpn-bot.example`; при `ProtectSystem=strict` бота без root хелпер сначала входит в mount namespace PID 1, как и остальные хелперы) |
+
+**Без доказательства фазы 2 не будет никогда.** Его ищут каждый деплой (план Phase 1; деплой,
+который его нашёл, сам выполняет фазу 2 с `rollback_now`), загрузка и ежедневный прогон
+(`vpn-bot-host-check.timer` → `vpn-bot-host-check.service` `Wants=` `vpn-bot-ssh-port.service` →
+`vpn-bot-ssh-port advance`), сразу после каждого DEPLOY OK хоста в фазе 1 (relay, чей фильтр только
+что подтвердила проба с main, заканчивает в том же прогоне) и сразу после «Подтвердить». `advance`
+берёт lock деплоя (`/run/vpn-bot-deploy.lock`) или оставляет работу идущему деплою; трогает только
+файлы, которые ровно такие, какими их оставила фаза 1.
+
+Бот один раз сообщает суперадминам о старте фазы 1 (с кнопкой) и один раз — о завершении
+(`schema_meta` помнит это через рестарты). На relay бота нет: его состояние — в отчёте деплоя и в
+журнале. Деплой печатает состояние в Phase 1, в отчёте и в DEPLOY OK, например
+
+```text
+ssh port: migrating 22 -> 54321 (waiting for proof: main's probe of tcp 54321 (RELAY_CONFIRM_URL), or an ssh connection from outside on 54321 in the sshd log)
+```
+
+`SSH_PORT` снова изменили во время ожидания — новая фаза 1 от исходного порта к новому значению
+(недоказанный порт убирается, исходный не закрывается); `SSH_PORT` вернули на исходный порт —
+недоказанный убирается (`phase: 0`, отменено).
+
+### Пост-проверка каждой фазы
+
+`sshd -t` на установленной конфигурации; `daemon-reload`, `restart ssh.socket` и — если sshd
+работает — `restart ssh` (работающий sshd держит сокеты, с которыми стартовал); затем `ssh.socket`
+должен быть active, `systemctl show -p Listen ssh.socket` — содержать **ровно** запланированные
+порты, каждый запланированный порт — слушать и отвечать SSH-баннером, а убранный шагом порт —
+больше не слушать. Любой сбой: в деплое `rollback_now` — прежние файлы, прежний state-файл,
+открытое фазой 1 правило UFW снова удалено, сокет и ssh перезапущены на восстановленном наборе; в
+`advance` — собственный откат к прежнему набору, причина — в `last_error` state-файла (host check:
+WARN).
+
+**Открытые сессии не рвутся.** Проверено на пакете noble: `ssh.socket` — `Accept=no`, его
+включение создаёт `ssh.service.requires/ssh.socket`, поэтому рестарт сокета рестартит и
+`ssh.service` — а у `ssh.service` `KillMode=process`: SIGTERM получает только слушающий sshd;
+каждая сессия — отдельный дочерний sshd (`sshd: user@pts/N`; в openssh 9.6 ещё нет
+`sshd-session` — он с 9.8) со своим TCP-соединением, и он остаётся. Сессия на старом порту
+переживает и фазу 2: файрвол пропускает установленные соединения (`ctstate RELATED,ESTABLISHED` в
+UFW, `ct state established,related accept` в фильтре relay). Сам деплой идёт под `systemd-run`,
+вне ssh-сессии.
+
+### Что говорит host check (семейство `ssh-port`)
+
+| План | Установленный хост (таймер, Phase 2) | `--pre-install` (Phase 1) |
+|---|---|---|
+| на `SSH_PORT` | `OK ssh.socket`; `OK fallback`, если `sshd -T` даёт ровно `SSH_PORT`, иначе `MISMATCH fallback` (Port-drop-in не действует) | то же; fallback `PENDING`, пока деплой ставит drop-in |
+| `SSH_PORT` ≠ слушающему, переезд не начат | `MISMATCH migration` — следующий деплой начнёт фазу 1 | `PENDING` (этот деплой её начинает) |
+| фаза 1, доказательства нет | `PENDING migration` с тем, чего ждём | то же |
+| фаза 1, доказано | `PENDING` (дальше фаза 2); упавшая и откатанная фаза 2 добавляет `WARN` | `PENDING` |
+| `SSH_PORT` отклонён | `MISMATCH SSH_PORT` с причиной | то же (Phase 1 всё равно откажет) |

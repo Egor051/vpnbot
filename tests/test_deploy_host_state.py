@@ -961,8 +961,11 @@ def test_registry_entries_are_well_formed() -> None:
         if len(e) == 7:
             for kv in e[6].split(";"):
                 key, _, value = kv.partition("=")
-                assert key in {"gate", "legacy", "when"}, e
-                if key == "gate":
+                assert key in {"gate", "legacy", "when", "render"}, e
+                if key == "render":
+                    # The SSH port templates only (tests/test_ssh_port.py), class ssh.
+                    assert value == "ssh-port" and cls == "ssh", e
+                elif key == "gate":
                     assert value in VALID_GATES, e
                 elif key == "when":
                     assert value.startswith("/"), e
@@ -982,8 +985,12 @@ def test_hook_and_ssh_entries_point_where_the_host_expects() -> None:
         "deploy/vpn-bot-acme-reload.sh", "/usr/local/sbin/acme-reload.sh", "0755", "root:root", "hook", "main",
         "when=/etc/vpn-bot/tls/fullchain.pem"]
     assert reg["/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf"][5] == "relay"
-    for dst in ("/etc/ssh/sshd_config.d/00-root-key-only.conf", "/etc/systemd/system/ssh.socket.d/override.conf"):
-        assert reg[dst][4:6] == ["ssh", "main"]
+    assert reg["/etc/ssh/sshd_config.d/00-root-key-only.conf"][4:6] == ["ssh", "main"]
+    # The SSH port files are on both roles, rendered from SSH_PORT.
+    for role in ("main", "relay"):
+        by_dst = {e[1]: e for e in _registry() if e[5] == role}
+        for dst in ("/etc/systemd/system/ssh.socket.d/override.conf", "/etc/ssh/sshd_config.d/00-vpn-bot-port.conf"):
+            assert by_dst[dst][4] == "ssh" and by_dst[dst][6] == "render=ssh-port", (role, dst)
 
 
 def test_networkd_entry_is_the_dropin_the_phase1_check_reports() -> None:
@@ -1007,9 +1014,16 @@ def test_the_mtproxy_dropin_is_gated_with_its_legacy_name() -> None:
     assert e[6] == "gate=MTPROTO;legacy=/etc/systemd/system/mtproxy.service.d/vpnbot-managed.conf"
 
 
+# A render=ssh-port template is pinned as it renders for main's port (SSH_PORT's default).
+RENDERED_FOR_54321 = {"deploy/host/ssh/ssh.socket-override.conf"}
+
+
 @pytest.mark.parametrize("rel", sorted(HOST_SHA256))
 def test_repo_copy_is_byte_identical_to_the_host(rel: str) -> None:
-    digest = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
+    data = (ROOT / rel).read_bytes()
+    if rel in RENDERED_FOR_54321:
+        data = b"".join(ln.replace(b"@SSH_PORT@", b"54321") for ln in data.splitlines(keepends=True))
+    digest = hashlib.sha256(data).hexdigest()
     assert digest == HOST_SHA256[rel], (
         f"{rel} no longer matches the host copy byte for byte — the first deploy would "
         "reinstall it (ssh: refuse it without ALLOW_SSH_CHANGE=1)"

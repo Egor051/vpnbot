@@ -103,7 +103,7 @@ the repository.
 | `/usr/lib/systemd/system/danted.service`, `/etc/danted.conf` | package files: removed by `apt-get purge dante-server`, not by hand |
 | SOCKS5 users without the prefix or with another shell | not the bot's accounts |
 | `/opt/vpn-service/scripts/vpnbot-hy2-warp-mark`, `/opt/vpn-service/deploy/run-mtproxy-managed` | tracked in the repository |
-| the database, sshd, ports 22/54321, eth0, sysctl | global, never touched |
+| the database, sshd, port 22 and the SSH port (`SSH_PORT`, default 54321), eth0, sysctl | global, never touched |
 
 ## After the removal
 

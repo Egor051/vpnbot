@@ -26,7 +26,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_bundles, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, start
+from bot.handlers import admin, admin_bundles, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, callbacks, common, key_bundles, keys, proxy, settings as settings_handler, ssh_port, start
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
 from bot.middlewares.access import BlockedUserMiddleware
 from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
@@ -73,6 +73,7 @@ from services.protocol_uninstall import ProtocolUninstallService, UninstallRegis
 from services.proxy import ProxyService
 from services.relay import RelayCatalog
 from services.host_check import HostCheckMonitor
+from services.ssh_port import SshPortMonitor
 from services.relay_health import build_relay_health_supervisor
 from services.relay_management import RelayService
 from services.server_status import ServerStatusService
@@ -659,6 +660,14 @@ async def _build_app(
     # What the host check (vpn-bot-host-check.timer) last found; alerts the
     # superadmins on a change, remembering what it reported in schema_meta.
     host_check_monitor = HostCheckMonitor(store=db, admin_ids=settings.admin_ids)
+    # The SSH port migration (docs/host-state.md#the-ssh-port): one message per step
+    # to the superadmins; «Подтвердить» runs the root helper — through sudo in the
+    # helper model (exact-path grant), directly as root otherwise.
+    ssh_port_monitor = SshPortMonitor(
+        store=db,
+        admin_ids=settings.admin_ids,
+        runner=PrivilegedHelperRunner(shell=shell, use_sudo=settings.privilege_helpers_enabled),
+    )
 
     await audit_service.prune_old_audit_logs(settings.audit_retention_days)
 
@@ -821,6 +830,7 @@ async def _build_app(
         hysteria_health_probe=hysteria_health_probe,
         protocol_uninstall=protocol_uninstall_service,
         host_check=host_check_monitor,
+        ssh_port=ssh_port_monitor,
     )
 
     await _startup_reconcile_keys(services)
@@ -831,6 +841,7 @@ async def _build_app(
     anomaly_detection_service.bot = bot
     relay_health_supervisor.bot = bot
     host_check_monitor.bot = bot
+    ssh_port_monitor.bot = bot
     warp_manager.bot = bot
     # FSM state is in-memory only — bot restart clears in-progress wizards.
     # TTLMemoryStorage expires sessions idle for >30 min via the fsm_cleanup_loop
@@ -882,6 +893,7 @@ async def _build_app(
     dp.include_router(admin_modules.router)
     dp.include_router(admin_relays.router)
     dp.include_router(admin_maintenance.router)
+    dp.include_router(ssh_port.router)
     dp.include_router(admin_bundles.router)
     dp.include_router(keys.router)
     dp.include_router(key_bundles.router)

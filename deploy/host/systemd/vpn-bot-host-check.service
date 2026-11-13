@@ -1,6 +1,11 @@
 [Unit]
 Description=vpn-bot host invariants: is the effective host state what the repo says (read-only)
 Documentation=file:///opt/vpn-service/docs/host-state.md
+# The SSH port migration looks for its proof first (docs/host-state.md#the-ssh-port):
+# the boot run and the daily run of this timer are two of the moments phase 2 of a
+# proven migration happens; then this check judges the result.
+Wants=vpn-bot-ssh-port.service
+After=vpn-bot-ssh-port.service
 
 [Service]
 Type=oneshot

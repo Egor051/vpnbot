@@ -378,10 +378,11 @@ def test_rollback_now_picks_the_rollback_of_the_role(tmp_path: Path) -> None:
 
 
 def test_scan_on_a_relay_sees_only_the_relay_helpers(tmp_path: Path) -> None:
-    """The relay data-plane helper and the host invariants check (both roles run it)."""
+    """The relay data-plane helper, the host invariants check and the SSH port helper
+    (both roles run the last two)."""
     out = _shared_functions_output(tmp_path, "NODE_ROLE=relay\n", 'scan_out_of_repo_helpers "$APP_DIR"')
     rows = [ln for ln in out.split("\n--SC--\n")[0].splitlines() if "|" in ln]
-    assert [r.split("|")[0] for r in rows] == ["vpn-relay-apply", "vpn-bot-host-check"]
+    assert [r.split("|")[0] for r in rows] == ["vpn-relay-apply", "vpn-bot-host-check", "vpn-bot-ssh-port"]
     assert all(r.endswith("|absent|required") for r in rows)
 
 

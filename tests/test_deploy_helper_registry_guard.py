@@ -486,14 +486,16 @@ def test_relay_helper_is_registered_for_the_relay_role_only() -> None:
         "relay",
     )
     others = {name: entry[3] for name, entry in registry.items() if name != "vpn-relay-apply"}
-    # The host invariants check runs on both roles (vpn-bot-host-check.service is a
-    # MANAGED_HOST_FILES unit of each), so it is the one helper with an entry per role.
+    # The host invariants check and the SSH port helper run on both roles
+    # (vpn-bot-host-check.service and vpn-bot-ssh-port.service are MANAGED_HOST_FILES
+    # units of each), so they are the helpers with an entry per role.
     both = {name for name, role in others.items() if role == "main,relay"}
-    assert both == {"vpn-bot-host-check"}, f"only the host check may be on both roles: {others}"
+    assert both == {"vpn-bot-host-check", "vpn-bot-ssh-port"}, f"only these may be on both roles: {others}"
     assert {role for name, role in others.items() if name not in both} == {"main"}, (
         f"only the relay helper may be relay-only: {others}"
     )
     assert registry["vpn-bot-host-check"][2] == "required", "a unit executes it on every host"
+    assert registry["vpn-bot-ssh-port"][2] == "required", "a unit executes it on every host"
 
 
 def test_registry_has_no_duplicate_entries() -> None:

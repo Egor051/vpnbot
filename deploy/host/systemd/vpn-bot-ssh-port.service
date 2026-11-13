@@ -1,0 +1,17 @@
+[Unit]
+Description=vpn-bot: finish a PROVEN SSH port migration (phase 2) — never closes a port without proof
+Documentation=file:///opt/vpn-service/docs/host-state.md
+# Pulled in by vpn-bot-host-check.service (Wants=, the boot run and the daily run of its
+# timer), started by a deploy right after DEPLOY OK and by the bot's «Подтвердить».
+# `advance` does nothing unless SSH_PORT is in phase 1 of a migration AND proven to
+# work from outside (docs/host-state.md#the-ssh-port); then the old port leaves
+# ssh.socket, the Port drop-in and the firewall, and a failed check reverts it.
+# It never runs next to a deploy (it takes the deploy's lock, or leaves it alone).
+ConditionPathExists=/var/lib/vpn-bot/ssh-migration.json
+After=network-online.target ssh.socket ssh.service vpn-relay.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vpn-bot-ssh-port advance
+# A relay re-applies its input filter, which may wait for main's probe (2 x 20 s).
+TimeoutStartSec=300

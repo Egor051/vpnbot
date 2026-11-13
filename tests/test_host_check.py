@@ -955,6 +955,10 @@ def _real_registry() -> list[list[str]]:
     return [ln.strip().strip('"').split("|") for ln in body if ln.strip().startswith('"')]
 
 
+SSHD_MULTI_VALUE = frozenset({"port", "listenaddress", "hostkey", "hostcertificate", "acceptenv", "setenv",
+                              "subsystem", "allowusers", "denyusers", "allowgroups", "denygroups"})
+
+
 def _expected_keys(role: str) -> set[tuple[str, str]]:
     """Every (family, key) a repo file of this role sets, read here in Python.
 
@@ -972,7 +976,11 @@ def _expected_keys(role: str) -> set[tuple[str, str]]:
         elif dst.startswith("/etc/ssh/"):
             for ln in text.splitlines():
                 if ln.strip() and not ln.lstrip().startswith("#"):
-                    out.add(("sshd", re.split(r"[\s=]+", ln.strip(), maxsplit=1)[0].lower()))
+                    key = re.split(r"[\s=]+", ln.strip(), maxsplit=1)[0].lower()
+                    # Port (00-vpn-bot-port.conf, rendered from SSH_PORT) is a multi-value
+                    # keyword: family sshd never judges it, family ssh-port does.
+                    if key not in SSHD_MULTI_VALUE:
+                        out.add(("sshd", key))
         elif m := re.match(r"^/etc/systemd/([a-z]+)\.conf\.d/", dst):
             section = ""
             for ln in text.splitlines():
@@ -1033,14 +1041,15 @@ def test_invariants_list_is_well_formed_and_seeded() -> None:
             assert key.startswith("/"), ln
         seen.add((m.group("role"), probe, key, want))
     assert seen >= {
-        ("main", "unit-prop:ssh.socket:Listen", "-", "~54321"),
         ("main", "unit-prop:even-day-reboot.timer:UnitFileState", "-", "enabled"),
         ("main", "unit-prop:even-day-reboot.timer:ActiveState", "-", "active"),
         ("main", "path-regular", "/etc/resolv.conf", "-"),
-        ("relay", "unit-prop:ssh.socket:Listen", "-", "~22"),
         ("relay", "unit-prop:ufw.service:UnitFileState", "-", "masked"),
         ("all", "path-present", "/etc/cloud/cloud-init.disabled", "-"),
     }, seen
+    # The SSH port follows SSH_PORT (family ssh-port, tests/test_ssh_port.py): a fixed
+    # port here would contradict the setting during and after a migration.
+    assert not [x for x in seen if x[1].startswith("unit-prop:ssh.socket:") or x[1].startswith("tcp-listen:")], seen
 
 
 ACCEPT_LINE = re.compile(r"^(?P<path>/\S+)\|(?P<key>[^|\s]+)\|(?P<why>.+)$")
@@ -1057,15 +1066,14 @@ def test_accepted_overrides_list_is_well_formed_and_starts_empty() -> None:
 def test_the_real_invariants_hold_on_a_host_that_matches_them(tmp_path: Path) -> None:
     lab = HostLab(tmp_path)
     (lab.repo / "deploy/host/invariants.list").write_text(INVARIANTS.read_text(encoding="utf-8"), encoding="utf-8")
-    lab.unit("ssh.socket", Listen="0.0.0.0:54321 (Stream)\nListen=[::]:54321 (Stream)")
     lab.unit("even-day-reboot.timer", UnitFileState="enabled", ActiveState="active")
     lab.host("etc/resolv.conf", "nameserver 1.1.1.1\n")
     lab.host("etc/cloud/cloud-init.disabled", "")
     res = lab.run()
     inv = [r for r in res.rows if r[1] == "invariant"]
     assert inv and all(r[0] == "OK" for r in inv), res.out
-    lab.unit("ssh.socket", Listen="0.0.0.0:22 (Stream)")
-    assert lab.run().find("MISMATCH", "invariant", "unit-prop:ssh.socket:Listen")
+    lab.unit("even-day-reboot.timer", UnitFileState="disabled", ActiveState="inactive")
+    assert lab.run().find("MISMATCH", "invariant", "unit-prop:even-day-reboot.timer:UnitFileState")
 
 
 def test_the_relay_keeps_ufw_masked(tmp_path: Path) -> None:
