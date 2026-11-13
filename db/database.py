@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 40
+CURRENT_SCHEMA_VERSION = 41
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -407,6 +407,10 @@ class Database:
             await self._migrate_v40()
             await self._set_schema_version(40)
             version = 40
+        if version < 41:
+            await self._migrate_v41()
+            await self._set_schema_version(41)
+            version = 41
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1832,6 +1836,21 @@ class Database:
             )
         if "uninstall_backup" not in cols:
             await self.conn.execute("ALTER TABLE protocol_modules ADD COLUMN uninstall_backup TEXT")
+
+    async def _migrate_v41(self) -> None:
+        # The first superadmin of a fresh install claims the bot with a one-time
+        # deep link instead of being written into ADMIN_IDS by hand
+        # (scripts/install.sh, services/superadmin_claim.py). Mirrors schema.sql;
+        # idempotent. Nothing is backfilled: a superadmin from ADMIN_IDS is not a
+        # claim, and this table only ever grows through a successful claim.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS claimed_superadmins (
+              telegram_user_id INTEGER PRIMARY KEY CHECK (telegram_user_id > 0),
+              claimed_at TEXT NOT NULL
+            )
+            """
+        )
 
     async def _ensure_spider_x_backfill(self) -> None:
         # Idempotent per-key spiderX backfill, run on EVERY bootstrap (not gated by

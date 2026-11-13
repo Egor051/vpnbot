@@ -4,8 +4,9 @@ Complete reference for every environment variable parsed by `config/settings.py`
 
 The copy-paste template lives in [`.env.example`](../.env.example) (every variable is
 also documented inline there). Copy it to `.env` and replace placeholders with values
-for your server. `BOT_TOKEN` and `ADMIN_IDS` are required for startup; fill the relevant
-Xray or AWG values before issuing that key type.
+for your server. `BOT_TOKEN` is required for startup; `ADMIN_IDS` may be empty, in which
+case the first superadmin claims the bot with the deep link `scripts/install.sh` prints
+([install.md](install.md)). Fill the relevant Xray or AWG values before issuing that key type.
 
 Variables marked **Required** must be set before startup; variables not marked are
 optional with the shown default.
@@ -18,12 +19,13 @@ optional with the shown default.
 | Variable | Required | Default | Description | Example |
 |---|---|---|---|---|
 | `BOT_TOKEN` | **Yes** | — | Telegram Bot API token from BotFather. 🔒 | `123456:ABC-DEF...` |
-| `ADMIN_IDS` | **Yes** | — | Comma-separated Telegram user IDs with **superadmin** access. Additional moderators are assigned in-bot by a superadmin (no env var). | `123456,789012` |
+| `ADMIN_IDS` | No | empty | Comma-separated Telegram user IDs with **superadmin** access. Additional moderators are assigned in-bot by a superadmin (no env var). Empty is allowed: the effective superadmins are `ADMIN_IDS` ∪ the users who claimed the bot with the one-time install link ([install.md](install.md#the-first-superadmin-claim)); with any ID here the claim is inert. With neither, the bot logs a loud `NO SUPERADMIN` warning at startup. | `123456,789012` |
 | `DB_PATH` | No | `/opt/vpn-service/data/vpn.db` | Path to the SQLite database file. | `/opt/vpn-service/data/vpn.db` |
 | `SQLITE_SYNCHRONOUS` | No | `FULL` | SQLite synchronous mode: `FULL`, `NORMAL`, or `EXTRA`. `FULL` is safest. | `FULL` |
 | `LOG_DIR` | No | `/opt/vpn-service/logs` | Directory for rotating log files. | `/opt/vpn-service/logs` |
 | `BOT_LOCK_PATH` | No | `/run/vpn-bot/vpn-bot.lock` | Path to the single-instance PID lock file. | `/run/vpn-bot/vpn-bot.lock` |
 | `BOT_DROP_PENDING_UPDATES` | No | `false` | Drop queued Telegram updates on startup. Useful after downtime. | `false` |
+| `TELEGRAM_API_BASE` | No | empty (`api.telegram.org`) | Bot API server base URL, for a local Bot API server or the installer's CI mock. `https`, or `http` only towards a loopback host (the token travels in every request path); no query, fragment or credentials. | `http://127.0.0.1:8081` |
 | `BOT_LANGUAGE` | No | `ru` | Bot UI language. Supported: `ru`, `en`. | `ru` |
 | `AUDIT_RETENTION_DAYS` | No | `180` | Days to retain audit log entries (0 = forever, max 3650). | `180` |
 | `CONFIG_BACKUP_KEEP_LAST` | No | `20` | Number of config backups to keep per backend (1–500). | `20` |

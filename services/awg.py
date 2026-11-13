@@ -8,6 +8,7 @@ import logging
 import re
 import struct
 import zlib
+from pathlib import Path
 
 from adapters.awg_config import AwgConfigAdapter
 from adapters.clock import ClockProvider
@@ -598,6 +599,19 @@ class AwgService:
         try:
             active_keys = await self._list_awg_keys_by_statuses(AWG_ACTIVE_STATUSES)
             all_keys = await self._list_awg_keys_by_statuses(AWG_ALL_STATUSES)
+            if not all_keys and self._awg_not_installed():
+                # A host AmneziaWG was never installed on (a fresh scripts/install.sh
+                # install): no awg0.conf and not a single AWG key in the DB, in any
+                # status. Nothing can have drifted; reporting a degraded backend put
+                # a CRITICAL line and an audit row into every start of a
+                # protocol-less bot. Any key at all, or the config, keeps the full
+                # reconcile.
+                logger.info(
+                    "AWG startup drift reconciliation skipped: AmneziaWG is not installed "
+                    "on this host (%s absent) and no AWG keys exist",
+                    self.adapter.config_path,
+                )
+                return summary
             config_peers = self.adapter.list_config_peers()
             runtime_peers = await self._list_runtime_peers()
             summary["checked"] = len(active_keys) + len(config_peers) + len(runtime_peers)
@@ -623,6 +637,15 @@ class AwgService:
                 details={"error_type": type(exc).__name__},
             )
         return summary
+
+    def _awg_not_installed(self) -> bool:
+        """True only when the adapter names an awg0.conf that does not exist.
+
+        Test doubles without a ``config_path`` are never "not installed": they keep
+        the reconcile exactly as before.
+        """
+        config_path = getattr(self.adapter, "config_path", None)
+        return isinstance(config_path, Path) and not config_path.exists()
 
     def _awg_drift_reconcile_supported(self) -> bool:
         required_adapter = ("list_config_peers", "find_peer", "add_peer", "remove_peer", "list_runtime_peers")

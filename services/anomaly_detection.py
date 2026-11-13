@@ -5,6 +5,7 @@ import ipaddress
 import logging
 import re
 import time as time_module
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -122,7 +123,7 @@ class AnomalyDetectionService:
         awg: AwgConfigAdapter,
         xray_service: object,
         awg_service: object,
-        admin_ids: frozenset[int],
+        admin_ids: AbstractSet[int],
         window_seconds: int = 3600,
         unique_nets: int = 3,
         auto_revoke: bool = False,

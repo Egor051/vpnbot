@@ -42,6 +42,7 @@ import logging
 import ssl
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Set as AbstractSet
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -163,7 +164,7 @@ class RelayHealthMonitor:
             logger.warning("Relay health %s notification failed", kind, exc_info=True)
 
 
-async def broadcast_to_admins(bot: Bot, admin_ids: frozenset[int], text: str) -> None:
+async def broadcast_to_admins(bot: Bot, admin_ids: AbstractSet[int], text: str) -> None:
     """Send *text* to every admin; one admin failing never stops the rest."""
     for admin_id in admin_ids:
         try:
@@ -206,7 +207,7 @@ class RelayHealthSupervisor:
         load_relays: Callable[[], Awaitable[Sequence[Relay]]],
         port: int,
         sni: str,
-        admin_ids: frozenset[int],
+        admin_ids: AbstractSet[int],
         window: float,
         probe: Callable[..., Awaitable[bool]] | None = None,
         clock: Callable[[], float] = time.monotonic,

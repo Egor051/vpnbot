@@ -10,6 +10,7 @@ import sqlite3
 import tarfile
 from collections import Counter
 from collections.abc import Iterable, Sequence
+from collections.abc import Set as AbstractSet
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -488,7 +489,7 @@ class OffsiteBackupService:
         finally:
             src.close()
 
-    async def send_to_admins(self, bot: Bot, admin_ids: frozenset[int]) -> dict[str, int]:
+    async def send_to_admins(self, bot: Bot, admin_ids: AbstractSet[int]) -> dict[str, int]:
         """Send an encrypted backup to all admins and return delivery counts."""
         encrypted, filename = await self.create_encrypted_backup()
         success = 0
@@ -509,7 +510,7 @@ class OffsiteBackupService:
                 failed += 1
         return {"success": success, "failed": failed, "total": len(admin_ids)}
 
-    async def send_recovery_to_admins(self, bot: Bot, admin_ids: frozenset[int]) -> dict[str, int] | None:
+    async def send_recovery_to_admins(self, bot: Bot, admin_ids: AbstractSet[int]) -> dict[str, int] | None:
         """Send the encrypted recovery bundle to all admins and return delivery counts.
 
         Returns None when the bundle is disabled or no source file could be read,
@@ -540,7 +541,7 @@ class OffsiteBackupService:
                 failed += 1
         return {"success": success, "failed": failed, "total": len(admin_ids)}
 
-    async def send_system_to_admins(self, bot: Bot, admin_ids: frozenset[int]) -> dict[str, int] | None:
+    async def send_system_to_admins(self, bot: Bot, admin_ids: AbstractSet[int]) -> dict[str, int] | None:
         """Send the encrypted system bundle to all admins and return delivery counts.
 
         Returns None when the bundle is disabled or no source could be read, so
@@ -578,7 +579,7 @@ class OffsiteBackupService:
 async def offsite_backup_loop(
     service: OffsiteBackupService,
     bot: Bot,
-    admin_ids: frozenset[int],
+    admin_ids: AbstractSet[int],
     interval: int,
 ) -> None:
     """Send encrypted offsite backups to admins repeatedly at the given interval."""

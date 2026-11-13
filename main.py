@@ -64,6 +64,10 @@ async def main() -> None:
 
     with SingleInstanceLock(settings.bot_lock_path):
         bot, dp, db, backend_health, services = await create_app(settings)
+        # create_app swaps admin_ids for the live superadmin set (ADMIN_IDS + the
+        # claimed superadmins, services/superadmins.py): read everything from the
+        # app's settings from here on.
+        settings = services.settings
         runner: web.AppRunner | None = None
         awg_stats_task: asyncio.Task[None] | None = None
         xray_stats_task: asyncio.Task[None] | None = None

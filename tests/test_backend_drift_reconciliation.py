@@ -646,3 +646,73 @@ def test_degraded_vpn_backend_blocks_create_revoke_delete_and_reconcile_only_for
 
     health.require_mutation_allowed(ProxyAccessType.SOCKS5)
     health.require_mutation_allowed(ProxyAccessType.MTPROTO)
+
+
+# ── a host the backend was never installed on (scripts/install.sh) ────────────
+#
+# A fresh install has no config.json / awg0.conf and no keys. Nothing can have
+# drifted, so startup must not call the backend degraded: that used to log
+# CRITICAL and write audit rows on every start of a protocol-less bot, which the
+# installer's readiness scan (any ERROR/CRITICAL) rightly refuses.
+
+
+@pytest.mark.parametrize("backend", ["xray", "awg"])
+def test_absent_backend_with_no_keys_is_not_degraded(
+    tmp_path: Path, backend: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            audit = _Audit()
+            health = BackendHealth()
+            if backend == "xray":
+                service: XrayService | AwgService = _xray_service(
+                    tmp_path, repo, _xray_adapter(tmp_path / "absent-xray.json"), audit, health
+                )
+                key_type = VpnKeyType.XRAY
+            else:
+                service = _awg_service(tmp_path, repo, _awg_adapter(tmp_path / "absent-awg0.conf", _AwgShell()), audit, health)
+                key_type = VpnKeyType.AWG
+
+            summary = await service.startup_reconcile()
+
+            assert summary["failed"] == 0
+            assert audit.items == []
+            assert key_type not in health._degraded
+            assert not [r for r in caplog.records if r.levelno >= 40], "no ERROR/CRITICAL on a fresh host"
+            assert "not installed on this host" in caplog.text
+        finally:
+            await db.close()
+
+    caplog.set_level("INFO")
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("backend", ["xray", "awg"])
+def test_absent_backend_with_keys_still_degrades(tmp_path: Path, backend: str) -> None:
+    """Keys in the DB but no config: that IS drift, and it stays loud."""
+
+    async def run() -> None:
+        db, repo = await _repo(tmp_path)
+        try:
+            audit = _Audit()
+            health = BackendHealth()
+            if backend == "xray":
+                await _xray_key(repo, VpnKeyStatus.REVOKED)
+                service: XrayService | AwgService = _xray_service(
+                    tmp_path, repo, _xray_adapter(tmp_path / "absent-xray.json"), audit, health
+                )
+                key_type = VpnKeyType.XRAY
+            else:
+                await _awg_key(repo, VpnKeyStatus.REVOKED)
+                service = _awg_service(tmp_path, repo, _awg_adapter(tmp_path / "absent-awg0.conf", _AwgShell()), audit, health)
+                key_type = VpnKeyType.AWG
+
+            summary = await service.startup_reconcile()
+
+            assert summary["failed"] == 1
+            assert key_type in health._degraded
+        finally:
+            await db.close()
+
+    asyncio.run(run())
