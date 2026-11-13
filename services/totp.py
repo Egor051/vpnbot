@@ -215,15 +215,20 @@ class TotpService:
         return await asyncio.to_thread(self.key_file.create)
 
     async def begin_enrollment(self, user_id: int, account: str) -> Enrollment:
-        """A new secret, stored encrypted as not-yet-enabled. Refused while enabled."""
-        cred = await self.repo.get(user_id)
-        if cred is not None and cred.enabled:
-            raise TotpError("TOTP уже включён", key="totp_already_enabled")
-        fernet = await self._fernet_for_enrollment()
-        key = otp.generate_secret()
-        secret_b32 = otp.encode_secret(key)
-        token = fernet.encrypt(key).decode("ascii")
-        await self.repo.save_pending(user_id, token, self.clock.now())
+        """A new secret, stored encrypted as not-yet-enabled. Refused while enabled.
+
+        Under the user's lock, like the confirmation: an «Enable TOTP» pressed while a
+        code is being checked waits instead of swapping the secret under it.
+        """
+        async with self._lock(user_id):
+            cred = await self.repo.get(user_id)
+            if cred is not None and cred.enabled:
+                raise TotpError("TOTP уже включён", key="totp_already_enabled")
+            fernet = await self._fernet_for_enrollment()
+            key = otp.generate_secret()
+            secret_b32 = otp.encode_secret(key)
+            token = fernet.encrypt(key).decode("ascii")
+            await self.repo.save_pending(user_id, token, self.clock.now())
         await self.audit.write(
             actor_user_id=user_id,
             action="totp_enrollment_started",
@@ -249,7 +254,12 @@ class TotpService:
                 raise TotpError("неверный код", key="totp_invalid_code")
             codes = otp.generate_backup_codes()
             hashed = await asyncio.to_thread(_hash_codes, codes)
-            await self.repo.enable(user_id, step=step, codes=hashed, now=self.clock.now())
+            # Enables exactly the credential whose code was just verified (its
+            # ciphertext), never whichever pending one happens to exist by now.
+            if not await self.repo.enable(
+                user_id, secret_enc=cred.secret_enc, step=step, codes=hashed, now=self.clock.now()
+            ):
+                raise TotpError("подключение TOTP сменилось", key="totp_no_enrollment")
         self.elevate(user_id)
         await self.audit.write(
             actor_user_id=user_id,
@@ -261,9 +271,8 @@ class TotpService:
         return codes
 
     async def cancel_enrollment(self, user_id: int) -> None:
-        cred = await self.repo.get(user_id)
-        if cred is not None and not cred.enabled:
-            await self.repo.delete(user_id)
+        async with self._lock(user_id):
+            await self.repo.delete_pending(user_id)
 
     # ------------------------------------------------------------- verification
     async def verify(self, user_id: int, code: str, *, purpose: str, allow_backup: bool = True) -> VerifyResult:

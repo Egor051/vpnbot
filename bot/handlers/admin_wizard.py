@@ -133,10 +133,13 @@ async def wizard_cancel(callback: CallbackQuery, services: Services) -> None:
             return
         assert callback.data is not None and callback.from_user is not None
         wizard = _wizard(services)
-        run = await wizard.cancel(callback.from_user.id, _run_id(callback.data))
-        await safe_callback_answer(callback, t("wizard_cancelled"))
-        text, markup = run_view(run, await wizard.snapshot(run.id))
-        await safe_edit_message_text(callback.message, text, reply_markup=markup)
+        # The same lock as «Применить» and the monitor: the two buttons of one plan
+        # never interleave (the repository transitions are atomic on top of that).
+        async with wizard.exclusive():
+            run = await wizard.cancel(callback.from_user.id, _run_id(callback.data))
+            await safe_callback_answer(callback, t("wizard_cancelled"))
+            text, markup = run_view(run, await wizard.snapshot(run.id))
+            await safe_edit_message_text(callback.message, text, reply_markup=markup)
     except Exception as exc:
         await answer_callback_error(callback, exc)
 

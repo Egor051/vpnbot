@@ -470,3 +470,37 @@ async def test_the_confirmation_screen_is_retried_until_delivered_and_after_a_re
     await world.service().poll_once()  # a restart shows it once more
     assert world.notifier.kinds().count("plan_ready") == 4
     assert (await svc.get(run.id)).plan_ready
+
+
+async def _ready_plan(world: World, svc: WizardService) -> WizardRun:
+    run = await svc.start(ADMIN, "update", chat_id=5)
+    world.emit(run.id, "launched", phase="plan")
+    world.emit(run.id, "plan", text="p")
+    world.emit(run.id, "finished", phase="plan", outcome="planned")
+    await svc.poll_once()
+    return await svc.get(run.id)
+
+
+async def test_a_cancel_that_wins_means_nothing_is_launched(world: World) -> None:
+    svc = world.service()
+    run = await _ready_plan(world, svc)
+    stale = await svc.get(run.id)  # what a concurrent «Применить» read before the cancel
+    await svc.cancel(ADMIN, run.id)
+    launches = len(world.runner.calls)
+    assert not await svc.repo.claim_plan(stale.id, "t")
+    with pytest.raises(WizardError) as exc:
+        await svc.confirm(ADMIN, run.id)
+    assert exc.value.key == "wizard_not_awaiting"
+    assert len(world.runner.calls) == launches  # no execute phase
+    assert (await svc.get(run.id)).state == "cancelled"
+
+
+async def test_a_confirmation_that_wins_cannot_be_cancelled(world: World) -> None:
+    svc = world.service()
+    run = await _ready_plan(world, svc)
+    assert await svc.repo.claim_plan(run.id, "t")  # «Применить» claimed it
+    assert not await svc.repo.claim_plan(run.id, "t")  # a second tap does not
+    assert not await svc.repo.finish(run.id, "cancelled", "x", "t", only_ready_plan=True)
+    with pytest.raises(WizardError):
+        await svc.cancel(ADMIN, run.id)
+    assert (await svc.get(run.id)).state == "running"

@@ -452,3 +452,38 @@ async def test_totp_reset_cli_removes_the_factor_and_audits(world: tuple[Databas
     assert codes == (0,)
     again = _reset(str(USER), "--yes", "--db", db_file)
     assert again.returncode == 0 and "nothing to reset" in again.stdout
+
+
+async def test_a_restarted_enrollment_waits_for_the_running_confirmation(world: tuple[Database, Path]) -> None:
+    """«Enable TOTP» pressed while the first code is being checked must not swap the
+    secret under it: the confirmation enables exactly the secret it verified."""
+    import asyncio
+
+    db, key_path = world
+    clock = Clock()
+    svc = make_service(db, key_path, clock)
+    enrollment = await svc.begin_enrollment(USER, "alice")
+    key = otp.decode_secret(enrollment.secret_b32)
+    confirm = asyncio.create_task(svc.confirm_enrollment(USER, otp.totp(key, clock.t)))
+    await asyncio.sleep(0)  # the confirmation holds the user's lock now
+    restart = asyncio.create_task(svc.begin_enrollment(USER, "alice"))
+    codes = await confirm
+    with pytest.raises(TotpError) as exc:
+        await restart
+    assert exc.value.key == "totp_already_enabled"
+    assert len(codes) == 10
+    clock.t += 30
+    assert (await svc.verify(USER, otp.totp(key, clock.t), purpose="test")).method == "totp"
+
+
+async def test_enable_matches_the_verified_ciphertext(world: tuple[Database, Path]) -> None:
+    db, key_path = world
+    svc = make_service(db, key_path, Clock())
+    await svc.begin_enrollment(USER, "alice")
+    assert not await svc.repo.enable(USER, secret_enc="not-the-one", step=1, codes=[], now="t")
+    assert not await svc.is_enabled(USER)
+    cred = await svc.repo.get(USER)
+    assert cred is not None
+    assert await svc.repo.enable(USER, secret_enc=cred.secret_enc, step=1, codes=[], now="t")
+    await svc.cancel_enrollment(USER)  # never removes an enabled credential
+    assert await svc.is_enabled(USER)

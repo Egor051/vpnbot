@@ -150,17 +150,34 @@ class WizardRunRepository:
         )
         await self.db.commit()
 
-    async def finish(self, run_id: int, state: str, summary: str, now: str) -> bool:
-        """Terminal state + release the lock. False when the run was already finished."""
+    async def finish(self, run_id: int, state: str, summary: str, now: str, *, only_ready_plan: bool = False) -> bool:
+        """Terminal state + release the lock. False when the run was already finished —
+        or, with ``only_ready_plan``, when it is no longer a plan waiting for its
+        confirmation (a confirmation claimed it first)."""
         if state not in TERMINAL_STATES:
             raise ValueError(f"{state!r} is not a terminal state")
+        guard = " AND state = 'planned' AND plan_ready = 1" if only_ready_plan else ""
+        cursor = await self.db.conn.execute(
+            f"""
+            UPDATE wizard_runs
+            SET state = ?, summary = ?, active = NULL, finished_at = ?, updated_at = ?
+            WHERE id = ? AND active = 1{guard}
+            """,
+            (state, summary, now, now, run_id),
+        )
+        await self.db.commit()
+        return int(cursor.rowcount or 0) == 1
+
+    async def claim_plan(self, run_id: int, now: str) -> bool:
+        """planned + plan_ready -> running/execute, atomically. False when the plan
+        is no longer waiting (cancelled, expired, or claimed by another tap)."""
         cursor = await self.db.conn.execute(
             """
             UPDATE wizard_runs
-            SET state = ?, summary = ?, active = NULL, finished_at = ?, updated_at = ?
-            WHERE id = ? AND active = 1
+            SET state = 'running', phase = 'execute', plan_ready = 0, current_step = 'apply', updated_at = ?
+            WHERE id = ? AND active = 1 AND state = 'planned' AND plan_ready = 1
             """,
-            (state, summary, now, now, run_id),
+            (now, run_id),
         )
         await self.db.commit()
         return int(cursor.rowcount or 0) == 1

@@ -63,21 +63,24 @@ class TotpRepository:
             )
 
     async def enable(
-        self, user_id: int, *, step: int, codes: list[tuple[str, str]], now: str
-    ) -> None:
-        """Confirm the enrollment and store the backup codes, in one transaction."""
+        self, user_id: int, *, secret_enc: str, step: int, codes: list[tuple[str, str]], now: str
+    ) -> bool:
+        """Confirm THIS pending enrollment (matched by its ciphertext) and store the
+        backup codes, in one transaction. False when that enrollment is gone or was
+        replaced meanwhile — nothing is changed then."""
         async with self.db.transaction():
             cursor = await self.db.conn.execute(
                 """
                 UPDATE totp_credentials
                 SET enabled = 1, enabled_at = ?, last_used_step = ?, failed_attempts = 0, locked_until = 0
-                WHERE telegram_user_id = ? AND enabled = 0
+                WHERE telegram_user_id = ? AND enabled = 0 AND secret_enc = ?
                 """,
-                (now, step, user_id),
+                (now, step, user_id, secret_enc),
             )
             if int(cursor.rowcount or 0) != 1:
-                raise ValueError("no pending TOTP enrollment for this user")
+                return False
             await self._replace_codes(user_id, codes, now)
+        return True
 
     async def replace_backup_codes(self, user_id: int, codes: list[tuple[str, str]], now: str) -> None:
         async with self.db.transaction():
@@ -170,6 +173,14 @@ class TotpRepository:
                 (failures, user_id),
             )
             return failures, False
+
+    async def delete_pending(self, user_id: int) -> bool:
+        """Drop a not-yet-enabled enrollment; an enabled credential is never touched."""
+        cursor = await self.db.conn.execute(
+            "DELETE FROM totp_credentials WHERE telegram_user_id = ? AND enabled = 0", (user_id,)
+        )
+        await self.db.commit()
+        return int(cursor.rowcount or 0) > 0
 
     async def delete(self, user_id: int) -> bool:
         cursor = await self.db.conn.execute("DELETE FROM totp_credentials WHERE telegram_user_id = ?", (user_id,))

@@ -344,8 +344,11 @@ class WizardService:
             raise NotFound("нет запуска", key="wizard_run_not_found")
         if not run.active or run.state != "planned" or not run.plan_ready:
             raise WizardError("план не ждёт подтверждения", key="wizard_not_awaiting")
-        now = self.clock.now()
-        await self.repo.update(run.id, now, state="running", phase="execute", plan_ready=False, current_step="apply")
+        # The one transition that launches the execute phase, claimed atomically: a
+        # concurrent «Отменить», the plan's expiry or a second «Применить» that won
+        # makes this a no-op, and nothing is launched.
+        if not await self.repo.claim_plan(run.id, self.clock.now()):
+            raise WizardError("план не ждёт подтверждения", key="wizard_not_awaiting")
         await self.audit.write_best_effort(
             actor_user_id=actor_user_id,
             action="wizard_run_confirmed",
@@ -367,14 +370,20 @@ class WizardService:
             raise NotFound("нет запуска", key="wizard_run_not_found")
         if not run.active or run.state != "planned" or not run.plan_ready:
             raise WizardError("отменить можно только готовый план", key="wizard_not_awaiting")
-        await self._finish(run.id, "cancelled", "cancelled by a superadmin", actor_user_id)
+        if not await self._finish(run.id, "cancelled", "cancelled by a superadmin", actor_user_id, only_ready_plan=True):
+            # A confirmation claimed the plan first: it is running now, not cancelled.
+            raise WizardError("отменить можно только готовый план", key="wizard_not_awaiting")
         await self.repo.mark_reported(run.id, self.clock.now())
         fresh = await self.repo.get(run.id)
         assert fresh is not None
         return fresh
 
-    async def _finish(self, run_id: int, state: str, summary: str, actor: int | None = None) -> bool:
-        done = await self.repo.finish(run_id, state, redact_text(summary)[:2000], self.clock.now())
+    async def _finish(
+        self, run_id: int, state: str, summary: str, actor: int | None = None, *, only_ready_plan: bool = False
+    ) -> bool:
+        done = await self.repo.finish(
+            run_id, state, redact_text(summary)[:2000], self.clock.now(), only_ready_plan=only_ready_plan
+        )
         if done:
             run = await self.repo.get(run_id)
             await self.audit.write_best_effort(
@@ -419,7 +428,7 @@ class WizardService:
         if run.state == "planned" and run.plan_ready:
             updated = _parse_iso(run.updated_at)
             if updated is not None and now - updated > PLAN_TTL:
-                await self._finish(run.id, "cancelled", "the plan was not confirmed within 30 minutes")
+                await self._finish(run.id, "cancelled", "the plan was not confirmed within 30 minutes", only_ready_plan=True)
                 return
             if run.id not in self._plan_shown:
                 await self._show_plan(run, await self.snapshot(run.id))
