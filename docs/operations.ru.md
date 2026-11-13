@@ -514,8 +514,9 @@ UFW основного сервера вычисляется, а не набир
 включении и удалении протокола. Никогда не `ufw allow` руками: правило, которое не принадлежит ни
 модулю, ни ssh, кладётся в `extra.list`.
 
-- Эндпоинт `hy2_auth` (`HYSTERIA2_AUTH_LISTEN`), Traffic Stats API Hysteria2
-  (`HYSTERIA2_STATS_LISTEN`) и `XRAY_STATS_SERVER` держите только на loopback. Проверка слушателей
+- Эндпоинт `hy2_auth` (`HYSTERIA2_AUTH_LISTEN`) и Traffic Stats API Hysteria2
+  (`HYSTERIA2_STATS_LISTEN`) держите только на loopback, а `XRAY_STATS_SERVER` — на localhost,
+  например `127.0.0.1:<port>`. Никогда не открывайте Xray stats API в интернет. Проверка слушателей
   в деплое падает на публичном TCP-слушателе, которого набор не разрешает и не объявляет закрытым
   (`main|closed <port>/tcp|<почему>` в `extra.list`).
 - Политика routed не меняется никогда: AWG-клиенты выходят в интернет через своё route-правило.

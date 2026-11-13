@@ -634,9 +634,10 @@ is no longer in that set ([host-state.md](host-state.md#the-firewall-ufw)). The 
 does the bot when a protocol is switched on or removed. Never `ufw allow` by hand: put a rule that
 is neither a module's nor ssh's into `extra.list`.
 
-- Keep the `hy2_auth` endpoint (`HYSTERIA2_AUTH_LISTEN`), the Hysteria2 Traffic Stats API
-  (`HYSTERIA2_STATS_LISTEN`) and `XRAY_STATS_SERVER` bound to loopback only — never expose them.
-  The deploy's listener check fails on a public TCP listener the set neither allows nor declares
+- Keep the `hy2_auth` endpoint (`HYSTERIA2_AUTH_LISTEN`) and the Hysteria2 Traffic Stats API
+  (`HYSTERIA2_STATS_LISTEN`) bound to loopback only, and `XRAY_STATS_SERVER` bound to localhost,
+  for example `127.0.0.1:<port>`. Never expose the Xray stats API to the internet. The deploy's
+  listener check fails on a public TCP listener the set neither allows nor declares
   closed (`main|closed <port>/tcp|<why>` in `extra.list`).
 - The routed policy is never changed: AWG clients reach the internet through their route rule.
 
