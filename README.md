@@ -213,6 +213,7 @@ Step-by-step install (both models), the one-time Xray API setup, the post-deploy
 checklist, and day-2 operations live in:
 
 - **[docs/install.md](docs/install.md)** — the one-command installer (`scripts/install.sh`) and the first-superadmin claim.
+- **[docs/wizard.md](docs/wizard.md)** — the setup wizard in the admin panel (self-check, diagnostic dump, update) and the TOTP second factor.
 - **[docs/deployment.md](docs/deployment.md)** — install, both models, Xray API mode.
 - **[docs/operations.md](docs/operations.md)** — runbook: health checks, backup/restore, degraded recovery, rollback.
 
@@ -395,6 +396,7 @@ schema version internally).
 | [docs/configuration.md](docs/configuration.md) | Complete environment-variable reference (all backends, WARP, legacy aliases). |
 | [docs/deployment.md](docs/deployment.md) | Install steps for both models, Xray API mode, one-time server setup, smoke checklist. |
 | [docs/operations.md](docs/operations.md) | Production runbook: health checks, backup/restore, degraded recovery, rollback, manual verification. |
+| [docs/wizard.md](docs/wizard.md) | The setup wizard (fixed root helper modes in their own systemd unit: plan → apply → verify → rollback; self-check, diagnostic dump, update) and the superadmins' TOTP second factor, its emergency reset. |
 | [docs/host-state.md](docs/host-state.md) | Host files outside the checkout: what deploy.sh installs, repairs and retires, what it only reports, `ALLOW_SSH_CHANGE`; whether they are in effect (host invariants: BEATEN / MISMATCH / LATENT, at deploy, at boot and daily). |
 | [docs/hysteria.md](docs/hysteria.md) | Hysteria2 (apernet v2): data plane, `hy2_auth` endpoint, Traffic Stats API, health & recovery. |
 | [docs/proxy.md](docs/proxy.md) | SOCKS5/Dante and MTProto (static + managed) deployment and recovery. |

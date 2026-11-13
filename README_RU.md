@@ -214,6 +214,7 @@ docs/                      # Документация: конфигурация,
 эксплуатация описаны в:
 
 - **[docs/install.ru.md](docs/install.ru.md)** — установщик одной командой (`scripts/install.sh`) и claim первого суперадмина.
+- **[docs/wizard.ru.md](docs/wizard.ru.md)** — мастер настройки в админ-панели (самопроверка, диагностический дамп, обновление) и второй фактор TOTP.
 - **[docs/deployment.ru.md](docs/deployment.ru.md)** — установка, обе модели, Xray API mode.
 - **[docs/operations.ru.md](docs/operations.ru.md)** — runbook: health-проверки, backup/restore, восстановление из degraded, rollback.
 
@@ -279,6 +280,7 @@ SQLite — локальный backend хранилища; путь по умол
 | [docs/configuration.ru.md](docs/configuration.ru.md) | Полный справочник переменных окружения (все бэкенды, WARP, legacy-aliases). |
 | [docs/deployment.ru.md](docs/deployment.ru.md) | Установка для обеих моделей, Xray API mode, разовая настройка сервера, smoke-чеклист. |
 | [docs/operations.ru.md](docs/operations.ru.md) | Production runbook: health-проверки, backup/restore, восстановление из degraded, rollback, ручная проверка. |
+| [docs/wizard.ru.md](docs/wizard.ru.md) | Мастер настройки (фиксированные root-helper'ы в своём systemd-юните: план → apply → verify → rollback; самопроверка, диагностический дамп, обновление) и второй фактор TOTP суперадминов, его аварийный сброс. |
 | [docs/host-state.ru.md](docs/host-state.ru.md) | Файлы хоста вне чекаута: что deploy.sh ставит, чинит и удаляет, о чём только сообщает, `ALLOW_SSH_CHANGE`; действуют ли они (инварианты хоста: BEATEN / MISMATCH / LATENT — при деплое, при загрузке и раз в сутки). |
 | [docs/hysteria.ru.md](docs/hysteria.ru.md) | Hysteria2 (apernet v2): data plane, эндпоинт `hy2_auth`, Traffic Stats API, health и восстановление. |
 | [docs/proxy.ru.md](docs/proxy.ru.md) | SOCKS5/Dante и MTProto (static + managed): развёртывание и восстановление. |
