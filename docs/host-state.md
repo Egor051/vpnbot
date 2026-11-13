@@ -659,9 +659,12 @@ deploy.sh, `OUT_OF_REPO_HELPERS`, `required` on main) derives the whole rule set
 
 **Never a lockout.** A rule that opens the port sshd **really** listens on — the union of
 `sshd -T`, `systemctl show -p Listen ssh.socket` and the `ss` rows of sshd (or of PID 1 for a
-socket port) — is never deleted (`keep`); when none of them answers, nothing is deleted at all. A
+socket port) — is never deleted (`keep`); when none of them answers, nothing is deleted at all and
+ufw is neither enabled nor its incoming policy changed. Before either of those two steps every such
+port is opened too (`vpn-bot:ssh`): `SSH_PORT` alone may not be where ssh is (an inactive
+`ssh.socket`, an sshd still on 22); afterwards that rule is only kept while sshd listens there. A
 module that is on but whose rule cannot be written down here (its port unknown, no default route)
-keeps whatever is recognisably its own.
+keeps whatever is recognisably its own — by its key or by its `vpn-bot:<module>` comment.
 
 ### The dead-man
 
@@ -673,7 +676,8 @@ still answers from outside** — the proofs of the SSH port migration: a new con
 non-local address on an ssh port in the sshd log (`vpn-bot-ssh-port proof-journal`, `LogLevel
 VERBOSE`), or «Подтвердить» under the bot's message (`vpn-bot-ufw-apply confirm`, sudo, exact-path
 grant). Without one, 10 minutes after the change the previous incoming policy (and an inactive
-ufw) comes back. A reboot ends the timer: `vpn-bot-ufw-deadman.service`, pulled in by
+ufw) comes back — checked afterwards; a revert that failed stays pending and is retried every
+minute. A reboot ends the timer: `vpn-bot-ufw-deadman.service`, pulled in by
 `vpn-bot-host-check.service` (5 min after boot, daily), re-arms it or reverts. A timer that cannot
 be armed: the policy is not changed (exit 9). **An ordinary deploy changes no policy and arms no
 dead-man.**

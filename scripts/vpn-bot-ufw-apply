@@ -29,7 +29,9 @@ Every rule of the set carries the comment 'vpn-bot:<module|ssh|extra>'. `apply`
 Access is never at stake:
   * a rule that opens the port sshd REALLY listens on (`sshd -T`, ssh.socket's
     Listen=, `ss` rows of sshd or of PID 1 for a socket port) is never deleted; no
-    such port found = nothing is deleted at all;
+    such port found = nothing is deleted at all, and ufw is not enabled nor the
+    incoming policy changed. Before either, every such port is opened as well
+    (SSH_PORT alone may not be where ssh is: an inactive ssh.socket, sshd on 22);
   * ufw inactive -> enabled, and a change of the incoming policy, happen under a
     dead-man (as the relay's input filter): DEADMAN_STATE records what was before,
     a transient timer runs `deadman-check` every minute, and the change stays only
@@ -37,7 +39,8 @@ Access is never at stake:
     from a non-local address on it in the sshd log (`vpn-bot-ssh-port proof-journal`,
     the proof of the SSH port migration), or «Подтвердить» in the bot (`confirm`).
     Without one, DEADMAN_SECONDS after the change, the previous incoming policy (and
-    an inactive ufw) is restored. vpn-bot-ufw-deadman.service (pulled in by the host
+    an inactive ufw) is restored — verified; a revert that failed stays pending and
+    is retried at the next check. vpn-bot-ufw-deadman.service (pulled in by the host
     check: 5 min after boot, daily) does the same after a reboot. An ordinary deploy
     changes no policy and needs no dead-man.
 
@@ -182,7 +185,8 @@ def env_sed_val(text: str, key: str) -> str:
 
 
 def is_true(value: str) -> bool:
-    return value.lower() in ("1", "true", "yes", "on")
+    """config/settings.py's _bool: what the application itself treats as switched on."""
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 def tool_allowed(name: str) -> str | None:
@@ -564,6 +568,9 @@ class ModuleState:
     route_src: str = ""
     route_out: str = ""               # the WAN interface ("" = unknown)
     notes: list[str] = field(default_factory=list)
+    # On, but a rule of it cannot be written down here (a port or the WAN unknown): what
+    # is recognisably its own stays. Not set for a port that is off by design (0).
+    incomplete: bool = False
 
     def keys(self) -> list[tuple[Key, str]]:
         """The rules of this module that can be written down here, with why."""
@@ -630,6 +637,7 @@ def module_states(ctx: Ctx) -> list[ModuleState]:
                 if p is not None:
                     st.port, st.port_why = p, f"AWG_ENDPOINT_PORT={p}"
                 elif on:
+                    st.incomplete = True
                     st.notes.append("the AWG listen port is unknown (no ListenPort in the AWG config, no "
                                     "AWG_ENDPOINT_PORT) — its udp rule is not managed")
             st.route_in = ctx.env("AWG_INTERFACE") or "awg0"
@@ -638,6 +646,7 @@ def module_states(ctx: Ctx) -> list[ModuleState]:
                 wan = wan_interface() if wan is None else wan
                 st.route_out = wan
                 if not wan:
+                    st.incomplete = True
                     st.notes.append("no IPv4 default route (`ip -4 route show default`) — the AWG route rule "
                                     "cannot be written down: not managed")
         else:
@@ -652,6 +661,9 @@ def module_states(ctx: Ctx) -> list[ModuleState]:
             if raw in ("", "0"):
                 if on:
                     st.notes.append(f"{mod.port_keys[0]} is not set — {mod.name} has no public port to open")
+                    # "0" is off by design (SUBSCRIPTION_PUBLIC_PORT); an empty port of a module
+                    # that needs one (SOCKS5_PORT) is a port nobody can tell.
+                    st.incomplete = raw == "" and mod.port_default != "0"
             else:
                 p = port_of(raw)
                 if p is None:
@@ -1069,6 +1081,17 @@ def compute(ctx: Ctx, ssh_given: str | None, *, with_listeners: bool = True) -> 
 
     for p in ssh_ports:
         want(simple(p, "tcp"), "ssh", ssh_source)
+    # Before ufw is enabled or the incoming policy changes, every port sshd really listens on
+    # is opened too — SSH_PORT alone may not be where ssh is (an inactive ssh.socket, sshd
+    # still on 22). Afterwards such a rule is only kept while sshd listens there.
+    risky = ufw.present and not ufw.error and (
+        ufw.active is False
+        or ("incoming" in policy_want and ufw.policies.get("incoming") != policy_want["incoming"]))
+    if risky:
+        for p in live:
+            if p not in ssh_ports:
+                want(simple(p, "tcp"), "ssh", f"sshd listens on {p} ({live_why}) — opened before ufw is enabled "
+                                              "or the incoming policy changes")
     for st in modules:
         if st.on:
             for key, why in st.keys():
@@ -1100,7 +1123,7 @@ def compute(ctx: Ctx, ssh_given: str | None, *, with_listeners: bool = True) -> 
     wanted = {w.key for w in wants}
     # A module that is on but whose rules cannot all be written down here (its port or
     # the WAN interface unknown): a rule that is recognisably its own stays as it is.
-    incomplete = {st.module.name: st for st in modules if st.on and st.notes}
+    incomplete = {st.module.name: st for st in modules if st.on and st.incomplete}
     for r in ufw.rules:
         if r.key is not None and r.key in wanted:
             continue
@@ -1108,10 +1131,13 @@ def compute(ctx: Ctx, ssh_given: str | None, *, with_listeners: bool = True) -> 
         owner = r.comment[len(COMMENT_PREFIX):] if marked else ""
         why = ""
         mine = next((st for st in modules if r.key is not None and st.matches(r.key)), None)
-        if mine is not None and mine.module.name in incomplete:
-            items.append(Item("keep", mine.module.name, "yes" if marked else "no", r.text,
-                              f"{mine.module.name} is on, but its rules cannot all be written down here "
-                              f"({'; '.join(mine.notes)}) — left as it is", rule=r))
+        holder = mine if mine is not None and mine.module.name in incomplete else None
+        if holder is None and marked:
+            holder = incomplete.get(r.comment[len(COMMENT_PREFIX):])
+        if holder is not None:
+            items.append(Item("keep", holder.module.name, "yes" if marked else "no", r.text,
+                              f"{holder.module.name} is on, but its rules cannot all be written down here "
+                              f"({'; '.join(holder.notes)}) — left as it is", rule=r))
             continue
         if not marked and r.key is not None:
             for st in modules:
@@ -1315,17 +1341,26 @@ def finish_deadman(ctx: Ctx, st: dict[str, Any], state: str, proof: str) -> None
     write_atomic(ctx, ctx.host(DEADMAN_STATE), json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
-def revert(ctx: Ctx, st: dict[str, Any]) -> list[str]:
-    """Put the incoming policy (and an inactive ufw) back as it was before the change."""
+def revert(ctx: Ctx, st: dict[str, Any]) -> tuple[bool, list[str]]:
+    """Put the incoming policy (and an inactive ufw) back as it was before the change.
+    (all of it worked, what was done). Verified: the policy file and `ufw status`."""
     notes: list[str] = []
+    ok = True
     prev_in = st.get("prev_incoming")
     if isinstance(prev_in, str) and prev_in in POLICIES:
         rc, text = run(["ufw", "default", prev_in, "incoming"])
         notes.append(f"ufw default {prev_in} incoming: rc {rc}" + (f" — {one(text.strip())}" if rc else ""))
+        d = read_defaults(ctx)
+        now = POLICY_OF_IPT.get(d.get("DEFAULT_INPUT_POLICY", "").upper(), "?")
+        if rc != 0 or now != prev_in:
+            ok = False
     if st.get("prev_active") is False:
         rc, text = run(["ufw", "disable"])
         notes.append(f"ufw disable (it was inactive before): rc {rc}" + (f" — {one(text.strip())}" if rc else ""))
-    return notes
+        rc2, status_text = run(["ufw", "status"])
+        if rc != 0 or rc2 != 0 or not re.search(r"^Status: inactive", status_text, re.M):
+            ok = False
+    return ok, notes
 
 
 def deadman_check(ctx: Ctx) -> int:
@@ -1357,7 +1392,17 @@ def deadman_check(ctx: Ctx) -> int:
                       f"{'ok' if ok else 'FAILED ' + text}")
             print(f"vpn-bot-ufw-apply: waiting for a proof until {iso(deadline)} — {describe(st)}")
             return 0
-        notes = revert(ctx, st)
+        ok, notes = revert(ctx, st)
+        if not ok:
+            # Still pending, the timer still running: the next check tries again.
+            data = dict(st)
+            data["last_error"] = f"{iso(time.time())} revert failed: {'; '.join(notes)}"
+            write_atomic(ctx, ctx.host(DEADMAN_STATE), json.dumps(data, indent=2, sort_keys=True) + "\n")
+            if not timer_active():
+                arm_timer()
+            print(f"vpn-bot-ufw-apply: FAIL: no proof by {iso(deadline)}, and the REVERT FAILED — still pending, "
+                  f"retried at the next check: {'; '.join(notes)}")
+            return EXIT_CANNOT
         finish_deadman(ctx, st, "reverted", "")
         print(f"vpn-bot-ufw-apply: no proof by {iso(deadline)} — REVERTED: {describe(st)}")
         for n in notes:
@@ -1457,6 +1502,9 @@ def apply(ctx: Ctx, ssh_given: str | None) -> int:
         rc_deadman = 0
         if risky and pending:
             say(f"a UFW change waits for its proof already ({deadman_text(ctx)}) — the policy is left as it is")
+        elif risky and not plan.live:
+            fail(failures, f"the port sshd listens on cannot be told ({plan.live_why}) — "
+                           f"{'; '.join(c['what'] for c in risky)} NOT changed")
         elif risky:
             rc_deadman = arm_and_change(ctx, plan, risky, failures)
         # 3. Deletions last.

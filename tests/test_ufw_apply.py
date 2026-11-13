@@ -135,6 +135,8 @@ if args[:2] == ["--force", "enable"]:
         print("ERROR: enable failed"); sys.exit(1)
     st["active"] = True; save(); print("Firewall is active and enabled on system startup"); sys.exit(0)
 if cmd == "disable":
+    if fail("disable"):
+        print("ERROR: disable failed"); sys.exit(1)
     st["active"] = False; save(); print("Firewall stopped and disabled on system startup"); sys.exit(0)
 if cmd == "reload":
     print("Firewall reloaded"); sys.exit(0)
@@ -1286,3 +1288,77 @@ def test_the_sudoers_grant_is_apply_and_confirm_only() -> None:
               and not ln.lstrip().startswith("#")]
     assert grants == ["/usr/local/sbin/vpn-bot-ufw-apply apply", "/usr/local/sbin/vpn-bot-ufw-apply confirm *"]
     assert "VPN_BOT_SSH_PORT, VPN_BOT_UFW\n" in text
+
+
+# --------------------------------------------------------------------------- #
+# 14. Review fixes (PR #331): live ssh ports before enabling, a failed revert, the
+#     application's booleans, a marked rule of a module whose port is unknown
+# --------------------------------------------------------------------------- #
+def test_the_port_sshd_really_listens_on_is_opened_before_ufw_is_enabled(tmp_path: Path) -> None:
+    """ufw inactive, no rules, ssh.socket inactive and sshd on 22: SSH_PORT (54321) alone
+    would lock new ssh connections out — 22 is opened first."""
+    host = Host(tmp_path, active=False, rules=[], ssh=(22,))
+    host.flag("ssh.socket.active", "inactive")
+    host.flag("socket_ports", "")
+    host.flag("ss_tcp", 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=600,fd=3))\n')
+    plan = host.plan()
+    assert ("add", "ssh", "-", "allow 22/tcp") in _rules(plan)
+    proc = host.apply()
+    assert proc.returncode == 0, proc.stdout
+    muts = host.ufw_mutations()
+    assert muts.index("ufw allow 22/tcp comment vpn-bot:ssh") < muts.index("ufw --force enable")
+    assert host.rules()["allow 22/tcp"][0] == "vpn-bot:ssh" and host.rules()["allow 54321/tcp"][0] == "vpn-bot:ssh"
+    # Enabled: 22 is no longer added, only kept while sshd listens there.
+    host.clear_logs()
+    assert ("keep", "ssh", "yes", "allow 22/tcp") in _rules(host.plan())
+
+
+def test_ufw_is_not_enabled_when_the_ssh_port_cannot_be_told(tmp_path: Path) -> None:
+    host = Host(tmp_path, active=False)
+    host.flag("socket_ports", "")
+    host.flag("sshd_fail")
+    host.flag("ss_fail")
+    proc = host.apply()
+    assert proc.returncode == 4 and "cannot be told" in proc.stdout, proc.stdout
+    assert "ufw --force enable" not in host.ufw_mutations() and host.log("systemd-run") == []
+
+
+def test_a_failed_revert_stays_pending_and_is_retried(tmp_path: Path) -> None:
+    host = Host(tmp_path, active=False)
+    assert host.apply().returncode == 0
+    st = _deadman(host)
+    st["deadline"] = int(time.time()) - 1
+    host.put(DEADMAN, json.dumps(st))
+    host.flag("ufw_fail_disable")
+    host.clear_logs()
+    proc = host.helper("deadman-check")
+    assert proc.returncode == 5 and "REVERT FAILED" in proc.stdout, proc.stdout
+    st = _deadman(host)
+    assert st["state"] == "pending" and "revert failed" in st["last_error"]
+    assert "systemctl stop vpn-bot-ufw-deadman-watch.timer" not in host.log("systemctl"), "the timer keeps retrying"
+    (host.sd / "ufw_fail_disable").unlink()
+    again = host.helper("deadman-check")
+    assert again.returncode == 0 and "REVERTED" in again.stdout and _deadman(host)["state"] == "reverted"
+
+
+@pytest.mark.parametrize("value", ["y", "Y", "yes", "on", "1", "true", " true "])
+def test_the_enable_flags_read_as_the_application_reads_them(tmp_path: Path, value: str) -> None:
+    host = Host(tmp_path, env=MAIN_ENV.replace("SUBSCRIPTION_ENABLED=true", f"SUBSCRIPTION_ENABLED={value}"))
+    modules = dict(v.split("|", 2)[:2] for v in host.plan()["module"])
+    assert modules["subscription"] == "on"
+    m = _mod()
+    from config import settings
+    for v in ("y", "n", "yes", "no", "on", "off", "1", "0", "true", "false"):
+        assert m.is_true(v) == (v in {"1", "true", "yes", "y", "on"})
+    assert "{\"1\", \"true\", \"yes\", \"y\", \"on\"}" in Path(settings.__file__).read_text(encoding="utf-8")
+
+
+def test_a_marked_rule_of_a_module_whose_port_is_unknown_stays(tmp_path: Path) -> None:
+    """AWG on, its config unreadable and AWG_ENDPOINT_PORT unset: its marked udp rule is
+    still its own — kept, never deleted on a guess."""
+    host = Host(tmp_path, markers=("mtproto",),
+                rules=[*MEASURED_RULES, ["allow 11880/udp", "vpn-bot:awg", BOTH]])
+    plan = host.plan()
+    assert ("keep", "awg", "yes", "allow 11880/udp") in _rules(plan)
+    assert host.apply().returncode == 0
+    assert host.rules()["allow 11880/udp"] == ("vpn-bot:awg", BOTH)
