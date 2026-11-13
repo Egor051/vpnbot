@@ -227,6 +227,10 @@ def admin_panel_keyboard(
             [InlineKeyboardButton(text=t("btn_group_comms"), callback_data="admin:grp:comms")],
             [InlineKeyboardButton(text=t("btn_group_infra"), callback_data="admin:grp:infra")],
             [InlineKeyboardButton(text=t("btn_group_ops"), callback_data="admin:grp:ops")],
+            [
+                InlineKeyboardButton(text=t("btn_wizard"), callback_data="wiz:menu"),
+                InlineKeyboardButton(text=t("btn_security"), callback_data="sec:menu"),
+            ],
             [InlineKeyboardButton(text=t("btn_back_to_menu"), callback_data="menu:main")],
         ]
     )

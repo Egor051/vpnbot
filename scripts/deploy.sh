@@ -428,6 +428,18 @@ OUT_OF_REPO_HELPERS=(
   # by vpn-bot-ufw-deadman.service, by vpn-bot-ssh-port (firewall-open/close) and by
   # the bot through sudo (`apply`, `confirm`) — `required` on main; a relay has no UFW.
   "scripts/vpn-bot-ufw-apply|/usr/local/sbin/vpn-bot-ufw-apply|required"
+  # The setup wizard (docs/wizard.md): the bot runs `vpn-bot-wizard launch` through sudo
+  # (exact-path grant) or as root; the launcher starts its own `run` in a transient unit,
+  # which runs the mode helpers next to it and loads the library next to it — all of
+  # them must be on every main host, so `required`. A relay has no bot and no wizard.
+  "scripts/wizard/vpn-bot-wizard|/usr/local/sbin/vpn-bot-wizard|required"
+  "scripts/wizard/vpn-bot-wizard-lib|/usr/local/sbin/vpn-bot-wizard-lib|required"
+  "scripts/wizard/vpn-bot-wizard-selfcheck|/usr/local/sbin/vpn-bot-wizard-selfcheck|required"
+  "scripts/wizard/vpn-bot-wizard-dump|/usr/local/sbin/vpn-bot-wizard-dump|required"
+  "scripts/wizard/vpn-bot-wizard-update|/usr/local/sbin/vpn-bot-wizard-update|required"
+  # The emergency TOTP reset (docs/wizard.md#emergency-reset): a root CLI for the day the
+  # phone AND the backup codes are gone — it has to be on the host BEFORE that day.
+  "scripts/vpn-bot-totp-reset|/usr/local/sbin/vpn-bot-totp-reset|required"
 )
 # The one helper that is EXECUTED by a systemd unit (warp-routes.service runs it),
 # so a fresh binary only takes effect on restart. Refreshing it triggers a
@@ -796,6 +808,11 @@ declare -a UNINSTALLED_UNITS=()   # "<unit>|<protocol>": left out of UNIT_SET, r
 declare -a DEPLOY_SELF_UNITS=(
   "vpn-bot-deploy.service"   # redeploy.sh default: systemd-run --unit=vpn-bot-deploy
 )
+# The same, by pattern: the setup wizard's transient units (docs/wizard.md). Its
+# `update` mode runs redeploy.sh FROM `vpn-bot-wizard-<id>.service`, so that unit runs
+# for the whole deploy — a carrier of the deploy, not a backend. Glob, because the run
+# id is in the name; this detector only, like the list above.
+DEPLOY_SELF_UNIT_GLOB="vpn-bot-wizard-*"
 declare -A U_CLASS=() U_TARGET=() U_PRE_ACTIVE=() U_PRE_ENABLED=()
 # Sidecar units — the other long-lived processes running THIS repo's code from
 # their own systemd units (see the sidecar block further down). The list, each
@@ -4451,6 +4468,8 @@ running_not_watched() {
     # The deploy executor's own transient carrier unit is NOT a watched service:
     # exclude it from this detector only, never from UNIT_SET or any drift check.
     [[ -n "${selfdiag[${svc%.service}]:-}" ]] && continue
+    # shellcheck disable=SC2053  # the right-hand side IS the glob
+    [[ "${svc%.service}" == ${DEPLOY_SELF_UNIT_GLOB} ]] && continue
     printf '%s\n' "$svc"
   done <<< "$running"
 }

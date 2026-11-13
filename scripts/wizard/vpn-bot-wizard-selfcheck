@@ -1,0 +1,404 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-wizard-selfcheck — the «Самопроверка» mode of the setup wizard (docs/wizard.md).
+
+STRICTLY READ-ONLY: it changes nothing on the host. Every check emits one
+{"event": "item", "level": green|yellow|red, "key", "text"} line into the run's
+status file; the bot renders them as a traffic light.
+
+  listeners    `vpn-bot-ufw-apply listeners`: every public TCP listener is allowed by
+               the computed firewall set or declared closed (the helper owns the rule)
+  warp         only when WARP is deployed (out-warp.conf or warp-routes enabled):
+               the interface's fwmark table T, an `ip rule` that looks it up, and a
+               default route in table T
+  failed_units `systemctl --failed`
+  certs        every acme.sh certificate (/root/.acme.sh/<domain>[_ecc]/): days left
+               (< 21 yellow — acme.sh renews at 30 —, < 7 red) and a Le_ReloadCmd (no
+               reload command = a renewed certificate nobody picks up: yellow); plus
+               the certificate files the services read (/etc/hysteria/cert.pem,
+               SUBSCRIPTION_TLS_CERT)
+  helpers      drift of the OUT_OF_REPO_HELPERS of this host's role against the
+               checkout (/opt/vpn-service): drift = yellow (the next deploy closes it),
+               a missing `required` helper = red
+  perms        the database (DB_PATH) and its directory: owner vpn-bot (when that user
+               exists), no group/other bits on the file; .env: root-owned, never
+               world-readable, never group-writable
+  disk         free space on /, /var and the checkout's filesystem: < 1 GiB or < 5 %
+               red, < 15 % yellow
+  reboot       /var/run/reboot-required (yellow, with the packages that asked)
+
+  plan      prints that nothing will change
+  apply     runs the checks
+  verify    the checks produced their summary line
+  rollback  nothing to undo
+"""
+
+from __future__ import annotations
+
+import calendar
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pwd
+import re
+import shutil
+import sys
+import time
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+
+def _load_lib() -> ModuleType:
+    path = Path(__file__).resolve().parent / "vpn-bot-wizard-lib"
+    st = os.stat(path, follow_symlinks=False)
+    if os.geteuid() == 0 and os.environ.get("VPN_BOT_WIZARD_SELFTEST") != "1" and (st.st_uid != 0 or st.st_mode & 0o022):
+        sys.exit(f"{Path(__file__).name}: {path} must be root-owned and not group/other-writable")
+    loader = importlib.machinery.SourceFileLoader("vpn_bot_wizard_lib", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+lib = _load_lib()
+MODE = "selfcheck"
+UFW_HELPER = "/usr/local/sbin/vpn-bot-ufw-apply"
+WARP_CONF = "/etc/amnezia/out-warp.conf"
+WARP_IFACE = "out-warp"
+ACME_HOME = "/root/.acme.sh"
+FIXED_CERTS = ("/etc/hysteria/cert.pem",)
+CERT_YELLOW_DAYS = 21
+CERT_RED_DAYS = 7
+DISK_RED_BYTES = 1 << 30
+DISK_RED_PCT = 5.0
+DISK_YELLOW_PCT = 15.0
+REBOOT_FLAG = "/var/run/reboot-required"
+REBOOT_PKGS = "/var/run/reboot-required.pkgs"
+_REGISTRY_RE = re.compile(r'^\s*"([^"|]+)\|([^"|]+?)(?:\|([^"|]+)(?:\|([^"|]+))?)?"\s*$')
+
+
+class Items:
+    def __init__(self, ctx: Any) -> None:
+        self.ctx = ctx
+        self.counts = {"green": 0, "yellow": 0, "red": 0}
+
+    def add(self, level: str, key: str, text: str) -> None:
+        self.counts[level] += 1
+        self.ctx.event("item", level=level, key=key, text=text)
+        self.ctx.log.write(f"[{level}] {key}: {text}")
+
+
+def app_env() -> dict[str, str]:
+    return lib.env_file_values(lib.host_path(f"{lib.APP_DIR}/.env"))
+
+
+# --------------------------------------------------------------------------- #
+def check_listeners(ctx: Any, items: Items) -> None:
+    helper = lib.host_path(UFW_HELPER) if lib.SELFTEST else Path(UFW_HELPER)
+    if not lib.SELFTEST and not os.access(helper, os.X_OK):
+        items.add("yellow", "listeners", f"{UFW_HELPER} is not installed — listeners not checked (run a deploy)")
+        return
+    rc, out = ctx.run(["vpn-bot-ufw-apply" if lib.SELFTEST else UFW_HELPER, "listeners"], timeout=120)
+    verdict = ""
+    fails = []
+    for line in out.splitlines():
+        if line.startswith("listeners="):
+            verdict = line.split("=", 1)[1].strip()
+        elif line.startswith("listener=FAIL|"):
+            parts = line.split("|")
+            fails.append(f"{parts[2]}/{parts[1].split('=')[-1]} on {parts[3]}" if len(parts) > 3 else line)
+    if verdict == "ok":
+        items.add("green", "listeners", "every public listener is allowed by the firewall set or declared closed")
+    elif verdict == "fail":
+        items.add("red", "listeners", "not in the firewall set and not declared closed: " + ", ".join(fails[:8]))
+    else:
+        items.add("yellow", "listeners", f"listener check gave no verdict (exit {rc})")
+
+
+def warp_deployed(ctx: Any) -> bool:
+    if lib.host_path(WARP_CONF).exists():
+        return True
+    rc, out = ctx.run(["systemctl", "is-enabled", "warp-routes.service"])
+    return rc == 0 and out.strip() in ("enabled", "enabled-runtime", "static")
+
+
+def check_warp(ctx: Any, items: Items) -> None:
+    if not warp_deployed(ctx):
+        items.add("green", "warp", "WARP is not deployed on this host — nothing to check")
+        return
+    rc, out = ctx.run(["awg", "show", WARP_IFACE, "fwmark"])
+    fw = out.strip()
+    if rc != 0 or not re.fullmatch(r"0x[0-9a-fA-F]+", fw):
+        items.add("red", "warp", f"WARP is deployed but {WARP_IFACE} has no fwmark table (interface down?)")
+        return
+    table = int(fw, 16)
+    rc_rule, rules = ctx.run(["ip", "rule", "show"])
+    has_rule = rc_rule == 0 and re.search(rf"\blookup {table}\b", rules) is not None
+    rc_route, routes = ctx.run(["ip", "route", "show", "table", str(table)])
+    has_default = rc_route == 0 and any(r.startswith("default") for r in routes.splitlines())
+    if has_rule and has_default:
+        items.add("green", "warp", f"ip rule looks up table {table}; table {table} has a default route")
+    elif has_rule:
+        items.add("red", "warp", f"table {table} has no default route — WARP clients have no way out")
+    else:
+        items.add("red", "warp", f"no ip rule looks up the WARP table {table} — client traffic is not routed into WARP")
+
+
+def check_failed_units(ctx: Any, items: Items) -> None:
+    rc, out = ctx.run(["systemctl", "--failed", "--plain", "--no-legend", "--no-pager"])
+    if rc != 0:
+        items.add("yellow", "failed_units", f"systemctl --failed did not answer (exit {rc})")
+        return
+    failed = [line.split()[0] for line in out.splitlines() if line.strip()]
+    if failed:
+        items.add("red", "failed_units", "failed units: " + ", ".join(failed[:10]))
+    else:
+        items.add("green", "failed_units", "no failed units")
+
+
+def cert_not_after(ctx: Any, path: Path) -> float | None:
+    rc, out = ctx.run(["openssl", "x509", "-noout", "-enddate", "-in", str(path)])
+    m = re.search(r"notAfter=(.+)", out)
+    if rc != 0 or not m:
+        return None
+    try:
+        return float(calendar.timegm(time.strptime(m.group(1).strip().replace(" GMT", ""), "%b %d %H:%M:%S %Y")))
+    except ValueError:
+        return None
+
+
+def judge_cert(ctx: Any, items: Items, key: str, label: str, path: Path, extra: str = "") -> str:
+    not_after = cert_not_after(ctx, path)
+    if not_after is None:
+        items.add("yellow", key, f"{label}: cannot read the expiry of {path}")
+        return "yellow"
+    days = (not_after - time.time()) / 86400
+    level = "red" if days < CERT_RED_DAYS else "yellow" if days < CERT_YELLOW_DAYS else "green"
+    when = time.strftime("%Y-%m-%d", time.gmtime(not_after))
+    items.add(level, key, f"{label}: {days:.0f} days left (until {when}){extra}")
+    return level
+
+
+def acme_domain_dirs() -> list[tuple[str, Path, dict[str, str]]]:
+    home = lib.host_path(ACME_HOME)
+    found = []
+    if not home.is_dir():
+        return found
+    for d in sorted(home.iterdir()):
+        if not d.is_dir() or d.name in ("ca", "deploy", "dnsapi", "notify", "http.header"):
+            continue
+        domain = d.name[:-4] if d.name.endswith("_ecc") else d.name
+        conf = d / f"{domain}.conf"
+        if conf.is_file():
+            found.append((domain, d, _acme_conf(conf)))
+    return found
+
+
+def _acme_conf(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)='?(.*?)'?\s*$", line)
+        if m:
+            values[m.group(1)] = m.group(2)
+    return values
+
+
+def check_certs(ctx: Any, items: Items) -> None:
+    seen = 0
+    for domain, d, conf in acme_domain_dirs():
+        seen += 1
+        reload_cmd = conf.get("Le_ReloadCmd", "").strip()
+        cer = d / f"{domain}.cer"
+        if not reload_cmd:
+            items.add("yellow", f"cert:{domain}:reload", f"{domain}: acme.sh has no reloadcmd — a renewed certificate is not picked up by nginx/hysteria/subscription")
+        else:
+            items.add("green", f"cert:{domain}:reload", f"{domain}: acme.sh reloadcmd is set")
+        if cer.is_file():
+            judge_cert(ctx, items, f"cert:{domain}", domain, cer)
+        else:
+            items.add("yellow", f"cert:{domain}", f"{domain}: {cer.name} is missing in {d}")
+    certs = list(FIXED_CERTS)
+    sub = app_env().get("SUBSCRIPTION_TLS_CERT", "").strip()
+    if sub:
+        certs.append(sub)
+    for raw in certs:
+        path = lib.host_path(raw)
+        if path.is_file():
+            seen += 1
+            judge_cert(ctx, items, f"cert:{raw}", raw, path)
+    if not seen:
+        items.add("green", "certs", "no acme.sh certificate and no TLS certificate file on this host")
+
+
+def parse_registry(text: str, role: str) -> list[tuple[str, str, str]]:
+    start = text.find("OUT_OF_REPO_HELPERS=(")
+    if start < 0:
+        return []
+    out = []
+    for line in text[start:].splitlines()[1:]:
+        if line.rstrip() == ")":
+            break
+        m = _REGISTRY_RE.match(line)
+        if m is None:
+            continue
+        if (m.group(4) or "main") != role:
+            continue
+        out.append((m.group(1), m.group(2), m.group(3) or "absent-ok"))
+    return out
+
+
+def check_helpers(ctx: Any, items: Items) -> None:
+    app = lib.host_path(lib.APP_DIR)
+    deploy = app / "scripts" / "deploy.sh"
+    try:
+        text = deploy.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        items.add("yellow", "helpers", f"{deploy} is not readable — helper drift not checked")
+        return
+    role = app_env().get("NODE_ROLE", "").strip() or "main"
+    drift, missing = [], []
+    entries = parse_registry(text, role)
+    for src_rel, dst, policy in entries:
+        src, installed = app / src_rel, lib.host_path(dst)
+        if not installed.exists():
+            if policy == "required":
+                missing.append(Path(dst).name)
+            continue
+        try:
+            same = src.read_bytes() == installed.read_bytes()
+        except OSError:
+            same = False
+        if not same:
+            drift.append(Path(dst).name)
+    if missing:
+        items.add("red", "helpers", "required helper(s) not installed: " + ", ".join(missing) + " — run a deploy")
+    if drift:
+        items.add("yellow", "helpers", "installed copy differs from the checkout: " + ", ".join(drift) + " — the next deploy refreshes them")
+    if not missing and not drift:
+        items.add("green", "helpers", f"{len(entries)} out-of-repo helper(s) of role {role} match the checkout")
+
+
+def _owner(st: os.stat_result) -> str:
+    try:
+        return pwd.getpwuid(st.st_uid).pw_name
+    except KeyError:
+        return str(st.st_uid)
+
+
+def check_perms(ctx: Any, items: Items) -> None:
+    env = app_env()
+    db = lib.host_path(env.get("DB_PATH", "").strip() or f"{lib.APP_DIR}/data/vpn.db")
+    try:
+        pwd.getpwnam("vpn-bot")
+        want_owner = "vpn-bot"
+    except KeyError:
+        want_owner = ""
+    problems, ok = [], []
+    for path, max_mode in ((db.parent, 0o700), (db, 0o600)):
+        try:
+            st = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            problems.append(f"{path} is missing")
+            continue
+        mode = st.st_mode & 0o777
+        owner = _owner(st)
+        if mode & ~max_mode:
+            problems.append(f"{path} mode {mode:04o} (want {max_mode:04o})")
+        elif want_owner and not lib.SELFTEST and owner != want_owner:
+            problems.append(f"{path} owner {owner} (want {want_owner})")
+        else:
+            ok.append(f"{path.name} {owner} {mode:04o}")
+    env_path = lib.host_path(f"{lib.APP_DIR}/.env")
+    try:
+        st = os.stat(env_path, follow_symlinks=False)
+        mode = st.st_mode & 0o777
+        if mode & 0o007:
+            problems.append(f"{env_path} is world-accessible ({mode:04o}) — it holds the bot token")
+        elif mode & 0o020:
+            problems.append(f"{env_path} is group-writable ({mode:04o})")
+        elif st.st_uid != 0 and not lib.SELFTEST:
+            problems.append(f"{env_path} owner {_owner(st)} (want root)")
+        else:
+            ok.append(f".env {_owner(st)} {mode:04o}")
+    except FileNotFoundError:
+        problems.append(f"{env_path} is missing")
+    if problems:
+        items.add("red", "perms", "; ".join(problems))
+    else:
+        items.add("green", "perms", ", ".join(ok))
+
+
+def check_disk(ctx: Any, items: Items) -> None:
+    seen: set[int] = set()
+    worst = "green"
+    lines = []
+    for raw in ("/", "/var", lib.APP_DIR):
+        path = lib.host_path(raw)
+        if not path.exists():
+            continue
+        st = os.stat(path)
+        if st.st_dev in seen:
+            continue
+        seen.add(st.st_dev)
+        usage = shutil.disk_usage(path)
+        pct = 100.0 * usage.free / usage.total if usage.total else 0.0
+        level = "red" if usage.free < DISK_RED_BYTES or pct < DISK_RED_PCT else "yellow" if pct < DISK_YELLOW_PCT else "green"
+        worst = max(worst, level, key=("green", "yellow", "red").index)
+        lines.append(f"{raw}: {usage.free / (1 << 30):.1f} GiB free ({pct:.0f}%)")
+    items.add(worst, "disk", "; ".join(lines) or "no filesystem checked")
+
+
+def check_reboot(ctx: Any, items: Items) -> None:
+    flag = lib.host_path(REBOOT_FLAG)
+    if not flag.exists():
+        items.add("green", "reboot", "no reboot required")
+        return
+    try:
+        pkgs = sorted(set(lib.host_path(REBOOT_PKGS).read_text(encoding="utf-8").split()))
+    except OSError:
+        pkgs = []
+    items.add("yellow", "reboot", "a reboot is required" + (f" ({', '.join(pkgs[:8])})" if pkgs else ""))
+
+
+CHECKS = (check_listeners, check_warp, check_failed_units, check_certs, check_helpers, check_perms, check_disk, check_reboot)
+
+
+def step_plan(ctx: Any) -> int:
+    ctx.event("plan", text="read-only: the self-check changes nothing on the host", read_only=True)
+    print("read-only: nothing will change")
+    return 0
+
+
+def step_apply(ctx: Any) -> int:
+    items = Items(ctx)
+    for check in CHECKS:
+        name = check.__name__.removeprefix("check_")
+        ctx.say(f"checking {name}")
+        try:
+            check(ctx, items)
+        except Exception as exc:  # one broken check must not hide the others
+            items.add("yellow", name, f"the check itself failed: {type(exc).__name__}: {exc}")
+    ctx.event("summary", **items.counts)
+    lib.write_private(lib.artifact_path(ctx.run_id, "selfcheck.json"), json.dumps(items.counts).encode())
+    print(f"green={items.counts['green']} yellow={items.counts['yellow']} red={items.counts['red']}")
+    return 0
+
+
+def step_verify(ctx: Any) -> int:
+    summaries = [e for e in lib.read_events(ctx.run_id) if e.get("event") == "summary"]
+    if not summaries:
+        print("no summary line: the checks did not finish", file=sys.stderr)
+        return 1
+    return 0
+
+
+def step_rollback(ctx: Any) -> int:
+    print("read-only: nothing to roll back")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(lib.contract_main(MODE, {"plan": step_plan, "apply": step_apply, "verify": step_verify, "rollback": step_rollback}, sys.argv[1:]))

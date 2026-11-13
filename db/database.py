@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 41
+CURRENT_SCHEMA_VERSION = 42
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -411,6 +411,10 @@ class Database:
             await self._migrate_v41()
             await self._set_schema_version(41)
             version = 41
+        if version < 42:
+            await self._migrate_v42()
+            await self._set_schema_version(42)
+            version = 42
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1848,6 +1852,63 @@ class Database:
             CREATE TABLE IF NOT EXISTS claimed_superadmins (
               telegram_user_id INTEGER PRIMARY KEY CHECK (telegram_user_id > 0),
               claimed_at TEXT NOT NULL
+            )
+            """
+        )
+
+    async def _migrate_v42(self) -> None:
+        # The setup wizard (services/wizard.py) and the TOTP second factor of the
+        # superadmins (services/totp.py). Three new tables, mirrored in schema.sql;
+        # their indexes — the wizard's one-active-run lock among them — live in
+        # indexes.sql (phase 3). Idempotent; nothing is backfilled: there were no
+        # wizard runs and no second factor before this version.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS totp_credentials (
+              telegram_user_id INTEGER PRIMARY KEY REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+              secret_enc TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+              created_at TEXT NOT NULL,
+              enabled_at TEXT,
+              last_used_step INTEGER NOT NULL DEFAULT 0,
+              failed_attempts INTEGER NOT NULL DEFAULT 0,
+              locked_until INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS totp_backup_codes (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              telegram_user_id INTEGER NOT NULL REFERENCES totp_credentials(telegram_user_id) ON DELETE CASCADE,
+              salt_hex TEXT NOT NULL,
+              hash_hex TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              used_at TEXT
+            )
+            """
+        )
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wizard_runs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              mode TEXT NOT NULL,
+              state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'verifying', 'succeeded', 'rolled_back', 'failed', 'cancelled')),
+              phase TEXT NOT NULL DEFAULT 'plan' CHECK (phase IN ('plan', 'execute')),
+              current_step TEXT NOT NULL DEFAULT '',
+              params_json TEXT NOT NULL DEFAULT '{}',
+              started_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+              origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'scheduled')),
+              chat_id INTEGER,
+              message_id INTEGER,
+              log_path TEXT NOT NULL DEFAULT '',
+              summary TEXT NOT NULL DEFAULT '',
+              plan_ready INTEGER NOT NULL DEFAULT 0 CHECK (plan_ready IN (0, 1)),
+              active INTEGER CHECK (active IS NULL OR active = 1),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              finished_at TEXT,
+              reported_at TEXT
             )
             """
         )

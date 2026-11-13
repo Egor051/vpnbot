@@ -1,0 +1,258 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-wizard-dump — the «Диагностический дамп» mode of the setup wizard (docs/wizard.md).
+
+STRICTLY READ-ONLY on the host: it reads, and writes nothing but its own artifact
+/var/lib/vpn-bot-wizard/<id>.dump.txt (root:vpn-bot 0640), which the bot sends to
+the superadmin as a file. Every byte of it went through redact_text (the patterns
+of utils/redact.py), and `verify` re-scans the file and refuses one that still
+matches a secret pattern.
+
+Sections: versions (kernel, OS, python3, xray, hysteria, systemd), the checkout
+(HEAD, the last commit, dirty or not), the schema (live schema_version vs the
+checkout's CURRENT_SCHEMA_VERSION), units (vpn-bot*, xray, hysteria*, awg-quick@*,
+warp-*, failed), listeners (`ss -Hltnu`), `ip rule` / `ip -6 rule`, the tail of
+bot.log and of Xray's error.log.
+
+A log tail is judged by the TIMESTAMP of its last ERROR line ("last ERROR 3 h ago"),
+never by how many there are: a hundred errors from last week say less than one from
+a minute ago.
+
+Parameter: lines — how many lines of each log tail (20..1000, default 200).
+"""
+
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
+from collections import deque
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+
+def _load_lib() -> ModuleType:
+    path = Path(__file__).resolve().parent / "vpn-bot-wizard-lib"
+    st = os.stat(path, follow_symlinks=False)
+    if os.geteuid() == 0 and os.environ.get("VPN_BOT_WIZARD_SELFTEST") != "1" and (st.st_uid != 0 or st.st_mode & 0o022):
+        sys.exit(f"{Path(__file__).name}: {path} must be root-owned and not group/other-writable")
+    loader = importlib.machinery.SourceFileLoader("vpn_bot_wizard_lib", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+lib = _load_lib()
+MODE = "dump"
+ARTIFACT = "dump.txt"
+XRAY_CONFIG = "/usr/local/etc/xray/config.json"
+XRAY_ERROR_LOG = "/var/log/xray/error.log"
+MAX_LOG_BYTES = 4 * 1024 * 1024
+# bot.log: "2026-11-13T21:33:00+0300 ERROR [name] ..." — the host's LOCAL time with its
+# offset (utils/logging.py, datefmt "%Y-%m-%dT%H:%M:%S%z"). The offset is part of the
+# timestamp: dropping it misdates every line on a non-UTC host.
+_BOT_ERROR_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})([+-]\d{4}|Z)?\s+(?:ERROR|CRITICAL)\b")
+# xray: "2026/11/13 21:33:00 [Error] ..." (also with microseconds) — host local time,
+# no offset.
+_XRAY_ERROR_RE = re.compile(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})(?:\.\d+)?\s+\[Error\]")
+
+
+def section(title: str, body: str) -> str:
+    return f"\n===== {title} =====\n{body.rstrip()}\n"
+
+
+def cmd(ctx: Any, argv: list[str], timeout: int = 30) -> str:
+    rc, out = ctx.run(argv, timeout=timeout)
+    return out if rc == 0 else f"{out.rstrip()}\n(exit {rc})"
+
+
+def first_line(ctx: Any, argv: list[str]) -> str:
+    rc, out = ctx.run(argv, timeout=30)
+    lines = out.strip().splitlines()
+    return (lines[0] if lines else "?") if rc == 0 else f"? (exit {rc})"
+
+
+def tail(path: Path, lines: int) -> list[str]:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > MAX_LOG_BYTES:
+                fh.seek(size - MAX_LOG_BYTES)
+            data = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    return list(deque(data.splitlines(), maxlen=lines))
+
+
+def _local_epoch(raw: str, fmt: str) -> float:
+    """A timestamp without an offset is the host's local time (time.mktime)."""
+    return time.mktime(time.strptime(raw, fmt))
+
+
+def bot_log_epoch(m: re.Match[str]) -> float:
+    raw, offset = m.group(1), m.group(2)
+    if offset:
+        return datetime.strptime(raw + offset.replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    return _local_epoch(raw, "%Y-%m-%dT%H:%M:%S")
+
+
+def xray_log_epoch(m: re.Match[str]) -> float:
+    return _local_epoch(m.group(1), "%Y/%m/%d %H:%M:%S")
+
+
+def last_error_line(lines: list[str], pattern: re.Pattern[str], epoch_of: Callable[[re.Match[str]], float]) -> str:
+    """'last ERROR <UTC time> (<age> ago)' from the newest matching line, or 'no ERROR'."""
+    for line in reversed(lines):
+        m = pattern.match(line)
+        if m:
+            try:
+                ts = epoch_of(m)
+            except (ValueError, OverflowError):
+                return f"last ERROR line (time unreadable): {line[:200]}"
+            age = max(0.0, time.time() - ts)
+            if age < 3600:
+                ago = f"{age / 60:.0f} min"
+            elif age < 172800:
+                ago = f"{age / 3600:.1f} h"
+            else:
+                ago = f"{age / 86400:.0f} d"
+            return f"last ERROR at {time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(ts))} UTC ({ago} ago)"
+    return "no ERROR line in the tail"
+
+
+def schema_versions(env: dict[str, str]) -> str:
+    db = lib.host_path(env.get("DB_PATH", "").strip() or f"{lib.APP_DIR}/data/vpn.db")
+    live = "?"
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        try:
+            row = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
+            live = str(row[0]) if row else "?"
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        live = f"unreadable ({exc})"
+    code = "?"
+    try:
+        text = (lib.host_path(lib.APP_DIR) / "db" / "database.py").read_text(encoding="utf-8")
+        m = re.search(r"^CURRENT_SCHEMA_VERSION\s*=\s*(\d+)", text, re.MULTILINE)
+        code = m.group(1) if m else "?"
+    except OSError:
+        pass
+    return f"live schema_version: {live}\ncheckout CURRENT_SCHEMA_VERSION: {code}"
+
+
+def xray_error_log() -> Path:
+    try:
+        cfg = json.loads(lib.host_path(XRAY_CONFIG).read_text(encoding="utf-8"))
+        path = (cfg.get("log") or {}).get("error")
+        if isinstance(path, str) and path.startswith("/"):
+            return lib.host_path(path)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return lib.host_path(XRAY_ERROR_LOG)
+
+
+def build(ctx: Any) -> str:
+    n = int(ctx.params["lines"])
+    env = lib.env_file_values(lib.host_path(f"{lib.APP_DIR}/.env"))
+    app = str(lib.host_path(lib.APP_DIR))
+    parts = [f"vpn-bot diagnostic dump — run {ctx.run_id}, {lib.iso_now()} (redacted)\n"]
+    ctx.say("versions")
+    os_release = ""
+    try:
+        for line in lib.host_path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            if line.startswith("PRETTY_NAME="):
+                os_release = line.split("=", 1)[1].strip('"')
+    except OSError:
+        os_release = "?"
+    parts.append(section("versions", "\n".join([
+        f"os: {os_release}",
+        f"kernel: {first_line(ctx, ['uname', '-srm'])}",
+        f"python3: {first_line(ctx, ['python3', '--version'])}",
+        f"xray: {first_line(ctx, ['xray', 'version'])}",
+        f"hysteria: {first_line(ctx, ['hysteria', 'version'])}",
+        f"systemd: {first_line(ctx, ['systemctl', '--version'])}",
+        f"node role: {env.get('NODE_ROLE', '') or 'main'}",
+    ])))
+    ctx.say("checkout and schema")
+    parts.append(section("checkout", "\n".join([
+        f"HEAD: {cmd(ctx, ['git', '-C', app, 'rev-parse', 'HEAD']).strip()}",
+        f"last commit: {cmd(ctx, ['git', '-C', app, 'log', '-1', '--format=%h %cI %s']).strip()}",
+        f"dirty: {'yes' if cmd(ctx, ['git', '-C', app, 'status', '--porcelain']).strip() else 'no'}",
+    ])))
+    parts.append(section("schema", schema_versions(env)))
+    ctx.say("units, listeners, ip rules")
+    parts.append(section("units", cmd(ctx, [
+        "systemctl", "list-units", "--all", "--plain", "--no-legend", "--no-pager",
+        "vpn-bot*", "vpnbot*", "xray*", "hysteria*", "awg-quick@*", "warp*", "danted*", "mtproxy*", "nginx*",
+    ])))
+    parts.append(section("failed units", cmd(ctx, ["systemctl", "--failed", "--plain", "--no-legend", "--no-pager"]) or "none"))
+    parts.append(section("listeners", cmd(ctx, ["ss", "-Hltnu"])))
+    parts.append(section("ip rule", cmd(ctx, ["ip", "rule", "show"])))
+    parts.append(section("ip -6 rule", cmd(ctx, ["ip", "-6", "rule", "show"])))
+    ctx.say("log tails")
+    log_dir = lib.host_path(env.get("LOG_DIR", "").strip() or f"{lib.APP_DIR}/logs")
+    bot_lines = tail(log_dir / "bot.log", n)
+    parts.append(section(
+        f"bot.log (last {len(bot_lines)} lines) — {last_error_line(bot_lines, _BOT_ERROR_RE, bot_log_epoch)}",
+        "\n".join(bot_lines) or "(no bot.log)",
+    ))
+    xlog = xray_error_log()
+    x_lines = tail(xlog, n)
+    parts.append(section(
+        f"xray error.log (last {len(x_lines)} lines) — {last_error_line(x_lines, _XRAY_ERROR_RE, xray_log_epoch)}",
+        "\n".join(x_lines) or f"(no {xlog})",
+    ))
+    return lib.redact_text("".join(parts))
+
+
+def step_plan(ctx: Any) -> int:
+    ctx.event("plan", text="read-only: collects a redacted diagnostic dump; nothing on the host changes", read_only=True)
+    return 0
+
+
+def step_apply(ctx: Any) -> int:
+    text = build(ctx)
+    path = lib.artifact_path(ctx.run_id, ARTIFACT)
+    lib.write_private(path, text.encode("utf-8"))
+    ctx.event("artifact", name=ARTIFACT, path=str(path), size=len(text.encode("utf-8")))
+    print(f"dump written: {path} ({len(text)} chars)")
+    return 0
+
+
+def step_verify(ctx: Any) -> int:
+    path = lib.artifact_path(ctx.run_id, ARTIFACT)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"dump missing: {exc}", file=sys.stderr)
+        return 1
+    if not text.strip():
+        print("dump is empty", file=sys.stderr)
+        return 1
+    if lib.redact_text(text) != text:
+        print("dump still matches a secret pattern — refusing to hand it out", file=sys.stderr)
+        return 1
+    return 0
+
+
+def step_rollback(ctx: Any) -> int:
+    path = lib.artifact_path(ctx.run_id, ARTIFACT)
+    lib.fence(path)
+    path.unlink(missing_ok=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(lib.contract_main(MODE, {"plan": step_plan, "apply": step_apply, "verify": step_verify, "rollback": step_rollback}, sys.argv[1:]))

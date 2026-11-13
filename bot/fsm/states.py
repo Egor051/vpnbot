@@ -94,3 +94,16 @@ class AdminRelayStates(StatesGroup):
     edit_source_ips = State()
     edit_label = State()
     edit_note = State()
+
+
+class TotpStates(StatesGroup):
+    """The superadmin's TOTP (bot/handlers/security.py, bot/totp_gate.py)."""
+
+    # «Включить TOTP»: the QR/secret are on screen, waiting for the first code.
+    enroll_code = State()
+    # A dangerous action asked for a code (or a backup code).
+    gate_code = State()
+    # «Отключить TOTP»: a TOTP code or a backup code.
+    disable_code = State()
+    # «Перевыпустить резервные коды»: a TOTP code (a backup code is not enough).
+    reissue_code = State()

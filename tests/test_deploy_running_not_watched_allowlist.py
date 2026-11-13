@@ -191,3 +191,15 @@ def test_allowlist_matches_redeploy_default_deploy_unit() -> None:
     assert default_unit == "vpn-bot-deploy"
     deploy = DEPLOY_SH.read_text(encoding="utf-8")
     assert f"{default_unit}.service" in deploy
+
+
+def test_the_setup_wizard_carrier_is_filtered_out_too() -> None:
+    """The wizard's `update` mode runs redeploy.sh from vpn-bot-wizard-<id>.service:
+    it runs for the whole deploy and must not be reported (docs/wizard.md). A unit
+    that merely starts with vpn-bot-wizard but is not one (no dash after it) still is."""
+    units = (
+        "vpn-bot-wizard-42.service    loaded active running vpn-bot setup wizard: run 42 (update, execute)\n"
+        "vpn-bot-wizardry.service     loaded active running something else\n"
+    )
+    reported = _run_detector(units, unit_set=["xray.service"])
+    assert reported == ["vpn-bot-wizardry.service"], reported

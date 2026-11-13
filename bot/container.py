@@ -32,6 +32,8 @@ from services.ssh_port import SshPortMonitor
 from services.ufw import UfwDeadmanMonitor
 from services.socks5 import Socks5Service
 from services.superadmin_claim import SuperadminClaimService
+from services.totp import TotpService
+from services.wizard import WizardService
 from services.traffic_stats import TrafficStatsService
 from services.trial_access import TrialAccessService
 from services.users import UserService
@@ -112,3 +114,10 @@ class Services:
     # The first-superadmin claim (/start claim_<code>, scripts/install.sh). Inert
     # while any superadmin exists. None only in lightweight test doubles.
     superadmin_claim: SuperadminClaimService | None = None
+    # The superadmins' TOTP second factor (services/totp.py, «🔐 Безопасность») and
+    # the gate in front of dangerous actions (bot/totp_gate.py). None only in
+    # lightweight test doubles: the gate is then open.
+    totp: TotpService | None = None
+    # The setup wizard (services/wizard.py, «🧙 Мастер настройки»): runs of fixed root
+    # helper modes in their own systemd units. None only in lightweight test doubles.
+    wizard: WizardService | None = None

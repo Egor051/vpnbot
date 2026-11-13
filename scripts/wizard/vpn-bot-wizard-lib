@@ -1,0 +1,670 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-wizard-lib — the library every setup-wizard helper loads (docs/wizard.md).
+
+Not a command: the helpers next to it (installed by deploy.sh, OUT_OF_REPO_HELPERS)
+load it by path with SourceFileLoader, after checking — when running as root — that
+it is a root-owned regular file nobody else can write. Run directly it only prints
+what it is.
+
+What it holds, so that no mode re-invents it:
+
+  MODES          the fixed table of modes: helper basename, read-only or not, the
+                 typed parameters and the per-step timeouts. The launcher refuses a
+                 mode or a parameter that is not here, whatever the bot sent.
+  paths          /var/lib/vpn-bot-wizard/<id>.status   JSON lines, root 0644
+                 /var/log/vpn-bot-wizard/<id>.log      root:vpn-bot 0640 (redacted)
+                 /var/lib/vpn-bot-wizard/<id>.<name>   artifacts (dump), 0640
+                 /var/lib/vpn-bot-wizard/backups/<id>/ backups taken before a change
+                 /run/vpn-bot-wizard.lock              flock held by the running unit
+  Status         appends one JSON object per line: {"ts", "run", "event", ...}
+  RunLog         timestamped, redacted lines of everything a step printed
+  run_cmd        every external command: argv only (never a shell), a timeout, C
+                 locale; under the test seam only stubs from the stub directory run
+  redact_text    the patterns of utils/redact.py (tests/test_wizard_helpers.py keeps
+                 the two in step) — a log or a dump never leaves the host unredacted
+  deadman_*      `systemd-run --on-active=<N>` timer that runs `<helper> rollback`
+                 unless the step that armed it disarms it: for steps that touch the
+                 network (a lost SSH session cannot be the end of the story)
+  backup_paths   a tar.gz of the given paths (+ manifest) before a change; restore
+  contract_main  the CLI of a mode helper: plan | apply | verify | rollback
+
+TEST SEAM: VPN_BOT_WIZARD_SELFTEST=1 re-roots every host path under
+VPN_BOT_WIZARD_ROOT, refuses any command that is not a stub in
+VPN_BOT_WIZARD_SELFTEST_BIN (or a helper next to this file), and refuses to write
+outside the root. deploy.sh runs the test suite AS ROOT on the production host, so
+the seam must hold even there. sudo (env_reset) and systemd-run give the helpers a
+clean environment: production never sees these variables.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import fcntl
+import grp
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+SELFTEST = os.environ.get("VPN_BOT_WIZARD_SELFTEST") == "1"
+_FAKE_ROOT = os.environ.get("VPN_BOT_WIZARD_ROOT", "") if SELFTEST else ""
+HERE = Path(__file__).resolve().parent
+
+STATE_DIR = "/var/lib/vpn-bot-wizard"
+LOG_DIR = "/var/log/vpn-bot-wizard"
+LOCK_PATH = "/run/vpn-bot-wizard.lock"
+APP_DIR = "/opt/vpn-service"
+BOT_GROUP = "vpn-bot"
+UNIT_PREFIX = "vpn-bot-wizard-"
+COMMAND_TIMEOUT = 60
+MAX_RUN_ID = 10**9
+_RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,9}$")
+_PARAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+STEPS = ("plan", "apply", "verify", "rollback")
+
+
+class WizardError(Exception):
+    """A refusal or a failure with a one-line reason (exit code 2 = usage, 3 = cannot)."""
+
+    def __init__(self, message: str, code: int = 3) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# --------------------------------------------------------------------------- #
+# The mode table. The bot has its own copy (services/wizard_modes.py) for the UI;
+# tests/test_wizard_helpers.py fails when the two disagree.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Param:
+    kind: str                    # "int" | "bool" | "enum"
+    default: str
+    minimum: int = 0
+    maximum: int = 0
+    choices: tuple[str, ...] = ()
+
+    def check(self, raw: str) -> str:
+        if self.kind == "int":
+            if not re.fullmatch(r"-?[0-9]{1,9}", raw) or not self.minimum <= int(raw) <= self.maximum:
+                raise WizardError(f"must be an integer {self.minimum}..{self.maximum}", 2)
+            return str(int(raw))
+        if self.kind == "bool":
+            if raw not in ("0", "1"):
+                raise WizardError("must be 0 or 1", 2)
+            return raw
+        if self.kind == "enum":
+            if raw not in self.choices:
+                raise WizardError(f"must be one of {', '.join(self.choices)}", 2)
+            return raw
+        raise WizardError(f"unknown parameter kind {self.kind}", 2)
+
+
+@dataclass(frozen=True)
+class Mode:
+    helper: str
+    read_only: bool
+    params: Mapping[str, Param] = field(default_factory=dict)
+    # Seconds per step; the runner kills a step that overruns and treats it as failed.
+    timeouts: Mapping[str, int] = field(default_factory=dict)
+
+    def timeout(self, step: str) -> int:
+        return int(self.timeouts.get(step, 300))
+
+
+MODES: dict[str, Mode] = {
+    "selfcheck": Mode(
+        helper="vpn-bot-wizard-selfcheck",
+        read_only=True,
+        timeouts={"plan": 30, "apply": 300, "verify": 30, "rollback": 30},
+    ),
+    "dump": Mode(
+        helper="vpn-bot-wizard-dump",
+        read_only=True,
+        params={"lines": Param("int", "200", minimum=20, maximum=1000)},
+        timeouts={"plan": 30, "apply": 300, "verify": 60, "rollback": 30},
+    ),
+    "update": Mode(
+        helper="vpn-bot-wizard-update",
+        read_only=False,
+        params={"force": Param("bool", "0")},
+        # plan = CHECK=1 redeploy (Phase 1 runs the test suite), apply = the deploy.
+        timeouts={"plan": 3600, "apply": 5400, "verify": 300, "rollback": 300},
+    ),
+}
+
+
+def mode_of(name: str) -> Mode:
+    mode = MODES.get(name)
+    if mode is None:
+        raise WizardError(f"unknown mode {name!r}", 2)
+    return mode
+
+
+def parse_run_id(raw: str) -> int:
+    if not _RUN_ID_RE.match(raw or "") or int(raw) > MAX_RUN_ID:
+        raise WizardError(f"bad run id {raw!r}", 2)
+    return int(raw)
+
+
+def validate_params(mode_name: str, pairs: Sequence[str]) -> dict[str, str]:
+    """``key=value`` pairs, typed against the mode's table; defaults filled in."""
+    mode = mode_of(mode_name)
+    out: dict[str, str] = {}
+    for pair in pairs:
+        name, sep, value = pair.partition("=")
+        if not sep or not _PARAM_NAME_RE.match(name):
+            raise WizardError(f"bad parameter {pair!r} (want name=value)", 2)
+        spec = mode.params.get(name)
+        if spec is None:
+            raise WizardError(f"mode {mode_name} has no parameter {name!r}", 2)
+        if name in out:
+            raise WizardError(f"parameter {name!r} given twice", 2)
+        try:
+            out[name] = spec.check(value)
+        except WizardError as exc:
+            raise WizardError(f"parameter {name}: {exc}", 2) from None
+    for name, spec in mode.params.items():
+        out.setdefault(name, spec.default)
+    return out
+
+
+def param_args(params: Mapping[str, str]) -> list[str]:
+    args: list[str] = []
+    for name in sorted(params):
+        args += ["--param", f"{name}={params[name]}"]
+    return args
+
+
+# --------------------------------------------------------------------------- #
+# Paths, fenced under the test seam
+# --------------------------------------------------------------------------- #
+def host_path(path: str | Path) -> Path:
+    """A host path; under the seam, the same path under VPN_BOT_WIZARD_ROOT."""
+    p = str(path)
+    if SELFTEST:
+        if not _FAKE_ROOT:
+            raise WizardError("VPN_BOT_WIZARD_SELFTEST=1 needs VPN_BOT_WIZARD_ROOT", 2)
+        return Path(_FAKE_ROOT.rstrip("/") + p)
+    return Path(p)
+
+
+def fence(path: Path) -> None:
+    if SELFTEST and not str(path).startswith(_FAKE_ROOT.rstrip("/") + "/"):
+        raise WizardError(f"selftest: refusing to write {path} outside {_FAKE_ROOT!r}")
+
+
+def status_path(run_id: int) -> Path:
+    return host_path(f"{STATE_DIR}/{run_id}.status")
+
+
+def log_path(run_id: int) -> Path:
+    return host_path(f"{LOG_DIR}/{run_id}.log")
+
+
+def artifact_path(run_id: int, name: str) -> Path:
+    if not re.fullmatch(r"[a-z][a-z0-9_.-]{0,40}", name) or ".." in name:
+        raise WizardError(f"bad artifact name {name!r}")
+    return host_path(f"{STATE_DIR}/{run_id}.{name}")
+
+
+def backup_dir(run_id: int) -> Path:
+    return host_path(f"{STATE_DIR}/backups/{run_id}")
+
+
+def bot_gid() -> int:
+    """The bot's group (helper-nonroot model reads logs through it), else root's."""
+    if SELFTEST:
+        return os.getegid()
+    try:
+        return grp.getgrnam(BOT_GROUP).gr_gid
+    except KeyError:
+        return 0
+
+
+def ensure_dirs() -> None:
+    for d, mode in ((host_path(STATE_DIR), 0o755), (host_path(LOG_DIR), 0o750), (host_path(f"{STATE_DIR}/backups"), 0o700)):
+        fence(d)
+        d.mkdir(mode=mode, parents=True, exist_ok=True)
+        if d.is_symlink():
+            raise WizardError(f"{d} is a symlink")
+        os.chmod(d, mode)
+        if os.geteuid() == 0 and not SELFTEST:
+            os.chown(d, 0, bot_gid() if d == host_path(LOG_DIR) else 0)
+
+
+def _open_append(path: Path, mode: int, gid: int | None = None) -> int:
+    fence(path)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, mode)
+    os.fchmod(fd, mode)
+    if os.geteuid() == 0 and not SELFTEST:
+        os.fchown(fd, 0, 0 if gid is None else gid)
+    return fd
+
+
+def write_private(path: Path, data: bytes, mode: int = 0o640) -> None:
+    """Atomic write (tmp + rename in the same dir), group = the bot's group."""
+    fence(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        if os.geteuid() == 0 and not SELFTEST:
+            os.chown(tmp, 0, bot_gid())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+# --------------------------------------------------------------------------- #
+# Redaction — the patterns of utils/redact.py, kept identical by a test.
+# --------------------------------------------------------------------------- #
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b(bot_token|token|password|passwd|secret|mtproto_secret|private_key|preshared_key)\s*([:=])\s*[^,\s;]+",
+    re.IGNORECASE,
+)
+_SECRET_QUERY_RE = re.compile(r"(?i)(secret=)[^&\s]+")
+_HEX_SECRET_RE = re.compile(r"\b(?:dd)?[0-9a-fA-F]{32,}\b")
+_TG_BOT_TOKEN_RE = re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{35}\b")
+_BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_.~+/=-]{16,}\b")
+_URL_CREDENTIALS_RE = re.compile(r"(?i)([a-z][a-z0-9+\-.]*://)([^:@/\s]+:[^@/\s]+@)")
+_WG_PRIVATE_KEY_RE = re.compile(r"\b[A-Za-z0-9+/]{43}={1,2}(?=[^A-Za-z0-9+/=]|$)")
+
+
+def redact_text(text: str) -> str:
+    text = _SECRET_QUERY_RE.sub(r"\1***", text)
+    text = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _HEX_SECRET_RE.sub("***", text)
+    text = _TG_BOT_TOKEN_RE.sub("***", text)
+    text = _BEARER_TOKEN_RE.sub("Bearer ***", text)
+    text = _URL_CREDENTIALS_RE.sub(r"\1***@", text)
+    text = _WG_PRIVATE_KEY_RE.sub("***", text)
+    return text
+
+
+# --------------------------------------------------------------------------- #
+# Status file and run log
+# --------------------------------------------------------------------------- #
+class Status:
+    """Appends JSON lines to /var/lib/vpn-bot-wizard/<id>.status (root 0644)."""
+
+    MAX_TEXT = 3500
+
+    def __init__(self, run_id: int) -> None:
+        self.run_id = run_id
+        self.path = status_path(run_id)
+
+    def emit(self, event: str, **fields: Any) -> None:
+        record: dict[str, Any] = {"ts": iso_now(), "run": self.run_id, "event": event}
+        for key, value in fields.items():
+            if isinstance(value, str):
+                value = redact_text(value)
+                if len(value) > self.MAX_TEXT:
+                    value = value[: self.MAX_TEXT] + "\n…"
+            record[key] = value
+        line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+        fd = _open_append(self.path, 0o644)
+        try:
+            os.write(fd, line.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+class RunLog:
+    """Redacted, timestamped lines in /var/log/vpn-bot-wizard/<id>.log."""
+
+    def __init__(self, run_id: int) -> None:
+        self.path = log_path(run_id)
+
+    def write(self, text: str) -> None:
+        stamp = iso_now()
+        body = "".join(f"{stamp} {line}\n" for line in redact_text(text).splitlines() or [""])
+        fd = _open_append(self.path, 0o640, bot_gid())
+        try:
+            os.write(fd, body.encode("utf-8", errors="replace"))
+        finally:
+            os.close(fd)
+
+
+def read_events(run_id: int) -> list[dict[str, Any]]:
+    try:
+        raw = status_path(run_id).read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return []
+    events = []
+    for line in raw.splitlines():
+        with contextlib.suppress(ValueError):
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                events.append(obj)
+    return events
+
+
+# --------------------------------------------------------------------------- #
+# Commands
+# --------------------------------------------------------------------------- #
+def tool_allowed(name: str) -> str | None:
+    """Under the seam: a stub from VPN_BOT_WIZARD_SELFTEST_BIN or a helper next to
+    this file, else None (refused). Outside the seam: the name itself."""
+    if not SELFTEST:
+        return name
+    if os.path.isabs(name):
+        real = os.path.realpath(name)
+        return name if os.path.dirname(real) == str(HERE) else None
+    stub_dir = os.environ.get("VPN_BOT_WIZARD_SELFTEST_BIN", "")
+    found = shutil.which(name)
+    if not stub_dir or not found:
+        return None
+    if os.path.realpath(found) != os.path.realpath(os.path.join(stub_dir, name)):
+        return None
+    return found
+
+
+def run_cmd(
+    argv: Sequence[str],
+    *,
+    timeout: int = COMMAND_TIMEOUT,
+    env: Mapping[str, str] | None = None,
+    log: RunLog | None = None,
+    stdin_text: str | None = None,
+) -> tuple[int, str]:
+    """(exit code, stdout+stderr). 127 = not found / refused, 124 = timed out."""
+    args = list(argv)
+    exe = tool_allowed(args[0])
+    if exe is None:
+        return 127, f"{args[0]}: refused (VPN_BOT_WIZARD_SELFTEST: not a stub)"
+    args[0] = exe
+    run_env = {k: v for k, v in os.environ.items() if k not in ("LANGUAGE", "LC_MESSAGES")}
+    run_env["LC_ALL"] = "C"
+    if env:
+        run_env.update(env)
+    try:
+        proc = subprocess.run(  # noqa: S603 - argv list, never a shell
+            args,
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            env=run_env,
+        )
+    except FileNotFoundError:
+        out = f"{argv[0]}: not found"
+        if log is not None:
+            log.write(f"$ {' '.join(argv)}\n{out}")
+        return 127, out
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.stdout if isinstance(exc.stdout, str) else ""
+        out = f"{partial}\n{argv[0]}: timed out after {timeout}s"
+        if log is not None:
+            log.write(f"$ {' '.join(argv)}\n{out}")
+        return 124, out
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if log is not None:
+        log.write(f"$ {' '.join(argv)}  (exit {proc.returncode})\n{out.rstrip()}")
+    return proc.returncode, out
+
+
+def env_file_values(path: Path) -> dict[str, str]:
+    """KEY=VALUE lines of a .env (quotes, `export`, inline comments; last one wins)."""
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return values
+    for line in text.splitlines():
+        m = re.match(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*)$", line)
+        if not m:
+            continue
+        value = m.group(2).strip()
+        if value[:1] in ("'", '"'):
+            q = value[0]
+            end = value.find(q, 1)
+            value = value[1:end] if end > 0 else value[1:]
+        else:
+            value = re.sub(r"\s+#.*$", "", value).strip()
+        values[m.group(1)] = value
+    return values
+
+
+# --------------------------------------------------------------------------- #
+# The global lock (held by the running unit for its whole life)
+# --------------------------------------------------------------------------- #
+@contextlib.contextmanager
+def global_lock(block: bool = False) -> Any:
+    path = host_path(LOCK_PATH)
+    fence(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise WizardError("another wizard run holds the lock", 3) from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def active_wizard_units() -> list[str] | None:
+    """Units named vpn-bot-wizard-* that are not inactive; None when systemctl failed."""
+    rc, out = run_cmd(
+        ["systemctl", "list-units", "--all", "--plain", "--no-legend", "--no-pager", f"{UNIT_PREFIX}*"]
+    )
+    if rc != 0:
+        return None
+    busy = []
+    for line in out.splitlines():
+        parts = line.split()
+        # Some systemd versions mark a failed/not-found unit with a bullet even with --plain.
+        if parts and parts[0] in ("●", "*", "×"):
+            parts = parts[1:]
+        if len(parts) >= 3 and parts[0].startswith(UNIT_PREFIX) and parts[2] not in ("inactive", "failed"):
+            busy.append(parts[0])
+    return busy
+
+
+# --------------------------------------------------------------------------- #
+# Dead-man: a step that may cut the operator off arms a transient timer that runs
+# `<helper> rollback --run N --deadman` after <seconds> unless the step disarms it.
+# --------------------------------------------------------------------------- #
+def deadman_unit(run_id: int) -> str:
+    return f"{UNIT_PREFIX}{run_id}-deadman"
+
+
+def deadman_arm(run_id: int, seconds: int, helper: str, params: Mapping[str, str], log: RunLog | None = None) -> None:
+    if not 30 <= seconds <= 3600:
+        raise WizardError("dead-man interval must be 30..3600 s")
+    mode_helper = HERE / helper
+    argv = [
+        "systemd-run",
+        f"--unit={deadman_unit(run_id)}",
+        f"--on-active={seconds}",
+        "--collect",
+        "--quiet",
+        f"--description=vpn-bot wizard run {run_id}: dead-man rollback",
+        str(mode_helper),
+        "rollback",
+        "--run",
+        str(run_id),
+        "--deadman",
+        *param_args(params),
+    ]
+    rc, out = run_cmd(argv, log=log)
+    if rc != 0:
+        raise WizardError(f"cannot arm the dead-man: {out.strip()[-200:]}")
+    Status(run_id).emit("deadman", state="armed", seconds=seconds)
+
+
+def deadman_disarm(run_id: int, log: RunLog | None = None) -> bool:
+    """Stop the timer (and a rollback it may have started). True when it was armed."""
+    rc, _ = run_cmd(["systemctl", "stop", f"{deadman_unit(run_id)}.timer"], log=log)
+    run_cmd(["systemctl", "reset-failed", f"{deadman_unit(run_id)}.timer"], log=log)
+    Status(run_id).emit("deadman", state="disarmed")
+    return rc == 0
+
+
+# --------------------------------------------------------------------------- #
+# Backups before a change
+# --------------------------------------------------------------------------- #
+def backup_paths(run_id: int, paths: Sequence[str], log: RunLog | None = None) -> Path:
+    """tar.gz of every existing path (+ MANIFEST.json with sha256 of each file)."""
+    target_dir = backup_dir(run_id)
+    fence(target_dir)
+    target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    archive = target_dir / f"backup-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.tar.gz"
+    manifest: dict[str, Any] = {"run": run_id, "created": iso_now(), "files": {}, "missing": []}
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for raw in paths:
+            src = host_path(raw)
+            if not src.exists() and not src.is_symlink():
+                manifest["missing"].append(raw)
+                continue
+            tar.add(str(src), arcname=raw.lstrip("/"), recursive=True)
+            if src.is_file() and not src.is_symlink():
+                manifest["files"][raw] = hashlib.sha256(src.read_bytes()).hexdigest()
+        data = json.dumps(manifest, sort_keys=True, indent=1).encode()
+        info = tarfile.TarInfo("MANIFEST.json")
+        info.size = len(data)
+        info.mtime = int(time.time())
+        tar.addfile(info, io.BytesIO(data))
+    write_private(archive, buf.getvalue(), mode=0o600)
+    if log is not None:
+        log.write(f"backup {archive}: {len(manifest['files'])} file(s), missing {manifest['missing']}")
+    Status(run_id).emit("backup", path=str(archive), files=len(manifest["files"]))
+    return archive
+
+
+def restore_backup(archive: Path, log: RunLog | None = None) -> list[str]:
+    """Put every file of the archive back where it came from. Returns the paths."""
+    restored: list[str] = []
+    with tarfile.open(archive, mode="r:gz") as tar:
+        for member in tar.getmembers():
+            if member.name == "MANIFEST.json" or not member.isfile():
+                continue
+            name = "/" + member.name
+            if ".." in Path(member.name).parts:
+                raise WizardError(f"refusing a backup member {member.name!r}")
+            dst = host_path(name)
+            source = tar.extractfile(member)
+            if source is None:
+                continue
+            fence(dst)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(dst.parent), prefix=f".{dst.name}.")
+            with os.fdopen(fd, "wb") as fh:
+                shutil.copyfileobj(source, fh)
+            os.chmod(tmp, member.mode & 0o7777)
+            if os.geteuid() == 0 and not SELFTEST:
+                os.chown(tmp, member.uid, member.gid)
+            os.replace(tmp, dst)
+            restored.append(name)
+    if log is not None:
+        log.write(f"restored from {archive}: {', '.join(restored) or 'nothing'}")
+    return restored
+
+
+# --------------------------------------------------------------------------- #
+# The mode helper contract: <helper> plan|apply|verify|rollback --run N [--param k=v]
+# --------------------------------------------------------------------------- #
+@dataclass
+class Ctx:
+    mode: str
+    step: str
+    run_id: int
+    params: dict[str, str]
+    status: Status
+    log: RunLog
+    deadman: bool = False
+
+    def event(self, kind: str, **fields: Any) -> None:
+        self.status.emit(kind, step=self.step, **fields)
+
+    def say(self, text: str) -> None:
+        """A progress line for the bot's message, and the log."""
+        self.log.write(text)
+        self.event("progress", text=text)
+
+    def run(self, argv: Sequence[str], **kw: Any) -> tuple[int, str]:
+        return run_cmd(argv, log=self.log, **kw)
+
+
+Handler = Callable[[Ctx], int]
+
+
+def _parse_contract_argv(argv: Sequence[str]) -> tuple[str, int, list[str], bool]:
+    if not argv or argv[0] not in STEPS:
+        raise WizardError(f"usage: <helper> {{{'|'.join(STEPS)}}} --run N [--param k=v ...]", 2)
+    step, rest = argv[0], list(argv[1:])
+    run_id: int | None = None
+    pairs: list[str] = []
+    deadman = False
+    while rest:
+        flag = rest.pop(0)
+        if flag == "--run" and rest:
+            run_id = parse_run_id(rest.pop(0))
+        elif flag == "--param" and rest:
+            pairs.append(rest.pop(0))
+        elif flag == "--deadman" and step == "rollback":
+            deadman = True
+        else:
+            raise WizardError(f"unexpected argument {flag!r}", 2)
+    if run_id is None:
+        raise WizardError("--run N is required", 2)
+    return step, run_id, pairs, deadman
+
+
+def contract_main(mode_name: str, handlers: Mapping[str, Handler], argv: Sequence[str]) -> int:
+    """Entry point of a mode helper. Exit 0 = the step succeeded."""
+    try:
+        if os.geteuid() != 0 and not SELFTEST:
+            raise WizardError("run as root", 3)
+        step, run_id, pairs, deadman = _parse_contract_argv(argv)
+        params = validate_params(mode_name, pairs)
+        ensure_dirs()
+        ctx = Ctx(mode=mode_name, step=step, run_id=run_id, params=params, status=Status(run_id), log=RunLog(run_id), deadman=deadman)
+        handler = handlers.get(step)
+        if handler is None:
+            raise WizardError(f"{mode_name}: no {step} step", 2)
+        ctx.log.write(f"--- {mode_name} {step} (run {run_id}) params={params}{' [dead-man]' if deadman else ''}")
+        rc = handler(ctx)
+        ctx.log.write(f"--- {mode_name} {step}: exit {rc}")
+        return rc
+    except WizardError as exc:
+        print(f"{mode_name}: {exc}", file=sys.stderr)
+        return exc.code
+
+
+def lib_ok_to_load(path: Path) -> None:
+    """Called by every helper before loading this file (see their _load_lib)."""
+    st = os.stat(path, follow_symlinks=False)
+    if os.geteuid() == 0 and not SELFTEST and (st.st_uid != 0 or st.st_mode & 0o022):
+        raise WizardError(f"{path} must be root-owned and not group/other-writable")
+
+
+if __name__ == "__main__":
+    print("vpn-bot-wizard-lib: the library of the setup-wizard helpers (docs/wizard.md); not a command")
+    sys.exit(0)

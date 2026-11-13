@@ -8,6 +8,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Setup wizard: «🧙 Мастер настройки» in the admin panel (docs/wizard.md), SUPERADMIN only.**
+  Every mode is a fixed set of root helpers in `scripts/wizard/` (stdlib Python), installed to
+  `/usr/local/sbin` by deploy.sh (`OUT_OF_REPO_HELPERS`, `required` on main) and on a fresh host
+  by `scripts/install.sh` (`INSTALL_HELPERS`, manifest-backed, rolled back on failure):
+  `vpn-bot-wizard` (the only entry point: `launch --mode M --run N --phase plan|execute
+  [--param k=v]`), `vpn-bot-wizard-lib`, `vpn-bot-wizard-selfcheck`, `vpn-bot-wizard-dump`,
+  `vpn-bot-wizard-update`. No command execution, no «shell»: the launcher refuses any mode,
+  run id or parameter outside its typed table (exit 2, before anything runs); the bot types
+  the same parameters first (`services/wizard_modes.py`, a test keeps the tables equal). Helper
+  model: one sudoers grant, `/usr/local/sbin/vpn-bot-wizard launch *`; `launch` re-enters PID 1's
+  mount namespace (the non-root unit's `ProtectSystem=strict` is inherited through sudo). A phase starts ONLY
+  through `systemd-run --unit=vpn-bot-wizard-<id> --collect`, so a run survives the bot's
+  restart; the unit holds `/run/vpn-bot-wizard.lock` and drives the contract `plan` (dry run)
+  → `apply` → `verify` → `rollback` on failure. Progress is JSON lines in
+  `/var/lib/vpn-bot-wizard/<id>.status`; the bot edits one message with it, shows the plan with
+  «✅ Применить» / «✖️ Отменить» (30 minutes), and the final report. **Resume**: after a restart
+  the bot finds the active run, follows the status file and the unit and sends the report
+  exactly once (`reported_at`); the monitor never logs a traceback (it runs inside deploy.sh's
+  post-restart log scan). New table `wizard_runs` (schema v42): `active = 1` + a UNIQUE index
+  is the global lock — one active run. «📜 История» with the state, the log as a file (redacted
+  again on the way out) and the dump. Every action is audited (entity `wizard`).
+- **Wizard mode «Самопроверка»** (read-only): listeners (`vpn-bot-ufw-apply listeners`), the
+  WARP fwmark table and its `ip rule`/default route (when WARP is deployed), `systemctl
+  --failed`, certificate expiry (acme.sh certificates, `/etc/hysteria/cert.pem`,
+  `SUBSCRIPTION_TLS_CERT`) and acme.sh `Le_ReloadCmd`, out-of-repo helper drift, owner/mode of
+  the DB and `.env`, free disk, `reboot-required` — green / yellow / red. Optional **daily run**
+  that alerts the superadmins ONLY on a deviation.
+- **Wizard mode «Диагностический дамп»** (read-only): versions, `HEAD`, live vs checkout schema,
+  units, listeners, `ip rule`, the tail of `bot.log` and Xray's `error.log` judged by the
+  timestamp of the LAST ERROR line, not by the count — redacted with the patterns of
+  `utils/redact.py` (a test keeps the helper's copy identical); `verify` refuses a file that
+  still matches a secret pattern. Sent as a file.
+- **Wizard mode «Обновить бота»**: the plan is `git fetch` + the commits `HEAD..origin/main` +
+  the schema migration + `CHECK=1 redeploy.sh` (Phase 1), and records the exact `origin/main`
+  revision it shows (a no-op only when `HEAD` IS that revision; local commits not on
+  `origin/main` are named as lost by the deploy); after the confirmation the full redeploy runs in the wizard's unit — only
+  for that revision (origin/main moved since the plan: nothing is deployed); the report after the restart is DEPLOY OK (`succeeded`),
+  the ROLLBACK REPORT (`rolled_back`), or `failed` without a report.
+- **`REDEPLOY_ATTACH=pipe`** for `scripts/redeploy.sh`: `systemd-run --wait --pipe` under `set -o
+  pipefail` for a caller without a terminal (the wizard) — the wrapper waits and exits with
+  deploy.sh's code. Default `pty` is unchanged; any other value is refused before any work.
+- **The helpers' library** (`vpn-bot-wizard-lib`): a dead-man (`systemd-run --on-active=<N>`
+  timer running `<helper> rollback --deadman` unless disarmed) for future steps that touch the
+  network, a backup (tar.gz + sha256 manifest) before a change with restore, the redacted run
+  log `/var/log/vpn-bot-wizard/<id>.log`.
+- **TOTP second factor for superadmins: «🔐 Безопасность» (docs/wizard.md#totp).** RFC 6238 on
+  stdlib `hmac`/`hashlib`/`struct` (`utils/totp.py`, RFC 4226 + RFC 6238 vectors in the tests),
+  no new dependency (the QR uses the existing `qrcode`; the otpauth URI and the base32 secret
+  are always shown as text too). Enrollment: QR + secret → the current code → 10 one-time
+  backup codes shown once → on; the messages with the secret, the QR, the codes and every typed
+  code are deleted. The secret is Fernet-encrypted with `/etc/vpn-bot/totp.key` (0600, created
+  on the first enrollment, never replaced while credentials exist); backup codes are stored as
+  `hashlib.scrypt` only and redeemed once; reissuing needs a TOTP code. Checks: ±1 step, replay
+  guard (`last_used_step`), 5 wrong codes in a row → 15-minute lock + an alert to every
+  superadmin, kept in the database. Asked before dangerous actions — removing a protocol from
+  the server, disabling a protocol (deletes its keys), deleting a relay with its keys, the
+  wizard's dump and update — with a 5-minute elevation that a restart drops; disabling needs a
+  TOTP or backup code. Offered as an optional step right after the first-superadmin claim.
+  Emergency reset without phone and codes: `sudo vpn-bot-totp-reset <telegram_id>` (root CLI,
+  `OUT_OF_REPO_HELPERS`, audit `totp_reset_cli`). New tables `totp_credentials`,
+  `totp_backup_codes` (schema v42).
+
 - **One-command installer: `scripts/install.sh` (docs/install.md).** On a fresh Ubuntu 24.04 host
   (`x86_64`/`aarch64`, systemd) it asks the mode — `1) main server`, `2) relay` (not in this
   version: exits `2` with nothing changed on disk) — and the bot token (hidden input, format

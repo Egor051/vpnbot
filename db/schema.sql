@@ -51,6 +51,59 @@ CREATE TABLE IF NOT EXISTS claimed_superadmins (
   claimed_at TEXT NOT NULL
 );
 
+-- TOTP second factor of a superadmin (services/totp.py, migration v42). The secret
+-- is stored only Fernet-encrypted with /etc/vpn-bot/totp.key; enabled = 0 is an
+-- enrollment that has not been confirmed with a code yet. last_used_step is the
+-- replay guard (a code of that time-step or an older one is refused);
+-- failed_attempts/locked_until (unix seconds) the rate limit, kept here so a
+-- restart does not lift a lockout.
+CREATE TABLE IF NOT EXISTS totp_credentials (
+  telegram_user_id INTEGER PRIMARY KEY REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+  secret_enc TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  created_at TEXT NOT NULL,
+  enabled_at TEXT,
+  last_used_step INTEGER NOT NULL DEFAULT 0,
+  failed_attempts INTEGER NOT NULL DEFAULT 0,
+  locked_until INTEGER NOT NULL DEFAULT 0
+);
+
+-- One-time backup codes: only scrypt(code, salt) is stored; used_at is set when a
+-- code is redeemed, and a redeemed code never matches again.
+CREATE TABLE IF NOT EXISTS totp_backup_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  telegram_user_id INTEGER NOT NULL REFERENCES totp_credentials(telegram_user_id) ON DELETE CASCADE,
+  salt_hex TEXT NOT NULL,
+  hash_hex TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  used_at TEXT
+);
+
+-- Setup wizard runs (services/wizard.py, docs/wizard.md). active = 1 while a run
+-- holds the global lock (planned/running/verifying) and NULL afterwards; the unique
+-- index on it in indexes.sql makes "one active run" a database invariant, not a
+-- convention. params_json is redacted before it is written.
+CREATE TABLE IF NOT EXISTS wizard_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  mode TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'verifying', 'succeeded', 'rolled_back', 'failed', 'cancelled')),
+  phase TEXT NOT NULL DEFAULT 'plan' CHECK (phase IN ('plan', 'execute')),
+  current_step TEXT NOT NULL DEFAULT '',
+  params_json TEXT NOT NULL DEFAULT '{}',
+  started_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+  origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'scheduled')),
+  chat_id INTEGER,
+  message_id INTEGER,
+  log_path TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  plan_ready INTEGER NOT NULL DEFAULT 0 CHECK (plan_ready IN (0, 1)),
+  active INTEGER CHECK (active IS NULL OR active = 1),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  finished_at TEXT,
+  reported_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS access_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,

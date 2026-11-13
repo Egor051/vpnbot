@@ -15,6 +15,7 @@
 #   sudo CHECK=1 bash scripts/redeploy.sh   # inspection only: Phase 1, no mutations (PHASE1_ONLY=1)
 #   sudo FORCE=1 bash scripts/redeploy.sh   # redeploy even when HEAD already == origin/main
 #   sudo ALLOW_BACKEND_CONFIG_DRIFT=1 bash scripts/redeploy.sh   # forward a deploy.sh knob
+#   sudo REDEPLOY_ATTACH=pipe bash scripts/redeploy.sh   # no terminal: wait, exit with deploy.sh's code
 #
 # deploy.sh's gate bypasses (ALLOW_*) and tuning timeouts go on the same command
 # line, AFTER `sudo` (sudo drops the caller's environment). Only the names in
@@ -41,6 +42,12 @@ TMP_DEPLOY="${TMP_DEPLOY:-/tmp/deploy.sh}"      # where tip-of-main deploy.sh is
 LOG_DIR="${REDEPLOY_LOG_DIR:-/root}"            # where the tee'd run log is kept
 CHECK="${CHECK:-0}"                             # 1 => inspection only  (=> PHASE1_ONLY=1)
 FORCE="${FORCE:-0}"                             # 1 => redeploy even if already up to date
+# How the detached run is attached to THIS process: `pty` (default) streams it to the
+# operator's terminal; `pipe` is for a caller without a terminal — the setup wizard
+# (scripts/wizard/vpn-bot-wizard-update, docs/wizard.md): `systemd-run --wait --pipe`
+# under `set -o pipefail`, so this wrapper waits for deploy.sh and exits with ITS code
+# (with --pty the pipeline's code is tee's). Anything else is refused before any work.
+REDEPLOY_ATTACH="${REDEPLOY_ATTACH:-pty}"
 
 # --------------------------------------------------------------------------- #
 # deploy.sh knobs forwarded to the detached run — an explicit allowlist.
@@ -116,9 +123,24 @@ launch_deploy() {
   log_file="${LOG_DIR%/}/deploy-${ts}.log"
   echo "redeploy: launching ${DEPLOY_UNIT} (log: ${log_file})"
   echo "redeploy:   deploy.sh env: ${deploy_env[*]:-<none>}"
+  if [[ "$REDEPLOY_ATTACH" == "pipe" ]]; then
+    systemd-run --unit="$DEPLOY_UNIT" --collect --wait --pipe --quiet \
+      env ${deploy_env[@]+"${deploy_env[@]}"} \
+      bash -c "set -o pipefail; bash ${TMP_DEPLOY} 2>&1 | tee ${log_file}"
+    return
+  fi
   systemd-run --unit="$DEPLOY_UNIT" --collect --pty \
     env ${deploy_env[@]+"${deploy_env[@]}"} \
     bash -c "bash ${TMP_DEPLOY} 2>&1 | tee ${log_file}"
+}
+
+# REDEPLOY_ATTACH is one of two words; a typo must not silently pick the default.
+check_attach() {
+  case "$REDEPLOY_ATTACH" in
+    pty|pipe) return 0 ;;
+  esac
+  echo "redeploy: refusing to run — REDEPLOY_ATTACH must be pty or pipe, got '${REDEPLOY_ATTACH}'" >&2
+  return 1
 }
 
 # --------------------------------------------------------------------------- #
@@ -137,6 +159,7 @@ fi
 #    the gate the flag was meant to open.
 # --------------------------------------------------------------------------- #
 check_allow_env || exit 1
+check_attach || exit 1
 
 # --------------------------------------------------------------------------- #
 # 1. Root guard. deploy.sh stops the bot and writes under /etc, /usr/local/sbin,

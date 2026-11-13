@@ -74,6 +74,21 @@ ENV_FILE="${APP_DIR}/.env"
 UNIT_NAME="vpn-bot.service"
 UNIT_PATH="/etc/systemd/system/${UNIT_NAME}"
 DB_PERMS_HELPER="/usr/local/sbin/vpn-bot-db-perms"
+SBIN_DIR="/usr/local/sbin"
+# The other helpers a main server needs from its first minute (docs/wizard.md): the
+# setup wizard the bot launches — «Обновить бота» is how a fresh install reaches its
+# first redeploy — and the emergency TOTP reset, which must be on the host BEFORE the
+# day the phone and the codes are gone. The same entries as deploy.sh's
+# OUT_OF_REPO_HELPERS (role main, required); tests/test_install_script.py keeps them
+# equal. Installed through install_file, so a rollback removes them like the rest.
+INSTALL_HELPERS=(
+  scripts/wizard/vpn-bot-wizard
+  scripts/wizard/vpn-bot-wizard-lib
+  scripts/wizard/vpn-bot-wizard-selfcheck
+  scripts/wizard/vpn-bot-wizard-dump
+  scripts/wizard/vpn-bot-wizard-update
+  scripts/vpn-bot-totp-reset
+)
 CLAIM_DIR="/etc/vpn-bot"
 CLAIM_FILE="${CLAIM_DIR}/claim.json"
 LOCK_FILE="/run/vpn-bot-install.lock"
@@ -177,8 +192,12 @@ manifest_add() {
 # Rollback removes only paths it could have created. Anything else in a manifest
 # (an edited file, a bug) is refused rather than deleted.
 path_is_ours() {
-  local p="${1-}"
+  local p="${1-}" src dst
   [[ -n "$p" && "$p" == /* && "$p" != *..* && "$p" != */ ]] || return 1
+  for src in "${INSTALL_HELPERS[@]}"; do
+    dst="${SBIN_DIR}/${src##*/}"
+    [[ "$p" == "$dst" || "$p" == "$dst".* ]] && return 0
+  done
   case "$p" in
     "$APP_DIR" | "$APP_DIR"/* | "$CLAIM_DIR" | "$CLAIM_DIR"/* | "$UNIT_PATH" | "$UNIT_PATH".* | \
       "$DB_PERMS_HELPER" | "$DB_PERMS_HELPER".*) return 0 ;;
@@ -584,7 +603,17 @@ PY
 }
 
 install_unit() {
+  local src
   install_file "${APP_DIR}/scripts/vpn-bot-db-perms" "$DB_PERMS_HELPER" 0755
+  for src in "${INSTALL_HELPERS[@]}"; do
+    # A ref from before the wizard (INSTALL_REF) has none of them: nothing to install,
+    # the bot then says «helpers not installed» and the first deploy brings them.
+    if [[ ! -f "${APP_DIR}/${src}" ]]; then
+      log "not in this checkout: ${src} — skipped"
+      continue
+    fi
+    install_file "${APP_DIR}/${src}" "${SBIN_DIR}/${src##*/}" 0755
+  done
   install_file "${APP_DIR}/deploy/vpn-bot.service" "$UNIT_PATH" 0644
   run systemctl daemon-reload
   if ! systemctl is-enabled --quiet "$UNIT_NAME" 2>/dev/null; then

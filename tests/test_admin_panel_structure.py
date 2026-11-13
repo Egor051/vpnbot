@@ -47,11 +47,13 @@ from bot.handlers import (
     admin_warp_split,
     admin_warp_split_sources,
     admin_warp_split_ui,
+    admin_wizard,
     callbacks,
     common,
     key_bundles,
     keys,
     proxy,
+    security,
     ssh_port,
     start,
     ufw,
@@ -66,6 +68,8 @@ from bot.keyboards import keys as kb_keys
 from bot.keyboards import warp_keyboard as kb_warp
 from bot.keyboards import warp_split_keyboard as kb_split
 from bot.keyboards import warp_split_sources_keyboard as kb_src
+from bot import totp_gate, wizard_views as wv
+from models.dto import WizardRun
 from i18n import use_locale
 from models.dto import AccessRequest, Relay, User, VpnKey
 from models.enums import AccessRequestStatus, UserRole, VpnKeyStatus, VpnKeyType
@@ -80,9 +84,9 @@ REPO = Path(__file__).resolve().parent.parent
 
 # Same order as bot/app.py (pinned by test_router_order_matches_app below).
 ROUTERS = [
-    start, common, settings_handler, admin, admin_dashboard, admin_warp, admin_warp_split, admin_warp_split_ui,
-    admin_warp_split_sources, admin_modules, admin_relays, admin_maintenance, ssh_port, ufw, admin_bundles, keys,
-    key_bundles, proxy, callbacks,
+    start, security, common, settings_handler, admin, admin_dashboard, admin_warp, admin_warp_split, admin_warp_split_ui,
+    admin_warp_split_sources, admin_modules, admin_relays, admin_maintenance, ssh_port, ufw, admin_wizard, admin_bundles,
+    keys, key_bundles, proxy, callbacks,
 ]
 
 
@@ -243,7 +247,25 @@ CASES: list[tuple[str, Callable[[], InlineKeyboardMarkup], str | None]] = [
     ("aio_panel", kb_aio.admin_bundles_panel_keyboard, None),
     ("aio_confirm", lambda: kb_aio.admin_bundles_confirm_keyboard("basic"), None),
     ("aio_back", kb_aio.admin_bundles_back_keyboard, None),
+    ("wizard_menu", lambda: wv.menu_keyboard(active=_wrun(), daily=True), None),
+    ("wizard_menu_idle", lambda: wv.menu_keyboard(active=None, daily=False), None),
+    ("wizard_progress", lambda: wv.progress_keyboard(_wrun()), None),
+    ("wizard_plan", lambda: wv.plan_keyboard(_wrun()), None),
+    ("wizard_final", lambda: wv.final_keyboard(_wrun(), artifact=True), None),
+    ("wizard_history", lambda: wv.history_keyboard([_wrun()], 1, True), None),
+    ("totp_gate_cancel", totp_gate.gate_cancel_keyboard, None),
+    ("totp_gate_resume", lambda: totp_gate.resume_keyboard("admin:module:uninst:xray:x:0123456789ab"), None),
+    ("totp_claim_offer", security.claim_offer_keyboard, None),
+    ("totp_codes", security.codes_keyboard, None),
 ]
+
+
+def _wrun() -> WizardRun:
+    return WizardRun(
+        id=7, mode="update", state="planned", phase="plan", current_step="plan", params={"force": "0"},
+        started_by=1, origin="manual", chat_id=1, message_id=2, log_path="", summary="", plan_ready=True,
+        active=True, created_at=NOW, updated_at=NOW, finished_at=None, reported_at=None,
+    )
 
 
 def _buttons(markup: InlineKeyboardMarkup) -> Iterator[tuple[str, str]]:

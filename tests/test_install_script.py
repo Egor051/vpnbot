@@ -53,6 +53,7 @@ APP_DIR="$T/opt/vpn-service"
 ENV_FILE="$APP_DIR/.env"
 UNIT_PATH="$T/etc/systemd/system/vpn-bot.service"
 DB_PERMS_HELPER="$T/usr/local/sbin/vpn-bot-db-perms"
+SBIN_DIR="$T/usr/local/sbin"
 CLAIM_DIR="$T/etc/vpn-bot"
 CLAIM_FILE="$CLAIM_DIR/claim.json"
 INSTALL_LOG_DIR="$T/var/log"
@@ -669,3 +670,84 @@ def test_no_curl_pipe_bash_and_no_xtrace() -> None:
     text = INSTALL_SH.read_text()
     assert "set -x" not in text
     assert not re.search(r"curl[^\n|]*\|\s*(sudo\s+)?bash", text)
+
+
+# --------------------------------------------------------------------------- #
+# The setup wizard's helpers and the TOTP reset come with a fresh install
+# --------------------------------------------------------------------------- #
+WIZARD_HELPERS = [
+    "vpn-bot-wizard",
+    "vpn-bot-wizard-lib",
+    "vpn-bot-wizard-selfcheck",
+    "vpn-bot-wizard-dump",
+    "vpn-bot-wizard-update",
+    "vpn-bot-totp-reset",
+]
+
+
+def _install_helpers() -> list[str]:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    body = text[text.index("INSTALL_HELPERS=(") :].split("\n)", 1)[0].splitlines()[1:]
+    return [line.strip() for line in body if line.strip() and not line.strip().startswith("#")]
+
+
+def test_install_helpers_are_the_registered_main_helpers() -> None:
+    """The installer's list == deploy.sh's OUT_OF_REPO_HELPERS entries for these helpers
+    (same source, /usr/local/sbin/<name>, required, main): a deploy and a fresh install
+    put the same files in the same place."""
+    deploy = (ROOT / "scripts/deploy.sh").read_text(encoding="utf-8")
+    listed = _install_helpers()
+    assert sorted(src.rsplit("/", 1)[-1] for src in listed) == sorted(WIZARD_HELPERS)
+    for src in listed:
+        assert (ROOT / src).is_file(), src
+        name = src.rsplit("/", 1)[-1]
+        assert f'"{src}|/usr/local/sbin/{name}|required"' in deploy, src
+
+
+def _checkout_with_helpers(tmp_path: Path) -> str:
+    """A fake checkout with every helper the installer installs."""
+    lines = ['mkdir -p "$APP_DIR/scripts/wizard" "$APP_DIR/deploy"', 'echo db > "$APP_DIR/scripts/vpn-bot-db-perms"',
+             'echo unit > "$APP_DIR/deploy/vpn-bot.service"']
+    for src in _install_helpers():
+        lines.append(f'echo "{src}" > "$APP_DIR/{src}"')
+    return "\n".join(lines) + "\n"
+
+
+def test_install_unit_installs_the_wizard_helpers_and_rolls_them_back(tmp_path: Path) -> None:
+    body = _checkout_with_helpers(tmp_path) + """
+open_log
+install_unit
+for name in vpn-bot-wizard vpn-bot-wizard-lib vpn-bot-wizard-selfcheck vpn-bot-wizard-dump vpn-bot-wizard-update vpn-bot-totp-reset; do
+  [[ -f "$SBIN_DIR/$name" ]] || { echo "missing $name"; exit 1; }
+  stat -c '%a' "$SBIN_DIR/$name"
+done
+rollback
+for name in vpn-bot-wizard vpn-bot-totp-reset; do
+  [[ -e "$SBIN_DIR/$name" ]] && { echo "left behind: $name"; exit 1; }
+done
+echo rolled-back
+"""
+    result = _ok(_run(tmp_path, body))
+    lines = result.stdout.split()
+    assert lines[:6] == ["755"] * 6
+    assert lines[-1] == "rolled-back"
+
+
+def test_install_unit_skips_helpers_a_checkout_does_not_have(tmp_path: Path) -> None:
+    body = """
+mkdir -p "$APP_DIR/scripts" "$APP_DIR/deploy"
+echo db > "$APP_DIR/scripts/vpn-bot-db-perms"; echo unit > "$APP_DIR/deploy/vpn-bot.service"
+open_log
+install_unit
+[[ -e "$SBIN_DIR/vpn-bot-wizard" ]] && echo installed || echo skipped
+"""
+    assert _ok(_run(tmp_path, body)).stdout.strip().splitlines()[-1] == "skipped"
+
+
+def test_path_is_ours_covers_the_installed_helpers_only(tmp_path: Path) -> None:
+    body = """
+for p in "$SBIN_DIR/vpn-bot-wizard" "$SBIN_DIR/vpn-bot-totp-reset.vpn-bot-install.T.bak" "$SBIN_DIR/vpn-bot-ufw-apply" "$SBIN_DIR/vpn-bot-wizardx"; do
+  path_is_ours "$p" && echo ours || echo refused
+done
+"""
+    assert _ok(_run(tmp_path, body)).stdout.split() == ["ours", "ours", "refused", "refused"]
