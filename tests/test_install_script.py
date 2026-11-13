@@ -409,6 +409,51 @@ echo not-reached
     assert not (tmp_path / "opt/vpn-service").exists()
 
 
+def test_die_after_arming_rolls_back(tmp_path: Path) -> None:
+    """`exit` does not fire the ERR trap: a deliberate refusal must roll back itself."""
+    body = r"""
+open_log
+arm_rollback
+manifest_add dir "$APP_DIR"
+mkdir -p "$APP_DIR"
+die "refused half-way"
+"""
+    result = _run(tmp_path, body)
+    assert result.returncode == 1
+    assert not (tmp_path / "opt/vpn-service").exists()
+    manifest = next((tmp_path / "var/log").glob("vpn-bot-install.*.manifest")).read_text()
+    assert manifest.rstrip().splitlines()[-1].startswith("# rolled back")
+
+
+def test_die_before_arming_touches_nothing(tmp_path: Path) -> None:
+    keep = tmp_path / "opt/vpn-service"
+    keep.mkdir(parents=True)
+    result = _run(tmp_path, 'open_log; manifest_add dir "$APP_DIR"; die "precondition"')
+    assert result.returncode == 1
+    assert keep.is_dir(), "nothing was armed, so nothing may be rolled back"
+
+
+def test_ref_without_claim_support_leaves_no_checkout(tmp_path: Path) -> None:
+    """A release that predates the claim (v3.0.0): refused, and the clone is gone."""
+    repo = tmp_path / "old-release"
+    repo.mkdir()
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "README.md").write_text("old\n")
+    subprocess.run([*git, "add", "README.md"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "old"], check=True)
+    sha = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+    result = _run(
+        tmp_path,
+        f'open_log; arm_rollback; INSTALL_REPO="file://{repo}"; INSTALL_REF_RESOLVED="{sha}"; clone_checkout',
+    )
+
+    assert result.returncode == 1
+    assert "не поддерживает установку через claim" in result.stderr
+    assert not (tmp_path / "opt/vpn-service").exists()
+
+
 def test_injected_failure_point(tmp_path: Path) -> None:
     result = _run(
         tmp_path,

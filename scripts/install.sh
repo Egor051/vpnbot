@@ -93,6 +93,7 @@ TS="$(date -u +%Y%m%dT%H%M%SZ)"
 INSTALL_LOG=""
 MANIFEST=""
 ROLLING_BACK=0
+ROLLBACK_ARMED=0
 COMMITTED=0
 BOT_TOKEN=""
 BOT_USERNAME=""
@@ -123,8 +124,15 @@ say() {
 
 warn() { say "ВНИМАНИЕ: $*"; }
 
+# A deliberate stop. Once mutations have begun (arm_rollback) it rolls back
+# first: `exit` does not fire the ERR trap, so without this a refusal half-way
+# (a release without claim support, a file missing from the checkout) would leave
+# /opt/vpn-service behind and every later run would stop at "conflict".
 die() {
   say "ОШИБКА: $*"
+  if [[ "$ROLLBACK_ARMED" == 1 && "$COMMITTED" == 0 ]]; then
+    rollback
+  fi
   exit 1
 }
 
@@ -244,6 +252,7 @@ on_signal() {
 }
 
 arm_rollback() {
+  ROLLBACK_ARMED=1
   trap 'on_error $? $LINENO' ERR
   trap on_signal INT TERM HUP
 }
