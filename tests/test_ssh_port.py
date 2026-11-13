@@ -610,14 +610,15 @@ def test_the_helper_reenters_the_host_mount_namespace_as_root(monkeypatch: pytes
 def test_firewall_open_adds_a_migration_rule_and_undo_removes_only_that(tmp_path: Path) -> None:
     host = Host(tmp_path, "main", env="SSH_PORT=60022\n")
     host.flag("ufw", "allow 54321/tcp|\n")
-    assert host.helper("firewall-open", "--port", "60022").returncode == 0
+    opened = host.helper("firewall-open", "--port", "60022")
+    assert opened.returncode == 0 and opened.stdout.splitlines()[-1] == "added=yes"
     assert host.ufw_rules() == ["allow 54321/tcp|", "allow 60022/tcp|vpn-bot:ssh-migration"]
     assert host.helper("firewall-undo", "--port", "60022").returncode == 0
     assert host.ufw_rules() == ["allow 54321/tcp|"]
     # Already open by the operator: nothing added, so nothing to undo either.
     host.flag("ufw", "allow 60022/tcp|mine\n")
     out = host.helper("firewall-open", "--port", "60022").stdout
-    assert "already allows 60022/tcp" in out
+    assert "already allows 60022/tcp" in out and out.splitlines()[-1] == "added=no"
     host.helper("firewall-undo", "--port", "60022")
     assert host.ufw_rules() == ["allow 60022/tcp|mine"]
 
@@ -765,6 +766,21 @@ def test_deploy_phase1_failure_rolls_back_files_state_and_the_ufw_rule(tmp_path:
     assert host.state() is None
     assert host.ufw_rules() == ["allow 54321/tcp|"], "the rule phase 1 opened is gone again"
     assert host.mutating()[-2:] == ["systemctl restart ssh.socket", "systemctl restart ssh.service"]
+
+
+def test_a_rollback_undoes_only_a_firewall_rule_this_deploy_added(tmp_path: Path) -> None:
+    """A migration whose state file was lost: both ports listen and its UFW rule is
+    there. The plan starts phase 1 again; firewall-open adds nothing — so a rollback
+    must not delete that rule (the restored host listens on both ports again)."""
+    host = Deploy(tmp_path, "main", listening=(54321,), env="SSH_PORT=60022\n")
+    host.phase1((54321,), 60022)
+    host.h(STATE).unlink()
+    host.flag("ufw", "allow 54321/tcp|\nallow 60022/tcp|vpn-bot:ssh-migration\n")
+    proc = host.deploy(PHASE1 + FAIL_LATER)
+    assert proc.returncode == 42, proc.stdout
+    assert "ufw already allows 60022/tcp" in proc.stdout and "added=" not in proc.stdout
+    assert host.ufw_rules() == ["allow 54321/tcp|", "allow 60022/tcp|vpn-bot:ssh-migration"]
+    assert "ssh port firewall" not in proc.stdout, "nothing to undo"
 
 
 def test_deploy_a_later_failure_rolls_phase1_back_too(tmp_path: Path) -> None:

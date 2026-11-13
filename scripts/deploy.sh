@@ -2213,13 +2213,17 @@ ssh_port_phase1() {
 # Phase 1 of a migration on main: SSH_PLAN_TO is opened in the firewall FIRST — open
 # before anything listens costs nothing, the other order would leave the socket behind
 # a closed port. A failure is rollback_now, which removes the rule again.
+# Only a rule THIS call added is undone by a rollback (the helper's last line says
+# added=yes|no): a 'vpn-bot:ssh-migration' rule already there stays. A failed call may
+# have added one before its check failed — nothing was there then, so it is undone.
 ssh_port_phase2_pre() {
   local out
   [[ "$SSH_PLAN_ACTION" == "start" ]] || return 0
   SSH_FW_OPENED=1
   out="$(ssh_port_helper "$APP_DIR" firewall-open --port "$SSH_PLAN_TO" 2>&1)" \
     || rollback_now "ssh port: could not open ${SSH_PLAN_TO} in the firewall before phase 1: ${out}"
-  log "  ssh port: ${out}"
+  if [[ "${out##*$'\n'}" != "added=yes" ]]; then SSH_FW_OPENED=0; fi
+  log "  ssh port: ${out%$'\n'added=*}"
 }
 
 # Phase 2, both roles, armed, right after install_managed_host_files (its post-check —

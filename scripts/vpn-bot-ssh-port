@@ -754,25 +754,28 @@ def ufw(*args: str) -> tuple[int, str]:
     return run(["ufw", *args])
 
 
-def firewall_open(ctx: Ctx, port: int) -> str:
+def firewall_open(ctx: Ctx, port: int) -> tuple[str, bool]:
+    """(what happened, whether THIS call added a rule). Only an added rule may be undone:
+    a 'vpn-bot:ssh-migration' rule already there (a migration whose state file was
+    lost) belongs to the host as it was, and a rollback must leave it."""
     if ctx.role == "relay":
-        return f"relay: table inet vpnrelay_input takes the ssh ports from the listening sockets — {port} follows by itself"
+        return f"relay: table inet vpnrelay_input takes the ssh ports from the listening sockets — {port} follows by itself", False
     if os.access(ctx.host(UFW_APPLY), os.X_OK):
         rc, text = run([str(ctx.host(UFW_APPLY)), "apply"])
         if rc != 0:
             raise Cannot(f"{UFW_APPLY} apply failed (rc {rc}): {text.strip()}")
-        return f"{UFW_APPLY} apply: the firewall follows the listening ports"
+        return f"{UFW_APPLY} apply: the firewall follows the listening ports", False
     rules = ufw_rules(port)
     if rules is None:
-        return "ufw is not installed (or `ufw show added` fails) — no host firewall to open"
+        return "ufw is not installed (or `ufw show added` fails) — no host firewall to open", False
     have = ufw_allows_from_anywhere(rules, port)
     if have is not None:
-        return f"ufw already allows {port}/tcp ('{have.text}') — nothing added"
+        return f"ufw already allows {port}/tcp ('{have.text}') — nothing added", False
     rc, text = ufw("allow", f"{port}/tcp", "comment", UFW_MIGRATION_COMMENT)
     rules = ufw_rules(port) or []
     if rc != 0 or ufw_allows_from_anywhere(rules, port) is None:
         raise Cannot(f"ufw allow {port}/tcp failed (rc {rc}): {text.strip()}")
-    return f"ufw: opened {port}/tcp (rule comment '{UFW_MIGRATION_COMMENT}')"
+    return f"ufw: opened {port}/tcp (rule comment '{UFW_MIGRATION_COMMENT}')", True
 
 
 def firewall_undo(ctx: Ctx, port: int) -> str:
@@ -1084,7 +1087,10 @@ def main(argv: Sequence[str]) -> int:
             print(record(ctx, args.action, args.from_, args.to, proof))
             return 0
         if args.cmd == "firewall-open":
-            print(firewall_open(ctx, args.port))
+            # The last line tells deploy.sh whether a rollback has a rule to undo.
+            text, added = firewall_open(ctx, args.port)
+            print(text)
+            print(f"added={'yes' if added else 'no'}")
             return 0
         if args.cmd == "firewall-undo":
             print(firewall_undo(ctx, args.port))
