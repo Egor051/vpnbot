@@ -106,3 +106,7 @@ class AuditEntityType(StrEnum):
     RELAY = "relay"
     PROXY = "proxy"
     SYSTEM = "system"
+    # The setup wizard's runs (entity_id = wizard_runs.id) and the TOTP second
+    # factor (entity_id = the superadmin's Telegram id).
+    WIZARD = "wizard"
+    SECURITY = "security"

@@ -541,3 +541,60 @@ class ShellResult:
     @property
     def ok(self) -> bool:
         return self.returncode == 0
+
+
+@dataclass(frozen=True, slots=True)
+class TotpCredential:
+    """A superadmin's TOTP second factor (table ``totp_credentials``).
+
+    ``secret_enc`` is the Fernet token of the secret, never the secret itself, and is
+    still masked in the repr: a ciphertext next to a leaked key file is a secret.
+    """
+
+    telegram_user_id: int
+    secret_enc: str
+    enabled: bool
+    created_at: str
+    enabled_at: str | None
+    last_used_step: int
+    failed_attempts: int
+    locked_until: int
+
+    def __repr__(self) -> str:
+        return _redacted_repr(self, frozenset({"secret_enc"}))
+
+
+@dataclass(frozen=True, slots=True)
+class TotpBackupCode:
+    id: int
+    telegram_user_id: int
+    salt_hex: str
+    hash_hex: str
+    used_at: str | None
+
+    def __repr__(self) -> str:
+        return _redacted_repr(self, frozenset({"salt_hex", "hash_hex"}))
+
+
+@dataclass(frozen=True, slots=True)
+class WizardRun:
+    """One run of a setup-wizard mode (table ``wizard_runs``, docs/wizard.md)."""
+
+    id: int
+    mode: str
+    state: str
+    phase: str
+    current_step: str
+    params: dict[str, str]
+    started_by: int | None
+    origin: str
+    chat_id: int | None
+    message_id: int | None
+    log_path: str
+    summary: str
+    plan_ready: bool
+    active: bool
+    created_at: str
+    updated_at: str
+    finished_at: str | None
+    reported_at: str | None

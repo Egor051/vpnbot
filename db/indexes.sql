@@ -85,3 +85,10 @@ CREATE INDEX IF NOT EXISTS idx_announcement_batches_status ON announcement_batch
 -- Depends on announcement_batches.scheduled_at, added by the v16 table rebuild.
 CREATE INDEX IF NOT EXISTS idx_announcement_batches_scheduled ON announcement_batches(scheduled_at) WHERE status = 'scheduled' AND scheduled_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_announcement_deliveries_status ON announcement_deliveries(announcement_id, status, user_id);
+
+-- Tables added by migration v42.
+-- The global lock of the setup wizard: at most one row with active = 1 (NULLs do not
+-- collide in a UNIQUE index), so two concurrent starts cannot both succeed.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wizard_runs_one_active ON wizard_runs(active);
+CREATE INDEX IF NOT EXISTS idx_wizard_runs_created ON wizard_runs(created_at);
+CREATE INDEX IF NOT EXISTS idx_totp_backup_codes_user ON totp_backup_codes(telegram_user_id, used_at);
