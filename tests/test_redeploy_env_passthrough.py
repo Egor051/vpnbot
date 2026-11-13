@@ -279,3 +279,38 @@ def test_launch_without_forwarded_knobs_is_unchanged(
     assert proc.stdout == _expected_stdout(" ".join(deploy_env) or "<none>")
     assert _argv(tmp_path) == _expected_argv(*deploy_env)
     assert _calls(tmp_path) == ["date -u +%Y%m%dT%H%M%SZ", "systemd-run " + " ".join(_expected_argv(*deploy_env))]
+
+
+# --------------------------------------------------------------------------- #
+# 5. REDEPLOY_ATTACH: the setup wizard has no terminal (docs/wizard.md)
+# --------------------------------------------------------------------------- #
+def test_attach_pipe_waits_and_keeps_deploy_sh_exit_code(tmp_path: Path) -> None:
+    """`pipe`: --wait --pipe instead of --pty, and pipefail so tee cannot hide the code."""
+    proc = _source(tmp_path, LAUNCH, CHECK="1", REDEPLOY_ATTACH="pipe")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == _expected_stdout("PHASE1_ONLY=1")
+    assert _argv(tmp_path) == [
+        "--unit=vpn-bot-deploy",
+        "--collect",
+        "--wait",
+        "--pipe",
+        "--quiet",
+        "env",
+        "PHASE1_ONLY=1",
+        "bash",
+        "-c",
+        f"set -o pipefail; {BASH_C}",
+    ]
+
+
+def test_attach_pty_is_the_default_and_unchanged(tmp_path: Path) -> None:
+    proc = _source(tmp_path, LAUNCH, REDEPLOY_ATTACH="pty")
+    assert proc.returncode == 0, proc.stderr
+    assert _argv(tmp_path) == _expected_argv()
+
+
+def test_unknown_attach_value_is_refused_before_anything_runs(tmp_path: Path) -> None:
+    proc = _execute(tmp_path, REDEPLOY_ATTACH="tty")
+    assert proc.returncode == 1
+    assert "REDEPLOY_ATTACH must be pty or pipe" in proc.stderr
+    assert _calls(tmp_path) == []

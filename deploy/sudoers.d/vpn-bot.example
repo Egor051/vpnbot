@@ -123,4 +123,13 @@ Cmnd_Alias VPN_BOT_UFW = \
     /usr/local/sbin/vpn-bot-ufw-apply apply, \
     /usr/local/sbin/vpn-bot-ufw-apply confirm *
 
-vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_UNINSTALL, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT, VPN_BOT_SSH_PORT, VPN_BOT_UFW
+# The setup wizard (docs/wizard.md). Only the `launch` verb: the helper (installed by
+# deploy.sh, OUT_OF_REPO_HELPERS) takes exactly --mode M --run N --phase plan|execute and
+# --param name=value pairs, refuses a mode or a parameter that is not in its fixed table
+# (vpn-bot-wizard-lib MODES, typed: integer ranges, 0/1, enumerations), refuses while
+# another wizard unit runs, and starts the phase in a transient systemd unit. No verb
+# runs a command the bot supplies; `run` is executed by systemd, never through sudo.
+Cmnd_Alias VPN_BOT_WIZARD = \
+    /usr/local/sbin/vpn-bot-wizard launch *
+
+vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_UNINSTALL, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT, VPN_BOT_SSH_PORT, VPN_BOT_UFW, VPN_BOT_WIZARD

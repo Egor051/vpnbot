@@ -1,0 +1,213 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-wizard — launch and run one phase of a setup-wizard run (docs/wizard.md).
+
+The bot never runs a mode itself and never runs anything it typed: it asks THIS
+helper (sudo, exact-path grant `vpn-bot-wizard launch *` in the helper model; directly
+as root otherwise) to launch a phase of a run whose mode and parameters are checked
+against the fixed table in vpn-bot-wizard-lib (MODES). There is no other verb the bot
+may call and no way to pass a command.
+
+  vpn-bot-wizard launch --mode M --run N --phase plan|execute [--param k=v]...
+      Refuses while any vpn-bot-wizard-* unit is active or the lock is held, writes the
+      first status line, then starts the phase DETACHED:
+        systemd-run --unit=vpn-bot-wizard-N --collect ... vpn-bot-wizard run ...
+      so a restart of the bot — which `update` itself causes — cannot kill it.
+  vpn-bot-wizard run --mode M --run N --phase plan|execute [--param k=v]...
+      What the transient unit executes (root). Holds /run/vpn-bot-wizard.lock for its
+      whole life and drives the mode helper through its contract:
+        plan     <helper> plan                        -> outcome planned | failed
+        execute  <helper> apply, then verify          -> succeeded
+                 apply or verify failed: <helper> rollback -> rolled_back | failed
+                 (a read-only mode's rollback only removes its own artifact; the
+                 run stays failed)
+      Each step is a separate process with the mode's timeout. Progress is JSON lines
+      in /var/lib/vpn-bot-wizard/N.status; the last one is {"event": "finished"}.
+  vpn-bot-wizard active
+      The vpn-bot-wizard-* units that are not inactive (one per line).
+
+Exit codes: 0 ok, 2 usage, 3 refused / cannot run (busy, not root, systemd-run failed).
+"""
+
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from types import ModuleType
+
+PHASES = ("plan", "execute")
+
+
+def _load_lib() -> ModuleType:
+    path = Path(__file__).resolve().parent / "vpn-bot-wizard-lib"
+    st = os.stat(path, follow_symlinks=False)
+    if os.geteuid() == 0 and os.environ.get("VPN_BOT_WIZARD_SELFTEST") != "1" and (st.st_uid != 0 or st.st_mode & 0o022):
+        sys.exit(f"vpn-bot-wizard: {path} must be root-owned and not group/other-writable")
+    loader = importlib.machinery.SourceFileLoader("vpn_bot_wizard_lib", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+lib = _load_lib()
+
+
+def parse(argv: list[str]) -> tuple[str, int, str, dict[str, str]]:
+    mode = phase = ""
+    run_id = 0
+    pairs: list[str] = []
+    rest = list(argv)
+    while rest:
+        flag = rest.pop(0)
+        if not rest:
+            raise lib.WizardError(f"{flag}: missing value", 2)
+        value = rest.pop(0)
+        if flag == "--mode" and not mode:
+            mode = value
+        elif flag == "--run" and not run_id:
+            run_id = lib.parse_run_id(value)
+        elif flag == "--phase" and not phase:
+            phase = value
+        elif flag == "--param":
+            pairs.append(value)
+        else:
+            raise lib.WizardError(f"unexpected argument {flag!r}", 2)
+    if not mode or not run_id or phase not in PHASES:
+        raise lib.WizardError("need --mode M --run N --phase plan|execute", 2)
+    lib.mode_of(mode)
+    params = lib.validate_params(mode, pairs)
+    return mode, run_id, phase, params
+
+
+def require_root() -> None:
+    if os.geteuid() != 0 and not lib.SELFTEST:
+        raise lib.WizardError("run as root", 3)
+
+
+# --------------------------------------------------------------------------- #
+# launch
+# --------------------------------------------------------------------------- #
+def launch(mode: str, run_id: int, phase: str, params: dict[str, str]) -> int:
+    require_root()
+    busy = lib.active_wizard_units()
+    if busy is None:
+        raise lib.WizardError("systemctl list-units failed — cannot tell whether a run is active", 3)
+    if busy:
+        raise lib.WizardError(f"another wizard unit is active: {', '.join(busy)}", 3)
+    with lib.global_lock():
+        pass
+    lib.ensure_dirs()
+    status = lib.Status(run_id)
+    log = lib.RunLog(run_id)
+    unit = f"{lib.UNIT_PREFIX}{run_id}"
+    status.emit("launched", phase=phase, mode=mode, unit=unit)
+    log.write(f"=== launch run {run_id}: mode={mode} phase={phase} params={params}")
+    me = str(Path(__file__).resolve())
+    argv = [
+        "systemd-run",
+        f"--unit={unit}",
+        "--collect",
+        "--quiet",
+        f"--description=vpn-bot setup wizard: run {run_id} ({mode}, {phase})",
+        "--property=KillMode=mixed",
+        "--property=TimeoutStopSec=60",
+        me,
+        "run",
+        "--mode",
+        mode,
+        "--run",
+        str(run_id),
+        "--phase",
+        phase,
+        *lib.param_args(params),
+    ]
+    rc, out = lib.run_cmd(argv, log=log)
+    if rc != 0:
+        status.emit("finished", phase=phase, outcome="failed", summary=f"systemd-run failed: {out.strip()[-300:]}")
+        raise lib.WizardError(f"systemd-run failed (exit {rc}): {out.strip()[-300:]}", 3)
+    print(f"vpn-bot-wizard: launched {unit} ({mode}, {phase})")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# run (inside the transient unit)
+# --------------------------------------------------------------------------- #
+def step(mode_name: str, step_name: str, run_id: int, params: dict[str, str], status: object, log: object) -> int:
+    mode = lib.mode_of(mode_name)
+    helper = Path(__file__).resolve().parent / mode.helper
+    status.emit("step", step=step_name, state="start")  # type: ignore[attr-defined]
+    rc, out = lib.run_cmd(
+        [str(helper), step_name, "--run", str(run_id), *lib.param_args(params)],
+        timeout=mode.timeout(step_name),
+        log=log,
+    )
+    tail = out.strip().splitlines()[-1] if out.strip() else ""
+    status.emit("step", step=step_name, state="ok" if rc == 0 else "fail", rc=rc, text=tail[-300:])  # type: ignore[attr-defined]
+    return rc
+
+
+def run(mode_name: str, run_id: int, phase: str, params: dict[str, str]) -> int:
+    require_root()
+    mode = lib.mode_of(mode_name)
+    lib.ensure_dirs()
+    status = lib.Status(run_id)
+    log = lib.RunLog(run_id)
+    try:
+        with lib.global_lock():
+            status.emit("phase", phase=phase, state="start")
+            if phase == "plan":
+                rc = step(mode_name, "plan", run_id, params, status, log)
+                outcome = "planned" if rc == 0 else "failed"
+            else:
+                rc = step(mode_name, "apply", run_id, params, status, log)
+                if rc == 0:
+                    rc = step(mode_name, "verify", run_id, params, status, log)
+                if rc == 0:
+                    outcome = "succeeded"
+                else:
+                    # A read-only mode changed nothing on the host: its rollback only
+                    # cleans up its own artifact, and the run stays "failed".
+                    undone = step(mode_name, "rollback", run_id, params, status, log) == 0
+                    outcome = "rolled_back" if undone and not mode.read_only else "failed"
+            status.emit("finished", phase=phase, outcome=outcome)
+            log.write(f"=== run {run_id} {phase}: {outcome}")
+            return 0 if outcome in ("planned", "succeeded") else 1
+    except lib.WizardError as exc:
+        status.emit("finished", phase=phase, outcome="failed", summary=str(exc))
+        raise
+    except Exception as exc:
+        # Whatever broke, the bot must read an end, never wait for one.
+        status.emit("finished", phase=phase, outcome="failed", summary=f"runner crashed: {type(exc).__name__}: {exc}")
+        log.write(f"=== run {run_id} {phase}: runner crashed: {exc!r}")
+        return 1
+
+
+def main(argv: list[str]) -> int:
+    try:
+        if not argv:
+            raise lib.WizardError("usage: vpn-bot-wizard launch|run|active ...", 2)
+        verb, rest = argv[0], argv[1:]
+        if verb == "active":
+            if rest:
+                raise lib.WizardError("active takes no arguments", 2)
+            busy = lib.active_wizard_units()
+            if busy is None:
+                raise lib.WizardError("systemctl list-units failed", 3)
+            print("\n".join(busy))
+            return 0
+        if verb not in ("launch", "run"):
+            raise lib.WizardError(f"unknown verb {verb!r}", 2)
+        mode, run_id, phase, params = parse(rest)
+        return launch(mode, run_id, phase, params) if verb == "launch" else run(mode, run_id, phase, params)
+    except lib.WizardError as exc:
+        print(f"vpn-bot-wizard: {exc}", file=sys.stderr)
+        return exc.code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

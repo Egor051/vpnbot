@@ -1,0 +1,224 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-wizard-update — the «Обновить бота» mode of the setup wizard (docs/wizard.md).
+
+A thin, honest wrapper around the ONE supported redeploy path, scripts/redeploy.sh
+(which runs deploy.sh from origin/main under systemd-run with its own lock, gates
+and rollback). This helper adds nothing to the deploy itself; it runs it the way an
+operator would and reads its verdict.
+
+  plan      git fetch origin main; what would change: the commits HEAD..origin/main,
+            CURRENT_SCHEMA_VERSION of HEAD and of origin/main and the live
+            schema_version; then `CHECK=1 redeploy.sh` (deploy.sh PHASE1_ONLY=1: the
+            whole read-only Phase 1, tests included). HEAD already at origin/main
+            and force=0: a no-op plan, the CHECK is skipped.
+  apply     `redeploy.sh` (FORCE=1 with force=1). deploy.sh stops and restarts the
+            bot; this process runs in the wizard's own transient unit, so it lives on
+            and the restarted bot picks the run up from the status file.
+  verify    the deploy output has "===== DEPLOY OK =====" (or deploy.sh's "nothing
+            to deploy") and vpn-bot.service is active.
+  rollback  deploy.sh rolls itself back (code, venv, DB, configs, unit) and prints
+            "===== ROLLBACK REPORT ====="; this step reports it and checks that the
+            bot runs. No report = deploy.sh stopped before Phase 2 (nothing changed)
+            or never finished: failed, read the log.
+
+redeploy.sh is called with REDEPLOY_ATTACH=pipe: `systemd-run --wait --pipe` instead of
+`--pty` (there is no terminal here) and `set -o pipefail`, so its exit code is
+deploy.sh's. The verdict is still read from the report text, exactly as an operator
+reads it: the text is what deploy.sh guarantees.
+
+Parameter: force — 1 redeploys even when HEAD already equals origin/main (FORCE=1).
+"""
+
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import os
+import re
+import sqlite3
+import sys
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+
+def _load_lib() -> ModuleType:
+    path = Path(__file__).resolve().parent / "vpn-bot-wizard-lib"
+    st = os.stat(path, follow_symlinks=False)
+    if os.geteuid() == 0 and os.environ.get("VPN_BOT_WIZARD_SELFTEST") != "1" and (st.st_uid != 0 or st.st_mode & 0o022):
+        sys.exit(f"{Path(__file__).name}: {path} must be root-owned and not group/other-writable")
+    loader = importlib.machinery.SourceFileLoader("vpn_bot_wizard_lib", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+lib = _load_lib()
+MODE = "update"
+CHECK_LOG = "check.log"
+DEPLOY_LOG = "deploy.log"
+BOT_UNIT = "vpn-bot.service"
+MAX_COMMITS = 30
+DEPLOY_OK = "===== DEPLOY OK ====="
+ROLLBACK_REPORT = "===== ROLLBACK REPORT ====="
+PHASE1_REPORT = "===== PHASE 1 REPORT"
+NOTHING_TO_DEPLOY = "nothing to deploy"
+_SCHEMA_RE = re.compile(r"^CURRENT_SCHEMA_VERSION\s*=\s*(\d+)", re.MULTILINE)
+
+
+def app() -> str:
+    return str(lib.host_path(lib.APP_DIR))
+
+
+def git(ctx: Any, *args: str, timeout: int = 120) -> tuple[int, str]:
+    return ctx.run(["git", "-C", app(), *args], timeout=timeout)
+
+
+def schema_of(ctx: Any, rev: str) -> str:
+    rc, text = git(ctx, "show", f"{rev}:db/database.py")
+    m = _SCHEMA_RE.search(text) if rc == 0 else None
+    return m.group(1) if m else "?"
+
+
+def live_schema() -> str:
+    env = lib.env_file_values(lib.host_path(f"{lib.APP_DIR}/.env"))
+    db = lib.host_path(env.get("DB_PATH", "").strip() or f"{lib.APP_DIR}/data/vpn.db")
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        try:
+            row = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return "?"
+    return str(row[0]) if row else "?"
+
+
+def redeploy(ctx: Any, *, check: bool, timeout: int) -> tuple[int, str]:
+    env = {"REDEPLOY_ATTACH": "pipe"}
+    if check:
+        env["CHECK"] = "1"
+    if ctx.params.get("force") == "1":
+        env["FORCE"] = "1"
+    ctx.say("CHECK=1 redeploy (Phase 1, read-only)" if check else "redeploy: deploy.sh restarts the bot; the run continues in its own unit")
+    return ctx.run(["bash", f"{app()}/scripts/redeploy.sh"], env=env, timeout=timeout)
+
+
+def save(ctx: Any, name: str, text: str) -> None:
+    lib.write_private(lib.artifact_path(ctx.run_id, name), lib.redact_text(text).encode("utf-8"))
+
+
+def read_artifact(ctx: Any, name: str) -> str:
+    try:
+        return lib.artifact_path(ctx.run_id, name).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def report_block(text: str, marker: str) -> str:
+    """The report printed after *marker*, up to the closing ===== line."""
+    start = text.rfind(marker)
+    if start < 0:
+        return ""
+    lines = text[start:].splitlines()
+    out = [lines[0]]
+    for line in lines[1:]:
+        out.append(line)
+        if line.startswith("====="):
+            break
+    return "\n".join(out[:40])
+
+
+# --------------------------------------------------------------------------- #
+def step_plan(ctx: Any) -> int:
+    ctx.say("git fetch origin main")
+    rc, out = git(ctx, "fetch", "origin", "main", timeout=300)
+    if rc != 0:
+        ctx.event("plan", text=f"git fetch origin main failed (exit {rc}):\n{out[-800:]}")
+        return 1
+    _, head = git(ctx, "rev-parse", "--short", "HEAD")
+    _, tip = git(ctx, "rev-parse", "--short", "origin/main")
+    head, tip = head.strip(), tip.strip()
+    _, count = git(ctx, "rev-list", "--count", "HEAD..origin/main")
+    _, log = git(ctx, "log", "--oneline", "--no-decorate", f"--max-count={MAX_COMMITS}", "HEAD..origin/main")
+    schema_head, schema_tip, schema_live = schema_of(ctx, "HEAD"), schema_of(ctx, "origin/main"), live_schema()
+    n = int(count.strip()) if count.strip().isdigit() else 0
+    lines = [f"HEAD {head} → origin/main {tip}: {n} commit(s)"]
+    lines += [f"  {c}" for c in log.strip().splitlines()]
+    if n > MAX_COMMITS:
+        lines.append(f"  … and {n - MAX_COMMITS} more")
+    if schema_tip != schema_head:
+        lines.append(f"schema migration: {schema_head} → {schema_tip} (live {schema_live})")
+    else:
+        lines.append(f"schema: no migration ({schema_tip}, live {schema_live})")
+    if n == 0 and ctx.params.get("force") != "1":
+        lines.append("already at origin/main — nothing to deploy")
+        ctx.event("plan", text="\n".join(lines), noop=True, commits=0, schema_from=schema_head, schema_to=schema_tip)
+        return 0
+    rc, out = redeploy(ctx, check=True, timeout=lib.mode_of(MODE).timeout("plan") - 120)
+    save(ctx, CHECK_LOG, out)
+    phase1_ok = rc == 0 and PHASE1_REPORT in out
+    if phase1_ok:
+        lines.append("CHECK (deploy.sh Phase 1): OK — the full report is in the run log")
+    else:
+        tail = "\n".join(out.strip().splitlines()[-12:])
+        lines.append(f"CHECK (deploy.sh Phase 1): FAILED (exit {rc})\n{tail}")
+    ctx.event(
+        "plan",
+        text="\n".join(lines),
+        noop=False,
+        commits=n,
+        schema_from=schema_head,
+        schema_to=schema_tip,
+        check_ok=phase1_ok,
+    )
+    return 0 if phase1_ok else 1
+
+
+def step_apply(ctx: Any) -> int:
+    rc, out = redeploy(ctx, check=False, timeout=lib.mode_of(MODE).timeout("apply") - 120)
+    save(ctx, DEPLOY_LOG, out)
+    if DEPLOY_OK in out or NOTHING_TO_DEPLOY in out:
+        return 0
+    print(f"redeploy did not report DEPLOY OK (exit {rc})", file=sys.stderr)
+    return 1
+
+
+def step_verify(ctx: Any) -> int:
+    out = read_artifact(ctx, DEPLOY_LOG)
+    if DEPLOY_OK in out:
+        block = report_block(out, DEPLOY_OK)
+    elif NOTHING_TO_DEPLOY in out:
+        block = "HEAD already at origin/main — nothing to deploy"
+    else:
+        print("no DEPLOY OK in the deploy output", file=sys.stderr)
+        return 1
+    rc, state = ctx.run(["systemctl", "is-active", BOT_UNIT])
+    if state.strip() != "active":
+        print(f"{BOT_UNIT} is {state.strip() or 'unknown'} after the deploy", file=sys.stderr)
+        return 1
+    ctx.event("result", text=block, verdict="deploy_ok")
+    return 0
+
+
+def step_rollback(ctx: Any) -> int:
+    out = read_artifact(ctx, DEPLOY_LOG)
+    block = report_block(out, ROLLBACK_REPORT)
+    _, state = ctx.run(["systemctl", "is-active", BOT_UNIT])
+    running = state.strip() == "active"
+    if block:
+        ctx.event("result", text=block + f"\n{BOT_UNIT}: {state.strip() or 'unknown'}", verdict="rolled_back")
+        return 0 if running else 1
+    ctx.event(
+        "result",
+        text=f"no ROLLBACK REPORT: deploy.sh stopped before Phase 2 (nothing changed) or did not finish — read the run log. {BOT_UNIT}: {state.strip() or 'unknown'}",
+        verdict="no_report",
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(lib.contract_main(MODE, {"plan": step_plan, "apply": step_apply, "verify": step_verify, "rollback": step_rollback}, sys.argv[1:]))

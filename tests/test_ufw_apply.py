@@ -1290,7 +1290,7 @@ def test_the_sudoers_grant_is_apply_and_confirm_only() -> None:
     grants = [ln.strip().rstrip(", \\") for ln in text.splitlines() if "/usr/local/sbin/vpn-bot-ufw-apply" in ln
               and not ln.lstrip().startswith("#")]
     assert grants == ["/usr/local/sbin/vpn-bot-ufw-apply apply", "/usr/local/sbin/vpn-bot-ufw-apply confirm *"]
-    assert "VPN_BOT_SSH_PORT, VPN_BOT_UFW\n" in text
+    assert "VPN_BOT_SSH_PORT, VPN_BOT_UFW, VPN_BOT_WIZARD\n" in text
 
 
 # --------------------------------------------------------------------------- #
