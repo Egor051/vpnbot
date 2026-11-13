@@ -609,9 +609,13 @@ class Deploy(Host):
         self.stage.mkdir()
         self.unitdir = self.h("/etc/systemd/system")
         self.unitdir.mkdir(parents=True, exist_ok=True)
+        # deploy.sh creates a missing drop-in directory with `install -d -o root -g root`:
+        # the suite also runs unprivileged (CI), so `install` is the same stub as in
+        # tests/test_deploy_host_state.py — it copies and sets the mode, never the owner.
+        from test_deploy_host_state import INSTALL
+        _stub(self.stub / "install", INSTALL)
 
     def entries(self) -> list[str]:
-        owner = f"{os.getuid()}:{os.getgid()}"
         import grp
         import pwd
         owner = f"{pwd.getpwuid(os.getuid()).pw_name}:{grp.getgrgid(os.getgid()).gr_name}"
@@ -657,6 +661,8 @@ def test_deploy_relay_phase1_listens_on_both_ports_without_the_knob(tmp_path: Pa
     assert "ssh port: migrating 22 -> 54321 (phase 1 starts now: ssh.socket listens on both" in proc.stdout
     assert host.h(OVERRIDE).read_text(encoding="utf-8") == render(SOCKET_TPL, 22, 54321)
     assert host.h(PORT_DROPIN).read_text(encoding="utf-8") == render(PORT_TPL, 22, 54321)
+    assert any(" -d " in f" {ln} " and "ssh.socket.d" in ln for ln in host.log("install")), \
+        "the relay had no ssh.socket.d: the deploy creates it"
     assert (host.sd / "listening").read_text(encoding="utf-8").split() == ["22", "54321"], "22 never stops"
     assert "ssh port: ssh.socket holds exactly 22 54321" in proc.stdout
     state = host.state()
@@ -701,6 +707,9 @@ def test_deploy_a_later_failure_rolls_phase1_back_too(tmp_path: Path) -> None:
     host = Deploy(tmp_path, "relay", listening=(22,))
     proc = host.deploy(PHASE1 + FAIL_LATER)
     assert proc.returncode == 43, proc.stdout
+    # Phase 1 got all the way through before the later step failed.
+    assert "ssh port: phase 1 — ssh.socket listens on 22,54321" in proc.stdout
+    assert "a later step failed" in proc.stdout
     assert not host.h(OVERRIDE).exists() and not host.h(PORT_DROPIN).exists()
     assert host.state() is None, "the state file Phase 2 wrote is removed again"
     assert host.mutating()[-1] == "systemctl restart ssh.service"
