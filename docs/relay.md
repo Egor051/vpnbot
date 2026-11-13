@@ -473,8 +473,9 @@ Not done in this release; what it would take:
     from the relay's egress IP — the relay's users would share one bucket
     (`SUBSCRIPTION_RATE_LIMIT_BURST` per `SUBSCRIPTION_RATE_LIMIT_SECONDS`) unless the relay's
     source IPs get their own treatment;
-  - the firewall rule from `deploy/ufw-subscription.sh` already admits the relay (it is not
-    source-restricted), and the health monitor would still only probe `XRAY_PUBLIC_PORT`.
+  - the UFW rule for `SUBSCRIPTION_PUBLIC_PORT` (module `subscription` of
+    `scripts/vpn-bot-ufw-apply`) already admits the relay (it is not source-restricted), and
+    the health monitor would still only probe `XRAY_PUBLIC_PORT`.
 
 ## Managing relays in the admin panel
 

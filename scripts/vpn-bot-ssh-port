@@ -51,6 +51,8 @@ Usage (root, except `render` and a `plan` / `status` that can read what they nee
   vpn-bot-ssh-port firewall-close --from P[,P] --to P    main: close the old port(s)
   vpn-bot-ssh-port advance [--listen-wait S]   phase 1 + proof -> phase 2 (the unit)
   vpn-bot-ssh-port confirm --port P --since EPOCH --admin ID    proof `bot` (sudo)
+  vpn-bot-ssh-port proof-journal --ports P[,P] --since EPOCH   read-only: the journal proof for
+                                    any port (vpn-bot-ufw-apply's dead-man), key=value lines
 Common options: --env FILE (default /opt/vpn-service/.env), --repo DIR (default
 /opt/vpn-service, the templates), --role main|relay (default NODE_ROLE of --env),
 --root DIR (tests: every host path is read and written under DIR).
@@ -529,23 +531,29 @@ def is_local(raddr: str, laddr: str, own: set[str]) -> bool:
     return ip.is_loopback or ip.is_unspecified or r == normal_addr(laddr) or r in own
 
 
-def proof_journal(st: State) -> Proof | None:
+def journal_proof(ports: Sequence[int], since: int) -> Proof | None:
+    """A connection from a non-local address on one of <ports> in the sshd log since
+    <since>. Also the proof of vpn-bot-ufw-apply's dead-man (`proof-journal`)."""
     out = out_of(["journalctl", "--no-pager", "-q", "-o", "short-iso", "-u", SSH_UNIT,
-                  "--since", f"@{st.since}"], timeout=120)
+                  "--since", f"@{since}"], timeout=120)
     if not out:
         return None
     own: set[str] | None = None
     for line in out.splitlines():
         m = CONN_RE.search(line)
-        if not m or int(m.group(4)) != st.to:
+        if not m or int(m.group(4)) not in ports:
             continue
         if own is None:
             own = local_addresses()
         if is_local(m.group(1), m.group(3), own):
             continue
         stamp = line.split(" ", 1)[0]
-        return Proof("journal", f"sshd logged a connection from {m.group(1)} on port {st.to} ({stamp})")
+        return Proof("journal", f"sshd logged a connection from {m.group(1)} on port {m.group(4)} ({stamp})")
     return None
+
+
+def proof_journal(st: State) -> Proof | None:
+    return journal_proof([st.to], st.since)
 
 
 def find_proof(ctx: Ctx, st: State) -> Proof | None:
@@ -1058,6 +1066,9 @@ def main(argv: Sequence[str]) -> int:
     p.add_argument("--port", required=True, type=port_arg)
     p.add_argument("--since", required=True, type=int)
     p.add_argument("--admin", required=True, type=int)
+    p = sub.add_parser("proof-journal")
+    p.add_argument("--ports", required=True, type=ports_arg)
+    p.add_argument("--since", required=True, type=int)
     args = ap.parse_args(argv)
 
     try:
@@ -1068,6 +1079,11 @@ def main(argv: Sequence[str]) -> int:
             sys.stdout.write(render(tpl, args.ports))
             return 0
         ctx = make_ctx(args)
+        if args.cmd == "proof-journal":
+            proof = journal_proof(args.ports, args.since)
+            print(f"proof={proof.kind if proof else 'none'}")
+            print(f"proof_detail={proof.detail.replace(chr(10), ' ') if proof else ''}")
+            return 0
         if args.cmd == "plan":
             try:
                 plan = compute_plan(ctx)

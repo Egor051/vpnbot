@@ -1,0 +1,17 @@
+[Unit]
+Description=vpn-bot: a UFW policy change nobody proved — keep it with a proof, else revert it
+Documentation=file:///opt/vpn-service/docs/host-state.md
+# Pulled in by vpn-bot-host-check.service (Wants=: the boot run and the daily run of its
+# timer). While a change of the incoming policy (or the enabling of an inactive ufw)
+# waits for its proof, a transient timer (vpn-bot-ufw-deadman-watch) runs the same
+# check every minute; a reboot ends that timer, and this unit takes over 5 min after
+# boot (docs/host-state.md#the-firewall-ufw). `deadman-check` keeps the change with a
+# proof (a new ssh connection from outside in the sshd log, «Подтвердить» in the bot),
+# reverts it once its deadline has passed without one, and does nothing otherwise.
+ConditionPathExists=/var/lib/vpn-bot/ufw-deadman.json
+After=network-online.target ufw.service ssh.socket ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vpn-bot-ufw-apply deadman-check
+TimeoutStartSec=300

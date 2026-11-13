@@ -651,6 +651,32 @@ STRINGS: dict[str, str] = {
     "ssh_port_confirmed": "🔐 Port {port} confirmed.\n<code>{line}</code>",
     "ssh_port_confirm_stale": "This SSH port migration is not waiting for a confirmation any more.",
     "ssh_port_confirm_failed": "vpn-bot-ssh-port refused the confirmation — the bot's log says why.",
+    # ── UFW (docs/host-state.md#the-firewall-ufw) ────────────────────────────
+    "ufw_deadman_pending": (
+        "🧱 <b>UFW: a change waits for a confirmation</b>\n"
+        "{changes}\n"
+        "Connect to SSH (port {ports}) with a <b>new</b> connection and press «Confirm». "
+        "A connection from outside in the sshd log counts too. Without a proof the change is reverted at {deadline}."
+    ),
+    "ufw_deadman_confirmed": "✅ <b>UFW: the change is confirmed</b>\n{changes}\nProof: {proof} ({at}).",
+    "ufw_deadman_reverted": (
+        "↩️ <b>UFW: the change was reverted</b>\n{changes}\n"
+        "There was no proof — the previous policy is back ({at}). The next apply tries again."
+    ),
+    "btn_ufw_confirm": "✅ Confirm: SSH answers",
+    "ufw_confirmed_alert": "Done: the UFW change stays.",
+    "ufw_confirmed": "🧱 UFW change confirmed.\n<code>{line}</code>",
+    "ufw_confirm_stale": "This UFW policy change is not waiting for a confirmation any more.",
+    "ufw_confirm_failed": "vpn-bot-ufw-apply refused the confirmation — the bot's log says why.",
+    "module_firewall_ok": "🧱 UFW: {summary}",
+    "module_firewall_failed": (
+        "⚠️ UFW did not converge on the set: {summary}. The protocol is switched; the next deploy catches the "
+        "firewall up (bot.log has the details)."
+    ),
+    "module_uninstall_ufw_by_helper": (
+        "• vpn-bot-ufw-apply removes the protocol's rules right after the removal: the marker takes the module "
+        "out of the UFW set"
+    ),
     # ── relay panel (admin → «🛰 Manage relays») ─────────────────────────────
     "btn_relays": "🛰 Manage relays",
     "relays_title": "<b>🛰 Relays</b>",

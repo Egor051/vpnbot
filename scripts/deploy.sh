@@ -424,6 +424,10 @@ OUT_OF_REPO_HELPERS=(
   # by the bot through sudo (`confirm`) — `required` on every host of either role.
   "scripts/vpn-bot-ssh-port|/usr/local/sbin/vpn-bot-ssh-port|required"
   "scripts/vpn-bot-ssh-port|/usr/local/sbin/vpn-bot-ssh-port|required|relay"
+  # The main server's UFW (docs/host-state.md#the-firewall-ufw): executed by the deploy,
+  # by vpn-bot-ufw-deadman.service, by vpn-bot-ssh-port (firewall-open/close) and by
+  # the bot through sudo (`apply`, `confirm`) — `required` on main; a relay has no UFW.
+  "scripts/vpn-bot-ufw-apply|/usr/local/sbin/vpn-bot-ufw-apply|required"
 )
 # The one helper that is EXECUTED by a systemd unit (warp-routes.service runs it),
 # so a fresh binary only takes effect on restart. Refreshing it triggers a
@@ -559,6 +563,9 @@ MANAGED_HOST_FILES=(
   # Phase 2 of a proven migration outside a deploy; vpn-bot-host-check.service pulls
   # it in (Wants=), so the boot run and the daily run of its timer look for the proof.
   "deploy/host/systemd/vpn-bot-ssh-port.service|/etc/systemd/system/vpn-bot-ssh-port.service|0644|root:root|unit|main"
+  # A UFW policy change nobody proved: kept with a proof, else reverted — after a reboot
+  # too (vpn-bot-host-check.service pulls it in; docs/host-state.md#the-firewall-ufw).
+  "deploy/host/systemd/vpn-bot-ufw-deadman.service|/etc/systemd/system/vpn-bot-ufw-deadman.service|0644|root:root|unit|main"
   # Only where SOCKS5 is enabled and not removed from the host: after an uninstall
   # (apt-get purge dante-server) this drop-in would otherwise come back, and the
   # "did not exist before -> enable + start" branch would try to start a danted that
@@ -633,6 +640,35 @@ SSH_PLAN_TO=""; SSH_PLAN_PROOF=""; SSH_PLAN_PROOF_DETAIL=""; SSH_PLAN_STATUS="";
 SSH_FW_OPENED=0                        # Phase 2 opened SSH_PLAN_TO in UFW (rollback undoes it)
 SSH_FINAL_STATUS=""
 declare -A MH_SSH_STEP=()              # dst -> 1: an ssh drift that is a migration step
+# --------------------------------------------------------------------------- #
+# UFW — the main server's firewall, computed (docs/host-state.md#the-firewall-ufw)
+# --------------------------------------------------------------------------- #
+# scripts/vpn-bot-ufw-apply owns the rule set: the module table (a module is in it while
+# .env enables it and it has no uninstall marker), the ssh ports (SSH PORT above: the
+# plan's listen set — both ports during a migration), deploy/host/ufw/extra.list and the
+# default policies of deploy/host/ufw/policy (routed is never touched). Each rule of the
+# set carries the comment 'vpn-bot:<module|ssh|extra>'; nobody types `ufw allow`.
+#   Phase 1  `plan` from the checkout, read-only: the section «UFW» and the report. It
+#            stops (PHASE1_ONLY=1: reported) on a refused plan (extra.list, policy,
+#            .env), on a main server without ufw, and on a public listener the set
+#            neither allows nor declares closed — Phase 2 would roll back on it anyway.
+#   Phase 2  `save` right after the helpers are installed (before the SSH port opens
+#            anything), `apply` after the host files and the SSH port state, then
+#            `listeners`; a failure is rollback_now, and the rollback `restore`s the
+#            saved state (files, enabled or not, a dead-man this deploy armed stopped).
+# An ordinary deploy changes no policy and needs no dead-man; enabling an inactive ufw
+# or a new incoming policy is armed with one and stays only with a proof (a new ssh
+# connection from outside in the sshd log, «Подтвердить» in the bot) — DEPLOY OK then
+# says "dead-man: PENDING CONFIRM (reverts at ...)". Main only: a relay's input filter
+# is vpnrelay_input (vpn-relay-apply).
+UFW_HELPER_REL="scripts/vpn-bot-ufw-apply"
+UFW_ROOT="${UFW_ROOT:-}"          # tests: the helper reads and writes host paths under it
+UFW_HELPER=""                     # Phase 1 copies the checkout's helper into MH_CAND_DIR
+UFW_PLAN_OUT=""                   # the Phase 1 plan, key=value lines
+UFW_PLAN_RC=""
+UFW_SAVED=0                       # Phase 2 saved the UFW state: the rollback restores it
+UFW_SNAPSHOT=""
+UFW_FINAL_STATUS=""
 # Host-file knobs. The paths are overridable for the DEPLOY_SELFTEST suites only.
 ALLOW_SSH_CHANGE="${ALLOW_SSH_CHANGE:-0}"      # see the ENVIRONMENT KNOBS block
 SSHD_CONFIG="${SSHD_CONFIG:-/etc/ssh/sshd_config}"
@@ -2303,6 +2339,160 @@ ssh_port_report_block() {
 }
 
 # --------------------------------------------------------------------------- #
+# UFW (the UFW block at the top; docs/host-state.md#the-firewall-ufw) — main only
+# --------------------------------------------------------------------------- #
+# The helper of the commit being deployed (Phase 1 copies it into MH_CAND_DIR, so Phase
+# 2 and the rollback speak the same version), through python3 -I. Under DEPLOY_SELFTEST
+# it refuses to run without UFW_ROOT: a test never reaches the real firewall.
+ufw_helper() {
+  local repo="${1%/}" bin
+  shift
+  if [[ "${DEPLOY_SELFTEST:-0}" == "1" && -z "$UFW_ROOT" ]]; then
+    echo "DEPLOY_SELFTEST: UFW_ROOT is empty — refusing to run vpn-bot-ufw-apply against the real firewall"
+    return 5
+  fi
+  bin="${UFW_HELPER:-${repo}/${UFW_HELPER_REL}}"
+  local -a args=(--env "$ENV_FILE" --repo "$repo")
+  if [[ -n "$SSH_PORT_HELPER" ]]; then args+=(--ssh-port-helper "$SSH_PORT_HELPER"); fi
+  if [[ -n "$UFW_ROOT" ]]; then args+=(--root "$UFW_ROOT"); fi
+  python3 -I "$bin" "${args[@]}" "$@"
+}
+
+# The value of <key> in the helper's key=value lines <text> (the last one wins).
+ufw_kv() {
+  local line v=""
+  while IFS= read -r line; do
+    if [[ "$line" == "$1="* ]]; then v="${line#*=}"; fi
+  done <<< "$2"
+  printf '%s' "$v"
+}
+
+# The plan (key=value lines, read as data — never evaluated) as lines for a human.
+ufw_plan_text() {
+  local line k v a b c d e
+  while IFS= read -r line; do
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      error)     printf 'ERROR: %s\n' "$v" ;;
+      active)    printf 'ufw active: %s%s\n' "$v" "$([[ "$v" == no ]] && printf ' — Phase 2 enables it under a dead-man')" ;;
+      policy)    IFS='|' read -r a b c <<< "$v"
+                 if [[ "$c" == "-" ]]; then printf 'policy %-9s %s (not managed)\n' "$a" "$b"
+                 elif [[ "$b" == "$c" ]]; then printf 'policy %-9s %s\n' "$a" "$b"
+                 else printf 'policy %-9s %s -> %s (Phase 2%s)\n' "$a" "$b" "$c" "$([[ "$a" == incoming ]] && printf ', under a dead-man')"; fi ;;
+      ssh_ports) printf 'ssh ports in the set: %s' "$v" ;;
+      ssh_source) printf ' (%s)\n' "$v" ;;
+      ssh_live)  printf 'sshd listens on: %s' "${v:-<none found — nothing is deleted>}" ;;
+      ssh_live_why) printf ' (%s)\n' "$v" ;;
+      module)    IFS='|' read -r a b c <<< "$v"; printf 'module %-13s %-3s %s\n' "$a" "$b" "$([[ "$b" == off ]] && printf '(%s)' "$c")" ;;
+      rule)      IFS='|' read -r a b c d e <<< "$v"
+                 printf '%-6s %-12s %s — %s\n' "$a" "$b" "'${d}'" "$e" ;;
+      note)      printf 'note: %s\n' "$v" ;;
+      listener)  IFS='|' read -r a b c d e <<< "$v"
+                 [[ "$a" == ok ]] || printf 'listener %-6s %s/%s on %s — %s\n' "$a" "$c" "$b" "$d" "$e" ;;
+      listeners) printf 'listeners: %s\n' "$v" ;;
+      deadman)   [[ "$v" == none ]] || printf 'dead-man: %s\n' "$v" ;;
+      summary)   printf 'summary: %s\n' "$v" ;;
+    esac
+  done <<< "$1"
+}
+
+# Phase 1, main, read-only, after the SSH port plan (its `listen` set is the ssh part of
+# the UFW set). A refused plan, a host without ufw and a public listener that is neither
+# allowed nor declared closed stop here — before any mutation (PHASE1_ONLY=1: reported).
+ufw_phase1() {
+  local root="${1%/}" line
+  local -a fail=()
+  [[ "${NODE_ROLE:-main}" == "main" ]] || return 0
+  if [[ ! -f "${root}/${UFW_HELPER_REL}" ]]; then
+    warn "ufw: the checkout has no ${UFW_HELPER_REL} — the firewall is not managed by this deploy"
+    return 0
+  fi
+  mh_candidate_dir_init
+  UFW_HELPER="${MH_CAND_DIR}/vpn-bot-ufw-apply"
+  cp "${root}/${UFW_HELPER_REL}" "$UFW_HELPER" \
+    || die "cannot copy ${root}/${UFW_HELPER_REL} into ${MH_CAND_DIR}; nothing was changed"
+  UFW_PLAN_OUT="$(ufw_helper "$root" plan --ssh-ports "$SSH_PLAN_LISTEN" 2>&1)" && UFW_PLAN_RC=0 || UFW_PLAN_RC=$?
+  log "UFW (scripts/vpn-bot-ufw-apply plan; docs/host-state.md#the-firewall-ufw):"
+  while IFS= read -r line; do log "  ${line}"; done < <(ufw_plan_text "$UFW_PLAN_OUT")
+  if [[ "$(ufw_kv result "$UFW_PLAN_OUT")" != "ok" ]]; then
+    fail+=("the UFW plan was refused: $(ufw_kv error "$UFW_PLAN_OUT") (exit ${UFW_PLAN_RC}${UFW_PLAN_OUT:+; last line: ${UFW_PLAN_OUT##*$'\n'}})")
+  elif [[ "$(ufw_kv ufw "$UFW_PLAN_OUT")" != "present" || -n "$(ufw_kv error "$UFW_PLAN_OUT")" ]]; then
+    fail+=("ufw: $(ufw_kv error "$UFW_PLAN_OUT") — the main server's firewall is managed by the repo")
+  elif [[ "$(ufw_kv listeners "$UFW_PLAN_OUT")" == "fail" ]]; then
+    fail+=("ufw: a public listener is neither allowed by the set nor declared closed (the 'listener FAIL' lines above): declare it in deploy/host/ufw/extra.list ('main|closed <port>/<proto>|<why>'), allow it there, or stop it")
+  elif [[ "$(ufw_kv listeners "$UFW_PLAN_OUT")" == "unknown" ]]; then
+    warn "ufw: \`ss\` failed — the listeners are not checked"
+  fi
+  if [[ "$(ufw_kv summary "$UFW_PLAN_OUT")" == *"enable=yes"* || "$(ufw_kv summary "$UFW_PLAN_OUT")" != *"policy_changes=0"* ]]; then
+    warn "ufw: Phase 2 changes the incoming policy or enables ufw under a dead-man: it stays only with a proof — a NEW ssh"
+    warn "  connection from outside, or «Подтвердить» in the bot — within 10 minutes, else it is reverted by itself"
+  fi
+  (( ${#fail[@]} > 0 )) || return 0
+  for line in "${fail[@]}"; do warn "  ${line}"; done
+  if [[ "$PHASE1_ONLY" == "1" ]]; then
+    warn "PHASE1_ONLY=1: a real deploy stops here (not fatal in inspection mode)"
+    return 0
+  fi
+  die "ufw: ${fail[0]} — nothing was changed"
+}
+
+# The Phase 1 report section.
+ufw_report_block() {
+  local line
+  [[ "${NODE_ROLE:-main}" == "main" ]] || return 0
+  printf '\n  --- UFW (scripts/vpn-bot-ufw-apply — docs/host-state.md#the-firewall-ufw) ---\n'
+  if [[ -z "$UFW_HELPER" ]]; then printf '    not checked (no %s in the checkout)\n' "$UFW_HELPER_REL"; return 0; fi
+  while IFS= read -r line; do printf '    %s\n' "$line"; done < <(ufw_plan_text "$UFW_PLAN_OUT")
+}
+
+# Phase 2, main, armed, right after the helpers are installed and before the SSH port
+# opens anything: the UFW state the rollback puts back.
+ufw_phase2_save() {
+  local out
+  [[ -n "$UFW_HELPER" ]] || return 0
+  UFW_SNAPSHOT="${MH_CAND_DIR}/ufw-snapshot"
+  out="$(ufw_helper "$APP_DIR" save --dir "$UFW_SNAPSHOT" 2>&1)" \
+    || rollback_now "ufw: cannot save the UFW state before changing it: ${out}"
+  UFW_SAVED=1
+  log "  ${out##*$'\n'}"
+}
+
+# Phase 2, main, armed, after the host files and the SSH port state: apply the set as
+# Phase 1 planned it, then the listener check. Either failing is rollback_now.
+ufw_phase2_apply() {
+  local out rc line
+  [[ -n "$UFW_HELPER" ]] || return 0
+  log "ufw: apply (ssh ports ${SSH_PLAN_LISTEN:-from the helper})"
+  out="$(ufw_helper "$APP_DIR" apply --ssh-ports "$SSH_PLAN_LISTEN" 2>&1)" && rc=0 || rc=$?
+  while IFS= read -r line; do if [[ -n "$line" ]]; then log "  ${line}"; fi; done <<< "$out"
+  (( rc == 0 )) || rollback_now "ufw: vpn-bot-ufw-apply apply failed (exit ${rc}) — the lines above say why"
+  out="$(ufw_helper "$APP_DIR" listeners --ssh-ports "$SSH_PLAN_LISTEN" 2>&1)" && rc=0 || rc=$?
+  case "$rc" in
+    0) log "  ufw: every public TCP listener and every module UDP port is allowed or declared closed" ;;
+    4) while IFS= read -r line; do
+         if [[ "$line" == "listener=FAIL|"* ]]; then warn "  ${line#listener=}"; fi
+       done <<< "$out"
+       rollback_now "ufw: a public listener is neither allowed nor declared closed (above)" ;;
+    *) warn "ufw: the listener check could not run (exit ${rc}): ${out##*$'\n'}" ;;
+  esac
+}
+
+# The rollback's part (host_files_rollback): the UFW state saved before this deploy.
+ufw_rollback() {
+  local out rc
+  (( UFW_SAVED )) && [[ -n "$UFW_HELPER" && -n "$UFW_SNAPSHOT" ]] || return 0
+  out="$(ufw_helper "$APP_DIR" restore --dir "$UFW_SNAPSHOT" 2>&1)"; rc=$?
+  echo "ufw restored to the state saved before this deploy: ${out//$'\n'/; }: rc=${rc}"
+}
+
+# After DEPLOY OK (and after the SSH port's own step, which may close an old port):
+# the line DEPLOY OK prints. Never a rollback.
+ufw_after_deploy() {
+  [[ -n "$UFW_HELPER" ]] || return 0
+  UFW_FINAL_STATUS="$(ufw_helper "$APP_DIR" status 2>/dev/null)" || UFW_FINAL_STATUS="ufw: status could not be read"
+}
+
+# --------------------------------------------------------------------------- #
 # Host-path backup — ONE mechanism for every file a deploy creates, changes or
 # removes outside the checkout: MANAGED_HOST_FILES of both roles and the relay's
 # helper/unit/sysctl file. Built on stage_path, so every copy lands in $STAGE and
@@ -2720,6 +2910,7 @@ host_files_rollback() {
   done
   restore_host_paths
   ssh_port_rollback
+  ufw_rollback
   (( ${#MH_CHANGED[@]} > 0 )) || return 0
   for row in "${MH_CHANGED[@]}"; do
     IFS='|' read -r class dst how <<< "$row"
@@ -5159,6 +5350,11 @@ host_state_phase1 "$WT"
 # BEATEN/MISMATCH, or a LATENT on an sshd auth key nobody accepted, stops here.
 host_invariants_phase1 "$WT"
 
+# UFW (the UFW block at the top): the set Phase 2 applies, from the checkout — after the
+# SSH port plan, whose listen set is its ssh part. Stops on a refused plan, a missing
+# ufw or a public listener that is neither allowed nor declared closed.
+ufw_phase1 "$WT"
+
 # systemd-networkd foreign-rule guard (informational, never fatal). Keeps the WARP
 # `ip rule`s alive across a networkd (re)start. The drop-in itself is a
 # MANAGED_HOST_FILES entry (class networkd) now, so Phase 2 installs it; this only
@@ -5182,7 +5378,6 @@ if (( SUB_LIVE_RC == 0 )); then
 else
   warn "subscription endpoint: ${SUB_LIVE_MSG}"
   warn "  install -m0644 deploy/${SUBSCRIPTION_UNIT} /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now ${SUBSCRIPTION_UNIT%.service}"
-  warn "  (public port also needs: bash deploy/ufw-subscription.sh)"
 fi
 
 # UNIT_SET assembly + classification + pre-state snapshot (see assemble_unit_set).
@@ -5293,6 +5488,8 @@ phase1_report() {
   host_state_report_block
   # --- Host invariants: is it in effect (scripts/vpn-bot-host-check) ---
   host_invariants_report_block
+  # --- UFW: the set Phase 2 applies (scripts/vpn-bot-ufw-apply plan) ---
+  ufw_report_block
 
   # --- UNIT_SET: per-unit class + LoadState/ActiveState + is-enabled ---
   printf '\n  --- UNIT_SET (watched for an active-state regression across a deploy) ---\n'
@@ -5326,7 +5523,7 @@ phase1_report() {
   printf '    %s\n' "${SUB_LIVE_MSG:-<not checked>}"
   if (( ${SUB_LIVE_RC:-0} != 0 )); then
     printf '      install -m0644 deploy/%s /etc/systemd/system/ && systemctl daemon-reload\n' "$SUBSCRIPTION_UNIT"
-    printf '      systemctl enable --now %s   # plus deploy/ufw-subscription.sh for the public port\n' "${SUBSCRIPTION_UNIT%.service}"
+    printf '      systemctl enable --now %s   # its public port is in the UFW set (SUBSCRIPTION_PUBLIC_PORT)\n' "${SUBSCRIPTION_UNIT%.service}"
   fi
 
   # --- Sidecars: units running the same code, restarted by Phase 2 ---
@@ -5588,6 +5785,10 @@ log "installing prod dependencies"
 # would fail the unit with 203/EXEC on any host that does not already have it.
 install_out_of_repo_helpers
 
+# UFW: the state a rollback restores — saved before anything below may touch the
+# firewall (the SSH port opens its new port first).
+ufw_phase2_save
+
 # Host files as code (MANAGED_HOST_FILES): install, repair and retire from the
 # advanced tree, run each class's post-action for what actually changed, rescan.
 # Validated in Phase 1; every path is in the archive; a failure rolls back. The SSH
@@ -5595,6 +5796,9 @@ install_out_of_repo_helpers
 ssh_port_phase2_pre
 install_managed_host_files
 ssh_port_phase2_post
+
+# UFW: the set as Phase 1 planned it, then the listener check (a failure rolls back).
+ufw_phase2_apply
 
 log "installing ${BOT_UNIT} from deploy/vpn-bot.service (verbatim)"
 install -m0644 "deploy/vpn-bot.service" "$SYSTEM_UNIT"
@@ -5743,6 +5947,7 @@ trap - ERR INT TERM HUP
 # The SSH port after the deploy (never a rollback): close the old port of a finished
 # migration, or look for the proof of one in phase 1 right away.
 ssh_port_after_deploy
+ufw_after_deploy
 
 cat <<EOF
 
@@ -5756,6 +5961,7 @@ cat <<EOF
   host files       : $(host_files_summary)
   host invariants  : $(hc_summary_text)
   ${SSH_FINAL_STATUS:-ssh port: not checked}
+  ${UFW_FINAL_STATUS:-ufw: not checked}
 EOF
 host_invariants_report_rows
 # One line per sidecar (restarted / skipped), so a half-deployed host is visible

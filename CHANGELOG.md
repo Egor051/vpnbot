@@ -8,6 +8,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The main server's UFW is computed from the repo and `.env`, and owned by one helper
+  (docs/host-state.md#the-firewall-ufw).** New root helper `scripts/vpn-bot-ufw-apply` (stdlib
+  Python, `OUT_OF_REPO_HELPERS`, `required` on main): `plan` (read-only, `key=value` lines),
+  `apply`, `listeners`, `status`, `save`/`restore`, `deadman-check`, `confirm`. **The set**: one
+  module table — `xray` → `XRAY_PUBLIC_PORT/tcp`, `hysteria2` → `HYSTERIA2_PORT/udp`, `socks5` →
+  `SOCKS5_PORT/tcp`, `subscription` → `SUBSCRIPTION_PUBLIC_PORT/tcp`, `mtproto` → `MTPROTO_PORT/tcp`,
+  `awg` → its `ListenPort/udp` + `route allow in on <AWG_INTERFACE> out on <WAN> from <AWG_NETWORK>`;
+  a module is in it only while `.env` enables it and it has no uninstall marker — plus the ssh
+  ports (`SSH_PORT`, both ports during a migration: the SSH port plan's `listen` set) and
+  `deploy/host/ufw/extra.list` (`role|rule|reason`, reason ≥ 20 characters; also
+  `closed <port>/<proto>` for a listener closed on purpose; empty — every measured rule is a
+  module's or ssh's). Policies from `deploy/host/ufw/policy`, seeded from the measurement
+  (`incoming deny`, `outgoing allow`); **routed is never touched**. Each rule carries
+  `vpn-bot:<module|ssh|extra>`. `apply` adds what is missing (a missing v4 or v6 copy too —
+  IPv6 counted as ufw counts it: `IPV6=yes` and a kernel with IPv6), relabels a matching rule
+  without our comment in place (ufw updates the comment, the port never closes), deletes a marked
+  rule that is not in the set and an **unmarked rule that matches the table** (a module switched
+  off or removed, an old ssh port — so the route rule of the removed AWG and the old `22/tcp` of
+  the measured main leave; a route rule with `ufw route delete`, which ufw 0.36 requires —
+  measured), and only WARNs about any other unmarked rule. Rules are read from `ufw show added`
+  and `/etc/ufw/user*.rules` (`### tuple ###`, one file per family), whose text format was
+  checked against ufw 0.36.2's own `get_command`. **Never a lockout**: a rule for the port sshd
+  really listens on (`sshd -T`, ssh.socket's `Listen=`, `ss`) is never deleted, and nothing is
+  deleted when that port cannot be told; enabling an inactive ufw and a new incoming policy run
+  under a **dead-man** as the relay's input filter does (#328): a transient timer checks every
+  minute and keeps the change only with a proof from the SSH port migration — a new connection
+  from outside in the sshd log (new read-only `vpn-bot-ssh-port proof-journal`) or «Подтвердить»
+  in the bot — else reverts it after 10 minutes; after a reboot `vpn-bot-ufw-deadman.service`
+  (pulled in by `vpn-bot-host-check.service`) re-arms or reverts. An ordinary deploy changes no
+  policy and arms no dead-man. **Listeners**: every public or wildcard TCP `LISTEN` must be
+  allowed or declared closed; UDP only on the module table's ports; the listen-port of an awg/wg
+  interface (`awg show all listen-port`, never hardcoded) and outgoing sockets on a private
+  address (`172.16.0.2:*`) are INFO. **Deploy**: Phase 1 has a section «UFW» (and a report
+  block) and stops on a refused plan, a main server without ufw, or a listener nobody allowed;
+  Phase 2 saves the UFW state right after the helpers (before the SSH port opens anything),
+  applies after the host files and the SSH port state, checks the listeners — a failure is
+  `rollback_now`, which restores the saved state — and DEPLOY OK prints `ufw: …`. **The bot**:
+  switching a protocol on in «Модули протоколов» and removing one from the host run
+  `vpn-bot-ufw-apply apply` (new exact sudo grant: `apply`, `confirm *`); a policy change waiting
+  for its proof is announced once with «Подтвердить». **Host check**: family `ufw` — a missing
+  rule (or copy), a marked rule outside the set, a wrong policy and an inactive ufw are
+  `MISMATCH`, an unmarked rule outside the set `LATENT`; `--pre-install` makes what the deploy
+  fixes `PENDING`.
+
 - **The SSH port is one setting, `SSH_PORT`, and moves by itself on both roles
   (docs/host-state.md#the-ssh-port).** `SSH_PORT` in `.env` of the main server and of a relay
   (absent = 54321: the main server does not change, an existing relay moves from the package's 22
@@ -693,6 +737,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one image.
 
 ### Removed
+
+- `deploy/ufw-subscription.sh` and the deploy's hints to run it: the subscription port is the
+  `subscription` row of the UFW module table now. `deploy/helpers/vpn-bot-protocol-uninstall`
+  no longer deletes (or, on a rollback, re-adds) UFW rules, and its plan and manifest name none —
+  the marker it writes takes the module out of the UFW set and the bot runs
+  `vpn-bot-ufw-apply apply` right after: one owner of the firewall rules.
 
 - Text handlers for «🛡 Админ-панель» / «Панель модератора:» typed as a message (the bot sends no
   reply keyboard), and the unused `pagination_keyboard`, `modules_back_keyboard`,

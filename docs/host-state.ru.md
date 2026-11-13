@@ -63,6 +63,9 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/ssh/sshd_config.d/00-vpn-bot-port.conf` | шаблон + значения хоста (`ssh`, `render=ssh-port`) | deploy.sh, рендер из `SSH_PORT` | `/etc/ssh` | `Port SSH_PORT` (запасной путь: ssh.service без сокета) + `LogLevel VERBOSE` (доказательство по журналу) |
 | `/etc/systemd/system/vpn-bot-ssh-port.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot `vpn-bot-ssh-port advance`: фаза 2 доказанного переезда; его подтягивает `vpn-bot-host-check.service` (`Wants=`), сам не включается |
 | `/var/lib/vpn-bot/ssh-migration.json` | состояние | `vpn-bot-ssh-port` | — | переезд (`from`, `to`, `phase`, `since`, доказательство); атомарно, `root` `0644`; его читает бот |
+| `/etc/systemd/system/vpn-bot-ufw-deadman.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot `vpn-bot-ufw-apply deadman-check`: недоказанная смена политики UFW после перезагрузки остаётся или откатывается; его подтягивает `vpn-bot-host-check.service` (`Wants=`), сам не включается — [Фаервол (UFW)](#фаервол-ufw) |
+| `/etc/ufw/user.rules`, `/etc/ufw/user6.rules`, `/etc/default/ufw` | вычисляется (`vpn-bot-ufw-apply`) | деплой и бот через `vpn-bot-ufw-apply`; никогда не `ufw allow` руками | `/etc/ufw/user.rules`, `/etc/ufw/user6.rules`, `/etc/default/ufw` | набор: таблица модулей + ssh + `deploy/host/ufw/extra.list`; политики из `deploy/host/ufw/policy` (routed не трогается) |
+| `/var/lib/vpn-bot/ufw-deadman.json` | состояние | `vpn-bot-ufw-apply` | — | смена политики под dead-man (`pending`, `confirmed`, `reverted`); атомарно, `root` `0644`; его читает бот |
 | `/etc/ssh/sshd_config` | дефолт пакета (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh возвращает шаблон | `/etc/ssh` | активные `PasswordAuthentication yes` / `PermitRootLogin yes` образа провайдера после `Include` — LATENT, который останавливает Phase 1: файл возвращается, когда доказано, что `sshd -T` побайтно не меняется, — без `ALLOW_SSH_CHANGE` |
 | `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh, из `deploy/host/cloud/cloud-init.disabled` | — (в репо) | пустой маркер: cloud-init выключен (на ребуте он переписывал sshd и sudoers) |
 | `/etc/systemd/system/vpn-bot-host-check.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot: проверка инвариантов хоста — [Эффективное состояние](#эффективное-состояние) |
@@ -72,7 +75,7 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf` | repo-managed (`unit`, `gate=MTPROTO`) | deploy.sh, из `deploy/mtproxy-vpn-bot-managed.conf` | `/etc/systemd` | только пока `MTPROTO_ENABLED=true`; побайтно равный файл со старым именем `vpnbot-managed.conf` переименовывается. При выключенном MTProxy оставшийся drop-in показывается как сирота |
 | `/etc/systemd/system/vpn-bot.service` | repo-managed | deploy.sh, как есть | `/etc/systemd` | действуют гейты модели привилегий |
 | `/etc/systemd/system/<deploy/*.service, *.timer>` | repo-managed | оператор, руками | `/etc/systemd` | drift-гейт юнитов в Phase 1 печатает команды установки |
-| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms`, `vpn-bot-host-check`, `vpn-bot-ssh-port` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | из `scripts/` |
+| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms`, `vpn-bot-host-check`, `vpn-bot-ssh-port`, `vpn-bot-ufw-apply` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | из `scripts/` |
 | `/usr/local/sbin/vpn-bot-{xray,awg,mtproxy}-apply`, `vpn-bot-socks5-user` | backup-only (`installer`) | `deploy/setup-nonroot-helper-mode.sh` | `/usr/local/sbin` | исходники в `deploy/helpers/` |
 | `/usr/local/etc/xray/config.json` | шаблон + значения хоста | бот (клиенты) / оператор | бандл восстановления | структуру проверяет `deploy/backend-config-sync.py` |
 | `/etc/amnezia/amneziawg/awg0.conf` | шаблон + значения хоста | бот (peers) / оператор | бандл восстановления; `/etc/amnezia` | тот же гейт |
@@ -550,8 +553,9 @@ openssh-server 1:9.6p1-3ubuntu13: он идёт по `Include` в `sshd_config.d
    слушает оба. Файрвол следует за ними: на relay `table inet vpnrelay_input` сам берёт порты ssh
    из `ss` (рестарт `vpn-relay` в деплое применяет его заново, изменённый набор подтверждает проба
    с main — [docs/relay.ru.md](relay.ru.md#входной-фильтр)); на main деплой открывает `SSH_PORT`
-   в UFW **до** изменения сокета, правилом с комментарием `vpn-bot:ssh-migration` (или
-   `vpn-bot-ufw-apply apply`, где этот хелпер установлен, — тогда файрвол его). Старый порт не
+   в UFW **до** изменения сокета: `vpn-bot-ufw-apply apply` (установлен на main — файрвол его,
+   [Фаервол (UFW)](#фаервол-ufw)) кладёт в набор оба порта; правило с комментарием
+   `vpn-bot:ssh-migration` — только там, где хелпера нет. Старый порт не
    трогается. Состояние пишется в `/var/lib/vpn-bot/ssh-migration.json` (`from`, `to`,
    `phase: 1`, `since`).
 2. **Фаза 2 — только после доказательства**, что `SSH_PORT` работает **снаружи**: старый порт
@@ -622,3 +626,91 @@ UFW, `ct state established,related accept` в фильтре relay). Сам де
 | фаза 1, доказательства нет | `PENDING migration` с тем, чего ждём | то же |
 | фаза 1, доказано | `PENDING` (дальше фаза 2); упавшая и откатанная фаза 2 добавляет `WARN` | `PENDING` |
 | `SSH_PORT` отклонён | `MISMATCH SSH_PORT` с причиной | то же (Phase 1 всё равно откажет) |
+
+## Фаервол (UFW)
+
+UFW основного сервера **вычисляется**, руками его никто не набирает: `scripts/vpn-bot-ufw-apply`
+(ставит deploy.sh, `OUT_OF_REPO_HELPERS`, `required` на main) выводит весь набор правил из
+репозитория и `.env` и приводит к нему хост. У relay UFW нет: его входной фильтр —
+`vpnrelay_input` ([docs/relay.ru.md](relay.ru.md#входной-фильтр)).
+
+### Набор
+
+| Часть | Откуда | Комментарий правила |
+|---|---|---|
+| модули | одна таблица в хелпере (`MODULE_TABLE`), и это единственный список правил модуля вообще: `xray` → `XRAY_PUBLIC_PORT/tcp` (`XRAY_SERVER_PORT`, 443); `hysteria2` → `HYSTERIA2_PORT/udp`; `socks5` → `SOCKS5_PORT/tcp`; `subscription` → `SUBSCRIPTION_PUBLIC_PORT/tcp`; `mtproto` → `MTPROTO_PORT/tcp`; `awg` → `ListenPort/udp` AWG (`awg0.conf`, иначе `AWG_ENDPOINT_PORT`) + `route allow in on <AWG_INTERFACE> out on <WAN> from <AWG_NETWORK>` (WAN — устройство IPv4 default route). Модуль в наборе, только пока `.env` его включает (`*_ENABLED`; у Xray и AWG флага нет) **и** у него нет маркера удаления (`/etc/vpn-bot/uninstalled/<модуль>`) | `vpn-bot:<модуль>` |
+| ssh | `SSH_PORT` и, пока идёт переезд, его другие порты — набор `listen` из плана [SSH-порта](#ssh-порт) (деплой передаёт его как `--ssh-ports`; иначе хелпер спрашивает `vpn-bot-ssh-port plan`) | `vpn-bot:ssh` |
+| extra | `deploy/host/ufw/extra.list`, `role\|rule\|reason` (reason ≥ 20 символов): все прочие правила — так, как их печатает `ufw show added`, — и `closed <port>/<tcp\|udp>` для слушателя, закрытого намеренно. Замер 2026-11-12: пусто — каждое правило main принадлежит модулю или ssh | `vpn-bot:extra` |
+| политики | `deploy/host/ufw/policy`, строки `role\|incoming\|outgoing`; засеяны замером (`deny` / `allow`). **routed не управляется никогда** (форвардинг AWG и WARP живёт на route-правилах) — строка `routed` отклоняет план | — |
+
+### `apply`
+
+1. добавляет недостающее — и недостающую v4- или v6-копию (`ufw allow` добавляет обе; IPv6
+   учитывается только при `IPV6=yes` **и** ядре с IPv6 — правило самого ufw) — и переподписывает
+   (**adopt**) совпадающее правило без нашего комментария: ufw меняет комментарий на месте, порт не
+   закрывается ни на миг;
+2. ставит политику outgoing; политику incoming и включение неактивного ufw — под dead-man (ниже);
+3. удаляет правило с комментарием `vpn-bot:`, которого нет в наборе, и **непомеченное** правило,
+   совпадающее с правилом из таблицы, — модуль выключен или удалён, старый порт ssh (22 — порт
+   пакета; `from` переезда). Так уходят с хоста route-правило удалённого AWG из замера и старое
+   `22/tcp`. Route-правило удаляется через `ufw route delete …` (`ufw delete route …` ufw 0.36
+   отвергает);
+4. прочие непомеченные правила не трогает — `WARN`, никогда не удаляет;
+5. перечитывает результат: всё, что осталось добавить, переподписать или удалить, — провал (exit 4).
+
+**Потери доступа не бывает.** Правило, открывающее порт, на котором sshd **реально** слушает, —
+объединение `sshd -T`, `systemctl show -p Listen ssh.socket` и строк `ss` от sshd (или от PID 1 для
+порта сокета), — не удаляется никогда (`keep`); если ни один источник не ответил, не удаляется
+ничего. Включённый модуль, правило которого здесь не записать (порт неизвестен, нет default route),
+сохраняет всё, что узнаваемо его.
+
+### Dead-man
+
+Включение неактивного ufw и смена политики incoming — два шага, которые могут отрезать ssh. Оба идут
+под dead-man, как входной фильтр relay (#328): `/var/lib/vpn-bot/ufw-deadman.json` помнит, что было
+до, transient-таймер (`vpn-bot-ufw-deadman-watch`) раз в минуту запускает
+`vpn-bot-ufw-apply deadman-check`, и смена остаётся только с **доказательством, что ssh отвечает
+снаружи**, — теми же, что у переезда SSH-порта: новое подключение с нелокального адреса на порт ssh
+в журнале sshd (`vpn-bot-ssh-port proof-journal`, `LogLevel VERBOSE`) или «Подтвердить» под
+сообщением бота (`vpn-bot-ufw-apply confirm`, sudo, grant по точному пути). Без доказательства через
+10 минут после смены возвращается прежняя политика incoming (и неактивный ufw). Перезагрузка
+обрывает таймер: `vpn-bot-ufw-deadman.service`, который подтягивает `vpn-bot-host-check.service`
+(через 5 минут после загрузки и ежедневно), взводит его снова или откатывает. Таймер не взвёлся —
+политика не меняется (exit 9). **Обычный деплой политику не меняет и dead-man не взводит.**
+
+### Где это работает
+
+| Кто | Когда | Как |
+|---|---|---|
+| deploy.sh Phase 1 | каждый деплой main | `plan` из checkout: раздел «UFW» и отчёт. Останавливается (`PHASE1_ONLY=1`: в отчёте) на отклонённом плане, на main без ufw и на публичном слушателе, которого набор не разрешает и не объявляет закрытым |
+| deploy.sh Phase 2 | после хелперов | `save` состояния UFW (файлы, включён ли, состояние dead-man) — до того, как SSH-порт что-то откроет |
+| | после host-файлов и состояния SSH-порта | `apply`, затем `listeners`; провал любого — `rollback_now`, откат делает `restore` сохранённого |
+| | DEPLOY OK | `status`, одна строка |
+| бот | включение протокола в «Модули протоколов»; удаление протокола с сервера | `apply` (sudo, grant по точному пути). `vpn-bot-protocol-uninstall` ufw больше не трогает — его маркер выводит модуль из набора: **у правил один владелец** |
+| `vpn-bot-ssh-port` | фаза 1 / фаза 2 переезда | `firewall-open` / `firewall-close` вызывают `apply` |
+
+### Слушатели
+
+Каждый TCP `LISTEN` на публичном или wildcard-адресе должен быть разрешён набором или объявлен
+закрытым (`main|closed <port>/tcp|<почему>`). UDP проверяется только на UDP-портах таблицы модулей
+(и только на публичном или wildcard-адресе); все прочие UDP-сокеты — строки `INFO`, не ошибка:
+listen-port awg/wg-интерфейса (`awg show all listen-port` — сокет ядра, без процесса, случайный при
+каждом подъёме: `*:32808` у out-warp на замеренном хосте; порты не хардкодятся) и исходящие сокеты
+на частном адресе (`172.16.0.2:*` через WARP).
+
+### Что говорит host check (семейство `ufw`)
+
+| Находка | Установленный хост | `--pre-install` (Phase 1) |
+|---|---|---|
+| ufw не установлен, план отклонён | `MISMATCH` | `MISMATCH` |
+| ufw неактивен | `MISMATCH` | `PENDING` (деплой включит его под dead-man) |
+| политика не та, что в `deploy/host/ufw/policy` | `MISMATCH` | `PENDING` |
+| нет правила из набора или его v4/v6-копии | `MISMATCH` | `PENDING` |
+| правило с комментарием `vpn-bot:`, которого нет в наборе | `MISMATCH` | `PENDING` |
+| непомеченное правило вне набора | `LATENT` (`apply` удаляет правило таблицы, о прочих — WARN) | `PENDING` для правила таблицы, иначе `LATENT` |
+| правило набора без нашего комментария | `INFO` (`apply` переподпишет) | `PENDING` |
+| правило оставлено, потому что на его порту слушает sshd | `WARN` | `WARN` |
+| dead-man ждёт / откатил | `PENDING` / `WARN` | так же |
+
+Руками: `sudo /usr/local/sbin/vpn-bot-ufw-apply plan` (только чтение, строки `key=value`),
+`… apply`, `… status`. Никогда не `ufw allow` — следующий apply его переподпишет или удалит.

@@ -329,10 +329,11 @@ ls -l /etc/vpn-bot/tls          # ожидаем fullchain.pem + privkey.pem roo
 #    SUBSCRIPTION_TLS_CERT=/etc/vpn-bot/tls/fullchain.pem
 #    SUBSCRIPTION_TLS_KEY=/etc/vpn-bot/tls/privkey.pem
 
-# 3. Фаервол (трекаемое правило — никаких `ufw allow` руками)
-sudo bash deploy/ufw-subscription.sh          # порт берётся из .env
-#   ... и обратно:
-sudo bash deploy/ufw-subscription.sh --delete
+# 3. Фаервол: руками ничего. SUBSCRIPTION_PUBLIC_PORT/tcp — строка таблицы модулей UFW
+#    (scripts/vpn-bot-ufw-apply, docs/host-state.ru.md#фаервол-ufw): следующий деплой
+#    открывает его, пока SUBSCRIPTION_ENABLED=true, и закрывает, когда стало false.
+#    Без деплоя:
+sudo /usr/local/sbin/vpn-bot-ufw-apply apply
 
 # 4. Юнит — ставится руками (drift); deploy.sh его не ставит
 sudo install -m0644 deploy/vpn-bot-subscription.service /etc/systemd/system/

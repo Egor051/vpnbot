@@ -114,16 +114,9 @@ def uninstall_plan_text(plan: UninstallPlan) -> str:
         files.append("• " + t("module_uninstall_awg_group", count=len(awg_names), dir=h(awg_dir),
                               size=h(format_bytes(awg_size)), names=h(shown)))
 
-    ufw: list[str] = []
-    for rule in plan.ufw:
-        state = str(rule.get("state", ""))
-        spec = str(rule.get("rule", ""))
-        if state == "delete":
-            ufw.append(f"• {h(spec)} <i>({h(str(rule.get('line', '')))})</i>")
-        elif state == "absent":
-            absent.append(f"• ufw {h(spec)}")
-        else:
-            kept.append(f"• ufw {h(spec)} — {h(str(rule.get('reason', '')))}")
+    # The helper no longer touches ufw: the bot runs vpn-bot-ufw-apply after the removal,
+    # and the marker takes the module out of the set (docs/host-state.md#the-firewall-ufw).
+    ufw: list[str] = [t("module_uninstall_ufw_by_helper")]
 
     packages: list[str] = []
     for pkg in plan.packages:
@@ -226,6 +219,9 @@ def uninstall_report_text(report: UninstallReport) -> str:
     if report.rollback_errors:
         lines += ["", t("module_uninstall_section_rollback_errors"),
                   *_cut([f"• {h(e)}" for e in report.rollback_errors], 5)]
+    if report.firewall_ok is not None:
+        key = "module_firewall_ok" if report.firewall_ok else "module_firewall_failed"
+        lines += ["", t(key, summary=h(report.firewall))]
     if report.backup:
         lines += ["", t("module_uninstall_report_backup", path=h(report.backup))]
     if report.rollback_command and (report.ok or report.rollback_errors):

@@ -662,6 +662,31 @@ STRINGS: dict[str, str] = {
     "ssh_port_confirmed": "🔐 Порт {port} подтверждён.\n<code>{line}</code>",
     "ssh_port_confirm_stale": "Эта миграция SSH-порта уже не ждёт подтверждения.",
     "ssh_port_confirm_failed": "vpn-bot-ssh-port не принял подтверждение — подробности в журнале бота.",
+    # ── UFW (docs/host-state.md#the-firewall-ufw) ────────────────────────────
+    "ufw_deadman_pending": (
+        "🧱 <b>UFW: смена ждёт подтверждения</b>\n"
+        "{changes}\n"
+        "Подключись к SSH (порт {ports}) <b>новым</b> соединением и нажми «Подтвердить». "
+        "Подключение извне в журнале sshd тоже считается. Без доказательства смена откатится в {deadline}."
+    ),
+    "ufw_deadman_confirmed": "✅ <b>UFW: смена подтверждена</b>\n{changes}\nДоказательство: {proof} ({at}).",
+    "ufw_deadman_reverted": (
+        "↩️ <b>UFW: смена откатилась</b>\n{changes}\n"
+        "Доказательства не было — прежняя политика вернулась ({at}). Следующий apply попробует снова."
+    ),
+    "btn_ufw_confirm": "✅ Подтвердить: SSH отвечает",
+    "ufw_confirmed_alert": "Принято: смена UFW остаётся.",
+    "ufw_confirmed": "🧱 Смена UFW подтверждена.\n<code>{line}</code>",
+    "ufw_confirm_stale": "Эта смена политики UFW уже не ждёт подтверждения.",
+    "ufw_confirm_failed": "vpn-bot-ufw-apply не принял подтверждение — подробности в журнале бота.",
+    "module_firewall_ok": "🧱 UFW: {summary}",
+    "module_firewall_failed": (
+        "⚠️ UFW не приведён к набору: {summary}. Протокол переключён; firewall догонит следующий деплой "
+        "(подробности в bot.log)."
+    ),
+    "module_uninstall_ufw_by_helper": (
+        "• правила протокола снимет vpn-bot-ufw-apply сразу после удаления: маркер выводит модуль из набора UFW"
+    ),
     # ── relay panel (admin → «🛰 Управлять relay») ───────────────────────────
     "btn_relays": "🛰 Управлять relay",
     "relays_title": "<b>🛰 Relay</b>",

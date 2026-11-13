@@ -1,0 +1,1749 @@
+#!/usr/bin/python3 -I
+"""vpn-bot-ufw-apply — the main server's UFW is COMPUTED from the repo and .env.
+
+No hand-typed `ufw allow` (docs/host-state.md#the-firewall-ufw). The rule set is
+
+  modules   one table, MODULE_TABLE below: a module is in the set only while .env
+            enables it AND it has no uninstall marker (/etc/vpn-bot/uninstalled/<m>)
+              xray          XRAY_PUBLIC_PORT/tcp (XRAY_SERVER_PORT, 443)
+              hysteria2     HYSTERIA2_PORT/udp (443)           gate HYSTERIA2_ENABLED
+              socks5        SOCKS5_PORT/tcp                    gate SOCKS5_ENABLED
+              subscription  SUBSCRIPTION_PUBLIC_PORT/tcp       gate SUBSCRIPTION_ENABLED
+              mtproto       MTPROTO_PORT/tcp (8443)            gate MTPROTO_ENABLED
+              awg           the AWG ListenPort/udp (awg0.conf, else AWG_ENDPOINT_PORT)
+                            + route allow in on <AWG_INTERFACE> out on <WAN> from <AWG_NETWORK>
+  ssh       SSH_PORT (scripts/vpn-bot-ssh-port) and, while a migration runs, its other
+            port(s): the plan's `listen` set (deploy.sh passes it as --ssh-ports)
+  extra     deploy/host/ufw/extra.list  (role|rule|reason, reason >= 20 characters):
+            every other rule, and listeners declared closed (`closed <port>/<proto>`)
+  policies  deploy/host/ufw/policy (role|incoming|outgoing ...); routed is never touched
+
+Every rule of the set carries the comment 'vpn-bot:<module|ssh|extra>'. `apply`
+  adds what is missing (a missing v4 or v6 copy too: one `ufw allow` adds both),
+  relabels (adopts) a matching rule without our comment — ufw updates it in place,
+  deletes a rule with a vpn-bot: comment that is not in the set, and an UNMARKED
+  rule that matches a rule of the table (a module switched off or removed, an old
+  ssh port — 22 is the package's) — that is how a protocol's rules leave the host,
+  leaves any other unmarked rule alone: a WARN, never deleted.
+
+Access is never at stake:
+  * a rule that opens the port sshd REALLY listens on (`sshd -T`, ssh.socket's
+    Listen=, `ss` rows of sshd or of PID 1 for a socket port) is never deleted; no
+    such port found = nothing is deleted at all;
+  * ufw inactive -> enabled, and a change of the incoming policy, happen under a
+    dead-man (as the relay's input filter): DEADMAN_STATE records what was before,
+    a transient timer runs `deadman-check` every minute, and the change stays only
+    with a proof that the ssh port still answers from outside — a NEW connection
+    from a non-local address on it in the sshd log (`vpn-bot-ssh-port proof-journal`,
+    the proof of the SSH port migration), or «Подтвердить» in the bot (`confirm`).
+    Without one, DEADMAN_SECONDS after the change, the previous incoming policy (and
+    an inactive ufw) is restored. vpn-bot-ufw-deadman.service (pulled in by the host
+    check: 5 min after boot, daily) does the same after a reboot. An ordinary deploy
+    changes no policy and needs no dead-man.
+
+Listeners (`listeners`, also in `plan`): every TCP LISTEN on a public or wildcard
+address must be allowed by the set or declared closed in extra.list. UDP is checked
+only on the UDP ports of the module table; every other UDP socket — the listen-port
+of an awg/wg interface (`awg show all listen-port`: kernel-owned, random), outgoing
+sockets on a private address — is an INFO line, never an error.
+
+Usage (root; `plan`, `listeners` and `status` only read):
+  vpn-bot-ufw-apply plan [--ssh-ports P[,P]]        key=value lines: the decision
+  vpn-bot-ufw-apply apply [--ssh-ports P[,P]]       converge the host on the set
+  vpn-bot-ufw-apply listeners [--ssh-ports P[,P]]   the listener check alone
+  vpn-bot-ufw-apply status                          one line (DEPLOY OK, the bot)
+  vpn-bot-ufw-apply save --dir DIR                  snapshot for a rollback (deploy.sh)
+  vpn-bot-ufw-apply restore --dir DIR               put that snapshot back
+  vpn-bot-ufw-apply deadman-check                   the timer / the boot run
+  vpn-bot-ufw-apply confirm --since EPOCH --admin ID     the bot's «Подтвердить»
+Common options: --env FILE (/opt/vpn-service/.env), --repo DIR (/opt/vpn-service:
+deploy/host/ufw/*), --root DIR (tests: host files under DIR), --ssh-port-helper PATH
+(/usr/local/sbin/vpn-bot-ssh-port).
+
+Exit codes: 0 ok; 2 usage; 3 refused (extra.list/policy/.env invalid, not main);
+4 apply did not converge, or a listener check failed; 5 cannot run (ufw missing, a
+tool or a file); 9 the dead-man could not be armed (the policy is left as it was).
+
+Never evaluates command output; every command is an argv list. Stdlib only. Run
+as root from another mount namespace (the non-root bot's ProtectSystem=strict, which
+sudo keeps) a writing command re-executes itself in PID 1's first (nsenter): /etc/ufw
+must be writable. TEST SEAM: VPN_BOT_UFW_SELFTEST=1 needs --root and makes every
+command resolve inside VPN_BOT_UFW_SELFTEST_BIN — a missing stub never reaches a
+real ufw (deploy.sh runs the test suite as root on the production host).
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import ipaddress
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess  # noqa: S404 — fixed argv lists of system tools, never a shell
+import sys
+import tempfile
+import time
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any
+
+APP_DIR = "/opt/vpn-service"
+INSTALLED_PATH = "/usr/local/sbin/vpn-bot-ufw-apply"
+SSH_PORT_HELPER = "/usr/local/sbin/vpn-bot-ssh-port"
+EXTRA_LIST = "deploy/host/ufw/extra.list"
+POLICY_FILE = "deploy/host/ufw/policy"
+MARKER_DIR = "/etc/vpn-bot/uninstalled"
+UFW_DEFAULTS = "/etc/default/ufw"
+UFW_CONF = "/etc/ufw/ufw.conf"
+USER_RULES = "/etc/ufw/user.rules"
+USER6_RULES = "/etc/ufw/user6.rules"
+SAVED_FILES = (UFW_DEFAULTS, UFW_CONF, USER_RULES, USER6_RULES)
+SSHD_CONFIG = "/etc/ssh/sshd_config"
+PROC_IPV6 = "/proc/sys/net/ipv6"
+SSH_SOCKET = "ssh.socket"
+SSH_STATE = "/var/lib/vpn-bot/ssh-migration.json"
+DEADMAN_STATE = "/var/lib/vpn-bot/ufw-deadman.json"
+DEADMAN_UNIT = "vpn-bot-ufw-deadman-watch"
+DEADMAN_SECONDS = 600
+DEADMAN_INTERVAL = 60
+LOCK_FILE = "/run/vpn-bot-ufw-apply.lock"
+COMMENT_PREFIX = "vpn-bot:"
+# A rule for this port without our comment is ssh's: the port the package listens on.
+SSH_PACKAGE_PORT = 22
+SSH_DEFAULT = 54321                 # SSH_PORT absent (scripts/vpn-bot-ssh-port)
+AWG_CONFIG_DEFAULT = "/etc/amnezia/amneziawg/awg0.conf"
+REASON_MIN = 20
+COMMAND_TIMEOUT = 60
+EXIT_REFUSED = 3
+EXIT_NOT_CONVERGED = 4
+EXIT_CANNOT = 5
+EXIT_DEADMAN = 9
+
+SELFTEST = os.environ.get("VPN_BOT_UFW_SELFTEST") == "1"
+
+POLICY_OF_IPT = {"DROP": "deny", "ACCEPT": "allow", "REJECT": "reject"}
+POLICIES = frozenset({"allow", "deny", "reject"})
+DIRECTIONS = ("incoming", "outgoing")
+SSH_PROCS = frozenset({"sshd", "sshd-session"})
+PORT_RE = re.compile(r"^[1-9][0-9]{0,4}$")
+LISTEN_RE = re.compile(r"^Listen=(.*):(\d+) \(Stream\)$")
+USERS_RE = re.compile(r'\("([^"]+)",pid=(\d+)')
+ACTIONS = frozenset({"allow", "deny", "reject", "limit"})
+PROTOS = frozenset({"tcp", "udp", "ah", "esp", "gre", "ipv6", "igmp"})
+KEYWORDS = frozenset({"in", "out", "on", "from", "to", "port", "proto", "app", "log", "log-all"})
+
+
+class Refused(Exception):
+    """The set cannot be computed: the reason is for the operator."""
+
+
+class Cannot(Exception):
+    """A tool or a file the helper needs failed."""
+
+
+# --------------------------------------------------------------------------- #
+# Context
+# --------------------------------------------------------------------------- #
+@dataclass
+class Ctx:
+    env_file: Path
+    repo: Path
+    root: str
+    ssh_helper: str
+    env_text: str = ""
+
+    def host(self, path: str) -> Path:
+        return Path(f"{self.root}{path}")
+
+    def env(self, key: str) -> str:
+        return env_sed_val(self.env_text, key)
+
+
+def env_sed_val(text: str, key: str) -> str:
+    """scripts/deploy.sh's env_sed_val: optional `export`, spaces around `=`, an inline
+    `# comment`, double then single quotes, the last assignment wins."""
+    rx = re.compile(r"^\s*(?:export\s+)?" + re.escape(key) + r"\s*=\s*(.*)$")
+    val: str | None = None
+    for line in text.split("\n"):
+        m = rx.match(line)
+        if m:
+            val = m.group(1)
+    if val is None:
+        return ""
+    val = re.sub(r"\s*#.*$", "", val)
+    for q in ('"', "'"):
+        if len(val) >= 2 and val.startswith(q) and val.endswith(q):
+            val = val[1:-1]
+    return val.rstrip()
+
+
+def is_true(value: str) -> bool:
+    return value.lower() in ("1", "true", "yes", "on")
+
+
+def tool_allowed(name: str) -> str | None:
+    """Under the test seam, the stub's path; None = refused. Outside it, the name."""
+    if not SELFTEST:
+        return name
+    stub_dir = os.environ.get("VPN_BOT_UFW_SELFTEST_BIN", "")
+    found = shutil.which(name)
+    if not stub_dir or not found:
+        return None
+    if os.path.realpath(found) != os.path.realpath(os.path.join(stub_dir, name)):
+        return None
+    return found
+
+
+def run(argv: Sequence[str], *, timeout: int = COMMAND_TIMEOUT) -> tuple[int, str]:
+    """(exit code, stdout+stderr); 127 = not found (or refused by the test seam)."""
+    args = list(argv)
+    if args[0] != sys.executable:
+        exe = tool_allowed(args[0])
+        if exe is None:
+            return 127, f"{args[0]}: refused (VPN_BOT_UFW_SELFTEST: not a stub in VPN_BOT_UFW_SELFTEST_BIN)"
+        args[0] = exe
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)  # noqa: S603
+    except FileNotFoundError:
+        return 127, f"{argv[0]}: not found"
+    except subprocess.TimeoutExpired:
+        return 124, f"{argv[0]}: timed out after {timeout}s"
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def out_of(argv: Sequence[str], *, timeout: int = COMMAND_TIMEOUT) -> str | None:
+    """stdout+stderr of a command that must succeed, or None."""
+    rc, text = run(argv, timeout=timeout)
+    return text if rc == 0 else None
+
+
+def csv(ports: Sequence[int]) -> str:
+    return ",".join(str(p) for p in ports)
+
+
+def parse_ports(text: str) -> list[int]:
+    out: set[int] = set()
+    for part in re.split(r"[,\s]+", text.strip()):
+        if PORT_RE.match(part) and int(part) <= 65535:
+            out.add(int(part))
+    return sorted(out)
+
+
+def port_of(raw: str) -> int | None:
+    return int(raw) if PORT_RE.match(raw) and int(raw) <= 65535 else None
+
+
+def iso(ts: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def one(text: str) -> str:
+    return text.replace("\n", " ").replace("\r", " ").replace("|", "/")
+
+
+def fence(ctx: Ctx, path: Path) -> None:
+    """Under VPN_BOT_UFW_SELFTEST=1 nothing outside --root is ever written."""
+    if SELFTEST and (not ctx.root or not str(path).startswith(ctx.root.rstrip("/") + "/")):
+        raise Cannot(f"selftest: refusing to write {path} outside --root {ctx.root!r}")
+
+
+def read_text(path: Path) -> str | None:
+    """A regular file's text; None when absent. A symlink is never followed."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise Cannot(f"cannot read {path}: {exc}") from exc
+    with os.fdopen(fd, encoding="utf-8", errors="replace", newline="") as fh:
+        return fh.read()
+
+
+def write_atomic(ctx: Ctx, path: Path, data: str, mode: int = 0o644) -> None:
+    """A temporary file in the same directory (never follows a planted link), then rename."""
+    fence(ctx, path)
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        if os.geteuid() == 0 and not SELFTEST:
+            os.chown(tmp, 0, 0)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+# --------------------------------------------------------------------------- #
+# A UFW rule as a key: what `ufw show added` prints and what /etc/ufw/user*.rules
+# record (### tuple ###) map to the same Key, so v4 and v6 copies can be counted.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Key:
+    route: bool = False
+    action: str = "allow"      # allow | deny | reject | limit
+    log: str = ""              # "" | log | log-all
+    direction: str = "in"      # in | out
+    iface_in: str = ""
+    iface_out: str = ""
+    src: str = "any"
+    sport: str = "any"
+    dst: str = "any"
+    dport: str = "any"
+    proto: str = "any"
+    sapp: str = ""
+    dapp: str = ""
+
+
+def norm_addr(addr: str) -> str:
+    if addr in ("any", "0.0.0.0/0", "::/0"):
+        return "any"
+    try:
+        net = ipaddress.ip_network(addr, strict=False)
+    except ValueError:
+        return addr
+    if net.prefixlen == net.max_prefixlen:
+        return str(net.network_address)
+    return str(net)
+
+
+def addr_family(addr: str) -> str:
+    """v4 | v6 | "" (any, or not an address)."""
+    if addr == "any":
+        return ""
+    try:
+        return "v6" if ipaddress.ip_network(addr, strict=False).version == 6 else "v4"
+    except ValueError:
+        return ""
+
+
+def families_of(key: Key, ipv6: bool) -> frozenset[str]:
+    """The copies ufw keeps of this rule: one per address family it can apply to."""
+    fams = {addr_family(key.src), addr_family(key.dst)} - {""}
+    if fams:
+        return frozenset(fams)
+    return frozenset({"v4", "v6"} if ipv6 else {"v4"})
+
+
+def rule_text(key: Key) -> str:
+    """ufw's own UFWCommandRule.get_command (ufw 0.36), without the comment: the text
+    `ufw show added` prints, and the argv `ufw` takes."""
+    res = key.action
+    if key.src == "any" and key.dst == "any" and key.sport == "any" and not key.sapp \
+            and not key.iface_in and not key.iface_out and key.dport != "any":
+        if key.direction == "out":
+            res += " out"
+        if key.log:
+            res += f" {key.log}"
+        if key.dapp:
+            res += f" '{key.dapp}'" if " " in key.dapp else f" {key.dapp}"
+        else:
+            res += f" {key.dport}"
+            if key.proto != "any":
+                res += f"/{key.proto}"
+    else:
+        if key.iface_in:
+            res += f" in on {key.iface_in}"
+        if key.iface_out:
+            res += f" out on {key.iface_out}"
+        elif key.direction == "out":
+            res += " out"
+        if key.log:
+            res += f" {key.log}"
+        for word, loc, port, app in (("from", key.src, key.sport, key.sapp), ("to", key.dst, key.dport, key.dapp)):
+            if loc != "any" or port != "any" or app:
+                res += f" {word} {loc}"
+                if app:
+                    res += f" app '{app}'" if " " in app else f" app {app}"
+                elif port != "any":
+                    res += f" port {port}"
+        if " to " not in res and " from " not in res and not key.iface_in and not key.iface_out:
+            res += " to any"
+        if key.proto != "any" and not key.dapp and not key.sapp:
+            res += f" proto {key.proto}"
+    return ("route " + res) if key.route else res
+
+
+def parse_rule(text: str) -> Key | None:
+    """The Key of a rule as `ufw show added` prints it (without "ufw " and the comment);
+    None when it is not one of the shapes ufw prints."""
+    try:
+        toks = shlex.split(text)
+    except ValueError:
+        return None
+    if toks and toks[0] == "ufw":
+        toks = toks[1:]
+    route = bool(toks) and toks[0] == "route"
+    if route:
+        toks = toks[1:]
+    if not toks or toks[0] not in ACTIONS:
+        return None
+    k: dict[str, Any] = {"route": route, "action": toks[0]}
+    rest = toks[1:]
+    # Short syntax: [out] [log|log-all] PORT[/PROTO] | APP
+    j = 0
+    short: dict[str, Any] = {}
+    if j < len(rest) and rest[j] in ("in", "out") and (j + 1 >= len(rest) or rest[j + 1] != "on"):
+        short["direction"] = rest[j]
+        j += 1
+    if j < len(rest) and rest[j] in ("log", "log-all"):
+        short["log"] = rest[j]
+        j += 1
+    if len(rest) - j == 1 and rest[j] not in KEYWORDS:
+        m = re.fullmatch(r"([0-9][0-9,:]*)(?:/([a-z0-9]+))?", rest[j])
+        if m:
+            if m.group(2) and m.group(2) not in PROTOS:
+                return None
+            short.update(dport=m.group(1), proto=m.group(2) or "any")
+        else:
+            short["dapp"] = rest[j]
+        return Key(**k, **short)
+    # Full syntax
+    saw_in = saw_out = False
+    i = 0
+    while i < len(rest):
+        t = rest[i]
+        if t in ("in", "out"):
+            if i + 1 < len(rest) and rest[i + 1] == "on":
+                if i + 2 >= len(rest):
+                    return None
+                k["iface_in" if t == "in" else "iface_out"] = rest[i + 2]
+                i += 3
+            else:
+                i += 1
+            if t == "in":
+                saw_in = True
+            else:
+                saw_out = True
+        elif t in ("log", "log-all"):
+            k["log"] = t
+            i += 1
+        elif t in ("from", "to"):
+            if i + 1 >= len(rest):
+                return None
+            side = "s" if t == "from" else "d"
+            k["src" if side == "s" else "dst"] = norm_addr(rest[i + 1])
+            i += 2
+            if i + 1 < len(rest) and rest[i] == "port":
+                k[f"{side}port"] = rest[i + 1]
+                i += 2
+            elif i + 1 < len(rest) and rest[i] == "app":
+                k[f"{side}app"] = rest[i + 1]
+                i += 2
+        elif t == "proto":
+            if i + 1 >= len(rest) or rest[i + 1] not in PROTOS:
+                return None
+            k["proto"] = rest[i + 1]
+            i += 2
+        else:
+            return None
+    k["direction"] = "out" if saw_out and not saw_in else "in"
+    return Key(**k)
+
+
+def hex_decode(text: str) -> str:
+    try:
+        return bytes.fromhex(text).decode("utf-8", errors="replace")
+    except ValueError:
+        return ""
+
+
+def parse_tuple(line: str) -> tuple[Key, str] | None:
+    """(key, comment) of a `### tuple ###` line of /etc/ufw/user*.rules."""
+    line = line.rstrip("\n")
+    comment = ""
+    if " comment=" in line:
+        line, hexed = line.split(" comment=", 1)
+        comment = hex_decode(hexed.strip())
+    m = re.match(r"^### tuple ###\s*(.*)$", line)
+    if not m:
+        return None
+    tmp = m.group(1).split()
+    if len(tmp) not in (7, 9):
+        return None
+    action, route = tmp[0], False
+    if ":" in action:
+        route, action = True, action.split(":", 1)[1]
+    log = ""
+    if "_" in action:
+        action, log = action.split("_", 1)
+    if action not in ACTIONS:
+        return None
+    dapp = sapp = ""
+    if len(tmp) == 9:
+        dapp = "" if tmp[6] == "-" else tmp[6].replace("%20", " ")
+        sapp = "" if tmp[7] == "-" else tmp[7].replace("%20", " ")
+    ifaces = tmp[-1]
+    direction = ifaces.split("_", 1)[0].split("!", 1)[0]
+    iface_in = iface_out = ""
+    if "!" in ifaces:
+        a, b = ifaces.split("!", 1)
+        iface_in, iface_out = a.partition("_")[2], b.partition("_")[2]
+    elif "_" in ifaces:
+        d, _, ifc = ifaces.partition("_")
+        if d == "in":
+            iface_in = ifc
+        else:
+            iface_out = ifc
+    if direction not in ("in", "out"):
+        return None
+    key = Key(route=route, action=action, log=log, direction=direction, iface_in=iface_in, iface_out=iface_out,
+              src=norm_addr(tmp[5]), sport=tmp[4], dst=norm_addr(tmp[3]), dport=tmp[2], proto=tmp[1],
+              sapp=sapp, dapp=dapp)
+    return key, comment
+
+
+def port_covered(spec: str, port: int) -> bool:
+    """Does a ufw port spec ("443", "80,443", "6000:6007") contain <port>?"""
+    if spec == "any":
+        return True
+    for part in spec.split(","):
+        lo, _, hi = part.partition(":")
+        if not lo.isdigit() or (hi and not hi.isdigit()):
+            continue
+        if int(lo) <= port <= int(hi or lo):
+            return True
+    return False
+
+
+def opens(key: Key, port: int, proto: str) -> bool:
+    """Does this rule let <port>/<proto> in from anywhere or from somewhere?"""
+    return (not key.route and key.direction == "in" and key.action in ("allow", "limit")
+            and not key.dapp and key.proto in ("any", proto) and port_covered(key.dport, port))
+
+
+def simple(port: int, proto: str) -> Key:
+    return Key(dport=str(port), proto=proto)
+
+
+# --------------------------------------------------------------------------- #
+# The module table — the ONE place a module's rules are written down. The set uses
+# it for the modules that are on; recognition of unmarked rules uses it for all of
+# them (a module switched off or removed included); the listener check takes its
+# UDP ports from it. deploy/helpers/vpn-bot-protocol-uninstall knows no port: the
+# marker it writes takes the module out of the set, the bot runs `apply`.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Module:
+    name: str
+    gate: str            # the .env flag ("" = none: on unless removed)
+    marker: str          # its uninstall marker ("" = it cannot be removed)
+    proto: str           # of its port rule
+    port_keys: tuple[str, ...] = ()
+    port_default: str = ""
+    route: bool = False  # AWG: the route rule of its clients to the internet
+
+
+MODULE_TABLE: tuple[Module, ...] = (
+    Module("xray", "", "xray", "tcp", ("XRAY_PUBLIC_PORT", "XRAY_SERVER_PORT"), "443"),
+    Module("hysteria2", "HYSTERIA2_ENABLED", "hysteria2", "udp", ("HYSTERIA2_PORT",), "443"),
+    Module("socks5", "SOCKS5_ENABLED", "socks5", "tcp", ("SOCKS5_PORT",), ""),
+    Module("subscription", "SUBSCRIPTION_ENABLED", "", "tcp", ("SUBSCRIPTION_PUBLIC_PORT",), "0"),
+    Module("mtproto", "MTPROTO_ENABLED", "mtproto", "tcp", ("MTPROTO_PORT",), "8443"),
+    Module("awg", "", "awg", "udp", (), "", route=True),
+)
+
+
+@dataclass
+class ModuleState:
+    module: Module
+    on: bool
+    why: str                          # "on" | ".env: X=false" | "removed (marker)"
+    port: int | None = None
+    port_why: str = ""
+    route_in: str = ""                # AWG: interface and client network
+    route_src: str = ""
+    route_out: str = ""               # the WAN interface ("" = unknown)
+    notes: list[str] = field(default_factory=list)
+
+    def keys(self) -> list[tuple[Key, str]]:
+        """The rules of this module that can be written down here, with why."""
+        out: list[tuple[Key, str]] = []
+        if self.port is not None:
+            out.append((simple(self.port, self.module.proto), self.port_why))
+        if self.module.route and self.route_in and self.route_src and self.route_out:
+            out.append((Key(route=True, iface_in=self.route_in, iface_out=self.route_out, src=self.route_src),
+                        f"AWG clients ({self.route_src} on {self.route_in}) to the internet via {self.route_out}"))
+        return out
+
+    def matches(self, key: Key) -> bool:
+        """Is <key> a rule of this module (an unmarked rule recognised as ours)?"""
+        if self.port is not None and key == simple(self.port, self.module.proto):
+            return True
+        if self.module.route and self.route_in and self.route_src:
+            return (key.route and key.action == "allow" and key.iface_in == self.route_in
+                    and key.src == self.route_src and key.dst == "any" and key.sport == "any"
+                    and key.dport == "any" and key.proto == "any" and not key.sapp and not key.dapp)
+        return False
+
+
+def awg_listen_port(ctx: Ctx) -> int | None:
+    path = ctx.env("AWG_CONFIG_PATH") or AWG_CONFIG_DEFAULT
+    try:
+        text = read_text(ctx.host(path)) or ""
+    except Cannot:
+        return None
+    section = ""
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("["):
+            section = s.lower()
+            continue
+        m = re.match(r"^ListenPort\s*=\s*(\S+)", s)
+        if m and section == "[interface]":
+            return port_of(m.group(1))
+    return None
+
+
+def wan_interface() -> str:
+    out = out_of(["ip", "-4", "route", "show", "default"]) or ""
+    m = re.search(r"\bdev (\S+)", out)
+    return m.group(1) if m else ""
+
+
+def module_states(ctx: Ctx) -> list[ModuleState]:
+    wan: str | None = None
+    states: list[ModuleState] = []
+    for mod in MODULE_TABLE:
+        on, why = True, "on"
+        if mod.gate and not is_true(ctx.env(mod.gate)):
+            on, why = False, f".env: {mod.gate}={ctx.env(mod.gate) or '<unset>'}"
+        if mod.marker and ctx.host(f"{MARKER_DIR}/{mod.marker}").is_file():
+            on, why = False, f"removed from this host (marker {MARKER_DIR}/{mod.marker})"
+        st = ModuleState(mod, on, why)
+        if mod.name == "awg":
+            port = awg_listen_port(ctx)
+            if port is not None:
+                st.port, st.port_why = port, "ListenPort of the AWG config"
+            else:
+                raw = ctx.env("AWG_ENDPOINT_PORT")
+                p = port_of(raw)
+                if p is not None:
+                    st.port, st.port_why = p, f"AWG_ENDPOINT_PORT={p}"
+                elif on:
+                    st.notes.append("the AWG listen port is unknown (no ListenPort in the AWG config, no "
+                                    "AWG_ENDPOINT_PORT) — its udp rule is not managed")
+            st.route_in = ctx.env("AWG_INTERFACE") or "awg0"
+            st.route_src = norm_addr(ctx.env("AWG_NETWORK") or "10.0.0.0/24")
+            if on:
+                wan = wan_interface() if wan is None else wan
+                st.route_out = wan
+                if not wan:
+                    st.notes.append("no IPv4 default route (`ip -4 route show default`) — the AWG route rule "
+                                    "cannot be written down: not managed")
+        else:
+            raw, key_used = "", ""
+            for k in mod.port_keys:
+                raw = ctx.env(k)
+                if raw:
+                    key_used = k
+                    break
+            if not raw:
+                raw, key_used = mod.port_default, f"{mod.port_keys[0]} (default)"
+            if raw in ("", "0"):
+                if on:
+                    st.notes.append(f"{mod.port_keys[0]} is not set — {mod.name} has no public port to open")
+            else:
+                p = port_of(raw)
+                if p is None:
+                    if on:
+                        raise Refused(f"{key_used}={raw!r} in {ctx.env_file} is not a port ({mod.name} is on)")
+                else:
+                    st.port, st.port_why = p, f"{key_used.split(' ')[0]}={p}"
+        states.append(st)
+    return states
+
+
+# --------------------------------------------------------------------------- #
+# deploy/host/ufw/extra.list and deploy/host/ufw/policy
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Extra:
+    key: Key | None          # an extra rule ...
+    closed: tuple[int, str] | None   # ... or a listener declared closed: (port, proto)
+    reason: str
+    line: int
+
+
+def read_extra(ctx: Ctx) -> list[Extra]:
+    path = ctx.repo / EXTRA_LIST
+    text = read_text(path)
+    if text is None:
+        raise Refused(f"{path} is missing — the rules of no module go there; an empty list is a file with comments")
+    out: list[Extra] = []
+    seen: set[str] = set()
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("|", 2)
+        if len(parts) != 3:
+            raise Refused(f"{EXTRA_LIST}:{n}: not 'role|rule|reason': {line!r}")
+        role, rule, reason = (p.strip() for p in parts)
+        if role not in ("main", "relay"):
+            raise Refused(f"{EXTRA_LIST}:{n}: role {role!r} is not main or relay")
+        if len(reason) < REASON_MIN:
+            raise Refused(f"{EXTRA_LIST}:{n}: the reason must say why in at least {REASON_MIN} characters: {reason!r}")
+        if rule in seen:
+            raise Refused(f"{EXTRA_LIST}:{n}: {rule!r} is listed twice")
+        seen.add(rule)
+        if role != "main":
+            continue
+        m = re.fullmatch(r"closed\s+([0-9]+)/(tcp|udp)", rule)
+        if m:
+            port = port_of(m.group(1))
+            if port is None:
+                raise Refused(f"{EXTRA_LIST}:{n}: {m.group(1)!r} is not a port")
+            out.append(Extra(None, (port, m.group(2)), reason, n))
+            continue
+        if " comment " in f" {rule} ":
+            raise Refused(f"{EXTRA_LIST}:{n}: no comment in the rule — the helper writes 'vpn-bot:extra'")
+        key = parse_rule(rule)
+        if key is None or key.dapp or key.sapp:
+            raise Refused(f"{EXTRA_LIST}:{n}: {rule!r} is not a ufw rule as `ufw show added` prints it "
+                          "(no application profiles), nor 'closed <port>/<tcp|udp>'")
+        out.append(Extra(key, None, reason, n))
+    return out
+
+
+def read_policy(ctx: Ctx) -> dict[str, str]:
+    path = ctx.repo / POLICY_FILE
+    text = read_text(path)
+    if text is None:
+        raise Refused(f"{path} is missing — the default policies are written down there")
+    out: dict[str, str] = {}
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != 3:
+            raise Refused(f"{POLICY_FILE}:{n}: not 'role|direction|policy': {line!r}")
+        role, direction, policy = parts
+        if role not in ("main", "relay"):
+            raise Refused(f"{POLICY_FILE}:{n}: role {role!r} is not main or relay")
+        if direction == "routed":
+            raise Refused(f"{POLICY_FILE}:{n}: the routed policy is never managed (AWG and WARP forwarding live "
+                          "on route rules) — drop the line")
+        if direction not in DIRECTIONS:
+            raise Refused(f"{POLICY_FILE}:{n}: direction {direction!r} is not incoming or outgoing")
+        if policy not in POLICIES:
+            raise Refused(f"{POLICY_FILE}:{n}: policy {policy!r} is not allow, deny or reject")
+        if role == "main":
+            if direction in out:
+                raise Refused(f"{POLICY_FILE}:{n}: {direction} is set twice")
+            out[direction] = policy
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# The host: ufw, its files, ssh, listeners
+# --------------------------------------------------------------------------- #
+@dataclass
+class Rule:
+    text: str
+    comment: str
+    key: Key | None
+    families: frozenset[str] = frozenset()
+
+
+@dataclass
+class UfwState:
+    present: bool = False
+    active: bool | None = None
+    ipv6: bool = True
+    policies: dict[str, str] = field(default_factory=dict)   # incoming/outgoing/routed -> allow|deny|reject
+    rules: list[Rule] = field(default_factory=list)
+    families_known: bool = False
+    error: str = ""
+
+
+SHOW_RE = re.compile(r"^ufw (?P<rule>.*?)(?: comment '(?P<comment>.*)')?$")
+
+
+def read_defaults(ctx: Ctx) -> dict[str, str]:
+    text = read_text(ctx.host(UFW_DEFAULTS)) or ""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        m = re.match(r'^\s*([A-Z0-9_]+)\s*=\s*"?([^"#]*?)"?\s*(?:#.*)?$', line)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
+def read_tuples(ctx: Ctx) -> dict[Key, set[str]] | None:
+    """Key -> the families it has a copy in; None when the files cannot be read."""
+    fams: dict[Key, set[str]] = {}
+    for path, fam in ((USER_RULES, "v4"), (USER6_RULES, "v6")):
+        try:
+            text = read_text(ctx.host(path))
+        except Cannot:
+            return None
+        if text is None:
+            if fam == "v4":
+                return None
+            continue
+        for line in text.splitlines():
+            parsed = parse_tuple(line)
+            if parsed is not None:
+                fams.setdefault(parsed[0], set()).add(fam)
+    return fams
+
+
+def read_ufw(ctx: Ctx) -> UfwState:
+    st = UfwState()
+    rc, text = run(["ufw", "status"])
+    if rc == 127:
+        st.error = "ufw is not installed"
+        return st
+    st.present = True
+    if rc != 0:
+        st.error = f"`ufw status` failed (rc {rc}): {one(text.strip())}"
+        return st
+    m = re.search(r"^Status: (active|inactive)", text, re.M)
+    st.active = None if m is None else m.group(1) == "active"
+    d = read_defaults(ctx)
+    # ufw's own use_ipv6(): IPV6=yes AND a kernel with IPv6 — else it keeps no v6 copies.
+    st.ipv6 = d.get("IPV6", "yes").lower() == "yes" and ctx.host(PROC_IPV6).exists()
+    for name, var in (("incoming", "DEFAULT_INPUT_POLICY"), ("outgoing", "DEFAULT_OUTPUT_POLICY"),
+                      ("routed", "DEFAULT_FORWARD_POLICY")):
+        st.policies[name] = POLICY_OF_IPT.get(d.get(var, "").upper(), d.get(var, "") or "?")
+    rc, text = run(["ufw", "show", "added"])
+    if rc != 0:
+        st.error = f"`ufw show added` failed (rc {rc}): {one(text.strip())}"
+        return st
+    tuples = read_tuples(ctx)
+    st.families_known = tuples is not None
+    for line in text.splitlines():
+        m2 = SHOW_RE.match(line.strip())
+        if not m2:
+            continue
+        rtext = m2.group("rule")
+        key = parse_rule(rtext)
+        fams: frozenset[str] = frozenset()
+        if key is not None and tuples is not None:
+            fams = frozenset(tuples.get(key, set()))
+        st.rules.append(Rule(rtext, m2.group("comment") or "", key, fams))
+    return st
+
+
+@dataclass
+class Listener:
+    proto: str
+    addr: str
+    port: int
+    procs: list[tuple[str, int]]
+
+
+def listeners(proto: str) -> list[Listener] | None:
+    out = out_of(["ss", "-Hltnp" if proto == "tcp" else "-Hulnp"])
+    if out is None:
+        return None
+    rows: list[Listener] = []
+    for line in out.splitlines():
+        toks = line.split()
+        if len(toks) < 5:
+            continue
+        local = toks[3] if toks[0] in ("LISTEN", "UNCONN", "ESTAB") else toks[2]
+        addr, _, port = local.rpartition(":")
+        if not port.isdigit():
+            continue
+        rows.append(Listener(proto, addr, int(port), [(m.group(1), int(m.group(2))) for m in USERS_RE.finditer(line)]))
+    return rows
+
+
+def bare_addr(addr: str) -> str:
+    a = addr.split("%", 1)[0].strip("[]")
+    try:
+        ip = ipaddress.ip_address(a)
+    except ValueError:
+        return a
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return str(ip.ipv4_mapped)
+    return str(ip)
+
+
+def is_public(addr: str) -> bool:
+    a = bare_addr(addr)
+    if a in ("*", "0.0.0.0", "::", ""):  # noqa: S104 — classifying an address, not binding
+        return True
+    try:
+        return ipaddress.ip_address(a).is_global
+    except ValueError:
+        return False
+
+
+def is_loopback(addr: str) -> bool:
+    try:
+        return ipaddress.ip_address(bare_addr(addr)).is_loopback
+    except ValueError:
+        return False
+
+
+def socket_ports() -> list[int]:
+    out = out_of(["systemctl", "show", "-p", "Listen", SSH_SOCKET]) or ""
+    return sorted({int(m.group(2)) for ln in out.splitlines() if (m := LISTEN_RE.match(ln.strip()))})
+
+
+def sshd_ports(ctx: Ctx) -> list[int]:
+    out = out_of(["sshd", "-T", "-f", str(ctx.host(SSHD_CONFIG))]) or ""
+    return sorted({int(ln.split()[1]) for ln in out.splitlines() if re.match(r"^port \d+$", ln.strip())})
+
+
+def live_ssh_ports(ctx: Ctx, tcp: list[Listener] | None) -> tuple[list[int], str]:
+    """The ports sshd really listens on, and where that came from. A union of every
+    source: the safe direction is a port too many, never one too few."""
+    sock = socket_ports()
+    sshd = sshd_ports(ctx)
+    held = sorted({r.port for r in tcp or [] for name, pid in r.procs
+                   if name in SSH_PROCS or (name == "systemd" and pid == 1 and r.port in sock)})
+    ports = sorted({*sock, *sshd, *held})
+    why = f"ssh.socket {csv(sock) or '-'}, sshd -T {csv(sshd) or '-'}, ss {csv(held) or '-'}"
+    return ports, why
+
+
+def kernel_udp_ports() -> dict[int, str]:
+    """port -> interface: the listen-port of every awg/wg interface (no process owns it)."""
+    ports: dict[int, str] = {}
+    for tool in ("awg", "wg"):
+        out = out_of([tool, "show", "all", "listen-port"]) or ""
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].isdigit() and int(parts[1]) > 0:
+                ports.setdefault(int(parts[1]), f"{parts[0]} ({tool})")
+    return ports
+
+
+# --------------------------------------------------------------------------- #
+# SSH ports for the set
+# --------------------------------------------------------------------------- #
+def ssh_plan(ctx: Ctx) -> dict[str, str]:
+    helper = ctx.ssh_helper
+    if not helper or not os.path.isfile(helper):
+        return {}
+    argv = [sys.executable, "-I", helper, "--env", str(ctx.env_file), "--repo", str(ctx.repo), "--role", "main"]
+    if ctx.root:
+        argv += ["--root", ctx.root]
+    rc, text = run([*argv, "plan"], timeout=180)
+    plan = {ln.split("=", 1)[0]: ln.split("=", 1)[1] for ln in text.splitlines() if "=" in ln}
+    return plan if rc in (0, 3) else {}
+
+
+def ssh_desired(ctx: Ctx, given: str | None) -> tuple[list[int], str, list[int]]:
+    """(the ssh ports of the set, where they came from, other ssh ports this host had)."""
+    known: set[int] = {SSH_PACKAGE_PORT}
+    with contextlib.suppress(Cannot, ValueError, TypeError, KeyError):
+        data = json.loads(read_text(ctx.host(SSH_STATE)) or "{}")
+        known.update(int(p) for p in data.get("from", []))
+        if data.get("to"):
+            known.add(int(data["to"]))
+    if given:
+        ports = parse_ports(given)
+        if ports:
+            return ports, "the deploy's SSH port plan", sorted(known)
+    plan = ssh_plan(ctx)
+    if plan.get("action") not in (None, "", "refused") and parse_ports(plan.get("listen", "")):
+        known.update(parse_ports(plan.get("from", "")))
+        return parse_ports(plan["listen"]), f"vpn-bot-ssh-port plan ({plan['action']})", sorted(known)
+    raw = ctx.env("SSH_PORT")
+    port = port_of(raw) if raw else SSH_DEFAULT
+    if port is None:
+        raise Refused(f"SSH_PORT={raw!r} in {ctx.env_file} is not a port")
+    return [port], "SSH_PORT" + (" (default)" if not raw else ""), sorted(known)
+
+
+# --------------------------------------------------------------------------- #
+# The decision
+# --------------------------------------------------------------------------- #
+@dataclass
+class Want:
+    key: Key
+    category: str
+    why: str
+
+    @property
+    def comment(self) -> str:
+        return COMMENT_PREFIX + self.category
+
+    @property
+    def text(self) -> str:
+        return rule_text(self.key)
+
+
+@dataclass
+class Item:
+    action: str          # ok | add | adopt | delete | keep | warn
+    category: str        # module | ssh | extra | -
+    marked: str          # yes | no | - (delete/keep: did it carry a vpn-bot: comment)
+    text: str
+    detail: str
+    want: Want | None = None
+    rule: Rule | None = None
+
+    def kv(self) -> str:
+        return f"rule={self.action}|{self.category}|{self.marked}|{self.text}|{one(self.detail)}"
+
+
+@dataclass
+class ListenerItem:
+    verdict: str         # ok | closed | FAIL | info
+    proto: str
+    port: int
+    addr: str
+    detail: str
+
+    def kv(self) -> str:
+        return f"listener={self.verdict}|{self.proto}|{self.port}|{self.addr}|{one(self.detail)}"
+
+
+@dataclass
+class Plan:
+    ufw: UfwState
+    modules: list[ModuleState]
+    wants: list[Want]
+    items: list[Item]
+    policy_want: dict[str, str]
+    ssh_ports: list[int]
+    ssh_source: str
+    live: list[int]
+    live_why: str
+    closed: list[tuple[int, str]]
+    notes: list[str]
+    listeners: list[ListenerItem] = field(default_factory=list)
+    listeners_known: bool = True
+
+    def count(self, action: str) -> int:
+        return sum(1 for i in self.items if i.action == action)
+
+    @property
+    def policy_changes(self) -> dict[str, tuple[str, str]]:
+        return {d: (self.ufw.policies.get(d, "?"), w) for d, w in self.policy_want.items()
+                if self.ufw.policies.get(d) != w}
+
+    @property
+    def listener_failures(self) -> list[ListenerItem]:
+        return [x for x in self.listeners if x.verdict == "FAIL"]
+
+
+def protected(key: Key | None, live: list[int]) -> int | None:
+    """The live ssh port a rule opens (it is never deleted), or None."""
+    if key is None:
+        return None
+    for p in live:
+        if opens(key, p, "tcp"):
+            return p
+    return None
+
+
+def compute(ctx: Ctx, ssh_given: str | None, *, with_listeners: bool = True) -> Plan:
+    policy_want = read_policy(ctx)
+    extras = read_extra(ctx)
+    modules = module_states(ctx)
+    ssh_ports, ssh_source, ssh_known = ssh_desired(ctx, ssh_given)
+    ufw = read_ufw(ctx)
+    tcp = listeners("tcp")
+    live, live_why = live_ssh_ports(ctx, tcp)
+    notes: list[str] = []
+    for st in modules:
+        notes.extend(f"{st.module.name}: {n}" for n in st.notes)
+
+    # The set: ssh first, then the modules, then extra.list (a key claimed once).
+    wants: list[Want] = []
+    seen: set[Key] = set()
+
+    def want(key: Key, category: str, why: str) -> None:
+        if key in seen:
+            notes.append(f"{rule_text(key)} is in the set already — not added again for {category}")
+            return
+        seen.add(key)
+        wants.append(Want(key, category, why))
+
+    for p in ssh_ports:
+        want(simple(p, "tcp"), "ssh", ssh_source)
+    for st in modules:
+        if st.on:
+            for key, why in st.keys():
+                want(key, st.module.name, why)
+    for ex in extras:
+        if ex.key is not None:
+            want(ex.key, "extra", f"{EXTRA_LIST}:{ex.line}: {ex.reason}")
+
+    # The host's rules against the set.
+    items: list[Item] = []
+    by_key: dict[Key, Rule] = {}
+    for r in ufw.rules:
+        if r.key is not None and r.key not in by_key:
+            by_key[r.key] = r
+    for w in wants:
+        have = by_key.get(w.key)
+        if have is None:
+            items.append(Item("add", w.category, "-", w.text, f"missing ({w.why})", w))
+            continue
+        need = families_of(w.key, ufw.ipv6)
+        if ufw.families_known and not need <= have.families:
+            missing = ",".join(sorted(need - have.families))
+            items.append(Item("add", w.category, "-", w.text, f"the {missing} copy is missing ({w.why})", w, have))
+        elif have.comment != w.comment:
+            items.append(Item("adopt", w.category, "yes" if have.comment.startswith(COMMENT_PREFIX) else "no", w.text,
+                              f"comment '{have.comment}' -> '{w.comment}' ({w.why})", w, have))
+        else:
+            items.append(Item("ok", w.category, "yes", w.text, w.why, w, have))
+    wanted = {w.key for w in wants}
+    # A module that is on but whose rules cannot all be written down here (its port or
+    # the WAN interface unknown): a rule that is recognisably its own stays as it is.
+    incomplete = {st.module.name: st for st in modules if st.on and st.notes}
+    for r in ufw.rules:
+        if r.key is not None and r.key in wanted:
+            continue
+        marked = r.comment.startswith(COMMENT_PREFIX)
+        owner = r.comment[len(COMMENT_PREFIX):] if marked else ""
+        why = ""
+        mine = next((st for st in modules if r.key is not None and st.matches(r.key)), None)
+        if mine is not None and mine.module.name in incomplete:
+            items.append(Item("keep", mine.module.name, "yes" if marked else "no", r.text,
+                              f"{mine.module.name} is on, but its rules cannot all be written down here "
+                              f"({'; '.join(mine.notes)}) — left as it is", rule=r))
+            continue
+        if not marked and r.key is not None:
+            for st in modules:
+                if st.matches(r.key):
+                    owner, why = st.module.name, f"a rule of {st.module.name}, which is {st.why}"
+                    break
+            else:
+                for p in ssh_known:
+                    if r.key in (simple(p, "tcp"), replace(simple(p, "tcp"), action="limit")):
+                        owner, why = "ssh", f"an ssh rule of port {p}, which ssh does not listen on any more"
+                        break
+        elif marked:
+            why = f"'{r.comment}' is not in the set"
+        if not owner:
+            items.append(Item("warn", "-", "no", r.text,
+                              f"not ours (no '{COMMENT_PREFIX}' comment, not a rule of the module table) and not "
+                              f"in {EXTRA_LIST} — left as it is" + (f"; comment '{r.comment}'" if r.comment else ""),
+                              rule=r))
+            continue
+        held = protected(r.key, live)
+        if held is not None:
+            items.append(Item("keep", owner, "yes" if marked else "no", r.text,
+                              f"{why}, but sshd listens on {held} ({live_why}) — never deleted", rule=r))
+        elif not live:
+            items.append(Item("keep", owner, "yes" if marked else "no", r.text,
+                              f"{why}, but the port sshd listens on cannot be told ({live_why}) — nothing is deleted",
+                              rule=r))
+        else:
+            items.append(Item("delete", owner, "yes" if marked else "no", r.text, why, rule=r))
+
+    plan = Plan(ufw, modules, wants, items, policy_want, ssh_ports, ssh_source, live, live_why,
+                [ex.closed for ex in extras if ex.closed is not None], notes)
+    if with_listeners:
+        check_listeners(plan, tcp)
+    return plan
+
+
+def check_listeners(plan: Plan, tcp: list[Listener] | None) -> None:
+    """Every public TCP listener allowed or declared closed; UDP only on module ports."""
+    allowed = [w.key for w in plan.wants] + [i.rule.key for i in plan.items
+                                              if i.action == "keep" and i.rule is not None and i.rule.key is not None]
+    closed = set(plan.closed)
+    module_udp: dict[int, str] = {}
+    for st in plan.modules:
+        if st.port is not None and st.module.proto == "udp":
+            module_udp.setdefault(st.port, st.module.name)
+    udp = listeners("udp")
+    plan.listeners_known = tcp is not None and udp is not None
+    kernel = kernel_udp_ports()
+    seen: set[tuple[str, int]] = set()
+
+    def judge(proto: str, row: Listener, what: str) -> None:
+        if (proto, row.port) in seen:
+            return
+        seen.add((proto, row.port))
+        names = ",".join(sorted({n for n, _ in row.procs})) or what
+        if any(opens(k, row.port, proto) for k in allowed):
+            plan.listeners.append(ListenerItem("ok", proto, row.port, row.addr, f"{names}: allowed"))
+        elif (row.port, proto) in closed:
+            plan.listeners.append(ListenerItem("closed", proto, row.port, row.addr, f"{names}: declared closed in {EXTRA_LIST}"))
+        else:
+            plan.listeners.append(ListenerItem(
+                "FAIL", proto, row.port, row.addr,
+                f"{names} listens on {row.addr}:{row.port}/{proto}, which is neither allowed by the set nor declared "
+                f"closed ('main|closed {row.port}/{proto}|<why>' in {EXTRA_LIST})"))
+
+    for row in tcp or []:
+        if is_public(row.addr):
+            judge("tcp", row, "a process")
+    for row in udp or []:
+        if is_loopback(row.addr):
+            continue
+        if row.port in module_udp and is_public(row.addr):
+            judge("udp", row, f"{module_udp[row.port]}'s port")
+            continue
+        if ("udp-info", row.port) in seen:
+            continue
+        seen.add(("udp-info", row.port))
+        if row.port in kernel and not row.procs:
+            what = f"listen-port of {kernel[row.port]} — kernel-owned, random"
+        elif not is_public(row.addr):
+            what = "on a private address (outgoing, e.g. through WARP)"
+        else:
+            what = ",".join(sorted({n for n, _ in row.procs})) or "no process (kernel-owned)"
+        plan.listeners.append(ListenerItem("info", "udp", row.port, row.addr, f"{what} — not a module port, not checked"))
+
+
+def plan_lines(ctx: Ctx, plan: Plan) -> list[str]:
+    u = plan.ufw
+    lines = [f"ufw={'present' if u.present else 'absent'}"]
+    if u.error:
+        lines.append(f"error={one(u.error)}")
+    lines.append(f"active={'yes' if u.active else 'no' if u.active is not None else 'unknown'}")
+    lines.append(f"ipv6={'yes' if u.ipv6 else 'no'}")
+    for d in ("incoming", "outgoing", "routed"):
+        want = plan.policy_want.get(d, "-")
+        lines.append(f"policy={d}|{u.policies.get(d, '?')}|{want}")
+    lines.append(f"ssh_ports={csv(plan.ssh_ports)}")
+    lines.append(f"ssh_source={one(plan.ssh_source)}")
+    lines.append(f"ssh_live={csv(plan.live)}")
+    lines.append(f"ssh_live_why={one(plan.live_why)}")
+    for st in plan.modules:
+        lines.append(f"module={st.module.name}|{'on' if st.on else 'off'}|{one(st.why)}")
+    lines.extend(i.kv() for i in plan.items)
+    lines.extend(f"note={one(n)}" for n in plan.notes)
+    lines.extend(x.kv() for x in plan.listeners)
+    lines.append(f"listeners={'unknown' if not plan.listeners_known else 'fail' if plan.listener_failures else 'ok'}")
+    lines.append(f"deadman={one(deadman_text(ctx))}")
+    lines.append(
+        "summary=" + " ".join(f"{a}={plan.count(a)}" for a in ("ok", "add", "adopt", "delete", "keep", "warn"))
+        + f" policy_changes={len(plan.policy_changes)} enable={'yes' if u.active is False else 'no'}"
+        + f" listener_failures={len(plan.listener_failures)}")
+    return lines
+
+
+# --------------------------------------------------------------------------- #
+# The dead-man (incoming policy / enable)
+# --------------------------------------------------------------------------- #
+def load_deadman(ctx: Ctx) -> dict[str, Any] | None:
+    try:
+        text = read_text(ctx.host(DEADMAN_STATE))
+    except Cannot:
+        return None
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def deadman_text(ctx: Ctx) -> str:
+    st = load_deadman(ctx)
+    if st is None:
+        return "none"
+    state = st.get("state")
+    if state == "pending":
+        return (f"PENDING CONFIRM (reverts at {st.get('deadline_iso', '?')} unless a new ssh connection from outside "
+                f"on {csv(st.get('ssh_ports') or [])} or «Подтвердить» in the bot) — {describe(st)}")
+    if state == "confirmed":
+        return f"confirmed {st.get('done_iso', '?')} ({st.get('proof', '?')}) — {describe(st)}"
+    if state == "reverted":
+        return f"REVERTED {st.get('done_iso', '?')} (no proof) — {describe(st)}"
+    return "none"
+
+
+def describe(st: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for c in st.get("changes") or []:
+        if isinstance(c, dict):
+            parts.append(f"{c.get('what')}: {c.get('from')} -> {c.get('to')}")
+    return "; ".join(parts) or "?"
+
+
+def timer_active() -> bool:
+    out = out_of(["systemctl", "is-active", f"{DEADMAN_UNIT}.timer"])
+    return (out or "").strip() == "active"
+
+
+def stop_timer() -> None:
+    run(["systemctl", "stop", f"{DEADMAN_UNIT}.timer"])
+
+
+def self_path() -> str:
+    if not SELFTEST and os.access(INSTALLED_PATH, os.X_OK):
+        return INSTALLED_PATH
+    return os.path.realpath(sys.argv[0])
+
+
+def arm_timer() -> tuple[bool, str]:
+    stop_timer()
+    run(["systemctl", "reset-failed", f"{DEADMAN_UNIT}.timer", f"{DEADMAN_UNIT}.service"])
+    rc, text = run(["systemd-run", "--quiet", "--collect", f"--unit={DEADMAN_UNIT}",
+                    f"--on-active={DEADMAN_INTERVAL}", f"--on-unit-active={DEADMAN_INTERVAL}",
+                    "--timer-property=AccuracySec=5s",
+                    "--description=vpn-bot UFW dead-man (reverts the incoming policy unless proven)",
+                    self_path(), "deadman-check"])
+    return rc == 0, text.strip()
+
+
+def journal_proof(ctx: Ctx, ports: Sequence[int], since: int) -> str:
+    helper = ctx.ssh_helper
+    if not ports or not helper or not os.path.isfile(helper):
+        return ""
+    argv = [sys.executable, "-I", helper, "--env", str(ctx.env_file), "--repo", str(ctx.repo), "--role", "main"]
+    if ctx.root:
+        argv += ["--root", ctx.root]
+    rc, text = run([*argv, "proof-journal", "--ports", csv(ports), "--since", str(since)], timeout=180)
+    if rc != 0:
+        return ""
+    kv = {ln.split("=", 1)[0]: ln.split("=", 1)[1] for ln in text.splitlines() if "=" in ln}
+    return kv.get("proof_detail", "") if kv.get("proof") == "journal" else ""
+
+
+def finish_deadman(ctx: Ctx, st: dict[str, Any], state: str, proof: str) -> None:
+    stop_timer()
+    data = dict(st)
+    now = int(time.time())
+    data.update({"state": state, "done_at": now, "done_iso": iso(now), "proof": proof or None})
+    write_atomic(ctx, ctx.host(DEADMAN_STATE), json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def revert(ctx: Ctx, st: dict[str, Any]) -> list[str]:
+    """Put the incoming policy (and an inactive ufw) back as it was before the change."""
+    notes: list[str] = []
+    prev_in = st.get("prev_incoming")
+    if isinstance(prev_in, str) and prev_in in POLICIES:
+        rc, text = run(["ufw", "default", prev_in, "incoming"])
+        notes.append(f"ufw default {prev_in} incoming: rc {rc}" + (f" — {one(text.strip())}" if rc else ""))
+    if st.get("prev_active") is False:
+        rc, text = run(["ufw", "disable"])
+        notes.append(f"ufw disable (it was inactive before): rc {rc}" + (f" — {one(text.strip())}" if rc else ""))
+    return notes
+
+
+def deadman_check(ctx: Ctx) -> int:
+    with lock(ctx):
+        st = load_deadman(ctx)
+        if st is None or st.get("state") != "pending":
+            stop_timer()
+            print("vpn-bot-ufw-apply: no UFW change waits for a proof")
+            return 0
+        armed = int(st.get("armed_at") or 0)
+        deadline = int(st.get("deadline") or 0)
+        proof = ""
+        bc = st.get("bot_confirm")
+        if isinstance(bc, dict) and int(bc.get("at") or 0) >= armed:
+            proof = f"bot: superadmin {bc.get('admin_id')} pressed «Подтвердить» ({iso(int(bc.get('at') or 0))})"
+        if not proof:
+            ports = sorted({*(int(p) for p in st.get("ssh_ports") or []), *live_ssh_ports(ctx, listeners("tcp"))[0]})
+            detail = journal_proof(ctx, ports, armed)
+            if detail:
+                proof = f"journal: {detail}"
+        if proof:
+            finish_deadman(ctx, st, "confirmed", proof)
+            print(f"vpn-bot-ufw-apply: UFW change confirmed ({proof}) — {describe(st)}; dead-man stopped")
+            return 0
+        if time.time() < deadline:
+            if not timer_active():
+                ok, text = arm_timer()
+                print(f"vpn-bot-ufw-apply: dead-man re-armed (it was not running — a reboot?): "
+                      f"{'ok' if ok else 'FAILED ' + text}")
+            print(f"vpn-bot-ufw-apply: waiting for a proof until {iso(deadline)} — {describe(st)}")
+            return 0
+        notes = revert(ctx, st)
+        finish_deadman(ctx, st, "reverted", "")
+        print(f"vpn-bot-ufw-apply: no proof by {iso(deadline)} — REVERTED: {describe(st)}")
+        for n in notes:
+            print(f"vpn-bot-ufw-apply:   {n}")
+        return 0
+
+
+def confirm(ctx: Ctx, since: int, admin: int) -> int:
+    if admin <= 0:
+        raise Refused("admin id must be a positive Telegram id")
+    with lock(ctx):
+        st = load_deadman(ctx)
+        if st is None or st.get("state") != "pending" or int(st.get("armed_at") or 0) != since:
+            raise Refused(f"no UFW change armed at {since} is waiting for a proof — the button is stale")
+        now = int(time.time())
+        st["bot_confirm"] = {"admin_id": admin, "at": now}
+        finish_deadman(ctx, st, "confirmed", f"bot: superadmin {admin} pressed «Подтвердить» ({iso(now)})")
+    print(f"confirmed: {describe(st)} (superadmin {admin}); dead-man stopped")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# apply
+# --------------------------------------------------------------------------- #
+@contextlib.contextmanager
+def lock(ctx: Ctx) -> Iterator[None]:
+    path = ctx.host(LOCK_FILE)
+    fence(ctx, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def ufw(*args: str) -> tuple[int, str]:
+    return run(["ufw", *args])
+
+
+def delete_argv(text: str) -> list[str]:
+    """`ufw delete <rule>`; a route rule is `ufw route delete <rule>` (ufw 0.36 refuses
+    `ufw delete route ...` as invalid syntax — measured)."""
+    toks = shlex.split(text)
+    if toks and toks[0] == "route":
+        return ["route", "delete", *toks[1:]]
+    return ["delete", *toks]
+
+
+def fail(failures: list[str], text: str) -> None:
+    failures.append(text)
+    print(f"vpn-bot-ufw-apply: FAIL: {text}", flush=True)
+
+
+def say(text: str) -> None:
+    print(f"vpn-bot-ufw-apply: {text}", flush=True)
+
+
+def apply(ctx: Ctx, ssh_given: str | None) -> int:
+    with lock(ctx):
+        plan = compute(ctx, ssh_given, with_listeners=False)
+        u = plan.ufw
+        if not u.present:
+            raise Cannot("ufw is not installed on this main server — its firewall is not managed")
+        if u.error:
+            raise Cannot(u.error)
+        failures: list[str] = []
+        done = {"add": 0, "adopt": 0, "delete": 0}
+        for n in plan.notes:
+            say(f"note: {n}")
+        # 1. What is missing, then the relabels: a port opens before anything else moves.
+        for it in plan.items:
+            if it.action in ("add", "adopt") and it.want is not None:
+                rc, text = ufw(*shlex.split(it.want.text), "comment", it.want.comment)
+                verb = "added" if it.action == "add" else "adopted"
+                if rc == 0:
+                    done[it.action] += 1
+                    say(f"{verb} '{it.text}' ({it.want.comment}) — {it.detail}")
+                else:
+                    fail(failures, f"ufw {it.text} comment '{it.want.comment}' failed (rc {rc}): {one(text.strip())}")
+        # 2. Policies: outgoing as it is; incoming — and enabling — under the dead-man.
+        dm = load_deadman(ctx)
+        pending = dm is not None and dm.get("state") == "pending"
+        changes = plan.policy_changes
+        if "outgoing" in changes:
+            rc, text = ufw("default", changes["outgoing"][1], "outgoing")
+            if rc == 0:
+                say(f"default outgoing: {changes['outgoing'][0]} -> {changes['outgoing'][1]}")
+            else:
+                fail(failures, f"ufw default {changes['outgoing'][1]} outgoing failed (rc {rc}): {one(text.strip())}")
+        risky: list[dict[str, str]] = []
+        if "incoming" in changes:
+            risky.append({"what": "incoming policy", "from": changes["incoming"][0], "to": changes["incoming"][1]})
+        if u.active is False:
+            risky.append({"what": "ufw", "from": "inactive", "to": "active"})
+        rc_deadman = 0
+        if risky and pending:
+            say(f"a UFW change waits for its proof already ({deadman_text(ctx)}) — the policy is left as it is")
+        elif risky:
+            rc_deadman = arm_and_change(ctx, plan, risky, failures)
+        # 3. Deletions last.
+        for it in plan.items:
+            if it.action == "delete":
+                argv = delete_argv(it.text)
+                rc, text = ufw(*argv)
+                if rc == 0:
+                    done["delete"] += 1
+                    say(f"deleted '{it.text}'" + (f" ('{it.rule.comment}')" if it.rule and it.rule.comment else "")
+                        + f" — {it.detail}")
+                else:
+                    fail(failures, f"ufw {' '.join(argv)} failed (rc {rc}): {one(text.strip())}")
+            elif it.action == "keep":
+                say(f"kept '{it.text}' — {it.detail}")
+            elif it.action == "warn":
+                say(f"WARN: '{it.text}' — {it.detail}")
+        # 4. Converged?
+        after = compute(ctx, ssh_given, with_listeners=False)
+        left = [i for i in after.items if i.action in ("add", "adopt", "delete")]
+        for i in left:
+            fail(failures, f"still to {i.action}: '{i.text}' ({i.detail})")
+        if after.policy_changes.get("outgoing"):
+            fail(failures, f"the outgoing policy is still {after.ufw.policies.get('outgoing')}")
+        summary = (f"{after.count('ok')} rule(s) in place, {done['add']} added, {done['adopt']} adopted, "
+                   f"{done['delete']} deleted, {after.count('keep')} kept (ssh), {after.count('warn')} unmanaged")
+        say(summary)
+        if rc_deadman:
+            return rc_deadman
+        return EXIT_NOT_CONVERGED if failures else 0
+
+
+def arm_and_change(ctx: Ctx, plan: Plan, risky: list[dict[str, str]], failures: list[str]) -> int:
+    """The incoming policy / enabling, behind a dead-man that is armed FIRST."""
+    now = int(time.time())
+    st: dict[str, Any] = {"version": 1, "state": "pending", "armed_at": now, "armed_iso": iso(now),
+          "deadline": now + DEADMAN_SECONDS, "deadline_iso": iso(now + DEADMAN_SECONDS),
+          "changes": risky, "prev_incoming": plan.ufw.policies.get("incoming"),
+          "prev_active": bool(plan.ufw.active), "ssh_ports": sorted({*plan.ssh_ports, *plan.live}),
+          "bot_confirm": None, "proof": None, "done_at": None, "done_iso": None}
+    write_atomic(ctx, ctx.host(DEADMAN_STATE), json.dumps(st, indent=2, sort_keys=True) + "\n")
+    ok, text = arm_timer()
+    if not ok:
+        with contextlib.suppress(OSError):
+            ctx.host(DEADMAN_STATE).unlink()
+        print(f"vpn-bot-ufw-apply: FAIL: the dead-man could not be armed ({text}) — "
+              f"{'; '.join(c['what'] for c in risky)} NOT changed", flush=True)
+        return EXIT_DEADMAN
+    say(f"dead-man armed: {describe(st)} stays only with a proof by {st['deadline_iso']} "
+        f"(a new ssh connection from outside on {csv(st['ssh_ports'])}, or «Подтвердить» in the bot)")
+    if "incoming" in plan.policy_changes:
+        want = plan.policy_changes["incoming"][1]
+        rc, text = ufw("default", want, "incoming")
+        if rc != 0:
+            fail(failures, f"ufw default {want} incoming failed (rc {rc}): {one(text.strip())}")
+        else:
+            say(f"default incoming: {plan.policy_changes['incoming'][0]} -> {want}")
+    if plan.ufw.active is False:
+        rc, text = ufw("--force", "enable")
+        if rc != 0:
+            fail(failures, f"ufw --force enable failed (rc {rc}): {one(text.strip())}")
+        else:
+            say("ufw enabled")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# save / restore (deploy.sh's rollback)
+# --------------------------------------------------------------------------- #
+def save(ctx: Ctx, d: Path) -> int:
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (d / "files").mkdir(mode=0o700, exist_ok=True)
+    rc, text = ufw("status")
+    active: bool | None = None
+    if rc == 0:
+        m = re.search(r"^Status: (active|inactive)", text, re.M)
+        active = None if m is None else m.group(1) == "active"
+    present: dict[str, bool] = {}
+    for p in (*SAVED_FILES, DEADMAN_STATE):
+        src = ctx.host(p)
+        dst = d / "files" / p.strip("/").replace("/", "__")
+        if src.is_file():
+            shutil.copy2(src, dst)
+            present[p] = True
+        else:
+            present[p] = False
+    state = {"active": active, "present": present, "timer_active": timer_active(), "at": int(time.time())}
+    (d / "state.json").write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    say(f"saved the UFW state ({'active' if active else 'inactive' if active is False else 'unknown'}) in {d}")
+    return 0
+
+
+def restore(ctx: Ctx, d: Path) -> int:
+    try:
+        state = json.loads((d / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Cannot(f"no saved UFW state in {d}: {exc}") from exc
+    with lock(ctx):
+        changed: list[str] = []
+        for p, was in state.get("present", {}).items():
+            host = ctx.host(p)
+            saved = d / "files" / p.strip("/").replace("/", "__")
+            if was:
+                old = saved.read_bytes()
+                if not host.is_file() or host.read_bytes() != old:
+                    mode = (host.stat().st_mode & 0o777) if host.is_file() else 0o640
+                    write_atomic(ctx, host, old.decode("utf-8", errors="surrogateescape"), mode)
+                    changed.append(p)
+            elif host.exists():
+                fence(ctx, host)
+                host.unlink()
+                changed.append(p)
+        if not state.get("timer_active") and timer_active():
+            stop_timer()
+            changed.append(f"{DEADMAN_UNIT}.timer stopped")
+        was_active = state.get("active")
+        rc, text = ufw("status")
+        m = re.search(r"^Status: (active|inactive)", text, re.M) if rc == 0 else None
+        now_active = None if m is None else m.group(1) == "active"
+        ufw_files = [c for c in changed if c in SAVED_FILES]
+        if was_active is True and now_active is False:
+            rc, text = ufw("--force", "enable")
+            say(f"ufw enabled again (it was active): rc {rc}" + (f" — {one(text.strip())}" if rc else ""))
+        elif was_active is False and now_active is True:
+            rc, text = ufw("disable")
+            say(f"ufw disabled again (it was inactive): rc {rc}" + (f" — {one(text.strip())}" if rc else ""))
+        elif ufw_files and now_active:
+            rc, text = ufw("reload")
+            say(f"ufw reload: rc {rc}" + (f" — {one(text.strip())}" if rc else ""))
+        say("restored: " + (", ".join(changed) if changed else "nothing had changed"))
+        return 0 if rc == 0 else EXIT_CANNOT
+
+
+# --------------------------------------------------------------------------- #
+# status
+# --------------------------------------------------------------------------- #
+def status(ctx: Ctx) -> str:
+    try:
+        plan = compute(ctx, None, with_listeners=False)
+    except (Refused, Cannot) as exc:
+        return f"ufw: not judged ({exc})"
+    u = plan.ufw
+    if not u.present or u.error:
+        return f"ufw: {u.error or 'not installed'}"
+    todo = plan.count("add") + plan.count("adopt") + plan.count("delete")
+    text = (f"ufw: {'active' if u.active else 'INACTIVE'}; incoming {u.policies.get('incoming')}, outgoing "
+            f"{u.policies.get('outgoing')}, routed {u.policies.get('routed')} (not managed); "
+            f"{plan.count('ok')} rule(s) as the repo says")
+    if todo:
+        text += f", {todo} to change"
+    if plan.count("keep"):
+        text += f", {plan.count('keep')} kept for ssh"
+    if plan.count("warn"):
+        text += f", {plan.count('warn')} unmanaged (WARN)"
+    dm = deadman_text(ctx)
+    if dm != "none":
+        text += f"; dead-man: {dm}"
+    return text
+
+
+# --------------------------------------------------------------------------- #
+# Commands
+# --------------------------------------------------------------------------- #
+WRITING_COMMANDS = frozenset({"apply", "save", "restore", "deadman-check", "confirm"})
+GLOBAL_OPTIONS_WITH_VALUE = frozenset({"--env", "--repo", "--root", "--ssh-port-helper"})
+
+
+def subcommand(argv: Sequence[str]) -> str:
+    skip = False
+    for tok in argv:
+        if skip:
+            skip = False
+        elif tok in GLOBAL_OPTIONS_WITH_VALUE:
+            skip = True
+        elif not tok.startswith("-"):
+            return tok
+    return ""
+
+
+def host_mount_namespace_argv(argv: Sequence[str]) -> list[str] | None:
+    """The argv to re-run this helper in PID 1's mount namespace, or None when it already
+    runs there (the same escape as scripts/vpn-bot-ssh-port)."""
+    if SELFTEST or os.geteuid() != 0 or os.environ.get("VPN_BOT_UFW_HOSTNS") == "1":
+        return None
+    if subcommand(argv) not in WRITING_COMMANDS:
+        return None
+    try:
+        if os.readlink("/proc/self/ns/mnt") == os.readlink("/proc/1/ns/mnt"):
+            return None
+    except OSError:
+        return None
+    return ["nsenter", "--mount=/proc/1/ns/mnt", "--", sys.executable, "-I", os.path.realpath(sys.argv[0]), *argv]
+
+
+def make_ctx(args: argparse.Namespace) -> Ctx:
+    root = (args.root or "").rstrip("/")
+    if SELFTEST and not root:
+        raise Cannot("VPN_BOT_UFW_SELFTEST=1 needs --root")
+    env_file = Path(args.env or APP_DIR + "/.env")
+    # Under the test seam only an explicitly named SSH port helper runs: the installed one
+    # may exist on the production host the suite runs on.
+    default_helper = "" if SELFTEST else SSH_PORT_HELPER
+    ctx = Ctx(env_file=env_file, repo=Path(args.repo or APP_DIR), root=root,
+              ssh_helper=args.ssh_port_helper if args.ssh_port_helper is not None else default_helper)
+    ctx.env_text = read_text(env_file) or ""
+    role = ctx.env("NODE_ROLE")
+    if role not in ("", "main"):
+        raise Refused(f"NODE_ROLE={role!r}: UFW is the main server's firewall (a relay has vpnrelay_input)")
+    return ctx
+
+
+def require_root(cmd: str) -> None:
+    if not SELFTEST and os.geteuid() != 0:
+        raise Cannot(f"{cmd} must run as root (sudo -n {INSTALLED_PATH} {cmd} ...)")
+
+
+def main(argv: Sequence[str]) -> int:
+    reexec = host_mount_namespace_argv(argv)
+    if reexec is not None:
+        os.environ["VPN_BOT_UFW_HOSTNS"] = "1"
+        try:
+            os.execvpe(reexec[0], reexec, os.environ)  # noqa: S606 — fixed argv: nsenter, this interpreter, this script
+        except OSError as exc:
+            print(f"vpn-bot-ufw-apply: cannot enter the host mount namespace ({exc}) — going on in this one",
+                  file=sys.stderr)
+    ap = argparse.ArgumentParser(prog="vpn-bot-ufw-apply", description="UFW of the main server (docs/host-state.md)")
+    ap.add_argument("--env")
+    ap.add_argument("--repo")
+    ap.add_argument("--root")
+    ap.add_argument("--ssh-port-helper")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("plan", "apply", "listeners"):
+        p = sub.add_parser(name)
+        p.add_argument("--ssh-ports", default=None)
+    sub.add_parser("status")
+    sub.add_parser("deadman-check")
+    for name in ("save", "restore"):
+        p = sub.add_parser(name)
+        p.add_argument("--dir", required=True)
+    p = sub.add_parser("confirm")
+    p.add_argument("--since", required=True, type=int)
+    p.add_argument("--admin", required=True, type=int)
+    args = ap.parse_args(argv)
+    try:
+        ctx = make_ctx(args)
+        if args.cmd == "plan":
+            try:
+                plan = compute(ctx, args.ssh_ports)
+            except Refused as exc:
+                print("result=refused")
+                print("error=" + str(exc).replace("\n", " ").replace("\r", " "))   # not split on '|'
+                return EXIT_REFUSED
+            print("\n".join(plan_lines(ctx, plan)))
+            print("result=ok")
+            return 0
+        if args.cmd == "listeners":
+            plan = compute(ctx, args.ssh_ports)
+            for x in plan.listeners:
+                print(x.kv())
+            bad = plan.listener_failures
+            print(f"listeners={'unknown' if not plan.listeners_known else 'fail' if bad else 'ok'}")
+            if not plan.listeners_known:
+                print("vpn-bot-ufw-apply: `ss` failed — the listeners are not checked", file=sys.stderr)
+                return EXIT_CANNOT
+            return EXIT_NOT_CONVERGED if bad else 0
+        if args.cmd == "status":
+            print(status(ctx))
+            return 0
+        require_root(args.cmd)
+        if args.cmd == "apply":
+            return apply(ctx, args.ssh_ports)
+        if args.cmd == "save":
+            return save(ctx, Path(args.dir))
+        if args.cmd == "restore":
+            return restore(ctx, Path(args.dir))
+        if args.cmd == "deadman-check":
+            return deadman_check(ctx)
+        if args.cmd == "confirm":
+            return confirm(ctx, args.since, args.admin)
+    except Refused as exc:
+        print(f"vpn-bot-ufw-apply: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    except (Cannot, OSError) as exc:
+        print(f"vpn-bot-ufw-apply: {exc}", file=sys.stderr)
+        return EXIT_CANNOT
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

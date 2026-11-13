@@ -471,8 +471,9 @@ vpn-relay-apply input-confirm
     egress-IP relay — все пользователи relay делили бы один bucket
     (`SUBSCRIPTION_RATE_LIMIT_BURST` за `SUBSCRIPTION_RATE_LIMIT_SECONDS`), если source IPs
     relay не получат отдельной обработки;
-  - правило firewall из `deploy/ufw-subscription.sh` relay уже пропускает (оно не ограничено
-    по источнику), а монитор доступности по-прежнему проверял бы только `XRAY_PUBLIC_PORT`.
+  - правило UFW для `SUBSCRIPTION_PUBLIC_PORT` (модуль `subscription` в
+    `scripts/vpn-bot-ufw-apply`) relay уже пропускает (оно не ограничено по источнику), а
+    монитор доступности по-прежнему проверял бы только `XRAY_PUBLIC_PORT`.
 
 ## Управление relay в админ-панели
 

@@ -55,6 +55,7 @@ async def main() -> None:
     from services.anomaly_detection import anomaly_detection_loop
     from services.host_check import host_check_loop
     from services.ssh_port import ssh_port_loop
+    from services.ufw import ufw_deadman_loop
     from services.key_expiry import key_expiry_loop
     from services.offsite_backup import offsite_backup_loop
     from services.relay_health import relay_health_loop
@@ -78,6 +79,7 @@ async def main() -> None:
         relay_health_task: asyncio.Task[None] | None = None
         host_check_task: asyncio.Task[None] | None = None
         ssh_port_task: asyncio.Task[None] | None = None
+        ufw_deadman_task: asyncio.Task[None] | None = None
         # Protocols removed from the host: every backend loop below asks this on
         # each pass (a protocol can be removed while the bot runs).
         uninstalled = services.protocol_uninstall.registry if services.protocol_uninstall is not None else None
@@ -207,6 +209,10 @@ async def main() -> None:
                     ssh_port_loop(services.ssh_port, settings.host_check_interval),
                     name="ssh-port-alerts",
                 )
+            # A UFW policy change waiting for its proof (/var/lib/vpn-bot/ufw-deadman.json):
+            # its own short interval — the dead-man reverts after 10 minutes.
+            if services.ufw_deadman is not None:
+                ufw_deadman_task = asyncio.create_task(ufw_deadman_loop(services.ufw_deadman), name="ufw-deadman-alerts")
             server_status_task = asyncio.create_task(
                 services.server_status.run(),
                 name="server-status-sampler",
@@ -283,6 +289,9 @@ async def main() -> None:
             if ssh_port_task is not None:
                 ssh_port_task.cancel()
                 await asyncio.gather(ssh_port_task, return_exceptions=True)
+            if ufw_deadman_task is not None:
+                ufw_deadman_task.cancel()
+                await asyncio.gather(ufw_deadman_task, return_exceptions=True)
             if server_status_task is not None:
                 server_status_task.cancel()
                 await asyncio.gather(server_status_task, return_exceptions=True)

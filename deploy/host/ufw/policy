@@ -1,0 +1,17 @@
+# deploy/host/ufw/policy — the default policies of the main server's UFW
+# (docs/host-state.md#the-firewall-ufw). scripts/vpn-bot-ufw-apply sets them.
+#
+#   role|direction|policy      direction: incoming | outgoing; policy: allow | deny | reject
+#
+# Seeded from the main server as measured on 2026-11-12 (/etc/default/ufw:
+# DEFAULT_INPUT_POLICY="DROP", DEFAULT_OUTPUT_POLICY="ACCEPT").
+#
+# The routed policy is NOT here and is never changed: AWG clients and WARP reach the
+# internet through route rules (the module table of vpn-bot-ufw-apply), and the
+# measured DEFAULT_FORWARD_POLICY="DROP" stays exactly as the host has it.
+#
+# A change of the incoming policy (and enabling an inactive ufw) runs under a dead-man:
+# it stays only with a proof that ssh still answers from outside — a new connection
+# in the sshd log, or «Подтвердить» in the bot — else it is reverted after 10 minutes.
+main|incoming|deny
+main|outgoing|allow

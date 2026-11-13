@@ -112,4 +112,15 @@ Cmnd_Alias VPN_BOT_WARP_SPLIT = \
 Cmnd_Alias VPN_BOT_SSH_PORT = \
     /usr/local/sbin/vpn-bot-ssh-port confirm *
 
-vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_UNINSTALL, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT, VPN_BOT_SSH_PORT
+# The main server's UFW (docs/host-state.md#the-firewall-ufw). `apply` is pinned to no
+# further argument: the helper computes the whole rule set from .env, its module table,
+# the uninstall markers and deploy/host/ufw/* (root-owned) — the bot passes nothing.
+# It runs after a protocol is switched on and after one is removed from the host.
+# `confirm` keeps a change of the incoming policy that waits for its proof; the helper
+# takes exactly --since <epoch> --admin <id>, both numeric, and refuses any change but
+# the one waiting.
+Cmnd_Alias VPN_BOT_UFW = \
+    /usr/local/sbin/vpn-bot-ufw-apply apply, \
+    /usr/local/sbin/vpn-bot-ufw-apply confirm *
+
+vpn-bot ALL=(root) NOPASSWD: VPN_BOT_SOCKS5, VPN_BOT_XRAY, VPN_BOT_AWG, VPN_BOT_MTPROTO, VPN_BOT_UNINSTALL, VPN_BOT_WARP, VPN_BOT_WARP_SPLIT, VPN_BOT_SSH_PORT, VPN_BOT_UFW

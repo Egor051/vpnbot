@@ -1332,6 +1332,94 @@ ssh_port_rows() {
 }
 
 # --------------------------------------------------------------------------- #
+# UFW — the main server's firewall (docs/host-state.md#the-firewall-ufw). The decision is
+# scripts/vpn-bot-ufw-apply's `plan` (the checkout's copy, read-only: `ufw status`,
+# `ufw show added`, /etc/ufw/user*.rules, `sshd -T`, `ss`); this only turns its answer
+# into rows, against the set it computes (module table, ssh ports, extra.list, policy):
+#   ufw not installed, the plan refused, ufw inactive         MISMATCH (inactive with
+#                                                             --pre-install: PENDING)
+#   a policy that is not deploy/host/ufw/policy's             MISMATCH
+#   a rule of the set missing (or one of its v4/v6 copies)    MISMATCH
+#   a rule with a vpn-bot: comment that is not in the set     MISMATCH
+#   an unmarked rule that is not in the set                   LATENT (apply deletes a
+#                                                             rule of the module table,
+#                                                             WARNs about any other)
+#   a rule of the set without our comment                     INFO (apply relabels it)
+#   a rule kept because sshd listens on its port              WARN
+#   a dead-man waiting for its proof / one that reverted      PENDING / WARN
+# With --pre-install everything the deploy's apply changes (add, relabel, delete, the
+# policy) is PENDING; an unmarked rule nothing claims stays LATENT. A relay: no rows.
+# --------------------------------------------------------------------------- #
+UFW_HELPER_REL="scripts/vpn-bot-ufw-apply"
+UFW_RULES="/etc/ufw/user.rules"
+UFW_DEFAULTS="/etc/default/ufw"
+
+ufw_rows() {
+  local helper="${APP_DIR}/${UFW_HELPER_REL}" out line rc k v a b c d e verdict
+  local -a args=(--env "$ENV_FILE" --repo "$APP_DIR" --ssh-port-helper "${APP_DIR}/${SSH_PORT_HELPER_REL}")
+  [[ "$ROLE" == "main" ]] || return 0
+  if [[ ! -f "$helper" ]]; then
+    row INFO ufw ufw "-" "the checkout has no ${UFW_HELPER_REL} — UFW is not judged"
+    return 0
+  fi
+  if [[ -n "$ROOT" ]]; then args+=(--root "$ROOT"); fi
+  out="$(python3 -I "$helper" "${args[@]}" plan 2>/dev/null)" && rc=0 || rc=$?
+  # key=value lines, read as data — never evaluated.
+  if [[ "$out" != *$'\n'"result=ok"* ]]; then
+    v="$(printf '%s\n' "$out" | sed -n 's/^error=//p' | tail -n 1)"
+    row MISMATCH ufw plan "${APP_DIR}/deploy/host/ufw" "the UFW plan could not be made (exit ${rc}): ${v:-no output} — a deploy refuses it too"
+    return 0
+  fi
+  while IFS= read -r line; do
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      ufw)
+        if [[ "$v" != present ]]; then
+          row MISMATCH ufw ufw "-" "ufw is not installed — the main server's firewall is the repo's (vpn-bot-ufw-apply)"
+          return 0
+        fi ;;
+      error)
+        row WARN ufw ufw "-" "ufw could not be read: ${v} — UFW is not judged"
+        return 0 ;;
+      active)
+        case "$v" in
+          yes) row OK ufw active "-" "ufw is active" ;;
+          no)  if (( PRE_INSTALL )); then row PENDING ufw active "-" "ufw is inactive — the deploy enables it, under a dead-man"
+               else row MISMATCH ufw active "-" "ufw is INACTIVE: the host has no firewall — the next deploy (or vpn-bot-ufw-apply apply) enables it under a dead-man"; fi ;;
+          *)   row WARN ufw active "-" "\`ufw status\` did not say whether ufw is active" ;;
+        esac ;;
+      policy)
+        IFS='|' read -r a b c <<< "$v"
+        if [[ "$c" == "-" ]]; then continue; fi
+        if [[ "$b" == "$c" ]]; then row OK ufw "policy ${a}" "$UFW_DEFAULTS" "${b} = deploy/host/ufw/policy"
+        elif (( PRE_INSTALL )); then row PENDING ufw "policy ${a}" "$UFW_DEFAULTS" "${b} -> ${c}: the deploy sets it$([[ "$a" == incoming ]] && printf ', under a dead-man')"
+        else row MISMATCH ufw "policy ${a}" "$UFW_DEFAULTS" "${b}, but deploy/host/ufw/policy says ${c}"; fi ;;
+      rule)
+        IFS='|' read -r a b c d e <<< "$v"
+        case "$a" in
+          ok)     verdict=OK ;;
+          add)    verdict=MISMATCH; e="not in ufw: ${e}" ;;
+          adopt)  verdict=INFO; e="${e} — apply relabels it in place" ;;
+          delete) if [[ "$c" == yes ]]; then verdict=MISMATCH; else verdict=LATENT; fi
+                  e="not in the set: ${e} — apply deletes it" ;;
+          keep)   verdict=WARN ;;
+          warn)   verdict=LATENT ;;
+          *)      verdict=WARN; e="unknown plan action '${a}': ${e}" ;;
+        esac
+        if (( PRE_INSTALL )) && [[ "$a" == add || "$a" == adopt || "$a" == delete ]]; then verdict=PENDING; fi
+        row "$verdict" ufw "$d" "$UFW_RULES" "${b}: ${e}" ;;
+      deadman)
+        case "$v" in
+          none) ;;
+          PENDING*)  row PENDING ufw dead-man "/var/lib/vpn-bot/ufw-deadman.json" "$v" ;;
+          REVERTED*) row WARN ufw dead-man "/var/lib/vpn-bot/ufw-deadman.json" "$v — the next apply tries again" ;;
+          *)         row INFO ufw dead-man "/var/lib/vpn-bot/ufw-deadman.json" "$v" ;;
+        esac ;;
+    esac
+  done <<< "$out"
+}
+
+# --------------------------------------------------------------------------- #
 # Class pristine (--pristine, pre-install): does restoring the package default change
 # anything effective? Every key of the file's family — not only the repo's — once with
 # the package default in place (the main run) and once with the host copy (a second
@@ -1663,6 +1751,7 @@ main() {
   unit_rows
   invariant_rows
   ssh_port_rows
+  ufw_rows
   warn_cloud_init
   warn_logrotate
   warn_sudoers

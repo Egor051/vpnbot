@@ -589,6 +589,11 @@ def hysteria2_host(h: Host, *, clear_works: bool = True) -> None:
     h.set_ufw("ufw allow 443/tcp comment 'Xray Reality HTTPS'", "ufw allow 443/udp", "ufw allow 22/tcp")
 
 
+def _ufw_writes(host: Host) -> list[str]:
+    """Every ufw call that would change a rule — the helper makes none."""
+    return [c for c in host.calls_of("ufw") if c.split()[1] not in ("show", "status")]
+
+
 BUILDERS = {"xray": xray_host, "awg": awg_host, "socks5": socks5_host, "mtproto": mtproto_host,
             "hysteria2": hysteria2_host}
 PROTOCOLS = list(BUILDERS)
@@ -741,7 +746,7 @@ def test_the_xray_plan_lists_units_files_sizes_rules_and_skips(host: Host) -> No
     assert files["/usr/local/etc/xray"]["kind"] == "dir"
     assert files["/usr/local/etc/xray"]["entries"] == len(XRAY_BAKS) + 2
     assert files["/usr/local/share/xray"]["size"] > 0
-    assert [(w["rule"], w["state"]) for w in plan["ufw"]] == [("443/tcp", "delete")]
+    assert "ufw" not in plan, "the firewall is vpn-bot-ufw-apply's: the plan names no ufw rule"
     assert plan["users"] == [] and plan["packages"] == []
     assert plan["marker"] == {"path": "/etc/vpn-bot/uninstalled/xray", "state": "create"}
     shared = " ".join(s["what"] for s in plan["skipped_shared"])
@@ -775,8 +780,9 @@ def test_xray_apply_removes_the_manifest_and_nothing_shared(host: Host) -> None:
                 "usr/local/share/xray", "usr/local/etc/xray", "var/log/xray"):
         assert not host.p(rel).exists(), rel
     assert host.unit_state("xray.service")["load"] == "not-found"
-    assert host.ufw_rules() == ["ufw allow 31337/tcp", "ufw allow 443/udp", "ufw allow 22/tcp"]
-    assert "ufw delete allow 443/tcp" in host.calls_of("ufw")
+    assert host.ufw_rules() == ["ufw allow 443/tcp comment 'Xray Reality HTTPS'", "ufw allow 31337/tcp",
+                                "ufw allow 443/udp", "ufw allow 22/tcp"], "the helper leaves ufw alone"
+    assert _ufw_writes(host) == []
     assert host.calls_of("userdel") == [] and host.calls_of("apt-get") == []
     assert any(line.startswith("nobody:") for line in (host.st / "passwd").read_text(encoding="utf-8").splitlines())
     assert host.p("etc/logrotate.d/xray").exists()
@@ -826,7 +832,7 @@ def test_awg_apply_masks_the_unit_and_leaves_warp_alone(host: Host) -> None:
     assert os.readlink(host.p("etc/amnezia/amneziawg/out-warp.conf")) == "/etc/amnezia/out-warp.conf"
     _shared_untouched(host, before)
     assert host.calls_of("apt-get") == [] and host.calls_of("userdel") == []
-    assert [w["state"] for w in plan["ufw"]] == ["absent"]
+    assert "ufw" not in plan and _ufw_writes(host) == []
     assert report["ok"] is True
 
 
@@ -849,7 +855,9 @@ def test_socks5_apply_purges_and_deletes_only_matching_users(host: Host) -> None
     assert "apt-get purge -y -q dante-server" in host.calls_of("apt-get")
     assert not (host.st / "pkg_dante-server").exists()
     assert not host.p("etc/systemd/system/danted.service.d").exists()
-    assert host.ufw_rules() == ["ufw allow 443/tcp comment 'Xray Reality HTTPS'", "ufw allow 22/tcp"]
+    assert host.ufw_rules() == ["ufw allow 443/tcp comment 'Xray Reality HTTPS'", "ufw allow 31337/tcp",
+                                "ufw allow 22/tcp"], "31337/tcp goes with vpn-bot-ufw-apply, not here"
+    assert _ufw_writes(host) == []
     env = host.p("opt/vpn-service/.env").read_text(encoding="utf-8")
     assert "SOCKS5_ENABLED=false\n" in env and "SOCKS5_ENABLED=true" not in env
     _shared_untouched(host, before)
@@ -871,7 +879,8 @@ def test_mtproto_half_removed_is_a_normal_input(host: Host) -> None:
     proc, report = host.apply("mtproto", plan["sha256"])
     assert proc.returncode == 0, proc.stdout + proc.stderr
     absent = {a["item"] for a in report["already_absent"]}
-    assert {"mtproxy.service", "/usr/local/bin/mtproto-proxy", "9443/tcp"} <= absent
+    assert {"mtproxy.service", "/usr/local/bin/mtproto-proxy"} <= absent
+    assert not [a for a in report["already_absent"] if a["kind"] == "ufw"]
     assert not host.p("etc/mtproxy").exists()
     assert not host.p("etc/systemd/system/mtproxy.service.d").exists()
     assert not host.p("opt/vpn-service/scripts/run-mtproxy-managed").exists()
@@ -909,7 +918,9 @@ def test_hysteria2_clears_the_marks_before_anything_else(host: Host) -> None:
                 "usr/local/bin/hysteria", "etc/hysteria"):
         assert not host.p(rel).exists(), rel
     assert "hysteria:" not in (host.st / "passwd").read_text(encoding="utf-8")
-    assert host.ufw_rules() == ["ufw allow 443/tcp comment 'Xray Reality HTTPS'", "ufw allow 22/tcp"]
+    assert host.ufw_rules() == ["ufw allow 443/tcp comment 'Xray Reality HTTPS'", "ufw allow 443/udp",
+                                "ufw allow 22/tcp"]
+    assert _ufw_writes(host) == []
     assert "HYSTERIA2_ENABLED=false\n" in host.p("opt/vpn-service/.env").read_text(encoding="utf-8")
     _shared_untouched(host, before)
 
@@ -974,8 +985,8 @@ def test_a_backup_missing_a_member_is_rejected(host: Host) -> None:
 # 6. A failure in any step 4-10 rolls everything back
 # --------------------------------------------------------------------------- #
 FAIL_CASES = [(proto, step) for proto in ("xray", "socks5", "hysteria2")
-              for step in ("units", "files", "ufw", "packages", "users", "env", "marker")]
-FAIL_CASES += [("awg", step) for step in ("units", "files", "ufw", "marker")]
+              for step in ("units", "files", "packages", "users", "env", "marker")]
+FAIL_CASES += [("awg", step) for step in ("units", "files", "marker")]
 FAIL_CASES += [("mtproto", step) for step in ("files", "users", "env")]
 
 
@@ -1000,8 +1011,6 @@ def test_a_failure_after_each_step_restores_the_host(host: Host, proto: str, ste
 @pytest.mark.parametrize(("flag", "step"), [
     ("fail_systemctl_stop_xray.service", "units"),
     ("fail_systemctl_daemon-reload", "units"),   # one-shot: the rollback's own reload works
-    ("fail_ufw_delete", "ufw"),
-    ("ufw_delete_noop", "ufw"),
 ])
 def test_real_tool_failures_roll_back_xray(host: Host, flag: str, step: str) -> None:
     xray_host(host)
@@ -1048,11 +1057,11 @@ def test_restored_users_get_their_password_hash_back(host: Host) -> None:
 
 
 def test_a_rollback_that_cannot_finish_says_so(host: Host) -> None:
-    xray_host(host)
-    host.flag("fail_ufw_allow")
-    proc, report = host.apply("xray", fail="marker")
+    socks5_host(host)
+    host.flag("fail_apt_install")
+    proc, report = host.apply("socks5", fail="marker")
     assert proc.returncode == 71, proc.stdout
-    assert report["rolled_back"] is True and any("ufw allow 443/tcp" in e for e in report["rollback_errors"])
+    assert report["rolled_back"] is True and any("dante-server" in e for e in report["rollback_errors"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1201,14 +1210,28 @@ def test_a_dpkg_rc_package_is_not_purged(host: Host) -> None:
     assert plan["packages"][0]["state"] == "skip"
 
 
-def test_a_non_standard_ufw_rule_is_reported_not_removed(host: Host) -> None:
-    xray_host(host)
-    host.set_ufw("ufw allow 443", "ufw allow 443/udp")
-    plan = host.plan("xray")
-    assert [(w["state"], w["line"]) for w in plan["ufw"]] == [("skip", "ufw allow 443")]
-    proc, _ = host.apply("xray", plan["sha256"])
-    assert proc.returncode == 0
-    assert host.ufw_rules() == ["ufw allow 443", "ufw allow 443/udp"]
+@pytest.mark.parametrize("proto", PROTOCOLS)
+def test_the_helper_never_touches_ufw(host: Host, proto: str) -> None:
+    """One owner of the firewall rules: scripts/vpn-bot-ufw-apply. The marker this helper
+    writes takes the module out of its set and the bot runs `apply` right after
+    (docs/host-state.md#the-firewall-ufw) — here no rule is added or deleted, a
+    failed step's rollback re-adds none, and neither the plan nor the manifest names one."""
+    BUILDERS[proto](host)
+    before = host.ufw_rules()
+    plan = host.plan(proto)
+    assert "ufw" not in plan
+    assert "ufw" not in json.loads(host.run("manifest", proto).stdout)
+    proc, report = host.apply(proto, plan["sha256"])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert host.ufw_rules() == before
+    assert _ufw_writes(host) == []
+    assert not [i for i in (*report["removed"], *report["already_absent"], *report["skipped"]) if i["kind"] == "ufw"]
+
+
+def test_no_ufw_port_is_written_into_the_helper() -> None:
+    code = [ln for ln in HELPER.read_text(encoding="utf-8").splitlines() if not ln.lstrip().startswith("#")]
+    assert not [ln for ln in code if re.search(r"ufw (allow|delete|route|deny|reject|limit)", ln)]
+    assert not [ln for ln in code if re.search(r"\b(11880|9443|31337)/(tcp|udp)\b", ln)]
 
 
 # --------------------------------------------------------------------------- #
@@ -1309,16 +1332,14 @@ def test_the_expected_manifests(host: Host) -> None:
     man = {p: json.loads(host.run("manifest", p).stdout) for p in PROTOCOLS}
     assert man["xray"]["paths"] == ["/usr/local/bin/xray", "/usr/local/share/xray", "/usr/local/etc/xray",
                                     "/var/log/xray"]
-    assert man["xray"]["users"] == [] and man["xray"]["ufw"] == ["443/tcp"]
+    assert man["xray"]["users"] == [] and "ufw" not in man["xray"]
     assert man["awg"]["units"] == [{"unit": "awg-quick@awg0.service", "flag": "mask"}]
     assert man["awg"]["paths"] == [] and man["awg"]["awg_dir"] == "/etc/amnezia/amneziawg"
-    assert man["awg"]["ufw"] == ["11880/udp"]
     assert man["socks5"]["packages"] == ["dante-server"] and man["socks5"]["socks_rule"] is True
     assert man["socks5"]["unit_files"] == ["/etc/systemd/system/danted.service.d"]
-    assert man["socks5"]["ufw"] == ["31337/tcp"]
-    assert man["mtproto"]["users"] == ["mtproxy"] and man["mtproto"]["ufw"] == ["9443/tcp"]
+    assert man["mtproto"]["users"] == ["mtproxy"]
     assert man["hysteria2"]["units"][0] == {"unit": "vpnbot-hy2-warp-mark.service", "flag": "hy2mark"}
-    assert man["hysteria2"]["users"] == ["hysteria"] and man["hysteria2"]["ufw"] == ["443/udp"]
+    assert man["hysteria2"]["users"] == ["hysteria"]
     assert "/opt/vpn-service/scripts/vpnbot-hy2-warp-mark" not in man["hysteria2"]["paths"]
     assert {u["unit"] for u in man["hysteria2"]["units"]} == {
         "vpnbot-hy2-warp-mark.service", "hysteria-server.service", "hysteria-server@.service",

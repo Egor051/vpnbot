@@ -63,6 +63,9 @@ bundle also carries state that is not a deployed file and so is not listed here:
 | `/etc/ssh/sshd_config.d/00-vpn-bot-port.conf` | template + host values (`ssh`, `render=ssh-port`) | deploy.sh, rendered from `SSH_PORT` | `/etc/ssh` | `Port SSH_PORT` (the fallback path: ssh.service without the socket) + `LogLevel VERBOSE` (the journal proof) |
 | `/etc/systemd/system/vpn-bot-ssh-port.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot `vpn-bot-ssh-port advance`: phase 2 of a proven migration; pulled in by `vpn-bot-host-check.service` (`Wants=`), never enabled on its own |
 | `/var/lib/vpn-bot/ssh-migration.json` | state | `vpn-bot-ssh-port` | — | the migration (`from`, `to`, `phase`, `since`, proof); atomic, `root` `0644`; read by the bot |
+| `/etc/systemd/system/vpn-bot-ufw-deadman.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot `vpn-bot-ufw-apply deadman-check`: a UFW policy change nobody proved is kept or reverted after a reboot; pulled in by `vpn-bot-host-check.service` (`Wants=`), never enabled on its own — [The firewall (UFW)](#the-firewall-ufw) |
+| `/etc/ufw/user.rules`, `/etc/ufw/user6.rules`, `/etc/default/ufw` | computed (`vpn-bot-ufw-apply`) | the deploy and the bot through `vpn-bot-ufw-apply`; never `ufw allow` by hand | `/etc/ufw/user.rules`, `/etc/ufw/user6.rules`, `/etc/default/ufw` | the set: module table + ssh + `deploy/host/ufw/extra.list`; policies from `deploy/host/ufw/policy` (routed untouched) |
+| `/var/lib/vpn-bot/ufw-deadman.json` | state | `vpn-bot-ufw-apply` | — | a policy change under its dead-man (`pending`, `confirmed`, `reverted`); atomic, `root` `0644`; read by the bot |
 | `/etc/ssh/sshd_config` | package default (`pristine`, `ucf:/usr/share/openssh/sshd_config`) | openssh-server (ucf); deploy.sh puts the template back | `/etc/ssh` | the provider image's active `PasswordAuthentication yes` / `PermitRootLogin yes` after the `Include` are a LATENT that stops Phase 1: restored once `sshd -T` is proven byte-for-byte the same — no `ALLOW_SSH_CHANGE` |
 | `/etc/cloud/cloud-init.disabled` | repo-managed (`plain`) | deploy.sh, from `deploy/host/cloud/cloud-init.disabled` | — (in the repo) | empty marker: cloud-init stays off (it rewrote sshd and sudoers on a reboot) |
 | `/etc/systemd/system/vpn-bot-host-check.service` | repo-managed (`unit`) | deploy.sh | `/etc/systemd` | oneshot: the host invariants check — [Effective state](#effective-state) |
@@ -72,7 +75,7 @@ bundle also carries state that is not a deployed file and so is not listed here:
 | `/etc/systemd/system/mtproxy.service.d/vpn-bot-managed.conf` | repo-managed (`unit`, `gate=MTPROTO`) | deploy.sh, from `deploy/mtproxy-vpn-bot-managed.conf` | `/etc/systemd` | only while `MTPROTO_ENABLED=true`; a byte-identical old name `vpnbot-managed.conf` is renamed. With MTProxy off, a leftover drop-in is reported as an orphan |
 | `/etc/systemd/system/vpn-bot.service` | repo-managed | deploy.sh, verbatim | `/etc/systemd` | the privilege-model gates apply |
 | `/etc/systemd/system/<deploy/*.service, *.timer>` | repo-managed | the operator, by hand | `/etc/systemd` | Phase 1's unit-drift gate prints the install commands |
-| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms`, `vpn-bot-host-check`, `vpn-bot-ssh-port` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | from `scripts/` |
+| `/usr/local/sbin/vpn-bot-warp-*`, `warp-failsafe`, `vpnbot-hy2-warp-mark`, `vpn-bot-db-perms`, `vpn-bot-host-check`, `vpn-bot-ssh-port`, `vpn-bot-ufw-apply` | repo-managed (`OUT_OF_REPO_HELPERS`) | deploy.sh | `/usr/local/sbin` | from `scripts/` |
 | `/usr/local/sbin/vpn-bot-{xray,awg,mtproxy}-apply`, `vpn-bot-socks5-user` | backup-only (`installer`) | `deploy/setup-nonroot-helper-mode.sh` | `/usr/local/sbin` | source `deploy/helpers/` |
 | `/usr/local/etc/xray/config.json` | template + host values | the bot (clients) / operator | recovery bundle | structure checked by `deploy/backend-config-sync.py` |
 | `/etc/amnezia/amneziawg/awg0.conf` | template + host values | the bot (peers) / operator | recovery bundle; `/etc/amnezia` | same gate |
@@ -550,9 +553,9 @@ When the port ssh listens on (`systemctl show -p Listen ssh.socket`) is not `SSH
    listens on both. The firewall follows: on a relay `table inet vpnrelay_input` takes the ssh ports
    from `ss` on its own (the deploy's restart of `vpn-relay` re-applies it; the changed set is
    confirmed by main's probe — [docs/relay.md](relay.md#the-input-filter)); on main the deploy opens
-   `SSH_PORT` in UFW **before** the socket changes, with a rule commented
-   `vpn-bot:ssh-migration` (or runs `vpn-bot-ufw-apply apply` where that helper is installed — it
-   then owns the firewall). The old port is not touched. The state goes to
+   `SSH_PORT` in UFW **before** the socket changes: `vpn-bot-ufw-apply apply` (installed on main —
+   it owns the firewall, [The firewall (UFW)](#the-firewall-ufw)) puts both ports in the set; only
+   where that helper is missing, a rule commented `vpn-bot:ssh-migration`. The old port is not touched. The state goes to
    `/var/lib/vpn-bot/ssh-migration.json` (`from`, `to`, `phase: 1`, `since`).
 2. **Phase 2 — only after a proof** that `SSH_PORT` works **from outside**: the old port leaves the
    socket and the Port drop-in (`Port SSH_PORT` alone), and the firewall closes it — main: the
@@ -622,3 +625,92 @@ session.
 | phase 1, no proof | `PENDING migration` with what it waits for | the same |
 | phase 1, proven | `PENDING` (phase 2 next); a failed, reverted phase 2 adds a `WARN` | `PENDING` |
 | `SSH_PORT` refused | `MISMATCH SSH_PORT` with the reason | the same (Phase 1 refuses anyway) |
+
+## The firewall (UFW)
+
+The main server's UFW is **computed**, never typed: `scripts/vpn-bot-ufw-apply` (installed by
+deploy.sh, `OUT_OF_REPO_HELPERS`, `required` on main) derives the whole rule set from the repo and
+`.env`, and converges the host on it. A relay has no UFW: its input filter is `vpnrelay_input`
+([docs/relay.md](relay.md#the-input-filter)).
+
+### The set
+
+| Part | Where it comes from | Comment on the rule |
+|---|---|---|
+| modules | one table in the helper (`MODULE_TABLE`), also the only list of a module's rules anywhere: `xray` → `XRAY_PUBLIC_PORT/tcp` (`XRAY_SERVER_PORT`, 443); `hysteria2` → `HYSTERIA2_PORT/udp`; `socks5` → `SOCKS5_PORT/tcp`; `subscription` → `SUBSCRIPTION_PUBLIC_PORT/tcp`; `mtproto` → `MTPROTO_PORT/tcp`; `awg` → the AWG `ListenPort/udp` (`awg0.conf`, else `AWG_ENDPOINT_PORT`) + `route allow in on <AWG_INTERFACE> out on <WAN> from <AWG_NETWORK>` (WAN = the device of the IPv4 default route). A module is in the set only while `.env` enables it (`*_ENABLED`; Xray and AWG have no flag) **and** it has no uninstall marker (`/etc/vpn-bot/uninstalled/<module>`) | `vpn-bot:<module>` |
+| ssh | `SSH_PORT` and, while a migration runs, its other port(s) — the [SSH port](#the-ssh-port) plan's `listen` set (the deploy passes it as `--ssh-ports`; otherwise the helper asks `vpn-bot-ssh-port plan`) | `vpn-bot:ssh` |
+| extra | `deploy/host/ufw/extra.list`, `role\|rule\|reason` (reason ≥ 20 characters): every other rule, written as `ufw show added` prints it, and `closed <port>/<tcp\|udp>` for a listener closed on purpose. Measured 2026-11-12: empty — every rule of main is a module's or ssh's | `vpn-bot:extra` |
+| policies | `deploy/host/ufw/policy`, `role\|incoming\|outgoing` lines; seeded from the measurement (`deny` / `allow`). **routed is never managed** (AWG and WARP forwarding live on route rules) — a `routed` line refuses the plan | — |
+
+### `apply`
+
+1. adds what is missing — a missing v4 or v6 copy too (`ufw allow` adds both; IPv6 counts only
+   with `IPV6=yes` **and** a kernel with IPv6, ufw's own rule), and relabels (**adopts**) a
+   matching rule without our comment: ufw updates the comment in place, the port never closes;
+2. sets the outgoing policy; the incoming policy and enabling an inactive ufw under a dead-man
+   (below);
+3. deletes a rule with a `vpn-bot:` comment that is not in the set, and an **unmarked** rule that
+   matches a rule of the table — a module switched off or removed, an old ssh port (22 is the
+   package's; the migration's `from`). That is how the measured route rule of the removed AWG and
+   the old `22/tcp` leave the host. A route rule goes with `ufw route delete …` (ufw 0.36 refuses
+   `ufw delete route …`);
+4. leaves every other unmarked rule alone — a `WARN`, never deleted;
+5. reads the result back: anything still to add, relabel or delete is a failure (exit 4).
+
+**Never a lockout.** A rule that opens the port sshd **really** listens on — the union of
+`sshd -T`, `systemctl show -p Listen ssh.socket` and the `ss` rows of sshd (or of PID 1 for a
+socket port) — is never deleted (`keep`); when none of them answers, nothing is deleted at all. A
+module that is on but whose rule cannot be written down here (its port unknown, no default route)
+keeps whatever is recognisably its own.
+
+### The dead-man
+
+Enabling an inactive ufw and changing the incoming policy are the two steps that can cut ssh off.
+Both run under a dead-man, as the relay's input filter does (#328): `/var/lib/vpn-bot/ufw-deadman.json`
+records what was before, a transient timer (`vpn-bot-ufw-deadman-watch`) runs
+`vpn-bot-ufw-apply deadman-check` every minute, and the change stays only with a **proof that ssh
+still answers from outside** — the proofs of the SSH port migration: a new connection from a
+non-local address on an ssh port in the sshd log (`vpn-bot-ssh-port proof-journal`, `LogLevel
+VERBOSE`), or «Подтвердить» under the bot's message (`vpn-bot-ufw-apply confirm`, sudo, exact-path
+grant). Without one, 10 minutes after the change the previous incoming policy (and an inactive
+ufw) comes back. A reboot ends the timer: `vpn-bot-ufw-deadman.service`, pulled in by
+`vpn-bot-host-check.service` (5 min after boot, daily), re-arms it or reverts. A timer that cannot
+be armed: the policy is not changed (exit 9). **An ordinary deploy changes no policy and arms no
+dead-man.**
+
+### Where it runs
+
+| Who | When | How |
+|---|---|---|
+| deploy.sh Phase 1 | every deploy of main | `plan` from the checkout: the section «UFW» and the report. Stops (`PHASE1_ONLY=1`: reported) on a refused plan, a main server without ufw, and a public listener the set neither allows nor declares closed |
+| deploy.sh Phase 2 | after the helpers | `save` of the UFW state (files, enabled or not, the dead-man state) before the SSH port opens anything |
+| | after the host files and the SSH port state | `apply`, then `listeners`; either failing is `rollback_now`, and the rollback `restore`s the saved state |
+| | DEPLOY OK | `status`, one line |
+| the bot | a protocol switched on in «Модули протоколов»; a protocol removed from the host | `apply` (sudo, exact-path grant). `vpn-bot-protocol-uninstall` no longer touches ufw — its marker takes the module out of the set: **one owner of the rules** |
+| `vpn-bot-ssh-port` | phase 1 / phase 2 of a migration | `firewall-open` / `firewall-close` run `apply` |
+
+### Listeners
+
+Every TCP `LISTEN` on a public or wildcard address must be allowed by the set or declared closed
+(`main|closed <port>/tcp|<why>`). UDP is checked only on the UDP ports of the module table (and only
+on a public or wildcard address); every other UDP socket is an `INFO` line, never an error: the
+listen-port of an awg/wg interface (`awg show all listen-port` — kernel-owned, no process, random
+at every start: out-warp's `*:32808` on the measured host; never hardcoded) and outgoing sockets on
+a private address (`172.16.0.2:*` through WARP).
+
+### What the host check says (family `ufw`)
+
+| Finding | Installed host | `--pre-install` (Phase 1) |
+|---|---|---|
+| ufw not installed, the plan refused | `MISMATCH` | `MISMATCH` |
+| ufw inactive | `MISMATCH` | `PENDING` (the deploy enables it, under a dead-man) |
+| a policy that is not `deploy/host/ufw/policy`'s | `MISMATCH` | `PENDING` |
+| a rule of the set missing, or one of its v4/v6 copies | `MISMATCH` | `PENDING` |
+| a rule with a `vpn-bot:` comment that is not in the set | `MISMATCH` | `PENDING` |
+| an unmarked rule that is not in the set | `LATENT` (`apply` deletes a table rule, WARNs about any other) | `PENDING` for a table rule, `LATENT` otherwise |
+| a rule of the set without our comment | `INFO` (relabelled by `apply`) | `PENDING` |
+| a rule kept because sshd listens on its port | `WARN` | `WARN` |
+| a dead-man waiting / one that reverted | `PENDING` / `WARN` | the same |
+
+By hand: `sudo /usr/local/sbin/vpn-bot-ufw-apply plan` (read-only, `key=value` lines),
+`… apply`, `… status`. Never `ufw allow` — the next apply relabels or deletes it.
