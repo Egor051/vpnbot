@@ -5,8 +5,10 @@ import logging
 import os
 import ipaddress
 import re
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -312,6 +314,31 @@ def _loopback_host(name: str, value: str) -> str:
     return host
 
 
+def _telegram_api_base(name: str, value: str) -> str:
+    """Validate the Bot API base URL. Empty keeps the production api.telegram.org.
+
+    The bot token travels in the path of every request to this URL, so plain http
+    is accepted only towards a loopback host (a local Bot API server, the CI mock).
+    """
+    value = _no_control_chars(name, value).strip()
+    if not value:
+        return ""
+    parts = urlsplit(value)
+    host = parts.hostname or ""
+    if parts.scheme not in {"https", "http"} or not host:
+        raise SettingsError(f"{name} должен быть URL вида https://host[:port]")
+    if parts.query or parts.fragment or parts.username or parts.password:
+        raise SettingsError(f"{name} не должен содержать query, fragment или учётные данные")
+    if parts.scheme == "http":
+        try:
+            loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise SettingsError(f"{name}: http допустим только для loopback-хоста, иначе https")
+    return value.rstrip("/")
+
+
 def _optional_path(name: str) -> Path | None:
     """Return an optional filesystem path setting, or None when unset/blank."""
     value = _no_control_chars(name, _optional(name))
@@ -319,6 +346,18 @@ def _optional_path(name: str) -> Path | None:
 
 
 def _admin_ids(raw: str) -> frozenset[int]:
+    """Parse ADMIN_IDS. Empty is allowed: a fresh install has no superadmin yet.
+
+    The first superadmin then claims the bot with the one-time deep link
+    scripts/install.sh prints (services/superadmin_claim.py). The placeholder
+    from .env.example is still refused — it means the file was never edited.
+    """
+    raw = raw.strip()
+    if raw.startswith("<") and raw.endswith(">"):
+        raise SettingsError(
+            "Переменная ADMIN_IDS содержит незаполненный плейсхолдер из .env.example — "
+            "задайте Telegram ID или оставьте значение пустым"
+        )
     values: set[int] = set()
     for item in raw.split(","):
         item = item.strip()
@@ -331,8 +370,6 @@ def _admin_ids(raw: str) -> frozenset[int]:
         if parsed <= 0:
             raise SettingsError("ADMIN_IDS: все Telegram ID должны быть положительными числами")
         values.add(parsed)
-    if not values:
-        raise SettingsError("ADMIN_IDS не должен быть пустым")
     return frozenset(values)
 
 
@@ -417,7 +454,12 @@ def _ipv4_address_in_network(name: str, value: str, network_value: str) -> str:
 @dataclass(frozen=True, slots=True)
 class Settings:
     bot_token: str = field(repr=False)
-    admin_ids: frozenset[int]
+    # The EFFECTIVE superadmins. load_settings() fills it with ADMIN_IDS; bot
+    # startup replaces it with services.superadmins.SuperadminSet — ADMIN_IDS + the
+    # users who claimed the bot (claimed_superadmins), a live view a successful
+    # claim extends without a restart. Every consumer (roles, alerts, the command
+    # menu, the maintenance gate) reads this one field.
+    admin_ids: AbstractSet[int]
 
     db_path: Path
     log_dir: Path
@@ -772,6 +814,10 @@ class Settings:
     # Appended to the display name of standalone keys and basic-subscription
     # members (``<label>_🇫🇮``). Display only — never part of email_label.
     server_flag_emoji: str = "🇫🇮"
+    # Bot API server base URL (TELEGRAM_API_BASE). Empty = api.telegram.org. Only
+    # for a local Bot API server or the installer's CI mock; https, or http on a
+    # loopback host, since every request carries the bot token in its path.
+    telegram_api_base: str = ""
 
     def validate_xray_ready(self) -> None:
         if self.xray_apply_mode == "api":
@@ -898,6 +944,12 @@ class Settings:
 # removed protocol is still there. tests/conftest.py points it at a temp dir, so
 # load_settings() in a test never reads the production host's markers.
 PROTOCOL_UNINSTALL_MARKER_DIR = Path("/etc/vpn-bot/uninstalled")
+
+# The pending first-superadmin claim scripts/install.sh writes (sha256 of the code
+# and its expiry, never the code). Not a .env variable for the same reason as the
+# marker dir: the installer has the path compiled in. tests/conftest.py points it
+# at a path that does not exist, so a test never sees the host's claim.
+SUPERADMIN_CLAIM_PATH = Path("/etc/vpn-bot/claim.json")
 
 # Host-level state bundled into the third offsite artifact (the "system bundle").
 # Every entry here is something the DB snapshot and the recovery bundle never
@@ -1166,7 +1218,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
     relay_env_vars = tuple(name for name in LEGACY_RELAY_ENV_VARS if name in os.environ)
     return Settings(
         bot_token=_required("BOT_TOKEN"),
-        admin_ids=_admin_ids(_required("ADMIN_IDS")),
+        admin_ids=_admin_ids(_optional("ADMIN_IDS")),
         db_path=Path(_optional("DB_PATH", "/opt/vpn-service/data/vpn.db")),
         sqlite_synchronous=_choice("SQLITE_SYNCHRONOUS", "FULL", {"full", "normal", "extra"}).upper(),
         log_dir=Path(_optional("LOG_DIR", "/opt/vpn-service/logs")),
@@ -1392,4 +1444,5 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         host_check_interval=_int_range("HOST_CHECK_INTERVAL", 300, 0, 86400),
         ssh_port=_int_range("SSH_PORT", 54321, 1, 65535),
         server_flag_emoji=server_flag_emoji,
+        telegram_api_base=_telegram_api_base("TELEGRAM_API_BASE", _optional("TELEGRAM_API_BASE")),
     )

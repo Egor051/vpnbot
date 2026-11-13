@@ -43,6 +43,9 @@ _ISOLATED_ENV_PREFIXES: tuple[str, ...] = (
     # warn that they are ignored, so a host's live RELAY_* would change what a
     # test of that behaviour observes.
     "RELAY_",
+    # TELEGRAM_API_BASE points the bot at another Bot API server (the installer's
+    # CI mock): a host or CI job exporting it must not redirect a test's bot.
+    "TELEGRAM_",
 )
 
 
@@ -105,6 +108,11 @@ def _isolate_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # them, or an uninstalled protocol on the box would change what a test observes.
     monkeypatch.setattr(
         settings_module, "PROTOCOL_UNINSTALL_MARKER_DIR", Path("/nonexistent/vpn-bot-test/uninstalled")
+    )
+    # Same for the installer's pending superadmin claim (/etc/vpn-bot/claim.json):
+    # a bot built in a test must never see — let alone consume — the host's claim.
+    monkeypatch.setattr(
+        settings_module, "SUPERADMIN_CLAIM_PATH", Path("/nonexistent/vpn-bot-test/claim.json")
     )
 
 

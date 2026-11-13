@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -168,7 +169,7 @@ class SshPortMonitor:
         self,
         *,
         store: MetaStore,
-        admin_ids: frozenset[int],
+        admin_ids: AbstractSet[int],
         path: Path = STATE_PATH,
         helper: Path = HELPER_PATH,
         runner: PrivilegedHelperRunner | None = None,

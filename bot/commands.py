@@ -74,14 +74,7 @@ async def setup_bot_commands(bot: Bot, settings: Settings) -> None:
         # appear for regular users. Telegram resolves the chat scope ahead of the
         # default one, preferring the language_code match when present.
         for admin_id in settings.admin_ids:
-            scope = BotCommandScopeChat(chat_id=admin_id)
-            await bot.set_my_commands(_render(admin_commands, default_locale), scope=scope)
-            for locale in _MENU_LOCALES:
-                await bot.set_my_commands(
-                    _render(admin_commands, locale),
-                    scope=scope,
-                    language_code=locale,
-                )
+            await _publish_admin_scope(bot, default_locale, admin_id)
         logger.info(
             "Published bot command menu (%d public, %d admin commands for %d admin(s))",
             len(_USER_COMMANDS),
@@ -92,3 +85,26 @@ async def setup_bot_commands(bot: Bot, settings: Settings) -> None:
         # Publishing the menu is best-effort and must never block startup: swallow every
         # error (Telegram API/network as well as e.g. a missing i18n key) and log it.
         logger.warning("Failed to publish bot command menu to Telegram", exc_info=True)
+
+
+async def _publish_admin_scope(bot: Bot, default_locale: str, admin_id: int) -> None:
+    admin_commands = _USER_COMMANDS + _ADMIN_COMMANDS
+    scope = BotCommandScopeChat(chat_id=admin_id)
+    await bot.set_my_commands(_render(admin_commands, default_locale), scope=scope)
+    for locale in _MENU_LOCALES:
+        await bot.set_my_commands(
+            _render(admin_commands, locale),
+            scope=scope,
+            language_code=locale,
+        )
+
+
+async def publish_admin_commands(bot: Bot, settings: Settings, admin_id: int) -> None:
+    """Give one new superadmin (a successful install claim) the admin menu now.
+
+    Same best-effort contract as setup_bot_commands: never raises.
+    """
+    try:
+        await _publish_admin_scope(bot, settings.bot_language, admin_id)
+    except Exception:
+        logger.warning("Failed to publish the admin command menu for a new superadmin", exc_info=True)

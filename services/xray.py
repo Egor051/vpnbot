@@ -7,6 +7,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from adapters.clock import ClockProvider
@@ -976,6 +977,19 @@ class XrayService:
         try:
             active_keys = await self._list_xray_keys_by_statuses(XRAY_ACTIVE_STATUSES)
             all_keys = await self._list_xray_keys_by_statuses(XRAY_ALL_STATUSES)
+            if not all_keys and self._xray_not_installed():
+                # A host Xray was never installed on (a fresh scripts/install.sh
+                # install): no config.json and not a single Xray key in the DB, in
+                # any status. There is nothing that could have drifted, so this is
+                # not a degraded backend — reporting it as one put a CRITICAL line
+                # and two audit rows into every start of a protocol-less bot.
+                # Any key at all, or a config.json, keeps the full reconcile.
+                logger.info(
+                    "Xray startup drift reconciliation skipped: Xray is not installed "
+                    "on this host (%s absent) and no Xray keys exist",
+                    self.adapter.config_path,
+                )
+                return summary
             summary["checked"] = len(active_keys)
             summary["recovered"] += await self._remove_non_live_xray_clients(all_keys)
 
@@ -998,6 +1012,15 @@ class XrayService:
                 details={"error_type": type(exc).__name__},
             )
         return summary
+
+    def _xray_not_installed(self) -> bool:
+        """True only when the adapter names a config.json that does not exist.
+
+        Test doubles without a ``config_path`` are never "not installed": they keep
+        the reconcile exactly as before.
+        """
+        config_path = getattr(self.adapter, "config_path", None)
+        return isinstance(config_path, Path) and not config_path.exists()
 
     def _xray_drift_reconcile_supported(self) -> bool:
         required_adapter = ("list_clients", "find_client", "add_client", "remove_client")

@@ -1,12 +1,16 @@
 
 import asyncio
+import dataclasses
 import logging
+import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from bot.fsm.ttl_storage import TTLMemoryStorage
 
@@ -33,12 +37,14 @@ from bot.middlewares.config_cleanup import ConfigDocumentCleanupMiddleware
 from bot.middlewares.locale import LocaleMiddleware
 from bot.middlewares.maintenance import MaintenanceModeMiddleware
 from bot.rate_limit import RateLimiter
+import config.settings as settings_module
 from config.settings import Settings
 from db.database import Database
 from models.enums import AuditEntityType, ProxyAccessType, VpnKeyType
 from repositories.access_requests import AccessRequestRepository
 from repositories.announcements import AnnouncementRepository
 from repositories.audit_log import AuditLogRepository
+from repositories.claimed_superadmins import ClaimedSuperadminRepository
 from repositories.dashboard import DashboardRepository
 from repositories.key_bundles import KeyBundleRepository
 from repositories.protocol_modules import ProtocolModulesRepository
@@ -79,6 +85,8 @@ from services.relay_health import build_relay_health_supervisor
 from services.relay_management import RelayService
 from services.server_status import ServerStatusService
 from services.socks5 import Socks5Service
+from services.superadmin_claim import SuperadminClaimService, claim_status
+from services.superadmins import SuperadminSet
 from services.mtproto import MtProtoService
 from services.traffic_stats import TrafficStatsService
 from services.trial_access import TrialAccessService
@@ -213,10 +221,55 @@ async def create_app(settings: Settings) -> tuple[Bot, Dispatcher, Database, Bac
         raise
 
 
+def bot_session(settings: Settings) -> AiohttpSession | None:
+    """The Bot API session: None (aiogram's api.telegram.org) unless TELEGRAM_API_BASE."""
+    if not settings.telegram_api_base:
+        return None
+    return AiohttpSession(api=TelegramAPIServer.from_base(settings.telegram_api_base))
+
+
+async def _log_superadmin_state(
+    superadmins: SuperadminSet, claims: ClaimedSuperadminRepository, claim_path: Path
+) -> None:
+    """One line on who administers this bot — loud when the answer is nobody."""
+    if len(superadmins) > 0:
+        logger.info(
+            "Superadmins: %d from ADMIN_IDS, %d claimed", len(superadmins.configured), len(superadmins.claimed)
+        )
+        return
+    if await claims.any_superadmin():
+        logger.warning(
+            "ADMIN_IDS is empty and nobody has claimed the bot, but users with the SUPERADMIN role "
+            "exist in the database: they keep their role but receive no alerts — set ADMIN_IDS in .env"
+        )
+        return
+    status = claim_status(claim_path, time.time())
+    if status == "pending":
+        logger.info("No superadmin yet: waiting for the install claim link (%s)", claim_path)
+        return
+    logger.warning(
+        "NO SUPERADMIN: ADMIN_IDS is empty, nobody has claimed the bot and the install claim is %s "
+        "(%s). Nobody can administer this bot. Issue a new claim link with "
+        "`sudo bash install.sh --reclaim`, or set ADMIN_IDS in .env and restart.",
+        status,
+        claim_path,
+    )
+
+
 async def _build_app(
     settings: Settings, db: Database
 ) -> tuple[Bot, Dispatcher, Database, BackendHealth, Services]:
     await db.bootstrap()
+
+    # The effective superadmins (services/superadmins.py): ADMIN_IDS + the users who
+    # claimed the bot. From here on settings.admin_ids IS that live set, so every
+    # consumer below — roles, alerts, the command menu, maintenance — sees a claim
+    # the moment it is committed.
+    claimed_superadmins_repo = ClaimedSuperadminRepository(db)
+    superadmins = SuperadminSet(settings.admin_ids, await claimed_superadmins_repo.list_ids())
+    settings = dataclasses.replace(settings, admin_ids=superadmins)
+    claim_path = settings_module.SUPERADMIN_CLAIM_PATH
+    await _log_superadmin_state(superadmins, claimed_superadmins_repo, claim_path)
 
     clock = ClockProvider()
     shell = ShellRunner(max_output_chars=4096)
@@ -258,6 +311,15 @@ async def _build_app(
     audit_service = AuditService(audit_repo, clock, users_repo)
     user_service = UserService(users=users_repo, settings=settings, clock=clock, audit=audit_service, user_locks=user_locks)
     await user_service.bootstrap_admins()
+    superadmin_claim_service = SuperadminClaimService(
+        db=db,
+        claims=claimed_superadmins_repo,
+        users=users_repo,
+        audit=audit_service,
+        superadmins=superadmins,
+        claim_path=claim_path,
+        clock=clock,
+    )
 
     # Relays live in the database and are managed from the admin panel. The
     # catalog is the in-process snapshot every link builder reads; the relay
@@ -847,11 +909,16 @@ async def _build_app(
         host_check=host_check_monitor,
         ssh_port=ssh_port_monitor,
         ufw_deadman=ufw_deadman_monitor,
+        superadmin_claim=superadmin_claim_service,
     )
 
     await _startup_reconcile_keys(services)
 
-    bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(
+        settings.bot_token,
+        session=bot_session(settings),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     key_expiry_service.bot = bot
     trial_access_service.bot = bot
     anomaly_detection_service.bot = bot

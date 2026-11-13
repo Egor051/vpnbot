@@ -31,6 +31,7 @@ from services.server_status import ServerStatusService
 from services.ssh_port import SshPortMonitor
 from services.ufw import UfwDeadmanMonitor
 from services.socks5 import Socks5Service
+from services.superadmin_claim import SuperadminClaimService
 from services.traffic_stats import TrafficStatsService
 from services.trial_access import TrialAccessService
 from services.users import UserService
@@ -108,3 +109,6 @@ class Services:
     # of the incoming policy waits for its proof (with «Подтвердить») and how it ended.
     # None only in lightweight test doubles.
     ufw_deadman: UfwDeadmanMonitor | None = None
+    # The first-superadmin claim (/start claim_<code>, scripts/install.sh). Inert
+    # while any superadmin exists. None only in lightweight test doubles.
+    superadmin_claim: SuperadminClaimService | None = None

@@ -457,6 +457,8 @@ STRINGS: dict[str, str] = {
     "blocked_request_pending": "Your new request is already pending admin review.",
     "request_already_processed": "Request already processed. Wait for the admin's decision.",
     "request_created": "Access request submitted. Wait for the admin's decision.",
+    "superadmin_claim_success": "✅ Done: you are now the superadmin of this bot. Continue the setup in the admin panel: /admin",
+    "superadmin_claim_failed": "This link is invalid or has already been used.",
     "request_pending": "Your request is already pending admin review.",
     "trial_key_active": "You have an active trial key:\n\n{key_text}",
     "trial_offer": "You can request a 7-day trial access. An admin will review your request.",

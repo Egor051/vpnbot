@@ -41,6 +41,16 @@ CREATE TABLE IF NOT EXISTS users (
   expiry_notifications_enabled INTEGER NOT NULL DEFAULT 1
 );
 
+-- v41: superadmins who claimed the bot with the one-time deep link printed by
+-- scripts/install.sh (services/superadmin_claim.py). The effective superadmins are
+-- ADMIN_IDS ∪ this table (services/superadmins.py). Deliberately no foreign key to
+-- users: this table is the authority, and the users row (role SUPERADMIN) follows
+-- it — ensure_user restores the role on the next /start if that row is ever lost.
+CREATE TABLE IF NOT EXISTS claimed_superadmins (
+  telegram_user_id INTEGER PRIMARY KEY CHECK (telegram_user_id > 0),
+  claimed_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS access_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
@@ -409,12 +419,21 @@ CREATE TABLE IF NOT EXISTS warp_split_exclusions (
 -- routes every GCP customer range through the tunnel, and cloud.json only means
 -- anything once goog.json is on — so turning them on is a deliberate two-step act
 -- that the panel walks the operator through.
-INSERT OR IGNORE INTO warp_split_sources (slug, title, url, kind, mode, scope_slug, enabled, include_in_list)
-VALUES ('telegram-cidr', 'Telegram', 'https://core.telegram.org/resources/cidr.txt', 'cidr_text', 'add', NULL, 1, 1);
-INSERT OR IGNORE INTO warp_split_sources (slug, title, url, kind, mode, scope_slug, enabled, include_in_list)
-VALUES ('google-goog', 'Google (all announced ranges)', 'https://www.gstatic.com/ipranges/goog.json', 'google_json', 'add', NULL, 0, 1);
-INSERT OR IGNORE INTO warp_split_sources (slug, title, url, kind, mode, scope_slug, enabled, include_in_list)
-VALUES ('google-cloud', 'Google Cloud (GCP customer ranges)', 'https://www.gstatic.com/ipranges/cloud.json', 'google_json', 'subtract', 'google-goog', 0, 0);
+--
+-- INSERT … SELECT … WHERE NOT EXISTS rather than INSERT OR IGNORE: this file runs
+-- on EVERY bootstrap, and in an AUTOINCREMENT table an ignored INSERT still
+-- advances sqlite_sequence — three ids burnt and one write on every bot start.
+-- The guarded form allocates nothing when the row is already there, so a restart
+-- with nothing to change leaves vpn.db byte-for-byte as it was.
+INSERT INTO warp_split_sources (slug, title, url, kind, mode, scope_slug, enabled, include_in_list)
+SELECT 'telegram-cidr', 'Telegram', 'https://core.telegram.org/resources/cidr.txt', 'cidr_text', 'add', NULL, 1, 1
+WHERE NOT EXISTS (SELECT 1 FROM warp_split_sources WHERE slug = 'telegram-cidr');
+INSERT INTO warp_split_sources (slug, title, url, kind, mode, scope_slug, enabled, include_in_list)
+SELECT 'google-goog', 'Google (all announced ranges)', 'https://www.gstatic.com/ipranges/goog.json', 'google_json', 'add', NULL, 0, 1
+WHERE NOT EXISTS (SELECT 1 FROM warp_split_sources WHERE slug = 'google-goog');
+INSERT INTO warp_split_sources (slug, title, url, kind, mode, scope_slug, enabled, include_in_list)
+SELECT 'google-cloud', 'Google Cloud (GCP customer ranges)', 'https://www.gstatic.com/ipranges/cloud.json', 'google_json', 'subtract', 'google-goog', 0, 0
+WHERE NOT EXISTS (SELECT 1 FROM warp_split_sources WHERE slug = 'google-cloud');
 
 -- Address coverage of the last state that was actually APPLIED, one row per
 -- source plus one for the merged list (scope = 'list'). This is the comparison

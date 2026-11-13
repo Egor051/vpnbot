@@ -2,9 +2,11 @@
 import logging
 
 from aiogram import Bot, Router
-from aiogram.filters import CommandStart
+from aiogram.enums import ChatType
+from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import Message
 
+from bot.commands import publish_admin_commands
 from bot.container import Services
 from bot.formatters import key_detail_text, main_menu_text
 from bot.handlers.common import answer_message_error, main_menu_markup, profile_from_tg
@@ -14,7 +16,9 @@ from bot.private_chat import ensure_private_message
 from bot.rate_limit import RateLimiter
 from i18n import t
 from models.access import is_blocked_user
+from models.dto import TelegramUserProfile
 from models.enums import UserRole
+from services.superadmin_claim import ClaimOutcome, claim_payload
 from utils.formatting import h
 
 router = Router()
@@ -22,7 +26,13 @@ logger = logging.getLogger(__name__)
 
 
 @router.message(CommandStart())
-async def start_command(message: Message, services: Services, bot: Bot, rate_limiter: RateLimiter | None = None) -> None:
+async def start_command(
+    message: Message,
+    services: Services,
+    bot: Bot,
+    rate_limiter: RateLimiter | None = None,
+    command: CommandObject | None = None,
+) -> None:
     """Handle the /start command and register or greet the user."""
     if message.from_user is None:
         return
@@ -32,6 +42,13 @@ async def start_command(message: Message, services: Services, bot: Bot, rate_lim
         if rate_limiter is not None:
             rate_limiter.check(message.from_user.id, "start", 20)
         profile = profile_from_tg(message.from_user)
+        # /start claim_<code>: the install deep link that makes the first superadmin
+        # (services/superadmin_claim.py). Handled before anything else, and never
+        # falls through to an access request.
+        claim_code = claim_payload(command.args if command is not None else None)
+        if claim_code is not None and services.superadmin_claim is not None:
+            await _claim_superadmin(message, services, bot, profile, claim_code)
+            return
         result = await services.access.create_or_get_request(profile)
         if is_blocked_user(result.user):
             if result.request is None:
@@ -63,6 +80,27 @@ async def start_command(message: Message, services: Services, bot: Bot, rate_lim
         await _send_trial_offer(message, services, profile.telegram_user_id)
     except Exception as exc:
         await answer_message_error(message, exc)
+
+
+async def _claim_superadmin(
+    message: Message, services: Services, bot: Bot, profile: TelegramUserProfile, code: str
+) -> None:
+    assert services.superadmin_claim is not None
+    outcome = await services.superadmin_claim.claim(
+        profile, code, private_chat=message.chat.type == ChatType.PRIVATE
+    )
+    if outcome is not ClaimOutcome.CLAIMED:
+        # One answer for every failure — wrong, expired, consumed, inert, rate
+        # limited. The reason is in the bot log, never in the chat.
+        await message.answer(t("superadmin_claim_failed"))
+        return
+    await publish_admin_commands(bot, services.settings, profile.telegram_user_id)
+    await message.answer(t("superadmin_claim_success"))
+    if message.from_user is not None:
+        await message.answer(
+            main_menu_text(message.from_user),
+            reply_markup=await main_menu_markup(services, profile.telegram_user_id),
+        )
 
 
 async def _send_trial_offer(message: Message, services: Services, user_id: int) -> None:

@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -211,7 +212,7 @@ class HostCheckMonitor:
         self,
         *,
         store: MetaStore,
-        admin_ids: frozenset[int],
+        admin_ids: AbstractSet[int],
         path: Path = STATE_PATH,
         bot: Bot | None = None,
         send: Callable[[str], Awaitable[None]] | None = None,

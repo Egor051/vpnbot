@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -193,7 +194,7 @@ class UfwDeadmanMonitor:
         self,
         *,
         store: MetaStore,
-        admin_ids: frozenset[int],
+        admin_ids: AbstractSet[int],
         path: Path = DEADMAN_STATE_PATH,
         helper: Path = HELPER_PATH,
         runner: PrivilegedHelperRunner | None = None,

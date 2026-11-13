@@ -114,13 +114,20 @@ class WarpSettingsRepository:
         await self.db.conn.commit()
 
     async def reset_runtime(self) -> None:
-        """Zero all runtime columns (called on bot startup)."""
+        """Zero all runtime columns (called on bot startup).
+
+        Only a row that has something to zero is written: on a host where WARP
+        never ran, every start used to rewrite ``updated_at`` and nothing else,
+        so a plain restart changed vpn.db. The result is the same either way.
+        """
         await self.db.conn.execute(
             """
             UPDATE warp_settings
             SET tunnel_up = 0, routes_active = 0, fail_streak = 0, success_streak = 0,
                 last_handshake = 0, last_check_ts = 0, updated_at = ?
             WHERE id = 1
+              AND (tunnel_up != 0 OR routes_active != 0 OR fail_streak != 0
+                   OR success_streak != 0 OR last_handshake != 0 OR last_check_ts != 0)
             """,
             (int(time.time()),),
         )
