@@ -15,7 +15,11 @@ read or written. Pinned here:
    vendor rule (an unmodified conffile is no LATENT, a modified one is).
 3. systemd *.conf: journald drop-in with a higher number -> BEATEN.
 4. Units: shadowed FragmentPath, NeedDaemonReload=yes, a disabled timer, our drop-in
-   missing from DropInPaths, a foreign drop-in.
+   missing from DropInPaths, a foreign drop-in. A generator's drop-in in /run (4b,
+   the generator substituted, run into $TMPDIR): the package's unmodified generator
+   writing the same now -> INFO; something else now -> MISMATCH; missing / failing ->
+   WARN; not the package's (modified, unowned, shadowed, unnamed) -> LATENT; its
+   ssh.socket ports other than the SSH ports -> LATENT ssh-port generator.
 5. invariants.list probes (path-regular on a symlink, unit-prop "~token", ...) and
    accepted-overrides.list (silences exactly its row; malformed lines reported).
 6. WARN checks: cloud-init, logrotate ("error:" lines only, never the substring),
@@ -141,8 +145,14 @@ exit $rc
 
 DPKG_QUERY = r"""
 echo "dpkg-query $*" >> "$LOGS/dpkg-query.log"
-[[ "$1" == -W ]] || { echo "REFUSED: dpkg-query $*" >&2; exit 99; }
-cat "$SD/conffiles" 2>/dev/null; exit 0
+case "$1" in
+  -W) cat "$SD/conffiles" 2>/dev/null; exit 0 ;;
+  --control-show)
+    # dpkg >= 1.19.5; noble has 1.22.6: "<md5>  <path without the leading slash>".
+    if [[ "${3:-}" == md5sums && -f "$SD/md5sums/$2" ]]; then cat "$SD/md5sums/$2"; exit 0; fi
+    echo "dpkg-query: error: control file '${3:-}' does not exist" >&2; exit 1 ;;
+esac
+echo "REFUSED: dpkg-query $*" >&2; exit 99
 """
 
 LOGROTATE = r"""
@@ -187,7 +197,9 @@ class HostLab:
         self.stub = tmp / "stub"
         self.sd = tmp / "sd"
         self.logs = tmp / "logs"
-        for d in (self.root, self.repo, self.stub, self.sd / "units", self.sd / "live", self.logs):
+        self.tmpdir = tmp / "tmpdir"   # $TMPDIR of the check: a generator runs in there
+        for d in (self.root, self.repo, self.stub, self.sd / "units", self.sd / "live", self.sd / "md5sums",
+                  self.logs, self.tmpdir):
             d.mkdir(parents=True, exist_ok=True)
         for name, body in (("systemd-analyze", SYSTEMD_ANALYZE), ("sysctl", SYSCTL), ("sshd", SSHD),
                            ("systemctl", SYSTEMCTL), ("dpkg", DPKG), ("dpkg-query", DPKG_QUERY),
@@ -196,6 +208,7 @@ class HostLab:
         self.registry: list[str] = []
         self.owned: list[str] = []
         self.conffiles: dict[str, list[str]] = {}
+        self.md5sums: dict[str, list[str]] = {}
         self.host("etc/ssh/sshd_config", "Include /etc/ssh/sshd_config.d/*.conf\n")
         (self.root / "etc/ssh/sshd_config.d").mkdir(parents=True, exist_ok=True)
         self.repo_file("deploy/host/invariants.list", EMPTY_INVARIANTS)
@@ -253,6 +266,12 @@ class HostLab:
             digest = "0" * 32 if modified else _md5(self.root / path.lstrip("/"))
             self.conffiles.setdefault(pkg, []).append(f" {path} {digest}")
 
+    def package_binary(self, pkg: str, path: str, *, modified: bool = False) -> None:
+        """Owned by <pkg>, not a conffile: its md5 is in <pkg>'s md5sums (or not: modified)."""
+        self.owned.append(f"{pkg}: {path}")
+        digest = "0" * 32 if modified else _md5(self.root / path.lstrip("/"))
+        self.md5sums.setdefault(pkg, []).append(f"{digest}  {path.lstrip('/')}")
+
     def flag(self, name: str, content: str = "") -> None:
         (self.sd / name).write_text(content, encoding="utf-8")
 
@@ -263,6 +282,8 @@ class HostLab:
         (self.sd / "conffiles").write_text(
             "".join(f"{pkg}\n" + "".join(f"{c}\n" for c in cs) for pkg, cs in self.conffiles.items()),
             encoding="utf-8")
+        for pkg, sums in self.md5sums.items():
+            (self.sd / "md5sums" / pkg).write_text("".join(f"{s}\n" for s in sums), encoding="utf-8")
         args = ["bash", str(CHECK), "--repo", str(repo or self.repo), "--role", role,
                 "--root", str(self.root), "--env", str(self.env)]
         if registry:
@@ -272,7 +293,8 @@ class HostLab:
         args += ["--state", str(state)] if state else ["--no-state"]
         args += list(extra)
         env = {"PATH": f"{self.stub}:{os.environ.get('PATH', '/usr/bin:/bin')}", "HOME": str(self.tmp),
-               "SD": str(self.sd), "LOGS": str(self.logs), "HC_ROOT": str(self.root), "LANG": "C.UTF-8"}
+               "SD": str(self.sd), "LOGS": str(self.logs), "HC_ROOT": str(self.root), "LANG": "C.UTF-8",
+               "TMPDIR": str(self.tmpdir)}
         proc = subprocess.run(args, cwd=str(self.tmp), env=env, capture_output=True, text=True, check=False)
         rows: list[tuple[str, str, str, str, str]] = []
         summary: dict[str, str] = {}
@@ -706,6 +728,262 @@ def test_our_dropin_merged_is_ok(tmp_path: Path) -> None:
     res = lab.run()
     assert res.find("OK", "unit", "ssh.socket", "/etc/systemd/system/ssh.socket.d/override.conf"), res.out
     assert not res.verdicts("LATENT")
+
+
+# --------------------------------------------------------------------------- #
+# 4b. Generator output (/run/systemd/generator*/): ssh.socket and sshd-socket-generator,
+#     the #325 fixture (DropInPaths of ssh.socket) with the generator substituted.
+# --------------------------------------------------------------------------- #
+GENERATOR = "/usr/lib/systemd/system-generators/sshd-socket-generator"
+GEN_DROPIN = "/run/systemd/generator/ssh.socket.d/addresses.conf"
+OVERRIDE = "/etc/systemd/system/ssh.socket.d/override.conf"
+PORT_DROPIN = "/etc/ssh/sshd_config.d/00-vpn-bot-port.conf"
+OVERRIDE_TPL = (ROOT / "deploy/host/ssh/ssh.socket-override.conf").read_text(encoding="utf-8")
+PORT_TPL = (ROOT / "deploy/host/ssh/00-vpn-bot-port.conf").read_text(encoding="utf-8")
+
+
+def _render(template: str, *ports: int) -> str:
+    """scripts/vpn-bot-ssh-port render: each @SSH_PORT@ line once per port, ascending."""
+    out: list[str] = []
+    for line in template.splitlines(keepends=True):
+        out.extend([line.replace("@SSH_PORT@", str(p)) for p in sorted(ports)] if "@SSH_PORT@" in line else [line])
+    return "".join(out)
+
+
+def _gen_out(*ports: int) -> str:
+    """What noble's sshd-socket-generator (openssh-server 1:9.6p1-3ubuntu13.20) writes —
+    measured: the header, an empty line, a reset, then each port on 0.0.0.0 and [::]."""
+    lines = "".join(f"ListenStream=0.0.0.0:{p}\nListenStream=[::]:{p}\n" for p in ports)
+    return f"# Automatically generated by sshd-socket-generator\n\n[Socket]\nListenStream=\n{lines}"
+
+
+# The substituted generator: called as systemd calls it, it checks its three output
+# directories and writes $SD/gen_out where the real one writes (only the first one).
+GEN_STUB = r"""
+echo "generator $# $*" >> "$LOGS/generator.log"
+(( $# == 3 )) || { echo "Expected three arguments." >&2; exit 1; }
+for d in "$@"; do [[ -d "$d" ]] || { echo "Failed to generate ssh.socket: No such file or directory" >&2; exit 1; }; done
+if [[ -f "$SD/gen_rc" ]]; then cat "$SD/gen_msg" >&2; exit "$(cat "$SD/gen_rc")"; fi
+if [[ -f "$SD/gen_out" ]]; then
+  mkdir -p "$1/ssh.socket.d" && cp "$SD/gen_out" "$1/ssh.socket.d/addresses.conf"
+else
+  echo "No custom listen addresses configured. Will not generated anything."
+fi
+exit 0
+"""
+
+# scripts/vpn-bot-ssh-port substituted: `plan` prints $SD/ssh_plan.
+PLAN_STUB = """import os
+import sys
+
+with open(os.path.join(os.environ["SD"], "ssh_plan"), encoding="utf-8") as f:
+    sys.stdout.write(f.read())
+"""
+
+
+def _plan(action: str = "steady", port: int = 54321, from_: str = "", to: str = "", state: str = "none") -> str:
+    return (f"ssh_port={port}\nssh_port_source=env\nrole=main\nsocket=active\ncurrent={port}\nfallback={port}\n"
+            f"state={state}\naction={action}\nfrom={from_}\nto={to}\nstatus=ssh port: {action}\n")
+
+
+def _gen_lab(tmp_path: Path, *, run_file: str | None = None, gen_out: str | None = None,
+             generator: bool = True, ports: tuple[int, ...] = (54321,), plan: str | None = None,
+             extra_dropins: str = "") -> HostLab:
+    """The measured main host: SSH_PORT 54321, override.conf after addresses.conf."""
+    lab = HostLab(tmp_path)
+    lab.add("ssh", OVERRIDE, OVERRIDE_TPL, src="deploy/host/ssh/ssh.socket-override.conf", installed=False)
+    lab.host(OVERRIDE.lstrip("/"), _render(OVERRIDE_TPL, *ports))
+    lab.add("ssh", PORT_DROPIN, PORT_TPL, src="deploy/host/ssh/00-vpn-bot-port.conf", installed=False)
+    lab.host(PORT_DROPIN.lstrip("/"), _render(PORT_TPL, *ports))
+    lab.sshd_t(loglevel="VERBOSE", port=str(ports[0]))
+    lab.host(GEN_DROPIN.lstrip("/"), _gen_out(*ports) if run_file is None else run_file)
+    lab.unit("ssh.socket", LoadState="loaded", NeedDaemonReload="no",
+             DropInPaths=f"{GEN_DROPIN} {OVERRIDE}{extra_dropins}")
+    if generator:
+        lab.host(GENERATOR.lstrip("/"), "#!/usr/bin/env bash\n" + GEN_STUB, mode=0o755)
+        lab.package_binary("openssh-server", GENERATOR)
+    lab.flag("gen_out", _gen_out(*ports) if gen_out is None else gen_out)
+    lab.repo_file("scripts/vpn-bot-ssh-port", PLAN_STUB)
+    lab.flag("ssh_plan", plan if plan is not None else _plan(port=ports[0]))
+    return lab
+
+
+def _unit_rows(res: Result, path: str = GEN_DROPIN) -> list[str]:
+    return [r[0] for r in res.rows if r[1] == "unit" and r[3] == path]
+
+
+def test_generator_output_that_matches_is_info_the_measured_host(tmp_path: Path) -> None:
+    """Measured on both hosts after #330: addresses.conf from openssh-server's generator,
+    the same set as override.conf — INFO, neither LATENT nor MISMATCH."""
+    lab = _gen_lab(tmp_path)
+    res = lab.run()
+    assert res.rc == 0, res.out + res.err
+    assert _unit_rows(res) == ["INFO"], res.out
+    (info,) = res.find("INFO", "unit", "ssh.socket", GEN_DROPIN)
+    port_line = PORT_TPL.splitlines().index("Port @SSH_PORT@") + 1
+    assert info[4].startswith(
+        f"generated by {GENERATOR} (openssh-server, unmodified) from the Port/ListenAddress lines of "
+        f"/etc/ssh/sshd_config and its Includes: {PORT_DROPIN}:{port_line} Port 54321 — byte-identical"), info[4]
+    assert res.find("OK", "unit", "ssh.socket", OVERRIDE)
+    ok = res.find("OK", "ssh-port", "generator", GEN_DROPIN)
+    assert ok and "ListenStream= on 54321 — the SSH ports" in ok[0][4], res.out
+    assert not res.verdicts("LATENT") and not res.verdicts("MISMATCH") and not res.verdicts("WARN"), res.out
+    # Called as systemd calls it: three output directories (normal, early, late), all
+    # private — removed when the check ends; nothing else written.
+    (call,) = lab.log("generator")
+    argv = call.split()[1:]
+    assert argv[0] == "3" and [Path(a).name for a in argv[1:]] == ["normal", "early", "late"], call
+    assert all(a.startswith(f"{lab.tmpdir}/vpn-bot-host-check.") for a in argv[1:]), call
+    assert list(lab.tmpdir.iterdir()) == [], "the private directory is removed"
+    assert any(ln.startswith("dpkg -S " + GENERATOR) for ln in lab.log("dpkg"))
+    assert "dpkg-query --control-show openssh-server md5sums" in lab.log("dpkg-query")
+
+
+def test_a_latent_already_in_the_state_file_becomes_info(tmp_path: Path) -> None:
+    """last.json from before the fix holds the LATENT; the next run rewrites it as INFO
+    (services/host_check.py then forgets the LATENT without a new alert)."""
+    lab = _gen_lab(tmp_path)
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"version": 1, "rows": [
+        {"verdict": "LATENT", "family": "unit", "key": "ssh.socket", "path": GEN_DROPIN, "text": "foreign drop-in"}]}),
+        encoding="utf-8")
+    lab.run(state=state)
+    rows = [r for r in json.loads(state.read_text(encoding="utf-8"))["rows"] if r["path"] == GEN_DROPIN]
+    assert {(r["verdict"], r["family"], r["key"]) for r in rows} == {("INFO", "unit", "ssh.socket"),
+                                                                     ("OK", "ssh-port", "generator")}
+
+
+@pytest.mark.parametrize("now", ["other ports", "nothing"])
+def test_stale_generator_output_is_a_mismatch(tmp_path: Path, now: str) -> None:
+    """The file in /run is not what the generator writes from today's configuration:
+    sshd_config changed after the last daemon-reload."""
+    lab = _gen_lab(tmp_path, run_file=_gen_out(22), gen_out=_gen_out(54321) if now == "other ports" else "")
+    if now == "nothing":
+        (lab.sd / "gen_out").unlink()
+    res = lab.run()
+    assert res.rc == 1, res.out
+    assert _unit_rows(res) == ["MISMATCH"], res.out
+    text = res.find("MISMATCH", "unit", "ssh.socket", GEN_DROPIN)[0][4]
+    assert text.startswith("stale generator output — daemon-reload needed"), text
+    assert "ListenStream=0.0.0.0:22" in text
+    if now == "other ports":
+        assert "writes [Socket] ListenStream= ListenStream=0.0.0.0:54321 ListenStream=[::]:54321" in text
+        assert res.find("OK", "ssh-port", "generator"), "the ports compared are what it writes now"
+    else:
+        assert "no longer writes ssh.socket.d/addresses.conf" in text
+        assert "Will not generated anything" in text
+    assert not res.verdicts("LATENT")
+    assert list(lab.tmpdir.iterdir()) == []
+
+
+@pytest.mark.parametrize("how", ["absent", "fails", "masked"])
+def test_a_generator_that_is_missing_or_fails_is_a_warn(tmp_path: Path, how: str) -> None:
+    lab = _gen_lab(tmp_path, generator=how != "absent")
+    if how == "fails":
+        lab.flag("gen_rc", "255")
+        lab.flag("gen_msg", f"{PORT_DROPIN} line 7: Badly formatted port number.\n")
+    if how == "masked":
+        lab.link("etc/systemd/system-generators/sshd-socket-generator", "/dev/null")
+    res = lab.run()
+    assert res.rc == 0, res.out
+    assert _unit_rows(res) == ["WARN"], res.out
+    text = res.find("WARN", "unit", "ssh.socket", GEN_DROPIN)[0][4]
+    expected = {"absent": "names generator sshd-socket-generator, which is in none of /run/systemd/system-generators",
+                "fails": f"generator {GENERATOR} (openssh-server) could not be run (exit 255: {PORT_DROPIN} line 7: "
+                         "Badly formatted port number.) — " + GEN_DROPIN + " is not judged",
+                "masked": "but /etc/systemd/system-generators/sshd-socket-generator masks it"}[how]
+    assert expected in text, text
+    assert not res.verdicts("LATENT") and not res.verdicts("MISMATCH"), res.out
+    assert not res.find("OK", "ssh-port", "generator"), "nothing to compare without its output"
+
+
+@pytest.mark.parametrize("how", ["modified", "unowned", "shadowed in /etc", "no header"])
+def test_a_generator_that_is_not_the_packages_is_latent_as_before(tmp_path: Path, how: str) -> None:
+    lab = _gen_lab(tmp_path, generator=how in {"shadowed in /etc", "no header"},
+                   run_file="[Socket]\nListenStream=\nListenStream=2222\n" if how == "no header" else None)
+    if how == "modified":
+        lab.host(GENERATOR.lstrip("/"), "#!/usr/bin/env bash\n" + GEN_STUB, mode=0o755)
+        lab.package_binary("openssh-server", GENERATOR, modified=True)
+    if how == "unowned":
+        lab.host(GENERATOR.lstrip("/"), "#!/usr/bin/env bash\n" + GEN_STUB, mode=0o755)
+    if how == "shadowed in /etc":
+        lab.host("etc/systemd/system-generators/sshd-socket-generator", "#!/usr/bin/env bash\n" + GEN_STUB, mode=0o755)
+    res = lab.run()
+    assert res.rc == 0, res.out
+    assert _unit_rows(res) == ["LATENT"], res.out
+    text = res.find("LATENT", "unit", "ssh.socket", GEN_DROPIN)[0][4]
+    assert text.startswith(f"foreign drop-in {GEN_DROPIN} is merged into ssh.socket"), text
+    expected = {"modified": "modified locally (its md5 is not the one openssh-server recorded)",
+                "unowned": f"written by generator {GENERATOR}, which no package owns",
+                "shadowed in /etc": "written by generator /etc/systemd/system-generators/sshd-socket-generator, "
+                                    "which no package owns",
+                "no header": "no generator names itself in it"}[how]
+    assert expected in text, text
+    assert lab.log("generator") == [], "a generator that is not the package's is never run"
+    assert not res.find("OK", "ssh-port", "generator") and not res.find("LATENT", "ssh-port", "generator")
+
+
+def test_generator_ports_other_than_the_ssh_ports_are_latent(tmp_path: Path) -> None:
+    """A stray `Port 22` before the Include: the generator (and so ssh.socket without our
+    override) is on 22 as well — the override alone keeps ssh.socket on SSH_PORT."""
+    out = _gen_out(22, 54321)
+    lab = _gen_lab(tmp_path, run_file=out, gen_out=out)
+    lab.host("etc/ssh/sshd_config", "Port 22\nInclude /etc/ssh/sshd_config.d/*.conf\n")
+    res = lab.run()
+    assert res.rc == 0, res.out
+    assert _unit_rows(res) == ["INFO"], "the drop-in itself is the generator's, current"
+    (latent,) = res.find("LATENT", "ssh-port", "generator", GEN_DROPIN)
+    assert ("sshd-socket-generator gives ssh.socket ListenStream= on 22 54321, the SSH ports are 54321 (SSH_PORT) — "
+            f"only {OVERRIDE} keeps ssh.socket on them: remove it and ssh.socket listens on 22 54321") in latent[4]
+    assert "/etc/ssh/sshd_config:1 Port 22" in latent[4], "it names the line to look at"
+
+
+@pytest.mark.parametrize(("plan", "verdict"), [
+    (_plan("wait", from_="22", to="54321", state="phase1"), "OK"),
+    (_plan("finish", from_="22", to="54321", state="phase1"), "OK"),
+    (_plan("steady"), "LATENT"),
+    (_plan("start", from_="22", to="54321"), "INFO"),
+])
+def test_during_a_migration_the_ssh_ports_are_both(tmp_path: Path, plan: str, verdict: str) -> None:
+    out = _gen_out(22, 54321)
+    lab = _gen_lab(tmp_path, run_file=out, gen_out=out, ports=(22, 54321), plan=plan)
+    res = lab.run()
+    assert [r[0] for r in res.rows if r[1:3] == ("ssh-port", "generator")] == [verdict], res.out
+    if verdict == "INFO":
+        assert "not compared while the SSH port plan is 'start'" in res.find("INFO", "ssh-port", "generator")[0][4]
+
+
+def test_pre_install_the_generator_ports_wait_for_the_install(tmp_path: Path) -> None:
+    """Phase 1: the deploy changes a file the generator reads — Phase 2 compares."""
+    lab = _gen_lab(tmp_path)
+    rendered = tmp_path / "rendered"
+    rendered.mkdir()
+    (rendered / "override.conf").write_text(_render(OVERRIDE_TPL, 54321), encoding="utf-8")
+    (rendered / "port.conf").write_text(_render(PORT_TPL, 54321), encoding="utf-8")
+    lab.registry = [f"{rendered}/override.conf|{OVERRIDE}|0644|root:root|ssh|main|render=ssh-port",
+                    f"{rendered}/port.conf|{PORT_DROPIN}|0644|root:root|ssh|main|render=ssh-port"]
+    lab.host(PORT_DROPIN.lstrip("/"), "Port 54321\n")   # the host copy differs: Phase 2 installs ours
+    res = lab.run("--pre-install")
+    assert _unit_rows(res) == ["INFO"], res.out
+    pending = res.find("PENDING", "ssh-port", "generator", GEN_DROPIN)
+    assert pending and f"reads ({PORT_DROPIN}) — compared after the install" in pending[0][4], res.out
+    assert "its Includes —" in res.find("INFO", "unit", "ssh.socket", GEN_DROPIN)[0][4], \
+        "no line list: the walk followed the repo copy, the generator read the host's"
+
+
+def test_a_foreign_dropin_in_etc_is_still_latent(tmp_path: Path) -> None:
+    mine = "/etc/systemd/system/ssh.socket.d/10-mine.conf"
+    lab = _gen_lab(tmp_path, extra_dropins=f" {mine}")
+    lab.host(mine.lstrip("/"), "[Socket]\nListenStream=2222\n")
+    res = lab.run()
+    latent = res.find("LATENT", "unit", "ssh.socket")
+    assert [r[3] for r in latent] == [mine], res.out
+    assert latent[0][4].startswith(f"foreign drop-in {mine} is merged into ssh.socket")
+    assert _unit_rows(res) == ["INFO"]
+    # accepted-overrides.list still names exactly that row.
+    lab.repo_file("deploy/host/accepted-overrides.list", f"{mine}|ssh.socket|the provider's console needs port 2222\n")
+    res = lab.run()
+    assert not res.verdicts("LATENT") and res.find("ACCEPTED", "unit", "ssh.socket", mine)
 
 
 def test_relay_unit_set_is_deploy_relay_and_never_an_example(tmp_path: Path) -> None:
