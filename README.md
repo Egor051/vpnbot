@@ -40,7 +40,25 @@ or a heavy ORM.
 
 ## Quick Start
 
-Minimal run for evaluation (only `BOT_TOKEN` and `ADMIN_IDS` are required to start):
+### Install on a fresh Ubuntu 24.04 server (one command)
+
+Download the installer and its checksum from the latest release, verify, run — then
+continue in Telegram:
+
+```bash
+curl -fsSLO https://github.com/Egor051/vpnbot/releases/latest/download/install.sh && curl -fsSLO https://github.com/Egor051/vpnbot/releases/latest/download/SHA256SUMS && sha256sum -c --ignore-missing SHA256SUMS && sudo bash install.sh
+```
+
+It asks for the mode and the bot token, installs the bot from the latest release tag, checks
+it is really up, and prints a one-time link (and QR) that makes **you** the superadmin — no
+Telegram ID to look up, `ADMIN_IDS` stays empty. Re-running it repairs the install without
+touching `.env` or the database; `--reclaim` issues a new link. Never `curl … | bash` from a
+branch. Details: **[docs/install.md](docs/install.md)**.
+
+### Evaluation run from a checkout
+
+Minimal run for evaluation (only `BOT_TOKEN` is required to start; with `ADMIN_IDS` empty use
+the installer's claim link instead):
 
 ```bash
 git clone https://github.com/Egor051/vpnbot.git
@@ -160,13 +178,14 @@ operational messages.
 ## Configuration
 
 Copy `.env.example` to `.env` and replace placeholders with values for your server. Only
-`BOT_TOKEN` and `ADMIN_IDS` are required to start; fill the relevant Xray, AWG, or Hysteria2
-values before issuing that key type.
+`BOT_TOKEN` is required to start (`ADMIN_IDS` may be empty when the first superadmin claims the
+bot with the installer's link — [docs/install.md](docs/install.md)); fill the relevant Xray, AWG,
+or Hysteria2 values before issuing that key type.
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `BOT_TOKEN` | **Yes** | Telegram Bot API token from BotFather. 🔒 |
-| `ADMIN_IDS` | **Yes** | Comma-separated Telegram user IDs with **superadmin** access. Additional moderators are assigned in-bot by a superadmin. |
+| `ADMIN_IDS` | No (empty) | Comma-separated Telegram user IDs with **superadmin** access. Additional moderators are assigned in-bot by a superadmin. Empty on an installer setup: the effective superadmins are `ADMIN_IDS` ∪ whoever claimed the bot with the one-time install link; any ID here makes the claim inert. |
 | `BOT_LANGUAGE` | No (`ru`) | Bot UI language: `ru` or `en`. |
 | `SQLITE_SYNCHRONOUS` | No (`FULL`) | SQLite durability mode; `FULL` is the safe control-plane default. |
 | `XRAY_PUBLIC_HOST`, `XRAY_REALITY_PUBLIC_KEY`, `XRAY_SNI`, `XRAY_SHORT_ID` | For Xray keys | Reality connection parameters clients need. |
@@ -193,6 +212,7 @@ Two deployment models are supported:
 Step-by-step install (both models), the one-time Xray API setup, the post-deploy smoke
 checklist, and day-2 operations live in:
 
+- **[docs/install.md](docs/install.md)** — the one-command installer (`scripts/install.sh`) and the first-superadmin claim.
 - **[docs/deployment.md](docs/deployment.md)** — install, both models, Xray API mode.
 - **[docs/operations.md](docs/operations.md)** — runbook: health checks, backup/restore, degraded recovery, rollback.
 
@@ -317,7 +337,7 @@ operations remain in [docs/operations.md](docs/operations.md).
 
 **Roles.** Access is tiered:
 
-- **Superadmin** — every ID in `ADMIN_IDS`. Full control, including assigning/removing the moderator role and all backend and user actions.
+- **Superadmin** — every ID in `ADMIN_IDS`, and whoever claimed the bot with the installer's link. Full control, including assigning/removing the moderator role and all backend and user actions.
 - **Moderator** — assigned by a superadmin from the admin panel (there is no env var for it). Opens their panel with «🛡 Moderator panel» in the main menu (or `/moderator`). Can approve/reject access requests and block/unblock and manage users, but **cannot** assign/remove the moderator role, block another moderator or a superadmin, or manage another owner's keys/proxy access (that stays superadmin- or owner-only).
 - **Approved user** — issues and manages their own keys/proxy access.
 - **Pending user** — awaiting approval; **Blocked user** — bot access revoked.

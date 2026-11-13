@@ -338,7 +338,17 @@ check_reachable() {
   [[ -n "$code" && "$code" != 000 ]] || die "нет доступа к ${url} — проверьте сеть/DNS/прокси"
 }
 
+# The same rule as the bot's TELEGRAM_API_BASE (config/settings.py): the token
+# travels in every request path, so plain http only towards a loopback host.
+valid_api_base() {
+  local base="${1-}"
+  [[ "$base" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$ ]] && return 0
+  [[ "$base" =~ ^http://(127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|localhost|\[::1\])(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$ ]]
+}
+
 preflight() {
+  valid_api_base "$TG_API_BASE" \
+    || die "TELEGRAM_API_BASE должен быть https://… (или http:// на loopback): ${TG_API_BASE}"
   [[ "${EUID}" -eq 0 ]] || die "запустите от root: sudo bash install.sh"
   [[ -r /etc/os-release ]] || die "нет /etc/os-release"
   local id version arch free_mb probe
@@ -713,6 +723,7 @@ load_existing_bot() {
   token="$(env_value "$ENV_FILE" BOT_TOKEN)"
   base="$(env_value "$ENV_FILE" TELEGRAM_API_BASE)"
   [[ -n "$base" ]] && TG_API_BASE="${base%/}"
+  valid_api_base "$TG_API_BASE" || die "недопустимый TELEGRAM_API_BASE в ${ENV_FILE}"
   valid_token_format "$token" || die "в ${ENV_FILE} нет корректного BOT_TOKEN"
   BOT_USERNAME="$(telegram_get_me "$token")" || die "Telegram не принимает BOT_TOKEN из ${ENV_FILE}"
 }

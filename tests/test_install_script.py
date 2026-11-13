@@ -197,6 +197,26 @@ def test_redact_hides_tokens_and_claim_codes(tmp_path: Path) -> None:
     assert "<redacted-bot-token>" in result.stdout and "claim_<redacted>" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("base", "ok"),
+    [
+        ("https://api.telegram.org", True),
+        ("https://bot-api.example.com:8443/x", True),
+        ("http://127.0.0.1:8081", True),
+        ("http://localhost:8081", True),
+        ("http://[::1]:8081", True),
+        ("http://bot-api.example.com", False),  # the token would travel in clear text
+        ("http://127.0.0.1.evil.example", False),
+        ("ftp://127.0.0.1", False),
+        ("https://user:pw@example.com", False),
+        ("https://example.com/?q=1", False),
+    ],
+)
+def test_api_base_rule_matches_the_bots(tmp_path: Path, base: str, ok: bool) -> None:
+    result = _ok(_run(tmp_path, 'valid_api_base "$B" && echo yes || echo no', extra_env={"B": base}))
+    assert result.stdout.strip() == ("yes" if ok else "no")
+
+
 # ── questions ─────────────────────────────────────────────────────────────────
 
 

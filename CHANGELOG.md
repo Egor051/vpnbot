@@ -8,6 +8,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **One-command installer: `scripts/install.sh` (docs/install.md).** On a fresh Ubuntu 24.04 host
+  (`x86_64`/`aarch64`, systemd) it asks the mode — `1) main server`, `2) relay` (not in this
+  version: exits `2` with nothing changed on disk) — and the bot token (hidden input, format
+  `^[0-9]{6,12}:[A-Za-z0-9_-]{30,}$`, checked with `getMe` through `curl -K -`, so the token never
+  reaches an argv, the log or the terminal; the username comes from `getMe`). Then: apt packages,
+  a checkout of the latest release tag (`INSTALL_REF` overrides) in `/opt/vpn-service`, a venv
+  from `constraints-hashed.txt` with `--require-hashes`, `.env` from `.env.example` (token,
+  `ADMIN_IDS` empty, every `*_ENABLED=false`, `root:root 0600`), `vpn-bot-db-perms` and
+  `deploy/vpn-bot.service` verbatim — the root/api model is unchanged. Readiness is the
+  `Run polling` line in `bot.log` after the pre-start byte offset (90 s, no fixed sleeps; a
+  failed unit or an extra restart ends the wait), then that range is scanned for
+  ERROR/CRITICAL/Traceback. **Atomic**: a manifest of every path, unit and replaced file, written
+  before each is created, rolled back in reverse on any error or signal; apt packages are only
+  logged. `flock` on `/run/vpn-bot-install.lock`; refuses while `vpn-bot-deploy.service` runs.
+  **Idempotent**: a re-run on an existing install is a REPAIR that never writes `.env` or the
+  database (the superadmin check opens it `mode=ro`), reinstalls the helper and the unit,
+  restarts and checks; `--reclaim` only issues a new claim. Log
+  `/var/log/vpn-bot-install.<ts>.log` (token and claim code redacted) plus the manifest. Test
+  seams `INSTALL_SELFTEST=1` (like `DEPLOY_SELFTEST`), `INSTALL_INJECT_FAILURE=<step>` and
+  `TELEGRAM_API_BASE`.
+- **The first superadmin claims the bot with a one-time deep link.** The installer draws a 128-bit
+  code, stores only its sha256 and a 30-minute expiry in `/etc/vpn-bot/claim.json` (root `0600`),
+  and prints `https://t.me/<bot>?start=claim_<code>` plus a QR (`qrencode -t ANSIUTF8`, fed on
+  stdin). `/start claim_<code>` (private chat only) works only while there is no superadmin in
+  `ADMIN_IDS`, in the new `claimed_superadmins` table, or as a SUPERADMIN role; the hash is
+  compared with `hmac.compare_digest`, the expiry checked, attempts rate limited (5/hour per
+  user, 20/hour overall). Success, atomically: claim.json renamed away, then one transaction for
+  the claim row, the role and the `superadmin_claimed` audit row (on failure the file is put
+  back), then the admin command menu. Every failure gets one generic answer; the code is never
+  logged. **With `ADMIN_IDS` set the claim is completely inert** — claim.json is not even opened.
+- **Effective superadmins = `ADMIN_IDS` ∪ claimed** (`services/superadmins.py`): a live set that
+  replaces `Settings.admin_ids` at startup, so roles, alerts, the command menu and maintenance
+  see a claim at once, without a restart.
+- **`TELEGRAM_API_BASE`**: the Bot API server the bot talks to (aiogram `TelegramAPIServer`);
+  `https`, or `http` only towards a loopback host. Empty keeps `api.telegram.org`.
+- **CI: `installer-e2e`** runs the whole installer as root on a real ubuntu-24.04 VM against a mock
+  Bot API (`tests/e2e/`): relay changes nothing; a failure injected after the bot started leaves
+  no manifest path; a real install is active with `NRestarts=0`; the claim makes the operator
+  superadmin, alerts reach them without a restart, a second claim is refused; a re-run is a
+  repair with `.env` and `vpn.db` byte-for-byte unchanged.
+- **Release: `install.sh` and `SHA256SUMS` are attached to every `v*` release**
+  (`.github/workflows/release-installer.yml`). README: download both, `sha256sum -c
+  --ignore-missing`, `sudo bash install.sh` — never `curl | bash` from a branch.
+
 - **The main server's UFW is computed from the repo and `.env`, and owned by one helper
   (docs/host-state.md#the-firewall-ufw).** New root helper `scripts/vpn-bot-ufw-apply` (stdlib
   Python, `OUT_OF_REPO_HELPERS`, `required` on main): `plan` (read-only, `key=value` lines),
@@ -560,6 +604,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`ADMIN_IDS` may be empty.** An empty or unset value no longer stops the bot; the placeholder
+  from `.env.example` is still refused. With no superadmin anywhere and no pending claim the bot
+  logs a loud `NO SUPERADMIN` warning at startup.
+- **Schema v41**: table `claimed_superadmins`. Snapshot `tests/schema_snapshots/v40.sql` added.
+
 - **Host invariants: the SSH port is judged from `SSH_PORT`, not from a fixed line.** The
   `invariants.list` lines `main|unit-prop:ssh.socket:Listen|-|~54321` and
   `relay|unit-prop:ssh.socket:Listen|-|~22` are gone — a fixed port contradicts `SSH_PORT` during
@@ -749,6 +798,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `proxy_admin_status_text`, `proxy_page_text`, `proxy_entry_text`.
 
 ### Fixed
+
+- **A host without Xray/AmneziaWG no longer starts with CRITICAL.** The startup drift reconcile
+  reported a backend that was never installed (no `config.json`/`awg0.conf` and no keys of that
+  type in any status) as degraded: a CRITICAL line and audit rows on every start of a
+  protocol-less bot. That case is now skipped with an INFO line; any key, or the config, keeps
+  the full reconcile.
+- **A restart with nothing to change no longer writes `vpn.db`.** Three writes on every start or
+  stop: the `warp_split_sources` seed used `INSERT OR IGNORE` on an AUTOINCREMENT table (each
+  ignored insert advanced `sqlite_sequence`), `reset_runtime()` rewrote `updated_at` with every
+  runtime column already zero, and `WarpManager.stop()` stamped `last_check_ts` although WARP
+  never ran. All three now write only when there is something to change.
 
 - **Host check: a false LATENT on ssh.socket's generator drop-in (docs/host-state.md#generator-output).**
   After #330 both hosts reported «foreign drop-in /run/systemd/generator/ssh.socket.d/addresses.conf
