@@ -375,7 +375,13 @@ class WarpManager:
                 if not down.ok:
                     logger.warning("WARP interface down failed rc=%s: %s", down.returncode, down.stderr)
                 logger.info("WARP module stopped: routes removed, interface down")
+        was_running = self._running
         self._running = False
+        if not was_running and await self._runtime_view_is_clean():
+            # Never started (WARP off — every bot shutdown on such a host) and
+            # nothing to reset: writing last_check_ts here changed vpn.db on every
+            # stop, so a restart with nothing to change was never byte-identical.
+            return
         await self._repo.update_runtime(
             tunnel_up=False,
             routes_active=False,
@@ -383,6 +389,12 @@ class WarpManager:
             success_streak=0,
             last_handshake=0,
             last_check_ts=int(time.time()),
+        )
+
+    async def _runtime_view_is_clean(self) -> bool:
+        state = await self._repo.get()
+        return not (
+            state.tunnel_up or state.routes_active or state.fail_streak or state.success_streak or state.last_handshake
         )
 
     async def _run_install(self, config_text: str) -> int:

@@ -102,7 +102,15 @@ print("\n".join("|".join(map(str, row)) for row in conn.execute(sys.argv[1])))
 PY
 }
 
-newest() { ls -1t /var/log/vpn-bot-install.*."$1" 2>/dev/null | head -n1; }
+# Newest installer log/manifest. `|| true`: with pipefail, ls on no match would
+# end the whole script silently.
+newest() { { ls -1t /var/log/vpn-bot-install.*."$1" 2>/dev/null || true; } | head -n1; }
+
+count_install_files() {
+  local f n=0
+  for f in /var/log/vpn-bot-install.*; do [[ -e "$f" ]] && n=$((n + 1)); done
+  printf '%s' "$n"
+}
 
 assert_unit_healthy() {
   [[ "$(systemctl is-active vpn-bot.service)" == active ]] || fail "vpn-bot.service is not active"
@@ -132,7 +140,7 @@ mock_get health >/dev/null || fail "mock did not come up"
 
 # --------------------------------------------------------------------------- #
 step "A. relay mode: exit 2, nothing on disk"
-logs_before="$(ls /var/log/vpn-bot-install.* 2>/dev/null | wc -l)"
+logs_before="$(count_install_files)"
 set +e
 printf '2\n' | installer
 rc=$?
@@ -140,7 +148,7 @@ set -e
 [[ "$rc" == 2 ]] || fail "relay mode exited ${rc}, expected 2"
 [[ ! -e "$APP_DIR" && ! -e /etc/systemd/system/vpn-bot.service && ! -e /etc/vpn-bot ]] \
   || fail "relay mode changed the disk"
-[[ "$(ls /var/log/vpn-bot-install.* 2>/dev/null | wc -l)" == "$logs_before" ]] || fail "relay mode wrote a log"
+[[ "$(count_install_files)" == "$logs_before" ]] || fail "relay mode wrote a log"
 [[ ! -e /run/vpn-bot-install.lock ]] || fail "relay mode took the lock"
 
 # --------------------------------------------------------------------------- #

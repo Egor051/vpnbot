@@ -1,0 +1,65 @@
+name: Release installer
+
+# Attaches scripts/install.sh and its SHA256SUMS to the GitHub release of a
+# version tag, so the documented install is
+#
+#   curl -fsSLO https://github.com/Egor051/vpnbot/releases/latest/download/install.sh
+#   curl -fsSLO https://github.com/Egor051/vpnbot/releases/latest/download/SHA256SUMS
+#   sha256sum -c --ignore-missing SHA256SUMS && sudo bash install.sh
+#
+# and never `curl … | bash` from a branch. The installer then installs the
+# latest release tag itself (scripts/install.sh, resolve_ref). A release that
+# does not exist yet is created; an existing one (made in the UI) only gets the
+# two files, replacing older copies.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)attach the installer to"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-installer-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  attach:
+    name: Attach install.sh + SHA256SUMS
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Check the installer
+        run: |
+          bash -n scripts/install.sh
+          test -f services/superadmin_claim.py
+
+      - name: Build install.sh and SHA256SUMS
+        run: |
+          mkdir dist
+          install -m 0755 scripts/install.sh dist/install.sh
+          (cd dist && sha256sum install.sh > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "$TAG" \
+              --notes "Install: see docs/install.md. SHA256 of install.sh: $(cut -d' ' -f1 dist/SHA256SUMS)"
+          fi
+          gh release upload "$TAG" dist/install.sh dist/SHA256SUMS --clobber

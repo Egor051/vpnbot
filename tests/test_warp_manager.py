@@ -463,6 +463,22 @@ async def test_stop_when_not_running_runs_no_helper(world: World) -> None:
     assert (state.tunnel_up, state.fail_streak) == (False, 0)
 
 
+# Invariant: stopping a module that never started, with a clean runtime view,
+# writes nothing — every bot shutdown on a host without WARP used to stamp
+# last_check_ts, so a restart with nothing to change rewrote vpn.db.
+async def test_stop_of_a_never_started_module_writes_nothing(world: World) -> None:
+    # Arrange
+    before = await world.repo.get()
+    assert (before.tunnel_up, before.last_check_ts) == (False, 0)
+
+    # Act
+    await world.manager.stop()
+
+    # Assert
+    assert world.shell.calls == []
+    assert await world.repo.get() == before
+
+
 # ── enable / disable / restart / kill-switch ─────────────────────────────────
 
 
