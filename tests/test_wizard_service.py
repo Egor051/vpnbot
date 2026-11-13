@@ -59,12 +59,14 @@ class FakeShell:
 class Notifier:
     def __init__(self) -> None:
         self.events: list[tuple[str, int, str]] = []
+        self.deliver_plan = True
 
     async def progress(self, run: WizardRun, snap: StatusSnapshot) -> None:
         self.events.append(("progress", run.id, run.state))
 
-    async def plan_ready(self, run: WizardRun, snap: StatusSnapshot) -> None:
+    async def plan_ready(self, run: WizardRun, snap: StatusSnapshot) -> bool:
         self.events.append(("plan_ready", run.id, snap.plan_text or ""))
+        return self.deliver_plan
 
     async def finished(self, run: WizardRun, snap: StatusSnapshot) -> bool:
         self.events.append(("finished", run.id, run.state))
@@ -449,3 +451,22 @@ def test_param_specs_type_every_kind() -> None:
             number.coerce("n", bad)
     with pytest.raises(WizardParamError):
         ParamSpec("float", "0").coerce("x", "1")
+
+
+async def test_the_confirmation_screen_is_retried_until_delivered_and_after_a_restart(world: World) -> None:
+    svc = world.service()
+    run = await svc.start(ADMIN, "update", chat_id=5)
+    world.emit(run.id, "launched", phase="plan")
+    world.emit(run.id, "plan", text="HEAD a → origin/main b: 1 commit(s)")
+    world.emit(run.id, "finished", phase="plan", outcome="planned")
+    world.notifier.deliver_plan = False  # Telegram refuses the edit and the new message
+    await svc.poll_once()
+    await svc.poll_once()
+    assert world.notifier.kinds().count("plan_ready") == 2
+    world.notifier.deliver_plan = True
+    await svc.poll_once()
+    await svc.poll_once()
+    assert world.notifier.kinds().count("plan_ready") == 3  # delivered once, then quiet
+    await world.service().poll_once()  # a restart shows it once more
+    assert world.notifier.kinds().count("plan_ready") == 4
+    assert (await svc.get(run.id)).plan_ready

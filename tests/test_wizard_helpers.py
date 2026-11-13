@@ -112,6 +112,7 @@ esac
             "VPN_BOT_WIZARD_SELFTEST_BIN": str(self.bin),
             "CALLS": str(self.calls),
             "SD": str(self.bin.parent),
+            "TZ": "UTC",
             **extra,
         }
 
@@ -337,7 +338,7 @@ def test_dump_is_redacted_and_judges_errors_by_timestamp(host: Host) -> None:
     text = dump.read_text(encoding="utf-8")
     assert token not in text and "hunter2" not in text
     assert "last ERROR at 2026-11-13T10:05:00 UTC" in text
-    assert "last ERROR at 2026/11/13 09:00:00 UTC" in text
+    assert "last ERROR at 2026-11-13T09:00:00 UTC" in text  # host time (TZ=UTC here), shown in UTC
     assert "live schema_version: 41" in text
     log = host.file("/var/log/vpn-bot-wizard/11.log").read_text(encoding="utf-8")
     assert token not in log
@@ -355,18 +356,30 @@ def test_dump_verify_refuses_an_artifact_with_a_secret(host: Host) -> None:
 # --------------------------------------------------------------------------- #
 # update
 # --------------------------------------------------------------------------- #
+TIP = "b" * 40
+
+
 def _git_stub(host: Host, *, commits: int = 2) -> None:
+    """origin/main is TIP unless $SD/tip says otherwise (a push after the plan)."""
     host.stub("git", rf'''
 case "$*" in
   *"fetch origin main"*) : ;;
   *"rev-parse --short HEAD"*) echo aaaaaaa ;;
   *"rev-parse --short origin/main"*) echo bbbbbbb ;;
+  *"rev-parse origin/main"*) cat "$SD/tip" 2>/dev/null || echo {TIP} ;;
   *"rev-list --count"*) echo {commits} ;;
   *"log --oneline"*) [ {commits} -gt 0 ] && printf 'bbbbbbb feat: two\ncccccc1 fix: one\n' ;;
   *"show HEAD:db/database.py"*) echo "CURRENT_SCHEMA_VERSION = 41" ;;
   *"show origin/main:db/database.py"*) echo "CURRENT_SCHEMA_VERSION = 42" ;;
 esac
 ''')
+
+
+def _planned(host: Host, run_id: int, target: str = TIP) -> None:
+    """What step_plan leaves behind: the revision the superadmin was shown."""
+    path = host.file(f"/var/lib/vpn-bot-wizard/{run_id}.update-plan.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"target": target}), encoding="utf-8")
 
 
 def _redeploy_stub(host: Host, outcome: str) -> None:
@@ -410,6 +423,8 @@ def test_update_plan_is_a_noop_when_already_at_origin_main(host: Host) -> None:
 
 def test_update_deploy_ok_succeeds(host: Host) -> None:
     _redeploy_stub(host, "ok")
+    _git_stub(host)
+    _planned(host, 22)
     assert host.launcher("run", "--mode", "update", "--run", "22", "--phase", "execute").returncode == 0
     events = host.events(22)
     assert finished(events)["outcome"] == "succeeded"
@@ -420,12 +435,16 @@ def test_update_deploy_ok_succeeds(host: Host) -> None:
 
 def test_update_force_is_forwarded(host: Host) -> None:
     _redeploy_stub(host, "ok")
+    _git_stub(host)
+    _planned(host, 23)
     host.launcher("run", "--mode", "update", "--run", "23", "--phase", "execute", "--param", "force=1")
     assert [c for c in host.calls.read_text().splitlines() if c.startswith("env:")] == ["env: CHECK= FORCE=1 ATTACH=pipe"]
 
 
 def test_update_rollback_report_is_rolled_back(host: Host) -> None:
     _redeploy_stub(host, "rollback")
+    _git_stub(host)
+    _planned(host, 24)
     assert host.launcher("run", "--mode", "update", "--run", "24", "--phase", "execute").returncode == 1
     events = host.events(24)
     assert finished(events)["outcome"] == "rolled_back"
@@ -437,6 +456,8 @@ def test_update_rollback_report_is_rolled_back(host: Host) -> None:
 
 def test_update_rollback_with_the_bot_down_is_failed(host: Host) -> None:
     _redeploy_stub(host, "rollback")
+    _git_stub(host)
+    _planned(host, 25)
     (host.bin.parent / "bot-state").write_text("failed\n", encoding="utf-8")
     host.launcher("run", "--mode", "update", "--run", "25", "--phase", "execute")
     assert finished(host.events(25))["outcome"] == "failed"
@@ -444,6 +465,8 @@ def test_update_rollback_with_the_bot_down_is_failed(host: Host) -> None:
 
 def test_update_without_a_report_is_failed_not_rolled_back(host: Host) -> None:
     _redeploy_stub(host, "die")
+    _git_stub(host)
+    _planned(host, 26)
     host.launcher("run", "--mode", "update", "--run", "26", "--phase", "execute")
     events = host.events(26)
     assert finished(events)["outcome"] == "failed"
@@ -452,6 +475,8 @@ def test_update_without_a_report_is_failed_not_rolled_back(host: Host) -> None:
 
 def test_update_verify_needs_the_bot_running(host: Host) -> None:
     _redeploy_stub(host, "ok")
+    _git_stub(host)
+    _planned(host, 27)
     (host.bin.parent / "bot-state").write_text("activating\n", encoding="utf-8")
     host.launcher("run", "--mode", "update", "--run", "27", "--phase", "execute")
     steps = [(e["step"], e["state"]) for e in host.events(27) if e["event"] == "step"]
@@ -549,3 +574,85 @@ def test_validate_params_types(lib: ModuleType) -> None:
             lib.validate_params("dump", bad)
     assert lib.validate_params("update", ["force=1"]) == {"force": "1"}
     assert lib.validate_params("selfcheck", []) == {}
+
+
+def test_update_plan_records_the_revision_it_shows(host: Host) -> None:
+    _git_stub(host)
+    _redeploy_stub(host, "ok")
+    host.launcher("run", "--mode", "update", "--run", "30", "--phase", "plan")
+    plan = json.loads(host.file("/var/lib/vpn-bot-wizard/30.update-plan.json").read_text(encoding="utf-8"))
+    assert plan == {"target": TIP}
+
+
+def test_update_refuses_when_origin_main_moved_after_the_plan(host: Host) -> None:
+    _git_stub(host)
+    _redeploy_stub(host, "ok")
+    _planned(host, 31)
+    (host.bin.parent / "tip").write_text("c" * 40 + "\n", encoding="utf-8")
+    assert host.launcher("run", "--mode", "update", "--run", "31", "--phase", "execute").returncode == 1
+    events = host.events(31)
+    assert finished(events)["outcome"] == "failed"
+    results = [e for e in events if e["event"] == "result"]
+    assert [r["verdict"] for r in results] == ["target_moved"]
+    assert "bbbbbbb → ccccccc" in results[0]["text"]
+    assert host.calls_of("bash") == []  # nothing was deployed
+
+
+def test_update_without_a_plan_deploys_nothing(host: Host) -> None:
+    _git_stub(host)
+    _redeploy_stub(host, "ok")
+    host.launcher("run", "--mode", "update", "--run", "32", "--phase", "execute")
+    events = host.events(32)
+    assert finished(events)["outcome"] == "failed"
+    assert [e["verdict"] for e in events if e["event"] == "result"] == ["no_plan"]
+    assert host.calls_of("bash") == []
+
+
+def test_update_verify_tells_when_another_revision_was_deployed(host: Host) -> None:
+    _git_stub(host)
+    _redeploy_stub(host, "ok")  # reports "aaaaaaa -> bbbbbbb"
+    _planned(host, 33, "d" * 40)
+    (host.bin.parent / "tip").write_text("d" * 40 + "\n", encoding="utf-8")
+    host.launcher("run", "--mode", "update", "--run", "33", "--phase", "execute")
+    result = [e for e in host.events(33) if e["event"] == "result"][0]
+    assert "deployed bbbbbbb, the plan was for ddddddd" in result["text"]
+
+
+def test_dump_dates_errors_with_the_logs_own_offset(host: Host) -> None:
+    """utils/logging.py writes local time WITH %z: an error two hours old, logged at
+    +0300 on a Moscow host, is two hours old — not "0 min" from a misread offset."""
+    import datetime as dt
+
+    two_hours_ago = dt.datetime.now(dt.timezone(dt.timedelta(hours=3))) - dt.timedelta(hours=2)
+    stamp = two_hours_ago.strftime("%Y-%m-%dT%H:%M:%S%z")
+    host.file("/opt/vpn-service/logs/bot.log").write_text(f"{stamp} ERROR [x] boom\n", encoding="utf-8")
+    host.launcher("run", "--mode", "dump", "--run", "34", "--phase", "execute")
+    text = host.file("/var/lib/vpn-bot-wizard/34.dump.txt").read_text(encoding="utf-8")
+    utc = two_hours_ago.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    assert f"last ERROR at {utc} UTC (" in text
+    assert re.search(r"last ERROR at \S+ UTC \((1\.9|2\.0|2\.1) h ago\)", text), text
+
+
+def test_launch_reenters_the_host_mount_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under the non-root bot's ProtectSystem=strict, sudo keeps the bot's mount namespace:
+    /run, /var/lib and /var/log are read-only there. `launch` re-executes itself in PID 1's."""
+    for key in ("VPN_BOT_WIZARD_SELFTEST", "VPN_BOT_WIZARD_HOSTNS"):
+        monkeypatch.delenv(key, raising=False)
+    loader = importlib.machinery.SourceFileLoader("vpn_bot_wizard_launcher_under_test", str(LAUNCHER))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    launcher = importlib.util.module_from_spec(spec)
+    loader.exec_module(launcher)
+    namespaces = {"/proc/self/ns/mnt": "mnt:[1]", "/proc/1/ns/mnt": "mnt:[2]"}
+    monkeypatch.setattr(launcher.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(launcher.os, "readlink", lambda path: namespaces[path])
+    argv = ["launch", "--mode", "selfcheck", "--run", "1", "--phase", "execute"]
+    reexec = launcher.host_mount_namespace_argv(argv)
+    assert reexec[:3] == ["nsenter", "--mount=/proc/1/ns/mnt", "--"]
+    assert reexec[-len(argv):] == argv and reexec[-len(argv) - 1] == str(LAUNCHER)
+    assert launcher.host_mount_namespace_argv(["active"]) is None  # only launch writes
+    monkeypatch.setenv("VPN_BOT_WIZARD_HOSTNS", "1")
+    assert launcher.host_mount_namespace_argv(argv) is None  # already re-executed
+    monkeypatch.delenv("VPN_BOT_WIZARD_HOSTNS")
+    namespaces["/proc/1/ns/mnt"] = "mnt:[1]"
+    assert launcher.host_mount_namespace_argv(argv) is None  # already in the host's

@@ -22,7 +22,6 @@ Parameter: lines — how many lines of each log tail (20..1000, default 200).
 
 from __future__ import annotations
 
-import calendar
 import importlib.machinery
 import importlib.util
 import json
@@ -32,6 +31,8 @@ import sqlite3
 import sys
 import time
 from collections import deque
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -57,9 +58,12 @@ ARTIFACT = "dump.txt"
 XRAY_CONFIG = "/usr/local/etc/xray/config.json"
 XRAY_ERROR_LOG = "/var/log/xray/error.log"
 MAX_LOG_BYTES = 4 * 1024 * 1024
-# bot.log: "2026-11-13T21:33:00+0000 ERROR [name] ..." (utils/logging.py)
-_BOT_ERROR_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\S*\s+(ERROR|CRITICAL)\b")
-# xray: "2026/11/13 21:33:00 [Error] ..." (also with microseconds)
+# bot.log: "2026-11-13T21:33:00+0300 ERROR [name] ..." — the host's LOCAL time with its
+# offset (utils/logging.py, datefmt "%Y-%m-%dT%H:%M:%S%z"). The offset is part of the
+# timestamp: dropping it misdates every line on a non-UTC host.
+_BOT_ERROR_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})([+-]\d{4}|Z)?\s+(?:ERROR|CRITICAL)\b")
+# xray: "2026/11/13 21:33:00 [Error] ..." (also with microseconds) — host local time,
+# no offset.
 _XRAY_ERROR_RE = re.compile(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})(?:\.\d+)?\s+\[Error\]")
 
 
@@ -90,23 +94,39 @@ def tail(path: Path, lines: int) -> list[str]:
     return list(deque(data.splitlines(), maxlen=lines))
 
 
-def last_error_line(lines: list[str], pattern: re.Pattern[str], fmt: str) -> str:
-    """'last ERROR <ts> (<age> ago)' from the newest matching line, or 'no ERROR'."""
+def _local_epoch(raw: str, fmt: str) -> float:
+    """A timestamp without an offset is the host's local time (time.mktime)."""
+    return time.mktime(time.strptime(raw, fmt))
+
+
+def bot_log_epoch(m: re.Match[str]) -> float:
+    raw, offset = m.group(1), m.group(2)
+    if offset:
+        return datetime.strptime(raw + offset.replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    return _local_epoch(raw, "%Y-%m-%dT%H:%M:%S")
+
+
+def xray_log_epoch(m: re.Match[str]) -> float:
+    return _local_epoch(m.group(1), "%Y/%m/%d %H:%M:%S")
+
+
+def last_error_line(lines: list[str], pattern: re.Pattern[str], epoch_of: Callable[[re.Match[str]], float]) -> str:
+    """'last ERROR <UTC time> (<age> ago)' from the newest matching line, or 'no ERROR'."""
     for line in reversed(lines):
         m = pattern.match(line)
         if m:
             try:
-                ts = calendar.timegm(time.strptime(m.group(1), fmt))
-            except ValueError:
+                ts = epoch_of(m)
+            except (ValueError, OverflowError):
                 return f"last ERROR line (time unreadable): {line[:200]}"
-            age = max(0, time.time() - ts)
+            age = max(0.0, time.time() - ts)
             if age < 3600:
                 ago = f"{age / 60:.0f} min"
             elif age < 172800:
                 ago = f"{age / 3600:.1f} h"
             else:
                 ago = f"{age / 86400:.0f} d"
-            return f"last ERROR at {m.group(1)} UTC ({ago} ago)"
+            return f"last ERROR at {time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(ts))} UTC ({ago} ago)"
     return "no ERROR line in the tail"
 
 
@@ -185,13 +205,13 @@ def build(ctx: Any) -> str:
     log_dir = lib.host_path(env.get("LOG_DIR", "").strip() or f"{lib.APP_DIR}/logs")
     bot_lines = tail(log_dir / "bot.log", n)
     parts.append(section(
-        f"bot.log (last {len(bot_lines)} lines) — {last_error_line(bot_lines, _BOT_ERROR_RE, '%Y-%m-%dT%H:%M:%S')}",
+        f"bot.log (last {len(bot_lines)} lines) — {last_error_line(bot_lines, _BOT_ERROR_RE, bot_log_epoch)}",
         "\n".join(bot_lines) or "(no bot.log)",
     ))
     xlog = xray_error_log()
     x_lines = tail(xlog, n)
     parts.append(section(
-        f"xray error.log (last {len(x_lines)} lines) — {last_error_line(x_lines, _XRAY_ERROR_RE, '%Y/%m/%d %H:%M:%S')}",
+        f"xray error.log (last {len(x_lines)} lines) — {last_error_line(x_lines, _XRAY_ERROR_RE, xray_log_epoch)}",
         "\n".join(x_lines) or f"(no {xlog})",
     ))
     return lib.redact_text("".join(parts))

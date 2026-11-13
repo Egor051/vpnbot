@@ -31,6 +31,11 @@ In the helper-nonroot model the bot reaches the launcher through one sudoers lin
 /usr/local/sbin/vpn-bot-wizard launch *
 ```
 
+Run through sudo, the launcher inherits the bot's mount namespace — `ProtectSystem=strict`
+in `deploy/vpn-bot.nonroot.example.service` makes `/run`, `/var/lib` and `/var/log`
+read-only there — so `launch` first re-executes itself in PID 1's mount namespace
+(`nsenter --mount=/proc/1/ns/mnt`), the same escape as `vpn-bot-ufw-apply`.
+
 The launcher re-checks everything against its own table (`MODES` in
 `vpn-bot-wizard-lib`): an unknown mode, a run id that is not a positive integer, an
 unknown parameter, a value outside its type (integer range, `0`/`1`, enumeration) is
@@ -114,7 +119,9 @@ dirty or not), the live `schema_version` against the checkout's
 (parameter `lines`, 20–1000, default 200).
 
 A log tail is judged by the **timestamp of its last ERROR line** («last ERROR at …
-(3 h ago)»), never by how many there are.
+(3 h ago)»), never by how many there are. `bot.log` stamps carry their UTC offset
+(local time, `%z`) and are read with it; Xray's have none and are the host's local time;
+both are shown in UTC.
 
 Everything goes through the redaction patterns of `utils/redact.py` (bot tokens, keys,
 passwords, `secret=`, URL credentials, long hex). `verify` re-scans the file and refuses
@@ -129,8 +136,13 @@ A thin wrapper around the one supported redeploy path, `scripts/redeploy.sh`:
   `CURRENT_SCHEMA_VERSION` of both and the live schema; then `CHECK=1 redeploy.sh`
   (deploy.sh `PHASE1_ONLY=1`: the whole read-only Phase 1, the test suite included).
   Already at `origin/main`: nothing to do, the run ends there.
-* **confirm** (TOTP) → **apply** — `redeploy.sh`. `deploy.sh` stops and restarts the
-  bot; the run keeps going in its own unit.
+  The plan records the exact `origin/main` revision it describes.
+* **confirm** (TOTP) → **apply** — only that revision: `git fetch origin main` again, and
+  if `origin/main` moved since the plan (other commits, maybe another migration than the
+  one confirmed) nothing is deployed and the run fails with "start the update again".
+  Then `redeploy.sh`. `deploy.sh` stops and restarts the bot; the run keeps going in its
+  own unit. A push in the seconds between this check and redeploy.sh's own fetch is
+  reported by verify («deployed X, the plan was for Y»), never hidden.
 * **verify** — `===== DEPLOY OK =====` in the output and `vpn-bot.service` active.
 * **rollback** — `deploy.sh` rolls itself back (code, venv, DB, configs, unit) and
   prints `===== ROLLBACK REPORT =====`; the step reports it and checks that the bot

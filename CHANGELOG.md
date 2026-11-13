@@ -16,7 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `vpn-bot-wizard-update`. No command execution, no «shell»: the launcher refuses any mode,
   run id or parameter outside its typed table (exit 2, before anything runs); the bot types
   the same parameters first (`services/wizard_modes.py`, a test keeps the tables equal). Helper
-  model: one sudoers grant, `/usr/local/sbin/vpn-bot-wizard launch *`. A phase starts ONLY
+  model: one sudoers grant, `/usr/local/sbin/vpn-bot-wizard launch *`; `launch` re-enters PID 1's
+  mount namespace (the non-root unit's `ProtectSystem=strict` is inherited through sudo). A phase starts ONLY
   through `systemd-run --unit=vpn-bot-wizard-<id> --collect`, so a run survives the bot's
   restart; the unit holds `/run/vpn-bot-wizard.lock` and drives the contract `plan` (dry run)
   → `apply` → `verify` → `rollback` on failure. Progress is JSON lines in
@@ -39,8 +40,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `utils/redact.py` (a test keeps the helper's copy identical); `verify` refuses a file that
   still matches a secret pattern. Sent as a file.
 - **Wizard mode «Обновить бота»**: the plan is `git fetch` + the commits `HEAD..origin/main` +
-  the schema migration + `CHECK=1 redeploy.sh` (Phase 1); after the confirmation the full
-  redeploy runs in the wizard's unit; the report after the restart is DEPLOY OK (`succeeded`),
+  the schema migration + `CHECK=1 redeploy.sh` (Phase 1), and records the exact `origin/main`
+  revision it shows; after the confirmation the full redeploy runs in the wizard's unit — only
+  for that revision (origin/main moved since the plan: nothing is deployed); the report after the restart is DEPLOY OK (`succeeded`),
   the ROLLBACK REPORT (`rolled_back`), or `failed` without a report.
 - **`REDEPLOY_ATTACH=pipe`** for `scripts/redeploy.sh`: `systemd-run --wait --pipe` under `set -o
   pipefail` for a caller without a terminal (the wizard) — the wrapper waits and exits with

@@ -66,8 +66,8 @@ class TelegramWizardNotifier:
             return  # the handler that started it attaches the message right after
         await self._show(run, progress_text(run, snap), progress_keyboard(run))
 
-    async def plan_ready(self, run: WizardRun, snap: StatusSnapshot) -> None:
-        await self._show(run, plan_text(run, snap), plan_keyboard(run))
+    async def plan_ready(self, run: WizardRun, snap: StatusSnapshot) -> bool:
+        return await self._show(run, plan_text(run, snap), plan_keyboard(run))
 
     async def finished(self, run: WizardRun, snap: StatusSnapshot) -> bool:
         ok = await self._show(run, final_text(run, snap), final_keyboard(run, artifact=snap.artifact is not None))

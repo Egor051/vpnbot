@@ -26,6 +26,12 @@ may call and no way to pass a command.
       The vpn-bot-wizard-* units that are not inactive (one per line).
 
 Exit codes: 0 ok, 2 usage, 3 refused / cannot run (busy, not root, systemd-run failed).
+
+Run through sudo by the non-root bot, `launch` inherits the bot's mount namespace —
+ProtectSystem=strict (deploy/vpn-bot.nonroot.example.service) makes /run, /var/lib and
+/var/log read-only there — so it re-executes itself in PID 1's mount namespace first
+(nsenter), the same escape as vpn-bot-ufw-apply and vpn-bot-protocol-uninstall. `run`
+needs no escape: systemd starts the transient unit in the host's namespace.
 """
 
 from __future__ import annotations
@@ -187,7 +193,32 @@ def run(mode_name: str, run_id: int, phase: str, params: dict[str, str]) -> int:
         return 1
 
 
+HOSTNS_ENV = "VPN_BOT_WIZARD_HOSTNS"
+
+
+def host_mount_namespace_argv(argv: list[str]) -> list[str] | None:
+    """The argv that re-runs `launch` in PID 1's mount namespace, or None when it
+    already runs there (or is not `launch`, not root, or under the test seam)."""
+    if lib.SELFTEST or os.geteuid() != 0 or os.environ.get(HOSTNS_ENV) == "1":
+        return None
+    if not argv or argv[0] != "launch":
+        return None
+    try:
+        if os.readlink("/proc/self/ns/mnt") == os.readlink("/proc/1/ns/mnt"):
+            return None
+    except OSError:
+        return None
+    return ["nsenter", "--mount=/proc/1/ns/mnt", "--", sys.executable, "-I", str(Path(__file__).resolve()), *argv]
+
+
 def main(argv: list[str]) -> int:
+    reexec = host_mount_namespace_argv(argv)
+    if reexec is not None:
+        os.environ[HOSTNS_ENV] = "1"
+        try:
+            os.execvpe(reexec[0], reexec, os.environ)  # noqa: S606 - fixed argv: nsenter, this interpreter, this script
+        except OSError as exc:
+            print(f"vpn-bot-wizard: cannot enter the host mount namespace ({exc}) — going on in this one", file=sys.stderr)
     try:
         if not argv:
             raise lib.WizardError("usage: vpn-bot-wizard launch|run|active ...", 2)

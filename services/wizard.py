@@ -173,7 +173,7 @@ def parse_status(text: str) -> StatusSnapshot:
 class WizardNotifier(Protocol):
     async def progress(self, run: WizardRun, snap: StatusSnapshot) -> None: ...
 
-    async def plan_ready(self, run: WizardRun, snap: StatusSnapshot) -> None: ...
+    async def plan_ready(self, run: WizardRun, snap: StatusSnapshot) -> bool: ...
 
     async def finished(self, run: WizardRun, snap: StatusSnapshot) -> bool: ...
 
@@ -220,6 +220,10 @@ class WizardService:
         self.log_dir = log_dir
         self.notifier = notifier
         self._seen: dict[int, tuple[int, str]] = {}
+        # Plans whose confirmation screen reached the chat in THIS process. Empty after
+        # a restart on purpose: the screen is shown again (an edit to the same text is a
+        # no-op), so neither a failed delivery nor a restart leaves a stale screen.
+        self._plan_shown: set[int] = set()
         self._poll_lock = asyncio.Lock()
 
     # ------------------------------------------------------------- helpers
@@ -381,6 +385,7 @@ class WizardService:
                 details={"mode": run.mode if run else "?", "state": state, "summary": summary[:200]},
             )
         self._seen.pop(run_id, None)
+        self._plan_shown.discard(run_id)
         return done
 
     # ---------------------------------------------------------------- monitor
@@ -415,6 +420,9 @@ class WizardService:
             updated = _parse_iso(run.updated_at)
             if updated is not None and now - updated > PLAN_TTL:
                 await self._finish(run.id, "cancelled", "the plan was not confirmed within 30 minutes")
+                return
+            if run.id not in self._plan_shown:
+                await self._show_plan(run, await self.snapshot(run.id))
             return
         alive = await self.unit_alive(run.id)
         snap = await self.snapshot(run.id)
@@ -459,12 +467,7 @@ class WizardService:
                     entity_id=run.id,
                     details={"mode": run.mode},
                 )
-                fresh = await self.repo.get(run.id) or run
-                if self.notifier is not None:
-                    try:
-                        await self.notifier.plan_ready(fresh, snap)
-                    except Exception as exc:
-                        logger.warning("wizard run %d: plan message failed (%s: %s)", run.id, type(exc).__name__, exc)
+                await self._show_plan(await self.repo.get(run.id) or run, snap)
                 return
             if snap.outcome == "planned":
                 await self._finish(run.id, "succeeded", snap.plan_text or "nothing to do")
@@ -475,6 +478,18 @@ class WizardService:
         if snap.counts is not None:
             summary = f"green={snap.counts['green']} yellow={snap.counts['yellow']} red={snap.counts['red']}"
         await self._finish(run.id, snap.outcome or "failed", summary)
+
+    async def _show_plan(self, run: WizardRun, snap: StatusSnapshot) -> None:
+        """The confirmation screen; retried on every pass until it reached the chat."""
+        if self.notifier is None:
+            return
+        try:
+            shown = await self.notifier.plan_ready(run, snap)
+        except Exception as exc:
+            logger.warning("wizard run %d: plan message failed (%s: %s)", run.id, type(exc).__name__, exc)
+            shown = False
+        if shown:
+            self._plan_shown.add(run.id)
 
     async def _report(self, run: WizardRun) -> None:
         snap = await self.snapshot(run.id)

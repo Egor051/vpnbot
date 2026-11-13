@@ -11,9 +11,14 @@ operator would and reads its verdict.
             schema_version; then `CHECK=1 redeploy.sh` (deploy.sh PHASE1_ONLY=1: the
             whole read-only Phase 1, tests included). HEAD already at origin/main
             and force=0: a no-op plan, the CHECK is skipped.
-  apply     `redeploy.sh` (FORCE=1 with force=1). deploy.sh stops and restarts the
-            bot; this process runs in the wizard's own transient unit, so it lives on
-            and the restarted bot picks the run up from the status file.
+  apply     only the revision the plan showed: `git fetch origin main` again, and when
+            origin/main moved since the plan (other commits, maybe another migration
+            than the superadmin confirmed) nothing is deployed — the run fails with
+            "start the update again". Then `redeploy.sh` (FORCE=1 with force=1).
+            deploy.sh stops and restarts the bot; this process runs in the wizard's
+            own transient unit, so it lives on and the restarted bot picks the run up
+            from the status file. (redeploy.sh fetches once more itself; a push in the
+            seconds between the two fetches is reported by verify, never hidden.)
   verify    the deploy output has "===== DEPLOY OK =====" (or deploy.sh's "nothing
             to deploy") and vpn-bot.service is active.
   rollback  deploy.sh rolls itself back (code, venv, DB, configs, unit) and prints
@@ -33,6 +38,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import json
 import os
 import re
 import sqlite3
@@ -60,6 +66,8 @@ lib = _load_lib()
 MODE = "update"
 CHECK_LOG = "check.log"
 DEPLOY_LOG = "deploy.log"
+PLAN_FILE = "update-plan.json"
+TARGET_MOVED = "target-moved"
 BOT_UNIT = "vpn-bot.service"
 MAX_COMMITS = 30
 DEPLOY_OK = "===== DEPLOY OK ====="
@@ -142,6 +150,9 @@ def step_plan(ctx: Any) -> int:
     _, head = git(ctx, "rev-parse", "--short", "HEAD")
     _, tip = git(ctx, "rev-parse", "--short", "origin/main")
     head, tip = head.strip(), tip.strip()
+    _, target = git(ctx, "rev-parse", "origin/main")
+    # The revision this plan describes: apply deploys it or nothing (see step_apply).
+    save_plan(ctx, target.strip())
     _, count = git(ctx, "rev-list", "--count", "HEAD..origin/main")
     _, log = git(ctx, "log", "--oneline", "--no-decorate", f"--max-count={MAX_COMMITS}", "HEAD..origin/main")
     schema_head, schema_tip, schema_live = schema_of(ctx, "HEAD"), schema_of(ctx, "origin/main"), live_schema()
@@ -178,7 +189,41 @@ def step_plan(ctx: Any) -> int:
     return 0 if phase1_ok else 1
 
 
+def save_plan(ctx: Any, target: str) -> None:
+    lib.write_private(lib.artifact_path(ctx.run_id, PLAN_FILE), json.dumps({"target": target}).encode())
+
+
+def planned_target(ctx: Any) -> str:
+    try:
+        data = json.loads(read_artifact(ctx, PLAN_FILE) or "{}")
+    except ValueError:
+        return ""
+    target = data.get("target") if isinstance(data, dict) else None
+    return target if isinstance(target, str) and re.fullmatch(r"[0-9a-f]{40,64}", target) else ""
+
+
+def refuse_moved(ctx: Any, text: str, verdict: str) -> int:
+    ctx.event("result", text=text, verdict=verdict)
+    lib.write_private(lib.artifact_path(ctx.run_id, TARGET_MOVED), text.encode())
+    print(text, file=sys.stderr)
+    return 1
+
+
 def step_apply(ctx: Any) -> int:
+    target = planned_target(ctx)
+    if not target:
+        return refuse_moved(ctx, "no plan recorded for this run — nothing deployed; start the update again", "no_plan")
+    rc, out = git(ctx, "fetch", "origin", "main", timeout=300)
+    if rc != 0:
+        return refuse_moved(ctx, f"git fetch origin main failed (exit {rc}) — nothing deployed", "fetch_failed")
+    _, now = git(ctx, "rev-parse", "origin/main")
+    if now.strip() != target:
+        return refuse_moved(
+            ctx,
+            f"origin/main moved after the plan ({target[:7]} → {now.strip()[:7]}) — nothing deployed; "
+            "start the update again to see the new plan",
+            "target_moved",
+        )
     rc, out = redeploy(ctx, check=False, timeout=lib.mode_of(MODE).timeout("apply") - 120)
     save(ctx, DEPLOY_LOG, out)
     if DEPLOY_OK in out or NOTHING_TO_DEPLOY in out:
@@ -191,6 +236,10 @@ def step_verify(ctx: Any) -> int:
     out = read_artifact(ctx, DEPLOY_LOG)
     if DEPLOY_OK in out:
         block = report_block(out, DEPLOY_OK)
+        deployed = re.search(r"deployed\s*:\s*\S+\s*->\s*([0-9a-f]{4,64})", out)
+        target = planned_target(ctx)
+        if deployed and target and not target.startswith(deployed.group(1)):
+            block += f"\n⚠ deployed {deployed.group(1)}, the plan was for {target[:7]} (origin/main moved during the deploy)"
     elif NOTHING_TO_DEPLOY in out:
         block = "HEAD already at origin/main — nothing to deploy"
     else:
@@ -205,6 +254,8 @@ def step_verify(ctx: Any) -> int:
 
 
 def step_rollback(ctx: Any) -> int:
+    if read_artifact(ctx, TARGET_MOVED):
+        return 1  # apply deployed nothing; its result line already says why
     out = read_artifact(ctx, DEPLOY_LOG)
     block = report_block(out, ROLLBACK_REPORT)
     _, state = ctx.run(["systemctl", "is-active", BOT_UNIT])
