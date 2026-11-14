@@ -12,7 +12,8 @@
 # checkout (INSTALL_REPO=file://…, INSTALL_REF=HEAD).
 #
 # Phases, each one a hard assertion:
-#   A. relay mode exits 2 and changes nothing on disk;
+#   A. relay mode with a code that is not a pairing code exits 1 and changes
+#      nothing on disk (the relay mode itself: tests/e2e/run_relay_install_e2e.sh);
 #   B. a failure injected after the bot started rolls back: no path of the
 #      manifest is left, the unit is gone;
 #   C. a real install: unit active, NRestarts=0, readiness marker, no token or
@@ -139,14 +140,14 @@ for _ in $(seq 1 50); do mock_get health >/dev/null 2>&1 && break; sleep 0.2; do
 mock_get health >/dev/null || fail "mock did not come up"
 
 # --------------------------------------------------------------------------- #
-step "A. relay mode: exit 2, nothing on disk"
+step "A. relay mode with a bad pairing code: exit 1, nothing on disk"
 logs_before="$(count_install_files)"
 set +e
-printf '2\n' | installer
+printf '2\nnot-a-pairing-code\n' | installer
 rc=$?
 set -e
-[[ "$rc" == 2 ]] || fail "relay mode exited ${rc}, expected 2"
-[[ ! -e "$APP_DIR" && ! -e /etc/systemd/system/vpn-bot.service && ! -e /etc/vpn-bot ]] \
+[[ "$rc" == 1 ]] || fail "relay mode with a bad code exited ${rc}, expected 1"
+[[ ! -e "$APP_DIR" && ! -e /etc/systemd/system/vpn-bot.service && ! -e /etc/vpn-bot && ! -e /etc/vpn-relay ]] \
   || fail "relay mode changed the disk"
 [[ "$(count_install_files)" == "$logs_before" ]] || fail "relay mode wrote a log"
 [[ ! -e /run/vpn-bot-install.lock ]] || fail "relay mode took the lock"

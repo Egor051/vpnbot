@@ -945,6 +945,8 @@ def test_repo_unit_runs_the_helper_and_owns_both_tables() -> None:
     unit = _read(REPO_UNIT)
     body = unit.split("[Unit]", 1)[1]
     assert "ExecStart=/usr/local/sbin/vpn-relay-apply apply" in body
+    # reload = the same atomic apply, no stop (scripts/install.sh swaps a live table with it)
+    assert "ExecReload=/usr/local/sbin/vpn-relay-apply apply" in body
     assert re.findall(r"^ExecStop=.*$", body, re.M) == [
         "ExecStop=-/usr/sbin/nft delete table ip vpnrelay",
         "ExecStop=-/usr/sbin/nft delete table inet vpnrelay_input",

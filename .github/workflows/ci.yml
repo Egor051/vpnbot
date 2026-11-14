@@ -213,3 +213,41 @@ jobs:
           sudo journalctl -u vpn-bot.service -n 200 --no-pager || true
           sudo tail -n 200 /opt/vpn-service/logs/bot.log || true
           for f in /var/log/vpn-bot-install.*; do echo "== $f"; sudo cat "$f"; done || true
+
+  relay-installer-e2e:
+    # scripts/install.sh in RELAY mode end to end on a REAL ubuntu-24.04 VM (systemd,
+    # nftables, sshd): a hand-made relay (/etc/vpn-relay.nft + vpn-relay.service +
+    # table ip vpnrelay) is created first; a failure injected after the relay started
+    # must put it back exactly (live table, files, unit, authorized_keys, ip_forward);
+    # the real install must ADOPT it with exactly one DNAT per port and keep the old
+    # one in /var/backups/vpn-relay; then the agent is driven over a real ssh with
+    # the bot's key (whitelist, injections, hello/status/apply), the resolve timer
+    # follows a changed name, and uninstall removes everything. No Telegram: a relay
+    # never talks to the Bot API. Every phase is a hard assertion in
+    # tests/e2e/run_relay_install_e2e.sh.
+    name: Relay installer end-to-end (ubuntu-24.04, systemd, nftables, sshd)
+    runs-on: ubuntu-24.04
+    needs: [dependency-audit]
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The installer clones this checkout (file://) and checks out the commit
+          # under test by its SHA.
+          fetch-depth: 0
+
+      - name: Put the commit under test on a branch
+        run: git branch -f e2e-under-test HEAD
+
+      - name: Run scripts/install.sh --relay end to end
+        run: sudo bash tests/e2e/run_relay_install_e2e.sh
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          sudo nft list ruleset || true
+          sudo systemctl status vpn-relay.service vpn-relay-resolve.timer --no-pager || true
+          sudo journalctl -u vpn-relay.service -u vpn-relay-resolve.service -t vpn-relay-agent -n 200 --no-pager || true
+          for f in /var/log/vpn-bot-install.*; do echo "== $f"; sudo cat "$f"; done || true
