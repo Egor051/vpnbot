@@ -28,8 +28,11 @@ checked.
 
 ## What it asks
 
-1. **Mode** — `1) main server` or `2) relay`. Relay is not part of this version: the
-   installer says so and exits with code `2` having changed nothing on disk.
+1. **Mode** — `1) main server` or `2) relay`. Relay mode asks for nothing but the
+   **pairing code** the bot shows in «🧙 Мастер настройки → 🛰 Relay → ➕ Добавить relay»
+   (no token, no Telegram ID — a relay never talks to Telegram); the bot's one-line command
+   runs it as `install.sh --relay` with the code on stdin. Everything about it:
+   [relay.md](relay.md#installing-a-relay-with-one-command).
 2. **Bot token** from [@BotFather](https://t.me/BotFather), typed hidden. It must look like
    `123456789:AA…` and Telegram must accept it (`getMe`); three attempts. The token never
    appears in a process argv (curl reads it from a config on stdin), in the install log or
@@ -139,7 +142,10 @@ A failed repair rolls back the files it replaced and restarts the bot with them.
 | `INSTALL_SELFTEST=1` | Test seam: define every function and return (`tests/test_install_script.py`). |
 | `INSTALL_INJECT_FAILURE=<step>` | Test seam for the CI rollback check. Never set it on a real install. |
 
-Exit codes: `0` done · `1` failed (and rolled back) · `2` relay mode chosen (not available yet).
+Exit codes: `0` done · `1` failed (and rolled back) · `2` usage (an unknown argument).
+
+`--relay` (the code on stdin) and `--relay-update` (what the relay agent's `update` runs) are
+the relay mode's entry points — [relay.md](relay.md#installing-a-relay-with-one-command).
 
 ## After the install
 
@@ -154,7 +160,7 @@ through `scripts/redeploy.sh`, which deploys `origin/main`.
   stubbed host tools: token handling, `.env`, the claim file in exactly the format the bot
   reads, the manifest and the rollback, readiness, the read-only superadmin check.
 - The `installer-e2e` CI job runs the whole installer as root on a real ubuntu-24.04 VM
-  with systemd, against a mock Bot API (`tests/e2e/`): relay mode changes nothing; a
+  with systemd, against a mock Bot API (`tests/e2e/`): relay mode with a bad code changes nothing; a
   failure injected after the bot started leaves no manifest path behind; a real install is
   active with `NRestarts=0`; `/start claim_<code>` makes the operator superadmin and a
   second claim is refused; a re-run is a repair that leaves `.env` and `vpn.db`

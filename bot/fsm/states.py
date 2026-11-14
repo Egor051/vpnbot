@@ -107,3 +107,12 @@ class TotpStates(StatesGroup):
     disable_code = State()
     # «Перевыпустить резервные коды»: a TOTP code (a backup code is not enough).
     reissue_code = State()
+
+
+class RelayWizardStates(StatesGroup):
+    """«🧙 Мастер настройки → 🛰 Relay» (bot/handlers/admin_relay_agents.py)."""
+
+    add_name = State()
+    add_target = State()
+    pair_address = State()
+    forward = State()

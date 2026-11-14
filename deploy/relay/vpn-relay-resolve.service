@@ -1,0 +1,21 @@
+# vpnbot L4 relay — re-resolve the upstream's DNS name (docs/relay.md#a-dns-name-as-the-upstream).
+#
+# nftables resolves a name only when a ruleset is LOADED: `dnat to <name>` would be
+# frozen to the address of that moment. So the table always carries an address and
+# this oneshot, run by vpn-relay-resolve.timer every 5 minutes, resolves
+# RELAY_UPSTREAM_HOST again: when the live DNAT target is no longer one of its
+# addresses it applies the table (one atomic `nft -f`, the same path as
+# vpn-relay.service); otherwise it changes nothing. A name that does not resolve
+# leaves the live table alone (exit 20, the next pass retries). With
+# RELAY_UPSTREAM_IPV4 instead of a name it does nothing.
+#
+# Installed by scripts/install.sh (relay mode) from deploy/relay/.
+[Unit]
+Description=vpnbot L4 relay: re-resolve RELAY_UPSTREAM_HOST and reload the table on a change
+After=network-online.target vpn-relay.service
+Wants=network-online.target
+ConditionPathExists=/usr/local/sbin/vpn-relay-apply
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vpn-relay-apply resolve

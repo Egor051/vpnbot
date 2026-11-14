@@ -158,6 +158,13 @@ instead of `--pty` (there is no terminal) under `set -o pipefail`, so the wrappe
 and exits with deploy.sh's code. The verdict is still read from the report text, as an
 operator reads it. Parameter `force` (`0`/`1`) is `FORCE=1`.
 
+### 🛰 Relay
+
+Not a root-helper mode: relays the bot installs and manages itself over SSH — a pairing code,
+one command for the relay (`scripts/install.sh --relay`), then status, update, ports/target and
+delete from the relay's card. It holds no run lock of the wizard. Everything about it:
+[relay.md](relay.md#installing-a-relay-with-one-command).
+
 ## The helpers' library
 
 `vpn-bot-wizard-lib` is what future modes (IP or domain change, restore) build on:
@@ -235,6 +242,10 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 | deleting a relay together with its keys | «Relay → Удалить → вместе с ключами» |
 | wizard: diagnostic dump | start, and the dump file from the history |
 | wizard: update the bot | start and «✅ Применить» |
+| wizard → Relay: issue a pairing code | «➕ Добавить relay» |
+| wizard → Relay: update a relay | «⬆️ Обновить» |
+| wizard → Relay: change a relay's ports / target | «⚙️ Порты / цель» (the typed step checks the elevation again) |
+| wizard → Relay: delete a relay (uninstall on the relay) | the final button |
 
 A correct code **elevates** the user for 5 minutes: inside that window nothing is asked
 again. Elevations live in the bot process only — a restart drops them. The prompt

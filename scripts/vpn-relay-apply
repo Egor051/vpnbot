@@ -107,13 +107,27 @@
 #   vpn-relay-apply input-status      one line: off | PENDING CONFIRM (reverts at ...)
 #                                     [— why main did not confirm] | CONFIRMED by main
 #                                     probe (...) | OK (...) | ABSENT ... — DEPLOY OK prints it
+#   vpn-relay-apply resolve           RELAY_UPSTREAM_HOST only: resolve the name again and,
+#                                     when the live DNAT target is no longer one of its
+#                                     addresses, apply (one atomic nft transaction). What
+#                                     vpn-relay-resolve.timer runs every 5 minutes: nft
+#                                     resolves a name only when a ruleset is loaded, so
+#                                     without it a new A record would never reach the table.
 #
 # .env — RELAY_ENV (default /opt/vpn-service/.env). Read with the same sed parser
 # as scripts/deploy.sh (env_sed_val) and scripts/vpnbot-hy2-warp-mark: optional
 # `export`, spaces around `=`, single/double quotes, inline `# comments`, last
 # assignment wins; an empty value counts as unset. Template:
 # deploy/relay/relay.env.example.
-#   RELAY_UPSTREAM_IPV4      required. IPv4 of the main server.
+#   RELAY_UPSTREAM_IPV4      IPv4 of the main server, or
+#   RELAY_UPSTREAM_HOST      its DNS name (exactly one of the two). The name is resolved
+#                            (getent ahostsv4) at every render: the table always carries
+#                            an address. Among several A records the one the live table
+#                            already uses is kept (round-robin DNS does not reload the
+#                            table), else the lowest. The address of every apply is kept in
+#                            ${RELAY_STATE_DIR}/upstream.resolved, and a name that does not
+#                            resolve (DNS down at boot) falls back to it — for the SAME name
+#                            only; otherwise exit 20, nothing applied.
 #   RELAY_FORWARD_TCP_PORTS  default "443". Comma-separated, 1..65535; each port
 #                            is forwarded 1:1 to the same port on the upstream.
 #   RELAY_FORWARD_UDP_PORTS  default "443". Same, for UDP.
@@ -179,6 +193,9 @@
 #   18  check: a port listens on a public address but the filter closes it
 #       ("listening but filtered") — a new service would be silently dead
 #   19  input-confirm refused (nothing pending, too late, or not a new ssh session)
+#   20  RELAY_UPSTREAM_HOST does not resolve to a unicast IPv4 and there is no last-known
+#       address for that name (apply/check), or `resolve` could not resolve it (the live
+#       table is left as it is)
 # `check` runs every step it can, in this order — table (10/11), input filter
 # (16/17), listening ports (18), ip_forward (12), conntrack (15), TCP (13), TLS (14)
 # — and exits with the code of the FIRST failure. A conntrack table more than 80%
@@ -201,6 +218,8 @@ INPUT_MARKER="${RELAY_STATE_DIR}/input.confirmed"
 INPUT_PENDING="${RELAY_RUN_DIR}/input.pending"
 INPUT_REVERTED="${RELAY_RUN_DIR}/input.reverted"
 INPUT_PROBE="${RELAY_RUN_DIR}/input.probe"
+# The address RELAY_UPSTREAM_HOST resolved to at the last apply (host=, ipv4=, at=).
+UPSTREAM_STATE="${RELAY_STATE_DIR}/upstream.resolved"
 
 readonly SYSCTL_FORWARD="net.ipv4.ip_forward"
 readonly SYSCTL_CT_MAX="net.netfilter.nf_conntrack_max"
@@ -227,7 +246,7 @@ readonly PROBE_MAX_BODY=4096
 
 readonly E_USAGE=2 E_CONFIG=3 E_IFACE=4 E_TOOL=5 E_NFT=6 E_SYSCTL=7 E_NOSSH=8 E_DEADMAN=9
 readonly E_ABSENT=10 E_DIFF=11 E_FORWARD=12 E_TCP=13 E_TLS=14 E_CONNTRACK=15
-readonly E_INPUT=16 E_INPUT_DIFF=17 E_FILTERED=18 E_CONFIRM=19
+readonly E_INPUT=16 E_INPUT_DIFF=17 E_FILTERED=18 E_CONFIRM=19 E_RESOLVE=20
 
 ME="vpn-relay-apply"
 log()  { printf '%s: %s\n' "$ME" "$*"; }
@@ -236,7 +255,7 @@ warn() { printf '%s: WARNING: %s\n' "$ME" "$*" >&2; }
 fail() { local rc="$1"; shift; err "$*"; exit "$rc"; }
 
 usage() {
-  err "usage: ${ME} {apply | check [--dry-run] | show | input-confirm | input-off | input-status}"
+  err "usage: ${ME} {apply | check [--dry-run] | show | resolve | input-confirm | input-off | input-status}"
   exit "$E_USAGE"
 }
 
@@ -343,6 +362,9 @@ nft_set() {
 # Configuration (populates the globals below; exits 3/4/5/8 on a bad value)
 # --------------------------------------------------------------------------- #
 UPSTREAM=""
+# RELAY_UPSTREAM_HOST (empty with RELAY_UPSTREAM_IPV4) and where UPSTREAM came from.
+UPSTREAM_HOST=""
+UPSTREAM_SOURCE=""
 IFACE=""
 IFACE_SOURCE=""
 CHECK_SNI=""
@@ -461,14 +483,94 @@ load_input_config() {
   done
 }
 
+# --------------------------------------------------------------------------- #
+# The upstream: RELAY_UPSTREAM_IPV4, or RELAY_UPSTREAM_HOST resolved here
+# --------------------------------------------------------------------------- #
+# The unicast IPv4 addresses NAME resolves to, sorted numerically, one per line
+# (empty when it does not resolve). getent goes through nsswitch like every other
+# program on the host (systemd-resolved, /etc/hosts).
+resolve_name() {
+  local name="$1" out a
+  local -a good=()
+  command -v getent >/dev/null 2>&1 || fail "$E_TOOL" "getent not found — needed to resolve RELAY_UPSTREAM_HOST"
+  # getent exits 2 for an unknown name: that is an empty answer, not an error here.
+  out="$(getent ahostsv4 "$name" 2>/dev/null || true)"
+  for a in $(awk '{print $1}' <<< "$out"); do
+    if valid_upstream_ipv4 "$a"; then good+=("$a"); fi
+  done
+  (( ${#good[@]} )) || return 0
+  printf '%s\n' "${good[@]}" | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -u
+}
+
+# The single address the live `table ip vpnrelay` DNATs to; empty when the table is
+# absent, unreadable (not root) or names several.
+live_upstream() {
+  local out
+  out="$(nft list table ip "$TABLE" 2>/dev/null \
+         | sed -n 's/.*dnat to \([0-9.]*\):[0-9]*.*/\1/p' | sort -u)" || true
+  [[ -n "$out" && "$out" != *$'\n'* ]] && printf '%s' "$out"
+  return 0
+}
+
+# Out of the resolved addresses ($1, one per line): the live target when it is
+# one of them (a round-robin answer must not reload the table), else the lowest.
+pick_upstream() {
+  local resolved="$1" live
+  live="$(live_upstream)"
+  if [[ -n "$live" ]] && grep -qxF -- "$live" <<< "$resolved"; then
+    printf '%s' "$live"
+  else
+    head -n1 <<< "$resolved"
+  fi
+}
+
+load_upstream() {
+  local ipv4 host resolved last_host last_ipv4
+  ipv4="$(env_sed_val RELAY_UPSTREAM_IPV4)"
+  host="$(env_sed_val RELAY_UPSTREAM_HOST)"
+  if [[ -n "$ipv4" && -n "$host" ]]; then
+    fail "$E_CONFIG" "RELAY_UPSTREAM_IPV4 and RELAY_UPSTREAM_HOST are both set in ${RELAY_ENV} — keep one (the main server's IPv4 or its DNS name)"
+  fi
+  if [[ -n "$ipv4" ]]; then
+    valid_upstream_ipv4 "$ipv4" \
+      || fail "$E_CONFIG" "RELAY_UPSTREAM_IPV4='${ipv4}' is not a unicast IPv4 address"
+    UPSTREAM="$ipv4"; UPSTREAM_SOURCE="RELAY_UPSTREAM_IPV4"
+    return 0
+  fi
+  [[ -n "$host" ]] \
+    || fail "$E_CONFIG" "neither RELAY_UPSTREAM_IPV4 nor RELAY_UPSTREAM_HOST is set in ${RELAY_ENV} (the main server's IPv4 or DNS name)"
+  { valid_hostname "$host" && [[ "$host" == *.* ]] && ! [[ "$host" =~ ^[0-9.]+$ ]]; } \
+    || fail "$E_CONFIG" "RELAY_UPSTREAM_HOST='${host}' is not a DNS name (an address goes into RELAY_UPSTREAM_IPV4)"
+  UPSTREAM_HOST="$host"
+  resolved="$(resolve_name "$host")"
+  if [[ -n "$resolved" ]]; then
+    UPSTREAM="$(pick_upstream "$resolved")"
+    UPSTREAM_SOURCE="RELAY_UPSTREAM_HOST ${host} -> $(paste -sd, - <<< "$resolved")"
+    return 0
+  fi
+  last_host="$(kv_get "$UPSTREAM_STATE" host)"
+  last_ipv4="$(kv_get "$UPSTREAM_STATE" ipv4)"
+  if [[ "$last_host" == "$host" ]] && valid_upstream_ipv4 "$last_ipv4"; then
+    warn "RELAY_UPSTREAM_HOST ${host} does not resolve right now — using its last-known address ${last_ipv4} (${UPSTREAM_STATE}); vpn-relay-resolve.timer retries every 5 minutes"
+    UPSTREAM="$last_ipv4"
+    UPSTREAM_SOURCE="RELAY_UPSTREAM_HOST ${host}, last-known address (does not resolve now)"
+    return 0
+  fi
+  fail "$E_RESOLVE" "RELAY_UPSTREAM_HOST ${host} does not resolve to a unicast IPv4 and there is no last-known address for it — nothing applied"
+}
+
+# After an apply: remember what the name resolved to (the boot fallback above).
+remember_upstream() {
+  [[ -n "$UPSTREAM_HOST" ]] || return 0
+  write_state "$UPSTREAM_STATE" "host=${UPSTREAM_HOST}" "ipv4=${UPSTREAM}" "at=$(date +%s)" \
+    || warn "cannot write ${UPSTREAM_STATE} (the boot fallback for a name that does not resolve)"
+}
+
 load_config() {
   local raw tcp udp
   [[ -r "$RELAY_ENV" ]] || fail "$E_CONFIG" "${RELAY_ENV} is missing or unreadable (template: deploy/relay/relay.env.example)"
 
-  UPSTREAM="$(env_sed_val RELAY_UPSTREAM_IPV4)"
-  [[ -n "$UPSTREAM" ]] || fail "$E_CONFIG" "RELAY_UPSTREAM_IPV4 is not set in ${RELAY_ENV} (the main server's IPv4)"
-  valid_upstream_ipv4 "$UPSTREAM" \
-    || fail "$E_CONFIG" "RELAY_UPSTREAM_IPV4='${UPSTREAM}' is not a unicast IPv4 address"
+  load_upstream
 
   raw="$(env_sed_val RELAY_FORWARD_TCP_PORTS)"; tcp="$(parse_ports RELAY_FORWARD_TCP_PORTS "${raw:-443}")"
   raw="$(env_sed_val RELAY_FORWARD_UDP_PORTS)"; udp="$(parse_ports RELAY_FORWARD_UDP_PORTS "${raw:-443}")"
@@ -765,7 +867,7 @@ ssh_session_age() {
 
 summary() {
   local mh mt
-  log "upstream ${UPSTREAM}; WAN interface ${IFACE} (${IFACE_SOURCE})"
+  log "upstream ${UPSTREAM} (${UPSTREAM_SOURCE}); WAN interface ${IFACE} (${IFACE_SOURCE})"
   log "forward tcp: ${TCP_PORTS[*]}; udp: ${UDP_PORTS[*]}"
   log "conntrack: max ${CT_MAX}; tcp established timeout ${CT_EST}s"
   if [[ -n "$CHECK_SNI" ]]; then log "check TLS SNI: ${CHECK_SNI}"; else log "check TLS SNI: not set (handshake skipped)"; fi
@@ -1054,6 +1156,7 @@ cmd_apply() {
   else
     log "table ip ${TABLE} applied, table inet ${INPUT_TABLE} removed (one atomic nft transaction)"
   fi
+  remember_upstream
 
   if (( need_confirm )); then
     now="$(date +%s)"
@@ -1395,8 +1498,36 @@ cmd_input_status() {
   fi
 }
 
+# The timer's pass: re-resolve RELAY_UPSTREAM_HOST and apply only when the live
+# table no longer points at one of its addresses. A name that does not resolve
+# leaves the live table alone (exit 20 — the unit shows failed, the next pass
+# retries); an absent table is applied.
+cmd_resolve() {
+  local host resolved live
+  require_root resolve
+  require_tool nft
+  [[ -r "$RELAY_ENV" ]] || fail "$E_CONFIG" "${RELAY_ENV} is missing or unreadable (template: deploy/relay/relay.env.example)"
+  host="$(env_sed_val RELAY_UPSTREAM_HOST)"
+  if [[ -z "$host" ]]; then
+    log "resolve: no RELAY_UPSTREAM_HOST (the upstream is an address) — nothing to do"
+    return 0
+  fi
+  valid_hostname "$host" || fail "$E_CONFIG" "RELAY_UPSTREAM_HOST='${host}' is not a DNS name"
+  resolved="$(resolve_name "$host")"
+  [[ -n "$resolved" ]] \
+    || fail "$E_RESOLVE" "resolve: ${host} does not resolve to a unicast IPv4 right now — the live table is left as it is"
+  live="$(live_upstream)"
+  if [[ -n "$live" ]] && grep -qxF -- "$live" <<< "$resolved"; then
+    log "resolve: ${host} -> $(paste -sd, - <<< "$resolved"); the live table already uses ${live} — unchanged"
+    return 0
+  fi
+  log "resolve: ${host} -> $(paste -sd, - <<< "$resolved"); the live table uses ${live:-nothing} — applying"
+  cmd_apply
+}
+
 case "${1:-}" in
   apply) [[ $# -eq 1 ]] || usage; cmd_apply ;;
+  resolve) [[ $# -eq 1 ]] || usage; cmd_resolve ;;
   show)  [[ $# -eq 1 ]] || usage; cmd_show ;;
   check)
     if   [[ $# -eq 1 ]]; then cmd_check

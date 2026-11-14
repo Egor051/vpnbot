@@ -5,6 +5,12 @@
 #
 #   sudo bash install.sh            install (or repair an existing install)
 #   sudo bash install.sh --reclaim  issue a new superadmin claim link, nothing else
+#   printf '%s\n' '<pairing code>' | sudo bash install.sh --relay
+#                                   install a RELAY (the code comes from the bot:
+#                                   Мастер настройки → Relay → Добавить)
+#   sudo bash install.sh --relay-update
+#                                   reinstall a relay from its checkout (what the
+#                                   relay agent's `update` runs after a checkout)
 #
 # Get it from a GitHub release together with SHA256SUMS and verify it first
 # (docs/install.md); never pipe it from a branch into bash.
@@ -14,8 +20,7 @@
 # --------------------------------------------------------------------------- #
 #   1. Read-only preconditions: root, Ubuntu 24.04, x86_64|aarch64, systemd,
 #      free space, reachability of github.com, pypi.org and the Bot API.
-#   2. Asks the mode: 1) main server  2) relay. Relay is not in this version: it
-#      says so and exits 2 having changed NOTHING on disk.
+#   2. Asks the mode: 1) main server  2) relay (see MODE "relay" below).
 #   3. Asks for the bot token (hidden input) and checks it with getMe. That is
 #      the only input. The token never reaches a process argv (curl reads it from
 #      a config on stdin), the log or the terminal.
@@ -32,6 +37,36 @@
 #      (root 0600) holds only its sha256 and an expiry (30 min). Prints
 #      https://t.me/<bot>?start=claim_<code> and a QR (qrencode, if available) to
 #      the terminal only. The bot side is services/superadmin_claim.py.
+#
+# --------------------------------------------------------------------------- #
+# WHAT IT DOES (mode "relay", docs/relay.md#installing-a-relay-with-one-command)
+# --------------------------------------------------------------------------- #
+# A relay has NO Telegram bot and never talks to the Telegram API. Its only input
+# is the pairing code the bot shows (base64url JSON: v, target_host — the main
+# server's DNS name —, ports, main_pubkey, one_time_token, exp = 30 min). It is read
+# from stdin (never an argv); the token is reduced to its sha256 at once.
+#   1. Read-only preconditions: the same host checks, the code valid and not
+#      expired, root may log in with a key (sshd -T; sshd_config is NEVER changed),
+#      ufw not active (its forward policy would drop the relayed traffic), the
+#      target resolves, no forwarded TCP port is an sshd port, not a main server.
+#   2. Installs: nftables, a checkout of INSTALL_REF (the bot's command pins the
+#      main server's own commit) in /opt/vpn-service, a relay .env
+#      (RELAY_UPSTREAM_HOST = the target NAME, the ports, RELAY_INPUT_FILTER=off,
+#      SSH_PORT = where sshd listens now), /etc/vpn-relay/pairing.json (the token's
+#      hash, the expiry), vpn-relay-apply and vpn-relay-agent, vpn-relay.service and
+#      vpn-relay-resolve.{service,timer} (re-resolves the name every 5 minutes),
+#      and ONE authorized_keys line for root:
+#      restrict,command="/usr/local/sbin/vpn-relay-agent" ssh-ed25519 <main key>
+#   3. Starts vpn-relay (one atomic nft -f: DNAT tcp+udp -> target, masquerade,
+#      MSS clamp, forward policy drop but the DNAT; ip_forward via sysctl.d) and
+#      checks it: `vpn-relay-apply check`, exactly ONE DNAT rule per forwarded port
+#      in the whole ruleset, the timer active.
+#   4. ADOPTION: a relay installed by hand (/etc/vpn-relay.nft, vpn-relay.service,
+#      table ip vpnrelay) is replaced atomically — the same table name, so the one
+#      transaction swaps it, never two DNATs — and everything old goes to
+#      /var/backups/vpn-relay/adopt-<ts>/ (kept); the rollback puts it all back,
+#      the live table from its dump.
+#   A re-run with a new code on an installed relay re-pairs it (repair).
 #
 # ATOMIC: every path, unit and replaced file is appended to a manifest BEFORE it
 # is created; any failure (ERR trap, Ctrl-C, SIGTERM) rolls back strictly by that
@@ -58,9 +93,11 @@
 #   INSTALL_INJECT_FAILURE=<step>
 #                             test seam for the CI rollback check: fail at that
 #                             step (after_clone, after_venv, after_env,
-#                             after_unit, after_start). NEVER set it otherwise.
+#                             after_unit, after_start; relay: after_relay_clone,
+#                             after_relay_files, after_relay_start). NEVER set it
+#                             otherwise.
 #
-# EXIT CODES: 0 done · 1 failed (and rolled back) · 2 relay mode (not available).
+# EXIT CODES: 0 done · 1 failed (and rolled back) · 2 usage.
 
 set -Eeuo pipefail
 umask 022
@@ -101,6 +138,23 @@ CLAIM_TTL_SECONDS=1800
 MIN_FREE_MB=2048
 TOKEN_RE='^[0-9]{6,12}:[A-Za-z0-9_-]{30,}$'
 
+# Relay mode (docs/relay.md#installing-a-relay-with-one-command).
+RELAY_SUPPORT_MARKER="scripts/vpn-relay-agent"
+SYSTEMD_DIR="/etc/systemd/system"
+RELAY_UNITS=(vpn-relay.service vpn-relay-resolve.service vpn-relay-resolve.timer)
+RELAY_STATE_DIR="/etc/vpn-relay"
+RELAY_VAR_DIR="/var/lib/vpn-relay"
+RELAY_SYSCTL_FILE="/etc/sysctl.d/90-vpn-relay.conf"
+RELAY_LEGACY_NFT="/etc/vpn-relay.nft"
+RELAY_BACKUP_ROOT="/var/backups/vpn-relay"
+# The forced command of the bot's key: ALWAYS this literal path (tests re-root
+# SBIN_DIR, never this).
+readonly RELAY_AGENT_COMMAND="/usr/local/sbin/vpn-relay-agent"
+RELAY_MIN_FREE_MB=300
+# Accepted clock skew between the main server and the relay for the code's expiry.
+RELAY_CODE_SKEW=300
+APT_RELAY_PACKAGES=(git ca-certificates curl nftables)
+
 APT_PACKAGES=(git python3-venv ca-certificates curl)
 APT_OPTIONAL_PACKAGES=(qrencode)
 
@@ -113,6 +167,21 @@ COMMITTED=0
 BOT_TOKEN=""
 BOT_USERNAME=""
 CLAIM_LINK=""
+MODE=""
+# The pairing code, decoded and validated (relay mode). Never the token itself.
+PAIR_TARGET=""
+PAIR_TCP=""
+PAIR_UDP=""
+PAIR_KEY_BLOB=""
+PAIR_TOKEN_SHA256=""
+PAIR_EXP=""
+# The relay's authorized_keys for root (from sshd -T), the adoption backup dir,
+# whether this run created /opt/vpn-service, ip_forward before the install.
+AUTH_KEYS=""
+RELAY_ADOPT_DIR=""
+RELAY_CREATED_APP_DIR=0
+RELAY_FORWARD_BEFORE=""
+RELAY_EXISTING_CHECKOUT=0
 TG_API_BASE="${TELEGRAM_API_BASE:-$DEFAULT_TELEGRAM_API_BASE}"
 TG_API_BASE="${TG_API_BASE%/}"
 
@@ -124,7 +193,8 @@ TG_API_BASE="${TG_API_BASE%/}"
 redact() {
   sed -u -E \
     -e 's/[0-9]{6,12}:[A-Za-z0-9_-]{30,}/<redacted-bot-token>/g' \
-    -e 's/claim_[A-Za-z0-9_-]{8,}/claim_<redacted>/g'
+    -e 's/claim_[A-Za-z0-9_-]{8,}/claim_<redacted>/g' \
+    -e 's/[A-Za-z0-9_-]{150,}/<redacted-pairing-code>/g'
 }
 
 log() {
@@ -183,6 +253,15 @@ open_log() {
 #   started  <unit>             unit we started    -> stop
 #   restart  <unit>             unit we restarted  -> restarted after the rest
 #   apt      <package>          package we installed -> logged, never removed
+# relay mode:
+#   adopted  <path> <backup>    a relay file that existed (adoption, re-pair)
+#                               -> copied back from the backup; the backup in
+#                               /var/backups/vpn-relay STAYS, also after a commit
+#   nft      <family> <table> <dump|->
+#                               the live table before -> restored from its dump in
+#                               one nft transaction, or deleted ("-": none before)
+#   sysctl   <key> <value>      a runtime sysctl before -> sysctl -w back
+#   gitref   <dir> <sha>        a checkout we moved -> checked out back
 manifest_add() {
   [[ -n "$MANIFEST" ]] || die "internal: manifest is not open"
   local IFS=$'\t'
@@ -202,6 +281,20 @@ path_is_ours() {
     "$APP_DIR" | "$APP_DIR"/* | "$CLAIM_DIR" | "$CLAIM_DIR"/* | "$UNIT_PATH" | "$UNIT_PATH".* | \
       "$DB_PERMS_HELPER" | "$DB_PERMS_HELPER".*) return 0 ;;
   esac
+  [[ "$MODE" == relay ]] || return 1
+  local unit
+  for unit in "${RELAY_UNITS[@]}"; do
+    [[ "$p" == "${SYSTEMD_DIR}/${unit}" || "$p" == "${SYSTEMD_DIR}/${unit}".* ]] && return 0
+  done
+  case "$p" in
+    "${SBIN_DIR}/vpn-relay-apply" | "${SBIN_DIR}/vpn-relay-apply".* | "${SBIN_DIR}/vpn-relay-agent" | \
+      "${SBIN_DIR}/vpn-relay-agent".* | "$RELAY_STATE_DIR" | "$RELAY_STATE_DIR"/* | "$RELAY_VAR_DIR" | \
+      "$RELAY_VAR_DIR"/* | "$RELAY_SYSCTL_FILE" | "$RELAY_SYSCTL_FILE".* | "$RELAY_LEGACY_NFT" | \
+      "$RELAY_BACKUP_ROOT"/*) return 0 ;;
+  esac
+  if [[ -n "$AUTH_KEYS" ]]; then
+    [[ "$p" == "$AUTH_KEYS" || "$p" == "$AUTH_KEYS".* || "$p" == "$(dirname "$AUTH_KEYS")" ]] && return 0
+  fi
   return 1
 }
 
@@ -212,8 +305,8 @@ rollback() {
   trap - ERR
   [[ -n "$MANIFEST" && -f "$MANIFEST" ]] || return 0
   say "Откат по manifest ${MANIFEST}…"
-  local kind a b restarts=()
-  while IFS=$'\t' read -r kind a b; do
+  local kind a b c restarts=()
+  while IFS=$'\t' read -r kind a b c; do
     case "$kind" in
       '' | '#'*) continue ;;
       enabled)
@@ -240,11 +333,33 @@ rollback() {
         fi
         ;;
       apt) log "rollback: package ${a} stays installed (it may have been wanted before)" ;;
+      adopted)
+        if path_is_ours "$a" && path_is_ours "$b" && [[ -e "$b" ]]; then
+          log "rollback: put back ${a} from ${b} (the backup stays)"
+          cp -a -- "$b" "$a"
+        else
+          log "rollback: REFUSED to put back ${a} from ${b}"
+        fi
+        ;;
+      nft) rollback_nft "$a" "$b" "$c" ;;
+      sysctl)
+        if [[ "$a" =~ ^net\.[a-z0-9_.]+$ && "$b" =~ ^[0-9]+$ ]]; then
+          log "rollback: sysctl ${a}=${b}"
+          sysctl -q -w "${a}=${b}" >>"$INSTALL_LOG" 2>&1
+        fi
+        ;;
+      gitref)
+        if [[ "$a" == "$APP_DIR" && "$b" =~ ^[0-9a-f]{40}$ ]]; then
+          log "rollback: checkout ${b} in ${a}"
+          git -C "$a" -c advice.detachedHead=false checkout --quiet --detach "$b" >>"$INSTALL_LOG" 2>&1
+        fi
+        ;;
       *) log "rollback: unknown record '${kind}' ignored" ;;
     esac
   done < <(tac "$MANIFEST")
   systemctl daemon-reload >>"$INSTALL_LOG" 2>&1
   systemctl reset-failed "$UNIT_NAME" >>"$INSTALL_LOG" 2>&1
+  if [[ "$MODE" == relay ]]; then systemctl reset-failed "${RELAY_UNITS[@]}" >>"$INSTALL_LOG" 2>&1; fi
   local unit
   for unit in "${restarts[@]}"; do
     log "rollback: restart ${unit} with the restored files"
@@ -286,6 +401,25 @@ commit() {
   done <"$MANIFEST"
   printf '# committed %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$MANIFEST"
   log "committed"
+}
+
+# One nft record: the table back as it was, in ONE transaction (create + delete +
+# the dump), or deleted when it did not exist before ("-").
+rollback_nft() {
+  local family="$1" table="$2" dump="$3"
+  [[ "$family" =~ ^(ip|inet)$ && "$table" =~ ^vpnrelay(_input)?$ ]] || { log "rollback: REFUSED nft ${family} ${table}"; return 0; }
+  if [[ "$dump" == - ]]; then
+    if nft list table "$family" "$table" >/dev/null 2>&1; then
+      log "rollback: nft delete table ${family} ${table} (it did not exist before)"
+      nft delete table "$family" "$table" >>"$INSTALL_LOG" 2>&1
+    fi
+  elif path_is_ours "$dump" && [[ -f "$dump" ]]; then
+    log "rollback: table ${family} ${table} restored from ${dump}"
+    { printf 'table %s %s\ndelete table %s %s\n' "$family" "$table" "$family" "$table"; cat -- "$dump"; } \
+      | nft -f - >>"$INSTALL_LOG" 2>&1
+  else
+    log "rollback: REFUSED nft dump ${dump}"
+  fi
 }
 
 # Test seam for the CI rollback check (see the header).
@@ -525,7 +659,7 @@ resolve_ref() {
   INSTALL_REF_RESOLVED="$ref"
 }
 
-clone_checkout() {
+clone_repo() {
   local repo="${INSTALL_REPO:-$DEFAULT_REPO_URL}" ref="$INSTALL_REF_RESOLVED"
   say "Клонирую ${repo} @ ${ref}…"
   manifest_add dir "$APP_DIR"
@@ -534,6 +668,11 @@ clone_checkout() {
     run git -C "$APP_DIR" fetch --quiet origin -- "$ref"
     run git -C "$APP_DIR" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
   fi
+}
+
+clone_checkout() {
+  local ref="$INSTALL_REF_RESOLVED"
+  clone_repo
   [[ -f "${APP_DIR}/${CLAIM_SUPPORT_MARKER}" ]] \
     || die "ref ${ref} не поддерживает установку через claim (нет ${CLAIM_SUPPORT_MARKER}); укажите более новый INSTALL_REF"
   local f
@@ -807,31 +946,644 @@ reclaim() {
   print_claim
 }
 
+# --------------------------------------------------------------------------- #
+# Relay mode (docs/relay.md#installing-a-relay-with-one-command)
+# --------------------------------------------------------------------------- #
+preflight_relay() {
+  [[ "${EUID}" -eq 0 ]] || die "запустите от root: sudo bash install.sh --relay"
+  [[ -r /etc/os-release ]] || die "нет /etc/os-release"
+  local id version arch free_mb tool
+  id="$(. /etc/os-release && printf '%s' "${ID:-}")"
+  version="$(. /etc/os-release && printf '%s' "${VERSION_ID:-}")"
+  [[ "$id" == ubuntu && "$version" == 24.04 ]] \
+    || die "поддерживается только Ubuntu 24.04 (найдено: ${id:-?} ${version:-?})"
+  arch="$(uname -m)"
+  [[ "$arch" == x86_64 || "$arch" == aarch64 ]] || die "архитектура ${arch} не поддерживается (нужна x86_64 или aarch64)"
+  [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null \
+    || die "нужен systemd как init (контейнеры без systemd не поддерживаются)"
+  for tool in curl python3 sha256sum flock install mktemp tac cmp sed ip ss getent sshd sysctl; do
+    command -v "$tool" >/dev/null || die "нет команды ${tool}"
+  done
+  free_mb="$(df -Pm -- /opt 2>/dev/null | awk 'NR == 2 {print $4}')"
+  [[ "${free_mb:-0}" -ge "$RELAY_MIN_FREE_MB" ]] || die "мало места: ${free_mb:-?} МБ, нужно ≥ ${RELAY_MIN_FREE_MB} МБ"
+  # No Telegram here: a relay never talks to the Bot API. Only the repository.
+  case "${INSTALL_REPO:-$DEFAULT_REPO_URL}" in
+    file://*) ;;
+    *) check_reachable "https://github.com" ;;
+  esac
+}
+
+# The pairing code -> PAIR_* (validated). One line from stdin; on a terminal it
+# is asked for (hidden). The token itself never leaves python: only its sha256.
+read_pairing_code() {
+  local code="" attempt parsed
+  for attempt in 1 2 3; do
+    if [[ -t 0 ]]; then
+      printf 'Pairing-код из бота (Мастер настройки → Relay → Добавить; ввод скрыт): ' >&2
+      IFS= read -rs code || { printf '\n' >&2; die "pairing-код не введён"; }
+      printf '\n' >&2
+    else
+      IFS= read -r code || true
+    fi
+    code="${code//[[:space:]]/}"
+    if parsed="$(printf '%s\n' "$code" | parse_pairing_code)"; then
+      code=""
+      eval "$parsed"
+      say "Pairing-код принят: цель ${PAIR_TARGET}, tcp ${PAIR_TCP}, udp ${PAIR_UDP}, действует до $(date -u -d "@${PAIR_EXP}" '+%Y-%m-%d %H:%M UTC')"
+      return 0
+    fi
+    [[ -t 0 ]] || break
+  done
+  code=""
+  die "pairing-код не принят — выпустите новый в боте (Мастер настройки → Relay → Добавить)"
+}
+
+# stdin: the code. stdout: PAIR_*=<value> lines, every value matched against a
+# strict pattern (eval'ed by the caller). The same format as services/relay_pairing.py.
+parse_pairing_code() {
+  python3 -I - "$RELAY_CODE_SKEW" 3<&0 <<'PY'
+import base64, hashlib, json, os, re, struct, sys, time
+skew = int(sys.argv[1])
+raw = os.fdopen(3).readline().strip()
+def fail(why):
+    print(f"pairing-код: {why}", file=sys.stderr)
+    sys.exit(1)
+if not re.fullmatch(r"[A-Za-z0-9_-]{40,4096}", raw):
+    fail("это не pairing-код (ожидается одна строка base64url)")
+try:
+    data = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8"))
+except (ValueError, UnicodeDecodeError):
+    fail("не декодируется")
+if not isinstance(data, dict) or set(data) != {"v", "target_host", "ports", "main_pubkey", "one_time_token", "exp"}:
+    fail("неизвестный формат (поля)")
+if data["v"] != 1:
+    fail(f"версия {data['v']!r} не поддерживается этим установщиком")
+host = data["target_host"]
+label = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
+if (not isinstance(host, str) or len(host) > 253 or "." not in host
+        or not all(label.fullmatch(x) for x in host.split(".")) or host.split(".")[-1].isdigit()):
+    fail("target_host — не DNS-имя")
+ports = data["ports"]
+if not isinstance(ports, list) or not 2 <= len(ports) <= 16 or len(set(map(str, ports))) != len(ports):
+    fail("ports: нужен список вида [\"443/tcp\", \"443/udp\"]")
+tcp, udp = [], []
+for item in ports:
+    m = re.fullmatch(r"([1-9][0-9]{0,4})/(tcp|udp)", item) if isinstance(item, str) else None
+    if m is None or int(m[1]) > 65535:
+        fail(f"ports: {item!r}")
+    (tcp if m[2] == "tcp" else udp).append(int(m[1]))
+if not tcp or not udp or len(tcp) > 8 or len(udp) > 8:
+    fail("ports: нужен хотя бы один tcp и один udp (не больше 8 каждого)")
+key = data["main_pubkey"]
+m = re.fullmatch(r"ssh-ed25519 ([A-Za-z0-9+/]{68})(?: [!-~]{1,64})?", key) if isinstance(key, str) else None
+if m is None:
+    fail("main_pubkey — не ssh-ed25519")
+blob = base64.b64decode(m[1])
+if len(blob) != 51 or blob[:4] != struct.pack(">I", 11) or blob[4:15] != b"ssh-ed25519" or blob[15:19] != struct.pack(">I", 32):
+    fail("main_pubkey повреждён")
+token = data["one_time_token"]
+if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+    fail("one_time_token")
+exp = data["exp"]
+now = int(time.time())
+if not isinstance(exp, int) or isinstance(exp, bool):
+    fail("exp")
+if now > exp + skew:
+    fail("истёк — выпустите новый в боте")
+if exp > now + 7200:
+    fail("exp слишком далеко в будущем (часы этого хоста?)")
+print(f"PAIR_TARGET={host}")
+print(f"PAIR_TCP={','.join(map(str, sorted(tcp)))}")
+print(f"PAIR_UDP={','.join(map(str, sorted(udp)))}")
+print(f"PAIR_KEY_BLOB={m[1]}")
+print(f"PAIR_TOKEN_SHA256={hashlib.sha256(token.encode('ascii')).hexdigest()}")
+print(f"PAIR_EXP={exp}")
+PY
+}
+
+# TCP ports sshd listens on (or systemd holds for ssh.socket), one per line.
+sshd_ports() {
+  {
+    ss -Hltnp 2>/dev/null | awk '/"sshd/ {n = split($4, a, ":"); print a[n]}'
+    systemctl show -p Listen ssh.socket 2>/dev/null | grep -oE ':[0-9]{1,5} \(Stream\)' | tr -dc '0-9\n'
+  } | grep -E '^[0-9]+$' | sort -n -u || true
+}
+
+# The first address the target resolves to (empty when it does not).
+resolve_target() {
+  getent ahostsv4 "$1" 2>/dev/null | awk '$1 ~ /^[0-9.]+$/ {print $1; exit}' || true
+}
+
+# Root may log in with a key, judged by `sshd -T` for a connection from the main
+# server (Match blocks included); sets AUTH_KEYS. sshd_config itself is never touched.
+relay_check_ssh() {
+  local target_ip="$1" out verdict
+  if ! out="$(sshd -T -C "user=root,host=${PAIR_TARGET},addr=${target_ip}" 2>&1)"; then
+    if [[ "$out" == *"privilege separation directory"* ]]; then
+      install -d -m 0755 /run/sshd   # what ssh.service's RuntimeDirectory= creates
+      out="$(sshd -T -C "user=root,host=${PAIR_TARGET},addr=${target_ip}" 2>&1)" \
+        || die "sshd -T не отработал: ${out}"
+    else
+      die "sshd -T не отработал: ${out}"
+    fi
+  fi
+  verdict="$(printf '%s\n' "$out" | ssh_login_verdict "$(id -Gn root 2>/dev/null || echo root)")" || die "$verdict"
+  AUTH_KEYS="$verdict"
+}
+
+# stdin: `sshd -T` output; $1: root's groups. stdout: root's authorized_keys path,
+# or (exit 1) why the bot's key could not log in.
+ssh_login_verdict() {
+  python3 -I -c '
+import fnmatch, re, sys
+groups = sys.argv[1].split()
+conf = {}
+for line in sys.stdin:
+    key, _, value = line.strip().partition(" ")
+    conf.setdefault(key.lower(), []).append(value)
+def first(key):
+    return (conf.get(key) or [""])[0]
+def words(key):
+    return " ".join(conf.get(key, [])).split()
+def users_match(patterns):
+    return any(fnmatch.fnmatchcase("root", p.split("@", 1)[0]) for p in patterns)
+def groups_match(patterns):
+    return any(fnmatch.fnmatchcase(g, p) for g in groups for p in patterns)
+def no(why):
+    print(why)
+    sys.exit(1)
+if first("pubkeyauthentication") != "yes":
+    no("в sshd выключен вход по ключу (PubkeyAuthentication) — бот не сможет управлять relay")
+if first("permitrootlogin") not in ("yes", "prohibit-password", "without-password", "forced-commands-only"):
+    no("sshd не пускает root (PermitRootLogin no) — разрешите вход по ключу: prohibit-password или forced-commands-only")
+if users_match(words("denyusers")):
+    no("root в DenyUsers — бот не сможет войти")
+if words("allowusers") and not users_match(words("allowusers")):
+    no("root нет в AllowUsers — бот не сможет войти")
+if groups_match(words("denygroups")):
+    no("группа root в DenyGroups — бот не сможет войти")
+if words("allowgroups") and not groups_match(words("allowgroups")):
+    no("ни одной группы root нет в AllowGroups — бот не сможет войти")
+files = words("authorizedkeysfile")
+if not files or files[0] == "none":
+    no("AuthorizedKeysFile не задан (none) — некуда добавить ключ бота")
+path = re.sub(r"%(.)", lambda m: {"%": "%", "h": "/root", "u": "root", "U": "0"}.get(m[1], "\x00"), files[0])
+if not path.startswith("/"):
+    path = "/root/" + path
+if "\x00" in path or ".." in path or not re.fullmatch(r"/[A-Za-z0-9._/-]+", path):
+    no(f"непонятный AuthorizedKeysFile: {files[0]}")
+print(path)
+' "$1"
+}
+
+relay_preconditions() {
+  local target_ip clash p
+  target_ip="$(resolve_target "$PAIR_TARGET")"
+  [[ -n "$target_ip" ]] || die "${PAIR_TARGET} не резолвится в IPv4 на этом хосте — проверьте DNS"
+  relay_check_ssh "$target_ip"
+  if [[ -r /etc/ufw/ufw.conf ]] && grep -qE '^[[:space:]]*ENABLED[[:space:]]*=[[:space:]]*yes' /etc/ufw/ufw.conf; then
+    die "ufw включён: его forward-политика DROP отбросит пересылаемый трафик. Выключите: ufw disable && systemctl mask ufw.service (docs/relay.md)"
+  fi
+  clash=""
+  for p in ${PAIR_TCP//,/ }; do
+    if grep -qx -- "$p" <<< "$(sshd_ports)"; then clash+=" ${p}"; fi
+  done
+  [[ -z "$clash" ]] || die "sshd слушает TCP${clash} — этот порт нельзя пересылать (бот потерял бы доступ)"
+  [[ -n "$(sshd_ports)" ]] || die "не найден порт sshd — бот не сможет подключиться"
+  if systemctl is-enabled --quiet nftables.service 2>/dev/null && grep -qs 'dnat to' /etc/nftables.conf; then
+    warn "/etc/nftables.conf (nftables.service включён) содержит DNAT: при загрузке он добавит свой — проверьте, что там нет 443"
+  fi
+}
+
+relay_detect_state() {
+  RELAY_EXISTING_CHECKOUT=0
+  if [[ -e "$UNIT_PATH" ]] || systemctl cat "$UNIT_NAME" >/dev/null 2>&1; then
+    die "это основной сервер (${UNIT_NAME} есть) — relay ставится на отдельный хост"
+  fi
+  if [[ -e "$APP_DIR" ]]; then
+    if [[ -d "${APP_DIR}/.git" && "$(env_value "$ENV_FILE" NODE_ROLE)" == relay ]]; then
+      RELAY_EXISTING_CHECKOUT=1
+    else
+      die "${APP_DIR} есть, но это не checkout relay (NODE_ROLE=relay) — разберите вручную"
+    fi
+  fi
+  if [[ -f "${RELAY_STATE_DIR}/install.json" ]] \
+      && python3 -I -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("installer") == "vpn-relay" else 1)' \
+        "${RELAY_STATE_DIR}/install.json" 2>/dev/null; then
+    STATE=repair
+  elif [[ "$RELAY_EXISTING_CHECKOUT" == 1 || -e "$RELAY_LEGACY_NFT" || -e "${SYSTEMD_DIR}/vpn-relay.service" ]] \
+      || nft list table ip vpnrelay >/dev/null 2>&1; then
+    STATE=adopt
+  else
+    STATE=fresh
+  fi
+}
+
+relay_apt_install() {
+  export DEBIAN_FRONTEND=noninteractive
+  local pkg missing=()
+  for pkg in "${APT_RELAY_PACKAGES[@]}"; do
+    if [[ "$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true)" != *"install ok installed"* ]]; then
+      missing+=("$pkg")
+      manifest_add apt "$pkg"
+    fi
+  done
+  say "Пакеты: ${missing[*]:-всё уже установлено}"
+  [[ ${#missing[@]} -gt 0 ]] || return 0
+  run apt-get -o DPkg::Lock::Timeout=300 update -qq
+  run apt-get -o DPkg::Lock::Timeout=300 install -y -qq --no-install-recommends "${APT_RELAY_PACKAGES[@]}"
+}
+
+relay_require_checkout_files() {
+  local f
+  for f in "$RELAY_SUPPORT_MARKER" scripts/vpn-relay-apply deploy/relay/relay.env.example "${RELAY_UNITS[@]/#/deploy/relay/}"; do
+    [[ -f "${APP_DIR}/${f}" ]] || die "в checkout нет ${f} (ref без relay-установщика? задайте более новый INSTALL_REF)"
+  done
+}
+
+# Fresh: a new checkout of INSTALL_REF. An existing relay checkout moves to
+# INSTALL_REF only forward (never backwards past a newer update), recorded.
+relay_checkout() {
+  local head target
+  if [[ "$RELAY_EXISTING_CHECKOUT" == 0 ]]; then
+    resolve_ref
+    clone_repo
+    RELAY_CREATED_APP_DIR=1
+  elif [[ -n "${INSTALL_REF:-}" ]]; then
+    resolve_ref
+    head="$(git -C "$APP_DIR" rev-parse HEAD)"
+    run git -C "$APP_DIR" fetch --quiet origin -- "$INSTALL_REF_RESOLVED" || true
+    target="$(git -C "$APP_DIR" rev-parse --verify --quiet "${INSTALL_REF_RESOLVED}^{commit}" 2>/dev/null \
+      || git -C "$APP_DIR" rev-parse --verify --quiet "FETCH_HEAD^{commit}" 2>/dev/null || true)"
+    if [[ "$target" =~ ^[0-9a-f]{40}$ && "$target" != "$head" ]] \
+        && git -C "$APP_DIR" merge-base --is-ancestor "$head" "$target" 2>/dev/null; then
+      manifest_add gitref "$APP_DIR" "$head"
+      run git -C "$APP_DIR" -c advice.detachedHead=false checkout --quiet --detach "$target"
+    else
+      log "checkout stays at ${head} (INSTALL_REF ${INSTALL_REF_RESOLVED} is not ahead of it)"
+    fi
+  fi
+  relay_require_checkout_files
+  log "checkout: $(git -C "$APP_DIR" rev-parse HEAD)"
+}
+
+# A copy of an existing file into the adoption backup, recorded as `adopted`.
+relay_adopt_file() {
+  local path="$1" copy
+  [[ -e "$path" ]] || return 0
+  copy="${RELAY_ADOPT_DIR}/files${path}"
+  install -d -m 0700 "$(dirname "$copy")"
+  cp -a -- "$path" "$copy"
+  manifest_add adopted "$path" "$copy"
+}
+
+# Everything a relay already has goes to /var/backups/vpn-relay/adopt-<ts>/ first:
+# the live tables (as nft lists them), the hand-made /etc/vpn-relay.nft (then moved
+# away, so nothing loads it again), the unit, the sysctl file, the helpers, .env.
+relay_backup_existing() {
+  # Files vpn-relay-apply writes itself: gone again on a rollback when they are new.
+  [[ -e "$RELAY_SYSCTL_FILE" ]] || manifest_add file "$RELAY_SYSCTL_FILE"
+  [[ -e "${RELAY_STATE_DIR}/upstream.resolved" ]] || manifest_add file "${RELAY_STATE_DIR}/upstream.resolved"
+  if [[ "$STATE" == fresh ]]; then
+    # Nothing to keep; the records make a rollback delete whatever got applied.
+    relay_record_tables
+    return 0
+  fi
+  RELAY_ADOPT_DIR="${RELAY_BACKUP_ROOT}/adopt-${TS}"
+  install -d -m 0700 "$RELAY_BACKUP_ROOT" "$RELAY_ADOPT_DIR"
+  relay_record_tables
+  relay_adopt_file "$RELAY_LEGACY_NFT"
+  relay_adopt_file "$RELAY_SYSCTL_FILE"
+  # The last-known address of the OLD target: a rollback must not leave the new
+  # target's cache behind (it would not match the restored name at the next boot).
+  relay_adopt_file "${RELAY_STATE_DIR}/upstream.resolved"
+  relay_adopt_file "${SBIN_DIR}/vpn-relay-apply"
+  relay_adopt_file "${SBIN_DIR}/vpn-relay-agent"
+  local unit
+  for unit in "${RELAY_UNITS[@]}"; do relay_adopt_file "${SYSTEMD_DIR}/${unit}"; done
+  [[ "$RELAY_EXISTING_CHECKOUT" == 1 ]] && relay_adopt_file "$ENV_FILE"
+  [[ "$STATE" == repair ]] && relay_adopt_file "${RELAY_STATE_DIR}/pairing.json"
+  if [[ -e "$RELAY_LEGACY_NFT" ]]; then
+    rm -f -- "$RELAY_LEGACY_NFT"
+    log "moved ${RELAY_LEGACY_NFT} to ${RELAY_ADOPT_DIR}/files${RELAY_LEGACY_NFT} — nothing loads it any more"
+  fi
+  say "Найдена существующая установка relay (${STATE}): копия в ${RELAY_ADOPT_DIR}"
+}
+
+relay_record_sysctls() {
+  local key value
+  RELAY_FORWARD_BEFORE="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)"
+  for key in net.ipv4.ip_forward net.netfilter.nf_conntrack_max net.netfilter.nf_conntrack_tcp_timeout_established; do
+    value="$(sysctl -n "$key" 2>/dev/null || true)"
+    if [[ "$value" =~ ^[0-9]+$ ]]; then manifest_add sysctl "$key" "$value"; fi
+  done
+}
+
+# .env: from the template (fresh) or the existing relay .env, with the target NAME,
+# the ports, NODE_ROLE=relay; a new relay also gets SSH_PORT = where sshd listens
+# now (a later redeploy must not move ssh away from the bot) and the input filter off.
+relay_write_env() {
+  local base tmp ssh_port filter=""
+  if [[ "$RELAY_EXISTING_CHECKOUT" == 1 ]]; then base="$ENV_FILE"; else base="${APP_DIR}/deploy/relay/relay.env.example"; fi
+  ssh_port="$(sshd_ports | head -n1)"
+  [[ "$RELAY_EXISTING_CHECKOUT" == 1 ]] || filter=off
+  [[ -n "$(env_value "$ENV_FILE" SSH_PORT)" ]] && ssh_port=""
+  tmp="$(mktemp "${APP_DIR}/.env.XXXXXX")"
+  manifest_add file "$tmp"
+  [[ -e "$ENV_FILE" ]] || manifest_add file "$ENV_FILE"
+  python3 -I - "$base" "$tmp" "$PAIR_TARGET" "$PAIR_TCP" "$PAIR_UDP" "$ssh_port" "$filter" <<'PY'
+import os, re, sys
+base, target, host, tcp, udp, ssh_port, filt = sys.argv[1:8]
+lines = open(base, encoding="utf-8").read().splitlines()
+values = {"NODE_ROLE": "relay", "RELAY_UPSTREAM_IPV4": None, "RELAY_UPSTREAM_HOST": host,
+          "RELAY_FORWARD_TCP_PORTS": tcp, "RELAY_FORWARD_UDP_PORTS": udp}
+if ssh_port:
+    values["SSH_PORT"] = ssh_port
+if filt:
+    values["RELAY_INPUT_FILTER"] = filt
+for key, value in values.items():
+    pattern = re.compile(rf"^\s*(?:export\s+)?{key}\s*=")
+    hits = [i for i, line in enumerate(lines) if pattern.match(line)]
+    if value is None:
+        lines = [line for i, line in enumerate(lines) if i not in hits]
+    elif hits:
+        lines[hits[-1]] = f"{key}={value}"
+        lines = [line for i, line in enumerate(lines) if i not in hits[:-1]]
+    else:
+        lines.append(f"{key}={value}")
+fd = os.open(target, os.O_WRONLY | os.O_TRUNC)
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(lines) + "\n")
+PY
+  chown root:root "$tmp"
+  chmod 0600 "$tmp"
+  mv -f -- "$tmp" "$ENV_FILE"
+  log "wrote ${ENV_FILE} (target ${PAIR_TARGET}, tcp ${PAIR_TCP}, udp ${PAIR_UDP})"
+}
+
+# /etc/vpn-relay/pairing.json: the token's hash and the code's expiry — what the
+# agent's `hello` checks. A re-pair replaces it (the old one is in the backup).
+relay_write_pairing() {
+  local file="${RELAY_STATE_DIR}/pairing.json" tmp
+  if [[ ! -d "$RELAY_STATE_DIR" ]]; then
+    manifest_add dir "$RELAY_STATE_DIR"
+    install -d -o root -g root -m 0755 "$RELAY_STATE_DIR"
+  fi
+  [[ -e "$file" ]] || manifest_add file "$file"
+  tmp="$(mktemp "${RELAY_STATE_DIR}/.pairing.json.XXXXXX")"
+  manifest_add file "$tmp"
+  printf '{"v": 1, "token_sha256": "%s", "exp": %d, "paired_at": null, "main_key": "ssh-ed25519 %s", "target_host": "%s", "created_at": %d}\n' \
+    "$PAIR_TOKEN_SHA256" "$PAIR_EXP" "$PAIR_KEY_BLOB" "$PAIR_TARGET" "$(date +%s)" >"$tmp"
+  chown root:root "$tmp"
+  chmod 0600 "$tmp"
+  mv -f -- "$tmp" "$file"
+  log "wrote ${file} (the token's sha256 only)"
+}
+
+relay_install_files() {
+  local unit
+  install_file "${APP_DIR}/scripts/vpn-relay-apply" "${SBIN_DIR}/vpn-relay-apply" 0755
+  install_file "${APP_DIR}/scripts/vpn-relay-agent" "${SBIN_DIR}/vpn-relay-agent" 0755
+  for unit in "${RELAY_UNITS[@]}"; do
+    install_file "${APP_DIR}/deploy/relay/${unit}" "${SYSTEMD_DIR}/${unit}" 0644
+  done
+}
+
+# ONE line for the bot's key: restrict + the agent as the forced command. Any other
+# line with the same key goes (an unrestricted copy would be a root shell), every
+# other line stays byte-identical.
+relay_authorize_key() {
+  local dir tmp backup
+  dir="$(dirname "$AUTH_KEYS")"
+  if [[ ! -d "$dir" ]]; then
+    manifest_add dir "$dir"
+    install -d -o root -g root -m 0700 "$dir"
+  fi
+  tmp="$(mktemp "${AUTH_KEYS}.vpn-bot-install.XXXXXX")"
+  manifest_add file "$tmp"
+  python3 -I - "$AUTH_KEYS" "$PAIR_KEY_BLOB" "$RELAY_AGENT_COMMAND" >"$tmp" <<'PY'
+import sys
+path, blob, agent = sys.argv[1:4]
+try:
+    lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+except FileNotFoundError:
+    lines = []
+marker = f'command="{agent}"'
+kept = [l for l in lines if marker not in l and f"ssh-ed25519 {blob}" not in l]
+if kept and not kept[-1].endswith("\n"):
+    kept[-1] += "\n"
+removed = len(lines) - len(kept)
+if removed:
+    print(f"authorized_keys: {removed} old line(s) of this key replaced", file=sys.stderr)
+sys.stdout.write("".join(kept) + f'restrict,{marker} ssh-ed25519 {blob} vpn-relay-agent\n')
+PY
+  if [[ -e "$AUTH_KEYS" ]]; then
+    if cmp -s -- "$tmp" "$AUTH_KEYS"; then rm -f -- "$tmp"; log "unchanged: ${AUTH_KEYS}"; return 0; fi
+    backup="${AUTH_KEYS}.vpn-bot-install.${TS}.bak"
+    manifest_add replaced "$AUTH_KEYS" "$backup"
+    cp -a -- "$AUTH_KEYS" "$backup"
+  else
+    manifest_add file "$AUTH_KEYS"
+  fi
+  chown root:root "$tmp"
+  chmod 0600 "$tmp"
+  mv -f -- "$tmp" "$AUTH_KEYS"
+  log "authorized the bot's key in ${AUTH_KEYS} (forced command ${RELAY_AGENT_COMMAND})"
+}
+
+# vpn-relay.service applies the table (one atomic nft -f) and the sysctls; the
+# timer re-resolves the name. A RUNNING unit (the hand-made one too, once
+# daemon-reload loaded ours) is RELOADED — ExecReload is the same atomic apply — never
+# restarted: a restart runs ExecStop first and deletes the table, a moment with no
+# DNAT. The rollback restores the table from the nft record (its dump) in one
+# transaction too, so no unit is restarted on the way back either.
+relay_start() {
+  local unit="vpn-relay.service"
+  run systemctl daemon-reload
+  if ! systemctl is-enabled --quiet "$unit" 2>/dev/null; then manifest_add enabled "$unit"; fi
+  if ! systemctl is-enabled --quiet vpn-relay-resolve.timer 2>/dev/null; then manifest_add enabled vpn-relay-resolve.timer; fi
+  run systemctl enable "$unit" vpn-relay-resolve.timer
+  if systemctl is-active --quiet "$unit"; then
+    run systemctl reload "$unit"
+  else
+    manifest_add started "$unit"
+    run systemctl start "$unit"
+  fi
+  if ! systemctl is-active --quiet vpn-relay-resolve.timer; then manifest_add started vpn-relay-resolve.timer; fi
+  run systemctl restart vpn-relay-resolve.timer
+}
+
+# The live tables, recorded for the rollback: a dump (restored in one transaction)
+# or "-" (deleted). Dumps go to the adoption backup dir when there is one.
+relay_record_tables() {
+  local family table dump dir="${RELAY_ADOPT_DIR:-${RELAY_VAR_DIR}}"
+  for family in ip inet; do
+    table=vpnrelay; [[ "$family" == inet ]] && table=vpnrelay_input
+    if nft list table "$family" "$table" >/dev/null 2>&1; then
+      if [[ ! -d "$dir" ]]; then manifest_add dir "$dir"; install -d -m 0700 "$dir"; fi
+      dump="${dir}/${family}-${table}.${TS}.nft"
+      nft list table "$family" "$table" >"$dump"
+      manifest_add nft "$family" "$table" "$dump"
+    else
+      manifest_add nft "$family" "$table" -
+    fi
+  done
+}
+
+# check + exactly ONE DNAT rule per forwarded port in the whole ruleset + the timer.
+relay_verify() {
+  local out rc p n ruleset
+  set +e
+  out="$("${SBIN_DIR}/vpn-relay-apply" check 2>&1)"
+  rc=$?
+  set -e
+  printf '%s\n' "$out" | redact >>"$INSTALL_LOG"
+  case "$rc" in
+    0) say "Проверка relay: OK" ;;
+    13 | 14) warn "основной сервер (${PAIR_TARGET}) не ответил с relay на forwarded TCP — бот проверит путь сам при подключении" ;;
+    *) say "vpn-relay-apply check: exit ${rc}"; printf '%s\n' "$out" | tail -n 15 | redact >&2; return 1 ;;
+  esac
+  ruleset="$(nft list ruleset 2>/dev/null)"
+  for p in ${PAIR_TCP//,/ }; do
+    n="$(grep -cE "tcp dport ${p} .*dnat (ip )?to" <<< "$ruleset" || true)"
+    [[ "$n" == 1 ]] || { say "TCP ${p}: ${n} DNAT-правил в ruleset, ожидалось ровно 1"; return 1; }
+  done
+  for p in ${PAIR_UDP//,/ }; do
+    n="$(grep -cE "udp dport ${p} .*dnat (ip )?to" <<< "$ruleset" || true)"
+    [[ "$n" == 1 ]] || { say "UDP ${p}: ${n} DNAT-правил в ruleset, ожидалось ровно 1"; return 1; }
+  done
+  systemctl is-active --quiet vpn-relay-resolve.timer || { say "vpn-relay-resolve.timer не активен"; return 1; }
+}
+
+# /etc/vpn-relay/install.json — what uninstall needs to undo this install.
+relay_write_install_record() {
+  local file="${RELAY_STATE_DIR}/install.json" prev_created=0 prev_forward="" prev_backup=""
+  if [[ -f "$file" ]]; then
+    prev_created="$(python3 -I -c 'import json,sys; print(1 if json.load(open(sys.argv[1])).get("created_app_dir") else 0)' "$file" 2>/dev/null || echo 0)"
+    prev_forward="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("ip_forward_before", ""))' "$file" 2>/dev/null || true)"
+    prev_backup="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("adoption_backup") or "")' "$file" 2>/dev/null || true)"
+  else
+    manifest_add file "$file"
+  fi
+  [[ "$RELAY_CREATED_APP_DIR" == 1 ]] && prev_created=1
+  [[ -n "$prev_forward" ]] || prev_forward="${RELAY_FORWARD_BEFORE:-0}"
+  [[ "$STATE" == adopt ]] && prev_backup="$RELAY_ADOPT_DIR"
+  python3 -I - "$file" "$prev_created" "$prev_forward" "$AUTH_KEYS" "$prev_backup" "$(git -C "$APP_DIR" rev-parse HEAD)" <<'PY'
+import json, os, sys, time
+path, created, forward, keys, backup, ref = sys.argv[1:7]
+data = {"installer": "vpn-relay", "v": 1, "installed_at": int(time.time()), "ref": ref,
+        "created_app_dir": created == "1", "ip_forward_before": "1" if forward == "1" else "0",
+        "authorized_keys": keys, "adoption_backup": backup or None}
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
+}
+
+relay_report() {
+  local target_ip src port
+  target_ip="$(resolve_target "$PAIR_TARGET")"
+  src="$(ip -4 route get "${target_ip:-1.1.1.1}" 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n1)"
+  port="$(sshd_ports | head -n1)"
+  printf '\n%s\n' "Relay установлен: TCP ${PAIR_TCP} и UDP ${PAIR_UDP} → ${PAIR_TARGET}." >&2
+  printf '%s\n\n' "Вернитесь в бот и нажмите «Подключить», отправив адрес этого relay:" >&2
+  if [[ -n "$src" ]]; then printf '  %s\n\n' "${src}:${port:-22}"; fi
+  if [[ -z "$src" ]] || python3 -I -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_address(sys.argv[1]).is_private else 1)' "$src" 2>/dev/null; then
+    printf '%s\n' "(адрес выше внутренний — этот хост за NAT: отправьте его публичный IPv4 или DNS-имя и ssh-порт ${port:-22})" >&2
+  fi
+  printf '%s\n' "Pairing-код действует до $(date -u -d "@${PAIR_EXP}" '+%H:%M UTC'); бот завершит подключение по SSH." >&2
+  log "relay installed (${STATE}); address hint ${src:-?}:${port:-?}"
+}
+
+relay_install() {
+  MODE=relay
+  preflight_relay
+  read_pairing_code
+  acquire_lock
+  relay_detect_state
+  relay_preconditions
+  open_log
+  say "Режим relay: ${STATE} (лог ${INSTALL_LOG})"
+  arm_rollback
+  relay_apt_install
+  relay_checkout
+  fail_point after_relay_clone
+  relay_backup_existing
+  relay_record_sysctls
+  relay_write_env
+  relay_write_pairing
+  relay_install_files
+  relay_authorize_key
+  fail_point after_relay_files
+  relay_start
+  relay_verify
+  fail_point after_relay_start
+  relay_write_install_record
+  commit
+  relay_report
+  say "Лог установки: ${INSTALL_LOG}"
+}
+
+# What the agent's `update` runs from the NEW checkout: the helpers and units
+# reinstalled from it, vpn-relay restarted and checked; .env, the pairing and the
+# key are not touched. Any failure rolls the files back (the agent then moves the
+# checkout back).
+relay_update() {
+  MODE=relay
+  [[ "${EUID}" -eq 0 ]] || die "запустите от root"
+  acquire_lock
+  [[ -f "${RELAY_STATE_DIR}/install.json" && -f "$ENV_FILE" ]] || die "это не relay, установленный install.sh"
+  [[ "$(env_value "$ENV_FILE" NODE_ROLE)" == relay ]] || die "в ${ENV_FILE} нет NODE_ROLE=relay"
+  STATE=repair
+  PAIR_TCP="$(env_value "$ENV_FILE" RELAY_FORWARD_TCP_PORTS)"; PAIR_TCP="${PAIR_TCP:-443}"
+  PAIR_UDP="$(env_value "$ENV_FILE" RELAY_FORWARD_UDP_PORTS)"; PAIR_UDP="${PAIR_UDP:-443}"
+  PAIR_TARGET="$(env_value "$ENV_FILE" RELAY_UPSTREAM_HOST)"
+  open_log
+  arm_rollback
+  relay_require_checkout_files
+  relay_record_tables
+  relay_install_files
+  relay_start
+  relay_verify
+  commit
+  say "Relay обновлён до $(git -C "$APP_DIR" describe --tags --always 2>/dev/null || echo '?')"
+}
+
 usage() {
-  sed -n '3,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 main() {
-  local reclaim_only=0
+  local reclaim_only=0 action=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --reclaim) reclaim_only=1 ;;
+      --relay) action=relay ;;
+      --relay-update) action=relay-update ;;
       -h | --help) usage; exit 0 ;;
-      *) die "неизвестный аргумент: $1 (см. --help)" ;;
+      *) printf 'неизвестный аргумент: %s (см. --help)\n' "$1" >&2; exit 2 ;;
     esac
     shift
   done
-  preflight
+  case "$action" in
+    relay) relay_install; exit 0 ;;
+    relay-update) relay_update; exit 0 ;;
+  esac
   if [[ "$reclaim_only" == 1 ]]; then
+    preflight
     acquire_lock
     reclaim
     exit 0
   fi
   ask_mode
   if [[ "$MODE" == relay ]]; then
-    say "Режим relay будет в следующей версии установщика. Ничего не изменено."
-    exit 2
+    relay_install
+    exit 0
   fi
+  preflight
   acquire_lock
   require_no_deploy_running
   detect_state

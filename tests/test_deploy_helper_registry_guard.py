@@ -485,7 +485,17 @@ def test_relay_helper_is_registered_for_the_relay_role_only() -> None:
         "required",
         "relay",
     )
-    others = {name: entry[3] for name, entry in registry.items() if name != "vpn-relay-apply"}
+    # The relay agent (scripts/install.sh --relay): relay-only too, absent-ok — a relay
+    # deployed by hand has none.
+    assert registry["vpn-relay-agent"] == (
+        "scripts/vpn-relay-agent",
+        "/usr/local/sbin/vpn-relay-agent",
+        "absent-ok",
+        "relay",
+    )
+    others = {
+        name: entry[3] for name, entry in registry.items() if name not in ("vpn-relay-apply", "vpn-relay-agent")
+    }
     # The host invariants check and the SSH port helper run on both roles
     # (vpn-bot-host-check.service and vpn-bot-ssh-port.service are MANAGED_HOST_FILES
     # units of each), so they are the helpers with an entry per role.

@@ -378,12 +378,14 @@ def test_rollback_now_picks_the_rollback_of_the_role(tmp_path: Path) -> None:
 
 
 def test_scan_on_a_relay_sees_only_the_relay_helpers(tmp_path: Path) -> None:
-    """The relay data-plane helper, the host invariants check and the SSH port helper
-    (both roles run the last two)."""
+    """The relay data-plane helper, the relay agent (absent-ok: only the installer puts it
+    there), the host invariants check and the SSH port helper (both roles run the last two)."""
     out = _shared_functions_output(tmp_path, "NODE_ROLE=relay\n", 'scan_out_of_repo_helpers "$APP_DIR"')
     rows = [ln for ln in out.split("\n--SC--\n")[0].splitlines() if "|" in ln]
-    assert [r.split("|")[0] for r in rows] == ["vpn-relay-apply", "vpn-bot-host-check", "vpn-bot-ssh-port"]
-    assert all(r.endswith("|absent|required") for r in rows)
+    assert [r.split("|")[0] for r in rows] == ["vpn-relay-apply", "vpn-relay-agent", "vpn-bot-host-check", "vpn-bot-ssh-port"]
+    assert [r.rsplit("|", 2)[1:] for r in rows] == [
+        ["absent", "required"], ["absent", "absent-ok"], ["absent", "required"], ["absent", "required"],
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -945,6 +947,8 @@ def test_repo_unit_runs_the_helper_and_owns_both_tables() -> None:
     unit = _read(REPO_UNIT)
     body = unit.split("[Unit]", 1)[1]
     assert "ExecStart=/usr/local/sbin/vpn-relay-apply apply" in body
+    # reload = the same atomic apply, no stop (scripts/install.sh swaps a live table with it)
+    assert "ExecReload=/usr/local/sbin/vpn-relay-apply apply" in body
     assert re.findall(r"^ExecStop=.*$", body, re.M) == [
         "ExecStop=-/usr/sbin/nft delete table ip vpnrelay",
         "ExecStop=-/usr/sbin/nft delete table inet vpnrelay_input",
@@ -961,7 +965,7 @@ def test_relay_env_example_covers_the_keys_the_helper_reads() -> None:
     helper = _read(RELAY_HELPER_SRC)
     keys = set(re.findall(r"(?:env_sed_val|optional_ports) (RELAY_[A-Z0-9_]+)", helper))
     assert keys == {
-        "RELAY_UPSTREAM_IPV4", "RELAY_FORWARD_TCP_PORTS", "RELAY_FORWARD_UDP_PORTS",
+        "RELAY_UPSTREAM_IPV4", "RELAY_UPSTREAM_HOST", "RELAY_FORWARD_TCP_PORTS", "RELAY_FORWARD_UDP_PORTS",
         "RELAY_WAN_IFACE", "RELAY_CHECK_SNI",
         "RELAY_CONNTRACK_MAX", "RELAY_CONNTRACK_TCP_ESTABLISHED_TIMEOUT",
         "RELAY_INPUT_FILTER", "RELAY_INPUT_EXTRA_TCP", "RELAY_INPUT_EXTRA_UDP",

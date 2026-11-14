@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 42
+CURRENT_SCHEMA_VERSION = 43
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -415,6 +415,10 @@ class Database:
             await self._migrate_v42()
             await self._set_schema_version(42)
             version = 42
+        if version < 43:
+            await self._migrate_v43()
+            await self._set_schema_version(43)
+            version = 43
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1909,6 +1913,48 @@ class Database:
               updated_at TEXT NOT NULL,
               finished_at TEXT,
               reported_at TEXT
+            )
+            """
+        )
+
+    async def _migrate_v43(self) -> None:
+        # Relays the bot manages over SSH (the relay installer's pairing, «Мастер
+        # настройки → Relay»; services/relay_agents.py). Two new tables, mirrored in
+        # schema.sql; the pairings' index lives in indexes.sql (phase 3). Idempotent;
+        # nothing is backfilled: a relay added by hand has no agent and stays
+        # unmanaged until it is paired.
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS relay_agents (
+              relay_id INTEGER PRIMARY KEY REFERENCES relays(id) ON DELETE CASCADE,
+              ssh_host TEXT NOT NULL,
+              ssh_port INTEGER NOT NULL CHECK (ssh_port BETWEEN 1 AND 65535),
+              host_key TEXT NOT NULL,
+              target_host TEXT NOT NULL,
+              tcp_ports TEXT NOT NULL,
+              udp_ports TEXT NOT NULL,
+              agent_version TEXT NOT NULL DEFAULT '',
+              paired_at TEXT NOT NULL,
+              last_status_json TEXT,
+              last_status_at TEXT
+            )
+            """
+        )
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS relay_pairings (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              token TEXT NOT NULL DEFAULT '',
+              target_host TEXT NOT NULL,
+              tcp_ports TEXT NOT NULL,
+              udp_ports TEXT NOT NULL,
+              state TEXT NOT NULL CHECK (state IN ('pending', 'completed', 'cancelled', 'expired')),
+              expires_at INTEGER NOT NULL,
+              created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+              created_at TEXT NOT NULL,
+              relay_id INTEGER REFERENCES relays(id) ON DELETE SET NULL,
+              completed_at TEXT
             )
             """
         )

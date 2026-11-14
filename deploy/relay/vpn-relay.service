@@ -20,6 +20,11 @@
 # then verified with `vpn-relay-apply check`; any failure rolls back. The helper
 # it runs is installed/refreshed from OUT_OF_REPO_HELPERS (role relay).
 #
+# `systemctl reload` re-applies (ExecReload): the same atomic `nft -f`, with no
+# stop in between — what scripts/install.sh (relay mode) uses to swap the table of
+# a running relay, a hand-made one included, without a moment of no DNAT. A restart
+# would delete the tables first (ExecStop).
+#
 # Replaces the hand-installed unit of the same name that loaded
 # /etc/vpn-relay.nft; that file is renamed to /etc/vpn-relay.nft.pre-repo.<ts>
 # after the first successful deploy and is not read any more.
@@ -32,6 +37,7 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/vpn-relay-apply apply
+ExecReload=/usr/local/sbin/vpn-relay-apply apply
 ExecStop=-/usr/sbin/nft delete table ip vpnrelay
 ExecStop=-/usr/sbin/nft delete table inet vpnrelay_input
 

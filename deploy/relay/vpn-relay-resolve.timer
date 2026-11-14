@@ -1,0 +1,13 @@
+# Every 5 minutes: vpn-relay-resolve.service (docs/relay.md#a-dns-name-as-the-upstream).
+# Installed and enabled by scripts/install.sh (relay mode).
+[Unit]
+Description=vpnbot L4 relay: re-resolve the upstream's DNS name every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=vpn-relay-resolve.service
+
+[Install]
+WantedBy=timers.target

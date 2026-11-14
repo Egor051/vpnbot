@@ -26,10 +26,16 @@ inbound end to end". Each probe leaves one
 ``REALITY: processed invalid connection from <relay IP>`` line in Xray's error
 log — expected, documented in docs/relay.md.
 
+UDP (Hysteria2), when it is enabled: a QUIC packet with a reserved ("greasing")
+version, padded to 1200 bytes, to ``<relay host>:HYSTERIA2_PORT``. Every QUIC server
+must answer an unknown version with a Version Negotiation packet (RFC 9000 §6) that
+echoes both connection IDs — no handshake, no credentials, and through the relay's
+UDP DNAT it is again a hairpin to this host's hysteria-server. The same packet to
+127.0.0.1 first is the control: when this host's own server does not answer it
+either, UDP is "not judged" (None) — never "down".
+
 Deliberately NOT done here:
 
-* UDP (Hysteria2) is not probed — there is no cheap unauthenticated QUIC check
-  that proves the forward works; documented.
 * ``BackendHealth`` / the Xray degraded flag are not touched: a dead relay does
   not block issuing keys (direct keys are unaffected, and relay keys keep
   working the moment the relay comes back).
@@ -39,6 +45,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
 import ssl
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -90,6 +98,83 @@ async def tls_probe(host: str, port: int, sni: str, *, timeout: float = PROBE_TI
             writer.close()
             with suppress(Exception):
                 await asyncio.wait_for(writer.wait_closed(), timeout=timeout)
+
+
+# QUIC version negotiation (RFC 9000 §6, §17.2.1). 0x?a?a?a?a versions are reserved
+# for greasing: no server supports one, so every server answers with a VN packet —
+# quic-go (hysteria-server) only when the datagram is at least 1200 bytes.
+QUIC_GREASE_VERSION = bytes.fromhex("1a2a3a4a")
+QUIC_MIN_DATAGRAM = 1200
+UDP_PROBE_TIMEOUT_SECONDS = 4.5
+
+
+def quic_vn_request(dcid: bytes, scid: bytes) -> bytes:
+    header = bytes([0xC0]) + QUIC_GREASE_VERSION + bytes([len(dcid)]) + dcid + bytes([len(scid)]) + scid
+    return header + bytes(QUIC_MIN_DATAGRAM - len(header))
+
+
+def is_version_negotiation(data: bytes, *, dcid: bytes, scid: bytes) -> bool:
+    """A VN packet answering OUR request: long header, version 0, the IDs swapped."""
+    if len(data) < 7 or not data[0] & 0x80 or data[1:5] != b"\x00\x00\x00\x00":
+        return False
+    pos = 5
+    got_dcid = data[pos + 1 : pos + 1 + data[pos]]
+    pos += 1 + data[pos]
+    if pos >= len(data):
+        return False
+    got_scid = data[pos + 1 : pos + 1 + data[pos]]
+    pos += 1 + data[pos]
+    versions = data[pos:]
+    return got_dcid == scid and got_scid == dcid and len(versions) >= 4 and len(versions) % 4 == 0
+
+
+async def quic_probe(host: str, port: int, *, timeout: float = UDP_PROBE_TIMEOUT_SECONDS) -> bool:
+    """True when ``host:port`` answers a QUIC version-negotiation request. Never raises
+    (only cancellation propagates); sends the request up to three times (UDP)."""
+    loop = asyncio.get_running_loop()
+    dcid, scid = os.urandom(8), os.urandom(8)
+    answered: asyncio.Future[bool] = loop.create_future()
+
+    class _Protocol(asyncio.DatagramProtocol):
+        def datagram_received(self, data: bytes, addr: tuple[str | object, int]) -> None:
+            if not answered.done() and is_version_negotiation(data, dcid=dcid, scid=scid):
+                answered.set_result(True)
+
+        def error_received(self, exc: Exception) -> None:  # ICMP port unreachable
+            if not answered.done():
+                answered.set_result(False)
+
+    transport: asyncio.DatagramTransport | None = None
+    try:
+        endpoint, _ = await asyncio.wait_for(
+            loop.create_datagram_endpoint(_Protocol, remote_addr=(host, port), family=socket.AF_INET),
+            timeout=timeout,
+        )
+        transport = endpoint
+        packet = quic_vn_request(dcid, scid)
+        for _ in range(3):
+            endpoint.sendto(packet)
+            try:
+                return await asyncio.wait_for(asyncio.shield(answered), timeout=timeout / 3)
+            except asyncio.TimeoutError:
+                continue
+        return False
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("Relay UDP probe %s:%d failed: %s: %s", host, port, type(exc).__name__, exc)
+        return False
+    finally:
+        if transport is not None:
+            transport.close()
+
+
+async def udp_relay_probe(host: str, port: int) -> bool | None:
+    """UDP through the relay: True/False, or None when this host's own QUIC server
+    does not answer the control probe either (nothing to judge the relay by)."""
+    if not await quic_probe("127.0.0.1", port):
+        return None
+    return await quic_probe(host, port)
 
 
 class RelayHealthMonitor:
@@ -186,6 +271,8 @@ class ProbeResult:
     checked_at: str
     # The host that was probed (the relay's host may have changed since).
     host: str
+    # The UDP (Hysteria2) part: None = not probed or not judged (see udp_relay_probe).
+    udp: bool | None = None
 
 
 class _Checkable(Protocol):
@@ -213,6 +300,7 @@ class RelayHealthSupervisor:
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], str] = _utc_now,
         bot: Bot | None = None,
+        udp_probe: Callable[[str], Awaitable[bool | None]] | None = None,
     ) -> None:
         self._load_relays = load_relays
         self._port = port
@@ -220,6 +308,8 @@ class RelayHealthSupervisor:
         self._admin_ids = admin_ids
         self._window = window
         self._probe = probe
+        # Hysteria2 through the relay; None = TCP only (Hysteria2 is off).
+        self._udp_probe = udp_probe
         self._clock = clock
         self._wall_clock = wall_clock
         self.bot = bot
@@ -249,8 +339,19 @@ class RelayHealthSupervisor:
             ok = await tls_probe(relay.host, self._port, self._sni)
         else:
             ok = await probe(relay.host, self._port, self._sni)
-        self._last[relay.id] = ProbeResult(ok=bool(ok), checked_at=self._wall_clock(), host=relay.host)
-        return bool(ok)
+        udp: bool | None = None
+        if self._udp_probe is not None:
+            try:
+                udp = await self._udp_probe(relay.host)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Relay UDP probe of %s raised", relay.name, exc_info=True)
+                udp = False
+        # A relay is up when TCP passes and UDP did not FAIL (None: not judged).
+        ok = bool(ok) and udp is not False
+        self._last[relay.id] = ProbeResult(ok=ok, checked_at=self._wall_clock(), host=relay.host, udp=udp)
+        return ok
 
     async def probe_now(self, relay: Relay) -> ProbeResult:
         """«Проверить сейчас»: one probe outside the loop, recorded for the card.
@@ -326,12 +427,21 @@ def build_relay_health_supervisor(
     two consecutive failed probes (one interval of continuous failure) and back
     up after two consecutive successful ones.
     """
+    udp: Callable[[str], Awaitable[bool | None]] | None = None
+    if settings.hysteria2_enabled:
+        port = settings.hysteria2_port
+
+        async def udp(host: str) -> bool | None:
+            # Looked up at call time so tests can monkeypatch the module's probe.
+            return await udp_relay_probe(host, port)
+
     return RelayHealthSupervisor(
         load_relays=load_relays,
         port=settings.xray_public_port,
         sni=settings.xray_sni,
         admin_ids=settings.admin_ids,
         window=float(settings.relay_health_interval),
+        udp_probe=udp,
     )
 
 
