@@ -222,11 +222,19 @@ for bad in "status; id" "status && id" 'status $(id)' "id" "sh -c id" "uninstall
   rc="$(agent "$bad")"
   [[ "$rc" == 2 ]] || fail "'${bad}' exited ${rc}, expected 2"
 done
+# A login without a command: the forced command runs with no SSH_ORIGINAL_COMMAND -> refused.
 set +e
-ssh_main -tt </dev/null >"${WORK}/shell.out" 2>&1
+ssh_main </dev/null >"${WORK}/shell.out" 2>&1
 rc=$?
 set -e
-[[ "$rc" == 2 ]] || fail "an interactive login exited ${rc}, expected 2 (refused)"
+[[ "$rc" == 2 ]] || fail "a login without a command exited ${rc}, expected 2 (refused): $(cat "${WORK}/shell.out")"
+# A forced tty: `restrict` denies the pty, and ssh -tt gives up on that itself (255).
+set +e
+ssh_main -tt </dev/null >"${WORK}/tty.out" 2>&1
+rc=$?
+set -e
+[[ "$rc" != 0 ]] || fail "ssh -tt succeeded"
+grep -q 'PTY allocation request failed' "${WORK}/tty.out" || fail "the pty was not denied: $(cat "${WORK}/tty.out")"
 set +e
 ssh_main -o ExitOnForwardFailure=yes -R 127.0.0.1:18022:127.0.0.1:22 status >/dev/null 2>&1
 rc=$?
