@@ -74,11 +74,12 @@ ssh_main() {
     -o ConnectTimeout=10 root@127.0.0.1 "$@"
 }
 
-# rc of an ssh request, its JSON on stdout in $WORK/out.json
+# rc of an ssh request, its JSON on stdout in $WORK/out.json. `--` first: OpenSSH parses
+# options after the destination too, so a request starting with "-" would be ssh's own.
 agent() {
   local rc
   set +e
-  ssh_main "$@" >"${WORK}/out.json" 2>"${WORK}/out.err"
+  ssh_main -- "$1" >"${WORK}/out.json" 2>"${WORK}/out.err"
   rc=$?
   set -e
   printf '%s' "$rc"
