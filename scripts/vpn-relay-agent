@@ -433,6 +433,32 @@ def cmd_status(_: dict[str, str]) -> dict[str, Any]:
     return facts(with_check=True)
 
 
+def only_input_filter_failures(check_output: str) -> bool:
+    """Every FAIL line of `vpn-relay-apply check` is about the input filter.
+
+    check exits with the code of its FIRST failure and runs the input filter's steps
+    before the forwarding, conntrack, TCP and TLS ones, so an exit 16-18 alone does not
+    say the upstream answered — the FAIL lines do.
+    """
+    fails = [line for line in check_output.splitlines() if "FAIL: " in line]
+    return bool(fails) and all("vpnrelay_input" in line or "listening but filtered" in line for line in fails)
+
+
+def read_text_or_none(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def restore_text(path: Path, text: str | None) -> None:
+    if text is None:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+    else:
+        write_atomic(path, text, 0o644)
+
+
 def cmd_apply(args: dict[str, str]) -> dict[str, Any]:
     target = args["target"]
     if not valid_dns_name(target):
@@ -446,6 +472,9 @@ def cmd_apply(args: dict[str, str]) -> dict[str, Any]:
         if not resolve(target):
             raise Failed(f"{target} does not resolve to an IPv4 address on the relay — nothing changed")
         before = read_env()
+        # apply rewrites the last-known address for the NEW name; a rollback whose old
+        # name does not resolve right now needs the old one back, or it is refused (20).
+        cache_before = read_text_or_none(UPSTREAM_STATE)
         after = env_with(
             before,
             {
@@ -458,13 +487,18 @@ def cmd_apply(args: dict[str, str]) -> dict[str, Any]:
         write_atomic(ENV_FILE, after)
         applied = run([APPLY_HELPER, "apply"], timeout=120)
         checked = run([APPLY_HELPER, "check"], timeout=90) if applied.returncode == 0 else None
-        # Only a passing check, or one that fails for the input filter alone (16-18: not
-        # what apply changed), keeps the new forward. Everything else rolls back: 13/14
-        # the upstream does not answer, 10-12/15/20 the table or the sysctls did not
-        # take, 124 the check timed out (never validated), 127 it could not run.
-        tolerated = (0, 16, 17, 18)
-        if applied.returncode != 0 or (checked is not None and checked.returncode not in tolerated):
+        # Only a passing check, or one whose every failure is the input filter's (16-18,
+        # not what apply changed — judged by the FAIL lines, not the first exit code),
+        # keeps the new forward. Everything else rolls back: 13/14 the upstream does not
+        # answer, 10-12/15/20 the table or the sysctls did not take, 124 the check timed
+        # out (never validated), 127 it could not run.
+        kept = checked is not None and (
+            checked.returncode == 0
+            or (checked.returncode in (16, 17, 18) and only_input_filter_failures(checked.stdout + checked.stderr))
+        )
+        if applied.returncode != 0 or not kept:
             write_atomic(ENV_FILE, before)
+            restore_text(UPSTREAM_STATE, cache_before)
             back = run([APPLY_HELPER, "apply"], timeout=120)
             failed = applied if applied.returncode != 0 or checked is None else checked
             restored = "restored" if back.returncode == 0 else f"RESTORE FAILED, rc {back.returncode}"
@@ -600,6 +634,11 @@ def installer_relay() -> dict[str, Any] | None:
     return install
 
 
+def table_gone(family: str, table: str) -> bool:
+    """Proven absent: nft ran and said so (a timeout or a missing nft proves nothing)."""
+    return run(["nft", "list", "table", family, table], timeout=10).returncode not in (0, 124, 127)
+
+
 def internal_uninstall() -> int:
     steps: list[str] = []
     install = installer_relay()
@@ -612,6 +651,16 @@ def internal_uninstall() -> int:
     for family, table in TABLES:
         if run(["nft", "list", "table", family, table], timeout=10).returncode == 0:
             run(["nft", "delete", "table", family, table], timeout=10)
+    # Nothing that a retry needs (the key, the pairing, the helpers) goes before the
+    # data plane is really gone: a table that survived would keep forwarding with no
+    # way left for the bot to finish the job.
+    left = [f"{family} {table}" for family, table in TABLES if not table_gone(family, table)]
+    if left:
+        message = (f"table {', '.join(left)} could not be removed — the units are stopped, but the key, "
+                   "the pairing and the helpers stay so the bot can retry uninstall")
+        write_json(UNINSTALL_RESULT, {"ok": False, "message": message, "steps": steps})
+        journal(message)
+        return 1
     steps.append("units stopped and disabled, tables removed")
     for unit in UNITS:
         with contextlib.suppress(FileNotFoundError):

@@ -193,6 +193,10 @@ class Host:
         self.keys.write_text(OPERATOR_LINE + KEY_LINE + "# keep me\n", encoding="utf-8")
         self.apply_rc: list[int] = [0]
         self.check_rc = 0
+        # Extra lines `vpn-relay-apply check` prints (FAIL lines decide what apply keeps).
+        self.check_output = "vpn-relay-apply: ok: table ip vpnrelay matches"
+        # Tables `nft delete` cannot remove (uninstall must then keep the key).
+        self.undeletable: set[str] = set()
         self.dns = {"vpn.example.com": "203.0.113.10", "new.example.com": "198.51.100.20"}
         self.sshd_ports = [22]
         self.stubs()
@@ -221,12 +225,26 @@ class Host:
             f'  n=$(grep -c "^vpn-relay-apply apply" "{self.log}")\n'
             f'  rc=$(sed -n "${{n}}p" "{rcs}"); [[ -n "$rc" ]] || rc=$(tail -n1 "{rcs}")\n'
             f'  cp "{self.env_path}" "{self.tmp}/env-at-apply-$n"\n'
+            f'  cache="{self.root}/etc/vpn-relay/upstream.resolved"\n'
+            f'  if [[ -f "$cache" ]]; then cp "$cache" "{self.tmp}/cache-at-apply-$n"; fi\n'
+            # like the real helper: an apply remembers the address of the name it applied
+            f'  h=$(sed -n "s/^RELAY_UPSTREAM_HOST=//p" "{self.env_path}" | tail -n1)\n'
+            f'  printf "host=%s\\nipv4=192.0.2.99\\nat=1\\n" "$h" > "$cache"\n'
             f'  echo "applied"; exit "$rc"\nfi\n'
-            f'if [[ "$1" == check ]]; then echo "ok: table ip vpnrelay matches"; exit {self.check_rc}; fi\nexit 0\n',
+            f'if [[ "$1" == check ]]; then cat "{self.tmp}/check-output"; exit {self.check_rc}; fi\nexit 0\n',
         )
         hosts = "\n".join(f'  {n}) echo "{a}      STREAM {n}";;' for n, a in self.dns.items())
         self.stub("getent", f'case "$2" in\n{hosts}\n  *) exit 2;;\nesac\n')
-        self.stub("nft", 'echo "table ip vpnrelay { chain pre { iifname \\"eth0\\" tcp dport 443 counter dnat to 203.0.113.10:443 } }"\n')
+        (self.tmp / "check-output").write_text(self.check_output + "\n", encoding="utf-8")
+        gone = self.tmp / "nft-gone"
+        gone.mkdir(exist_ok=True)
+        stuck = " ".join(self.undeletable)
+        self.stub(
+            "nft",
+            f'if [[ "$1" == delete ]]; then case " {stuck} " in *" $3-$4 "*) exit 1;; esac; touch "{gone}/$3-$4"; exit 0; fi\n'
+            f'if [[ "$1" == list && -e "{gone}/$3-$4" ]]; then echo "Error: No such file or directory" >&2; exit 1; fi\n'
+            'echo "table ip vpnrelay { chain pre { iifname \\"eth0\\" tcp dport 443 counter dnat to 203.0.113.10:443 } }"\n',
+        )
         ss = "\n".join(f'LISTEN 0 4096 0.0.0.0:{p} 0.0.0.0:* users:(("sshd",pid=1,fd=3))' for p in self.sshd_ports)
         self.stub("ss", f"cat <<'EOF'\n{ss}\nEOF\n")
         self.stub("systemctl", 'case "$1" in is-active) echo active;; esac\nexit 0\n')
@@ -459,8 +477,45 @@ def test_apply_rolls_back_on_any_check_result_it_does_not_tolerate(host: Host, r
 def test_apply_keeps_the_forward_when_only_the_input_filter_check_fails(host: Host, rc: int) -> None:
     host.pair(paired=True)
     host.check_rc = rc
+    host.check_output = (
+        "vpn-relay-apply: FAIL: table inet vpnrelay_input differs from the render\n"
+        "vpn-relay-apply: FAIL: tcp/9100 listening but filtered: x listens on 0.0.0.0\n"
+        "vpn-relay-apply: ok: TCP connect 198.51.100.20:443"
+    )
     assert host.run("apply target=new.example.com tcp=443 udp=443")[0] == 0
     assert "RELAY_UPSTREAM_HOST=new.example.com" in host.env_path.read_text(encoding="utf-8")
+
+
+def test_apply_rollback_puts_back_the_old_upstream_cache(host: Host) -> None:
+    """The first apply writes the NEW name's last-known address; the rollback must put
+    the old one back before it re-applies, or a DNS-less moment refuses it (exit 20)."""
+    host.pair(paired=True)
+    cache = host.root / "etc/vpn-relay/upstream.resolved"
+    cache.write_text("host=vpn.example.com\nipv4=203.0.113.10\nat=1\n", encoding="utf-8")
+    host.check_rc = 13
+    assert host.run("apply target=new.example.com tcp=443 udp=443")[0] == 4
+    assert (host.tmp / "cache-at-apply-2").read_text(encoding="utf-8").startswith("host=vpn.example.com\nipv4=203.0.113.10")
+
+
+def test_apply_rollback_removes_a_cache_that_did_not_exist(host: Host) -> None:
+    host.pair(paired=True)
+    host.check_rc = 13
+    assert host.run("apply target=new.example.com tcp=443 udp=443")[0] == 4
+    assert not (host.tmp / "cache-at-apply-2").exists(), "no cache of the new name when the old apply ran"
+
+
+def test_an_input_filter_exit_code_does_not_hide_a_dead_upstream(host: Host) -> None:
+    """check exits with its FIRST failure (the input filter's 18) although TCP failed too."""
+    host.pair(paired=True)
+    before = host.env_path.read_text(encoding="utf-8")
+    host.check_rc = 18
+    host.check_output = (
+        "vpn-relay-apply: FAIL: tcp/9100 listening but filtered: node_exporter listens on 0.0.0.0\n"
+        "vpn-relay-apply: FAIL: TCP connect 198.51.100.20:443 failed: timed out"
+    )
+    rc, payload = host.run("apply target=new.example.com tcp=443 udp=443")
+    assert rc == 4 and "rolled back" in payload["error"]
+    assert host.env_path.read_text(encoding="utf-8") == before
 
 
 def test_apply_with_a_dead_upstream_rolls_back(host: Host) -> None:
@@ -501,6 +556,22 @@ def test_uninstall_removes_what_the_installer_installed(host: Host) -> None:
     calls = host.calls()
     assert "systemctl disable --now vpn-relay.service" in calls
     assert "sysctl -q -w net.ipv4.ip_forward=0" in calls
+
+
+def test_uninstall_keeps_the_key_when_a_table_survives(host: Host) -> None:
+    """A table nft could not delete keeps forwarding: the key, the pairing and the
+    helpers stay, so the bot can run uninstall again."""
+    _installed(host, created_app_dir=True)
+    host.undeletable = {"ip-vpnrelay"}
+    rc, payload = host.run("uninstall")
+    assert rc == 4 and "could not be removed" in payload["error"]
+    assert KEY_LINE in host.keys.read_text(encoding="utf-8")
+    assert host.pairing_path.exists()
+    assert (host.root / "usr/local/sbin/vpn-relay-agent").exists()
+    assert (host.root / "etc/vpn-relay/install.json").exists()
+    host.undeletable = set()
+    assert host.run("uninstall")[0] == 0, "the retry finishes the job"
+    assert KEY_LINE not in host.keys.read_text(encoding="utf-8")
 
 
 def test_uninstall_keeps_an_app_dir_it_did_not_create(host: Host) -> None:
