@@ -598,3 +598,49 @@ class WizardRun:
     updated_at: str
     finished_at: str | None
     reported_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RelayAgent:
+    """A relay the bot manages over SSH (table ``relay_agents``, docs/relay.md).
+
+    Exists only for a relay paired through «Мастер настройки → Relay → Добавить»;
+    a relay added by hand in the panel has none and is not managed.
+    """
+
+    relay_id: int
+    # Where the agent answers: root@ssh_host:ssh_port, the bot's key only.
+    ssh_host: str
+    ssh_port: int
+    # The relay's host key pinned at the first contact: "<type> <base64>".
+    host_key: str
+    # What the relay forwards: the main server's DNS name and the ports.
+    target_host: str
+    tcp_ports: tuple[int, ...]
+    udp_ports: tuple[int, ...]
+    agent_version: str
+    paired_at: str
+    # The last `status` answer (JSON object) and when it came.
+    last_status: dict[str, object] | None
+    last_status_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RelayPairing:
+    """One issued pairing code (table ``relay_pairings``).
+
+    ``token`` is empty once the pairing ended (completed, cancelled, expired).
+    """
+
+    id: int
+    name: str
+    token: str
+    target_host: str
+    tcp_ports: tuple[int, ...]
+    udp_ports: tuple[int, ...]
+    state: str
+    expires_at: int
+    created_by: int | None
+    created_at: str
+    relay_id: int | None
+    completed_at: str | None

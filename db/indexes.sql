@@ -92,3 +92,4 @@ CREATE INDEX IF NOT EXISTS idx_announcement_deliveries_status ON announcement_de
 CREATE UNIQUE INDEX IF NOT EXISTS idx_wizard_runs_one_active ON wizard_runs(active);
 CREATE INDEX IF NOT EXISTS idx_wizard_runs_created ON wizard_runs(created_at);
 CREATE INDEX IF NOT EXISTS idx_totp_backup_codes_user ON totp_backup_codes(telegram_user_id, used_at);
+CREATE INDEX IF NOT EXISTS idx_relay_pairings_state ON relay_pairings(state, expires_at);

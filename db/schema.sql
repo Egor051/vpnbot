@@ -231,6 +231,44 @@ CREATE TABLE IF NOT EXISTS relays (
   updated_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL
 );
 
+-- Relays the bot manages over SSH, paired in «Мастер настройки → Relay → Добавить»
+-- (services/relay_agents.py, docs/relay.md). Mirrors _migrate_v43.
+--   relay_agents — one row per managed relay: where its agent answers (ssh_host,
+--             ssh_port), the host key pinned at the first contact (TOFU: "<type>
+--             <base64>"), what it forwards (target_host — the main server's DNS
+--             name — and the ports) and its last `status`. Goes with the relay.
+--   relay_pairings — issued pairing codes. ``token`` is the one-time token the bot
+--             sends in `hello`; it is cleared as soon as the pairing ends
+--             (completed / cancelled / expired), so only a live code keeps one.
+CREATE TABLE IF NOT EXISTS relay_agents (
+  relay_id INTEGER PRIMARY KEY REFERENCES relays(id) ON DELETE CASCADE,
+  ssh_host TEXT NOT NULL,
+  ssh_port INTEGER NOT NULL CHECK (ssh_port BETWEEN 1 AND 65535),
+  host_key TEXT NOT NULL,
+  target_host TEXT NOT NULL,
+  tcp_ports TEXT NOT NULL,
+  udp_ports TEXT NOT NULL,
+  agent_version TEXT NOT NULL DEFAULT '',
+  paired_at TEXT NOT NULL,
+  last_status_json TEXT,
+  last_status_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS relay_pairings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  token TEXT NOT NULL DEFAULT '',
+  target_host TEXT NOT NULL,
+  tcp_ports TEXT NOT NULL,
+  udp_ports TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'completed', 'cancelled', 'expired')),
+  expires_at INTEGER NOT NULL,
+  created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  relay_id INTEGER REFERENCES relays(id) ON DELETE SET NULL,
+  completed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS trial_key_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_user_id INTEGER NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
