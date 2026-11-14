@@ -414,6 +414,10 @@ OUT_OF_REPO_HELPERS=(
   # L4 relay data plane: executed by deploy/relay/vpn-relay.service (ExecStart=),
   # so `required` on every relay host; invisible on a main server.
   "scripts/vpn-relay-apply|/usr/local/sbin/vpn-relay-apply|required|relay"
+  # The relay agent (docs/relay.md#the-agent-vpn-relay-agent): the forced command of the
+  # main bot's key, installed by scripts/install.sh --relay only — a relay deployed by
+  # hand has none, so absent-ok; where it is installed a redeploy keeps it current.
+  "scripts/vpn-relay-agent|/usr/local/sbin/vpn-relay-agent|absent-ok|relay"
   # The host invariants check (docs/host-state.md#effective-state): executed by
   # vpn-bot-host-check.service (a MANAGED_HOST_FILES unit of BOTH roles), so
   # `required` on every host of either role — one entry per role.
