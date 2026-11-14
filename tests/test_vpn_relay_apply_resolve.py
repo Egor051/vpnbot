@@ -130,7 +130,7 @@ def test_without_a_live_table_the_lowest_address_wins(named: NamedRelay) -> None
 
 def test_non_unicast_answers_are_ignored(named: NamedRelay) -> None:
     named.live_listing = None
-    named.dns[HOST] = ["127.0.0.1", "0.0.0.0", "240.0.0.1", NEW]
+    named.dns[HOST] = ["127.0.0.1", "0.0.0.0", "240.0.0.1", NEW]  # noqa: S104 — a DNS answer, not a bind
     result = named.run("show")
     assert result.returncode == 0, result.stderr
     assert f"dnat to {NEW}:443" in result.stdout

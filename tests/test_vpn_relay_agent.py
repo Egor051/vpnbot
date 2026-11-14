@@ -590,7 +590,7 @@ def test_update_never_goes_backwards(repo_host: tuple[Host, Path]) -> None:
 
 
 def test_failed_installer_puts_the_checkout_back(repo_host: tuple[Host, Path]) -> None:
-    host, origin = repo_host
+    host, _ = repo_host
     app = host.root / "opt/vpn-service"
     before = _git(app, "rev-parse", "HEAD")
     rc, payload = _run_update(host, installer_rc=1)

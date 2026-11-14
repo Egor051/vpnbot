@@ -1241,6 +1241,9 @@ relay_adopt_file() {
 # the live tables (as nft lists them), the hand-made /etc/vpn-relay.nft (then moved
 # away, so nothing loads it again), the unit, the sysctl file, the helpers, .env.
 relay_backup_existing() {
+  # Files vpn-relay-apply writes itself: gone again on a rollback when they are new.
+  [[ -e "$RELAY_SYSCTL_FILE" ]] || manifest_add file "$RELAY_SYSCTL_FILE"
+  [[ -e "${RELAY_STATE_DIR}/upstream.resolved" ]] || manifest_add file "${RELAY_STATE_DIR}/upstream.resolved"
   if [[ "$STATE" == fresh ]]; then
     # Nothing to keep; the records make a rollback delete whatever got applied.
     relay_record_tables

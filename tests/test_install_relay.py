@@ -275,7 +275,7 @@ def test_authorize_key_adds_one_restricted_line(tmp_path: Path) -> None:
     keys.write_text(
         OPERATOR
         + f"{PUBKEY} copied-by-hand\n"
-        + f'restrict,command="/usr/local/sbin/vpn-relay-agent" ssh-ed25519 OLDKEY vpn-relay-agent\n'
+        + 'restrict,command="/usr/local/sbin/vpn-relay-agent" ssh-ed25519 OLDKEY vpn-relay-agent\n'
         + "# comment",
         encoding="utf-8",
     )
@@ -466,3 +466,19 @@ def test_relay_mode_never_reaches_the_bot_api() -> None:
     relay = text[start:end]
     for needle in ("TG_API_BASE", "telegram_get_me", "BOT_TOKEN", "api.telegram.org"):
         assert needle not in relay, needle
+
+
+def test_files_the_helper_writes_are_removed_by_a_rollback(tmp_path: Path) -> None:
+    """vpn-relay-apply writes the sysctl file and upstream.resolved itself: a rollback
+    of a relay that had neither leaves neither."""
+    sysctl = tmp_path / "etc/sysctl.d/90-vpn-relay.conf"
+    state = tmp_path / "etc/vpn-relay/upstream.resolved"
+    stubs = {"nft": "[[ \"$1\" == list ]] && exit 1\nexit 0\n"}
+    _ok(_run(
+        tmp_path,
+        f'STATE=adopt; RELAY_EXISTING_CHECKOUT=0; open_log; arm_rollback; relay_backup_existing; '
+        f'mkdir -p "{state.parent}"; echo x > "{sysctl}"; echo y > "{state}"; rollback',
+        stubs=stubs,
+    ))
+    assert not sysctl.exists() and not state.exists()
+

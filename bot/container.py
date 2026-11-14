@@ -25,6 +25,7 @@ from services.online_clients import OnlineClientsService
 from services.protocol_modules import ProtocolModulesService
 from services.protocol_uninstall import ProtocolUninstallService
 from services.proxy import ProxyService
+from services.relay_agents import RelayAgentService
 from services.relay_health import RelayHealthSupervisor
 from services.relay_management import RelayService
 from services.server_status import ServerStatusService
@@ -121,3 +122,6 @@ class Services:
     # The setup wizard (services/wizard.py, «🧙 Мастер настройки»): runs of fixed root
     # helper modes in their own systemd units. None only in lightweight test doubles.
     wizard: WizardService | None = None
+    # Relays the bot installs and manages over SSH («🧙 Мастер настройки → 🛰 Relay»,
+    # services/relay_agents.py). None only in lightweight test doubles.
+    relay_agents: RelayAgentService | None = None

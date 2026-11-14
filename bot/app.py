@@ -30,7 +30,7 @@ from adapters.systemctl import SystemCtlAdapter
 from adapters.xray_config import XrayConfigAdapter, vless_inbound_present
 from adapters.xray_stats import XrayStatsAdapter
 from bot.container import Services
-from bot.handlers import admin, admin_bundles, admin_dashboard, admin_maintenance, admin_modules, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, security, settings as settings_handler, ssh_port, start, ufw
+from bot.handlers import admin, admin_bundles, admin_dashboard, admin_maintenance, admin_modules, admin_relay_agents, admin_relays, admin_warp, admin_warp_split, admin_warp_split_sources, admin_warp_split_ui, admin_wizard, callbacks, common, key_bundles, keys, proxy, security, settings as settings_handler, ssh_port, start, ufw
 from bot.keyboards.warp_split_sources_keyboard import warp_split_pending_keyboard
 from bot.wizard_notifier import TelegramWizardNotifier
 from bot.middlewares.access import BlockedUserMiddleware
@@ -51,6 +51,7 @@ from repositories.key_bundles import KeyBundleRepository
 from repositories.protocol_modules import ProtocolModulesRepository
 from repositories.proxy_entries import ProxyRepository
 from repositories.proxy_accesses import ProxyAccessRepository
+from repositories.relay_agents import RelayAgentRepository
 from repositories.relays import RelayRepository
 from repositories.traffic_stats import TrafficStatsRepository
 from repositories.trial_requests import TrialKeyRequestRepository
@@ -86,6 +87,8 @@ from services.ssh_port import SshPortMonitor
 from services.ufw import UfwApplier, UfwDeadmanMonitor
 from services.relay_health import build_relay_health_supervisor
 from services.relay_management import RelayService
+from services.relay_agents import RelayAgentService
+from services.relay_ssh import RelayAgentClient, RelayKeyStore
 from services.server_status import ServerStatusService
 from services.socks5 import Socks5Service
 from services.superadmin_claim import SuperadminClaimService, claim_status
@@ -895,6 +898,20 @@ async def _build_app(
         store=db,
     )
 
+    # Relays the bot installs itself (the relay installer's pairing code) and manages
+    # over SSH with its one ed25519 key — services/relay_agents.py, docs/relay.md.
+    relay_agent_service = RelayAgentService(
+        repo=RelayAgentRepository(db),
+        relays=relay_service,
+        users=user_service,
+        audit=audit_service,
+        clock=clock,
+        keys=RelayKeyStore(),
+        client=RelayAgentClient(ShellRunner(max_output_chars=200_000), RelayKeyStore()),
+        settings=settings,
+        source_root=Path(__file__).resolve().parents[1],
+    )
+
     services = Services(
         settings=settings,
         db=db,
@@ -938,6 +955,7 @@ async def _build_app(
         superadmin_claim=superadmin_claim_service,
         totp=totp_service,
         wizard=wizard_service,
+        relay_agents=relay_agent_service,
     )
 
     await _startup_reconcile_keys(services)
@@ -1008,6 +1026,7 @@ async def _build_app(
     dp.include_router(admin_warp_split_sources.router)
     dp.include_router(admin_modules.router)
     dp.include_router(admin_relays.router)
+    dp.include_router(admin_relay_agents.router)
     dp.include_router(admin_maintenance.router)
     dp.include_router(ssh_port.router)
     dp.include_router(ufw.router)

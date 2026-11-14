@@ -8,6 +8,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Relay with one command: the installer's relay mode, the relay agent and pairing from «🧙 Мастер
+  настройки → 🛰 Relay → ➕ Добавить relay» (docs/relay.md#installing-a-relay-with-one-command).** A relay has
+  **no Telegram bot and never talks to the Telegram API**. **Pairing (main)**: the bot generates its relay key
+  once (`/etc/vpn-bot/relay_ssh/id_ed25519`, ed25519 via `cryptography`, `0600`, never replaced, refused when
+  not private) and issues a code — `base64url(JSON{v, target_host, ports ["443/tcp","443/udp"], main_pubkey,
+  one_time_token, exp = 30 min})`, `target_host` the main server's **DNS name**, never an IP
+  (`services/relay_pairing.py`) — plus ONE command: the installer of the bot's own commit, its sha256 pinned,
+  the code on stdin (`printf` builtin, never an argv). Issuing is TOTP-gated (`relay_pair`). **Installer
+  (relay)**: `install.sh --relay` / mode `2` — the code is the only input (no token, no Telegram ID, no Bot
+  API reachability check); read-only preconditions (key login for root judged by `sshd -T -C …`, sshd_config
+  never written; ufw not enabled; the target resolves; no forwarded TCP port is an sshd port; not a main
+  server); then nftables, the checkout, a relay `.env` with `RELAY_UPSTREAM_HOST`, `pairing.json` (the
+  token's sha256 only), `vpn-relay-apply` + `vpn-relay-agent`, `vpn-relay.service` and
+  `vpn-relay-resolve.{service,timer}`, and one `restrict,command="/usr/local/sbin/vpn-relay-agent"` line in
+  root's authorized_keys (an unrestricted copy of the same key goes). A running relay is swapped with
+  `systemctl reload` (new `ExecReload=` = the same atomic `nft -f`), never restarted. Verification:
+  `vpn-relay-apply check` and **exactly one DNAT rule per forwarded port in the whole ruleset**. **Adoption**:
+  a hand-made relay (`/etc/vpn-relay.nft`, `vpn-relay.service`, `table ip vpnrelay`) is replaced atomically
+  (same table name, one transaction), everything old kept in `/var/backups/vpn-relay/adopt-<ts>/`; new
+  manifest records `adopted`, `nft` (the live table restored from its dump in one transaction), `sysctl`,
+  `gitref` make the rollback put it all back. **Agent** (`scripts/vpn-relay-agent`, stdlib Python, the forced
+  command): a full-string whitelist of `SSH_ORIGINAL_COMMAND` — `hello <token>` (sha256, constant time, within
+  the expiry; nothing else before it), `status`, `apply target=<dns> tcp=<ports> udp=<ports>` (strict; an sshd
+  port refused; `.env` put back on a failed apply/check), `update` (newest `vX.Y.Z`, never backwards, in a
+  transient unit, rolled back), `uninstall` (in a transient unit; only on an installer relay); everything else
+  exit 2 before anything runs. **Completion**: the operator sends the relay's address; the bot connects (trust
+  on first use: the host key pinned, then `StrictHostKeyChecking=yes` under `HostKeyAlias`), runs `hello`,
+  checks TCP and UDP through the relay, registers it in `relays` (its source IPs — the anomaly detector's
+  exclusions — are the address it is reached at and its reported egress) and the health loop alerts on it.
+  **Management** from the wizard: list, status, «Обновить», «Порты / цель», «Удалить» (uninstall + the row;
+  TOTP: `relay_update`, `relay_apply`, `relay_uninstall`). Schema **v43**: `relay_agents`, `relay_pairings`
+  (the token cleared when a pairing ends).
+- **`RELAY_UPSTREAM_HOST` and `vpn-relay-apply resolve` (docs/relay.md#a-dns-name-as-the-upstream).** nftables
+  resolves names only at load, so the helper resolves the name itself at every render (the live address kept
+  among several A records, the last-known address as the boot fallback for the same name; exit `20` otherwise)
+  and `vpn-relay-resolve.timer` re-resolves every 5 minutes, reloading the table atomically only when the
+  address changed.
+- **Relay health: UDP.** With Hysteria2 on, the relay health loop (and the pairing check) also sends a QUIC
+  packet with a greasing version through the relay — answered by version negotiation (RFC 9000 §6) — after a
+  control probe to 127.0.0.1, so UDP is never called down when this host's own server does not answer either.
+- **CI: `relay-installer-e2e`** on a real ubuntu-24.04 VM: a hand-made relay, an injected failure that must
+  restore it exactly, the adopting install with one DNAT per port, the agent over a real ssh (whitelist,
+  injections, interactive login and forwarding refused), apply, the resolve timer, uninstall.
+
 - **Setup wizard: «🧙 Мастер настройки» in the admin panel (docs/wizard.md), SUPERADMIN only.**
   Every mode is a fixed set of root helpers in `scripts/wizard/` (stdlib Python), installed to
   `/usr/local/sbin` by deploy.sh (`OUT_OF_REPO_HELPERS`, `required` on main) and on a fresh host

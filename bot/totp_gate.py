@@ -34,6 +34,10 @@ DANGEROUS_ACTIONS: dict[str, str] = {
     "relay_delete_keys": "dangerous_relay_delete_keys",
     "wizard_dump": "dangerous_wizard_dump",
     "wizard_update": "dangerous_wizard_update",
+    "relay_pair": "dangerous_relay_pair",
+    "relay_update": "dangerous_relay_update",
+    "relay_apply": "dangerous_relay_apply",
+    "relay_uninstall": "dangerous_relay_uninstall",
 }
 
 RESUME_KEY = "totp_resume"

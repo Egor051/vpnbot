@@ -116,6 +116,7 @@ def menu_keyboard(*, active: WizardRun | None, daily: bool) -> InlineKeyboardMar
     rows = [_row(f"{mode_title(key)}", f"wiz:start:{key}") for key in MODES]
     if active is not None:
         rows.insert(0, _row(t("btn_wizard_active", id=active.id, mode=mode_title(active.mode)), f"wiz:run:{active.id}"))
+    rows.append(_row(t("btn_wizard_relay"), "wrl:menu"))
     rows.append(_row(t("btn_wizard_history"), "wiz:hist:0"))
     rows.append(_row(t("btn_wizard_daily_on") if daily else t("btn_wizard_daily_off"), "wiz:sched"))
     rows.append(_row(t("btn_admin_panel"), "admin:panel"))
