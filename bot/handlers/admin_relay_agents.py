@@ -586,7 +586,7 @@ async def _report_deletion(callback: CallbackQuery, services: Services, relay: R
         notice = t("relay_wiz_deleted", name=h(relay.name)) + ("" if uninstalled else "\n" + t("relay_wiz_deleted_record_only"))
         await _edit(callback, *await menu_screen(services, callback.from_user.id, notice))
     else:
-        await _edit(callback, t("relay_wiz_delete_incomplete", name=h(relay.name), remaining=remaining), _back_markup())
+        await _edit(callback, t("relay_wiz_delete_incomplete", name=h(relay.name), remaining=remaining), _back_markup(relay.id))
 
 
 @router.callback_query(F.data.regexp(r"^wrl:(dk|dr):\d+:[01]$"))

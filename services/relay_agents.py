@@ -350,8 +350,12 @@ class RelayAgentService:
         return self._render(await self._pending(pairing_id))
 
     async def cancel(self, actor_user_id: int, pairing_id: int) -> None:
+        """Cancel a pending pairing. Under the completion lock: a cancel never lands in
+        the middle of a completion (it waits for it, then finds nothing pending)."""
         await self.users.require_superadmin(actor_user_id)
-        if await self.repo.finish_pairing(pairing_id, "cancelled", now=self.clock.now()):
+        async with self._lock:
+            cancelled = await self.repo.finish_pairing(pairing_id, "cancelled", now=self.clock.now())
+        if cancelled:
             await self._audit(actor_user_id, "relay_pairing_cancelled", None, {"pairing_id": pairing_id})
 
     async def checks(self, host: str) -> CheckResult:
@@ -419,7 +423,11 @@ class RelayAgentService:
                 # No half-registered relay: without its agent row it would look hand-made.
                 await self.relays.delete(actor_user_id, relay.id, with_keys=False)
                 raise
-            await self.repo.finish_pairing(pairing.id, "completed", now=self.clock.now(), relay_id=relay.id)
+            if not await self.repo.finish_pairing(pairing.id, "completed", now=self.clock.now(), relay_id=relay.id):
+                # Expired or cancelled meanwhile: no relay is registered for a pairing that
+                # is not completed (the agent row goes with the relay row).
+                await self.relays.delete(actor_user_id, relay.id, with_keys=False)
+                raise NotFound("pairing не найден или закрыт", key="relay_pair_not_pending")
         await self._audit(
             actor_user_id,
             "relay_paired",
@@ -478,6 +486,8 @@ class RelayAgentService:
         return relay, agent
 
     async def _call(self, agent: RelayAgent, request: str, *, timeout: float = 120.0) -> AgentReply:
+        if agent_uninstalled(agent) and request != "uninstall":
+            raise RelayAgentError("relay уже снят с хоста", key="relay_agent_uninstalled")
         return await self.client.call(
             agent.ssh_host, agent.ssh_port, request, alias=f"vpn-relay-{agent.relay_id}",
             host_key=agent.host_key, timeout=timeout,
@@ -541,17 +551,24 @@ class RelayAgentService:
         row; the relay keeps forwarding until it is uninstalled by hand.
         """
         relay, agent = await self.get(actor_user_id, relay_id)
-        uninstalled = False
+        uninstalled = agent_uninstalled(agent)
         async with self._lock:
-            if relay_side:
+            if relay_side and not uninstalled:
                 reply = await self._call(agent, "uninstall", timeout=360.0)
                 await self._audit(actor_user_id, "relay_agent_uninstall", relay.id,
                                   {"name": relay.name, "ok": reply.ok, **({} if reply.ok else {"error": reply.error[:300]})})
                 self._require_ok(reply)
+                # The key is no longer authorized there. The agent row stays (marked) until
+                # the relay row is really gone, so an interrupted delete can be resumed from
+                # the wizard; it goes with the relay row (ON DELETE CASCADE).
+                await self.repo.record_status(
+                    relay_id, {**(agent.last_status or {}), UNINSTALLED_KEY: self.clock.now()},
+                    now=self.clock.now(), agent_version=agent.agent_version,
+                )
                 uninstalled = True
-            # The key is no longer authorized there: the relay is not managed any more.
-            await self.repo.delete(relay_id)
         deletion = await self.relays.delete(actor_user_id, relay_id, with_keys=with_keys)
+        if deletion.deleted:
+            await self.repo.delete(relay_id)  # already gone by the cascade; explicit for clarity
         return RemovalReport(relay=relay, uninstalled=uninstalled, deletion=deletion)
 
     async def _audit(self, actor_user_id: int | None, action: str, relay_id: int | None, details: dict[str, object]) -> None:
@@ -562,6 +579,14 @@ class RelayAgentService:
             entity_id=relay_id,
             details=details,
         )
+
+
+UNINSTALLED_KEY = "uninstalled_at"
+
+
+def agent_uninstalled(agent: RelayAgent) -> bool:
+    """``uninstall`` already ran on this relay (a delete that did not finish)."""
+    return bool((agent.last_status or {}).get(UNINSTALLED_KEY))
 
 
 def _slim(payload: dict[str, Any]) -> dict[str, object]:

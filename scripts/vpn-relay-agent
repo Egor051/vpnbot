@@ -458,9 +458,12 @@ def cmd_apply(args: dict[str, str]) -> dict[str, Any]:
         write_atomic(ENV_FILE, after)
         applied = run([APPLY_HELPER, "apply"], timeout=120)
         checked = run([APPLY_HELPER, "check"], timeout=90) if applied.returncode == 0 else None
-        # 13/14: the upstream does not answer — the new target is wrong; 10-12/15/20:
-        # the table or the sysctls did not take. 16-18 belong to the input filter.
-        if applied.returncode != 0 or (checked is not None and checked.returncode in (10, 11, 12, 13, 14, 15, 20)):
+        # Only a passing check, or one that fails for the input filter alone (16-18: not
+        # what apply changed), keeps the new forward. Everything else rolls back: 13/14
+        # the upstream does not answer, 10-12/15/20 the table or the sysctls did not
+        # take, 124 the check timed out (never validated), 127 it could not run.
+        tolerated = (0, 16, 17, 18)
+        if applied.returncode != 0 or (checked is not None and checked.returncode not in tolerated):
             write_atomic(ENV_FILE, before)
             back = run([APPLY_HELPER, "apply"], timeout=120)
             failed = applied if applied.returncode != 0 or checked is None else checked

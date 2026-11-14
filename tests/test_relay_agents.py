@@ -719,3 +719,72 @@ def test_udp_is_probed_only_with_hysteria2(tmp_path: Path) -> None:
     on = build_relay_health_supervisor(_settings(tmp_path, hysteria2_enabled=True), load)
     assert off._udp_probe is None
     assert on._udp_probe is not None
+
+
+async def test_a_cancel_waits_for_a_completion_in_flight(world: World) -> None:
+    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    gate = asyncio.Event()
+    original = world.client.call
+
+    async def slow_call(*args: Any, **kwargs: Any) -> AgentReply:
+        await gate.wait()
+        return await original(*args, **kwargs)
+
+    world.client.call = slow_call  # type: ignore[method-assign]
+    completing = asyncio.create_task(world.service.complete(ADMIN, issued.pairing.id, RELAY_IP))
+    await asyncio.sleep(0.05)
+    cancelling = asyncio.create_task(world.service.cancel(ADMIN, issued.pairing.id))
+    await asyncio.sleep(0.05)
+    assert not cancelling.done(), "the cancel must wait for the completion's lock"
+    gate.set()
+    outcome = await completing
+    await cancelling
+    pairing = await world.repo.get_pairing(issued.pairing.id)
+    assert pairing is not None and pairing.state == "completed" and pairing.relay_id == outcome.relay.id
+    assert "relay_pairing_cancelled" not in world.audit.actions()
+
+
+async def test_a_pairing_closed_during_completion_leaves_no_relay(world: World) -> None:
+    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    original = world.client.call
+
+    async def expiring_call(*args: Any, **kwargs: Any) -> AgentReply:
+        reply = await original(*args, **kwargs)
+        await world.repo.finish_pairing(issued.pairing.id, "expired", now="now")  # closed meanwhile
+        return reply
+
+    world.client.call = expiring_call  # type: ignore[method-assign]
+    with pytest.raises(NotFound):
+        await world.service.complete(ADMIN, issued.pairing.id, RELAY_IP)
+    assert await world.relay_repo.count() == 0
+    assert await world.repo.list_all() == []
+
+
+async def test_an_interrupted_delete_can_be_resumed_without_a_second_uninstall(world: World) -> None:
+    from services.relay_management import RelayDeletionReport
+
+    relay_id = await _paired(world)
+    world.client.replies["uninstall"] = AgentReply(0, {"ok": True})
+    original_delete = world.relays.delete
+    calls = {"n": 0}
+
+    async def flaky_delete(actor: int, rid: int, *, with_keys: bool) -> RelayDeletionReport:
+        calls["n"] += 1
+        if calls["n"] == 1:  # a key failed: the relay row stays
+            relay = await world.relay_repo.get_by_id(rid)
+            assert relay is not None
+            return RelayDeletionReport(relay=relay, deleted=False, remaining_keys=1)
+        return await original_delete(actor, rid, with_keys=with_keys)
+
+    world.relays.delete = flaky_delete  # type: ignore[method-assign]
+    first = await world.service.remove(ADMIN, relay_id, with_keys=True)
+    assert first.uninstalled and not first.deletion.deleted
+    assert [r for r, _ in await world.service.managed(ADMIN)], "still in the wizard, to resume"
+    with pytest.raises(RelayAgentError):
+        await world.service.status(ADMIN, relay_id)  # the key is gone there: a clear refusal
+    uninstalls = sum(1 for c in world.client.calls if c["request"] == "uninstall")
+    second = await world.service.remove(ADMIN, relay_id, with_keys=True)
+    assert second.deletion.deleted and second.uninstalled
+    assert sum(1 for c in world.client.calls if c["request"] == "uninstall") == uninstalls, "no second uninstall"
+    assert await world.repo.get(relay_id) is None
+

@@ -444,6 +444,25 @@ def test_apply_failure_puts_env_back_and_reapplies(host: Host) -> None:
     assert (host.tmp / "env-at-apply-2").read_text(encoding="utf-8") == before
 
 
+@pytest.mark.parametrize("rc", [124, 127, 1])
+def test_apply_rolls_back_on_any_check_result_it_does_not_tolerate(host: Host, rc: int) -> None:
+    """A check that timed out (124) or could not run never validated the new upstream."""
+    host.pair(paired=True)
+    before = host.env_path.read_text(encoding="utf-8")
+    host.check_rc = rc
+    rc_, payload = host.run("apply target=new.example.com tcp=443 udp=443")
+    assert rc_ == 4 and f"exit {rc}" in payload["error"]
+    assert host.env_path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("rc", [16, 17, 18])
+def test_apply_keeps_the_forward_when_only_the_input_filter_check_fails(host: Host, rc: int) -> None:
+    host.pair(paired=True)
+    host.check_rc = rc
+    assert host.run("apply target=new.example.com tcp=443 udp=443")[0] == 0
+    assert "RELAY_UPSTREAM_HOST=new.example.com" in host.env_path.read_text(encoding="utf-8")
+
+
 def test_apply_with_a_dead_upstream_rolls_back(host: Host) -> None:
     host.pair(paired=True)
     before = host.env_path.read_text(encoding="utf-8")

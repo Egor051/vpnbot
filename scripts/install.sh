@@ -1254,6 +1254,9 @@ relay_backup_existing() {
   relay_record_tables
   relay_adopt_file "$RELAY_LEGACY_NFT"
   relay_adopt_file "$RELAY_SYSCTL_FILE"
+  # The last-known address of the OLD target: a rollback must not leave the new
+  # target's cache behind (it would not match the restored name at the next boot).
+  relay_adopt_file "${RELAY_STATE_DIR}/upstream.resolved"
   relay_adopt_file "${SBIN_DIR}/vpn-relay-apply"
   relay_adopt_file "${SBIN_DIR}/vpn-relay-agent"
   local unit

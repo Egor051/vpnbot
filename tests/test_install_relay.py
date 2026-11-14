@@ -482,3 +482,19 @@ def test_files_the_helper_writes_are_removed_by_a_rollback(tmp_path: Path) -> No
     ))
     assert not sysctl.exists() and not state.exists()
 
+
+def test_a_repair_rollback_puts_back_the_old_upstream_cache(tmp_path: Path) -> None:
+    """Re-pair with another target, then a failure: the old target's last-known address
+    must come back (a cache of the new name would be refused at a DNS-less boot)."""
+    state = tmp_path / "etc/vpn-relay/upstream.resolved"
+    state.parent.mkdir(parents=True)
+    state.write_text("host=old.example.com\nipv4=203.0.113.10\nat=1\n", encoding="utf-8")
+    stubs = {"nft": "[[ \"$1\" == list ]] && exit 1\nexit 0\n"}
+    _ok(_run(
+        tmp_path,
+        f'STATE=repair; RELAY_EXISTING_CHECKOUT=0; open_log; arm_rollback; relay_backup_existing; '
+        f'printf "host=new.example.com\\nipv4=198.51.100.20\\nat=2\\n" > "{state}"; rollback',
+        stubs=stubs,
+    ))
+    assert state.read_text(encoding="utf-8").startswith("host=old.example.com")
+
