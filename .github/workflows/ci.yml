@@ -160,12 +160,25 @@ jobs:
           test -r /sys/class/net/out-warp/statistics/rx_bytes
           test -r /sys/class/net/awg0/statistics/rx_bytes
 
-      - name: Run tests (mirror deploy Phase 1 — deterministic, no pytest cache)
+      - name: Run tests (mirror deploy Phase 1 — detached worktree, deterministic, no pytest cache)
         # Same invocation as scripts/deploy.sh Phase 1 (`-p no:cacheprovider`, no
         # xdist, no randomly) so CI reproduces that gate 1:1 — now WITH the tunnel
         # interfaces present. If either determinism plugin is ever added it must go
         # to deploy.sh, the `tests` job AND here, or the three stop reproducing.
-        run: python -m pytest -q -p no:cacheprovider
+        #
+        # And from the same kind of tree: Phase 1 runs pytest in
+        # `git worktree add --detach "$WT" origin/main`, where .git is a FILE
+        # (`gitdir: <repo>/.git/worktrees/<name>`), not the directory of a plain
+        # checkout. Code that reads .git and does not understand a worktree
+        # (services/relay_agents.py::installer_source did) passed here and failed on
+        # the host; run from a worktree, it fails here, before merge. HEAD is the
+        # commit under test (deploy.sh tests origin/main).
+        run: |
+          WT="$(mktemp -d)"
+          git worktree add --detach "$WT" HEAD
+          test -f "$WT/.git"
+          cd "$WT"
+          python -m pytest -q -p no:cacheprovider
 
   installer-e2e:
     # scripts/install.sh end to end on a REAL VM: ubuntu-24.04 with systemd as

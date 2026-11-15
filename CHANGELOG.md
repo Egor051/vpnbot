@@ -905,6 +905,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Relay pairing reads the bot's commit from a `git worktree` too; deploy Phase 1 no longer fails on
+  `test_installer_source_of_this_repository`.** `services/relay_agents.py::installer_source` read
+  `<root>/.git/HEAD` as if `.git` were always a directory. In a linked worktree — `deploy.sh` Phase 1 runs
+  pytest in `git worktree add --detach "$WT" origin/main` — `.git` is a FILE `gitdir: <repo>/.git/worktrees/<name>`:
+  the read failed, the commit was "unknown" (`relay_pair_no_commit`) and Phase 1 stopped at 1 failed / 4981
+  passed while CI was green (the same host-leak class as #239/#241/#242). The checkout is still read from its
+  files, no `git` subprocess: `.git` a directory → it is both the gitdir and the common dir (a plain checkout
+  is read exactly as before); `.git` a regular file (not a symlink, ≤ 4 KiB, one line `gitdir: <path>`, a
+  relative path from the checkout root) → that existing directory is the gitdir and its `commondir` file
+  (relative to it; absent → the gitdir itself, as with `--separate-git-dir`) names the common dir. HEAD comes
+  from the gitdir; a `ref:` (validated as before) from the gitdir, then the common dir, then the common
+  `packed-refs`; `remote "origin"` from the common `config`. Anything else is `relay_pair_no_commit`. Tests: a
+  synthetic worktree (detached HEAD; a branch from the common `packed-refs`, a loose common ref, a
+  per-worktree ref first; a relative gitdir), `--separate-git-dir`, and refusals (no `gitdir:` prefix, two
+  lines, oversized, not UTF-8, a missing or non-directory gitdir/commondir, a symlinked `.git` or `commondir`,
+  a FIFO, no `.git`). **CI `tests-host-like` now runs pytest from `git worktree add --detach "$WT" HEAD`**
+  (`test -f "$WT/.git"` asserts it really is a worktree), as Phase 1 does, so the next `.git` read that does
+  not understand a worktree fails before merge; `tests/test_deploy_host_invariants.py` pins that step and
+  Phase 1's worktree + pytest lines. `deploy.sh` is unchanged.
 - **A host without Xray/AmneziaWG no longer starts with CRITICAL.** The startup drift reconcile
   reported a backend that was never installed (no `config.json`/`awg0.conf` and no keys of that
   type in any status) as degraded: a CRITICAL line and audit rows on every start of a
