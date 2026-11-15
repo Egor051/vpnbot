@@ -963,8 +963,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `test_udp_is_probed_only_with_hysteria2` calls the built UDP probe through stubs; a new
   `test_udp_relay_probe_judges_the_relay_only_after_the_local_control` pins the control step with
   `quic_probe` stubbed. Production code is unchanged. **Test data**: every real host of the project in
-  `tests/` (the relay and server domains, the main server's IPv4 in Python tests, the relay fixtures and the
-  v43 seed) is replaced with RFC 2606 / TEST-NET names (`relay.example.net`, `hy2.example.net`,
+  `tests/` (the relay and server domains, the main server's IPv4 in Python tests, the relay fixtures — and the
+  relay installer e2e that rewrites them — and the v43 seed) is replaced with RFC 2606 / TEST-NET names (`relay.example.net`, `hy2.example.net`,
   `vpn.example.net`, `203.0.113.43`); the one literal kept is the uninstall helper's own fixed wording,
   matched as text. **Guard** (`tests/conftest.py::_forbid_network`, autouse, first): for every test it wraps
   `socket.socket.connect` / `connect_ex` / `sendto` / `sendmsg`, `socket.getaddrinfo`, `gethostbyname`,
