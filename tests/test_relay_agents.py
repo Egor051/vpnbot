@@ -27,6 +27,7 @@ import socket
 import stat
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -163,6 +164,153 @@ def test_installer_source_reads_the_checkout(tmp_path: Path) -> None:
     (git / "refs/heads/main").unlink()
     (git / "packed-refs").write_text(f"# pack-refs\n{SHA} refs/heads/main\n", encoding="utf-8")
     assert installer_source(tmp_path).commit == SHA
+
+
+# A linked worktree as `git worktree add` lays it out (deploy.sh Phase 1 runs pytest in
+# one): the worktree's .git is a FILE `gitdir: <main>/.git/worktrees/wt`; that directory
+# holds HEAD and `commondir` (`../..`); refs, packed-refs and config are in <main>/.git.
+WT_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+BRANCH_SHA = "89abcdef0123456789abcdef0123456789abcdef"
+INSTALLER = b"#!/bin/bash\n# worktree\n"
+
+
+def _linked_worktree(tmp_path: Path, head: str) -> tuple[Path, Path]:
+    """(worktree root, its per-worktree gitdir) next to a main checkout on another commit."""
+    common = tmp_path / "main/.git"
+    (common / "refs/heads").mkdir(parents=True)
+    (common / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (common / "refs/heads/main").write_text(SHA + "\n", encoding="utf-8")
+    (common / "packed-refs").write_text(
+        f"# pack-refs with: peeled fully-peeled sorted\n{BRANCH_SHA} refs/heads/feature\n", encoding="utf-8"
+    )
+    (common / "config").write_text('[core]\n\tbare = false\n[remote "origin"]\n\turl = git@github.com:me/fork.git\n', encoding="utf-8")
+    gitdir = common / "worktrees/wt"
+    gitdir.mkdir(parents=True)
+    (gitdir / "HEAD").write_text(head + "\n", encoding="utf-8")
+    (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+    root = tmp_path / "wt"
+    (gitdir / "gitdir").write_text(f"{root}/.git\n", encoding="utf-8")
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts/install.sh").write_bytes(INSTALLER)
+    (root / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    return root, gitdir
+
+
+def test_installer_source_reads_a_detached_linked_worktree(tmp_path: Path) -> None:
+    root, _ = _linked_worktree(tmp_path, WT_SHA)
+    assert installer_source(root) == Source(
+        owner="me", repo="fork", commit=WT_SHA, installer_sha256=hashlib.sha256(INSTALLER).hexdigest()
+    ), "HEAD from the worktree's own gitdir, origin from the common config"
+
+
+def test_installer_source_reads_a_worktree_branch_from_the_common_dir(tmp_path: Path) -> None:
+    root, gitdir = _linked_worktree(tmp_path, "ref: refs/heads/feature")
+    common = tmp_path / "main/.git"
+    assert installer_source(root).commit == BRANCH_SHA, "packed-refs of the common dir"
+    (common / "refs/heads/feature").write_text(WT_SHA + "\n", encoding="utf-8")
+    assert installer_source(root).commit == WT_SHA, "a loose ref of the common dir before packed-refs"
+    (gitdir / "refs/heads").mkdir(parents=True)
+    (gitdir / "refs/heads/feature").write_text(SHA + "\n", encoding="utf-8")
+    assert installer_source(root).commit == SHA, "the per-worktree gitdir is read first"
+    (root / ".git").write_text("gitdir: ../main/.git/worktrees/wt", encoding="utf-8")
+    assert installer_source(root).commit == SHA, "a relative gitdir is relative to the worktree, no newline needed"
+    (gitdir / "commondir").write_text(f"{common}\n", encoding="utf-8")
+    assert installer_source(root).owner == "me", "an absolute commondir"
+
+
+def test_installer_source_reads_a_separate_git_dir(tmp_path: Path) -> None:
+    """`git init --separate-git-dir`: a .git file, a full gitdir, no commondir file."""
+    sep = tmp_path / "sep.git"
+    (sep / "refs/heads").mkdir(parents=True)
+    (sep / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (sep / "refs/heads/main").write_text(WT_SHA + "\n", encoding="utf-8")
+    (sep / "config").write_text('[remote "origin"]\n\turl = https://github.com/me/fork.git\n', encoding="utf-8")
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts/install.sh").write_bytes(INSTALLER)
+    (root / ".git").write_text("gitdir: ../sep.git\n", encoding="utf-8")
+    source = installer_source(root)
+    assert (source.owner, source.repo, source.commit) == ("me", "fork", WT_SHA)
+
+
+def _gitfile_without_prefix(root: Path, gitdir: Path) -> None:
+    (root / ".git").write_text(f"{gitdir}\n", encoding="utf-8")
+
+
+def _gitfile_misspelled(root: Path, gitdir: Path) -> None:
+    (root / ".git").write_text(f"gitdir:{gitdir}\n", encoding="utf-8")
+
+
+def _gitfile_two_lines(root: Path, gitdir: Path) -> None:
+    (root / ".git").write_text(f"gitdir: {gitdir}\ngitdir: {gitdir}\n", encoding="utf-8")
+
+
+def _gitfile_empty_path(root: Path, gitdir: Path) -> None:
+    (root / ".git").write_text("gitdir: \n", encoding="utf-8")
+
+
+def _gitfile_too_large(root: Path, gitdir: Path) -> None:
+    (root / ".git").write_text(f"gitdir: {gitdir}" + "/" * 4096 + "\n", encoding="utf-8")
+
+
+def _gitfile_not_utf8(root: Path, gitdir: Path) -> None:
+    (root / ".git").write_bytes(b"gitdir: " + bytes(gitdir) + b"\xff\n")
+
+
+def _gitdir_missing(root: Path, gitdir: Path) -> None:
+    (root / ".git").write_text(f"gitdir: {gitdir.parent / 'gone'}\n", encoding="utf-8")
+
+
+def _gitdir_is_a_file(root: Path, gitdir: Path) -> None:
+    (root / ".git").write_text(f"gitdir: {gitdir / 'HEAD'}\n", encoding="utf-8")
+
+
+def _gitfile_symlink(root: Path, gitdir: Path) -> None:
+    real = root.parent / "gitfile"
+    real.write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    (root / ".git").unlink()
+    (root / ".git").symlink_to(real)
+
+
+def _gitfile_fifo(root: Path, gitdir: Path) -> None:
+    (root / ".git").unlink()
+    os.mkfifo(root / ".git")
+
+
+def _commondir_missing(root: Path, gitdir: Path) -> None:
+    (gitdir / "commondir").write_text("../../../gone\n", encoding="utf-8")
+
+
+def _commondir_empty(root: Path, gitdir: Path) -> None:
+    (gitdir / "commondir").write_text("", encoding="utf-8")
+
+
+def _commondir_symlink(root: Path, gitdir: Path) -> None:
+    real = root.parent / "commondir"
+    real.write_text("../..\n", encoding="utf-8")
+    (gitdir / "commondir").unlink()
+    (gitdir / "commondir").symlink_to(real)
+
+
+def _no_dot_git(root: Path, gitdir: Path) -> None:
+    (root / ".git").unlink()
+
+
+@pytest.mark.parametrize(
+    "breaks",
+    [
+        _gitfile_without_prefix, _gitfile_misspelled, _gitfile_two_lines, _gitfile_empty_path, _gitfile_too_large,
+        _gitfile_not_utf8, _gitdir_missing, _gitdir_is_a_file, _gitfile_symlink, _gitfile_fifo, _commondir_missing,
+        _commondir_empty, _commondir_symlink, _no_dot_git,
+    ],
+)
+def test_installer_source_refuses_a_broken_gitfile(tmp_path: Path, breaks: Callable[[Path, Path], None]) -> None:
+    root, gitdir = _linked_worktree(tmp_path, WT_SHA)
+    assert installer_source(root).commit == WT_SHA
+    breaks(root, gitdir)
+    with pytest.raises(InvalidOperation) as exc:
+        installer_source(root)
+    assert exc.value.key == "relay_pair_no_commit"
 
 
 def test_installer_source_of_this_repository() -> None:

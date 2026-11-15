@@ -381,7 +381,26 @@ def test_no_allow_knob_was_added() -> None:
     assert "ALLOW_" not in "".join(ln for ln in text.splitlines() if "host_invariants" in ln or "HOST_CHECK" in ln)
 
 
-def test_the_host_like_ci_job_runs_the_whole_suite() -> None:
+def test_the_host_like_ci_job_runs_the_whole_suite_from_a_worktree() -> None:
+    """The host-like job runs pytest as deploy.sh Phase 1 does, and from where it does.
+
+    The whole suite (no path, no -k filter), `-p no:cacheprovider`, in a detached
+    `git worktree` — its .git is a FILE, so code that reads .git as a directory fails
+    in CI before merge instead of on the host.
+    """
     ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     job = ci[ci.index("  tests-host-like:"):]
-    assert "run: python -m pytest -q -p no:cacheprovider\n" in job, "no path or -k filter: these suites run there"
+    next_job = re.search(r"\n  [A-Za-z0-9_-]+:\n", job)
+    job = job[: next_job.start()] if next_job else job
+    run = job[job.index('        run: |\n          WT="'):]
+    assert run.startswith(
+        "        run: |\n"
+        '          WT="$(mktemp -d)"\n'
+        '          git worktree add --detach "$WT" HEAD\n'
+        '          test -f "$WT/.git"\n'
+        '          cd "$WT"\n'
+        "          python -m pytest -q -p no:cacheprovider\n"
+    ), "no path or -k filter: these suites run there — from a worktree, as on the host"
+    deploy = DEPLOY_SH.read_text(encoding="utf-8")
+    assert 'git worktree add --detach "$WT" origin/main' in deploy
+    assert '( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider )' in deploy
