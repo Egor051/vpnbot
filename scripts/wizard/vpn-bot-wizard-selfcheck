@@ -271,6 +271,7 @@ def split_prefixes(path: Path) -> list[ipaddress.IPv4Network]:
     except OSError:
         return []
     out: list[ipaddress.IPv4Network] = []
+    seen: set[ipaddress.IPv4Network] = set()  # the list keeps the order (the probe), the set the cost linear
     for raw in text.splitlines():
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -279,7 +280,8 @@ def split_prefixes(path: Path) -> list[ipaddress.IPv4Network]:
             net = ipaddress.ip_network(line, strict=False)
         except ValueError:
             continue
-        if isinstance(net, ipaddress.IPv4Network) and net.prefixlen and net not in out:
+        if isinstance(net, ipaddress.IPv4Network) and net.prefixlen and net not in seen:
+            seen.add(net)
             out.append(net)
     return out
 
