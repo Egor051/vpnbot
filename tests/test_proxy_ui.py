@@ -84,7 +84,7 @@ def _stats_item(
             last_shown_at=None,
             revoked_at=created_at if status == ProxyAccessStatus.REVOKED else None,
             deleted_at=created_at if status == ProxyAccessStatus.DELETED else None,
-            host="150.251.152.243",
+            host="203.0.113.43",
             port=31337,
             login=f"vpn_socks_100_{access_id}",
         )
@@ -100,7 +100,7 @@ def _stats_item(
         last_shown_at=None,
         revoked_at=created_at if status == ProxyAccessStatus.REVOKED else None,
         deleted_at=created_at if status == ProxyAccessStatus.DELETED else None,
-        host="150.251.152.243",
+        host="203.0.113.43",
         port=8443,
         mtproto_mode="managed",
         secret_fingerprint=f"fingerprint{access_id}",
@@ -183,11 +183,11 @@ def test_admin_keyboard_has_single_proxy_button() -> None:
 def test_socks5_proxy_text_contains_credentials_and_url() -> None:
     text = socks5_proxy_text(
         {
-            "host": "150.251.152.243",
+            "host": "203.0.113.43",
             "port": 31337,
             "login": "vpn_socks_100_abcd",
             "password": "secret",
-            "url": "socks5://vpn_socks_100_abcd:secret@150.251.152.243:31337",
+            "url": "socks5://vpn_socks_100_abcd:secret@203.0.113.43:31337",
         }
     )
 
@@ -201,10 +201,10 @@ def test_socks5_proxy_text_contains_credentials_and_url() -> None:
 def test_mtproto_proxy_text_shows_plain_link_before_dd_link() -> None:
     text = mtproto_proxy_text(
         {
-            "host": "150.251.152.243",
+            "host": "203.0.113.43",
             "port": 8443,
-            "link": "https://t.me/proxy?server=150.251.152.243&port=8443&secret=abc",
-            "link_dd": "https://t.me/proxy?server=150.251.152.243&port=8443&secret=ddabc",
+            "link": "https://t.me/proxy?server=203.0.113.43&port=8443&secret=abc",
+            "link_dd": "https://t.me/proxy?server=203.0.113.43&port=8443&secret=ddabc",
         }
     )
 
@@ -216,10 +216,10 @@ def test_mtproto_proxy_text_managed_mentions_individual_revoke() -> None:
     text = mtproto_proxy_text(
         {
             "mode": "managed",
-            "host": "150.251.152.243",
+            "host": "203.0.113.43",
             "port": 8443,
-            "link": "https://t.me/proxy?server=150.251.152.243&port=8443&secret=abc",
-            "link_dd": "https://t.me/proxy?server=150.251.152.243&port=8443&secret=ddabc",
+            "link": "https://t.me/proxy?server=203.0.113.43&port=8443&secret=abc",
+            "link_dd": "https://t.me/proxy?server=203.0.113.43&port=8443&secret=ddabc",
         }
     )
 
@@ -266,10 +266,10 @@ def test_proxy_admin_combined_shows_status_stats_and_traffic_note() -> None:
             total_users=0,
             runtime=ProxyRuntimeStats(
                 socks5_enabled=True,
-                socks5_host="150.251.152.243",
+                socks5_host="203.0.113.43",
                 socks5_port=31337,
                 mtproto_enabled=True,
-                mtproto_host="150.251.152.243",
+                mtproto_host="203.0.113.43",
                 mtproto_port=8443,
             ),
         ),
@@ -306,7 +306,7 @@ def test_user_proxy_stats_socks5_omits_password() -> None:
                     last_shown_at="2026-05-06T20:20:00+00:00",
                     revoked_at=None,
                     deleted_at=None,
-                    host="150.251.152.243",
+                    host="203.0.113.43",
                     port=31337,
                     login="vpn_socks_100_abcd",
                 ),
@@ -317,7 +317,7 @@ def test_user_proxy_stats_socks5_omits_password() -> None:
 
     assert "SOCKS5" in text
     assert "active" in text
-    assert "150.251.152.243" in text
+    assert "203.0.113.43" in text
     assert "31337" in text
     assert "vpn_socks_100_abcd" in text
     assert "secret-password" not in text
@@ -342,7 +342,7 @@ def test_user_proxy_stats_mtproto_omits_secret_and_links() -> None:
                     last_shown_at=None,
                     revoked_at=None,
                     deleted_at=None,
-                    host="150.251.152.243",
+                    host="203.0.113.43",
                     port=8443,
                     mtproto_mode="managed",
                     secret_fingerprint="f3bff43850e88441",
@@ -466,10 +466,10 @@ def test_proxy_admin_combined_shows_users_and_no_raw_credentials() -> None:
             total_users=1,
             runtime=ProxyRuntimeStats(
                 socks5_enabled=True,
-                socks5_host="150.251.152.243",
+                socks5_host="203.0.113.43",
                 socks5_port=31337,
                 mtproto_enabled=True,
-                mtproto_host="150.251.152.243",
+                mtproto_host="203.0.113.43",
                 mtproto_port=8443,
                 mtproto_mode="managed",
                 mtproto_systemd_active=True,

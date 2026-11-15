@@ -76,7 +76,7 @@ INPUT_LIVE_LISTING = FIXTURES / "nft-list-input-live.txt"
 # ss prints it while sshd runs behind ssh.socket.
 SS_LISTEN = FIXTURES / "ss-listen.txt"
 
-UPSTREAM = "150.251.152.243"
+UPSTREAM = "203.0.113.43"
 # `ip -4 route show default` on the live relay (one interface, eth0).
 DEFAULT_ROUTE = "default via 191.223.140.1 dev eth0 proto static\n"
 SOCKET_LISTEN_22 = "Listen=0.0.0.0:22 (Stream)\nListen=[::]:22 (Stream)\n"
@@ -1260,7 +1260,7 @@ def test_input_confirm_reports_a_timer_that_does_not_stop(relay: Relay) -> None:
 # --------------------------------------------------------------------------- #
 # The main probe: main confirms a PENDING filter (POST /relay/ssh-probe)
 # --------------------------------------------------------------------------- #
-SNI = "anycastedge.example.net"
+SNI = "vpn.example.net"
 DEFAULT_URL = f"https://{SNI}:2096/relay/ssh-probe"
 
 
@@ -1675,7 +1675,7 @@ def test_check_passes_on_the_live_relay(relay: Relay) -> None:
     assert "ok: tcp/22 on 0.0.0.0 :: (sshd,systemd) — ssh" in proc.stdout
     assert "ok: udp/546 on fe80::be24:11ff:febf:df1d (systemd-network) — dhcpv6 client" in proc.stdout
     assert "/53 " not in proc.stdout, "loopback listeners are not judged"
-    assert "probe tcp 150.251.152.243 443" in relay.calls()
+    assert "probe tcp 203.0.113.43 443" in relay.calls()
     assert not any(c.startswith("probe tls") for c in relay.calls()), "no SNI -> no handshake"
     assert "RELAY_CHECK_SNI not set" in proc.stdout
 
@@ -1715,7 +1715,7 @@ def test_check_different_table_is_11_with_a_diff(relay: Relay) -> None:
     relay.write_env(f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_FORWARD_TCP_PORTS=443,2096\n")
     proc = relay.run("check")
     assert proc.returncode == 11
-    assert "+iifname \"eth0\" tcp dport 2096 counter dnat to 150.251.152.243:2096" in proc.stderr
+    assert "+iifname \"eth0\" tcp dport 2096 counter dnat to 203.0.113.43:2096" in proc.stderr
 
 
 def test_check_absent_input_table_is_16(relay: Relay) -> None:
@@ -1896,7 +1896,7 @@ def test_check_probes_every_forwarded_tcp_port(relay: Relay) -> None:
     relay.write_env(f"RELAY_UPSTREAM_IPV4={UPSTREAM}\nRELAY_FORWARD_TCP_PORTS=443,2096\n")
     relay.live_listing = LIVE_LISTING.read_text(encoding="utf-8").replace(
         "\t\tiifname \"eth0\" udp",
-        "\t\tiifname \"eth0\" tcp dport 2096 counter packets 1 bytes 60 dnat to 150.251.152.243:2096\n"
+        "\t\tiifname \"eth0\" tcp dport 2096 counter packets 1 bytes 60 dnat to 203.0.113.43:2096\n"
         "\t\tiifname \"eth0\" udp",
     )
     proc = relay.run("check")

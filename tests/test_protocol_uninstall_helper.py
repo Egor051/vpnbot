@@ -465,7 +465,7 @@ def shared_host(h: Host) -> None:
     """The parts of the host every protocol must leave alone."""
     h.put("etc/nginx/nginx.conf", "events {}\n")
     h.put("etc/nginx/conf.d/decoy.conf", "server {}\n")
-    h.put("var/www/anycastedge/index.html", "<html></html>\n")
+    h.put("var/www/decoy/index.html", "<html></html>\n")
     h.put("etc/vpn-bot/tls/fullchain.pem", "chain\n")
     h.put("etc/vpn-bot/tls/privkey.pem", "key\n", 0o640)
     h.put("etc/vpn-bot/warp-split.list", "1.1.1.0/24\n")
@@ -750,6 +750,8 @@ def test_the_xray_plan_lists_units_files_sizes_rules_and_skips(host: Host) -> No
     assert plan["users"] == [] and plan["packages"] == []
     assert plan["marker"] == {"path": "/etc/vpn-bot/uninstalled/xray", "state": "create"}
     shared = " ".join(s["what"] for s in plan["skipped_shared"])
+    # "/var/www/anycastedge" is the helper's own fixed wording (deploy/helpers/
+    # vpn-bot-protocol-uninstall, man_shared) — matched as text, never resolved.
     for what in ("nobody", "/etc/nginx", "/var/www/anycastedge", "/etc/vpn-bot/tls", "/root/.acme.sh"):
         assert what in shared
     assert plan["backup_dir"] == "/var/backups/vpn-bot/uninstall"

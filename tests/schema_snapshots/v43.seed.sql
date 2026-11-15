@@ -14,7 +14,7 @@ VALUES
 
 INSERT INTO relays (id, name, label, host, source_ips, enabled, in_subscriptions, note, created_at, updated_at, created_by, updated_by)
 VALUES
-  (1, 'ru1', 'relay', 'relay.anycastedge.net', '198.51.100.7/32,203.0.113.0/28', 1, 1, NULL,
+  (1, 'ru1', 'relay', 'relay.example.net', '198.51.100.7/32,203.0.113.0/28', 1, 1, NULL,
    '2026-08-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00', NULL, NULL);
 
 INSERT INTO key_bundles (id, user_id, label, note, status, token, created_at, updated_at, display_no, kind)

@@ -69,7 +69,7 @@ def _settings(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = dict(
         subscription_enabled=True,
         subscription_public_port=2096,
-        hysteria2_sni="anycastedge.duckdns.org",
+        hysteria2_sni="hy2.example.net",
         hysteria2_host="203.0.113.10",
         hysteria2_enabled=True,
         xray_xhttp_enabled=True,
@@ -679,7 +679,7 @@ def test_create_confirm_calls_the_bundle_service_and_shows_the_card() -> None:
         assert t("bundle_created_title") in text
         assert "VLESS (TCP)" in text and "Hysteria2" in text
         # The wizard ends with the credential on screen, like the single-key flow.
-        assert f"https://anycastedge.duckdns.org:2096/sub/{TOKEN}" in text
+        assert f"https://hy2.example.net:2096/sub/{TOKEN}" in text
         assert state.cleared is True
 
     asyncio.run(run())
@@ -752,7 +752,7 @@ def test_created_screen_carries_the_same_secret_warning_as_the_config_screen() -
         _create_result((_key(1),)), viewer_user_id=OWNER, settings=_settings(), available=FULL_AVAILABILITY
     )
 
-    assert f"https://anycastedge.duckdns.org:2096/sub/{TOKEN}" in text
+    assert f"https://hy2.example.net:2096/sub/{TOKEN}" in text
     assert t("bundle_config_secret_warning") in text
     assert t("bundle_config_hint") in text
 
@@ -918,7 +918,7 @@ def test_note_button_enters_the_shared_note_wizard_for_the_bundle() -> None:
 def test_subscription_url_is_built_from_settings() -> None:
     assert (
         subscription_url(_settings(), TOKEN)  # type: ignore[arg-type]
-        == f"https://anycastedge.duckdns.org:2096/sub/{TOKEN}"
+        == f"https://hy2.example.net:2096/sub/{TOKEN}"
     )
     # A different deployment yields a different URL — nothing is hardcoded.
     assert (
@@ -947,7 +947,7 @@ def test_config_screen_shows_the_url_and_keeps_the_token_out_of_the_log(
         with caplog.at_level(logging.DEBUG):
             await show_bundle_config(callback, _State(), _services(views=views), RateLimiter(), None)  # type: ignore[arg-type]
 
-        assert f"https://anycastedge.duckdns.org:2096/sub/{TOKEN}" in callback.message.last_text
+        assert f"https://hy2.example.net:2096/sub/{TOKEN}" in callback.message.last_text
         # The QR encodes the same token-bearing URL, so rendering it must not leak
         # the token into a log line either.
         assert len(callback.message.photos) == 1

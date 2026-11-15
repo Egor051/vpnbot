@@ -135,8 +135,8 @@ FORWARD_BEFORE="$(sysctl -n net.ipv4.ip_forward)"
 
 # --------------------------------------------------------------------------- #
 step "R0. a hand-made relay"
-sed "s/150\.251\.152\.243/${OLD_UPSTREAM}/g" "${FIXTURES}/vpn-relay.nft" >/etc/vpn-relay.nft
-sed "s/150\.251\.152\.243/${OLD_UPSTREAM}/g" "${FIXTURES}/vpn-relay.manual.service" >/etc/systemd/system/vpn-relay.service
+sed "s/203\.0\.113\.43/${OLD_UPSTREAM}/g" "${FIXTURES}/vpn-relay.nft" >/etc/vpn-relay.nft
+sed "s/203\.0\.113\.43/${OLD_UPSTREAM}/g" "${FIXTURES}/vpn-relay.manual.service" >/etc/systemd/system/vpn-relay.service
 systemctl daemon-reload
 systemctl enable --now vpn-relay.service
 table_shape >"${WORK}/table.before"

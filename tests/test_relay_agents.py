@@ -866,16 +866,64 @@ async def test_health_loop_counts_udp_when_it_is_judged(tcp: bool, udp: bool | N
     assert result.ok is ok and result.udp is udp
 
 
-def test_udp_is_probed_only_with_hysteria2(tmp_path: Path) -> None:
-    from services.relay_health import build_relay_health_supervisor
+async def test_udp_is_probed_only_with_hysteria2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The built monitor carries a UDP probe only with Hysteria2 on, and that probe is
+    udp_relay_probe(<relay host>, HYSTERIA2_PORT). Stubbed: the real one asks this
+    host's QUIC server on 127.0.0.1 first, and on the box one answers."""
+    from services import relay_health
+
+    calls: list[tuple[str, int]] = []
+
+    async def fake_udp_probe(host: str, port: int) -> bool | None:
+        calls.append((host, port))
+        return True
+
+    async def no_tls_probe(*_: object, **__: object) -> bool:
+        raise AssertionError("the TCP probe is not part of this test")
+
+    monkeypatch.setattr(relay_health, "udp_relay_probe", fake_udp_probe)
+    monkeypatch.setattr(relay_health, "tls_probe", no_tls_probe)
 
     async def load() -> list[Any]:
         return []
 
-    off = build_relay_health_supervisor(_settings(tmp_path, hysteria2_enabled=False), load)
-    on = build_relay_health_supervisor(_settings(tmp_path, hysteria2_enabled=True), load)
+    off = relay_health.build_relay_health_supervisor(_settings(tmp_path, hysteria2_enabled=False), load)
+    on = relay_health.build_relay_health_supervisor(
+        _settings(tmp_path, hysteria2_enabled=True, hysteria2_port=4443), load
+    )
     assert off._udp_probe is None
     assert on._udp_probe is not None
+    assert await on._udp_probe(PUBLIC_HOST) is True
+    assert calls == [(PUBLIC_HOST, 4443)]
+
+
+@pytest.mark.parametrize(
+    ("control", "relay", "expected", "probed"),
+    [
+        # This host's own QUIC server does not answer: nothing to judge by, and the
+        # relay is never probed.
+        (False, True, None, [("127.0.0.1", 4443)]),
+        (True, True, True, [("127.0.0.1", 4443), (PUBLIC_HOST, 4443)]),
+        (True, False, False, [("127.0.0.1", 4443), (PUBLIC_HOST, 4443)]),
+    ],
+)
+async def test_udp_relay_probe_judges_the_relay_only_after_the_local_control(
+    monkeypatch: pytest.MonkeyPatch, control: bool, relay: bool, expected: bool | None, probed: list[tuple[str, int]]
+) -> None:
+    """udp_relay_probe's verdict depends on whether something answers QUIC on
+    127.0.0.1:<port> — exactly the host-dependent part a test must never leave to
+    the machine it runs on. Both halves are stubbed here."""
+    from services import relay_health
+
+    calls: list[tuple[str, int]] = []
+
+    async def fake_quic_probe(host: str, port: int, **_: object) -> bool:
+        calls.append((host, port))
+        return control if host == "127.0.0.1" else relay
+
+    monkeypatch.setattr(relay_health, "quic_probe", fake_quic_probe)
+    assert await relay_health.udp_relay_probe(PUBLIC_HOST, 4443) is expected
+    assert calls == probed
 
 
 async def test_a_cancel_waits_for_a_completion_in_flight(world: World) -> None:

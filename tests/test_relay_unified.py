@@ -60,7 +60,7 @@ from subscription_server.store import BundleView
 
 pytestmark = pytest.mark.timeout(60)
 
-RU1_HOST = "relay.anycastedge.net"
+RU1_HOST = "relay.example.net"
 RU1_IP = "198.51.100.7"
 OTHER_IP = "203.0.113.200"
 EGRESS = "198.51.100.77"  # what _hello() reports as the relay's source address
@@ -283,7 +283,7 @@ async def test_production_scenario_attach_then_detach(prod: Env) -> None:
     links and subscriptions unchanged → disconnect → a hand-made relay again."""
     before = await prod.relay()
     keys_before, links_before = await prod.key_rows(), await prod.links()
-    assert before.agent is None and any("relay.anycastedge.net" in link for link in links_before[0])
+    assert before.agent is None and any("relay.example.net" in link for link in links_before[0])
     [overview] = await prod.service.list_overview(ADMIN)
     assert overview.relay.id == before.id and overview.relay.agent is None
 

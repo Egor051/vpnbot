@@ -3,13 +3,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import importlib.machinery
 import importlib.util
 import io
+import ipaddress
 import os
 import re
+import socket
 import sys
+import sysconfig
+import threading
+import traceback
 from collections.abc import Callable, Generator
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any, NamedTuple
@@ -18,6 +25,231 @@ import aiosqlite
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+# --------------------------------------------------------------------------- #
+# No network from a test
+#
+# deploy.sh Phase 1 runs this suite ON the production host. A test that reaches
+# the real network there does not just flake: it talks to the live services. The
+# relay health test did exactly that — build_relay_health_supervisor wired the
+# real udp_relay_probe, whose control probe found the live hysteria-server on
+# 127.0.0.1:443 and then sent a QUIC packet to the production relay named in the
+# test's constant. In CI nothing listens on 127.0.0.1:443, so it was green there.
+#
+# The guard below makes that class impossible to miss. For the duration of every
+# test it wraps the socket entry points (and asyncio's loop.getaddrinfo, so an
+# async lookup is reported with its caller's stack, not the executor thread's);
+# any attempt to reach a non-loopback
+# address, or to resolve any name but ``localhost``, is RECORDED and refused with
+# the errno an offline host would give. The record is what fails the test (on
+# teardown, with the address, the port and the stack): the probes swallow every
+# exception by design, so an exception alone would only make the test pass
+# silently with another result.
+# --------------------------------------------------------------------------- #
+_LOOPBACK_NAMES = frozenset({"localhost", "localhost."})
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkViolation:
+    call: str
+    target: str
+    port: object
+    thread: str
+    stack: str
+
+    def render(self) -> str:
+        return f"  {self.call}({self.target!r}, port={self.port!r}) [thread {self.thread}]\n{self.stack}"
+
+
+def _host_text(host: object) -> str | None:
+    if isinstance(host, bytes):
+        return host.decode("ascii", "replace")
+    return host if isinstance(host, str) else None
+
+
+def _is_loopback_ip(text: str) -> bool | None:
+    """True/False for an IP literal (loopback or the unspecified address, which
+    Linux connects to locally), None when *text* is not an IP literal at all."""
+    try:
+        ip = ipaddress.ip_address(text.split("%", 1)[0])
+    except ValueError:
+        return None
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback or ip.is_unspecified
+
+
+def _is_local_destination(host: str) -> bool:
+    loopback = _is_loopback_ip(host)
+    if loopback is not None:
+        return loopback
+    return host.lower() in _LOOPBACK_NAMES
+
+
+def _is_local_lookup(host: object) -> bool:
+    """A name resolution that never leaves the box: no host (a passive bind), an
+    IP literal (no DNS query; the connect that follows is checked on its own) or
+    ``localhost``."""
+    text = _host_text(host)
+    if not text:
+        return True
+    return _is_loopback_ip(text) is not None or text.lower() in _LOOPBACK_NAMES
+
+
+_STDLIB_DIR = sysconfig.get_paths()["stdlib"]
+_RUNNER_PARTS = tuple(f"{os.sep}{name}{os.sep}" for name in ("_pytest", "pytest", "pluggy", "pytest_asyncio"))
+
+
+def _caller_stack() -> str:
+    """The frames that matter: the guard's own, the standard library's and pytest's
+    left out (a running coroutine's awaiting chain is on the stack, so an async test
+    shows the probe and the test that called it)."""
+    frames = [f for f in traceback.extract_stack() if f.filename != __file__]
+    ours = [
+        f for f in frames
+        if not f.filename.startswith((_STDLIB_DIR, "<frozen"))
+        and not any(part in f.filename for part in _RUNNER_PARTS)
+    ]
+    return "".join(traceback.format_list((ours or frames)[-15:])).rstrip()
+
+
+class NetworkGuard:
+    """Wraps the socket entry points: records — and refuses — every connection or
+    datagram to a non-loopback address and every DNS lookup but ``localhost``.
+
+    Local servers on 127.0.0.1/::1 (a test's own listener) and AF_UNIX sockets are
+    untouched. It patches through its OWN MonkeyPatch, never the shared
+    ``monkeypatch``: a test that stubs ``socket.getaddrinfo`` itself patches over
+    the guard and is undone first, then the guard goes. A guard installed inside
+    another one refuses before the outer one is reached (tests of the guard).
+    """
+
+    def __init__(self) -> None:
+        self.violations: list[NetworkViolation] = []
+        self._lock = threading.Lock()
+        self._patch = pytest.MonkeyPatch()
+
+    def _record(self, call: str, target: str, port: object) -> None:
+        violation = NetworkViolation(call, target, port, threading.current_thread().name, _caller_stack())
+        with self._lock:
+            self.violations.append(violation)
+
+    def _refuse_lookup(self, call: str, host: object, port: object) -> None:
+        self._record(call, str(_host_text(host)), port)
+        raise socket.gaierror(socket.EAI_NONAME, f"{call}({host!r}) refused: no DNS in tests (tests/conftest.py)")
+
+    def _refuse(self, call: str, target: tuple[str, object]) -> OSError:
+        self._record(call, *target)
+        return OSError(errno.ENETUNREACH, f"{call} to {target[0]}:{target[1]} refused: no network in tests")
+
+    @staticmethod
+    def _outside(sock: socket.socket, address: object) -> tuple[str, object] | None:
+        """(host, port) when *address* leaves the box, None when it does not."""
+        if sock.family not in (socket.AF_INET, socket.AF_INET6) or not isinstance(address, tuple) or not address:
+            return None
+        host = _host_text(address[0])
+        if host is None or _is_local_destination(host):
+            return None
+        return host, address[1] if len(address) > 1 else None
+
+    def install(self) -> None:
+        guard = self
+        real_loop_getaddrinfo = asyncio.base_events.BaseEventLoop.getaddrinfo
+        real_getaddrinfo = socket.getaddrinfo
+        real_gethostbyname = socket.gethostbyname
+        real_gethostbyname_ex = socket.gethostbyname_ex
+        real_connect = socket.socket.connect
+        real_connect_ex = socket.socket.connect_ex
+        real_sendto = socket.socket.sendto
+        real_sendmsg = socket.socket.sendmsg
+
+        async def loop_getaddrinfo(loop: Any, host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
+            # asyncio resolves in an executor thread, whose stack shows nothing of
+            # the caller: refuse here, in the task, where the stack is the caller's.
+            if not _is_local_lookup(host):
+                guard._refuse_lookup("getaddrinfo", host, port)
+            return await real_loop_getaddrinfo(loop, host, port, *args, **kwargs)
+
+        def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
+            if not _is_local_lookup(host):
+                guard._refuse_lookup("getaddrinfo", host, port)
+            return real_getaddrinfo(host, port, *args, **kwargs)
+
+        def gethostbyname(host: str) -> str:
+            if not _is_local_lookup(host):
+                guard._refuse_lookup("gethostbyname", host, None)
+            return real_gethostbyname(host)
+
+        def gethostbyname_ex(host: str) -> tuple[str, list[str], list[str]]:
+            if not _is_local_lookup(host):
+                guard._refuse_lookup("gethostbyname_ex", host, None)
+            return real_gethostbyname_ex(host)
+
+        def connect(self: socket.socket, address: Any) -> None:
+            target = guard._outside(self, address)
+            if target is not None:
+                raise guard._refuse("connect", target)
+            real_connect(self, address)
+
+        def connect_ex(self: socket.socket, address: Any) -> int:
+            target = guard._outside(self, address)
+            if target is not None:
+                guard._record("connect_ex", *target)
+                return errno.ENETUNREACH
+            return real_connect_ex(self, address)
+
+        def sendto(self: socket.socket, data: Any, *args: Any) -> int:
+            # sendto(data, address) or sendto(data, flags, address)
+            target = guard._outside(self, args[-1]) if args else None
+            if target is not None:
+                raise guard._refuse("sendto", target)
+            return real_sendto(self, data, *args)
+
+        def sendmsg(self: socket.socket, buffers: Any, *args: Any) -> int:
+            # sendmsg(buffers[, ancdata[, flags[, address]]])
+            target = guard._outside(self, args[2]) if len(args) >= 3 else None
+            if target is not None:
+                raise guard._refuse("sendmsg", target)
+            return real_sendmsg(self, buffers, *args)
+
+        self._patch.setattr(asyncio.base_events.BaseEventLoop, "getaddrinfo", loop_getaddrinfo)
+        self._patch.setattr(socket, "getaddrinfo", getaddrinfo)
+        self._patch.setattr(socket, "gethostbyname", gethostbyname)
+        self._patch.setattr(socket, "gethostbyname_ex", gethostbyname_ex)
+        self._patch.setattr(socket.socket, "connect", connect)
+        self._patch.setattr(socket.socket, "connect_ex", connect_ex)
+        self._patch.setattr(socket.socket, "sendto", sendto)
+        self._patch.setattr(socket.socket, "sendmsg", sendmsg)
+
+    def uninstall(self) -> None:
+        self._patch.undo()
+
+    def report(self, nodeid: str) -> str:
+        return (
+            f"{nodeid} reached the network outside loopback ({len(self.violations)} time(s)). "
+            "This suite runs on the production host (deploy.sh Phase 1): stub the probe/client "
+            "instead of reaching a real address.\n" + "\n".join(v.render() for v in self.violations)
+        )
+
+
+@pytest.fixture(autouse=True)
+def _forbid_network(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """Fail the test (on teardown) when it reached the network outside loopback.
+
+    Defined FIRST among the autouse fixtures, so it is set up first and torn down
+    last: a connection opened while another fixture tears down is still seen. Fix
+    a flagged test by stubbing what it reaches — never by allowlisting an address.
+    """
+    guard = NetworkGuard()
+    guard.install()
+    try:
+        yield
+    finally:
+        guard.uninstall()
+    if guard.violations:
+        pytest.fail(guard.report(request.node.nodeid), pytrace=False)
+
 
 # Prod env-var families the settings loader reads. In tests a Settings build must
 # come only from what the test sets explicitly (monkeypatch.setenv or an explicit
@@ -415,7 +647,7 @@ def make_relay(
     name: str = "ru1",
     *,
     label: str = "relay",
-    host: str = "relay.anycastedge.net",
+    host: str = "relay.example.net",
     source_ips: str = "198.51.100.7",
     enabled: bool = True,
     in_subscriptions: bool = True,

@@ -124,6 +124,18 @@ system-level calls are mocked.
 When adding a feature, add or update tests in `tests/`. Name files after the
 feature area, e.g. `test_<area>.py`.
 
+**No network from a test.** `scripts/deploy.sh` runs this suite on the production
+host, so a test must never reach a real address and never depend on what happens
+to listen on `127.0.0.1` there. The autouse guard in `tests/conftest.py` records
+every connection or datagram to a non-loopback address and every DNS lookup but
+`localhost`, refuses it, and fails the test on teardown. Stub the probe or client
+instead (e.g. both `relay_health.tls_probe` and `relay_health.udp_relay_probe`
+when a test builds the relay health monitor), and use the reserved names in test
+data — `*.example.net` (RFC 2606) and the TEST-NET ranges `192.0.2.0/24`,
+`198.51.100.0/24`, `203.0.113.0/24` — never a real host of the project. The
+`tests-host-like` CI job holds the production host's ports on loopback
+(`tests/host_like_ports.py`) so a test that relies on a free port fails there.
+
 ## All Local Gates at Once
 
 ```bash
