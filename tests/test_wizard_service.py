@@ -162,6 +162,22 @@ def test_parse_status_follows_the_current_phase_only() -> None:
     assert snap.plan_text is None  # the plan belongs to the previous phase
 
 
+def test_parse_status_keeps_an_items_message_and_drops_junk() -> None:
+    lines = [
+        {"event": "launched", "phase": "execute"},
+        {"event": "item", "level": "green", "key": "warp", "text": "t", "msg": "warp_direct_ok", "args": {"table": "51820", "iface": "out-warp"}},
+        {"event": "item", "level": "red", "key": "a", "text": "t", "msg": "Bad-Name", "args": {"x": "1"}},
+        {"event": "item", "level": "red", "key": "b", "text": "t", "msg": "ok_name", "args": {"Bad": "1", "n": 7, "l": [1], "s": "x" * 999}},
+        {"event": "item", "level": "red", "key": "c", "text": "t", "msg": "ok_name", "args": "not a dict"},
+    ]
+    snap = parse_status("\n".join(json.dumps(line) for line in lines))
+    good, bad_msg, junk_args, no_args = snap.items
+    assert (good.msg, good.args) == ("warp_direct_ok", (("iface", "out-warp"), ("table", "51820")))
+    assert (bad_msg.msg, bad_msg.args) == ("", ())
+    assert junk_args.msg == "ok_name" and dict(junk_args.args) == {"n": "7", "s": "x" * 256}
+    assert (no_args.msg, no_args.args) == ("ok_name", ())
+
+
 async def test_one_active_run_is_a_database_invariant(world: World) -> None:
     repo = WizardRunRepository(world.db)
     first = await repo.create(mode="selfcheck", params={}, started_by=ADMIN, origin="manual", chat_id=1, log_path_template="/l/{id}.log", now="t")

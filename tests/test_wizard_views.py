@@ -5,6 +5,9 @@
 * A progress message that can no longer be edited is replaced by a new one, which
   becomes the run's message (so the report after a restart lands somewhere).
 * The dump's file follows the report; the scheduled alert goes to every superadmin.
+* An item that names a message (``msg``/``args``) is shown in the reader's language;
+  a message this bot does not know, or arguments that do not fill it, fall back to the
+  helper's English text.
 """
 
 from __future__ import annotations
@@ -17,7 +20,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import EditMessageText
 
 from bot.wizard_notifier import TelegramWizardNotifier
-from bot.wizard_views import final_text, plan_text, progress_text, run_view, scheduled_alert_text
+from bot.wizard_views import final_text, item_text, plan_text, progress_text, run_view, scheduled_alert_text
+from i18n import use_locale
 from models.dto import WizardRun
 from services.wizard import Item, StatusSnapshot, parse_status
 
@@ -43,6 +47,28 @@ def test_helper_text_is_escaped_everywhere() -> None:
     assert "&lt;.env&gt;" in final_text(run(state="succeeded", active=False), snap)
     assert "x &lt; y" in final_text(run(mode="update", state="succeeded", active=False), snap)
     assert "&lt;.env&gt;" in scheduled_alert_text(run(origin="scheduled", state="succeeded"), snap)
+
+
+def test_an_item_is_shown_in_the_readers_language() -> None:
+    args = (("addr", "172.16.0.2"), ("protos", "VLESS/SOCKS5"), ("wan", "eth0"))
+    item = Item("red", "warp:egress", "English fallback", "warp_egress_no_snat", args)
+    with use_locale("ru"):
+        ru = item_text(item)
+    with use_locale("en"):
+        en = item_text(item)
+    assert ru == "VLESS/SOCKS5 уходят в eth0 с адресом 172.16.0.2 без SNAT — трафик не выходит; hy2 при этом может работать"
+    assert en.startswith("VLESS/SOCKS5 leave into eth0 with source 172.16.0.2 and no SNAT")
+    with use_locale("ru"):
+        text = final_text(run(state="succeeded", active=False), StatusSnapshot(items=[item]))
+    assert "🔴 <b>warp:egress</b>: VLESS/SOCKS5 уходят в eth0" in text
+
+
+def test_an_unknown_message_or_missing_arguments_fall_back_to_the_helpers_text() -> None:
+    assert item_text(Item("yellow", "x", "plain <text>", "no_such_message", ())) == "plain <text>"
+    assert item_text(Item("red", "warp", "fallback", "warp_down", ())) == "fallback"  # {iface} unfilled
+    assert item_text(Item("green", "disk", "no msg at all")) == "no msg at all"
+    snap = StatusSnapshot(items=[Item("red", "warp", "x", "warp_down", (("iface", "<b>"),))])
+    assert "&lt;b&gt;" in final_text(run(state="succeeded", active=False), snap)  # arguments are escaped too
 
 
 def test_run_view_picks_the_screen_by_state() -> None:

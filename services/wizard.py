@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -78,11 +79,37 @@ class WizardError(InvalidOperation):
 # --------------------------------------------------------------------------- #
 # The status file
 # --------------------------------------------------------------------------- #
+# An item may name an i18n message (``wizard_item_<msg>``) with string arguments, so the
+# bot shows it in the reader's language; ``text`` (English) stays the fallback.
+_ITEM_MSG_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
+_ITEM_ARG_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_MAX_ITEM_ARGS = 16
+_MAX_ITEM_ARG_LEN = 256
+
+
 @dataclass(frozen=True, slots=True)
 class Item:
     level: str  # green | yellow | red
     key: str
     text: str
+    msg: str = ""
+    args: tuple[tuple[str, str], ...] = ()
+
+
+def _item_message(rec: dict[str, Any]) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """The optional ``msg``/``args`` of an item record; junk is dropped, never fatal."""
+    msg = rec.get("msg")
+    if not isinstance(msg, str) or not _ITEM_MSG_RE.match(msg):
+        return "", ()
+    raw = rec.get("args")
+    if not isinstance(raw, dict) or len(raw) > _MAX_ITEM_ARGS:
+        return msg, ()
+    args = tuple(
+        (name, str(value)[:_MAX_ITEM_ARG_LEN])
+        for name, value in sorted(raw.items())
+        if isinstance(name, str) and _ITEM_ARG_RE.match(name) and isinstance(value, str | int)
+    )
+    return msg, args
 
 
 @dataclass(slots=True)
@@ -151,7 +178,8 @@ def parse_status(text: str) -> StatusSnapshot:
         elif kind == "item":
             level = str(rec.get("level") or "")
             if level in ("green", "yellow", "red"):
-                snap.items.append(Item(level, str(rec.get("key") or ""), str(rec.get("text") or "")))
+                msg, args = _item_message(rec)
+                snap.items.append(Item(level, str(rec.get("key") or ""), str(rec.get("text") or ""), msg, args))
         elif kind == "summary":
             snap.counts = {k: int(rec.get(k) or 0) for k in ("green", "yellow", "red")}
         elif kind == "artifact":

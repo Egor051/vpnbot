@@ -905,6 +905,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **«Самопроверка»: the `warp` item compares intent with fact and no longer shows a false 🔴 «table T has no
+  default route — WARP clients have no way out» on a host where WARP split is off on purpose.** `check_warp`
+  (`scripts/wizard/vpn-bot-wizard-selfcheck`) accepted only a full tunnel (a default in table T + an `ip rule`
+  on it). The production host runs split OFF (`/etc/vpn-bot/warp-split.disabled`), table 51820 holds only the
+  anti-loop route via the WAN, AWG is uninstalled and every VLESS/SOCKS5 packet leaves from the `out-warp`
+  address (`WARP_PROXY_EGRESS=true`, xray `sendThrough 172.16.0.2`, danted `external: 172.16.0.2`) via
+  `eth0` with its own MASQUERADE — a healthy state the check called an outage. Intent is now read from the
+  same places the bot uses, read-only: `warp_settings.enabled` (`vpn.db`, `sqlite3` `mode=ro`), the split
+  marker, the split list (non-empty → selective; empty/absent → full tunnel, the state in which
+  `vpn-bot-warp-split apply` refuses to blackhole and leaves awg-quick's default), `/etc/vpn-bot/uninstalled/awg`,
+  the live xray `config.json` and `/etc/danted.conf`; the facts from `awg show … fwmark`, `ip -4 route show
+  table T`, `n_table` of `vpn-bot-warp-split-state status`, `ip -4 rule show`, `ip -4 -br addr show`, `ip -4
+  route show default`, `ip -4 route get <probe> from <A>` (a FIB lookup — no packet; the probe is a TEST-NET
+  address outside the list) and `iptables -t nat -S POSTROUTING`. **`warp`**: not deployed / turned off by the
+  administrator → 🟢 (with a note when `out-warp` is up all the same); turned on without a fwmark → 🔴; split
+  off → 🟢 with no route via `out-warp` in T, 🟡 with any, 🟡 with a default (the PR #274 class: «off» became a
+  full tunnel); selective → 🟢 when the `dev out-warp` prefixes equal the list, 🟡 otherwise or with a default;
+  full tunnel → 🔴 without its default. **`warp:rule`** (`from <AWG_NETWORK> lookup T`) only while AWG is
+  installed (🟡 instead of 🔴 with split off). **`warp:egress`**, per address A a proxy sends from (an address
+  on another interface is skipped), whatever `warp_settings` says: A not on an up `out-warp` → 🔴 in every
+  mode; split off → the probe via the WAN (from the default route, not «eth0») plus a MASQUERADE/SNAT covering
+  A on it, else 🔴 «VLESS/SOCKS5 leave with A and no SNAT; hy2 may still work»; selective → the first listed
+  prefix via `out-warp` with `-o out-warp -j MASQUERADE` and a probe outside the list as with split off; full
+  tunnel → via `out-warp` with its MASQUERADE; `WARP_PROXY_EGRESS` on with nobody bound to the tunnel address
+  → 🟡; unreadable addresses / WAN / nat table → 🟡, never a guessed 🔴. **Items in the reader's language**: an item may carry `msg` + `args` next to the English `text`; the bot
+  renders `wizard_item_<msg>` (new keys in `i18n/ru.py` / `i18n/en.py`) and falls back to `text` for a message
+  it does not know or arguments that do not fill it (`services/wizard.py`, `bot/wizard_views.py`); the `warp`
+  items use it. The helper also passes `mypy --strict` now (two pre-existing findings fixed). Tests
+  (`tests/test_wizard_helpers.py`): every row of the matrix with stubs, the production host itself (all green,
+  for `enabled` 0 and 1 and both flag spellings), the MASQUERADE for A removed → 🔴, A removed from `out-warp`
+  with the marker → 🔴, a non-`eth0` WAN, a read-only assertion over every `ip`/`iptables`/`awg` call, the
+  helper's English templates equal to `i18n/en.py`, `snat_covers` and the tunnel-address parser against
+  `warp/proxy_egress.py`; `tests/test_wizard_views.py` / `tests/test_wizard_service.py` for the rendering and
+  the parsing. Docs: docs/wizard.md, docs/wizard.ru.md («The `warp` items: intent against fact»).
+
 - **Relay pairing reads the bot's commit from a `git worktree` too; deploy Phase 1 no longer fails on
   `test_installer_source_of_this_repository`.** `services/relay_agents.py::installer_source` read
   `<root>/.git/HEAD` as if `.git` were always a directory. In a linked worktree — `deploy.sh` Phase 1 runs
