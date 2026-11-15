@@ -42,7 +42,6 @@ from bot.handlers import (
     admin_dashboard,
     admin_maintenance,
     admin_modules,
-    admin_relay_agents,
     admin_relays,
     admin_warp,
     admin_warp_split,
@@ -72,11 +71,11 @@ from bot.keyboards import warp_split_sources_keyboard as kb_src
 from bot import totp_gate, wizard_views as wv
 from models.dto import WizardRun
 from i18n import use_locale
-from models.dto import AccessRequest, Relay, User, VpnKey
+from models.dto import AccessRequest, Relay, RelayAgent, RelayPairing, User, VpnKey
 from models.enums import AccessRequestStatus, UserRole, VpnKeyStatus, VpnKeyType
 from repositories.announcements import AnnouncementBatch
 from repositories.protocol_modules import ProtocolModule
-from services.relay_management import RelayOverview
+from services.relays import RelayOverview
 from warp.feed_state import SplitSource
 from warp.split_manager import SplitStatus
 from warp.state import WarpState
@@ -86,7 +85,7 @@ REPO = Path(__file__).resolve().parent.parent
 # Same order as bot/app.py (pinned by test_router_order_matches_app below).
 ROUTERS = [
     start, security, common, settings_handler, admin, admin_dashboard, admin_warp, admin_warp_split, admin_warp_split_ui,
-    admin_warp_split_sources, admin_modules, admin_relays, admin_relay_agents, admin_maintenance, ssh_port, ufw,
+    admin_warp_split_sources, admin_modules, admin_relays, admin_maintenance, ssh_port, ufw,
     admin_wizard, admin_bundles, keys, key_bundles, proxy, callbacks,
 ]
 
@@ -119,8 +118,18 @@ def _request() -> AccessRequest:
     return AccessRequest(11, 123, "u", AccessRequestStatus.PENDING, NOW, None, None, None)
 
 
-def _relay(enabled: bool = True) -> Relay:
-    return Relay(7, "r1", "EU", "203.0.113.5", (IPv4Network("203.0.113.0/24"),), enabled, True, None, NOW, NOW, None, None)
+def _relay(enabled: bool = True, *, agent: bool = False) -> Relay:
+    managed = RelayAgent("203.0.113.5", 22, "ssh-ed25519 AAAA", "vpn.example.com", (443,), (443,), "1", NOW) if agent else None
+    return Relay(
+        7, "r1", "EU", "203.0.113.5", (IPv4Network("203.0.113.0/24"),), enabled, True, None, NOW, NOW, None, None, managed
+    )
+
+
+def _pairing(kind: str = "new") -> RelayPairing:
+    return RelayPairing(
+        9, "r2", "t" * 43, "vpn.example.com", (443,), (443,), "pending", 2_000_000_000, 1, NOW,
+        7 if kind == "attach" else None, None, kind, "relay2.example.net" if kind == "new" else None,
+    )
 
 
 def _batch(status: str, bid: int) -> AnnouncementBatch:
@@ -236,15 +245,25 @@ CASES: list[tuple[str, Callable[[], InlineKeyboardMarkup], str | None]] = [
     ("module_disable_2", lambda: kb_mod.module_disable_confirm2_keyboard("xray"), None),
     ("module_enable", lambda: kb_mod.module_enable_confirm_keyboard("awg"), None),
     ("module_uninstall_plan", lambda: kb_mod.module_uninstall_plan_keyboard("xray", "0123456789ab"), None),
-    ("relays", lambda: kb_rel.relays_list_keyboard([RelayOverview(_relay(), 3)]), None),
+    ("relays", lambda: kb_rel.relays_list_keyboard(
+        [RelayOverview(_relay(), 3), RelayOverview(_relay(agent=True), 0)], {}, [_pairing(), _pairing("attach")]
+    ), None),
     ("relay_card", lambda: kb_rel.relay_card_keyboard(_relay(), suggest_source_ip="203.0.113.5"), None),
+    ("relay_card_agent", lambda: kb_rel.relay_card_keyboard(_relay(agent=True)), None),
+    ("relay_card_attach_pending", lambda: kb_rel.relay_card_keyboard(_relay(), pending_attach=_pairing("attach")), None),
     ("relay_toggle_confirm", lambda: kb_rel.relay_toggle_confirm_keyboard(7, "enabled"), None),
-    ("relay_delete_confirm", lambda: kb_rel.relay_delete_confirm_keyboard(7), None),
-    ("relay_delete_impact", lambda: kb_rel.relay_delete_impact_keyboard(7), None),
+    ("relay_delete_confirm", lambda: kb_rel.relay_delete_keyboard(_relay(), has_keys=False), None),
+    ("relay_delete_impact", lambda: kb_rel.relay_delete_keyboard(_relay(agent=True), has_keys=True), None),
+    ("relay_unreachable", lambda: kb_rel.relay_unreachable_keyboard(7, with_keys=True), None),
+    ("relay_detach", lambda: kb_rel.relay_detach_keyboard(_relay(agent=True)), None),
+    ("relay_pairing", lambda: kb_rel.pairing_keyboard(_pairing("attach")), None),
+    ("relay_pairing_retry", lambda: kb_rel.pairing_retry_keyboard(9), AdminRelayStates.pair_address.state),
+    ("relay_back", lambda: kb_rel.relay_back_keyboard(7), None),
     ("relay_edit", lambda: kb_rel.relay_cancel_keyboard("admin:relay:7"), AdminRelayStates.edit_host.state),
-    ("relay_add_src", lambda: kb_rel.relay_source_step_keyboard("203.0.113.5"), AdminRelayStates.add_source_ips.state),
-    ("relay_add_label", lambda: kb_rel.relay_label_step_keyboard(True), AdminRelayStates.add_label.state),
-    ("relay_add_confirm", kb_rel.relay_add_confirm_keyboard, AdminRelayStates.add_confirm.state),
+    ("relay_add_name", lambda: kb_rel.add_name_keyboard("relay2"), AdminRelayStates.add_name.state),
+    ("relay_add_ipv4", lambda: kb_rel.add_ipv4_keyboard("203.0.113.9"), AdminRelayStates.add_host_ipv4.state),
+    ("relay_add_target", lambda: kb_rel.target_keyboard("vpn.example.com", "admin:relay:add:tg", "admin:relays"),
+     AdminRelayStates.add_target.state),
     ("aio_panel", kb_aio.admin_bundles_panel_keyboard, None),
     ("aio_confirm", lambda: kb_aio.admin_bundles_confirm_keyboard("basic"), None),
     ("aio_back", kb_aio.admin_bundles_back_keyboard, None),
@@ -269,6 +288,10 @@ def _wrun() -> WizardRun:
     )
 
 
+# Handlers that only say «устарело»: a button of a CURRENT screen must never land there.
+STALE_CATCH_ALLS = {"callbacks.unknown_callback", "admin_relays.stale_relay_callback", "admin_relays.legacy_wizard_relay"}
+
+
 def _buttons(markup: InlineKeyboardMarkup) -> Iterator[tuple[str, str]]:
     for row in markup.inline_keyboard:
         for button in row:
@@ -280,9 +303,7 @@ def _buttons(markup: InlineKeyboardMarkup) -> Iterator[tuple[str, str]]:
 def test_every_admin_button_reaches_a_handler_in_its_state(
     name: str, factory: Callable[[], InlineKeyboardMarkup], state: str | None
 ) -> None:
-    dead = [
-        (text, data) for text, data in _buttons(factory()) if _resolve(data, state) == "callbacks.unknown_callback"
-    ]
+    dead = [(text, data) for text, data in _buttons(factory()) if _resolve(data, state) in STALE_CATCH_ALLS]
     assert dead == [], f"{name}: buttons that only hit the stale-callback catch-all: {dead}"
 
 

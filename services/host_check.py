@@ -21,7 +21,7 @@ What was reported is kept in ``schema_meta`` (:meth:`db.database.Database.set_me
 so a bot restart — every deploy is one — does not report the same rows again.
 
 The relay runs no bot. The bot has no channel to it either: relays are rows in the
-database (:mod:`services.relay_management`) probed from outside by a TLS handshake
+database (:mod:`services.relays`) probed from outside by a TLS handshake
 (:mod:`services.relay_health`), and no new channel is built for this. A relay's
 verdict is in its own journal (``journalctl -u vpn-bot-host-check``, exit 1 = a
 failed unit on BEATEN/MISMATCH) and in Phase 1 of every relay deploy.

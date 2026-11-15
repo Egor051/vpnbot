@@ -43,6 +43,9 @@ status file; the bot renders them as a traffic light.
   disk         free space on /, /var and the checkout's filesystem: < 1 GiB or < 5 %
                red, < 15 % yellow
   reboot       /var/run/reboot-required (yellow, with the packages that asked)
+  legacy_env   the obsolete RELAY_ENABLED/RELAY_NAME/RELAY_HOST/RELAY_SOURCE_IPS still in .env:
+               yellow — the bot does not read them (relays live in the database) and logs
+               the same thing once at startup; delete the lines
 
   plan      prints that nothing will change
   apply     runs the checks
@@ -114,6 +117,8 @@ DISK_RED_PCT = 5.0
 DISK_YELLOW_PCT = 15.0
 REBOOT_FLAG = "/var/run/reboot-required"
 REBOOT_PKGS = "/var/run/reboot-required.pkgs"
+# config/settings.py LEGACY_RELAY_ENV_VARS: no longer read by the bot.
+LEGACY_RELAY_ENV = ("RELAY_ENABLED", "RELAY_NAME", "RELAY_HOST", "RELAY_SOURCE_IPS")
 _REGISTRY_RE = re.compile(r'^\s*"([^"|]+)\|([^"|]+?)(?:\|([^"|]+)(?:\|([^"|]+))?)?"\s*$')
 
 
@@ -155,6 +160,8 @@ MESSAGES = {
     "warp_egress_warp_no_nat": "{protos} from {addr} leave via {iface}, but {addr} is not the tunnel address {tunnel} and nothing masquerades it there (-o {iface} -j MASQUERADE) — WARP drops the packets",
     "warp_egress_selective_ok": "selective split: {protos} from {addr} reach the listed prefixes via {iface} (probe {probe_in}) and the rest via {wan} with MASQUERADE (probe {probe})",
     "warp_egress_full_ok": "full tunnel: {protos} from {addr} leave via {iface} (probe {probe})",
+    "legacy_relay_env": "obsolete in .env, not read by the bot (relays live in the database): {names} — delete them",
+    "legacy_relay_env_none": "no obsolete RELAY_* variables in .env",
 }
 
 
@@ -829,7 +836,18 @@ def check_reboot(ctx: Any, items: Items) -> None:
     items.add("yellow", "reboot", "a reboot is required" + (f" ({', '.join(pkgs[:8])})" if pkgs else ""))
 
 
-CHECKS = (check_listeners, check_warp, check_failed_units, check_certs, check_helpers, check_perms, check_disk, check_reboot)
+def check_legacy_env(ctx: Any, items: Items) -> None:
+    legacy = [name for name in LEGACY_RELAY_ENV if name in app_env()]
+    if legacy:
+        items.say("yellow", "legacy_env", "legacy_relay_env", names=", ".join(legacy))
+    else:
+        items.say("green", "legacy_env", "legacy_relay_env_none")
+
+
+CHECKS = (
+    check_listeners, check_warp, check_failed_units, check_certs, check_helpers, check_perms, check_disk, check_reboot,
+    check_legacy_env,
+)
 
 
 def step_plan(ctx: Any) -> int:

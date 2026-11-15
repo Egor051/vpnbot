@@ -29,7 +29,7 @@ checked.
 ## What it asks
 
 1. **Mode** — `1) main server` or `2) relay`. Relay mode asks for nothing but the
-   **pairing code** the bot shows in «🧙 Мастер настройки → 🛰 Relay → ➕ Добавить relay»
+   **pairing code** the bot shows in «🛡 Админ-панель → 🛰 Relay → ➕ Добавить relay» (the wizard's «🛰 Relay» opens the same screen)
    (no token, no Telegram ID — a relay never talks to Telegram); the bot's one-line command
    runs it as `install.sh --relay` with the code on stdin. Everything about it:
    [relay.md](relay.md#installing-a-relay-with-one-command).

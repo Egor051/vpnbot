@@ -1,12 +1,23 @@
-"""Background health monitor for the L4 relays.
+"""Background health monitor for the L4 relays — ONE verdict per relay.
 
 Modelled on the WARP tunnel monitor (``warp/health.py``): a probe runs every
-``RELAY_HEALTH_INTERVAL`` seconds and feeds a time-based latch. After
-``fail_window`` seconds of continuous failure a relay is declared *down*, after
-``recover_window`` seconds of continuous success it is declared *back up*; a
-single opposite probe resets the running window, so one dropped probe never
-alerts. Each latch crossing fires its callback exactly once — the admins hear
-about a state change, never about every failed probe.
+``RELAY_HEALTH_INTERVAL`` seconds and feeds a time-based latch. A relay's health
+has three levels:
+
+* ``ok``   — traffic through the relay reaches this server (TCP, and UDP when it
+  is judged) and, for a relay with an agent, the agent answers and its own
+  ``vpn-relay-apply check`` passes;
+* ``warn`` — traffic passes, but the agent does not answer over SSH or reports a
+  problem: keys work, management does not;
+* ``down`` — traffic through the relay does not reach this server: its keys do
+  not work.
+
+The latch moves to a new level after ``window`` seconds of probes continuously at
+that level; a single opposite probe resets the running window, so one dropped
+probe never alerts. Each move fires ONE alert naming the level and its one-line
+reason — the admins hear about a state change, never about every failed probe,
+and never twice (the traffic probe and the agent are one verdict, not two
+monitors).
 
 There is ONE loop for every relay (:class:`RelayHealthSupervisor`). Each pass
 reads the relays from the database, so a relay added, re-pointed or switched off
@@ -15,6 +26,11 @@ enabled relay has its own latch, keyed by ``relays.id`` — a new relay starts a
 healthy, a relay that is switched off or deleted loses its latch, and one
 relay's state never affects another's. The latest probe of each relay is kept in
 memory for its card in the panel («Проверить сейчас» records there too).
+
+For a relay with an agent the pass also asks the agent ``status`` over SSH (the
+relay service's ``poll_agent``): an SSH failure, or a ``check`` exit code other
+than 0 / 13 / 14 (13/14 — the relay cannot reach this server by itself — are
+judged by the hairpin probe instead), makes an otherwise passing relay ``warn``.
 
 The probe is a TCP connect to ``<relay host>:XRAY_PUBLIC_PORT`` plus a full TLS
 handshake with ``server_hostname=XRAY_SNI`` and certificate verification. The bot
@@ -52,7 +68,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -177,76 +193,108 @@ async def udp_relay_probe(host: str, port: int) -> bool | None:
     return await quic_probe(host, port)
 
 
+LEVEL_OK = "ok"
+LEVEL_WARN = "warn"
+LEVEL_DOWN = "down"
+LEVELS = (LEVEL_OK, LEVEL_WARN, LEVEL_DOWN)
+LEVEL_ICONS = {LEVEL_OK: "🟢", LEVEL_WARN: "🟡", LEVEL_DOWN: "🔴"}
+# `vpn-relay-apply check` exit codes that do not count against the agent: 13/14 =
+# the relay cannot reach the upstream by itself (this host may not answer it
+# directly) — the hairpin probe from here is what judges the path.
+AGENT_CHECK_OK_CODES = frozenset({0, 13, 14})
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCheck:
+    """What a relay's agent said in one health pass (the relay service's ``poll_agent``).
+
+    ``ok`` False with ``error_key`` — it did not answer (SSH, refused); with ``rc``
+    — it answered and its ``vpn-relay-apply check`` failed with that exit code.
+    """
+
+    ok: bool
+    rc: int | None = None
+    error_key: str | None = None
+    error_params: dict[str, object] = field(default_factory=dict, hash=False, compare=False)
+
+
+def agent_check_from_status(status: dict[str, object]) -> AgentCheck:
+    """Judge a ``status`` answer: its ``check.rc`` (no check at all → ok)."""
+    check = status.get("check")
+    rc = check.get("rc") if isinstance(check, dict) else None
+    if not isinstance(rc, int):
+        return AgentCheck(ok=True)
+    return AgentCheck(ok=rc in AGENT_CHECK_OK_CODES, rc=rc)
+
+
 class RelayHealthMonitor:
-    """Time-based up/down latch over a probe, with one callback per transition."""
+    """Time-based latch over a relay's level, with one callback per level change.
+
+    *probe* returns a level (``ok``/``warn``/``down``) or a bool (True = ok,
+    False = down). The latch starts at ``ok`` and moves to another level once the
+    probes have been continuously at it for *window* seconds.
+    """
 
     def __init__(
         self,
         *,
-        probe: Callable[[], Awaitable[bool]],
-        on_down: Callable[[], Awaitable[None]],
-        on_recovered: Callable[[], Awaitable[None]],
-        fail_window: float,
-        recover_window: float,
+        probe: Callable[[], Awaitable[object]],
+        on_change: Callable[[str, str], Awaitable[None]],
+        window: float,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._probe = probe
-        self._on_down = on_down
-        self._on_recovered = on_recovered
-        self._fail_window = fail_window
-        self._recover_window = recover_window
+        self._on_change = on_change
+        self._window = window
         self._clock = clock
-        # Assumed up at start: a relay that is down at boot is reported after one
-        # fail window, exactly like one that goes down later.
-        self._healthy = True
-        # Start of the current uninterrupted failure / success run (None while
-        # the opposite outcome was seen last).
-        self._fail_since: float | None = None
-        self._success_since: float | None = None
+        # Assumed ok at start: a relay that is down at boot is reported after one
+        # window, exactly like one that goes down later.
+        self._level = LEVEL_OK
+        # The level seen since ``_since`` without interruption, while it differs
+        # from the latched one (None: the last probe agreed with the latch).
+        self._candidate: str | None = None
+        self._since: float | None = None
+
+    @property
+    def level(self) -> str:
+        return self._level
 
     @property
     def healthy(self) -> bool:
-        return self._healthy
+        return self._level == LEVEL_OK
 
-    async def check_once(self) -> bool:
-        """Run one probe, advance the latch, fire a callback on a crossing.
+    async def check_once(self) -> str:
+        """Run one probe, advance the latch, fire the callback on a change.
 
-        A probe that raises (it should not — :func:`tls_probe` never does) counts
-        as a failure; a callback that raises is logged and swallowed. Neither can
-        break the loop that calls this.
+        A probe that raises counts as ``down``; a callback that raises is logged
+        and swallowed. Neither can break the loop that calls this.
         """
         try:
-            ok = bool(await self._probe())
+            raw = await self._probe()
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.warning("Relay probe raised; counting it as a failure", exc_info=True)
-            ok = False
+            logger.warning("Relay probe raised; counting it as down", exc_info=True)
+            raw = LEVEL_DOWN
+        observed = raw if raw in LEVELS else (LEVEL_OK if raw is True else LEVEL_DOWN)
+        assert isinstance(observed, str)
         now = self._clock()
-        if ok:
-            self._fail_since = None
-            if self._success_since is None:
-                self._success_since = now
-            if not self._healthy and now - self._success_since >= self._recover_window:
-                self._healthy = True
-                await self._notify(self._on_recovered, "recovered")
-        else:
-            self._success_since = None
-            if self._fail_since is None:
-                self._fail_since = now
-            if self._healthy and now - self._fail_since >= self._fail_window:
-                self._healthy = False
-                await self._notify(self._on_down, "down")
-        return ok
-
-    async def _notify(self, callback: Callable[[], Awaitable[None]], kind: str) -> None:
-        logger.warning("Relay health: %s", kind)
-        try:
-            await callback()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("Relay health %s notification failed", kind, exc_info=True)
+        if observed == self._level:
+            self._candidate = self._since = None
+            return observed
+        if observed != self._candidate or self._since is None:
+            self._candidate, self._since = observed, now
+        if now - self._since >= self._window:
+            before, self._level = self._level, observed
+            self._candidate = self._since = None
+            logger.warning("Relay health: %s -> %s", before, observed)
+            try:
+                await self._on_change(before, observed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Relay health %s notification failed", observed, exc_info=True)
+        return observed
 
 
 async def broadcast_to_admins(bot: Bot, admin_ids: AbstractSet[int], text: str) -> None:
@@ -264,8 +312,9 @@ def _utc_now() -> str:
 
 @dataclass(frozen=True, slots=True)
 class ProbeResult:
-    """The outcome of one probe of one relay, for its card in the panel."""
+    """The outcome of one health pass of one relay, for its card in the panel."""
 
+    # The relay's level is ``ok`` (traffic passes and the agent, if any, is fine).
     ok: bool
     # UTC ISO-8601 instant the probe finished at.
     checked_at: str
@@ -273,6 +322,44 @@ class ProbeResult:
     host: str
     # The UDP (Hysteria2) part: None = not probed or not judged (see udp_relay_probe).
     udp: bool | None = None
+    # The TCP (TLS through the relay) part.
+    tcp: bool = True
+    # ok / warn / down — see the module doc.
+    level: str = LEVEL_OK
+    # The agent's part: None for a relay without one (or not asked).
+    agent: AgentCheck | None = None
+
+    @property
+    def traffic_ok(self) -> bool:
+        return self.tcp and self.udp is not False
+
+
+def judge(*, tcp: bool, udp: bool | None, agent: AgentCheck | None) -> str:
+    """The one verdict: traffic first, then the agent."""
+    if not tcp or udp is False:
+        return LEVEL_DOWN
+    if agent is not None and not agent.ok:
+        return LEVEL_WARN
+    return LEVEL_OK
+
+
+def health_reason(probe: ProbeResult, *, port: int, udp_port: int | None = None) -> str:
+    """The one line saying why a relay is at its level (in the active locale)."""
+    if not probe.tcp and probe.udp is False:
+        return t("relay_reason_tcp_udp_down", port=port, udp_port=udp_port or port)
+    if not probe.tcp:
+        return t("relay_reason_tcp_down", port=port)
+    if probe.udp is False:
+        return t("relay_reason_udp_down", port=udp_port or port)
+    agent = probe.agent
+    if agent is not None and not agent.ok:
+        if agent.error_key:
+            return t("relay_reason_agent_unreachable", error=h(t(agent.error_key, **agent.error_params)))
+        return t("relay_reason_agent_check", rc=agent.rc)
+    udp = "✓" if probe.udp else "—"
+    if agent is not None:
+        return t("relay_reason_ok_agent", udp=udp)
+    return t("relay_reason_ok", udp=udp)
 
 
 class _Checkable(Protocol):
@@ -283,9 +370,11 @@ class RelayHealthSupervisor:
     """One health loop for every relay; one latch per ``relays.id``.
 
     *load_relays* returns the relays as the database holds them right now (all of
-    them — only the enabled ones are probed). Alerts go to every admin in
-    ``ADMIN_IDS`` once :attr:`bot` is attached (bot.app does that), naming the
-    relay's label, name and host.
+    them — only the enabled ones are probed). *agent_probe* (the relay service's
+    ``poll_agent``) asks a relay's agent for its status; None = traffic only.
+    Alerts go to every admin in ``ADMIN_IDS`` once :attr:`bot` is attached
+    (bot.app does that): ONE message per level change, naming the relay's label,
+    name and host and the one-line reason.
     """
 
     def __init__(
@@ -301,8 +390,12 @@ class RelayHealthSupervisor:
         wall_clock: Callable[[], str] = _utc_now,
         bot: Bot | None = None,
         udp_probe: Callable[[str], Awaitable[bool | None]] | None = None,
+        udp_port: int | None = None,
+        agent_probe: Callable[[Relay], Awaitable[AgentCheck | None]] | None = None,
     ) -> None:
         self._load_relays = load_relays
+        self._udp_port = udp_port
+        self.agent_probe = agent_probe
         self._port = port
         self._sni = sni
         self._admin_ids = admin_ids
@@ -332,7 +425,16 @@ class RelayHealthSupervisor:
         monitor = self._monitors.get(relay_id)
         return None if monitor is None else monitor.healthy
 
-    async def _run_probe(self, relay: Relay) -> bool:
+    def level(self, relay_id: int) -> str | None:
+        """The latched level of an enabled relay, None if the loop has not seen it."""
+        monitor = self._monitors.get(relay_id)
+        return None if monitor is None else monitor.level
+
+    def reason(self, probe: ProbeResult) -> str:
+        """The one-line reason of a probe (in the active locale)."""
+        return health_reason(probe, port=self._port, udp_port=self._udp_port)
+
+    async def _run_probe(self, relay: Relay) -> str:
         probe = self._probe
         if probe is None:
             # Looked up at call time so tests can monkeypatch the module's probe.
@@ -348,13 +450,30 @@ class RelayHealthSupervisor:
             except Exception:
                 logger.warning("Relay UDP probe of %s raised", relay.name, exc_info=True)
                 udp = False
-        # A relay is up when TCP passes and UDP did not FAIL (None: not judged).
-        ok = bool(ok) and udp is not False
-        self._last[relay.id] = ProbeResult(ok=ok, checked_at=self._wall_clock(), host=relay.host, udp=udp)
-        return ok
+        agent: AgentCheck | None = None
+        if relay.agent is not None and self.agent_probe is not None:
+            try:
+                agent = await self.agent_probe(relay)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Relay agent probe of %s raised", relay.name, exc_info=True)
+                agent = AgentCheck(ok=False, error_key="internal_error")
+        # Up when TCP passes and UDP did not FAIL (None: not judged); then the agent.
+        level = judge(tcp=bool(ok), udp=udp, agent=agent)
+        self._last[relay.id] = ProbeResult(
+            ok=level == LEVEL_OK,
+            checked_at=self._wall_clock(),
+            host=relay.host,
+            udp=udp,
+            tcp=bool(ok),
+            level=level,
+            agent=agent,
+        )
+        return level
 
     async def probe_now(self, relay: Relay) -> ProbeResult:
-        """«Проверить сейчас»: one probe outside the loop, recorded for the card.
+        """«Проверить сейчас»: one pass outside the loop (traffic + agent), recorded for the card.
 
         It does not feed the latch — the latch decides alerts, and an alert must
         not depend on an admin pressing a button.
@@ -367,31 +486,27 @@ class RelayHealthSupervisor:
         if monitor is not None:
             return monitor
 
-        async def probe() -> bool:
+        async def probe() -> str:
             return await self._run_probe(self._current[relay_id])
 
-        async def on_down() -> None:
-            await self._broadcast("relay_alert_down", self._current[relay_id])
+        async def on_change(before: str, after: str) -> None:
+            await self._broadcast(after, self._current[relay_id])
 
-        async def on_recovered() -> None:
-            await self._broadcast("relay_alert_recovered", self._current[relay_id])
-
-        monitor = RelayHealthMonitor(
-            probe=probe,
-            on_down=on_down,
-            on_recovered=on_recovered,
-            fail_window=self._window,
-            recover_window=self._window,
-            clock=self._clock,
-        )
+        monitor = RelayHealthMonitor(probe=probe, on_change=on_change, window=self._window, clock=self._clock)
         self._monitors[relay_id] = monitor
         return monitor
 
-    async def _broadcast(self, key: str, relay: Relay) -> None:
+    def alert_text(self, level: str, relay: Relay) -> str:
+        """The ONE message of a level change (the reason from the latest probe)."""
+        key = {LEVEL_OK: "relay_alert_recovered", LEVEL_WARN: "relay_alert_warn"}.get(level, "relay_alert_down")
+        probe = self._last.get(relay.id)
+        reason = self.reason(probe) if probe is not None else ""
+        return t(key, label=h(relay.label), name=h(relay.name), host=h(relay.host), port=self._port, reason=reason)
+
+    async def _broadcast(self, level: str, relay: Relay) -> None:
         if self.bot is None:
             return
-        text = t(key, label=h(relay.label), name=h(relay.name), host=h(relay.host), port=self._port)
-        await broadcast_to_admins(self.bot, self._admin_ids, text)
+        await broadcast_to_admins(self.bot, self._admin_ids, self.alert_text(level, relay))
 
     async def check_once(self) -> None:
         """One pass: refresh the relay list, then probe every enabled relay once.
@@ -419,9 +534,11 @@ class RelayHealthSupervisor:
 
 
 def build_relay_health_supervisor(
-    settings: Settings, load_relays: Callable[[], Awaitable[Sequence[Relay]]]
+    settings: Settings,
+    load_relays: Callable[[], Awaitable[Sequence[Relay]]],
+    agent_probe: Callable[[Relay], Awaitable[AgentCheck | None]] | None = None,
 ) -> RelayHealthSupervisor:
-    """Wire the supervisor to the database and the admins' chats.
+    """Wire the supervisor to the database, the relays' agents and the admins' chats.
 
     Both windows equal the probe interval, so a relay is reported down after
     two consecutive failed probes (one interval of continuous failure) and back
@@ -442,6 +559,8 @@ def build_relay_health_supervisor(
         admin_ids=settings.admin_ids,
         window=float(settings.relay_health_interval),
         udp_probe=udp,
+        udp_port=settings.hysteria2_port if settings.hysteria2_enabled else None,
+        agent_probe=agent_probe,
     )
 
 

@@ -128,6 +128,17 @@ DATASET: list[tuple[str, Row]] = [
     ("warp_split_runs", {"id": 5951, "ts": 96, "mode": "auto", "decision": "applied"}),
     ("relays", {"id": 5961, "name": "fid1", "label": "fid", "host": "relay.example", "source_ips": "192.0.2.7",
                 "created_at": T0, "updated_at": T0, "created_by": 5001}),
+    # A relay the bot manages (v43: a relay_agents row; v44: the agent columns of
+    # this very row) and a code still waiting.
+    ("relays", {"id": 5962, "name": "fid2", "label": "fid2", "host": "203.0.113.62", "source_ips": "203.0.113.62",
+                "created_at": T0, "updated_at": T0, "created_by": 5001}),
+    ("relay_agents", {"relay_id": 5962, "ssh_host": "203.0.113.62", "ssh_port": 2222,
+                      "host_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFidelityHostKey", "target_host": "vpn.example.com",
+                      "tcp_ports": "443", "udp_ports": "443", "agent_version": "1.0", "paired_at": T0,
+                      "last_status_json": '{"agent": "1.0", "check": {"rc": 0}}', "last_status_at": T0}),
+    ("relay_pairings", {"id": 5971, "name": "fid3", "token": "t" * 43, "target_host": "vpn.example.com",
+                        "tcp_ports": "443", "udp_ports": "443", "state": "pending", "expires_at": 1_900_000_000,
+                        "created_by": 5001, "created_at": T0}),
     ("traffic_hourly", {"hour_utc": 490_000, "key_id": 5101, "protocol": "xray", "downloaded_bytes": 5,
                         "uploaded_bytes": 6}),
 ]
@@ -200,6 +211,18 @@ async def _bootstrap(db_path: Path) -> int:
         await db.close()
 
 
+# A table a migration folds into another one: (target table, the column naming the
+# target row, renamed columns). _migrate_v44 moves each relay_agents row onto its
+# relays row (docs/relay.md); every value must arrive there.
+_FOLDED: dict[str, tuple[str, str, dict[str, str]]] = {
+    "relay_agents": (
+        "relays",
+        "relay_id",
+        {"paired_at": "agent_paired_at", "last_status_json": "agent_status_json", "last_status_at": "agent_status_at"},
+    ),
+}
+
+
 def _diff(before: dict[str, TableRows], after: dict[str, TableRows]) -> list[str]:
     """Human-readable list of every lost row and every changed pre-existing value."""
     problems: list[str] = []
@@ -207,6 +230,17 @@ def _diff(before: dict[str, TableRows], after: dict[str, TableRows]) -> list[str
         if table == "schema_meta":
             continue  # schema_version is SUPPOSED to change
         after_rows = after.get(table)
+        if after_rows is None and table in _FOLDED:
+            target, ref, renamed = _FOLDED[table]
+            for key, old in rows.items():
+                folded = after.get(target, {}).get((old[ref],))
+                if folded is None:
+                    problems.append(f"{table}{key}: its {target} row is gone")
+                    continue
+                for column, value in old.items():
+                    if column != ref and folded.get(renamed.get(column, column)) != value:
+                        problems.append(f"{table}{key}.{column}: {value!r} not folded into {target}")
+            continue
         if after_rows is None:
             problems.append(f"table {table} disappeared")
             continue

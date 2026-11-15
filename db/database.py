@@ -18,7 +18,7 @@ import aiosqlite
 from utils.spider_x import parse_spider_x_pool, pick_spider_x
 
 
-CURRENT_SCHEMA_VERSION = 43
+CURRENT_SCHEMA_VERSION = 44
 logger = logging.getLogger(__name__)
 
 # Transport/profile-aware Xray email scheme (see _migrate_v28). A label already on
@@ -419,6 +419,10 @@ class Database:
             await self._migrate_v43()
             await self._set_schema_version(43)
             version = 43
+        if version < 44:
+            await self._migrate_v44()
+            await self._set_schema_version(44)
+            version = 44
         await self._validate_reference_integrity()
         await self._validate_enum_values()
 
@@ -1763,12 +1767,11 @@ class Database:
         # the schema, as _migrate_v35 does.)
         #
         # Nothing is backfilled from vpn_keys.relay: a migration cannot know a
-        # relay's host or egress IPs. The one existing relay of a deployment is
-        # seeded from the legacy RELAY_* variables at bot startup instead
-        # (services.relay_management.seed_relays_from_settings) — the only place
-        # that has them, already validated by config.settings. Until it is seeded
-        # (or added in the panel) its keys are refused, never pointed at the main
-        # host.
+        # relay's host or egress IPs. The one existing relay of a deployment was
+        # seeded from the legacy RELAY_* variables at bot startup at the time (that
+        # seed is gone since the relay model became one, v44; RELAY_* in .env now
+        # only draw a warning). Until a relay row exists its keys are refused,
+        # never pointed at the main host.
         #
         # vpn_keys.relay deliberately gets NO foreign key here: legacy rows with
         # status 'deleted' keep the name forever and a RESTRICT would make the
@@ -1918,11 +1921,11 @@ class Database:
         )
 
     async def _migrate_v43(self) -> None:
-        # Relays the bot manages over SSH (the relay installer's pairing, «Мастер
-        # настройки → Relay»; services/relay_agents.py). Two new tables, mirrored in
-        # schema.sql; the pairings' index lives in indexes.sql (phase 3). Idempotent;
-        # nothing is backfilled: a relay added by hand has no agent and stays
-        # unmanaged until it is paired.
+        # Relays the bot manages over SSH (the relay installer's pairing). Two new
+        # tables; the pairings' index lives in indexes.sql (phase 3). Idempotent;
+        # nothing is backfilled. relay_agents lived only until v44, which folds it
+        # into relays (_migrate_v44) — it is still created here so the chain alone
+        # describes every intermediate schema.
         await self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS relay_agents (
@@ -1958,6 +1961,72 @@ class Database:
             )
             """
         )
+
+    # The agent columns _migrate_v44 adds to relays, in schema.sql order, with the
+    # relay_agents column each one is copied from.
+    _V44_AGENT_COLUMNS: ClassVar[tuple[tuple[str, str, str], ...]] = (
+        ("ssh_host", "TEXT", "ssh_host"),
+        ("ssh_port", "INTEGER CHECK (ssh_port IS NULL OR ssh_port BETWEEN 1 AND 65535)", "ssh_port"),
+        ("host_key", "TEXT", "host_key"),
+        ("target_host", "TEXT", "target_host"),
+        ("tcp_ports", "TEXT", "tcp_ports"),
+        ("udp_ports", "TEXT", "udp_ports"),
+        ("agent_version", "TEXT", "agent_version"),
+        ("agent_paired_at", "TEXT", "paired_at"),
+        ("agent_status_json", "TEXT", "last_status_json"),
+        ("agent_status_at", "TEXT", "last_status_at"),
+    )
+
+    async def _migrate_v44(self) -> None:
+        # ONE relay model. Until v43 a relay the bot manages over SSH was a row in
+        # relays PLUS a row in relay_agents, and the two admin sections that read
+        # them did not see each other: a relay set up by hand (the legacy RELAY_*
+        # seed) could never get an agent, and pairing the same VPS made a second
+        # relay. From v44 the agent is a property of the relay (services.relays):
+        #
+        #  1) relays gets the agent columns, all NULLable — «the relay has an
+        #     agent» = ssh_host IS NOT NULL. Plain ADD COLUMNs, mirrored in
+        #     schema.sql: nothing about an existing relay row changes (name, label,
+        #     host, source_ips — what keys and links read — are not touched).
+        #  2) every relay_agents row is copied onto its relay (relay_agents is 1:1
+        #     with relays and cascades with it, so each row has its relay), then
+        #     relay_agents is dropped.
+        #  3) relay_pairings (temporary rows) gets kind ('new' | 'attach') and
+        #     relay_host — the public host of a NEW relay. A pending pre-v44 code
+        #     is a 'new' one with no relay_host; it still completes as before.
+        #
+        # Idempotent: each column is added only when missing, and step 2 runs only
+        # while relay_agents exists (a re-run finds it gone). On a fresh database
+        # schema.sql already created both tables with the new columns and
+        # _migrate_v43 just created an empty relay_agents, which is dropped here.
+        relay_cols = await self._table_columns("relays")
+        for column, decl, _ in self._V44_AGENT_COLUMNS:
+            if column not in relay_cols:
+                await self.conn.execute(f"ALTER TABLE relays ADD COLUMN {column} {decl}")
+        if await self._table_exists("relay_agents"):
+            sources = ", ".join(source for _, _, source in self._V44_AGENT_COLUMNS)
+            assignments = ", ".join(f"{column} = ?" for column, _, _ in self._V44_AGENT_COLUMNS)
+            cursor = await self.conn.execute(f"SELECT relay_id, {sources} FROM relay_agents ORDER BY relay_id")
+            for row in await cursor.fetchall():
+                values = tuple(row[source] for _, _, source in self._V44_AGENT_COLUMNS)
+                await self.conn.execute(
+                    f"UPDATE relays SET {assignments} WHERE id = ?", (*values, int(row["relay_id"]))
+                )
+            await self.conn.execute("DROP TABLE relay_agents")
+        pairing_cols = await self._table_columns("relay_pairings")
+        if "kind" not in pairing_cols:
+            await self.conn.execute(
+                "ALTER TABLE relay_pairings ADD COLUMN kind TEXT NOT NULL DEFAULT 'new' "
+                "CHECK (kind IN ('new', 'attach'))"
+            )
+        if "relay_host" not in pairing_cols:
+            await self.conn.execute("ALTER TABLE relay_pairings ADD COLUMN relay_host TEXT")
+
+    async def _table_exists(self, table_name: str) -> bool:
+        row = await self.conn.execute_fetchone(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)
+        )
+        return row is not None
 
     async def _ensure_spider_x_backfill(self) -> None:
         # Idempotent per-key spiderX backfill, run on EVERY bootstrap (not gated by

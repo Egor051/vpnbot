@@ -1,7 +1,9 @@
 """The relay pairing code and the one-line relay install command (docs/relay.md).
 
-Pure functions only — no I/O. The bot issues a code in «Мастер настройки → Relay →
-Добавить»; the operator pastes the command it renders on the relay, where
+Pure functions, except :func:`installer_source`, which reads this checkout's own
+``.git`` (files only, no subprocess). The bot issues a code from admin panel →
+«🛰 Relay» (a new relay, or an agent for an existing one); the operator pastes
+the command it renders on the relay, where
 ``scripts/install.sh --relay`` decodes the code with the SAME rules
 (``parse_pairing_code`` there; tests/test_install_relay.py feeds codes made here
 through it). The relay agent (``scripts/vpn-relay-agent``) validates the targets and
@@ -21,12 +23,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
+import os
 import re
 import secrets
+import stat
 import struct
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+
+from services.errors import InvalidOperation
 
 PAIRING_VERSION = 1
 PAIRING_TTL_SECONDS = 30 * 60
@@ -43,6 +51,9 @@ _PUBKEY = re.compile(r"ssh-ed25519 ([A-Za-z0-9+/]{68})(?: [!-~]{1,64})?")
 _FIELDS = frozenset({"v", "target_host", "ports", "main_pubkey", "one_time_token", "exp"})
 _GITHUB_REMOTE = re.compile(r"(?:https://github\.com/|git@github\.com:)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?")
 _SHA = re.compile(r"[0-9a-f]{40}")
+_GITFILE = re.compile(r"gitdir: (?P<path>[^\r\n\x00]+)\n?")
+_COMMONDIR = re.compile(r"(?P<path>[^\r\n\x00]+)\n?")
+_GITFILE_MAX_BYTES = 4096
 
 
 class PairingCodeError(ValueError):
@@ -234,3 +245,127 @@ def relay_command(code: str, source: Source) -> str:
 
 def format_port_specs(tcp: Sequence[int], udp: Sequence[int]) -> str:
     return " ".join([*(f"{p}/tcp" for p in sorted(tcp)), *(f"{p}/udp" for p in sorted(udp))])
+
+
+# ── where the relay gets the installer: this checkout's own commit ────────────
+
+
+def _small_text(path: Path) -> str | None:
+    """A small regular file's UTF-8 text; a symlink, a non-regular or a larger file is None.
+
+    O_NOFOLLOW refuses a symlink, O_NONBLOCK keeps a FIFO from blocking the open, and
+    the type and size are checked through the open descriptor.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _GITFILE_MAX_BYTES:
+            return None
+        raw = os.read(fd, _GITFILE_MAX_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(raw) > _GITFILE_MAX_BYTES:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _git_dirs(repo_root: Path) -> tuple[Path, Path] | None:
+    """``(gitdir, commondir)`` of the checkout at ``repo_root``; anything unexpected is None.
+
+    A plain checkout: ``.git`` is the directory and both are it. A linked worktree
+    (``git worktree add`` — deploy.sh Phase 1 runs pytest in one): ``.git`` is a FILE,
+    one line ``gitdir: <path>`` (relative to ``repo_root``). That per-worktree
+    directory holds HEAD and per-worktree refs; its ``commondir`` file (relative to it,
+    usually ``../..``) names the shared directory with refs/*, packed-refs and config.
+    Without a ``commondir`` file (``--separate-git-dir``) the gitdir is the common dir.
+    """
+    dot_git = repo_root / ".git"
+    if dot_git.is_dir():
+        return dot_git, dot_git
+    gitfile = _small_text(dot_git)
+    match = _GITFILE.fullmatch(gitfile) if gitfile is not None else None
+    if match is None:
+        return None
+    gitdir = repo_root / match.group("path")
+    if not gitdir.is_dir():
+        return None
+    commondir_file = gitdir / "commondir"
+    if not os.path.lexists(commondir_file):
+        return gitdir, gitdir
+    content = _small_text(commondir_file)
+    common = _COMMONDIR.fullmatch(content) if content is not None else None
+    if common is None:
+        return None
+    commondir = gitdir / common.group("path")
+    if not commondir.is_dir():
+        return None
+    return gitdir, commondir
+
+
+def _read_head(gitdir: Path, commondir: Path) -> str | None:
+    try:
+        head = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if _SHA.fullmatch(head):
+        return head
+    if not head.startswith("ref: "):
+        return None
+    ref = head[5:].strip()
+    if not re.fullmatch(r"refs/[A-Za-z0-9._/-]+", ref) or ".." in ref:
+        return None
+    # A per-worktree ref (refs/bisect, refs/worktree) lives in the gitdir, a branch in
+    # the common dir; in a plain checkout the two are one directory, read once.
+    for refs_dir in (gitdir,) if gitdir == commondir else (gitdir, commondir):
+        try:
+            value = (refs_dir / ref).read_text(encoding="utf-8").strip()
+            return value if _SHA.fullmatch(value) else None
+        except OSError:
+            pass
+    try:
+        for line in (commondir / "packed-refs").read_text(encoding="utf-8").splitlines():
+            sha, _, name = line.partition(" ")
+            if name.strip() == ref and _SHA.fullmatch(sha):
+                return sha
+    except OSError:
+        return None
+    return None
+
+
+def _origin_url(commondir: Path) -> str:
+    try:
+        text = (commondir / "config").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    section = re.search(r'\[remote "origin"\](.*?)(?:\n\[|\Z)', text, re.S)
+    if section is None:
+        return ""
+    url = re.search(r"^\s*url\s*=\s*(\S+)\s*$", section.group(1), re.M)
+    return url.group(1) if url else ""
+
+
+def installer_source(repo_root: Path) -> Source:
+    """The installer the relay runs: this checkout's commit (its file's sha256).
+
+    The checkout is read from its files (no ``git`` subprocess) — a plain one or a
+    linked worktree alike (:func:`_git_dirs`).
+    """
+    dirs = _git_dirs(repo_root)
+    commit = None if dirs is None else _read_head(*dirs)
+    if dirs is None or commit is None:
+        raise InvalidOperation("не удалось определить коммит бота (.git)", key="relay_pair_no_commit")
+    _, commondir = dirs
+    try:
+        digest = hashlib.sha256((repo_root / "scripts" / "install.sh").read_bytes()).hexdigest()
+    except OSError as exc:
+        raise InvalidOperation("нет scripts/install.sh в checkout бота", key="relay_pair_no_installer") from exc
+    owner, repo = github_remote(_origin_url(commondir)) or (DEFAULT_OWNER, DEFAULT_REPO)
+    return Source(owner=owner, repo=repo, commit=commit, installer_sha256=digest)

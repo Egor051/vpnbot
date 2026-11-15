@@ -104,7 +104,7 @@ line from the admin panel → «🧩 Протоколы и маршрутиза�
 
 - **«Перевести все подписки в базовый вид»** — every active bundle gets the composition a
   **new basic** bundle would get right now: VLESS (TCP) and Hysteria2, plus their copies through
-  every relay that is enabled and «в подписках» («🛰 Управлять relay»). The **VLESS (HTTP) children are deleted** (backend client, DB row,
+  every relay that is enabled and «в подписках» («🛰 Relay»). The **VLESS (HTTP) children are deleted** (backend client, DB row,
   traffic archived to the deleted-key totals, audit — the same path as deleting a key), the
   missing members are created, and the kind becomes `basic`.
 - **«Дополнить все подписки по текущим настройкам»** — the same without changing the kind:

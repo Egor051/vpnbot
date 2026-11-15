@@ -2,9 +2,8 @@
 
 Covers:
 
-* the v38 migration — fresh database and an upgrade from a populated v37 one;
-* the one-time seed from the legacy RELAY_* variables, and the WARNING when they
-  are ignored;
+* the relays table — fresh database and an upgrade from a populated v37 one;
+* the obsolete RELAY_* variables: never read, one WARNING at startup;
 * RelayService — validation of every field, the immutable name, a name still
   carried by keys, SUPERADMIN-only access, the audit trail;
 * deletion — with no keys, with keys (each through the key's normal delete path:
@@ -47,7 +46,7 @@ from test_relay import (
 from adapters.clock import ClockProvider
 from bot.fsm.states import AdminRelayStates
 from bot.handlers import admin_relays as panel
-from config.settings import Settings, SettingsError, load_settings
+from config.settings import Settings, load_settings
 from db.database import CURRENT_SCHEMA_VERSION, Database
 from i18n import t
 from models.dto import TelegramUserProfile, User
@@ -62,7 +61,7 @@ from services.hysteria import HysteriaService
 from services.key_bundles import KeyBundleService, subscription_sort_key
 from services.relay import RelayCatalog, RelaySnapshot, RelayUnavailable
 from services.relay_health import RelayHealthSupervisor
-from services.relay_management import RelayService
+from services.relays import RelayService, warn_legacy_relay_env
 from services.xray import XrayService
 from subscription_server.render import render_links
 from subscription_server.store import BundleView, ReadOnlyBundleStore
@@ -240,13 +239,18 @@ async def test_fresh_database_has_an_empty_relays_table(tmp_path: Path) -> None:
     try:
         await db.bootstrap()
         version = await db.conn.execute_fetchone("SELECT value FROM schema_meta WHERE key = 'schema_version'")
-        assert version is not None and int(version["value"]) == CURRENT_SCHEMA_VERSION >= 38
+        assert version is not None and int(version["value"]) == CURRENT_SCHEMA_VERSION >= 44
         assert await RelayRepository(db).count() == 0
         columns = {row["name"] for row in await db.conn.execute_fetchall("PRAGMA table_info(relays)")}
         assert columns == {
             "id", "name", "label", "host", "source_ips", "enabled", "in_subscriptions", "note",
             "created_at", "updated_at", "created_by", "updated_by",
+            # how the relay is managed: its agent, all NULL without one (v44)
+            "ssh_host", "ssh_port", "host_key", "target_host", "tcp_ports", "udp_ports",
+            "agent_version", "agent_paired_at", "agent_status_json", "agent_status_at",
         }
+        tables = {row["name"] for row in await db.conn.execute_fetchall("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "relay_agents" not in tables
         # vpn_keys.relay is deliberately NOT a foreign key to relays.
         fks = await db.conn.execute_fetchall("PRAGMA foreign_key_list(vpn_keys)")
         assert all(row["table"] != "relays" for row in fks)
@@ -254,12 +258,10 @@ async def test_fresh_database_has_an_empty_relays_table(tmp_path: Path) -> None:
         await db.close()
 
 
-async def test_v37_upgrade_keeps_relay_keys_and_the_seed_adopts_them(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A v37 host that used the .env relay: the migration leaves vpn_keys.relay as it
-    was, the relays table starts empty, and the startup seed gives the keys back
-    the relay they already name — their links point at RELAY_HOST again."""
+async def test_v37_upgrade_keeps_relay_keys_and_a_relay_row_gives_them_back(tmp_path: Path) -> None:
+    """A v37 host that used the .env relay: the migrations leave vpn_keys.relay as it
+    was and the relays table starts empty (nothing is seeded from .env any more);
+    once the relay row exists, its keys' links point at its host again."""
     from test_schema_upgrade_path import _materialise
 
     db_path = tmp_path / "vpn.db"
@@ -273,17 +275,10 @@ async def test_v37_upgrade_keeps_relay_keys_and_the_seed_adopts_them(
         assert [(int(r[0]), r[1]) for r in rows] == [(20, None), (21, "ru1"), (22, "ru1"), (24, None), (25, "ru1")]
         relay_repo = RelayRepository(db)
         assert await relay_repo.count() == 0
-
-        _minimal_env(monkeypatch, tmp_path)
-        monkeypatch.setenv("RELAY_ENABLED", "true")
-        monkeypatch.setenv("RELAY_HOST", RELAY_HOST)
-        monkeypatch.setenv("RELAY_SOURCE_IPS", "198.51.100.7")
-        catalog = RelayCatalog()
-        service = RelayService(
-            relays=relay_repo, users=_Users(), audit=_Audit(), clock=ClockProvider(), catalog=catalog,  # type: ignore[arg-type]
+        await relay_repo.create(
+            name="ru1", label="relay", host=RELAY_HOST,
+            source_ips=(ipaddress.IPv4Network("198.51.100.7/32"),), now="2026-01-01T00:00:00+00:00",
         )
-        seeded = await service.seed_from_settings(load_settings())
-        assert seeded is not None and seeded.name == "ru1"
         bundle_repo = KeyBundleRepository(db)
         bundle = await bundle_repo.get_by_id(1)
         assert bundle is not None
@@ -291,7 +286,7 @@ async def test_v37_upgrade_keeps_relay_keys_and_the_seed_adopts_them(
             bundle=bundle,
             keys=tuple(await bundle_repo.list_keys_of_bundle(1)),
             traffic=None,
-            relays=catalog.snapshot,
+            relays=RelaySnapshot.of(await relay_repo.list_all()),
         )
         links = render_links(view, _settings(tmp_path))
         assert len(links) == 2
@@ -301,98 +296,50 @@ async def test_v37_upgrade_keeps_relay_keys_and_the_seed_adopts_them(
         await db.close()
 
 
-# ── the one-time seed from RELAY_* ────────────────────────────────────────────
+# ── the obsolete RELAY_* in .env ──────────────────────────────────────────────
 
 
-def _seed_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **values: str) -> Settings:
+def _legacy_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **values: str) -> Settings:
     _minimal_env(monkeypatch, tmp_path)
     for name, value in values.items():
         monkeypatch.setenv(name, value)
     return load_settings()
 
 
-async def test_seed_creates_one_relay_from_env(
+async def test_obsolete_relay_vars_draw_one_warning_and_create_nothing(
     world: _World, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    settings = _seed_env(
+    settings = _legacy_env(
         monkeypatch, tmp_path,
         RELAY_ENABLED="true", RELAY_NAME="msk-2", RELAY_HOST=RELAY_HOST, RELAY_SOURCE_IPS="198.51.100.7, 203.0.113.0/28",
     )
-    with caplog.at_level(logging.INFO, logger="services.relay_management"):
-        relay = await world.relays.seed_from_settings(settings)
-    assert relay is not None
-    rows = await world.relay_repo.list_all()
-    assert len(rows) == 1
-    seeded = rows[0]
-    assert (seeded.name, seeded.label, seeded.host) == ("msk-2", "relay", RELAY_HOST)
-    assert seeded.source_ips == (ipaddress.IPv4Network("198.51.100.7/32"), ipaddress.IPv4Network("203.0.113.0/28"))
-    assert seeded.enabled and seeded.in_subscriptions
-    # The bot's snapshot already has it, the seed is audited, INFO (not WARNING) is logged.
-    assert world.catalog.snapshot.get("msk-2") == seeded
-    assert world.audit.actions(AuditEntityType.RELAY) == ["relay_seeded_from_env"]
-    assert [r.levelno for r in caplog.records if r.name == "services.relay_management"] == [logging.INFO]
-
-
-async def test_seed_uses_ru1_when_relay_name_is_unset(
-    world: _World, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    settings = _seed_env(monkeypatch, tmp_path, RELAY_ENABLED="true", RELAY_HOST="203.0.113.5", RELAY_SOURCE_IPS="203.0.113.5")
-    relay = await world.relays.seed_from_settings(settings)
-    assert relay is not None and relay.name == "ru1"
-
-
-async def test_seed_skips_a_non_empty_table_and_warns(
-    world: _World, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    await world.add_relay("ru1")
-    settings = _seed_env(
-        monkeypatch, tmp_path, RELAY_ENABLED="true", RELAY_NAME="other", RELAY_HOST=NEW_HOST, RELAY_SOURCE_IPS="203.0.113.5"
-    )
-    with caplog.at_level(logging.INFO, logger="services.relay_management"):
-        assert await world.relays.seed_from_settings(settings) is None
-    assert [r.name for r in await world.relay_repo.list_all()] == ["ru1"]
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "RELAY_* в .env игнорируются: relay управляется из админки" in warnings[0].getMessage()
-    assert "RELAY_HOST" in warnings[0].getMessage()
-
-
-async def test_relay_vars_without_enabled_only_warn(
-    world: _World, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    settings = _seed_env(monkeypatch, tmp_path, RELAY_ENABLED="false", RELAY_HOST=RELAY_HOST)
-    with caplog.at_level(logging.WARNING, logger="services.relay_management"):
-        assert await world.relays.seed_from_settings(settings) is None
+    with caplog.at_level(logging.INFO, logger="services.relays"):
+        assert warn_legacy_relay_env(settings) is True
     assert await world.relay_repo.count() == 0
-    assert any("игнорируются" in r.getMessage() for r in caplog.records)
+    records = [r for r in caplog.records if r.name == "services.relays"]
+    assert [r.levelno for r in records] == [logging.WARNING]
+    message = records[0].getMessage()
+    assert "устарели" in message and "удалите" in message
+    for name in ("RELAY_ENABLED", "RELAY_NAME", "RELAY_HOST", "RELAY_SOURCE_IPS"):
+        assert name in message
 
 
-async def test_no_relay_vars_no_seed_no_warning(
-    world: _World, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+async def test_garbage_obsolete_relay_vars_still_start_with_one_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    settings = _seed_env(monkeypatch, tmp_path)
-    with caplog.at_level(logging.INFO, logger="services.relay_management"):
-        assert await world.relays.seed_from_settings(settings) is None
-    assert await world.relay_repo.count() == 0
-    assert not [r for r in caplog.records if r.name == "services.relay_management"]
+    settings = _legacy_env(monkeypatch, tmp_path, RELAY_ENABLED="true", RELAY_HOST="bad host", RELAY_SOURCE_IPS="nope")
+    with caplog.at_level(logging.WARNING, logger="services.relays"):
+        assert warn_legacy_relay_env(settings) is True
+    assert len([r for r in caplog.records if r.name == "services.relays"]) == 1
 
 
-@pytest.mark.parametrize(
-    "values",
-    [
-        {"RELAY_ENABLED": "true", "RELAY_HOST": "bad host", "RELAY_SOURCE_IPS": "198.51.100.7"},
-        {"RELAY_ENABLED": "true", "RELAY_HOST": RELAY_HOST, "RELAY_SOURCE_IPS": "198.51.100.7,nope"},
-        {"RELAY_ENABLED": "true", "RELAY_HOST": RELAY_HOST},
-        {"RELAY_ENABLED": "true", "RELAY_SOURCE_IPS": "198.51.100.7"},
-        {"RELAY_NAME": "Bad_Name"},
-        {"RELAY_SOURCE_IPS": "2001:db8::1"},
-    ],
-)
-def test_garbage_relay_env_still_fails_startup(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, values: dict[str, str]
+async def test_no_relay_vars_no_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    with pytest.raises(SettingsError, match="RELAY_"):
-        _seed_env(monkeypatch, tmp_path, **values)
+    settings = _legacy_env(monkeypatch, tmp_path)
+    with caplog.at_level(logging.INFO, logger="services.relays"):
+        assert warn_legacy_relay_env(settings) is False
+    assert not [r for r in caplog.records if r.name == "services.relays"]
 
 
 # ── RelayService: validation, immutability, rights, audit ─────────────────────
@@ -1007,7 +954,10 @@ async def test_health_latches_are_independent_and_survive_a_deletion() -> None:
     for _ in range(3):
         await supervisor.check_once()
         clock.now += 300
-    assert sent == [t("relay_alert_down", label="relay", name="ru1", host="a.example.net", port=443)]
+    assert sent == [
+        t("relay_alert_down", label="relay", name="ru1", host="a.example.net", port=443,
+          reason=t("relay_reason_tcp_down", port=443))
+    ]
     assert supervisor.healthy(1) is False and supervisor.healthy(2) is True
     last = supervisor.last_probe(2)
     assert last is not None and last.ok and last.checked_at == "2026-11-03T10:00:00+00:00"
@@ -1136,21 +1086,30 @@ async def test_panel_is_superadmin_only(panel_services: Any) -> None:
 
 
 async def test_list_and_card(world: _World, panel_services: Any) -> None:
+    """A relay set up by hand is listed with «⚠️ без агента»; its page offers to
+    connect one; «Проверить сейчас» shows the one verdict."""
     relay = await world.add_relay(note="spb")
     callback = _Callback("admin:relays")
     await panel.relays_panel(callback, _State(), panel_services)  # type: ignore[arg-type]
-    assert "ru1" in callback.message.last_text and RELAY_HOST in callback.message.last_text
+    text = callback.message.last_text
+    assert "ru1" in text and RELAY_HOST in text and t("relay_managed_none") in text
     # «Назад» returns to the «Протоколы и маршрутизация» section of the panel.
     assert _callbacks(callback.message.last_markup) == [f"admin:relay:{relay.id}", "admin:relay:add", "admin:grp:infra"]
+    assert callback.message.last_markup.inline_keyboard[0][0].text.endswith("⚠️")
 
     card = _Callback(f"admin:relay:{relay.id}")
     await panel.relay_card(card, _State(), panel_services)  # type: ignore[arg-type]
     assert "198.51.100.7" in card.message.last_text and "spb" in card.message.last_text
-    assert f"admin:relay:{relay.id}:check" in _callbacks(card.message.last_markup)
+    assert t("relay_no_agent_hint") in card.message.last_text
+    buttons = _callbacks(card.message.last_markup)
+    assert f"admin:relay:{relay.id}:check" in buttons and f"admin:relay:{relay.id}:ag:attach" in buttons
+    assert not any(":ag:up" in b or ":ag:fw" in b or ":ag:detach" in b for b in buttons)
 
     check = _Callback(f"admin:relay:{relay.id}:check")
     await panel.relay_check_now(check, panel_services)  # type: ignore[arg-type]
-    assert check.message.last_text.startswith(t("relay_check_ok", host=f"<code>{RELAY_HOST}:443</code>"))
+    assert check.message.last_text.startswith(
+        t("relay_check_result", icon="🟢", host=f"<code>{RELAY_HOST}</code>", reason=t("relay_reason_ok", udp="—"))
+    )
     assert panel_services.relay_health.last_probe(relay.id) is not None
 
 
@@ -1160,97 +1119,43 @@ async def test_stale_callbacks_get_a_short_answer_and_the_list(world: _World, pa
     for handler, data in (
         (panel.relay_card, f"admin:relay:{relay.id}"),
         (panel.relay_edit_start, f"admin:relay:{relay.id}:edit:host"),
+        (panel.relay_toggle, f"admin:relay:{relay.id}:toggle:enabled"),
+        (panel.relay_delete_execute, f"admin:relay:{relay.id}:del:keys"),
+        (panel.relay_attach, f"admin:relay:{relay.id}:ag:attach"),
     ):
         callback = _Callback(data)
         await handler(callback, _State(), panel_services)  # type: ignore[operator]
-        assert callback.alerts == [t("err_relay_not_found")]
+        assert callback.alerts == [t("err_relay_not_found")], data
         assert t("relays_empty") in callback.message.last_text
     for handler, data in (
-        (panel.relay_toggle, f"admin:relay:{relay.id}:toggle:enabled"),
         (panel.relay_check_now, f"admin:relay:{relay.id}:check"),
         (panel.relay_delete_prompt, f"admin:relay:{relay.id}:del"),
-        (panel.relay_delete_execute, f"admin:relay:{relay.id}:del:keys"),
+        (panel.relay_detach_prompt, f"admin:relay:{relay.id}:ag:detach"),
     ):
         callback = _Callback(data)
         await handler(callback, panel_services)  # type: ignore[operator]
         assert callback.alerts == [t("err_relay_not_found")], data
 
 
-async def test_add_wizard_end_to_end(world: _World, panel_services: Any) -> None:
+async def test_no_manual_relay_creation_in_the_panel(world: _World, panel_services: Any) -> None:
+    """«Добавить relay» is the pairing code; without the agent machinery wired it
+    says so — it never falls back to a form that writes a relay without an agent."""
     state = _State()
     start = _Callback("admin:relay:add")
     await panel.relay_add_start(start, state, panel_services)  # type: ignore[arg-type]
-    assert state.state == AdminRelayStates.add_name
-
-    bad = _Message("Bad Name")
-    await panel.relay_add_name(bad, state, panel_services)  # type: ignore[arg-type]
-    assert t("err_relay_name_invalid", value="Bad Name") in bad.last_text
-    assert state.state == AdminRelayStates.add_name  # the same step again
-
-    await panel.relay_add_name(_Message("ru1"), state, panel_services)  # type: ignore[arg-type]
-    assert state.state == AdminRelayStates.add_host
-    await panel.relay_add_host(_Message("bad host"), state, panel_services)  # type: ignore[arg-type]
-    assert state.state == AdminRelayStates.add_host
-    host_msg = _Message("203.0.113.5")
-    await panel.relay_add_host(host_msg, state, panel_services)  # type: ignore[arg-type]
-    assert state.state == AdminRelayStates.add_source_ips
-    assert "admin:relay:add:srcashost" in _callbacks(host_msg.last_markup)
-
-    as_host = _Callback("admin:relay:add:srcashost")
-    await panel.relay_add_source_as_host(as_host, state, panel_services)  # type: ignore[arg-type]
-    assert state.state == AdminRelayStates.add_label
-    assert "admin:relay:add:labeldefault" in _callbacks(as_host.message.last_markup)
-
-    default = _Callback("admin:relay:add:labeldefault")
-    await panel.relay_add_label_default(default, state, panel_services)  # type: ignore[arg-type]
-    assert state.state == AdminRelayStates.add_confirm
-    assert "203.0.113.5" in default.message.last_text and "ru1" in default.message.last_text
-    assert await world.relay_repo.count() == 0  # nothing written before the confirmation
-
-    confirm = _Callback("admin:relay:add:confirm")
-    await panel.relay_add_confirm(confirm, state, panel_services)  # type: ignore[arg-type]
+    assert start.alerts == [t("relay_agent_unavailable")]
     assert state.state is None
-    relays = await world.relay_repo.list_all()
-    assert [(r.name, r.host, r.label) for r in relays] == [("ru1", "203.0.113.5", "relay")]
-    assert relays[0].source_ips == (ipaddress.IPv4Network("203.0.113.5/32"),)
-    assert t("relay_created", label="relay") in confirm.message.last_text
+    assert await world.relay_repo.count() == 0
 
 
-async def test_add_wizard_dns_host_and_typed_label(world: _World, panel_services: Any) -> None:
-    await world.add_relay("ru1")  # takes the default "relay" label
-    state = _State()
-    await panel.relay_add_start(_Callback("admin:relay:add"), state, panel_services)  # type: ignore[arg-type]
-    await panel.relay_add_name(_Message("ru2"), state, panel_services)  # type: ignore[arg-type]
-    host = _Message(NEW_HOST)
-    await panel.relay_add_host(host, state, panel_services)  # type: ignore[arg-type]
-    assert "admin:relay:add:srcashost" not in _callbacks(host.last_markup)  # not an IPv4 host
-    src = _Message("198.51.100.20, 198.51.100.21")
-    await panel.relay_add_source_ips(src, state, panel_services)  # type: ignore[arg-type]
-    assert "admin:relay:add:labeldefault" not in _callbacks(src.last_markup)  # "relay" is taken
-    taken = _Message("relay")
-    await panel.relay_add_label(taken, state, panel_services)  # type: ignore[arg-type]
-    assert t("err_relay_label_taken", value="relay") in taken.last_text
-    await panel.relay_add_label(_Message("msk"), state, panel_services)  # type: ignore[arg-type]
-    await panel.relay_add_confirm(_Callback("admin:relay:add:confirm"), state, panel_services)  # type: ignore[arg-type]
-    created = await world.relay_repo.get_by_name("ru2")
-    assert created is not None and created.label == "msk"
-
-
-async def test_add_wizard_takes_an_emoji_label(world: _World, panel_services: Any) -> None:
-    state = _State()
-    await panel.relay_add_start(_Callback("admin:relay:add"), state, panel_services)  # type: ignore[arg-type]
-    await panel.relay_add_name(_Message("ru1"), state, panel_services)  # type: ignore[arg-type]
-    await panel.relay_add_host(_Message(NEW_HOST), state, panel_services)  # type: ignore[arg-type]
-    await panel.relay_add_source_ips(_Message("198.51.100.20"), state, panel_services)  # type: ignore[arg-type]
-    label = _Message("🇷🇺➜")
-    await panel.relay_add_label(label, state, panel_services)  # type: ignore[arg-type]
-    assert state.state == AdminRelayStates.add_confirm
-    assert "<code>🇷🇺➜</code>" in label.last_text
-    confirm = _Callback("admin:relay:add:confirm")
-    await panel.relay_add_confirm(confirm, state, panel_services)  # type: ignore[arg-type]
-    created = await world.relay_repo.get_by_name("ru1")
-    assert created is not None and created.label == "🇷🇺➜"
-    assert t("relay_created", label="🇷🇺➜") in confirm.message.last_text
+@pytest.mark.parametrize("data", ["admin:relay:add:srcashost", "admin:relay:add:labeldefault", "admin:relay:add:confirm"])
+async def test_old_manual_add_buttons_lead_to_the_list(world: _World, panel_services: Any, data: str) -> None:
+    """Buttons of the removed manual «Добавить relay» still in the chat: the list, not an error."""
+    callback = _Callback(data)
+    await panel.stale_relay_callback(callback, _State(), panel_services)  # type: ignore[arg-type]
+    assert callback.alerts == [t("action_stale")]
+    assert t("relays_title") in callback.message.last_text
+    assert await world.relay_repo.count() == 0
 
 
 async def test_a_rejected_label_is_echoed_html_escaped(world: _World, panel_services: Any) -> None:
@@ -1291,10 +1196,12 @@ async def test_edit_host_shows_the_reimport_notice_and_the_source_ip_offer(
     await panel.relay_edit_host(message, state, panel_services)  # type: ignore[arg-type]
     assert state.state is None
     assert t("relay_host_changed", host="<code>198.51.100.20</code>", count=1) in message.last_text
+    # An IPv4 host for links is allowed, with the warning.
+    assert t("relay_host_ipv4_warning") in message.last_text
     assert f"admin:relay:{relay.id}:addsrc" in _callbacks(message.last_markup)
 
     add = _Callback(f"admin:relay:{relay.id}:addsrc")
-    await panel.relay_add_host_to_sources(add, panel_services)  # type: ignore[arg-type]
+    await panel.relay_add_host_to_sources(add, _State(), panel_services)  # type: ignore[arg-type]
     stored = await world.relay_repo.get_by_id(relay.id)
     assert stored is not None and ipaddress.IPv4Network("198.51.100.20/32") in stored.source_ips
 
@@ -1322,15 +1229,16 @@ async def test_delete_flow_from_the_panel(world: _World, panel_services: Any) ->
         f"admin:relay:{relay.id}",
     ]
     assert "4" in prompt.message.last_text
+    assert t("relay_delete_no_agent_note") in prompt.message.last_text
 
     disable = _Callback(f"admin:relay:{relay.id}:del:disable")
-    await panel.relay_delete_execute(disable, panel_services)  # type: ignore[arg-type]
+    await panel.relay_delete_execute(disable, _State(), panel_services)  # type: ignore[arg-type]
     stored = await world.relay_repo.get_by_id(relay.id)
     assert stored is not None and not stored.enabled
     assert t("relay_disabled_instead", label="relay") in disable.message.last_text
 
     delete = _Callback(f"admin:relay:{relay.id}:del:keys")
-    await panel.relay_delete_execute(delete, panel_services)  # type: ignore[arg-type]
+    await panel.relay_delete_execute(delete, _State(), panel_services)  # type: ignore[arg-type]
     assert await world.relay_repo.count() == 0
     assert t("relay_deleted", label="relay", count=4) in delete.message.last_text
 
@@ -1341,23 +1249,24 @@ async def test_delete_a_relay_without_keys_from_the_panel(world: _World, panel_s
     await panel.relay_delete_prompt(prompt, panel_services)  # type: ignore[arg-type]
     assert _callbacks(prompt.message.last_markup) == [f"admin:relay:{relay.id}:del:yes", f"admin:relay:{relay.id}"]
     yes = _Callback(f"admin:relay:{relay.id}:del:yes")
-    await panel.relay_delete_execute(yes, panel_services)  # type: ignore[arg-type]
+    await panel.relay_delete_execute(yes, _State(), panel_services)  # type: ignore[arg-type]
     assert await world.relay_repo.count() == 0
 
 
 async def test_toggles_from_the_card(world: _World, panel_services: Any) -> None:
     relay = await world.add_relay()
-    await panel.relay_toggle(_Callback(f"admin:relay:{relay.id}:toggle:subs"), panel_services)  # type: ignore[arg-type]
-    await panel.relay_toggle(_Callback(f"admin:relay:{relay.id}:toggle:enabled"), panel_services)  # type: ignore[arg-type]
+    await panel.relay_toggle(_Callback(f"admin:relay:{relay.id}:toggle:subs"), _State(), panel_services)  # type: ignore[arg-type]
+    await panel.relay_toggle(_Callback(f"admin:relay:{relay.id}:toggle:enabled"), _State(), panel_services)  # type: ignore[arg-type]
     stored = await world.relay_repo.get_by_id(relay.id)
     assert stored is not None and not stored.in_subscriptions and not stored.enabled
     assert world.catalog.snapshot.enabled == ()
 
 
-async def test_leaving_to_the_list_abandons_a_relay_wizard(world: _World, panel_services: Any) -> None:
+async def test_leaving_to_the_list_abandons_a_relay_step(world: _World, panel_services: Any) -> None:
+    relay = await world.add_relay()
     state = _State()
-    await panel.relay_add_start(_Callback("admin:relay:add"), state, panel_services)  # type: ignore[arg-type]
-    assert state.state == AdminRelayStates.add_name
+    await panel.relay_edit_start(_Callback(f"admin:relay:{relay.id}:edit:note"), state, panel_services)  # type: ignore[arg-type]
+    assert state.state == AdminRelayStates.edit_note
     await panel.relays_panel(_Callback("admin:relays"), state, panel_services)  # type: ignore[arg-type]
     assert state.state is None
 
@@ -1365,12 +1274,11 @@ async def test_leaving_to_the_list_abandons_a_relay_wizard(world: _World, panel_
 # ── bot startup ───────────────────────────────────────────────────────────────
 
 
-async def test_bot_startup_seeds_once_and_then_warns(
+async def test_bot_startup_creates_nothing_from_env_and_warns_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """create_app: the first start moves RELAY_* into the table and loads the
-    snapshot every link builder reads; the next start leaves the table alone and
-    says the variables are ignored."""
+    """create_app with the obsolete RELAY_* still in .env: the bot starts, the table
+    stays as it is (nothing is seeded) and ONE warning says to delete them."""
     import bot.app as app_module
 
     _minimal_env(monkeypatch, tmp_path)
@@ -1404,22 +1312,16 @@ async def test_bot_startup_seeds_once_and_then_warns(
     monkeypatch.setattr(app_module, "_startup_reconcile_keys", no_reconcile)
     monkeypatch.setattr(ShellRunner, "run", no_shell)
 
-    async def start() -> Any:
+    with caplog.at_level(logging.INFO, logger="services.relays"):
         bot, _dp, db, _health, services = await app_module.create_app(settings)
-        snapshot = services.relays.snapshot
-        assert services.xray.relays is services.hysteria.relays is services.key_bundles.relays
-        await bot.session.close()
-        await db.close()
-        return snapshot
-
-    with caplog.at_level(logging.INFO, logger="services.relay_management"):
-        first = await start()
-    assert [relay.name for relay in first.relays] == ["ru1"]
-    assert first.get("ru1").host == RELAY_HOST
-    caplog.clear()
-    with caplog.at_level(logging.INFO, logger="services.relay_management"):
-        second = await start()
-    assert second.relays == first.relays
-    assert any(
-        record.levelno == logging.WARNING and "игнорируются" in record.getMessage() for record in caplog.records
-    )
+        try:
+            assert services.relays.snapshot.relays == ()
+            assert services.xray.relays is services.hysteria.relays is services.key_bundles.relays
+            assert services.relays.agents_available
+            assert services.relay_health.agent_probe == services.relays.poll_agent
+            assert not hasattr(services, "relay_agents")
+        finally:
+            await bot.session.close()
+            await db.close()
+    warnings = [r for r in caplog.records if r.name == "services.relays" and r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "RELAY_ENABLED" in warnings[0].getMessage()

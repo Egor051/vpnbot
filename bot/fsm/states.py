@@ -83,13 +83,19 @@ class WarpSplitStates(StatesGroup):
 
 
 class AdminRelayStates(StatesGroup):
-    """The relay panel's wizards: «Добавить relay» and the per-field edits."""
+    """The ONE relay screen's typed steps (bot/handlers/admin_relays.py)."""
 
+    # «Добавить relay»: name → public host (→ keep an IPv4?) → the main server's name.
     add_name = State()
     add_host = State()
-    add_source_ips = State()
-    add_label = State()
-    add_confirm = State()
+    add_host_ipv4 = State()
+    add_target = State()
+    # «🔗 Подключить агент» when the main server's DNS name is not known.
+    attach_target = State()
+    # «🔌 Подключить»: the relay's SSH address.
+    pair_address = State()
+    # «⚙️ Порты / цель» of a relay with an agent.
+    forward = State()
     edit_host = State()
     edit_source_ips = State()
     edit_label = State()
@@ -107,12 +113,3 @@ class TotpStates(StatesGroup):
     disable_code = State()
     # «Перевыпустить резервные коды»: a TOTP code (a backup code is not enough).
     reissue_code = State()
-
-
-class RelayWizardStates(StatesGroup):
-    """«🧙 Мастер настройки → 🛰 Relay» (bot/handlers/admin_relay_agents.py)."""
-
-    add_name = State()
-    add_target = State()
-    pair_address = State()
-    forward = State()

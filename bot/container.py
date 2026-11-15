@@ -25,9 +25,8 @@ from services.online_clients import OnlineClientsService
 from services.protocol_modules import ProtocolModulesService
 from services.protocol_uninstall import ProtocolUninstallService
 from services.proxy import ProxyService
-from services.relay_agents import RelayAgentService
 from services.relay_health import RelayHealthSupervisor
-from services.relay_management import RelayService
+from services.relays import RelayService
 from services.server_status import ServerStatusService
 from services.ssh_port import SshPortMonitor
 from services.ufw import UfwDeadmanMonitor
@@ -86,9 +85,10 @@ class Services:
     # every method on both, so with the flag off neither is reachable.
     key_bundles: KeyBundleService
     key_bundle_views: KeyBundleViewService
-    # L4 relays (the admin panel's «🛰 Управлять relay»): the service owns the
-    # in-process snapshot every link builder reads (``relays.snapshot``); the
-    # supervisor runs the health loop and keeps each relay's latest probe.
+    # L4 relays — ONE service (admin panel → «🛰 Relay», services/relays.py): every
+    # relay, its agent and the pairing codes. It owns the in-process snapshot every
+    # link builder reads (``relays.snapshot``); the supervisor runs the one health
+    # loop (traffic + agent) and keeps each relay's latest verdict.
     relays: RelayService
     relay_health: RelayHealthSupervisor
     # Loopback /healthz probe for the hy2_auth data plane; None when Hysteria2 is
@@ -122,6 +122,3 @@ class Services:
     # The setup wizard (services/wizard.py, «🧙 Мастер настройки»): runs of fixed root
     # helper modes in their own systemd units. None only in lightweight test doubles.
     wizard: WizardService | None = None
-    # Relays the bot installs and manages over SSH («🧙 Мастер настройки → 🛰 Relay»,
-    # services/relay_agents.py). None only in lightweight test doubles.
-    relay_agents: RelayAgentService | None = None

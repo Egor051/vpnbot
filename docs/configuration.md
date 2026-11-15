@@ -367,20 +367,17 @@ link points at the relay's host instead of the main host. Topology, DNS and the
 limitations are in [docs/relay.md](relay.md).
 
 **Relays are managed in the admin panel, not here** (🛡 Админ-панель → 🧩 Протоколы и маршрутизация →
-🛰 Управлять relay; stored in the `relays` table): name, host, source IPs, the marker in key names,
-on/off and «в подписках», several relays at once. See
+🛰 Relay — one screen; stored in the `relays` table): name, host for links, source IPs, the marker in key names,
+on/off, «в подписках», the relay's agent, several relays at once. See
 [docs/relay.md](relay.md#managing-relays-in-the-admin-panel).
 
 | Variable | Required | Default | Description | Example |
 |---|---|---|---|---|
-| `RELAY_HEALTH_INTERVAL` | No | `300` | Seconds between relay health probes (TCP connect + verified TLS handshake to `<relay host>:XRAY_PUBLIC_PORT` with SNI `XRAY_SNI`, for every enabled relay); `0` disables the monitor (0–86400). Admins are alerted once when a relay goes down and once when it comes back. | `300` |
+| `RELAY_HEALTH_INTERVAL` | No | `300` | Seconds between relay health probes (TCP connect + verified TLS handshake to `<relay host>:XRAY_PUBLIC_PORT` with SNI `XRAY_SNI`, for every enabled relay, plus the agent's `status` over SSH for a relay with one); `0` disables the monitor (0–86400). One verdict per relay (🟢 / 🟡 agent / 🔴 traffic): the admins get one message per change, never two. | `300` |
 | `HOST_CHECK_INTERVAL` | No | `300` | Seconds between reads of `/var/lib/vpn-bot-host-check/last.json`, the verdict of the host invariants check (`vpn-bot-host-check.timer` 5 min after boot and daily, plus every deploy). The superadmins are alerted when a row turns BEATEN or MISMATCH, when a new LATENT appears, and once when the last BEATEN/MISMATCH is gone — never twice for the same row ([host-state.md](host-state.md#effective-state)); `0` disables the alerts (0–86400). Main server only: a relay runs no bot. | `300` |
 | `SSH_PORT` | No | `54321` | The port ssh listens on, main server and relay ([host-state.md](host-state.md#the-ssh-port)). The deploy renders `ssh.socket`'s `ListenStream=` and an `sshd_config.d` `Port` drop-in from it; a change is a two-phase migration — both ports first (UFW opens the new one), the old one closed only after a proof that the new one works from outside (a connection from outside in the sshd log, «Подтвердить» under the bot's message, on a relay main's probe). No `ALLOW_SSH_CHANGE`. 1–65535, never the TCP port of a service of the role (the deploy refuses it). The bot only reports the migration. | `54321` |
 | `SERVER_FLAG_EMOJI` | No | `🇫🇮` | Appended to the display name (`#fragment`) of every standalone key and of basic-subscription members: `<label>_[<relay label>]<flag>`. Display only — the email label never changes. Non-empty, no control characters, at most 16 characters. | `🇫🇮` |
-| `RELAY_ENABLED` | No | `false` | **Legacy — seed only.** With `true` (plus `RELAY_HOST` and `RELAY_SOURCE_IPS`) and an empty `relays` table, the bot creates that relay once at startup; afterwards every `RELAY_*` below is ignored with a WARNING. | `true` |
-| `RELAY_NAME` | No | `ru1` | **Legacy — seed only.** Name of the seeded relay (`^[a-z0-9][a-z0-9-]{0,31}$`) — the value its keys carry in `vpn_keys.relay`. | `ru1` |
-| `RELAY_HOST` | When `RELAY_ENABLED=true` | *(empty)* | **Legacy — seed only.** Public DNS name (recommended) or IPv4 of the seeded relay. IPv6 is rejected. | `relay.anycastedge.net` |
-| `RELAY_SOURCE_IPS` | When `RELAY_ENABLED=true` | *(empty)* | **Legacy — seed only.** Comma-separated IPv4 addresses / CIDR networks the seeded relay's traffic arrives **from**. Still parsed strictly (`ipaddress`, host bits in a CIDR rejected): anything malformed fails startup — even with `RELAY_ENABLED=false`. | `198.51.100.7, 203.0.113.0/28` |
+| `RELAY_ENABLED`, `RELAY_NAME`, `RELAY_HOST`, `RELAY_SOURCE_IPS` | No | — | **Obsolete — not read, not even parsed.** Relays live in the `relays` table (an earlier release seeded the relay they described once). A value left here cannot stop the bot; it logs one WARNING at startup and the wizard's self-check shows a yellow `legacy_env` item until the lines are deleted ([relay.md](relay.md#the-obsolete-relay_-in-env)). | — |
 
 **There is no relay port setting.** The relay forwards 1:1, so the port in a relay
 link is the protocol's own public port: `XRAY_PUBLIC_PORT` for VLESS (TCP and
