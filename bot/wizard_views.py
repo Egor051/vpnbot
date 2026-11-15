@@ -73,10 +73,29 @@ def plan_text(run: WizardRun, snap: StatusSnapshot | None = None) -> str:
     return "\n".join([header(run), "", t("wizard_plan_title"), _pre(body), t("wizard_plan_confirm_hint")])
 
 
+def item_text(item: Item) -> str:
+    """The item in the reader's language (``wizard_item_<msg>``), else the helper's text.
+
+    A message this bot does not know, or arguments that do not fill it, fall back to
+    the English ``text`` the helper wrote — a helper newer than the bot must not break
+    the report. Plain text: the caller escapes it."""
+    if item.msg:
+        key = f"wizard_item_{item.msg}"
+        template = t(key)  # t() returns the key itself for a message it does not know
+        if template != key:
+            try:
+                # Always formatted (t() skips it without kwargs): a placeholder the
+                # arguments do not fill is a fallback, never a raw "{iface}" in chat.
+                return template.format_map(dict(item.args))
+            except (KeyError, IndexError, ValueError):
+                pass
+    return item.text
+
+
 def _items_block(items: list[Item]) -> str:
     order = {"red": 0, "yellow": 1, "green": 2}
     return "\n".join(
-        f"{LEVEL_ICONS[i.level]} <b>{h(i.key)}</b>: {h(i.text)}" for i in sorted(items, key=lambda i: order[i.level])
+        f"{LEVEL_ICONS[i.level]} <b>{h(i.key)}</b>: {h(item_text(i))}" for i in sorted(items, key=lambda i: order[i.level])
     )
 
 

@@ -98,13 +98,79 @@ Changes nothing. Each check is a green / yellow / red item:
 | Check | Red | Yellow |
 |---|---|---|
 | `listeners` — `vpn-bot-ufw-apply listeners` | a public TCP listener the firewall set neither allows nor declares closed | no verdict / helper missing |
-| `warp` — only when WARP is deployed (`/etc/amnezia/out-warp.conf` or `warp-routes` enabled) | no fwmark table on `out-warp`, no `ip rule` looking it up, or no default route in it | — |
+| `warp` — only when WARP is deployed (`WARP_CONFIG_PATH`, default `/etc/amnezia/out-warp.conf`, or `warp-routes` enabled); see [below](#the-warp-items-intent-against-fact) | WARP turned on but `out-warp` has no fwmark table; full tunnel without its default route | the split routes in table T do not match the intent |
+| `warp:rule` — only while AWG is installed | no `ip rule from <AWG_NETWORK> lookup T` (selective / full tunnel) | the same with split off (harmless until it is turned on) |
+| `warp:clients_nat` — only while AWG is installed and split is not off | no MASQUERADE/SNAT on `out-warp` for the client subnet: AWG clients leave into WARP without SNAT | nat table unreadable |
+| `warp:egress` — per address xray (`sendThrough`) / danted (`external:`) send from | the address is not on an up `out-warp`; the probe leaves the wrong way; no SNAT for it on the WAN, or on `out-warp` for an address that is not the tunnel address | split off but it still leaves via `out-warp`; `WARP_PROXY_EGRESS` on and nobody bound to the tunnel address; the addresses, the WAN or the nat table unreadable |
 | `failed_units` — `systemctl --failed` | any failed unit | — |
 | `certs` — every acme.sh certificate, `/etc/hysteria/cert.pem`, `SUBSCRIPTION_TLS_CERT` | < 7 days left | < 21 days left (acme.sh renews at 30); acme.sh has no `Le_ReloadCmd` |
 | `helpers` — `OUT_OF_REPO_HELPERS` of this role vs the checkout | a `required` helper missing | an installed copy differs (the next deploy closes it) |
 | `perms` — `DB_PATH` (0600) and its directory (0700), owner `vpn-bot` when it exists; `.env` root-owned, not world-accessible, not group-writable | any deviation | — |
 | `disk` — `/`, `/var`, the checkout | < 1 GiB or < 5 % free | < 15 % free |
 | `reboot` — `/var/run/reboot-required` | — | a reboot is required (with the packages) |
+
+Each item is shown in the reader's language: the helper writes `msg` and `args` next
+to the English `text`, and the bot renders the i18n message `wizard_item_<msg>` with
+them. `text` stays the log line and the fallback — a message the bot does not know,
+or arguments that do not fill it, show the helper's English as before. The English
+templates live in the helper (`MESSAGES`) and equal `i18n/en.py`; a test keeps the two
+in step. Today the `warp` items use it; the other checks still write English only.
+
+#### The `warp` items: intent against fact
+
+The check looks for a **discrepancy between what the bot was told and what the kernel
+routes**; it never demands one particular mode. Every source of intent is the one the
+bot itself uses, read-only:
+
+| Intent | Source |
+|---|---|
+| WARP on / off | `warp_settings.enabled` in `vpn.db` (`sqlite3` `mode=ro` — the bot owns the WAL; never written) |
+| split off — **all direct** | the marker `WARP_SPLIT_DISABLED_MARKER_PATH` (default `/etc/vpn-bot/warp-split.disabled`), written by `vpn-bot-warp-split-state off` |
+| split on — **selective** | no marker, a non-empty `WARP_SPLIT_LIST_PATH` (default `/etc/vpn-bot/warp-split.list`; IPv4, comments and `0.0.0.0/0` dropped, each network once) |
+| **full tunnel** | no marker and no (or an empty) list: `vpn-bot-warp-split apply` then refuses to blackhole and leaves awg-quick's `default dev out-warp` in table T. The state of `vpn-bot-warp-split.service` is not intent: with a non-empty list the bot's own panel wants the list too (`n_table == n_list`), so a disabled unit that left the default behind is the same 🟡 the panel shows |
+| AWG clients exist | no `/etc/vpn-bot/uninstalled/awg` (the marker `vpn-bot-protocol-uninstall` writes) |
+| proxies egress through WARP | the live xray `config.json` (`XRAY_CONFIG_PATH`; `sendThrough` of every outbound) and `external:` in `/etc/danted.conf`; `WARP_PROXY_EGRESS(_ENABLED)` is what makes the bot emit `sendThrough` = the `[Interface] Address` of the WARP config |
+
+The facts: `awg show <iface> fwmark` (table T), `ip -4 route show table T`, the
+`n_table` of `vpn-bot-warp-split-state status` (its own count of `<prefix> dev
+out-warp`), `ip -4 rule show`, `ip -4 -br addr show`, `ip -4 route show default` (the
+WAN device — never assumed to be `eth0`), `ip -4 route get <probe> from <A>` (a FIB
+lookup through the policy rules; no packet is sent; the probe is a TEST-NET address
+outside the split list, `1.1.1.1` last) and `iptables -t nat -S POSTROUTING`. Nothing
+else runs: no `-A`/`-D`, no `ip route add`.
+
+`warp`:
+
+| State | Verdict |
+|---|---|
+| WARP not deployed | 🟢 nothing to check |
+| `warp_settings.enabled = 0` | 🟢 turned off by the administrator (noted when `out-warp` is up all the same — systemd keeps it in observer mode) |
+| turned on (or `warp_settings` unreadable) and `out-warp` has no fwmark | 🔴 |
+| split off | 🟢 when table T has **no** route via `out-warp` (the anti-loop route via the WAN stays); any route via `out-warp` → 🟡, a default via `out-warp` → 🟡 «off turned into a full tunnel» (the PR #274 class) |
+| selective | 🟢 when the `dev out-warp` prefixes in T equal the list; another count → 🟡; a default via `out-warp` → 🟡 (full tunnel instead of selective) |
+| full tunnel | 🟢 with a default via `out-warp`, 🔴 without |
+
+`warp:rule` exists only while AWG is installed — without AWG there is no client subnet
+and no rule to want. `warp:clients_nat` likewise, and only when split is not off (with
+split off no client enters WARP): the client subnet's source is not WARP's address, so
+entering the tunnel it needs a MASQUERADE/SNAT on `out-warp` (`-o out-warp -j
+MASQUERADE`, installed by `warp-routes`); without one → 🔴 «AWG clients leave into WARP
+without SNAT». Without AWG clients the item is not shown at all: whether the host still
+matches the warp-routes recipe is the business of the host invariants / drift checks,
+not of the egress self-check.
+
+`warp:egress` — for every address A a proxy sends from, unless A sits on another
+interface (a second public IP is not WARP's business). It runs whatever
+`warp_settings` says: a proxy bound to the tunnel address uses `out-warp` either way.
+
+| Check | Verdict |
+|---|---|
+| A is not on `out-warp`, or `out-warp` is down | 🔴 in **every** split mode: xray/danted cannot send a single packet |
+| split off | the probe from A leaves via the WAN **and** a MASQUERADE/SNAT covers A there (`-s A/32 -o <wan>`, or a broader plain rule) → 🟢; no such rule → 🔴 (VLESS/SOCKS5 leave with A and no SNAT; hy2 may still work); still via `out-warp` → 🟡 |
+| selective | a probe in the first listed prefix via `out-warp`, a probe outside the list as when split is off; any difference → 🔴 |
+| full tunnel | the probe via `out-warp`, else 🔴 |
+| through `out-warp` (selective / full tunnel) | A is the tunnel address (the `[Interface] Address` of the WARP config; unreadable → the address on `out-warp`): **no NAT required** — the source is the one WARP accepts, and `vpn-bot-warp-routes` installs none for source-bind proxies; the route and A on the interface are enough. Another address on `out-warp` needs `-o out-warp` MASQUERADE/SNAT, else 🔴 (WARP drops it) |
+| `WARP_PROXY_EGRESS` on, nobody bound to the tunnel address | 🟡 (the proxies egress from the host IP) |
 
 **Daily run.** «⏰ Ежедневная самопроверка» (stored in `schema_meta`,
 `wizard_selfcheck_daily`) starts a self-check every 24 hours when nothing else runs.

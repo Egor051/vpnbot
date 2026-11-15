@@ -7,9 +7,27 @@ status file; the bot renders them as a traffic light.
 
   listeners    `vpn-bot-ufw-apply listeners`: every public TCP listener is allowed by
                the computed firewall set or declared closed (the helper owns the rule)
-  warp         only when WARP is deployed (out-warp.conf or warp-routes enabled):
-               the interface's fwmark table T, an `ip rule` that looks it up, and a
-               default route in table T
+  warp         only when WARP is deployed (out-warp.conf or warp-routes enabled).
+               Compares the INTENT the bot keeps with the FACT the kernel routes —
+               it looks for a discrepancy, it never demands one mode. Intent:
+               warp_settings.enabled (vpn.db, opened mode=ro), the split marker
+               (/etc/vpn-bot/warp-split.disabled → all direct), the split list
+               (non-empty → selective, empty/absent → full tunnel: the split helper
+               then leaves awg-quick's default in table T), the AWG uninstall marker
+               (/etc/vpn-bot/uninstalled/awg → no client subnet, no client rule to
+               want). Fact: `awg show <iface> fwmark` (table T), `ip -4 route show
+               table T` and `vpn-bot-warp-split-state status` (n_table).
+  warp:rule    only while AWG is installed: `ip rule from <AWG_NETWORK> lookup T`
+  warp:clients_nat  only while AWG is installed and split is not off: a MASQUERADE/SNAT
+               on <iface> for the client subnet (its source is not WARP's address)
+  warp:egress  per address A a local proxy sends from (xray `sendThrough` of every
+               outbound in the live config.json, danted `external:`), unless A sits
+               on another interface: A must be on an up <iface>; then a FIB lookup
+               (`ip -4 route get <probe> from A`, no packet is sent) must leave the
+               way the split mode says. Via the WAN, `iptables -t nat -S POSTROUTING`
+               must carry a MASQUERADE/SNAT for A; via <iface> only when A is not the
+               tunnel address (the tunnel address needs no NAT there). WARP_PROXY_EGRESS
+               on with nobody bound to the tunnel address is yellow.
   failed_units `systemctl --failed`
   certs        every acme.sh certificate (/root/.acme.sh/<domain>[_ecc]/): days left
                (< 21 yellow — acme.sh renews at 30 —, < 7 red) and a Le_ReloadCmd (no
@@ -37,16 +55,20 @@ from __future__ import annotations
 import calendar
 import importlib.machinery
 import importlib.util
+import ipaddress
 import json
 import os
 import pwd
 import re
+import shlex
 import shutil
+import sqlite3
 import sys
 import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from urllib.parse import quote
 
 
 def _load_lib() -> ModuleType:
@@ -66,8 +88,23 @@ def _load_lib() -> ModuleType:
 lib = _load_lib()
 MODE = "selfcheck"
 UFW_HELPER = "/usr/local/sbin/vpn-bot-ufw-apply"
-WARP_CONF = "/etc/amnezia/out-warp.conf"
-WARP_IFACE = "out-warp"
+# WARP: the bot's defaults; .env overrides them exactly as config/settings.py does.
+WARP_CONF = "/etc/amnezia/out-warp.conf"                # WARP_CONFIG_PATH
+WARP_IFACE = "out-warp"                                 # WARP_INTERFACE
+SPLIT_LIST = "/etc/vpn-bot/warp-split.list"             # WARP_SPLIT_LIST_PATH
+SPLIT_MARKER = "/etc/vpn-bot/warp-split.disabled"       # WARP_SPLIT_DISABLED_MARKER_PATH
+SPLIT_STATE_HELPER = "/usr/local/sbin/vpn-bot-warp-split-state"
+AWG_NETWORK = "10.0.0.0/24"                             # AWG_NETWORK
+XRAY_CONFIG = "/usr/local/etc/xray/config.json"         # XRAY_CONFIG_PATH
+DANTE_CONF = "/etc/danted.conf"
+UNINSTALLED_DIR = "/etc/vpn-bot/uninstalled"            # vpn-bot-protocol-uninstall markers
+# Destinations for `ip route get` — a FIB lookup, never a packet. TEST-NET first:
+# 1.1.1.1 is Cloudflare's and may well sit in a split list.
+PROBE_IPS = ("192.0.2.1", "198.51.100.1", "203.0.113.1", "1.1.1.1")
+EGRESS_PROTOS = {"xray": "VLESS", "danted": "SOCKS5"}
+_TRUE = frozenset({"1", "true", "yes", "y", "on"})
+_FALSE = frozenset({"0", "false", "no", "n", "off"})
+_ADDRESS_RE = re.compile(r"^[ \t]*Address[ \t]*=[ \t]*(.+?)[ \t]*$", re.IGNORECASE | re.MULTILINE)
 ACME_HOME = "/root/.acme.sh"
 FIXED_CERTS = ("/etc/hysteria/cert.pem",)
 CERT_YELLOW_DAYS = 21
@@ -80,19 +117,71 @@ REBOOT_PKGS = "/var/run/reboot-required.pkgs"
 _REGISTRY_RE = re.compile(r'^\s*"([^"|]+)\|([^"|]+?)(?:\|([^"|]+)(?:\|([^"|]+))?)?"\s*$')
 
 
+# Items that the bot shows in its own language: the event carries `msg` (the bot
+# renders i18n key `wizard_item_<msg>` with `args`) next to the English `text`, which
+# stays the log line and the fallback for a bot that does not know the key. These
+# English templates equal i18n/en.py (tests/test_wizard_helpers.py keeps them in step).
+MESSAGES = {
+    "warp_not_deployed": "WARP is not deployed on this host — nothing to check",
+    "warp_disabled": "WARP is turned off by the administrator (warp_settings.enabled = 0)",
+    "warp_disabled_up": "WARP is turned off by the administrator (warp_settings.enabled = 0); {iface} is up all the same — systemd keeps it, the bot does not watch it",
+    "warp_down": "WARP is turned on, but {iface} has no fwmark table (interface down?)",
+    "warp_down_unknown": "WARP is deployed, but {iface} has no fwmark table (interface down?); warp_settings could not be read",
+    "warp_direct_ok": "split is off — all traffic goes direct; table {table} has no route via {iface}",
+    "warp_direct_drift": "split is off (marker present), but table {table} still has {count} route(s) via {iface} — traffic goes into WARP against the intent",
+    "warp_direct_default": "split is off (marker present), but table {table} has a default route via {iface} — «off» turned into a full tunnel",
+    "warp_selective_ok": "selective split: {count} prefix(es) via {iface} in table {table}, as in the list",
+    "warp_selective_drift": "selective split: the list has {want} prefix(es), table {table} has {count} via {iface}",
+    "warp_selective_default": "selective split, but table {table} has a default route via {iface} — a full tunnel instead of the {want} listed prefix(es)",
+    "warp_full_ok": "full tunnel (no split list): table {table} has a default route via {iface}",
+    "warp_full_missing": "full tunnel (no split list), but table {table} has no default route via {iface} — traffic sent into WARP has no way out",
+    "warp_rule_ok": "ip rule from {subnet} looks up table {table}",
+    "warp_rule_missing": "no ip rule from {subnet} looks up table {table} — AWG clients bypass WARP",
+    "warp_rule_missing_direct": "no ip rule from {subnet} looks up table {table}: harmless while split is off, but turning it on will not route AWG clients into WARP",
+    "warp_clients_nat_ok": "AWG clients ({subnet}) leave into WARP masqueraded on {iface}",
+    "warp_clients_nat_missing": "AWG clients ({subnet}) leave into WARP without SNAT — no MASQUERADE on {iface} (-o {iface} -j MASQUERADE)",
+    "warp_clients_nat_unreadable": "the nat table could not be read (iptables -t nat -S) — the SNAT of AWG clients into WARP was not checked",
+    "warp_egress_no_address": "WARP_PROXY_EGRESS is on, but {conf} has no IPv4 [Interface] Address — the bot emits no sendThrough, the proxies egress from the host IP",
+    "warp_egress_unused": "WARP_PROXY_EGRESS is on, but neither xray (sendThrough) nor danted (external) is bound to {addr} — the proxies egress from the host IP",
+    "warp_egress_addrs_unreadable": "the interface addresses could not be read (ip -4 -br addr show) — the egress of the proxies was not checked",
+    "warp_egress_addr_missing": "{who} cannot send a single packet: address {addr} is not on {iface}",
+    "warp_egress_iface_down": "{who} cannot send a single packet: {iface} (address {addr}) is down",
+    "warp_egress_no_wan": "no IPv4 default route in the main table — the egress of {who} from {addr} was not checked",
+    "warp_egress_nat_unreadable": "the nat table could not be read (iptables -t nat -S) — the egress of {who} from {addr} was not checked",
+    "warp_egress_direct_ok": "split is off: {protos} from {addr} leave via {wan} with MASQUERADE (probe {probe})",
+    "warp_egress_no_snat": "{protos} leave into {wan} with source {addr} and no SNAT — the traffic does not get out; hy2 may still work",
+    "warp_egress_direct_via_warp": "split is off, but {protos} from {addr} still leave via {iface} (probe {probe})",
+    "warp_egress_route": "{protos} from {addr}: a probe to {probe} resolves to {got}, expected {want}",
+    "warp_egress_warp_no_nat": "{protos} from {addr} leave via {iface}, but {addr} is not the tunnel address {tunnel} and nothing masquerades it there (-o {iface} -j MASQUERADE) — WARP drops the packets",
+    "warp_egress_selective_ok": "selective split: {protos} from {addr} reach the listed prefixes via {iface} (probe {probe_in}) and the rest via {wan} with MASQUERADE (probe {probe})",
+    "warp_egress_full_ok": "full tunnel: {protos} from {addr} leave via {iface} (probe {probe})",
+}
+
+
 class Items:
     def __init__(self, ctx: Any) -> None:
         self.ctx = ctx
         self.counts = {"green": 0, "yellow": 0, "red": 0}
 
-    def add(self, level: str, key: str, text: str) -> None:
+    def add(self, level: str, key: str, text: str, msg: str = "", args: dict[str, str] | None = None) -> None:
         self.counts[level] += 1
-        self.ctx.event("item", level=level, key=key, text=text)
+        fields: dict[str, Any] = {"level": level, "key": key, "text": text}
+        if msg:
+            # Status.emit redacts only top-level strings: redact the values here.
+            fields["msg"] = msg
+            fields["args"] = {k: lib.redact_text(v) for k, v in (args or {}).items()}
+        self.ctx.event("item", **fields)
         self.ctx.log.write(f"[{level}] {key}: {text}")
+
+    def say(self, level: str, key: str, msg: str, **args: object) -> None:
+        """An item in the bot's language: MESSAGES[msg] is the English text."""
+        values = {k: str(v) for k, v in args.items()}
+        self.add(level, key, MESSAGES[msg].format_map(values), msg=msg, args=values)
 
 
 def app_env() -> dict[str, str]:
-    return lib.env_file_values(lib.host_path(f"{lib.APP_DIR}/.env"))
+    values: dict[str, str] = lib.env_file_values(lib.host_path(f"{lib.APP_DIR}/.env"))
+    return values
 
 
 # --------------------------------------------------------------------------- #
@@ -118,33 +207,410 @@ def check_listeners(ctx: Any, items: Items) -> None:
         items.add("yellow", "listeners", f"listener check gave no verdict (exit {rc})")
 
 
-def warp_deployed(ctx: Any) -> bool:
-    if lib.host_path(WARP_CONF).exists():
+def warp_deployed(ctx: Any, conf: str = WARP_CONF) -> bool:
+    if lib.host_path(conf).exists():
         return True
     rc, out = ctx.run(["systemctl", "is-enabled", "warp-routes.service"])
     return rc == 0 and out.strip() in ("enabled", "enabled-runtime", "static")
 
 
+def env_bool(env: dict[str, str], name: str) -> bool | None:
+    """config/settings.py `_bool` without the exception: None = unset or not a boolean."""
+    raw = env.get(name, "").strip().lower()
+    return True if raw in _TRUE else False if raw in _FALSE else None
+
+
+def proxy_egress_flag(env: dict[str, str]) -> bool:
+    """WARP_PROXY_EGRESS_ENABLED, falling back to the legacy WARP_PROXY_EGRESS (as the bot)."""
+    if env.get("WARP_PROXY_EGRESS_ENABLED", "").strip():
+        return env_bool(env, "WARP_PROXY_EGRESS_ENABLED") is True
+    return env_bool(env, "WARP_PROXY_EGRESS") is True
+
+
+def uninstalled(proto: str) -> bool:
+    return bool(lib.host_path(f"{UNINSTALLED_DIR}/{proto}").exists())
+
+
+def warp_settings_enabled(env: dict[str, str]) -> bool | None:
+    """warp_settings.enabled, read-only (mode=ro: the bot owns the WAL). None = unknown."""
+    db = lib.host_path(env.get("DB_PATH", "").strip() or f"{lib.APP_DIR}/data/vpn.db")
+    if not db.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{quote(str(db))}?mode=ro", uri=True, timeout=5)
+        try:
+            row = conn.execute("SELECT enabled FROM warp_settings WHERE id = 1").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return None if row is None else bool(row[0])
+
+
+def ipv4(value: str) -> str | None:
+    try:
+        return str(ipaddress.IPv4Address(value.strip()))
+    except ValueError:
+        return None
+
+
+def read_tunnel_address(path: Path) -> str | None:
+    """warp/proxy_egress.py read_tunnel_address: the address the bot puts in sendThrough."""
+    try:
+        match = _ADDRESS_RE.search(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return None
+    if match is None:
+        return None
+    for token in match.group(1).split(","):
+        found = ipv4(token.split("/")[0])
+        if found:
+            return found
+    return None
+
+
+def split_prefixes(path: Path) -> list[ipaddress.IPv4Network]:
+    """The routes `vpn-bot-warp-split apply` installs from the list: IPv4, no comments,
+    no default route, each network once (the bot's read_list, canonical)."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[ipaddress.IPv4Network] = []
+    seen: set[ipaddress.IPv4Network] = set()  # the list keeps the order (the probe), the set the cost linear
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        try:
+            net = ipaddress.ip_network(line, strict=False)
+        except ValueError:
+            continue
+        if isinstance(net, ipaddress.IPv4Network) and net.prefixlen and net not in seen:
+            seen.add(net)
+            out.append(net)
+    return out
+
+
+def table_routes(text: str, iface: str) -> tuple[bool, int, int]:
+    """(a default via iface, `<prefix> dev iface` routes, every route via iface) in table T.
+
+    The prefix count is the filter of the split helpers ($1 != default, $2 == dev,
+    $3 == iface); "every route" also counts `<prefix> via <gw> dev iface`."""
+    default, prefixes, total = False, 0, 0
+    for line in text.splitlines():
+        tok = line.split()
+        if not any(tok[i] == "dev" and tok[i + 1] == iface for i in range(len(tok) - 1)):
+            continue
+        total += 1
+        if tok[0] == "default":
+            default = True
+        elif len(tok) >= 3 and tok[1] == "dev":
+            prefixes += 1
+    return default, prefixes, total
+
+
+def split_state_status(ctx: Any, iface: str) -> dict[str, str] | None:
+    """`vpn-bot-warp-split-state status` (tunnel_up, n_table, marker); None = not available."""
+    if not lib.SELFTEST and not os.access(SPLIT_STATE_HELPER, os.X_OK):
+        return None
+    argv = ["vpn-bot-warp-split-state" if lib.SELFTEST else SPLIT_STATE_HELPER, "status"]
+    rc, out = ctx.run(argv, env={"WARP_IFACE": iface}, timeout=30)
+    if rc != 0:
+        return None
+    facts = {}
+    for line in out.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if sep:
+            facts[key.strip()] = value.strip()
+    return facts
+
+
+def rule_present(rules: str, src: str, table: int) -> bool:
+    for line in rules.splitlines():
+        tok = line.split()
+        if "from" in tok and "lookup" in tok:
+            i, j = tok.index("from"), tok.index("lookup")
+            if tok[i + 1 : i + 2] == [src] and tok[j + 1 : j + 2] == [str(table)]:
+                return True
+    return False
+
+
+def iface_addresses(ctx: Any) -> dict[str, tuple[bool, list[str]]] | None:
+    """`ip -4 -br addr show`: interface → (up, IPv4 addresses); None = not readable.
+    WireGuard reports its operstate as UNKNOWN when up."""
+    rc, out = ctx.run(["ip", "-4", "-br", "addr", "show"])
+    found: dict[str, tuple[bool, list[str]]] = {}
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        tok = line.split()
+        if len(tok) < 2:
+            continue
+        addrs = [a for a in (ipv4(t.split("/")[0]) for t in tok[2:]) if a]
+        found[tok[0].split("@", 1)[0]] = (tok[1] in ("UP", "UNKNOWN"), addrs)
+    return found
+
+
+def egress_consumers(env: dict[str, str], iface: str, addrs: dict[str, tuple[bool, list[str]]], tunnel_ip: str | None) -> tuple[dict[str, set[str]], bool]:
+    """Address → the proxies sending from it (xray sendThrough, danted external), and
+    whether the live xray config was read at all."""
+    users: dict[str, set[str]] = {}
+    xray_read = False
+    if not uninstalled("xray"):
+        try:
+            cfg = json.loads(lib.host_path(env.get("XRAY_CONFIG_PATH", "").strip() or XRAY_CONFIG).read_text(encoding="utf-8"))
+            xray_read = True
+        except (OSError, ValueError):
+            cfg = None
+        outbounds = cfg.get("outbounds") if isinstance(cfg, dict) else None
+        for ob in outbounds if isinstance(outbounds, list) else []:
+            src = ob.get("sendThrough") if isinstance(ob, dict) else None
+            addr = ipv4(src) if isinstance(src, str) else None
+            if addr:
+                users.setdefault(addr, set()).add("xray")
+    if not uninstalled("socks5"):
+        try:
+            text = lib.host_path(DANTE_CONF).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            m = re.match(r"^\s*external\s*:\s*(\S+)", line.split("#", 1)[0])
+            if m is None:
+                continue
+            addr = ipv4(m.group(1))
+            if addr:
+                users.setdefault(addr, set()).add("danted")
+            elif m.group(1) == iface:  # `external: out-warp` binds whatever the interface holds
+                for a in addrs.get(iface, (False, []))[1] or ([tunnel_ip] if tunnel_ip else []):
+                    users.setdefault(a, set()).add("danted")
+    return users, xray_read
+
+
+def route_dev(ctx: Any, probe: str, src: str) -> str | None:
+    """The device `ip -4 route get <probe> from <src>` resolves to — a FIB lookup through
+    the policy rules, nothing is sent. None = no route."""
+    rc, out = ctx.run(["ip", "-4", "route", "get", probe, "from", src])
+    tok = out.split("\n", 1)[0].split() if rc == 0 else []
+    if not tok or tok[0] in ("unreachable", "prohibit", "blackhole", "throw"):
+        return None
+    return next((tok[i + 1] for i in range(len(tok) - 1) if tok[i] == "dev"), None)
+
+
+def default_wan(ctx: Any) -> str | None:
+    rc, out = ctx.run(["ip", "-4", "route", "show", "default"])
+    for line in str(out).splitlines() if rc == 0 else []:
+        tok = line.split()
+        if tok[:1] == ["default"] and "dev" in tok[:-1]:
+            return tok[tok.index("dev") + 1]
+    return None
+
+
+def snat_covers(rules: str, src: str, dev: str) -> bool:
+    """Does `iptables -t nat -S POSTROUTING` carry a MASQUERADE/SNAT that rewrites
+    packets from `src` leaving via `dev`? Only a plain rule counts: `-s` (covering src
+    or absent), `-o` (dev, an `eth+` wildcard, or absent), a comment and the target's
+    own options. Any other match (`-m mark`, `-d`, `!` …) is not a rule for src."""
+    valued = {"-s": "s", "--source": "s", "-o": "o", "--out-interface": "o", "-j": "j", "--comment": "c"}
+    target_opts = {"--to-source": 1, "--to-ports": 1, "--random": 0, "--random-fully": 0, "--persistent": 0}
+    for line in rules.splitlines():
+        try:
+            tok = shlex.split(line)
+        except ValueError:
+            continue
+        if tok[:2] != ["-A", "POSTROUTING"]:
+            continue
+        opts: dict[str, str] = {}
+        i, plain = 2, True
+        while i < len(tok):
+            t = tok[i]
+            if t in valued and i + 1 < len(tok):
+                opts[valued[t]] = tok[i + 1]
+                i += 2
+            elif t == "-m" and tok[i + 1 : i + 2] == ["comment"]:
+                i += 2
+            elif t in target_opts:
+                i += 1 + target_opts[t]
+            else:
+                plain = False
+                break
+        if not plain or opts.get("j") not in ("MASQUERADE", "SNAT"):
+            continue
+        out = opts.get("o")
+        if out is not None and out != dev and not (out.endswith("+") and dev.startswith(out[:-1])):
+            continue
+        try:
+            if "s" in opts and ipaddress.IPv4Address(src) not in ipaddress.IPv4Network(opts["s"], strict=False):
+                continue
+        except ValueError:
+            continue
+        return True
+    return False
+
+
 def check_warp(ctx: Any, items: Items) -> None:
-    if not warp_deployed(ctx):
-        items.add("green", "warp", "WARP is not deployed on this host — nothing to check")
+    env = app_env()
+    conf = env.get("WARP_CONFIG_PATH", "").strip() or WARP_CONF
+    if not warp_deployed(ctx, conf):
+        items.say("green", "warp", "warp_not_deployed")
         return
-    rc, out = ctx.run(["awg", "show", WARP_IFACE, "fwmark"])
+    iface = env.get("WARP_INTERFACE", "").strip() or WARP_IFACE
+    marker = lib.host_path(env.get("WARP_SPLIT_DISABLED_MARKER_PATH", "").strip() or SPLIT_MARKER).exists()
+    want = [] if marker else split_prefixes(lib.host_path(env.get("WARP_SPLIT_LIST_PATH", "").strip() or SPLIT_LIST))
+    mode = "direct" if marker else "selective" if want else "full"
+    rc, out = ctx.run(["awg", "show", iface, "fwmark"])
     fw = out.strip()
-    if rc != 0 or not re.fullmatch(r"0x[0-9a-fA-F]+", fw):
-        items.add("red", "warp", f"WARP is deployed but {WARP_IFACE} has no fwmark table (interface down?)")
-        return
-    table = int(fw, 16)
-    rc_rule, rules = ctx.run(["ip", "rule", "show"])
-    has_rule = rc_rule == 0 and re.search(rf"\blookup {table}\b", rules) is not None
-    rc_route, routes = ctx.run(["ip", "route", "show", "table", str(table)])
-    has_default = rc_route == 0 and any(r.startswith("default") for r in routes.splitlines())
-    if has_rule and has_default:
-        items.add("green", "warp", f"ip rule looks up table {table}; table {table} has a default route")
-    elif has_rule:
-        items.add("red", "warp", f"table {table} has no default route — WARP clients have no way out")
+    table = int(fw, 16) if rc == 0 and re.fullmatch(r"0x[0-9a-fA-F]+", fw) else None
+    enabled = warp_settings_enabled(env)
+    if enabled is False:
+        # Turned off in the bot: nothing to demand of the routes. In observer mode
+        # systemd may keep out-warp up all the same — a note, never a red.
+        items.say("green", "warp", "warp_disabled_up" if table is not None else "warp_disabled", iface=iface)
+    elif table is None:
+        items.say("red", "warp", "warp_down" if enabled else "warp_down_unknown", iface=iface)
     else:
-        items.add("red", "warp", f"no ip rule looks up the WARP table {table} — client traffic is not routed into WARP")
+        check_warp_routes(ctx, items, env, iface, table, mode, len(want))
+    # Independent of warp_settings: a proxy bound to the tunnel address uses out-warp
+    # whatever the bot's toggle says.
+    check_warp_egress(ctx, items, env, conf, iface, mode, want)
+
+
+def check_warp_routes(ctx: Any, items: Items, env: dict[str, str], iface: str, table: int, mode: str, n_want: int) -> None:
+    rc, routes = ctx.run(["ip", "-4", "route", "show", "table", str(table)])
+    # A table nothing was ever added to is "FIB table does not exist": empty.
+    default, prefixes, total = table_routes(routes if rc == 0 else "", iface)
+    facts = split_state_status(ctx, iface) or {}
+    n_table = int(facts["n_table"]) if facts.get("n_table", "").isdigit() else prefixes
+    if mode == "direct":
+        if default:
+            items.say("yellow", "warp", "warp_direct_default", table=table, iface=iface)
+        elif total:
+            items.say("yellow", "warp", "warp_direct_drift", table=table, iface=iface, count=total)
+        else:
+            items.say("green", "warp", "warp_direct_ok", table=table, iface=iface)
+    elif mode == "selective":
+        if default:
+            items.say("yellow", "warp", "warp_selective_default", table=table, iface=iface, want=n_want)
+        elif n_table != n_want:
+            items.say("yellow", "warp", "warp_selective_drift", table=table, iface=iface, want=n_want, count=n_table)
+        else:
+            items.say("green", "warp", "warp_selective_ok", table=table, iface=iface, count=n_table)
+    elif default:
+        items.say("green", "warp", "warp_full_ok", table=table, iface=iface)
+    else:
+        items.say("red", "warp", "warp_full_missing", table=table, iface=iface)
+    if uninstalled("awg"):
+        return  # no client subnet: its rule is nobody's business
+    try:
+        subnet = str(ipaddress.IPv4Network(env.get("AWG_NETWORK", "").strip() or AWG_NETWORK, strict=False))
+    except ValueError:
+        subnet = AWG_NETWORK
+    rc, rules = ctx.run(["ip", "-4", "rule", "show"])
+    if rc == 0 and rule_present(rules, subnet, table):
+        items.say("green", "warp:rule", "warp_rule_ok", subnet=subnet, table=table)
+    elif mode == "direct":
+        items.say("yellow", "warp:rule", "warp_rule_missing_direct", subnet=subnet, table=table)
+    else:
+        items.say("red", "warp:rule", "warp_rule_missing", subnet=subnet, table=table)
+    if mode == "direct":
+        return  # with split off no client enters WARP: there is nothing to masquerade there
+    # The client subnet's source is not WARP's address: entering the tunnel it needs
+    # the SNAT warp-routes installs. Only AWG clients need it — a proxy sending from
+    # the tunnel address does not (warp:egress).
+    rc_nat, nat = ctx.run(["iptables", "-t", "nat", "-S", "POSTROUTING"])
+    client = str(next(ipaddress.IPv4Network(subnet).hosts(), ipaddress.IPv4Network(subnet).network_address))
+    if rc_nat != 0:
+        items.say("yellow", "warp:clients_nat", "warp_clients_nat_unreadable")
+    elif snat_covers(nat, client, iface):
+        items.say("green", "warp:clients_nat", "warp_clients_nat_ok", subnet=subnet, iface=iface)
+    else:
+        items.say("red", "warp:clients_nat", "warp_clients_nat_missing", subnet=subnet, iface=iface)
+
+
+def check_warp_egress(ctx: Any, items: Items, env: dict[str, str], conf: str, iface: str, mode: str, want: list[ipaddress.IPv4Network]) -> None:
+    tunnel_ip = read_tunnel_address(lib.host_path(conf))
+    addrs = iface_addresses(ctx)
+    if addrs is None:
+        # Without the addresses every consumer would look "not on out-warp": a false red.
+        items.say("yellow", "warp:egress", "warp_egress_addrs_unreadable")
+        return
+    users, xray_read = egress_consumers(env, iface, addrs, tunnel_ip)
+    owner = {a: name for name, (_, al) in addrs.items() for a in al}
+    # An address on another interface (a second public IP, say) is not WARP's.
+    bound = {a: who for a, who in users.items() if owner.get(a) in (None, iface)}
+    if not bound:
+        if proxy_egress_flag(env) and tunnel_ip is None:
+            items.say("yellow", "warp:egress", "warp_egress_no_address", conf=conf)
+        elif proxy_egress_flag(env) and xray_read:
+            items.say("yellow", "warp:egress", "warp_egress_unused", addr=tunnel_ip)
+        return
+    wan = default_wan(ctx)
+    rc_nat, nat = ctx.run(["iptables", "-t", "nat", "-S", "POSTROUTING"])
+    probe_out = next((p for p in PROBE_IPS if not any(ipaddress.IPv4Address(p) in n for n in want)), None)
+    for addr in sorted(bound):
+        names = sorted(bound[addr], key=list(EGRESS_PROTOS).index)
+        who, protos = "/".join(names), "/".join(EGRESS_PROTOS[n] for n in names)
+        up, on_iface = addrs.get(iface, (False, []))
+        if addr not in on_iface:
+            items.say("red", "warp:egress", "warp_egress_addr_missing", who=who, addr=addr, iface=iface)
+        elif not up:
+            items.say("red", "warp:egress", "warp_egress_iface_down", who=who, addr=addr, iface=iface)
+        elif wan is None:
+            items.say("yellow", "warp:egress", "warp_egress_no_wan", who=who, addr=addr)
+        elif rc_nat != 0:
+            items.say("yellow", "warp:egress", "warp_egress_nat_unreadable", who=who, addr=addr)
+        else:
+            judge_egress(ctx, items, mode, addr=addr, protos=protos, iface=iface, wan=wan, nat=nat, want=want, probe_out=probe_out, tunnel_ip=tunnel_ip)
+
+
+def judge_egress(ctx: Any, items: Items, mode: str, *, addr: str, protos: str, iface: str, wan: str, nat: str, want: list[ipaddress.IPv4Network], probe_out: str | None, tunnel_ip: str | None) -> None:
+    """One address on an up out-warp: does the split mode's path out exist, with NAT?
+
+    Through out-warp, the tunnel address itself needs no NAT (the source is already the
+    one WARP accepts; vpn-bot-warp-routes installs none for source-bind proxies): the
+    route and the address on the interface are enough. Another address on out-warp
+    does need `-o out-warp` MASQUERADE/SNAT. Through the WAN, A always needs SNAT."""
+    # The tunnel address is the config's [Interface] Address; unreadable → A, which is
+    # on out-warp, is taken for it.
+    warp_nat_needed = tunnel_ip is not None and addr != tunnel_ip
+
+    def wrong(probe: str, got: str | None, expected: str) -> None:
+        items.say("red", "warp:egress", "warp_egress_route", protos=protos, addr=addr, probe=probe, got=got or "—", want=expected)
+
+    def via_warp(probe: str) -> bool:
+        got = route_dev(ctx, probe, addr)
+        if got != iface:
+            wrong(probe, got, iface)
+        elif warp_nat_needed and not snat_covers(nat, addr, iface):
+            items.say("red", "warp:egress", "warp_egress_warp_no_nat", protos=protos, addr=addr, iface=iface, tunnel=tunnel_ip)
+        else:
+            return True
+        return False
+
+    def via_wan(probe: str) -> bool:
+        got = route_dev(ctx, probe, addr)
+        if got == iface and mode == "direct":
+            items.say("yellow", "warp:egress", "warp_egress_direct_via_warp", protos=protos, addr=addr, iface=iface, probe=probe)
+        elif got != wan:
+            wrong(probe, got, wan)
+        elif not snat_covers(nat, addr, wan):
+            items.say("red", "warp:egress", "warp_egress_no_snat", protos=protos, addr=addr, wan=wan)
+        else:
+            return True
+        return False
+
+    probe = probe_out or PROBE_IPS[0]
+    if mode == "full":
+        if via_warp(probe):
+            items.say("green", "warp:egress", "warp_egress_full_ok", protos=protos, addr=addr, iface=iface, probe=probe)
+    elif mode == "direct":
+        if via_wan(probe):
+            items.say("green", "warp:egress", "warp_egress_direct_ok", protos=protos, addr=addr, wan=wan, probe=probe)
+    else:
+        first = want[0]
+        probe_in = str(first.network_address + 1 if first.num_addresses > 2 else first.network_address)
+        if via_warp(probe_in) and (probe_out is None or via_wan(probe_out)):
+            items.say("green", "warp:egress", "warp_egress_selective_ok", protos=protos, addr=addr, iface=iface, wan=wan, probe_in=probe_in, probe=probe_out or "—")
 
 
 def check_failed_units(ctx: Any, items: Items) -> None:
@@ -184,7 +650,7 @@ def judge_cert(ctx: Any, items: Items, key: str, label: str, path: Path, extra: 
 
 def acme_domain_dirs() -> list[tuple[str, Path, dict[str, str]]]:
     home = lib.host_path(ACME_HOME)
-    found = []
+    found: list[tuple[str, Path, dict[str, str]]] = []
     if not home.is_dir():
         return found
     for d in sorted(home.iterdir()):
