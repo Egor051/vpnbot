@@ -12,8 +12,6 @@ from urllib.parse import urlsplit
 
 from dotenv import find_dotenv, load_dotenv
 
-from config import validators
-from config.validators import RELAY_NAME_PATTERN as RELAY_NAME_PATTERN
 from utils.spider_x import parse_spider_x_pool
 
 logger = logging.getLogger(__name__)
@@ -23,26 +21,13 @@ class SettingsError(RuntimeError):
     pass
 
 
-# The legacy relay variables. They are no longer a source of truth — relays live
-# in the ``relays`` table and are managed from the admin panel — but they are
-# still parsed (strictly, as before) so a deployment that had them can be seeded
-# once into that table, and so the bot can warn that they are now ignored.
-# RELAY_HEALTH_INTERVAL is NOT one of them: it stays an ordinary setting.
+# The legacy relay variables. Relays live in the ``relays`` table and are managed
+# from the admin panel (services/relays.py); these are NOT read any more — not even
+# parsed, so a stale or malformed value can never stop the bot. Their presence in
+# .env only draws one WARNING at startup ("устаревшие, удалите") and a yellow item
+# in the wizard's self-check. RELAY_HEALTH_INTERVAL is NOT one of them: it stays an
+# ordinary setting.
 LEGACY_RELAY_ENV_VARS: tuple[str, ...] = ("RELAY_ENABLED", "RELAY_NAME", "RELAY_HOST", "RELAY_SOURCE_IPS")
-
-
-@dataclass(frozen=True, slots=True)
-class RelaySeed:
-    """The relay the legacy ``RELAY_*`` variables describe, already validated.
-
-    Present only while ``RELAY_ENABLED=true`` (which still requires RELAY_HOST and
-    RELAY_SOURCE_IPS). Used exactly once: at bot startup, when the ``relays``
-    table is empty, it becomes the first row (see services.relay_management).
-    """
-
-    name: str
-    host: str
-    source_ips: tuple[ipaddress.IPv4Network, ...]
 
 
 # SERVER_FLAG_EMOJI is a display decoration, not data: a short cap keeps a typo
@@ -381,39 +366,6 @@ def _xray_short_id(value: str, *, required: bool) -> str:
     if len(value) > 16 or len(value) % 2 != 0 or re.fullmatch(r"[0-9a-fA-F]+", value) is None:
         raise SettingsError("XRAY_SHORT_ID должен быть hex-строкой чётной длины до 16 символов")
     return value.lower()
-
-
-def _relay_name(name: str, value: str) -> str:
-    """Validate a relay name against :data:`RELAY_NAME_PATTERN`."""
-    try:
-        return validators.relay_name(name, value)
-    except validators.InvalidValue as exc:
-        raise SettingsError(str(exc)) from exc
-
-
-def _dns_name_or_ipv4(name: str, value: str) -> str:
-    """Accept an IPv4 address or an RFC 1123 DNS name; reject everything else.
-
-    The check itself is :func:`config.validators.dns_name_or_ipv4`, shared with
-    the admin panel so both accept exactly the same hosts.
-    """
-    try:
-        return validators.dns_name_or_ipv4(name, value)
-    except validators.InvalidValue as exc:
-        raise SettingsError(str(exc)) from exc
-
-
-def parse_ipv4_networks(name: str, raw: str) -> tuple[ipaddress.IPv4Network, ...]:
-    """Strictly parse a comma-separated list of IPv4 addresses / CIDR networks.
-
-    :func:`config.validators.parse_ipv4_networks` with the error raised as a
-    ``SettingsError`` — the admin panel parses source IPs with the very same
-    function, so a value accepted in one place is accepted in the other.
-    """
-    try:
-        return validators.parse_ipv4_networks(name, raw)
-    except validators.InvalidValue as exc:
-        raise SettingsError(str(exc)) from exc
 
 
 def _server_flag_emoji(name: str, value: str) -> str:
@@ -793,14 +745,9 @@ class Settings:
     # must be able to run while the other is down.
     subscription_lock_path: Path = Path("/run/vpn-bot-subscription/subscription.lock")
     # L4 relays (see docs/relay.md) are managed from the admin panel and stored
-    # in the ``relays`` table — NOT here. What remains of the old RELAY_* block:
-    #
-    # * relay_seed — the relay RELAY_ENABLED/RELAY_NAME/RELAY_HOST/RELAY_SOURCE_IPS
-    #   describe (None unless RELAY_ENABLED=true), used once to seed an empty
-    #   ``relays`` table at bot startup;
-    # * relay_env_vars — which of those variables are set at all, so the bot can
-    #   warn that they are ignored from now on.
-    relay_seed: RelaySeed | None = None
+    # in the ``relays`` table — NOT here. Of the old RELAY_* block only the names
+    # that are still set remain (never their values): the bot warns once at
+    # startup that they are obsolete and should be removed.
     relay_env_vars: tuple[str, ...] = ()
     # Seconds between relay health probes; 0 disables the monitor.
     relay_health_interval: int = 300
@@ -1197,24 +1144,9 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
             "ANOMALY_HYSTERIA2_MAX_CONN>0 требует HYSTERIA2_STATS_SECRET "
             "(проверка одновременных подключений Hysteria2 использует Traffic Stats API)"
         )
-    # Legacy RELAY_* — parsed exactly as strictly as when they were the source of
-    # truth (garbage still fails startup), but only to seed an empty ``relays``
-    # table once; see RelaySeed and services.relay_management.
-    relay_enabled = _bool("RELAY_ENABLED", False)
-    relay_name = _relay_name("RELAY_NAME", _optional("RELAY_NAME", "ru1") or "ru1")
-    relay_host = _dns_name_or_ipv4("RELAY_HOST", _optional("RELAY_HOST"))
-    relay_source_ips = parse_ipv4_networks("RELAY_SOURCE_IPS", _optional("RELAY_SOURCE_IPS"))
     server_flag_emoji = _server_flag_emoji("SERVER_FLAG_EMOJI", _optional("SERVER_FLAG_EMOJI", "🇫🇮"))
-    relay_seed: RelaySeed | None = None
-    if relay_enabled:
-        # Both are needed for the seed to be coherent: without a host there is
-        # nothing to put in a relay link, and without the source IPs every relay
-        # connection would be counted by anomaly detection as one more network.
-        if not relay_host:
-            raise SettingsError("RELAY_ENABLED=true требует RELAY_HOST (DNS-имя или IPv4 relay)")
-        if not relay_source_ips:
-            raise SettingsError("RELAY_ENABLED=true требует RELAY_SOURCE_IPS (egress IP/CIDR relay)")
-        relay_seed = RelaySeed(name=relay_name, host=relay_host, source_ips=relay_source_ips)
+    # Legacy RELAY_*: only WHICH are set (never parsed — garbage there must not stop
+    # the bot); see LEGACY_RELAY_ENV_VARS.
     relay_env_vars = tuple(name for name in LEGACY_RELAY_ENV_VARS if name in os.environ)
     return Settings(
         bot_token=_required("BOT_TOKEN"),
@@ -1438,7 +1370,6 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         subscription_lock_path=Path(
             _optional("SUBSCRIPTION_LOCK_PATH", "/run/vpn-bot-subscription/subscription.lock")
         ),
-        relay_seed=relay_seed,
         relay_env_vars=relay_env_vars,
         relay_health_interval=_int_range("RELAY_HEALTH_INTERVAL", 300, 0, 86400),
         host_check_interval=_int_range("HOST_CHECK_INTERVAL", 300, 0, 86400),

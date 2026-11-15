@@ -710,6 +710,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Relays: ONE model, ONE service, ONE screen (docs/relay.md, schema v44).** The two relay sections —
+  «🛰 Управлять relay» (`relays`, `services/relay_management.py`) and «Мастер настройки → Relay»
+  (`relay_agents`, `services/relay_agents.py`) — did not see each other: the legacy relay `ru1` existed
+  only in the first, and pairing the same VPS would have made a second relay with a new label. Now the
+  agent is a **property of the relay** («how it is managed»), not an entity: **migration v44** moves the
+  agent columns into `relays` as NULLable (`ssh_host`, `ssh_port`, `host_key`, `target_host`, `tcp_ports`,
+  `udp_ports`, `agent_version`, `agent_paired_at`, `agent_status_json`, `agent_status_at`; «has an agent» =
+  `ssh_host IS NOT NULL`), copies every `relay_agents` row onto its relay and drops `relay_agents`;
+  `relay_pairings` gets `kind` ('new' | 'attach') and `relay_host`. Nothing else about a relay row or a
+  key changes (the production snapshot — ru1 with 13 keys — and one with an agent are tested value by
+  value). **One service** `services/relays.py` (`RelayService`, one lock; a long agent call marks only its
+  relay busy) replaces both; `bot/container.py` has one field. **One screen**: admin panel → «🛰 Relay» lists
+  every relay (name, host, on/off, «в подписках», keys, health, «агент vX» / «⚠️ без агента»); a relay's page
+  has the common actions (on/off, «в подписках», rename, the host for links, source IPs, note, check,
+  delete) and the agent block (connect / status / update / ports and target / disconnect). The wizard's
+  «🛰 Relay» opens the same screen. One intro text instead of two.
+- **«🔗 Подключить агент (ключи не меняются)» on a relay without one.** A pairing code for that relay — no
+  name asked; completing it writes ONLY the agent columns (name, label, host, keys and links untouched),
+  only after the SSH address proves to be the same server (the relay's host, inside its source IPs, or the
+  address its host resolves to — otherwise «это другой сервер»), and `source_ips` only grows by the
+  addresses the agent reports. One transaction: any failure leaves the relay exactly as it was.
+  «🔌 Отключить агент» clears the agent columns (optionally with `uninstall` on the relay); the relay and
+  its keys stay.
+- **«➕ Добавить relay» is the only way to create a relay**: name, the PUBLIC host for links (a DNS name; an
+  IPv4 address is accepted with the warning that a burned IP has to be changed at every client) and the
+  main server's name, then the pairing code. The SSH address is stored apart from `relay.host` (before,
+  a paired relay's links pointed at the SSH address). The manual add form without an agent is gone; a
+  relay without an agent keeps working and is shown with the hint to connect one.
+- **Deleting a relay with an agent runs `uninstall` on the relay first** (no DNAT to this server is left
+  behind), then the row — with or without keys as before; a relay that does not answer offers «Удалить
+  только запись». Deleting a relay cancels its waiting attach code.
+- **One health verdict per relay**: the TLS (and QUIC) probe through the relay plus, for a relay with an
+  agent, its `status` over SSH — 🟢 ok / 🟡 traffic passes, the agent does not / 🔴 traffic fails; one icon
+  and one reason line on the list and the page, one latch and **one alert per change** (traffic and the
+  agent failing together are one 🔴, never two messages).
+- **Every change of a relay asks for the TOTP code** (when TOTP is on) and is audited — on/off, «в
+  подписках», every edit, delete, add, attach, connect, update, ports/target, disconnect; new dangerous
+  actions `relay_edit`, `relay_delete`, `relay_connect`, `relay_detach`. Typed steps re-check the elevation.
+- **Buttons of both former sections still in the chat history** (`wrl:*`, the old manual add steps) lead to
+  the new screen — a relay's page, a code, or the list — never to an error, and never change anything.
+
 - **`ADMIN_IDS` may be empty.** An empty or unset value no longer stops the bot; the placeholder
   from `.env.example` is still refused. With no superadmin anywhere and no pending claim the bot
   logs a loud `NO SUPERADMIN` warning at startup.
@@ -892,6 +933,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one image.
 
 ### Removed
+
+- **The legacy `RELAY_*` seed.** `RELAY_ENABLED` / `RELAY_NAME` / `RELAY_HOST` / `RELAY_SOURCE_IPS` are no
+  longer read — not even parsed, so a stale or malformed value cannot stop the bot. Left in `.env`, they
+  draw ONE startup WARNING («устарели и не читаются — удалите») and a yellow `legacy_env` item in the
+  wizard's self-check. `RELAY_HEALTH_INTERVAL` stays.
 
 - `deploy/ufw-subscription.sh` and the deploy's hints to run it: the subscription port is the
   `subscription` row of the UFW module table now. `deploy/helpers/vpn-bot-protocol-uninstall`

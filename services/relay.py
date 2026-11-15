@@ -7,7 +7,7 @@ differs in the link is the host (plus the relay's marker in the display name);
 the port stays the protocol's public port.
 
 Relays live in the ``relays`` table and are managed from the admin panel
-(:mod:`services.relay_management`). Everything that renders a link reads them
+(:mod:`services.relays`). Everything that renders a link reads them
 through a :class:`RelaySnapshot` — an immutable copy of that table:
 
 * the bot keeps one in a :class:`RelayCatalog`, refreshed by every write the
@@ -126,7 +126,7 @@ EMPTY_RELAYS = RelaySnapshot()
 class RelayCatalog:
     """The bot process's current :class:`RelaySnapshot`.
 
-    A plain holder: :class:`services.relay_management.RelayService` replaces the
+    A plain holder: :class:`services.relays.RelayService` replaces the
     snapshot after every write it makes (it is the only writer of the table), and
     the link builders read :attr:`snapshot` synchronously. Starts empty, which is
     exactly "no relays": every relay key is refused until the snapshot is loaded.

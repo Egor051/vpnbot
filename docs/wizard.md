@@ -108,6 +108,7 @@ Changes nothing. Each check is a green / yellow / red item:
 | `perms` — `DB_PATH` (0600) and its directory (0700), owner `vpn-bot` when it exists; `.env` root-owned, not world-accessible, not group-writable | any deviation | — |
 | `disk` — `/`, `/var`, the checkout | < 1 GiB or < 5 % free | < 15 % free |
 | `reboot` — `/var/run/reboot-required` | — | a reboot is required (with the packages) |
+| `legacy_env` — the obsolete `RELAY_ENABLED` / `RELAY_NAME` / `RELAY_HOST` / `RELAY_SOURCE_IPS` in `.env` | — | they are still there: the bot does not read them (relays live in the database) — delete them ([relay.md](relay.md#the-obsolete-relay_-in-env)) |
 
 Each item is shown in the reader's language: the helper writes `msg` and `args` next
 to the English `text`, and the bot renders the i18n message `wizard_item_<msg>` with
@@ -226,10 +227,8 @@ operator reads it. Parameter `force` (`0`/`1`) is `FORCE=1`.
 
 ### 🛰 Relay
 
-Not a root-helper mode: relays the bot installs and manages itself over SSH — a pairing code,
-one command for the relay (`scripts/install.sh --relay`), then status, update, ports/target and
-delete from the relay's card. It holds no run lock of the wizard. Everything about it:
-[relay.md](relay.md#installing-a-relay-with-one-command).
+Not a mode: the wizard's «🛰 Relay» opens the admin panel's ONE relay screen — see
+[relay.md → Managing relays in the admin panel](relay.md#managing-relays-in-the-admin-panel).
 
 ## The helpers' library
 
@@ -305,13 +304,16 @@ Only when the superadmin has TOTP enabled (the factor is opt-in):
 |---|---|
 | removing a protocol from the server | «Модули протоколов → Удалить с сервера» (the final button) |
 | disabling a protocol (deletes all its keys and accesses) | «Модули протоколов → Отключить» (the final button) |
-| deleting a relay together with its keys | «Relay → Удалить → вместе с ключами» |
+| every change of a relay — on/off, «в подписках», host, rename, source IPs, note, the source IP offer | the button on the relay's page (a typed step checks the elevation again) |
+| deleting a relay (record only included) / together with its keys | «Relay → Удалить» (the final button) |
 | wizard: diagnostic dump | start, and the dump file from the history |
 | wizard: update the bot | start and «✅ Применить» |
-| wizard → Relay: issue a pairing code | «➕ Добавить relay» |
-| wizard → Relay: update a relay | «⬆️ Обновить» |
-| wizard → Relay: change a relay's ports / target | «⚙️ Порты / цель» (the typed step checks the elevation again) |
-| wizard → Relay: delete a relay (uninstall on the relay) | the final button |
+| Relay: issue a pairing code — a new relay or an agent for an existing one | «➕ Добавить relay», «🔗 Подключить агент» |
+| Relay: complete a pairing | «🔌 Подключить» (the typed address checks the elevation again) |
+| Relay: update a relay's agent | «⬆️ Обновить агент» |
+| Relay: change a relay's ports / target | «⚙️ Порты / цель» (the typed step checks the elevation again) |
+| Relay: disconnect the agent | «🔌 Отключить агент» |
+| Relay: uninstall on the relay (delete of a relay with an agent, «🧹 Отключить и снять с relay») | the final button |
 
 A correct code **elevates** the user for 5 minutes: inside that window nothing is asked
 again. Elevations live in the bot process only — a restart drops them. The prompt

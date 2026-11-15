@@ -608,15 +608,8 @@ STRINGS: dict[str, str] = {
         "Relay «{relay}» is currently unavailable, so this key's link cannot be shown. "
         "Contact the administrator."
     ),
-    "relay_alert_down": (
-        "🔴 <b>Relay «{label}» ({name}) is down</b>\n"
-        "The check of {host}:{port} is failing. Keys through this relay do not work right now; "
-        "direct keys are not affected."
-    ),
-    "relay_alert_recovered": (
-        "🟢 <b>Relay «{label}» ({name}) is back</b>\n"
-        "The check of {host}:{port} passes again."
-    ),
+    "relay_alert_down": "🔴 <b>Relay «{label}» ({name}) is down</b>\n{reason}. Direct keys are not affected.\nCheck: {host}:{port}",
+    "relay_alert_recovered": "🟢 <b>Relay «{label}» ({name}) is fine again</b>\n{reason}\nCheck: {host}:{port}",
     # ── host invariants (scripts/vpn-bot-host-check, docs/host-state.md) ────────
     "host_check_alert": (
         "🛑 <b>Host state: the {role} server changed</b>\n"
@@ -679,42 +672,33 @@ STRINGS: dict[str, str] = {
         "• vpn-bot-ufw-apply removes the protocol's rules right after the removal: the marker takes the module "
         "out of the UFW set"
     ),
-    # ── relay panel (admin → «🛰 Manage relays») ─────────────────────────────
-    "btn_relays": "🛰 Manage relays",
+    # ── the relay screen (admin → «🛰 Relays») ─────────────────────────────────
+    "btn_relays": "🛰 Relays",
     "relays_title": "<b>🛰 Relays</b>",
-    "relays_intro": (
-        "A relay is an intermediate server that forwards traffic to this server. "
-        "A key «via relay» differs from a direct one only by the address in its link and a marker in its name."
-    ),
-    "relays_empty": "No relays yet. Add the first one — it can then be chosen when a key is created.",
-    "relays_list_line": (
-        "{icon} <b>{label}</b> · {name} → {host}\n"
-        "{state} · {subs} · active keys: {keys}\n"
-        "Check: {health}"
-    ),
+    "relays_intro": "A relay is an intermediate server that forwards traffic to this server; a key «via relay» differs from a direct one only by the address in its link and a marker in its name. Every relay is here — installed by the bot or set up by hand. The bot looks after a relay with an agent itself over SSH (update, ports and target, removal from its host); a relay without one works as before — an agent can be connected from its page, the keys do not change. A new relay is added with one command: «➕ Add a relay».",
+    "relays_empty": "No relays yet. «➕ Add a relay» gives one command for a new server — then the relay can be chosen when a key is created.",
+    "relays_list_line": "{icon} <b>{label}</b> · {name} → {host}\n{state} · {subs} · active keys: {keys}\nHealth: {health}\nManaged: {managed}",
     "relay_state_on": "enabled",
     "relay_state_off": "disabled",
     "relay_subs_on": "in subscriptions",
     "relay_subs_off": "not in subscriptions",
-    "relay_health_ok": "🟢 passing ({time})",
-    "relay_health_fail": "🔴 failing ({time})",
     "relay_health_none": "not yet",
     "relay_card_title": "<b>🛰 Relay «{label}»</b>",
     "relay_field_name": "Name",
     "relay_name_immutable": "(cannot be changed)",
     "relay_field_label": "Marker in key names",
-    "relay_field_host": "Host",
+    "relay_field_host": "Host for links",
     "relay_field_source_ips": "Source IPs",
     "relay_field_state": "State",
     "relay_field_subs": "Subscriptions",
     "relay_field_keys": "Active keys",
-    "relay_field_health": "Last check",
+    "relay_field_health": "Health",
     "relay_field_note": "Note",
     "btn_relay_add": "➕ Add a relay",
     "btn_relays_back": "⬅️ Back to relays",
-    "btn_relay_edit_host": "✏️ Host",
+    "btn_relay_edit_host": "✏️ Host for links",
     "btn_relay_edit_src": "✏️ Source IPs",
-    "btn_relay_edit_label": "✏️ Marker",
+    "btn_relay_edit_label": "✏️ Rename",
     "btn_relay_edit_note": "✏️ Note",
     "btn_relay_disable": "⏸ Disable",
     "btn_relay_enable": "▶️ Enable",
@@ -723,40 +707,12 @@ STRINGS: dict[str, str] = {
     "btn_relay_check": "🔍 Check now",
     "btn_relay_delete": "🗑 Delete",
     "btn_relay_add_source_ip": "➕ Add {ip} to source IPs",
-    "btn_relay_src_as_host": "Same as host ({host})",
-    "btn_relay_label_default": "relay",
-    "btn_relay_create": "✅ Create",
     "btn_relay_delete_confirm": "🗑 Delete the relay",
     "btn_relay_delete_with_keys": "🗑 Delete the keys and the relay",
     "btn_relay_disable_instead": "⏸ Disable instead of deleting",
-    "relay_add_name_prompt": (
-        "<b>New relay — step 1 of 4: name</b>\n\n"
-        "The name is written into every key of this relay and never changes afterwards. "
-        "Lowercase Latin letters, digits and hyphens, up to 32 characters — e.g. <code>ru1</code> or <code>msk-2</code>."
-    ),
-    "relay_add_host_prompt": (
-        "<b>Step 2 of 4: host</b>\n\n"
-        "The DNS name or IPv4 address of the relay — what the keys' links will point at. "
-        "A DNS name is better (e.g. <code>relay.example.net</code>, a record without proxying): "
-        "moving the relay to another IP then needs no key re-import."
-    ),
-    "relay_add_src_prompt": (
-        "<b>Step 3 of 4: source IPs</b>\n\n"
-        "The addresses the relay's traffic arrives at this server from — IPv4 or CIDR, comma-separated, "
-        "e.g. <code>203.0.113.7</code> or <code>203.0.113.0/28</code>. "
-        "Anomaly detection ignores these addresses."
-    ),
-    "relay_add_label_prompt": (
-        "<b>Step 4 of 4: marker</b>\n\n"
-        "The marker goes into the key name right before the flag: "
-        "<code>xray_tcp_ab12c_&lt;marker&gt;🇫🇮</code>. Emoji and any characters are fine, up to 16: "
-        "e.g. <code>🇷🇺➜</code> gives <code>xray_tcp_ab12c_🇷🇺➜🇫🇮</code>. No separator is added before "
-        "the flag — if you want one, put it into the marker (<code>ru_</code>). Each relay has its own marker."
-    ),
-    "relay_add_confirm_title": "<b>Check the new relay</b>",
-    "relay_add_confirm_question": "Create it?",
+    "relay_add_name_prompt": "<b>New relay — step 1 of 3: name</b>\n\nThe name is written into every key of this relay and never changes afterwards. Lowercase Latin letters, digits and hyphens, up to 32 characters — e.g. <code>ru2</code> or <code>msk-2</code>. Send a name or press the button.",
+    "relay_add_host_prompt": "<b>Step 2 of 3: the host for links of relay {name}</b>\n\nThe relay's public DNS name — what the keys' links will point at, e.g. <code>relay.example.net</code> (an A record to the relay's IP, not proxied). Moving the relay to another IP is then an A-record change, not a re-import of keys. An IPv4 address works too, but a burned IP has to be changed at every client. The address for SSH is asked separately, at the end.",
     "relay_try_again": "Please try again.",
-    "relay_created": "✅ Relay «{label}» added.",
     "relay_saved": "✅ Saved.",
     "relay_saved_short": "Saved",
     "relay_unchanged": "Nothing changed.",
@@ -769,21 +725,16 @@ STRINGS: dict[str, str] = {
         "ℹ️ The host is the IPv4 address {ip}, which is not among the source IPs. A relay usually "
         "sends its traffic from that same address — you can add it with the button below."
     ),
-    "relay_edit_host_prompt": "New host for «{label}» (now {value}): a DNS name or an IPv4 address.",
+    "relay_edit_host_prompt": "New host for links of «{label}» (now {value}): a DNS name (better) or an IPv4 address. Subscriptions follow it by themselves, single keys have to be re-imported.",
     "relay_edit_src_prompt": (
         "New source IPs for «{label}» (now {value}): IPv4 or CIDR, comma-separated. "
         "The whole list is replaced."
     ),
-    "relay_edit_label_prompt": (
-        "New marker for «{label}» (now {value}): up to 16 characters, emoji are fine, e.g. "
-        "<code>🇷🇺➜</code>. The marker goes right before the flag, with no underscore."
-    ),
+    "relay_edit_label_prompt": "New name (marker) for «{label}» (now {value}) — how the relay is shown in lists and in key names, right before the flag: up to 16 characters, emoji allowed, e.g. <code>🇷🇺➜</code>. The name {name} in the keys does not change.",
     "relay_edit_note_prompt": (
         "Note for «{label}» (now {value}), on one line. Send <code>-</code> to clear it."
     ),
     "relay_check_running": "Checking…",
-    "relay_check_ok": "🟢 The check of {host} passed.",
-    "relay_check_fail": "🔴 The check of {host} failed.",
     "relay_delete_confirm": "Delete relay «{label}» ({name})? No keys go through it.",
     "relay_delete_impact": (
         "<b>Keys issued through relay «{label}» ({name}): {keys}</b>, of them {bundle_keys} "
@@ -827,6 +778,99 @@ STRINGS: dict[str, str] = {
     "err_relay_source_ips_required": "Enter at least one address.",
     "err_relay_note_invalid": "The note must be a single line of at most {max} characters.",
     "err_relay_key_type_undeletable": "This key cannot be deleted together with the relay.",
+    # ── the ONE relay screen: agent, pairing, health (bot/handlers/admin_relays.py) ──
+    "relays_pending_title": "<b>Waiting to connect:</b>",
+    "relay_pending_line_new": "⏳ {name} — a new relay, the code is valid until {until}",
+    "relay_pending_line_attach": "⏳ {name} — an agent to connect, the code is valid until {until}",
+    "relay_health_line": "{icon} {reason} ({time})",
+    "relay_reason_ok": "TCP ✓ · UDP {udp}",
+    "relay_reason_ok_agent": "TCP ✓ · UDP {udp} · agent ✓",
+    "relay_reason_tcp_down": "TCP {port} through the relay fails — keys through the relay do not work",
+    "relay_reason_udp_down": "UDP {port} (Hysteria2) through the relay fails",
+    "relay_reason_tcp_udp_down": "TCP {port} and UDP {udp_port} through the relay fail — keys through the relay do not work",
+    "relay_reason_agent_unreachable": "traffic passes, but the agent does not answer: {error}",
+    "relay_reason_agent_check": "traffic passes, but the check on the relay itself (vpn-relay-apply check) failed: exit {rc}",
+    "relay_alert_warn": "🟡 <b>Relay «{label}» ({name}): {reason}</b>\nKeys through the relay work; the bot cannot manage the relay until the agent answers.\nCheck: {host}:{port}",
+    "relay_field_managed": "Managed",
+    "relay_managed_agent": "agent {version}",
+    "relay_managed_none": "⚠️ no agent",
+    "relay_managed_uninstalled": "⚠️ uninstalled on the relay, the record is left",
+    "relay_no_agent_hint": "The relay was set up by hand: the bot edits its fields but cannot update it, change its target or ports or remove it from its host. «🔗 Connect an agent» gives one command for that server — the name, the host for links, the marker and the keys stay the same.",
+    "relay_attach_pending": "⏳ The agent code is valid until {until} — «⏳ Agent code».",
+    "relay_agent_block": "SSH: {ssh} · target: {target} · {ports}",
+    "relay_agent_status_none": "The agent's status has not been asked yet — «🔍 Check now».",
+    "relay_agent_status_at": "The agent's status as of {at} UTC:",
+    "relay_agent_status_live": "• DNAT currently to {target}",
+    "relay_agent_status_units": "• units: {units}",
+    "relay_agent_status_check": "• vpn-relay-apply check: exit {rc}",
+    "relay_agent_status_version": "• version: {version}",
+    "relay_agent_status_update": "• last update: {state} — {message}",
+    "relay_host_ipv4_hint": "⚠️ The host for links is an IPv4 address: if it gets blocked, every client has to change it. A DNS name is better («✏️ Host for links»).",
+    "relay_host_ipv4_warning": "⚠️ This is an IPv4 address: if it gets blocked, every client has to change it. With a DNS name an A-record change is enough.",
+    "btn_relay_attach": "🔗 Connect an agent (keys stay the same)",
+    "btn_relay_attach_code": "⏳ Agent code",
+    "btn_relay_agent_update": "⬆️ Update the agent",
+    "btn_relay_agent_forward": "⚙️ Ports / target",
+    "btn_relay_detach": "🔌 Disconnect the agent",
+    "btn_relay_detach_keep": "🔌 Disconnect, leave the relay as it is",
+    "btn_relay_detach_uninstall": "🧹 Disconnect and uninstall on the relay",
+    "btn_relay_delete_uninstall": "🗑 Uninstall on the relay and delete",
+    "btn_relay_delete_with_keys_uninstall": "🗑 Uninstall on the relay, delete the keys and the relay",
+    "btn_relay_delete_record": "🗑 Delete only the record",
+    "btn_relay_page": "🛰 Relay page",
+    "btn_relay_back_short": "↩️ Back",
+    "btn_relay_connect": "🔌 Connect",
+    "btn_relay_cancel_pairing": "✖️ Cancel the code",
+    "btn_relay_retry": "🔌 Connect again",
+    "btn_relay_use_name": "Use «{name}»",
+    "btn_relay_use_target": "🎯 {target}",
+    "btn_relay_keep_ipv4": "Keep the IP {host}",
+    "relay_add_host_ipv4": "⚠️ {host} is an IPv4 address. If it gets blocked, every client has to change it (single keys by a re-import). With a DNS name an A-record change is enough.\n\nSend a DNS name or keep the IP with the button.",
+    "relay_add_target_prompt": "<b>Step 3 of 3: where to forward</b>\n\nRelay <b>{name}</b> (links → {host}) will forward traffic to the main server by its DNS name (not by IP: a new IP is an A-record change, the relay re-resolves the name itself). Press the button or send another name.",
+    "relay_add_target_prompt_none": "<b>Step 3 of 3: where to forward</b>\n\nRelay <b>{name}</b> (links → {host}) forwards traffic to the main server by its DNS name (not by IP). Send this server's DNS name (e.g. <code>vpn.example.com</code>).",
+    "relay_attach_target_prompt": "Relay «{label}» forwards traffic to the main server by its DNS name. Send this server's DNS name (e.g. <code>vpn.example.com</code>) — the agent gets it.",
+    "relay_pairing_new": "🛰 <b>New relay {name}</b>\nLinks → <code>{host}</code> · target: <code>{target}</code> · {ports} · the code is valid until {until}\n\n1. On the new server (Ubuntu 24.04, root) run one line:\n{command}\n\n2. The installer asks only for this code (it is already in the line) and prints the relay's address for SSH at the end.\n3. Press «🔌 Connect» and send that address — the bot connects over SSH, checks TCP and UDP and adds the relay.",
+    "relay_pairing_attach": "🔗 <b>An agent for relay «{label}» ({name})</b>\nTarget: <code>{target}</code> · {ports} · the code is valid until {until}\n\nThe relay's name, host for links, marker and keys stay the same.\n\n1. On that relay (root) run one line — the installer adopts a relay set up by hand (the old files and tables go to /var/backups/vpn-relay/, forwarding is not interrupted):\n{command}\n\n2. Press «🔌 Connect» and send the relay's address for SSH the installer prints. It must equal the relay's host or be in its source IPs — the bot refuses another server.",
+    "relay_pairing_cancelled": "Code cancelled",
+    "relay_ask_address": "Send the relay's address for SSH: <code>IP</code> or <code>IP:ssh-port</code> (or a DNS name). The installer printed it at the end.",
+    "relay_connecting": "⏳ Connecting to the relay over SSH, checking TCP and UDP…",
+    "relay_paired": "✅ <b>Relay «{label}» ({name}) added</b>\nLinks → <code>{host}</code> · SSH: <code>{ssh}</code>\nCheck through the relay: {checks}\nSource IPs (excluded from the anomaly detector): {sources}\n{health}",
+    "relay_paired_health_on": "Health check: every {interval} s — traffic and the agent, an alert to the superadmins when the state changes.",
+    "relay_paired_health_off": "The health check is off (RELAY_HEALTH_INTERVAL=0 in .env) — there will be no alerts.",
+    "relay_paired_host_mismatch": "⚠️ The host for links {host} points at {resolved} right now, not at this relay. Keys through the relay will not work until the A record is fixed.",
+    "relay_host_unresolved": "nothing (the name does not resolve)",
+    "relay_attached": "✅ <b>Agent connected to relay «{label}» ({name})</b>\nThe name, the host for links (<code>{host}</code>), the marker and the keys did not change.\nSSH: <code>{ssh}</code> · check through the relay: {checks}\n{sources}\n{health}",
+    "relay_attached_sources_added": "Source IPs extended with: {sources}",
+    "relay_attached_sources_same": "Source IPs did not change.",
+    "relay_check_failed_pairing": "❌ The relay answered, but traffic through it does not reach this server: {checks}.\nNothing was changed. Check the main server's firewall and the relay provider's, then connect again.",
+    "relay_connect_failed": "❌ Could not connect: {error}\nNothing was changed.",
+    "relay_reauth": "The TOTP confirmation expired — start the action again with its button.",
+    "relay_check_result": "{icon} {host}: {reason}",
+    "relay_agent_updating": "Updating the agent…",
+    "relay_agent_updated": "⬆️ Update: {state} — {message}",
+    "relay_agent_update_failed": "❌ The update failed: {error}",
+    "relay_agent_ask_forward": "Now: {current}\n\nSend the new target and ports in the same form: <code>vpn.example.com tcp=443 udp=443</code> (tcp/udp may be left out — they stay as they are). If the new target does not answer, the relay rolls the change back itself.",
+    "relay_agent_applying": "⏳ Applying on the relay…",
+    "relay_agent_forward_done": "✅ Forwarding changed.",
+    "relay_agent_forward_failed": "❌ Not applied: {error}",
+    "relay_agent_forward_format": "Format: <code>vpn.example.com tcp=443 udp=443</code>",
+    "relay_detach_confirm": "🔌 <b>Disconnect the agent of relay «{label}» ({name})?</b>\nThe relay and its keys stay; the bot stops managing it over SSH (update, ports, removal from its host) — like a relay set up by hand. An agent can be connected again.\n\n«🧹 Disconnect and uninstall on the relay» also runs uninstall on the relay: its forwarding goes, and keys through the relay stop working until it is set up again.",
+    "relay_detaching": "Disconnecting…",
+    "relay_detached": "🔌 The agent of relay «{label}» is disconnected. The relay and its keys are in place; nothing was removed on the relay itself.",
+    "relay_detached_uninstalled": "🧹 The agent of relay «{label}» is disconnected and the relay was uninstalled: it forwards nothing any more. The relay and its keys stay in the list — switch it off or delete it if it is no longer needed.",
+    "relay_detach_uninstall_failed": "❌ The relay did not run uninstall: {error}\nThe agent was not disconnected. It can be disconnected without uninstall.",
+    "relay_unreachable": "❌ The relay did not run uninstall: {error}\n\nNothing was deleted. If the relay no longer exists, only the record can be deleted — nothing is removed on the relay itself (its forwarding to this server stays until it is removed by hand, docs/relay.md).",
+    "relay_delete_uninstall_first": "Uninstall runs on the relay first (its forwarding to this server, the units, the agent and the bot's key go), then the record is deleted.",
+    "relay_delete_no_agent_note": "The relay has no agent: only the record is deleted, nothing is removed on the relay itself.",
+    "relay_deleted_record_only": "Nothing was removed on the relay itself — do it by hand (docs/relay.md).",
+    "relay_delete_resume_hint": "Uninstall already ran on the relay; deleting again will not repeat it.",
+    "relay_attach_other_server": "{value} is another server: it is not the host of relay «{name}» ({host}) and not in its source IPs. The agent was not connected. Run the command on that relay itself and send its address.",
+    "relay_agent_already": "Relay {name} already has an agent.",
+    "relay_busy": "Relay {name} is busy with another agent operation — try again in a minute.",
+    "dangerous_relay_edit": "changing a relay",
+    "dangerous_relay_delete": "deleting a relay",
+    "dangerous_relay_connect": "connecting a relay with a pairing code",
+    "dangerous_relay_detach": "disconnecting a relay's agent",
     # ── all-in-one kinds ──────────────────────────────────────────────────────
     "field_bundle_kind": "Kind",
     "bundle_kind_prompt": "<b>Choose the subscription kind:</b>",
@@ -1283,7 +1327,7 @@ STRINGS: dict[str, str] = {
         "set: VLESS (TCP) and Hysteria2, plus their copies through every enabled relay that is "
         "«in subscriptions». VLESS (HTTP) keys are deleted, missing keys are created.\n\n"
         "<b>Top every subscription up to current settings</b> — the same without changing the "
-        "kind: e.g. to add the relay members after a relay was added in «Manage relays».\n\n"
+        "kind: e.g. to add the relay members after a relay was added in «🛰 Relays».\n\n"
         "Users keep their subscription link. A plan is shown first; nothing changes until you "
         "confirm."
     ),
@@ -1850,6 +1894,8 @@ STRINGS: dict[str, str] = {
     "wizard_item_warp_egress_warp_no_nat": "{protos} from {addr} leave via {iface}, but {addr} is not the tunnel address {tunnel} and nothing masquerades it there (-o {iface} -j MASQUERADE) — WARP drops the packets",
     "wizard_item_warp_egress_selective_ok": "selective split: {protos} from {addr} reach the listed prefixes via {iface} (probe {probe_in}) and the rest via {wan} with MASQUERADE (probe {probe})",
     "wizard_item_warp_egress_full_ok": "full tunnel: {protos} from {addr} leave via {iface} (probe {probe})",
+    "wizard_item_legacy_relay_env": "obsolete in .env, not read by the bot (relays live in the database): {names} — delete them",
+    "wizard_item_legacy_relay_env_none": "no obsolete RELAY_* variables in .env",
     "wizard_dump_ready": "📦 The dump is collected and redacted — the file is below.",
     "wizard_failed_hint": "Details are in the log («📄 Log»).",
     "wizard_scheduled_alert": "🩺 <b>Daily self-check</b> (run #{id}): something deviates.",
@@ -1873,69 +1919,11 @@ STRINGS: dict[str, str] = {
     "dangerous_relay_pair": "issuing a relay pairing code",
     "dangerous_relay_update": "updating a relay",
     "dangerous_relay_apply": "changing a relay's ports/target",
-    "dangerous_relay_uninstall": "removing a relay from its host",
+    "dangerous_relay_uninstall": "uninstall on a relay (removal from its host)",
     "btn_wizard_relay": "🛰 Relay",
-    "btn_relay_wiz_add": "➕ Add a relay",
-    "btn_relay_wiz_connect": "🔌 Connect",
-    "btn_relay_wiz_cancel_pairing": "✖️ Cancel the code",
-    "btn_relay_wiz_back": "↩️ Relay",
-    "btn_relay_wiz_card": "🛰 Relay card",
-    "btn_relay_wiz_status": "🔄 Status",
-    "btn_relay_wiz_update": "⬆️ Update",
-    "btn_relay_wiz_forward": "⚙️ Ports / target",
-    "btn_relay_wiz_delete": "🗑 Delete",
-    "btn_relay_wiz_delete_confirm": "🗑 Uninstall from the relay and delete",
-    "btn_relay_wiz_delete_with_keys": "🗑 Uninstall, delete the keys and the relay",
-    "btn_relay_wiz_delete_record": "🗑 Delete the record only",
-    "btn_relay_wiz_panel_card": "🛰 Card in the admin panel",
-    "btn_relay_wiz_use_name": "Use «{name}»",
-    "btn_relay_wiz_use_target": "🎯 {target}",
-    "btn_relay_wiz_retry": "🔌 Connect again",
-    "relay_wiz_title": "🛰 <b>Relays from the installer</b>\n\nA relay is installed with one command from the bot: «Add» issues a pairing code and a line for the relay, the installer sets up TCP+UDP/443 forwarding to the main server, and the bot connects to the relay over SSH with its own key and manages it from here. A relay has no Telegram bot of its own.",
-    "relay_wiz_empty": "No relays installed through the bot yet.",
-    "relay_wiz_managed_line": "{icon} <b>{label}</b> {name} — {host}",
-    "relay_wiz_pending_line": "⏳ {name} → {target}: the code is valid until {until}",
-    "relay_wiz_ask_name": "The new relay's name — Latin letters, digits, hyphen (e.g. <code>ru2</code>). It goes into the keys and never changes. Send a name or press the button.",
-    "relay_wiz_ask_target": "Relay <b>{name}</b> will forward to the main server by its DNS name (not by IP: a new IP is an A-record change, the relay re-resolves the name by itself). Press the button or send another name.",
-    "relay_wiz_ask_target_none": "Relay <b>{name}</b> forwards to the main server by its DNS name (not by IP). Send this server's DNS name (e.g. <code>vpn.example.com</code>).",
-    "relay_wiz_pairing": "🛰 <b>Pairing code for relay {name}</b>\nTarget: <code>{target}</code> · {ports} · valid until {until}\n\n1. On the new relay (Ubuntu 24.04, root) run this one line:\n{command}\n\n2. The installer needs only this code (it is in the line) and prints the relay's address at the end.\n3. Press «Connect» and send that address — the bot connects over SSH, checks TCP and UDP and registers the relay.",
-    "relay_wiz_pairing_cancelled": "Code cancelled",
-    "relay_wiz_ask_address": "Send the relay's address: <code>IP</code> or <code>IP:ssh-port</code> (or a DNS name). The installer printed it at the end.",
-    "relay_wiz_connecting": "⏳ Connecting to the relay over SSH, checking TCP and UDP…",
-    "relay_wiz_paired": "✅ <b>Relay «{label}» ({name}) connected</b>\nAddress: <code>{host}</code>\nCheck through the relay: {checks}\nSource IPs (excluded from the anomaly detector): {sources}\n{health}",
-    "relay_wiz_health_on": "Health check: every {interval} s, an alert to the superadmins when it goes down and back up.",
-    "relay_wiz_health_off": "The health check is off (RELAY_HEALTH_INTERVAL=0 in .env) — no alerts.",
-    "relay_wiz_check_failed": "❌ The relay answered, but traffic through it does not reach this server: {checks}.\nThe relay is not registered. Check the main server's and the relay provider's firewall, then connect again.",
-    "relay_wiz_connect_failed": "❌ Could not connect the relay: {error}",
-    "relay_wiz_reauth": "The TOTP confirmation expired — start the action again with its button.",
-    "relay_wiz_card": "🛰 <b>{label}</b> · {name} ({state})\nHost: <code>{host}</code> · SSH: <code>{ssh}</code>\nTarget: <code>{target}</code> · {ports}",
-    "relay_wiz_status_none": "No status asked for yet — press «Status».",
-    "relay_wiz_status_at": "Status of {at} UTC:",
-    "relay_wiz_status_live": "• DNAT currently to {target}",
-    "relay_wiz_status_units": "• units: {units}",
-    "relay_wiz_status_check": "• vpn-relay-apply check: exit {rc}",
-    "relay_wiz_status_version": "• version: {version}",
-    "relay_wiz_status_update": "• last update: {state} — {message}",
-    "relay_wiz_probe": "Health check: {ok} ({at} UTC)",
-    "relay_wiz_status_running": "Asking for the status…",
-    "relay_wiz_status_failed": "❌ No status: {error}",
-    "relay_wiz_updating": "Updating the relay…",
-    "relay_wiz_updated": "⬆️ Update: {state} — {message}",
-    "relay_wiz_update_failed": "❌ The update failed: {error}",
-    "relay_wiz_ask_forward": "Now: {current}\n\nSend the new target and ports the same way: <code>vpn.example.com tcp=443 udp=443</code> (tcp/udp may be left out — they stay). If the new target does not answer, the relay rolls the change back by itself.",
-    "relay_wiz_applying": "⏳ Applying on the relay…",
-    "relay_wiz_forward_done": "✅ Forwarding changed.",
-    "relay_wiz_forward_failed": "❌ Not applied: {error}",
-    "relay_wiz_forward_format": "Format: <code>vpn.example.com tcp=443 udp=443</code>",
-    "relay_wiz_delete_impact": "🗑 <b>Delete relay «{label}» ({name})?</b>\nThe relay runs uninstall (nftables tables, units, the agent and the bot's key go), then the record is deleted. Keys through the relay: {keys} (in subscriptions: {bundles}).",
-    "relay_wiz_deleting": "Deleting…",
-    "relay_wiz_deleted": "✅ Relay {name} deleted.",
-    "relay_wiz_deleted_record_only": "Nothing was removed on the relay itself — do it by hand (docs/relay.md).",
-    "relay_wiz_delete_incomplete": "⚠️ Relay {name} was uninstalled, but the record stays: {remaining} more key(s). Press «Delete» on the relay's card again — the delete continues (uninstall is not run twice).",
-    "relay_agent_uninstalled": "The relay was already uninstalled — only the record is left: «🗑 Delete».",
-    "relay_wiz_unreachable": "❌ The relay did not run uninstall: {error}\n\nIf the relay no longer exists, you can delete the record only (nothing is removed on the relay).",
+    "relay_agent_uninstalled": "The relay was already uninstalled — it forwards nothing any more. What is left: delete the record («🗑 Delete») or disconnect the agent.",
     "relay_agent_unavailable": "Relay management is not wired.",
-    "relay_agent_not_managed": "This relay was added by hand — the bot does not manage it.",
+    "relay_agent_not_managed": "This relay has no agent — connect one from the relay's page.",
     "relay_agent_refused": "The relay refused: {error}",
     "relay_agent_protocol": "Incompatible agent version on the relay ({value}) — update the relay.",
     "relay_agent_mismatch": "The relay was set up with another code ({got}).",

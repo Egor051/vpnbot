@@ -35,6 +35,10 @@ from db.database import CURRENT_SCHEMA_VERSION, Database
 
 SNAPSHOT_DIR = Path(__file__).resolve().parent / "schema_snapshots"
 _SNAPSHOT_RE = re.compile(r"^v(\d+)\.sql$")
+# Tables a migration folds into another one and then DROPs, with the version that
+# does it. Their rows are not lost — they are columns of another table now — and a
+# dedicated test proves every row arrived (relay_agents: tests/test_relay_unified.py).
+FOLDED_TABLES: dict[str, int] = {"relay_agents": 44}
 
 
 def _snapshot_versions() -> list[int]:
@@ -93,7 +97,13 @@ async def _bootstrap_and_read(db_path: Path) -> tuple[int, SchemaShape]:
 async def _row_counts(db_path: Path, tables: dict[str, int]) -> dict[str, int]:
     counts: dict[str, int] = {}
     async with aiosqlite.connect(db_path) as conn:
+        cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        present = {str(row[0]) for row in await cursor.fetchall()}
+        gone = set(tables) - present
+        assert gone <= set(FOLDED_TABLES), f"tables dropped by the upgrade: {sorted(gone)}"
         for table in tables:
+            if table in gone:
+                continue
             cursor = await conn.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
             row = await cursor.fetchone()
             counts[table] = int(row[0]) if row is not None else 0
@@ -137,7 +147,7 @@ def test_bootstrap_upgrades_snapshot_to_current_schema(version: int, tmp_path: P
         # singleton tables (protocol_modules, warp_settings, …) with
         # INSERT OR IGNORE on every start.
         after = await _row_counts(upgraded, before)
-        lost = {table: (before[table], after[table]) for table in before if after[table] < before[table]}
+        lost = {table: (before[table], after[table]) for table in after if after[table] < before[table]}
         assert not lost, f"v{version}: rows lost across the upgrade (before, after): {lost}"
 
     asyncio.run(run())

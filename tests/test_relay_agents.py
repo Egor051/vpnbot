@@ -7,10 +7,12 @@
   replaced, refused when not private), the ssh argv (every option pinned, only a
   whitelisted request), trust on first use and the pinned key afterwards — with a
   fake `ssh` that behaves like OpenSSH's known_hosts handling;
-* services/relay_agents.py — pairing on a real SQLite database: hello, the TCP/UDP
-  checks, registration in the relays table with the source IPs the anomaly detector
-  excludes, the token cleared; a failed check or a wrong relay registers nothing;
-  status / apply / update / remove;
+* services/relays.py — a NEW relay's pairing on a real SQLite database: hello, the
+  TCP/UDP checks, the relay row with its agent (the public host for links apart from
+  the SSH address) and the source IPs the anomaly detector excludes, the token
+  cleared; a failed check or a wrong relay registers nothing; status / apply /
+  update / delete with uninstall (the agent of an EXISTING relay:
+  tests/test_relay_unified.py);
 * services/relay_health.py — the QUIC version-negotiation probe against a local UDP
   server that answers like a QUIC server, and one that does not.
 """
@@ -39,29 +41,23 @@ from adapters.clock import ClockProvider
 from adapters.shell_runner import ShellRunner
 from db.database import Database
 from models.enums import AuditEntityType
-from repositories.relay_agents import RelayAgentRepository
+from models.dto import RelayAgent
 from repositories.relays import RelayRepository
 from services.errors import AccessDenied, InvalidOperation, NotFound
 from services.relay import RelayCatalog, RelaySnapshot
-from services.relay_agents import (
-    PairingCheckFailed,
-    RelayAgentError,
-    RelayAgentService,
-    installer_source,
-    parse_address,
-)
 from services.relay_health import is_version_negotiation, quic_probe, quic_vn_request
-from services.relay_management import RelayService
 from services.relay_pairing import (
     PairingCode,
     PairingCodeError,
     Source,
     decode_pairing_code,
     encode_pairing_code,
+    installer_source,
     new_token,
     parse_ports,
     relay_command,
 )
+from services.relays import PairingCheckFailed, RelayAgentError, RelayService, parse_address
 from services.relay_ssh import AgentReply, RelayAgentClient, RelayHostKeyMismatch, RelayKeyStore, RelaySshError
 
 BLOB = base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + bytes(range(32))).decode()
@@ -69,6 +65,7 @@ PUBKEY = f"ssh-ed25519 {BLOB}"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostKeyOfTheRelayHostKeyOfTheRelay00"
 RELAY_IP = "203.0.113.50"
+PUBLIC_HOST = "relay.example.com"
 TARGET = "vpn.example.com"
 
 pytestmark = pytest.mark.timeout(60)
@@ -547,9 +544,7 @@ class World:
         await self.db.commit()
         self.audit = _Audit()
         self.relay_repo = RelayRepository(self.db)
-        self.relays = RelayService(relays=self.relay_repo, users=_Users(), audit=self.audit,  # type: ignore[arg-type]
-                                   clock=ClockProvider(), catalog=RelayCatalog())
-        self.repo = RelayAgentRepository(self.db)
+        self.repo = self.relay_repo  # the pairings live in the same repository
         self.keys = RelayKeyStore(self.tmp / "relay_ssh")
         self.client = FakeClient()
         self.client.replies["hello"] = _hello()
@@ -569,14 +564,15 @@ class World:
             return self.udp[0]
 
         async def resolve(host: str) -> list[str]:
-            return [RELAY_IP] if host in (RELAY_IP, "relay.example.com") else []
+            return [RELAY_IP] if host in (RELAY_IP, PUBLIC_HOST) else []
 
-        self.service = RelayAgentService(
-            repo=self.repo, relays=self.relays, users=_Users(), audit=self.audit,  # type: ignore[arg-type]
-            clock=ClockProvider(), keys=self.keys, client=self.client,  # type: ignore[arg-type]
+        self.service = RelayService(
+            relays=self.relay_repo, users=_Users(), audit=self.audit,  # type: ignore[arg-type]
+            clock=ClockProvider(), catalog=RelayCatalog(), keys=self.keys, client=self.client,  # type: ignore[arg-type]
             settings=_settings(self.tmp, hysteria2_enabled=True, xray_public_host=TARGET, **settings),
             source_root=root, tcp_probe=tcp, udp_probe=udp, resolve=resolve, now=lambda: self.now,
         )
+        self.relays = self.service
         return self
 
     async def close(self) -> None:
@@ -591,7 +587,7 @@ async def world(tmp_path: Path) -> Any:
 
 
 async def test_issue_renders_code_and_command_and_keeps_only_the_live_token(world: World) -> None:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     code = decode_pairing_code(issued.code, now=int(time.time()))
     assert code.target_host == TARGET and code.tcp_ports == (443,) and code.udp_ports == (443,)
     assert code.main_pubkey == world.keys.public_key()
@@ -605,37 +601,45 @@ async def test_issue_renders_code_and_command_and_keeps_only_the_live_token(worl
 
 async def test_issue_is_superadmin_only(world: World) -> None:
     with pytest.raises(AccessDenied):
-        await world.service.issue(MODERATOR, name="ru2", target_host=TARGET)
+        await world.service.issue_new(MODERATOR, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
 
 
 @pytest.mark.parametrize("target", ["203.0.113.1", "localhost", "bad name"])
 async def test_issue_refuses_a_target_that_is_not_a_name(world: World, target: str) -> None:
     with pytest.raises(InvalidOperation):
-        await world.service.issue(ADMIN, name="ru2", target_host=target)
+        await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=target)
 
 
 async def test_a_name_can_wait_for_only_one_pairing(world: World) -> None:
-    await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     with pytest.raises(InvalidOperation):
-        await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+        await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
 
 
 async def test_default_target_is_the_main_dns_name(world: World) -> None:
     assert world.service.default_target() == TARGET
 
 
+async def _agent(world: World, relay_id: int) -> RelayAgent | None:
+    relay = await world.relay_repo.get_by_id(relay_id)
+    return None if relay is None else relay.agent
+
+
 async def test_complete_registers_the_relay(world: World) -> None:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
+    assert issued.pairing.kind == "new" and issued.pairing.relay_host == PUBLIC_HOST
     outcome = await world.service.complete(ADMIN, issued.pairing.id, f"{RELAY_IP}:2222")
     hello = world.client.calls[0]
     assert hello["request"] == f"hello {issued.pairing.token}"
     assert hello["host_key"] is None and hello["port"] == 2222
     relay = outcome.relay
-    assert relay.name == "ru2" and relay.host == RELAY_IP and relay.enabled
+    assert not outcome.attached and outcome.host_mismatch is None
+    # The links point at the PUBLIC host; the SSH address is the agent's, apart.
+    assert relay.name == "ru2" and relay.host == PUBLIC_HOST and relay.enabled
     assert {str(n) for n in relay.source_ips} == {f"{RELAY_IP}/32", "198.51.100.77/32"}
-    agent = await world.repo.get(relay.id)
+    agent = await _agent(world, relay.id)
     assert agent is not None and agent.host_key == HOST_KEY and agent.ssh_port == 2222
-    assert agent.target_host == TARGET
+    assert agent.ssh_host == RELAY_IP and agent.target_host == TARGET
     pairing = await world.repo.get_pairing(issued.pairing.id)
     assert pairing is not None and pairing.state == "completed" and pairing.token == "" and pairing.relay_id == relay.id
     assert outcome.checks.tcp is True and outcome.checks.udp is True
@@ -649,7 +653,7 @@ async def test_complete_registers_the_relay(world: World) -> None:
 
 
 async def test_a_failed_check_registers_nothing_and_a_retry_works(world: World) -> None:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     world.udp[0] = False
     with pytest.raises(PairingCheckFailed) as exc:
         await world.service.complete(ADMIN, issued.pairing.id, RELAY_IP)
@@ -663,14 +667,14 @@ async def test_a_failed_check_registers_nothing_and_a_retry_works(world: World) 
 
 
 async def test_tcp_failure_blocks_too(world: World) -> None:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     world.tcp[0] = False
     with pytest.raises(PairingCheckFailed):
         await world.service.complete(ADMIN, issued.pairing.id, RELAY_IP)
 
 
 async def test_a_relay_set_up_by_another_code_is_refused(world: World) -> None:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     world.client.replies["hello"] = _hello(target_host="other.example.com")
     with pytest.raises(RelayAgentError):
         await world.service.complete(ADMIN, issued.pairing.id, RELAY_IP)
@@ -681,14 +685,14 @@ async def test_a_relay_set_up_by_another_code_is_refused(world: World) -> None:
 
 
 async def test_a_refused_hello_is_reported(world: World) -> None:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     world.client.replies["hello"] = AgentReply(3, {"ok": False, "error": "token does not match"})
     with pytest.raises(RelayAgentError, match="token does not match"):
         await world.service.complete(ADMIN, issued.pairing.id, RELAY_IP)
 
 
 async def test_an_expired_pairing_cannot_complete_and_loses_its_token(world: World) -> None:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     world.now += 1800 + 900 + 1
     with pytest.raises(NotFound):
         await world.service.complete(ADMIN, issued.pairing.id, RELAY_IP)
@@ -698,13 +702,13 @@ async def test_an_expired_pairing_cannot_complete_and_loses_its_token(world: Wor
 
 
 async def test_within_the_grace_it_completes(world: World) -> None:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     world.now += 1800 + 600
     await world.service.complete(ADMIN, issued.pairing.id, RELAY_IP)
 
 
 async def test_cancel_clears_the_token(world: World) -> None:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     await world.service.cancel(ADMIN, issued.pairing.id)
     pairing = await world.repo.get_pairing(issued.pairing.id)
     assert pairing is not None and pairing.state == "cancelled" and pairing.token == ""
@@ -713,17 +717,17 @@ async def test_cancel_clears_the_token(world: World) -> None:
 
 
 async def _paired(world: World) -> int:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     return (await world.service.complete(ADMIN, issued.pairing.id, RELAY_IP)).relay.id
 
 
 async def test_status_uses_the_pinned_key_and_records_it(world: World) -> None:
     relay_id = await _paired(world)
     world.client.replies["status"] = AgentReply(0, {"ok": True, "agent": "1", "check": {"rc": 0, "lines": []}})
-    await world.service.status(ADMIN, relay_id)
+    await world.service.agent_status(ADMIN, relay_id)
     call = world.client.calls[-1]
     assert call["request"] == "status" and call["host_key"] == HOST_KEY and call["alias"] == f"vpn-relay-{relay_id}"
-    agent = await world.repo.get(relay_id)
+    agent = await _agent(world, relay_id)
     assert agent is not None and agent.last_status == {"agent": "1", "check": {"rc": 0, "lines": []}}
 
 
@@ -732,41 +736,46 @@ async def test_change_forward_validates_and_records(world: World) -> None:
     world.client.replies["apply"] = AgentReply(0, {"ok": True})
     await world.service.change_forward(ADMIN, relay_id, target_host="New.Example.com", tcp="443, 8443", udp="443")
     assert world.client.calls[-1]["request"] == "apply target=new.example.com tcp=443,8443 udp=443"
-    agent = await world.repo.get(relay_id)
+    agent = await _agent(world, relay_id)
     assert agent is not None and agent.target_host == "new.example.com" and agent.tcp_ports == (443, 8443)
     with pytest.raises(InvalidOperation):
         await world.service.change_forward(ADMIN, relay_id, target_host="1.2.3.4", tcp="443", udp="443")
     world.client.replies["apply"] = AgentReply(4, {"ok": False, "error": "rolled back"})
     with pytest.raises(RelayAgentError):
         await world.service.change_forward(ADMIN, relay_id, target_host="x.example.com", tcp="443", udp="443")
-    agent = await world.repo.get(relay_id)
+    agent = await _agent(world, relay_id)
     assert agent is not None and agent.target_host == "new.example.com", "a failed apply records nothing"
 
 
-async def test_remove_uninstalls_then_deletes(world: World) -> None:
+async def test_delete_uninstalls_then_deletes(world: World) -> None:
     relay_id = await _paired(world)
     world.client.replies["uninstall"] = AgentReply(0, {"ok": True, "uninstall": {"ok": True}})
-    report = await world.service.remove(ADMIN, relay_id, with_keys=False)
-    assert report.uninstalled and report.deletion.deleted
-    assert await world.repo.get(relay_id) is None
+    report = await world.service.delete(ADMIN, relay_id, with_keys=False)
+    assert report.uninstalled and report.deleted
+    assert [c["request"] for c in world.client.calls][-1] == "uninstall"
     assert await world.relay_repo.get_by_id(relay_id) is None
 
 
-async def test_remove_stops_when_the_relay_refuses(world: World) -> None:
+async def test_delete_stops_when_the_relay_refuses(world: World) -> None:
     relay_id = await _paired(world)
     world.client.replies["uninstall"] = AgentReply(4, {"ok": False, "error": "busy"})
     with pytest.raises(RelayAgentError):
-        await world.service.remove(ADMIN, relay_id, with_keys=False)
+        await world.service.delete(ADMIN, relay_id, with_keys=False)
     assert await world.relay_repo.get_by_id(relay_id) is not None
-    report = await world.service.remove(ADMIN, relay_id, with_keys=False, relay_side=False)
-    assert not report.uninstalled and report.deletion.deleted
+    report = await world.service.delete(ADMIN, relay_id, with_keys=False, relay_side=False)
+    assert not report.uninstalled and report.deleted
 
 
-async def test_an_unmanaged_relay_is_not_offered(world: World) -> None:
+async def test_a_relay_without_an_agent_has_no_agent_calls(world: World) -> None:
     relay = await world.relays.create(ADMIN, name="ru1", host="relay.example.com", source_ips=RELAY_IP)
+    for call in (world.service.agent_status, world.service.update_agent):
+        with pytest.raises(NotFound):
+            await call(ADMIN, relay.id)
     with pytest.raises(NotFound):
-        await world.service.status(ADMIN, relay.id)
-    assert await world.service.managed(ADMIN) == []
+        await world.service.detach_agent(ADMIN, relay.id, uninstall=False)
+    [overview] = await world.service.list_overview(ADMIN)
+    assert overview.relay.agent is None and not overview.relay.managed
+    assert world.client.calls == []
 
 
 # ── the QUIC probe against a real local UDP socket ────────────────────────────
@@ -870,7 +879,7 @@ def test_udp_is_probed_only_with_hysteria2(tmp_path: Path) -> None:
 
 
 async def test_a_cancel_waits_for_a_completion_in_flight(world: World) -> None:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     gate = asyncio.Event()
     original = world.client.call
 
@@ -893,7 +902,7 @@ async def test_a_cancel_waits_for_a_completion_in_flight(world: World) -> None:
 
 
 async def test_a_pairing_closed_during_completion_leaves_no_relay(world: World) -> None:
-    issued = await world.service.issue(ADMIN, name="ru2", target_host=TARGET)
+    issued = await world.service.issue_new(ADMIN, name="ru2", host=PUBLIC_HOST, target_host=TARGET)
     original = world.client.call
 
     async def expiring_call(*args: Any, **kwargs: Any) -> AgentReply:
@@ -905,34 +914,29 @@ async def test_a_pairing_closed_during_completion_leaves_no_relay(world: World) 
     with pytest.raises(NotFound):
         await world.service.complete(ADMIN, issued.pairing.id, RELAY_IP)
     assert await world.relay_repo.count() == 0
-    assert await world.repo.list_all() == []
 
 
 async def test_an_interrupted_delete_can_be_resumed_without_a_second_uninstall(world: World) -> None:
-    from services.relay_management import RelayDeletionReport
-
     relay_id = await _paired(world)
     world.client.replies["uninstall"] = AgentReply(0, {"ok": True})
-    original_delete = world.relays.delete
+    original = world.relay_repo.delete_if_unused
     calls = {"n": 0}
 
-    async def flaky_delete(actor: int, rid: int, *, with_keys: bool) -> RelayDeletionReport:
+    async def flaky_delete_if_unused(rid: int, **kwargs: Any) -> bool:
         calls["n"] += 1
-        if calls["n"] == 1:  # a key failed: the relay row stays
-            relay = await world.relay_repo.get_by_id(rid)
-            assert relay is not None
-            return RelayDeletionReport(relay=relay, deleted=False, remaining_keys=1)
-        return await original_delete(actor, rid, with_keys=with_keys)
+        if calls["n"] == 1:  # a key appeared meanwhile: the relay row stays
+            return False
+        return await original(rid, **kwargs)
 
-    world.relays.delete = flaky_delete  # type: ignore[method-assign]
-    first = await world.service.remove(ADMIN, relay_id, with_keys=True)
-    assert first.uninstalled and not first.deletion.deleted
-    assert [r for r, _ in await world.service.managed(ADMIN)], "still in the wizard, to resume"
+    world.relay_repo.delete_if_unused = flaky_delete_if_unused  # type: ignore[method-assign]
+    first = await world.service.delete(ADMIN, relay_id, with_keys=True)
+    assert first.uninstalled and not first.deleted
+    [overview] = await world.service.list_overview(ADMIN)
+    assert overview.relay.agent is not None, "still listed with its (uninstalled) agent, to resume"
     with pytest.raises(RelayAgentError):
-        await world.service.status(ADMIN, relay_id)  # the key is gone there: a clear refusal
+        await world.service.agent_status(ADMIN, relay_id)  # the key is gone there: a clear refusal
     uninstalls = sum(1 for c in world.client.calls if c["request"] == "uninstall")
-    second = await world.service.remove(ADMIN, relay_id, with_keys=True)
-    assert second.deletion.deleted and second.uninstalled
+    second = await world.service.delete(ADMIN, relay_id, with_keys=True)
+    assert second.deleted and second.uninstalled
     assert sum(1 for c in world.client.calls if c["request"] == "uninstall") == uninstalls, "no second uninstall"
-    assert await world.repo.get(relay_id) is None
-
+    assert await world.relay_repo.get_by_id(relay_id) is None

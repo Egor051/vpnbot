@@ -260,7 +260,7 @@ def test_selfcheck_on_a_healthy_host_is_all_green(host: Host) -> None:
     events = host.events(5)
     assert finished(events)["outcome"] == "succeeded"
     items = {e["key"]: e["level"] for e in events if e["event"] == "item"}
-    for key in ("listeners", "warp", "failed_units", "certs", "helpers", "perms", "reboot"):
+    for key in ("listeners", "warp", "failed_units", "certs", "helpers", "perms", "reboot", "legacy_env"):
         assert items[key] == "green", (key, events)
     assert "disk" in items
     steps = [(e["step"], e["state"]) for e in events if e["event"] == "step"]
@@ -292,6 +292,20 @@ def test_selfcheck_reports_deviations(host: Host) -> None:
     assert items["cert:example.org"][0] == "red"
     summary = [e for e in host.events(6) if e["event"] == "summary"][0]
     assert summary["red"] >= 4
+
+
+def test_selfcheck_flags_the_obsolete_relay_vars_yellow(host: Host) -> None:
+    """RELAY_ENABLED/NAME/HOST/SOURCE_IPS left in .env: the bot ignores them and says
+    so once at startup; the self-check shows the same as a yellow item."""
+    env = host.file("/opt/vpn-service/.env")
+    env.write_text(
+        env.read_text(encoding="utf-8") + "RELAY_ENABLED=true\nRELAY_HOST=relay.example.net\nRELAY_HEALTH_INTERVAL=300\n",
+        encoding="utf-8",
+    )
+    assert host.launcher("run", "--mode", "selfcheck", "--run", "41", "--phase", "execute").returncode == 0
+    [item] = [e for e in host.events(41) if e["event"] == "item" and e["key"] == "legacy_env"]
+    assert item["level"] == "yellow" and item["msg"] == "legacy_relay_env"
+    assert item["args"] == {"names": "RELAY_ENABLED, RELAY_HOST"}, "RELAY_HEALTH_INTERVAL is a live setting"
 
 
 # --------------------------------------------------------------------------- #

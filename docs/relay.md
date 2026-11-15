@@ -3,10 +3,20 @@
 A **relay** is a second entry point into this server: a small VPS (here: in Russia)
 that forwards client traffic at L4 to the main server. A key issued "via relay" is an
 ordinary key whose link points at the relay instead of the main host. There can be
-**several relays**; they are managed in the bot's admin panel (**🛡 Админ-панель →
-🧩 Протоколы и маршрутизация → 🛰 Управлять relay**) and stored in the `relays` table of `vpn.db`. With no relay in
-the table the feature is invisible. A new relay is installed fastest
-[with one command from the bot](#installing-a-relay-with-one-command).
+**several relays**. They live in ONE table (`relays` in `vpn.db`) and on ONE screen of the
+bot: **🛡 Админ-панель → 🧩 Протоколы и маршрутизация → 🛰 Relay** (the setup wizard's
+«🛰 Relay» opens the same screen). With no relay in the table the feature is invisible.
+
+**One model.** How a relay is managed is a property of the relay, not a separate entity:
+
+- **with an agent** — the bot reaches `vpn-relay-agent` on the relay over SSH with its own key
+  and runs status, update, ports/target and uninstall from the relay's page;
+- **without an agent** — a relay set up by hand (the one that used to come from `RELAY_*` in
+  `.env` among them). It works exactly as before; its page offers **«🔗 Подключить агент (ключи не
+  меняются)»**, which connects an agent without changing the relay's name, host, label or keys.
+
+A new relay is added with [one command from the bot](#installing-a-relay-with-one-command) —
+**«➕ Добавить relay»** is the only way to create one.
 
 ## Topology
 
@@ -444,17 +454,18 @@ Check it: `systemctl status vpn-relay`, `nft list table ip vpnrelay`,
 `nft list table inet vpnrelay_input`, `/usr/local/sbin/vpn-relay-apply input-status`,
 `/usr/local/sbin/vpn-relay-apply check`.
 
-On the **main server** (steps 1–2 before the relay's first deploy, see above):
+On the **main server**:
 
 1. A DNS A record for the relay — e.g. `relay2.anycastedge.net` → the relay's IPv4 — with
    Cloudflare proxying **off** (see [DNS](#dns--use-a-name-not-an-address)).
-2. **🛡 Админ-панель → 🧩 Протоколы и маршрутизация → 🛰 Управлять relay → Добавить relay**: host = that name, source IPs = the
-   relay's egress IPv4 (for a DNAT relay usually the address it is reached at), name and label
-   as in [Managing relays](#managing-relays-in-the-admin-panel). (`RELAY_HOST` /
-   `RELAY_SOURCE_IPS` in the main `.env` are legacy since relays moved to the panel: they only
-   seed an empty `relays` table once.)
-3. **«Проверить сейчас»** on the relay's card: the health probe goes through the relay's DNAT
-   to the main inbound and back.
+2. The relay must be a row of `relays` before its first deploy (main's probe answers only the
+   address of an enabled relay). The panel creates relays only through a pairing code: for a NEW
+   relay use **«➕ Добавить relay»** — [the installer](#installing-a-relay-with-one-command) does
+   everything this section does by hand, and the relay comes with its agent. A relay deployed by
+   hand that is already in the table (the legacy one) gets its agent with **«🔗 Подключить агент»**
+   on its page: the installer [adopts](#adoption-of-a-hand-made-relay) the hand-made setup.
+3. **«🔍 Проверить сейчас»** on the relay's page: the health probe goes through the relay's DNAT
+   to the main inbound and back (and asks the agent, when there is one).
 
 Changing `RELAY_FORWARD_*` (or any relay `.env` value) does not move `HEAD`, so apply it with
 `sudo FORCE=1 bash scripts/redeploy.sh` — backup, restart, check and rollback included — rather
@@ -484,12 +495,25 @@ Not done in this release; what it would take:
 
 ## Installing a relay with one command
 
-The quickest way to a new relay: **🛡 Админ-панель → 🧙 Мастер настройки → 🛰 Relay →
-➕ Добавить relay**. The bot issues a pairing code and shows **one line** to paste on the
-relay; the relay installs itself from it, and the bot connects to it over SSH and manages it
-from then on. The relay has **no Telegram bot and never talks to the Telegram API**: the only
-thing the main server and the relay share is the bot's SSH key, whose line in the relay's
-`authorized_keys` runs nothing but [the agent](#the-agent-vpn-relay-agent).
+**🛡 Админ-панель → 🧩 Протоколы и маршрутизация → 🛰 Relay → ➕ Добавить relay** (or the wizard's
+«🛰 Relay», the same screen) asks three things and shows **one line** to paste on the relay:
+
+1. the relay's **name** — written into every key of it, never changes (a free `relayN` is offered);
+2. the **public host for links** — what every key's link points at. A DNS name (recommended: a new
+   IP of the relay is then an A-record change, no key is re-imported); an IPv4 address is accepted
+   with a warning — a burned IP has to be changed at every client. This is NOT the address the bot
+   manages the relay through: the SSH address is asked separately when the pairing completes and
+   kept apart (the agent's `ssh_host`);
+3. the **main server's DNS name** the relay forwards to (the bot offers `XRAY_PUBLIC_HOST`).
+
+The relay installs itself from the line, and the bot connects to it over SSH and manages it from
+then on. The relay has **no Telegram bot and never talks to the Telegram API**: the only thing the
+main server and the relay share is the bot's SSH key, whose line in the relay's `authorized_keys`
+runs nothing but [the agent](#the-agent-vpn-relay-agent).
+
+The same code mechanism **connects an agent to an existing relay** («🔗 Подключить агент» on a
+relay's page, [below](#connecting-an-agent-to-an-existing-relay)): no name is asked, and nothing
+about the relay or its keys changes.
 
 ### The pairing code
 
@@ -592,12 +616,12 @@ A relay that was set up by hand — `/etc/vpn-relay.nft`, a `vpn-relay.service` 
 
 ### Completing the pairing
 
-«🔌 Подключить» → send the relay's address (`IP`, `IP:port` or a DNS name). The bot:
+«🔌 Подключить» (TOTP) → send the relay's SSH address (`IP`, `IP:port` or a DNS name). The bot:
 
 1. connects as `root` with its key — **trust on first use**: the relay's host key is learned
-   now and pinned in `relay_agents.host_key`; every later call runs with
-   `StrictHostKeyChecking=yes` under `HostKeyAlias=vpn-relay-<id>`, and a relay that shows another
-   key is refused («ключ хоста relay изменился»);
+   now and pinned in `relays.host_key`; every later call runs with `StrictHostKeyChecking=yes`
+   under `HostKeyAlias=vpn-relay-<id>`, and a relay that shows another key is refused («ключ хоста
+   relay изменился»);
 2. runs `hello <token>`; the agent compares the sha256 in constant time, within the expiry, and
    marks itself paired. A repeated `hello` with the same token answers again (the bot may retry
    its checks), any other token is refused;
@@ -605,14 +629,41 @@ A relay that was set up by hand — `/etc/vpn-relay.nft`, a `vpn-relay.service` 
    TLS handshake with `XRAY_SNI` to `<relay>:XRAY_PUBLIC_PORT` (the [health probe](#health-monitor));
    **UDP** (when Hysteria2 is on) — a QUIC packet with a reserved version to
    `<relay>:HYSTERIA2_PORT`, which every QUIC server answers with version negotiation. A failure of
-   either registers nothing and offers «Подключить снова»;
-4. **registers** it in the existing relay model: a row in `relays` (enabled, «в подписках», label
-   `relay` or the name), whose **source IPs** — the address it is reached at plus the source
-   address the agent reports for the upstream, when that is public — are what the
-   [anomaly detector excludes](#limitations); the row in `relay_agents`; the token cleared;
-5. the [health monitor](#health-monitor) probes it from the next pass on and alerts the
-   superadmins on down / back up (`RELAY_HEALTH_INTERVAL`, default 300 s; with `0` the card says
-   there will be no alerts).
+   either changes nothing and offers «Подключить снова»;
+4. **a new relay**: creates the row of `relays` WITH its agent, in one transaction with closing the
+   code — enabled, «в подписках», label `relay` or the name, `host` = the public host for links
+   from the code, **source IPs** = the address it is reached at plus the source address the agent
+   reports for the upstream, when that is public (what the [anomaly detector excludes](#limitations)).
+   When the public host does not resolve to the relay, the result says so;
+5. the [health monitor](#health-monitor) watches it from the next pass on and alerts the
+   superadmins when its state changes (`RELAY_HEALTH_INTERVAL`, default 300 s; with `0` the result
+   says there will be no alerts).
+
+### Connecting an agent to an existing relay
+
+A relay without an agent (set up by hand — the legacy `ru1`) keeps working as it is. Its page says
+«⚠️ без агента» and offers **«🔗 Подключить агент (ключи не меняются)»** (TOTP): a pairing code
+for THAT relay — no name asked — and the one line for it. On the relay the installer
+[adopts](#adoption-of-a-hand-made-relay) the hand-made setup (the old files and tables go to
+`/var/backups/vpn-relay/`, the forwarding is never interrupted). Then «🔌 Подключить» with the
+relay's SSH address, as above, except:
+
+- **it must be the same server**: the SSH address equals the relay's host, lies inside its source
+  IPs, or is an address the relay's host resolves to — otherwise **«это другой сервер»**, nothing is
+  asked of that server and the code stays pending for the right address;
+- **nothing about the relay changes** but the agent columns: name, label, host for links, on/off,
+  «в подписках» and every key stay byte-identical, so links and subscriptions do not change.
+  `source_ips` may only **grow** — by the addresses the agent reports that the list does not cover
+  yet; nothing is removed;
+- **any failure leaves the relay exactly as it was**: the agent columns, the source IPs and the
+  code are written in ONE transaction, after the checks;
+- a relay that already has an agent cannot get a second one; a code already waiting is shown again
+  instead of a new one; deleting the relay cancels its waiting code.
+
+**«🔌 Отключить агент»** is the reverse: the agent columns are cleared — the relay and its keys stay,
+it is a hand-made relay again (nothing lost: host, label, source IPs as they were). Optionally
+«🧹 Отключить и снять с relay» runs `uninstall` on the relay first; that also removes its forwarding,
+so its keys stop working until the relay is set up again (the screen says so).
 
 ### The agent (`vpn-relay-agent`)
 
@@ -651,17 +702,16 @@ address of that moment. The relay therefore never puts a name into the table:
   exits `20` with nothing applied, and `resolve` leaves the live table alone (exit `20`, the next
   pass retries).
 
-### Managing it from the wizard
+### Managing it from the relay's page
 
-**🧙 Мастер настройки → 🛰 Relay** lists the relays the bot manages and the codes still waiting.
-A relay's card: «🔄 Статус» (`status`, kept in `relay_agents.last_status`), «⬆️ Обновить»
-(`update`), «⚙️ Порты / цель» (`apply` — send `vpn.example.com tcp=443 udp=443`), «🗑 Удалить»
-(`uninstall` on the relay, then the relay row — with its keys when there are some; a relay that
-does not answer offers «Удалить только запись»), and its card in the admin panel for host, label,
-on/off. Issuing a code, update, ports/target and delete ask for the TOTP code; a step that waits
-for typed input checks the elevation again before it acts. Every action is audited (entity
-`relay`: `relay_pairing_issued`, `relay_pairing_cancelled`, `relay_pairing_check_failed`,
-`relay_paired`, `relay_agent_update`, `relay_agent_apply`, `relay_agent_uninstall`).
+A relay with an agent shows «агент vX», the SSH address, the target and the ports, and the agent's
+last `status` (the live DNAT target, the units, `vpn-relay-apply check`, the version, the last
+update). Its page adds: «⬆️ Обновить агент» (`update`), «⚙️ Порты / цель» (`apply` — send
+`vpn.example.com tcp=443 udp=443`), «🔌 Отключить агент», and «🗑 Удалить» runs `uninstall` on the
+relay before the row goes (a relay that does not answer offers «Удалить только запись»). An agent
+call that takes minutes (update, apply, uninstall) marks only THAT relay busy — the screen stays
+usable, another change of that relay meanwhile is refused («relay занят»). Every change asks for the
+TOTP code ([below](#managing-relays-in-the-admin-panel)) and is audited (entity `relay`).
 
 ### Limits of the installer relay
 
@@ -675,43 +725,50 @@ for typed input checks the elevation again before it acts. Every action is audit
 
 ## Managing relays in the admin panel
 
-SUPERADMIN only. **🛡 Админ-панель → 🧩 Протоколы и маршрутизация → 🛰 Управлять relay** lists every relay with its
-label, name, host, on/off, «в подписках», the number of active keys and the result of
-the latest health probe.
+SUPERADMIN only. **🛡 Админ-панель → 🧩 Протоколы и маршрутизация → 🛰 Relay** — ONE screen for
+every relay; the setup wizard's «🛰 Relay» opens it too (it has no list of its own). The list shows
+each relay with its label, name, host for links, on/off, «в подписках», the number of active keys,
+its [health](#health-monitor) (one icon, one reason) and how it is managed — «агент vX» or
+«⚠️ без агента»; then the codes still waiting.
 
-**Add a relay** — a four-step wizard, each value validated by the same functions the
-old `.env` loader used (a bad value is explained and the step is asked again):
+**A relay's page** — common actions for every relay:
 
-1. **name** — `^[a-z0-9][a-z0-9-]{0,31}$`, e.g. `ru1`. It is written into every key of
-   the relay (`vpn_keys.relay`) and **can never be changed**. A name that any key row
-   still carries — in any status, deleted ones included — cannot be given to a new
-   relay, because those keys would silently start pointing at another host.
-2. **host** — DNS name (recommended) or IPv4; IPv6 is refused.
-3. **source IPs** — the relay's egress IPv4 addresses / CIDR networks as this server
-   sees them, comma-separated, never empty. If the host is an IPv4 address the step
-   offers «Как host».
-4. **label** — the marker in key names, unique per relay: 1–16 characters on one line, no
-   control characters; emoji and any symbols are fine (`🇷🇺➜`). It is followed by the flag
-   directly, with no `_`, so a separator, if wanted, goes into the label (`ru_`). The step
-   offers `relay` while no other relay uses it.
+- **«✏️ Хост ссылок»** — the host links point at (DNS name or IPv4; IPv6 is refused). After a change
+  the page says that subscriptions already point at the new address and how many single relay keys
+  must be re-imported; an IPv4 host gets the «burned IP» warning, and one the source IPs do not
+  cover is offered as a source IP;
+- **«✏️ Переименовать»** — the label: the relay's name in lists and its marker in key names, unique
+  per relay, 1–16 characters on one line, emoji welcome (`🇷🇺➜`), glued to the flag with no `_`.
+  The **name** (`^[a-z0-9][a-z0-9-]{0,31}$`, what keys carry in `vpn_keys.relay`) never changes;
+  a name any key row still carries — in any status — is never given to a new relay;
+- **«✏️ Source IPs»**, **«✏️ Заметка»**, **on/off**, **«в подписках»** ([below](#switching-a-relay-off)),
+  **«🔍 Проверить сейчас»** (one health pass: traffic and the agent; the verdict stays on the page),
+  **«🗑 Удалить»** ([below](#deleting-a-relay));
+- the **agent block**: «🔗 Подключить агент» for a relay without one, or status / update / ports and
+  target / disconnect for a relay with one ([above](#managing-it-from-the-relays-page)).
 
-A confirmation card shows everything before the relay is created.
+**«➕ Добавить relay»** is the only way to create a relay — through a pairing code, so a new relay
+always comes with its agent ([above](#installing-a-relay-with-one-command)). The panel offers no
+form that writes a relay without one.
 
-**The relay card** edits host, source IPs, label and note, switches the relay on/off
-and «в подписках» on/off, runs **«Проверить сейчас»** (the health probe, once — the
-result and its time stay on the card) and deletes the relay. Every change is audited
-with the values before and after, and **takes effect on the next rendered link**:
+**Every change is a dangerous action**: with TOTP on, the button asks for the code first
+([wizard.md](wizard.md#where-it-is-asked)) — on/off, «в подписках», every edit, the source IP
+offer, delete (with or without keys, record only), «Добавить relay», «Подключить агент»,
+«Подключить», update, ports/target, disconnect. A step that waits for typed input checks the
+elevation again before it acts. Every change is audited (entity `relay`) with the values before
+and after: `relay_updated`, `relay_deleted`, `relay_delete_incomplete`, `relay_pairing_issued`,
+`relay_pairing_cancelled`, `relay_pairing_check_failed`, `relay_paired`, `relay_attach_refused`,
+`relay_agent_attached`, `relay_agent_detached`, `relay_agent_update`, `relay_agent_apply`,
+`relay_agent_uninstall`.
 
-- the bot keeps an in-memory snapshot of the table that every write through the panel
-  replaces immediately (the bot is the only writer);
-- the subscription endpoint (`vpn-bot-subscription`) reads the table on **every
-  request** through its read-only connection, so it serves the change without a
-  restart.
+Every change **takes effect on the next rendered link**: the bot keeps an in-memory snapshot of the
+table that every write replaces immediately (the bot is the only writer); the subscription endpoint
+(`vpn-bot-subscription`) reads the table on **every request** through its read-only connection.
 
-After a host change the card says that subscriptions already point at the new address
-and how many single relay keys must be re-imported. If the new host is an IPv4 address
-the source IPs do not cover, it offers to add it (a DNAT relay usually egresses from
-the address it is reached at).
+**Buttons from before** — messages in the chat history of the two former sections («🛰 Управлять
+relay» and «Мастер настройки → Relay», `wrl:*`) and of the old manual «Добавить relay» lead to this
+screen: a relay's button to its page, a code's to the code, everything else to the list — never to
+an error, and an old button never changes anything by itself.
 
 ### Switching a relay off
 
@@ -726,8 +783,13 @@ the address it is reached at).
 
 ### Deleting a relay
 
-- **No keys** go through it (outside status `deleted`): one confirmation, then it is
-  deleted.
+- A relay **with an agent**: `uninstall` runs on the relay **first** — so no DNAT to this server is
+  left behind — and only then is the row deleted. A relay that refuses or does not answer: nothing
+  is deleted, and the screen offers **«Удалить только запись»** (the relay itself keeps forwarding
+  until it is cleaned up by hand). After an `uninstall` the relay is marked, so an interrupted
+  delete resumes without a second one.
+- A relay **without an agent**: only the record is deleted; nothing is done on the relay itself.
+- **No keys** go through it (outside status `deleted`): one confirmation.
 - **Keys remain**: the screen says how many (and how many of them are in how many
   subscriptions) and offers:
   - **Удалить ключи и relay** — every key through the relay is deleted through the
@@ -740,30 +802,21 @@ the address it is reached at).
   - **Отмена**.
 
 The relay row is removed only if, at that very moment, no key names it any more (one
-SQL statement), so a key issued while the delete runs cannot be orphaned.
+SQL statement), so a key issued while the delete runs cannot be orphaned; its waiting
+«Подключить агент» code is cancelled in the same transaction.
 
-## Migrating from `.env` (`RELAY_*`)
+## The obsolete `RELAY_*` in `.env`
 
 Relays used to be configured with `RELAY_ENABLED`, `RELAY_NAME`, `RELAY_HOST` and
-`RELAY_SOURCE_IPS`. These are **no longer a source of truth**:
+`RELAY_SOURCE_IPS`; an earlier release seeded the relay they described into the table once (that
+is how `ru1` got there). They are **not read any more — not even parsed**:
 
-- On bot startup, if the `relays` table is **empty** and `.env` has
-  `RELAY_ENABLED=true` with `RELAY_HOST` and `RELAY_SOURCE_IPS`, that relay is created
-  once — name `RELAY_NAME` (default `ru1`, exactly what the existing relay keys
-  carry), label `relay`, enabled, in subscriptions — and an INFO line says so.
-- In every other case where any of these variables is set, the bot logs
-  `WARNING RELAY_* в .env игнорируются: relay управляется из админки`.
-- The variables are still parsed as strictly as before: garbage (a bad host, a bad
-  source IP, `RELAY_ENABLED=true` without host or source IPs) fails startup with a
-  `SettingsError`.
+- a value left in `.env` cannot stop the bot, malformed or not;
+- the bot logs ONE `WARNING RELAY_* в .env устарели и не читаются … — удалите их: <names>` at
+  startup;
+- the wizard's self-check shows the same as a yellow item (`legacy_env`).
 
-So: deploy, check the relay appeared in the panel, then delete the `RELAY_*` lines from
-`.env`. `RELAY_HEALTH_INTERVAL` and `SERVER_FLAG_EMOJI` stay in `.env`.
-
-> If a deployment had relay keys but `RELAY_ENABLED=false` at the moment of the upgrade,
-> nothing is seeded and those keys stay refused. Their name is already carried by keys,
-> so it cannot be re-created by hand in the panel: start once with `RELAY_ENABLED=true`
-> (and the old host/source IPs) to seed it, then switch it off in the panel if needed.
+Delete the lines. `RELAY_HEALTH_INTERVAL` and `SERVER_FLAG_EMOJI` are live settings and stay.
 
 ## What a relay key is
 
@@ -809,7 +862,7 @@ Full reference: [Configuration → Relay](configuration.md#relay).
 |---|---|---|
 | `RELAY_HEALTH_INTERVAL` | `300` | Health probe period, seconds; `0` = off. |
 | `SERVER_FLAG_EMOJI` | `🇫🇮` | Flag in the display name of standalone keys and basic members. |
-| `RELAY_ENABLED`, `RELAY_NAME`, `RELAY_HOST`, `RELAY_SOURCE_IPS` | — | **Legacy.** Only seed an empty `relays` table once (see above); ignored afterwards. |
+| `RELAY_ENABLED`, `RELAY_NAME`, `RELAY_HOST`, `RELAY_SOURCE_IPS` | — | **Obsolete.** Not read; one WARNING at startup and a yellow self-check item until they are deleted ([above](#the-obsolete-relay_-in-env)). |
 
 **There is no relay port setting**: the port in a relay link is the protocol's own
 public port (`XRAY_PUBLIC_PORT`, `HYSTERIA2_PORT`), because the relay forwards 1:1.
@@ -817,15 +870,25 @@ public port (`XRAY_PUBLIC_PORT`, `HYSTERIA2_PORT`), because the relay forwards 1
 ## Health monitor
 
 With `RELAY_HEALTH_INTERVAL > 0` the bot runs **one** background loop for every relay,
-modelled on the WARP monitor. Each pass reads the relays from the database (so a relay
-added or edited in the panel is picked up with no restart) and probes every **enabled**
-relay: a TCP connection to `<relay host>:XRAY_PUBLIC_PORT` and a TLS handshake with
-`server_hostname=XRAY_SNI`, **verifying the certificate**. The bot runs on the main
-server, so the probe goes out to the relay and comes back in through its DNAT (a
-hairpin); REALITY does not recognise it as a client and hands it to the decoy, whose
-certificate is valid for `XRAY_SNI`. A passing probe therefore means "TCP/443 through
-the relay reaches the main inbound end to end" (checked by hand: HTTP 200, `verify=0`,
-TLS ≈ 0.29 s).
+modelled on the WARP monitor, and keeps **one verdict per relay** — one icon and one line of
+reason on the list and the page, one latch, one alert per change. Each pass reads the relays
+from the database (so a relay added or edited in the panel is picked up with no restart) and,
+for every **enabled** relay:
+
+1. **traffic** — a TCP connection to `<relay host>:XRAY_PUBLIC_PORT` and a TLS handshake with
+   `server_hostname=XRAY_SNI`, **verifying the certificate** (and UDP, below). The bot runs on
+   the main server, so the probe goes out to the relay and comes back in through its DNAT (a
+   hairpin); REALITY does not recognise it as a client and hands it to the decoy, whose
+   certificate is valid for `XRAY_SNI`. A passing probe therefore means "TCP/443 through the relay
+   reaches the main inbound end to end" (checked by hand: HTTP 200, `verify=0`, TLS ≈ 0.29 s);
+2. **the agent**, for a relay with one — `status` over SSH (kept on the relay's row and shown on its
+   page). It did not answer, or its `vpn-relay-apply check` failed with an exit code other than
+   `0`/`13`/`14` (13/14 — the relay cannot reach this server by itself — are judged by the hairpin
+   probe instead): the agent part fails.
+
+The verdict: 🔴 **down** — traffic through the relay does not reach this server (its keys do not
+work); 🟡 **warn** — traffic passes, the agent does not (keys work, management does not);
+🟢 **ok** — both. A relay without an agent is judged by its traffic alone.
 
 - **UDP** (when `HYSTERIA2_ENABLED=true`): a QUIC packet with a reserved ("greasing") version,
   padded to 1200 bytes, to `<relay host>:HYSTERIA2_PORT` — every QUIC server answers an unknown
@@ -834,12 +897,13 @@ TLS ≈ 0.29 s).
   own hysteria-server does not answer it either, UDP is "not judged", never "down". A relay is up
   when TCP passes and UDP did not fail.
 - One probe never takes more than 10 s and never raises.
-- One time-based latch **per relay** (`relays.id`): a relay is reported **down** after
-  one interval of continuous failure (two failed probes in a row) and **back** after one
-  interval of continuous success. Every admin in `ADMIN_IDS` gets exactly one message
-  per transition, naming the relay's label, name and host. A new relay starts healthy;
-  a relay switched off or deleted loses its latch; one relay's state never affects
-  another's.
+- One time-based latch **per relay** (`relays.id`) over the three levels: the relay moves to a
+  level after one interval at it (two probes in a row). Every admin in `ADMIN_IDS` gets **exactly
+  one message per change** — 🔴 / 🟡 / 🟢, naming the relay's label, name, host and the one-line
+  reason — never two for one event (traffic and the agent failing together are ONE 🔴), never a
+  repeat while nothing changes. A new relay starts healthy; a relay switched off or deleted loses its
+  latch; one relay's state never affects another's. While an agent call (update, uninstall) runs on
+  a relay, the loop does not ask its agent.
 - The latest probe of each relay (loop or «Проверить сейчас») is shown on its card; it
   lives in the bot's memory only.
 - A dead relay does **not** mark Xray degraded and does not block issuing keys.

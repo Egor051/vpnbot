@@ -31,12 +31,17 @@ logger = logging.getLogger(__name__)
 DANGEROUS_ACTIONS: dict[str, str] = {
     "protocol_uninstall": "dangerous_protocol_uninstall",
     "protocol_disable": "dangerous_protocol_disable",
-    "relay_delete_keys": "dangerous_relay_delete_keys",
     "wizard_dump": "dangerous_wizard_dump",
     "wizard_update": "dangerous_wizard_update",
+    # Every change of a relay (admin panel → «🛰 Relay», bot/handlers/admin_relays.py).
+    "relay_edit": "dangerous_relay_edit",
+    "relay_delete": "dangerous_relay_delete",
+    "relay_delete_keys": "dangerous_relay_delete_keys",
     "relay_pair": "dangerous_relay_pair",
+    "relay_connect": "dangerous_relay_connect",
     "relay_update": "dangerous_relay_update",
     "relay_apply": "dangerous_relay_apply",
+    "relay_detach": "dangerous_relay_detach",
     "relay_uninstall": "dangerous_relay_uninstall",
 }
 

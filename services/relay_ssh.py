@@ -14,7 +14,7 @@
 
 Host keys: trust on first use. The pairing's first call runs with an empty
 known_hosts and ``StrictHostKeyChecking=accept-new`` under ``HostKeyAlias``; the key
-it learned is returned and pinned in ``relay_agents.host_key``. Every later call
+it learned is returned and pinned in ``relays.host_key``. Every later call
 writes that one key to a private temporary known_hosts and runs with
 ``StrictHostKeyChecking=yes`` — a relay that shows another key is refused
 (:class:`RelayHostKeyMismatch`). The alias makes the pin independent of the address

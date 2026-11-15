@@ -6,7 +6,7 @@ Two bulk operations, both :meth:`services.key_bundles.KeyBundleService.reconcile
   children go, the missing members (relay ones too, for every relay that is
   enabled and «в подписках») are created, the kind becomes basic;
 * «top every subscription up» — ``target_kind=None``: the same without a kind
-  change, e.g. to add the relay members after a relay was added in «Управлять relay».
+  change, e.g. to add the relay members after a relay was added in «🛰 Relay».
 
 Each starts with a dry run over every active bundle and a plan screen; nothing
 is written before the confirmation. The run itself takes one Xray apply per

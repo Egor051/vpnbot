@@ -2,8 +2,8 @@
 
 Covers, end to end where it matters:
 
-* settings — the legacy RELAY_* (now only a one-time seed) / SERVER_FLAG_EMOJI
-  parsing and the cross-field checks;
+* settings — the obsolete RELAY_* (never parsed: only their names are kept for one
+  warning) / SERVER_FLAG_EMOJI parsing;
 * link rendering — a DIRECT key keeps every byte but the remark; a RELAY key
   differs from its direct twin ONLY by host and the relay's marker; a relay that
   is switched off, deleted or unknown is an error, never a silent fallback to the
@@ -16,8 +16,8 @@ Covers, end to end where it matters:
 * anomaly detection ignores relay egress IPs; the relay health latch alerts once
   per transition.
 
-The relay itself is a row of the ``relays`` table (see services.relay_management
-and tests/test_relay_admin.py for the panel side); the world below inserts it
+The relay itself is a row of the ``relays`` table (see services.relays and
+tests/test_relay_admin.py for the panel side); the world below inserts it
 through the repository, exactly as the admin panel would.
 """
 
@@ -43,7 +43,8 @@ from bot.bundles import bundle_config_text, bundle_created_text, bundle_detail_t
 from conftest import make_relay, relay_snapshot
 
 from bot.formatters import create_type_label, format_hysteria2_link, hysteria2_key_link, key_type_label
-from config.settings import RelaySeed, Settings, SettingsError, load_settings, parse_ipv4_networks
+from config.settings import Settings, SettingsError, load_settings
+from config.validators import InvalidValue, parse_ipv4_networks
 from db.database import Database
 from hy2_auth.store import ReadOnlyKeyStore
 from i18n import t
@@ -370,33 +371,19 @@ def _minimal_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 def test_relay_settings_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """With no RELAY_* at all there is nothing to seed and nothing to warn about."""
+    """With no RELAY_* at all there is nothing to warn about."""
     _minimal_env(monkeypatch, tmp_path)
     settings = load_settings()
-    assert settings.relay_seed is None
     assert settings.relay_env_vars == ()
     assert settings.relay_health_interval == 300
     assert settings.server_flag_emoji == FLAG
     # The legacy fields are gone from Settings: nothing can read them as truth.
-    for legacy in ("relay_enabled", "relay_name", "relay_host", "relay_source_ips"):
+    for legacy in ("relay_enabled", "relay_name", "relay_host", "relay_source_ips", "relay_seed"):
         assert not hasattr(settings, legacy)
 
 
-@pytest.mark.parametrize("missing", ["RELAY_HOST", "RELAY_SOURCE_IPS"])
-def test_relay_enabled_requires_host_and_source_ips(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, missing: str
-) -> None:
-    _minimal_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("RELAY_ENABLED", "true")
-    monkeypatch.setenv("RELAY_HOST", RELAY_HOST)
-    monkeypatch.setenv("RELAY_SOURCE_IPS", "198.51.100.7")
-    monkeypatch.delenv(missing)
-    with pytest.raises(SettingsError, match=missing):
-        load_settings()
-
-
-def test_relay_enabled_with_everything_loads(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """RELAY_ENABLED=true + host + source IPs is parsed into the one-time seed."""
+def test_obsolete_relay_vars_are_only_noticed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """RELAY_ENABLED/NAME/HOST/SOURCE_IPS are not read: only which of them are set."""
     _minimal_env(monkeypatch, tmp_path)
     monkeypatch.setenv("RELAY_ENABLED", "true")
     monkeypatch.setenv("RELAY_NAME", "msk-2")
@@ -404,22 +391,30 @@ def test_relay_enabled_with_everything_loads(monkeypatch: pytest.MonkeyPatch, tm
     monkeypatch.setenv("RELAY_SOURCE_IPS", "198.51.100.7, 203.0.113.0/28")
     monkeypatch.setenv("RELAY_HEALTH_INTERVAL", "0")
     settings = load_settings()
-    assert settings.relay_seed == RelaySeed(
-        name="msk-2",
-        host=RELAY_HOST,
-        source_ips=(ipaddress.IPv4Network("198.51.100.7/32"), ipaddress.IPv4Network("203.0.113.0/28")),
-    )
     assert settings.relay_env_vars == ("RELAY_ENABLED", "RELAY_NAME", "RELAY_HOST", "RELAY_SOURCE_IPS")
     assert settings.relay_health_interval == 0
 
 
-def test_relay_disabled_in_env_seeds_nothing_but_is_noticed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("RELAY_ENABLED", "maybe"),
+        ("RELAY_ENABLED", "true"),  # without host/source IPs: that used to fail too
+        ("RELAY_NAME", "RU1"),
+        ("RELAY_NAME", "ru_1"),
+        ("RELAY_HOST", "2001:db8::1"),
+        ("RELAY_HOST", "bad host"),
+        ("RELAY_SOURCE_IPS", "198.51.100.7,nope"),
+        ("RELAY_SOURCE_IPS", "198.51.100.7/24"),
+    ],
+)
+def test_garbage_in_obsolete_relay_vars_never_stops_the_bot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, value: str
+) -> None:
+    """The strict parsing of the old block is gone: a stale value cannot fail startup."""
     _minimal_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("RELAY_ENABLED", "false")
-    monkeypatch.setenv("RELAY_HOST", RELAY_HOST)
-    settings = load_settings()
-    assert settings.relay_seed is None
-    assert settings.relay_env_vars == ("RELAY_ENABLED", "RELAY_HOST")
+    monkeypatch.setenv(name, value)
+    assert load_settings().relay_env_vars == (name,)
 
 
 @pytest.mark.parametrize(
@@ -435,7 +430,7 @@ def test_relay_disabled_in_env_seeds_nothing_but_is_noticed(monkeypatch: pytest.
     ],
 )
 def test_source_ip_parser_accepts(raw: str, expected: tuple[str, ...]) -> None:
-    assert tuple(str(net) for net in parse_ipv4_networks("RELAY_SOURCE_IPS", raw)) == expected
+    assert tuple(str(net) for net in parse_ipv4_networks("source_ips", raw)) == expected
 
 
 @pytest.mark.parametrize(
@@ -454,52 +449,15 @@ def test_source_ip_parser_accepts(raw: str, expected: tuple[str, ...]) -> None:
     ],
 )
 def test_source_ip_parser_rejects_garbage(raw: str) -> None:
-    with pytest.raises(SettingsError):
-        parse_ipv4_networks("RELAY_SOURCE_IPS", raw)
+    with pytest.raises(InvalidValue):
+        parse_ipv4_networks("source_ips", raw)
 
 
-def test_garbage_source_ips_fail_startup_even_with_relay_off(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_relay_health_interval_is_validated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _minimal_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("RELAY_SOURCE_IPS", "198.51.100.7,nope")
-    with pytest.raises(SettingsError, match="RELAY_SOURCE_IPS"):
+    monkeypatch.setenv("RELAY_HEALTH_INTERVAL", "-1")
+    with pytest.raises(SettingsError, match="RELAY_HEALTH_INTERVAL"):
         load_settings()
-
-
-@pytest.mark.parametrize(
-    ("name", "value"),
-    [
-        ("RELAY_NAME", "RU1"),
-        ("RELAY_NAME", "-ru1"),
-        ("RELAY_NAME", "ru_1"),
-        ("RELAY_NAME", "r" * 33),
-        ("RELAY_HOST", "2001:db8::1"),
-        ("RELAY_HOST", "bad host"),
-        ("RELAY_HOST", "-bad.example.net"),
-        ("RELAY_HOST", "1.2.3.256"),
-        ("RELAY_HEALTH_INTERVAL", "-1"),
-    ],
-)
-def test_relay_values_are_validated(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, value: str
-) -> None:
-    _minimal_env(monkeypatch, tmp_path)
-    monkeypatch.setenv(name, value)
-    with pytest.raises(SettingsError, match=name):
-        load_settings()
-
-
-@pytest.mark.parametrize("host", ["relay.anycastedge.net", "relay.anycastedge.net.", "203.0.113.5", "r1"])
-def test_relay_host_accepts_dns_names_and_ipv4(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: str
-) -> None:
-    _minimal_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("RELAY_ENABLED", "true")
-    monkeypatch.setenv("RELAY_HOST", host)
-    monkeypatch.setenv("RELAY_SOURCE_IPS", "198.51.100.7")
-    seed = load_settings().relay_seed
-    assert seed is not None and seed.host == host
 
 
 def test_server_flag_emoji_custom_value(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1133,13 +1091,10 @@ async def test_health_alerts_exactly_once_per_transition() -> None:
     async def probe() -> bool:
         return outcomes.pop(0)
 
-    async def down() -> None:
-        events.append("down")
+    async def on_change(before: str, after: str) -> None:
+        events.append("down" if after == "down" else "up")
 
-    async def up() -> None:
-        events.append("up")
-
-    monitor = RelayHealthMonitor(probe=probe, on_down=down, on_recovered=up, fail_window=300, recover_window=300, clock=clock)
+    monitor = RelayHealthMonitor(probe=probe, on_change=on_change, window=300, clock=clock)
     # A single failure (and a single success in between) never alerts.
     for ok in (True, False, True, False):
         outcomes.append(ok)
@@ -1169,17 +1124,14 @@ async def test_probe_exception_counts_as_failure_and_never_escapes() -> None:
     async def probe() -> bool:
         raise RuntimeError("boom")
 
-    async def down() -> None:
-        events.append("down")
+    async def on_change(before: str, after: str) -> None:
+        events.append(after)
         raise RuntimeError("telegram is down too")
 
-    async def up() -> None:
-        events.append("up")
-
-    monitor = RelayHealthMonitor(probe=probe, on_down=down, on_recovered=up, fail_window=10, recover_window=10, clock=clock)
-    assert await monitor.check_once() is False
+    monitor = RelayHealthMonitor(probe=probe, on_change=on_change, window=10, clock=clock)
+    assert await monitor.check_once() == "down"
     clock.now += 10
-    assert await monitor.check_once() is False  # callback raised: swallowed
+    assert await monitor.check_once() == "down"  # callback raised: swallowed
     assert events == ["down"]
 
 
@@ -1293,11 +1245,12 @@ async def test_built_monitor_alerts_every_admin_once_per_transition(
         await monitor.check_once()
     assert probes[0] == (RELAY_HOST, 443, "example.com")
     params = {"label": "relay", "name": "ru1", "host": RELAY_HOST, "port": 443}
-    assert sent == [(ADMIN, t("relay_alert_down", **params))]
+    down_reason = t("relay_reason_tcp_down", port=443)
+    assert sent == [(ADMIN, t("relay_alert_down", reason=down_reason, **params))]
     outcome["ok"] = True
     for _ in range(3):
         await monitor.check_once()
-    assert sent[-1] == (ADMIN, t("relay_alert_recovered", **params))
+    assert sent[-1] == (ADMIN, t("relay_alert_recovered", reason=t("relay_reason_ok", udp="—"), **params))
     assert len(sent) == 2
 
 

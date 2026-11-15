@@ -240,6 +240,8 @@ def test_every_gated_call_site_names_a_registered_action() -> None:
             sites.append((path.name, m.group(1)))
     names = {action for _, action in sites}
     assert {"protocol_uninstall", "protocol_disable", "relay_delete_keys"} <= names, sites
+    # Every relay action (one screen, every change gated) has a call site of its own.
+    assert {action for action in DANGEROUS_ACTIONS if action.startswith("relay_")} <= names, sites
     assert names <= set(DANGEROUS_ACTIONS), sites
     for key, mode in MODES.items():
         if mode.dangerous:

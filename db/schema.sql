@@ -204,18 +204,29 @@ CREATE TABLE IF NOT EXISTS key_bundles (
   kind TEXT NOT NULL DEFAULT 'extended'
 );
 
--- L4 relays, managed from the admin panel (they used to be RELAY_* in .env).
--- Mirrors _migrate_v38.
+-- L4 relays — ONE table for every relay, whoever set it up (docs/relay.md).
+-- Mirrors _migrate_v38 + _migrate_v44.
 --   name    — immutable slug, the value keys carry in vpn_keys.relay (no FK, see
 --             vpn_keys.relay above). Never reused for a different relay while any
---             key row still names it — enforced by services.relay_management.
+--             key row still names it — enforced by services.relays.
 --   label   — the relay's marker in a key's display name; editable.
---   host    — DNS name or IPv4 the relay's links point at; editable, takes effect
---             on the next rendered link (links are built on the fly).
+--   host    — PUBLIC DNS name or IPv4 the relay's links point at; editable, takes
+--             effect on the next rendered link (links are built on the fly). Never
+--             the SSH address the bot manages it through (ssh_host below).
 --   source_ips — normalized comma-separated IPv4/CIDR list, never empty: the
 --             relay's egress addresses, excluded from anomaly-detection IPs.
 --   enabled — 0: links of its keys are refused, it is not offered anywhere.
 --   in_subscriptions — 0: new all-in-one bundles get no members through it.
+-- How the relay is MANAGED (its agent, vpn-relay-agent) is a property of the
+-- relay, not a separate entity: «the relay has an agent» = ssh_host IS NOT NULL,
+-- and then every agent column below is set (services.relays writes them all at
+-- once and clears them all at once). A relay set up by hand has them all NULL.
+--   ssh_host, ssh_port — where the agent answers (root@ssh_host:ssh_port, the
+--             bot's key only); host_key — pinned at the first contact (TOFU,
+--             "<type> <base64>"); target_host, tcp_ports, udp_ports — what the
+--             relay forwards (the main server's DNS name, comma-separated ports);
+--             agent_version, agent_paired_at; agent_status_json / agent_status_at
+--             — the last `status` answer and when it came.
 CREATE TABLE IF NOT EXISTS relays (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
@@ -228,32 +239,29 @@ CREATE TABLE IF NOT EXISTS relays (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
-  updated_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL
+  updated_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
+  ssh_host TEXT,
+  ssh_port INTEGER CHECK (ssh_port IS NULL OR ssh_port BETWEEN 1 AND 65535),
+  host_key TEXT,
+  target_host TEXT,
+  tcp_ports TEXT,
+  udp_ports TEXT,
+  agent_version TEXT,
+  agent_paired_at TEXT,
+  agent_status_json TEXT,
+  agent_status_at TEXT
 );
 
--- Relays the bot manages over SSH, paired in «Мастер настройки → Relay → Добавить»
--- (services/relay_agents.py, docs/relay.md). Mirrors _migrate_v43.
---   relay_agents — one row per managed relay: where its agent answers (ssh_host,
---             ssh_port), the host key pinned at the first contact (TOFU: "<type>
---             <base64>"), what it forwards (target_host — the main server's DNS
---             name — and the ports) and its last `status`. Goes with the relay.
---   relay_pairings — issued pairing codes. ``token`` is the one-time token the bot
---             sends in `hello`; it is cleared as soon as the pairing ends
---             (completed / cancelled / expired), so only a live code keeps one.
-CREATE TABLE IF NOT EXISTS relay_agents (
-  relay_id INTEGER PRIMARY KEY REFERENCES relays(id) ON DELETE CASCADE,
-  ssh_host TEXT NOT NULL,
-  ssh_port INTEGER NOT NULL CHECK (ssh_port BETWEEN 1 AND 65535),
-  host_key TEXT NOT NULL,
-  target_host TEXT NOT NULL,
-  tcp_ports TEXT NOT NULL,
-  udp_ports TEXT NOT NULL,
-  agent_version TEXT NOT NULL DEFAULT '',
-  paired_at TEXT NOT NULL,
-  last_status_json TEXT,
-  last_status_at TEXT
-);
-
+-- Issued pairing codes (services/relays.py, docs/relay.md). Temporary rows:
+-- ``token`` is the one-time token the bot sends in `hello`; it is cleared as soon
+-- as the pairing ends (completed / cancelled / expired), so only a live code keeps
+-- one. Mirrors _migrate_v43 + _migrate_v44.
+--   kind — 'new': completing it creates the relay ``name`` whose links point at
+--          ``relay_host`` (NULL only on a pre-v44 row: the SSH address then, as
+--          before); 'attach': it connects an agent to the EXISTING relay
+--          ``relay_id`` and changes nothing else about it.
+--   relay_id — 'attach': the relay to connect, from the start; 'new': the relay
+--          created, once completed.
 CREATE TABLE IF NOT EXISTS relay_pairings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -266,7 +274,9 @@ CREATE TABLE IF NOT EXISTS relay_pairings (
   created_by INTEGER REFERENCES users(telegram_user_id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   relay_id INTEGER REFERENCES relays(id) ON DELETE SET NULL,
-  completed_at TEXT
+  completed_at TEXT,
+  kind TEXT NOT NULL DEFAULT 'new' CHECK (kind IN ('new', 'attach')),
+  relay_host TEXT
 );
 
 CREATE TABLE IF NOT EXISTS trial_key_requests (
