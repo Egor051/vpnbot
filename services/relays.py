@@ -65,7 +65,7 @@ from config import validators
 from config.settings import Settings
 from models.dto import Relay, RelayAgent, RelayPairing
 from models.enums import AuditEntityType, VpnKeyType
-from repositories.relays import RelayRepository, RelayUsage
+from repositories.relays import AGENT_UNINSTALLED_KEY, RelayRepository, RelayUsage
 from services.audit import AuditService
 from services.errors import InvalidOperation, NotFound, ServiceError
 from services.notes import MAX_NOTE_LENGTH, normalize_note
@@ -95,7 +95,7 @@ KeyDeleter = Callable[[int, int], Awaitable[None]]
 
 PROTOCOL = 1
 DEFAULT_SSH_PORT = 22
-UNINSTALLED_KEY = "uninstalled_at"
+UNINSTALLED_KEY = AGENT_UNINSTALLED_KEY
 _ADDRESS = re.compile(r"(?P<host>[A-Za-z0-9.-]{1,253})(?::(?P<port>[0-9]{1,5}))?")
 
 
@@ -1057,9 +1057,7 @@ class RelayService:
             return AgentCheck(ok=False, error_key=exc.key or "relay_ssh_failed", error_params=dict(exc.params))
         if not reply.ok:
             return AgentCheck(ok=False, error_key="relay_agent_refused", error_params={"error": reply.error[:300]})
-        if relay.id not in self._busy:
-            # Not while an agent call (uninstall above all) runs: it writes the row.
-            await self._record_status(relay, reply)
+        await self._record_status(relay, reply)
         return agent_check_from_status(reply.payload)
 
     async def update_agent(self, actor_user_id: int, relay_id: int) -> AgentReply:
@@ -1221,10 +1219,28 @@ class RelayService:
             host_key=agent.host_key, timeout=timeout,
         )
 
-    async def _record_status(self, relay: Relay, reply: AgentReply) -> None:
-        await self.relays.record_agent_status(
-            relay.id, _slim(reply.payload), now=self.clock.now(), agent_version=str(reply.payload.get("agent", ""))
-        )
+    async def _record_status(self, relay: Relay, reply: AgentReply) -> bool:
+        """Keep a ``status`` answer on the relay's row — only if it still describes it.
+
+        The request may have started before an agent call that changes the row: under
+        the lock, the answer is dropped while an agent call runs on the relay, or
+        when the relay meanwhile lost its agent, got another one or was uninstalled
+        (the repository refuses to erase that mark too).
+        """
+        async with self._lock:
+            current = await self.relays.get_by_id(relay.id)
+            if (
+                relay.id in self._busy
+                or current is None
+                or current.agent is None
+                or relay.agent is None
+                or agent_uninstalled(current.agent)
+                or current.agent.host_key != relay.agent.host_key
+            ):
+                return False
+            return await self.relays.record_agent_status(
+                relay.id, _slim(reply.payload), now=self.clock.now(), agent_version=str(reply.payload.get("agent", ""))
+            )
 
     @staticmethod
     def _require_ok(reply: AgentReply) -> AgentReply:

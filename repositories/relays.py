@@ -47,6 +47,10 @@ _PAIRING_COLUMNS = (
     "relay_id, completed_at, kind, relay_host"
 )
 PAIRING_STATES = frozenset({"pending", "completed", "cancelled", "expired"})
+# Set in the agent's status once `uninstall` ran on the relay (services.relays): the
+# bot's key is gone there, and an interrupted delete/detach resumes without a second
+# uninstall. A status written later never drops it (record_agent_status).
+AGENT_UNINSTALLED_KEY = "uninstalled_at"
 PAIRING_KINDS = frozenset({"new", "attach"})
 
 # Columns an update may change. ``name`` is absent on purpose: it is the value
@@ -369,14 +373,22 @@ class RelayRepository:
 
     async def record_agent_status(
         self, relay_id: int, status: Mapping[str, object], *, now: str, agent_version: str
-    ) -> None:
-        """The last ``status`` answer of a relay's agent (no-op without an agent)."""
-        await self.db.conn.execute(
+    ) -> bool:
+        """The last ``status`` answer of a relay's agent. False (nothing written) when
+        the relay has no agent, or when ``uninstall`` already ran there and *status*
+        does not carry that mark itself: a late answer of a status request that
+        started before the uninstall must not erase it."""
+        cursor = await self.db.conn.execute(
             "UPDATE relays SET agent_status_json = ?, agent_status_at = ?, agent_version = ? "
-            "WHERE id = ? AND ssh_host IS NOT NULL",
-            (status_json(status), now, agent_version, relay_id),
+            "WHERE id = ? AND ssh_host IS NOT NULL AND (? OR agent_status_json IS NULL "
+            "OR NOT json_valid(agent_status_json) OR json_extract(agent_status_json, ?) IS NULL)",
+            (
+                status_json(status), now, agent_version, relay_id,
+                1 if status.get(AGENT_UNINSTALLED_KEY) else 0, f"$.{AGENT_UNINSTALLED_KEY}",
+            ),
         )
         await self.db.commit()
+        return cursor.rowcount == 1
 
     async def update_agent_forward(
         self, relay_id: int, *, target_host: str, tcp_ports: Sequence[int], udp_ports: Sequence[int]

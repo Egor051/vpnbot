@@ -983,3 +983,49 @@ def test_parse_forward_input(text: str, expected: tuple[str, str, str]) -> None:
 def test_parse_forward_input_refuses(text: str) -> None:
     with pytest.raises(ServiceError):
         ui.parse_forward_input(text)
+
+
+async def test_a_late_status_answer_never_erases_the_uninstall_mark(prod: Env) -> None:
+    """A health `status` that started before an `uninstall` and answers after it has
+    finished: the answer is dropped, the mark stays, and the interrupted delete
+    resumes without a second uninstall (which would fail: the bot's key is gone)."""
+    import asyncio
+
+    await _attached(prod)
+    gate = asyncio.Event()
+    original = prod.client.call
+
+    async def racing(*args: Any, **kwargs: Any) -> AgentReply:
+        if args[2] == "status":
+            await gate.wait()  # still running on the relay while uninstall goes through
+            return AgentReply(0, {"ok": True, "agent": "1", "check": {"rc": 0}})
+        return await original(*args, **kwargs)
+
+    prod.client.call = racing  # type: ignore[method-assign]
+    prod.client.replies["uninstall"] = AgentReply(0, {"ok": True})
+    polling = asyncio.create_task(prod.service.poll_agent(await prod.relay()))
+    await asyncio.sleep(0.05)
+
+    # No key deleters are wired in this world, so with_keys=True stops at the first
+    # key right after the uninstall: an interrupted delete.
+    first = await prod.service.delete(ADMIN, 1, with_keys=True)
+    assert first.uninstalled and not first.deleted
+    gate.set()
+    check = await polling
+    assert check is not None and check.ok  # the health loop still gets its verdict…
+    relay = await prod.relay()
+    assert relay.agent is not None and relay.agent.last_status is not None
+    assert "uninstalled_at" in relay.agent.last_status, "…but the late answer is not kept"
+    uninstalls = sum(1 for c in prod.client.calls if c["request"] == "uninstall")
+    second = await prod.service.delete(ADMIN, 1, with_keys=True)
+    assert second.uninstalled
+    assert sum(1 for c in prod.client.calls if c["request"] == "uninstall") == uninstalls, "no second uninstall"
+
+
+async def test_the_repository_refuses_to_erase_the_uninstall_mark(env: Env) -> None:
+    issued = await env.service.issue_new(ADMIN, name="ru2", host="203.0.113.50", target_host=TARGET)
+    relay = (await env.service.complete(ADMIN, issued.pairing.id, "203.0.113.50")).relay
+    assert await env.repo.record_agent_status(relay.id, {"agent": "1", "uninstalled_at": "t1"}, now="t1", agent_version="1")
+    assert not await env.repo.record_agent_status(relay.id, {"agent": "1", "check": {"rc": 0}}, now="t2", agent_version="1")
+    stored = await env.relay(relay.id)
+    assert stored.agent is not None and stored.agent.last_status == {"agent": "1", "uninstalled_at": "t1"}
