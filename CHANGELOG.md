@@ -923,18 +923,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   off → 🟢 with no route via `out-warp` in T, 🟡 with any, 🟡 with a default (the PR #274 class: «off» became a
   full tunnel); selective → 🟢 when the `dev out-warp` prefixes equal the list, 🟡 otherwise or with a default;
   full tunnel → 🔴 without its default. **`warp:rule`** (`from <AWG_NETWORK> lookup T`) only while AWG is
-  installed (🟡 instead of 🔴 with split off). **`warp:egress`**, per address A a proxy sends from (an address
+  installed (🟡 instead of 🔴 with split off). **`warp:clients_nat`**, only while AWG is installed and split is not
+  off: a MASQUERADE/SNAT on `out-warp` for the client subnet, else 🔴 «AWG clients leave into WARP without SNAT»;
+  without AWG clients it is not shown (recipe drift is the host invariants' business). **`warp:egress`**, per address A a proxy sends from (an address
   on another interface is skipped), whatever `warp_settings` says: A not on an up `out-warp` → 🔴 in every
   mode; split off → the probe via the WAN (from the default route, not «eth0») plus a MASQUERADE/SNAT covering
   A on it, else 🔴 «VLESS/SOCKS5 leave with A and no SNAT; hy2 may still work»; selective → the first listed
-  prefix via `out-warp` with `-o out-warp -j MASQUERADE` and a probe outside the list as with split off; full
-  tunnel → via `out-warp` with its MASQUERADE; `WARP_PROXY_EGRESS` on with nobody bound to the tunnel address
+  prefix via `out-warp` and a probe outside the list as with split off; full tunnel → via `out-warp`. Through
+  `out-warp` the tunnel address needs no NAT (its source is the one WARP accepts; `vpn-bot-warp-routes` installs
+  none for source-bind proxies), another address on `out-warp` needs `-o out-warp` MASQUERADE/SNAT; through the
+  WAN A always needs SNAT. `WARP_PROXY_EGRESS` on with nobody bound to the tunnel address
   → 🟡; unreadable addresses / WAN / nat table → 🟡, never a guessed 🔴. **Items in the reader's language**: an item may carry `msg` + `args` next to the English `text`; the bot
   renders `wizard_item_<msg>` (new keys in `i18n/ru.py` / `i18n/en.py`) and falls back to `text` for a message
   it does not know or arguments that do not fill it (`services/wizard.py`, `bot/wizard_views.py`); the `warp`
   items use it. The helper also passes `mypy --strict` now (two pre-existing findings fixed). Tests
   (`tests/test_wizard_helpers.py`): every row of the matrix with stubs, the production host itself (all green,
-  for `enabled` 0 and 1 and both flag spellings), the MASQUERADE for A removed → 🔴, A removed from `out-warp`
+  for `enabled` 0 and 1 and both flag spellings), the MASQUERADE for A removed → 🔴, no `-o out-warp`
+  MASQUERADE (proxies on the tunnel address 🟢 and no client item without AWG; with AWG 🔴 only in
+  `warp:clients_nat`; another address on `out-warp` 🔴), A removed from `out-warp`
   with the marker → 🔴, a non-`eth0` WAN, a read-only assertion over every `ip`/`iptables`/`awg` call, the
   helper's English templates equal to `i18n/en.py`, `snat_covers` and the tunnel-address parser against
   `warp/proxy_egress.py`; `tests/test_wizard_views.py` / `tests/test_wizard_service.py` for the rendering and

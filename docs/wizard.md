@@ -100,7 +100,8 @@ Changes nothing. Each check is a green / yellow / red item:
 | `listeners` — `vpn-bot-ufw-apply listeners` | a public TCP listener the firewall set neither allows nor declares closed | no verdict / helper missing |
 | `warp` — only when WARP is deployed (`WARP_CONFIG_PATH`, default `/etc/amnezia/out-warp.conf`, or `warp-routes` enabled); see [below](#the-warp-items-intent-against-fact) | WARP turned on but `out-warp` has no fwmark table; full tunnel without its default route | the split routes in table T do not match the intent |
 | `warp:rule` — only while AWG is installed | no `ip rule from <AWG_NETWORK> lookup T` (selective / full tunnel) | the same with split off (harmless until it is turned on) |
-| `warp:egress` — per address xray (`sendThrough`) / danted (`external:`) send from | the address is not on an up `out-warp`; the probe leaves the wrong way; no MASQUERADE/SNAT for it there | split off but it still leaves via `out-warp`; `WARP_PROXY_EGRESS` on and nobody bound to the tunnel address; the addresses, the WAN or the nat table unreadable |
+| `warp:clients_nat` — only while AWG is installed and split is not off | no MASQUERADE/SNAT on `out-warp` for the client subnet: AWG clients leave into WARP without SNAT | nat table unreadable |
+| `warp:egress` — per address xray (`sendThrough`) / danted (`external:`) send from | the address is not on an up `out-warp`; the probe leaves the wrong way; no SNAT for it on the WAN, or on `out-warp` for an address that is not the tunnel address | split off but it still leaves via `out-warp`; `WARP_PROXY_EGRESS` on and nobody bound to the tunnel address; the addresses, the WAN or the nat table unreadable |
 | `failed_units` — `systemctl --failed` | any failed unit | — |
 | `certs` — every acme.sh certificate, `/etc/hysteria/cert.pem`, `SUBSCRIPTION_TLS_CERT` | < 7 days left | < 21 days left (acme.sh renews at 30); acme.sh has no `Le_ReloadCmd` |
 | `helpers` — `OUT_OF_REPO_HELPERS` of this role vs the checkout | a `required` helper missing | an installed copy differs (the next deploy closes it) |
@@ -150,7 +151,13 @@ else runs: no `-A`/`-D`, no `ip route add`.
 | full tunnel | 🟢 with a default via `out-warp`, 🔴 without |
 
 `warp:rule` exists only while AWG is installed — without AWG there is no client subnet
-and no rule to want.
+and no rule to want. `warp:clients_nat` likewise, and only when split is not off (with
+split off no client enters WARP): the client subnet's source is not WARP's address, so
+entering the tunnel it needs a MASQUERADE/SNAT on `out-warp` (`-o out-warp -j
+MASQUERADE`, installed by `warp-routes`); without one → 🔴 «AWG clients leave into WARP
+without SNAT». Without AWG clients the item is not shown at all: whether the host still
+matches the warp-routes recipe is the business of the host invariants / drift checks,
+not of the egress self-check.
 
 `warp:egress` — for every address A a proxy sends from, unless A sits on another
 interface (a second public IP is not WARP's business). It runs whatever
@@ -160,8 +167,9 @@ interface (a second public IP is not WARP's business). It runs whatever
 |---|---|
 | A is not on `out-warp`, or `out-warp` is down | 🔴 in **every** split mode: xray/danted cannot send a single packet |
 | split off | the probe from A leaves via the WAN **and** a MASQUERADE/SNAT covers A there (`-s A/32 -o <wan>`, or a broader plain rule) → 🟢; no such rule → 🔴 (VLESS/SOCKS5 leave with A and no SNAT; hy2 may still work); still via `out-warp` → 🟡 |
-| selective | a probe in the first listed prefix via `out-warp` with `-o out-warp -j MASQUERADE`, a probe outside the list as when split is off; any difference → 🔴 |
-| full tunnel | the probe via `out-warp` with `-o out-warp -j MASQUERADE`, else 🔴 |
+| selective | a probe in the first listed prefix via `out-warp`, a probe outside the list as when split is off; any difference → 🔴 |
+| full tunnel | the probe via `out-warp`, else 🔴 |
+| through `out-warp` (selective / full tunnel) | A is the tunnel address (the `[Interface] Address` of the WARP config; unreadable → the address on `out-warp`): **no NAT required** — the source is the one WARP accepts, and `vpn-bot-warp-routes` installs none for source-bind proxies; the route and A on the interface are enough. Another address on `out-warp` needs `-o out-warp` MASQUERADE/SNAT, else 🔴 (WARP drops it) |
 | `WARP_PROXY_EGRESS` on, nobody bound to the tunnel address | 🟡 (the proxies egress from the host IP) |
 
 **Daily run.** «⏰ Ежедневная самопроверка» (stored in `schema_meta`,

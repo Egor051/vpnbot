@@ -452,7 +452,8 @@ def test_selfcheck_warp_production_host_is_all_green(host: Host, enabled: int, f
     warp_host(host, enabled=enabled, env=flag + "\n")
     items = warp_items(host)
     assert {i["level"] for i in items} == {"green"}, items
-    assert "warp:rule" not in {i["key"] for i in items}  # AWG is gone: no client rule to want
+    # AWG is gone: no client rule and no client SNAT to want.
+    assert not {"warp:rule", "warp:clients_nat"} & {i["key"] for i in items}
     egress = only(items, "warp:egress")
     assert egress["msg"] == "warp_egress_direct_ok"
     assert egress["args"]["addr"] == "172.16.0.2" and egress["args"]["wan"] == "eth0"
@@ -544,9 +545,14 @@ def test_selfcheck_warp_full_tunnel_needs_its_default(host: Host, table: str, le
 def test_selfcheck_warp_client_rule_only_while_awg_is_installed(host: Host, marker: bool, rules: str, level: str, msg: str) -> None:
     table = ANTI_LOOP if marker else f"default dev out-warp scope link\n{ANTI_LOOP}"
     warp_host(host, marker=marker, table=table, rules=rules, awg_removed=False, send_through=None, dante_external=None, env="")
-    item = only(warp_items(host), "warp:rule")
+    items = warp_items(host)
+    item = only(items, "warp:rule")
     assert (item["level"], item["msg"]) == (level, msg)
     assert item["args"] == {"subnet": "10.0.0.0/24", "table": "51820"}
+    if marker:  # split off: no client enters WARP, nothing to masquerade there
+        assert "warp:clients_nat" not in {i["key"] for i in items}
+    else:
+        assert verdict(items, "warp:clients_nat") == ("green", "warp_clients_nat_ok")
 
 
 def test_selfcheck_warp_egress_without_the_masquerade_for_its_address_is_red(host: Host) -> None:
@@ -598,10 +604,6 @@ def test_selfcheck_warp_egress_selective_needs_both_paths(host: Host) -> None:
     warp_host(host, marker=False, split_list=["1.2.3.0/24"], table=table)
     item = only(warp_items(host), "warp:egress")
     assert (item["level"], item["msg"], item["args"]["want"], item["args"]["got"]) == ("red", "warp_egress_route", "out-warp", "eth0")
-    # Through out-warp, but nothing masquerades there.
-    warp_host(host, marker=False, split_list=["1.2.3.0/24"], table=table, route_get_by_probe=listed,
-              nat=PROD_NAT.replace("-A POSTROUTING -o out-warp -j MASQUERADE\n", ""))
-    assert verdict(warp_items(host), "warp:egress") == ("red", "warp_egress_warp_no_nat")
     # The rest goes out of the WAN without a MASQUERADE for the address.
     warp_host(host, marker=False, split_list=["1.2.3.0/24"], table=table, route_get_by_probe=listed,
               nat="-A POSTROUTING -o out-warp -j MASQUERADE\n")
@@ -611,6 +613,53 @@ def test_selfcheck_warp_egress_selective_needs_both_paths(host: Host) -> None:
               route_get_by_probe={"192.0.2.1": "dev out-warp table 51820"})
     item = only(warp_items(host), "warp:egress")
     assert item["msg"] == "warp_egress_selective_ok" and item["args"]["probe"] == "198.51.100.1"
+
+
+NO_WARP_MASQ = PROD_NAT.replace("-A POSTROUTING -o out-warp -j MASQUERADE\n", "")
+
+
+def test_selfcheck_warp_tunnel_address_needs_no_masquerade_on_out_warp(host: Host) -> None:
+    """The production facts (A = 172.16.0.2 = the out-warp address, AWG uninstalled)
+    without `-o out-warp -j MASQUERADE`: the proxies are fine — the tunnel address is the
+    source WARP accepts — and with no AWG clients there is no client SNAT item at all."""
+    listed = {"1.2.3.1": "dev out-warp table 51820"}
+    table = f"1.2.3.0/24 dev out-warp scope link\n{ANTI_LOOP}"
+    warp_host(host, marker=False, split_list=["1.2.3.0/24"], table=table, route_get_by_probe=listed, nat=NO_WARP_MASQ)
+    items = warp_items(host)
+    assert {i["level"] for i in items} == {"green"}, items
+    assert only(items, "warp:egress")["msg"] == "warp_egress_selective_ok"
+    assert "warp:clients_nat" not in {i["key"] for i in items}
+    warp_host(host, marker=False, table=f"default dev out-warp scope link\n{ANTI_LOOP}",
+              route_get="dev out-warp table 51820", nat=NO_WARP_MASQ)
+    assert verdict(warp_items(host), "warp:egress") == ("green", "warp_egress_full_ok")
+
+
+def test_selfcheck_warp_awg_clients_without_masquerade_on_out_warp_are_red_on_their_own(host: Host) -> None:
+    listed = {"1.2.3.1": "dev out-warp table 51820"}
+    table = f"1.2.3.0/24 dev out-warp scope link\n{ANTI_LOOP}"
+    warp_host(host, marker=False, split_list=["1.2.3.0/24"], table=table, route_get_by_probe=listed, nat=NO_WARP_MASQ,
+              awg_removed=False)
+    items = warp_items(host)
+    assert [(i["key"], i["msg"]) for i in items if i["level"] != "green"] == [("warp:clients_nat", "warp_clients_nat_missing")]
+    clients = only(items, "warp:clients_nat")
+    assert clients["args"] == {"subnet": "10.0.0.0/24", "iface": "out-warp"}
+    assert "without SNAT" in clients["text"]
+    assert verdict(items, "warp:egress") == ("green", "warp_egress_selective_ok")  # the proxies are not the clients
+
+
+def test_selfcheck_warp_another_address_through_out_warp_needs_its_masquerade(host: Host) -> None:
+    """A is on out-warp but is not the tunnel address WARP assigned: through the tunnel
+    it must be masqueraded, or WARP drops it."""
+    addr = PROD_ADDR.replace("172.16.0.2/32", "172.16.0.2/32 172.16.0.9/32")
+    table = f"default dev out-warp scope link\n{ANTI_LOOP}"
+    common: dict[str, Any] = {"marker": False, "table": table, "addr": addr, "send_through": "172.16.0.9",
+                              "dante_external": None, "route_get": "dev out-warp table 51820"}
+    warp_host(host, nat=NO_WARP_MASQ, **common)
+    item = only(warp_items(host), "warp:egress")
+    assert (item["level"], item["msg"]) == ("red", "warp_egress_warp_no_nat")
+    assert item["args"]["addr"] == "172.16.0.9" and item["args"]["tunnel"] == "172.16.0.2"
+    warp_host(host, nat=PROD_NAT, **common)
+    assert verdict(warp_items(host), "warp:egress") == ("green", "warp_egress_full_ok")
 
 
 def test_selfcheck_warp_egress_full_tunnel_goes_through_out_warp(host: Host) -> None:

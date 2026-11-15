@@ -18,13 +18,16 @@ status file; the bot renders them as a traffic light.
                want). Fact: `awg show <iface> fwmark` (table T), `ip -4 route show
                table T` and `vpn-bot-warp-split-state status` (n_table).
   warp:rule    only while AWG is installed: `ip rule from <AWG_NETWORK> lookup T`
+  warp:clients_nat  only while AWG is installed and split is not off: a MASQUERADE/SNAT
+               on <iface> for the client subnet (its source is not WARP's address)
   warp:egress  per address A a local proxy sends from (xray `sendThrough` of every
                outbound in the live config.json, danted `external:`), unless A sits
                on another interface: A must be on an up <iface>; then a FIB lookup
                (`ip -4 route get <probe> from A`, no packet is sent) must leave the
-               way the split mode says, and `iptables -t nat -S POSTROUTING` must
-               carry a MASQUERADE/SNAT for A on that device. WARP_PROXY_EGRESS on
-               with nobody bound to the tunnel address is yellow.
+               way the split mode says. Via the WAN, `iptables -t nat -S POSTROUTING`
+               must carry a MASQUERADE/SNAT for A; via <iface> only when A is not the
+               tunnel address (the tunnel address needs no NAT there). WARP_PROXY_EGRESS
+               on with nobody bound to the tunnel address is yellow.
   failed_units `systemctl --failed`
   certs        every acme.sh certificate (/root/.acme.sh/<domain>[_ecc]/): days left
                (< 21 yellow — acme.sh renews at 30 —, < 7 red) and a Le_ReloadCmd (no
@@ -135,6 +138,9 @@ MESSAGES = {
     "warp_rule_ok": "ip rule from {subnet} looks up table {table}",
     "warp_rule_missing": "no ip rule from {subnet} looks up table {table} — AWG clients bypass WARP",
     "warp_rule_missing_direct": "no ip rule from {subnet} looks up table {table}: harmless while split is off, but turning it on will not route AWG clients into WARP",
+    "warp_clients_nat_ok": "AWG clients ({subnet}) leave into WARP masqueraded on {iface}",
+    "warp_clients_nat_missing": "AWG clients ({subnet}) leave into WARP without SNAT — no MASQUERADE on {iface} (-o {iface} -j MASQUERADE)",
+    "warp_clients_nat_unreadable": "the nat table could not be read (iptables -t nat -S) — the SNAT of AWG clients into WARP was not checked",
     "warp_egress_no_address": "WARP_PROXY_EGRESS is on, but {conf} has no IPv4 [Interface] Address — the bot emits no sendThrough, the proxies egress from the host IP",
     "warp_egress_unused": "WARP_PROXY_EGRESS is on, but neither xray (sendThrough) nor danted (external) is bound to {addr} — the proxies egress from the host IP",
     "warp_egress_addrs_unreadable": "the interface addresses could not be read (ip -4 -br addr show) — the egress of the proxies was not checked",
@@ -146,9 +152,9 @@ MESSAGES = {
     "warp_egress_no_snat": "{protos} leave into {wan} with source {addr} and no SNAT — the traffic does not get out; hy2 may still work",
     "warp_egress_direct_via_warp": "split is off, but {protos} from {addr} still leave via {iface} (probe {probe})",
     "warp_egress_route": "{protos} from {addr}: a probe to {probe} resolves to {got}, expected {want}",
-    "warp_egress_warp_no_nat": "{protos} from {addr} leave via {iface}, but there is no MASQUERADE on {iface} (-o {iface} -j MASQUERADE, installed by warp-routes)",
+    "warp_egress_warp_no_nat": "{protos} from {addr} leave via {iface}, but {addr} is not the tunnel address {tunnel} and nothing masquerades it there (-o {iface} -j MASQUERADE) — WARP drops the packets",
     "warp_egress_selective_ok": "selective split: {protos} from {addr} reach the listed prefixes via {iface} (probe {probe_in}) and the rest via {wan} with MASQUERADE (probe {probe})",
-    "warp_egress_full_ok": "full tunnel: {protos} from {addr} leave via {iface} with MASQUERADE (probe {probe})",
+    "warp_egress_full_ok": "full tunnel: {protos} from {addr} leave via {iface} (probe {probe})",
 }
 
 
@@ -506,6 +512,19 @@ def check_warp_routes(ctx: Any, items: Items, env: dict[str, str], iface: str, t
         items.say("yellow", "warp:rule", "warp_rule_missing_direct", subnet=subnet, table=table)
     else:
         items.say("red", "warp:rule", "warp_rule_missing", subnet=subnet, table=table)
+    if mode == "direct":
+        return  # with split off no client enters WARP: there is nothing to masquerade there
+    # The client subnet's source is not WARP's address: entering the tunnel it needs
+    # the SNAT warp-routes installs. Only AWG clients need it — a proxy sending from
+    # the tunnel address does not (warp:egress).
+    rc_nat, nat = ctx.run(["iptables", "-t", "nat", "-S", "POSTROUTING"])
+    client = str(next(ipaddress.IPv4Network(subnet).hosts(), ipaddress.IPv4Network(subnet).network_address))
+    if rc_nat != 0:
+        items.say("yellow", "warp:clients_nat", "warp_clients_nat_unreadable")
+    elif snat_covers(nat, client, iface):
+        items.say("green", "warp:clients_nat", "warp_clients_nat_ok", subnet=subnet, iface=iface)
+    else:
+        items.say("red", "warp:clients_nat", "warp_clients_nat_missing", subnet=subnet, iface=iface)
 
 
 def check_warp_egress(ctx: Any, items: Items, env: dict[str, str], conf: str, iface: str, mode: str, want: list[ipaddress.IPv4Network]) -> None:
@@ -541,11 +560,20 @@ def check_warp_egress(ctx: Any, items: Items, env: dict[str, str], conf: str, if
         elif rc_nat != 0:
             items.say("yellow", "warp:egress", "warp_egress_nat_unreadable", who=who, addr=addr)
         else:
-            judge_egress(ctx, items, mode, addr=addr, protos=protos, iface=iface, wan=wan, nat=nat, want=want, probe_out=probe_out)
+            judge_egress(ctx, items, mode, addr=addr, protos=protos, iface=iface, wan=wan, nat=nat, want=want, probe_out=probe_out, tunnel_ip=tunnel_ip)
 
 
-def judge_egress(ctx: Any, items: Items, mode: str, *, addr: str, protos: str, iface: str, wan: str, nat: str, want: list[ipaddress.IPv4Network], probe_out: str | None) -> None:
-    """One address on an up out-warp: does the split mode's path out exist, with NAT?"""
+def judge_egress(ctx: Any, items: Items, mode: str, *, addr: str, protos: str, iface: str, wan: str, nat: str, want: list[ipaddress.IPv4Network], probe_out: str | None, tunnel_ip: str | None) -> None:
+    """One address on an up out-warp: does the split mode's path out exist, with NAT?
+
+    Through out-warp, the tunnel address itself needs no NAT (the source is already the
+    one WARP accepts; vpn-bot-warp-routes installs none for source-bind proxies): the
+    route and the address on the interface are enough. Another address on out-warp
+    does need `-o out-warp` MASQUERADE/SNAT. Through the WAN, A always needs SNAT."""
+    # The tunnel address is the config's [Interface] Address; unreadable → A, which is
+    # on out-warp, is taken for it.
+    warp_nat_needed = tunnel_ip is not None and addr != tunnel_ip
+
     def wrong(probe: str, got: str | None, expected: str) -> None:
         items.say("red", "warp:egress", "warp_egress_route", protos=protos, addr=addr, probe=probe, got=got or "—", want=expected)
 
@@ -553,8 +581,8 @@ def judge_egress(ctx: Any, items: Items, mode: str, *, addr: str, protos: str, i
         got = route_dev(ctx, probe, addr)
         if got != iface:
             wrong(probe, got, iface)
-        elif not snat_covers(nat, addr, iface):
-            items.say("red", "warp:egress", "warp_egress_warp_no_nat", protos=protos, addr=addr, iface=iface)
+        elif warp_nat_needed and not snat_covers(nat, addr, iface):
+            items.say("red", "warp:egress", "warp_egress_warp_no_nat", protos=protos, addr=addr, iface=iface, tunnel=tunnel_ip)
         else:
             return True
         return False
