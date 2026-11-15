@@ -57,7 +57,7 @@ GUEST = 102
 ADMIN = 1
 FLAG = "🇫🇮"
 DIRECT_HOST = "vpn.example.com"
-RELAY_HOST = "relay.anycastedge.net"
+RELAY_HOST = "relay.example.net"
 EXPIRES_AT = "2030-01-01T00:00:00+00:00"
 XHTTP = {"xray_http_base", "xray_http_multi", "xray_http_antisib"}
 
@@ -113,7 +113,7 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         hysteria2_enabled=True,
         hysteria2_host=DIRECT_HOST,
         hysteria2_port=443,
-        hysteria2_sni="anycastedge.duckdns.org",
+        hysteria2_sni="hy2.example.net",
         hysteria2_insecure=False,
         subscription_enabled=True,
     )

@@ -951,6 +951,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Tests never reach the network; deploy Phase 1 no longer fails on
+  `test_built_monitor_alerts_every_admin_once_per_transition` (1 failed / 5109 passed on the host, green in
+  CI — the host-leak class of #239/#241/#242/#336), and the suite no longer sends traffic from the production
+  host to the production relay.** The test stubbed only `relay_health.tls_probe`; with `HYSTERIA2_ENABLED`
+  `build_relay_health_supervisor` wires the real `udp_relay_probe`, whose control step sends QUIC to
+  `127.0.0.1:HYSTERIA2_PORT`. In CI nobody answers there (UDP «—»); on the host the live hysteria-server does,
+  so the probe went on to the relay host — the test's constant was the real production relay — got through,
+  and the recovery said «UDP ✓». **The test** now stubs both probes and runs for both outcomes (UDP not
+  judged → «—», UDP through the relay → «✓»), asserting the UDP probe gets `<relay host>, HYSTERIA2_PORT`;
+  `test_udp_is_probed_only_with_hysteria2` calls the built UDP probe through stubs; a new
+  `test_udp_relay_probe_judges_the_relay_only_after_the_local_control` pins the control step with
+  `quic_probe` stubbed. Production code is unchanged. **Test data**: every real host of the project in
+  `tests/` (the relay and server domains, the main server's IPv4 in Python tests, the relay fixtures and the
+  v43 seed) is replaced with RFC 2606 / TEST-NET names (`relay.example.net`, `hy2.example.net`,
+  `vpn.example.net`, `203.0.113.43`); the one literal kept is the uninstall helper's own fixed wording,
+  matched as text. **Guard** (`tests/conftest.py::_forbid_network`, autouse, first): for every test it wraps
+  `socket.socket.connect` / `connect_ex` / `sendto` / `sendmsg`, `socket.getaddrinfo`, `gethostbyname`,
+  `gethostbyname_ex` and asyncio's `loop.getaddrinfo` (refused in the task, so the stack is the caller's, not
+  the executor thread's); a connection or datagram to a non-loopback address or a lookup of any name but
+  `localhost` is RECORDED and refused (`ENETUNREACH` / `EAI_NONAME`, so nothing leaves the box), and the test
+  fails on teardown listing call, address, port, thread and stack — the record, not the exception, fails it,
+  because the probes swallow every exception. The full suite under the guard has no other violation, so there
+  is no opt-out marker; the old version of the test, with the ports below held, fails on it.
+  `tests/test_network_guard.py` covers each entry point, IPv6 and v4-mapped addresses, a probe that swallows
+  the refusal, what stays allowed (loopback, the unspecified address, AF_UNIX, IP literals in
+  `getaddrinfo`) and, in a child pytest, the teardown failure itself. **CI `tests-host-like`** now holds the
+  production host's ports on loopback before pytest (`tests/host_like_ports.py`, run as root): UDP 443
+  answers QUIC with a version negotiation exactly as quic-go does (the step checks
+  `quic_probe("127.0.0.1", 443)` succeeds), TCP 443, 2096, 8443, 8444, 8445, 8888, 9999, 10085, 31337 and
+  54321 accept (HTTP → `503`); every connection and datagram is logged and printed when the job fails (a full
+  run with them held: no test reaches any of them).
+  `tests/test_host_like_ports.py` checks the stub against the production probe on ephemeral ports and that
+  every port `.env.example` names is held. CONTRIBUTING.md: «No network from a test».
+
 - **«Самопроверка»: the `warp` item compares intent with fact and no longer shows a false 🔴 «table T has no
   default route — WARP clients have no way out» on a host where WARP split is off on purpose.** `check_warp`
   (`scripts/wizard/vpn-bot-wizard-selfcheck`) accepted only a full tunnel (a default in table T + an `ip rule`

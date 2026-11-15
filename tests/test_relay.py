@@ -74,7 +74,7 @@ from subscription_server.store import BundleView, ReadOnlyBundleStore
 OWNER = 100
 ADMIN = 1
 FLAG = "🇫🇮"
-RELAY_HOST = "relay.anycastedge.net"
+RELAY_HOST = "relay.example.net"
 DIRECT_HOST = "vpn.example.com"
 MARKS = ("🟢", "🟡", "🟠", "🔴")
 
@@ -133,7 +133,7 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         hysteria2_enabled=True,
         hysteria2_host=DIRECT_HOST,
         hysteria2_port=443,
-        hysteria2_sni="anycastedge.duckdns.org",
+        hysteria2_sni="hy2.example.net",
         hysteria2_insecure=False,
         subscription_enabled=True,
         subscription_rate_limit_seconds=0,
@@ -587,16 +587,16 @@ def test_hysteria2_direct_and_relay_links(tmp_path: Path) -> None:
     # The direct link is the pre-change link, remark aside.
     assert _prefix(direct) == _prefix(
         format_hysteria2_link(
-            "hy2_x7k2p", "00ff00ff", host=DIRECT_HOST, port=443, sni="anycastedge.duckdns.org"
+            "hy2_x7k2p", "00ff00ff", host=DIRECT_HOST, port=443, sni="hy2.example.net"
         )
     )
-    assert direct == "hysteria2://00ff00ff@vpn.example.com:443/?sni=anycastedge.duckdns.org#" + quote(
+    assert direct == "hysteria2://00ff00ff@vpn.example.com:443/?sni=hy2.example.net#" + quote(
         f"hy2_x7k2p_{FLAG}", safe=""
     )
-    assert relay == "hysteria2://00ff00ff@relay.anycastedge.net:443/?sni=anycastedge.duckdns.org#" + quote(
+    assert relay == "hysteria2://00ff00ff@relay.example.net:443/?sni=hy2.example.net#" + quote(
         f"hy2_x7k2p_relay{FLAG}", safe=""
     )
-    assert "sni=anycastedge.duckdns.org" in relay
+    assert "sni=hy2.example.net" in relay
 
 
 @pytest.mark.parametrize(
@@ -749,7 +749,7 @@ async def test_hy2_relay_key_is_authenticated_by_hy2_auth_unchanged(tmp_path: Pa
         assert key.key_type is VpnKeyType.HYSTERIA2
         assert re.fullmatch(r"hy2_\w+", key.email_label or "")
         link = world.hysteria.connection_link(key)
-        assert link.startswith(f"hysteria2://{key.payload['secret']}@{RELAY_HOST}:443/?sni=anycastedge.duckdns.org#")
+        assert link.startswith(f"hysteria2://{key.payload['secret']}@{RELAY_HOST}:443/?sni=hy2.example.net#")
         store = ReadOnlyKeyStore(world.db.path)
         await store.connect()
         try:
@@ -978,7 +978,7 @@ async def test_pre_v37_bundle_renders_exactly_as_before(tmp_path: Path) -> None:
             "vless://33333333-3333-4333-8333-333333333333@vpn.example.com:443?type=tcp&security=reality"
             "&encryption=none&pbk=public&fp=chrome&sni=example.com&sid=abcd&flow=xtls-rprx-vision#"
             + quote("xray_tcp_Cc333_🟢"),
-            "hysteria2://11ee@vpn.example.com:443/?sni=anycastedge.duckdns.org#" + quote("hy2_Dd444_🟢", safe=""),
+            "hysteria2://11ee@vpn.example.com:443/?sni=hy2.example.net#" + quote("hy2_Dd444_🟢", safe=""),
         )
     finally:
         await db.close()
@@ -1213,23 +1213,46 @@ async def test_fingerprint_change_keeps_relay_host_and_name(tmp_path: Path) -> N
         await world.db.close()
 
 
+@pytest.mark.parametrize(
+    ("udp", "udp_mark"),
+    [
+        # This host has no QUIC server of its own (CI): UDP is "not judged".
+        pytest.param(None, "—", id="udp-not-judged"),
+        # This host's hysteria-server answers and so does the relay (the box).
+        pytest.param(True, "✓", id="udp-through-relay"),
+    ],
+)
 async def test_built_monitor_alerts_every_admin_once_per_transition(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, udp: bool | None, udp_mark: str
 ) -> None:
-    """The wired monitor probes <relay host>:XRAY_PUBLIC_PORT with SNI=XRAY_SNI and
-    tells every ADMIN_IDS chat — naming the relay's label, name and host; one admin
-    who cannot be reached does not stop the others."""
+    """The wired monitor probes <relay host>:XRAY_PUBLIC_PORT with SNI=XRAY_SNI (TCP)
+    and <relay host>:HYSTERIA2_PORT (UDP), and tells every ADMIN_IDS chat — naming
+    the relay's label, name and host; one admin who cannot be reached does not stop
+    the others.
+
+    BOTH probes are stubbed. With Hysteria2 on, the built monitor carries the real
+    udp_relay_probe, whose control probe asks 127.0.0.1:HYSTERIA2_PORT first: in CI
+    nobody answers there (UDP «—»), but on the production host, where deploy.sh
+    Phase 1 runs this suite, the live hysteria-server does — and the real probe then
+    sent QUIC to the relay host, got through, and the recovery said «UDP ✓». Both
+    outcomes are covered here, neither by what happens to listen on the host."""
     from services import relay_health
 
-    settings = _settings(tmp_path, relay_health_interval=0)
+    settings = _settings(tmp_path, relay_health_interval=0, hysteria2_port=4443)
     probes: list[tuple[str, int, str]] = []
+    udp_probes: list[tuple[str, int]] = []
     outcome = {"ok": False}
 
     async def fake_probe(host: str, port: int, sni: str, **_: object) -> bool:
         probes.append((host, port, sni))
         return outcome["ok"]
 
+    async def fake_udp_probe(host: str, port: int) -> bool | None:
+        udp_probes.append((host, port))
+        return udp
+
     monkeypatch.setattr(relay_health, "tls_probe", fake_probe)
+    monkeypatch.setattr(relay_health, "udp_relay_probe", fake_udp_probe)
     sent: list[tuple[int, str]] = []
 
     class _Bot:
@@ -1244,14 +1267,16 @@ async def test_built_monitor_alerts_every_admin_once_per_transition(
     for _ in range(3):
         await monitor.check_once()
     assert probes[0] == (RELAY_HOST, 443, "example.com")
+    assert udp_probes[0] == (RELAY_HOST, 4443)
     params = {"label": "relay", "name": "ru1", "host": RELAY_HOST, "port": 443}
     down_reason = t("relay_reason_tcp_down", port=443)
     assert sent == [(ADMIN, t("relay_alert_down", reason=down_reason, **params))]
     outcome["ok"] = True
     for _ in range(3):
         await monitor.check_once()
-    assert sent[-1] == (ADMIN, t("relay_alert_recovered", reason=t("relay_reason_ok", udp="—"), **params))
+    assert sent[-1] == (ADMIN, t("relay_alert_recovered", reason=t("relay_reason_ok", udp=udp_mark), **params))
     assert len(sent) == 2
+    assert len(udp_probes) == len(probes) == 6
 
 
 async def test_bundle_fingerprint_change_completes_while_the_relay_is_off(tmp_path: Path) -> None:

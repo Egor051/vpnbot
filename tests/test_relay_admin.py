@@ -67,7 +67,7 @@ from subscription_server.render import render_links
 from subscription_server.store import BundleView, ReadOnlyBundleStore
 
 MODERATOR = 5
-NEW_HOST = "relay2.anycastedge.net"
+NEW_HOST = "relay2.example.net"
 
 
 # ── harness ───────────────────────────────────────────────────────────────────
@@ -347,7 +347,7 @@ async def test_no_relay_vars_no_warning(
 
 async def test_create_normalizes_and_audits(world: _World) -> None:
     relay = await world.relays.create(
-        ADMIN, name="ru1", host=" relay.anycastedge.net ", source_ips=" 198.51.100.7 , 203.0.113.0/28,", note=" spb "
+        ADMIN, name="ru1", host=" relay.example.net ", source_ips=" 198.51.100.7 , 203.0.113.0/28,", note=" spb "
     )
     assert relay.host == RELAY_HOST
     assert relay.label == "relay"

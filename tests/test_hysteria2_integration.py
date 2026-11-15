@@ -68,7 +68,7 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         hysteria2_enabled=True,
         hysteria2_host="vpn.example.com",
         hysteria2_port=443,
-        hysteria2_sni="anycastedge.duckdns.org",
+        hysteria2_sni="hy2.example.net",
         hysteria2_obfs_password="",
         hysteria2_insecure=False,
     )
@@ -226,9 +226,9 @@ def test_format_hysteria2_link_default_insecure_off_valid_cert_domain() -> None:
         "deadbeef" * 6,
         host="vpn.example.com",
         port=443,
-        sni="anycastedge.duckdns.org",
+        sni="hy2.example.net",
     )
-    assert "sni=anycastedge.duckdns.org" in link
+    assert "sni=hy2.example.net" in link
     assert "insecure=1" not in link
     assert "insecure=" not in link
     assert "obfs" not in link

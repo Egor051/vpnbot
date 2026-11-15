@@ -122,6 +122,9 @@ jobs:
     # fail on the host at deploy time. This job materialises the interfaces so the
     # same /sys branches run in CI as on the host, turning that whole class of
     # host-leak regressions into a PRE-MERGE gate instead of a Phase 1 surprise.
+    # The same goes for the host's listening ports: they are occupied here too
+    # (tests/host_like_ports.py), so a test that relies on "nothing listens on
+    # 127.0.0.1:<port>" fails in this job instead of on the host.
     name: Tests (host-like — deploy Phase 1 env)
     runs-on: ubuntu-latest
     needs: [dependency-audit]
@@ -160,6 +163,26 @@ jobs:
           test -r /sys/class/net/out-warp/statistics/rx_bytes
           test -r /sys/class/net/awg0/statistics/rx_bytes
 
+      - name: Occupy the ports the deploy host has in use (loopback)
+        # On the host, hysteria-server answers QUIC on 443/udp and xray, hy2_auth,
+        # the subscription endpoint, the stats APIs and sshd hold their TCP ports;
+        # on a runner all of them are free. A test that passes only because
+        # "nobody answers on 127.0.0.1:<port>" was green here and red in deploy
+        # Phase 1 (the relay health test: the real UDP probe's control step found
+        # the live hysteria-server on the host, then sent QUIC to the real relay).
+        # tests/host_like_ports.py holds those ports, answering QUIC with a
+        # version negotiation exactly as quic-go does, so such a test fails HERE,
+        # before merge. The network guard in tests/conftest.py refuses anything
+        # past loopback, so no test can follow that answer out to a real host.
+        run: |
+          sudo nohup "$(command -v python)" tests/host_like_ports.py \
+            --ready-file "$RUNNER_TEMP/host-like-ports.ready" > "$RUNNER_TEMP/host-like-ports.log" 2>&1 &
+          for _ in $(seq 100); do test -s "$RUNNER_TEMP/host-like-ports.ready" && break; sleep 0.1; done
+          if ! test -s "$RUNNER_TEMP/host-like-ports.ready"; then cat "$RUNNER_TEMP/host-like-ports.log"; exit 1; fi
+          cat "$RUNNER_TEMP/host-like-ports.ready"
+          # The relay health probe's control step now gets the answer it gets on the host.
+          python -c 'import asyncio, sys; from services.relay_health import quic_probe; sys.exit(0 if asyncio.run(quic_probe("127.0.0.1", 443)) else 1)'
+
       - name: Run tests (mirror deploy Phase 1 — detached worktree, deterministic, no pytest cache)
         # Same invocation as scripts/deploy.sh Phase 1 (`-p no:cacheprovider`, no
         # xdist, no randomly) so CI reproduces that gate 1:1 — now WITH the tunnel
@@ -179,6 +202,10 @@ jobs:
           test -f "$WT/.git"
           cd "$WT"
           python -m pytest -q -p no:cacheprovider
+
+      - name: What reached the occupied ports (on failure)
+        if: failure()
+        run: cat "$RUNNER_TEMP/host-like-ports.log" || true
 
   installer-e2e:
     # scripts/install.sh end to end on a REAL VM: ubuntu-24.04 with systemd as

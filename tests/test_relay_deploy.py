@@ -882,7 +882,7 @@ def test_relay_phase1_reports_the_first_transition_without_mutating(
     (wt / "deploy" / "relay" / "vpn-relay.service").write_text(_read(REPO_UNIT), encoding="utf-8")
     env = tmp_path / "relay.env"
     env.write_text(
-        "NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=150.251.152.243\nRELAY_WAN_IFACE=eth0\n", encoding="utf-8"
+        "NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=203.0.113.43\nRELAY_WAN_IFACE=eth0\n", encoding="utf-8"
     )
     proc = host.run(
         f'ENV_FILE="{env}"; WT="{wt}"\nrelay_phase1\nrelay_phase1_report\necho PHASE1-RETURNED\n'
@@ -915,7 +915,7 @@ def test_relay_phase1_reports_the_first_transition_without_mutating(
     state = "present" if input_filter else "absent"
     assert f"table inet vpnrelay_input : {state} (dead-man {DEADMAN_TIMER}: inactive)" in out, "the pre-state"
     assert not [c for c in host.log("sysctl") if "-w" in c], "Phase 1 writes no sysctl"
-    assert host.log("probe") == ["probe tcp 150.251.152.243 443"]
+    assert host.log("probe") == ["probe tcp 203.0.113.43 443"]
     assert host.log("systemd-run") == [] and host.log("logger") == [], "Phase 1 arms nothing"
     assert (_read(host.marker) if host.marker.exists() else None) == marker_before, "Phase 1 confirms nothing"
     assert not host.pending.exists() and not host.probe_note.exists()
@@ -1040,7 +1040,7 @@ def test_relay_phase1_stops_on_an_auth_latent(tmp_path: Path) -> None:
     (wt / "scripts").mkdir(parents=True)
     (wt / "scripts" / "vpn-relay-apply").write_text(_read(RELAY_HELPER_SRC), encoding="utf-8")
     env = tmp_path / "relay.env"
-    env.write_text("NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=150.251.152.243\nRELAY_WAN_IFACE=eth0\n", encoding="utf-8")
+    env.write_text("NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=203.0.113.43\nRELAY_WAN_IFACE=eth0\n", encoding="utf-8")
     proc = host.run(f'ENV_FILE="{env}"; WT="{wt}"\nrelay_phase1\necho PHASE1-RETURNED\n')
     assert proc.returncode == 1
     assert "PHASE1-RETURNED" not in proc.stdout
@@ -1302,7 +1302,7 @@ def test_relay_phase1_refuses_a_relay_without_an_ssh_port(tmp_path: Path) -> Non
     (wt / "scripts").mkdir(parents=True)
     (wt / "scripts" / "vpn-relay-apply").write_text(_read(RELAY_HELPER_SRC), encoding="utf-8")
     env = tmp_path / "relay.env"
-    env.write_text("NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=150.251.152.243\nRELAY_WAN_IFACE=eth0\n", encoding="utf-8")
+    env.write_text("NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=203.0.113.43\nRELAY_WAN_IFACE=eth0\n", encoding="utf-8")
     proc = host.run(f'ENV_FILE="{env}"; WT="{wt}"\nrelay_phase1\necho PHASE1-RETURNED\n')
     assert proc.returncode == 1
     assert "PHASE1-RETURNED" not in proc.stdout

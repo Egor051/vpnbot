@@ -538,14 +538,14 @@ _EXCLUDED_BY_DEFAULT = (
 _KEPT_BY_DEFAULT = (
     "/usr/local/etc/xray/config.json",
     "/etc/amnezia/amneziawg/awg0.conf",
-    "/etc/nginx/conf.d/anycastedge.net.conf",
-    "/var/www/anycastedge/index.html",
+    "/etc/nginx/conf.d/vpn.example.net.conf",
+    "/var/www/decoy/index.html",
     "/etc/sudoers.d/vpn-bot",
     "/etc/systemd/journald.conf.d/10-vpn-bot.conf",
     "/etc/systemd/networkd.conf.d/10-keep-foreign-rules.conf",
     "/root/.acme.sh/account.conf",
     "/root/.acme.sh/acme.sh",
-    "/root/.acme.sh/anycastedge.net_ecc/fullchain.cer",
+    "/root/.acme.sh/vpn.example.net_ecc/fullchain.cer",
     "/var/spool/cron/crontabs/root",
 )
 
@@ -582,8 +582,8 @@ async def test_default_policy_on_a_fixture_host_tree(tmp_path: Path) -> None:
         "usr/local/etc/xray/config.json": "{}",
         "etc/hysteria/config.yaml": "listen: :443",
         "root/.acme.sh/account.conf": "SAVED_CF_Token=x",
-        "etc/nginx/conf.d/anycastedge.net.conf": "server {}",
-        "var/www/anycastedge/index.html": "<html></html>",
+        "etc/nginx/conf.d/vpn.example.net.conf": "server {}",
+        "var/www/decoy/index.html": "<html></html>",
         "etc/sudoers.d/vpn-bot": "vpn-bot ALL=(root) NOPASSWD: /usr/local/sbin/vpn-bot-xray-apply",
         "etc/systemd/journald.conf.d/10-vpn-bot.conf": "[Journal]\nSystemMaxUse=500M\n",
         "etc/ssh/sshd_config": "PermitRootLogin prohibit-password",

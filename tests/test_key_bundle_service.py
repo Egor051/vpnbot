@@ -83,7 +83,7 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         hysteria2_enabled=True,
         hysteria2_host="vpn.example.com",
         hysteria2_port=443,
-        hysteria2_sni="anycastedge.duckdns.org",
+        hysteria2_sni="hy2.example.net",
         hysteria2_insecure=False,
         subscription_enabled=True,
     )
