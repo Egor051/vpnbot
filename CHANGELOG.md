@@ -13,7 +13,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pruned after each change that was installed **and** applied. Only names matching that exact
   template are deleted — an operator's own `config.json.*.bak` and the privileged helper's
   `config.json.<ns>.bak` stay; a cleanup error is a WARNING, never a failed key operation; a
-  failed change prunes nothing. Before, Xray shared `CONFIG_BACKUP_KEEP_LAST` (20) with the other
+  failed change prunes nothing; a change that turns out to be a no-op (the startup label
+  reconcile on every boot, a shortId already present, a duplicate client) writes no backup at
+  all. Before, Xray shared `CONFIG_BACKUP_KEEP_LAST` (20) with the other
   backends, pruned *before* the change by the loose glob `config.json.*.bak`, and an error there
   failed the change. AmneziaWG and the rest keep `CONFIG_BACKUP_KEEP_LAST` as before. Hysteria2:
   `deploy/hysteria/install-config.sh` keeps the newest `HYSTERIA_CONFIG_BACKUP_KEEP` (default 3)

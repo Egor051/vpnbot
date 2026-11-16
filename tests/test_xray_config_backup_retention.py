@@ -267,6 +267,47 @@ def test_two_adapters_on_one_config_share_the_retention(tmp_path: Path) -> None:
     assert len(_own(tmp_path)) == 4
 
 
+def test_no_op_mutations_write_no_backup(tmp_path: Path) -> None:
+    """Codex review on #345: the startup label reconcile runs on every boot and is a
+    no-op there; with create-time pruning off it piled up one backup per boot. A backup
+    is now taken only once a change is known to be needed."""
+    config = tmp_path / "config.json"
+    _write_config(config)
+    uuid = "00000000-0000-4000-8000-000000000001"
+
+    async def run() -> None:
+        adapter = _adapter(config, keep=1)
+        await adapter.add_client(uuid_value=uuid, email_label="user1", short_id="abcd", flow="", manage_short_id=True)
+        assert len(_own(tmp_path)) == 1
+        for _ in range(5):
+            assert await adapter.rename_clients({uuid: "user1"}, prefer_restart=True) == 0
+            assert await adapter.ensure_short_id("abcd") is False
+            await adapter.remove_client(uuid_value="00000000-0000-4000-8000-0000000000ff", email_label=None,
+                                        short_id=None, remove_short_id=False)
+            with pytest.raises(Exception, match="уже существует"):
+                await adapter.add_client(uuid_value=uuid, email_label="user1", short_id="abcd", flow="",
+                                         manage_short_id=False)
+
+    asyncio.run(run())
+    assert len(_own(tmp_path)) == 1, [p.name for p in _own(tmp_path)]
+
+
+def test_a_real_rename_is_still_backed_up_and_bounded(tmp_path: Path) -> None:
+    config = tmp_path / "config.json"
+    _write_config(config)
+    uuid = "00000000-0000-4000-8000-000000000001"
+
+    async def run() -> None:
+        adapter = _adapter(config, keep=2)
+        await adapter.add_client(uuid_value=uuid, email_label="user0", short_id="abcd", flow="", manage_short_id=False)
+        for i in range(1, 5):
+            assert await adapter.rename_clients({uuid: f"user{i}"}) == 1
+
+    asyncio.run(run())
+    assert len(_own(tmp_path)) == 2
+    assert json.loads(config.read_text(encoding="utf-8"))["inbounds"][0]["settings"]["clients"][0]["email"] == "user4"
+
+
 # --------------------------------------------------------------------------- #
 # The setting
 # --------------------------------------------------------------------------- #
