@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [3.1.0](https://github.com/Egor051/vpnbot/releases/tag/v3.1.0) — 2026-11-16
+
 ### Added
 
 - **Relay with one command: the installer's relay mode, the relay agent and pairing from «🧙 Мастер
