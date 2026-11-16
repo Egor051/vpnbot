@@ -66,6 +66,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The hy2-auth unit is installed by the deploy, under its live name (docs/hysteria.md#auth-unit-name-one-name-installed-by-the-deploy).**
+  The repo shipped `deploy/vpn-bot-hy2-auth.service` while the hosts run `vpnbot-hy2-auth`
+  (#222), so every DEPLOY OK said `units skipped: vpn-bot-hy2-auth.service` and nothing compared
+  the live file — which went without `LimitNOFILE=65536`. Now ONE name, `vpnbot-hy2-auth`: the
+  repo file `deploy/vpnbot-hy2-auth.service` and the default of `HYSTERIA2_AUTH_SERVICE_NAME`
+  (`config/settings.py`, `.env.example`, the protocol-uninstall helper, the docs). While
+  `HYSTERIA2_ENABLED=true`, `scripts/deploy.sh` compares it with
+  `${HYSTERIA2_AUTH_SERVICE_NAME}.service` in Phase 1 (diff shown, `systemd-analyze verify`, a
+  symlink there stops the deploy), installs it verbatim in Phase 2 next to `vpn-bot.service`
+  (an absent file is installed, never enabled or started), the sidecar restart then runs it and
+  DEPLOY OK reports the open-files limit of the restarted process; a rollback puts the previous
+  file back. `UNIT_SET` and the unaccounted-files scan map the repo file to the `.env` name.
+- **Host hygiene, part 2 (docs/host-state.md#host-hygiene).** Masked (never purged) on both
+  roles: `snapd.socket`, `snapd.service`, `snapd.seeded.service` (now on the relay too) and
+  `multipathd.socket`, `multipathd.service` (the root of both hosts is a plain disk); each socket
+  before its service. After a successful deploy (both roles) every local branch merged into
+  `origin/main` — not the current one, not `main` — is deleted with `git branch -d` (never `-D`;
+  a refusal is a WARN); DEPLOY OK carries `merged branches : …`.
 - **Deploy: the new venv's TLS context is probed before the bot starts on it.** After PR #269
   the new bot died on its first start with `FileNotFoundError` on `certifi/cacert.pem`, looped
   and was rolled back — a fault `pip check` cannot see. `scripts/deploy.sh` Phase 2 now runs

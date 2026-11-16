@@ -212,15 +212,23 @@ plane, независимо от `vpn-bot.service`. Бот только пише
 handshake — нет шага apply и нет перезапуска data plane.
 
 Устанавливаются три вещи: сам сервер `hysteria`, его HTTP-auth, указывающий на
-`hy2_auth`, и systemd-юнит `vpn-bot-hy2-auth.service`.
+`hy2_auth`, и systemd-юнит `vpnbot-hy2-auth.service`.
 
 ### 1. Установка systemd-юнита `hy2_auth`
 
+У юнита одно имя — `vpnbot-hy2-auth` (файл в репо `deploy/vpnbot-hy2-auth.service`, дефолт
+`HYSTERIA2_AUTH_SERVICE_NAME`). При `HYSTERIA2_ENABLED=true` в `.env` каждый
+`scripts/redeploy.sh` ставит этот файл **как есть** под именем `${HYSTERIA2_AUTH_SERVICE_NAME}.service`
+(хост, выбравший другое имя, его сохраняет), перезапускает с ним sidecar, если тот работал, и
+откатывает файл вместе со всем остальным при неудачном деплое. В первый раз включите его один раз:
+
 ```bash
-sudo cp deploy/vpn-bot-hy2-auth.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now vpn-bot-hy2-auth
+sudo systemctl enable --now vpnbot-hy2-auth
 ```
+
+(До первого деплоя с включённым Hysteria2 поставьте файл вручную:
+`sudo install -m0644 deploy/vpnbot-hy2-auth.service /etc/systemd/system/` и
+`sudo systemctl daemon-reload`.)
 
 Юнит запускает `python -m hy2_auth` из venv проекта, читает тот же
 `/opt/vpn-service/.env`, биндится **только на loopback** (`HYSTERIA2_AUTH_LISTEN`,
@@ -271,7 +279,7 @@ sudo bash deploy/hysteria/install-config.sh
 применяет этот файл. Перед рестартом сервиса запускайте
 `deploy/hysteria/preflight-udp443.sh` (fail-closed, если UDP/443 занят
 чужим процессом; TCP/443, т.е. Xray, игнорируется). Запускайте
-`hysteria-server.service` после `vpn-bot-hy2-auth` (юнит объявляет
+`hysteria-server.service` после `vpnbot-hy2-auth` (юнит объявляет
 `Before=hysteria-server.service`).
 
 ### 2b. (Опционально) Traffic Stats API — трафик, онлайн, kick при отзыве
@@ -335,7 +343,7 @@ Xray REALITY.
   отказывает **закрыто** (fail-closed).
 - Неподошедший токен логируется тихо (debug); сбой базы (locked, corrupt)
   логируется на уровне **error** со счётчиком сбоев, поэтому сломанный data plane
-  виден в `journalctl -u vpn-bot-hy2-auth`, а не прячется за безобидными отказами.
+  виден в `journalctl -u vpnbot-hy2-auth`, а не прячется за безобидными отказами.
 - `GET /healthz` делает пробный read: **200** `{"ok": true}`, когда база читается,
   и **503** `{"ok": false}`, когда нет — пригодно для watchdog или ручного
   `curl http://127.0.0.1:8444/healthz`.

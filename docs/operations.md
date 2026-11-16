@@ -41,8 +41,19 @@ When the checkout already sits at `origin/main`, the no-op run (no `FORCE`) stil
 `main` — the same commit, so no file changes and nothing is restarted. Phase 1 prints a `WARN`
 (and the `PHASE1_ONLY` report a `branch :` line) when the checkout is on another branch or a
 detached HEAD; a real deploy stops before any mutation while another worktree has `main`
-checked out. The branch the checkout was on is left where it is — delete it by hand once you no
-longer need it.
+checked out. The branch the checkout was on is left where it is.
+
+**Merged local branches are cleaned up after a successful deploy (both roles).** Once the deploy
+is certain (after DEPLOY OK can no longer roll back), every local branch
+`git branch --merged origin/main` lists — except the one the checkout is on and `main` — is
+deleted with `git branch -d`, **never `-D`**: git itself refuses a branch that is not merged
+into its upstream (or into `HEAD` without one) or that another worktree has checked out, and such
+a refusal is only a `WARN`. Each deletion is logged as `merged branch: Deleted branch <name>
+(was <sha>)`; DEPLOY OK carries `merged branches : N deleted …, M kept …`. To get one back:
+
+```bash
+git -C /opt/vpn-service branch <name> <sha>
+```
 
 **The new venv must build a TLS context before the bot starts on it.** Right after
 `pip install` + `pip check`, Phase 2 runs
@@ -142,7 +153,7 @@ The rules, deliberately narrow:
 cd /opt/vpn-service
 python deploy/check-nonroot-helper-mode.py
 sudo systemctl status vpn-bot --no-pager
-sudo systemctl status vpn-bot-hy2-auth hysteria-server --no-pager  # if Hysteria2 is enabled
+sudo systemctl status vpnbot-hy2-auth hysteria-server --no-pager  # if Hysteria2 is enabled
 sudo journalctl -u vpn-bot -n 100 --no-pager
 sqlite3 /opt/vpn-service/data/vpn.db "PRAGMA quick_check;"
 .venv/bin/python -m compileall .
@@ -234,7 +245,7 @@ Diagnostics  OK
 ✓ vpn-bot: active
 ✓ xray: active
 ✓ awg-quick@awg0: active
-✓ vpn-bot-hy2-auth: active   (when Hysteria2 is enabled)
+✓ vpnbot-hy2-auth: active   (when Hysteria2 is enabled)
 ...
 ```
 
@@ -685,7 +696,7 @@ sudo systemctl status danted --no-pager
 sudo ss -tlnp | grep 31337
 sudo systemctl status mtproxy --no-pager
 sudo ss -tlnp | grep 8443
-sudo systemctl status hysteria-server vpn-bot-hy2-auth --no-pager   # if Hysteria2 is enabled
+sudo systemctl status hysteria-server vpnbot-hy2-auth --no-pager   # if Hysteria2 is enabled
 sudo ss -ulnp | grep :443                                           # public Hysteria2 UDP port
 curl -s http://127.0.0.1:8444/healthz                               # hy2_auth liveness (loopback)
 sudo systemctl status vpn-bot-subscription --no-pager               # if the subscription endpoint is deployed
@@ -784,14 +795,14 @@ liveness** only: a background loop polls the `hy2_auth` `GET /healthz` endpoint 
 unreachable", i.e. new handshakes are being rejected even though the bot's key rows are intact.
 
 ```bash
-sudo systemctl status vpn-bot-hy2-auth --no-pager        # the loopback handshake-auth endpoint
+sudo systemctl status vpnbot-hy2-auth --no-pager        # the loopback handshake-auth endpoint
 sudo systemctl status hysteria-server --no-pager         # the Hysteria2 data plane itself
 curl -s http://127.0.0.1:8444/healthz                    # 200 {"ok":true} when vpn.db is readable
-sudo journalctl -u vpn-bot-hy2-auth -n 100 --no-pager    # DB faults are logged at ERROR here
+sudo journalctl -u vpnbot-hy2-auth -n 100 --no-pager    # DB faults are logged at ERROR here
 sqlite3 /opt/vpn-service/data/vpn.db "SELECT status, COUNT(*) FROM vpn_keys WHERE key_type='hysteria2' GROUP BY status;"
 ```
 
-Recovery is service-level, not config reconciliation: bring `vpn-bot-hy2-auth` (and, if needed,
+Recovery is service-level, not config reconciliation: bring `vpnbot-hy2-auth` (and, if needed,
 `hysteria-server`) back to active — the endpoint reads the **live** database, so once it is
 healthy again revokes/issues already reflect on the next handshake with no data-plane restart. If
 `GET /healthz` returns `503`, the endpoint cannot read `vpn.db` (locked/corrupt or a missing WAL
@@ -937,7 +948,7 @@ On a staging user before production use:
 2. Revoke and delete the Xray key, verify DB/config/runtime no longer allow access.
 3. Create one AWG key, verify DB, `awg0.conf`, and `awg show` agree.
 4. Revoke and delete the AWG key, verify peer removal from config and runtime.
-5. (Hysteria2, when `HYSTERIA2_ENABLED`) Create one Hysteria2 key, verify it is active in DB (`key_type='hysteria2'`) and that a fresh client handshake authenticates — the accepted handshake is logged in `journalctl -u vpn-bot-hy2-auth`.
+5. (Hysteria2, when `HYSTERIA2_ENABLED`) Create one Hysteria2 key, verify it is active in DB (`key_type='hysteria2'`) and that a fresh client handshake authenticates — the accepted handshake is logged in `journalctl -u vpnbot-hy2-auth`.
 6. Revoke the Hysteria2 key and confirm the next handshake is rejected with **no data-plane restart** (the `hy2_auth` endpoint reads the live DB). With the Traffic Stats API enabled (`HYSTERIA2_STATS_SECRET`), confirm the already-live session is also torn down by the best-effort `/kick`.
 7. Open "Прокси" as an approved test user, issue SOCKS5 after confirmation, and verify the message contains Host, Port, Login, Password, and URL.
 8. Issue MTProto after confirmation and verify the plain Telegram link appears before the `dd` link.

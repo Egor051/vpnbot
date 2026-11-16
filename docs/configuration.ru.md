@@ -223,7 +223,7 @@ Hysteria2 работает как отдельный data plane (сервер `h
 | `HYSTERIA2_STATS_SECRET` | Нет | — | Секрет Traffic Stats API; ОБЯЗАН совпадать с `trafficStats.secret` в `config.yaml`. Пусто — трафик/онлайн/kick для hy2 отключены. 🔒 |
 | `HYSTERIA2_STATS_INTERVAL` | Нет | `60` | Интервал фонового сбора статистики hy2 в секундах (0–3600; 0 отключает цикл). |
 | `HYSTERIA2_SERVICE_NAME` | Нет | `hysteria-server` | systemd-юнит сервера Hysteria2, проверяется админ-диагностикой (`systemctl is-active`). |
-| `HYSTERIA2_AUTH_SERVICE_NAME` | Нет | `vpn-bot-hy2-auth` | systemd-юнит эндпоинта `hy2_auth`, проверяется админ-диагностикой. |
+| `HYSTERIA2_AUTH_SERVICE_NAME` | Нет | `vpnbot-hy2-auth` | systemd-юнит эндпоинта `hy2_auth`, проверяется админ-диагностикой; `scripts/deploy.sh` ставит `deploy/vpnbot-hy2-auth.service` под этим именем (пока включён `HYSTERIA2_ENABLED`). |
 | `HYSTERIA2_CONFIG_PATH` | Нет | `/etc/hysteria/config.yaml` | Путь к конфигу hysteria-server; кладётся в офсайт recovery-архив (если recovery включён), чтобы пересозданный сервер восстановил data plane. Отсутствующий файл пропускается. |
 | `HYSTERIA2_HEALTH_INTERVAL` | Нет | `60` | Частота (сек) опроса `hy2_auth` `GET /healthz`, отражается в записи **Hysteria2: OK/DEGRADED** на дашборде/в health (0–3600; 0 отключает). Активно только при `HYSTERIA2_ENABLED`. |
 

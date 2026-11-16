@@ -4,10 +4,12 @@
 # vpn.db and must keep running even when the bot (vpn-bot.service) is down. It
 # binds loopback only and opens the DB read-only.
 #
-# Operator install:
-#   sudo cp deploy/vpn-bot-hy2-auth.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now vpn-bot-hy2-auth
+# Name: vpnbot-hy2-auth — the one name of this unit (the hosts' name since #222), also
+# the default of HYSTERIA2_AUTH_SERVICE_NAME. scripts/deploy.sh installs THIS file
+# verbatim as ${HYSTERIA2_AUTH_SERVICE_NAME}.service while Hysteria2 is enabled
+# (HYSTERIA2_ENABLED=true), and restarts the sidecar with it when it was running.
+# The first time, enable it once:
+#   sudo systemctl enable --now vpnbot-hy2-auth
 # Point Hysteria at it in /etc/hysteria/config.yaml:
 #   auth:
 #     type: http

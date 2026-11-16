@@ -48,8 +48,8 @@ pytestmark = pytest.mark.timeout(60)
 
 
 SUB_UNIT = "vpn-bot-subscription.service"
-# Deliberately NOT the deploy.sh default (`vpn-bot-hy2-auth`): the live host runs
-# `vpnbot-hy2-auth`, and reading the name from .env is the requirement.
+# The live host's name, which is also deploy.sh's default (HY2_AUTH_DEFAULT_NAME) now;
+# that .env decides is pinned with a name that is NOT the default (below).
 HY2_UNIT = "vpnbot-hy2-auth.service"
 
 ENV_FIXTURE = """\
@@ -260,8 +260,18 @@ def test_unit_list_comes_from_env_and_existing_variables(tmp_path: Path) -> None
     assert proc.returncode == 0, proc.stdout
     names = [ln for ln in proc.stdout.splitlines() if ln.endswith(".service")]
     assert names == [SUB_UNIT, HY2_UNIT], proc.stdout
-    # The default name is what a hardcoded list would have produced.
-    assert "vpn-bot-hy2-auth.service" not in names
+    custom = _run(tmp_path / "custom", "resolve_backend_units\nsidecar_units\n",
+                  env_fixture=ENV_FIXTURE.replace("=vpnbot-hy2-auth", "=hy2-auth-custom"))
+    names = [ln for ln in custom.stdout.splitlines() if ln.endswith(".service")]
+    # Not the default: what a hardcoded list would have produced is not there.
+    assert names == [SUB_UNIT, "hy2-auth-custom.service"], custom.stdout
+
+
+def test_without_the_env_key_the_default_is_the_canonical_name(tmp_path: Path) -> None:
+    proc = _run(tmp_path, "resolve_backend_units\nsidecar_units\n",
+                env_fixture=ENV_FIXTURE.replace("HYSTERIA2_AUTH_SERVICE_NAME=vpnbot-hy2-auth\n", ""))
+    names = [ln for ln in proc.stdout.splitlines() if ln.endswith(".service")]
+    assert names == [SUB_UNIT, "vpnbot-hy2-auth.service"], proc.stdout
 
 
 def test_renamed_subscription_unit_is_followed(tmp_path: Path) -> None:

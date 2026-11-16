@@ -248,7 +248,7 @@ one endpoint.
   process refuse to start (`Settings.validate_subscription_ready`), and the loopback bind host is
   validated to be a loopback address.
 - **Which key, read by whom** — the endpoint runs as the unprivileged **`vpn-bot`** user (same as
-  `vpn-bot-hy2-auth.service`) and reads a **group-readable copy of the already-issued Let's
+  `vpnbot-hy2-auth.service`) and reads a **group-readable copy of the already-issued Let's
   Encrypt material** for the server's domain — the same certificate `acme.sh` installs for
   Hysteria2, *not* `/etc/hysteria/key.pem` itself. Copying the key into a dedicated directory
   keeps the Hysteria2 material untouched and gives this process exactly one readable secret:

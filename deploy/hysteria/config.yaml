@@ -84,7 +84,7 @@ tls:
   cert: /etc/hysteria/cert.pem
   key: /etc/hysteria/key.pem
 
-# HTTP auth against vpn.db via the separate hy2_auth endpoint (deploy/vpn-bot-hy2-auth.service).
+# HTTP auth against vpn.db via the separate hy2_auth endpoint (deploy/vpnbot-hy2-auth.service).
 # url host:port must match HYSTERIA2_AUTH_LISTEN in .env.
 auth:
   type: http

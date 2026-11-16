@@ -34,8 +34,19 @@ sudo bash scripts/redeploy.sh            # деплой
 переводит его на `main` — коммит тот же, файлы не меняются, ничего не перезапускается. Phase 1
 печатает `WARN` (а отчёт `PHASE1_ONLY` — строку `branch :`), если чекаут на другой ветке или на
 detached HEAD; настоящий деплой останавливается до любых мутаций, если `main` checked out в
-другом worktree. Ветка, на которой стоял чекаут, остаётся как есть — удалите её руками, когда она
-больше не нужна.
+другом worktree. Ветка, на которой стоял чекаут, остаётся как есть.
+
+**Слитые локальные ветки убираются после успешного деплоя (обе роли).** Когда деплой уже
+состоялся (DEPLOY OK больше не может откатиться), каждая локальная ветка из
+`git branch --merged origin/main` — кроме той, на которой стоит чекаут, и `main` — удаляется через
+`git branch -d`, **никогда не `-D`**: git сам отказывает для ветки, не слитой в свой upstream (или
+в `HEAD`, если upstream нет), или checked out в другом worktree, и такой отказ — только `WARN`.
+Каждое удаление пишется в лог как `merged branch: Deleted branch <имя> (was <sha>)`; в DEPLOY OK
+— строка `merged branches : N deleted …, M kept …`. Вернуть ветку:
+
+```bash
+git -C /opt/vpn-service branch <имя> <sha>
+```
 
 **Новый venv должен собрать TLS-контекст до того, как на нём стартует бот.** Сразу после
 `pip install` + `pip check` Phase 2 выполняет в prod venv
@@ -131,7 +142,7 @@ fallback»). Так бывает на хосте, чей чекаут ещё н�
 cd /opt/vpn-service
 python deploy/check-nonroot-helper-mode.py
 sudo systemctl status vpn-bot --no-pager
-sudo systemctl status vpn-bot-hy2-auth hysteria-server --no-pager  # если включён Hysteria2
+sudo systemctl status vpnbot-hy2-auth hysteria-server --no-pager  # если включён Hysteria2
 sudo journalctl -u vpn-bot -n 100 --no-pager
 sqlite3 /opt/vpn-service/data/vpn.db "PRAGMA quick_check;"
 .venv/bin/python -m compileall .
@@ -222,7 +233,7 @@ Diagnostics  OK
 ✓ vpn-bot: active
 ✓ xray: active
 ✓ awg-quick@awg0: active
-✓ vpn-bot-hy2-auth: active   (когда включён Hysteria2)
+✓ vpnbot-hy2-auth: active   (когда включён Hysteria2)
 ...
 ```
 
@@ -565,7 +576,7 @@ sudo systemctl status danted --no-pager
 sudo ss -tlnp | grep 31337
 sudo systemctl status mtproxy --no-pager
 sudo ss -tlnp | grep 8443
-sudo systemctl status hysteria-server vpn-bot-hy2-auth --no-pager   # если включён Hysteria2
+sudo systemctl status hysteria-server vpnbot-hy2-auth --no-pager   # если включён Hysteria2
 sudo ss -ulnp | grep :443                                          # публичный UDP-порт Hysteria2
 curl -s http://127.0.0.1:8444/healthz                              # liveness hy2_auth (loopback)
 sudo systemctl status vpn-bot-subscription --no-pager              # если развёрнут эндпоинт подписки
@@ -665,14 +676,14 @@ plane**: фоновый цикл опрашивает эндпоинт `hy2_auth
 недоступен», т.е. новые handshake отклоняются, хотя строки ключей в БД целы.
 
 ```bash
-sudo systemctl status vpn-bot-hy2-auth --no-pager        # loopback-эндпоинт авторизации handshake
+sudo systemctl status vpnbot-hy2-auth --no-pager        # loopback-эндпоинт авторизации handshake
 sudo systemctl status hysteria-server --no-pager         # собственно data plane Hysteria2
 curl -s http://127.0.0.1:8444/healthz                    # 200 {"ok":true}, когда vpn.db читается
-sudo journalctl -u vpn-bot-hy2-auth -n 100 --no-pager    # ошибки БД логируются здесь на ERROR
+sudo journalctl -u vpnbot-hy2-auth -n 100 --no-pager    # ошибки БД логируются здесь на ERROR
 sqlite3 /opt/vpn-service/data/vpn.db "SELECT status, COUNT(*) FROM vpn_keys WHERE key_type='hysteria2' GROUP BY status;"
 ```
 
-Восстановление — на уровне сервиса, а не сверки конфигов: верните `vpn-bot-hy2-auth` (и при
+Восстановление — на уровне сервиса, а не сверки конфигов: верните `vpnbot-hy2-auth` (и при
 необходимости `hysteria-server`) в active — эндпоинт читает **живую** базу, поэтому после
 восстановления отзывы/выдачи применяются на следующем handshake без перезапуска data plane. Если
 `GET /healthz` вернул `503`, эндпоинт не может прочитать `vpn.db` (locked/corrupt или отсутствует
@@ -807,7 +818,7 @@ git status --porcelain   # scripts/run-mtproxy-managed в gitignore -> не по
 2. Отзовите и удалите Xray-ключ, убедитесь, что DB/config/runtime больше не дают доступ.
 3. Создайте один AWG-ключ, убедитесь, что DB, `awg0.conf` и `awg show` согласованы.
 4. Отзовите и удалите AWG-ключ, убедитесь, что peer удалён из config и runtime.
-5. (Hysteria2, при `HYSTERIA2_ENABLED`) Создайте один Hysteria2-ключ, убедитесь, что он активен в БД (`key_type='hysteria2'`) и что свежий client handshake авторизуется — принятый handshake виден в `journalctl -u vpn-bot-hy2-auth`.
+5. (Hysteria2, при `HYSTERIA2_ENABLED`) Создайте один Hysteria2-ключ, убедитесь, что он активен в БД (`key_type='hysteria2'`) и что свежий client handshake авторизуется — принятый handshake виден в `journalctl -u vpnbot-hy2-auth`.
 6. Отзовите Hysteria2-ключ и убедитесь, что следующий handshake отклоняется **без перезапуска data plane** (эндпоинт `hy2_auth` читает живую БД). При включённом Traffic Stats API (`HYSTERIA2_STATS_SECRET`) убедитесь, что уже установленная сессия также рвётся best-effort `/kick`.
 7. Откройте «Прокси» от одобренного тестового пользователя, выдайте SOCKS5 после подтверждения и убедитесь, что сообщение содержит Host, Port, Login, Password и URL.
 8. Выдайте MTProto после подтверждения и убедитесь, что обычная Telegram-ссылка идёт перед `dd`-ссылкой.

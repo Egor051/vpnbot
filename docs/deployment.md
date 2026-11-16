@@ -223,15 +223,23 @@ process reads the **live** database, a revoke or delete takes effect on the very
 next handshake — there is no apply step and no data-plane restart.
 
 You install three things: the `hysteria` server, its HTTP-auth pointing at
-`hy2_auth`, and the `vpn-bot-hy2-auth.service` systemd unit.
+`hy2_auth`, and the `vpnbot-hy2-auth.service` systemd unit.
 
 ### 1. Install the `hy2_auth` systemd unit
 
+The unit has one name, `vpnbot-hy2-auth` (the repo file `deploy/vpnbot-hy2-auth.service`, the
+default of `HYSTERIA2_AUTH_SERVICE_NAME`). With `HYSTERIA2_ENABLED=true` in `.env`, every
+`scripts/redeploy.sh` installs that file **verbatim** as `${HYSTERIA2_AUTH_SERVICE_NAME}.service`
+(a host that chose another name keeps it), restarts the sidecar with it when it was running, and
+rolls the file back with the rest of a failed deploy. The first time, enable it once:
+
 ```bash
-sudo cp deploy/vpn-bot-hy2-auth.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now vpn-bot-hy2-auth
+sudo systemctl enable --now vpnbot-hy2-auth
 ```
+
+(Before the first deploy with Hysteria2 enabled, install the file by hand instead:
+`sudo install -m0644 deploy/vpnbot-hy2-auth.service /etc/systemd/system/` and
+`sudo systemctl daemon-reload`.)
 
 The unit runs `python -m hy2_auth` from the project venv, reads the same
 `/opt/vpn-service/.env`, binds **loopback only** (`HYSTERIA2_AUTH_LISTEN`,
@@ -281,7 +289,7 @@ bot only builds client links from `HYSTERIA2_PORT`, it does not template or
 apply this file. Run `deploy/hysteria/preflight-udp443.sh` before restarting
 the service (fails closed if UDP/443 is held by a non-hysteria process;
 TCP/443, i.e. Xray, is ignored). Start `hysteria-server.service` after
-`vpn-bot-hy2-auth` (the unit declares `Before=hysteria-server.service`).
+`vpnbot-hy2-auth` (the unit declares `Before=hysteria-server.service`).
 
 ### 2b. (Optional) Enable the Traffic Stats API — traffic, online, revoke-kick
 
@@ -342,7 +350,7 @@ host is already held by Xray REALITY.
   a malformed body, or a database fault — it always fails **closed**.
 - A wrong token is logged quietly (debug); a database fault (locked, corrupt) is
   logged at **error** with a failure counter, so a broken data plane is visible
-  in `journalctl -u vpn-bot-hy2-auth` instead of hiding behind benign rejections.
+  in `journalctl -u vpnbot-hy2-auth` instead of hiding behind benign rejections.
 - `GET /healthz` runs a probe read: **200** `{"ok": true}` when the database is
   readable, **503** `{"ok": false}` when it is not — usable by a watchdog or a
   manual `curl http://127.0.0.1:8444/healthz`.
