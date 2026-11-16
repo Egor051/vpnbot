@@ -69,7 +69,7 @@ Xray:
 - `vpn-bot-xray-apply validate <candidate_config_path>`
 - `vpn-bot-xray-apply status`
 
-Candidates must live under `/run/vpn-bot/xray`. The helper validates JSON, runs `/usr/local/bin/xray run -test -config <candidate>`, installs `/usr/local/etc/xray/config.json` atomically as `nobody:vpn-bot` mode `0640` (world-unreadable; group-readable for non-root reads), restarts fixed service `xray`, verifies active state, and restores the previous config on failure.
+Candidates must live under `/run/vpn-bot/xray`. The helper validates JSON, runs `/usr/local/bin/xray run -test -config <candidate>`, installs `/usr/local/etc/xray/config.json` atomically as `nobody:vpn-bot` mode `0640` (world-unreadable; group-readable for non-root reads), restarts fixed service `xray`, verifies active state, and restores the previous config on failure. Each `apply` first copies the live config to `config.json.<time_ns>.bak`; after a successful apply the helper keeps the newest 10 of those ([Backup retention](#backup-retention)).
 
 AWG:
 
@@ -79,16 +79,27 @@ AWG:
 - `vpn-bot-awg-apply show-peers`
 - `vpn-bot-awg-apply show-transfer`
 
-Candidates must live under `/run/vpn-bot/awg`. The helper validates with `awg-quick strip` or `wg-quick strip`, installs `/etc/amnezia/amneziawg/awg0.conf` atomically as `root:vpn-bot` mode `0640` (world-unreadable; group-readable for non-root reads — note this exposes the server WireGuard PrivateKey to the `vpn-bot` group, an accepted trade-off), applies runtime with fixed-interface `syncconf` for `awg0`, checks `awg-quick@awg0`, and restores the previous config on failure.
+Candidates must live under `/run/vpn-bot/awg`. The helper validates with `awg-quick strip` or `wg-quick strip`, installs `/etc/amnezia/amneziawg/awg0.conf` atomically as `root:vpn-bot` mode `0640` (world-unreadable; group-readable for non-root reads — note this exposes the server WireGuard PrivateKey to the `vpn-bot` group, an accepted trade-off), applies runtime with fixed-interface `syncconf` for `awg0`, checks `awg-quick@awg0`, and restores the previous config on failure. Each `apply` first copies the live config to `awg0.conf.<time_ns>.bak` — one more copy of the `[Interface] PrivateKey` — and after a successful apply the helper keeps the newest 10 of those ([Backup retention](#backup-retention)).
 
 MTProxy:
 
 - `vpn-bot-mtproxy-apply apply <candidate_dir>`
 - `vpn-bot-mtproxy-apply status`
 
-The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpn-bot/managed-secrets.json` and `/etc/mtproxy/vpn-bot/mtproxy.env` atomically as `root:vpn-bot` mode `0640` in a `0750` `root:vpn-bot` directory (world-unreadable; group-readable for non-root reads), restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure.
+The candidate directory must live under `/run/vpn-bot/mtproxy` and contain `managed-secrets.json` plus `mtproxy.env`. The helper validates managed-secrets JSON shape without printing secrets, installs `/etc/mtproxy/vpn-bot/managed-secrets.json` and `/etc/mtproxy/vpn-bot/mtproxy.env` atomically as `root:vpn-bot` mode `0640` in a `0750` `root:vpn-bot` directory (world-unreadable; group-readable for non-root reads), restarts fixed service `mtproxy`, verifies active state and the configured port, and restores previous files on failure. Each `apply` first copies both live files to `<name>.<time_ns>.bak`; after a successful apply the helper keeps the newest 10 of each ([Backup retention](#backup-retention)).
 
 These `root:vpn-bot 0640` modes are for the **non-root helper deployment**: they let the unprivileged bot read managed status, and the managed-mode wrapper (which always runs as root — see [Proxy → MTProto managed mode](../../docs/proxy.md)) reads them regardless. The **root+direct manual install** documented in `docs/proxy.md` instead uses `root:root 0600`. Both are correct because the wrapper runs as root and drops the proxy to `MTPROTO_RUN_USER` via `-u`; they are not a contradiction.
+
+## Backup retention
+
+`vpn-bot-xray-apply`, `vpn-bot-awg-apply` and `vpn-bot-mtproxy-apply` copy every file they are about to replace to `<name>.<time_ns>.bak` next to it, so a failed apply can be rolled back. Before this, nothing ever deleted those copies. Now each helper prunes its **own** copies itself:
+
+- **How many:** the newest **10** per target file — `config.json`, `awg0.conf`, and `managed-secrets.json` and `mtproxy.env` each on their own. The number is a constant in the helper (`BACKUP_KEEP`), not a setting: the helpers run through sudo with a fixed argv and do not read `.env`. It equals the default of `XRAY_CONFIG_BACKUP_KEEP`, which bounds the copies the bot writes itself in the root+api model. "Newest" is the `time_ns` in the name, not the mtime (a copy carries the mtime of the config it copied). The copy the current apply just wrote is never deleted.
+- **What:** only regular files whose **whole** name is `<name>.<19 digits>.bak` — the shape `time.time_ns()` has had since 2001. Never touched: a symlink or a directory with such a name, the bot's own `<name>.<stamp>.<ns>.<token>.bak` (root+api model), and an operator's copy such as `config.json.pre-migration.bak`, `config.json.$(date +%s).bak` (10 digits) or `config.json.20261116.bak`.
+- **When:** only after an `apply` that succeeded. A failed apply prunes nothing — its copy is the config that was just restored, and stays as evidence, whether or not the rollback worked. `validate` and `status` write and prune nothing.
+- **On error:** a pruning failure prints `warning: … not pruned: <reason>` to stderr and the exit code stays `0`, because the apply itself succeeded. The bot ignores a helper's stderr when it exits `0`, so you only see that warning when you run the helper by hand.
+
+The deploy does not refresh these helpers (see the registry note below). An installed copy picks this up only when you rerun `deploy/setup-nonroot-helper-mode.sh` or the `install` commands above. The first successful apply after that removes all but the newest 10 copies that have built up.
 
 ## WARP outbound-IP masking helpers
 

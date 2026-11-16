@@ -20,6 +20,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   failed the change. AmneziaWG and the rest keep `CONFIG_BACKUP_KEEP_LAST` as before. Hysteria2:
   `deploy/hysteria/install-config.sh` keeps the newest `HYSTERIA_CONFIG_BACKUP_KEEP` (default 3)
   of its own `config.yaml.bak.<YYYYmmddTHHMMSS>` after a successful install.
+- **The root helpers prune their own backups too (deploy/helpers/README.md#backup-retention).** In the
+  helper model (`PRIVILEGE_HELPERS_ENABLED=true`), `vpn-bot-xray-apply`, `vpn-bot-awg-apply` and
+  `vpn-bot-mtproxy-apply` copy every file they replace to `<name>.<time_ns>.bak`, and nothing ever
+  deleted those copies (each `awg0.conf` copy holds the AWG `[Interface] PrivateKey`). Now each helper
+  keeps the newest 10 per target (`config.json`, `awg0.conf`, `managed-secrets.json`, `mtproxy.env`).
+  10 is a fixed constant, because the helpers read no `.env`; it matches the `XRAY_CONFIG_BACKUP_KEEP`
+  default. Pruning runs only after an apply that succeeded, never on the rollback path. It deletes only
+  regular files whose whole name is `<name>.<19 digits>.bak`: never a symlink, never the bot's
+  `<name>.<stamp>.<ns>.<token>.bak`, never an operator's `*.bak` (`$(date +%s)` and `%Y%m%d` stamps
+  included). A pruning error is a warning on stderr; the exit code stays `0`. Installed helpers pick
+  this up when `deploy/setup-nonroot-helper-mode.sh` is rerun; the deploy does not refresh them.
 
 ### Added
 

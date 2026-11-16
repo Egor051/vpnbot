@@ -4,7 +4,9 @@ deploy/helpers/vpn-bot-{awg,xray,mtproxy}-apply and vpn-bot-socks5-user run
 as root via sudo with arguments the (unprivileged) bot controls. Every way they
 can say "no" — argument, path and name validation, malformed inputs, failed
 tools, rollback — is pinned here, together with the exit code the bot relies
-on (64 = validation, 70 = command failed).
+on (64 = validation, 70 = command failed). So is the one thing the three apply
+helpers delete on their own: the old copies of their own backups, pruned only
+after a successful apply and never at the cost of its exit code.
 
 Hermetic by construction:
 * every path constant is pointed into tmp_path;
@@ -17,11 +19,13 @@ Hermetic by construction:
 
 from __future__ import annotations
 
+import errno
 import grp
 import io
 import json
 import os
 import pwd
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -1334,3 +1338,243 @@ def test_socks5_cli_malformed(socks: SimpleNamespace, argv: list[str]) -> None:
 
     # Assert
     assert excinfo.value.code == 2
+
+
+# ── backup retention (awg / xray / mtproxy apply) ────────────────────────────
+#
+# Each apply helper writes "<name>.<time_ns>.bak" next to every target it
+# replaces. It keeps the newest BACKUP_KEEP of exactly those and nothing else.
+
+OLD_NS = 1_700_000_000_000_000_000  # 2023-11-14: 19 digits, older than any fresh time_ns()
+SEEDED = 12  # older own backups per target before the apply; the apply adds one more
+OWN_NAME = r"\.[0-9]{19}\.bak"  # restated here on purpose, not imported from the helpers
+
+
+def _own(target: Path, ns: int) -> Path:
+    return target.with_name(f"{target.name}.{ns}.bak")
+
+
+def _own_backups(target: Path) -> set[Path]:
+    """Regular files (not symlinks, not directories) named like the helper's own copies."""
+    name_re = re.compile(re.escape(target.name) + OWN_NAME)
+    return {
+        path
+        for path in target.parent.iterdir()
+        if name_re.fullmatch(path.name) and not path.is_symlink() and path.is_file()
+    }
+
+
+@pytest.fixture(params=["xray", "awg", "mtp"])
+def applier(request: pytest.FixtureRequest) -> SimpleNamespace:
+    """One apply helper, its live target(s) in place, and a way to make the apply fail."""
+    world = request.getfixturevalue(request.param)
+    h = world.h
+    if request.param == "mtp":
+        live = {h.TARGET_SECRETS: "OLD-SECRETS", h.TARGET_ENV: "MTPROTO_PORT=8443\n"}
+        applied = {h.TARGET_SECRETS: _secrets(), h.TARGET_ENV: VALID_ENV}
+        fail = ("systemctl", "restart")
+    elif request.param == "awg":
+        live = {h.CANONICAL_CONFIG: "[Interface]\nPrivateKey = OLD\n"}
+        applied = {h.CANONICAL_CONFIG: world.candidate.read_text(encoding="utf-8")}
+        fail = ("awg", "syncconf")
+    else:
+        live = {h.CANONICAL_CONFIG: '{"old": true}'}
+        applied = {h.CANONICAL_CONFIG: world.candidate.read_text(encoding="utf-8")}
+        fail = ("systemctl", "restart")
+    for target, content in live.items():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return SimpleNamespace(
+        world=world, h=h, live=live, applied=applied, targets=list(live), argv=["apply", str(world.candidate)],
+        fail=fail,
+    )
+
+
+def _seed_own(w: SimpleNamespace) -> dict[Path, list[Path]]:
+    """SEEDED old own backups per target, oldest first."""
+    seeded: dict[Path, list[Path]] = {}
+    for target in w.targets:
+        paths = [_own(target, OLD_NS + i * 10**9) for i in range(SEEDED)]
+        for i, path in enumerate(paths):
+            path.write_text(f"old copy {i}", encoding="utf-8")
+        seeded[target] = paths
+    return seeded
+
+
+def _seed_foreign(w: SimpleNamespace) -> dict[Path, str]:
+    """Everything next to the targets that is NOT the helper's own backup. Each is
+    stamped OLD_NS or older, so a matcher that wrongly took it would delete it first."""
+    foreign: dict[Path, str] = {}
+    for target in w.targets:
+        n = target.name
+        for name in (
+            f"{n}.2026-11-16T123456_0000.{OLD_NS}.{'A' * 22}.bak",  # the bot's in-process copy
+            f"{n}.pre-migration.bak",
+            f"{n}.bak",
+            f"{n}.1700000000.bak",  # an operator's $(date +%s)
+            f"{n}.20261116.bak",  # an operator's $(date +%Y%m%d)
+            f"{n}.{OLD_NS // 10}.bak",  # 18 digits
+            f"{n}.{OLD_NS}0.bak",  # 20 digits
+            f"{n}.{OLD_NS}.bak.orig",
+            f"{n}.{OLD_NS}.BAK",
+            f".{n}.{OLD_NS}.bak",
+            f"{n.replace('.', 'X')}.{OLD_NS}.bak",  # the "." in the name is literal
+        ):
+            path = target.with_name(name)
+            path.write_text(name, encoding="utf-8")
+            foreign[path] = name
+    return foreign
+
+
+def _seed_non_files(w: SimpleNamespace) -> list[tuple[Path, Path, Path]]:
+    """Per target: a symlink and a directory that carry the own-backup NAME and the
+    oldest stamps of all. Returns (symlink, what it points at, directory) triples."""
+    seeded: list[tuple[Path, Path, Path]] = []
+    for target in w.targets:
+        outside = w.world.tmp / f"outside-{target.name}"
+        outside.write_text("OUTSIDE", encoding="utf-8")
+        link = _own(target, OLD_NS - 1)
+        link.symlink_to(outside)
+        directory = _own(target, OLD_NS - 2)
+        directory.mkdir()
+        (directory / "inside").write_text("x", encoding="utf-8")
+        seeded.append((link, outside, directory))
+    return seeded
+
+
+def _fail_apply(w: SimpleNamespace, *, rollback_ok: bool) -> None:
+    """The apply's own step fails; the same step during the rollback succeeds or not."""
+    real_run = w.world.run
+    seen = {"n": 0}
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if tuple(args[: len(w.fail)]) == w.fail:
+            seen["n"] += 1
+            real_run.calls.append(list(args))
+            ok = seen["n"] > 1 and rollback_ok
+            return subprocess.CompletedProcess(args, 0 if ok else 1, "", "")
+        return real_run(args, **kwargs)
+
+    w.h.subprocess.run = run
+
+
+# Invariant: the retention is a fixed constant in every apply helper (they read
+# no .env), equal to the default of the bot's own XRAY_CONFIG_BACKUP_KEEP.
+def test_backup_keep_is_a_fixed_ten(load_helper: Callable[[str], ModuleType]) -> None:
+    # Act
+    keeps = {name: load_helper(name).BACKUP_KEEP
+             for name in ("vpn-bot-xray-apply", "vpn-bot-awg-apply", "vpn-bot-mtproxy-apply")}
+
+    # Assert
+    assert keeps == {"vpn-bot-xray-apply": 10, "vpn-bot-awg-apply": 10, "vpn-bot-mtproxy-apply": 10}
+
+
+# Invariant: a successful apply leaves the newest BACKUP_KEEP of the helper's own
+# "<name>.<time_ns>.bak" per target — the copy it just wrote among them — and
+# deletes the older ones; any other name, a symlink or a directory is untouched,
+# however old it looks.
+def test_successful_apply_keeps_newest_own_backups_only(applier: SimpleNamespace) -> None:
+    # Arrange
+    w = applier
+    seeded = _seed_own(w)
+    foreign = _seed_foreign(w)
+    non_files = _seed_non_files(w)
+    err = io.StringIO()
+
+    # Act
+    rc = w.h.main(w.argv, stdout=io.StringIO(), stderr=err)
+
+    # Assert
+    assert (rc, err.getvalue()) == (0, "")
+    for target in w.targets:
+        own = _own_backups(target)
+        assert len(own) == w.h.BACKUP_KEEP == 10
+        fresh = own - set(seeded[target])
+        assert len(fresh) == 1  # the copy of the config this apply replaced
+        assert fresh.pop().read_text(encoding="utf-8") == w.live[target]
+        assert own & set(seeded[target]) == set(seeded[target][SEEDED - 9 :])
+        assert not any(path.exists() for path in seeded[target][: SEEDED - 9])
+    assert {path: path.read_text(encoding="utf-8") for path in foreign} == foreign
+    for link, outside, directory in non_files:
+        assert link.is_symlink() and outside.read_text(encoding="utf-8") == "OUTSIDE"
+        assert (directory / "inside").read_text(encoding="utf-8") == "x"
+
+
+# Invariant: a failed apply prunes nothing — whether the rollback worked or not,
+# every older own backup is still there next to the one this attempt wrote.
+@pytest.mark.parametrize("rollback_ok", [True, False])
+def test_failed_apply_prunes_nothing(applier: SimpleNamespace, rollback_ok: bool) -> None:
+    # Arrange
+    w = applier
+    seeded = _seed_own(w)
+    _fail_apply(w, rollback_ok=rollback_ok)
+    err = io.StringIO()
+
+    # Act
+    rc = w.h.main(w.argv, stdout=io.StringIO(), stderr=err)
+
+    # Assert
+    assert rc == EXIT_COMMAND_FAILED
+    assert ("rollback failed" in err.getvalue()) is not rollback_ok
+    assert "warning" not in err.getvalue()
+    for target in w.targets:
+        own = _own_backups(target)
+        assert len(own) == SEEDED + 1
+        assert set(seeded[target]) <= own
+
+
+# Invariant: a pruning error never changes the exit code of an apply that
+# succeeded: the config is installed, the helper exits 0 and only warns — and for
+# MTProxy one target's failure does not stop the other target's pruning.
+def test_prune_error_never_changes_the_exit_code(applier: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange
+    w = applier
+    _seed_own(w)
+    real_prune = w.h.prune_own_backups
+    pruned: list[Path] = []
+
+    def flaky_prune(target: Path, keep: int, *, spare: Path | None = None) -> list[Path]:
+        pruned.append(target)
+        if target == w.targets[0]:
+            raise OSError(errno.EACCES, "Permission denied", str(target.parent))
+        return real_prune(target, keep, spare=spare)
+
+    monkeypatch.setattr(w.h, "prune_own_backups", flaky_prune)
+    err = io.StringIO()
+
+    # Act
+    rc = w.h.main(w.argv, stdout=io.StringIO(), stderr=err)
+
+    # Assert
+    assert rc == 0
+    assert pruned == w.targets
+    assert {target: target.read_text(encoding="utf-8") for target in w.targets} == w.applied
+    warnings = err.getvalue().splitlines()
+    assert len(warnings) == 1
+    assert warnings[0].startswith("warning: ") and "not pruned" in warnings[0] and "Permission denied" in warnings[0]
+    assert len(_own_backups(w.targets[0])) == SEEDED + 1
+    for target in w.targets[1:]:
+        assert len(_own_backups(target)) == 10
+
+
+# Invariant: "newest" is the time_ns in the NAME, not the mtime (copy2 stamps a
+# backup with the mtime of the config it copied); the copy this apply just wrote
+# is spared even when a clock step made it the oldest; keep below 1 keeps 1.
+def test_prune_orders_by_name_and_spares_the_fresh_copy(xray: SimpleNamespace) -> None:
+    # Arrange
+    target = xray.h.CANONICAL_CONFIG
+    target.parent.mkdir(parents=True)
+    copies = [_own(target, OLD_NS + i * 10**9) for i in range(5)]  # oldest name first
+    for i, path in enumerate(copies):
+        path.write_text(str(i), encoding="utf-8")
+        mtime_ns = OLD_NS + (10 - i) * 10**9  # ...and newest mtime first
+        os.utime(path, ns=(mtime_ns, mtime_ns))
+
+    # Act
+    removed = xray.h.prune_own_backups(target, 2, spare=copies[0])
+    removed_down_to_one = xray.h.prune_own_backups(target, 0)
+
+    # Assert
+    assert removed == [copies[2], copies[1]]
+    assert removed_down_to_one == [copies[3], copies[0]]
+    assert _own_backups(target) == {copies[4]}
