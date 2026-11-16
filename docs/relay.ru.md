@@ -367,7 +367,8 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
 - **Phase 2**: бэкап живых `nft list table ip vpnrelay` и `nft list table inet vpnrelay_input`,
   установленного хелпера, каждого unit'а набора, sysctl-файла и маркера подтверждения
   `/etc/vpn-relay/input.confirmed` (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; ради бэкапа ничего не
-  останавливается); `git reset --hard origin/main`; установка `vpn-relay-apply` через
+  останавливается); `git checkout -f -B main origin/main` (чекаут остаётся на локальной `main`,
+  [как на основном сервере](operations.ru.md#pre-deploy-чеклист)); установка `vpn-relay-apply` через
   `OUT_OF_REPO_HELPERS` (роль `relay`) и каждого unit'а набора как есть (копия, которая уже
   совпадает, не переписывается); `daemon-reload`, `enable` `vpn-relay` и каждого таймера,
   `restart vpn-relay` (установленные потоки сохраняют NAT в

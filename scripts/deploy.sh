@@ -18,7 +18,9 @@
 #
 # Invariant: after a run either the new code is running with every assertion
 # green, or the system is rolled back to PREV_SHA (code + venv + DB + control-
-# plane configs + unit) and the bot is running. The bot is never left stopped.
+# plane configs + unit, and every sidecar the deploy restarted is restarted again
+# on that code) and the bot is running. The bot is never left stopped. Either way
+# the live tree is on local branch `main` (see deploy_branch_phase1).
 #
 # The two supported deployment models are detected, never hardcoded:
 #   api-root       XRAY_APPLY_MODE=api, User=root, PRIVILEGE_HELPERS_ENABLED unset
@@ -369,7 +371,8 @@ RELAY_LIVE_OUT=""
 RELAY_LIVE_RC=""
 
 # Out-of-repo privileged helpers: tracked SOURCE lives in the checkout, the
-# INSTALLED copy lives under /usr/local/sbin. `git reset --hard origin/main`
+# INSTALLED copy lives under /usr/local/sbin. Advancing the checkout (Phase 2's
+# `git checkout -f -B main origin/main`, formerly `git reset --hard origin/main`)
 # advances the source but NEVER the installed copy, so a fixed helper would keep
 # running stale — which is exactly how a broken vpn-bot-warp-routes survived a
 # source fix and took warp-routes.service down (deploy/helpers/README.md L101-106).
@@ -844,6 +847,9 @@ declare -A U_CLASS=() U_TARGET=() U_PRE_ACTIVE=() U_PRE_ENABLED=()
 declare -a SIDECAR_UNITS=()
 declare -A SIDECAR_PRE_ACTIVE=()
 declare -a SIDECAR_REPORT=()
+# The sidecars Phase 2 asked systemd to restart (restart_sidecar_units), in order: the
+# rollback restarts exactly these again on PREV_SHA (rollback_restart_sidecars).
+declare -a SIDECAR_RESTARTED=()
 # wait_for_listen results; each caller reads them inside its own $(...).
 LISTEN_MISSING=""
 LISTEN_RETRIES=0
@@ -1020,7 +1026,7 @@ helper_absent_reason() {
 
 # Scan each managed helper's installed copy against the tracked source under
 # <root> (Phase 1 passes $WT = origin/main worktree; Phase 2 passes $APP_DIR =
-# the post-`git reset` working tree). Prints one line per helper:
+# the advanced working tree). Prints one line per helper:
 #   "<base>|<resolved-src>|<dst>|<state>|<policy>"  state ∈ absent | synced | drift
 # For an absent-ok helper, ABSENT (no installed copy) means the piece it belongs to
 # is not on this host (its entry's <absent-reason>: WARP not deployed, the relay not
@@ -1400,7 +1406,8 @@ mh_candidate() {
 # --- render=ssh-port: the two SSH port templates --------------------------------------
 # The checkout's helper, through python3 -I (a noexec worktree cannot stop it). Phase 1
 # copies the helper of the commit being deployed into MH_CAND_DIR; Phase 2 and both
-# rollbacks use that copy (after `git reset` to PREV_SHA the checkout may have none).
+# rollbacks use that copy (once the rollback has checked PREV_SHA out, the checkout may
+# have none).
 ssh_port_helper() {
   local repo="${1%/}" bin
   shift
@@ -3439,10 +3446,10 @@ schema_version() {
 }
 
 # The schema version the DEPLOYED code targets, read from the just-checked-out
-# db/database.py (`CURRENT_SCHEMA_VERSION = N`). MUST be called AFTER `git reset
-# --hard origin/main` so it reflects the incoming SHA, not the outgoing tree. The
-# assignment is anchored to the start of line (^CURRENT_SCHEMA_VERSION) and must
-# match EXACTLY once: zero matches (constant renamed/moved) or more than one
+# db/database.py (`CURRENT_SCHEMA_VERSION = N`). MUST be called AFTER Phase 2's
+# `git checkout -f -B main origin/main` so it reflects the incoming SHA, not the
+# outgoing tree. The assignment is anchored to the start of line
+# (^CURRENT_SCHEMA_VERSION) and must match EXACTLY once: zero matches (constant renamed/moved) or more than one
 # (ambiguous) is a hard fail, never a silent default — a wrong target would turn
 # the gate back into theatre. Sets SCHEMA_EXPECT; die()s (does NOT roll back) on
 # any ambiguity, so it never fabricates a value.
@@ -3576,6 +3583,61 @@ rotate_backups() {
   ls -1t "$BACKUP_DIR"/backup-*.tar.gz 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | while IFS= read -r f; do
     rm -f "$f"
   done || true
+}
+
+# --------------------------------------------------------------------------- #
+# SSL / certifi probe of the prod venv (the PR #269 incident)
+# --------------------------------------------------------------------------- #
+# aiogram's AiohttpSession builds its TLS context exactly like this on the first
+# request: ssl.create_default_context(cafile=certifi.where()). After the PR #269
+# deploy the new bot died on its first start with FileNotFoundError on
+# certifi/cacert.pem, systemd restarted it in a loop and the deploy rolled back.
+# `pip check` cannot see such a fault: it checks the distributions' metadata, not
+# whether the data file certifi names is on disk.
+#
+# WHERE it runs follows from Phase 2's order, not from a choice: the prod deps are
+# installed INTO the live venv, and that happens after `systemctl stop vpn-bot`, the
+# backup, the tree advance and the venv snapshot. So the probe on the NEW deps runs
+# right after `pip check`, before anything else is installed and before the bot is
+# started; by then the venv is already replaced, and a failure leaves through
+# rollback_now — the existing path that puts .venv back from .venv.prev, the tree on
+# PREV_SHA and starts the old bot. Nothing earlier can test the new deps: Phase 1
+# installs nothing into the prod venv. Phase 1 probes the LIVE venv (current deps)
+# instead, for the report; that result is never a gate — a deploy may be the fix.
+#
+# `-B`: no .pyc is written, so the Phase 1 probe stays read-only.
+SSL_PROBE_PY='import ssl, certifi; ssl.create_default_context(cafile=certifi.where()); print(certifi.where())'
+SSL_PROBE_PRE=""     # Phase 1: the live venv's result, one line (report)
+SSL_PROBE_POST=""    # Phase 2: the new deps' result, one line (DEPLOY OK)
+
+# One line about <venv>: "OK — <cafile>" or "FAILED — <last line of the error>".
+# Returns 0 iff the context was built. Never fatal by itself.
+venv_ssl_probe() {
+  local py="${1%/}/bin/python" out rc
+  if [[ ! -x "$py" ]]; then
+    printf 'FAILED — %s is missing or not executable' "$py"; return 1
+  fi
+  out="$("$py" -B -c "$SSL_PROBE_PY" 2>&1)" && rc=0 || rc=$?
+  if (( rc == 0 )); then
+    printf 'OK — %s' "$(printf '%s\n' "$out" | tail -n 1)"; return 0
+  fi
+  printf 'FAILED (exit %s) — %s' "$rc" "$(printf '%s\n' "$out" | awk 'NF' | tail -n 1)"
+  return 1
+}
+
+# Phase 2, right after the prod deps went into the live venv and `pip check` passed:
+# the new venv must build the TLS context the bot builds on its first request. The
+# venv is already replaced here (see the block above), so a failure is rollback_now.
+assert_venv_ssl() {
+  local rc
+  log "probing the new prod venv: ssl.create_default_context(cafile=certifi.where())"
+  SSL_PROBE_POST="$(venv_ssl_probe "$VENV")" && rc=0 || rc=$?
+  if (( rc != 0 )); then
+    rollback_now "the prod venv cannot build the TLS context aiogram builds on its first request (ssl.create_default_context(cafile=certifi.where())): ${SSL_PROBE_POST}. The new bot would die on start and loop (the PR #269 incident), so it is not started on these deps. Rolling back — the venv comes back from ${VENV_PREV}"
+    # shellcheck disable=SC2317  # reached when a test replaces rollback_now
+    return 1
+  fi
+  log "  ssl/certifi: ${SSL_PROBE_POST}"
 }
 
 # --------------------------------------------------------------------------- #
@@ -3926,7 +3988,6 @@ wait_unit_active() {
 # itself is active is a warn line, never a rollback.
 restart_sidecar_units() {
   local u pre post post_rc rc msg mrc
-  local -a restarted=()
   for u in "${SIDECAR_UNITS[@]}"; do
     pre="${SIDECAR_PRE_ACTIVE[$u]:-absent}"
     case "$pre" in
@@ -3942,20 +4003,21 @@ restart_sidecar_units() {
     esac
 
     log "  restarting ${u} (was active before the deploy — it runs the deployed code)"
+    # Recorded BEFORE the restart is asked for: from that moment the old-code process
+    # may be gone (a signal mid-restart included), so a rollback must restart this unit
+    # again on PREV_SHA whatever happens next — rollback_restart_sidecars.
+    SIDECAR_RESTARTED+=("$u")
     # rc is reported but never trusted on its own; the state read below is what
     # decides. Kept off the ERR trap so a failure is described, not just trapped.
     systemctl restart "$u" && rc=0 || rc=$?
     post="$(wait_unit_active "$u" "$SIDECAR_ACTIVE_WAIT")" && post_rc=0 || post_rc=$?
     if (( post_rc != 0 )); then
       SIDECAR_REPORT+=("${u}: FAILED (was active before, ${post} after the restart)")
-      if (( ${#restarted[@]} > 0 )); then
-        warn "already restarted onto the new code, and the rollback does not revert them: ${restarted[*]} — restart them by hand once the tree is back on ${PREV_SHA}"
-      fi
+      warn "restarted by this deploy so far: ${SIDECAR_RESTARTED[*]} — the rollback restarts them again once the tree and the venv are back on ${PREV_SHA:-<unknown>}"
       rollback_now "${u} did not come back from the deploy restart: active before, ${post} after ${SIDECAR_ACTIVE_WAIT}s (systemctl restart rc=${rc}). It runs the same code as vpn-bot, so this is a regression caused by this deploy"
       # shellcheck disable=SC2317  # reached when a test replaces rollback_now
       return 1
     fi
-    restarted+=("$u")
 
     if [[ "$u" == "$SUBSCRIPTION_UNIT" ]]; then
       # Reuse the Phase 1 check verbatim, start-to-bind retry included.
@@ -3972,6 +4034,52 @@ restart_sidecar_units() {
     fi
     SIDECAR_REPORT+=("${u}: restarted")
   done
+}
+
+# Rollback: put every sidecar this deploy restarted back onto the restored code.
+# Without it a rollback after restart_sidecar_units (a log-scan hit, a failing PR hook,
+# the hy2-auth restart failing after the subscription one succeeded) left the sidecars
+# running the NEW code out of memory on a host whose tree, venv and DB were back on
+# PREV_SHA — the half-deployed host of 2026-08-08, produced by the rollback this time.
+#
+# EXACTLY the units in SIDECAR_RESTARTED: restart_sidecar_units records one the moment
+# it asks systemd to restart it, so a unit that did not come back is in the list too
+# (it was active before the deploy; restarting it on PREV_SHA is what puts it back). An
+# absent or inactive sidecar was never restarted and is never touched here.
+# The same checks as the deploy's restart: wait_unit_active, then the port —
+# subscription_endpoint_status (its ~20s start-to-bind window, SUBSCRIPTION_BIND_WAIT)
+# or hy2_auth_listen_status (HY2_AUTH_BIND_TIMEOUT). A unit that does not come back is a
+# loud report line and nothing more: no second rollback, no retry, no loop — this IS
+# the last resort. rollback() calls it after the tree, the venv, the DB and its
+# ownership are back and vpn-bot was started: the deploy's own order (bot first, the
+# sidecars once the shared-WAL DB is right), so they reopen the restored vpn.db.
+# Prints one report line per unit; never fails, never calls rollback_now.
+rollback_restart_sidecars() {
+  local u post post_rc rc msg mrc
+  if (( ${#SIDECAR_RESTARTED[@]} == 0 )); then
+    printf 'sidecar units: none was restarted by this deploy — nothing to put back\n'
+    return 0
+  fi
+  for u in "${SIDECAR_RESTARTED[@]}"; do
+    systemctl restart "$u" >/dev/null 2>&1 && rc=0 || rc=$?
+    post="$(wait_unit_active "$u" "$SIDECAR_ACTIVE_WAIT")" && post_rc=0 || post_rc=$?
+    if (( post_rc != 0 )); then
+      printf '!!! SIDECAR NOT RESTORED: %s did not come back after the rollback restart (%s after %ss, systemctl restart rc=%s) — it was active before the deploy — MANUAL ACTION REQUIRED: systemctl restart %s; journalctl -u %s -n 50\n' \
+        "$u" "$post" "$SIDECAR_ACTIVE_WAIT" "$rc" "$u" "$u"
+      continue
+    fi
+    if [[ "$u" == "$SUBSCRIPTION_UNIT" ]]; then
+      msg="$(subscription_endpoint_status)" && mrc=0 || mrc=$?
+    else
+      msg="$(hy2_auth_listen_status)" && mrc=0 || mrc=$?
+    fi
+    if (( mrc == 0 )); then
+      printf 'sidecar %s: restarted back onto %s — active; %s\n' "$u" "${PREV_SHA:-<unknown>}" "$msg"
+    else
+      printf 'sidecar %s: restarted back onto %s — active, but %s (informational)\n' "$u" "${PREV_SHA:-<unknown>}" "$msg"
+    fi
+  done
+  return 0
 }
 
 # One line per sidecar for the end-of-deploy report. A half-deployed host was
@@ -3997,7 +4105,7 @@ rollback() {
   local rc db_own_msg db_own_rc canary_msg canary_rc line
   warn "ROLLBACK: restoring PREV_SHA=${PREV_SHA:-<unknown>}"
 
-  git reset --hard "$PREV_SHA"; report+=("git reset --hard ${PREV_SHA}: rc=$?")
+  report+=("$(restore_tree_to "$PREV_SHA")")
 
   # Restore venv from the on-disk snapshot, NOT the network (R6): a network-caused
   # failure would otherwise make the venv rollback fail too. If the failure hit
@@ -4093,6 +4201,10 @@ rollback() {
   systemctl start "$BOT_UNIT"; report+=("start vpn-bot: rc=$?")
   if systemctl is-active --quiet "$BOT_UNIT"; then report+=("vpn-bot is-active: yes")
   else report+=("vpn-bot is-active: NO — MANUAL ACTION REQUIRED"); fi
+
+  # Sidecars this deploy restarted onto the new code: restarted again on the restored
+  # tree + venv + DB (rollback_restart_sidecars — exactly those units, one try each).
+  while IFS= read -r line; do [[ -n "$line" ]] && report+=("$line"); done < <(rollback_restart_sidecars)
 
   printf '\n===== ROLLBACK REPORT =====\n' >&2
   printf '  - %s\n' "${report[@]}" >&2
@@ -4547,19 +4659,135 @@ constraints_stamp() {
   cat "$wt/constraints-hashed.txt" "$wt/constraints-dev-hashed.txt" | sha256sum | awk '{print $1}'
 }
 
+# --------------------------------------------------------------------------- #
+# The live tree's branch — always local `main` (both roles)
+# --------------------------------------------------------------------------- #
+# Phase 2 used to advance the tree with `git reset --hard origin/main`, which moves
+# WHATEVER branch is checked out. The production checkout had been left on a feature
+# branch (feat/offsite-system-bundle), so every deploy rewrote that branch to the tip
+# of main and `git status` named a branch the host was not running. The live tree is
+# now always on local `main`, created or reset to the commit it must carry:
+#   Phase 2 (both roles)     git checkout -f -B main origin/main
+#   rollback (both roles)    git checkout -f -B main PREV_SHA   (restore_tree_to)
+#   no-op guard              git checkout -B main origin/main   (HEAD is already that
+#                            commit: no file changes, no -f so a local edit stays, the
+#                            bot is not restarted — noop_pin_branch)
+# `checkout -f -B` is `reset --hard` onto main: local changes to tracked files are
+# discarded (fetch_origin_main has refused a dirty tree before Phase 2 anyway),
+# untracked files stay. The branch the tree was on is never deleted or moved again.
+DEPLOY_BRANCH="main"
+BRANCH_BEFORE=""     # the branch Phase 1 found (empty = detached HEAD)
+BRANCH_BLOCKER=""    # another worktree that has DEPLOY_BRANCH checked out (branch_blocker)
+
+# The checked-out branch, or nothing on a detached HEAD.
+current_branch() { git symbolic-ref -q --short HEAD 2>/dev/null || true; }
+
+# "branch <name>" / "a detached HEAD", for messages.
+branch_text() { if [[ -n "$1" ]]; then printf 'branch %s' "$1"; else printf 'a detached HEAD'; fi; }
+
+# The path of ANOTHER worktree that has DEPLOY_BRANCH checked out; nothing when none.
+# While one does, `checkout -B main` here is wrong on every git: git >= 2.45 refuses it
+# (Phase 2 would fail into a rollback), older git moves `main` under that worktree's
+# feet and leaves two trees on one branch. Phase 1 stops on it instead.
+branch_blocker() {
+  local here line wt=""
+  here="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$here" ]] || here="$PWD"
+  here="$(realpath -m "$here" 2>/dev/null || printf '%s' "$here")"
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) wt="${line#worktree }" ;;
+      "branch refs/heads/${DEPLOY_BRANCH}")
+        if [[ -n "$wt" && "$(realpath -m "$wt" 2>/dev/null || printf '%s' "$wt")" != "$here" ]]; then
+          printf '%s' "$wt"; return 0
+        fi ;;
+    esac
+  done < <(git worktree list --porcelain 2>/dev/null)
+  return 0
+}
+
+# Phase 1 (fetch_origin_main, both roles): record where the tree is and WARN when that
+# is not local DEPLOY_BRANCH. Read-only.
+deploy_branch_phase1() {
+  BRANCH_BEFORE="$(current_branch)"
+  BRANCH_BLOCKER="$(branch_blocker)"
+  if [[ "$BRANCH_BEFORE" != "$DEPLOY_BRANCH" ]]; then
+    warn "the live checkout is on $(branch_text "$BRANCH_BEFORE"), not on local ${DEPLOY_BRANCH} — the deploy moves it to ${DEPLOY_BRANCH} (git checkout -B ${DEPLOY_BRANCH} origin/main)$([[ -n "$BRANCH_BEFORE" ]] && printf '; branch %s itself is left where it is' "$BRANCH_BEFORE")"
+  fi
+  if [[ -n "$BRANCH_BLOCKER" ]]; then
+    warn "local ${DEPLOY_BRANCH} is checked out in another worktree (${BRANCH_BLOCKER}) — the deploy cannot put the live tree on it; remove that worktree (git worktree remove ${BRANCH_BLOCKER})"
+  fi
+  return 0
+}
+
+# One report line (both PHASE1_ONLY reports).
+branch_report_line() {
+  if [[ "$BRANCH_BEFORE" == "$DEPLOY_BRANCH" ]]; then
+    printf 'branch            : %s (the deploy keeps the tree on it)' "$DEPLOY_BRANCH"
+  else
+    printf 'branch            : WARN %s — the deploy moves the tree to local %s (git checkout -B %s origin/main)' \
+      "$(branch_text "$BRANCH_BEFORE")" "$DEPLOY_BRANCH" "$DEPLOY_BRANCH"
+  fi
+  if [[ -n "$BRANCH_BLOCKER" ]]; then
+    printf ' — BLOCKED: %s is checked out in %s, a real deploy stops' "$DEPLOY_BRANCH" "$BRANCH_BLOCKER"
+  fi
+}
+
+# Phase 2 (both roles): the live tree to <rev> on local DEPLOY_BRANCH, reset --hard style.
+pin_tree_to_main() { git checkout --quiet --force -B "$DEPLOY_BRANCH" "$1"; }
+
+# Rollback (both roles): the tree back to <sha> on local DEPLOY_BRANCH. Should git refuse
+# the branch (a stale refs/heads/main.lock, main taken by another worktree on git >=
+# 2.45), the CODE still comes back: a forced DETACHED checkout of <sha>, which writes no
+# branch ref at all — PREV_SHA matters more than the branch's name, and the next
+# deploy's Phase 1 WARNs about the detached HEAD. Prints the report line; never fails.
+restore_tree_to() {
+  local sha="$1" rc rc2
+  git checkout --quiet --force -B "$DEPLOY_BRANCH" "$sha" >/dev/null 2>&1 && rc=0 || rc=$?
+  if (( rc == 0 )); then
+    printf 'git checkout -f -B %s %s: rc=0' "$DEPLOY_BRANCH" "$sha"
+    return 0
+  fi
+  git checkout --quiet --force --detach "$sha" >/dev/null 2>&1 && rc2=0 || rc2=$?
+  printf 'git checkout -f -B %s %s: rc=%s — FELL BACK to git checkout -f --detach %s: rc=%s%s' \
+    "$DEPLOY_BRANCH" "$sha" "$rc" "$sha" "$rc2" \
+    "$( ((rc2 == 0)) && printf ' (code restored, HEAD detached)' || printf ' — CODE NOT RESTORED — MANUAL ACTION REQUIRED')"
+  return 0
+}
+
+# The no-op guard (HEAD == origin/main, no FORCE): normalize the branch only. HEAD is
+# already the commit `main` gets, so the checkout changes no file and, without -f,
+# carries any local edit over untouched; nothing is stopped or restarted.
+noop_pin_branch() {
+  [[ "$BRANCH_BEFORE" == "$DEPLOY_BRANCH" ]] && return 0
+  if [[ -n "$BRANCH_BLOCKER" ]]; then
+    warn "left on $(branch_text "$BRANCH_BEFORE"): local ${DEPLOY_BRANCH} is checked out in ${BRANCH_BLOCKER}"
+    return 0
+  fi
+  if git checkout --quiet -B "$DEPLOY_BRANCH" origin/main; then
+    log "moved the checkout from $(branch_text "$BRANCH_BEFORE") to local ${DEPLOY_BRANCH} at origin/main (${TAG}) — the same commit: no file changed, vpn-bot not restarted"
+  else
+    warn "could not move the checkout to local ${DEPLOY_BRANCH} (git checkout -B ${DEPLOY_BRANCH} origin/main failed) — left on $(branch_text "$BRANCH_BEFORE"); nothing else changed"
+  fi
+  return 0
+}
+
 # Fetch origin/main, set TAG, apply the up-to-date gate (exit 0 unless FORCE /
-# PHASE1_ONLY) and refuse a dirty working tree. Shared by both host roles; the
-# main path calls it exactly where this code used to stand inline.
+# PHASE1_ONLY; the no-op still puts the tree on local main) and refuse a dirty working
+# tree. Shared by both host roles; the main path calls it exactly where this code used
+# to stand inline.
 fetch_origin_main() {
   log "fetching origin/main"
   git fetch origin main
   TAG="$(git rev-parse --short origin/main)"
+  deploy_branch_phase1
 
   if [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]]; then
     if [[ "$PHASE1_ONLY" == "1" ]]; then
       log "HEAD already at origin/main (${TAG}); PHASE1_ONLY=1: running Phase 1 checks anyway (no deploy)."
     elif [[ "$FORCE" != "1" ]]; then
       log "HEAD already at origin/main (${TAG}); nothing to deploy. Set FORCE=1 to redeploy anyway."
+      noop_pin_branch
       exit 0
     else
       warn "FORCE=1: redeploying although HEAD already equals origin/main"
@@ -4572,6 +4800,12 @@ fetch_origin_main() {
   if [[ -n "$dirty" ]]; then
     warn "working tree is not clean:"; printf '%s\n' "$dirty" >&2
     die "commit, stash, or clean the working tree before deploying"
+  fi
+  # Phase 2 checks the tree out as local main, which is wrong while another worktree has
+  # main (branch_blocker). A real deploy stops here, before any mutation; PHASE1_ONLY
+  # reports it.
+  if [[ -n "$BRANCH_BLOCKER" && "$PHASE1_ONLY" != "1" ]]; then
+    die "local ${DEPLOY_BRANCH} is checked out in another worktree (${BRANCH_BLOCKER}) — Phase 2 could not put the live tree on it; remove that worktree first"
   fi
 }
 
@@ -4855,6 +5089,7 @@ relay_phase1_report() {
   [[ "$head_sha" == "$TAG" ]] && uptodate=" (already up to date)"
   printf '\n===== PHASE 1 REPORT — RELAY (PHASE1_ONLY=1 — no mutations performed) =====\n'
   printf '  checkout          : %s -> origin/main %s%s\n' "$head_sha" "$TAG" "$uptodate"
+  printf '  %s\n' "$(branch_report_line)"
   printf '  host role         : relay (NODE_ROLE=relay in %s)\n' "$ENV_FILE"
   printf '  not on this host  : vpn-bot, vpn-bot-subscription, hy2_auth, the DB, Xray, AmneziaWG,\n'
   printf '                      WARP, Telegram — main-only checks skipped, none of it is touched\n'
@@ -4909,7 +5144,7 @@ relay_phase1_report() {
 
   printf '\n  --- Phase 2 (sudo bash scripts/redeploy.sh) would ---\n'
   printf '    back up the live tables + %s, every unit above, %s\n' "$RELAY_HELPER" "$RELAY_SYSCTL_FILE"
-  printf '    git reset --hard origin/main; install the helper; install every unit above verbatim (a synced one is left as it is)\n'
+  printf '    git checkout -f -B main origin/main; install the helper; install every unit above verbatim (a synced one is left as it is)\n'
   printf '    daemon-reload; enable %s and every timer; restart %s; start a timer that is not active\n' "$RELAY_UNIT" "$RELAY_UNIT"
   printf '      (the oneshot a timer runs is never started by hand); verify with vpn-relay-apply check\n'
   printf '    input filter: a TCP set not confirmed yet (see the dry-run above) arms the 5-minute dead-man,\n'
@@ -4946,7 +5181,7 @@ relay_rollback() {
   local state rc line u
   warn "ROLLBACK (relay): restoring PREV_SHA=${PREV_SHA:-<unknown>} and the backed-up relay state"
 
-  git reset --hard "$PREV_SHA" >/dev/null 2>&1; report+=("git reset --hard ${PREV_SHA}: rc=$?")
+  report+=("$(restore_tree_to "$PREV_SHA")")
 
   # A unit that was not running before is stopped again (this run may have started
   # it; its ExecStop removes the table — the saved one, if any, comes back below).
@@ -5176,8 +5411,8 @@ relay_phase2() {
 
   arm_relay_rollback          # from here every failure restores the backup
 
-  log "advancing working tree to origin/main (${TAG})"
-  git reset --hard origin/main || rollback_now "git reset --hard origin/main failed"
+  log "advancing working tree to origin/main (${TAG}) on local branch ${DEPLOY_BRANCH}"
+  pin_tree_to_main origin/main || rollback_now "git checkout -f -B ${DEPLOY_BRANCH} origin/main failed"
 
   # The registry mechanism, role-filtered: installs/refreshes vpn-relay-apply
   # (required on a relay) and nothing else; its failures reach relay_rollback.
@@ -5344,6 +5579,14 @@ flock -n "$LOCK_FD" || die "another deploy already holds ${LOCK}"
 fetch_origin_main
 
 [[ -x "${VENV}/bin/python" ]] || die "prod venv missing at ${VENV}"
+
+# SSL/certifi on the LIVE venv (current deps), for the report — never a gate here: the
+# new deps are probed in Phase 2 right after their install (assert_venv_ssl).
+if SSL_PROBE_PRE="$(venv_ssl_probe "$VENV")"; then
+  log "ssl/certifi (live venv, current deps): ${SSL_PROBE_PRE}"
+else
+  warn "ssl/certifi (live venv, current deps): ${SSL_PROBE_PRE} — the running bot will hit this on its next restart; Phase 2 probes the new deps after the install and rolls back if they fail too"
+fi
 
 need_app=$(( 1073741824 + $(du -sb "$VENV" | awk '{print $1}') ))   # 1GiB + room for .venv.prev
 avail_app=$(fs_avail_bytes "$APP_DIR")
@@ -5647,6 +5890,10 @@ phase1_report() {
   head_sha="$(git rev-parse --short HEAD)"
   [[ "$head_sha" == "$TAG" ]] && uptodate=" (already up to date)"
   printf '  checkout          : %s -> origin/main %s%s\n' "$head_sha" "$TAG" "$uptodate"
+  printf '  %s\n' "$(branch_report_line)"
+  printf '  ssl/certifi       : live venv (current deps): %s\n' "${SSL_PROBE_PRE:-<not probed>}"
+  printf '                      Phase 2 probes the NEW deps right after pip install, before vpn-bot starts;\n'
+  printf '                      a failure rolls back (.venv <- .venv.prev, tree -> PREV_SHA)\n'
 
   # --- Model detection: MODE and the exact facts it was derived from ---
   local basis="helper-nonroot"
@@ -5997,8 +6244,8 @@ log "backup verified (${#manifest[@]} entries)"
 
 arm_rollback                # from here, any failure triggers full rollback()
 
-log "advancing working tree to origin/main (${TAG})"
-git reset --hard origin/main
+log "advancing working tree to origin/main (${TAG}) on local branch ${DEPLOY_BRANCH}"
+pin_tree_to_main origin/main
 
 log "snapshotting venv to ${VENV_PREV} (file-level, for a network-independent rollback)"
 rm -rf "$VENV_PREV"
@@ -6008,9 +6255,13 @@ VENV_SNAPSHOT_DONE=1
 log "installing prod dependencies"
 "${VENV}/bin/pip" install -r requirements.txt -c constraints.txt
 "${VENV}/bin/pip" check
+# The TLS context the bot builds on its first request, on the NEW deps — before any
+# other mutation and long before the bot starts. The venv is already replaced here, so
+# a failure is rollback_now (.venv <- .venv.prev); see assert_venv_ssl.
+assert_venv_ssl
 
 # Refresh out-of-repo privileged helpers from the freshly-advanced tree. This is
-# the structural fix for the /usr/local/sbin drift: `git reset` above updated the
+# the structural fix for the /usr/local/sbin drift: the checkout above updated the
 # tracked source but not the installed copy, so without this step a fixed helper
 # would keep running stale (the vpn-bot-warp-routes incident). Done here, right
 # before the unit install, so the helper the units execute is current before any
@@ -6103,7 +6354,7 @@ if [[ "$MODE" == "helper-nonroot" ]]; then
 fi
 
 # Schema migration gate -----------------------------------------------------
-# Read the target from the JUST-CHECKED-OUT code (post `git reset`), then WAIT for
+# Read the target from the JUST-CHECKED-OUT code (post `git checkout -f -B main origin/main`), then WAIT for
 # migrations to actually reach it before deciding. A single read here would race
 # bootstrap(): under Type=simple is-active is true before migrations run, so the
 # old `>= SCHEMA_BEFORE` check read the stale pre-migration value and reported
@@ -6191,8 +6442,9 @@ cat <<EOF
 
 ===== DEPLOY OK =====
   model            : ${MODE}
-  deployed         : ${PREV_SHA} -> ${TAG}
+  deployed         : ${PREV_SHA} -> ${TAG} (local branch ${DEPLOY_BRANCH})
   schema_version   : ${SCHEMA_BEFORE} -> ${SCHEMA_AFTER} (target ${SCHEMA_EXPECT})
+  ssl/certifi      : ${SSL_PROBE_POST:-not probed}
   backup           : ${ARCHIVE}
   units skipped    : ${skipped[*]:-none}
   removed protocols: $(uninstalled_protocols | sed 's/^$/none/')

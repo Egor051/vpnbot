@@ -410,7 +410,8 @@ def test_restart_command_failure_is_also_a_rollback(tmp_path: Path) -> None:
 
 
 def test_already_restarted_sidecars_are_named_on_the_fatal_path(tmp_path: Path) -> None:
-    """The rollback restores the tree but not the sidecars we already bounced."""
+    """The fatal path names every sidecar this deploy bounced — the rollback restarts
+    exactly those again on PREV_SHA (tests/test_deploy_sidecar_rollback.py)."""
     proc = _run(
         tmp_path,
         SNAPSHOT_AND_RESTART,
@@ -420,8 +421,10 @@ def test_already_restarted_sidecars_are_named_on_the_fatal_path(tmp_path: Path) 
         },
     )
     assert proc.returncode == 9, proc.stdout
-    assert "restart them by hand" in proc.stdout
-    assert SUB_UNIT in proc.stdout.split("restart them by hand")[0][-200:]
+    assert "the rollback restarts them again" in proc.stdout
+    named = proc.stdout.split("the rollback restarts them again")[0][-200:]
+    assert SUB_UNIT in named and HY2_UNIT in named
+    assert "restart them by hand" not in proc.stdout
 
 
 def test_port_that_does_not_answer_is_informational(tmp_path: Path) -> None:

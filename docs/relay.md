@@ -370,7 +370,8 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
 - **Phase 2**: back up the live `nft list table ip vpnrelay` and
   `nft list table inet vpnrelay_input`, the installed helper, every unit of the set, the sysctl file and the
   confirmation marker `/etc/vpn-relay/input.confirmed` (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; nothing is
-  stopped for it); `git reset --hard origin/main`; install `vpn-relay-apply` through
+  stopped for it); `git checkout -f -B main origin/main` (the checkout stays on local `main`,
+  [as on the main server](operations.md#pre-deploy-checklist)); install `vpn-relay-apply` through
   `OUT_OF_REPO_HELPERS` (role `relay`) and every unit of the set verbatim (a copy that already
   matches is left as it is); `daemon-reload`, `enable` `vpn-relay` and every timer,
   `restart vpn-relay` (established flows keep their conntrack NAT
