@@ -986,6 +986,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   started, and ANY unit of the set missing after Phase 2 rolls back; the rollback unit by unit; `resolve` a
   no-op with an address upstream; the absent-ok reason per entry, and every absent-ok entry must carry one.
 
+- **The relay agent reads the relay's unit set from the checkout — the same `relay_unit_names` rule as
+  deploy.sh, install.sh and the host check — instead of its own list** (docs/relay.md#the-agent-vpn-relay-agent).
+  `scripts/vpn-relay-agent` hard-coded `vpn-relay-resolve.{timer,service}` + `vpn-relay.service` for
+  `uninstall` and `vpn-relay.service` + `vpn-relay-resolve.timer` for `status`, so a unit added to
+  `deploy/relay/` would be installed by deploy/install but never stopped, disabled or removed by `uninstall`,
+  and never shown by `status`. Now `checkout_unit_names` is that rule in Python (every
+  `/opt/vpn-service/deploy/relay/*.service` and `*.timer`, never an `*.example.*`, no dotfile); `uninstall`
+  stops/disables and then removes the whole set in a safe order — **timers first** (none can fire its oneshot
+  between the steps), then the oneshots, **`vpn-relay.service` last** (its `ExecStop` removes the tables);
+  its step line names the units. `status` reports `vpn-relay.service` and every timer of the set (a oneshot is
+  `inactive` between runs; its timer tells). **Without a checkout** (removed, or on a ref without
+  `deploy/relay/vpn-relay.service`) the agent does not fall back to a list frozen into it, which would drift
+  again. It uses the `vpn-relay.service` / `vpn-relay-<name>.service|.timer` unit files actually present in
+  `/etc/systemd/system`, plus `vpn-relay.service`, which is stopped even when its file is gone. A test pins
+  that every unit of `deploy/relay/` matches that name pattern. With a checkout, only its set is touched; another
+  `vpn-relay*` file is left alone. **Tests** (`tests/test_vpn_relay_agent.py`): the agent's set equals
+  deploy.sh's `relay_unit_names` on the repo and on a checkout with an extra timer/service (plus an example, a
+  dotfile, a directory and a non-unit); no unit of the set but the data plane named in the agent; the stop
+  order; `status` with the extra timer; `uninstall` stops, disables and removes the extra pair, in the order
+  timers → services → `vpn-relay.service`, before the tables go; without a checkout, by the files present
+  (an unrelated unit file and a drop-in directory untouched).
+
 - **Tests never reach the network; deploy Phase 1 no longer fails on
   `test_built_monitor_alerts_every_admin_once_per_transition` (1 failed / 5109 passed on the host, green in
   CI — the host-leak class of #239/#241/#242/#336), and the suite no longer sends traffic from the production
