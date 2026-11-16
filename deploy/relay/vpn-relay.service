@@ -16,14 +16,14 @@
 # socket activation) must be listening first. A unit that does not exist orders nothing.
 #
 # Installed VERBATIM by scripts/deploy.sh in the relay role (the same way
-# deploy/vpn-bot.service is installed on the main server), enabled, restarted,
-# then verified with `vpn-relay-apply check`; any failure rolls back. The helper
-# it runs is installed/refreshed from OUT_OF_REPO_HELPERS (role relay).
+# deploy/vpn-bot.service is installed on the main server), enabled,
+# reload-or-restarted, then verified with `vpn-relay-apply check`; any failure rolls
+# back. The helper it runs is installed/refreshed from OUT_OF_REPO_HELPERS (role relay).
 #
 # `systemctl reload` re-applies (ExecReload): the same atomic `nft -f`, with no
-# stop in between — what scripts/install.sh (relay mode) uses to swap the table of
-# a running relay, a hand-made one included, without a moment of no DNAT. A restart
-# would delete the tables first (ExecStop).
+# stop in between — what scripts/deploy.sh (reload-or-restart) and scripts/install.sh
+# (relay mode) use to swap the table of a running relay, a hand-made one included,
+# without a moment of no DNAT. A restart would delete the tables first (ExecStop).
 #
 # Replaces the hand-installed unit of the same name that loaded
 # /etc/vpn-relay.nft; that file is renamed to /etc/vpn-relay.nft.pre-repo.<ts>

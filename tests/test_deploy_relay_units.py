@@ -359,7 +359,7 @@ def test_the_production_relay_gets_the_resolve_units_and_deploys_ok(tmp_path: Pa
         assert _read(host.unit_dir / src.name) == _read(src), src.name
     assert _mutating(host) == [
         "daemon-reload", f"enable --quiet {DATA_PLANE}", f"enable --quiet {RESOLVE_TIMER}",
-        f"restart {DATA_PLANE}", f"start {RESOLVE_TIMER}",
+        f"reload-or-restart {DATA_PLANE}", f"start {RESOLVE_TIMER}",
     ]
     assert host.state(f"{RESOLVE_TIMER}.active") == "active"
     assert host.state(f"{RESOLVE_TIMER}.enabled") == "enabled"

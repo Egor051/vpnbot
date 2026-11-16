@@ -95,6 +95,10 @@ KeyDeleter = Callable[[int, int], Awaitable[None]]
 
 PROTOCOL = 1
 DEFAULT_SSH_PORT = 22
+# `update` runs a whole relay deploy, its pytest gate included, in the agent's transient
+# unit (UPDATE_TIMEOUT = 2700 s in scripts/vpn-relay-agent); the answer may take that
+# long, plus a minute for SSH and the agent itself.
+AGENT_UPDATE_TIMEOUT = 2760.0
 UNINSTALLED_KEY = AGENT_UNINSTALLED_KEY
 _ADDRESS = re.compile(r"(?P<host>[A-Za-z0-9.-]{1,253})(?::(?P<port>[0-9]{1,5}))?")
 
@@ -1061,11 +1065,12 @@ class RelayService:
         return agent_check_from_status(reply.payload)
 
     async def update_agent(self, actor_user_id: int, relay_id: int) -> AgentReply:
-        """``update`` on the relay (the newest release tag; minutes)."""
+        """``update`` on the relay: deploy.sh of the newest release tag (minutes — its
+        pytest gate runs on the relay)."""
         await self.users.require_superadmin(actor_user_id)
         relay = await self._claim(relay_id)
         try:
-            reply = await self._call(relay, "update", timeout=960.0)
+            reply = await self._call(relay, "update", timeout=AGENT_UPDATE_TIMEOUT)
         finally:
             self._busy.discard(relay.id)
         await self._audit(actor_user_id, "relay_agent_update", relay.id,

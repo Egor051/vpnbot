@@ -351,8 +351,9 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
 а активен `vpn-relay` и unit'а `vpn-bot` нет вовсе).
 
 - **Phase 1** (только чтение; `CHECK=1` на ней останавливается и печатает отчёт): fetch
-  `origin/main`, тот же гейт ruff / compileall / pytest на checkout, что и на основном
-  сервере (тестовый venv собирается в `/var/lib/vpn-bot-deploy/`, поэтому relay нужен
+  `origin/main` и тегов, выбор [ревизии для деплоя](#какую-ревизию-деплоит-relay) — по умолчанию
+  самый новый релиз, только вперёд — и передача управления `deploy.sh` ЭТОЙ ревизии; на ней тот же
+  гейт ruff / compileall / pytest, что и на основном сервере (тестовый venv собирается в `/var/lib/vpn-bot-deploy/`, поэтому relay нужен
   `python3-venv` и ~1 ГиБ свободного места), `vpn-relay-apply check --dry-run` из checkout,
   исходное состояние relay (включая `nf_conntrack_max` и
   `nf_conntrack_tcp_timeout_established` в рантайме), сравнение каждого unit'а
@@ -365,24 +366,27 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
   есть поставит ли Phase 2 dead-man, и URL пробы main, которая его подтвердит; порт, который
   слушает, но был бы закрыт фильтром, отмечается отдельно: `check` в Phase 2 откатил бы деплой.
 - **Phase 2**: бэкап живых `nft list table ip vpnrelay` и `nft list table inet vpnrelay_input`,
-  установленного хелпера, каждого unit'а набора, sysctl-файла и маркера подтверждения
+  установленных хелперов (`vpn-relay-apply`, агент, …), каждого unit'а набора, sysctl-файла и маркера подтверждения
   `/etc/vpn-relay/input.confirmed` (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; ради бэкапа ничего не
-  останавливается); `git checkout -f -B main origin/main` (чекаут остаётся на локальной `main`,
-  [как на основном сервере](operations.ru.md#pre-deploy-чеклист)); установка `vpn-relay-apply` через
+  останавливается); `git checkout -f --detach <цель>` (checkout relay стоит detached на своём
+  релизе — локальная ветка, на которой он был, остаётся на месте); установка хелперов через
   `OUT_OF_REPO_HELPERS` (роль `relay`) и каждого unit'а набора как есть (копия, которая уже
   совпадает, не переписывается); `daemon-reload`, `enable` `vpn-relay` и каждого таймера,
-  `restart vpn-relay` (установленные потоки сохраняют NAT в
-  conntrack на миллисекундный разрыв; неподтверждённый набор здесь же подтверждает проба main),
-  `start` таймера, который не активен;
-  проверка `vpn-relay-apply check`. Вокруг файлов хоста двигается [SSH-порт](host-state.ru.md#ssh-порт),
-  когда этого требует `SSH_PORT` (фаза 1: оба порта; рестарт `vpn-relay` пускает их, проба с main
+  `reload-or-restart vpn-relay` (работающий relay **перезагружается**: `ExecReload` — тот же
+  атомарный apply, без `ExecStop` перед ним, поэтому нет момента без DNAT — так всегда делал
+  установщик; неработающий relay запускается; неподтверждённый набор здесь же подтверждает проба
+  main), `start` таймера, который не активен;
+  проверка `vpn-relay-apply check` и **ровно одного DNAT на каждый проброшенный порт во всём
+  ruleset** (второй в другой таблице — например, из `/etc/nftables.conf` при загрузке — конкурировал
+  бы с relay; установщик проверял это всегда). Вокруг файлов хоста двигается [SSH-порт](host-state.ru.md#ssh-порт),
+  когда этого требует `SSH_PORT` (фаза 1: оба порта; reload `vpn-relay` пускает их, проба с main
   их подтверждает); сразу после DEPLOY OK `vpn-bot-ssh-port.service` один раз ищет доказательство,
   так что relay обычно заканчивает переезд в том же прогоне.
   В DEPLOY OK есть `ssh port: …` и `input filter : …` из
   `vpn-relay-apply input-status` — `CONFIRMED by main probe (…)`, и делать ничего не нужно, или
   `PENDING CONFIRM (…) — <причина>`, за которым идут причина и инструкция выполнить
   `input-confirm` из НОВОЙ ssh-сессии в течение 5 минут.
-- **Любой сбой** откатывает: прежний checkout, хелпер, unit'ы и sysctl-файл (или их отсутствие),
+- **Любой сбой** откатывает: прежний checkout (`PREV_SHA`, detached), хелперы, unit'ы и sysctl-файл (или их отсутствие),
   сохранённая таблица проброса применяется заново одной транзакцией, входной фильтр — как был:
   подтверждённый восстанавливается из дампа, отсутствовавший снимается, ждавший `input-confirm`
   тоже снимается (восстановленный, он мог бы пережить свой dead-man; снять — безопасное
@@ -398,6 +402,45 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
   переход**, а не drift. После первого успешного деплоя `/etc/vpn-relay.nft` переименовывается
   в `/etc/vpn-relay.nft.pre-repo.<ts>` (не удаляется) и больше никем не читается.
 
+#### Какую ревизию деплоит relay
+
+Relay следует за **релизами**, и движок обновления у него ОДИН — этот деплой. `sudo bash
+scripts/redeploy.sh` на relay и «⬆️ Обновить агент» в боте ([`update`](#агент-vpn-relay-agent)
+агента) оба заканчиваются в `deploy.sh` и выбирают одну и ту же ревизию:
+
+- **по умолчанию** — самый новый тег релиза: `vMAJOR.MINOR[.PATCH[.BUILD]]`, сравнение как чисел
+  (`v1.10.0` новее `v1.9.0`). Всё прочее — не релиз: `v.3.1.0` (тег-опечатка в репозитории),
+  `v3.2.0-rc1`, `v3`. Правило записано дважды — `relay_latest_release` в `deploy.sh`,
+  `latest_release` в агенте, — и `tests/test_relay_release_tag.py` прогоняет оба на одних и тех же
+  тегах, так что разойтись они не могут.
+- **`DEPLOY_REF=main`** — `origin/main`; **`DEPLOY_REF=<тег>`** или **`DEPLOY_REF=<sha коммита>`**
+  — этот коммит. На основном сервере `DEPLOY_REF` отклоняется, если это не `main`: main всегда
+  деплоит `origin/main` на локальную `main`.
+
+И только **вперёд**:
+
+| Checkout | Деплой |
+|---|---|
+| позади цели (её предок) | деплоит её; checkout оказывается **detached** на цели, откат возвращает `PREV_SHA` тоже detached |
+| на цели | `nothing to deploy` (`FORCE=1` деплоит заново, `CHECK=1` проверяет) |
+| впереди цели | `INFO: … is ahead of latest release vX.Y.Z … nothing to deploy; DEPLOY_REF=main to follow main` — выход 0, relay никогда не откатывается назад |
+| на другой линии истории | отказ до любых изменений («never moves sideways») |
+
+Detached на теге релиза или впереди него — нормальное состояние relay: Phase 1 сообщает, где дерево
+и куда оно пойдёт (`tree : … -> latest release vX.Y.Z (…), detached`), без WARN.
+
+Работает **собственный** `deploy.sh` цели: `redeploy.sh` запускает копию из `origin/main`, она
+выбирает цель и передаёт управление (`exec`) `deploy.sh` этой ревизии — relay, который деплоит более
+старый релиз, не должен прогонять более новый код реестров против более старого дерева. Цель,
+`deploy.sh` которой старше деплоя relay по релизам, отклоняется (она задеплоила бы `origin/main`);
+`DEPLOY_REF=main` деплоит main.
+
+Relay, задеплоенный раньше из `main` — на 2026-11-16 это ru1 на `1a87f67`, тогда как самый новый
+релиз `v3.1.0` старше, — при обычном запуске остаётся на месте (строка INFO выше); за релизами он
+снова пойдёт, когда появится релиз новее его коммита. `sudo DEPLOY_REF=main bash
+scripts/redeploy.sh` держит его на main до тех пор (этот же запуск ставит агента, который
+обновляет через `deploy.sh`).
+
 #### Какие unit'ы ставит деплой relay
 
 Набор unit'ов relay — **все `deploy/relay/*.service` и `*.timer`** (файл `*.example.*` — не
@@ -408,7 +451,7 @@ unit). Это одно правило (`relay_unit_names`), дословно о�
 
 | Unit | Phase 2 |
 |---|---|
-| `vpn-relay.service` | ставится как есть, включается, перезапускается (`vpn-relay-apply apply`) |
+| `vpn-relay.service` | ставится как есть, включается, перезагружается, если работает, — запускается, если нет (`systemctl reload-or-restart`: `vpn-relay-apply apply` без остановки между) |
 | `vpn-relay-resolve.timer` | ставится как есть, включается, запускается, если не активен |
 | `vpn-relay-resolve.service` | только ставится как есть — его запускает таймер; деплой его не запускает никогда |
 
@@ -457,16 +500,19 @@ install -m 0600 -o root -g root /opt/vpn-service/deploy/relay/relay.env.example 
 получить relay-участников на несколько минут раньше.) Затем проверка и деплой:
 
 ```bash
-cd /opt/vpn-service && sudo CHECK=1 bash scripts/redeploy.sh
+cd /opt/vpn-service && sudo CHECK=1 DEPLOY_REF=main bash scripts/redeploy.sh
 ```
 
 ```bash
-cd /opt/vpn-service && sudo FORCE=1 bash scripts/redeploy.sh
+cd /opt/vpn-service && sudo FORCE=1 DEPLOY_REF=main bash scripts/redeploy.sh
 ```
 
-`FORCE=1` — только в этот первый раз: свежий clone уже стоит на `origin/main`, и обычный
-запуск ответит «nothing to deploy» — ровно как на основном сервере. Дальше обновления
-обычные: `sudo CHECK=1 bash scripts/redeploy.sh`, затем `sudo bash scripts/redeploy.sh`.
+`DEPLOY_REF=main` и `FORCE=1` — только в этот первый раз: свежий clone уже стоит на
+`origin/main` — впереди самого нового релиза, о чём обычный запуск только сообщил бы
+([какую ревизию деплоит relay](#какую-ревизию-деплоит-relay)), — а `FORCE=1` потому, что он уже на
+цели. Дальше обновления обычные: `sudo CHECK=1 bash scripts/redeploy.sh`, затем
+`sudo bash scripts/redeploy.sh` — следующий релиз новее этого коммита; чтобы следовать за main,
+оставьте `DEPLOY_REF=main` в обоих.
 
 Первый деплой включает [входной фильтр](#входной-фильтр), проба main его подтверждает, и
 DEPLOY OK говорит `input filter : CONFIRMED by main probe (…)` — запускать ничего не нужно. Только
@@ -703,7 +749,7 @@ SSH, как выше, но:
 | `hello <token>` | Завершает pairing; отвечает фактами о relay. Единственный запрос до pairing. |
 | `status` | Факты: цель, порты, текущая цель DNAT, во что имя резолвится сейчас, `ip_forward`, юниты (`vpn-relay.service` и каждый таймер набора ниже), ssh-порты, source-адрес исходящего трафика, checkout, последнее обновление и `vpn-relay-apply check`. |
 | `apply target=<dns-имя> tcp=<порты> udp=<порты>` | Сменить цель/порты: отказ для имени, которое не имя или не резолвится на relay, порта вне 1..65535, больше 8 портов, TCP-порта, на котором слушает sshd. Переписывает только `RELAY_UPSTREAM_HOST` / `RELAY_FORWARD_*`, применяет, проверяет; возвращает `.env` и применяет заново, если ruleset или проверка (таблица, sysctl, upstream не отвечает) не прошли. |
-| `update` | В transient-юните (`systemd-run --wait`): забирает теги релизов, переводит checkout на самый новый `vX.Y.Z` — только вперёд, никогда назад или вбок — и запускает его `install.sh --relay-update` (helper'ы и юниты переустановлены, vpn-relay перезагружен, проверен; при сбое откат и checkout обратно). |
+| `update` | В transient-юните (`systemd-run --wait`): забирает теги релизов, выбирает самый новый релиз ([то же правило, что у деплоя](#какую-ревизию-деплоит-relay)) — только вперёд, никогда назад или вбок — и запускает для него деплой relay: `scripts/redeploy.sh` с `DEPLOY_REF=<тег>` (`deploy.sh` этого тега в своём transient-юните, лог `/root/deploy-<ts>.log`): гейт pytest, helper'ы, юниты и файлы хоста, reload vpn-relay, проверки; откатывается `deploy.sh` сам. Сам агент ничего не checkout'ит. Итог (`running` / `noop` / `failed` / `succeeded`, `from_commit`, `to_commit`, `release`, `log`) — в `/var/lib/vpn-relay/update.json` и в `status`. Это минуты: агент ждёт до 45 минут. |
 | `uninstall` | В transient-юните: юниты набора ниже остановлены и удалены (сначала таймеры, `vpn-relay.service` последним), обе таблицы удалены, sysctl-файл удалён и `ip_forward` возвращён к значению до установки, удалены helper'ы, `/etc/vpn-relay`, `/var/lib/vpn-relay`, checkout (если его создал установщик) и строка ключа агента. Бэкап adoption остаётся. Отказ на хосте без `/etc/vpn-relay/install.json` установщика. |
 
 **Юниты** в агенте не перечислены. Он берёт их из checkout по тому же правилу, что deploy.sh,
@@ -754,9 +800,16 @@ TOTP-код ([ниже](#управление-relay-в-админ-панели))
 - **Нет входного фильтра**: установщик ставит `RELAY_INPUT_FILTER=off` — входящее на сам relay не
   фильтруется (как на свежем VPS). [Входной фильтр](#входной-фильтр) можно включить вручную; его
   dead-man тогда требует подтверждения, как описано там.
-- Смешивание с `redeploy.sh`: relay из установщика можно разворачивать `redeploy.sh` (это checkout с
-  `NODE_ROLE=relay`), но тот следует за `origin/main`, а не за релизами, и приносит host-файлы;
-  держите один способ на relay.
+- `redeploy.sh` и `update` агента — один и тот же движок (`deploy.sh` в роли relay, по умолчанию
+  самый новый релиз): relay из установщика можно в любой момент задеплоить вручную, а host-файлы
+  приходят с каждым обновлением в обоих случаях. Агент из времени до этого (он вызывал
+  `install.sh --relay-update`, который теперь только отказывает) получает новый ОДНИМ ручным
+  `sudo bash /opt/vpn-service/scripts/redeploy.sh` на relay — с `DEPLOY_REF=main` на relay, который
+  уже впереди самого нового релиза.
+- `/etc/vpn-relay/install.json` хранит то, что нужно `uninstall`; его `ref` — коммит, который
+  поставила **установка** (переустановка его перезаписывает), — актуальным не поддерживается:
+  деплои и `update` двигают checkout, не трогая файл. Коммит, на котором работает relay, —
+  `git -C /opt/vpn-service rev-parse HEAD` (`status`: `checkout.commit`).
 - Только IPv4, как и весь relay.
 
 ## Управление relay в админ-панели

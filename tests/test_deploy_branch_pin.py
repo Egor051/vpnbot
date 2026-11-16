@@ -5,14 +5,16 @@ branch is checked out. Production had been left on ``feat/offsite-system-bundle`
 every deploy rewrote that feature branch to the tip of main and ``git status`` named a
 branch the host was not running. Now:
 
-* Phase 2 (both roles): ``git checkout -f -B main origin/main``;
-* rollback (both roles): ``git checkout -f -B main PREV_SHA``, falling back to
+* Phase 2 (the main server): ``git checkout -f -B main origin/main``;
+* rollback (the main server): ``git checkout -f -B main PREV_SHA``, falling back to
   ``git reset --hard PREV_SHA`` should git refuse the branch — the code comes back
   regardless;
 * the no-op guard (HEAD == origin/main, no FORCE): ``git checkout -B main origin/main``
   only — the same commit, so no file changes, a local edit survives, nothing restarts;
 * Phase 1 WARNs when the tree is not on main, and a real deploy stops before any
   mutation when another worktree has main checked out (git would refuse ``-B``).
+
+A relay follows releases, detached — tests/test_relay_release_tag.py.
 
 Driven through the ``DEPLOY_SELFTEST=1`` seam against REAL git repositories under
 tmp_path (a bare origin and a clone) — never the repository running this suite. The
@@ -287,19 +289,23 @@ def _code_lines(text: str) -> list[str]:
 
 
 def test_no_role_advances_the_tree_with_reset_hard_any_more() -> None:
+    """main: local main at origin/main; a relay: its target, detached (its own suite,
+    tests/test_relay_release_tag.py) — neither by reset --hard."""
     text = DEPLOY_SH.read_text(encoding="utf-8")
     code = "\n".join(_code_lines(text))
-    assert "git reset --hard origin/main" not in code
-    assert code.count("pin_tree_to_main origin/main") == 2, "main Phase 2 and relay_phase2"
-    for header in ("\nrollback() {", "\nrelay_rollback() {"):
+    assert "git reset --hard" not in code
+    assert code.count("pin_tree_to_main origin/main") == 1, "main Phase 2 only"
+    assert code.count('pin_tree_detached "$RELAY_TARGET_SHA"') == 1, "relay_phase2"
+    for header, restore in (("\nrollback() {", "restore_tree_to"), ("\nrelay_rollback() {", "restore_tree_detached")):
         start = text.index(header)
         body = text[start : text.index("\n}\n", start)]
-        assert 'report+=("$(restore_tree_to "$PREV_SHA")")' in body, header
+        assert f'report+=("$({restore} "$PREV_SHA")")' in body, header
         assert "git reset --hard" not in "\n".join(_code_lines(body)), header
 
 
-def test_both_phase1_reports_carry_the_branch_line() -> None:
+def test_each_phase1_report_carries_its_tree_line() -> None:
+    """main: the branch line (WARN off main); a relay: where the tree goes, no WARN."""
     text = DEPLOY_SH.read_text(encoding="utf-8")
-    for header in ("\nphase1_report() {", "\nrelay_phase1_report() {"):
+    for header, line in (("\nphase1_report() {", "branch_report_line"), ("\nrelay_phase1_report() {", "relay_ref_report_line")):
         start = text.index(header)
-        assert "branch_report_line" in text[start : text.index("\n}\n", start)], header
+        assert line in text[start : text.index("\n}\n", start)], header

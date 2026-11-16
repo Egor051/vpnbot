@@ -8,6 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **A relay has ONE update engine: `scripts/deploy.sh`, following releases (docs/relay.md#which-revision-a-relay-deploys).**
+  The relay agent's `update` used to check the newest `v*` tag out itself and run
+  `install.sh --relay-update` (helpers and units only: no host files, no deploy backup, no host
+  invariants), while `redeploy.sh` put the relay on `main` — two sources of truth for the ref
+  and for what gets applied. Now `deploy.sh` in the relay role deploys the newest release tag by
+  default (`vMAJOR.MINOR[.PATCH[.BUILD]]`; `v.3.1.0`, pre-releases are not releases — the same
+  rule as the agent, `tests/test_relay_release_tag.py` runs both), or `DEPLOY_REF=<tag|main|sha>`
+  (forwarded by `redeploy.sh`); only forward: a checkout already at or ahead of the target is a
+  no-op ("ahead of latest release; DEPLOY_REF=main to follow main"), one on another line of
+  history is refused before any change. The tree goes to the target **detached**, a rollback
+  brings `PREV_SHA` back detached, and the target's own `deploy.sh` runs the deploy (handover).
+  The agent's `update` picks the release and runs `redeploy.sh` with `DEPLOY_REF=<tag>`
+  (`update.json` keeps its states and fields, plus `log`). From the installer path the deploy
+  took over: a running `vpn-relay` is **reloaded** (no moment without DNAT) and exactly one DNAT
+  per forwarded port in the whole ruleset is verified; every relay helper (the agent too) is
+  backed up and restored by a rollback. `install.sh --relay-update` is retired (it refuses with
+  the one command that moves an old relay over). The main server is unchanged and refuses a
+  `DEPLOY_REF` other than `main`. `/etc/vpn-relay/install.json`'s `ref` is documented as the
+  install's ref (never kept current).
 - **Config backups are pruned in the source.** Xray: `XrayConfigAdapter` now keeps the newest
   `XRAY_CONFIG_BACKUP_KEEP` (new, default 10, 1–500) of its own `config.json.<stamp>.<ns>.<token>.bak`,
   pruned after each change that was installed **and** applied. Only names matching that exact

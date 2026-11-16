@@ -3,8 +3,10 @@
 # Idempotent, privilege-model-aware production deploy for the VPN Telegram bot.
 #
 # This script replaces the ad-hoc "paste a command block into an ssh shell"
-# redeploy. It always deploys the current origin/main and is fetched FROM
-# origin/main so it deploys itself from tip-of-main.
+# redeploy. On the main server it always deploys the current origin/main and is
+# fetched FROM origin/main so it deploys itself from tip-of-main. A relay deploys a
+# release instead (the newest release tag, or DEPLOY_REF) and hands over to THAT
+# revision's deploy.sh, so there too the code that deploys a tree is the tree's own.
 #
 # The supported entry point is scripts/redeploy.sh, which does exactly this:
 #
@@ -20,7 +22,8 @@
 # green, or the system is rolled back to PREV_SHA (code + venv + DB + control-
 # plane configs + unit, and every sidecar the deploy restarted is restarted again
 # on that code) and the bot is running. The bot is never left stopped. Either way
-# the live tree is on local branch `main` (see deploy_branch_phase1).
+# the live tree is on local branch `main` (see deploy_branch_phase1); a relay's is
+# detached at its target or at PREV_SHA (see relay_resolve_target).
 #
 # The two supported deployment models are detected, never hardcoded:
 #   api-root       XRAY_APPLY_MODE=api, User=root, PRIVILEGE_HELPERS_ENABLED unset
@@ -38,17 +41,25 @@
 #          mutation, and the main path continues exactly as it always has.
 #   relay  an L4 relay (docs/relay.md). Runs NO bot, DB, Xray, AmneziaWG, WARP or
 #          Telegram; its .env is the minimal deploy/relay/relay.env.example.
-#          Phase 1: fetch, the same ruff/compileall/pytest gate on the checkout,
+#          The ONE engine that updates a relay: `redeploy.sh` by hand and the relay
+#          agent's `update` (scripts/vpn-relay-agent) both end here.
+#          Phase 1: fetch origin/main and the tags, pick the target — DEPLOY_REF,
+#          default the newest release tag, forward only (relay_resolve_target) — and
+#          hand over to the target's own deploy.sh (relay_handover); the same
+#          ruff/compileall/pytest gate on the target,
 #          `vpn-relay-apply check --dry-run` from the checkout (the ruleset renders
 #          from .env) — no main-only check. Phase 2: backup (live table ip
-#          vpnrelay and table inet vpnrelay_input, helper, units, sysctl file),
-#          reset, install the helper (OUT_OF_REPO_HELPERS, role relay) and the
+#          vpnrelay and table inet vpnrelay_input, the relay's helpers, units, sysctl
+#          file), detached checkout of the target, install the helpers
+#          (OUT_OF_REPO_HELPERS, role relay) and the
 #          relay's unit set — every deploy/relay/*.service|*.timer
 #          (relay_unit_names, the rule scripts/install.sh and
 #          scripts/vpn-bot-host-check use) — verbatim, daemon-reload, enable
-#          vpn-relay.service and every timer, restart vpn-relay.service, start a
+#          vpn-relay.service and every timer, reload-or-restart vpn-relay.service
+#          (a running relay swaps its tables without a moment of no DNAT), start a
 #          timer that is not active (the oneshots a timer runs are never started
-#          by hand), verify = `vpn-relay-apply check`; any failure rolls back to
+#          by hand), verify = `vpn-relay-apply check` and exactly one DNAT per
+#          forwarded port in the whole ruleset; any failure rolls back to
 #          the backup (files + saved tables + the input filter's dead-man state
 #          and confirmation marker) and to the pre-deploy runtime sysctls
 #          (ip_forward, conntrack). A TCP set of the input filter that is not
@@ -197,6 +208,22 @@
 #             old one only after a proof that the new one works from outside. The
 #             exception covers exactly a host copy that is the rendering of the ports
 #             ssh listens on now; a hand edit of those files still needs the knob.
+#
+#   DEPLOY_REF=<tag|main|sha>   (relay only; default: the newest release tag)
+#     What:   The revision a RELAY deploys (docs/relay.md, "Which revision a relay
+#             deploys"). Unset: the newest release tag vX.Y[.Z[.W]], by the rule the
+#             relay agent's `update` uses (relay_latest_release == the agent's
+#             latest_release; tests/test_relay_release_tag.py runs both). `main` =
+#             origin/main; a tag name or a commit sha (7-40 hex) = that commit. The
+#             tree goes there DETACHED and only FORWARD: a tree already at or ahead of
+#             the target is a no-op ("ahead of ..."), one on another line of history
+#             is refused before any mutation. The deploy.sh that runs is the target's
+#             own (relay_handover).
+#     When:   DEPLOY_REF=main to follow main on a relay; a tag to pin a release.
+#     Risk:   None beyond a normal deploy: it never moves a relay backwards or
+#             sideways. On the main server only empty or `main` is accepted — main
+#             always deploys origin/main on local main; anything else stops before
+#             any mutation.
 #
 #   DB_OWNER_USER=<user>   (default: vpn-bot)
 #     What:   The user that must own the data dir, vpn.db and its -wal/-shm
@@ -1082,6 +1109,17 @@ scan_out_of_repo_helpers() {
     elif cmp -s "$src" "$dst"; then printf '%s|%s|%s|synced|%s\n' "$base" "$src" "$dst" "$policy"
     else                            printf '%s|%s|%s|drift|%s\n'  "$base" "$src" "$dst" "$policy"; fi
   done
+}
+
+# The installed path of every OUT_OF_REPO_HELPERS entry of this host's role, one per
+# line (the relay deploy stages them all, so its rollback puts every helper back).
+role_helper_dsts() {
+  local entry dst role
+  for entry in "${OUT_OF_REPO_HELPERS[@]}"; do
+    IFS='|' read -r _ dst _ role _ <<< "$entry"
+    [[ "${role:-main}" == "${NODE_ROLE:-main}" ]] && printf '%s\n' "$dst"
+  done
+  return 0
 }
 
 # Phase 2: close out-of-repo helper drift from the checkout. Reinstalls every
@@ -4760,22 +4798,28 @@ constraints_stamp() {
 }
 
 # --------------------------------------------------------------------------- #
-# The live tree's branch — always local `main` (both roles)
+# The live tree's branch — always local `main` (the main server)
 # --------------------------------------------------------------------------- #
 # Phase 2 used to advance the tree with `git reset --hard origin/main`, which moves
 # WHATEVER branch is checked out. The production checkout had been left on a feature
 # branch (feat/offsite-system-bundle), so every deploy rewrote that branch to the tip
 # of main and `git status` named a branch the host was not running. The live tree is
 # now always on local `main`, created or reset to the commit it must carry:
-#   Phase 2 (both roles)     git checkout -f -B main origin/main
-#   rollback (both roles)    git checkout -f -B main PREV_SHA   (restore_tree_to)
+#   Phase 2                  git checkout -f -B main origin/main
+#   rollback                 git checkout -f -B main PREV_SHA   (restore_tree_to)
 #   no-op guard              git checkout -B main origin/main   (HEAD is already that
 #                            commit: no file changes, no -f so a local edit stays, the
 #                            bot is not restarted — noop_pin_branch)
 # `checkout -f -B` is `reset --hard` onto main: local changes to tracked files are
 # discarded (fetch_origin_main has refused a dirty tree before Phase 2 anyway),
 # untracked files stay. The branch the tree was on is never deleted or moved again.
+# A RELAY does not use any of this: it deploys a release, detached (the relay block
+# below — relay_resolve_target, pin_tree_detached, restore_tree_detached).
 DEPLOY_BRANCH="main"
+# The revision Phase 1 tests (run_checkout_tests) and its name in the log. Always
+# origin/main on the main server; a relay sets both in relay_resolve_target.
+DEPLOY_TARGET="origin/main"
+DEPLOY_TARGET_LABEL="origin/main"
 BRANCH_BEFORE=""     # the branch Phase 1 found (empty = detached HEAD)
 BRANCH_BLOCKER=""    # another worktree that has DEPLOY_BRANCH checked out (branch_blocker)
 
@@ -4806,8 +4850,8 @@ branch_blocker() {
   return 0
 }
 
-# Phase 1 (fetch_origin_main, both roles): record where the tree is and WARN when that
-# is not local DEPLOY_BRANCH. Read-only.
+# Phase 1 (fetch_origin_main, the main server): record where the tree is and WARN when
+# that is not local DEPLOY_BRANCH. Read-only.
 deploy_branch_phase1() {
   BRANCH_BEFORE="$(current_branch)"
   BRANCH_BLOCKER="$(branch_blocker)"
@@ -4820,7 +4864,7 @@ deploy_branch_phase1() {
   return 0
 }
 
-# One report line (both PHASE1_ONLY reports).
+# One report line (the main server's PHASE1_ONLY report).
 branch_report_line() {
   if [[ "$BRANCH_BEFORE" == "$DEPLOY_BRANCH" ]]; then
     printf 'branch            : %s (the deploy keeps the tree on it)' "$DEPLOY_BRANCH"
@@ -4833,10 +4877,10 @@ branch_report_line() {
   fi
 }
 
-# Phase 2 (both roles): the live tree to <rev> on local DEPLOY_BRANCH, reset --hard style.
+# Phase 2 (the main server): the live tree to <rev> on local DEPLOY_BRANCH, reset --hard style.
 pin_tree_to_main() { git checkout --quiet --force -B "$DEPLOY_BRANCH" "$1"; }
 
-# Rollback (both roles): the tree back to <sha> on local DEPLOY_BRANCH. Should git refuse
+# Rollback (the main server): the tree back to <sha> on local DEPLOY_BRANCH. Should git refuse
 # the branch (a stale refs/heads/main.lock, main taken by another worktree on git >=
 # 2.45), the CODE still comes back: a forced DETACHED checkout of <sha>, which writes no
 # branch ref at all — PREV_SHA matters more than the branch's name, and the next
@@ -4874,8 +4918,8 @@ noop_pin_branch() {
 
 # Fetch origin/main, set TAG, apply the up-to-date gate (exit 0 unless FORCE /
 # PHASE1_ONLY; the no-op still puts the tree on local main) and refuse a dirty working
-# tree. Shared by both host roles; the main path calls it exactly where this code used
-# to stand inline.
+# tree. The main server's; the main path calls it exactly where this code used to
+# stand inline (a relay fetches its target in relay_fetch_target).
 fetch_origin_main() {
   log "fetching origin/main"
   git fetch origin main
@@ -4895,12 +4939,7 @@ fetch_origin_main() {
   fi
 
   # Preconditions -------------------------------------------------------------
-  local dirty
-  dirty="$(git status --porcelain)"
-  if [[ -n "$dirty" ]]; then
-    warn "working tree is not clean:"; printf '%s\n' "$dirty" >&2
-    die "commit, stash, or clean the working tree before deploying"
-  fi
+  refuse_dirty_tree
   # Phase 2 checks the tree out as local main, which is wrong while another worktree has
   # main (branch_blocker). A real deploy stops here, before any mutation; PHASE1_ONLY
   # reports it.
@@ -4909,14 +4948,26 @@ fetch_origin_main() {
   fi
 }
 
+# A deploy never discards local changes to tracked files: Phase 2's checkout would
+# (it is forced). Both roles, before any mutation.
+refuse_dirty_tree() {
+  local dirty
+  dirty="$(git status --porcelain)"
+  if [[ -n "$dirty" ]]; then
+    warn "working tree is not clean:"; printf '%s\n' "$dirty" >&2
+    die "commit, stash, or clean the working tree before deploying"
+  fi
+}
+
 # Tests in an isolated worktree + a separate test venv (never the prod venv).
 # Sets WT (global: the EXIT trap removes it). Shared by both host roles: a relay
-# runs the SAME gate on the checkout it is about to deploy.
+# runs the SAME gate on the checkout it is about to deploy — DEPLOY_TARGET, which is
+# origin/main on the main server and the relay's target (relay_resolve_target).
 run_checkout_tests() {
   local want_stamp have_stamp
   WT="$(mktemp -d)"
-  git worktree add --detach "$WT" origin/main >/dev/null
-  log "worktree at ${WT} (origin/main ${TAG})"
+  git worktree add --detach "$WT" "$DEPLOY_TARGET" >/dev/null
+  log "worktree at ${WT} (${DEPLOY_TARGET_LABEL} ${TAG})"
 
   want_stamp="$(constraints_stamp "$WT")"
   have_stamp="$(cat "${TEST_VENV}/.constraints-stamp" 2>/dev/null || true)"
@@ -4933,7 +4984,7 @@ run_checkout_tests() {
     log "reusing test venv ${TEST_VENV}"
   fi
 
-  log "running ruff / compileall / pytest against origin/main"
+  log "running ruff / compileall / pytest against ${DEPLOY_TARGET_LABEL}"
   # This is the one ruff call site that does NOT go through `make lint`/.venv-lint,
   # and deliberately so. The rule `make lint` exists to enforce is "never lint with
   # an ambient or prod-venv ruff"; TEST_VENV already satisfies it more strictly —
@@ -4978,6 +5029,211 @@ run_checkout_tests() {
 # discipline install_out_of_repo_helpers already follows. The armed trap still
 # catches INT/TERM/HUP.
 
+# --------------------------------------------------------------------------- #
+# Which revision a relay deploys — DEPLOY_REF (see the ENVIRONMENT KNOBS block)
+# --------------------------------------------------------------------------- #
+# The main server deploys origin/main on local main (the block above, unchanged). A
+# relay follows RELEASES, by ONE engine: `redeploy.sh` by hand and the relay agent's
+# `update` both end in this deploy, and both pick the same tag — the agent's
+# latest_release and relay_latest_release below are one rule (RELEASE TAG RULE), run
+# side by side on the same tag sets by tests/test_relay_release_tag.py.
+#   target    DEPLOY_REF unset: the newest release tag · main: origin/main · a tag
+#             name or a commit sha: that commit (relay_resolve_target)
+#   at it     nothing to deploy (FORCE=1 redeploys it, PHASE1_ONLY=1 inspects it)
+#   behind    HEAD is an ancestor of the target: Phase 1 + Phase 2, the tree goes to
+#             the target DETACHED (pin_tree_detached); a rollback puts PREV_SHA back
+#             detached (restore_tree_detached)
+#   ahead     HEAD is a descendant of the target: a relay never goes backwards —
+#             nothing to deploy, an INFO line, exit 0
+#   sideways  neither: refused before any mutation
+# Detached on a release tag, or ahead of one, is the normal state of a relay: Phase 1
+# reports it without a WARN (the branch WARN is the main server's).
+#
+# The deploy.sh that runs is the TARGET's own (relay_handover): redeploy.sh extracts
+# deploy.sh from origin/main, and a relay deploying an older release must not run
+# newer registry code (MANAGED_HOST_FILES, OUT_OF_REPO_HELPERS) against an older tree.
+# A target whose deploy.sh predates this block would follow origin/main instead — it
+# lacks RELAY_REF_PROTOCOL, and the handover refuses it.
+RELAY_REF_PROTOCOL=1
+DEPLOY_REF="${DEPLOY_REF:-}"
+# Set by relay_handover for the copy it starts: the commit that copy must deploy.
+DEPLOY_HANDOVER_SHA="${DEPLOY_HANDOVER_SHA:-}"
+# Where relay_handover writes the target's deploy.sh (it runs from there): a file of
+# its own per run — bash reads a script while it runs it, so a second deploy must never
+# rewrite the file of the first. Files older than a day are removed by the next one.
+HANDOVER_DIR="${HANDOVER_DIR:-/var/lib/vpn-bot-deploy/handover}"
+RELAY_TARGET_SHA=""      # the full commit the relay deploys
+RELAY_TARGET_NAME=""     # vX.Y.Z | origin/main | <sha>
+RELAY_TARGET_KIND=""     # release (the default) | main | tag | commit
+RELAY_HEAD_BEFORE=""     # HEAD as Phase 1 found it
+
+# RELEASE TAG RULE — the newest release tag among the names on stdin, one per line in
+# `git tag -l --sort=refname 'v*'` order. A release tag is vMAJOR.MINOR[.PATCH[.BUILD]]
+# in ASCII digits (the agent's RELEASE_TAG_RE); `v.3.1.0`, `v3`, `v3.1.0-rc1`,
+# `v3.1.0.1.2` are not. Compared as tuples of integers (the agent's _release_key:
+# leading zeros do not count, a longer tuple with an equal prefix is newer); of equal
+# ones the FIRST wins, like Python's max(). Prints nothing when there is none.
+relay_latest_release() {
+  local LC_ALL=C t best=""
+  while IFS= read -r t || [[ -n "$t" ]]; do
+    [[ "$t" =~ ^v[0-9]+(\.[0-9]+){1,3}$ ]] || continue
+    if [[ -z "$best" ]] || release_tag_newer "$t" "$best"; then best="$t"; fi
+  done
+  [[ -z "$best" ]] || printf '%s\n' "$best"
+  return 0
+}
+
+# 0 iff release tag $1 is newer than $2 (both already match the rule above). Digit
+# strings, not shell integers: no octal for a leading zero, no 64-bit overflow.
+release_tag_newer() {
+  local LC_ALL=C i n x y
+  local -a a b
+  IFS=. read -r -a a <<< "${1#v}"
+  IFS=. read -r -a b <<< "${2#v}"
+  n=${#a[@]}; (( ${#b[@]} < n )) && n=${#b[@]}
+  for (( i = 0; i < n; i++ )); do
+    x="${a[i]#"${a[i]%%[!0]*}"}"; y="${b[i]#"${b[i]%%[!0]*}"}"
+    [[ "$x" == "$y" ]] && continue
+    if (( ${#x} != ${#y} )); then (( ${#x} > ${#y} )); return; fi
+    [[ "$x" > "$y" ]]; return
+  done
+  (( ${#a[@]} > ${#b[@]} ))
+}
+
+# "latest release v3.2.0" / "origin/main" / "tag v3.0.0" / "commit 1a87f67", for messages.
+relay_target_text() {
+  case "$RELAY_TARGET_KIND" in
+    release) printf 'latest release %s' "$RELAY_TARGET_NAME" ;;
+    main)    printf 'origin/main' ;;
+    *)       printf '%s %s' "$RELAY_TARGET_KIND" "$RELAY_TARGET_NAME" ;;
+  esac
+}
+
+# DEPLOY_REF -> RELAY_TARGET_{SHA,NAME,KIND}, DEPLOY_TARGET (= the sha, what Phase 1
+# tests) and its label. Read-only; run after the fetch. Dies on a ref that does not
+# resolve — nothing has changed yet.
+relay_resolve_target() {
+  local ref="$DEPLOY_REF" sha=""
+  if [[ -z "$ref" ]]; then
+    RELAY_TARGET_KIND="release"
+    RELAY_TARGET_NAME="$(git tag -l --sort=refname 'v*' | relay_latest_release)"
+    [[ -n "$RELAY_TARGET_NAME" ]] \
+      || die "relay: no release tag (vX.Y[.Z[.W]]) in the repository — DEPLOY_REF=main to follow main; nothing was changed"
+    sha="$(git rev-parse --verify --quiet "refs/tags/${RELAY_TARGET_NAME}^{commit}")" \
+      || die "relay: release tag ${RELAY_TARGET_NAME} does not name a commit; nothing was changed"
+  elif [[ "$ref" == "main" ]]; then
+    RELAY_TARGET_KIND="main"; RELAY_TARGET_NAME="origin/main"
+    sha="$(git rev-parse --verify --quiet 'origin/main^{commit}')" \
+      || die "relay: origin/main does not resolve after the fetch; nothing was changed"
+  else
+    [[ "$ref" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ && "$ref" != *..* ]] \
+      || die "relay: DEPLOY_REF='${ref}' is not main, a tag name or a commit sha; nothing was changed"
+    if sha="$(git rev-parse --verify --quiet "refs/tags/${ref}^{commit}")"; then
+      RELAY_TARGET_KIND="tag"; RELAY_TARGET_NAME="$ref"
+    elif [[ "$ref" =~ ^[0-9a-f]{7,40}$ ]] && sha="$(git rev-parse --verify --quiet "${ref}^{commit}")"; then
+      RELAY_TARGET_KIND="commit"; RELAY_TARGET_NAME="$ref"
+    else
+      die "relay: DEPLOY_REF='${ref}' is no tag and no commit of this repository (after the fetch); nothing was changed"
+    fi
+  fi
+  RELAY_TARGET_SHA="$sha"
+  DEPLOY_TARGET="$sha"
+  DEPLOY_TARGET_LABEL="$(relay_target_text)"
+  TAG="$(git rev-parse --short "$sha")"
+}
+
+# Phase 1 of a relay: fetch origin/main and the tags (forced, like the agent's fetch:
+# a re-pointed tag must not fail it), resolve the target, then the gate of the table
+# in the block comment. Exits 0 on "at it" (unless FORCE / PHASE1_ONLY) and on
+# "ahead"; dies on "sideways" and on a dirty tree. Mutates nothing but the fetch.
+relay_fetch_target() {
+  local head rc
+  log "fetching origin/main and the release tags"
+  git fetch --quiet origin main
+  git fetch --quiet --tags --force origin
+  relay_resolve_target
+  if [[ -n "$DEPLOY_HANDOVER_SHA" && "$DEPLOY_HANDOVER_SHA" != "$RELAY_TARGET_SHA" ]]; then
+    die "relay: $(relay_target_text) moved during the handover (${DEPLOY_HANDOVER_SHA:0:12} -> ${RELAY_TARGET_SHA:0:12}) — run the deploy again; nothing was changed"
+  fi
+  head="$(git rev-parse HEAD)"
+  RELAY_HEAD_BEFORE="$head"
+  BRANCH_BEFORE="$(current_branch)"
+  log "relay target: $(relay_target_text) (${TAG}); the checkout is at ${head:0:12} on $(branch_text "$BRANCH_BEFORE")"
+
+  if [[ "$head" == "$RELAY_TARGET_SHA" ]]; then
+    if [[ "$PHASE1_ONLY" == "1" ]]; then
+      log "HEAD already at $(relay_target_text) (${TAG}); PHASE1_ONLY=1: running Phase 1 checks anyway (no deploy)."
+    elif [[ "$FORCE" != "1" ]]; then
+      log "HEAD already at $(relay_target_text) (${TAG}); nothing to deploy. Set FORCE=1 to redeploy anyway."
+      exit 0
+    else
+      warn "FORCE=1: redeploying although HEAD already equals $(relay_target_text) (${TAG})"
+    fi
+  else
+    git merge-base --is-ancestor "$RELAY_TARGET_SHA" "$head" && rc=0 || rc=$?
+    if (( rc == 0 )); then
+      log "INFO: the checkout (${head:0:12}) is ahead of $(relay_target_text) (${TAG}) — a relay never goes backwards: nothing to deploy$( [[ "$RELAY_TARGET_KIND" != "main" ]] && printf '; DEPLOY_REF=main to follow main')"
+      exit 0
+    fi
+    (( rc == 1 )) || die "relay: git merge-base failed (exit ${rc}) comparing ${head:0:12} with ${TAG}; nothing was changed"
+    git merge-base --is-ancestor "$head" "$RELAY_TARGET_SHA" && rc=0 || rc=$?
+    if (( rc == 1 )); then
+      die "relay: the checkout (${head:0:12}) and $(relay_target_text) (${TAG}) are on different lines of history — a relay never moves sideways; nothing was changed (DEPLOY_REF=<a descendant of ${head:0:12}> to go on)"
+    fi
+    (( rc == 0 )) || die "relay: git merge-base failed (exit ${rc}) comparing ${head:0:12} with ${TAG}; nothing was changed"
+  fi
+  refuse_dirty_tree
+}
+
+# The deploy.sh of the target runs the deploy (see the block comment). Called once the
+# target is known and before anything else happens: when THIS copy is not the
+# target's, its own copy is written to a new file under HANDOVER_DIR and exec'd with
+# DEPLOY_HANDOVER_SHA=<target> (the environment — DEPLOY_REF, FORCE, PHASE1_ONLY, the
+# ALLOW_* knobs — goes with it). The lock is released first: the new copy takes it
+# again (flock refuses a second descriptor of the same process). Refuses a target
+# whose deploy.sh has no RELAY_REF_PROTOCOL — it would deploy origin/main instead.
+relay_handover() {
+  local self="${BASH_SOURCE[0]}" script
+  [[ -z "$DEPLOY_HANDOVER_SHA" ]] || return 0
+  if [[ -f "$self" ]] && git show "${RELAY_TARGET_SHA}:scripts/deploy.sh" 2>/dev/null | cmp -s - "$self"; then
+    return 0
+  fi
+  install -d -m 0700 "$HANDOVER_DIR"
+  find "$HANDOVER_DIR" -maxdepth 1 -type f -name 'deploy-*.sh' -mmin +1440 -delete 2>/dev/null || true
+  script="$(mktemp "${HANDOVER_DIR}/deploy-${TAG}.XXXXXX.sh")" \
+    || die "relay: cannot create a file under ${HANDOVER_DIR}; nothing was changed"
+  git show "${RELAY_TARGET_SHA}:scripts/deploy.sh" > "$script" \
+    || die "relay: cannot read scripts/deploy.sh of $(relay_target_text) (${TAG}); nothing was changed"
+  grep -E '^RELAY_REF_PROTOCOL=1$' "$script" >/dev/null \
+    || die "relay: the deploy.sh of $(relay_target_text) (${TAG}) predates release-based relay deploys (it would deploy origin/main instead) — DEPLOY_REF=main deploys main; nothing was changed"
+  log "relay: handing over to the deploy.sh of $(relay_target_text) (${TAG}) — the tree is deployed by its own code (${script})"
+  if [[ -n "$LOCK_FD" ]]; then
+    flock -u "$LOCK_FD" 2>/dev/null || true
+    exec {LOCK_FD}>&-
+  fi
+  exec env DEPLOY_HANDOVER_SHA="$RELAY_TARGET_SHA" bash "$script"
+}
+
+# Phase 2 of a relay: the tree to <sha>, detached, reset --hard style (a branch the
+# tree was on — local main of an older deploy — stays where it is).
+pin_tree_detached() { git checkout --quiet --force --detach "$1"; }
+
+# Relay rollback: the tree back to <sha>, detached. Prints the report line; never fails.
+restore_tree_detached() {
+  local sha="$1" rc
+  git checkout --quiet --force --detach "$sha" >/dev/null 2>&1 && rc=0 || rc=$?
+  printf 'git checkout -f --detach %s: rc=%s%s' "$sha" "$rc" \
+    "$( ((rc == 0)) && printf ' (code restored, HEAD detached)' || printf ' — CODE NOT RESTORED — MANUAL ACTION REQUIRED')"
+  return 0
+}
+
+# Both relay reports: where the tree is and where Phase 2 takes it. No WARN: detached
+# on a release, or ahead of one, is how a relay is meant to be.
+relay_ref_report_line() {
+  printf 'tree              : %s at %s -> %s (%s), detached — a relay follows releases (DEPLOY_REF)' \
+    "$(branch_text "$BRANCH_BEFORE")" "${RELAY_HEAD_BEFORE:0:12}" "$(relay_target_text)" "$TAG"
+}
+
 # The relay role's unit set: the basenames of every deploy/relay/*.service and
 # *.timer of checkout $1, one per line (an *.example.* file is not a unit). ONE rule,
 # carried verbatim by scripts/deploy.sh, scripts/install.sh (relay mode) and
@@ -5001,7 +5257,7 @@ relay_unit_dst() {
 }
 
 # What Phase 2 does with a unit of the set once its file is in place:
-#   data-plane  vpn-relay.service — enabled and restarted (vpn-relay-apply apply)
+#   data-plane  vpn-relay.service — enabled and reload-or-restarted (vpn-relay-apply apply)
 #   timer       enabled, and started when it is not active
 #   timer-run   any other .service: the oneshot a timer of the set runs — installed
 #               only, never started by hand (tests/test_deploy_relay_units.py pins
@@ -5013,7 +5269,7 @@ relay_unit_kind() {
 }
 
 # Pre-deploy facts the relay rollback restores to, and the unit set of checkout $1
-# (default APP_DIR; Phase 1 passes $WT — origin/main, the tree Phase 2 installs) with
+# (default APP_DIR; Phase 1 passes $WT — the target, the tree Phase 2 installs) with
 # each unit's file, is-active, is-enabled and installed copy (relay_unit_state).
 # Read-only.
 relay_snapshot_prestate() {
@@ -5188,8 +5444,8 @@ relay_phase1_report() {
   head_sha="$(git rev-parse --short HEAD)"
   [[ "$head_sha" == "$TAG" ]] && uptodate=" (already up to date)"
   printf '\n===== PHASE 1 REPORT — RELAY (PHASE1_ONLY=1 — no mutations performed) =====\n'
-  printf '  checkout          : %s -> origin/main %s%s\n' "$head_sha" "$TAG" "$uptodate"
-  printf '  %s\n' "$(branch_report_line)"
+  printf '  checkout          : %s -> %s %s%s\n' "$head_sha" "$(relay_target_text)" "$TAG" "$uptodate"
+  printf '  %s\n' "$(relay_ref_report_line)"
   printf '  host role         : relay (NODE_ROLE=relay in %s)\n' "$ENV_FILE"
   printf '  not on this host  : vpn-bot, vpn-bot-subscription, hy2_auth, the DB, Xray, AmneziaWG,\n'
   printf '                      WARP, Telegram — main-only checks skipped, none of it is touched\n'
@@ -5244,9 +5500,9 @@ relay_phase1_report() {
 
   printf '\n  --- Phase 2 (sudo bash scripts/redeploy.sh) would ---\n'
   printf '    back up the live tables + %s, every unit above, %s\n' "$RELAY_HELPER" "$RELAY_SYSCTL_FILE"
-  printf '    git checkout -f -B main origin/main; install the helper; install every unit above verbatim (a synced one is left as it is)\n'
-  printf '    daemon-reload; enable %s and every timer; restart %s; start a timer that is not active\n' "$RELAY_UNIT" "$RELAY_UNIT"
-  printf '      (the oneshot a timer runs is never started by hand); verify with vpn-relay-apply check\n'
+  printf '    git checkout -f --detach %s (%s); install the helpers; install every unit above verbatim (a synced one is left as it is)\n' "$TAG" "$(relay_target_text)"
+  printf '    daemon-reload; enable %s and every timer; reload-or-restart %s (a running relay: reload, no stop); start a timer that is not active\n' "$RELAY_UNIT" "$RELAY_UNIT"
+  printf '      (the oneshot a timer runs is never started by hand); verify with vpn-relay-apply check + one DNAT per forwarded port\n'
   printf '    input filter: a TCP set not confirmed yet (see the dry-run above) arms the 5-minute dead-man,\n'
   printf '      then main probes the ssh ports (main probe above): DEPLOY OK says CONFIRMED by main probe;\n'
   printf '      if main cannot, it says PENDING CONFIRM and why, and input-confirm must run from a NEW ssh session\n'
@@ -5281,7 +5537,7 @@ relay_rollback() {
   local state rc line u
   warn "ROLLBACK (relay): restoring PREV_SHA=${PREV_SHA:-<unknown>} and the backed-up relay state"
 
-  report+=("$(restore_tree_to "$PREV_SHA")")
+  report+=("$(restore_tree_detached "$PREV_SHA")")
 
   # A unit that was not running before is stopped again (this run may have started
   # it; its ExecStop removes the table — the saved one, if any, comes back below).
@@ -5422,6 +5678,25 @@ relay_rollback() {
   exit 1
 }
 
+# install.sh's relay mode has always verified it and the agent's `update` — which ran
+# that — now runs this deploy: EXACTLY ONE DNAT rule per forwarded port in the WHOLE
+# ruleset. `vpn-relay-apply check` compares only its own table; a second DNAT for the
+# same port in another table (/etc/nftables.conf at boot, a leftover of a hand-made
+# relay) would race it. The forwarded ports are the DNAT ports of table ip vpnrelay,
+# which check has just proven equal to the render from .env. One line per port that
+# is wrong (and for an nft that cannot list); empty = fine.
+relay_dnat_problems() {
+  local own ruleset key n
+  own="$(nft list table ip "$RELAY_TABLE" 2>/dev/null)" || { echo "nft list table ip ${RELAY_TABLE} failed"; return 0; }
+  ruleset="$(nft list ruleset 2>/dev/null)" || { echo "nft list ruleset failed"; return 0; }
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    n="$(grep -cE "${key} .*dnat (ip )?to" <<< "$ruleset" || true)"
+    [[ "$n" == "1" ]] || printf '%s: %s DNAT rules, expected exactly 1\n' "$key" "${n:-0}"
+  done < <(grep -E 'dnat (ip )?to' <<< "$own" | grep -oE '(tcp|udp) dport [0-9]+' | sort -u)
+  return 0
+}
+
 # DEPLOY OK: one line per unit of the set other than vpn-relay.service (that one has
 # its own line), with its installed copy before the deploy.
 relay_units_ok_rows() {
@@ -5453,12 +5728,12 @@ relay_retire_legacy_nft() {
   fi
 }
 
-# Phase 2, relay. Nothing is stopped for the backup: the relay keeps forwarding
-# until the restart, and the restart's gap (ExecStop deletes the table, ExecStart
-# applies the new one) is milliseconds; established flows keep their conntrack NAT.
+# Phase 2, relay. Nothing is stopped for the backup, nor later: a running relay is
+# reloaded (ExecReload swaps both tables in one transaction, no ExecStop), so it keeps
+# forwarding throughout; established flows keep their conntrack NAT anyway.
 relay_phase2() {
-  local out rc entry listing legacy_before input_status probe_why u dst units_rows nl
-  local -a mh_paths=() unit_paths=()
+  local out rc entry listing legacy_before input_status probe_why u dst units_rows nl dnat
+  local -a mh_paths=() unit_paths=() helper_paths=()
   # The unit set comes from relay_snapshot_prestate (Phase 1: the checkout Phase 2
   # installs); without it there is nothing to back up or install against.
   [[ " ${RELAY_UNITS[*]} " == *" ${RELAY_UNIT} "* ]] \
@@ -5469,14 +5744,17 @@ relay_phase2() {
   STAGE="$(make_stage_dir)" || die "cannot create the backup stage"
   manifest=()
   log "backing up the relay state (nothing is stopped for it)"
-  # The relay's own files — the helper, EVERY unit of the set, the sysctl file — and
+  # The relay's own files — EVERY helper of the relay role (vpn-relay-apply, the
+  # agent: a rollback must not leave a newer agent driving an older tree), EVERY unit
+  # of the set, the sysctl file — and
   # the input filter's confirmation marker (main's probe may write it during the
   # restart; a rollback puts back the one that matches the restored filter), then its
   # MANAGED_HOST_FILES — one mechanism (stage_host_paths / restore_host_paths) for
   # every file outside the checkout. A unit that is not there yet is recorded as
   # absent: the rollback removes it.
   for u in "${RELAY_UNITS[@]}"; do unit_paths+=("$(relay_unit_dst "$u")"); done
-  stage_host_paths "$RELAY_HELPER" "${unit_paths[@]}" "$RELAY_SYSCTL_FILE" "$RELAY_INPUT_MARKER"
+  readarray -t helper_paths < <(role_helper_dsts)
+  stage_host_paths "$RELAY_HELPER" "${helper_paths[@]}" "${unit_paths[@]}" "$RELAY_SYSCTL_FILE" "$RELAY_INPUT_MARKER"
   readarray -t mh_paths < <(managed_host_stage_paths)
   stage_host_paths "${mh_paths[@]}" "$(ssh_port_state_path)"
   install -d -m0755 "${STAGE}$(dirname "$RELAY_TABLE_DUMP")"
@@ -5511,8 +5789,8 @@ relay_phase2() {
 
   arm_relay_rollback          # from here every failure restores the backup
 
-  log "advancing working tree to origin/main (${TAG}) on local branch ${DEPLOY_BRANCH}"
-  pin_tree_to_main origin/main || rollback_now "git checkout -f -B ${DEPLOY_BRANCH} origin/main failed"
+  log "moving the working tree to $(relay_target_text) (${TAG}), detached"
+  pin_tree_detached "$RELAY_TARGET_SHA" || rollback_now "git checkout -f --detach ${RELAY_TARGET_SHA} failed"
 
   # The registry mechanism, role-filtered: installs/refreshes vpn-relay-apply
   # (required on a relay) and nothing else; its failures reach relay_rollback.
@@ -5540,11 +5818,16 @@ relay_phase2() {
     [[ "$(relay_unit_kind "$u")" == "timer" ]] || continue
     systemctl enable --quiet "$u" || rollback_now "systemctl enable ${u} failed"
   done
-  log "restarting ${RELAY_UNIT} (vpn-relay-apply apply: table ip ${RELAY_TABLE} + table inet ${RELAY_INPUT_TABLE} from .env, conntrack sysctls, ip_forward=1; a TCP set not confirmed yet: dead-man, then main's probe)"
-  systemctl restart "$RELAY_UNIT" \
-    || rollback_now "${RELAY_UNIT} restart failed — vpn-relay-apply apply exited non-zero (see: journalctl -u ${RELAY_UNIT} -n 50 --no-pager)"
+  # reload-or-restart: a RUNNING relay is reloaded — ExecReload is the same atomic
+  # `vpn-relay-apply apply` as ExecStart, with no ExecStop before it, so the tables are
+  # swapped in one transaction and there is no moment without DNAT (what install.sh's
+  # relay mode has always done; the hand-made unit too, once daemon-reload loaded
+  # ours). A relay that is not running is started.
+  log "reload-or-restart ${RELAY_UNIT} (vpn-relay-apply apply: table ip ${RELAY_TABLE} + table inet ${RELAY_INPUT_TABLE} from .env, conntrack sysctls, ip_forward=1; a TCP set not confirmed yet: dead-man, then main's probe)"
+  systemctl reload-or-restart "$RELAY_UNIT" \
+    || rollback_now "${RELAY_UNIT} reload-or-restart failed — vpn-relay-apply apply exited non-zero (see: journalctl -u ${RELAY_UNIT} -n 50 --no-pager)"
   [[ "$(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true)" == "active" ]] \
-    || rollback_now "${RELAY_UNIT} is not active after the restart"
+    || rollback_now "${RELAY_UNIT} is not active after the reload-or-restart"
   # The timers: one that is not active is started (an active one already runs the
   # file daemon-reload loaded). The oneshot a timer runs is the timer's to start —
   # never started here, so a deploy never runs e.g. `vpn-relay-apply resolve` itself.
@@ -5564,6 +5847,10 @@ relay_phase2() {
   out="$(RELAY_ENV="$ENV_FILE" "$RELAY_HELPER" check 2>&1)" && rc=0 || rc=$?
   printf '%s\n' "$out" | sed 's/^/    /'
   (( rc == 0 )) || rollback_now "vpn-relay-apply check failed after the restart (exit ${rc}: $(relay_live_rc_text "$rc"))"
+  dnat="$(relay_dnat_problems)"
+  [[ -z "$dnat" ]] \
+    || rollback_now "not exactly one DNAT per forwarded port in the whole ruleset — ${dnat//$'\n'/; } (a DNAT outside table ip ${RELAY_TABLE}, e.g. from /etc/nftables.conf, would race the relay's)"
+  log "one DNAT per forwarded port in the whole ruleset: OK"
 
   # Is the relay's host state in effect now? A BEATEN/MISMATCH rolls back.
   host_invariants_phase2 "$APP_DIR"
@@ -5591,10 +5878,10 @@ relay_phase2() {
 
 ===== DEPLOY OK (relay) =====
   role             : relay
-  deployed         : ${PREV_SHA} -> ${TAG}
+  deployed         : ${PREV_SHA} -> ${RELAY_TARGET_SHA} ($(relay_target_text), detached)
   backup           : ${ARCHIVE}
   unit             : ${RELAY_UNIT} active, enabled (before: active=${RELAY_PRE_ACTIVE:-unknown}, installed copy ${RELAY_UNIT_STATE:-unknown})${units_rows:+${nl}${units_rows}}
-  verify           : vpn-relay-apply check OK
+  verify           : vpn-relay-apply check OK; one DNAT per forwarded port
   input filter     : ${input_status:-unknown}
   host files       : $(host_files_summary)
   host invariants  : $(hc_summary_text)
@@ -5629,7 +5916,10 @@ relay_deploy() {
   flock -n "$LOCK_FD" || die "another deploy already holds ${LOCK}"
   log "host role: relay (NODE_ROLE=relay in ${ENV_FILE}) — vpn-bot, its sidecars, the DB, Xray, AmneziaWG and WARP are not part of this deploy"
 
-  fetch_origin_main
+  # The target (DEPLOY_REF, default the newest release; forward only), then the
+  # target's own deploy.sh takes over — see "Which revision a relay deploys".
+  relay_fetch_target
+  relay_handover
   avail="$(fs_avail_bytes "$APP_DIR")"
   (( avail > 1073741824 )) || die "insufficient space on ${APP_DIR} FS for the test venv: need >1024MiB, have $((avail/1024/1024))MiB"
 
@@ -5663,6 +5953,10 @@ if [[ "$NODE_ROLE" == "relay" ]]; then
   relay_deploy
   exit 0
 fi
+# DEPLOY_REF picks a relay's release; the main server always deploys origin/main on
+# local main, so any other value is a mistake that must not pass silently.
+[[ -z "$DEPLOY_REF" || "$DEPLOY_REF" == "main" ]] \
+  || die "DEPLOY_REF=${DEPLOY_REF} applies to a relay only — the main server always deploys origin/main (on local main); unset it. Nothing was changed"
 
 require_tools git sqlite3 flock systemd-analyze systemctl tar visudo python3 sha256sum \
               awk df du date journalctl stat tail

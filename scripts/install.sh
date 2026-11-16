@@ -9,8 +9,9 @@
 #                                   install a RELAY (the code comes from the bot:
 #                                   Мастер настройки → Relay → Добавить)
 #   sudo bash install.sh --relay-update
-#                                   reinstall a relay from its checkout (what the
-#                                   relay agent's `update` runs after a checkout)
+#                                   RETIRED: a relay is updated by scripts/deploy.sh
+#                                   (the agent's `update` runs redeploy.sh); this only
+#                                   says so, for agents that still call it
 #
 # Get it from a GitHub release together with SHA256SUMS and verify it first
 # (docs/install.md); never pipe it from a branch into bash.
@@ -1509,7 +1510,12 @@ relay_verify() {
   done < <(relay_timers)
 }
 
-# /etc/vpn-relay/install.json — what uninstall needs to undo this install.
+# /etc/vpn-relay/install.json — what uninstall needs to undo this install. Its "ref" is
+# the commit THIS INSTALL put in place (a re-run with a new code rewrites the record):
+# the ref of the installation, never kept current. deploy.sh and the agent's `update`
+# move the checkout without touching this file; the commit a relay runs is
+# `git -C /opt/vpn-service rev-parse HEAD` (the agent's `status`: checkout.commit).
+# tests/test_relay_release_tag.py pins that nothing else writes it.
 relay_write_install_record() {
   local file="${RELAY_STATE_DIR}/install.json" prev_created=0 prev_forward="" prev_backup=""
   if [[ -f "$file" ]]; then
@@ -1581,29 +1587,25 @@ relay_install() {
   say "Лог установки: ${INSTALL_LOG}"
 }
 
-# What the agent's `update` runs from the NEW checkout: the helpers and units
-# reinstalled from it, vpn-relay restarted and checked; .env, the pairing and the
-# key are not touched. Any failure rolls the files back (the agent then moves the
-# checkout back).
+# --relay-update, RETIRED. A relay has ONE update engine now: scripts/deploy.sh in the
+# relay role (DEPLOY_REF, docs/relay.md "Which revision a relay deploys"); the agent's
+# `update` runs scripts/redeploy.sh with DEPLOY_REF=<release tag>. This entry point
+# reinstalled helpers and units only — no host files, no deploy backup, no host
+# invariants — and is kept solely to answer an agent from before that change, which
+# checks the release out itself and then calls it: the answer is a refusal with the
+# one command that moves the relay onto the new path (that agent then moves the
+# checkout back, as after any failed update). Not a wrapper on purpose: such an agent
+# kills this process after 600 s and checks the old commit out again, which would race
+# a deploy (its pytest gate alone takes longer than that on a relay).
 relay_update() {
   MODE=relay
-  [[ "${EUID}" -eq 0 ]] || die "запустите от root"
-  acquire_lock
-  [[ -f "${RELAY_STATE_DIR}/install.json" && -f "$ENV_FILE" ]] || die "это не relay, установленный install.sh"
-  [[ "$(env_value "$ENV_FILE" NODE_ROLE)" == relay ]] || die "в ${ENV_FILE} нет NODE_ROLE=relay"
-  STATE=repair
-  PAIR_TCP="$(env_value "$ENV_FILE" RELAY_FORWARD_TCP_PORTS)"; PAIR_TCP="${PAIR_TCP:-443}"
-  PAIR_UDP="$(env_value "$ENV_FILE" RELAY_FORWARD_UDP_PORTS)"; PAIR_UDP="${PAIR_UDP:-443}"
-  PAIR_TARGET="$(env_value "$ENV_FILE" RELAY_UPSTREAM_HOST)"
-  open_log
-  arm_rollback
-  relay_require_checkout_files
-  relay_record_tables
-  relay_install_files
-  relay_start
-  relay_verify
-  commit
-  say "Relay обновлён до $(git -C "$APP_DIR" describe --tags --always 2>/dev/null || echo '?')"
+  {
+    printf '%s\n' "install.sh --relay-update больше не обновляет relay: это делает scripts/deploy.sh (роль relay)."
+    printf '%s\n' "Один раз вручную на этом relay (ставит и новый агент, после этого «Обновить агент» в боте работает):"
+    printf '%s\n' "  sudo bash ${APP_DIR}/scripts/redeploy.sh"
+    printf '%s\n' "(relay, который уже впереди последнего релиза, обновляется до main: sudo DEPLOY_REF=main bash ${APP_DIR}/scripts/redeploy.sh)"
+  } >&2
+  exit 1
 }
 
 usage() {

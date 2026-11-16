@@ -402,5 +402,6 @@ def test_the_host_like_ci_job_runs_the_whole_suite_from_a_worktree() -> None:
         "          python -m pytest -q -p no:cacheprovider\n"
     ), "no path or -k filter: these suites run there — from a worktree, as on the host"
     deploy = DEPLOY_SH.read_text(encoding="utf-8")
-    assert 'git worktree add --detach "$WT" origin/main' in deploy
+    assert 'git worktree add --detach "$WT" "$DEPLOY_TARGET"' in deploy
+    assert 'DEPLOY_TARGET="origin/main"' in deploy, "the main server tests origin/main (a relay: its target)"
     assert '( cd "$WT" && "${TEST_VENV}/bin/python" -m pytest -q -p no:cacheprovider )' in deploy

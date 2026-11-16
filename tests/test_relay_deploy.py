@@ -424,9 +424,14 @@ case "$1" in
   is-enabled)
     [[ -f "$SD/$unit.enabled" ]] || exit 1; echo enabled; exit 0 ;;
   show) [[ -f "$SD/$unit.active" ]] && echo loaded || echo not-found; exit 0 ;;
-  restart)
+  restart|reload-or-restart)
     rc="$(cat "$SD/restart_rc" 2>/dev/null || echo 0)"
-    rm -f "$SD/table" "$SD/input_table"
+    was="$(cat "$SD/$unit.active" 2>/dev/null || echo inactive)"
+    # restart runs ExecStop first (both tables gone); reload-or-restart RELOADS an
+    # active unit (ExecReload = the same apply, no stop: the tables stay until the
+    # apply swaps them) and starts an inactive one.
+    reload=0; [[ "$1" == reload-or-restart && "$was" == active ]] && reload=1
+    (( reload )) || rm -f "$SD/table" "$SD/input_table"
     # ExecStart = vpn-relay-apply apply, which sets the sysctls from .env (here its
     # defaults) and installs the input filter — arming the dead-man for a TCP set that
     # is not confirmed. A failed restart has done all of it too: the worst case for the
@@ -448,7 +453,9 @@ case "$1" in
       printf 'result=ok\nsha256=new\n' > "$SD/run/input.probe"
     fi
     if [[ "$rc" == "0" ]]; then echo active > "$SD/$unit.active"; touch "$SD/table"
-    else echo failed > "$SD/$unit.active"; fi
+    elif (( ! reload )); then echo failed > "$SD/$unit.active"; fi
+    # A failed reload leaves the unit active (systemd keeps the state of a failed
+    # reload job) and the old table in place (the apply is one transaction).
     exit "$rc" ;;
   start) echo active > "$SD/$unit.active"; [[ "$unit" == vpn-relay.service ]] && touch "$SD/table" "$SD/input_table"; exit 0 ;;
   stop)
@@ -467,6 +474,12 @@ echo "nft $*" >> "$LOGS/nft.log"
 case "$*" in
   "list table ip vpnrelay") [[ -f "$SD/table" ]] || exit 1; cat "$LIVE_LISTING" ;;
   "list table inet vpnrelay_input") [[ -f "$SD/input_table" ]] || exit 1; cat "$INPUT_LISTING" ;;
+  "list ruleset")
+    [[ -f "$SD/table" ]] && cat "$LIVE_LISTING"
+    [[ -f "$SD/input_table" ]] && cat "$INPUT_LISTING"
+    # A DNAT another table carries for a forwarded port (/etc/nftables.conf at boot).
+    [[ -f "$SD/foreign_dnat" ]] && cat "$SD/foreign_dnat"
+    exit 0 ;;
   "-f -")
     cat > "$LOGS/nft-stdin.tmp"
     if grep -q 'table inet vpnrelay_input' "$LOGS/nft-stdin.tmp"; then
@@ -497,6 +510,8 @@ done
 exit 0
 """
 
+# The commit the prelude says relay_resolve_target picked.
+TARGET_SHA = "abc1234abc1234abc1234abc1234abc1234abc12"
 CT_MAX = "net.netfilter.nf_conntrack_max"
 CT_EST = "net.netfilter.nf_conntrack_tcp_timeout_established"
 # The hand-made relay never set them: kernel defaults, not the .env defaults.
@@ -663,6 +678,8 @@ class RelayHost:
             # turns every relay_phase1 stop into a report. A test that wants
             # inspection mode sets PHASE1_ONLY=1 in its own body.
             'PHASE1_ONLY=0; NODE_ROLE=relay; TAG=abc1234\n'
+            # The target relay_resolve_target picks (its own tests: test_relay_release_tag.py).
+            f"RELAY_TARGET_SHA={TARGET_SHA}; RELAY_TARGET_KIND=release; RELAY_TARGET_NAME=v9.1.0\n"
         )
         return _source_and_run(self.tmp, prelude + body, env_text="NODE_ROLE=relay\n", extra_path=self.stub)
 
@@ -705,9 +722,12 @@ def test_relay_phase2_migrates_the_hand_installed_relay(tmp_path: Path) -> None:
     mutating = [c for c in sc if c.split()[0] not in {"is-active", "is-enabled"}]
     assert mutating == [
         "daemon-reload", "enable --quiet vpn-relay.service", f"enable --quiet {RESOLVE_TIMER}",
-        "restart vpn-relay.service", f"start {RESOLVE_TIMER}",
-    ], "the oneshot the timer runs is never started by the deploy"
-    assert "git checkout --quiet --force -B main origin/main" in host.log("git")
+        "reload-or-restart vpn-relay.service", f"start {RESOLVE_TIMER}",
+    ], "the oneshot the timer runs is never started by the deploy; a running relay is reloaded, never stopped"
+    assert f"git checkout --quiet --force --detach {TARGET_SHA}" in host.log("git"), "detached at the target"
+    assert not any(" -B " in c for c in host.log("git")), "a relay never moves a branch"
+    assert "nft list ruleset" in host.log("nft"), "one DNAT per forwarded port in the whole ruleset"
+    assert f"deployed         : prevsha0000 -> {TARGET_SHA} (latest release v9.1.0, detached)" in proc.stdout
     assert not any("prevsha" in c for c in host.log("git") if "checkout" in c or "reset" in c)
 
     assert not host.legacy.exists()
@@ -759,31 +779,66 @@ def test_failed_check_rolls_the_hand_installed_relay_back(tmp_path: Path) -> Non
     assert host.state("vpn-relay.service.active") == "active"
     assert host.state("vpn-relay.service.enabled") == "enabled"
     moves = [c for c in host.log("git") if c.startswith(("git reset", "git checkout"))]
-    assert moves == ["git checkout --quiet --force -B main origin/main",
-                     "git checkout --quiet --force -B main prevsha0000"], "both on local main"
+    assert moves == [f"git checkout --quiet --force --detach {TARGET_SHA}",
+                     "git checkout --quiet --force --detach prevsha0000"], "both detached: a relay has no branch"
+    assert "git checkout -f --detach prevsha0000: rc=0 (code restored, HEAD detached)" in proc.stderr
     sc = [ln.removeprefix("systemctl ") for ln in host.log("systemctl")]
     assert "disable --quiet vpn-relay.service" not in sc, "it was enabled before"
     assert "stop vpn-relay.service" not in sc, "it was active before"
     _assert_no_main_piece_touched(host)
 
 
-def test_failed_restart_rolls_the_hand_installed_relay_back_and_restarts_it(tmp_path: Path) -> None:
+def test_failed_reload_rolls_the_hand_installed_relay_back(tmp_path: Path) -> None:
+    """A running relay is RELOADED (no ExecStop, no moment without DNAT). A reload whose
+    apply fails leaves the unit active: the rollback restores the files and re-applies
+    the saved table — it never has to start the data plane again."""
     host = RelayHost(tmp_path)
     host.hand_installed()
     host.fail_restart()
     proc = host.phase2()
     assert proc.returncode == 1
-    assert "restart failed" in proc.stderr
-    assert host.log("helper") == [], "no check after a failed restart"
+    assert "reload-or-restart failed" in proc.stderr
+    assert host.log("helper") == [], "no check after a failed reload"
     assert _read(host.unit) == _read(MANUAL_UNIT)
     sc = [ln.removeprefix("systemctl ") for ln in host.log("systemctl")]
-    assert "start vpn-relay.service" in sc, "a unit that was active is started again"
-    assert sc.index("daemon-reload", sc.index("restart vpn-relay.service")) < sc.index("start vpn-relay.service"), (
-        "it starts with the RESTORED unit file"
-    )
+    assert "reload-or-restart vpn-relay.service" in sc and "restart vpn-relay.service" not in sc
+    assert "start vpn-relay.service" not in sc and "stop vpn-relay.service" not in sc, "never stopped"
+    assert "vpn-relay.service still active (the restored unit file applies from its next start)" in proc.stderr
     assert host.state("table") == "", "the saved table is live again"
+    assert _read(host.logs / "nft-restore.nft") == "table ip vpnrelay\ndelete table ip vpnrelay\n" + _read(LIVE_LISTING)
     assert host.state("vpn-relay.service.active") == "active"
     assert host.conntrack() == KERNEL_CT, "what the failed apply set is undone"
+
+
+def test_failed_start_of_a_stopped_relay_rolls_back_and_stops_it(tmp_path: Path) -> None:
+    """A relay that was not running is STARTED (reload-or-restart of an inactive unit);
+    a failed start is rolled back and the unit is left stopped, as it was."""
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    (host.sd / "vpn-relay.service.active").write_text("inactive", encoding="utf-8")
+    host.fail_restart()
+    proc = host.phase2()
+    assert proc.returncode == 1
+    assert "reload-or-restart failed" in proc.stderr
+    sc = [ln.removeprefix("systemctl ") for ln in host.log("systemctl")]
+    assert "stop vpn-relay.service" in sc, "it was not running before the deploy"
+    assert host.state("vpn-relay.service.active") == "inactive"
+    assert _read(host.unit) == _read(MANUAL_UNIT)
+
+
+def test_a_duplicate_dnat_outside_the_relay_table_rolls_back(tmp_path: Path) -> None:
+    """install.sh's relay mode always required exactly one DNAT per forwarded port in the
+    whole ruleset; the agent's update runs this deploy now, so the deploy requires it."""
+    host = RelayHost(tmp_path)
+    host.hand_installed()
+    (host.sd / "foreign_dnat").write_text(
+        "table ip nat {\n\tchain prerouting {\n\t\ttcp dport 443 dnat to 198.51.100.9:443\n\t}\n}\n", encoding="utf-8"
+    )
+    proc = host.phase2()
+    assert proc.returncode == 1
+    assert "not exactly one DNAT per forwarded port in the whole ruleset — tcp dport 443: 2 DNAT rules" in proc.stderr
+    assert "ROLLBACK REPORT (relay)" in proc.stderr
+    assert _read(host.unit) == _read(MANUAL_UNIT)
 
 
 def test_failed_check_on_a_fresh_relay_removes_everything_it_added(tmp_path: Path) -> None:
@@ -802,7 +857,7 @@ def test_failed_check_on_a_fresh_relay_removes_everything_it_added(tmp_path: Pat
     assert host.state("vpn-relay.service.active") == "inactive"
     sc = [ln.removeprefix("systemctl ") for ln in host.log("systemctl")]
     assert "stop vpn-relay.service" in sc and "disable --quiet vpn-relay.service" in sc
-    assert sc.index("disable --quiet vpn-relay.service") < sc.index("daemon-reload", sc.index("restart vpn-relay.service")), (
+    assert sc.index("disable --quiet vpn-relay.service") < sc.index("daemon-reload", sc.index("reload-or-restart vpn-relay.service")), (
         "disabled while the deploy's unit file is still there (no dangling wants link)"
     )
     assert not (host.logs / "nft-restore.nft").exists(), "no table to restore"
@@ -953,7 +1008,8 @@ def test_relay_phase2_routes_every_mutation_through_the_rollback() -> None:
     body = text[text.index("relay_phase2() {") :]
     body = body[: body.index("\n}\n")]
     armed = body[body.index("arm_relay_rollback") : body.index("  disarm")]
-    for verb in ("pin_tree_to_main", "install -m0644", "systemctl daemon-reload", "systemctl enable", "systemctl restart"):
+    for verb in ("pin_tree_detached", "install -m0644", "systemctl daemon-reload", "systemctl enable",
+                 "systemctl reload-or-restart"):
         idx = armed.index(verb)
         tail = armed[idx : armed.index("\n", armed.index("\n", idx) + 1) + 1]
         assert "rollback_now" in tail, f"{verb!r} is not routed to the rollback"
