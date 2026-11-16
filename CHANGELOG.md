@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Config backups are pruned in the source.** Xray: `XrayConfigAdapter` now keeps the newest
+  `XRAY_CONFIG_BACKUP_KEEP` (new, default 10, 1–500) of its own `config.json.<stamp>.<ns>.<token>.bak`,
+  pruned after each change that was installed **and** applied. Only names matching that exact
+  template are deleted — an operator's own `config.json.*.bak` and the privileged helper's
+  `config.json.<ns>.bak` stay; a cleanup error is a WARNING, never a failed key operation; a
+  failed change prunes nothing. Before, Xray shared `CONFIG_BACKUP_KEEP_LAST` (20) with the other
+  backends, pruned *before* the change by the loose glob `config.json.*.bak`, and an error there
+  failed the change. AmneziaWG and the rest keep `CONFIG_BACKUP_KEEP_LAST` as before. Hysteria2:
+  `deploy/hysteria/install-config.sh` keeps the newest `HYSTERIA_CONFIG_BACKUP_KEEP` (default 3)
+  of its own `config.yaml.bak.<YYYYmmddTHHMMSS>` after a successful install.
+
+### Added
+
+- **Host hygiene by the deploy (docs/host-state.md#host-hygiene).** New `MANAGED_HOST_FILES`
+  class `masked`: `/etc/systemd/system/<unit>` must be the symlink to `/dev/null` that
+  `systemctl mask` writes. Phase 1 stops when anything else sits there; Phase 2 creates it,
+  daemon-reloads and stops the unit if it ran; the rollback removes it and starts the unit
+  again if it ran; `vpn-bot-host-check` requires `LoadState=masked` and the unit not running
+  (MISMATCH / BEATEN otherwise). Masked on both roles: `ModemManager.service`,
+  `udisks2.service` — mask, never purge. Retired on both roles (class `absent`):
+  `/etc/apt/sources.list.d/ookla_speedtest-cli.list`, packagecloud's broken speedtest-cli
+  source that made every `apt update` end in `E:`.
+
 ## [3.1.0](https://github.com/Egor051/vpnbot/releases/tag/v3.1.0) — 2026-11-16
 
 ### Added

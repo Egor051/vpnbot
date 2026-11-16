@@ -11,7 +11,7 @@ has nothing to restore them from, and nobody notices a hand edit that drifted.
 when they drift, removes the ones that were retired — and in Phase 1 it reports every other file
 in the scanned host directories that nothing accounts for.
 
-## The five classes
+## The six classes
 
 Every file on a host is in exactly one of these:
 
@@ -21,6 +21,7 @@ Every file on a host is in exactly one of these:
 | **template + host values** | the repo holds the *shape*, the host the values | the operator / the bot, checked by a deploy gate |
 | **backup-only** | not in the repo by design; listed in `deploy/host/known-unmanaged.list` | a third-party installer, the provider, or the operator — and the offsite backup |
 | **retired** | a `class absent` entry: the file must *not* exist | `deploy.sh` removes it |
+| **masked unit** | a `class masked` entry: `/etc/systemd/system/<unit>` must be the symlink to `/dev/null` that `systemctl mask` writes | `deploy.sh` masks the unit — [Host hygiene](#host-hygiene) |
 | **package default** | the package itself: a `class pristine` entry names `dpkg:<package>` or `ucf:<template>` | `deploy.sh`, and only back to the package default — [Package defaults](#package-defaults-class-pristine) |
 
 `known-unmanaged.list` tags each backup-only entry with who writes it: `installer` (Xray-install,
@@ -95,6 +96,9 @@ bundle also carries state that is not a deployed file and so is not listed here:
 | `/usr/local/sbin/site-freshen.sh` | retired | — | — | its job is `deploy/vpn-bot-decoy-freshen.sh` now |
 | `/etc/ssh/sshd_config.d/50-cloud-init.conf` | retired | — | — | cloud-init's `PasswordAuthentication yes`; removed by hand first, the entry keeps it from coming back (a removal reloads ssh) |
 | `/etc/sudoers.d/90-cloud-init-users` | retired | — | — | cloud-init's `NOPASSWD:ALL` grant; removed by hand first |
+| `/etc/apt/sources.list.d/ookla_speedtest-cli.list` | retired | — | — | packagecloud's speedtest-cli source is broken: every `apt update` ended in `E:` — [Host hygiene](#host-hygiene) |
+| `/etc/systemd/system/ModemManager.service` | masked unit | deploy.sh | — (in the repo) | no modem on a server; mask, not purge — [Host hygiene](#host-hygiene) |
+| `/etc/systemd/system/udisks2.service` | masked unit | deploy.sh | — (in the repo) | desktop disk automounter; mask, not purge |
 
 ### relay
 
@@ -116,6 +120,8 @@ The relay runs no bot, so it sends no offsite backup: its files come back from t
 | `/etc/ssh/sshd_config.d/50-cloud-init.conf`, `/etc/sudoers.d/90-cloud-init-users` | retired | — | cloud-init's password login and `NOPASSWD:ALL` grant |
 | `/etc/systemd/system/vpn-relay.service` | repo-managed | deploy.sh, verbatim | |
 | `/etc/sysctl.d/90-vpn-relay.conf` | template + host values | `vpn-relay-apply apply`, from the relay's `.env` | |
+| `/etc/apt/sources.list.d/ookla_speedtest-cli.list` | retired | — | as on main |
+| `/etc/systemd/system/ModemManager.service`, `/etc/systemd/system/udisks2.service` | masked unit | deploy.sh | as on main — [Host hygiene](#host-hygiene) |
 
 ## How the deploy handles them
 
@@ -148,16 +154,18 @@ any repo file.
 | `ssh` | `sshd -t` on `sshd_config` with the candidate swapped into a copy of its drop-in directory; a socket drop-in must leave a `ListenStream` port | see [below](#allow_ssh_change-and-the-lockout-risk) |
 | `absent` | nothing may still name it (below) | `disable --now` if it is a unit file, then removed; an `sshd_config.d` file is followed by `sshd -t` + reload + the port check, like an ssh change |
 | `pristine` | the copy carries the package manager's md5; restoring it changes nothing effective (host check `--pristine`; for `sshd_config` also `sshd -T`) | installed atomically; `journald.conf` → restart journald, `resolved.conf` → as `resolved`, `sshd_config` → as `ssh` — [below](#package-defaults-class-pristine) |
+| `masked` | nothing else may sit at `/etc/systemd/system/<unit>` (an admin's unit file, a symlink elsewhere: Phase 1 stops) | the symlink to `/dev/null` (what `systemctl mask` writes), `daemon-reload`, then `stop` if the unit ran — [Host hygiene](#host-hygiene) |
 
 **Phase 1** (read-only, also under `PHASE1_ONLY=1`) scans every entry against `origin/main` and
 reports a state per file: `synced`, `absent` (will be installed), `drift` (will be reinstalled —
 the diff is printed), `meta` (content right, mode/owner wrong — fixed in place), `rename`,
-`present` / `gone` (retired files), `gated-off`, `cannot-restore` (a package default that could
-not be obtained or verified: a WARN, never a stop). It validates every candidate Phase 2 would
-install and **stops before any mutation** when a validator refuses one, when a retired file is
-still referenced, when a legacy-named file differs from the repo, when an ssh file differs
-without `ALLOW_SSH_CHANGE=1`, or when restoring a package default would change the effective
-configuration.
+`present` / `gone` (retired files), `masked` / `unmasked` / `mask-conflict` (masked units),
+`gated-off`, `cannot-restore` (a package default that could not be obtained or verified: a WARN,
+never a stop). It validates every candidate Phase 2 would install and **stops before any
+mutation** when a validator refuses one, when a retired file is still referenced, when a
+legacy-named file differs from the repo, when an ssh file differs without `ALLOW_SSH_CHANGE=1`,
+when something else sits where a mask goes, or when restoring a package default would change
+the effective configuration.
 
 **Phase 2** stages every path it may touch into the backup archive first, then installs,
 repairs and removes, runs each class's post-action once for what actually changed, and rescans:
@@ -276,7 +284,7 @@ implementation: deploy Phase 1, deploy Phase 2 and
 | Verdict | Meaning | Deploy Phase 1 | Deploy Phase 2 | Bot (main) |
 |---|---|---|---|---|
 | **BEATEN** | a value a repo-managed file sets is not in effect: another file wins | FAIL | rollback | alert |
-| **MISMATCH** | the live value (`sshd -T`, `sysctl -n`, `systemctl show`) differs from what the files give, for a key a repo file sets; a repo unit that is masked, waits for `daemon-reload`, or (a timer the deploy installs) is not enabled+active; an `invariants.list` line that does not hold; (`--pristine`) restoring a package default would change a key | FAIL | rollback | alert |
+| **MISMATCH** | the live value (`sshd -T`, `sysctl -n`, `systemctl show`) differs from what the files give, for a key a repo file sets; a repo unit that is masked, waits for `daemon-reload`, or (a timer the deploy installs) is not enabled+active; an `invariants.list` line that does not hold; (`--pristine`) restoring a package default would change a key; a `class masked` unit that is not masked, not reloaded, or still running | FAIL | rollback | alert |
 | **LATENT** | right now, but a loser that is neither repo-managed nor vendor holds another value: remove the winner and the value silently flips. The row names the winner, the losers and `winner gone -> <value> from <file>` | FAIL on an sshd auth key¹, else WARN | reported | alert when new |
 | **ACCEPTED** | a LATENT listed in `deploy/host/accepted-overrides.list` | reported | reported | — |
 | **WARN** | host state outside the repo worth a look (below) | WARN | reported | — |
@@ -514,11 +522,44 @@ called out as an **orphan drop-in for absent unit**. For each warning, decide: p
 To retire a file, add `"-|<path>|-|-|absent|<role>"`. Its backup copy stays in the deploy
 archives (`/var/backups/vpn-bot`, the last `BACKUP_KEEP`).
 
+To keep a unit masked, add `"-|/etc/systemd/system/<unit>|-|-|masked|<role>"`.
+
 To put a package's own file back to its default, add
 `"dpkg:<package>|<path>|0644|root:root|pristine|<role>"` (a dpkg conffile) or
 `"ucf:<template>|<path>|0644|root:root|pristine|<role>"` (a ucf-managed file). The path must be
 in a family the effect proof covers: `/etc/ssh/sshd_config`, `/etc/systemd/<x>.conf`, sysctl.
 `tests/test_deploy_pristine.py` pins the form and that the path is that package's conffile.
+
+## Host hygiene
+
+Two things a provider image leaves behind are cleaned up by the deploy itself — no command to
+run by hand:
+
+- **A broken apt source is retired.** `/etc/apt/sources.list.d/ookla_speedtest-cli.list`
+  (packagecloud's speedtest-cli repository) made every `apt update` end in `E:`. It is a
+  `class absent` entry on both roles: Phase 2 backs it up into the deploy archive and removes
+  it; the host check treats it as retired. The `speedtest-cli` package itself is not touched.
+- **Daemons a server never needs are masked** (`class masked`): `ModemManager.service` and
+  `udisks2.service` on both roles. *Masked, never purged* — the package and its files stay, so
+  it is reversible.
+
+How a mask is done: Phase 2 creates `/etc/systemd/system/<unit> -> /dev/null` (exactly what
+`systemctl mask` writes; the path is staged first, like every host file), runs one
+`daemon-reload`, then stops each unit that was running. A masked unit cannot be started again —
+by hand, by socket activation or as a dependency. The rescan requires the mask; the host check
+then requires `LoadState=masked` and the unit not running (MISMATCH otherwise, BEATEN if a unit
+file of higher priority — `/etc/systemd/system.control`, `/run/systemd/transient` — shadows the
+mask). If anything else already sits at that path (an admin's own unit file, a symlink
+elsewhere), Phase 1 stops: replacing it is a decision for a human.
+
+A rollback removes the mask again (the path did not exist before), `daemon-reload`s and starts
+each unit that was running before the deploy; its enablement was never touched, so it comes back
+as it was.
+
+**Undoing a mask on purpose.** Removing a `class masked` entry from the registry does not unmask
+anything — the deploy then simply stops managing that path. To take a unit back, remove the
+entry and run `sudo systemctl unmask <unit>` once (then `systemctl start <unit>` if you want it
+running).
 
 ## ALLOW_SSH_CHANGE and the lockout risk
 

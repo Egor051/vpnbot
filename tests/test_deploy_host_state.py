@@ -932,7 +932,7 @@ def test_a_relay_installs_only_the_relay_entry(tmp_path: Path) -> None:
 # 6. Static guards on the real registry and deploy/host/
 # --------------------------------------------------------------------------- #
 VALID_CLASSES = {"logrotate", "sysctl", "unit", "journald", "networkd", "hook", "ssh", "plain", "resolved", "absent",
-                 "pristine"}
+                 "pristine", "masked"}
 PRISTINE_SOURCE_RE = re.compile(r"dpkg:[a-z0-9][a-z0-9+.-]+|ucf:/[^\s|]+")
 VALID_GATES = {"MTPROTO", "SOCKS5", "HYSTERIA2"}
 
@@ -952,6 +952,12 @@ def test_registry_entries_are_well_formed() -> None:
         if cls == "absent":
             assert (src, mode, owner) == ("-", "-", "-"), f"a retired entry carries no source: {e}"
             assert len(e) == 6
+            continue
+        if cls == "masked":
+            # The mask is the symlink `systemctl mask` writes: /etc/systemd/system/<unit>.
+            assert (src, mode, owner) == ("-", "-", "-"), f"a masked entry carries no source: {e}"
+            assert len(e) == 6, f"a masked entry takes no options: {e}"
+            assert re.fullmatch(r"/etc/systemd/system/[A-Za-z0-9@._-]+\.(service|socket|timer|path)", dst), e
             continue
         if cls == "pristine":
             assert PRISTINE_SOURCE_RE.fullmatch(src), f"a pristine source is dpkg:<package> or ucf:<template>: {e}"
@@ -975,7 +981,7 @@ def test_registry_entries_are_well_formed() -> None:
 
 def test_every_registry_source_exists() -> None:
     for e in _registry():
-        if e[4] not in {"absent", "pristine"}:
+        if e[4] not in {"absent", "pristine", "masked"}:
             assert (ROOT / e[0]).is_file(), f"{e[1]}: source {e[0]} missing from the checkout"
 
 
