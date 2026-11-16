@@ -5012,6 +5012,47 @@ noop_pin_branch() {
   return 0
 }
 
+# --------------------------------------------------------------------------- #
+# Merged local branches — removed after a successful deploy (both roles)
+# --------------------------------------------------------------------------- #
+# A checkout that once followed feature branches keeps every one of them (the main
+# server had 15 on 2026-11-16). Once a deploy is certain — after disarm, so this can
+# never roll a deploy back — every local branch `git branch --merged origin/main`
+# lists, except the branch the tree is on and DEPLOY_BRANCH, is deleted with
+# `git branch -d`. NEVER -D: git itself refuses a branch whose commits are not merged
+# (into its upstream, or into HEAD when it has none) or that another worktree has
+# checked out, and such a refusal is a warning, never a failure. Every deletion is
+# logged with the commit it pointed at ("Deleted branch X (was <sha>)"), so a branch
+# comes back with `git branch X <sha>`. DEPLOY OK carries one counter line.
+MERGED_DELETED=0
+MERGED_KEPT=0
+delete_merged_branches() {
+  local current b out
+  MERGED_DELETED=0; MERGED_KEPT=0
+  current="$(current_branch)"
+  while IFS= read -r b; do
+    [[ -n "$b" && "$b" != "$current" && "$b" != "$DEPLOY_BRANCH" ]] || continue
+    if out="$(git branch -d -- "$b" 2>&1)"; then
+      MERGED_DELETED=$(( MERGED_DELETED + 1 ))
+      log "merged branch: ${out}"
+    else
+      MERGED_KEPT=$(( MERGED_KEPT + 1 ))
+      warn "merged branch ${b} kept — git branch -d refused: ${out//$'\n'/; }"
+    fi
+  done < <(git branch --format='%(refname:short)' --merged origin/main 2>/dev/null || true)
+  return 0
+}
+
+# The DEPLOY OK counter line.
+merged_branches_summary() {
+  if (( MERGED_DELETED + MERGED_KEPT == 0 )); then
+    printf 'none merged into origin/main besides %s' "$DEPLOY_BRANCH"
+  else
+    printf '%s deleted (git branch -d; each with its sha in the log above), %s kept (git refused — see the WARN lines)' \
+      "$MERGED_DELETED" "$MERGED_KEPT"
+  fi
+}
+
 # Fetch origin/main, set TAG, apply the up-to-date gate (exit 0 unless FORCE /
 # PHASE1_ONLY; the no-op still puts the tree on local main) and refuse a dirty working
 # tree. Shared by both host roles; the main path calls it exactly where this code used
@@ -5718,6 +5759,7 @@ relay_phase2() {
   relay_retire_legacy_nft
   rotate_backups
   ssh_port_after_deploy
+  delete_merged_branches
   # One line from the helper: off | OK (...) | CONFIRMED by main probe (...) |
   # PENDING CONFIRM (reverts at ...) — <why main did not confirm> | ...
   input_status="$(RELAY_ENV="$ENV_FILE" "$RELAY_HELPER" input-status 2>/dev/null)" \
@@ -5739,6 +5781,7 @@ relay_phase2() {
   host files       : $(host_files_summary)
   host invariants  : $(hc_summary_text)
   ${SSH_FINAL_STATUS:-ssh port: not checked}
+  merged branches  : $(merged_branches_summary)
   ${RELAY_LEGACY_NFT} : ${legacy_before}$( [[ "$legacy_before" == "present" ]] && printf ' -> renamed to .pre-repo.<ts>')
 EOF
   host_invariants_report_rows
@@ -6690,6 +6733,8 @@ trap - ERR INT TERM HUP
 # migration, or look for the proof of one in phase 1 right away.
 ssh_port_after_deploy
 ufw_after_deploy
+# Local branches already merged into origin/main (never a rollback, never -D).
+delete_merged_branches
 
 cat <<EOF
 
@@ -6706,6 +6751,7 @@ cat <<EOF
   host invariants  : $(hc_summary_text)
   ${SSH_FINAL_STATUS:-ssh port: not checked}
   ${UFW_FINAL_STATUS:-ufw: not checked}
+  merged branches  : $(merged_branches_summary)
 EOF
 host_invariants_report_rows
 # One line per sidecar (restarted / skipped), so a half-deployed host is visible

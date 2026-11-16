@@ -62,7 +62,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Host hygiene, part 2 (docs/host-state.md#host-hygiene).** Masked (never purged) on both
   roles: `snapd.socket`, `snapd.service`, `snapd.seeded.service` (now on the relay too) and
   `multipathd.socket`, `multipathd.service` (the root of both hosts is a plain disk); each socket
-  before its service.
+  before its service. After a successful deploy (both roles) every local branch merged into
+  `origin/main` — not the current one, not `main` — is deleted with `git branch -d` (never `-D`;
+  a refusal is a WARN); DEPLOY OK carries `merged branches : …`.
 - **Deploy: the new venv's TLS context is probed before the bot starts on it.** After PR #269
   the new bot died on its first start with `FileNotFoundError` on `certifi/cacert.pem`, looped
   and was rolled back — a fault `pip check` cannot see. `scripts/deploy.sh` Phase 2 now runs

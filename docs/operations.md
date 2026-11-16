@@ -41,8 +41,19 @@ When the checkout already sits at `origin/main`, the no-op run (no `FORCE`) stil
 `main` — the same commit, so no file changes and nothing is restarted. Phase 1 prints a `WARN`
 (and the `PHASE1_ONLY` report a `branch :` line) when the checkout is on another branch or a
 detached HEAD; a real deploy stops before any mutation while another worktree has `main`
-checked out. The branch the checkout was on is left where it is — delete it by hand once you no
-longer need it.
+checked out. The branch the checkout was on is left where it is.
+
+**Merged local branches are cleaned up after a successful deploy (both roles).** Once the deploy
+is certain (after DEPLOY OK can no longer roll back), every local branch
+`git branch --merged origin/main` lists — except the one the checkout is on and `main` — is
+deleted with `git branch -d`, **never `-D`**: git itself refuses a branch that is not merged
+into its upstream (or into `HEAD` without one) or that another worktree has checked out, and such
+a refusal is only a `WARN`. Each deletion is logged as `merged branch: Deleted branch <name>
+(was <sha>)`; DEPLOY OK carries `merged branches : N deleted …, M kept …`. To get one back:
+
+```bash
+git -C /opt/vpn-service branch <name> <sha>
+```
 
 **The new venv must build a TLS context before the bot starts on it.** Right after
 `pip install` + `pip check`, Phase 2 runs
