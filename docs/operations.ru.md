@@ -42,9 +42,16 @@ detached HEAD; настоящий деплой останавливается д
 
 **Слитые локальные ветки убираются после успешного деплоя (обе роли).** Когда деплой уже
 состоялся (DEPLOY OK больше не может откатиться), каждая локальная ветка из
-`git branch --merged origin/main` — кроме той, на которой стоит чекаут, и `main` — удаляется через
-`git branch -d`, **никогда не `-D`**: git сам отказывает для ветки, не слитой в свой upstream (или
-в `HEAD`, если upstream нет), или checked out в другом worktree, и такой отказ — только `WARN`.
+`git for-each-ref --merged origin/main refs/heads/` — кроме той, на которой стоит чекаут, и
+`main` — удаляется, если её коммит — **предок `origin/main`**: это проверяется ещё раз прямо перед
+удалением (`git merge-base --is-ancestor <sha> origin/main`), затем
+`git update-ref -d refs/heads/<имя> <sha>` — git откажет, если ветка сдвинулась после листинга, —
+и `git config --remove-section branch.<имя>`. Ветку с коммитом, которого нет в `origin/main`,
+деплой не трогает никогда (**никогда не `-D`**); ветку, checked out в другом worktree, оставляет.
+Не `git branch -d`: он сверяет ветку с её upstream, а деплой фетчит только `main`, так что
+`origin/<имя>` — устаревший remote-tracking ref, и локальная ветка «впереди» него; 2026-11-16 это
+оставило 10 из 13 слитых веток на main-сервере. И не `git branch --merged`: на detached HEAD (relay
+всегда такой) он печатает ещё и `(HEAD detached at <sha>)`. Любой отказ — только `WARN`.
 Каждое удаление пишется в лог как `merged branch: Deleted branch <имя> (was <sha>)`; в DEPLOY OK
 — строка `merged branches : N deleted …, M kept …`. Вернуть ветку:
 

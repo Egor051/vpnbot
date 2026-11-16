@@ -66,6 +66,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Deploy: merged local branches are judged by `origin/main`, not by a stale upstream, and a
+  detached HEAD is not a branch (docs/operations.md#pre-deploy-checklist).** Measured on
+  2026-11-16/17. On a relay (always detached now) `git branch --merged origin/main` also printed
+  `(HEAD detached at 4962f71)`, and `delete_merged_branches` tried to delete it — a `WARN` on every
+  relay deploy. On the main server 10 of 13 merged branches stayed: `git branch -d` checks a
+  branch against its upstream, and the deploy fetches only `main`, so `origin/<b>` is a stale
+  remote-tracking ref the local branch was ahead of (by up to 149 commits — an old deploy did
+  `reset --hard` on the current branch): "not deleting branch '<b>' that is not yet merged to
+  'refs/remotes/origin/<b>', even though it is merged to HEAD". Now the candidates come from
+  `git for-each-ref --merged origin/main refs/heads/` (branches only, each with its sha); right
+  before each deletion `git merge-base --is-ancestor <sha> origin/main`, then
+  `git update-ref -d refs/heads/<b> <sha>` (refused when the branch moved since the listing) and
+  `git config --remove-section branch.<b>`. A branch with a commit `origin/main` lacks is never
+  touched; one another worktree has checked out is kept (update-ref, unlike `branch -d`, would not
+  refuse it); every refusal is a `WARN`, never a failure. The log line keeps its shape,
+  `merged branch: Deleted branch <b> (was <sha>)`, now with the full sha.
+- **The provider image's two files no longer show up as "host files nothing accounts for"
+  (docs/host-state.md#files-nothing-accounts-for).** `/etc/ssh/sshd_config.d/60-cloudimg-settings.conf`
+  (one line, `PasswordAuthentication no` — the repo's own policy, and our `00-*` are read first)
+  and `/etc/sysctl.d/99-cloudimg-ipv6.conf` (`use_tempaddr = 0` for `all`/`default`; changes
+  nothing on a host without IPv6) are written by the cloud image build and owned by no package
+  (`dpkg -S` finds nothing), so Phase 1 warned about them on every deploy of both roles. Both are
+  in `deploy/host/known-unmanaged.list` as `provider`, like `/etc/netplan/*`, and in the tables
+  of docs/host-state.md.
 - **`scripts/redeploy.sh` always runs as `origin/main`'s copy (docs/operations.md#which-copy-of-redeploysh-runs).**
   It took `deploy.sh` from `origin/main` but ran itself from the working tree, so on a checkout
   behind `origin/main` an older wrapper ran, and names added to `DEPLOY_ENV_PASSTHROUGH` since
@@ -98,8 +122,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   roles: `snapd.socket`, `snapd.service`, `snapd.seeded.service` (now on the relay too) and
   `multipathd.socket`, `multipathd.service` (the root of both hosts is a plain disk); each socket
   before its service. After a successful deploy (both roles) every local branch merged into
-  `origin/main` — not the current one, not `main` — is deleted with `git branch -d` (never `-D`;
-  a refusal is a WARN); DEPLOY OK carries `merged branches : …`.
+  `origin/main` — not the current one, not `main` — is deleted when it is an ancestor of
+  `origin/main` (`git update-ref -d` with the listed sha, never `-D`; a refusal is a WARN — see
+  *Fixed*); DEPLOY OK carries `merged branches : …`.
 - **Deploy: the new venv's TLS context is probed before the bot starts on it.** After PR #269
   the new bot died on its first start with `FileNotFoundError` on `certifi/cacert.pem`, looped
   and was rolled back — a fault `pip check` cannot see. `scripts/deploy.sh` Phase 2 now runs

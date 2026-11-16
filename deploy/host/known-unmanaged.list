@@ -38,6 +38,8 @@
 
 # --- Provider / backup-only / deployment-local ---------------------------------
 /etc/netplan/*  # provider — сетевая конфигурация образа VPS; /etc/netplan не сканируется, запись для таблицы docs/host-state.md
+/etc/ssh/sshd_config.d/60-cloudimg-settings.conf  # provider — образ провайдера; PasswordAuthentication no совпадает с политикой репо, а наши 00-* читаются раньше (first match wins)
+/etc/sysctl.d/99-cloudimg-ipv6.conf  # provider — образ провайдера; use_tempaddr=0, на хостах без IPv6 ни на что не влияет
 /var/spool/cron/crontabs/root  # backup-only — строку acme.sh --cron пишет acme.sh; файл держится в offsite system-бэкапе
 /etc/nginx/conf.d/*.conf  # backup-only — vhost decoy/self-steal с доменом хоста; перевод в шаблон репо — отдельная задача
 /usr/local/sbin/site-freshen.py  # deployment-local — rewriter decoy-сайта, по docs/hysteria.md в репо не хранится; держится в system-бэкапе
