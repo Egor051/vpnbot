@@ -223,7 +223,7 @@ dropped; `HYSTERIA2_OBFS_PASSWORD` is deprecated and ignored.
 | `HYSTERIA2_STATS_SECRET` | No | — | Shared secret for the Traffic Stats API; MUST equal `trafficStats.secret` in `config.yaml`. Empty disables hy2 traffic/online/kick. 🔒 | `s3cret` |
 | `HYSTERIA2_STATS_INTERVAL` | No | `60` | Background hy2 traffic-stats sampling interval in seconds (0–3600; 0 disables the loop). | `60` |
 | `HYSTERIA2_SERVICE_NAME` | No | `hysteria-server` | systemd unit of the Hysteria2 server, checked by the admin health diagnostics (`systemctl is-active`). | `hysteria-server` |
-| `HYSTERIA2_AUTH_SERVICE_NAME` | No | `vpn-bot-hy2-auth` | systemd unit of the `hy2_auth` endpoint, checked by the admin health diagnostics. | `vpn-bot-hy2-auth` |
+| `HYSTERIA2_AUTH_SERVICE_NAME` | No | `vpnbot-hy2-auth` | systemd unit of the `hy2_auth` endpoint, checked by the admin health diagnostics; `scripts/deploy.sh` installs `deploy/vpnbot-hy2-auth.service` under this name (while `HYSTERIA2_ENABLED`). | `vpnbot-hy2-auth` |
 | `HYSTERIA2_CONFIG_PATH` | No | `/etc/hysteria/config.yaml` | Path to the hysteria-server config, bundled into the offsite recovery archive (when recovery is enabled) so a rebuilt box can restore the data plane. A missing file is skipped. | `/etc/hysteria/config.yaml` |
 | `HYSTERIA2_HEALTH_INTERVAL` | No | `60` | How often (seconds) to probe `hy2_auth` `GET /healthz` and reflect it in the dashboard/health **Hysteria2: OK/DEGRADED** entry (0–3600; 0 disables the probe). Only active when `HYSTERIA2_ENABLED`. | `60` |
 

@@ -110,8 +110,10 @@
 #
 #   ALLOW_UNIT_DRIFT=1
 #     What:   BYPASSES THE REAL UNIT-DRIFT GATE. deploy.sh installs only
-#             vpn-bot.service; when another shipped deploy/*.service differs from
-#             the copy installed on the host, that is drift and the deploy stops.
+#             vpn-bot.service and the hy2-auth unit (deploy/vpnbot-hy2-auth.service,
+#             under HYSTERIA2_AUTH_SERVICE_NAME); when another shipped deploy/*.service
+#             differs from the copy installed on the host, that is drift and the
+#             deploy stops.
 #             This knob continues past it anyway, deploying vpn-bot while leaving
 #             the other units stale.
 #     When:   Apply ONLY consciously, when the drift is already known and safe —
@@ -887,6 +889,15 @@ declare -A U_CLASS=() U_TARGET=() U_PRE_ACTIVE=() U_PRE_ENABLED=()
 declare -a SIDECAR_UNITS=()
 declare -A SIDECAR_PRE_ACTIVE=()
 declare -a SIDECAR_REPORT=()
+# The Hysteria2 auth sidecar's unit FILE (see "The hy2-auth unit" further down): one
+# canonical name, the one the hosts have run since #222, for the repo file, the default
+# of HYSTERIA2_AUTH_SERVICE_NAME (config/settings.py, .env.example) and this script.
+HY2_AUTH_DEFAULT_NAME="vpnbot-hy2-auth"
+HY2_AUTH_UNIT_SRC="deploy/vpnbot-hy2-auth.service"   # checkout-relative; installed verbatim
+HY2_AUTH_UNIT_DST=""      # ${SYSTEMD_UNIT_DIR}/${HY2_AUTH_SERVICE_NAME_V}.service
+HY2_AUTH_UNIT_STATE=""    # off | absent | synced | differs | symlink (hy2_auth_unit_phase1)
+HY2_AUTH_UNIT_RESULT=""   # what Phase 2 did with it, for DEPLOY OK
+PROC_DIR="${PROC_DIR:-/proc}"   # tests: where /proc/<pid>/limits is read
 # The sidecars Phase 2 asked systemd to restart (restart_sidecar_units), in order: the
 # rollback restarts exactly these again on PREV_SHA (rollback_restart_sidecars).
 declare -a SIDECAR_RESTARTED=()
@@ -1017,18 +1028,18 @@ uninstalled_protocols() {
 
 # The removed protocol a unit belongs to, or nothing. The names come from .env
 # (resolve_backend_units), with the same defaults, so this works before it ran too.
-# vpn-bot-hy2-auth.service is the repo's name of the unit the host runs as
+# deploy/vpnbot-hy2-auth.service is the repo file of the unit the host runs as
 # HYSTERIA2_AUTH_SERVICE_NAME; vpnbot-hy2-warp-mark.service is the Hysteria2 tagger.
 unit_uninstalled_owner() {
   local u="$1" x h a
   x="${XRAY_SERVICE_NAME_V:-xray}"; h="${HY2_SERVICE_NAME_V:-hysteria-server}"
-  a="${HY2_AUTH_SERVICE_NAME_V:-vpn-bot-hy2-auth}"
+  a="${HY2_AUTH_SERVICE_NAME_V:-$HY2_AUTH_DEFAULT_NAME}"
   if proto_uninstalled xray && [[ "$u" == "${x}.service" || "$u" == "${x}@"*.service ]]; then printf xray; return 0; fi
   if proto_uninstalled awg && [[ "$u" == "awg-quick@${AWG_IFACE_V:-awg0}.service" ]]; then printf awg; return 0; fi
   if proto_uninstalled socks5 && [[ "$u" == "${SOCKS5_SERVICE_NAME_V:-danted}.service" ]]; then printf socks5; return 0; fi
   if proto_uninstalled mtproto && [[ "$u" == "${MTPROTO_SERVICE_NAME_V:-mtproxy}.service" ]]; then printf mtproto; return 0; fi
   if proto_uninstalled hysteria2 && [[ "$u" == "${h}.service" || "$u" == "${h}@"*.service || "$u" == "${a}.service" \
-       || "$u" == vpn-bot-hy2-auth.service || "$u" == "$HY2_MARK_UNIT" ]]; then
+       || "$u" == "${HY2_AUTH_UNIT_SRC##*/}" || "$u" == "$HY2_MARK_UNIT" ]]; then
     printf hysteria2; return 0
   fi
   return 0
@@ -2164,6 +2175,7 @@ scan_unaccounted_host_files() {
     for f in "$root"/deploy/*.service "$root"/deploy/*.timer; do
       base="$(basename "$f")"
       [[ "$base" == *.example.* ]] && continue
+      [[ "$base" == "${HY2_AUTH_UNIT_SRC##*/}" ]] && base="${HY2_AUTH_SERVICE_NAME_V:-$HY2_AUTH_DEFAULT_NAME}.service"
       known["${SYSTEMD_UNIT_DIR}/${base}"]=1
     done
   fi
@@ -4005,7 +4017,7 @@ sidecar_units() {
   # Phase 1 resolves this from .env (resolve_backend_units) long before the
   # snapshot runs; the fallback only keeps the function callable on its own from
   # the DEPLOY_SELFTEST seam, and reads the same .env key rather than a literal.
-  [[ -n "$hy2_auth" ]] || hy2_auth="$(env_or HYSTERIA2_AUTH_SERVICE_NAME vpn-bot-hy2-auth)"
+  [[ -n "$hy2_auth" ]] || hy2_auth="$(env_or HYSTERIA2_AUTH_SERVICE_NAME "$HY2_AUTH_DEFAULT_NAME")"
   printf '%s\n' "$SUBSCRIPTION_UNIT" "${hy2_auth}.service" | awk 'NF && !seen[$0]++'
 }
 
@@ -4205,6 +4217,120 @@ sidecar_report_block() {
   fi
   printf '  sidecar units    :\n'
   for line in "${SIDECAR_REPORT[@]}"; do printf '    %s\n' "$line"; done
+}
+
+# --------------------------------------------------------------------------- #
+# The hy2-auth unit — installed by the deploy under its live name (main server)
+# --------------------------------------------------------------------------- #
+# The sidecar's unit file used to be hand-installed: the repo shipped it as
+# deploy/vpn-bot-hy2-auth.service, the hosts ran it as vpnbot-hy2-auth.service (the
+# name of #222, kept on purpose), so every DEPLOY OK said "units skipped:
+# vpn-bot-hy2-auth.service" and nothing ever compared the live file — which went
+# without LimitNOFILE=65536 since that line was added to the repo. Now ONE name
+# (HY2_AUTH_DEFAULT_NAME) for the repo file and every default, and the deploy installs
+# HY2_AUTH_UNIT_SRC as ${HYSTERIA2_AUTH_SERVICE_NAME}.service — the .env name, so a
+# host that chose another keeps it — the way it installs vpn-bot.service:
+#   Phase 1  compared with the checkout (off | absent | synced | differs), the diff of a
+#            differing copy shown, the candidate through systemd-analyze verify
+#            (a fatal finding stops here; PHASE1_ONLY reports it); a symlink there (a
+#            mask) is somebody's decision: Phase 1 stops
+#   Phase 2  staged into the backup, installed verbatim (a synced copy is left as it
+#            is), daemon-reload with vpn-bot.service's; restart_sidecar_units then
+#            restarts the sidecar if it was active — so the new file is in effect —
+#            and waits for its port (wait_for_listen). An ABSENT file is installed
+#            but never enabled or started (the deploy never starts what did not run)
+#   rollback the previous file back (or none), daemon-reload, the sidecar restarted
+#            on PREV_SHA with it (rollback_restart_sidecars)
+# Only while Hysteria2 is on (HYSTERIA2_ENABLED, no uninstall marker): otherwise the
+# path is not compared, installed or touched.
+
+hy2_auth_unit_state_text() {
+  case "$HY2_AUTH_UNIT_STATE" in
+    off)     echo "not managed here — Hysteria2 is not enabled (HYSTERIA2_ENABLED, or removed from this host)" ;;
+    absent)  echo "not installed — Phase 2 installs ${HY2_AUTH_UNIT_SRC} there, neither enabled nor started (enable it once: systemctl enable --now ${HY2_AUTH_SERVICE_NAME_V})" ;;
+    synced)  echo "matches ${HY2_AUTH_UNIT_SRC}" ;;
+    differs) echo "differs from ${HY2_AUTH_UNIT_SRC} — Phase 2 installs the repo copy; the sidecar restart loads it" ;;
+    symlink) echo "a symlink, not a unit file — a real deploy stops in Phase 1" ;;
+    *)       echo "unknown (${HY2_AUTH_UNIT_STATE:-not scanned})" ;;
+  esac
+}
+
+# Phase 1 (main path, after resolve_backend_units). Read-only.
+hy2_auth_unit_phase1() {
+  local root="${1%/}" src out rc
+  src="${root}/${HY2_AUTH_UNIT_SRC}"
+  HY2_AUTH_UNIT_DST="${SYSTEMD_UNIT_DIR}/${HY2_AUTH_SERVICE_NAME_V:-$HY2_AUTH_DEFAULT_NAME}.service"
+  if [[ "${HYSTERIA2_ON:-no}" != "yes" ]]; then
+    HY2_AUTH_UNIT_STATE="off"
+    log "hy2-auth unit ${HY2_AUTH_UNIT_DST}: $(hy2_auth_unit_state_text)"
+    return 0
+  fi
+  [[ -f "$src" ]] || die "the checkout has no ${HY2_AUTH_UNIT_SRC} — the hy2-auth unit cannot be installed; nothing was changed"
+  if [[ -L "$HY2_AUTH_UNIT_DST" ]]; then
+    # A mask (-> /dev/null) or a link elsewhere is a decision somebody made by hand.
+    if [[ "$PHASE1_ONLY" == "1" ]]; then
+      warn "hy2-auth unit ${HY2_AUTH_UNIT_DST} is a symlink (-> $(readlink "$HY2_AUTH_UNIT_DST")) — a real deploy stops here"
+      HY2_AUTH_UNIT_STATE="symlink"; return 0
+    fi
+    die "hy2-auth unit ${HY2_AUTH_UNIT_DST} is a symlink (-> $(readlink "$HY2_AUTH_UNIT_DST")), not a unit file — the deploy does not replace it; nothing was changed"
+  fi
+  if [[ ! -e "$HY2_AUTH_UNIT_DST" ]]; then HY2_AUTH_UNIT_STATE="absent"
+  elif cmp -s "$src" "$HY2_AUTH_UNIT_DST"; then HY2_AUTH_UNIT_STATE="synced"
+  else HY2_AUTH_UNIT_STATE="differs"; fi
+  log "hy2-auth unit ${HY2_AUTH_UNIT_DST} (HYSTERIA2_AUTH_SERVICE_NAME=${HY2_AUTH_SERVICE_NAME_V}): $(hy2_auth_unit_state_text)"
+  [[ "$HY2_AUTH_UNIT_STATE" != "differs" ]] || mh_show_diff "$HY2_AUTH_UNIT_DST" "$src"
+  [[ "$HY2_AUTH_UNIT_STATE" != "synced" ]] || return 0
+  out="$(mh_validate_unit "$src" "$HY2_AUTH_UNIT_DST")" && rc=0 || rc=$?
+  [[ -z "$out" ]] || printf '%s\n' "$out" | sed 's/^/      /'
+  if (( rc != 0 )); then
+    [[ "$PHASE1_ONLY" == "1" ]] \
+      || die "systemd-analyze verify refuses ${HY2_AUTH_UNIT_SRC} (above) — the hy2-auth unit is not installed; nothing was changed"
+    warn "systemd-analyze verify refuses ${HY2_AUTH_UNIT_SRC} (above) — a real deploy stops here"
+  fi
+  return 0
+}
+
+# Phase 2 (main path, armed, next to the vpn-bot.service install; the caller's
+# daemon-reload loads it). Every failure is rollback_now.
+hy2_auth_unit_install() {
+  case "$HY2_AUTH_UNIT_STATE" in
+    off)
+      HY2_AUTH_UNIT_RESULT="not managed — Hysteria2 is not enabled here"
+      return 0 ;;
+    synced)
+      HY2_AUTH_UNIT_RESULT="${HY2_AUTH_UNIT_DST} matches ${HY2_AUTH_UNIT_SRC} — left as it is"
+      log "hy2-auth unit: ${HY2_AUTH_UNIT_RESULT}"
+      return 0 ;;
+    absent|differs) ;;
+    *) rollback_now "hy2-auth unit: unexpected state '${HY2_AUTH_UNIT_STATE}' (Phase 1 did not scan it)"; return 1 ;;
+  esac
+  log "installing ${HY2_AUTH_UNIT_SRC} as ${HY2_AUTH_UNIT_DST} (verbatim; was ${HY2_AUTH_UNIT_STATE})"
+  mh_selftest_fence "$HY2_AUTH_UNIT_DST"
+  install -m0644 "$HY2_AUTH_UNIT_SRC" "$HY2_AUTH_UNIT_DST" \
+    || rollback_now "failed to install ${HY2_AUTH_UNIT_SRC} to ${HY2_AUTH_UNIT_DST}"
+  HY2_AUTH_UNIT_RESULT="${HY2_AUTH_UNIT_DST} installed from ${HY2_AUTH_UNIT_SRC} (was ${HY2_AUTH_UNIT_STATE})"
+  return 0
+}
+
+# The open-files limit of the running sidecar (/proc/<MainPID>/limits): proof the
+# restart put the unit's LimitNOFILE in effect. Informational, one phrase.
+hy2_auth_nofile() {
+  local u="${HY2_AUTH_SERVICE_NAME_V:-$HY2_AUTH_DEFAULT_NAME}.service" pid lim
+  pid="$(systemctl show -p MainPID --value "$u" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { printf 'no running process'; return 0; }
+  lim="$(awk '/^Max open files/ { print $4 "/" $5; exit }' "${PROC_DIR}/${pid}/limits" 2>/dev/null || true)"
+  printf 'open files %s (soft/hard) in pid %s' "${lim:-unknown}" "$pid"
+}
+
+# DEPLOY OK line.
+hy2_auth_unit_report() {
+  local u="${HY2_AUTH_SERVICE_NAME_V:-$HY2_AUTH_DEFAULT_NAME}.service" st
+  printf '%s' "${HY2_AUTH_UNIT_RESULT:-not scanned}"
+  [[ "$HY2_AUTH_UNIT_STATE" == "off" ]] && return 0
+  st="$(systemctl is-active "$u" 2>/dev/null || true)"
+  printf '; %s %s' "$u" "${st:-unknown}"
+  [[ "$st" == "active" ]] && printf ', %s' "$(hy2_auth_nofile)"
+  return 0
 }
 
 # --------------------------------------------------------------------------- #
@@ -4608,7 +4734,7 @@ resolve_backend_units() {
   SOCKS5_SERVICE_NAME_V="$(env_or SOCKS5_SERVICE_NAME danted)"
   MTPROTO_SERVICE_NAME_V="$(env_or MTPROTO_SERVICE_NAME mtproxy)"
   HY2_SERVICE_NAME_V="$(env_or HYSTERIA2_SERVICE_NAME hysteria-server)"
-  HY2_AUTH_SERVICE_NAME_V="$(env_or HYSTERIA2_AUTH_SERVICE_NAME vpn-bot-hy2-auth)"
+  HY2_AUTH_SERVICE_NAME_V="$(env_or HYSTERIA2_AUTH_SERVICE_NAME "$HY2_AUTH_DEFAULT_NAME")"
   AWG_IFACE_V="$(env_or AWG_INTERFACE awg0)"
   SOCKS5_ON="$(yesno "$(env_val SOCKS5_ENABLED)")"
   MTPROTO_ON="$(yesno "$(env_val MTPROTO_ENABLED)")"
@@ -4657,6 +4783,8 @@ assemble_unit_set() {
   shopt -s nullglob
   for f in "$WT"/deploy/*.service; do
     base="$(basename "$f")"; [[ "$base" == *.example.service ]] && continue
+    # The hy2-auth repo file runs here under the .env name (hy2_auth_unit_phase1).
+    [[ "$base" == "${HY2_AUTH_UNIT_SRC##*/}" ]] && base="${HY2_AUTH_SERVICE_NAME_V:-$HY2_AUTH_DEFAULT_NAME}.service"
     UNIT_SET+=("$base")
   done
   shopt -u nullglob
@@ -5800,10 +5928,10 @@ else
 fi
 
 # Unit drift check (R3): other units are asserted but never installed here ---
+# (vpn-bot.service and the hy2-auth unit are installed by this deploy: not compared.)
 # DRIFT (a unit that exists on BOTH sides with different content) is a real
 # divergence and fails at ALLOW_UNIT_DRIFT=0. A unit shipped in the repo whose
-# installed file is ABSENT is NOT drift — most often it is a rename (the repo
-# ships deploy/vpn-bot-hy2-auth.service while the host runs vpnbot-hy2-auth), and
+# installed file is ABSENT is NOT drift — most often it is a rename, and
 # treating it as a hard-fail would sink the first real deploy. It is reported as
 # INFO so the operator can reconcile names, never as a failure.
 drift=()
@@ -5813,6 +5941,8 @@ for f in "$WT"/deploy/*.service; do
   base="$(basename "$f")"
   [[ "$base" == *.example.service ]] && continue
   [[ "$base" == "$BOT_UNIT" ]] && continue
+  # Installed by this deploy, under the .env name (hy2_auth_unit_phase1 below).
+  [[ "$base" == "${HY2_AUTH_UNIT_SRC##*/}" ]] && continue
   # A unit of a protocol removed from the host is absent on purpose: not drift, not INFO.
   if [[ -n "$(unit_uninstalled_owner "$base")" ]]; then
     log "  ${base}: its protocol was removed from this host (uninstall marker) — not compared"
@@ -5848,6 +5978,10 @@ if [[ ${#drift[@]} -gt 0 ]]; then
     die "unit drift detected (set ALLOW_UNIT_DRIFT=1 to deploy vpn-bot anyway and apply the rest by hand)"
   fi
 fi
+
+# The hy2-auth unit: the deploy installs it like vpn-bot.service, under the .env name
+# (see "The hy2-auth unit" above) — compared and validated here, before any mutation.
+hy2_auth_unit_phase1 "$WT"
 
 # Backend config drift (R3c): live Xray/AmneziaWG configs vs the tracked skeletons.
 # Why this is a separate gate from unit drift: deploy.sh installs neither of these
@@ -6181,6 +6315,10 @@ phase1_report() {
     printf '    (none listed)\n'
   fi
 
+  # --- The hy2-auth unit: installed by the deploy under its .env name ---
+  printf '\n  --- hy2-auth unit (%s -> %s, HYSTERIA2_AUTH_SERVICE_NAME) ---\n' "$HY2_AUTH_UNIT_SRC" "${HY2_AUTH_UNIT_DST:-?}"
+  printf '    %s: %s\n' "${HY2_AUTH_UNIT_STATE:-?}" "$(hy2_auth_unit_state_text)"
+
   # --- Repo units not installed on the host (INFO, from the drift check) ---
   printf '\n  --- Repo deploy/*.service units NOT installed on this host (INFO, not drift) ---\n'
   if [[ ${#absent[@]} -gt 0 ]]; then
@@ -6329,6 +6467,8 @@ STAGE="$(make_stage_dir)"
 manifest=()
 stage_db_snapshot
 stage_path "$SYSTEM_UNIT"
+# The hy2-auth unit file Phase 2 may install (absent before = removed by the rollback).
+[[ "$HY2_AUTH_UNIT_STATE" == "off" ]] || stage_host_paths "$HY2_AUTH_UNIT_DST"
 stage_path "$ENV_FILE"
 stage_path "$XRAY_CONF"
 stage_path "$AWG_CONF"
@@ -6401,6 +6541,7 @@ ssh_port_phase2_post
 # UFW: the set as Phase 1 planned it, then the listener check (a failure rolls back).
 ufw_phase2_apply
 
+hy2_auth_unit_install
 log "installing ${BOT_UNIT} from deploy/vpn-bot.service (verbatim)"
 install -m0644 "deploy/vpn-bot.service" "$SYSTEM_UNIT"
 systemctl daemon-reload
@@ -6559,6 +6700,7 @@ cat <<EOF
   ssl/certifi      : ${SSL_PROBE_POST:-not probed}
   backup           : ${ARCHIVE}
   units skipped    : ${skipped[*]:-none}
+  hy2-auth unit    : $(hy2_auth_unit_report)
   removed protocols: $(uninstalled_protocols | sed 's/^$/none/')
   host files       : $(host_files_summary)
   host invariants  : $(hc_summary_text)

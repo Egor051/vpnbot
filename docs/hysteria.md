@@ -33,7 +33,7 @@ Three moving parts, only one of which is the bot:
    the tracked `deploy/vpn-bot-acme-reload.sh` hook, which deploy.sh installs as
    `/usr/local/sbin/acme-reload.sh` — acme.sh's `--reloadcmd`
    ([Subscription → TLS termination](subscription.md#tls-termination)).
-2. **`hy2_auth` endpoint** (`python -m hy2_auth`, `deploy/vpn-bot-hy2-auth.service`) — a small,
+2. **`hy2_auth` endpoint** (`python -m hy2_auth`, `deploy/vpnbot-hy2-auth.service`) — a small,
    **separate** process the `hysteria` server calls over loopback for every handshake. It opens
    `vpn.db` **read-only** and validates the per-key token in constant time
    (`hmac.compare_digest`), always replying HTTP 200 with `{"ok": <bool>, "id": "<label>"}` and
@@ -54,27 +54,33 @@ The bot itself never binds any of these ports; it only reads the stats/health AP
 `adapters/hysteria_stats.py` / `adapters/hysteria_auth_health.py`) and writes `vpn_keys` rows
 (`key_type='hysteria2'`, per-key secret in `payload_json`, stats label `hy2_<rnd>`).
 
-### Auth-unit name: repo vs host (a recorded, deliberate divergence)
+### Auth-unit name: one name, installed by the deploy
 
-The tracked unit file is `deploy/vpn-bot-hy2-auth.service`, but on a host provisioned before the
-`vpnbot-*` → `vpn-bot-*` rename the **installed** unit is `vpnbot-hy2-auth.service`. That legacy
-name is **kept on purpose** — like `vpnbot-hy2-warp-mark`, it is not tech debt and must not be
-"fixed" by a rename; the two are the only survivors of the old spelling.
+The auth sidecar's unit has ONE name: **`vpnbot-hy2-auth`** — the name the hosts have run it
+under since #222 (like `vpnbot-hy2-warp-mark`, a survivor of the old spelling, kept on purpose).
+The repo file is `deploy/vpnbot-hy2-auth.service`, and it is the default of
+`HYSTERIA2_AUTH_SERVICE_NAME` in `config/settings.py` and `.env.example`. (Until 2026-11 the
+repo shipped it as `deploy/vpn-bot-hy2-auth.service` while the hosts ran `vpnbot-hy2-auth`; the
+deploy compared nothing, printed `units skipped: vpn-bot-hy2-auth.service` on every run, and the
+live file went without `LimitNOFILE=65536`.)
 
-What bridges the two is `.env`: `HYSTERIA2_AUTH_SERVICE_NAME` is what the bot's admin diagnostics
-actually call `systemctl is-active` on, so they follow whichever name the host uses. `.env.example`
-ships the **`vpn-bot-hy2-auth`** default, so a host running the legacy unit **must** set the legacy
-name in its own `.env` — otherwise diagnostics report the auth sidecar as inactive while handshakes
-keep succeeding.
+`scripts/deploy.sh` installs the repo file under the name `.env` gives it —
+`${HYSTERIA2_AUTH_SERVICE_NAME}.service`, so a host that chose another name keeps it — while
+`HYSTERIA2_ENABLED=true` (and Hysteria2 is not [removed](protocol-uninstall.md)):
 
-Two consequences in `scripts/deploy.sh` Phase 1 that are **expected output, not faults**:
+- **Phase 1** compares it: `absent`, `synced`, or `differs` (the diff is printed); the candidate
+  goes through `systemd-analyze verify`. A symlink at that path (a mask) stops the deploy — a
+  decision somebody made by hand.
+- **Phase 2** backs it up, installs it verbatim (a synced copy is left as it is) with
+  `vpn-bot.service`, `daemon-reload`, and the [sidecar restart](deployment.md) restarts the unit
+  if it was running — so the new file is in effect — and waits for its port. An absent file is
+  installed but never enabled or started. DEPLOY OK says `hy2-auth unit : … installed …` and the
+  open-files limit of the restarted process (`open files 65536/65536 (soft/hard) in pid …`).
+- **A rollback** puts the previous file back (or removes one that was not there) and restarts the
+  sidecar on the previous code with it.
 
-- `UNIT_SET` collects the basename of every shipped `deploy/*.service`, so it contains
-  `vpn-bot-hy2-auth.service`. On a legacy-named host that unit is `load=not-found`, and Phase 1
-  reports it as *not installed / skipped*.
-- The unit that really is serving handshakes, `vpnbot-hy2-auth.service`, enters `UNIT_SET` only
-  through the `.env`-derived branch — i.e. **only because `HYSTERIA2_AUTH_SERVICE_NAME` names it**.
-  Clear that key and the live sidecar silently stops being watched.
+The deploy watches the unit under the `.env` name too (`UNIT_SET`), so `units skipped` no longer
+names a hy2-auth unit the host does not run.
 
 Read your host's actual state (read-only):
 
@@ -303,7 +309,7 @@ When `HYSTERIA2_ENABLED=true`, Hysteria2 reaches operational parity with Xray/AW
 | Capability | Requires | Notes |
 |---|---|---|
 | Issue / revoke / delete | `HYSTERIA2_HOST`, `HYSTERIA2_SNI` | Pure `vpn.db` writes; effective on the next handshake. |
-| Admin **diagnostics** (`systemctl is-active`) | `HYSTERIA2_SERVICE_NAME`, `HYSTERIA2_AUTH_SERVICE_NAME` | Checks `hysteria-server` and `vpn-bot-hy2-auth`. |
+| Admin **diagnostics** (`systemctl is-active`) | `HYSTERIA2_SERVICE_NAME`, `HYSTERIA2_AUTH_SERVICE_NAME` | Checks `hysteria-server` and `vpnbot-hy2-auth`. |
 | **Backend-health** `Hysteria2: OK/DEGRADED` | `HYSTERIA2_HEALTH_INTERVAL` (>0) | Data-plane liveness only — **never blocks** issue/revoke (unlike Xray/AWG). |
 | Off-site **recovery bundle** | `OFFSITE_BACKUP_INCLUDE_CONFIGS=true` | Bundles `HYSTERIA2_CONFIG_PATH` (`/etc/hysteria/config.yaml`). |
 | Per-key **traffic**, **online** count, revoke-**/kick**, concurrent-conn anomaly | `HYSTERIA2_STATS_SECRET` (+ `ANOMALY_HYSTERIA2_MAX_CONN` for anomaly) | Only obtainable from the Traffic Stats API; the bot cannot synthesise it. |

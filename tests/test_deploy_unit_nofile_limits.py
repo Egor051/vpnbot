@@ -44,15 +44,14 @@ MIN_NOFILE = 65536
 # the discovery below cannot quietly make the whole guard vacuous, and so a NEW
 # Python unit has to be added here consciously (with its LimitNOFILE).
 #
-# NOTE ON NAMES: the repo ships deploy/vpn-bot-hy2-auth.service while the host runs
-# it as `vpnbot-hy2-auth.service`. That divergence is known and intentional here —
-# deploy.sh reports the repo file as "not installed / reconcile if this is a rename"
-# rather than failing. Do not "fix" it by renaming the file.
+# NOTE ON NAMES: the hy2-auth unit has ONE name, vpnbot-hy2-auth — the hosts' name
+# since #222 — and deploy.sh installs deploy/vpnbot-hy2-auth.service under
+# HYSTERIA2_AUTH_SERVICE_NAME (whose default it is), so its LimitNOFILE reaches the host.
 EXPECTED_PYTHON_UNITS = frozenset(
     {
-        "vpn-bot.service",                        # main.py — the only unit deploy.sh installs
+        "vpn-bot.service",                        # main.py — installed by deploy.sh
         "vpn-bot-subscription.service",           # -m subscription_server — installed by hand
-        "vpn-bot-hy2-auth.service",               # -m hy2_auth — installed by hand (vpnbot-hy2-auth)
+        "vpnbot-hy2-auth.service",                # -m hy2_auth — installed by deploy.sh (.env name)
         "vpn-bot.nonroot.example.service",        # reference variants of vpn-bot.service; not
         "vpn-bot.root-legacy.example.service",    # installed by deploy.sh, but same process
     }
@@ -139,4 +138,4 @@ def test_the_two_measured_services_are_covered() -> None:
     execs = {unit: " ".join(_values(service, "ExecStart")) for unit, service in units.items()}
     assert "/opt/vpn-service/main.py" in execs["vpn-bot.service"]
     assert "-m subscription_server" in execs["vpn-bot-subscription.service"]
-    assert "-m hy2_auth" in execs["vpn-bot-hy2-auth.service"]
+    assert "-m hy2_auth" in execs["vpnbot-hy2-auth.service"]

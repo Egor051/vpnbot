@@ -240,7 +240,7 @@ load_env() {
 		;;
 	hysteria2)
 		read_unit_base HY2_SVC HYSTERIA2_SERVICE_NAME hysteria-server
-		read_unit_base HY2_AUTH_SVC HYSTERIA2_AUTH_SERVICE_NAME vpn-bot-hy2-auth
+		read_unit_base HY2_AUTH_SVC HYSTERIA2_AUTH_SERVICE_NAME vpnbot-hy2-auth
 		;;
 	esac
 }

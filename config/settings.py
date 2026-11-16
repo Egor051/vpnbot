@@ -704,7 +704,7 @@ class Settings:
     # health diagnostics (systemctl is-active), so a down hy2 data plane surfaces
     # in the panel exactly like Xray/AWG. The bot never manages these units.
     hysteria2_service_name: str = "hysteria-server"
-    hysteria2_auth_service_name: str = "vpn-bot-hy2-auth"
+    hysteria2_auth_service_name: str = "vpnbot-hy2-auth"
     # /etc/hysteria/config.yaml — the hysteria-server config (obfs password, TLS,
     # trafficStats). Bundled into the offsite recovery archive so a rebuilt box can
     # restore the data plane, mirroring the Xray config.json / AWG .conf backup.
@@ -1357,7 +1357,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         hysteria2_stats_secret=hysteria2_stats_secret,
         hysteria2_stats_interval=_int_range("HYSTERIA2_STATS_INTERVAL", 60, 0, 3600),
         hysteria2_service_name=_optional("HYSTERIA2_SERVICE_NAME", "hysteria-server"),
-        hysteria2_auth_service_name=_optional("HYSTERIA2_AUTH_SERVICE_NAME", "vpn-bot-hy2-auth"),
+        hysteria2_auth_service_name=_optional("HYSTERIA2_AUTH_SERVICE_NAME", "vpnbot-hy2-auth"),
         hysteria2_config_path=Path(_optional("HYSTERIA2_CONFIG_PATH", "/etc/hysteria/config.yaml")),
         hysteria2_health_interval=_int_range("HYSTERIA2_HEALTH_INTERVAL", 60, 0, 3600),
         subscription_enabled=_bool("SUBSCRIPTION_ENABLED", False),

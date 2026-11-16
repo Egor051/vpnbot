@@ -32,7 +32,7 @@
    `hysteria` и рестарт сервиса — делается трекнутым хуком `deploy/vpn-bot-acme-reload.sh`,
    который deploy.sh ставит как `/usr/local/sbin/acme-reload.sh` — `--reloadcmd` у acme.sh
    ([Подписка → TLS-терминация](subscription.ru.md#tls-терминация)).
-2. **Эндпоинт `hy2_auth`** (`python -m hy2_auth`, `deploy/vpn-bot-hy2-auth.service`) — небольшой
+2. **Эндпоинт `hy2_auth`** (`python -m hy2_auth`, `deploy/vpnbot-hy2-auth.service`) — небольшой
    **отдельный** процесс, к которому сервер `hysteria` обращается по loopback на каждый handshake.
    Он открывает `vpn.db` **read-only** и проверяет персональный токен ключа в постоянное время
    (`hmac.compare_digest`), всегда отвечая HTTP 200 с `{"ok": <bool>, "id": "<label>"}` и
@@ -53,28 +53,33 @@
 `adapters/hysteria_stats.py` / `adapters/hysteria_auth_health.py`) и пишет строки `vpn_keys`
 (`key_type='hysteria2'`, персональный секрет в `payload_json`, stats-label `hy2_<rnd>`).
 
-### Имя auth-юнита: репо против хоста (зафиксированное намеренное расхождение)
+### Имя auth-юнита: одно имя, ставит деплой
 
-Трекнутый unit-файл — `deploy/vpn-bot-hy2-auth.service`, но на хосте, поднятом до переименования
-`vpnbot-*` → `vpn-bot-*`, **установлен** юнит `vpnbot-hy2-auth.service`. Это legacy-имя оставлено
-**намеренно** — как и `vpnbot-hy2-warp-mark`, это не техдолг, и «исправлять» его переименованием
-нельзя; они двое — единственные наследники старого написания.
+У юнита auth-sidecar ОДНО имя: **`vpnbot-hy2-auth`** — имя, под которым хосты запускают его со
+времён #222 (как и `vpnbot-hy2-warp-mark`, наследник старого написания, оставлен намеренно).
+Файл в репо — `deploy/vpnbot-hy2-auth.service`, и это дефолт `HYSTERIA2_AUTH_SERVICE_NAME` в
+`config/settings.py` и `.env.example`. (До 2026-11 репо поставлял его как
+`deploy/vpn-bot-hy2-auth.service`, а хосты запускали `vpnbot-hy2-auth`; деплой ничего не сравнивал,
+на каждом прогоне печатал `units skipped: vpn-bot-hy2-auth.service`, а живой файл остался без
+`LimitNOFILE=65536`.)
 
-Мостом между ними служит `.env`: именно на `HYSTERIA2_AUTH_SERVICE_NAME` админ-диагностика бота
-вызывает `systemctl is-active`, поэтому она следует за тем именем, которое использует хост. В
-`.env.example` лежит дефолт **`vpn-bot-hy2-auth`**, так что хост с legacy-юнитом **обязан**
-прописать legacy-имя в своём `.env` — иначе диагностика будет показывать auth-sidecar неактивным,
-пока handshake'и продолжают успешно проходить.
+`scripts/deploy.sh` ставит файл из репо под именем, которое даёт `.env`, —
+`${HYSTERIA2_AUTH_SERVICE_NAME}.service`, так что хост, выбравший другое имя, его сохраняет, — пока
+`HYSTERIA2_ENABLED=true` (и Hysteria2 не [удалён](protocol-uninstall.ru.md)):
 
-Два следствия в Phase 1 `scripts/deploy.sh`, которые являются **ожидаемым выводом, а не ошибкой**:
+- **Phase 1** сравнивает его: `absent`, `synced` или `differs` (печатается diff); кандидат
+  проходит `systemd-analyze verify`. Симлинк по этому пути (маска) останавливает деплой — это
+  решение, принятое кем-то вручную.
+- **Phase 2** кладёт его в бэкап, ставит как есть (совпадающая копия не трогается) вместе с
+  `vpn-bot.service`, `daemon-reload`, и [рестарт sidecar'ов](deployment.ru.md) перезапускает юнит,
+  если он работал, — так новый файл вступает в силу, — и ждёт его порт. Отсутствовавший файл
+  ставится, но не включается и не запускается. В DEPLOY OK — `hy2-auth unit : … installed …` и
+  лимит открытых файлов перезапущенного процесса (`open files 65536/65536 (soft/hard) in pid …`).
+- **Откат** возвращает прежний файл (или удаляет тот, которого не было) и перезапускает sidecar
+  на прежнем коде с ним.
 
-- `UNIT_SET` собирает basename каждого поставляемого `deploy/*.service`, поэтому содержит
-  `vpn-bot-hy2-auth.service`. На хосте с legacy-именем этот юнит `load=not-found`, и Phase 1
-  сообщает о нём как о *не установленном / пропущенном*.
-- Юнит, который реально обслуживает handshake'и, `vpnbot-hy2-auth.service`, попадает в `UNIT_SET`
-  только через ветку, производную от `.env` — то есть **только потому, что его называет
-  `HYSTERIA2_AUTH_SERVICE_NAME`**. Очистите этот ключ — и живой sidecar молча перестанет
-  отслеживаться.
+Деплой следит за юнитом тоже под именем из `.env` (`UNIT_SET`), поэтому `units skipped` больше не
+называет hy2-auth-юнит, которого на хосте нет.
 
 Посмотреть фактическое состояние своего хоста (только чтение):
 
@@ -309,7 +314,7 @@ sudo systemctl restart hysteria-server      # рвёт живые QUIC-сесс�
 | Возможность | Требует | Примечания |
 |---|---|---|
 | Выдача / отзыв / удаление | `HYSTERIA2_HOST`, `HYSTERIA2_SNI` | Чистые записи в `vpn.db`; действуют на следующем handshake. |
-| Админ-**диагностика** (`systemctl is-active`) | `HYSTERIA2_SERVICE_NAME`, `HYSTERIA2_AUTH_SERVICE_NAME` | Проверяет `hysteria-server` и `vpn-bot-hy2-auth`. |
+| Админ-**диагностика** (`systemctl is-active`) | `HYSTERIA2_SERVICE_NAME`, `HYSTERIA2_AUTH_SERVICE_NAME` | Проверяет `hysteria-server` и `vpnbot-hy2-auth`. |
 | **Backend-health** `Hysteria2: OK/DEGRADED` | `HYSTERIA2_HEALTH_INTERVAL` (>0) | Только liveness data plane — **никогда не блокирует** выдачу/отзыв (в отличие от Xray/AWG). |
 | Офсайтовый **бандл восстановления** | `OFFSITE_BACKUP_INCLUDE_CONFIGS=true` | Кладёт `HYSTERIA2_CONFIG_PATH` (`/etc/hysteria/config.yaml`). |
 | Per-key **трафик**, счётчик **онлайна**, revoke-**/kick**, аномалия по одновременным конн. | `HYSTERIA2_STATS_SECRET` (+ `ANOMALY_HYSTERIA2_MAX_CONN` для аномалии) | Доступно только из Traffic Stats API; бот не может это синтезировать. |
