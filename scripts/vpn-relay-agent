@@ -95,7 +95,12 @@ APPLY_HELPER = "/usr/local/sbin/vpn-relay-apply"
 AGENT_PATH = "/usr/local/sbin/vpn-relay-agent"
 UNIT_DIR = P("/etc/systemd/system")
 SYSCTL_FILE = P("/etc/sysctl.d/90-vpn-relay.conf")
-UNITS = ("vpn-relay-resolve.timer", "vpn-relay-resolve.service", "vpn-relay.service")
+# The relay's units come from the checkout (relay_units below), never from a list here.
+DATA_PLANE_UNIT = "vpn-relay.service"
+# What an installed relay unit is called (only the fallback without a checkout reads it):
+# vpn-relay.service and vpn-relay-<name>.service|.timer. tests/test_vpn_relay_agent.py
+# pins that every unit of deploy/relay/ matches, so the fallback covers the whole set.
+INSTALLED_UNIT_RE = re.compile(r"vpn-relay(?:-[a-z0-9][a-z0-9-]*)?\.(?:service|timer)")
 TABLES = (("ip", "vpnrelay"), ("inet", "vpnrelay_input"))
 SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 KEY_MARKER = f'command="{AGENT_PATH}"'
@@ -352,6 +357,68 @@ def unit_state(unit: str) -> str:
     return run(["systemctl", "is-active", unit], timeout=10).stdout.strip() or "unknown"
 
 
+def checkout_unit_names(checkout: Path) -> list[str]:
+    """``relay_unit_names`` of scripts/deploy.sh, install.sh and vpn-bot-host-check.
+
+    Every deploy/relay/*.service and *.timer of <checkout> (the basename), never an
+    *.example.* file. It is the same rule, so a unit added to deploy/relay/ is
+    stopped, disabled and removed by `uninstall` and shown by `status` as soon as
+    deploy/install install it (tests/test_vpn_relay_agent.py pins the sets equal).
+    Like the bash glob, a dotfile is not a match and a symlink to a file is.
+    """
+    src = checkout / "deploy" / "relay"
+    names: list[str] = []
+    for suffix in (".service", ".timer"):
+        names.extend(
+            path.name for path in sorted(src.glob(f"*{suffix}"))
+            if not path.name.startswith(".") and ".example." not in path.name and path.is_file()
+        )
+    return names
+
+
+def installed_unit_names() -> list[str]:
+    """The relay unit files actually present in UNIT_DIR (INSTALLED_UNIT_RE)."""
+    try:
+        entries = sorted(UNIT_DIR.iterdir())
+    except OSError:
+        return []
+    return [p.name for p in entries if INSTALLED_UNIT_RE.fullmatch(p.name) and p.is_file()]
+
+
+def stop_order(names: Sequence[str]) -> list[str]:
+    """Timers first, then the oneshots they run, the data plane last.
+
+    A timer stopped first cannot fire its oneshot (vpn-relay-apply resolve) between
+    the steps; vpn-relay.service goes last because its ExecStop removes the tables,
+    and nothing may re-apply them after that.
+    """
+    unique = sorted(set(names))
+    timers = [n for n in unique if n.endswith(".timer")]
+    services = [n for n in unique if n.endswith(".service") and n != DATA_PLANE_UNIT]
+    return [*timers, *services, *([DATA_PLANE_UNIT] if DATA_PLANE_UNIT in unique else [])]
+
+
+def relay_units() -> list[str]:
+    """The relay's unit set, in stop_order; vpn-relay.service is always in it.
+
+    From the checkout (checkout_unit_names of APP_DIR) when it carries the data plane
+    — the set deploy.sh / install.sh installed from it, and nothing else.
+
+    Without it (the checkout was removed or moved to a ref without deploy/relay/) the
+    files decide: the vpn-relay*.service|.timer unit files present in UNIT_DIR, plus
+    vpn-relay.service (stopping a unit whose file is gone is harmless, a running data
+    plane left behind is not). Not a list frozen into the agent: that is the drift
+    this function removes, and the files on the host are exactly what uninstall has
+    to remove, whichever release installed them. The name pattern keeps it to the
+    installer's naming, on a host installer_relay proved is a relay install.sh
+    installed (the input filter's dead-man timer is transient, never in UNIT_DIR).
+    """
+    names = checkout_unit_names(APP_DIR)
+    if DATA_PLANE_UNIT not in names:
+        names = [*installed_unit_names(), DATA_PLANE_UNIT]
+    return stop_order(names)
+
+
 def egress(target: str | None) -> dict[str, str]:
     if not target:
         return {}
@@ -380,7 +447,10 @@ def facts(*, with_check: bool) -> dict[str, Any]:
         "live_target": target,
         "resolved": resolve(host) if host else [],
         "ip_forward": run(["sysctl", "-n", "net.ipv4.ip_forward"], timeout=5).stdout.strip(),
-        "units": {unit: unit_state(unit) for unit in ("vpn-relay.service", "vpn-relay-resolve.timer")},
+        # The data plane and every timer of the set (a oneshot a timer runs is
+        # "inactive" between its runs — its timer is what tells).
+        "units": {unit: unit_state(unit) for unit in relay_units()
+                  if unit == DATA_PLANE_UNIT or unit.endswith(".timer")},
         "ssh_ports": ssh_ports(),
         "egress": egress(target),
         "checkout": checkout_ref(),
@@ -645,7 +715,10 @@ def internal_uninstall() -> int:
     if install is None:
         write_json(UNINSTALL_RESULT, {"ok": False, "message": "this is not a relay installed by install.sh — refusing"})
         return 1
-    for unit in UNITS:
+    # Read once, before anything is removed (the checkout may go at the end): timers,
+    # then the oneshots, vpn-relay.service last (its ExecStop removes the tables).
+    units = relay_units()
+    for unit in units:
         run(["systemctl", "disable", "--now", unit], timeout=60)
     run(["systemctl", "stop", "vpn-relay-input-deadman.timer"], timeout=30)
     for family, table in TABLES:
@@ -661,8 +734,8 @@ def internal_uninstall() -> int:
         write_json(UNINSTALL_RESULT, {"ok": False, "message": message, "steps": steps})
         journal(message)
         return 1
-    steps.append("units stopped and disabled, tables removed")
-    for unit in UNITS:
+    steps.append(f"units stopped and disabled ({', '.join(units)}), tables removed")
+    for unit in units:
         with contextlib.suppress(FileNotFoundError):
             (UNIT_DIR / unit).unlink()
     run(["systemctl", "daemon-reload"], timeout=60)

@@ -705,10 +705,19 @@ line, extra words, an argv, an interactive login — is refused with exit 2 befo
 | Request | Does |
 |---|---|
 | `hello <token>` | Complete the pairing; answers the relay's facts. The only request before pairing. |
-| `status` | Facts: target, ports, the live DNAT target, what the name resolves to now, `ip_forward`, the units, the ssh ports, the egress source address, the checkout, the last update, and `vpn-relay-apply check`. |
+| `status` | Facts: target, ports, the live DNAT target, what the name resolves to now, `ip_forward`, the units (`vpn-relay.service` and every timer of the set below), the ssh ports, the egress source address, the checkout, the last update, and `vpn-relay-apply check`. |
 | `apply target=<dns name> tcp=<ports> udp=<ports>` | Re-point / re-port: refused for a name that is not a name or does not resolve on the relay, a port outside 1..65535, more than 8, a TCP port sshd listens on. Rewrites only `RELAY_UPSTREAM_HOST` / `RELAY_FORWARD_*`, applies, checks; puts `.env` back and re-applies when the ruleset or the check (table, sysctls, the upstream not answering) fails. |
 | `update` | In a transient unit (`systemd-run --wait`): fetch the release tags, move the checkout to the newest `vX.Y.Z` — only forward, never backwards or sideways — and run its `install.sh --relay-update` (helpers and units reinstalled, vpn-relay reloaded, checked; rolled back on failure, the checkout moved back). |
-| `uninstall` | In a transient unit: the units stopped and removed, both tables deleted, the sysctl file removed and `ip_forward` back to what it was before the install, the helpers, `/etc/vpn-relay`, `/var/lib/vpn-relay`, the checkout (when the installer created it) and the agent's key line removed. The adoption backup stays. Refused on a host without the installer's `/etc/vpn-relay/install.json`. |
+| `uninstall` | In a transient unit: the units of the set below stopped and removed (timers first, `vpn-relay.service` last), both tables deleted, the sysctl file removed and `ip_forward` back to what it was before the install, the helpers, `/etc/vpn-relay`, `/var/lib/vpn-relay`, the checkout (when the installer created it) and the agent's key line removed. The adoption backup stays. Refused on a host without the installer's `/etc/vpn-relay/install.json`. |
+
+**The units** are not a list in the agent. They are read from the checkout by the same rule deploy.sh,
+install.sh and the host check use (`relay_unit_names`): every `deploy/relay/*.service` and `*.timer` of
+`/opt/vpn-service`, never an `*.example.*`. So a unit added there is stopped, disabled and removed by
+`uninstall` and shown by `status` as soon as deploy/install install it. `uninstall` stops the timers first,
+so none fires its oneshot halfway through. The oneshots go next, and `vpn-relay.service` goes last, because
+its `ExecStop` removes the tables. With a checkout, only its set is touched. Without one (removed, or on a
+ref without `deploy/relay/`), `uninstall` uses the `vpn-relay.service` / `vpn-relay-<name>.service|.timer`
+files present in `/etc/systemd/system`, plus `vpn-relay.service`.
 
 Exit codes: `0` ok · `2` refused · `3` not allowed (token, not paired, expired) · `4` failed (what
 it changed was put back) · `5` busy (another mutating call holds the lock). One JSON object on
