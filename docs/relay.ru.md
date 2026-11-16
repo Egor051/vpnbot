@@ -429,17 +429,42 @@ scripts/redeploy.sh` на relay и «⬆️ Обновить агент» в б�
 Detached на теге релиза или впереди него — нормальное состояние relay: Phase 1 сообщает, где дерево
 и куда оно пойдёт (`tree : … -> latest release vX.Y.Z (…), detached`), без WARN.
 
-Работает **собственный** `deploy.sh` цели: `redeploy.sh` запускает копию из `origin/main`, она
-выбирает цель и передаёт управление (`exec`) `deploy.sh` этой ревизии — relay, который деплоит более
+Работает **собственный** `deploy.sh` цели: `redeploy.sh` (сам — копия из `origin/main`: чекаут
+relay на теге релиза обычно от неё отличается, и после fetch обёртка переисполняет себя этой
+копией, см. [docs/operations.ru.md](operations.ru.md#какая-копия-redeploysh-работает)) запускает
+`deploy.sh` из `origin/main`, тот выбирает цель и передаёт управление (`exec`) `deploy.sh` этой
+ревизии — relay, который деплоит более
 старый релиз, не должен прогонять более новый код реестров против более старого дерева. Цель,
 `deploy.sh` которой старше деплоя relay по релизам, отклоняется (она задеплоила бы `origin/main`);
 `DEPLOY_REF=main` деплоит main.
 
 Relay, задеплоенный раньше из `main` — на 2026-11-16 это ru1 на `1a87f67`, тогда как самый новый
 релиз `v3.1.0` старше, — при обычном запуске остаётся на месте (строка INFO выше); за релизами он
-снова пойдёт, когда появится релиз новее его коммита. `sudo DEPLOY_REF=main bash
-scripts/redeploy.sh` держит его на main до тех пор (этот же запуск ставит агента, который
-обновляет через `deploy.sh`).
+снова пойдёт, когда появится релиз новее его коммита. Чтобы до тех пор держать его на main (этот
+же запуск ставит агента, который обновляет через `deploy.sh`), запускайте `redeploy.sh` **из
+`origin/main`** с `DEPLOY_REF=main`, а не копию из чекаута: копия на `1a87f67` старше и проброса
+`DEPLOY_REF`, и переисполнения, поэтому `sudo DEPLOY_REF=main bash scripts/redeploy.sh` там
+печатает `deploy.sh env: <none>`, и переменная до `deploy.sh` не доходит (замерено 2026-11-16):
+
+```bash
+sudo git -C /opt/vpn-service fetch origin main
+```
+
+```bash
+sudo git -C /opt/vpn-service show origin/main:scripts/redeploy.sh | sudo tee /root/redeploy-main.sh > /dev/null
+```
+
+```bash
+sudo CHECK=1 DEPLOY_REF=main bash /root/redeploy-main.sh
+```
+
+```bash
+sudo DEPLOY_REF=main bash /root/redeploy-main.sh
+```
+
+В строке `deploy.sh env:` должно быть `DEPLOY_REF=main` (`PHASE1_ONLY=1 DEPLOY_REF=main` для
+запуска с `CHECK=1`). Когда relay уже на main, `scripts/redeploy.sh` сам переисполняет себя копией
+из `origin/main`.
 
 #### Какие unit'ы ставит деплой relay
 

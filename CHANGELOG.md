@@ -66,6 +66,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`scripts/redeploy.sh` always runs as `origin/main`'s copy (docs/operations.md#which-copy-of-redeploysh-runs).**
+  It took `deploy.sh` from `origin/main` but ran itself from the working tree, so on a checkout
+  behind `origin/main` an older wrapper ran, and names added to `DEPLOY_ENV_PASSTHROUGH` since
+  were dropped without a word. Only an unknown `ALLOW_*` was refused. Measured on a relay on
+  2026-11-16: checkout at `1a87f67`, `sudo DEPLOY_REF=main bash scripts/redeploy.sh` printed
+  `deploy.sh env: <none>`, while `CHECK=1` reached `deploy.sh` (`PHASE1_ONLY=1`). Now, right after
+  the fetch, the wrapper compares its own file byte for byte with
+  `git show origin/main:scripts/redeploy.sh`. When they differ, it writes that copy to a `mktemp`
+  file (0700), prints `redeploy: re-exec from origin/main (<sha>)` and `exec`s it with the same
+  arguments and environment. `REDEPLOY_REEXEC=1` stops the second run from re-executing again,
+  and that run deletes its temp file as it starts. When `origin/main`'s copy cannot be used (no
+  such path, `git show` fails, empty, does not parse), the wrapper prints a `WARN` and goes on with
+  the current copy. Nothing else changes: the `ALLOW_*` refusal, `CHECK` → `PHASE1_ONLY`, `FORCE`,
+  `DEPLOY_ENV_PASSTHROUGH` forwarding and the `deploy.sh` extraction. A checkout from before this
+  change has no re-exec yet: run `origin/main`'s copy by hand once (docs/relay.md has the
+  commands for the relay at `1a87f67`). `tests/test_redeploy_reexec.py` covers it.
 - **The hy2-auth unit is installed by the deploy, under its live name (docs/hysteria.md#auth-unit-name-one-name-installed-by-the-deploy).**
   The repo shipped `deploy/vpn-bot-hy2-auth.service` while the hosts run `vpnbot-hy2-auth`
   (#222), so every DEPLOY OK said `units skipped: vpn-bot-hy2-auth.service` and nothing compared
