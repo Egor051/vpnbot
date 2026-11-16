@@ -491,6 +491,9 @@ class Settings:
     mtproto_apply_timeout_seconds: int = 10
     mtproto_rollback_on_apply_failure: bool = True
     mtproto_keep_last_backups: int = 10
+    # Xray config.json backups XrayConfigAdapter keeps (its own exact name template only),
+    # pruned after each successful mutation. CONFIG_BACKUP_KEEP_LAST no longer applies to Xray.
+    xray_config_backup_keep: int = 10
     privilege_helpers_enabled: bool = False
     helper_staging_root: Path = Path("/run/vpn-bot")
     socks5_user_helper_path: Path = Path("/usr/local/sbin/vpn-bot-socks5-user")
@@ -1214,6 +1217,7 @@ def load_settings(env_path: str | Path | None = None) -> Settings:
         default_proxy_note=_optional("DEFAULT_PROXY_NOTE"),
         audit_retention_days=_int_range("AUDIT_RETENTION_DAYS", 180, 0, 3650),
         config_backup_keep_last=_int_range("CONFIG_BACKUP_KEEP_LAST", 20, 1, 500),
+        xray_config_backup_keep=_int_range("XRAY_CONFIG_BACKUP_KEEP", 10, 1, 500),
         socks5_enabled=socks5_enabled,
         socks5_host=_no_control_chars("SOCKS5_HOST", socks5_host),
         socks5_port=socks5_port,

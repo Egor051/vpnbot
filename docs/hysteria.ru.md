@@ -21,7 +21,9 @@
    в `/etc/hysteria/config.yaml` (трекнутый источник: `deploy/hysteria/config.yaml`, устанавливается
    через `sudo bash deploy/hysteria/install-config.sh` — **никогда** не голым `cp`, т.к.
    `trafficStats.secret` в трекнутом файле — плейсхолдер, и именно установщик подставляет
-   настоящий `HYSTERIA2_STATS_SECRET` из `.env`). Терминирует клиентские сессии на чистом QUIC —
+   настоящий `HYSTERIA2_STATS_SECRET` из `.env`; старый файл он сохраняет как
+   `config.yaml.bak.<stamp>` и оставляет новейшие `HYSTERIA_CONFIG_BACKUP_KEEP` таких копий, по
+   умолчанию 3, — других файлов не трогает). Терминирует клиентские сессии на чистом QUIC —
    без salamander-обфускации — на публичном **UDP**-порту `HYSTERIA2_PORT` (дефолт `443`;
    сосуществует с Xray REALITY на TCP/443), предъявляя валидный сертификат Let's Encrypt для
    домена сервера (выпускается/продлевается `acme.sh` вне этого репозитория). Перед рестартом

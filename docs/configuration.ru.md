@@ -29,7 +29,8 @@
 | `TELEGRAM_API_BASE` | Нет | пусто (`api.telegram.org`) | Базовый URL сервера Bot API — для локального Bot API server или mock в CI установщика. `https`, либо `http` только на loopback-хост (токен передаётся в пути каждого запроса); без query, fragment и учётных данных. |
 | `BOT_LANGUAGE` | Нет | `ru` | Язык UI бота. Поддерживается: `ru`, `en`. |
 | `AUDIT_RETENTION_DAYS` | Нет | `180` | Сколько дней хранить записи audit log (0 = вечно, макс. 3650). |
-| `CONFIG_BACKUP_KEEP_LAST` | Нет | `20` | Сколько config-бэкапов хранить на backend (1–500). |
+| `CONFIG_BACKUP_KEEP_LAST` | Нет | `20` | Сколько config-бэкапов хранить на конфиг backend'а (1–500): AmneziaWG и остальные. У Xray своя настройка `XRAY_CONFIG_BACKUP_KEEP`. |
+| `XRAY_CONFIG_BACKUP_KEEP` | Нет | `10` | Сколько бэкапов `config.json` хранит Xray-адаптер (1–500). Чистка — после каждого **успешного** изменения и только файлов с собственным шаблоном имени адаптера `config.json.<stamp>.<ns>.<token>.bak`: ваши `config.json.*.bak` и `config.json.<ns>.bak` привилегированного хелпера не трогаются (свои хелпер чистит сам, оставляя новейшие 10). Ошибка чистки — WARNING в логе бота, а не провал операции с ключом. |
 
 ## Health Endpoint
 

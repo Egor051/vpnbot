@@ -95,6 +95,8 @@ def _base_env(hysteria_bin: Path) -> dict[str, str]:
     env["INSTALL_CONFIG_GROUP"] = _CURRENT_GROUP
     # Always a path under tmp_path, whatever the caller's environment says.
     env["HYSTERIA_BIN"] = str(hysteria_bin)
+    # The retention knob never leaks in from the environment running the suite.
+    env.pop("HYSTERIA_CONFIG_BACKUP_KEEP", None)
     return env
 
 
@@ -105,6 +107,7 @@ def _run_install(
     *,
     version_line: str | None = _DEFAULT_VERSION_LINE,
     hysteria_bin: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the real install-config.sh against a temp .env/target, unprivileged.
 
@@ -122,6 +125,7 @@ def _run_install(
         hysteria_bin = _write_mock_hysteria(tmp_path / "bin" / "hysteria", version_line)
     assert tmp_path in hysteria_bin.parents, "HYSTERIA_BIN must stay inside tmp_path"
     env = _base_env(hysteria_bin)
+    env.update(extra_env or {})
 
     return subprocess.run(
         ["bash", str(INSTALL_SCRIPT), "--env", str(env_file), "--target", str(target)],
@@ -385,3 +389,131 @@ def test_install_config_refused_install_creates_no_target(tmp_path: Path) -> Non
     proc = _run_install(tmp_path, "HYSTERIA2_STATS_SECRET=s3cret\n", version_line="Version:\tv2.7.1")
     assert proc.returncode != 0
     assert not (tmp_path / "config.yaml").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Backup retention: HYSTERIA_CONFIG_BACKUP_KEEP (default 3), own names only
+# --------------------------------------------------------------------------- #
+# Names a careless glob would take for this script's backups — never deleted.
+_FOREIGN_BACKUPS = (
+    "config.yaml.bak443",                    # a hand-made copy (operations.md lists it)
+    "config.yaml.bak",
+    "config.yaml.bak.2026-11-01",
+    "config.yaml.bak.20261101T000000.orig",
+    "config.yaml.bak.20261101T0000",
+    "other.yaml.bak.20261101T000000",
+    "cert.pem.selfsigned.bak",
+)
+
+
+def _plant_old_backups(tmp_path: Path, n: int) -> list[Path]:
+    """n backups in this script's own name, oldest first (2020-01-01 .. 2020-01-n)."""
+    out = []
+    for i in range(1, n + 1):
+        p = tmp_path / f"config.yaml.bak.202001{i:02d}T000000"
+        p.write_text(f"old {i}\n", encoding="utf-8")
+        out.append(p)
+    for name in _FOREIGN_BACKUPS:
+        (tmp_path / name).write_text("foreign\n", encoding="utf-8")
+    return out
+
+
+def _own_backups(tmp_path: Path) -> list[str]:
+    rx = re.compile(r"config\.yaml\.bak\.[0-9]{8}T[0-9]{6}")
+    return sorted(p.name for p in tmp_path.iterdir() if rx.fullmatch(p.name))
+
+
+def _assert_foreign_backups_intact(tmp_path: Path) -> None:
+    for name in _FOREIGN_BACKUPS:
+        assert (tmp_path / name).read_text(encoding="utf-8") == "foreign\n", name
+
+
+def test_install_keeps_the_newest_three_backups_by_default(tmp_path: Path) -> None:
+    _plant_old_backups(tmp_path, 5)
+    proc = _run_install(tmp_path, "HYSTERIA2_STATS_SECRET=s3cret\n", target_initial="live\n")
+    assert proc.returncode == 0, proc.stderr
+    own = _own_backups(tmp_path)
+    # The one this run wrote (today) plus the two newest planted ones.
+    assert len(own) == 3, own
+    assert own[:2] == ["config.yaml.bak.20200104T000000", "config.yaml.bak.20200105T000000"]
+    assert (tmp_path / own[2]).read_text(encoding="utf-8") == "live\n"
+    assert proc.stderr.count("removed old backup") == 3
+    _assert_foreign_backups_intact(tmp_path)
+
+
+def test_install_honours_hysteria_config_backup_keep(tmp_path: Path) -> None:
+    _plant_old_backups(tmp_path, 4)
+    proc = _run_install(
+        tmp_path, "HYSTERIA2_STATS_SECRET=s3cret\n", target_initial="live\n",
+        extra_env={"HYSTERIA_CONFIG_BACKUP_KEEP": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    own = _own_backups(tmp_path)
+    assert len(own) == 1 and (tmp_path / own[0]).read_text(encoding="utf-8") == "live\n"
+    _assert_foreign_backups_intact(tmp_path)
+
+
+def test_install_with_few_backups_deletes_nothing(tmp_path: Path) -> None:
+    _plant_old_backups(tmp_path, 1)
+    proc = _run_install(tmp_path, "HYSTERIA2_STATS_SECRET=s3cret\n", target_initial="live\n")
+    assert proc.returncode == 0, proc.stderr
+    assert len(_own_backups(tmp_path)) == 2
+    assert "removed old backup" not in proc.stderr
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "abc", "1001", "07"])
+def test_bad_keep_value_warns_and_uses_the_default(tmp_path: Path, bad: str) -> None:
+    _plant_old_backups(tmp_path, 5)
+    proc = _run_install(
+        tmp_path, "HYSTERIA2_STATS_SECRET=s3cret\n", target_initial="live\n",
+        extra_env={"HYSTERIA_CONFIG_BACKUP_KEEP": bad},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert f"HYSTERIA_CONFIG_BACKUP_KEEP='{bad}' is not a whole number" in proc.stderr
+    assert len(_own_backups(tmp_path)) == 3
+
+
+def test_a_symlink_with_the_backup_name_is_never_followed_or_deleted(tmp_path: Path) -> None:
+    _plant_old_backups(tmp_path, 4)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me\n", encoding="utf-8")
+    link = tmp_path / "config.yaml.bak.20190101T000000"
+    link.symlink_to(victim)
+    proc = _run_install(
+        tmp_path, "HYSTERIA2_STATS_SECRET=s3cret\n", target_initial="live\n",
+        extra_env={"HYSTERIA_CONFIG_BACKUP_KEEP": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert link.is_symlink() and victim.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_cleanup_failure_warns_and_the_install_still_succeeds(tmp_path: Path) -> None:
+    _plant_old_backups(tmp_path, 5)
+    # An `rm` that refuses this script's backups (root ignores file modes, so a stub
+    # on PATH is the portable way to make the deletion fail); anything else goes to
+    # the real rm (the EXIT trap removes its temp file through it).
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    (stub / "rm").write_text(
+        '#!/bin/sh\nfor a in "$@"; do case "$a" in *.bak.*) echo "rm: denied" >&2; exit 1 ;; esac; done\n'
+        'exec /bin/rm "$@"\n',
+        encoding="utf-8",
+    )
+    (stub / "rm").chmod(0o755)
+    proc = _run_install(
+        tmp_path, "HYSTERIA2_STATS_SECRET=s3cret\n", target_initial="live\n",
+        extra_env={"PATH": f"{stub}:{os.environ['PATH']}"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "WARNING: could not remove every old" in proc.stderr
+    assert '"s3cret"' in _read(tmp_path / "config.yaml"), "the new config is installed all the same"
+    assert len(_own_backups(tmp_path)) == 6
+
+
+def test_refused_install_prunes_nothing(tmp_path: Path) -> None:
+    _plant_old_backups(tmp_path, 5)
+    proc = _run_install(
+        tmp_path, "HYSTERIA2_STATS_SECRET=s3cret\n", target_initial="live\n", version_line="Version:\tv2.7.1"
+    )
+    assert proc.returncode != 0
+    assert len(_own_backups(tmp_path)) == 5

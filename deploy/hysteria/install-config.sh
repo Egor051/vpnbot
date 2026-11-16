@@ -19,9 +19,17 @@
 # older than that, or whose `version` output carries no parseable
 # `Version: vX.Y.Z` line fails closed — the target is left untouched.
 #
+# Every install backs the existing target up as <target>.bak.<YYYYmmddTHHMMSS>. Once
+# the new file is in place, only the newest HYSTERIA_CONFIG_BACKUP_KEEP (default 3) of
+# THOSE are kept: a file is a candidate only when its whole name is exactly
+# <target basename>.bak.<8 digits>T<6 digits> — a hand-made config.yaml.bak443,
+# cert.pem.selfsigned.bak or anything else in the directory is never touched. A
+# failed cleanup is a WARNING; the install itself has already succeeded (exit 0).
+#
 # Usage:
 #   sudo bash deploy/hysteria/install-config.sh [--env <path>] [--target <path>]
 #   sudo HYSTERIA_BIN=/path/to/hysteria bash deploy/hysteria/install-config.sh ...
+#   sudo HYSTERIA_CONFIG_BACKUP_KEEP=5 bash deploy/hysteria/install-config.sh ...
 #   bash deploy/hysteria/install-config.sh --selftest
 #
 # Exit codes:
@@ -54,6 +62,10 @@ MIN_HYSTERIA_MAJOR=2
 MIN_HYSTERIA_MINOR=8
 MIN_HYSTERIA_PATCH=0
 MIN_HYSTERIA_VERSION="v${MIN_HYSTERIA_MAJOR}.${MIN_HYSTERIA_MINOR}.${MIN_HYSTERIA_PATCH}"
+# How many <target>.bak.<stamp> copies survive an install (public knob, 1-1000). A
+# value that is not a whole number in that range warns and falls back to the default.
+BACKUP_KEEP_DEFAULT=3
+HYSTERIA_CONFIG_BACKUP_KEEP="${HYSTERIA_CONFIG_BACKUP_KEEP:-$BACKUP_KEEP_DEFAULT}"
 
 die() {
   echo "$ME: $*" >&2
@@ -73,12 +85,59 @@ usage: $ME [--env <path>] [--target <path>]
 
   HYSTERIA_BIN     hysteria binary to version-check
                     (default: /usr/local/bin/hysteria; must be >= $MIN_HYSTERIA_VERSION)
+  HYSTERIA_CONFIG_BACKUP_KEEP
+                   how many <target>.bak.<stamp> copies to keep after an install
+                    (default: $BACKUP_KEEP_DEFAULT; only that exact name is ever deleted)
 
 Copies $REPO_CONFIG to <target>, replacing its trafficStats.secret
 placeholder with HYSTERIA2_STATS_SECRET read from <env>. Refuses to
 install unless HYSTERIA_BIN reports $MIN_HYSTERIA_VERSION or newer. Never
 restarts hysteria-server; see the printed next-steps on success.
 EOF
+}
+
+# backup_keep_count
+#
+# HYSTERIA_CONFIG_BACKUP_KEEP as a number: a whole number 1-1000, else a warning and
+# the default. Never fails — it only tunes the cleanup after a successful install.
+backup_keep_count() {
+  local v="$HYSTERIA_CONFIG_BACKUP_KEEP"
+  if [[ "$v" =~ ^[1-9][0-9]{0,3}$ ]] && ((v <= 1000)); then
+    printf '%s' "$v"
+  else
+    echo "$ME: WARNING: HYSTERIA_CONFIG_BACKUP_KEEP='$v' is not a whole number 1-1000 -- keeping $BACKUP_KEEP_DEFAULT" >&2
+    printf '%s' "$BACKUP_KEEP_DEFAULT"
+  fi
+}
+
+# prune_backups <target> <keep>
+#
+# Delete all but the newest <keep> backups this script wrote for <target>. A file is
+# a candidate only when it is a regular file (not a symlink) whose whole name is
+# "<basename>.bak.YYYYmmddTHHMMSS" — the name main() gives it; the stamp sorts
+# chronologically, so the newest are the last in name order. Prints one line per
+# deleted file; returns non-zero if one could not be deleted (the caller warns).
+prune_backups() {
+  local target="$1" keep="$2" dir base f name stamp rc=0
+  local -a own=()
+  dir="$(dirname "$target")"
+  base="$(basename "$target")"
+  for f in "$dir/$base".bak.*; do
+    [[ -f "$f" && ! -L "$f" ]] || continue
+    name="$(basename "$f")"
+    stamp="${name#"$base".bak.}"
+    [[ "$name" == "$base.bak.$stamp" && "$stamp" =~ ^[0-9]{8}T[0-9]{6}$ ]] || continue
+    own+=("$f")
+  done
+  ((${#own[@]} > keep)) || return 0
+  while IFS= read -r f; do
+    if rm -f -- "$f"; then
+      echo "$ME: removed old backup $f (keeping the newest $keep)" >&2
+    else
+      rc=1
+    fi
+  done < <(printf '%s\n' "${own[@]}" | LC_ALL=C sort | head -n "$((${#own[@]} - keep))")
+  return "$rc"
 }
 
 # check_hysteria_version <bin>
@@ -433,6 +492,11 @@ main() {
     install -o "$OWNER" -g "$GROUP" -m 0600 "$tmp" "$target" || die "failed to install $target"
   else
     install -m 0600 "$tmp" "$target" || die "failed to install $target"
+  fi
+
+  # Retention, only now that the new file is in place; never fails the install.
+  if ! prune_backups "$target" "$(backup_keep_count)"; then
+    echo "$ME: WARNING: could not remove every old ${target}.bak.<stamp> backup -- the install itself succeeded" >&2
   fi
 
   cat >&2 <<EOF2
