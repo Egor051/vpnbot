@@ -42,6 +42,14 @@ DEPLOY_SH = ROOT / "scripts" / "deploy.sh"
 RELAY_HELPER_SRC = ROOT / "scripts" / "vpn-relay-apply"
 HY2_MARK = ROOT / "scripts" / "vpnbot-hy2-warp-mark"
 REPO_UNIT = ROOT / "deploy" / "relay" / "vpn-relay.service"
+# The relay's whole unit set as the repo ships it (deploy.sh's relay_unit_names rule).
+RELAY_UNIT_FILES = sorted(
+    p for p in [*(ROOT / "deploy" / "relay").glob("*.service"), *(ROOT / "deploy" / "relay").glob("*.timer")]
+    if ".example." not in p.name
+)
+RELAY_UNIT_NAMES = {p.name for p in RELAY_UNIT_FILES}
+RESOLVE_TIMER = "vpn-relay-resolve.timer"
+RESOLVE_SERVICE = "vpn-relay-resolve.service"
 FIXTURES = ROOT / "tests" / "fixtures" / "relay"
 MANUAL_UNIT = FIXTURES / "vpn-relay.manual.service"
 CAPTURED_RULESET = FIXTURES / "vpn-relay.nft"
@@ -60,6 +68,22 @@ def _read(path: Path) -> str:
 def _stub(path: Path, body: str) -> None:
     path.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
     path.chmod(0o755)
+
+
+def _copy_relay_units(checkout: Path) -> None:
+    """Every deploy/relay/*.service|*.timer of the repo into <checkout>/deploy/relay/."""
+    (checkout / "deploy" / "relay").mkdir(parents=True, exist_ok=True)
+    for src in RELAY_UNIT_FILES:
+        (checkout / "deploy" / "relay" / src.name).write_text(_read(src), encoding="utf-8")
+
+
+def _phase1_worktree(tmp_path: Path) -> Path:
+    """A Phase 1 worktree: the real helper and the relay's whole unit set."""
+    wt = tmp_path / "wt"
+    (wt / "scripts").mkdir(parents=True)
+    (wt / "scripts" / "vpn-relay-apply").write_text(_read(RELAY_HELPER_SRC), encoding="utf-8")
+    _copy_relay_units(wt)
+    return wt
 
 
 def _source_and_run(
@@ -526,7 +550,7 @@ class RelayHost:
         self.helper = self.sbin / "vpn-relay-apply"
         self.sysctl_file = self.etc / "sysctl.d" / "90-vpn-relay.conf"
         self.legacy = self.etc / "vpn-relay.nft"
-        (self.repo / "deploy" / "relay" / "vpn-relay.service").write_text(_read(REPO_UNIT), encoding="utf-8")
+        _copy_relay_units(self.repo)
         (self.repo / "scripts" / "vpn-relay-apply").write_text(FAKE_HELPER, encoding="utf-8")
         (self.repo / "scripts" / "vpn-relay-apply").chmod(0o755)
         (self.repo / "scripts" / "vpn-bot-db-perms").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -660,7 +684,7 @@ class RelayHost:
 def _assert_no_main_piece_touched(host: RelayHost) -> None:
     for line in host.log("systemctl"):
         args = line.split()[1:]
-        assert args[0] == "daemon-reload" or args[-1] in {"vpn-relay.service", DEADMAN_TIMER}, line
+        assert args[0] == "daemon-reload" or args[-1] in RELAY_UNIT_NAMES | {DEADMAN_TIMER}, line
     assert host.log("sqlite3") == [], "a relay deploy never opens a database"
     assert not (host.sbin / "vpn-bot-db-perms").exists(), "a main-role helper was installed on a relay"
 
@@ -673,11 +697,16 @@ def test_relay_phase2_migrates_the_hand_installed_relay(tmp_path: Path) -> None:
     assert "PHASE2-RETURNED" in proc.stdout and "DEPLOY OK (relay)" in proc.stdout
 
     assert _read(host.unit) == _read(REPO_UNIT), "the unit is installed verbatim"
+    for src in RELAY_UNIT_FILES:
+        assert _read(host.unit.parent / src.name) == _read(src), f"{src.name} is installed verbatim"
     assert _read(host.helper) == FAKE_HELPER, "the helper comes from OUT_OF_REPO_HELPERS"
     assert host.log("helper") == ["helper check", "helper input-status"], "verify = vpn-relay-apply check"
     sc = [ln.removeprefix("systemctl ") for ln in host.log("systemctl")]
     mutating = [c for c in sc if c.split()[0] not in {"is-active", "is-enabled"}]
-    assert mutating == ["daemon-reload", "enable --quiet vpn-relay.service", "restart vpn-relay.service"]
+    assert mutating == [
+        "daemon-reload", "enable --quiet vpn-relay.service", f"enable --quiet {RESOLVE_TIMER}",
+        "restart vpn-relay.service", f"start {RESOLVE_TIMER}",
+    ], "the oneshot the timer runs is never started by the deploy"
     assert "git reset --hard origin/main" in host.log("git")
     assert not any("prevsha" in c for c in host.log("git") if "reset" in c)
 
@@ -848,9 +877,7 @@ def test_relay_unit_state(tmp_path: Path, setup: str, state: str) -> None:
 def test_relay_phase1_refuses_an_env_that_does_not_render(tmp_path: Path) -> None:
     host = RelayHost(tmp_path)
     host.hand_installed()
-    wt = tmp_path / "wt"
-    (wt / "scripts").mkdir(parents=True)
-    (wt / "scripts" / "vpn-relay-apply").write_text(_read(RELAY_HELPER_SRC), encoding="utf-8")
+    wt = _phase1_worktree(tmp_path)
     env = tmp_path / "relay.env"
     env.write_text("NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=999.1.1.1\n", encoding="utf-8")
     proc = host.run(f'ENV_FILE="{env}"; WT="{wt}"\nrelay_phase1\necho PHASE1-RETURNED\n')
@@ -875,11 +902,7 @@ def test_relay_phase1_reports_the_first_transition_without_mutating(
     if input_filter:
         host.on_this_version()
     marker_before = _read(host.marker) if host.marker.exists() else None
-    wt = tmp_path / "wt"
-    (wt / "scripts").mkdir(parents=True)
-    (wt / "deploy" / "relay").mkdir(parents=True)
-    (wt / "scripts" / "vpn-relay-apply").write_text(_read(RELAY_HELPER_SRC), encoding="utf-8")
-    (wt / "deploy" / "relay" / "vpn-relay.service").write_text(_read(REPO_UNIT), encoding="utf-8")
+    wt = _phase1_worktree(tmp_path)
     env = tmp_path / "relay.env"
     env.write_text(
         "NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=203.0.113.43\nRELAY_WAN_IFACE=eth0\n", encoding="utf-8"
@@ -1036,9 +1059,7 @@ def test_relay_phase1_stops_on_an_auth_latent(tmp_path: Path) -> None:
     (host.sd / "hc_rows").write_text(
         "LATENT|sshd|passwordauthentication|/etc/ssh/sshd_config.d/50-cloud-init.conf|winner ... gone -> yes\n",
         encoding="utf-8")
-    wt = tmp_path / "wt"
-    (wt / "scripts").mkdir(parents=True)
-    (wt / "scripts" / "vpn-relay-apply").write_text(_read(RELAY_HELPER_SRC), encoding="utf-8")
+    wt = _phase1_worktree(tmp_path)
     env = tmp_path / "relay.env"
     env.write_text("NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=203.0.113.43\nRELAY_WAN_IFACE=eth0\n", encoding="utf-8")
     proc = host.run(f'ENV_FILE="{env}"; WT="{wt}"\nrelay_phase1\necho PHASE1-RETURNED\n')
@@ -1298,9 +1319,7 @@ def test_relay_phase1_refuses_a_relay_without_an_ssh_port(tmp_path: Path) -> Non
     host = RelayHost(tmp_path)
     host.hand_installed()
     _stub(host.stub / "ss", 'echo "tcp LISTEN 0 4096 127.0.0.1:22 0.0.0.0:* users:((\\"sshd\\",pid=1,fd=3))"\n')
-    wt = tmp_path / "wt"
-    (wt / "scripts").mkdir(parents=True)
-    (wt / "scripts" / "vpn-relay-apply").write_text(_read(RELAY_HELPER_SRC), encoding="utf-8")
+    wt = _phase1_worktree(tmp_path)
     env = tmp_path / "relay.env"
     env.write_text("NODE_ROLE=relay\nRELAY_UPSTREAM_IPV4=203.0.113.43\nRELAY_WAN_IFACE=eth0\n", encoding="utf-8")
     proc = host.run(f'ENV_FILE="{env}"; WT="{wt}"\nrelay_phase1\necho PHASE1-RETURNED\n')

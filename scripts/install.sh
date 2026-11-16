@@ -53,14 +53,16 @@
 #      main server's own commit) in /opt/vpn-service, a relay .env
 #      (RELAY_UPSTREAM_HOST = the target NAME, the ports, RELAY_INPUT_FILTER=off,
 #      SSH_PORT = where sshd listens now), /etc/vpn-relay/pairing.json (the token's
-#      hash, the expiry), vpn-relay-apply and vpn-relay-agent, vpn-relay.service and
-#      vpn-relay-resolve.{service,timer} (re-resolves the name every 5 minutes),
+#      hash, the expiry), vpn-relay-apply and vpn-relay-agent, the relay's units —
+#      every deploy/relay/*.service|*.timer of the checkout (relay_unit_names, the
+#      rule scripts/deploy.sh and scripts/vpn-bot-host-check use): vpn-relay.service
+#      and vpn-relay-resolve.{service,timer} (re-resolves the name every 5 minutes),
 #      and ONE authorized_keys line for root:
 #      restrict,command="/usr/local/sbin/vpn-relay-agent" ssh-ed25519 <main key>
 #   3. Starts vpn-relay (one atomic nft -f: DNAT tcp+udp -> target, masquerade,
 #      MSS clamp, forward policy drop but the DNAT; ip_forward via sysctl.d) and
 #      checks it: `vpn-relay-apply check`, exactly ONE DNAT rule per forwarded port
-#      in the whole ruleset, the timer active.
+#      in the whole ruleset, every timer of the set active.
 #   4. ADOPTION: a relay installed by hand (/etc/vpn-relay.nft, vpn-relay.service,
 #      table ip vpnrelay) is replaced atomically — the same table name, so the one
 #      transaction swaps it, never two DNATs — and everything old goes to
@@ -141,7 +143,14 @@ TOKEN_RE='^[0-9]{6,12}:[A-Za-z0-9_-]{30,}$'
 # Relay mode (docs/relay.md#installing-a-relay-with-one-command).
 RELAY_SUPPORT_MARKER="scripts/vpn-relay-agent"
 SYSTEMD_DIR="/etc/systemd/system"
-RELAY_UNITS=(vpn-relay.service vpn-relay-resolve.service vpn-relay-resolve.timer)
+# The relay's units: every deploy/relay/*.service|*.timer of the checkout
+# (relay_unit_names — one rule with scripts/deploy.sh and scripts/vpn-bot-host-check,
+# never a list of names here). Filled by relay_load_units once the checkout is in
+# place; empty before it, when nothing of them can have been installed yet.
+RELAY_UNITS=()
+# The data plane: the one unit started/reloaded by name (relay_start); every timer of
+# the set is enabled and (re)started, the oneshot a timer runs is never started here.
+RELAY_DATA_UNIT="vpn-relay.service"
 RELAY_STATE_DIR="/etc/vpn-relay"
 RELAY_VAR_DIR="/var/lib/vpn-relay"
 RELAY_SYSCTL_FILE="/etc/sysctl.d/90-vpn-relay.conf"
@@ -359,7 +368,8 @@ rollback() {
   done < <(tac "$MANIFEST")
   systemctl daemon-reload >>"$INSTALL_LOG" 2>&1
   systemctl reset-failed "$UNIT_NAME" >>"$INSTALL_LOG" 2>&1
-  if [[ "$MODE" == relay ]]; then systemctl reset-failed "${RELAY_UNITS[@]}" >>"$INSTALL_LOG" 2>&1; fi
+  # Never `reset-failed` without a unit: that resets every failed unit of the host.
+  if [[ "$MODE" == relay && ${#RELAY_UNITS[@]} -gt 0 ]]; then systemctl reset-failed "${RELAY_UNITS[@]}" >>"$INSTALL_LOG" 2>&1; fi
   local unit
   for unit in "${restarts[@]}"; do
     log "rollback: restart ${unit} with the restored files"
@@ -1194,11 +1204,44 @@ relay_apt_install() {
   run apt-get -o DPkg::Lock::Timeout=300 install -y -qq --no-install-recommends "${APT_RELAY_PACKAGES[@]}"
 }
 
+# The relay role's unit set: the basenames of every deploy/relay/*.service and
+# *.timer of checkout $1, one per line (an *.example.* file is not a unit). ONE rule,
+# carried verbatim by scripts/deploy.sh, scripts/install.sh (relay mode) and
+# scripts/vpn-bot-host-check (role relay) — tests/test_deploy_relay_units.py pins the
+# three bodies together and their sets equal. Never a hard-coded list: a unit added
+# to deploy/relay/ is installed by both and expected by the check at once.
+relay_unit_names() {
+  local f base
+  for f in "${1%/}"/deploy/relay/*.service "${1%/}"/deploy/relay/*.timer; do
+    [[ -f "$f" ]] || continue
+    base="${f##*/}"
+    [[ "$base" == *.example.* ]] && continue
+    printf '%s\n' "$base"
+  done
+}
+
+# RELAY_UNITS from the checkout; it must carry the data plane.
+relay_load_units() {
+  readarray -t RELAY_UNITS < <(relay_unit_names "$APP_DIR")
+  [[ " ${RELAY_UNITS[*]} " == *" ${RELAY_DATA_UNIT} "* ]] \
+    || die "в checkout нет deploy/relay/${RELAY_DATA_UNIT} (ref без relay-установщика? задайте более новый INSTALL_REF)"
+  log "relay units (deploy/relay/*.service|*.timer): ${RELAY_UNITS[*]}"
+}
+
+# The timers of the set, one per line.
+relay_timers() {
+  local unit
+  for unit in "${RELAY_UNITS[@]}"; do
+    if [[ "$unit" == *.timer ]]; then printf '%s\n' "$unit"; fi
+  done
+}
+
 relay_require_checkout_files() {
   local f
-  for f in "$RELAY_SUPPORT_MARKER" scripts/vpn-relay-apply deploy/relay/relay.env.example "${RELAY_UNITS[@]/#/deploy/relay/}"; do
+  for f in "$RELAY_SUPPORT_MARKER" scripts/vpn-relay-apply deploy/relay/relay.env.example; do
     [[ -f "${APP_DIR}/${f}" ]] || die "в checkout нет ${f} (ref без relay-установщика? задайте более новый INSTALL_REF)"
   done
+  relay_load_units
 }
 
 # Fresh: a new checkout of INSTALL_REF. An existing relay checkout moves to
@@ -1391,26 +1434,33 @@ PY
   log "authorized the bot's key in ${AUTH_KEYS} (forced command ${RELAY_AGENT_COMMAND})"
 }
 
-# vpn-relay.service applies the table (one atomic nft -f) and the sysctls; the
-# timer re-resolves the name. A RUNNING unit (the hand-made one too, once
+# vpn-relay.service applies the table (one atomic nft -f) and the sysctls; every
+# timer of the set is enabled and (re)started — vpn-relay-resolve.timer re-resolves the
+# name; the oneshot a timer runs is never started here. A RUNNING unit (the hand-made one too, once
 # daemon-reload loaded ours) is RELOADED — ExecReload is the same atomic apply — never
 # restarted: a restart runs ExecStop first and deletes the table, a moment with no
 # DNAT. The rollback restores the table from the nft record (its dump) in one
 # transaction too, so no unit is restarted on the way back either.
 relay_start() {
-  local unit="vpn-relay.service"
+  local unit="$RELAY_DATA_UNIT" timer
+  local -a timers=()
+  readarray -t timers < <(relay_timers)
   run systemctl daemon-reload
   if ! systemctl is-enabled --quiet "$unit" 2>/dev/null; then manifest_add enabled "$unit"; fi
-  if ! systemctl is-enabled --quiet vpn-relay-resolve.timer 2>/dev/null; then manifest_add enabled vpn-relay-resolve.timer; fi
-  run systemctl enable "$unit" vpn-relay-resolve.timer
+  for timer in "${timers[@]}"; do
+    if ! systemctl is-enabled --quiet "$timer" 2>/dev/null; then manifest_add enabled "$timer"; fi
+  done
+  run systemctl enable "$unit" "${timers[@]}"
   if systemctl is-active --quiet "$unit"; then
     run systemctl reload "$unit"
   else
     manifest_add started "$unit"
     run systemctl start "$unit"
   fi
-  if ! systemctl is-active --quiet vpn-relay-resolve.timer; then manifest_add started vpn-relay-resolve.timer; fi
-  run systemctl restart vpn-relay-resolve.timer
+  for timer in "${timers[@]}"; do
+    if ! systemctl is-active --quiet "$timer"; then manifest_add started "$timer"; fi
+    run systemctl restart "$timer"
+  done
 }
 
 # The live tables, recorded for the rollback: a dump (restored in one transaction)
@@ -1430,9 +1480,10 @@ relay_record_tables() {
   done
 }
 
-# check + exactly ONE DNAT rule per forwarded port in the whole ruleset + the timer.
+# check + exactly ONE DNAT rule per forwarded port in the whole ruleset + every timer
+# of the set active.
 relay_verify() {
-  local out rc p n ruleset
+  local out rc p n ruleset timer
   set +e
   out="$("${SBIN_DIR}/vpn-relay-apply" check 2>&1)"
   rc=$?
@@ -1452,7 +1503,10 @@ relay_verify() {
     n="$(grep -cE "udp dport ${p} .*dnat (ip )?to" <<< "$ruleset" || true)"
     [[ "$n" == 1 ]] || { say "UDP ${p}: ${n} DNAT-правил в ruleset, ожидалось ровно 1"; return 1; }
   done
-  systemctl is-active --quiet vpn-relay-resolve.timer || { say "vpn-relay-resolve.timer не активен"; return 1; }
+  [[ ${#RELAY_UNITS[@]} -gt 0 ]] || relay_load_units
+  while IFS= read -r timer; do
+    systemctl is-active --quiet "$timer" || { say "${timer} не активен"; return 1; }
+  done < <(relay_timers)
 }
 
 # /etc/vpn-relay/install.json — what uninstall needs to undo this install.

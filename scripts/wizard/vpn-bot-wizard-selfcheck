@@ -119,7 +119,8 @@ REBOOT_FLAG = "/var/run/reboot-required"
 REBOOT_PKGS = "/var/run/reboot-required.pkgs"
 # config/settings.py LEGACY_RELAY_ENV_VARS: no longer read by the bot.
 LEGACY_RELAY_ENV = ("RELAY_ENABLED", "RELAY_NAME", "RELAY_HOST", "RELAY_SOURCE_IPS")
-_REGISTRY_RE = re.compile(r'^\s*"([^"|]+)\|([^"|]+?)(?:\|([^"|]+)(?:\|([^"|]+))?)?"\s*$')
+# deploy.sh's OUT_OF_REPO_HELPERS entry: src|dst[|policy[|role[|absent-reason]]].
+_REGISTRY_RE = re.compile(r'^\s*"([^"|]+)\|([^"|]+?)(?:\|([^"|]+)(?:\|([^"|]+)(?:\|([^"|]+))?)?)?"\s*$')
 
 
 # Items that the bot shows in its own language: the event carries `msg` (the bot

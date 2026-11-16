@@ -951,6 +951,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The relay deploy installs the relay's whole unit set — it no longer rolls back on its own host invariants
+  gate with «FAIL MISMATCH unit vpn-relay-resolve.service / vpn-relay-resolve.timer — the repo installs …, but
+  it is not on the host»** (docs/relay.md#the-units-a-relay-deploy-installs). `scripts/install.sh --relay`
+  installed `vpn-relay.service` and `vpn-relay-resolve.{service,timer}`, `scripts/vpn-bot-host-check` (role
+  relay) expects every `deploy/relay/*.service|*.timer`, but `scripts/deploy.sh` (`NODE_ROLE=relay`) installed
+  `vpn-relay.service` only, so on the production relay the gate found the two resolve units missing after
+  Phase 2 and rolled the deploy back (correctly; the relay stayed up). **One rule**: `relay_unit_names` —
+  every `deploy/relay/*.service` and `*.timer`, never an `*.example.*` — is carried verbatim by all three
+  scripts; install.sh fills `RELAY_UNITS` from the checkout instead of a hard-coded list, and enables /
+  (re)starts every timer of the set, verifying each is active. **deploy.sh, role relay**: Phase 1 shows every
+  unit of the set (`absent` / `synced` / `differs`; `legacy` for the hand-made `vpn-relay.service`) in its log
+  and the `CHECK=1` report, with each unit's pre-state; Phase 2 backs up every unit (one not there yet is
+  recorded as absent), installs each verbatim (a synced copy is not rewritten), `daemon-reload`, enables
+  `vpn-relay.service` and every timer, restarts `vpn-relay.service`, starts a timer that is not active — the
+  oneshot a timer runs (`vpn-relay-resolve.service`) is never started by hand. The rollback stops and disables
+  a unit that was not installed before (its file removed with the backup's other files), stops / disables a
+  timer that was not active / enabled, keeps one that was, and the ROLLBACK REPORT ends with one line per unit
+  (now vs before the deploy); DEPLOY OK has a line per unit. The order is unchanged: host invariants after the
+  install stays the gate. `vpn-relay-apply resolve` with `RELAY_UPSTREAM_IPV4` (the production relay) was
+  already a no-op — it logs «no RELAY_UPSTREAM_HOST … nothing to do» and exits 0 — and is now pinned against
+  the shipped `relay.env.example`. **Also**: the «leaving absent» line for an absent `absent-ok` helper said
+  «(WARP not deployed here)» for every helper, the relay agent on a relay too; the reason is now the entry's
+  own new fifth field in `OUT_OF_REPO_HELPERS` (`<src>|<dst>|<policy>|<role>|<absent-reason>`, read by
+  `helper_absent_reason`): «WARP not deployed here» for the WARP helpers, «installed at pairing from the bot —
+  there is none before pairing» for `vpn-relay-agent`. The registry parsers (the scan of unaccounted host
+  files, `vpn-bot-wizard-selfcheck`, the registry guard test) read the fifth field. **Tests**:
+  `tests/test_deploy_relay_units.py` — the three bodies identical and their sets equal (on the repo and on a
+  checkout with extra units), the real host check judging exactly that set, no unit of the set named in
+  either installer's code, every other service of the set run by a timer of the set; install.sh by the set;
+  end to end against the REAL `vpn-bot-host-check` — the production relay (repo `vpn-relay.service`, no
+  resolve units) gets them, host invariants clean, DEPLOY OK (against the old deploy.sh the same test fails
+  with the production MISMATCH rows), a second deploy all `synced` with no unit file rewritten and no unit
+  started, and ANY unit of the set missing after Phase 2 rolls back; the rollback unit by unit; `resolve` a
+  no-op with an address upstream; the absent-ok reason per entry, and every absent-ok entry must carry one.
+
+- **The relay agent reads the relay's unit set from the checkout — the same `relay_unit_names` rule as
+  deploy.sh, install.sh and the host check — instead of its own list** (docs/relay.md#the-agent-vpn-relay-agent).
+  `scripts/vpn-relay-agent` hard-coded `vpn-relay-resolve.{timer,service}` + `vpn-relay.service` for
+  `uninstall` and `vpn-relay.service` + `vpn-relay-resolve.timer` for `status`, so a unit added to
+  `deploy/relay/` would be installed by deploy/install but never stopped, disabled or removed by `uninstall`,
+  and never shown by `status`. Now `checkout_unit_names` is that rule in Python (every
+  `/opt/vpn-service/deploy/relay/*.service` and `*.timer`, never an `*.example.*`, no dotfile); `uninstall`
+  stops/disables and then removes the whole set in a safe order — **timers first** (none can fire its oneshot
+  between the steps), then the oneshots, **`vpn-relay.service` last** (its `ExecStop` removes the tables);
+  its step line names the units. `status` reports `vpn-relay.service` and every timer of the set (a oneshot is
+  `inactive` between runs; its timer tells). **Without a checkout** (removed, or on a ref without
+  `deploy/relay/vpn-relay.service`) the agent does not fall back to a list frozen into it, which would drift
+  again. It uses the `vpn-relay.service` / `vpn-relay-<name>.service|.timer` unit files actually present in
+  `/etc/systemd/system`, plus `vpn-relay.service`, which is stopped even when its file is gone. A test pins
+  that every unit of `deploy/relay/` matches that name pattern. With a checkout, only its set is touched; another
+  `vpn-relay*` file is left alone. **Tests** (`tests/test_vpn_relay_agent.py`): the agent's set equals
+  deploy.sh's `relay_unit_names` on the repo and on a checkout with an extra timer/service (plus an example, a
+  dotfile, a directory and a non-unit); no unit of the set but the data plane named in the agent; the stop
+  order; `status` with the extra timer; `uninstall` stops, disables and removes the extra pair, in the order
+  timers → services → `vpn-relay.service`, before the tables go; without a checkout, by the files present
+  (an unrelated unit file and a drop-in directory untouched).
+
 - **Tests never reach the network; deploy Phase 1 no longer fails on
   `test_built_monitor_alerts_every_admin_once_per_transition` (1 failed / 5109 passed on the host, green in
   CI — the host-leak class of #239/#241/#242/#336), and the suite no longer sends traffic from the production

@@ -209,7 +209,7 @@ def test_the_warp_mark_helper_is_left_alone_after_hysteria2_is_removed(tmp_path:
 def test_the_real_helper_mapping_names_the_installed_warp_mark() -> None:
     text = _read(DEPLOY_SH)
     assert 'if [[ "$1" == /usr/local/sbin/vpnbot-hy2-warp-mark ]] && proto_uninstalled hysteria2' in text
-    assert '"scripts/vpnbot-hy2-warp-mark|/usr/local/sbin/vpnbot-hy2-warp-mark|absent-ok"' in text
+    assert '"scripts/vpnbot-hy2-warp-mark|/usr/local/sbin/vpnbot-hy2-warp-mark|absent-ok|main|' in text
 
 
 def test_the_rollback_skips_the_oneshots_of_a_removed_protocol() -> None:

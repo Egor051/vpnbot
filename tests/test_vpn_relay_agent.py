@@ -16,6 +16,11 @@ parts):
   re-applies when the ruleset or its check fails.
 * **uninstall** removes what the installer installed and only the agent's own
   authorized_keys line; it refuses a host that is not an installer relay.
+* **The unit set** is ``relay_unit_names`` of scripts/deploy.sh (one rule with install.sh
+  and the host check), read from the checkout: equal on the repo and on a checkout with
+  an extra timer/service. uninstall stops, disables and removes every unit of it —
+  timers, then the oneshots, vpn-relay.service last — and, without a checkout, the
+  vpn-relay*.service|.timer files present; status shows the data plane and every timer.
 
 External commands are stubs (VPN_RELAY_AGENT_SELFTEST_BIN); every path is re-rooted
 under a temporary directory (VPN_RELAY_AGENT_ROOT).
@@ -162,6 +167,95 @@ def test_env_with_replaces_last_assignment_and_drops_the_rest() -> None:
     assert out == "# relay\nNODE_ROLE=relay\nRELAY_FORWARD_TCP_PORTS=443\nSSH_PORT=22\nRELAY_UPSTREAM_HOST=vpn.example.com\n"
     assert agent.env_value(out, "RELAY_FORWARD_TCP_PORTS") == "443"
     assert agent.env_value(text, "RELAY_FORWARD_TCP_PORTS") == "8443"
+
+
+# --------------------------------------------------------------------------- #
+# The unit set: relay_unit_names of scripts/deploy.sh, read from the checkout
+# --------------------------------------------------------------------------- #
+DEPLOY_SH = ROOT / "scripts" / "deploy.sh"
+DATA_PLANE = "vpn-relay.service"
+EXTRA_TIMER = "vpn-relay-extra.timer"
+EXTRA_SERVICE = "vpn-relay-extra.service"
+
+
+def _repo_unit_names() -> list[str]:
+    return [p.name for p in sorted((ROOT / "deploy" / "relay").iterdir())
+            if p.suffix in (".service", ".timer") and ".example." not in p.name]
+
+
+def _deploy_relay_unit_names(checkout: Path) -> set[str]:
+    """relay_unit_names of scripts/deploy.sh (the body tests/test_deploy_relay_units.py
+    pins identical in install.sh and the host check), run on <checkout>."""
+    text = DEPLOY_SH.read_text(encoding="utf-8")
+    start = text.index("\nrelay_unit_names() {\n") + 1
+    body = text[start : text.index("\n}\n", start) + 3]
+    proc = subprocess.run(["bash", "-c", body + 'relay_unit_names "$1"\n', "x", str(checkout)],
+                          capture_output=True, text=True, check=True)
+    lines = proc.stdout.splitlines()
+    assert len(lines) == len(set(lines)), lines
+    return set(lines)
+
+
+def _checkout(app: Path, *, extra: bool) -> None:
+    """deploy/relay/ of the repo in <app>; with <extra>, a unit pair the repo does not have
+    and everything relay_unit_names must skip."""
+    src = app / "deploy" / "relay"
+    src.mkdir(parents=True, exist_ok=True)
+    for f in (ROOT / "deploy" / "relay").iterdir():
+        shutil.copyfile(f, src / f.name)
+    if not extra:
+        return
+    files = {
+        EXTRA_TIMER: "[Timer]\nOnUnitActiveSec=1h\nUnit=vpn-relay-extra.service\n[Install]\nWantedBy=timers.target\n",
+        EXTRA_SERVICE: "[Service]\nType=oneshot\nExecStart=/bin/true\n",
+        "vpn-relay-x.example.service": "[Service]\n",
+        ".hidden.timer": "[Timer]\n",
+        "notes.txt": "not a unit\n",
+    }
+    for name, body in files.items():
+        (src / name).write_text(body, encoding="utf-8")
+    (src / "dir.service").mkdir()
+
+
+@pytest.mark.parametrize("which", ["repo", "extra"])
+def test_the_agents_unit_set_is_deploys_relay_unit_names(tmp_path: Path, which: str) -> None:
+    checkout = ROOT
+    if which == "extra":
+        checkout = tmp_path / "checkout"
+        _checkout(checkout, extra=True)
+    names = agent.checkout_unit_names(checkout)
+    assert len(names) == len(set(names)), names
+    assert set(names) == _deploy_relay_unit_names(checkout)
+    expected = set(_repo_unit_names()) | ({EXTRA_TIMER, EXTRA_SERVICE} if which == "extra" else set())
+    assert set(names) == expected and DATA_PLANE in expected
+
+
+def test_the_agent_names_no_relay_unit_in_code() -> None:
+    """The set is read from the checkout: no unit of deploy/relay/ but the data plane
+    (which uninstall stops even without a checkout) is named in the agent."""
+    text = AGENT.read_text(encoding="utf-8")
+    for name in _repo_unit_names():
+        if name != DATA_PLANE:
+            assert f'"{name}"' not in text, name
+
+
+def test_every_repo_unit_is_one_the_fallback_finds() -> None:
+    """Without a checkout, uninstall finds the units by name in /etc/systemd/system."""
+    for name in _repo_unit_names():
+        assert agent.INSTALLED_UNIT_RE.fullmatch(name), name
+    for other in ("vpn-relay.service.d", "vpn-relay.service.bak", "vpn-relayx.service", "nginx.service",
+                  "vpn-relay-x.socket", "vpn-relay@.service"):
+        assert not agent.INSTALLED_UNIT_RE.fullmatch(other), other
+
+
+def test_stop_order_is_timers_then_services_then_the_data_plane(tmp_path: Path) -> None:
+    _checkout(tmp_path, extra=True)
+    order = agent.stop_order(agent.checkout_unit_names(tmp_path))
+    timers = [n for n in order if n.endswith(".timer")]
+    assert order[: len(timers)] == timers and EXTRA_TIMER in timers and "vpn-relay-resolve.timer" in timers
+    assert order[-1] == DATA_PLANE
+    assert set(order[len(timers) : -1]) == {EXTRA_SERVICE, "vpn-relay-resolve.service"}
+    assert agent.stop_order([DATA_PLANE, "b.service", "a.timer", "a.timer"]) == ["a.timer", "b.service", DATA_PLANE]
 
 
 # --------------------------------------------------------------------------- #
@@ -400,6 +494,17 @@ def test_status_runs_the_check(host: Host) -> None:
     assert "vpn-relay-apply check" in host.calls()
 
 
+@pytest.mark.parametrize("extra", [False, True])
+def test_status_shows_the_data_plane_and_every_timer_of_the_set(host: Host, extra: bool) -> None:
+    host.pair(paired=True)
+    _checkout(host.root / "opt/vpn-service", extra=extra)
+    rc, payload = host.run("status")
+    assert rc == 0, payload
+    timers = {n for n in _repo_unit_names() if n.endswith(".timer")} | ({EXTRA_TIMER} if extra else set())
+    assert set(payload["units"]) == {DATA_PLANE} | timers
+    assert all(state == "active" for state in payload["units"].values())
+
+
 def test_apply_rewrites_only_the_upstream_keys(host: Host) -> None:
     host.pair(paired=True)
     host.env_path.write_text(
@@ -530,18 +635,37 @@ def test_apply_with_a_dead_upstream_rolls_back(host: Host) -> None:
 # --------------------------------------------------------------------------- #
 # uninstall
 # --------------------------------------------------------------------------- #
-def _installed(host: Host, *, created_app_dir: bool) -> None:
+def _installed(host: Host, *, created_app_dir: bool, checkout: bool = True, extra: bool = False) -> list[str]:
+    """What install.sh leaves: with <checkout>, deploy/relay/ in the checkout (with
+    <extra>, a unit pair the repo does not have) and its whole set installed; without,
+    the units installed and no deploy/relay/ to read them from. Returns the units."""
     host.pair(paired=True)
     (host.root / "etc/vpn-relay/install.json").write_text(
         json.dumps({"installer": "vpn-relay", "created_app_dir": created_app_dir, "ip_forward_before": "0",
                     "authorized_keys": "/root/.ssh/authorized_keys", "adoption_backup": None}),
         encoding="utf-8",
     )
-    for unit in ("vpn-relay.service", "vpn-relay-resolve.service", "vpn-relay-resolve.timer"):
+    units = _repo_unit_names() + ([EXTRA_TIMER, EXTRA_SERVICE] if extra else [])
+    if checkout:
+        _checkout(host.root / "opt/vpn-service", extra=extra)
+    for unit in units:
         (host.root / "etc/systemd/system" / unit).write_text("[Unit]\n", encoding="utf-8")
     (host.root / "etc/sysctl.d/90-vpn-relay.conf").write_text("net.ipv4.ip_forward = 1\n", encoding="utf-8")
     for name in ("vpn-relay-apply", "vpn-relay-agent"):
         (host.root / "usr/local/sbin" / name).write_text("#!/bin/sh\n", encoding="utf-8")
+    return units
+
+
+def _disabled(host: Host) -> list[str]:
+    """The units uninstall stopped and disabled, in its order."""
+    prefix = "systemctl disable --now "
+    return [c[len(prefix):] for c in host.calls() if c.startswith(prefix)]
+
+
+def _assert_stop_order(order: list[str]) -> None:
+    timers = [u for u in order if u.endswith(".timer")]
+    assert order[: len(timers)] == timers, order
+    assert order[-1] == DATA_PLANE and order.count(DATA_PLANE) == 1, order
 
 
 def test_uninstall_removes_what_the_installer_installed(host: Host) -> None:
@@ -556,6 +680,51 @@ def test_uninstall_removes_what_the_installer_installed(host: Host) -> None:
     calls = host.calls()
     assert "systemctl disable --now vpn-relay.service" in calls
     assert "sysctl -q -w net.ipv4.ip_forward=0" in calls
+
+
+def test_uninstall_stops_disables_and_removes_a_unit_the_checkout_adds(host: Host) -> None:
+    """A unit added to deploy/relay/ is installed by deploy/install — and undone here."""
+    units = _installed(host, created_app_dir=False, extra=True)
+    rc, payload = host.run("uninstall")
+    assert rc == 0, payload
+    order = _disabled(host)
+    assert sorted(order) == sorted(units) and {EXTRA_TIMER, EXTRA_SERVICE} <= set(order)
+    _assert_stop_order(order)
+    for unit in units:
+        assert not (host.root / "etc/systemd/system" / unit).exists(), unit
+    assert EXTRA_TIMER in payload["uninstall"]["steps"][0]
+    calls = host.calls()
+    last_stop = calls.index(f"systemctl disable --now {DATA_PLANE}")
+    assert all(i <= last_stop for i, c in enumerate(calls) if c.startswith("systemctl disable --now "))
+    assert last_stop < calls.index("nft delete table ip vpnrelay") < calls.index("systemctl daemon-reload")
+
+
+def test_uninstall_with_a_checkout_leaves_other_unit_files_alone(host: Host) -> None:
+    """The checkout's set is what deploy/install installed from it — nothing else goes."""
+    _installed(host, created_app_dir=False)
+    unit_dir = host.root / "etc/systemd/system"
+    for other in ("vpn-relay-operator.service", "nginx.service"):
+        (unit_dir / other).write_text("[Unit]\n", encoding="utf-8")
+    assert host.run("uninstall")[0] == 0
+    assert (unit_dir / "vpn-relay-operator.service").exists() and (unit_dir / "nginx.service").exists()
+    assert sorted(_disabled(host)) == sorted(_repo_unit_names())
+
+
+def test_uninstall_without_a_checkout_removes_the_relay_units_present(host: Host) -> None:
+    """No deploy/relay/ to read: the vpn-relay*.service|.timer files present decide, and
+    vpn-relay.service is stopped even when its file is gone already."""
+    units = _installed(host, created_app_dir=True, checkout=False, extra=True)
+    unit_dir = host.root / "etc/systemd/system"
+    (unit_dir / DATA_PLANE).unlink()
+    (unit_dir / "nginx.service").write_text("[Unit]\n", encoding="utf-8")
+    (unit_dir / "vpn-relay.service.d").mkdir()
+    rc, payload = host.run("uninstall")
+    assert rc == 0, payload
+    order = _disabled(host)
+    assert sorted(order) == sorted(units)
+    _assert_stop_order(order)
+    assert not any((unit_dir / u).exists() for u in units)
+    assert (unit_dir / "nginx.service").exists() and (unit_dir / "vpn-relay.service.d").is_dir()
 
 
 def test_uninstall_keeps_the_key_when_a_table_survives(host: Host) -> None:

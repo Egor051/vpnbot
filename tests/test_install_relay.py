@@ -412,7 +412,16 @@ def test_relay_paths_are_ours_only_in_relay_mode(tmp_path: Path) -> None:
 # ── verification: exactly one DNAT per port ──────────────────────────────────
 
 
+def _checkout_units(tmp_path: Path) -> None:
+    """The checkout's deploy/relay/ as the repo ships it: the unit set relay_verify reads."""
+    dst = tmp_path / "opt/vpn-service/deploy/relay"
+    dst.mkdir(parents=True, exist_ok=True)
+    for src in (ROOT / "deploy" / "relay").iterdir():
+        (dst / src.name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+
 def _verify(tmp_path: Path, *, check_rc: int, ruleset: str, timer: int = 0) -> subprocess.CompletedProcess[str]:
+    _checkout_units(tmp_path)
     helper = tmp_path / "usr/local/sbin/vpn-relay-apply"
     helper.parent.mkdir(parents=True, exist_ok=True)
     helper.write_text(f"#!/bin/bash\necho checked\nexit {check_rc}\n", encoding="utf-8")
@@ -448,7 +457,9 @@ def test_verify_check_codes(tmp_path: Path, rc: int, ok: bool) -> None:
 
 
 def test_verify_needs_the_timer(tmp_path: Path) -> None:
-    assert _verify(tmp_path, check_rc=0, ruleset=ONE, timer=3).returncode != 0
+    result = _verify(tmp_path, check_rc=0, ruleset=ONE, timer=3)
+    assert result.returncode != 0
+    assert "vpn-relay-resolve.timer не активен" in result.stderr + result.stdout
 
 
 # ── the dispatch ─────────────────────────────────────────────────────────────

@@ -404,14 +404,30 @@ opt_of() {
   return 0
 }
 
+# The relay role's unit set: the basenames of every deploy/relay/*.service and
+# *.timer of checkout $1, one per line (an *.example.* file is not a unit). ONE rule,
+# carried verbatim by scripts/deploy.sh, scripts/install.sh (relay mode) and
+# scripts/vpn-bot-host-check (role relay) — tests/test_deploy_relay_units.py pins the
+# three bodies together and their sets equal. Never a hard-coded list: a unit added
+# to deploy/relay/ is installed by both and expected by the check at once.
+relay_unit_names() {
+  local f base
+  for f in "${1%/}"/deploy/relay/*.service "${1%/}"/deploy/relay/*.timer; do
+    [[ -f "$f" ]] || continue
+    base="${f##*/}"
+    [[ "$base" == *.example.* ]] && continue
+    printf '%s\n' "$base"
+  done
+}
+
 collect_units() {
   local f base
   shopt -s nullglob
   if [[ "$ROLE" == relay ]]; then
-    for f in "${APP_DIR}"/deploy/relay/*.service "${APP_DIR}"/deploy/relay/*.timer; do
-      base="$(basename "$f")"; [[ "$base" == *.example.* ]] && continue
-      UNITS_DEPLOY+=("${f}|${UNIT_DIR}/${base}")
-    done
+    # Exactly the units deploy.sh (role relay) and install.sh --relay install.
+    while IFS= read -r base; do
+      UNITS_DEPLOY+=("${APP_DIR}/deploy/relay/${base}|${UNIT_DIR}/${base}")
+    done < <(relay_unit_names "$APP_DIR")
   else
     if [[ -f "${APP_DIR}/deploy/vpn-bot.service" ]]; then
       UNITS_DEPLOY+=("${APP_DIR}/deploy/vpn-bot.service|${UNIT_DIR}/vpn-bot.service")
