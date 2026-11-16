@@ -29,7 +29,7 @@ optional with the shown default.
 | `BOT_LANGUAGE` | No | `ru` | Bot UI language. Supported: `ru`, `en`. | `ru` |
 | `AUDIT_RETENTION_DAYS` | No | `180` | Days to retain audit log entries (0 = forever, max 3650). | `180` |
 | `CONFIG_BACKUP_KEEP_LAST` | No | `20` | Number of config backups to keep per backend config file (1–500): AmneziaWG and the other backends. Xray has its own `XRAY_CONFIG_BACKUP_KEEP`. | `20` |
-| `XRAY_CONFIG_BACKUP_KEEP` | No | `10` | Number of `config.json` backups the Xray adapter keeps (1–500). Pruned after each **successful** change, and only files with the adapter's own name `config.json.<stamp>.<ns>.<token>.bak` — your own `config.json.*.bak` copies and the privileged helper's `config.json.<ns>.bak` are never touched. A failed cleanup is a WARNING in the bot log, never a failed key operation. | `10` |
+| `XRAY_CONFIG_BACKUP_KEEP` | No | `10` | Number of `config.json` backups the Xray adapter keeps (1–500). Pruned after each **successful** change, and only files with the adapter's own name `config.json.<stamp>.<ns>.<token>.bak` — your own `config.json.*.bak` copies and the privileged helper's `config.json.<ns>.bak` are never touched (the helper keeps the newest 10 of its own itself). A failed cleanup is a WARNING in the bot log, never a failed key operation. | `10` |
 
 ## Health Endpoint
 

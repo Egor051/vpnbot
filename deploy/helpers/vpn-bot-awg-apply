@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -165,6 +166,66 @@ def backup_current() -> Path | None:
     return backup_path
 
 
+# Retention of this helper's OWN backups: backup_current() writes one
+# "<name>.<time_ns>.bak" per apply, and they used to pile up forever. Kept: the
+# newest BACKUP_KEEP. A fixed constant, not a setting: the helper runs through
+# sudo with a fixed argv and reads no .env. 10 matches the default of
+# XRAY_CONFIG_BACKUP_KEEP, the bot's own retention for the copies it writes
+# itself in the api-root model.
+BACKUP_KEEP = 10
+
+
+def own_backup_name_re(target: Path) -> re.Pattern[str]:
+    """The whole-name template of the backups this helper writes for ``target``.
+
+    time.time_ns() has had exactly 19 digits since 2001-09-09 and keeps them until
+    2286, so this matches every name the helper has ever written. It does NOT match
+    the bot's ``<name>.<stamp>.<ns>.<token>.bak``, nor an operator's
+    ``<name>.$(date +%s).bak`` (10 digits) or ``<name>.20261116.bak`` (8 digits).
+    """
+    return re.compile(re.escape(target.name) + r"\.([0-9]{19})\.bak")
+
+
+def prune_own_backups(target: Path, keep: int, *, spare: Path | None = None) -> list[Path]:
+    """Delete all but the newest ``keep`` of this helper's own backups of ``target``.
+
+    Candidates are the entries of target's directory that are regular files (never
+    followed: a symlink is not a candidate, whatever its name) and whose WHOLE name
+    matches own_backup_name_re(target). Newest means the largest time_ns in the name,
+    not mtime: shutil.copy2 stamps a backup with the mtime of the config it copied.
+    ``spare`` (the copy this apply just wrote) is never deleted, even when a clock
+    step made it look older than the rest. ``keep`` below 1 is treated as 1.
+    Returns the deleted paths.
+    """
+    name_re = own_backup_name_re(target)
+    found: list[tuple[int, Path]] = []
+    with os.scandir(target.parent) as entries:
+        for entry in entries:
+            match = name_re.fullmatch(entry.name)
+            if match is not None and entry.is_file(follow_symlinks=False):
+                found.append((int(match.group(1)), Path(entry.path)))
+    found.sort(reverse=True)
+    removed: list[Path] = []
+    for _ns, path in found[max(1, keep):]:
+        if path == spare:
+            continue
+        path.unlink(missing_ok=True)
+        removed.append(path)
+    return removed
+
+
+def prune_after_apply(spare: Path | None, stderr: TextIO) -> None:
+    """Retention after a SUCCESSFUL apply only; it never changes the exit code.
+
+    The apply has already succeeded, and an old backup left behind costs nothing but
+    disk, so a cleanup error is reported as a warning and swallowed.
+    """
+    try:
+        prune_own_backups(CANONICAL_CONFIG, BACKUP_KEEP, spare=spare)
+    except Exception as exc:
+        print(f"warning: config applied, but old backups were not pruned: {exc}", file=stderr)
+
+
 def install_candidate(candidate: Path) -> None:
     _prepare_target_dir()
     tmp_path = CANONICAL_CONFIG.with_name(f".{CANONICAL_CONFIG.name}.{time.time_ns()}.tmp")
@@ -236,7 +297,7 @@ def action_validate(raw_path: str) -> int:
     return 0
 
 
-def action_apply(raw_path: str) -> int:
+def action_apply(raw_path: str, stderr: TextIO | None = None) -> int:
     candidate = validate_candidate_path(raw_path)
     stripped = quick_strip(candidate)
     backup_path = backup_current()
@@ -249,6 +310,9 @@ def action_apply(raw_path: str) -> int:
         except Exception as rollback_exc:
             raise HelperError("AWG apply failed and rollback failed") from rollback_exc
         raise HelperError("AWG apply failed; previous config restored") from exc
+    # Only here, past a successful apply: a failed one returned through the rollback
+    # above, and its backup — the restored config — stays as evidence.
+    prune_after_apply(backup_path, stderr or sys.stderr)
     return 0
 
 
@@ -297,7 +361,7 @@ def main(
     stderr = stderr or sys.stderr
     try:
         if args.action == "apply":
-            return action_apply(args.candidate_config_path)
+            return action_apply(args.candidate_config_path, stderr)
         if args.action == "validate":
             return action_validate(args.candidate_config_path)
         if args.action == "status":
