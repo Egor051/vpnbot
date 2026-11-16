@@ -220,8 +220,10 @@ checklist, and day-2 operations live in:
 ### Deploy (`scripts/redeploy.sh` → `scripts/deploy.sh`)
 
 Redeploy a backward-compatible change from `origin/main` with `scripts/redeploy.sh`, the
-single entry point. It is a thin wrapper that fetches `origin/main`, extracts `deploy.sh`
-straight from tip-of-main (never the working tree), and launches it detached under systemd
+single entry point. It is a thin wrapper that fetches `origin/main`, re-executes itself as
+`origin/main`'s copy when the checkout's copy differs (one line:
+`redeploy: re-exec from origin/main (<sha>)`), extracts `deploy.sh` straight from tip-of-main
+(never the working tree), and launches it detached under systemd
 (`systemd-run --unit=vpn-bot-deploy`) so an SSH disconnect can never strand a half-finished
 deploy. The versioned, idempotent `deploy.sh` does all the real work.
 
@@ -257,6 +259,7 @@ those itself in Phase 2 (see below), so a plain redeploy keeps them in sync with
 
 ```bash
 git -C /opt/vpn-service fetch origin main
+# (here it re-executes as origin/main's scripts/redeploy.sh if the checkout's copy differs)
 git -C /opt/vpn-service show origin/main:scripts/deploy.sh > /tmp/deploy.sh
 sudo systemctl reset-failed vpn-bot-deploy 2>/dev/null || true
 sudo systemd-run --unit=vpn-bot-deploy --collect --pty \
@@ -271,9 +274,11 @@ sudo systemd-run --unit=vpn-bot-deploy --collect --pty \
   env ALLOW_BACKEND_CONFIG_DRIFT=1 bash -c "bash /tmp/deploy.sh 2>&1 | tee /root/deploy-$(date -u +%Y%m%dT%H%M%SZ).log"
 ```
 
-This is also the fallback when the wrapper cannot forward a flag. The `redeploy.sh` that runs is
-the one in the checkout, not the one on `origin/main`, so a host still on a commit from before
-the allowlist forwards `CHECK`/`FORCE` only.
+This is also the last resort when the wrapper cannot forward a flag. The `redeploy.sh` that runs
+is `origin/main`'s: after the fetch, a checkout copy that differs from it re-executes as that
+copy, so the names forwarded are the ones `origin/main` lists. A checkout from before that change
+still runs its own copy; run `origin/main`'s by hand once
+([docs/operations.md](docs/operations.md#which-copy-of-redeploysh-runs)).
 </details>
 
 > **Mandatory first step on a new host — `CHECK=1` (`PHASE1_ONLY=1`).** Before the

@@ -26,8 +26,10 @@ sudo CHECK=1 bash scripts/redeploy.sh    # read-only Phase 1 (PHASE1_ONLY=1) —
 sudo bash scripts/redeploy.sh            # deploy
 ```
 
-`redeploy.sh` fetches `origin/main`, runs `deploy.sh` from tip-of-main detached under
-systemd, and (in Phase 2) refreshes the out-of-repo `/usr/local/sbin` helpers automatically.
+`redeploy.sh` fetches `origin/main`, re-executes itself as `origin/main`'s copy when the
+checkout's copy differs ([below](#which-copy-of-redeploysh-runs)), runs `deploy.sh`
+from tip-of-main detached under systemd, and (in Phase 2) refreshes the out-of-repo
+`/usr/local/sbin` helpers automatically.
 Run mutating deploys in a low-traffic window — see [Rollback after a bad
 deploy](#rollback-after-a-bad-deploy) for why. Details in the [README Deploy
 section](../README.md).
@@ -75,18 +77,71 @@ sudo CHECK=1 SCHEMA_WAIT_TIMEOUT=180 bash scripts/redeploy.sh
 ```
 
 The wrapper forwards an explicit allowlist (`DEPLOY_ENV_PASSTHROUGH` in `scripts/redeploy.sh`):
-every `ALLOW_*` gate bypass `deploy.sh` reads, plus `SCHEMA_WAIT_TIMEOUT` and
-`HY2_AUTH_BIND_TIMEOUT`, each only when set and non-empty — never the whole environment. The
+every `ALLOW_*` gate bypass `deploy.sh` reads, plus `SCHEMA_WAIT_TIMEOUT`,
+`HY2_AUTH_BIND_TIMEOUT` and `DEPLOY_REF` (the revision a relay deploys), each only when set and
+non-empty — never the whole environment. The
 `deploy.sh env:` line of the output lists what was forwarded (`deploy.sh env: PHASE1_ONLY=1
 ALLOW_BACKEND_CONFIG_DRIFT=1`), so the `CHECK=1` report already shows the flag will reach Phase 2
 as well. An `ALLOW_*` outside the allowlist — a typo, or a new `deploy.sh` flag nobody added —
 stops the wrapper before it fetches or launches anything and prints the accepted names.
 
-Fallback, when the wrapper cannot forward a flag: run `deploy.sh` by hand with the flag on the
-`systemd-run … env ALLOW_X=1 bash -c "bash /tmp/deploy.sh …"` line (README, "no-wrapper
-fallback"). That is the case on a host whose checkout is still on a commit from before the
-allowlist: the `redeploy.sh` that runs is the checkout's copy, which forwards `CHECK`/`FORCE`
-only.
+### Which copy of `redeploy.sh` runs
+
+`deploy.sh` has always come from `origin/main`, but the `redeploy.sh` that ran was the copy in
+the checkout. On a host whose tree lags behind `origin/main` (a relay on a release tag, any host
+not deployed for a while) that copy is older, and a name added to `DEPLOY_ENV_PASSTHROUGH` since
+was dropped without a word. Only an unknown `ALLOW_*` is refused; other names are not checked at
+all. Measured on a relay on 2026-11-16: checkout at `1a87f67`,
+`sudo DEPLOY_REF=main bash scripts/redeploy.sh` printed `deploy.sh env: <none>`, while `CHECK=1`
+got through in the same run (`PHASE1_ONLY=1`).
+
+Now, right after the fetch, the wrapper compares its own file byte for byte with
+`git show origin/main:scripts/redeploy.sh`. When they differ, it writes `origin/main`'s copy to a
+private temp file (`mktemp`, mode 0700) and `exec`s it with the same arguments and environment.
+The output shows one line, then that copy's whole run, including its own fetch:
+
+```text
+redeploy: fetching origin/main
+redeploy: re-exec from origin/main (<sha>)
+redeploy: fetching origin/main
+redeploy: host HEAD=1a87f67  origin/main=<sha>
+…
+redeploy:   deploy.sh env: DEPLOY_REF=main
+```
+
+The second run carries `REDEPLOY_REEXEC=1` and never re-executes again, even if a push lands
+between the two fetches. It deletes its temp file as it starts. When the copies match (the main
+server right after a deploy), nothing is printed and nothing changes. When `origin/main`'s copy
+cannot be used (the path is missing there, `git show` fails, the file is empty or does not
+parse), the wrapper prints two `redeploy: WARN:` lines and goes on with the checkout's copy, as
+before. Check the `deploy.sh env:` line in that case.
+
+Two cases still run the checkout's copy, and in both you run `origin/main`'s copy by hand:
+
+- **A checkout from before this change** has no re-exec at all. That is the relay above. Once
+  one deploy brings this change into the checkout, the wrapper takes care of it.
+- **The unknown-`ALLOW_*` refusal** runs before the root guard and the fetch, so the checkout's
+  copy decides it. An `ALLOW_*` that `origin/main` gained after the checkout's commit is refused
+  as unknown.
+
+```bash
+sudo git -C /opt/vpn-service fetch origin main
+```
+
+```bash
+sudo git -C /opt/vpn-service show origin/main:scripts/redeploy.sh | sudo tee /root/redeploy-main.sh > /dev/null
+```
+
+```bash
+sudo CHECK=1 DEPLOY_REF=main bash /root/redeploy-main.sh
+```
+
+Put the knobs on the last line as you would for `scripts/redeploy.sh`. That copy matches
+`origin/main`, so it runs as it is; it changes into `APP_DIR` itself.
+
+The last resort, when no copy of the wrapper can forward a flag: run `deploy.sh` by hand with the
+flag on the `systemd-run … env ALLOW_X=1 bash -c "bash /tmp/deploy.sh …"` line (README,
+"no-wrapper fallback").
 
 ### The deploy restarts the sidecar units too
 

@@ -433,17 +433,42 @@ And only **forward**:
 Detached on a release tag, or ahead of one, is the normal state of a relay: Phase 1 reports where
 the tree is and where it goes (`tree : … -> latest release vX.Y.Z (…), detached`) without a WARN.
 
-The `deploy.sh` that runs is the **target's own**: `redeploy.sh` starts `origin/main`'s copy,
-which picks the target and hands over (`exec`) to the `deploy.sh` of that revision — a relay
+The `deploy.sh` that runs is the **target's own**: `redeploy.sh` (itself `origin/main`'s copy —
+a relay's checkout on a release tag usually differs from it, so the wrapper re-executes as that
+copy after the fetch: [docs/operations.md](operations.md#which-copy-of-redeploysh-runs)) starts
+`origin/main`'s `deploy.sh`, which picks the target and hands over (`exec`) to the `deploy.sh` of
+that revision — a relay
 deploying an older release must not run newer registry code against an older tree. A target
 whose `deploy.sh` predates release-based relay deploys is refused (it would deploy `origin/main`);
 `DEPLOY_REF=main` deploys main.
 
 A relay deployed from `main` before this — 2026-11-16: ru1 at `1a87f67`, while the newest release
 `v3.1.0` is older — stays where it is on a plain run (the INFO line above); it follows releases
-again once a release newer than its commit exists. `sudo DEPLOY_REF=main bash
-scripts/redeploy.sh` keeps it on main meanwhile (that run also installs the agent that updates
-through `deploy.sh`).
+again once a release newer than its commit exists. To keep it on main meanwhile (that run also
+installs the agent that updates through `deploy.sh`), run **`origin/main`'s** `redeploy.sh` with
+`DEPLOY_REF=main`, not the checkout's: the copy at `1a87f67` predates both `DEPLOY_REF`
+forwarding and the re-exec, so `sudo DEPLOY_REF=main bash scripts/redeploy.sh` there prints
+`deploy.sh env: <none>` and the knob never reaches `deploy.sh` (measured on 2026-11-16):
+
+```bash
+sudo git -C /opt/vpn-service fetch origin main
+```
+
+```bash
+sudo git -C /opt/vpn-service show origin/main:scripts/redeploy.sh | sudo tee /root/redeploy-main.sh > /dev/null
+```
+
+```bash
+sudo CHECK=1 DEPLOY_REF=main bash /root/redeploy-main.sh
+```
+
+```bash
+sudo DEPLOY_REF=main bash /root/redeploy-main.sh
+```
+
+The `deploy.sh env:` line must read `DEPLOY_REF=main` (`PHASE1_ONLY=1 DEPLOY_REF=main` for the
+`CHECK=1` run). Once the relay is on main, `scripts/redeploy.sh` re-executes as `origin/main`'s
+copy by itself.
 
 #### The units a relay deploy installs
 

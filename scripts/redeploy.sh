@@ -3,12 +3,13 @@
 # redeploy.sh — the single entry point for production redeploys of the VPN bot.
 #
 # It is a thin, self-contained wrapper around scripts/deploy.sh. It performs NO
-# production mutation itself: it fetches origin/main, pulls deploy.sh straight
-# FROM tip-of-main (never the working tree), and launches it detached under
-# systemd so an SSH disconnect can never strand a half-finished deploy. deploy.sh
-# does all the real work — including refreshing the out-of-repo /usr/local/sbin
-# helpers (install_out_of_repo_helpers) — so this wrapper deliberately does NOT
-# touch helpers.
+# production mutation itself: it fetches origin/main, re-executes itself as
+# origin/main's copy of this file when the checkout's copy differs, pulls
+# deploy.sh straight FROM tip-of-main (never the working tree), and launches it
+# detached under systemd so an SSH disconnect can never strand a half-finished
+# deploy. deploy.sh does all the real work — including refreshing the out-of-repo
+# /usr/local/sbin helpers (install_out_of_repo_helpers) — so this wrapper
+# deliberately does NOT touch helpers.
 #
 # Usage (always as root):
 #   sudo bash scripts/redeploy.sh           # normal deploy of origin/main
@@ -151,13 +152,80 @@ check_attach() {
 }
 
 # --------------------------------------------------------------------------- #
-# Test seam: tests/test_redeploy_env_passthrough.py SOURCES this file with
-# REDEPLOY_SELFTEST=1 and drives the functions above with systemd-run stubbed.
+# Run origin/main's copy of THIS file, not the checkout's.
+# --------------------------------------------------------------------------- #
+# deploy.sh comes from origin/main (step 5), but the wrapper that runs is the copy
+# in the checkout. On a host whose tree lags behind origin/main — a relay sitting
+# on a release tag, any host not deployed for a while — that copy is older, and a
+# name added to DEPLOY_ENV_PASSTHROUGH since is dropped without a word (only an
+# unknown ALLOW_* is refused): a relay on 1a87f67 ran
+# `DEPLOY_REF=main bash scripts/redeploy.sh` and got `deploy.sh env: <none>`.
+#
+# So, right after the fetch, the running file ($1) is compared byte for byte with
+# origin/main's. When they differ, origin/main's copy is written to a private
+# temp file (mktemp, 0700) and exec'd with the same arguments and environment,
+# plus REDEPLOY_REEXEC=1, which stops that run from re-executing again (a push
+# landing between the two fetches must not start a loop), and
+# REDEPLOY_REEXEC_FILE=<the temp file>, which that run deletes as it starts.
+#
+# When origin/main's copy cannot be used (no such path, git fails, empty, does not
+# parse), this copy carries on with a WARN: a deploy is never refused over its
+# wrapper.
+reexec_from_origin_main() {
+  local self="$1" tmp="" sha="" err="" why=""
+  shift
+  [[ "${REDEPLOY_REEXEC:-0}" == "1" ]] && return 0
+  if ! sha="$(git rev-parse --verify --quiet --short 'origin/main^{commit}' 2>/dev/null)"; then
+    why="origin/main does not resolve"
+  elif ! tmp="$(mktemp "${TMPDIR:-/tmp}/redeploy.XXXXXXXX")"; then
+    tmp=""
+    why="cannot create a temp file"
+  elif ! err="$(git show "${sha}:scripts/redeploy.sh" 2>&1 >"$tmp")"; then
+    why="git show ${sha}:scripts/redeploy.sh failed: ${err%%$'\n'*}"
+  elif [[ ! -s "$tmp" ]]; then
+    why="origin/main's scripts/redeploy.sh (${sha}) is empty"
+  elif ! "$BASH" -n "$tmp" 2>/dev/null; then
+    why="origin/main's scripts/redeploy.sh (${sha}) does not parse (bash -n)"
+  fi
+  if [[ -n "$why" ]]; then
+    [[ -n "$tmp" ]] && rm -f -- "$tmp"
+    {
+      echo "redeploy: WARN: cannot run origin/main's copy of this wrapper — ${why}"
+      echo "redeploy: WARN:   continuing with THIS copy (${self}): a name added to DEPLOY_ENV_PASSTHROUGH after it was written is NOT forwarded — check the 'deploy.sh env:' line below"
+    } >&2
+    return 0
+  fi
+  if [[ -f "$self" ]] && cmp -s "$self" "$tmp"; then
+    rm -f -- "$tmp"
+    return 0
+  fi
+  chmod 0700 "$tmp"
+  echo "redeploy: re-exec from origin/main (${sha})"
+  export REDEPLOY_REEXEC=1 REDEPLOY_REEXEC_FILE="$tmp"
+  exec "$BASH" "$tmp" "$@"
+}
+
+# --------------------------------------------------------------------------- #
+# Test seam: tests/test_redeploy_env_passthrough.py and tests/test_redeploy_reexec.py
+# SOURCE this file with REDEPLOY_SELFTEST=1 and drive the functions above with
+# systemd-run stubbed.
 # Run (not sourced) with it set, the wrapper refuses instead of turning a
 # redeploy into a silent no-op. Never set it in production.
 # --------------------------------------------------------------------------- #
 if [[ "${REDEPLOY_SELFTEST:-0}" == "1" ]]; then
   return 0 2>/dev/null || { echo "redeploy: REDEPLOY_SELFTEST=1 is a test seam for sourcing this file — refusing to run" >&2; exit 1; }
+fi
+
+# The file this run executes, made absolute before step 2 changes directory, for
+# the comparison with origin/main's copy in step 3a. A run that step 3a started
+# executes from a temp file: delete it now — bash holds it open and reads on from
+# the descriptor. Only that exact file, never the checkout's copy.
+# (Read from stdin there is no file: BASH_SOURCE is empty, the comparison fails
+# and origin/main's copy runs.)
+REDEPLOY_SELF="${BASH_SOURCE[0]:-}"
+[[ "$REDEPLOY_SELF" == /* ]] || REDEPLOY_SELF="${PWD}/${REDEPLOY_SELF}"
+if [[ "${REDEPLOY_REEXEC:-0}" == "1" && -n "${REDEPLOY_REEXEC_FILE:-}" && "$REDEPLOY_REEXEC_FILE" == "${BASH_SOURCE[0]:-}" ]]; then
+  rm -f -- "$REDEPLOY_REEXEC_FILE"
 fi
 
 # --------------------------------------------------------------------------- #
@@ -184,6 +252,14 @@ cd "$APP_DIR" || { echo "redeploy: APP_DIR ${APP_DIR} not found" >&2; exit 1; }
 # --------------------------------------------------------------------------- #
 echo "redeploy: fetching origin/main"
 git fetch origin main
+
+# --------------------------------------------------------------------------- #
+# 3a. Run origin/main's copy of this wrapper, not the checkout's — the knobs it
+#     forwards are origin/main's (reexec_from_origin_main above). When the two
+#     differ it prints one line and does not return; when origin/main's copy
+#     cannot be read it WARNs and this copy goes on.
+# --------------------------------------------------------------------------- #
+reexec_from_origin_main "$REDEPLOY_SELF" "$@"
 
 # --------------------------------------------------------------------------- #
 # 4. Show where the host stands relative to the tip we are about to deploy, and

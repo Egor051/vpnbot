@@ -25,6 +25,10 @@ sudo CHECK=1 bash scripts/redeploy.sh    # read-only Phase 1 (PHASE1_ONLY=1) —
 sudo bash scripts/redeploy.sh            # деплой
 ```
 
+`redeploy.sh` делает fetch `origin/main`, переисполняет себя копией из `origin/main`, если копия в
+чекауте отличается ([ниже](#какая-копия-redeploysh-работает)), и запускает `deploy.sh` из вершины
+`origin/main` в отдельном transient-юните systemd.
+
 **Живой чекаут всегда стоит на локальной ветке `main`.** Phase 2 продвигает дерево командой
 `git checkout -f -B main origin/main`, rollback возвращает его через
 `git checkout -f -B main <PREV_SHA>`. Раньше выполнялся `git reset --hard origin/main`, который
@@ -68,17 +72,71 @@ sudo CHECK=1 SCHEMA_WAIT_TIMEOUT=180 bash scripts/redeploy.sh
 ```
 
 Обёртка пробрасывает явный allowlist (`DEPLOY_ENV_PASSTHROUGH` в `scripts/redeploy.sh`): все
-`ALLOW_*`, которые читает `deploy.sh`, плюс `SCHEMA_WAIT_TIMEOUT` и `HY2_AUTH_BIND_TIMEOUT`,
-каждую — только если она задана и не пуста. Окружение целиком не пробрасывается никогда. Строка
+`ALLOW_*`, которые читает `deploy.sh`, плюс `SCHEMA_WAIT_TIMEOUT`, `HY2_AUTH_BIND_TIMEOUT` и
+`DEPLOY_REF` (ревизия, которую деплоит relay), каждую — только если она задана и не пуста. Окружение целиком не пробрасывается никогда. Строка
 `deploy.sh env:` в выводе перечисляет всё проброшенное (`deploy.sh env: PHASE1_ONLY=1
 ALLOW_BACKEND_CONFIG_DRIFT=1`), так что уже по отчёту `CHECK=1` видно, что флаг дойдёт и до
 Phase 2. `ALLOW_*` вне allowlist (опечатка или новый флаг `deploy.sh`, который забыли добавить)
 останавливает обёртку до fetch и запуска, со списком допустимых имён.
 
-Fallback, если обёртка флаг пробросить не может: запустить `deploy.sh` руками, указав флаг в
-строке `systemd-run … env ALLOW_X=1 bash -c "bash /tmp/deploy.sh …"` (README, блок «no-wrapper
-fallback»). Так бывает на хосте, чей чекаут ещё на коммите до allowlist: запускается копия
-`redeploy.sh` из чекаута, а она пробрасывает только `CHECK`/`FORCE`.
+### Какая копия `redeploy.sh` работает
+
+`deploy.sh` всегда брался из `origin/main`, а `redeploy.sh` работал тот, что лежит в чекауте. На
+хосте, чьё дерево отстаёт от `origin/main` (relay на теге релиза, любой хост, который давно не
+деплоили), эта копия старше, и имя, добавленное с тех пор в `DEPLOY_ENV_PASSTHROUGH`, молча
+терялось. Отклоняется только неизвестная `ALLOW_*`, остальные имена вообще не проверяются.
+Замерено на relay 2026-11-16: чекаут на `1a87f67`, `sudo DEPLOY_REF=main bash scripts/redeploy.sh`
+напечатал `deploy.sh env: <none>`, а `CHECK=1` в том же запуске дошёл (`PHASE1_ONLY=1`).
+
+Теперь сразу после fetch обёртка побайтово сравнивает свой файл с
+`git show origin/main:scripts/redeploy.sh`. Если они различаются, она пишет копию из
+`origin/main` во временный файл (`mktemp`, права 0700) и делает ему `exec` с теми же аргументами
+и окружением. В выводе — одна строка, а дальше весь запуск этой копии, включая её собственный
+fetch:
+
+```text
+redeploy: fetching origin/main
+redeploy: re-exec from origin/main (<sha>)
+redeploy: fetching origin/main
+redeploy: host HEAD=1a87f67  origin/main=<sha>
+…
+redeploy:   deploy.sh env: DEPLOY_REF=main
+```
+
+Второй запуск идёт с `REDEPLOY_REEXEC=1` и повторно себя не переисполняет, даже если между двумя
+fetch прилетел push. Свой временный файл он удаляет при старте. Если копии совпадают (основной
+сервер сразу после деплоя), ничего не печатается и ничего не меняется. Если копию из `origin/main`
+использовать нельзя (такого пути там нет, `git show` упал, файл пуст или не парсится), обёртка
+печатает две строки `redeploy: WARN:` и продолжает копией из чекаута, как раньше. В этом случае
+проверьте строку `deploy.sh env:`.
+
+Копия из чекаута по-прежнему работает в двух случаях, и в обоих копию из `origin/main` запускают
+руками:
+
+- **Чекаут с коммита до этого изменения** не умеет переисполняться вовсе. Это тот самый relay
+  выше. Как только один деплой принесёт это изменение в чекаут, обёртка справится сама.
+- **Отказ на неизвестную `ALLOW_*`** выполняется до проверки на root и до fetch, поэтому решает
+  его копия из чекаута. `ALLOW_*`, появившаяся в `origin/main` позже коммита чекаута, будет
+  отклонена как неизвестная.
+
+```bash
+sudo git -C /opt/vpn-service fetch origin main
+```
+
+```bash
+sudo git -C /opt/vpn-service show origin/main:scripts/redeploy.sh | sudo tee /root/redeploy-main.sh > /dev/null
+```
+
+```bash
+sudo CHECK=1 DEPLOY_REF=main bash /root/redeploy-main.sh
+```
+
+Переменные пишутся в последней строке так же, как для `scripts/redeploy.sh`. Эта копия совпадает
+с `origin/main`, поэтому работает как есть; в `APP_DIR` она переходит сама.
+
+Последнее средство, если флаг не может пробросить ни одна копия обёртки: запустить `deploy.sh`
+руками, указав флаг в строке `systemd-run … env ALLOW_X=1 bash -c "bash /tmp/deploy.sh …"`
+(README, блок «no-wrapper fallback»).
 
 ## Деплой перезапускает и sidecar-юниты
 
