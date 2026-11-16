@@ -15,7 +15,8 @@ scripts/vpn-bot-host-check (tests/test_host_check.py's ``HostLab``)
   * OK / PENDING (pre-install) / MISMATCH (not masked, something else there, not
     reloaded, still running) / BEATEN (a higher-priority unit file wins).
 The real registry
-  * the apt list is retired and ModemManager / udisks2 are masked, on both roles.
+  * the apt list is retired and ModemManager / udisks2 / snapd / multipathd are masked,
+    on both roles (each socket before its service).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 from test_deploy_host_state import BOTH, PHASE1, PHASE2, Lab, _registry
 from test_host_check import HostLab
 
@@ -251,9 +253,29 @@ def test_registry_carries_the_host_hygiene_entries_on_both_roles() -> None:
         assert reg["/etc/systemd/system/udisks2.service", role] == "masked", role
 
 
-def test_snapd_is_masked_on_main_only_socket_first() -> None:
-    main = [e[1] for e in _registry() if e[5] == "main" and e[4] == "masked"]
-    snapd = [d for d in main if "/snapd" in d]
-    assert snapd == ["/etc/systemd/system/snapd.socket", "/etc/systemd/system/snapd.service",
-                     "/etc/systemd/system/snapd.seeded.service"], "the socket first: it cannot re-activate the service"
-    assert not [e for e in _registry() if e[5] == "relay" and "/snapd" in e[1]]
+@pytest.mark.parametrize("role", ["main", "relay"])
+@pytest.mark.parametrize(
+    "units",
+    [
+        ("snapd.socket", "snapd.service", "snapd.seeded.service"),
+        ("multipathd.socket", "multipathd.service"),
+    ],
+)
+def test_socket_activated_daemons_are_masked_on_both_roles_socket_first(role: str, units: tuple[str, ...]) -> None:
+    """snapd (no snap on either host) and multipathd (the root of both hosts is a plain
+    disk, measured 2026-11-16): masked, never purged — the socket first, so it cannot
+    re-activate the service between the two."""
+    stem = units[0].split(".")[0]
+    masked = [e[1] for e in _registry() if e[5] == role and e[4] == "masked"]
+    assert [d for d in masked if Path(d).name.split(".")[0] == stem] == [f"/etc/systemd/system/{u}" for u in units]
+    for entry in (e for e in _registry() if e[5] == role and Path(e[1]).name in units):
+        assert entry[0] == entry[2] == entry[3] == "-" and entry[4] == "masked", entry
+
+
+def test_the_unmask_of_every_masked_pair_is_documented() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for doc in ("docs/host-state.md", "docs/host-state.ru.md"):
+        text = (root / doc).read_text(encoding="utf-8")
+        assert "sudo systemctl unmask snapd.socket snapd.service snapd.seeded.service" in text, doc
+        assert "sudo systemctl unmask multipathd.socket multipathd.service" in text, doc
+        assert "multipath -ll" in text, doc

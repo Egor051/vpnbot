@@ -100,6 +100,7 @@ bundle also carries state that is not a deployed file and so is not listed here:
 | `/etc/systemd/system/ModemManager.service` | masked unit | deploy.sh | — (in the repo) | no modem on a server; mask, not purge — [Host hygiene](#host-hygiene) |
 | `/etc/systemd/system/udisks2.service` | masked unit | deploy.sh | — (in the repo) | desktop disk automounter; mask, not purge |
 | `/etc/systemd/system/snapd.socket`, `/etc/systemd/system/snapd.service`, `/etc/systemd/system/snapd.seeded.service` | masked unit | deploy.sh | — (in the repo) | nothing in the repo uses a snap; mask, not purge — [Host hygiene](#host-hygiene) |
+| `/etc/systemd/system/multipathd.socket`, `/etc/systemd/system/multipathd.service` | masked unit | deploy.sh | — (in the repo) | the root is a plain disk, no multipath device; mask, not purge — [Host hygiene](#host-hygiene) |
 
 ### relay
 
@@ -123,6 +124,8 @@ The relay runs no bot, so it sends no offsite backup: its files come back from t
 | `/etc/sysctl.d/90-vpn-relay.conf` | template + host values | `vpn-relay-apply apply`, from the relay's `.env` | |
 | `/etc/apt/sources.list.d/ookla_speedtest-cli.list` | retired | — | as on main |
 | `/etc/systemd/system/ModemManager.service`, `/etc/systemd/system/udisks2.service` | masked unit | deploy.sh | as on main — [Host hygiene](#host-hygiene) |
+| `/etc/systemd/system/snapd.socket`, `/etc/systemd/system/snapd.service`, `/etc/systemd/system/snapd.seeded.service` | masked unit | deploy.sh | as on main (the relay has no snap) |
+| `/etc/systemd/system/multipathd.socket`, `/etc/systemd/system/multipathd.service` | masked unit | deploy.sh | as on main |
 
 ## How the deploy handles them
 
@@ -540,12 +543,17 @@ run by hand:
   (packagecloud's speedtest-cli repository) made every `apt update` end in `E:`. It is a
   `class absent` entry on both roles: Phase 2 backs it up into the deploy archive and removes
   it; the host check treats it as retired. The `speedtest-cli` package itself is not touched.
-- **Daemons a server never needs are masked** (`class masked`): `ModemManager.service` and
-  `udisks2.service` on both roles, `snapd.socket`, `snapd.service` and
-  `snapd.seeded.service` on main. *Masked, never purged* — the package and its files stay, so
-  it is reversible. Nothing in this repo uses a snap: every component comes from apt or its own
-  installer under `/usr/local`. A snap the provider installed keeps its files, but snapd no
-  longer runs or refreshes it.
+- **Daemons a server never needs are masked** (`class masked`) on both roles:
+  `ModemManager.service`, `udisks2.service`, `snapd.socket`, `snapd.service`,
+  `snapd.seeded.service`, `multipathd.socket` and `multipathd.service` (each socket before its
+  service, so it cannot activate the service between the two). *Masked, never purged* — the
+  package and its files stay, so it is reversible. Nothing in this repo uses a snap: every
+  component comes from apt or its own installer under `/usr/local`. A snap the provider
+  installed keeps its files, but snapd no longer runs or refreshes it (the relay had none,
+  measured 2026-11-16). multipathd manages multipath block devices; the root of both hosts is a
+  plain disk (`sda1`, `multipath -ll` empty, measured 2026-11-16), so it has nothing to do — on
+  a host whose root IS on a multipath device, do not deploy this entry unchanged: remove it
+  first (below).
 
 How a mask is done: Phase 2 creates `/etc/systemd/system/<unit> -> /dev/null` (exactly what
 `systemctl mask` writes; the path is staged first, like every host file), runs one
@@ -563,7 +571,26 @@ as it was.
 **Undoing a mask on purpose.** Removing a `class masked` entry from the registry does not unmask
 anything — the deploy then simply stops managing that path. To take a unit back, remove the
 entry and run `sudo systemctl unmask <unit>` once (then `systemctl start <unit>` if you want it
-running).
+running). For a socket-activated pair, unmask both and start the socket:
+
+```bash
+sudo systemctl unmask snapd.socket snapd.service snapd.seeded.service
+```
+
+```bash
+sudo systemctl start snapd.socket
+```
+
+```bash
+sudo systemctl unmask multipathd.socket multipathd.service
+```
+
+```bash
+sudo systemctl start multipathd.socket multipathd.service
+```
+
+While the entry is still in the registry, the next deploy masks the unit again: the registry
+change (removing the entry) comes first.
 
 ## ALLOW_SSH_CHANGE and the lockout risk
 

@@ -662,6 +662,11 @@ MANAGED_HOST_FILES=(
   "-|/etc/systemd/system/snapd.socket|-|-|masked|main"
   "-|/etc/systemd/system/snapd.service|-|-|masked|main"
   "-|/etc/systemd/system/snapd.seeded.service|-|-|masked|main"
+  # multipathd: the root of both hosts is a plain disk (sda1; `multipath -ll` empty,
+  # measured 2026-11-16), so there is nothing for it to manage. The socket first, as
+  # for snapd: it cannot activate the service between the two.
+  "-|/etc/systemd/system/multipathd.socket|-|-|masked|main"
+  "-|/etc/systemd/system/multipathd.service|-|-|masked|main"
   # --- relay -----------------------------------------------------------------
   "deploy/host/ssh/00-vpnrelay-keyonly.conf|/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf|0644|root:root|ssh|relay"
   "deploy/host/ssh/ssh.socket-override.conf|/etc/systemd/system/ssh.socket.d/override.conf|0644|root:root|ssh|relay|render=ssh-port"
@@ -677,6 +682,13 @@ MANAGED_HOST_FILES=(
   "-|/etc/apt/sources.list.d/ookla_speedtest-cli.list|-|-|absent|relay"
   "-|/etc/systemd/system/ModemManager.service|-|-|masked|relay"
   "-|/etc/systemd/system/udisks2.service|-|-|masked|relay"
+  # The relay has no snap either (none installed, measured 2026-11-16; snapd.socket was
+  # active). The socket first, as on main.
+  "-|/etc/systemd/system/snapd.socket|-|-|masked|relay"
+  "-|/etc/systemd/system/snapd.service|-|-|masked|relay"
+  "-|/etc/systemd/system/snapd.seeded.service|-|-|masked|relay"
+  "-|/etc/systemd/system/multipathd.socket|-|-|masked|relay"
+  "-|/etc/systemd/system/multipathd.service|-|-|masked|relay"
 )
 # --------------------------------------------------------------------------- #
 # SSH PORT — SSH_PORT in .env, both roles (docs/host-state.md#the-ssh-port)

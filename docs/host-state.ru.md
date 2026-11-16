@@ -100,6 +100,7 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/systemd/system/ModemManager.service` | замаскированный юнит | deploy.sh | — (в репо) | модема на сервере нет; mask, не purge — [Гигиена хоста](#гигиена-хоста) |
 | `/etc/systemd/system/udisks2.service` | замаскированный юнит | deploy.sh | — (в репо) | десктопный автомонтировщик дисков; mask, не purge |
 | `/etc/systemd/system/snapd.socket`, `/etc/systemd/system/snapd.service`, `/etc/systemd/system/snapd.seeded.service` | замаскированный юнит | deploy.sh | — (в репо) | ничто в репо не использует snap; mask, не purge — [Гигиена хоста](#гигиена-хоста) |
+| `/etc/systemd/system/multipathd.socket`, `/etc/systemd/system/multipathd.service` | замаскированный юнит | deploy.sh | — (в репо) | корень — обычный диск, multipath-устройств нет; mask, не purge — [Гигиена хоста](#гигиена-хоста) |
 
 ### relay
 
@@ -123,6 +124,8 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/sysctl.d/90-vpn-relay.conf` | шаблон + значения хоста | `vpn-relay-apply apply`, из `.env` relay | |
 | `/etc/apt/sources.list.d/ookla_speedtest-cli.list` | retired | — | как на main |
 | `/etc/systemd/system/ModemManager.service`, `/etc/systemd/system/udisks2.service` | замаскированный юнит | deploy.sh | как на main — [Гигиена хоста](#гигиена-хоста) |
+| `/etc/systemd/system/snapd.socket`, `/etc/systemd/system/snapd.service`, `/etc/systemd/system/snapd.seeded.service` | замаскированный юнит | deploy.sh | как на main (snap на relay нет) |
+| `/etc/systemd/system/multipathd.socket`, `/etc/systemd/system/multipathd.service` | замаскированный юнит | deploy.sh | как на main |
 
 ## Как деплой с ними обращается
 
@@ -540,12 +543,17 @@ conffile этого пакета.
   (репозиторий speedtest-cli на packagecloud) ломал каждый `apt update` ошибкой `E:`. Это запись
   `class absent` на обеих ролях: Phase 2 кладёт файл в архив деплоя и удаляет его; host check
   считает его выведенным. Сам пакет `speedtest-cli` не трогается.
-- **Демоны, которые серверу не нужны, маскируются** (`class masked`): `ModemManager.service` и
-  `udisks2.service` на обеих ролях, `snapd.socket`, `snapd.service` и `snapd.seeded.service` на
-  main. *Mask, никогда не purge* — пакет и его файлы остаются, поэтому всё обратимо. Ничто в
-  этом репо не использует snap: каждый компонент ставится из apt или своим установщиком в
-  `/usr/local`. Snap, поставленный провайдером, сохраняет свои файлы, но snapd его больше не
-  запускает и не обновляет.
+- **Демоны, которые серверу не нужны, маскируются** (`class masked`) на обеих ролях:
+  `ModemManager.service`, `udisks2.service`, `snapd.socket`, `snapd.service`,
+  `snapd.seeded.service`, `multipathd.socket` и `multipathd.service` (каждый socket раньше своего
+  service, чтобы он не активировал service между двумя шагами). *Mask, никогда не purge* — пакет
+  и его файлы остаются, поэтому всё обратимо. Ничто в этом репо не использует snap: каждый
+  компонент ставится из apt или своим установщиком в `/usr/local`. Snap, поставленный
+  провайдером, сохраняет свои файлы, но snapd его больше не запускает и не обновляет (на relay
+  их не было, замер 2026-11-16). multipathd управляет multipath-устройствами; корень обоих хостов
+  — обычный диск (`sda1`, `multipath -ll` пуст, замер 2026-11-16), так что делать ему нечего — на
+  хосте, где корень ДЕЙСТВИТЕЛЬНО на multipath-устройстве, эту запись не деплойте как есть:
+  сначала уберите её (ниже).
 
 Как делается маска: Phase 2 создаёт `/etc/systemd/system/<unit> -> /dev/null` (ровно то, что
 пишет `systemctl mask`; путь, как любой файл хоста, сначала сохраняется в архив), выполняет один
@@ -563,6 +571,26 @@ Rollback снова убирает маску (до деплоя пути не �
 **Снять маску намеренно.** Удаление записи `class masked` из реестра ничего не размаскирует —
 деплой просто перестаёт управлять этим путём. Чтобы вернуть юнит, удалите запись и один раз
 выполните `sudo systemctl unmask <unit>` (и `systemctl start <unit>`, если он нужен запущенным).
+Для пары с socket-активацией снимите маску с обоих и запустите socket:
+
+```bash
+sudo systemctl unmask snapd.socket snapd.service snapd.seeded.service
+```
+
+```bash
+sudo systemctl start snapd.socket
+```
+
+```bash
+sudo systemctl unmask multipathd.socket multipathd.service
+```
+
+```bash
+sudo systemctl start multipathd.socket multipathd.service
+```
+
+Пока запись остаётся в реестре, следующий деплой снова замаскирует юнит: сначала меняется реестр
+(запись удаляется).
 
 ## ALLOW_SSH_CHANGE и риск потери доступа
 
