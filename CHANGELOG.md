@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Config backups are pruned in the source.** Xray: `XrayConfigAdapter` now keeps the newest
+  `XRAY_CONFIG_BACKUP_KEEP` (new, default 10, 1–500) of its own `config.json.<stamp>.<ns>.<token>.bak`,
+  pruned after each change that was installed **and** applied. Only names matching that exact
+  template are deleted — an operator's own `config.json.*.bak` and the privileged helper's
+  `config.json.<ns>.bak` stay; a cleanup error is a WARNING, never a failed key operation; a
+  failed change prunes nothing; a change that turns out to be a no-op (the startup label
+  reconcile on every boot, a shortId already present, a duplicate client) writes no backup at
+  all. Before, Xray shared `CONFIG_BACKUP_KEEP_LAST` (20) with the other
+  backends, pruned *before* the change by the loose glob `config.json.*.bak`, and an error there
+  failed the change. AmneziaWG and the rest keep `CONFIG_BACKUP_KEEP_LAST` as before. Hysteria2:
+  `deploy/hysteria/install-config.sh` keeps the newest `HYSTERIA_CONFIG_BACKUP_KEEP` (default 3)
+  of its own `config.yaml.bak.<YYYYmmddTHHMMSS>` after a successful install.
+- **The root helpers prune their own backups too (deploy/helpers/README.md#backup-retention).** In the
+  helper model (`PRIVILEGE_HELPERS_ENABLED=true`), `vpn-bot-xray-apply`, `vpn-bot-awg-apply` and
+  `vpn-bot-mtproxy-apply` copy every file they replace to `<name>.<time_ns>.bak`, and nothing ever
+  deleted those copies (each `awg0.conf` copy holds the AWG `[Interface] PrivateKey`). Now each helper
+  keeps the newest 10 per target (`config.json`, `awg0.conf`, `managed-secrets.json`, `mtproxy.env`).
+  10 is a fixed constant, because the helpers read no `.env`; it matches the `XRAY_CONFIG_BACKUP_KEEP`
+  default. Pruning runs only after an apply that succeeded, never on the rollback path. It deletes only
+  regular files whose whole name is `<name>.<19 digits>.bak`: never a symlink, never the bot's
+  `<name>.<stamp>.<ns>.<token>.bak`, never an operator's `*.bak` (`$(date +%s)` and `%Y%m%d` stamps
+  included). A pruning error is a warning on stderr; the exit code stays `0`. Installed helpers pick
+  this up when `deploy/setup-nonroot-helper-mode.sh` is rerun; the deploy does not refresh them.
+
+### Added
+
+- **Host hygiene by the deploy (docs/host-state.md#host-hygiene).** New `MANAGED_HOST_FILES`
+  class `masked`: `/etc/systemd/system/<unit>` must be the symlink to `/dev/null` that
+  `systemctl mask` writes. Phase 1 stops when anything else sits there; Phase 2 creates it,
+  daemon-reloads and stops the unit if it ran; the rollback removes it and starts the unit
+  again if it ran; `vpn-bot-host-check` requires `LoadState=masked` and the unit not running
+  (MISMATCH / BEATEN otherwise). Masked on both roles: `ModemManager.service`,
+  `udisks2.service`; on main also `snapd.socket`, `snapd.service`, `snapd.seeded.service`
+  (nothing in the repo uses a snap) — mask, never purge. Retired on both roles (class `absent`):
+  `/etc/apt/sources.list.d/ookla_speedtest-cli.list`, packagecloud's broken speedtest-cli
+  source that made every `apt update` end in `E:`.
+
 ### Fixed
 
 - **Deploy: the new venv's TLS context is probed before the bot starts on it.** After PR #269

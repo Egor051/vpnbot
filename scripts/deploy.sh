@@ -547,6 +547,18 @@ HY2_MARK_UNIT="vpnbot-hy2-warp-mark.service"
 #                THE ONE EXCEPTION to "deploy.sh never writes a conffile"
 #                (CONFFILE_REPORT_PATHS): only a pristine entry, and only with a copy
 #                the package manager's own md5 vouches for.
+#     masked     the UNIT must stay masked: <dst> is ${SYSTEMD_UNIT_DIR}/<unit> and must be
+#                a symlink to /dev/null — exactly what `systemctl mask <unit>` writes.
+#                src/mode/owner are "-", no opts. Reversible by design (mask, never
+#                purge: the package and its files stay). Phase 1 STOPS when anything
+#                else sits at <dst> (an admin's unit file, a symlink elsewhere) — that
+#                is a decision for a human. Phase 2 creates the symlink (ln -s, like
+#                systemctl mask), daemon-reload, then stops the unit if it was active;
+#                the rescan requires the mask. The rollback removes the symlink,
+#                daemon-reloads and starts the unit again if it was active before.
+#                scripts/vpn-bot-host-check judges the effect: LoadState=masked and not
+#                running (MISMATCH otherwise; BEATEN when a higher-priority unit file
+#                shadows the mask).
 #   role     main | relay — an entry is invisible on a host of the other role.
 #   opts     optional, ";"-separated:
 #     gate=<PROTO>    the entry exists only while <PROTO>_ON=yes (resolve_backend_units,
@@ -638,6 +650,18 @@ MANAGED_HOST_FILES=(
   "dpkg:systemd|/etc/systemd/journald.conf|0644|root:root|pristine|main"
   "dpkg:systemd-resolved|/etc/systemd/resolved.conf|0644|root:root|pristine|main"
   "ucf:/usr/share/openssh/sshd_config|/etc/ssh/sshd_config|0644|root:root|pristine|main"
+  # Host hygiene (docs/host-state.md#host-hygiene). packagecloud's speedtest-cli source
+  # is broken — every `apt update` ends in E: — so its list is retired. Daemons a server
+  # never needs are masked: mask, never purge (reversible, the package stays).
+  "-|/etc/apt/sources.list.d/ookla_speedtest-cli.list|-|-|absent|main"
+  "-|/etc/systemd/system/ModemManager.service|-|-|masked|main"
+  "-|/etc/systemd/system/udisks2.service|-|-|masked|main"
+  # snapd: nothing in this repo uses a snap (every component comes from apt or its own
+  # installer under /usr/local). The socket first, so it cannot activate the service
+  # between the two; the seeding oneshot with them.
+  "-|/etc/systemd/system/snapd.socket|-|-|masked|main"
+  "-|/etc/systemd/system/snapd.service|-|-|masked|main"
+  "-|/etc/systemd/system/snapd.seeded.service|-|-|masked|main"
   # --- relay -----------------------------------------------------------------
   "deploy/host/ssh/00-vpnrelay-keyonly.conf|/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf|0644|root:root|ssh|relay"
   "deploy/host/ssh/ssh.socket-override.conf|/etc/systemd/system/ssh.socket.d/override.conf|0644|root:root|ssh|relay|render=ssh-port"
@@ -649,6 +673,10 @@ MANAGED_HOST_FILES=(
   "deploy/host/cloud/cloud-init.disabled|/etc/cloud/cloud-init.disabled|0644|root:root|plain|relay"
   "-|/etc/ssh/sshd_config.d/50-cloud-init.conf|-|-|absent|relay"
   "-|/etc/sudoers.d/90-cloud-init-users|-|-|absent|relay"
+  # Host hygiene, as on main.
+  "-|/etc/apt/sources.list.d/ookla_speedtest-cli.list|-|-|absent|relay"
+  "-|/etc/systemd/system/ModemManager.service|-|-|masked|relay"
+  "-|/etc/systemd/system/udisks2.service|-|-|masked|relay"
 )
 # --------------------------------------------------------------------------- #
 # SSH PORT — SSH_PORT in .env, both roles (docs/host-state.md#the-ssh-port)
@@ -1269,6 +1297,9 @@ mh_meta_matches() {
 #   gate-unit-mismatch  gated drop-in for a unit .env does not name -> Phase 1 stops
 #   cannot-restore  class pristine: no verified package default (mh_pristine_prepare
 #                 says why) -> WARN, the file is left alone, the deploy goes on
+#   masked        class masked: <dst> is the /dev/null symlink -> nothing to do
+#   unmasked      class masked: nothing at <dst> -> Phase 2 masks the unit
+#   mask-conflict class masked: something else sits at <dst> -> Phase 1 stops
 # Class pristine compares against the verified copy mh_pristine_prepare left in
 # MH_CAND_DIR — the same copy in Phase 1 and Phase 2 (one process); <root> is unused.
 mh_entry_state() {
@@ -1276,6 +1307,10 @@ mh_entry_state() {
   MH_SRCPATH="-"; MH_STATE=""; MH_DETAIL=""; MH_LEGACY=""; MH_LEGACY_STATE=""
   if [[ "$MH_CLASS" == "absent" ]]; then
     if [[ -e "$MH_DST" || -L "$MH_DST" ]]; then MH_STATE="present"; else MH_STATE="gone"; fi
+    return 0
+  fi
+  if [[ "$MH_CLASS" == "masked" ]]; then
+    mh_mask_state "$MH_DST"
     return 0
   fi
   if [[ "$MH_CLASS" == "pristine" ]]; then
@@ -1342,6 +1377,32 @@ mh_entry_state() {
     MH_DETAIL="legacy name ${MH_LEGACY} on the host (${MH_LEGACY_STATE} to the repo)"
   fi
   return 0
+}
+
+# Class masked: the state of <dst> (MH_STATE/MH_DETAIL). The mask is the symlink
+# `systemctl mask` writes, <dst> -> /dev/null; nothing there = still to be masked;
+# anything else = a conflict a human resolves (an admin's unit file in /etc wins over
+# the package's — the deploy will not replace it with a mask).
+mh_mask_state() {
+  local dst="$1" unit en act
+  unit="$(basename "$dst")"
+  if [[ -L "$dst" && "$(readlink "$dst")" == /dev/null ]]; then
+    MH_STATE="masked"; MH_DETAIL="${unit} -> /dev/null"
+  elif [[ -e "$dst" || -L "$dst" ]]; then
+    MH_STATE="mask-conflict"
+    if [[ -L "$dst" ]]; then
+      MH_DETAIL="${dst} is a symlink to $(readlink "$dst"), not the mask (/dev/null) — remove it or drop the entry"
+    else
+      MH_DETAIL="${dst} is a unit file of its own, not the mask (a symlink to /dev/null) — remove it or drop the entry"
+    fi
+  else
+    MH_STATE="unmasked"
+    # is-enabled prints "disabled"/"static" with a non-zero exit, and nothing at all for
+    # a unit that is not installed: read the output, never the exit code.
+    en="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    act="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    MH_DETAIL="${unit} is ${en:-not installed}/${act:-inactive} now"
+  fi
 }
 
 # One line per entry of this host's role, against the sources under <root>:
@@ -1893,6 +1954,9 @@ mh_action_text() {   # $1 class, $2 state, $3 dst
     gate-unit-mismatch) echo "drop-in for a unit .env does not run — fix MANAGED_HOST_FILES (Phase 1 stops)" ;;
     cannot-restore)     echo "left exactly as it is (WARN, not fatal)" ;;
     cannot-render)      echo "left exactly as it is (no SSH port plan — a real deploy stops in Phase 1)" ;;
+    masked)             echo "masked — in sync" ;;
+    unmasked)           echo "Phase 2 masks it (symlink to /dev/null, as systemctl mask), daemon-reload, stops it if it runs" ;;
+    mask-conflict)      echo "something else sits where the mask goes — resolve by hand (a real deploy stops in Phase 1)" ;;
     absent|drift)
       case "$1" in
         pristine)
@@ -1955,7 +2019,7 @@ managed_host_phase1() {
     IFS='|' read -r dst src class state mode owner detail <<< "$row"
     if [[ "$state" == "cannot-restore" ]]; then
       warn "  $(printf '%-9s %-12s %s' "$class" "$state" "$dst") — ${detail} — left as it is"
-    elif [[ "$state" == "cannot-render" ]]; then
+    elif [[ "$state" == "cannot-render" || "$state" == "mask-conflict" ]]; then
       warn "  $(printf '%-9s %-12s %s' "$class" "$state" "$dst") — ${detail}"
     else
       log "  $(printf '%-9s %-12s %s' "$class" "$state" "$dst")${detail:+ — ${detail}}"
@@ -1968,7 +2032,7 @@ managed_host_phase1() {
           fail+=("${dst}: retired, but still named by the line(s) above — remove the reference first, or drop the absent entry")
         fi ;;
       gate-unit-mismatch) fail+=("${dst}: ${detail}") ;;
-      cannot-render)
+      cannot-render|mask-conflict)
         if [[ "$PHASE1_ONLY" != "1" ]]; then fail+=("${dst}: ${detail}"); fi ;;
       legacy-drift)
         legacy_bad+=("$dst")
@@ -2598,6 +2662,16 @@ mh_note_unit() {
   MH_UNITS_TOUCHED+=("$1")
 }
 
+# Did this run mask <unit> (class masked)?
+mh_masked_by_us() {
+  local row class dst
+  for row in "${MH_CHANGED[@]}"; do
+    IFS='|' read -r class dst _ <<< "$row"
+    if [[ "$class" == "masked" && "$(basename "$dst")" == "$1" ]]; then return 0; fi
+  done
+  return 1
+}
+
 mh_is_unit_file() { [[ "$1" == "${SYSTEMD_UNIT_DIR}/"* && "$1" =~ \.(service|timer|socket|path)$ ]]; }
 
 # A drop-in of the sshd_config next to SSHD_CONFIG (a retired one needs an ssh reload).
@@ -2801,7 +2875,7 @@ mh_pristine_install() {
 # is not inherited by functions).
 install_managed_host_files() {
   local entry row class dst how dir t u out units=0 journald=0 resolved=0 msg
-  local -a timers=() sysctl_files=() ssh_changed=() bad=()
+  local -a timers=() sysctl_files=() ssh_changed=() bad=() masked=()
   log "host files (MANAGED_HOST_FILES, role ${NODE_ROLE:-main}): installing / repairing / retiring from the checkout"
   for entry in "${MANAGED_HOST_FILES[@]}"; do
     mh_parse "$entry"
@@ -2817,8 +2891,17 @@ install_managed_host_files() {
       legacy-drift)
         warn "  ${MH_DST}: ${MH_DETAIL} — left exactly as it is (ALLOW_UNIT_DRIFT=1)"
         continue ;;
-      gate-unit-mismatch)
+      gate-unit-mismatch|mask-conflict)
         rollback_now "${MH_DST}: ${MH_DETAIL} (Phase 1 should have stopped here)" ;;
+      masked)    log "  ${MH_DST}: masked (in sync)" ;;
+      unmasked)
+        # What `systemctl mask` writes, written here so the path is the entry's dst
+        # (staged, fenced in the selftest, removed again by the rollback).
+        mh_selftest_fence "$MH_DST"
+        mh_note_unit "$(basename "$MH_DST")"
+        ln -s /dev/null "$MH_DST" || rollback_now "cannot mask $(basename "$MH_DST") (ln -s /dev/null ${MH_DST})"
+        MH_CHANGED+=("masked|${MH_DST}|masked")
+        log "  ${MH_DST}: masked (-> /dev/null; was ${MH_DETAIL#* is })" ;;
       meta)
         mh_selftest_fence "$MH_DST"
         chown "$MH_OWNER" "$MH_DST" || rollback_now "chown ${MH_OWNER} ${MH_DST} failed"
@@ -2887,6 +2970,7 @@ install_managed_host_files() {
       resolved)  resolved=1 ;;
       ssh)       ssh_changed+=("$dst") ;;
       networkd)  log "  ${dst}: takes effect at the next systemd-networkd restart (not restarted by the deploy)" ;;
+      masked)    units=1; masked+=("$(basename "$dst")") ;;
       logrotate) log "  ${dst}: logrotate reads it on its next run" ;;
       plain)     log "  ${dst}: installed verbatim (nothing reloaded)" ;;
       pristine)
@@ -2901,6 +2985,16 @@ install_managed_host_files() {
   if (( units )); then
     systemctl daemon-reload || rollback_now "systemctl daemon-reload failed after the host unit changes"
   fi
+  # A mask does not stop a running unit: stop the ones that ran (a masked unit cannot
+  # be started again, by hand or by a dependency).
+  for u in "${masked[@]}"; do
+    if [[ "${MH_UNIT_PRE_ACTIVE[$u]:-}" == "active" ]]; then
+      systemctl stop "$u" || rollback_now "systemctl stop ${u} failed after masking it"
+      log "  ${u}: masked and stopped (it was running)"
+    else
+      log "  ${u}: masked (was ${MH_UNIT_PRE_ACTIVE[$u]:-inactive} — nothing to stop)"
+    fi
+  done
   for t in "${timers[@]}"; do
     u="$(basename "$t")"
     # enable --now only when it was enabled before, or the file did not exist: a
@@ -2932,24 +3026,26 @@ install_managed_host_files() {
   if (( ${#ssh_changed[@]} > 0 )); then mh_ssh_apply "${ssh_changed[@]}"; fi
 
   while IFS='|' read -r dst _ class msg _; do
-    case "$msg" in absent|drift|meta|rename|present) bad+=("${dst} (${msg})") ;; esac
+    case "$msg" in absent|drift|meta|rename|present|unmasked|mask-conflict) bad+=("${dst} (${msg})") ;; esac
   done < <(scan_managed_host_files "$APP_DIR")
   (( ${#bad[@]} == 0 )) || rollback_now "host files still not as the checkout says after the install: ${bad[*]}"
   log "host files: $(host_files_summary)"
 }
 
 host_files_summary() {
-  local row n=0 r=0 m=0 p=0
+  local row n=0 r=0 m=0 p=0 k=0
   for row in "${MH_CHANGED[@]}"; do
     case "${row##*|}" in
       meta) m=$(( m + 1 )) ;;
       removed|removed-legacy) r=$(( r + 1 )) ;;
+      masked) k=$(( k + 1 )) ;;
       *) if [[ "$row" == pristine\|* ]]; then p=$(( p + 1 )); else n=$(( n + 1 )); fi ;;
     esac
   done
-  if (( n + r + m + p == 0 )); then echo "all in sync, nothing changed"; return 0; fi
+  if (( n + r + m + p + k == 0 )); then echo "all in sync, nothing changed"; return 0; fi
   printf '%s installed, %s removed, %s mode/owner fixed' "$n" "$r" "$m"
   if (( p > 0 )); then printf ', %s restored to the package default' "$p"; fi
+  if (( k > 0 )); then printf ', %s unit(s) masked' "$k"; fi
   printf '\n'
 }
 
@@ -2977,7 +3073,7 @@ host_files_rollback() {
     IFS='|' read -r class dst how <<< "$row"
     [[ "$how" == "meta" ]] && continue
     case "$class" in
-      unit) reload=1 ;;
+      unit|masked) reload=1 ;;
       absent)
         if mh_is_unit_file "$dst"; then reload=1; fi
         if mh_is_sshd_dropin "$dst"; then conf=1; fi ;;
@@ -2994,7 +3090,11 @@ host_files_rollback() {
   done
   if (( reload )); then systemctl daemon-reload; echo "daemon-reload (host files): rc=$?"; fi
   for u in "${MH_UNITS_TOUCHED[@]}"; do
-    if [[ ! -e "${SYSTEMD_UNIT_DIR}/${u}" ]]; then echo "${u}: no unit file after the restore (as before the deploy)"; continue; fi
+    # A unit this deploy masked has its file elsewhere (/usr/lib): the restore removed
+    # only the mask, so its pre-deploy state is put back like any other unit's.
+    if [[ ! -e "${SYSTEMD_UNIT_DIR}/${u}" ]] && ! mh_masked_by_us "$u"; then
+      echo "${u}: no unit file after the restore (as before the deploy)"; continue
+    fi
     now="$(systemctl is-enabled "$u" 2>/dev/null || true)"
     if [[ "${MH_UNIT_PRE_ENABLED[$u]}" == "enabled" && "$now" != "enabled" ]]; then
       systemctl enable --quiet "$u"; echo "enable ${u} (enabled before the deploy): rc=$?"

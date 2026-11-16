@@ -143,6 +143,7 @@ class XrayConfigAdapter:
         helper_staging_dir: Path | None = None,
         require_reality: bool = True,
         warp_send_through: Callable[[], str | None] | None = None,
+        backup_keep: int = 10,
     ) -> None:
         if config_path.is_symlink():
             raise XrayConfigError("Xray config path не должен быть symlink. Укажите реальный путь к config.json.")
@@ -176,6 +177,10 @@ class XrayConfigAdapter:
         self.require_reality = require_reality
         self.allow_restart_on_rollback = allow_restart_on_rollback
         self.backup = backup
+        # How many of its OWN config.json backups this adapter keeps (XRAY_CONFIG_BACKUP_KEEP).
+        # It writes one per mutation (create_backup with prune=False) and prunes them
+        # itself once a mutation succeeded — see _prune_backups.
+        self.backup_keep = max(1, backup_keep)
         self.systemctl = systemctl
         self.shell = shell
         self.stats_server = stats_server
@@ -210,9 +215,7 @@ class XrayConfigAdapter:
             if not self._using_helper():
                 await self._ensure_current_config_valid()
             snapshot = await self._snapshot_config()
-            backup_path = None if self._using_helper() else await asyncio.to_thread(
-                self.backup.create_backup, self.config_path
-            )
+            backup_path: Path | None = None
             temp_path: Path | None = None
             try:
                 config = await asyncio.to_thread(self._read_config, self.config_path)
@@ -230,6 +233,7 @@ class XrayConfigAdapter:
                 if manage_short_id:
                     short_id_inserted = self._add_short_id(inbound, short_id)
 
+                backup_path = await self._backup_before_change(snapshot)
                 temp_path = await self._write_temp_config(config, self.config_path)
                 if not self._using_helper() and self.apply_mode == "api" and not short_id_inserted:
                     # Pure client add: reload the inbound via the API. A shortId insert
@@ -255,9 +259,7 @@ class XrayConfigAdapter:
             if not self._using_helper():
                 await self._ensure_current_config_valid()
             snapshot = await self._snapshot_config()
-            backup_path = None if self._using_helper() else await asyncio.to_thread(
-                self.backup.create_backup, self.config_path
-            )
+            backup_path: Path | None = None
             temp_path: Path | None = None
             try:
                 config = await asyncio.to_thread(self._read_config, self.config_path)
@@ -277,6 +279,7 @@ class XrayConfigAdapter:
                 if not changed:
                     return
 
+                backup_path = await self._backup_before_change(snapshot)
                 temp_path = await self._write_temp_config(config, self.config_path)
                 if not self._using_helper() and self.apply_mode == "api" and not short_id_removed:
                     # Pure client remove: reload the inbound via the API. A shortId removal
@@ -320,9 +323,7 @@ class XrayConfigAdapter:
             if not self._using_helper():
                 await self._ensure_current_config_valid()
             snapshot = await self._snapshot_config()
-            backup_path = None if self._using_helper() else await asyncio.to_thread(
-                self.backup.create_backup, self.config_path
-            )
+            backup_path: Path | None = None
             temp_path: Path | None = None
             try:
                 config = await asyncio.to_thread(self._read_config, self.config_path)
@@ -350,6 +351,7 @@ class XrayConfigAdapter:
                 if renamed == 0:
                     return 0
 
+                backup_path = await self._backup_before_change(snapshot)
                 temp_path = await self._write_temp_config(config, self.config_path)
                 await self._install_candidate(temp_path, snapshot, backup_path, prefer_restart=prefer_restart)
                 if prefer_restart:
@@ -368,9 +370,7 @@ class XrayConfigAdapter:
             if not self._using_helper():
                 await self._ensure_current_config_valid()
             snapshot = await self._snapshot_config()
-            backup_path = None if self._using_helper() else await asyncio.to_thread(
-                self.backup.create_backup, self.config_path
-            )
+            backup_path: Path | None = None
             temp_path: Path | None = None
             try:
                 config = await asyncio.to_thread(self._read_config, self.config_path)
@@ -379,6 +379,7 @@ class XrayConfigAdapter:
                 if not self._add_short_id(inbound, short_id):
                     return False
 
+                backup_path = await self._backup_before_change(snapshot)
                 temp_path = await self._write_temp_config(config, self.config_path)
                 await self._install_candidate(temp_path, snapshot, backup_path)
                 return True
@@ -614,6 +615,7 @@ class XrayConfigAdapter:
         await self._assert_config_unchanged(snapshot)
         await self._replace_main_config(temp_path, self.config_path)
         await self._apply_or_restore(backup_path, prefer_restart=prefer_restart)
+        await self._prune_backups()
 
     async def _apply_helper(self, candidate_path: Path, snapshot: tuple[int, int, bytes]) -> None:
         if self.helper_runner is None:
@@ -790,6 +792,53 @@ class XrayConfigAdapter:
                     except Exception:
                         logger.error("Xray restart after API rollback also failed", exc_info=True)
             raise XrayApplyError(f"xray api {action} failed, config restored from backup") from exc
+        await self._prune_backups()
+
+    async def _backup_before_change(self, snapshot: tuple[int, int, bytes]) -> Path | None:
+        """The pre-change copy of config.json — taken only once a change is known to be needed.
+
+        Every mutator decides first (a duplicate client, nothing to remove, labels already
+        right, the shortId already there all return before this point), so a no-op — the
+        startup label reconcile on every boot, for one — writes no backup at all, and every
+        backup that is written is followed by an install that either succeeds (then
+        _prune_backups bounds them) or fails (then it is the restored copy, kept as
+        evidence). The snapshot is asserted again so the copy is the file the change was
+        computed from. None under a privileged helper, which keeps its own copy.
+        """
+        if self._using_helper():
+            return None
+        await self._assert_config_unchanged(snapshot)
+        return await asyncio.to_thread(self.backup.create_backup, self.config_path, prune=False)
+
+    async def _prune_backups(self) -> None:
+        """Keep the newest ``backup_keep`` of this adapter's own config.json backups.
+
+        Runs only after a mutation was installed AND applied (never on a failed one, whose
+        backup has just been restored and is evidence). Deletes nothing but files whose
+        whole name matches the template BackupAdapter.create_backup writes for
+        config.json — an operator's own ``config.json.*.bak`` and the privileged helper's
+        ``config.json.<ns>.bak`` are never candidates. A failure here is a WARNING: the
+        mutation already succeeded, and an old backup left behind costs nothing but disk.
+        Called inside the ConfigFileLock of the mutation, so the REALITY and XHTTP
+        adapters (same config.json) never prune concurrently.
+        """
+        try:
+            removed = await asyncio.to_thread(self.backup.prune_backups, self.config_path, self.backup_keep)
+        except Exception:
+            logger.warning(
+                "Xray config backup cleanup failed for %s (the change itself was applied); "
+                "old backups are left as they are",
+                self.config_path,
+                exc_info=True,
+            )
+            return
+        if removed:
+            logger.info(
+                "Xray config backups: removed %d old %s backup(s), kept the newest %d",
+                removed,
+                self.config_path.name,
+                self.backup_keep,
+            )
 
     async def _api_reload_inbound(self) -> None:
         """Sync the running xray inbound with the current on-disk config via rmi + adi."""

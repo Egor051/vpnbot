@@ -1,5 +1,7 @@
 
+import glob
 import os
+import re
 import secrets
 import shutil
 import time
@@ -10,13 +12,34 @@ from adapters.errors import AdapterError
 from adapters.file_ops import copy_stat, fsync_parent
 
 
+# The name create_backup gives a copy of <name>: "<name>.<stamp>.<time_ns>.<token>.bak".
+# <stamp> is ClockProvider.now() (ISO 8601, seconds, with an offset) with ":" and "."
+# dropped and "+" turned into "_" (2026-11-16T123456_0000); <token> is
+# secrets.token_urlsafe(16), always 22 characters. prune_backups deletes ONLY names
+# that match this whole template, so an operator's own config.json.pre-x.bak, the
+# privileged helpers' "<name>.<time_ns>.bak" and anything else in the directory are
+# never touched.
+_STAMP_RE = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}(?:[_-][0-9]{4}|Z)?"
+_NONCE_RE = r"[A-Za-z0-9_-]{22}"  # secrets.token_urlsafe(16): a random file-name suffix
+
+
 class BackupAdapter:
     def __init__(self, clock: ClockProvider, keep_last: int = 20) -> None:
         self.clock = clock
         self.keep_last = max(0, keep_last)
 
-    def create_backup(self, target: Path) -> Path:
-        """Create a timestamped private backup copy of the target file."""
+    @staticmethod
+    def backup_name_re(target: Path) -> re.Pattern[str]:
+        """The exact name template of the backups create_backup writes for ``target``."""
+        return re.compile(rf"{re.escape(target.name)}\.{_STAMP_RE}\.[0-9]+\.{_NONCE_RE}\.bak")
+
+    def create_backup(self, target: Path, *, prune: bool = True) -> Path:
+        """Create a timestamped private backup copy of the target file.
+
+        ``prune=False`` leaves retention to the caller (XrayConfigAdapter prunes its own
+        copies with prune_backups once a mutation succeeded); otherwise the copies of
+        ``target`` beyond ``keep_last`` are deleted right here, as before.
+        """
         if not target.exists():
             raise AdapterError(f"Файл не найден для backup: {target}")
         stamp = self.clock.now().replace(":", "").replace("+", "_").replace(".", "")
@@ -34,9 +57,23 @@ class BackupAdapter:
             break
         if backup_path is None:
             raise AdapterError(f"Не удалось создать уникальное имя backup для {target}")
-        if self.keep_last:
+        if prune and self.keep_last:
             self.cleanup_old_backups(target.parent, pattern=f"{target.name}.*.bak", keep_last=self.keep_last)
         return backup_path
+
+    def prune_backups(self, target: Path, keep_last: int) -> int:
+        """Keep the newest ``keep_last`` backups create_backup wrote for ``target``.
+
+        Only files whose whole name matches backup_name_re(target) are candidates —
+        never another file in the directory, whatever its name. Returns how many were
+        deleted. ``keep_last`` below 1 is treated as 1: the newest copy always stays.
+        """
+        return self.cleanup_old_backups(
+            target.parent,
+            pattern=f"{glob.escape(target.name)}.*.bak",
+            keep_last=max(1, keep_last),
+            name_re=self.backup_name_re(target),
+        )
 
     def restore(self, backup_path: Path, target: Path, mode_from: Path | None = None) -> None:
         """Atomically restore the target file from a backup copy."""
@@ -71,10 +108,24 @@ class BackupAdapter:
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    def cleanup_old_backups(self, directory: Path, pattern: str = "*.bak", keep_last: int = 20) -> int:
-        """Delete old backup files, keeping only the most recent ones."""
+    def cleanup_old_backups(
+        self,
+        directory: Path,
+        pattern: str = "*.bak",
+        keep_last: int = 20,
+        *,
+        name_re: re.Pattern[str] | None = None,
+    ) -> int:
+        """Delete old backup files, keeping only the most recent ones.
+
+        ``name_re``: only files whose whole name matches it are considered at all.
+        """
         backups = sorted(
-            (path for path in directory.glob(pattern) if path.is_file()),
+            (
+                path
+                for path in directory.glob(pattern)
+                if path.is_file() and (name_re is None or name_re.fullmatch(path.name))
+            ),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )

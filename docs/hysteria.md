@@ -22,7 +22,9 @@ Three moving parts, only one of which is the bot:
    in `/etc/hysteria/config.yaml` (tracked source: `deploy/hysteria/config.yaml`, installed via
    `sudo bash deploy/hysteria/install-config.sh` — **never** a bare `cp`, since the tracked file's
    `trafficStats.secret` is a placeholder and the installer is what injects the real
-   `HYSTERIA2_STATS_SECRET` from `.env`). Terminates plain-QUIC client sessions — no salamander
+   `HYSTERIA2_STATS_SECRET` from `.env`; it backs the old file up as `config.yaml.bak.<stamp>` and
+   keeps the newest `HYSTERIA_CONFIG_BACKUP_KEEP` of those, 3 by default — no other file is
+   touched). Terminates plain-QUIC client sessions — no salamander
    obfuscation — on the public **UDP** port `HYSTERIA2_PORT` (default `443`; coexists with Xray
    REALITY on TCP/443), presenting a valid Let's Encrypt cert for the server's domain
    (issued/renewed by `acme.sh` outside this repo). Run `deploy/hysteria/preflight-udp443.sh`

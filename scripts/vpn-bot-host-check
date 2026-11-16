@@ -24,7 +24,8 @@
 #   MISMATCH  the live value (sshd -T / sysctl -n / systemctl show) differs from what
 #             the files give, for a key a repo-managed file sets; a repo unit that is
 #             shadowed, masked, waiting for daemon-reload or (a timer) not running;
-#             an entry of deploy/host/invariants.list that does not hold.
+#             an entry of deploy/host/invariants.list that does not hold; a unit the
+#             repo keeps masked (class masked) that is not masked or still running.
 #   LATENT    right now, but a loser that is neither repo-managed nor vendor holds
 #             another value: remove the winner and the value silently flips.
 #   ACCEPTED  a LATENT that deploy/host/accepted-overrides.list accepts.
@@ -318,6 +319,7 @@ resolve_role() {
 # --------------------------------------------------------------------------- #
 declare -a REG=()            # "src|dst|class|opts" — this role, gate open; src a path, dst logical
 declare -a REG_ABSENT=()     # retired dsts of this role
+declare -a REG_MASKED=()     # class masked dsts of this role: <unit dir>/<unit> -> /dev/null
 declare -A PRISTINE_SRC=()   # class pristine dst -> its source (dpkg:<pkg> | ucf:<template>)
 declare -A PRISTINE_COPY=()  # --pristine: dst -> the package default Phase 2 restores
 declare -a UNITS_DEPLOY=()   # "src|dst": unit files deploy.sh installs verbatim
@@ -352,6 +354,8 @@ load_registry() {
     # with --pristine (pre-install); otherwise its host copy is read like any file.
     if [[ "$class" == pristine ]]; then PRISTINE_SRC["$dst"]="$src"; continue; fi
     if [[ "$class" == absent ]]; then REG_ABSENT+=("$dst"); continue; fi
+    # A unit kept masked: no repo source; the file is the /dev/null symlink (masked_rows).
+    if [[ "$class" == masked ]]; then REG_MASKED+=("$dst"); continue; fi
     if [[ -z "$REGISTRY_FILE" ]] && ! gate_open "${opts:-}"; then continue; fi
     # An absolute src is a copy deploy.sh rendered (opts render=ssh-port) for this run;
     # without --registry the template itself stands in (its @SSH_PORT@ lines carry
@@ -1360,6 +1364,62 @@ unit_rows() {
 }
 
 # --------------------------------------------------------------------------- #
+# Class masked — units the repo keeps masked (MANAGED_HOST_FILES)
+# --------------------------------------------------------------------------- #
+# deploy.sh owns the file: <dst> = <unit dir>/<unit>, a symlink to /dev/null, which is
+# what `systemctl mask` writes. This judges the effect, from systemd itself:
+#   OK        the mask is in place, LoadState=masked, the unit does not run
+#   PENDING   (--pre-install) not masked yet — Phase 2 masks it
+#   MISMATCH  not masked (nothing at <dst>, or something else: a unit file of its own,
+#             a symlink elsewhere); the mask is in place but systemd still runs the old
+#             definition (NeedDaemonReload); masked but still running (masked without
+#             a stop)
+#   BEATEN    the mask is in place, yet systemd loads the unit from another file: one
+#             of higher priority (/etc/systemd/system.control, /run/systemd/transient,
+#             a generator) wins over /etc/systemd/system
+masked_rows() {
+  local dst unit f load act frag reload what
+  for dst in "${REG_MASKED[@]}"; do
+    unit="${dst##*/}"
+    f="$(fs "$dst")"
+    if [[ ! -L "$f" || "$(readlink "$f")" != /dev/null ]]; then
+      if [[ -L "$f" ]]; then
+        what="a symlink to $(readlink "$f")"
+      elif [[ -e "$f" ]]; then
+        what="a unit file of its own"
+      elif (( PRE_INSTALL )); then
+        row PENDING masked "$unit" "$dst" "the deploy masks ${unit} now — checked after the install"
+        continue
+      else
+        row MISMATCH masked "$unit" "$dst" "${unit} is not masked (${dst} is absent) — the next deploy masks it"
+        continue
+      fi
+      row MISMATCH masked "$unit" "$dst" "${unit} is not masked: ${dst} is ${what}, not the mask (a symlink to /dev/null) — the deploy will not replace it; decide by hand"
+      continue
+    fi
+    unit_show "$unit" LoadState ActiveState FragmentPath NeedDaemonReload
+    load="${UPROP[LoadState]:-}"; act="${UPROP[ActiveState]:-}"
+    frag="${UPROP[FragmentPath]:-}"; reload="${UPROP[NeedDaemonReload]:-}"
+    if [[ "$load" != masked ]]; then
+      if [[ "$reload" == yes ]]; then
+        row MISMATCH masked "$unit" "$dst" "the mask ${dst} is in place, but ${unit} still runs its old definition (LoadState=${load:-?}, NeedDaemonReload=yes) — systemctl daemon-reload"
+      elif [[ "$load" == loaded && -n "$frag" && "$frag" != /dev/null ]]; then
+        row BEATEN masked "$unit" "$dst" "the mask ${dst} is in place, but systemd loads ${unit} from ${frag} — a unit file of higher priority wins"
+      else
+        row MISMATCH masked "$unit" "$dst" "the mask ${dst} is in place, but ${unit} reads LoadState=${load:-unknown}, not masked"
+      fi
+      continue
+    fi
+    case "$act" in
+      active|activating|reloading|deactivating|refreshing)
+        row MISMATCH masked "$unit" "$dst" "${unit} is masked but still ${act} — it ran before the mask; systemctl stop ${unit} (the deploy stops it when it masks it)"
+        continue ;;
+    esac
+    row OK masked "$unit" "$dst" "masked (LoadState=masked, ${act:-inactive})"
+  done
+}
+
+# --------------------------------------------------------------------------- #
 # deploy/host/invariants.list and deploy/host/accepted-overrides.list
 # --------------------------------------------------------------------------- #
 INV_PROBE_RE='^(sshd|sysctl|systemd-conf:[a-z]+|unit-prop:[A-Za-z0-9@._-]+:[A-Za-z]+|path-present|path-absent|path-regular|tcp-listen:[0-9]+)$'
@@ -1999,6 +2059,7 @@ main() {
   sshd_live
   live_rows
   unit_rows
+  masked_rows
   invariant_rows
   ssh_port_rows
   ufw_rows

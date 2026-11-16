@@ -394,6 +394,7 @@ async def _build_app(
         helper_path=settings.xray_apply_helper_path,
         helper_staging_dir=settings.xray_helper_staging_dir,
         warp_send_through=warp_send_through,
+        backup_keep=settings.xray_config_backup_keep,
     )
     # Second VLESS transport (XHTTP+REALITY) inbound. Shares the same config.json,
     # service, apply_mode and stats_server; only the inbound_tag differs. Both
@@ -426,6 +427,7 @@ async def _build_app(
             helper_staging_dir=settings.xray_helper_staging_dir,
             require_reality=False,
             warp_send_through=warp_send_through,
+            backup_keep=settings.xray_config_backup_keep,
         )
         if vless_inbound_present(settings.xray_config_path, settings.xray_xhttp_inbound_tag)
         else None
