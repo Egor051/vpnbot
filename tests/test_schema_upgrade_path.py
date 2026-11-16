@@ -60,6 +60,11 @@ async def _materialise(db_path: Path, version: int) -> dict[str, int]:
     seed_path = SNAPSHOT_DIR / f"v{version}.seed.sql"
     async with aiosqlite.connect(db_path) as conn:
         await conn.execute("PRAGMA foreign_keys = ON")
+        # A per-connection setting, never stored in the file: the snapshot is
+        # written exactly as before, minus ~300 fdatasync()s (executescript commits
+        # statement by statement under the default rollback journal), which are
+        # real disk flushes on the production host running this suite.
+        await conn.execute("PRAGMA synchronous = OFF")
         await conn.executescript(snapshot)
         if seed_path.exists():
             await conn.executescript(seed_path.read_text(encoding="utf-8"))
