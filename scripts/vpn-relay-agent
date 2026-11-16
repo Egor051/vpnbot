@@ -16,8 +16,9 @@ everything else is refused with exit 2 before anything is read or changed:
     apply target=<dns name> tcp=<ports> udp=<ports>
                                           re-point / re-port the forward; rolled back
                                           when the ruleset or its check fails
-    update                                move the checkout to the newest release tag
-                                          (never backwards) and reinstall from it
+    update                                deploy the newest release tag (never backwards
+                                          or sideways) with scripts/deploy.sh — the
+                                          relay's one update engine
     uninstall                             remove everything scripts/install.sh installed
 
 Before a successful `hello` only `hello` is accepted. `hello` compares sha256(token)
@@ -38,6 +39,14 @@ dropped SSH connection cannot cut them in half. Their bodies are the internal en
 points `--internal-update` / `--internal-uninstall`, which only root can start and
 which refuse to run inside an SSH session: the SSH client cannot reach them (a
 forced command gets no argv).
+
+`update` does not install anything itself. It picks the newest release tag (the rule
+scripts/deploy.sh's relay_latest_release carries too — tests/test_relay_release_tag.py
+runs both on the same tags), refuses to go backwards or sideways, and hands the move to
+the deploy an operator runs by hand: scripts/redeploy.sh with DEPLOY_REF=<tag>
+(deploy.sh of that tag, in its own transient unit, its log under /root). deploy.sh
+gates, installs the helpers, units and host files, verifies and rolls back by itself;
+the result lands in /var/lib/vpn-relay/update.json.
 
 TEST SEAM: VPN_RELAY_AGENT_SELFTEST=1 (ignored inside an SSH session) re-roots every
 path under VPN_RELAY_AGENT_ROOT and runs external commands only from
@@ -103,6 +112,18 @@ DATA_PLANE_UNIT = "vpn-relay.service"
 INSTALLED_UNIT_RE = re.compile(r"vpn-relay(?:-[a-z0-9][a-z0-9-]*)?\.(?:service|timer)")
 TABLES = (("ip", "vpnrelay"), ("inet", "vpnrelay_input"))
 SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# `update` runs the whole deploy (the pytest gate included) inside its transient unit;
+# the bot waits this long plus a minute for the answer (services/relays.py).
+UPDATE_TIMEOUT = 2700
+# What redeploy.sh prints when it starts deploy.sh, and the reports deploy.sh ends with.
+REDEPLOY = "scripts/redeploy.sh"
+_REDEPLOY_LOG_RE = re.compile(r"^redeploy: launching \S+ \(log: (?P<log>/\S+)\)$", re.MULTILINE)
+DEPLOY_OK = "===== DEPLOY OK (relay) ====="
+ROLLBACK_REPORT = "===== ROLLBACK REPORT (relay) ====="
+# RELEASE TAG RULE (scripts/deploy.sh relay_latest_release is the same rule):
+# vMAJOR.MINOR[.PATCH[.BUILD]] in ASCII digits; `v.3.1.0`, `v3`, `v3.1.0-rc1` are not.
+RELEASE_TAG_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){1,3}")
+TAG_LIST = ("tag", "-l", "--sort=refname", "v*")
 KEY_MARKER = f'command="{AGENT_PATH}"'
 
 E_OK, E_REFUSED, E_DENIED, E_FAILED, E_BUSY = 0, 2, 3, 4, 5
@@ -182,17 +203,20 @@ def parse_request(raw: str | None) -> tuple[str, dict[str, str]]:
 # --------------------------------------------------------------------------- #
 # Small host helpers
 # --------------------------------------------------------------------------- #
-def command_env() -> dict[str, str]:
-    """A fixed environment for every external command: nothing the caller sent."""
+def command_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """A fixed environment for every external command: nothing the caller sent, plus
+    the fixed knobs *extra* the agent itself sets (update's DEPLOY_REF)."""
     path = f"{_BIN}:{SAFE_PATH}" if _BIN else SAFE_PATH
-    env = {"PATH": path, "LC_ALL": "C", "LANG": "C"}
+    env = {"PATH": path, "LC_ALL": "C", "LANG": "C", **(extra or {})}
     if SELFTEST:
         # The whole seam, or a nested agent (update/uninstall) would run on the host.
         env.update(VPN_RELAY_AGENT_SELFTEST="1", VPN_RELAY_AGENT_ROOT=_ROOT, VPN_RELAY_AGENT_SELFTEST_BIN=_BIN)
     return env
 
 
-def run(args: Sequence[str], *, timeout: float = 60, check: bool = False) -> subprocess.CompletedProcess[str]:
+def run(
+    args: Sequence[str], *, timeout: float = 60, check: bool = False, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     if _BIN:
         exe = Path(_BIN) / Path(args[0]).name
         if not exe.exists():
@@ -204,7 +228,7 @@ def run(args: Sequence[str], *, timeout: float = 60, check: bool = False) -> sub
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=command_env(),
+            env=command_env(env),
             check=False,
             stdin=subprocess.DEVNULL,
         )
@@ -592,7 +616,7 @@ def _transient(unit: str, internal: str, timeout: int) -> subprocess.CompletedPr
 def cmd_update(_: dict[str, str]) -> dict[str, Any]:
     with exclusive():
         require_paired()
-        done = _transient("vpn-relay-update", "--internal-update", 900)
+        done = _transient("vpn-relay-update", "--internal-update", UPDATE_TIMEOUT)
     result = read_json(UPDATE_FILE) or {}
     if done.returncode != 0 or result.get("state") == "failed":
         raise Failed(str(result.get("message") or tail(done.stderr) or f"update unit exit {done.returncode}"))
@@ -627,6 +651,37 @@ def _release_key(tag: str) -> tuple[int, ...]:
     return tuple(int(x) for x in tag[1:].split("."))
 
 
+def latest_release(listing: str) -> str | None:
+    """The newest release tag of a `git tag -l --sort=refname v*` listing, or None.
+
+    One name per line (split on "\\n" only, as bash's `read` splits); a release is a
+    full RELEASE_TAG_RE match, compared by _release_key; of equal keys the first wins
+    (max). scripts/deploy.sh's relay_latest_release is the same rule.
+    """
+    tags = [t for t in listing.split("\n") if RELEASE_TAG_RE.fullmatch(t)]
+    return max(tags, key=_release_key) if tags else None
+
+
+def _deploy_reason(output: str) -> str:
+    """Why deploy.sh ended as it did, in its own words (one line, capped).
+
+    A rollback: the WARN right before "ROLLBACK (relay):" (rollback_now's reason). A
+    stop before Phase 2: the last FAIL line. A no-op: its "nothing to deploy" line.
+    """
+    lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+    warn, fail, info = "[deploy][WARN] ", "[deploy][FAIL] ", "[deploy] "
+    for i, line in enumerate(lines):
+        if f"{warn}ROLLBACK (relay):" in line and i and warn in lines[i - 1]:
+            return lines[i - 1].split(warn, 1)[1][:600]
+    fails = [ln.split(fail, 1)[1] for ln in lines if fail in ln]
+    if fails:
+        return fails[-1][:600]
+    noops = [ln.split(info, 1)[1] for ln in lines if info in ln and "nothing to deploy" in ln]
+    if noops:
+        return noops[-1][:600]
+    return tail(output, 3)[:600]
+
+
 def internal_update() -> int:
     started = int(time.time())
 
@@ -647,11 +702,10 @@ def internal_update() -> int:
     if fetched.returncode != 0:
         note("failed", f"git fetch failed: {tail(fetched.stderr)}", from_commit=old)
         return 1
-    tags = [t for t in run([*git, "tag", "-l", "v*"], timeout=15).stdout.split() if re.fullmatch(r"v[0-9]+(\.[0-9]+){1,3}", t)]
-    if not tags:
+    latest = latest_release(run([*git, *TAG_LIST], timeout=15).stdout)
+    if latest is None:
         note("noop", "no release tag (v*) in the repository", from_commit=old)
         return 0
-    latest = max(tags, key=_release_key)
     target = run([*git, "rev-parse", f"{latest}^{{commit}}"], timeout=15).stdout.strip()
     if target == old or run([*git, "merge-base", "--is-ancestor", target, old], timeout=15).returncode == 0:
         note("noop", f"already at or past {latest}", from_commit=old, release=latest)
@@ -659,19 +713,44 @@ def internal_update() -> int:
     if run([*git, "merge-base", "--is-ancestor", old, target], timeout=15).returncode != 0:
         note("failed", f"{old[:12]} is not an ancestor of {latest} — not moving sideways", from_commit=old, release=latest)
         return 1
-    note("running", f"checking out {latest}", from_commit=old, release=latest)
-    if run([*git, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", target], timeout=60).returncode != 0:
-        note("failed", f"git checkout {latest} failed", from_commit=old, release=latest)
-        return 1
-    installer = APP_DIR / "scripts" / "install.sh"
-    done = run(["bash", str(installer), "--relay-update"], timeout=600)
-    if done.returncode != 0:
-        run([*git, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", old], timeout=60)
-        note("failed", f"the installer of {latest} failed and rolled back (exit {done.returncode}): {tail(done.stderr)}",
+    redeploy = APP_DIR / REDEPLOY
+    try:
+        knows_ref = "DEPLOY_REF" in redeploy.read_text(encoding="utf-8")
+    except OSError:
+        knows_ref = False
+    if not knows_ref:
+        note("failed", f"{redeploy} of this checkout cannot deploy a release (no DEPLOY_REF) — "
+             "deploy the relay once by hand: sudo DEPLOY_REF=main bash scripts/redeploy.sh",
              from_commit=old, release=latest)
         return 1
-    note("succeeded", f"updated to {latest}", from_commit=old, to_commit=target, release=latest)
-    return 0
+    note("running", f"deploying {latest} (scripts/redeploy.sh, DEPLOY_REF={latest})", from_commit=old, release=latest)
+    # The deploy an operator runs, unattended: redeploy.sh starts the tag's deploy.sh
+    # in its own transient unit and, with REDEPLOY_ATTACH=pipe, waits and exits with
+    # deploy.sh's code. deploy.sh re-checks forward-only itself and rolls back by itself.
+    done = run(["bash", str(redeploy)], env={"DEPLOY_REF": latest, "REDEPLOY_ATTACH": "pipe"},
+               timeout=UPDATE_TIMEOUT - 120)
+    output = done.stdout + done.stderr
+    found = _REDEPLOY_LOG_RE.search(output)
+    where = {"log": found["log"]} if found else {}
+    now = run([*git, "rev-parse", "HEAD"], timeout=15).stdout.strip()
+    if done.returncode == 0 and now == target:
+        note("succeeded", f"updated to {latest}", from_commit=old, to_commit=target, release=latest, **where)
+        return 0
+    if done.returncode == 0 and now == old:
+        note("noop", f"deploy.sh found nothing to deploy for {latest}: {_deploy_reason(output)}",
+             from_commit=old, release=latest, **where)
+        return 0
+    if done.returncode == 124:
+        verdict = f"did not finish within {UPDATE_TIMEOUT - 120}s (it may still run: systemctl status vpn-bot-deploy)"
+    elif ROLLBACK_REPORT in output:
+        verdict = f"failed and rolled back (exit {done.returncode})"
+    elif DEPLOY_OK in output:
+        verdict = f"reported DEPLOY OK but the checkout is at {now[:12] or '?'}, not {target[:12]}"
+    else:
+        verdict = f"stopped before any change (exit {done.returncode})"
+    note("failed", f"the deploy of {latest} {verdict}: {_deploy_reason(output)}",
+         from_commit=old, release=latest, **({"now_commit": now} if now != old else {}), **where)
+    return 1
 
 
 # --------------------------------------------------------------------------- #

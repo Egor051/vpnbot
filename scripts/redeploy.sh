@@ -16,6 +16,7 @@
 #   sudo FORCE=1 bash scripts/redeploy.sh   # redeploy even when HEAD already == origin/main
 #   sudo ALLOW_BACKEND_CONFIG_DRIFT=1 bash scripts/redeploy.sh   # forward a deploy.sh knob
 #   sudo REDEPLOY_ATTACH=pipe bash scripts/redeploy.sh   # no terminal: wait, exit with deploy.sh's code
+#   sudo DEPLOY_REF=main bash scripts/redeploy.sh   # a relay: follow main instead of the newest release
 #
 # deploy.sh's gate bypasses (ALLOW_*) and tuning timeouts go on the same command
 # line, AFTER `sudo` (sudo drops the caller's environment). Only the names in
@@ -24,7 +25,10 @@
 #
 # The same commands deploy an L4 relay host: deploy.sh reads NODE_ROLE from the
 # host's .env (main | relay) and runs the matching flow, so this wrapper has no
-# role of its own (docs/relay.md, "A new relay from scratch").
+# role of its own (docs/relay.md, "A new relay from scratch"). A relay deploys the
+# newest release tag, or DEPLOY_REF=<tag|main|sha>, and its deploy.sh hands over to
+# that revision's own deploy.sh — the wrapper still only fetches origin/main and
+# starts origin/main's copy. The relay agent's `update` runs this wrapper too.
 #
 # CHECK and FORCE are independent. CHECK maps to deploy.sh's PHASE1_ONLY=1 and is
 # the recommended first step on any host you have not just deployed. Recommended
@@ -60,6 +64,8 @@ REDEPLOY_ATTACH="${REDEPLOY_ATTACH:-pty}"
 #     tests/test_redeploy_env_passthrough.py compares this list with the ALLOW_*
 #     names in deploy.sh and fails when deploy.sh gains one that is missing here.
 #   * The tuning timeouts an operator actually sets.
+#   * DEPLOY_REF: which revision a relay deploys (deploy.sh refuses it on the main
+#     server unless it is `main`).
 # An ALLOW_* that is set but NOT listed (a typo, or a new deploy.sh flag nobody
 # added here) used to be dropped silently, and deploy.sh then stopped on the very
 # gate it was meant to open. check_allow_env refuses to run instead.
@@ -71,6 +77,7 @@ DEPLOY_ENV_PASSTHROUGH=(
   ALLOW_SSH_CHANGE
   SCHEMA_WAIT_TIMEOUT
   HY2_AUTH_BIND_TIMEOUT
+  DEPLOY_REF
 )
 deploy_env=()
 

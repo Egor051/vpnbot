@@ -144,8 +144,10 @@ A failed repair rolls back the files it replaced and restarts the bot with them.
 
 Exit codes: `0` done · `1` failed (and rolled back) · `2` usage (an unknown argument).
 
-`--relay` (the code on stdin) and `--relay-update` (what the relay agent's `update` runs) are
-the relay mode's entry points — [relay.md](relay.md#installing-a-relay-with-one-command).
+`--relay` (the code on stdin) is the relay mode's entry point —
+[relay.md](relay.md#installing-a-relay-with-one-command). `--relay-update` is retired: a relay is
+updated by `scripts/deploy.sh` (the agent's `update` runs `redeploy.sh`,
+[relay.md](relay.md#which-revision-a-relay-deploys)); it only says so, for an agent from before.
 
 ## After the install
 

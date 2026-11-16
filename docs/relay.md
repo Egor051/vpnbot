@@ -353,8 +353,10 @@ The same commands as on the main server; `deploy.sh` reads `NODE_ROLE` and refus
 whose services contradict it (role `relay` while `vpn-bot` or `xray` is active; role `main`
 while `vpn-relay` is active and there is no `vpn-bot` unit at all).
 
-- **Phase 1** (read-only; `CHECK=1` stops here and prints a report): fetch `origin/main`, the
-  same ruff / compileall / pytest gate on the checkout as on the main server (a test venv is
+- **Phase 1** (read-only; `CHECK=1` stops here and prints a report): fetch `origin/main` and the
+  tags, pick the [revision to deploy](#which-revision-a-relay-deploys) — the newest release by
+  default, forward only — and hand over to THAT revision's `deploy.sh`; the
+  same ruff / compileall / pytest gate on it as on the main server (a test venv is
   built under `/var/lib/vpn-bot-deploy/`, so the relay needs `python3-venv` and ~1 GiB free),
   `vpn-relay-apply check --dry-run` from the checkout, the relay's pre-state (including the
   runtime `nf_conntrack_max` and `nf_conntrack_tcp_timeout_established`), every unit of the
@@ -368,24 +370,27 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   probe that will confirm it, and a port that listens but would be filtered is called out:
   Phase 2's `check` would roll back.
 - **Phase 2**: back up the live `nft list table ip vpnrelay` and
-  `nft list table inet vpnrelay_input`, the installed helper, every unit of the set, the sysctl file and the
+  `nft list table inet vpnrelay_input`, the installed helpers (`vpn-relay-apply`, the agent, …), every unit of the set, the sysctl file and the
   confirmation marker `/etc/vpn-relay/input.confirmed` (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; nothing is
-  stopped for it); `git checkout -f -B main origin/main` (the checkout stays on local `main`,
-  [as on the main server](operations.md#pre-deploy-checklist)); install `vpn-relay-apply` through
+  stopped for it); `git checkout -f --detach <target>` (a relay's checkout is detached at its
+  release — a local branch it was on stays where it is); install the helpers through
   `OUT_OF_REPO_HELPERS` (role `relay`) and every unit of the set verbatim (a copy that already
   matches is left as it is); `daemon-reload`, `enable` `vpn-relay` and every timer,
-  `restart vpn-relay` (established flows keep their conntrack NAT
-  across the millisecond gap; a set that is not confirmed is confirmed by main's probe here),
-  `start` a timer that is not active;
-  verify with `vpn-relay-apply check`. Around the host files the [SSH port](host-state.md#the-ssh-port)
-  moves when `SSH_PORT` asks for it (phase 1: both ports; the restart of `vpn-relay` then lets
+  `reload-or-restart vpn-relay` (a running relay is **reloaded**: `ExecReload` is the same atomic
+  apply, with no `ExecStop` before it, so there is no moment without DNAT — what the installer has
+  always done; a relay that is not running is started; a set that is not confirmed is confirmed by
+  main's probe here), `start` a timer that is not active;
+  verify with `vpn-relay-apply check` and **exactly one DNAT per forwarded port in the whole
+  ruleset** (a second one in another table — `/etc/nftables.conf` at boot, say — would race the
+  relay's; the installer always checked it). Around the host files the [SSH port](host-state.md#the-ssh-port)
+  moves when `SSH_PORT` asks for it (phase 1: both ports; the reload of `vpn-relay` then lets
   them in and main's probe confirms them); right after DEPLOY OK `vpn-bot-ssh-port.service` looks
   for the proof once, so the relay usually finishes the migration in the same run.
   DEPLOY OK carries `ssh port: …` and `input filter : …` from
   `vpn-relay-apply input-status` — `CONFIRMED by main probe (…)` with nothing to do, or
   `PENDING CONFIRM (…) — <why>` followed by the reason and the instruction to run
   `input-confirm` from a NEW ssh session within 5 minutes.
-- **Any failure** rolls back: the previous checkout, helper, units and sysctl file (or their
+- **Any failure** rolls back: the previous checkout (`PREV_SHA`, detached), helpers, units and sysctl file (or their
   absence), the saved forwarding table re-applied in one transaction, the input filter as it
   was — a confirmed one from its dump, one that did not exist removed, one that was still
   waiting for `input-confirm` removed too (restored, it could outlive its dead-man; removing is
@@ -401,6 +406,45 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   transition**, not drift. After the first successful deploy `/etc/vpn-relay.nft` is renamed to
   `/etc/vpn-relay.nft.pre-repo.<ts>` (never deleted) and nothing reads it any more.
 
+#### Which revision a relay deploys
+
+A relay follows **releases**, and has ONE update engine: this deploy. `sudo bash
+scripts/redeploy.sh` on the relay and «⬆️ Обновить агент» in the bot (the agent's
+[`update`](#the-agent-vpn-relay-agent)) both end in `deploy.sh`, and both pick the same revision:
+
+- **default** — the newest release tag: `vMAJOR.MINOR[.PATCH[.BUILD]]`, compared as numbers
+  (`v1.10.0` is newer than `v1.9.0`). Anything else is not a release: `v.3.1.0` (the typo tag
+  on the repository), `v3.2.0-rc1`, `v3`. The rule is written twice — `relay_latest_release`
+  in `deploy.sh`, `latest_release` in the agent — and `tests/test_relay_release_tag.py` runs
+  both on the same tags, so they cannot drift apart.
+- **`DEPLOY_REF=main`** — `origin/main`; **`DEPLOY_REF=<tag>`** or **`DEPLOY_REF=<commit sha>`**
+  — that commit. On the main server `DEPLOY_REF` is refused unless it is `main`: main always
+  deploys `origin/main` on local `main`.
+
+And only **forward**:
+
+| The checkout is | The deploy |
+|---|---|
+| behind the target (an ancestor of it) | deploys it; the checkout ends **detached** at the target, a rollback puts `PREV_SHA` back detached |
+| at the target | `nothing to deploy` (`FORCE=1` redeploys it, `CHECK=1` inspects it) |
+| ahead of the target | `INFO: … is ahead of latest release vX.Y.Z … nothing to deploy; DEPLOY_REF=main to follow main` — exit 0, a relay never goes backwards |
+| on another line of history | refused before any change ("never moves sideways") |
+
+Detached on a release tag, or ahead of one, is the normal state of a relay: Phase 1 reports where
+the tree is and where it goes (`tree : … -> latest release vX.Y.Z (…), detached`) without a WARN.
+
+The `deploy.sh` that runs is the **target's own**: `redeploy.sh` starts `origin/main`'s copy,
+which picks the target and hands over (`exec`) to the `deploy.sh` of that revision — a relay
+deploying an older release must not run newer registry code against an older tree. A target
+whose `deploy.sh` predates release-based relay deploys is refused (it would deploy `origin/main`);
+`DEPLOY_REF=main` deploys main.
+
+A relay deployed from `main` before this — 2026-11-16: ru1 at `1a87f67`, while the newest release
+`v3.1.0` is older — stays where it is on a plain run (the INFO line above); it follows releases
+again once a release newer than its commit exists. `sudo DEPLOY_REF=main bash
+scripts/redeploy.sh` keeps it on main meanwhile (that run also installs the agent that updates
+through `deploy.sh`).
+
 #### The units a relay deploy installs
 
 The relay's unit set is **every `deploy/relay/*.service` and `*.timer`** (an `*.example.*` file
@@ -411,7 +455,7 @@ what the installer installs and what the host check expects — never a hard-cod
 
 | Unit | Phase 2 |
 |---|---|
-| `vpn-relay.service` | installed verbatim, enabled, restarted (`vpn-relay-apply apply`) |
+| `vpn-relay.service` | installed verbatim, enabled, reloaded when running — started when not (`systemctl reload-or-restart`: `vpn-relay-apply apply`, no stop in between) |
 | `vpn-relay-resolve.timer` | installed verbatim, enabled, started when it is not active |
 | `vpn-relay-resolve.service` | installed verbatim only — its timer runs it; the deploy never starts it |
 
@@ -461,16 +505,19 @@ deploy is done if new bundles must not get relay members a few minutes early.) T
 deploy:
 
 ```bash
-cd /opt/vpn-service && sudo CHECK=1 bash scripts/redeploy.sh
+cd /opt/vpn-service && sudo CHECK=1 DEPLOY_REF=main bash scripts/redeploy.sh
 ```
 
 ```bash
-cd /opt/vpn-service && sudo FORCE=1 bash scripts/redeploy.sh
+cd /opt/vpn-service && sudo FORCE=1 DEPLOY_REF=main bash scripts/redeploy.sh
 ```
 
-`FORCE=1` only on this first run: a fresh clone is already at `origin/main`, and a plain run
-would say "nothing to deploy" — exactly as on the main server. Every later update is the usual
-`sudo CHECK=1 bash scripts/redeploy.sh`, then `sudo bash scripts/redeploy.sh`.
+`DEPLOY_REF=main` and `FORCE=1` only on this first run: a fresh clone is already at `origin/main`
+— ahead of the newest release, which a plain run would only report
+([which revision a relay deploys](#which-revision-a-relay-deploys)) — and `FORCE=1` because it is
+already at the target. Every later update is the usual `sudo CHECK=1 bash scripts/redeploy.sh`,
+then `sudo bash scripts/redeploy.sh`: the next release newer than that commit; keep
+`DEPLOY_REF=main` on both to follow main instead.
 
 The first deploy enables the [input filter](#the-input-filter), main's probe confirms it, and
 DEPLOY OK says `input filter : CONFIRMED by main probe (…)` — nothing to run. Only if it says
@@ -708,7 +755,7 @@ line, extra words, an argv, an interactive login — is refused with exit 2 befo
 | `hello <token>` | Complete the pairing; answers the relay's facts. The only request before pairing. |
 | `status` | Facts: target, ports, the live DNAT target, what the name resolves to now, `ip_forward`, the units (`vpn-relay.service` and every timer of the set below), the ssh ports, the egress source address, the checkout, the last update, and `vpn-relay-apply check`. |
 | `apply target=<dns name> tcp=<ports> udp=<ports>` | Re-point / re-port: refused for a name that is not a name or does not resolve on the relay, a port outside 1..65535, more than 8, a TCP port sshd listens on. Rewrites only `RELAY_UPSTREAM_HOST` / `RELAY_FORWARD_*`, applies, checks; puts `.env` back and re-applies when the ruleset or the check (table, sysctls, the upstream not answering) fails. |
-| `update` | In a transient unit (`systemd-run --wait`): fetch the release tags, move the checkout to the newest `vX.Y.Z` — only forward, never backwards or sideways — and run its `install.sh --relay-update` (helpers and units reinstalled, vpn-relay reloaded, checked; rolled back on failure, the checkout moved back). |
+| `update` | In a transient unit (`systemd-run --wait`): fetch the release tags, pick the newest release ([the same rule as the deploy](#which-revision-a-relay-deploys)) — only forward, never backwards or sideways — and run the relay's deploy for it: `scripts/redeploy.sh` with `DEPLOY_REF=<tag>` (that tag's `deploy.sh`, in its own transient unit, log `/root/deploy-<ts>.log`): the pytest gate, helpers, units and host files, the reload of vpn-relay, the checks; `deploy.sh` rolls back by itself. The agent never checks anything out. The result (`running` / `noop` / `failed` / `succeeded`, `from_commit`, `to_commit`, `release`, `log`) is in `/var/lib/vpn-relay/update.json` and in `status`. Minutes: the agent waits up to 45 minutes. |
 | `uninstall` | In a transient unit: the units of the set below stopped and removed (timers first, `vpn-relay.service` last), both tables deleted, the sysctl file removed and `ip_forward` back to what it was before the install, the helpers, `/etc/vpn-relay`, `/var/lib/vpn-relay`, the checkout (when the installer created it) and the agent's key line removed. The adoption backup stays. Refused on a host without the installer's `/etc/vpn-relay/install.json`. |
 
 **The units** are not a list in the agent. They are read from the checkout by the same rule deploy.sh,
@@ -758,9 +805,16 @@ TOTP code ([below](#managing-relays-in-the-admin-panel)) and is audited (entity 
 - **No input filter**: the installer sets `RELAY_INPUT_FILTER=off` — what comes in to the relay
   itself is not filtered (as on a fresh VPS). [The input filter](#the-input-filter) can be
   switched on by hand; its dead-man then needs a confirmation as described there.
-- Mixing with `redeploy.sh`: an installer relay can be deployed with `redeploy.sh` (it is a
-  `NODE_ROLE=relay` checkout), but that tracks `origin/main`, not releases, and the host files
-  come with it; keep one way per relay.
+- `redeploy.sh` and the agent's `update` are the same engine (`deploy.sh` in the relay role, the
+  newest release by default): an installer relay can be deployed by hand at any time, and the
+  host files come with every update either way. An agent from before that (it called
+  `install.sh --relay-update`, which now only refuses) gets the new one with ONE manual
+  `sudo bash /opt/vpn-service/scripts/redeploy.sh` on the relay — `DEPLOY_REF=main` on a relay
+  that is already ahead of the newest release.
+- `/etc/vpn-relay/install.json` records what `uninstall` needs; its `ref` is the commit the
+  **install** put in place (a re-install rewrites it) — never kept current: deploys and
+  `update` move the checkout without touching the file. The commit a relay runs is
+  `git -C /opt/vpn-service rev-parse HEAD` (`status`: `checkout.commit`).
 - IPv4 only, like the rest of the relay.
 
 ## Managing relays in the admin panel

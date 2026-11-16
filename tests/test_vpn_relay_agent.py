@@ -775,12 +775,20 @@ def test_uninstall_refuses_a_main_server(host: Host) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# update — real git against a local "origin", the installer stubbed
+# update — real git against a local "origin", redeploy.sh stubbed
 # --------------------------------------------------------------------------- #
+# The agent no longer checks anything out or installs anything: it picks the release
+# (latest_release, the rule of deploy.sh's relay_latest_release) and runs
+# scripts/redeploy.sh with DEPLOY_REF=<tag> REDEPLOY_ATTACH=pipe. The `bash` stub below
+# plays redeploy.sh + deploy.sh: it records the env, and per DEPLOY_MODE moves the
+# checkout to the tag and prints DEPLOY OK, rolls back, stops in Phase 1, or no-ops.
 def _git(cwd: Path, *args: str) -> str:
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
     return subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, text=True).stdout.strip()
+
+
+REDEPLOY_TEXT = "# scripts/redeploy.sh (stand-in): forwards DEPLOY_REF\n"
 
 
 @pytest.fixture
@@ -788,9 +796,11 @@ def repo_host(host: Host) -> tuple[Host, Path]:
     origin = host.tmp / "origin"
     origin.mkdir()
     _git(origin, "init", "-q", "-b", "main")
+    (origin / "scripts").mkdir()
+    (origin / "scripts" / "redeploy.sh").write_text(REDEPLOY_TEXT, encoding="utf-8")
     for tag in ("v1.0.0", "v1.1.0"):
         (origin / "f").write_text(tag, encoding="utf-8")
-        _git(origin, "add", "f")
+        _git(origin, "add", "f", "scripts/redeploy.sh")
         _git(origin, "commit", "-q", "-m", tag)
         _git(origin, "tag", tag)
     app = host.root / "opt/vpn-service"
@@ -803,27 +813,84 @@ def repo_host(host: Host) -> tuple[Host, Path]:
     return host, origin
 
 
-def _run_update(host: Host, installer_rc: int = 0) -> tuple[int, dict[str, Any]]:
+DEPLOY_STUB = r"""
+echo "env DEPLOY_REF=${DEPLOY_REF:-} REDEPLOY_ATTACH=${REDEPLOY_ATTACH:-} FORCE=${FORCE:-}" >> "@LOG@"
+echo "redeploy: launching vpn-bot-deploy (log: /root/deploy-20261116T000000Z.log)"
+G=(/usr/bin/git -c safe.directory=* -C "@APP@")
+case "@MODE@" in
+  ok)
+    "${G[@]}" -c advice.detachedHead=false checkout -q --detach "${DEPLOY_REF}^{commit}"
+    printf '%s
+' "[deploy] moving the working tree to latest release ${DEPLOY_REF}" "" "===== DEPLOY OK (relay) =====" "  role : relay"
+    exit 0 ;;
+  rollback)
+    old="$("${G[@]}" rev-parse HEAD)"
+    "${G[@]}" -c advice.detachedHead=false checkout -q --detach "${DEPLOY_REF}^{commit}"
+    printf '%s
+' "[deploy][WARN] vpn-relay-apply check failed after the restart (exit 13: the upstream does not answer)" >&2
+    printf '%s
+' "[deploy][WARN] ROLLBACK (relay): restoring PREV_SHA=${old} and the backed-up relay state" >&2
+    "${G[@]}" -c advice.detachedHead=false checkout -q --detach "$old"
+    printf '%s
+' "" "===== ROLLBACK REPORT (relay) =====" "  - git checkout -f --detach ${old}: rc=0" >&2
+    exit 1 ;;
+  phase1)
+    printf '%s
+' "[deploy][FAIL] insufficient space on /opt/vpn-service FS for the test venv: need >1024MiB, have 300MiB" >&2
+    exit 1 ;;
+  noop)
+    printf '%s
+' "[deploy] INFO: the checkout (0123) is ahead of latest release ${DEPLOY_REF} (abc) — a relay never goes backwards: nothing to deploy"
+    exit 0 ;;
+esac
+exit 99
+"""
+
+
+def _run_update(host: Host, mode: str = "ok") -> tuple[int, dict[str, Any]]:
     original = host.stubs
+    app = host.root / "opt/vpn-service"
 
     def stubs() -> None:
         original()
         host.stub("git", 'exec /usr/bin/git -c safe.directory="*" "$@"\n')
-        host.stub("bash", f"exit {installer_rc}\n")
+        host.stub("bash", DEPLOY_STUB.replace("@LOG@", str(host.log)).replace("@APP@", str(app)).replace("@MODE@", mode))
 
     host.stubs = stubs  # type: ignore[method-assign]
     return host.run("update")
 
 
-def test_update_moves_to_the_newest_release(repo_host: tuple[Host, Path]) -> None:
+def _update_state(host: Host) -> dict[str, Any]:
+    return json.loads((host.root / "var/lib/vpn-relay/update.json").read_text(encoding="utf-8"))
+
+
+def _deploys(host: Host) -> list[str]:
+    return [c for c in host.calls() if c.startswith("bash ")]
+
+
+def _agent_moved_the_checkout(host: Host) -> bool:
+    """Did the AGENT run git checkout/reset (the stub's own git is /usr/bin/git, unlogged)?"""
+    return any(c.startswith("git ") and (" checkout" in c or " reset" in c) for c in host.calls())
+
+
+def test_update_deploys_the_newest_release_through_redeploy(repo_host: tuple[Host, Path]) -> None:
     host, origin = repo_host
+    app = host.root / "opt/vpn-service"
+    old = _git(app, "rev-parse", "HEAD")
+    install_record = (host.root / "etc/vpn-relay/install.json").read_bytes()
     rc, payload = _run_update(host)
     assert rc == 0, payload
-    assert payload["update"]["state"] == "succeeded"
-    assert payload["update"]["release"] == "v1.1.0"
-    app = host.root / "opt/vpn-service"
+    state = payload["update"]
+    assert state["state"] == "succeeded" and state["release"] == "v1.1.0"
+    assert state["from_commit"] == old and state["to_commit"] == _git(origin, "rev-parse", "v1.1.0")
+    assert state["log"] == "/root/deploy-20261116T000000Z.log"
     assert _git(app, "rev-parse", "HEAD") == _git(origin, "rev-parse", "v1.1.0")
-    assert any(c.startswith("bash ") and c.endswith("--relay-update") for c in host.calls())
+    assert _deploys(host) == [f"bash {app}/scripts/redeploy.sh"], "redeploy.sh, nothing else"
+    assert "env DEPLOY_REF=v1.1.0 REDEPLOY_ATTACH=pipe FORCE=" in host.calls()
+    assert not _agent_moved_the_checkout(host), "deploy.sh moves the tree, never the agent"
+    assert not any("--relay-update" in c for c in host.calls()), "install.sh --relay-update is retired"
+    assert (host.root / "etc/vpn-relay/install.json").read_bytes() == install_record, "install.json: the install's ref"
+    assert _update_state(host) == state
 
 
 def test_update_at_the_newest_release_is_a_noop(repo_host: tuple[Host, Path]) -> None:
@@ -831,7 +898,8 @@ def test_update_at_the_newest_release_is_a_noop(repo_host: tuple[Host, Path]) ->
     _git(host.root / "opt/vpn-service", "checkout", "-q", "--detach", "v1.1.0")
     rc, payload = _run_update(host)
     assert rc == 0 and payload["update"]["state"] == "noop"
-    assert not any(c.startswith("bash ") for c in host.calls())
+    assert "already at or past v1.1.0" in payload["update"]["message"]
+    assert _deploys(host) == []
 
 
 def test_update_never_goes_backwards(repo_host: tuple[Host, Path]) -> None:
@@ -846,14 +914,83 @@ def test_update_never_goes_backwards(repo_host: tuple[Host, Path]) -> None:
     rc, payload = _run_update(host)
     assert rc == 0 and payload["update"]["state"] == "noop"
     assert _git(app, "rev-parse", "HEAD") == head
+    assert _deploys(host) == []
 
 
-def test_failed_installer_puts_the_checkout_back(repo_host: tuple[Host, Path]) -> None:
+def test_update_never_moves_sideways(repo_host: tuple[Host, Path]) -> None:
+    host, origin = repo_host
+    app = host.root / "opt/vpn-service"
+    _git(app, "checkout", "-q", "--detach", "v1.1.0")
+    _git(origin, "checkout", "-q", "-b", "side", "v1.0.0")
+    (origin / "f").write_text("side", encoding="utf-8")
+    _git(origin, "commit", "-qam", "side")
+    _git(origin, "tag", "v2.0.0")
+    _git(origin, "checkout", "-q", "main")
+    rc, _ = _run_update(host)
+    assert rc == 4
+    assert _update_state(host)["state"] == "failed" and "not moving sideways" in _update_state(host)["message"]
+    assert _update_state(host)["release"] == "v2.0.0"
+    assert _deploys(host) == [] and _git(app, "rev-parse", "HEAD") == _git(origin, "rev-parse", "v1.1.0")
+
+
+def test_update_ignores_tags_that_are_not_releases(repo_host: tuple[Host, Path]) -> None:
+    """v.3.1.0 (the typo tag on the real repo), pre-releases and other v* names are not
+    releases: the newest RELEASE is still v1.1.0."""
+    host, origin = repo_host
+    for junk in ("v.3.1.0", "v9.0.0-rc1", "v9", "vX.1.0", "v9.0.0.0.0", "version-9.0"):
+        _git(origin, "tag", junk, "v1.1.0")
+    rc, payload = _run_update(host)
+    assert rc == 0 and payload["update"]["release"] == "v1.1.0"
+    assert "env DEPLOY_REF=v1.1.0 REDEPLOY_ATTACH=pipe FORCE=" in host.calls()
+
+
+def test_failed_deploy_is_rolled_back_by_deploy_sh(repo_host: tuple[Host, Path]) -> None:
     host, _ = repo_host
     app = host.root / "opt/vpn-service"
     before = _git(app, "rev-parse", "HEAD")
-    rc, payload = _run_update(host, installer_rc=1)
-    assert rc == 4 and "rolled back" in payload["error"]
+    rc, payload = _run_update(host, "rollback")
+    assert rc == 4 and "failed and rolled back (exit 1)" in payload["error"]
+    assert "vpn-relay-apply check failed after the restart" in payload["error"], "deploy.sh's own reason"
     assert _git(app, "rev-parse", "HEAD") == before
-    state = json.loads((host.root / "var/lib/vpn-relay/update.json").read_text(encoding="utf-8"))
-    assert state["state"] == "failed"
+    assert not _agent_moved_the_checkout(host), "the rollback is deploy.sh's"
+    state = _update_state(host)
+    assert state["state"] == "failed" and state["from_commit"] == before and "to_commit" not in state
+    assert state["log"] == "/root/deploy-20261116T000000Z.log"
+
+
+def test_deploy_stopping_in_phase1_changes_nothing(repo_host: tuple[Host, Path]) -> None:
+    host, _ = repo_host
+    app = host.root / "opt/vpn-service"
+    before = _git(app, "rev-parse", "HEAD")
+    rc, payload = _run_update(host, "phase1")
+    assert rc == 4
+    assert "stopped before any change (exit 1): insufficient space" in payload["error"]
+    assert _git(app, "rev-parse", "HEAD") == before and _update_state(host)["state"] == "failed"
+
+
+def test_deploy_finding_nothing_to_do_is_a_noop(repo_host: tuple[Host, Path]) -> None:
+    host, _ = repo_host
+    rc, payload = _run_update(host, "noop")
+    assert rc == 0 and payload["update"]["state"] == "noop"
+    assert "never goes backwards" in payload["update"]["message"]
+
+
+def test_a_checkout_whose_redeploy_predates_deploy_ref_is_refused(repo_host: tuple[Host, Path]) -> None:
+    """An older redeploy.sh would drop DEPLOY_REF and deploy origin/main: never run it."""
+    host, _ = repo_host
+    (host.root / "opt/vpn-service/scripts/redeploy.sh").write_text("# an old wrapper\n", encoding="utf-8")
+    rc, payload = _run_update(host)
+    assert rc == 4 and "cannot deploy a release (no DEPLOY_REF)" in payload["error"]
+    assert _deploys(host) == []
+
+
+def test_update_unit_and_bot_wait_long_enough_for_a_deploy() -> None:
+    """The deploy runs the pytest gate on the relay: the transient unit, the deploy's own
+    wait and the bot's SSH call are sized for it, each inside the next."""
+    from services.relays import AGENT_UPDATE_TIMEOUT
+
+    text = AGENT.read_text(encoding="utf-8")
+    assert '_transient("vpn-relay-update", "--internal-update", UPDATE_TIMEOUT)' in text
+    assert "timeout=UPDATE_TIMEOUT - 120" in text
+    assert agent.UPDATE_TIMEOUT >= 2400
+    assert AGENT_UPDATE_TIMEOUT == agent.UPDATE_TIMEOUT + 60
