@@ -149,9 +149,11 @@ SBIN_COMMAND_RE = re.compile(r"^/usr/local/sbin/([A-Za-z0-9][A-Za-z0-9._-]*)$")
 # what a shell function actually re-applies instead of grepping for unit names —
 # `systemctl restart "$SOME_NEW_UNIT"` must be as visible as a literal.
 SYSTEMCTL_CALL_RE = re.compile(r"\bsystemctl\s+([a-z][a-z-]*)(?:\s+(\S+))?")
-# One OUT_OF_REPO_HELPERS entry: "<src>|<dst>[|<policy>[|<role>]]" — policy and role
-# optional (absent-ok / main when omitted, exactly as scan_out_of_repo_helpers reads it).
-REGISTRY_ENTRY_RE = re.compile(r'^\s*"([^"|]+)\|([^"|]+?)(?:\|([^"|]+)(?:\|([^"|]+))?)?"\s*$')
+# One OUT_OF_REPO_HELPERS entry: "<src>|<dst>[|<policy>[|<role>[|<absent-reason>]]]" —
+# policy and role optional (absent-ok / main when omitted, exactly as
+# scan_out_of_repo_helpers reads it); the absent-reason is what deploy.sh prints when it
+# leaves an absent absent-ok helper absent (helper_absent_reason).
+REGISTRY_ENTRY_RE = re.compile(r'^\s*"([^"|]+)\|([^"|]+?)(?:\|([^"|]+)(?:\|([^"|]+)(?:\|([^"|]+))?)?)?"\s*$')
 
 VALID_POLICIES = frozenset({"absent-ok", "required"})
 # Host roles (NODE_ROLE). An entry is scanned/installed only on a host of its role.
@@ -185,7 +187,8 @@ def parse_registry(deploy_text: str) -> dict[str, tuple[str, str, str, str]]:
     Returns {installed basename: (checkout-relative source, installed path, policy, role)}.
     Comment lines inside the array are ignored; a two-field entry defaults to the
     `absent-ok` policy and a policy-only entry to the `main` role, exactly like
-    scan_out_of_repo_helpers does in bash. Every role counts as "registered": the
+    scan_out_of_repo_helpers does in bash; the fifth field (the absent-reason) is
+    absent_reasons()' business, not this map's. Every role counts as "registered": the
     guards below ask whether the drift gate knows a helper at all, and a relay
     helper is gated on every relay host just as a main helper is on every main one.
     A helper of BOTH roles has one entry per role; they are merged here into one
@@ -977,7 +980,11 @@ def test_registry_parser_defaults_the_optional_policy_and_role_fields() -> None:
         '  "scripts/two-field|/usr/local/sbin/two-field"\n'
         '  "scripts/three-field|/usr/local/sbin/three-field|required"\n'
         '  "scripts/four-field|/usr/local/sbin/four-field|required|relay"\n'
+        '  "scripts/five-field|/usr/local/sbin/five-field|absent-ok|relay|not paired yet"\n'
         ')\n'
+    )
+    assert parsed["five-field"] == (
+        "scripts/five-field", "/usr/local/sbin/five-field", "absent-ok", "relay"
     )
     assert parsed["two-field"] == (
         "scripts/two-field", "/usr/local/sbin/two-field", "absent-ok", "main"
@@ -1000,7 +1007,39 @@ def test_registry_parser_rejects_a_malformed_entry() -> None:
     with pytest.raises(AssertionError):
         parse_registry('OUT_OF_REPO_HELPERS=(\n  "scripts/no-destination"\n)\n')
     with pytest.raises(AssertionError):
-        parse_registry('OUT_OF_REPO_HELPERS=(\n  "scripts/x|/usr/local/sbin/x|required|relay|extra"\n)\n')
+        parse_registry('OUT_OF_REPO_HELPERS=(\n  "scripts/x|/usr/local/sbin/x|absent-ok|relay|why|extra"\n)\n')
+
+
+def absent_reasons(deploy_text: str) -> dict[tuple[str, str], str]:
+    """{(installed basename, role): absent-reason} of every entry that carries one."""
+    start = deploy_text.index("OUT_OF_REPO_HELPERS=(")
+    body = deploy_text[start:].split("\n)", 1)[0].splitlines()[1:]
+    out: dict[tuple[str, str], str] = {}
+    for line in body:
+        m = REGISTRY_ENTRY_RE.match(line)
+        if m is not None and m.group(5):
+            out[m.group(2).rsplit("/", 1)[-1], m.group(4) or "main"] = m.group(5)
+    return out
+
+
+def test_every_absent_ok_entry_says_why_it_may_stay_absent() -> None:
+    """deploy.sh prints the entry's reason on its "leaving absent" line, so a relay is
+    not told its missing agent means "WARP not deployed". A `required` helper is never
+    left absent: a reason there would be dead text, and is refused."""
+    text = _read(DEPLOY_SH)
+    reasons = absent_reasons(text)
+    body = text[text.index("OUT_OF_REPO_HELPERS=(") :].split("\n)", 1)[0].splitlines()[1:]
+    for line in body:
+        m = REGISTRY_ENTRY_RE.match(line)
+        if m is None:
+            continue
+        name, policy, role = m.group(2).rsplit("/", 1)[-1], m.group(3) or "absent-ok", m.group(4) or "main"
+        if policy == "absent-ok":
+            assert reasons.get((name, role), "").strip(), f"{name} ({role}): absent-ok without an absent-reason"
+        else:
+            assert (name, role) not in reasons, f"{name} ({role}): a required helper is never left absent"
+    assert reasons["vpn-relay-agent", "relay"] == "installed at pairing from the bot — there is none before pairing"
+    assert all(why == "WARP not deployed here" for (name, role), why in reasons.items() if role == "main")
 
 
 def test_registry_parser_reads_the_real_array_whole() -> None:

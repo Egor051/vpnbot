@@ -355,8 +355,9 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
   сервере (тестовый venv собирается в `/var/lib/vpn-bot-deploy/`, поэтому relay нужен
   `python3-venv` и ~1 ГиБ свободного места), `vpn-relay-apply check --dry-run` из checkout,
   исходное состояние relay (включая `nf_conntrack_max` и
-  `nf_conntrack_tcp_timeout_established` в рантайме), сравнение установленного unit'а с
-  `deploy/relay/vpn-relay.service` и `check` из checkout против живого relay — на relay, где
+  `nf_conntrack_tcp_timeout_established` в рантайме), сравнение каждого unit'а
+  [набора relay](#какие-unitы-ставит-деплой-relay) с его копией в `deploy/relay/` (`absent`,
+  `synced`, `differs`; `legacy` — для собранного вручную `vpn-relay.service`) и `check` из checkout против живого relay — на relay, где
   ещё работает ruleset, собранный вручную, `ok: table ip vpnrelay matches` здесь доказывает,
   что репозиторий воспроизводит его 1:1 (код `16`, пока нет [входного фильтра](#входной-фильтр),
   `15`, пока не выставлены значения [conntrack](#conntrack), PASS — после обоих). Dry-run
@@ -364,12 +365,14 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
   есть поставит ли Phase 2 dead-man, и URL пробы main, которая его подтвердит; порт, который
   слушает, но был бы закрыт фильтром, отмечается отдельно: `check` в Phase 2 откатил бы деплой.
 - **Phase 2**: бэкап живых `nft list table ip vpnrelay` и `nft list table inet vpnrelay_input`,
-  установленного хелпера, unit'а, sysctl-файла и маркера подтверждения
+  установленного хелпера, каждого unit'а набора, sysctl-файла и маркера подтверждения
   `/etc/vpn-relay/input.confirmed` (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; ради бэкапа ничего не
   останавливается); `git reset --hard origin/main`; установка `vpn-relay-apply` через
-  `OUT_OF_REPO_HELPERS` (роль `relay`) и `deploy/relay/vpn-relay.service` как есть;
-  `daemon-reload`, `enable`, `restart vpn-relay` (установленные потоки сохраняют NAT в
-  conntrack на миллисекундный разрыв; неподтверждённый набор здесь же подтверждает проба main);
+  `OUT_OF_REPO_HELPERS` (роль `relay`) и каждого unit'а набора как есть (копия, которая уже
+  совпадает, не переписывается); `daemon-reload`, `enable` `vpn-relay` и каждого таймера,
+  `restart vpn-relay` (установленные потоки сохраняют NAT в
+  conntrack на миллисекундный разрыв; неподтверждённый набор здесь же подтверждает проба main),
+  `start` таймера, который не активен;
   проверка `vpn-relay-apply check`. Вокруг файлов хоста двигается [SSH-порт](host-state.ru.md#ssh-порт),
   когда этого требует `SSH_PORT` (фаза 1: оба порта; рестарт `vpn-relay` пускает их, проба с main
   их подтверждает); сразу после DEPLOY OK `vpn-bot-ssh-port.service` один раз ищет доказательство,
@@ -378,19 +381,46 @@ the conntrack sysctls differ») вместо PASS; Phase 2 их выставля
   `vpn-relay-apply input-status` — `CONFIRMED by main probe (…)`, и делать ничего не нужно, или
   `PENDING CONFIRM (…) — <причина>`, за которым идут причина и инструкция выполнить
   `input-confirm` из НОВОЙ ssh-сессии в течение 5 минут.
-- **Любой сбой** откатывает: прежний checkout, хелпер, unit и sysctl-файл (или их отсутствие),
+- **Любой сбой** откатывает: прежний checkout, хелпер, unit'ы и sysctl-файл (или их отсутствие),
   сохранённая таблица проброса применяется заново одной транзакцией, входной фильтр — как был:
   подтверждённый восстанавливается из дампа, отсутствовавший снимается, ждавший `input-confirm`
   тоже снимается (восстановленный, он мог бы пережить свой dead-man; снять — безопасное
   направление), маркер подтверждения — как был (подтверждение, которое проба main записала во
   время рестарта, относится к набору, которого больше нет в живых), а dead-man, поставленный
   деплоем, останавливается; восстанавливаются enabled/active
-  unit'а, прежний `ip_forward` и прежние значения conntrack в рантайме (каждое перечитывается;
+  каждого unit'а (unit, которого до деплоя не было, останавливается, выключается и удаляется;
+  таймер, который до деплоя не был активен / включён, снова останавливается / выключается;
+  отчёт об откате перечисляет каждый unit), прежний `ip_forward` и прежние значения conntrack в рантайме (каждое перечитывается;
   значение, которое до деплоя не читалось — nf_conntrack не был загружен, — остаётся таким, как
   его выставил `apply`). Деплой выходит с ненулевым кодом и отчётом об откате.
 - Unit, установленный вручную и загружающий `/etc/vpn-relay.nft`, — **ожидаемый первый
   переход**, а не drift. После первого успешного деплоя `/etc/vpn-relay.nft` переименовывается
   в `/etc/vpn-relay.nft.pre-repo.<ts>` (не удаляется) и больше никем не читается.
+
+#### Какие unit'ы ставит деплой relay
+
+Набор unit'ов relay — **все `deploy/relay/*.service` и `*.timer`** (файл `*.example.*` — не
+unit). Это одно правило (`relay_unit_names`), дословно одинаковое в `scripts/deploy.sh`,
+`scripts/install.sh --relay` и `scripts/vpn-bot-host-check`: деплой ставит ровно то, что ставит
+установщик и ждёт проверка хоста, — и никакого захардкоженного списка
+(`tests/test_deploy_relay_units.py` держит все три вместе). Сейчас:
+
+| Unit | Phase 2 |
+|---|---|
+| `vpn-relay.service` | ставится как есть, включается, перезапускается (`vpn-relay-apply apply`) |
+| `vpn-relay-resolve.timer` | ставится как есть, включается, запускается, если не активен |
+| `vpn-relay-resolve.service` | только ставится как есть — его запускает таймер; деплой его не запускает никогда |
+
+Unit, установленная копия которого уже совпадает, не переписывается: повторный деплой
+показывает каждый unit как `synced` и ни один не меняет. Гейтом остаётся проверка
+[host invariants](host-state.ru.md#эффективное-состояние) после установки: отсутствующий unit
+набора, unit, загруженный не из `/etc/systemd/system/`, или таймер, который не enabled + active, —
+это MISMATCH и откат деплоя. С `RELAY_UPSTREAM_IPV4` (адрес, а не
+[имя](#dns-имя-как-upstream)) таймер всё равно стоит и активен: `vpn-relay-apply resolve` тогда
+пишет `no RELAY_UPSTREAM_HOST (the upstream is an address) — nothing to do`, выходит с кодом 0 и
+ничего не трогает. Relay, развёрнутый до того, как деплой начал ставить resolve-unit'ы (на нём
+только `vpn-relay.service`), получает их при следующем деплое — раньше проверка хоста из-за них
+откатывала этот деплой.
 
 ### Новый relay с нуля
 

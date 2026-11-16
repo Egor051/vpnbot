@@ -1,5 +1,6 @@
 # Every 5 minutes: vpn-relay-resolve.service (docs/relay.md#a-dns-name-as-the-upstream).
-# Installed and enabled by scripts/install.sh (relay mode).
+# Installed verbatim, enabled and started by scripts/install.sh (relay mode) and by
+# scripts/deploy.sh (role relay); the host check (role relay) wants it enabled + active.
 [Unit]
 Description=vpnbot L4 relay: re-resolve the upstream's DNS name every 5 minutes
 

@@ -951,6 +951,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The relay deploy installs the relay's whole unit set — it no longer rolls back on its own host invariants
+  gate with «FAIL MISMATCH unit vpn-relay-resolve.service / vpn-relay-resolve.timer — the repo installs …, but
+  it is not on the host»** (docs/relay.md#the-units-a-relay-deploy-installs). `scripts/install.sh --relay`
+  installed `vpn-relay.service` and `vpn-relay-resolve.{service,timer}`, `scripts/vpn-bot-host-check` (role
+  relay) expects every `deploy/relay/*.service|*.timer`, but `scripts/deploy.sh` (`NODE_ROLE=relay`) installed
+  `vpn-relay.service` only, so on the production relay the gate found the two resolve units missing after
+  Phase 2 and rolled the deploy back (correctly; the relay stayed up). **One rule**: `relay_unit_names` —
+  every `deploy/relay/*.service` and `*.timer`, never an `*.example.*` — is carried verbatim by all three
+  scripts; install.sh fills `RELAY_UNITS` from the checkout instead of a hard-coded list, and enables /
+  (re)starts every timer of the set, verifying each is active. **deploy.sh, role relay**: Phase 1 shows every
+  unit of the set (`absent` / `synced` / `differs`; `legacy` for the hand-made `vpn-relay.service`) in its log
+  and the `CHECK=1` report, with each unit's pre-state; Phase 2 backs up every unit (one not there yet is
+  recorded as absent), installs each verbatim (a synced copy is not rewritten), `daemon-reload`, enables
+  `vpn-relay.service` and every timer, restarts `vpn-relay.service`, starts a timer that is not active — the
+  oneshot a timer runs (`vpn-relay-resolve.service`) is never started by hand. The rollback stops and disables
+  a unit that was not installed before (its file removed with the backup's other files), stops / disables a
+  timer that was not active / enabled, keeps one that was, and the ROLLBACK REPORT ends with one line per unit
+  (now vs before the deploy); DEPLOY OK has a line per unit. The order is unchanged: host invariants after the
+  install stays the gate. `vpn-relay-apply resolve` with `RELAY_UPSTREAM_IPV4` (the production relay) was
+  already a no-op — it logs «no RELAY_UPSTREAM_HOST … nothing to do» and exits 0 — and is now pinned against
+  the shipped `relay.env.example`. **Also**: the «leaving absent» line for an absent `absent-ok` helper said
+  «(WARP not deployed here)» for every helper, the relay agent on a relay too; the reason is now the entry's
+  own new fifth field in `OUT_OF_REPO_HELPERS` (`<src>|<dst>|<policy>|<role>|<absent-reason>`, read by
+  `helper_absent_reason`): «WARP not deployed here» for the WARP helpers, «installed at pairing from the bot —
+  there is none before pairing» for `vpn-relay-agent`. The registry parsers (the scan of unaccounted host
+  files, `vpn-bot-wizard-selfcheck`, the registry guard test) read the fifth field. **Tests**:
+  `tests/test_deploy_relay_units.py` — the three bodies identical and their sets equal (on the repo and on a
+  checkout with extra units), the real host check judging exactly that set, no unit of the set named in
+  either installer's code, every other service of the set run by a timer of the set; install.sh by the set;
+  end to end against the REAL `vpn-bot-host-check` — the production relay (repo `vpn-relay.service`, no
+  resolve units) gets them, host invariants clean, DEPLOY OK (against the old deploy.sh the same test fails
+  with the production MISMATCH rows), a second deploy all `synced` with no unit file rewritten and no unit
+  started, and ANY unit of the set missing after Phase 2 rolls back; the rollback unit by unit; `resolve` a
+  no-op with an address upstream; the absent-ok reason per entry, and every absent-ok entry must carry one.
+
 - **Tests never reach the network; deploy Phase 1 no longer fails on
   `test_built_monitor_alerts_every_admin_once_per_transition` (1 failed / 5109 passed on the host, green in
   CI — the host-leak class of #239/#241/#242/#336), and the suite no longer sends traffic from the production

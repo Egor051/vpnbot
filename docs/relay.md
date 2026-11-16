@@ -357,8 +357,9 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   same ruff / compileall / pytest gate on the checkout as on the main server (a test venv is
   built under `/var/lib/vpn-bot-deploy/`, so the relay needs `python3-venv` and ~1 GiB free),
   `vpn-relay-apply check --dry-run` from the checkout, the relay's pre-state (including the
-  runtime `nf_conntrack_max` and `nf_conntrack_tcp_timeout_established`), the installed unit
-  compared with `deploy/relay/vpn-relay.service`, and the checkout's `check` against the live
+  runtime `nf_conntrack_max` and `nf_conntrack_tcp_timeout_established`), every unit of the
+  relay's [unit set](#the-units-a-relay-deploy-installs) compared with its `deploy/relay/` copy
+  (`absent`, `synced`, `differs`; `legacy` for the hand-made `vpn-relay.service`), and the checkout's `check` against the live
   relay — on a relay that still runs the hand-made ruleset `ok: table ip vpnrelay matches`
   there proves the repo reproduces it 1:1 (the exit is `16` until the
   [input filter](#the-input-filter) exists, `15` before the [conntrack](#conntrack) values are
@@ -367,12 +368,14 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   probe that will confirm it, and a port that listens but would be filtered is called out:
   Phase 2's `check` would roll back.
 - **Phase 2**: back up the live `nft list table ip vpnrelay` and
-  `nft list table inet vpnrelay_input`, the installed helper, the unit, the sysctl file and the
+  `nft list table inet vpnrelay_input`, the installed helper, every unit of the set, the sysctl file and the
   confirmation marker `/etc/vpn-relay/input.confirmed` (`/var/backups/vpn-bot/backup-relay-<sha>-<ts>.tar.gz`; nothing is
   stopped for it); `git reset --hard origin/main`; install `vpn-relay-apply` through
-  `OUT_OF_REPO_HELPERS` (role `relay`) and `deploy/relay/vpn-relay.service` verbatim;
-  `daemon-reload`, `enable`, `restart vpn-relay` (established flows keep their conntrack NAT
-  across the millisecond gap; a set that is not confirmed is confirmed by main's probe here);
+  `OUT_OF_REPO_HELPERS` (role `relay`) and every unit of the set verbatim (a copy that already
+  matches is left as it is); `daemon-reload`, `enable` `vpn-relay` and every timer,
+  `restart vpn-relay` (established flows keep their conntrack NAT
+  across the millisecond gap; a set that is not confirmed is confirmed by main's probe here),
+  `start` a timer that is not active;
   verify with `vpn-relay-apply check`. Around the host files the [SSH port](host-state.md#the-ssh-port)
   moves when `SSH_PORT` asks for it (phase 1: both ports; the restart of `vpn-relay` then lets
   them in and main's probe confirms them); right after DEPLOY OK `vpn-bot-ssh-port.service` looks
@@ -381,19 +384,46 @@ while `vpn-relay` is active and there is no `vpn-bot` unit at all).
   `vpn-relay-apply input-status` — `CONFIRMED by main probe (…)` with nothing to do, or
   `PENDING CONFIRM (…) — <why>` followed by the reason and the instruction to run
   `input-confirm` from a NEW ssh session within 5 minutes.
-- **Any failure** rolls back: the previous checkout, helper, unit and sysctl file (or their
+- **Any failure** rolls back: the previous checkout, helper, units and sysctl file (or their
   absence), the saved forwarding table re-applied in one transaction, the input filter as it
   was — a confirmed one from its dump, one that did not exist removed, one that was still
   waiting for `input-confirm` removed too (restored, it could outlive its dead-man; removing is
   the safe direction) — the confirmation marker as it was (a confirmation main's probe wrote
   during the restart is for a set that is no longer live), the dead-man the deploy armed
-  stopped, the unit's enabled/active state, the
+  stopped, the enabled/active state of every unit (one that was not installed before is
+  stopped, disabled and removed; a timer that was not active / enabled before is stopped /
+  disabled again; the rollback report names every unit), the
   previous `ip_forward` and the previous runtime conntrack values (each read back; a value that
   was unreadable before the deploy — nf_conntrack not loaded — is left as `apply` set it). The
   deploy exits non-zero with a rollback report.
 - A unit installed by hand that loads `/etc/vpn-relay.nft` is the **expected first
   transition**, not drift. After the first successful deploy `/etc/vpn-relay.nft` is renamed to
   `/etc/vpn-relay.nft.pre-repo.<ts>` (never deleted) and nothing reads it any more.
+
+#### The units a relay deploy installs
+
+The relay's unit set is **every `deploy/relay/*.service` and `*.timer`** (an `*.example.*` file
+is not a unit). It is one rule (`relay_unit_names`), carried verbatim by `scripts/deploy.sh`,
+`scripts/install.sh --relay` and `scripts/vpn-bot-host-check`, so a deploy installs exactly
+what the installer installs and what the host check expects — never a hard-coded list
+(`tests/test_deploy_relay_units.py` pins the three together). Today:
+
+| Unit | Phase 2 |
+|---|---|
+| `vpn-relay.service` | installed verbatim, enabled, restarted (`vpn-relay-apply apply`) |
+| `vpn-relay-resolve.timer` | installed verbatim, enabled, started when it is not active |
+| `vpn-relay-resolve.service` | installed verbatim only — its timer runs it; the deploy never starts it |
+
+A unit whose installed copy already matches is not rewritten: a second deploy reports every
+unit `synced` and changes none of them. The [host invariants](host-state.md#effective-state)
+check after the install stays the gate — a unit of the set that is missing, not loaded from
+`/etc/systemd/system/`, or a timer that is not enabled + active is a MISMATCH and rolls the
+deploy back. With `RELAY_UPSTREAM_IPV4` (an address, not a [name](#a-dns-name-as-the-upstream))
+the timer is installed and active all the same: `vpn-relay-apply resolve` then logs
+`no RELAY_UPSTREAM_HOST (the upstream is an address) — nothing to do`, exits 0 and touches
+nothing. A relay deployed before the deploy installed the resolve units (it has
+`vpn-relay.service` only) gets them on its next deploy — they used to make the host check roll
+that deploy back.
 
 ### A new relay from scratch
 

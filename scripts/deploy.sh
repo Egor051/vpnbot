@@ -39,10 +39,14 @@
 #          Phase 1: fetch, the same ruff/compileall/pytest gate on the checkout,
 #          `vpn-relay-apply check --dry-run` from the checkout (the ruleset renders
 #          from .env) — no main-only check. Phase 2: backup (live table ip
-#          vpnrelay and table inet vpnrelay_input, helper, unit, sysctl file),
-#          reset, install the helper (OUT_OF_REPO_HELPERS, role relay) and
-#          deploy/relay/vpn-relay.service verbatim, daemon-reload, enable,
-#          restart, verify = `vpn-relay-apply check`; any failure rolls back to
+#          vpnrelay and table inet vpnrelay_input, helper, units, sysctl file),
+#          reset, install the helper (OUT_OF_REPO_HELPERS, role relay) and the
+#          relay's unit set — every deploy/relay/*.service|*.timer
+#          (relay_unit_names, the rule scripts/install.sh and
+#          scripts/vpn-bot-host-check use) — verbatim, daemon-reload, enable
+#          vpn-relay.service and every timer, restart vpn-relay.service, start a
+#          timer that is not active (the oneshots a timer runs are never started
+#          by hand), verify = `vpn-relay-apply check`; any failure rolls back to
 #          the backup (files + saved tables + the input filter's dead-man state
 #          and confirmation marker) and to the pre-deploy runtime sysctls
 #          (ip_forward, conntrack). A TCP set of the input filter that is not
@@ -315,6 +319,15 @@ NODE_ROLE=""                                   # resolved by resolve_node_role: 
 RELAY_UNIT="vpn-relay.service"
 RELAY_UNIT_SRC="deploy/relay/vpn-relay.service"   # checkout-relative; installed verbatim
 RELAY_SYSTEM_UNIT="${RELAY_SYSTEM_UNIT:-/etc/systemd/system/vpn-relay.service}"
+# The relay's whole unit set: every deploy/relay/*.service|*.timer of the checkout
+# Phase 2 installs (relay_unit_names — the same rule as scripts/install.sh and
+# scripts/vpn-bot-host-check), each installed verbatim next to RELAY_SYSTEM_UNIT
+# (relay_unit_dst). vpn-relay.service is one of them. Filled by relay_snapshot_prestate.
+declare -a RELAY_UNITS=()
+declare -A RELAY_UNIT_STATES=()       # unit -> absent | synced | legacy | differs (relay_unit_state)
+declare -A RELAY_PRE_UNIT_FILE=()     # unit -> present | absent: its unit file before the deploy
+declare -A RELAY_PRE_UNIT_ACTIVE=()   # unit -> is-active before the deploy
+declare -A RELAY_PRE_UNIT_ENABLED=()  # unit -> is-enabled before the deploy
 RELAY_HELPER="/usr/local/sbin/vpn-relay-apply"     # == its OUT_OF_REPO_HELPERS destination
 RELAY_SYSCTL_FILE="${RELAY_SYSCTL_FILE:-/etc/sysctl.d/90-vpn-relay.conf}"
 # The hand-installed relay loaded this file; after the first successful deploy it
@@ -384,11 +397,15 @@ RELAY_LIVE_RC=""
 # (Exec*=), or a deploy/sudoers.d/* fragment grants one, that has no entry here.
 # That second scan is anchored at the install site, so it still fires for a helper
 # whose source is not (or is no longer) a scripts/ file.
-# Format per entry: "<checkout-relative-source>|<installed-absolute-path>[|<policy>[|<role>]]"
+# Format per entry:
+#   "<checkout-relative-source>|<installed-absolute-path>[|<policy>[|<role>[|<absent-reason>]]]"
 # policy (default absent-ok when the field is omitted):
-#   absent-ok  an ABSENT installed copy means the subsystem is not deployed on this
-#              host (WARP), so installing the helper alone would be pointless —
-#              absent is not drift and is never "fixed".
+#   absent-ok  an ABSENT installed copy means the piece it belongs to is not on this
+#              host (WARP not deployed; the relay agent before pairing), so installing
+#              the helper alone would be pointless — absent is not drift and is never
+#              "fixed". <absent-reason> says WHY for this entry; Phase 2 prints it on
+#              its "leaving absent" line (helper_absent_reason) — every absent-ok
+#              entry carries one (tests/test_deploy_helper_registry_guard.py).
 #   required   the helper MUST exist on every host because a systemd unit names it
 #              in Exec*=; absent is installed, not tolerated. Without this,
 #              vpn-bot.service's ExecStartPre would fail 203/EXEC on a clean host.
@@ -396,28 +413,30 @@ RELAY_LIVE_RC=""
 # entry belongs to. scan_out_of_repo_helpers only ever sees the entries of the
 # host's own role, so a main server never scans, installs or reports a relay
 # helper and a relay never touches the WARP/DB helpers. `required` means
-# "required on every host OF THAT ROLE".
+# "required on every host OF THAT ROLE". An entry with an <absent-reason> spells its
+# role out (the fields are positional).
 OUT_OF_REPO_HELPERS=(
-  "scripts/vpn-bot-warp-install|/usr/local/sbin/vpn-bot-warp-install|absent-ok"
-  "scripts/vpn-bot-warp-iface|/usr/local/sbin/vpn-bot-warp-iface|absent-ok"
-  "scripts/vpn-bot-warp-routes|/usr/local/sbin/vpn-bot-warp-routes|absent-ok"
-  "scripts/vpn-bot-warp-status|/usr/local/sbin/vpn-bot-warp-status|absent-ok"
+  "scripts/vpn-bot-warp-install|/usr/local/sbin/vpn-bot-warp-install|absent-ok|main|WARP not deployed here"
+  "scripts/vpn-bot-warp-iface|/usr/local/sbin/vpn-bot-warp-iface|absent-ok|main|WARP not deployed here"
+  "scripts/vpn-bot-warp-routes|/usr/local/sbin/vpn-bot-warp-routes|absent-ok|main|WARP not deployed here"
+  "scripts/vpn-bot-warp-status|/usr/local/sbin/vpn-bot-warp-status|absent-ok|main|WARP not deployed here"
   # WARP selective-split layer + the boot failsafe. Additive on top of the
   # full-tunnel base, installed unconditionally by setup-nonroot-helper-mode.sh
   # but never auto-enabled, so absent-ok is the right policy for all four.
-  "scripts/vpn-bot-warp-split|/usr/local/sbin/vpn-bot-warp-split|absent-ok"
-  "scripts/vpn-bot-warp-split-state|/usr/local/sbin/vpn-bot-warp-split-state|absent-ok"
-  "scripts/vpn-bot-warp-split-apply|/usr/local/sbin/vpn-bot-warp-split-apply|absent-ok"
-  "scripts/warp-failsafe|/usr/local/sbin/warp-failsafe|absent-ok"
-  "scripts/vpnbot-hy2-warp-mark|/usr/local/sbin/vpnbot-hy2-warp-mark|absent-ok"
+  "scripts/vpn-bot-warp-split|/usr/local/sbin/vpn-bot-warp-split|absent-ok|main|WARP not deployed here"
+  "scripts/vpn-bot-warp-split-state|/usr/local/sbin/vpn-bot-warp-split-state|absent-ok|main|WARP not deployed here"
+  "scripts/vpn-bot-warp-split-apply|/usr/local/sbin/vpn-bot-warp-split-apply|absent-ok|main|WARP not deployed here"
+  "scripts/warp-failsafe|/usr/local/sbin/warp-failsafe|absent-ok|main|WARP not deployed here"
+  "scripts/vpnbot-hy2-warp-mark|/usr/local/sbin/vpnbot-hy2-warp-mark|absent-ok|main|WARP not deployed here"
   "scripts/vpn-bot-db-perms|/usr/local/sbin/vpn-bot-db-perms|required"
   # L4 relay data plane: executed by deploy/relay/vpn-relay.service (ExecStart=),
   # so `required` on every relay host; invisible on a main server.
   "scripts/vpn-relay-apply|/usr/local/sbin/vpn-relay-apply|required|relay"
   # The relay agent (docs/relay.md#the-agent-vpn-relay-agent): the forced command of the
-  # main bot's key, installed by scripts/install.sh --relay only — a relay deployed by
-  # hand has none, so absent-ok; where it is installed a redeploy keeps it current.
-  "scripts/vpn-relay-agent|/usr/local/sbin/vpn-relay-agent|absent-ok|relay"
+  # main bot's key, installed by scripts/install.sh --relay only, i.e. when the relay is
+  # paired from the bot — a relay deployed by hand, or one not paired yet, has none, so
+  # absent-ok; where it is installed a redeploy keeps it current.
+  "scripts/vpn-relay-agent|/usr/local/sbin/vpn-relay-agent|absent-ok|relay|installed at pairing from the bot — there is none before pairing"
   # The host invariants check (docs/host-state.md#effective-state): executed by
   # vpn-bot-host-check.service (a MANAGED_HOST_FILES unit of BOTH roles), so
   # `required` on every host of either role — one entry per role.
@@ -987,13 +1006,26 @@ gate_protocol() {
 # --------------------------------------------------------------------------- #
 # Out-of-repo helper drift (see OUT_OF_REPO_HELPERS above)
 # --------------------------------------------------------------------------- #
+# Why an ABSENT absent-ok helper stays absent ($1 = its installed path): the
+# <absent-reason> of its registry entry for this host's role, else a generic reason.
+helper_absent_reason() {
+  local entry dst role why
+  for entry in "${OUT_OF_REPO_HELPERS[@]}"; do
+    IFS='|' read -r _ dst _ role why <<< "$entry"
+    [[ "$dst" == "$1" && "${role:-main}" == "${NODE_ROLE:-main}" ]] || continue
+    if [[ -n "$why" ]]; then printf '%s' "$why"; return 0; fi
+  done
+  printf '%s' "the part of the system it belongs to is not deployed on this host"
+}
+
 # Scan each managed helper's installed copy against the tracked source under
 # <root> (Phase 1 passes $WT = origin/main worktree; Phase 2 passes $APP_DIR =
 # the post-`git reset` working tree). Prints one line per helper:
 #   "<base>|<resolved-src>|<dst>|<state>|<policy>"  state ∈ absent | synced | drift
-# For an absent-ok helper, ABSENT (no installed copy) means WARP is not deployed on
-# this host — installing a helper without its config/units/symlink would be
-# pointless, so absent is NOT drift and is never "fixed" here. For a `required`
+# For an absent-ok helper, ABSENT (no installed copy) means the piece it belongs to
+# is not on this host (its entry's <absent-reason>: WARP not deployed, the relay not
+# paired) — installing the helper alone would be pointless, so absent is NOT drift
+# and is never "fixed" here. For a `required`
 # helper absent IS actionable (a unit's Exec*= names it). Only a present-but-
 # different copy is drift, under either policy.
 scan_out_of_repo_helpers() {
@@ -1002,7 +1034,8 @@ scan_out_of_repo_helpers() {
     # Read the fields positionally: the policy field is OPTIONAL and defaults to
     # absent-ok, so a two-field entry stays valid; the role field is OPTIONAL too
     # and defaults to main. Entries of another role are not this host's helpers.
-    IFS='|' read -r src_rel dst policy role <<< "$entry"
+    # The fifth field (<absent-reason>) is helper_absent_reason's, not this scan's.
+    IFS='|' read -r src_rel dst policy role _ <<< "$entry"
     policy="${policy:-absent-ok}"
     [[ "${role:-main}" == "${NODE_ROLE:-main}" ]] || continue
     base="$(basename "$dst")"
@@ -1039,7 +1072,7 @@ install_out_of_repo_helpers() {
             || rollback_now "failed to install required helper ${base} from ${src} to ${dst}"
           changed=1
         else
-          log "  ${base}: not installed on this host (WARP not deployed here) — leaving absent"
+          log "  ${base}: not installed on this host ($(helper_absent_reason "$dst")) — leaving absent"
         fi
         ;;
       synced) log "  ${base}: already in sync with the checkout" ;;
@@ -2035,14 +2068,14 @@ scan_unaccounted_host_files() {
     if [[ -n "$legacy" ]]; then known["$legacy"]=1; fi
   done
   for entry in "${OUT_OF_REPO_HELPERS[@]}"; do
-    IFS='|' read -r _ dst _ role <<< "$entry"
+    IFS='|' read -r _ dst _ role _ <<< "$entry"
     if [[ "${role:-main}" == "${NODE_ROLE:-main}" ]]; then known["$dst"]=1; fi
   done
   shopt -s nullglob
   if [[ "${NODE_ROLE:-main}" == "relay" ]]; then
-    for f in "$root"/deploy/relay/*.service "$root"/deploy/relay/*.timer; do
-      known["${SYSTEMD_UNIT_DIR}/$(basename "$f")"]=1
-    done
+    while IFS= read -r base; do
+      known["${SYSTEMD_UNIT_DIR}/${base}"]=1
+    done < <(relay_unit_names "$root")
     known["$RELAY_SYSCTL_FILE"]=1
   else
     for f in "$root"/deploy/*.service "$root"/deploy/*.timer; do
@@ -4606,8 +4639,46 @@ run_checkout_tests() {
 # discipline install_out_of_repo_helpers already follows. The armed trap still
 # catches INT/TERM/HUP.
 
-# Pre-deploy facts the relay rollback restores to. Read-only.
+# The relay role's unit set: the basenames of every deploy/relay/*.service and
+# *.timer of checkout $1, one per line (an *.example.* file is not a unit). ONE rule,
+# carried verbatim by scripts/deploy.sh, scripts/install.sh (relay mode) and
+# scripts/vpn-bot-host-check (role relay) — tests/test_deploy_relay_units.py pins the
+# three bodies together and their sets equal. Never a hard-coded list: a unit added
+# to deploy/relay/ is installed by both and expected by the check at once.
+relay_unit_names() {
+  local f base
+  for f in "${1%/}"/deploy/relay/*.service "${1%/}"/deploy/relay/*.timer; do
+    [[ -f "$f" ]] || continue
+    base="${f##*/}"
+    [[ "$base" == *.example.* ]] && continue
+    printf '%s\n' "$base"
+  done
+}
+
+# Where a unit of the set is installed: next to vpn-relay.service.
+relay_unit_dst() {
+  if [[ "$1" == "$RELAY_UNIT" ]]; then printf '%s\n' "$RELAY_SYSTEM_UNIT"
+  else printf '%s/%s\n' "${RELAY_SYSTEM_UNIT%/*}" "$1"; fi
+}
+
+# What Phase 2 does with a unit of the set once its file is in place:
+#   data-plane  vpn-relay.service — enabled and restarted (vpn-relay-apply apply)
+#   timer       enabled, and started when it is not active
+#   timer-run   any other .service: the oneshot a timer of the set runs — installed
+#               only, never started by hand (tests/test_deploy_relay_units.py pins
+#               that every such service has its timer in deploy/relay/)
+relay_unit_kind() {
+  if [[ "$1" == "$RELAY_UNIT" ]]; then echo data-plane
+  elif [[ "$1" == *.timer ]]; then echo timer
+  else echo timer-run; fi
+}
+
+# Pre-deploy facts the relay rollback restores to, and the unit set of checkout $1
+# (default APP_DIR; Phase 1 passes $WT — origin/main, the tree Phase 2 installs) with
+# each unit's file, is-active, is-enabled and installed copy (relay_unit_state).
+# Read-only.
 relay_snapshot_prestate() {
+  local root="${1:-$APP_DIR}" u
   RELAY_PRE_ACTIVE="$(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true)"
   RELAY_PRE_ENABLED="$(systemctl is-enabled "$RELAY_UNIT" 2>/dev/null || true)"
   RELAY_PRE_FORWARD="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || true)"
@@ -4624,33 +4695,69 @@ relay_snapshot_prestate() {
     RELAY_PRE_INPUT_TABLE="absent"
   fi
   RELAY_PRE_DEADMAN="$(systemctl is-active "$RELAY_DEADMAN_TIMER" 2>/dev/null || true)"
+  readarray -t RELAY_UNITS < <(relay_unit_names "$root")
+  RELAY_UNIT_STATES=(); RELAY_PRE_UNIT_FILE=(); RELAY_PRE_UNIT_ACTIVE=(); RELAY_PRE_UNIT_ENABLED=()
+  for u in "${RELAY_UNITS[@]}"; do
+    if [[ -e "$(relay_unit_dst "$u")" ]]; then RELAY_PRE_UNIT_FILE["$u"]="present"; else RELAY_PRE_UNIT_FILE["$u"]="absent"; fi
+    RELAY_PRE_UNIT_ACTIVE["$u"]="$(systemctl is-active "$u" 2>/dev/null || true)"
+    RELAY_PRE_UNIT_ENABLED["$u"]="$(systemctl is-enabled "$u" 2>/dev/null || true)"
+    RELAY_UNIT_STATES["$u"]="$(relay_unit_state "$root" "$u")"
+  done
+  RELAY_UNIT_STATE="${RELAY_UNIT_STATES[$RELAY_UNIT]:-absent}"
 }
 
-# The installed vpn-relay.service vs the checkout's copy ($1 = checkout root):
-#   absent   not installed (a fresh relay)
+# An installed unit of the set vs the checkout's copy ($1 = checkout root, $2 = the
+# unit, default vpn-relay.service):
+#   absent   not installed (a fresh relay — or one installed before the unit was
+#            added to deploy/relay/, like vpn-relay-resolve.* on an older relay)
 #   synced   byte-identical
-#   legacy   the hand-installed unit: its ExecStart loads a ruleset file straight
-#            into nft (`nft -f /etc/vpn-relay.nft`) — the expected FIRST
-#            transition to the repo, not drift
+#   legacy   vpn-relay.service only: the hand-installed unit, its ExecStart loads a
+#            ruleset file straight into nft (`nft -f /etc/vpn-relay.nft`) — the
+#            expected FIRST transition to the repo, not drift
 #   differs  an older repo copy (or a hand edit) — replaced like vpn-bot.service is
-# In the relay role the unit is INSTALLED, never drift-reported, so no state here
+# In the relay role the units are INSTALLED, never drift-reported, so no state here
 # is an error. (The main role never looks at deploy/relay/ at all.)
 relay_unit_state() {
-  local src="${1%/}/${RELAY_UNIT_SRC}"
-  if [[ ! -f "$RELAY_SYSTEM_UNIT" ]]; then echo "absent"
-  elif cmp -s "$src" "$RELAY_SYSTEM_UNIT"; then echo "synced"
-  elif grep -E '^[[:space:]]*ExecStart=.*nft[[:space:]]+-f[[:space:]]' "$RELAY_SYSTEM_UNIT" >/dev/null 2>&1; then echo "legacy"
+  local unit="${2:-$RELAY_UNIT}" src dst
+  src="${1%/}/deploy/relay/${unit}"
+  dst="$(relay_unit_dst "$unit")"
+  if [[ ! -f "$dst" ]]; then echo "absent"
+  elif cmp -s "$src" "$dst"; then echo "synced"
+  elif [[ "$unit" == "$RELAY_UNIT" ]] \
+      && grep -E '^[[:space:]]*ExecStart=.*nft[[:space:]]+-f[[:space:]]' "$dst" >/dev/null 2>&1; then echo "legacy"
   else echo "differs"; fi
 }
 
-relay_unit_state_text() {
+relay_unit_state_text() {   # $1 state, $2 unit (default vpn-relay.service)
+  local unit="${2:-$RELAY_UNIT}" src
+  src="deploy/relay/${unit}"
   case "$1" in
-    absent)  echo "not installed — Phase 2 installs ${RELAY_UNIT_SRC} and enables it (fresh relay)" ;;
-    synced)  echo "matches ${RELAY_UNIT_SRC}" ;;
-    legacy)  echo "the hand-installed unit (loads ${RELAY_LEGACY_NFT}) — the expected first transition, NOT drift: Phase 2 replaces it with ${RELAY_UNIT_SRC} and, after a successful deploy, renames ${RELAY_LEGACY_NFT} to ${RELAY_LEGACY_NFT}.pre-repo.<ts>" ;;
-    differs) echo "differs from ${RELAY_UNIT_SRC} — Phase 2 installs the repo copy verbatim (relay role: installed, not drift-reported)" ;;
+    absent)
+      case "$(relay_unit_kind "$unit")" in
+        data-plane) echo "not installed — Phase 2 installs ${src} and enables it (fresh relay)" ;;
+        timer)      echo "not installed — Phase 2 installs ${src}, enables it and starts it" ;;
+        *)          echo "not installed — Phase 2 installs ${src} (its timer runs it; never started by hand)" ;;
+      esac ;;
+    synced)  echo "matches ${src}" ;;
+    legacy)  echo "the hand-installed unit (loads ${RELAY_LEGACY_NFT}) — the expected first transition, NOT drift: Phase 2 replaces it with ${src} and, after a successful deploy, renames ${RELAY_LEGACY_NFT} to ${RELAY_LEGACY_NFT}.pre-repo.<ts>" ;;
+    differs) echo "differs from ${src} — Phase 2 installs the repo copy verbatim (relay role: installed, not drift-reported)" ;;
     *)       echo "unknown (${1})" ;;
   esac
+}
+
+# A unit of the set, one line: where it is and what it is doing now.
+relay_unit_now() {
+  local u="$1" file="absent" active enabled
+  [[ -e "$(relay_unit_dst "$u")" ]] && file="present"
+  active="$(systemctl is-active "$u" 2>/dev/null || true)"
+  enabled="$(systemctl is-enabled "$u" 2>/dev/null || true)"
+  printf 'file %s, active=%s enabled=%s' "$file" "${active:-unknown}" "${enabled:-<none>}"
+}
+
+relay_unit_before() {
+  local u="$1"
+  printf 'file %s, active=%s enabled=%s' "${RELAY_PRE_UNIT_FILE[$u]:-unknown}" \
+    "${RELAY_PRE_UNIT_ACTIVE[$u]:-unknown}" "${RELAY_PRE_UNIT_ENABLED[$u]:-<none>}"
 }
 
 relay_live_rc_text() {
@@ -4673,7 +4780,7 @@ relay_live_rc_text() {
 
 # Phase 1, relay part. Read-only; die()s only on what Phase 2 could not survive.
 relay_phase1() {
-  local rc hd hd_base hd_src hd_dst hd_state hd_policy
+  local rc hd hd_base hd_src hd_dst hd_state hd_policy u
   log "relay: rendering the ruleset from ${ENV_FILE} with the checkout's helper (vpn-relay-apply check --dry-run)"
   RELAY_RENDER_OUT="$(RELAY_ENV="$ENV_FILE" bash "$WT/scripts/vpn-relay-apply" check --dry-run 2>&1)" && rc=0 || rc=$?
   printf '%s\n' "$RELAY_RENDER_OUT" | sed 's/^/    /'
@@ -4682,11 +4789,17 @@ relay_phase1() {
   fi
   (( rc == 0 )) || die "relay: the ruleset does not render from ${ENV_FILE} (vpn-relay-apply exit ${rc}, see above) — fix .env (template: deploy/relay/relay.env.example); nothing was changed"
 
-  relay_snapshot_prestate
+  relay_snapshot_prestate "$WT"
+  [[ " ${RELAY_UNITS[*]} " == *" ${RELAY_UNIT} "* ]] \
+    || die "relay: the checkout has no ${RELAY_UNIT_SRC} — refusing to deploy a relay without its data plane; nothing was changed"
   log "relay pre-state: ${RELAY_UNIT} active=${RELAY_PRE_ACTIVE:-unknown} enabled=${RELAY_PRE_ENABLED:-<not installed>}; table ip ${RELAY_TABLE} ${RELAY_PRE_TABLE}; table inet ${RELAY_INPUT_TABLE} ${RELAY_PRE_INPUT_TABLE} (dead-man ${RELAY_PRE_DEADMAN:-unknown}); net.ipv4.ip_forward=${RELAY_PRE_FORWARD:-unknown}; ${RELAY_CT_MAX_KEY}=${RELAY_PRE_CT_MAX:-unknown}; ${RELAY_CT_EST_KEY}=${RELAY_PRE_CT_EST:-unknown}"
 
-  RELAY_UNIT_STATE="$(relay_unit_state "$WT")"
-  log "relay unit ${RELAY_SYSTEM_UNIT}: $(relay_unit_state_text "$RELAY_UNIT_STATE")"
+  # Every unit of the set Phase 2 installs (deploy/relay/*.service|*.timer), each with
+  # its installed copy vs the checkout's.
+  log "relay units Phase 2 installs (deploy/relay/*.service|*.timer): ${RELAY_UNITS[*]}"
+  for u in "${RELAY_UNITS[@]}"; do
+    log "  relay unit $(relay_unit_dst "$u"): ${RELAY_UNIT_STATES[$u]} — $(relay_unit_state_text "${RELAY_UNIT_STATES[$u]}" "$u")"
+  done
 
   # The same registry scan as the main role, filtered to this role's entries.
   helper_drift=()
@@ -4748,6 +4861,11 @@ relay_phase1_report() {
 
   printf '\n  --- Pre-state (the rollback restores exactly this) ---\n'
   printf '    %-24s : active=%s enabled=%s\n' "$RELAY_UNIT" "${RELAY_PRE_ACTIVE:-unknown}" "${RELAY_PRE_ENABLED:-<not installed>}"
+  local u
+  for u in "${RELAY_UNITS[@]}"; do
+    [[ "$u" == "$RELAY_UNIT" ]] && continue
+    printf '    %-24s : %s\n' "$u" "$(relay_unit_before "$u")"
+  done
   printf '    %-24s : %s\n' "table ip ${RELAY_TABLE}" "$RELAY_PRE_TABLE"
   printf '    %-24s : %s (dead-man %s: %s)\n' "table inet ${RELAY_INPUT_TABLE}" "$RELAY_PRE_INPUT_TABLE" \
     "$RELAY_DEADMAN_TIMER" "${RELAY_PRE_DEADMAN:-unknown}"
@@ -4760,8 +4878,10 @@ relay_phase1_report() {
     printf '    %-24s : absent\n' "$RELAY_LEGACY_NFT"
   fi
 
-  printf '\n  --- Unit %s ---\n' "$RELAY_SYSTEM_UNIT"
-  printf '    %s\n' "$(relay_unit_state_text "$RELAY_UNIT_STATE")"
+  printf '\n  --- Units (deploy/relay/*.service|*.timer -> %s/, installed verbatim) ---\n' "${RELAY_SYSTEM_UNIT%/*}"
+  for u in "${RELAY_UNITS[@]}"; do
+    printf '    %-26s : %s — %s\n' "$u" "${RELAY_UNIT_STATES[$u]:-unknown}" "$(relay_unit_state_text "${RELAY_UNIT_STATES[$u]:-}" "$u")"
+  done
 
   printf '\n  --- Helper (OUT_OF_REPO_HELPERS, role relay) ---\n'
   if [[ ${#helper_drift[@]} -gt 0 ]]; then
@@ -4783,13 +4903,15 @@ relay_phase1_report() {
   printf '    => %s\n' "$(relay_live_rc_text "$RELAY_LIVE_RC")"
 
   printf '\n  --- Phase 2 (sudo bash scripts/redeploy.sh) would ---\n'
-  printf '    back up the live tables + %s, %s, %s\n' "$RELAY_HELPER" "$RELAY_SYSTEM_UNIT" "$RELAY_SYSCTL_FILE"
-  printf '    git reset --hard origin/main; install the helper; install %s verbatim\n' "$RELAY_UNIT_SRC"
-  printf '    daemon-reload; enable + restart %s; verify with vpn-relay-apply check\n' "$RELAY_UNIT"
+  printf '    back up the live tables + %s, every unit above, %s\n' "$RELAY_HELPER" "$RELAY_SYSCTL_FILE"
+  printf '    git reset --hard origin/main; install the helper; install every unit above verbatim (a synced one is left as it is)\n'
+  printf '    daemon-reload; enable %s and every timer; restart %s; start a timer that is not active\n' "$RELAY_UNIT" "$RELAY_UNIT"
+  printf '      (the oneshot a timer runs is never started by hand); verify with vpn-relay-apply check\n'
   printf '    input filter: a TCP set not confirmed yet (see the dry-run above) arms the 5-minute dead-man,\n'
   printf '      then main probes the ssh ports (main probe above): DEPLOY OK says CONFIRMED by main probe;\n'
   printf '      if main cannot, it says PENDING CONFIRM and why, and input-confirm must run from a NEW ssh session\n'
-  printf '    any failure -> rollback (files + saved tables + dead-man state + enable/active state + ip_forward + conntrack sysctls)\n'
+  printf '    any failure -> rollback (files + saved tables + dead-man state + enable/active state of every unit\n'
+  printf '      + ip_forward + conntrack sysctls; a unit that was not installed before is stopped, disabled, removed)\n'
   printf '\n===================================================================\n'
 }
 
@@ -4816,7 +4938,7 @@ relay_rollback() {
   trap - ERR INT TERM HUP
   set +e
   local -a report=()
-  local state rc line
+  local state rc line u
   warn "ROLLBACK (relay): restoring PREV_SHA=${PREV_SHA:-<unknown>} and the backed-up relay state"
 
   git reset --hard "$PREV_SHA" >/dev/null 2>&1; report+=("git reset --hard ${PREV_SHA}: rc=$?")
@@ -4833,13 +4955,35 @@ relay_rollback() {
     systemctl disable --quiet "$RELAY_UNIT" >/dev/null 2>&1
     report+=("disable ${RELAY_UNIT} (was ${RELAY_PRE_ENABLED:-not installed} before): rc=$?")
   fi
+  # The rest of the unit set, the same way and for the same reason (no dangling
+  # timers.target.wants link): a unit that was not installed before is stopped and
+  # disabled — its file is removed with the files below; a timer that was installed
+  # but not active before is stopped again, one that was not enabled is disabled.
+  for u in "${RELAY_UNITS[@]}"; do
+    [[ "$u" == "$RELAY_UNIT" ]] && continue
+    if [[ "${RELAY_PRE_UNIT_FILE[$u]:-absent}" != "present" ]]; then
+      systemctl stop "$u" >/dev/null 2>&1
+      report+=("stop ${u} (not installed before the deploy): rc=$?")
+      systemctl disable --quiet "$u" >/dev/null 2>&1
+      report+=("disable ${u} (not installed before the deploy; its file is removed below): rc=$?")
+    elif [[ "$(relay_unit_kind "$u")" == "timer" ]]; then
+      if [[ "${RELAY_PRE_UNIT_ACTIVE[$u]:-}" != "active" ]]; then
+        systemctl stop "$u" >/dev/null 2>&1
+        report+=("stop ${u} (was ${RELAY_PRE_UNIT_ACTIVE[$u]:-not active} before): rc=$?")
+      fi
+      if [[ "${RELAY_PRE_UNIT_ENABLED[$u]:-}" != "enabled" ]]; then
+        systemctl disable --quiet "$u" >/dev/null 2>&1
+        report+=("disable ${u} (was ${RELAY_PRE_UNIT_ENABLED[$u]:-not enabled} before): rc=$?")
+      fi
+    fi
+  done
 
   if [[ -n "$STAGE" && -d "$STAGE" ]]; then
-    # helper, unit, sysctl file and the relay's MANAGED_HOST_FILES, in staging order:
+    # helper, units, sysctl file and the relay's MANAGED_HOST_FILES, in staging order:
     # each back from the stage, or removed when it did not exist before the deploy.
     while IFS= read -r line; do [[ -n "$line" ]] && report+=("$line"); done < <(host_files_rollback)
   else
-    report+=("backup stage MISSING — helper/unit/sysctl file NOT restored — MANUAL ACTION REQUIRED (archive: ${ARCHIVE:-<none>})")
+    report+=("backup stage MISSING — helper/units/sysctl file NOT restored — MANUAL ACTION REQUIRED (archive: ${ARCHIVE:-<none>})")
   fi
   systemctl daemon-reload; report+=("daemon-reload: rc=$?")
 
@@ -4855,6 +4999,17 @@ relay_rollback() {
       report+=("${RELAY_UNIT} still active (the restored unit file applies from its next start)")
     fi
   fi
+  # A timer that was installed AND enabled/active before: so it is again, with its
+  # restored file (the deploy never disables or stops one; this is the safety net).
+  for u in "${RELAY_UNITS[@]}"; do
+    [[ "$(relay_unit_kind "$u")" == "timer" && "${RELAY_PRE_UNIT_FILE[$u]:-}" == "present" ]] || continue
+    if [[ "${RELAY_PRE_UNIT_ENABLED[$u]:-}" == "enabled" && "$(systemctl is-enabled "$u" 2>/dev/null || true)" != "enabled" ]]; then
+      systemctl enable --quiet "$u" >/dev/null 2>&1; report+=("enable ${u} (was enabled before): rc=$?")
+    fi
+    if [[ "${RELAY_PRE_UNIT_ACTIVE[$u]:-}" == "active" && "$(systemctl is-active "$u" 2>/dev/null || true)" != "active" ]]; then
+      systemctl start "$u" >/dev/null 2>&1; report+=("start ${u} with the restored unit (was active before): rc=$?")
+    fi
+  done
 
   # The table exactly as it was — applied LAST so it is what stays live, in one
   # transaction (create-if-missing + delete + the dump).
@@ -4917,10 +5072,31 @@ relay_rollback() {
   fi
 
   report+=("${RELAY_UNIT} is-active: $(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true) (before the deploy: ${RELAY_PRE_ACTIVE:-unknown})")
+  # Every unit of the set, as it is left now next to how it was before the deploy.
+  for u in "${RELAY_UNITS[@]}"; do
+    report+=("unit ${u}: now $(relay_unit_now "$u") (before the deploy: $(relay_unit_before "$u"))")
+  done
   printf '\n===== ROLLBACK REPORT (relay) =====\n' >&2
   printf '  - %s\n' "${report[@]}" >&2
   printf '===================================\n' >&2
   exit 1
+}
+
+# DEPLOY OK: one line per unit of the set other than vpn-relay.service (that one has
+# its own line), with its installed copy before the deploy.
+relay_units_ok_rows() {
+  local u
+  for u in "${RELAY_UNITS[@]}"; do
+    [[ "$u" == "$RELAY_UNIT" ]] && continue
+    if [[ "$(relay_unit_kind "$u")" == "timer" ]]; then
+      printf '  unit             : %s %s, %s (before: active=%s, installed copy %s)\n' "$u" \
+        "$(systemctl is-active "$u" 2>/dev/null || true)" "$(systemctl is-enabled "$u" 2>/dev/null || true)" \
+        "${RELAY_PRE_UNIT_ACTIVE[$u]:-unknown}" "${RELAY_UNIT_STATES[$u]:-unknown}"
+    else
+      printf '  unit             : %s installed, run by its timer (installed copy %s before)\n' "$u" \
+        "${RELAY_UNIT_STATES[$u]:-unknown}"
+    fi
+  done
 }
 
 # After a successful deploy only: the hand-installed ruleset file is no longer read
@@ -4941,19 +5117,26 @@ relay_retire_legacy_nft() {
 # until the restart, and the restart's gap (ExecStop deletes the table, ExecStart
 # applies the new one) is milliseconds; established flows keep their conntrack NAT.
 relay_phase2() {
-  local out rc entry listing legacy_before input_status probe_why
-  local -a mh_paths=()
+  local out rc entry listing legacy_before input_status probe_why u dst units_rows nl
+  local -a mh_paths=() unit_paths=()
+  # The unit set comes from relay_snapshot_prestate (Phase 1: the checkout Phase 2
+  # installs); without it there is nothing to back up or install against.
+  [[ " ${RELAY_UNITS[*]} " == *" ${RELAY_UNIT} "* ]] \
+    || die "relay: the unit set is not known (relay_snapshot_prestate did not run) — nothing was changed"
   PREV_SHA="$(git rev-parse HEAD)"
   log "PREV_SHA=${PREV_SHA} (relay)"
 
   STAGE="$(make_stage_dir)" || die "cannot create the backup stage"
   manifest=()
   log "backing up the relay state (nothing is stopped for it)"
-  # The relay's own three files and the input filter's confirmation marker (main's
-  # probe may write it during the restart; a rollback puts back the one that matches
-  # the restored filter), then its MANAGED_HOST_FILES — one mechanism
-  # (stage_host_paths / restore_host_paths) for every file outside the checkout.
-  stage_host_paths "$RELAY_HELPER" "$RELAY_SYSTEM_UNIT" "$RELAY_SYSCTL_FILE" "$RELAY_INPUT_MARKER"
+  # The relay's own files — the helper, EVERY unit of the set, the sysctl file — and
+  # the input filter's confirmation marker (main's probe may write it during the
+  # restart; a rollback puts back the one that matches the restored filter), then its
+  # MANAGED_HOST_FILES — one mechanism (stage_host_paths / restore_host_paths) for
+  # every file outside the checkout. A unit that is not there yet is recorded as
+  # absent: the rollback removes it.
+  for u in "${RELAY_UNITS[@]}"; do unit_paths+=("$(relay_unit_dst "$u")"); done
+  stage_host_paths "$RELAY_HELPER" "${unit_paths[@]}" "$RELAY_SYSCTL_FILE" "$RELAY_INPUT_MARKER"
   readarray -t mh_paths < <(managed_host_stage_paths)
   stage_host_paths "${mh_paths[@]}" "$(ssh_port_state_path)"
   install -d -m0755 "${STAGE}$(dirname "$RELAY_TABLE_DUMP")"
@@ -5000,16 +5183,42 @@ relay_phase2() {
   # ports from the listening sockets (a step changes them: the filter follows).
   ssh_port_phase2_post
 
-  log "installing ${RELAY_UNIT} from ${RELAY_UNIT_SRC} (verbatim)"
-  install -m0644 "$RELAY_UNIT_SRC" "$RELAY_SYSTEM_UNIT" \
-    || rollback_now "failed to install ${RELAY_UNIT_SRC} to ${RELAY_SYSTEM_UNIT}"
+  # The whole unit set, each verbatim (a copy that already matches is left as it is).
+  for u in "${RELAY_UNITS[@]}"; do
+    dst="$(relay_unit_dst "$u")"
+    if [[ "$(relay_unit_state "$APP_DIR" "$u")" == "synced" ]]; then
+      log "${u}: ${dst} matches deploy/relay/${u} — left as it is"
+      continue
+    fi
+    log "installing ${u} from deploy/relay/${u} (verbatim)"
+    install -m0644 "deploy/relay/${u}" "$dst" \
+      || rollback_now "failed to install deploy/relay/${u} to ${dst}"
+  done
   systemctl daemon-reload || rollback_now "systemctl daemon-reload failed"
   systemctl enable --quiet "$RELAY_UNIT" || rollback_now "systemctl enable ${RELAY_UNIT} failed"
+  for u in "${RELAY_UNITS[@]}"; do
+    [[ "$(relay_unit_kind "$u")" == "timer" ]] || continue
+    systemctl enable --quiet "$u" || rollback_now "systemctl enable ${u} failed"
+  done
   log "restarting ${RELAY_UNIT} (vpn-relay-apply apply: table ip ${RELAY_TABLE} + table inet ${RELAY_INPUT_TABLE} from .env, conntrack sysctls, ip_forward=1; a TCP set not confirmed yet: dead-man, then main's probe)"
   systemctl restart "$RELAY_UNIT" \
     || rollback_now "${RELAY_UNIT} restart failed — vpn-relay-apply apply exited non-zero (see: journalctl -u ${RELAY_UNIT} -n 50 --no-pager)"
   [[ "$(systemctl is-active "$RELAY_UNIT" 2>/dev/null || true)" == "active" ]] \
     || rollback_now "${RELAY_UNIT} is not active after the restart"
+  # The timers: one that is not active is started (an active one already runs the
+  # file daemon-reload loaded). The oneshot a timer runs is the timer's to start —
+  # never started here, so a deploy never runs e.g. `vpn-relay-apply resolve` itself.
+  for u in "${RELAY_UNITS[@]}"; do
+    [[ "$(relay_unit_kind "$u")" == "timer" ]] || continue
+    if [[ "$(systemctl is-active "$u" 2>/dev/null || true)" == "active" ]]; then
+      log "${u}: active — left running"
+    else
+      log "starting ${u}"
+      systemctl start "$u" || rollback_now "systemctl start ${u} failed"
+      [[ "$(systemctl is-active "$u" 2>/dev/null || true)" == "active" ]] \
+        || rollback_now "${u} is not active after the start"
+    fi
+  done
 
   log "verifying the relay: vpn-relay-apply check"
   out="$(RELAY_ENV="$ENV_FILE" "$RELAY_HELPER" check 2>&1)" && rc=0 || rc=$?
@@ -5036,6 +5245,7 @@ relay_phase2() {
   input_status="${input_status##*$'\n'}"
   probe_why=""
   [[ "$input_status" != "PENDING CONFIRM"*" — "* ]] || probe_why="${input_status#* — }"
+  units_rows="$(relay_units_ok_rows)"; nl=$'\n'
 
   cat <<EOF
 
@@ -5043,7 +5253,7 @@ relay_phase2() {
   role             : relay
   deployed         : ${PREV_SHA} -> ${TAG}
   backup           : ${ARCHIVE}
-  unit             : ${RELAY_UNIT} active, enabled (before: active=${RELAY_PRE_ACTIVE:-unknown}, installed copy ${RELAY_UNIT_STATE:-unknown})
+  unit             : ${RELAY_UNIT} active, enabled (before: active=${RELAY_PRE_ACTIVE:-unknown}, installed copy ${RELAY_UNIT_STATE:-unknown})${units_rows:+${nl}${units_rows}}
   verify           : vpn-relay-apply check OK
   input filter     : ${input_status:-unknown}
   host files       : $(host_files_summary)
@@ -5340,7 +5550,7 @@ fi
 # Out-of-repo helper drift (R3b): read-only scan against origin/main ($WT). Unlike
 # unit drift this is NOT a gate — Phase 2 closes it automatically
 # (install_out_of_repo_helpers), so here we only record + report it. Helpers that
-# are absent (WARP not deployed on this host) are not drift and stay silent.
+# are absent (their entry's <absent-reason>: WARP not deployed, ...) are not drift and stay silent.
 # A `required` helper (one a unit names in Exec*=) that is ABSENT is listed here
 # too: Phase 2 installs it, and seeing it in the report is how an operator knows a
 # clean host is about to gain the helper its unit needs.
