@@ -443,6 +443,171 @@ def _isolate_i18n_locale() -> Generator[None, None, None]:
         i18n._current_locale.set(None)
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "scrypt_production_cost: keep utils.totp's real scrypt cost (see _cheap_scrypt)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "real_bootstrap: run Database.bootstrap()'s full migration chain even on a "
+        "fresh database (see _bootstrap_from_template)",
+    )
+
+
+# Test-only scrypt cost for backup codes. utils/totp.py hashes every backup code with
+# N=2**14, r=8 (16 MiB, tens of ms — chosen for interactive logins), and one
+# enrollment hashes ten codes while a redeem checks up to ten: ~1 s per TOTP test,
+# and 16 MiB allocations at a time on the 1 GiB production host that runs this suite
+# as its Phase 1 gate. Nothing in a test depends on the cost — every digest is
+# produced and checked inside the same process — so the work factor is dropped to
+# the minimum scrypt accepts. The production parameters are pinned by
+# tests/test_totp.py::test_the_production_scrypt_cost_is_pinned, which opts out with
+# @pytest.mark.scrypt_production_cost and also hashes once at the real cost.
+CHEAP_SCRYPT_N = 2**4
+
+
+@pytest.fixture(autouse=True)
+def _cheap_scrypt(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    if request.node.get_closest_marker("scrypt_production_cost") is not None:
+        return
+    import utils.totp as totp_module
+
+    monkeypatch.setattr(totp_module, "SCRYPT_N", CHEAP_SCRYPT_N)
+
+
+# --------------------------------------------------------------------------- #
+# synchronous=NORMAL for test databases
+#
+# Database() defaults to synchronous=FULL (the production default, settings
+# SQLITE_SYNCHRONOUS), which in WAL mode means one fdatasync() per COMMIT. Over the
+# suite that is ~60 000 fdatasyncs: free on a CI runner's page cache, but on the
+# production host that runs this suite as its deploy gate every one is a real disk
+# flush. Only power-loss durability differs between FULL and NORMAL (in WAL mode
+# NORMAL syncs at checkpoints, not commits) and no test can observe that, so a
+# Database built WITHOUT an explicit `synchronous` gets NORMAL here. An explicit
+# value (bot/app.py and init_db.py pass settings.sqlite_synchronous; tests that pin
+# the PRAGMA pass their own) is untouched. Patched through __init__.__defaults__, so
+# the function object — and the bootstrap-template fingerprint below — is unchanged.
+# --------------------------------------------------------------------------- #
+TEST_SQLITE_SYNCHRONOUS = "NORMAL"
+
+
+@pytest.fixture(autouse=True)
+def _relaxed_sqlite_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    from db.database import Database
+
+    monkeypatch.setattr(Database.__init__, "__defaults__", (TEST_SQLITE_SYNCHRONOUS,))
+
+
+# --------------------------------------------------------------------------- #
+# Fresh-database bootstrap from a session template
+#
+# ~1100 tests open an empty database and call Database.bootstrap(), which runs
+# schema.sql, the whole v1..CURRENT migration chain and indexes.sql — hundreds of
+# round trips to the aiosqlite worker thread and ~50 fdatasync()s each (synchronous
+# = FULL), on every test. The result is byte-for-byte the same every time, so the
+# FIRST eligible bootstrap of the session runs the real chain into a template file,
+# and every later one copies that template into the test's open connection with
+# SQLite's online backup API (one page copy, a few fsyncs) and then finishes the way
+# bootstrap() does (spiderX backfill, commit, chmod).
+#
+# The shortcut is taken ONLY when it cannot change what a test observes:
+#   * the database is pristine (no schema object at all) — an old snapshot being
+#     upgraded, or a second bootstrap, always runs the real chain;
+#   * default schema/index files (a test passing its own runs the real chain);
+#   * exactly `Database`, not a subclass;
+#   * nothing that bootstrap reads was replaced since the test started: every
+#     attribute of the Database class and of the db.database module is compared by
+#     identity against a snapshot taken when this fixture ran, and the instance must
+#     not shadow a class attribute. A test that monkeypatches a migration to fail
+#     therefore gets the real chain and its real failure;
+#   * the test is not marked @pytest.mark.real_bootstrap.
+# tests/test_bootstrap_template.py proves the template equals a real fresh
+# bootstrap (full SQL dump + header pragmas) and that each guard falls back.
+# --------------------------------------------------------------------------- #
+_BOOTSTRAP_TEMPLATE: list[Path] = []
+
+
+def _db_fingerprint() -> tuple[tuple[tuple[str, int], ...], tuple[tuple[str, int], ...]]:
+    import db.database as db_module
+
+    return (
+        tuple((name, id(value)) for name, value in vars(db_module.Database).items()),
+        tuple((name, id(value)) for name, value in vars(db_module).items()),
+    )
+
+
+def _template_backup_into(raw: Any, template: Path) -> Callable[[], None]:
+    import sqlite3
+
+    def _copy() -> None:
+        # Runs ON the aiosqlite worker thread, which owns raw._conn; the source
+        # connection is opened there too.
+        src = sqlite3.connect(template)
+        try:
+            src.backup(raw._conn)
+        finally:
+            src.close()
+
+    return _copy
+
+
+@pytest.fixture(autouse=True)
+def _bootstrap_from_template(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    if request.node.get_closest_marker("real_bootstrap") is not None:
+        return
+    from db.database import Database
+
+    real_bootstrap = Database.bootstrap
+
+    async def bootstrap(self: Database, schema_path: Path | None = None, indexes_path: Path | None = None) -> None:
+        if (
+            schema_path is not None
+            or indexes_path is not None
+            or type(self) is not Database
+            or _db_fingerprint() != fingerprint
+            or any(name in vars(Database) for name in vars(self))
+        ):
+            return await real_bootstrap(self, schema_path, indexes_path)
+        raw = self._raw_conn()
+        cursor = await raw.execute("SELECT count(*) FROM sqlite_master")
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None or row[0] != 0:
+            return await real_bootstrap(self, schema_path, indexes_path)
+        if not _BOOTSTRAP_TEMPLATE:
+            # Built exactly the way a test (or the bot) builds a fresh database:
+            # its own Database, connect(), the REAL bootstrap, close() — which
+            # checkpoints the WAL into the main file, so the template is one file.
+            template = tmp_path_factory.mktemp("bootstrap-template") / "template.db"
+            seed = Database(template, synchronous=self.synchronous)
+            await seed.connect()
+            try:
+                await real_bootstrap(seed)
+            finally:
+                await seed.close()
+            _BOOTSTRAP_TEMPLATE.append(template)
+        await raw._execute(_template_backup_into(raw, _BOOTSTRAP_TEMPLATE[0]))
+        # The tail of the real bootstrap(): the backfill reads the test's env (a
+        # no-op on an empty vpn_keys), then commit and the private-file chmod.
+        try:
+            await self._ensure_spider_x_backfill()
+            await self.commit()
+            self._chmod_sqlite_files()
+        except Exception:
+            await self.rollback()
+            raise
+        return None
+
+    monkeypatch.setattr(Database, "bootstrap", bootstrap)
+    fingerprint = _db_fingerprint()
+
+
 async def wait_until_lock_contended(lock: asyncio.Lock, *, timeout: float = 5.0) -> None:
     """Wait until ``lock`` is held and at least one task is waiting to acquire it,
     then return.

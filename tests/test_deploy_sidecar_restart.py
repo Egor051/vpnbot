@@ -383,6 +383,10 @@ def test_active_sidecar_that_does_not_come_back_rolls_back(tmp_path: Path) -> No
     # The rollback pre-empts everything downstream, hy2-auth included.
     assert _restarted(tmp_path) == [SUB_UNIT], proc.stdout
     assert "CONTINUED" not in proc.stdout
+    # SIDECAR_ACTIVE_WAIT=4 is a retry budget of ceil(4/2)=2 re-checks, 2s apart —
+    # a count, not a wall-clock deadline, so the stubbed sleep ends the wait at once
+    # (the deadline version spun `systemctl is-active` for 4 real seconds here).
+    assert _sleeps(tmp_path) == ["2", "2"]
 
 
 def test_restart_command_failure_is_also_a_rollback(tmp_path: Path) -> None:
@@ -534,7 +538,8 @@ def test_hy2_unit_not_active_after_restart_keeps_the_fatal_path(tmp_path: Path) 
             HY2_UNIT: {"load": "loaded", "state": "active", "after": "failed"},
         },
         ss_script=_ss_hy2_bound_after(0),
-        # wait_unit_active gives up at once instead of polling a dead unit for 4s.
+        # wait_unit_active makes a single check (no re-check, so no `sleep 2` lands
+        # in the sleep log this test pins to the hy2 port wait).
         active_wait=0,
     )
     assert proc.returncode == 9, proc.stdout

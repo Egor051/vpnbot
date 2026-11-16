@@ -2055,6 +2055,11 @@ def _run_endpoint_check(env_lines: str, *, unit_loaded: bool, listening_ports: l
         "  return 0\n"
         "}\n"
         f'ss() {{ printf "%s\\n" "{ss_output}"; }}\n'
+        # Instant sleep: wait_for_listen caps the start-to-bind wait by a retry
+        # COUNT, so the dead-port case still runs every re-test (and reports the
+        # window as passed) without burning SUBSCRIPTION_BIND_WAIT real seconds.
+        # Each call is recorded so a test can see the re-tests happened.
+        f'sleep() {{ printf "%s\\n" "$*" >> "{tmp_path / "sleeps"}"; }}\n'
         "subscription_endpoint_status\n"
         "exit $?\n"
     )
@@ -2094,6 +2099,9 @@ def test_deploy_check_flags_a_missing_unit_and_a_dead_port(tmp_path: Path) -> No
     )
     assert rc == 1
     assert "NOT listening" in message and "2096" in message
+    # The default 30s window was waited out as 15 re-tests 2s apart (stubbed).
+    assert "the ~20s start-to-bind window has passed" in message
+    assert (tmp_path / "sleeps").read_text(encoding="utf-8").splitlines() == ["2"] * 15
 
 
 def test_deploy_check_is_silent_while_the_feature_is_off(tmp_path: Path) -> None:

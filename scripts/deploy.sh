@@ -3891,14 +3891,19 @@ hy2_auth_listen_status() {
 # Poll ActiveState until it reads `active`, for up to $2 seconds. Echoes the final
 # state and returns 0 iff it went active. See SIDECAR_ACTIVE_WAIT for why this is
 # not, and must not become, a second start-to-bind wait.
+#
+# Like wait_for_listen, the cap is a retry COUNT (one check, then at most
+# ceil(timeout/2) re-checks, each after `sleep 2`), not a wall-clock deadline: the
+# longest wait on a host is the same, and a test with a stubbed `sleep` ends at
+# once instead of spinning `systemctl is-active` for real seconds.
 wait_unit_active() {
-  local u="$1" timeout="$2" deadline state
-  deadline=$(( SECONDS + timeout ))
+  local u="$1" timeout="$2" tries=0 state
   while :; do
     state="$(systemctl is-active "$u" 2>/dev/null || true)"
     if [[ "$state" == "active" ]]; then printf 'active'; return 0; fi
-    (( SECONDS < deadline )) || { printf '%s' "${state:-unknown}"; return 1; }
+    (( tries < (timeout + 1) / 2 )) || { printf '%s' "${state:-unknown}"; return 1; }
     sleep 2
+    tries=$(( tries + 1 ))
   done
 }
 

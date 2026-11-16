@@ -140,6 +140,27 @@ def test_secret_encoding_and_otpauth_uri() -> None:
         assert part in uri
 
 
+@pytest.mark.scrypt_production_cost
+def test_the_production_scrypt_cost_is_pinned() -> None:
+    """Every other test hashes backup codes at a token cost (tests/conftest.py
+    _cheap_scrypt). This one keeps the real module values, pins them to the RFC 7914
+    interactive-login parameters and runs one hash at that cost, so lowering the
+    production work factor can never hide behind the test fixture."""
+    assert (otp.SCRYPT_N, otp.SCRYPT_R, otp.SCRYPT_P, otp.SCRYPT_DKLEN) == (2**14, 8, 1, 32)
+    salt = otp.new_salt()
+    code = otp.generate_backup_codes()[0]
+    digest = otp.hash_backup_code(code, salt)
+    assert len(digest) == 32
+    assert otp.backup_code_matches(code, salt, digest)
+
+
+def test_the_cheap_test_cost_really_is_in_effect() -> None:
+    """The fixture must actually reach the module global hash_backup_code reads."""
+    from conftest import CHEAP_SCRYPT_N
+
+    assert otp.SCRYPT_N == CHEAP_SCRYPT_N
+
+
 def test_backup_codes_are_distinct_and_hash_only_their_normalized_form() -> None:
     codes = otp.generate_backup_codes()
     assert len(codes) == otp.BACKUP_CODE_COUNT == len(set(codes))
