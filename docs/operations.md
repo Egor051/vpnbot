@@ -32,6 +32,28 @@ Run mutating deploys in a low-traffic window — see [Rollback after a bad
 deploy](#rollback-after-a-bad-deploy) for why. Details in the [README Deploy
 section](../README.md).
 
+**The live checkout is always on local `main`.** Phase 2 advances the tree with
+`git checkout -f -B main origin/main`, and a rollback puts it back with
+`git checkout -f -B main <PREV_SHA>`. It used to run `git reset --hard origin/main`, which moves
+*whatever* branch is checked out: a host left on a feature branch had that branch rewritten to
+the tip of `main` on every deploy, and `git status` named a branch the host was not running.
+When the checkout already sits at `origin/main`, the no-op run (no `FORCE`) still moves it onto
+`main` — the same commit, so no file changes and nothing is restarted. Phase 1 prints a `WARN`
+(and the `PHASE1_ONLY` report a `branch :` line) when the checkout is on another branch or a
+detached HEAD; a real deploy stops before any mutation while another worktree has `main`
+checked out. The branch the checkout was on is left where it is — delete it by hand once you no
+longer need it.
+
+**The new venv must build a TLS context before the bot starts on it.** Right after
+`pip install` + `pip check`, Phase 2 runs
+`ssl.create_default_context(cafile=certifi.where())` in the prod venv — what aiogram's
+`AiohttpSession` does on its first request. After PR #269 the new bot died on start with
+`FileNotFoundError` on `certifi/cacert.pem`, looped and was rolled back; `pip check` cannot see
+such a fault. The deps go into the live venv after `vpn-bot` is stopped, so a failure leaves
+through the normal rollback (`.venv` ← `.venv.prev`, tree → `PREV_SHA`) and the bot is never
+started on that venv. The `PHASE1_ONLY` report shows the same probe on the current venv
+(informational), `DEPLOY OK` its result on the new one (`ssl/certifi : OK — <cafile>`).
+
 **Gate bypasses and tuning knobs.** `deploy.sh` runs under `systemd-run`, which starts it with a
 fresh environment, so its knobs go on the wrapper's command line — after `sudo`, whose
 environment reset would otherwise drop them:
@@ -100,6 +122,12 @@ The rules, deliberately narrow:
 - **Every unit gets a report line** — `restarted` / `skipped (was inactive)` /
   `skipped (absent)` — in both the `PHASE1_ONLY` report and the final `DEPLOY OK` block, so a
   half-deployed host is visible instead of silent.
+- **A rollback restarts them again.** A rollback after this step — a log-scan hit, a failing PR
+  hook, the second sidecar not coming back after the first did — restarts exactly the units the
+  deploy restarted (never an absent or inactive one), once the tree, the venv and the DB are
+  back and `vpn-bot` is started, with the same checks and bind windows. One that does not come
+  back is a `!!! SIDECAR NOT RESTORED … MANUAL ACTION REQUIRED` line in the `ROLLBACK REPORT` —
+  no second rollback, no retry.
 
 > ⏱️ **Restarting `vpnbot-hy2-auth` rejects new Hysteria2 handshakes for a few seconds.** The
 > endpoint is deliberately **fail-closed** (`hysteria-server` gets `ok: false`, never a 5xx,
@@ -787,10 +815,11 @@ not affect handshake auth or the health entry.
 > [README](../README.md)). The manual steps below are for a hand-rollback when you are not
 > using the script.
 >
-> **Sidecars are not rolled back.** A rollback restores the tree to `PREV_SHA` and restarts
-> `vpn-bot`, but a [sidecar unit](#the-deploy-restarts-the-sidecar-units-too) the deploy had
-> already restarted keeps running the new code. The rollback output names those units — restart
-> them by hand once the tree is back.
+> **Sidecars are rolled back too.** A rollback restores the tree to `PREV_SHA` (on local
+> `main`), the venv and the DB, starts `vpn-bot`, then restarts every [sidecar
+> unit](#the-deploy-restarts-the-sidecar-units-too) the deploy had restarted, so none keeps
+> running the new code. One that does not come back is named in the `ROLLBACK REPORT` with the
+> command to restart it by hand.
 
 > ⏱️ **Rollback loses the health-poll data window — deploy mutating changes at low traffic.**
 > Rollback restores the DB from the backup snapshot taken *before* the mutation. But the new
@@ -820,12 +849,13 @@ sudo chmod 600 /root/vpn-service-backups/pre-rollback-*.tar.gz
 ```bash
 cd /opt/vpn-service
 git log --oneline -5
-git reset --hard <previous_commit>
+git checkout -f -B main <previous_commit>
 .venv/bin/pip install -r requirements.txt -c constraints.txt
 ```
 
-`git reset --hard` discards all local code changes on the server. Only use it when rolling
-back an unwanted deploy.
+`git checkout -f -B main` discards all local code changes on the server, like
+`git reset --hard`, and keeps the tree on local `main` as the deploy does. Only use it when
+rolling back an unwanted deploy.
 
 > **`init_db.py` is for fresh installs only.** Do NOT run `init_db.py` during rollback — it
 > requires `BOT_TOKEN`/`ADMIN_IDS` and will attempt forward migrations on the existing

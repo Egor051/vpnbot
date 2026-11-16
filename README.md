@@ -317,7 +317,12 @@ fixed helper can no longer keep running stale after a deploy. For the same reaso
 the **sidecar units that run the same code from their own units** — the subscription endpoint
 and the Hysteria2 auth endpoint — whenever they were active before the deploy, so a change to
 `subscription_server/` or `hy2_auth/` can no longer ship to the bot alone
-([runbook](docs/operations.md#the-deploy-restarts-the-sidecar-units-too)). A unit-model change requires
+([runbook](docs/operations.md#the-deploy-restarts-the-sidecar-units-too)); a rollback restarts
+those same units again on the restored code. Before the bot starts on freshly installed
+dependencies, the new venv must build the TLS context aiogram builds on its first request
+(`ssl.create_default_context(cafile=certifi.where())`), or the deploy rolls back; and the live
+checkout is always kept on local `main` (`git checkout -f -B main origin/main`), whatever branch
+it was found on ([runbook](docs/operations.md#pre-deploy-checklist)). A unit-model change requires
 `ALLOW_MODEL_SWITCH=1` (after the host has been migrated); pending changes to other
 `deploy/*.service` units surface as a drift check (`ALLOW_UNIT_DRIFT=1` to override). Day-2
 operations remain in [docs/operations.md](docs/operations.md).

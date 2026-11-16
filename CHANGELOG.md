@@ -45,6 +45,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `/etc/apt/sources.list.d/ookla_speedtest-cli.list`, packagecloud's broken speedtest-cli
   source that made every `apt update` end in `E:`.
 
+### Fixed
+
+- **Deploy: the new venv's TLS context is probed before the bot starts on it.** After PR #269
+  the new bot died on its first start with `FileNotFoundError` on `certifi/cacert.pem`, looped
+  and was rolled back — a fault `pip check` cannot see. `scripts/deploy.sh` Phase 2 now runs
+  `ssl.create_default_context(cafile=certifi.where())` (what aiogram's `AiohttpSession` does on
+  its first request) in the prod venv right after `pip install` + `pip check`. The deps go into
+  the live venv after `vpn-bot` is stopped, so a failure leaves through the existing rollback
+  (`.venv` ← `.venv.prev`) and the bot is never started on that venv. The `PHASE1_ONLY` report
+  shows the probe on the current venv, `DEPLOY OK` its result on the new one.
+- **Deploy: a rollback restarts the sidecars the deploy restarted.** A rollback after the
+  sidecar step (a log-scan hit, a failing PR hook, hy2-auth failing after the subscription
+  endpoint came back) used to leave `vpn-bot-subscription` / hy2-auth running the new code on a
+  host rolled back to `PREV_SHA`. The rollback now restarts exactly the units the deploy
+  restarted — never an absent or inactive one — after the tree, the venv and the DB are back
+  and `vpn-bot` is started, with the same checks (`wait_unit_active`, the subscription
+  endpoint's ~20 s bind window, the hy2-auth port). One that does not come back is a loud
+  `SIDECAR NOT RESTORED … MANUAL ACTION REQUIRED` line in the `ROLLBACK REPORT`, with no second
+  rollback.
+- **Deploy: the live checkout is always on local `main`.** Phase 2 ran
+  `git reset --hard origin/main` in whatever branch was checked out — production sat on
+  `feat/offsite-system-bundle`, which every deploy rewrote to the tip of `main`. Both roles now
+  use `git checkout -f -B main origin/main`, and both rollbacks `git checkout -f -B main
+  PREV_SHA` (falling back to a detached checkout of `PREV_SHA` should git refuse the branch, so
+  the code always comes back). The no-op run (HEAD already at `origin/main`, no `FORCE`) moves
+  the checkout onto `main` too — the same commit, no file changes, nothing restarted. Phase 1
+  warns when the checkout is not on `main`, and a real deploy stops before any mutation while
+  another worktree has `main` checked out.
+
 ## [3.1.0](https://github.com/Egor051/vpnbot/releases/tag/v3.1.0) — 2026-11-16
 
 ### Added

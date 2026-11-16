@@ -172,14 +172,15 @@ def test_deploy_sh_reapplies_hy2_mark_on_was_active_not_on_file_change() -> None
 
 
 def test_deploy_sh_helper_step_runs_after_tree_advance_and_before_unit_install() -> None:
-    """The refresh must happen after `git reset --hard origin/main` (fresh source)
-    and before the unit install (so units execute the current helper)."""
+    """The refresh must happen after the tree advance (`pin_tree_to_main origin/main`,
+    i.e. `git checkout -f -B main origin/main` — fresh source) and before the unit
+    install (so units execute the current helper)."""
     # The main Phase 2 runs after the DEPLOY_SELFTEST seam; the relay role's own
     # reset/install sequence lives in relay_phase2() above it and is pinned in
     # tests/test_relay_deploy.py, so search the main path only.
     full = _read(DEPLOY_SH)
     text = full[full.index('if [[ "${DEPLOY_SELFTEST:-0}" == "1" ]]') :]
-    tree_advance = text.index("git reset --hard origin/main")
+    tree_advance = text.index("\npin_tree_to_main origin/main\n")
     helper_call = text.index("\ninstall_out_of_repo_helpers\n")
     unit_install = text.index('install -m0644 "deploy/vpn-bot.service"')
     assert tree_advance < helper_call < unit_install

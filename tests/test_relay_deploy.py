@@ -707,8 +707,8 @@ def test_relay_phase2_migrates_the_hand_installed_relay(tmp_path: Path) -> None:
         "daemon-reload", "enable --quiet vpn-relay.service", f"enable --quiet {RESOLVE_TIMER}",
         "restart vpn-relay.service", f"start {RESOLVE_TIMER}",
     ], "the oneshot the timer runs is never started by the deploy"
-    assert "git reset --hard origin/main" in host.log("git")
-    assert not any("prevsha" in c for c in host.log("git") if "reset" in c)
+    assert "git checkout --quiet --force -B main origin/main" in host.log("git")
+    assert not any("prevsha" in c for c in host.log("git") if "checkout" in c or "reset" in c)
 
     assert not host.legacy.exists()
     renamed = list(host.etc.glob("vpn-relay.nft.pre-repo.*"))
@@ -758,8 +758,9 @@ def test_failed_check_rolls_the_hand_installed_relay_back(tmp_path: Path) -> Non
     assert f"{CT_MAX}=262144 (pre-deploy value): rc=0" in proc.stderr
     assert host.state("vpn-relay.service.active") == "active"
     assert host.state("vpn-relay.service.enabled") == "enabled"
-    resets = [c for c in host.log("git") if c.startswith("git reset")]
-    assert resets == ["git reset --hard origin/main", "git reset --hard prevsha0000"]
+    moves = [c for c in host.log("git") if c.startswith(("git reset", "git checkout"))]
+    assert moves == ["git checkout --quiet --force -B main origin/main",
+                     "git checkout --quiet --force -B main prevsha0000"], "both on local main"
     sc = [ln.removeprefix("systemctl ") for ln in host.log("systemctl")]
     assert "disable --quiet vpn-relay.service" not in sc, "it was enabled before"
     assert "stop vpn-relay.service" not in sc, "it was active before"
@@ -918,7 +919,7 @@ def test_relay_phase1_reports_the_first_transition_without_mutating(
     nft = host.log("nft")
     assert nft and all(c.startswith("nft list table") or c.startswith("nft -c") for c in nft), nft
     assert all(c.split()[1] in {"is-active", "is-enabled"} for c in host.log("systemctl"))
-    assert not any("reset" in c for c in host.log("git"))
+    assert not any("reset" in c or "checkout" in c for c in host.log("git"))
     assert _read(host.unit) == _read(MANUAL_UNIT) and host.legacy.exists()
     assert "ok: table ip vpnrelay matches" in out, "the repo renders the hand-made ruleset 1:1"
     assert f"{CT_MAX}={conntrack[0]}; {CT_EST}={conntrack[1]}" in out, "pre-state log line"
@@ -952,7 +953,7 @@ def test_relay_phase2_routes_every_mutation_through_the_rollback() -> None:
     body = text[text.index("relay_phase2() {") :]
     body = body[: body.index("\n}\n")]
     armed = body[body.index("arm_relay_rollback") : body.index("  disarm")]
-    for verb in ("git reset", "install -m0644", "systemctl daemon-reload", "systemctl enable", "systemctl restart"):
+    for verb in ("pin_tree_to_main", "install -m0644", "systemctl daemon-reload", "systemctl enable", "systemctl restart"):
         idx = armed.index(verb)
         tail = armed[idx : armed.index("\n", armed.index("\n", idx) + 1) + 1]
         assert "rollback_now" in tail, f"{verb!r} is not routed to the rollback"
