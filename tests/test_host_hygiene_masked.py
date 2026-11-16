@@ -249,3 +249,11 @@ def test_registry_carries_the_host_hygiene_entries_on_both_roles() -> None:
         assert reg["/etc/apt/sources.list.d/ookla_speedtest-cli.list", role] == "absent", role
         assert reg["/etc/systemd/system/ModemManager.service", role] == "masked", role
         assert reg["/etc/systemd/system/udisks2.service", role] == "masked", role
+
+
+def test_snapd_is_masked_on_main_only_socket_first() -> None:
+    main = [e[1] for e in _registry() if e[5] == "main" and e[4] == "masked"]
+    snapd = [d for d in main if "/snapd" in d]
+    assert snapd == ["/etc/systemd/system/snapd.socket", "/etc/systemd/system/snapd.service",
+                     "/etc/systemd/system/snapd.seeded.service"], "the socket first: it cannot re-activate the service"
+    assert not [e for e in _registry() if e[5] == "relay" and "/snapd" in e[1]]

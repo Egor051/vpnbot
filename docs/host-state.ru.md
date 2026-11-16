@@ -99,6 +99,7 @@ drift, удаляет выведенные из оборота — а в Phase 1
 | `/etc/apt/sources.list.d/ookla_speedtest-cli.list` | retired | — | — | источник speedtest-cli на packagecloud сломан: каждый `apt update` заканчивался `E:` — [Гигиена хоста](#гигиена-хоста) |
 | `/etc/systemd/system/ModemManager.service` | замаскированный юнит | deploy.sh | — (в репо) | модема на сервере нет; mask, не purge — [Гигиена хоста](#гигиена-хоста) |
 | `/etc/systemd/system/udisks2.service` | замаскированный юнит | deploy.sh | — (в репо) | десктопный автомонтировщик дисков; mask, не purge |
+| `/etc/systemd/system/snapd.socket`, `/etc/systemd/system/snapd.service`, `/etc/systemd/system/snapd.seeded.service` | замаскированный юнит | deploy.sh | — (в репо) | ничто в репо не использует snap; mask, не purge — [Гигиена хоста](#гигиена-хоста) |
 
 ### relay
 
@@ -540,8 +541,11 @@ conffile этого пакета.
   `class absent` на обеих ролях: Phase 2 кладёт файл в архив деплоя и удаляет его; host check
   считает его выведенным. Сам пакет `speedtest-cli` не трогается.
 - **Демоны, которые серверу не нужны, маскируются** (`class masked`): `ModemManager.service` и
-  `udisks2.service` на обеих ролях. *Mask, никогда не purge* — пакет и его файлы остаются,
-  поэтому всё обратимо.
+  `udisks2.service` на обеих ролях, `snapd.socket`, `snapd.service` и `snapd.seeded.service` на
+  main. *Mask, никогда не purge* — пакет и его файлы остаются, поэтому всё обратимо. Ничто в
+  этом репо не использует snap: каждый компонент ставится из apt или своим установщиком в
+  `/usr/local`. Snap, поставленный провайдером, сохраняет свои файлы, но snapd его больше не
+  запускает и не обновляет.
 
 Как делается маска: Phase 2 создаёт `/etc/systemd/system/<unit> -> /dev/null` (ровно то, что
 пишет `systemctl mask`; путь, как любой файл хоста, сначала сохраняется в архив), выполняет один

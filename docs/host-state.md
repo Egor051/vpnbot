@@ -99,6 +99,7 @@ bundle also carries state that is not a deployed file and so is not listed here:
 | `/etc/apt/sources.list.d/ookla_speedtest-cli.list` | retired | — | — | packagecloud's speedtest-cli source is broken: every `apt update` ended in `E:` — [Host hygiene](#host-hygiene) |
 | `/etc/systemd/system/ModemManager.service` | masked unit | deploy.sh | — (in the repo) | no modem on a server; mask, not purge — [Host hygiene](#host-hygiene) |
 | `/etc/systemd/system/udisks2.service` | masked unit | deploy.sh | — (in the repo) | desktop disk automounter; mask, not purge |
+| `/etc/systemd/system/snapd.socket`, `/etc/systemd/system/snapd.service`, `/etc/systemd/system/snapd.seeded.service` | masked unit | deploy.sh | — (in the repo) | nothing in the repo uses a snap; mask, not purge — [Host hygiene](#host-hygiene) |
 
 ### relay
 
@@ -540,8 +541,11 @@ run by hand:
   `class absent` entry on both roles: Phase 2 backs it up into the deploy archive and removes
   it; the host check treats it as retired. The `speedtest-cli` package itself is not touched.
 - **Daemons a server never needs are masked** (`class masked`): `ModemManager.service` and
-  `udisks2.service` on both roles. *Masked, never purged* — the package and its files stay, so
-  it is reversible.
+  `udisks2.service` on both roles, `snapd.socket`, `snapd.service` and
+  `snapd.seeded.service` on main. *Masked, never purged* — the package and its files stay, so
+  it is reversible. Nothing in this repo uses a snap: every component comes from apt or its own
+  installer under `/usr/local`. A snap the provider installed keeps its files, but snapd no
+  longer runs or refreshes it.
 
 How a mask is done: Phase 2 creates `/etc/systemd/system/<unit> -> /dev/null` (exactly what
 `systemctl mask` writes; the path is staged first, like every host file), runs one

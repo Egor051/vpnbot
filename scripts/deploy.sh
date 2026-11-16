@@ -653,6 +653,12 @@ MANAGED_HOST_FILES=(
   "-|/etc/apt/sources.list.d/ookla_speedtest-cli.list|-|-|absent|main"
   "-|/etc/systemd/system/ModemManager.service|-|-|masked|main"
   "-|/etc/systemd/system/udisks2.service|-|-|masked|main"
+  # snapd: nothing in this repo uses a snap (every component comes from apt or its own
+  # installer under /usr/local). The socket first, so it cannot activate the service
+  # between the two; the seeding oneshot with them.
+  "-|/etc/systemd/system/snapd.socket|-|-|masked|main"
+  "-|/etc/systemd/system/snapd.service|-|-|masked|main"
+  "-|/etc/systemd/system/snapd.seeded.service|-|-|masked|main"
   # --- relay -----------------------------------------------------------------
   "deploy/host/ssh/00-vpnrelay-keyonly.conf|/etc/ssh/sshd_config.d/00-vpnrelay-keyonly.conf|0644|root:root|ssh|relay"
   "deploy/host/ssh/ssh.socket-override.conf|/etc/systemd/system/ssh.socket.d/override.conf|0644|root:root|ssh|relay|render=ssh-port"

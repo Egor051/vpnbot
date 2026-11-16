@@ -27,7 +27,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   daemon-reloads and stops the unit if it ran; the rollback removes it and starts the unit
   again if it ran; `vpn-bot-host-check` requires `LoadState=masked` and the unit not running
   (MISMATCH / BEATEN otherwise). Masked on both roles: `ModemManager.service`,
-  `udisks2.service` — mask, never purge. Retired on both roles (class `absent`):
+  `udisks2.service`; on main also `snapd.socket`, `snapd.service`, `snapd.seeded.service`
+  (nothing in the repo uses a snap) — mask, never purge. Retired on both roles (class `absent`):
   `/etc/apt/sources.list.d/ookla_speedtest-cli.list`, packagecloud's broken speedtest-cli
   source that made every `apt update` end in `E:`.
 
