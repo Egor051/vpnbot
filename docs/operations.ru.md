@@ -460,7 +460,7 @@ DKMS-сборка модуля amneziawg, приватные SSH host-ключи
 | Исключено | Почему | Настраивается |
 |---|---|---|
 | `ssh_host_*_key` (по имени файла) | Приватные host-ключи SSH: с одним расшифрованным бандлом кто угодно сможет выдать себя за хост, а пересобранный хост всё равно генерирует новые ключи. | **нет** — жёсткая политика, `OFFSITE_BACKUP_SYSTEM_EXCLUDE` её не отключает |
-| `*.bak`, `*.bak.*`, `*.bak-*`, `*.bak[0-9]*` | Копии конфигов: собственные `config.json.<stamp>.<token>.bak` бота (до `CONFIG_BACKUP_KEEP_LAST`, по 20 на файл), `config.yaml.bak.<stamp>` от `install-config.sh`, ручные `cert.pem.selfsigned.bak`, `config.yaml.bak443`, `config.json.bak-<дата>`. Живой конфиг уже есть в этом бандле или в бандле восстановления, а в `/etc/amnezia` каждая копия — ещё одна копия приватных ключей AWG. | да |
+| `*.bak`, `*.bak.*`, `*.bak-*`, `*.bak[0-9]*` | Копии конфигов: собственные `config.json.<stamp>.<ns>.<token>.bak` бота (новейшие `XRAY_CONFIG_BACKUP_KEEP`, по умолчанию 10; `awg0.conf.*.bak` — до `CONFIG_BACKUP_KEEP_LAST`, 20), `config.yaml.bak.<stamp>` от `install-config.sh` (новейшие `HYSTERIA_CONFIG_BACKUP_KEEP`, по умолчанию 3), ручные `cert.pem.selfsigned.bak`, `config.yaml.bak443`, `config.json.bak-<дата>`. Живой конфиг уже есть в этом бандле или в бандле восстановления, а в `/etc/amnezia` каждая копия — ещё одна копия приватных ключей AWG. | да |
 | `/root/.acme.sh/dnsapi/*`, `deploy/*`, `notify/*` | Около 276 собственных hook-скриптов acme.sh; установка acme.sh возвращает их. `account.conf` (токен DNS-API) и выпущенные сертификаты остаются в бандле. | да |
 
 Настраиваемый список — `DEFAULT_OFFSITE_SYSTEM_EXCLUDE` в `config/settings.py`.
